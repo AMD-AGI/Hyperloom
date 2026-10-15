@@ -6,49 +6,49 @@
 from __future__ import annotations
 
 from hyperloom.orchestrator.kernel import lane_budget as lb
-from hyperloom.orchestrator.kernel.request_handlers import _lane_underfunded
+from hyperloom.orchestrator.kernel.request_handlers import _unfunded_lane_skip
 
 
-def test_an_underfunded_lane_reports_a_skip_not_a_failure():
-    out = _lane_underfunded("forge_fusion", lb.LANE_FUSION, 223)
+def test_an_underfunded_lane_reports_a_skip_not_a_verdict():
+    """Nothing was attempted, so the ledgers must not learn the work is impossible."""
+    out = _unfunded_lane_skip(lb.LANE_FUSION)
 
-    # Skipped, not failed: nothing was attempted, so the ledgers must not learn the work is impossible.
     assert out["status"] == "skipped"
-    assert out["error_class"] == "lane_underfunded"
-    assert out["kept"] is False
-    assert out["decision"] == "REVERT"
+    assert "kept" not in out and "decision" not in out
 
 
-def test_the_decline_names_the_share_it_refused_on():
-    out = _lane_underfunded("forge_fusion", lb.LANE_FUSION, 223)
+def test_the_decline_names_the_lane_and_the_budget_it_refused_on():
+    out = _unfunded_lane_skip(lb.LANE_FUSION)
 
-    assert out["lane_budget_sec"] == 223
-    assert "223s" in out["error"]
-    assert lb.LANE_FUSION in out["error"]
-    assert "override" in out["error"]
+    assert lb.LANE_FUSION in out["skip_reason"]
+    assert "phase time budget" in out["skip_reason"]
 
 
-def test_both_forge_lanes_use_the_same_decline():
-    """Each names the engine its own handler reports on every other path, so the rows attribute alike."""
-    fusion = _lane_underfunded("forge_fusion", lb.LANE_FUSION, 10)
-    gemm = _lane_underfunded("forge", lb.LANE_GEMM, 10)
+def test_both_forge_lanes_decline_through_the_same_shape():
+    fusion = _unfunded_lane_skip(lb.LANE_FUSION)
+    gemm = _unfunded_lane_skip(lb.LANE_GEMM)
 
-    assert fusion["engine"] == "forge_fusion" and gemm["engine"] == "forge"
     assert fusion["backend"] == gemm["backend"] == "forge"
-    assert fusion["error_class"] == gemm["error_class"] == "lane_underfunded"
+    assert fusion["error_class"] == gemm["error_class"]
 
 
-def test_the_phase_share_an_observed_session_dispatched_on_is_now_unfundable():
-    # 18h session, KERNEL phase entered with minutes left: the fusion share landed at 223 s and forge-fuse was
-    # started on a 31 MB trace anyway, writing nothing but the input it was handed.
-    allocation = lb.allocate(6.0)[lb.LANE_FUSION]
+def test_a_fusion_share_too_small_for_one_recipe_funds_nothing():
+    """A fusion share was counted fundable whenever it was non-zero, so the skip could not fire for this lane.
 
-    assert allocation.budget_sec < lb.FUSION_DEFAULT_TARGET_SEC
-    assert allocation.is_fundable is False
+    An 18h session entered KERNEL with minutes left, the fusion share landed at
+    223 s, and forge-fuse was started on a 31 MB trace anyway --- writing
+    nothing but the input it was handed. Pricing a recipe is what lets the
+    share report that it pays for no target.
+    """
+    starved = lb.allocate(6.0)[lb.LANE_FUSION]
+
+    assert starved.budget_sec > 0
+    assert starved.max_targets == 0
+    assert starved.is_fundable is False
 
 
-def test_a_phase_with_room_still_funds_the_lane():
-    allocation = lb.allocate(240.0)[lb.LANE_FUSION]
+def test_a_share_that_pays_for_recipes_still_funds_them():
+    generous = lb.allocate(600.0)[lb.LANE_FUSION]
 
-    assert allocation.is_fundable is True
-    assert allocation.max_targets >= 1
+    assert generous.is_fundable is True
+    assert generous.max_targets >= 1

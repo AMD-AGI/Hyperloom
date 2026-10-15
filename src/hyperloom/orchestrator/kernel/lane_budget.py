@@ -28,6 +28,10 @@ FUSION_DEFAULT_TARGET_SEC = GEMM_DEFAULT_TARGET_SEC
 #: itself needs to close out.
 PHASE_RESERVE_SEC = 300
 
+#: Why KERNEL work did not start: what is left of a bounded phase cannot fund one run of it.
+#: A skip, not a verdict on the work: a later KERNEL entry may still fund it.
+INSUFFICIENT_BUDGET = "insufficient_budget"
+
 #: Rewrite is not a lane: the route budgets itself against the wall clock (see
 #: ``_kernel_rewrite_controller_timeouts``), so its half comes off the top and
 #: never becomes an allocation the caller has to discard.
@@ -56,16 +60,6 @@ class LaneAllocation:
     def is_fundable(self) -> bool:
         """Whether the share pays for at least one target."""
         return self.max_targets > 0
-
-    @property
-    def is_underfunded(self) -> bool:
-        """Whether a share that was derived is too small to pay for one target.
-
-        Distinct from ``not is_fundable``: a zero share means no budget could be derived at all -- an unbounded
-        session has no remaining-minutes to divide -- and that is not the same as a phase with minutes left that
-        cannot pay for the work. Only the latter is a reason to decline.
-        """
-        return self.budget_sec > 0 and self.max_targets == 0
 
 
 def phase_budget_sec(remaining_minutes: object, *, reserve_sec: int = PHASE_RESERVE_SEC) -> int:

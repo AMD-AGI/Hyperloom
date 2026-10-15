@@ -1,17 +1,29 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Time-budget helpers: cost estimation and budget gate for session actions."""
+"""Time-budget helpers: cost estimation and the session and phase budget gates for actions."""
 
 from __future__ import annotations
 
 import math
 from typing import TYPE_CHECKING, Any
 
+from hyperloom.common.deadline import Deadline
+
 from ..bus.gpu_pool import GPU_LEASE_TTL_GRACE
+from ..phases import machine_state as _phase_state
+from ..policy.gate import PolicyDenied
+from ..specialists.profile import resolve_specialist_profile, wall_budget_base_min
 
 if TYPE_CHECKING:
     from ..state.shared_state import SharedState
+
+# The phases whose own wall-clock budget bounds the search work started in them; every other phase answers only to
+# the session budget.
+PHASE_BUDGET_GATED_PHASES: frozenset[str] = frozenset({"FRAMEWORK_AGENT", "KERNEL_AGENT"})
+
+# What a bench-capable specialist spends before its first benchmark round can start.
+_BENCH_SPECIALIST_STARTUP_MIN = 10.0
 
 # Actions that must stay startable no matter how little budget is left: they are how a session ends cleanly, so a time
 # gate that refused them would strand the run with nothing to show.
@@ -84,3 +96,70 @@ def action_fits_time_budget(
     if expected_cost_minutes <= 0.0:
         return True
     return usable_sec >= expected_cost_minutes * _SECONDS_PER_MINUTE
+
+
+def gated_phase_remaining_sec(shared_state: SharedState) -> float | None:
+    """Seconds left in the current phase's budget when that budget bounds the phase's search, else ``None``."""
+    if str(shared_state.phase or "").upper() not in PHASE_BUDGET_GATED_PHASES:
+        return None
+    return _phase_state.phase_budget_remaining_seconds(shared_state)
+
+
+def phase_deadline(shared_state: SharedState) -> Deadline | None:
+    """The instant the current phase's budget runs out, or ``None`` when no phase budget bounds its search."""
+    remaining = gated_phase_remaining_sec(shared_state)
+    return None if remaining is None else Deadline.after(remaining)
+
+
+def specialist_admission_minutes(shared_state: SharedState, params: dict[str, Any] | None) -> float:
+    """The shortest run worth starting a specialist for.
+
+    That is its mode's base budget and, for one that benches, room for one measured benchmark round after startup.
+    Admission asks only for this minimum; a dispatched specialist runs to its full wall budget, tightened to the
+    session and phase ends.
+    """
+    floor_min = wall_budget_base_min(params)
+    if resolve_specialist_profile(params).reserves_benchmark_lane:
+        round_min = measured_baseline_runtime_sec(shared_state) / _SECONDS_PER_MINUTE
+        floor_min = max(floor_min, round_min + _BENCH_SPECIALIST_STARTUP_MIN)
+    return floor_min
+
+
+def time_budget_denial(action: str, expected_cost_minutes: float, shared_state: SharedState) -> PolicyDenied | None:
+    """Refuse an action that the session's usable time, or the gated phase's remaining time, cannot fit.
+
+    Args:
+        action: The action being admitted.
+        expected_cost_minutes: What the action is expected to cost.
+        shared_state: The live session state both budgets are read from.
+
+    Returns:
+        A :class:`PolicyDenied` naming the budget that cannot fit the action, else ``None``.
+    """
+    session_sec = shared_state.session_budget_usable_sec()
+    if not action_fits_time_budget(usable_sec=session_sec, expected_cost_minutes=expected_cost_minutes):
+        return PolicyDenied(
+            _cost_exceeds(action, expected_cost_minutes, session_sec, "the session budget"),
+            rule="time_budget",
+            hint=(
+                "the wall-clock budget cannot fit this action; pick an action that fits "
+                "the time left, the Coordinator closes the session once none does"
+            ),
+        )
+    phase_sec = gated_phase_remaining_sec(shared_state)
+    if not action_fits_time_budget(usable_sec=phase_sec, expected_cost_minutes=expected_cost_minutes):
+        return PolicyDenied(
+            _cost_exceeds(action, expected_cost_minutes, phase_sec, f"the {shared_state.phase} phase budget"),
+            rule="phase_time_budget",
+            hint="the phase's wall-clock budget cannot fit this action; pick one that fits the time left in the phase",
+        )
+    return None
+
+
+def _cost_exceeds(action: str, expected_cost_minutes: float, usable_sec: float | None, budget: str) -> str:
+    """The denial reason: what the action needs against what ``budget`` has left."""
+    remaining_min = (usable_sec or 0.0) / _SECONDS_PER_MINUTE
+    return (
+        f"action={action!r} denied: needs ~{expected_cost_minutes:.0f} min but only "
+        f"{remaining_min:.0f} min of {budget} is left"
+    )

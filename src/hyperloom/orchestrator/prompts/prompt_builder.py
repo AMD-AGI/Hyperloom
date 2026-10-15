@@ -219,7 +219,7 @@ def _section_phase_semantics(
         "",
         "The Coordinator runs the optimization as a linear pipeline.",
         "Each tick it injects a `=== Phase ===` block with the current",
-        "phase. Per-phase proposable action sets (informational):",
+        "phase. Per-phase proposable action sets (enforced at admission):",
         "",
     ]
     if disabled_suffix:
@@ -417,17 +417,14 @@ def _format_gain_pair(meta: ActionMetadata) -> str:
     return f"{lo:.0f}-{hi:.0f}%"
 
 
-def _llm_selectable_domains(*, custom_specialist: bool = False) -> str:
+def _llm_selectable_domains() -> str:
     """The domains Orchestration may name, pipe-separated, from the registry."""
-    from ..specialists.domains import CUSTOM_SPECIALIST_KEY, SPECIALIST_DOMAINS
+    from ..specialists.domains import SPECIALIST_DOMAINS
 
-    keys = [d.key for d in SPECIALIST_DOMAINS if d.llm_selectable]
-    if custom_specialist:
-        keys.append(CUSTOM_SPECIALIST_KEY)
-    return "|".join(keys)
+    return "|".join(d.key for d in SPECIALIST_DOMAINS if d.llm_selectable)
 
 
-def _format_emit_hint(meta: ActionMetadata, *, custom_specialist_description: str = "") -> str:
+def _format_emit_hint(meta: ActionMetadata) -> str:
     """Build the per-action ``EMIT:`` hint showing the correct transport.
 
     Kernel-owned actions render a ``REQUEST{...}`` template; ``specialist`` /
@@ -437,8 +434,6 @@ def _format_emit_hint(meta: ActionMetadata, *, custom_specialist_description: st
 
     Args:
         meta (ActionMetadata): The action to build an emit hint for.
-        custom_specialist_description (str): Non-empty when the session
-            defines ``custom_specialist``; adds it to the domain list.
 
     Returns:
         str: The emit-hint string for the catalogue entry.
@@ -457,7 +452,7 @@ def _format_emit_hint(meta: ActionMetadata, *, custom_specialist_description: st
     if meta.name == "specialist":
         return (
             "delegate{action_name='specialist', params={"
-            f"domain=<one of {_llm_selectable_domains(custom_specialist=bool(custom_specialist_description))}>, "
+            f"domain=<one of {_llm_selectable_domains()}>, "
             "gap_canonical_id=<stable gap id>, "
             "gap_symptom?=<str>, gap_layer?=<str>, "
             "gap_evidence?={profile_trace:..., ...}, "
@@ -516,11 +511,7 @@ def _format_grid_injection_hint(name: str) -> str | None:
     return None
 
 
-def _section_action_catalogue(
-    actions: list[ActionMetadata],
-    *,
-    custom_specialist_description: str = "",
-) -> list[str]:
+def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
     """Build the ACTIONS YOU MAY USE catalogue section, grouped by phase.
 
     Every enabled action keeps its description, cost/gain/risk line and payload
@@ -529,8 +520,6 @@ def _section_action_catalogue(
 
     Args:
         actions (list[ActionMetadata]): The actions enabled for this run.
-        custom_specialist_description (str): The operator's one-line
-            description of ``custom_specialist``; empty when not defined.
 
     Returns:
         list[str]: Markdown lines for the action catalogue.
@@ -562,16 +551,21 @@ def _section_action_catalogue(
                 f"crash_risk={meta.crash_risk:.2f}  "
                 f"family={meta.family}"
             )
-            lines.append(
-                f"    EMIT: {_format_emit_hint(meta, custom_specialist_description=custom_specialist_description)}"
-            )
-            if name == "specialist" and custom_specialist_description:
-                lines.append(f"    OPERATOR-DEFINED DOMAIN: custom_specialist — {custom_specialist_description}")
+            lines.append(f"    EMIT: {_format_emit_hint(meta)}")
             grid_hint = _format_grid_injection_hint(name)
             if grid_hint:
                 lines.append(f"    {grid_hint}")
         lines.append("")
     return lines
+
+
+def _stop_report_step(phase_key: str) -> str:
+    """The Stop step's ``report`` instruction: admission refuses ``report`` in a phase that does not offer it."""
+    from ..phases.machine_state import allowed_actions_for
+
+    if not phase_key or "report" in allowed_actions_for(phase_key):
+        return "propose `report` once (if not already done)"
+    return "do not propose `report` (only CLOSE allows it, and the Coordinator routes the run there)"
 
 
 def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transport: str = "") -> list[str]:
@@ -612,7 +606,7 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
         "sequence. Read the dynamic SharedState section and decide:",
         "",
         "1. **Stop**: if `stop_reason` is set OR `cumulative_gain_validated >= target_gain_pct`,",
-        "   propose `report` once (if not already done) then send an observation 'goal-reached'.",
+        f"   {_stop_report_step(phase_key)} then send an observation 'goal-reached'.",
         *measure_lines,
         "3. **Stack-aware grids**: route every grid attempt through",
         "   ``delegate{action_name='explore', params={grid: [...] }}``;",
@@ -646,10 +640,12 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
             "   c. **KB sub-graphs + warm-start recipe** when present —",
             "      cross-session priors carry " + "*qualitative* hints (what worked / what failed last time).",
             "   d. **`=== Untested proposals (current cycle) ===`** — the",
-            "      executable specialist proposals this cycle that no explore",
-            "      round has benched, ranked by gap severity. The Coordinator",
+            "      executable proposals this cycle that no explore round has",
+            "      benched: predictor rows (`provenance: primatune`) first, then",
+            "      specialist proposals ranked by gap severity. The Coordinator",
             "      benches this queue itself; your own grid adds only what it",
-            "      does not already hold.",
+            "      does not already hold, except predictor rows, which you copy",
+            "      verbatim unless the block names them as already in a grid.",
             "   e. **Ordering facts**: baseline runs before anything else",
             "      (invariant). ``analysis.md`` / ``last_profile_trace`` arrive",
             "      automatically from the Coordinator-owned analysis task at",
@@ -771,7 +767,8 @@ def _idea_generation_lines() -> list[str]:
         "",
         "The Coordinator benches `=== Untested proposals (current cycle) ===`",
         "itself; build your own grid from the five moves above to a target of 4",
-        "(hard maximum 6), leaving out anything that queue already holds.",
+        "(hard maximum 6), leaving out anything that queue already holds except",
+        "the predictor rows it asks you to carry verbatim.",
         "",
         "An explore round that produces zero new ideas is a bug — send an observation",
         "with body_md='idea-pipeline-empty' and explain which search directions are exhausted.",
@@ -1061,7 +1058,6 @@ def build_orchestration_prompt(
     agentx_corpus_shape: Mapping[str, Any] | None = None,
     agentx_grading: Mapping[str, Any] | None = None,
     agentx_backend: str = "",
-    custom_specialist_description: str = "",
 ) -> str:
     """Compose the Orchestration system prompt (deterministic for given inputs).
 
@@ -1101,8 +1097,6 @@ def build_orchestration_prompt(
             to the session-context section.
         references_dir: directory of on-demand reference documents; defaults
             to ``asset_prompt_references_dir()`` when ``None``.
-        custom_specialist_description: the operator's one-line description of
-            ``custom_specialist``; empty leaves the domain out of the prompt.
 
     Returns:
         The composed Orchestration system prompt text.
@@ -1155,7 +1149,7 @@ def build_orchestration_prompt(
             kernel_enabled=kernel_enabled,
             framework_agent_phase_enabled=framework_agent_phase_enabled,
         ),
-        _section_action_catalogue(actions, custom_specialist_description=custom_specialist_description),
+        _section_action_catalogue(actions),
         _section_decision_framework(kernel_enabled=kernel_enabled, phase=phase_norm, transport=transport),
         _section_cycle_directive(
             macro_cycle=macro_cycle, cycle_directive=cycle_directive, cycle_strategy=cycle_strategy

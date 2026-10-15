@@ -728,6 +728,96 @@ async def test_warm_replay_skips_when_best_config_empty(tmp_path):
     assert coord.shared_state.warm_replay_outcome["reason"] == "best_config_empty"
 
 
+def _vllm_baseline(tmp_path: Path, coord: Coordinator) -> None:
+    """Point the stub at a real vLLM baseline config the replay would be appended to."""
+    config = tmp_path / "baseline_config.with_envs.yaml"
+    config.write_text(
+        json.dumps(
+            {
+                "benchmark": {
+                    "framework": "vllm",
+                    "envs": {
+                        "VLLM_ROCM_USE_AITER": "1",
+                        "EXTRA_VLLM_ARGS": "--kv-cache-dtype fp8 --enable-prefix-caching --max-num-seqs 64",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    coord.shared_state.framework = "vllm"
+    coord.shared_state.baseline_config_path = str(config)
+
+
+@pytest.mark.asyncio
+async def test_warm_replay_skips_a_recipe_that_restates_the_baseline(tmp_path):
+    """A recipe whose every arg and env the baseline already sets would measure the baseline again, for a full round."""
+    recipe = _warm_recipe_t1(
+        extra_server_args="--kv-cache-dtype fp8 --enable-prefix-caching",
+        extra_envs={"VLLM_ROCM_USE_AITER": "1"},
+    )
+    coord = _make_coord(tmp_path, warm_start_recipe=recipe)
+    _vllm_baseline(tmp_path, coord)
+
+    assert await coord.phase_prelude.maybe_enqueue_warm_replay(baseline_tput=600.0) is None
+
+    assert coord.tasks.calls == []
+    outcome = coord.shared_state.warm_replay_outcome
+    assert (outcome["status"], outcome["reason"]) == ("skipped", "restates_baseline")
+    persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert persisted["warm_replay_attempted"] is True
+
+
+@pytest.mark.asyncio
+async def test_warm_replay_runs_a_recipe_that_changes_the_baseline(tmp_path):
+    """One setting the baseline does not hold is enough for the replay to run."""
+    recipe = _warm_recipe_t1(extra_server_args="--kv-cache-dtype fp8 --max-num-seqs 128")
+    coord = _make_coord(tmp_path, warm_start_recipe=recipe)
+    _vllm_baseline(tmp_path, coord)
+
+    assert await coord.phase_prelude.maybe_enqueue_warm_replay(baseline_tput=600.0) is not None
+
+    assert [call["params"]["extra_server_args"] for call in coord.tasks.calls] == [
+        "--kv-cache-dtype fp8 --max-num-seqs 128"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_warm_replay_runs_restated_args_under_reference_launch_controls(tmp_path):
+    """Materialization re-applies a replacing reference launch, so the replay need not launch the baseline config."""
+    recipe = _warm_recipe_t1(extra_server_args="--kv-cache-dtype fp8")
+    coord = _make_coord(tmp_path, warm_start_recipe=recipe)
+    _vllm_baseline(tmp_path, coord)
+    coord.shared_state.reference_launch_controls = {"args_mode": "replace"}
+
+    assert await coord.phase_prelude.maybe_enqueue_warm_replay(baseline_tput=600.0) is not None
+
+    assert [call["params"]["extra_server_args"] for call in coord.tasks.calls] == ["--kv-cache-dtype fp8"]
+
+
+@pytest.mark.asyncio
+async def test_warm_replay_runs_restated_args_that_carry_a_code_patch(tmp_path):
+    """The patch is the change, and the argv cannot show it."""
+    framework_root = tmp_path / "vllm"
+    framework_root.mkdir()
+    context = {
+        "status": "hit",
+        "match": {"tier": "exact", "confidence": 0.85, "source": "gbrain"},
+        "recommended_replay": {
+            "extra_server_args": "--kv-cache-dtype fp8",
+            "extra_envs": {},
+            "expected_gain_pct": 25.0,
+            "patches": [{"patch_file": "p.patch", "framework_root": str(framework_root)}],
+        },
+    }
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1(), warm_start_context=context)
+    _vllm_baseline(tmp_path, coord)
+
+    assert await coord.phase_prelude.maybe_enqueue_warm_replay(baseline_tput=600.0) is not None
+
+    assert [len(call["params"]["patches"]) for call in coord.tasks.calls] == [1]
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [

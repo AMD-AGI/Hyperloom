@@ -158,13 +158,26 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     return " ".join(out)
 
 
-# Serving-ineligible harness flags.
+# Serving-ineligible harness flags: legal to benchmark with, wrong to hand back as a serving recipe. Stripped where a
+# recipe is persisted, never on the launch path: the baseline keeps the operator's flags, so a variant must too.
 _BENCHMARK_HARNESS_FLAG_DENYLIST: tuple[str, ...] = ("--no-enable-prefix-caching",)
 
 
 def strip_benchmark_harness_flags(server_args: str | None) -> str:
     """Drop every :data:`_BENCHMARK_HARNESS_FLAG_DENYLIST` entry from ``server_args``."""
     return remove_server_args(server_args, _BENCHMARK_HARNESS_FLAG_DENYLIST)
+
+
+def normalize_server_args(server_args: str | None) -> str:
+    """Compact JSON values and drop one layer of shell wrappers, removing nothing.
+
+    Magpie expands ``EXTRA_*_ARGS`` unquoted, so a ``--quantization 'fp8'`` wrapper would reach argv literally.
+    """
+    args = _reserialize_json_blobs(str(server_args or "").strip())
+    if not args:
+        return ""
+    tokens = _split_args_preserving_json(args)
+    return args if tokens is None else " ".join(tokens)
 
 
 def compose_server_args(
@@ -191,7 +204,7 @@ def compose_server_args(
         raw = merge_server_args(combined_base, variant_extra_args)
         pruned = remove_server_args(combined_base, remove_args)
         composed = merge_server_args(pruned, variant_extra_args)
-    result = strip_benchmark_harness_flags(composed)
+    result = normalize_server_args(composed)
     # Compare against the RAW inputs, not against ``composed``.
     _warn_on_damaged_json_values(raw, result)
     return result
@@ -238,8 +251,9 @@ def _parses_as_json(value: str) -> bool:
 
 
 # A JSON "bareword": an identifier-like token that appears where a double-quoted JSON key or string value should be
-# (letters/digits/underscore plus the ``.``, ``/``, ``-`` common in model ids and paths).
-_JSON_BAREWORD = r"[+-]?[A-Za-z_][A-Za-z0-9_./-]*"
+# (letters/digits/underscore plus the ``.``, ``/``, ``-`` common in model ids and paths). It may start with ``/`` so an
+# absolute path value (a spec-decode draft ``model``) is quoted too; a bare number never matches and stays numeric.
+_JSON_BAREWORD = r"[+-]?[A-Za-z_/][A-Za-z0-9_./-]*"
 _UNQUOTED_KEY_RE = re.compile(r"([{,]\s*)(" + _JSON_BAREWORD + r")(\s*:)")
 _UNQUOTED_VALUE_RE = re.compile(r"([:\[,]\s*)(" + _JSON_BAREWORD + r")")
 

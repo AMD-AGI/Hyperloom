@@ -11,12 +11,13 @@ import pytest
 from hyperloom_kb import (
     LEXICAL_FUZZY_PROVIDER_REF,
     AnthropicPlannerBackend,
-    Change,
     Experience,
     ExperienceDeclaration,
     ExperienceService,
     ExperienceStatus,
     FieldDeclaration,
+    FieldKind,
+    FieldRole,
     InMemoryExperienceStore,
     InMemoryQueryViewStore,
     InMemorySchemaRegistry,
@@ -25,8 +26,6 @@ from hyperloom_kb import (
     LLMQueryPlanner,
     LocalRetrievalService,
     ObjectiveDeclaration,
-    ObjectiveDirection,
-    Outcome,
     PlannerConfiguration,
     PlannerExecutionError,
     PlannerGatewayConfig,
@@ -47,20 +46,22 @@ NOW = datetime(2026, 9, 22, tzinfo=timezone.utc)
 
 def _declaration() -> ExperienceDeclaration:
     return ExperienceDeclaration(
+        objectives=(ObjectiveDeclaration("throughput@v1", "Maximize throughput."),),
         identity=(
             FieldDeclaration("model", "Model."),
             FieldDeclaration("gpu", "GPU."),
         ),
-        baseline_identity=(FieldDeclaration("config", "Baseline."),),
-        change_identity=(FieldDeclaration("knob", "Knob."),),
-        objectives=(
-            ObjectiveDeclaration(
-                "throughput@v1",
-                ObjectiveDirection.HIGHER_IS_BETTER,
-                "Throughput.",
-            ),
+        baseline=(FieldDeclaration("config", "Baseline.", group=True),),
+        change=(
+            FieldDeclaration("knob", "Knob.", group=True),
+            FieldDeclaration("summary", "What changed.", role=FieldRole.SUMMARY, search=4),
+            FieldDeclaration("content", "The change.", kind=FieldKind.TEXT),
         ),
-        decisions=("keep", "revert"),
+        outcome=(
+            FieldDeclaration("decision", "Decision.", role=FieldRole.DECISION, values=("keep", "revert")),
+            FieldDeclaration("value", "Throughput.", kind=FieldKind.NUMBER, role=FieldRole.MEASUREMENT),
+        ),
+        reflection=(FieldDeclaration("text", "Reflection.", kind=FieldKind.TEXT),),
     )
 
 
@@ -80,15 +81,14 @@ def _experience(
         completed_at=NOW,
         identity={"model": model, "gpu": "mi300x"},
         objective="throughput@v1",
-        baseline_identity={"config": "default"},
-        baseline_value=100.0,
+        baseline={"config": "default"},
         provenance=Provenance("read-test", "1"),
         schema_ref=schema.schema_ref,
         status=ExperienceStatus.COMPLETE,
-        reasoning=reasoning,
-        change=Change({"knob": knob}, f"Change {knob}.", kind="config"),
-        outcome=Outcome("keep", 110.0),
-        reflection="The measured result improved.",
+        rationale={"reasoning": reasoning},
+        change={"knob": knob, "summary": f"Change {knob}."},
+        outcome={"decision": "keep", "value": 110.0},
+        reflection={"text": "The measured result improved."},
     )
 
 
@@ -165,7 +165,7 @@ def _stack():
     )
     for item in (target, other):
         service.submit_complete(item)
-    fuzzy = LexicalFuzzyProvider(experiences)
+    fuzzy = LexicalFuzzyProvider(experiences, schema)
     view = QueryViewMaintainer(schemas, experiences, views).rebuild(
         schema.schema_ref,
         fuzzy_ready=True,
@@ -261,10 +261,11 @@ def test_anthropic_planner_backend_reads_text_response() -> None:
     }
 
 
-def test_planner_rejects_unknown_structured_field() -> None:
+@pytest.mark.parametrize("field", ["identity.not_declared", "change.content", "baseline_identity.config"])
+def test_planner_rejects_a_structured_field_exact_lookup_does_not_index(field: str) -> None:
     schema = _declaration()
     value = json.loads(_planner_response())
-    value["signals"][0]["field"] = "identity.not_declared"
+    value["signals"][0]["field"] = field
     backend = FakePlannerBackend([json.dumps(value)])
     planner = LLMQueryPlanner(
         backend,

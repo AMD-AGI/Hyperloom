@@ -241,6 +241,75 @@ def clear_competitor_target(session_dir: Path) -> None:
         pass
 
 
+def _no_match_reason(rows: list, query: BaselineQuery, canonical_model: str) -> tuple[BaselineReason, str]:
+    """Why no InferenceX row is comparable: the GPU, the precision, or the shape."""
+    hardware = query.gpu.strip().casefold()
+    has_gpu = any(isinstance(r, dict) and str(r.get("hardware") or "").strip().casefold() == hardware for r in rows)
+    if not has_gpu:
+        return "unsupported_target_gpu", f"InferenceX has no {query.gpu!r} data for model={canonical_model!r}"
+    # GPU present but no comparable row.
+    if query.precision:
+        shape_rows = find_reference_rows(
+            rows,
+            hardware=query.gpu,
+            isl=query.isl,
+            osl=query.osl,
+            precision="",
+            benchmark_mode=query.benchmark_mode,
+        )
+        if shape_rows:
+            return "precision_mismatch", (
+                f"InferenceX has gpu={query.gpu} isl/osl={query.isl}/{query.osl} rows "
+                f"but none at precision={query.precision}"
+            )
+    return "dimension_mismatch", (
+        f"no InferenceX row for gpu={query.gpu} isl/osl={query.isl}/{query.osl} precision={query.precision or '(any)'}"
+    )
+
+
+def _collect_points(matched: list, *, agentx: bool) -> tuple[list[BaselinePoint], dict[str, BaselinePoint]]:
+    """The reference points these rows carry, and the agentic ones keyed by benchmark id.
+
+    In agentx mode a row whose id will not normalize is kept as a
+    throughput-only reference, and a repeated id is taken once.
+    """
+    points: list[BaselinePoint] = []
+    by_id: dict[str, BaselinePoint] = {}
+    for row in matched:
+        point = _row_to_point(row)
+        if point is None:
+            continue
+        if agentx:
+            try:
+                point.benchmark_id = normalize_benchmark_id(row.get("id"))
+            except ValueError:
+                pass  # Keep the row as a throughput-only reference.
+            if point.benchmark_id is not None:
+                if point.benchmark_id in by_id:
+                    continue
+                by_id[point.benchmark_id] = point
+        points.append(point)
+    return points, by_id
+
+
+def _agentx_warnings(points: list[BaselinePoint], by_id: dict[str, BaselinePoint]) -> list[str]:
+    """Fill in agentic P90 interactivity, and say what the comparison does not prove."""
+    warnings = [
+        "cross-system reference, not a GPU-only comparison; precision bucket does not prove identical "
+        "quantization, corpus or deployment configuration"
+    ]
+    derived = fetch_agentic_interactivity(list(by_id)) if by_id else {}
+    if derived is None:
+        warnings.append("P90 fetch failed; total throughput remains available")
+    else:
+        for key, point in by_id.items():
+            point.e2e_norm_intvty_p90 = derived.get(key)
+    missing_p90 = sum(point.e2e_norm_intvty_p90 is None for point in points)
+    if missing_p90:
+        warnings.append(f"P90 unavailable for {missing_p90} of {len(points)} reference rows")
+    return warnings
+
+
 def analyze(
     *,
     session_dir: Path,
@@ -322,72 +391,14 @@ def analyze(
         benchmark_mode=query.benchmark_mode,
     )
     if not matched:
-        hw = query.gpu.strip().casefold()
-        has_gpu = any(isinstance(r, dict) and str(r.get("hardware") or "").strip().casefold() == hw for r in rows)
-        if not has_gpu:
-            return _skip(
-                "no_match",
-                "unsupported_target_gpu",
-                f"InferenceX has no {query.gpu!r} data for model={canonical_model!r}",
-            )
-        # GPU present but no comparable row.
-        if query.precision:
-            shape_rows = find_reference_rows(
-                rows,
-                hardware=query.gpu,
-                isl=query.isl,
-                osl=query.osl,
-                precision="",
-                benchmark_mode=query.benchmark_mode,
-            )
-            if shape_rows:
-                return _skip(
-                    "no_match",
-                    "precision_mismatch",
-                    f"InferenceX has gpu={query.gpu} isl/osl={query.isl}/{query.osl} rows "
-                    f"but none at precision={query.precision}",
-                )
-        return _skip(
-            "no_match",
-            "dimension_mismatch",
-            f"no InferenceX row for gpu={query.gpu} isl/osl={query.isl}/{query.osl} "
-            f"precision={query.precision or '(any)'}",
-        )
+        reason, warning = _no_match_reason(rows, query, canonical_model)
+        return _skip("no_match", reason, warning)
 
-    points: list[BaselinePoint] = []
-    by_id: dict[str, BaselinePoint] = {}
-    for row in matched:
-        point = _row_to_point(row)
-        if point is None:
-            continue
-        if agentx:
-            try:
-                point.benchmark_id = normalize_benchmark_id(row.get("id"))
-            except ValueError:
-                pass  # Keep the row as a throughput-only reference.
-            if point.benchmark_id is not None:
-                if point.benchmark_id in by_id:
-                    continue
-                by_id[point.benchmark_id] = point
-        points.append(point)
+    points, by_id = _collect_points(matched, agentx=agentx)
     if not points:
         return _skip("no_match", "no_valid_rows", "matched InferenceX rows had no positive tput_per_gpu")
 
-    warnings: list[str] = []
-    if agentx:
-        warnings.append(
-            "cross-system reference, not a GPU-only comparison; precision bucket does not prove identical "
-            "quantization, corpus or deployment configuration"
-        )
-        derived = fetch_agentic_interactivity(list(by_id)) if by_id else {}
-        if derived is None:
-            warnings.append("P90 fetch failed; total throughput remains available")
-        else:
-            for key, point in by_id.items():
-                point.e2e_norm_intvty_p90 = derived.get(key)
-        missing_p90 = sum(p.e2e_norm_intvty_p90 is None for p in points)
-        if missing_p90:
-            warnings.append(f"P90 unavailable for {missing_p90} of {len(points)} reference rows")
+    warnings = _agentx_warnings(points, by_id) if agentx else []
 
     all_points = _dedup_by_conc(points)
     best = max(points, key=lambda p: p.tput_per_gpu)

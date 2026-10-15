@@ -1108,8 +1108,8 @@ def test_framework_isolation_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyP
     repo_url = "https://github.com/sgl-project/sglang.git"
     candidate = Candidate(ref="PR:42", repo=repo_url)
     assert isolation._repo_cache_dir(repo_url, tmp_path).name == "https---github-com-sgl-project-sglang-git"
-    assert isolation._worktree_ref(candidate) == "refs/pull/42/head"
-    assert isolation._worktree_ref(Candidate(ref="main", repo=repo_url)) == "main"
+    assert isolation.checkout_ref(candidate.ref) == "refs/pull/42/head"
+    assert isolation.checkout_ref("main") == "main"
 
     usage = SimpleNamespace(free=2 * 1024**3)
     monkeypatch.setattr(isolation.shutil, "disk_usage", lambda _p: usage)

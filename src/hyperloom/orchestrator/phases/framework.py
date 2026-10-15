@@ -10,7 +10,6 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Collection, Iterable, Mapping
-from hashlib import sha1
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.coerce import to_float
@@ -25,6 +24,8 @@ from ..state.task_registry import TaskNotFound
 from ..state.shared_state import resolve_grading_anchor_tput, inject_stack_base_params
 
 if TYPE_CHECKING:
+    from ..predictor.pump import PhaseBudget
+    from ..predictor.view import SessionView
     from ..state.task_registry import Task
     from .machine import Transition
 from ..loop.proposals import PendingProposal, integrate_review_in_flight, record_proposal
@@ -41,7 +42,7 @@ from hyperloom.orchestrator.lever import (
     LEVER_UPSTREAM_PR,
     patch_owner_phase,
 )
-from ..collaborator import CoordinatorCollaborator
+from .proposal_bench import CUSTOM_PROPOSAL_DOMAIN, ProposalBench, kb_exposure_of
 
 log = _logging.getLogger(__name__)
 
@@ -273,6 +274,9 @@ def _forward_integrate_source(
     if domain:
         dst["domain"] = domain
         dst["provenance"] = f"specialist:{domain}"
+    elif src.get("provenance"):
+        # A domain-less dispatch such as a predictor mandate keeps the label it was dispatched under.
+        dst["provenance"] = str(src["provenance"])
     # ``framework`` is intentionally not forwarded: integrate_patch consumes
     # that parameter when selecting accuracy parsing/gating behavior, whereas
     # proposal ownership only needs the gap metadata below.
@@ -304,6 +308,24 @@ def _forward_integrate_source(
 def _recorder(coord: Any):
     """Return the framework recorder for this phase entry, or ``None`` outside an open entry."""
     return coord._framework_timeline_recorder
+
+
+def predictor_budget(state: SessionView) -> PhaseBudget:
+    """The FRAMEWORK clock a predictor request is conditioned on, read when the request goes out."""
+    from ..predictor.pump import PhaseBudget
+
+    limits: list[float] = []
+    remaining = _phase_state.phase_budget_remaining_seconds(state)
+    if remaining is not None:
+        limits.append(float(remaining))
+    cap = _phase_state.phase_cap_seconds(state)
+    if cap is not None:
+        limits.append(float(cap) - float(_phase_state.phase_cumulative_seconds(state)))
+    return PhaseBudget(
+        headroom_sec=min(limits) if limits else None,
+        elapsed_sec=_phase_state.phase_elapsed_seconds(state),
+        keep_threshold_pct=_phase_state.resolve_keep_threshold(state),
+    )
 
 
 def _record_run(coord: Any, task: Any, *, role: str, status: str, **fields: Any) -> None:
@@ -463,21 +485,6 @@ def _record_kb_exposure(recorder: Any, proposal_id: str, params: Mapping[str, An
     refs = params.get("kb_rendered_refs") or []
     if read_id or refs:
         recorder.record_proposal(proposal_id, kb_read_id=read_id, rendered_refs=refs)
-
-
-def _kb_exposure_of(rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
-    """The KB exposure of a grid assembled from several specialists' proposals, for its one proposal row.
-
-    The row holds every Experience any of those reads showed. It names a read only when one read fed every proposal.
-    """
-    rows = list(rows)
-    read_ids = {str(row.get("kb_read_id") or "") for row in rows}
-    refs: dict[str, Any] = {}
-    for row in rows:
-        for ref in row.get("kb_rendered_refs") or []:
-            if isinstance(ref, Mapping) and str(ref.get("id") or "") not in refs:
-                refs[str(ref.get("id") or "")] = dict(ref)
-    return {"kb_read_id": read_ids.pop() if len(read_ids) == 1 else "", "kb_rendered_refs": list(refs.values())}
 
 
 def _record_source_attempt(
@@ -699,11 +706,13 @@ def _record_discovered(coord: Any, task: Any, *, raw: Any, candidates: list[dict
         recorder.settle_proposal(ref, disposition=DISPOSITION_DROPPED, reason=verdict)
 
 
-class FrameworkPhase(CoordinatorCollaborator):
+class FrameworkPhase(ProposalBench):
     """The FRAMEWORK_AGENT phase: upstream candidates, authored patches, deliverable routing, and the enablement hand-off."""
 
     # Set for the span of one FRAMEWORK entry; ``None`` outside it and when the recorder is unbound.
     _framework_timeline_recorder: Any = None
+    # The PrimaTune predictor's in-flight request, created on first use (``predictor.pump.PredictorPump``).
+    _predictor: Any = None
     # Max tried-candidate rows fed into the ranker/discovery working memory.
     _FRAMEWORK_TRIED_MEMORY_CAP: int = 12
     # Tail of outcomes from the priors ledger to evaluate.
@@ -711,8 +720,6 @@ class FrameworkPhase(CoordinatorCollaborator):
     # Backstop: max Critic-review submissions for a single candidate before the pump force-stamps
     # ``repeated_review_abort`` and stops re-selecting it.
     _MAX_REPEATED_REVIEW_SUBMISSIONS: int = 3
-    # Cap on specialist proposal rows benched per automatic explore grid.
-    _AUTO_EXPLORE_GRID_CAP: int = 4
 
     def on_specialist_settled(self, task: "Task", done_payload: dict[str, Any], *, run_error: str) -> None:
         """Stamp an empty authoring round's terminal row and harvest a discovery round's candidates."""
@@ -918,7 +925,47 @@ class FrameworkPhase(CoordinatorCollaborator):
         # Opened after the reprofile so the policy reads the settled anchor,
         # and before the pump so the entry's first dispatch is inside the event.
         self._open_framework_timeline()
+        # Queued before orchestration's first turn so the tick's dispatch reaches it ahead of what that turn delegates.
+        await self._coord.specialist_dispatch.ensure_custom_specialist()
+        if self.shared_state.custom_specialist_only:
+            return
         await self._pump_framework_agent_phase()
+        # Before orchestration's first turn, so the first grid it composes can carry the answer; last, as on the
+        # tick, so a predictor fault reaches the transition's guard after the entry's own work has run.
+        await self._predictor_pump().settle(self.shared_state)
+
+    def _predictor_pump(self) -> Any:
+        from ..predictor.pump import PredictorPump
+
+        if self._predictor is None:
+            self._predictor = PredictorPump(budget=predictor_budget, on_filed=self._record_predictor_round)
+        return self._predictor
+
+    def _record_predictor_round(self, entry: dict[str, Any]) -> None:
+        """Record a filed predictor answer on this entry's event, as the config-arm run that produced it.
+
+        Keyed by the round id, since no task produced it; only an answer that
+        queued something is filed, so the run never reads as a failure.
+        """
+        from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ROLE_CONFIG
+
+        rows = entry.get("proposal_set") or []
+        mandate = str(entry.get("mandate_id") or "")
+        _record_run(
+            self,
+            str(entry.get("round_id") or ""),
+            role=ROLE_CONFIG,
+            status="succeeded",
+            domain=str(entry.get("domain") or ""),
+            dispatched_at=str(entry.get("asked_at") or ""),
+            completed_at=str(entry.get("completed_at") or ""),
+            proposals_total=len(rows),
+            summary=f"{len(rows)} config row(s)" + (f", source-change mandate {mandate}" if mandate else ""),
+        )
+
+    async def _pump_predictor(self) -> None:
+        """Step the PrimaTune predictor; a no-op unless an endpoint is configured."""
+        await self._predictor_pump().step(self.shared_state)
 
     def _authoring_inflight_candidate_ids(self, queued: list[Any], running: list[Any]) -> set[str]:
         """Candidate ids with a live specialist / integrate_patch task or a review proposal awaiting its verdict."""
@@ -2328,16 +2375,25 @@ class FrameworkPhase(CoordinatorCollaborator):
         exception, because a pump that raises on every tick otherwise leaves a
         phase that never dispatched anything closing clean.
         """
+        stage = "framework_pump"
         try:
+            if self.shared_state.custom_specialist_only:
+                await self._coord.specialist_dispatch.ensure_custom_specialist()
+                await self._maybe_bench_untested_proposals()
+                await self._maybe_finish_custom_only_cycle()
+                return
             await self._pump_framework_agent_phase()
             await self._maybe_bench_untested_proposals()
             await self._coord.phase_internal.maybe_enqueue_explore_research_scout()
             await self._coord.specialist_dispatch.maybe_force_stalled_domain_specialist()
-            await self._coord.specialist_dispatch.maybe_ensure_custom_specialist()
+            await self._coord.specialist_dispatch.ensure_custom_specialist()
             self._record_advisory_plateau()
+            # Last, as at entry, so a predictor fault is filed here after the phase's own work has run.
+            stage = "framework_predictor"
+            await self._pump_predictor()
         except Exception as exc:
-            log.exception("FRAMEWORK pump failed")
-            self._coord.record_exception(stage="framework_pump", exc=exc)
+            log.exception("FRAMEWORK pump failed at %s", stage)
+            self._coord.record_exception(stage=stage, exc=exc)
 
     def _record_framework_agent_authored_outcome(
         self,
@@ -2801,41 +2857,43 @@ class FrameworkPhase(CoordinatorCollaborator):
         return out
 
     async def _maybe_bench_untested_proposals(self) -> None:
-        """Enqueue an explore grid from the highest-severity untested specialist proposals.
-
-        Runs in FRAMEWORK_AGENT while no explore is queued or running. The
-        idempotency key names the fingerprint set, so a grid that failed without
-        recording any variant is not re-enqueued until the queue head changes.
-        """
-        from ..actions.executors._proposal_identity import controls_of
-
+        """Enqueue explore grids from ``untested_proposal_rows``: the custom specialist's alone, ahead of every gate;
+        the rest once no explore is queued or running and the framework candidate track is open."""
         state = self.shared_state
-        if (
-            state.phase or ""
-        ).strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT or state.framework_agent_phase_done:
+        if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
         dispatcher = self._coord.dispatcher
         if dispatcher.admission_frozen or dispatcher.dispatch_paused_for_phase_budget():
             return
-        if any(t.kind == "explore" for t in (*await self.tasks.queued(), *await self.tasks.running())):
+        explores = [t for t in (*await self.tasks.queued(), *await self.tasks.running()) if t.kind == "explore"]
+        custom = self._custom_proposal_rows()
+        if custom and not self._has_operator_work(explores):
+            if await self._enqueue_bench_grid(custom, operator_priority=True):
+                return
+        if state.custom_specialist_only or state.framework_agent_phase_done or explores:
             return
-        rows = state.untested_proposal_rows()[: self._AUTO_EXPLORE_GRID_CAP]
-        if not rows:
-            return
+        rows = [r for r in state.untested_proposal_rows() if r["domain"] != CUSTOM_PROPOSAL_DOMAIN]
+        if rows:
+            await self._enqueue_bench_grid(rows[: self._AUTO_EXPLORE_GRID_CAP], operator_priority=False)
+
+    async def _enqueue_bench_grid(self, rows: list[dict[str, Any]], *, operator_priority: bool) -> bool:
+        """Enqueue one explore grid benching ``rows``; returns whether a new task was created."""
+        from ..actions.executors._proposal_identity import controls_of
+
+        state = self.shared_state
         grid = [
             {
                 "name": row["name"],
                 "extra_args": row["extra_args"],
                 "extra_envs": dict(row["extra_envs"]),
                 **controls_of(row),
-                "provenance": f"specialist:{row['domain']}",
+                "provenance": row["provenance"],
                 # The proposing specialist's whole reasoning and checked citations reach the measured Experience.
                 "reasoning": row["reason"],
                 **({"experience_citations": row["experience_citations"]} if row["experience_citations"] else {}),
             }
             for row in rows
         ]
-        fp_hash = sha1(",".join(sorted(row["fingerprint"] for row in rows)).encode(), usedforsecurity=False)
         # The grid's attempts join their proposal row through this id, as a proposed or delegated grid's do.
         proposal_id = uuid.uuid4().hex
         params: dict[str, Any] = {
@@ -2844,6 +2902,8 @@ class FrameworkPhase(CoordinatorCollaborator):
             "grid": grid,
             "proposal_msg_id": proposal_id,
         }
+        if operator_priority:
+            params["operator_priority"] = True
         if state.baseline_config_path:
             params["config_path"] = state.baseline_config_path
         inject_stack_base_params(params, state, anchor=True)
@@ -2856,19 +2916,20 @@ class FrameworkPhase(CoordinatorCollaborator):
         etask, was_existing = await self.tasks.create_or_return_existing(
             kind="explore",
             params=params,
-            idempotency_key=f"auto-explore-c{int(state.macro_cycle or 0)}-{fp_hash.hexdigest()[:12]}",
+            idempotency_key=self._bench_key(rows, operator_priority=operator_priority),
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
             dispatch_class="coordinator",
         )
         if was_existing:
-            return
+            return False
         log.info("auto_bench: enqueued explore task_id=%s (variants=%d)", etask.task_id, len(grid))
         from ..loop.proposals import record_config_proposal
 
         record_config_proposal(
-            self._coord, proposal_id, "explore", {"params": params, **_kb_exposure_of(rows)}, outcome="auto_bench"
+            self._coord, proposal_id, "explore", {"params": params, **kb_exposure_of(rows)}, outcome="auto_bench"
         )
+        return True
 
     async def maybe_autosubmit_specialist_patches(
         self,

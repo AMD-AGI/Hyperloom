@@ -58,6 +58,7 @@ from ..framework.artifacts import candidate_key
 from ..state._shared_state.attempt_audit import _AUDIT_ACTIONS
 from ..state.shared_state import SharedState, resolve_graded_comparison, stack_base_params
 from ..bus.message_bus import Message
+from hyperloom.inference_optimizer.session.resume_guard import confirmed_stopped_scope
 from hyperloom.inference_optimizer.grid_server_args import (
     dedupe_extra_server_args,
     merge_cumulative_extra_server_args,
@@ -1816,6 +1817,40 @@ class WritebackCollaborator(CoordinatorCollaborator):
         "conc_sweep": "_promote_conc_sweep",
     }
 
+    def _anchor_held_reason(self, result: dict, *, is_revalidation: bool) -> str:
+        """Why a baseline result does not replace the anchor, or ``""`` when it does.
+
+        The anchor is the best measurement of the unmodified stack. A later, lower re-baseline must not replace it, or
+        downstream gains end up measured against a different reference than the one they claim. A revalidation is
+        exempt: the enablement patch changed the stack, so the prior anchor no longer describes anything reproducible.
+        """
+        tput = result.get("output_throughput")
+        if not (isinstance(tput, (int, float)) and tput > 0):
+            return "no_measurement"
+        prior_anchor = float(self.shared_state.baseline_tput or 0.0)
+        if prior_anchor <= 0.0 or is_revalidation:
+            return ""
+        # A stamped cumulative gain is measured against this anchor; moving it afterwards leaves every stamp
+        # describing a reference that no longer exists, which the report then classifies as `inconsistent`.
+        if self.shared_state.has_validated_gain_stamp:
+            return "anchor_load_bearing"
+        # A hot pass measured against a recorded COLD anchor is a correction, not a regression, so it lands even when
+        # the number is lower. The two are not comparable -- that is what the cold marker says -- and a cold figure
+        # can read higher than the hot one that replaces it whenever the "cold" pass was not really cold: weights in
+        # page cache and a JIT cache a prior run populated leave it paying none of the startup its depressed
+        # reputation assumes. Without this the session cannot escape the marker. PRELUDE refuses to finish while it
+        # is set, the retry that would clear it is rejected for measuring lower, and the run re-measures whole
+        # baseline rounds until the clock kills it.
+        hot_pass_ran = result.get("measure_round_runtime_sec")
+        corrects_a_cold_anchor = (
+            bool(self.shared_state.baseline_measure_round_dropped)
+            and isinstance(hot_pass_ran, (int, float))
+            and hot_pass_ran > 0
+        )
+        if float(tput) > prior_anchor or corrects_a_cold_anchor:
+            return ""
+        return "below_anchor"
+
     async def _promote_baseline(
         self,
         result: dict,
@@ -1838,33 +1873,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
             task_params.get("reason") == ENABLEMENT_REVALIDATION_REASON
             or (tracked_tid and tracked_tid == promoting_tid)
         )
-        # The anchor is the best measurement of the unmodified stack. A later,
-        # lower re-baseline must not replace it, or downstream gains end up
-        # measured against a different reference than the one they claim. A
-        # revalidation is exempt: the enablement patch changed the stack, so the
-        # prior anchor no longer describes anything reproducible.
         prior_anchor = float(self.shared_state.baseline_tput or 0.0)
-        # A hot pass measured against a recorded COLD anchor is a correction, not
-        # a regression, so it lands even when the number is lower. The two are not
-        # comparable -- that is what the cold marker says -- and a cold figure can
-        # read higher than the hot one that replaces it whenever the "cold" pass
-        # was not really cold: weights in page cache and a JIT cache a prior run
-        # populated leave it paying none of the startup its depressed reputation
-        # assumes. Without this the session cannot escape the marker. PRELUDE
-        # refuses to finish while it is set, the retry that would clear it is
-        # rejected for measuring lower, and the run re-measures whole baseline
-        # rounds until the clock kills it.
-        hot_pass_ran = result.get("measure_round_runtime_sec")
-        corrects_a_cold_anchor = (
-            bool(self.shared_state.baseline_measure_round_dropped)
-            and isinstance(hot_pass_ran, (int, float))
-            and hot_pass_ran > 0
-        )
-        anchor_accepted = bool(
-            isinstance(tput, (int, float))
-            and tput > 0
-            and (prior_anchor <= 0.0 or float(tput) > prior_anchor or is_revalidation or corrects_a_cold_anchor)
-        )
+        held_reason = self._anchor_held_reason(result, is_revalidation=is_revalidation)
+        anchor_accepted = not held_reason
         if isinstance(tput, (int, float)) and tput > 0:
             if anchor_accepted:
                 # The anchor is the hot measure round; the cold warmup round is
@@ -1872,10 +1883,11 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 self.shared_state.baseline_tput = float(tput)
             else:
                 log.info(
-                    "baseline anchor: keeping %.1f; re-baseline measured %.1f (task=%s)",
+                    "baseline anchor: keeping %.1f; re-baseline measured %.1f (task=%s reason=%s)",
                     prior_anchor,
                     float(tput),
                     promoting_tid,
+                    held_reason,
                 )
             self.shared_state.baseline_failure_streak = 0
             # A genuine baseline is what revalidates an enablement KEEP.
@@ -2080,6 +2092,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         }
         if not anchor_accepted and isinstance(tput, (int, float)) and tput > 0:
             audit_extras["anchor_kept_tput"] = prior_anchor
+            audit_extras["anchor_held"] = {"reason": held_reason, "prior": prior_anchor, "measured": float(tput)}
         # Present only when the probe cut a runaway eval short; explains a ~0 accuracy.
         if result.get("eval_probe"):
             audit_extras["eval_probe"] = result["eval_probe"]
@@ -3492,6 +3505,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         *,
         measurement: Mapping[str, Any] | None = None,
         server_launch_flags: str | None = None,
+        server_launch_envs: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """Fully-reproducible descriptor of ``current_best``'s launch environment.
 
@@ -3548,7 +3562,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     "reproducible": source_layer_reproducible(entry),
                 }
             )
-        # ``extra_server_args``/``extra_envs`` remain the current_best delta.
+        # ``extra_server_args`` remains the current_best delta; ``extra_envs`` is the
+        # current_best delta layered over any recipe launch environment (see below).
         # Full engine flags must come from the same promoted measurement, not a
         # search over historical benchmarks with a similar throughput.
         if not isinstance(measurement, Mapping):
@@ -3564,7 +3579,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
             "schema_version": 1,
             "config": {
                 "extra_server_args": materialized.get("extra_server_args") or "",
-                "extra_envs": dict(materialized.get("extra_envs") or {}),
+                # A launch-time environment the recipe applied itself sits under
+                # the current_best delta, which wins on a shared name.
+                "extra_envs": {**dict(server_launch_envs or {}), **dict(materialized.get("extra_envs") or {})},
                 "remove_args": list(materialized["remove_args"]),
                 "unset_envs": list(materialized["unset_envs"]),
                 "args_mode": materialized["args_mode"],
@@ -3816,7 +3833,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             return False
         return len(self.shared_state.optimization_stack or []) > before
 
-    def _resume_rollback_pending_integrate(self, pending: dict[str, Any]) -> dict[str, Any]:
+    def _resume_rollback_pending_integrate(self, pending: dict[str, Any], gone_scope: str | None) -> dict[str, Any]:
         """Restore a pending integration from its durable file and stash evidence.
 
         Incomplete evidence or an unverifiable restore remains pending; the
@@ -3824,12 +3841,16 @@ class WritebackCollaborator(CoordinatorCollaborator):
 
         Args:
             pending: The ``pending_integrate`` sentinel dict.
+            gone_scope: What an operator confirmed stopped with the task (``confirmed_stopped_scope``), if anything.
 
         Returns:
             A summary ``{"reversed": [...], "failed": [...]}``.
         """
         from ..actions.executors.integrate_patch import restore_pending_integrate
+        from ..actions.executors.source_tree_identity import settle_replaced_tree, tree_replaced
 
+        if tree_replaced(pending, gone_scope):
+            return settle_replaced_tree(pending)
         return restore_pending_integrate(pending)
 
     @staticmethod
@@ -3866,23 +3887,22 @@ class WritebackCollaborator(CoordinatorCollaborator):
     async def _recover_pending_integrate_from_task(
         self,
         pending: dict[str, Any],
-        task_id: str,
+        task: Task | None,
         report: dict[str, Any],
     ) -> bool:
-        """Settle a mutated integrate window from durable records rather than the bus.
+        """Settle an integrate window from durable records rather than the bus.
 
         Args:
             pending: The ``pending_integrate`` sentinel dict.
-            task_id: The sentinel's task id.
+            task: The sentinel's ``integrate_patch`` task row, if it still exists.
             report: The resume report dict to append fixes/warnings to.
 
         Returns:
             ``True`` when the sentinel was discharged or deliberately retained,
-            ``False`` when the caller should roll the half-applied patch back.
+            ``False`` when the caller should roll the window back (a no-op when it changed nothing in the tree).
         """
-        from ..state.task_registry import TaskNotFound
-
         state = self.shared_state
+        task_id = str(pending.get("task_id") or "")
         # Event retention can erase a KEEP. A promoted stack row is
         # independent positive evidence; a terminal/missing task without
         # its result is not evidence that a candidate was rejected.
@@ -3892,12 +3912,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
             state.save(self.session_dir)
             report["fixes"].append({"kind": "retained_promoted_pending_integrate", "task_id": task_id})
             return True
-        try:
-            task = await self.tasks.get(task_id)
-        except TaskNotFound:
-            task = None
-        if task is not None and task.kind != "integrate_patch":
-            task = None
         recovery = pending.get("recovery")
         phase = str(recovery.get("phase") or "") if isinstance(recovery, dict) else ""
         outcome = _confirmed_task_outcome(task) if task is not None else None
@@ -3909,6 +3923,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
             )
             self._clear_pending_integrate(pending, gc_runtime=False)
             return True
+        if not (pending.get("patches") or pending.get("artifacts")):
+            return False  # env/args only: short of a recorded KEEP there is nothing to hold, only to clear
         if verdict == "settled":
             report["fixes"].append(
                 {
@@ -3920,21 +3936,17 @@ class WritebackCollaborator(CoordinatorCollaborator):
             self._clear_pending_integrate(pending, gc_runtime=True)
             return True
         if phase == "restored" and outcome is not None:
-            # A confirmed outcome carrying no result: the attempt put the tree
-            # back and then died before recording what it decided. The verdict
-            # table needs a result to call that settled, but the phase already
-            # says the tree is clean. An unconfirmed or absent outcome is a
-            # different case and still falls through to the rollback below.
+            # A confirmed outcome carrying no result: the attempt put the tree back and then died before recording
+            # what it decided. The verdict table needs a result to call that settled, but the phase already says the
+            # tree is clean. An unconfirmed or absent outcome is a different case and still falls through below.
             report["fixes"].append({"kind": "settled_pending_integrate", "task_id": task_id, "phase": phase})
             self._clear_pending_integrate(pending, gc_runtime=True)
             return True
         if phase == "accepted":
-            # A KEEP verdict left the candidate in the tree on purpose and
-            # popped the user's stash, so neither rollback nor clear is
-            # correct here. Hold the obligation: dropping it would strand
-            # unrecorded candidate code, and standing in a baseline number
-            # for the lost measurement would poison current_best and
-            # misattribute the candidate's gain on the next stack rebench.
+            # A KEEP verdict left the candidate in the tree on purpose and popped the user's stash, so neither rollback
+            # nor clear is correct here. Hold the obligation: dropping it would strand unrecorded candidate code, and
+            # standing in a baseline number for the lost measurement would poison current_best and misattribute the
+            # candidate's gain on the next stack rebench.
             report["warnings"].append({"kind": "pending_integrate_outcome_unknown", "task_id": task_id, "phase": phase})
             return True
         if verdict == "incomplete":
@@ -3943,6 +3955,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
             # sentinel until someone edits state.json. An online restore that
             # failed lands here on a task the runner recorded as succeeded.
             return False
+        if confirmed_stopped_scope(task.history if task is not None else None) is not None:
+            return False  # confirmed stopped with no verdict: nothing will ever finish this window
         if task is None or task.state not in ("queued", "running", "failed"):
             report["warnings"].append({"kind": "pending_integrate_outcome_unknown", "task_id": task_id})
             return True
@@ -4009,16 +4023,16 @@ class WritebackCollaborator(CoordinatorCollaborator):
             )
             self._clear_pending_integrate(pending, gc_runtime=False)
             return
-        if (pending.get("patches") or pending.get("artifacts")) and await self._recover_pending_integrate_from_task(
-            pending, task_id, report
-        ):
+        task = await self.tasks.find(task_id, kind="integrate_patch")
+        if await self._recover_pending_integrate_from_task(pending, task, report):
             return
-        summary = self._resume_rollback_pending_integrate(pending)
+        gone_scope = confirmed_stopped_scope(task.history if task is not None else None)
+        summary = self._resume_rollback_pending_integrate(pending, gone_scope)
         if summary.get("failed"):
             report["warnings"].append({"kind": "pending_integrate_rollback_failed", "task_id": task_id, **summary})
             state.save(self.session_dir)
             return
-        if summary.get("reversed") or summary.get("artifacts_reverted"):
+        if summary.get("reversed") or summary.get("artifacts_reverted") or summary.get("tree_replaced"):
             report["fixes"].append({"kind": "rolled_back_pending_integrate", "task_id": task_id, **summary})
         else:
             report["fixes"].append({"kind": "cleared_stale_pending_integrate", "task_id": task_id})

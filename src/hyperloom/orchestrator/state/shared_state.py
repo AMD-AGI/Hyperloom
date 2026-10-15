@@ -51,15 +51,11 @@ resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_m
 ESCALATE_HINT_SKIP_TO_KERNEL: str = "skip_to_kernel"
 ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
 ESCALATE_HINT_SKIP_TO_CLOSE: str = "skip_to_close"
-ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
-ESCALATE_HINT_EXTEND_KERNEL_BUDGET: str = "extend_kernel_budget"
 ESCALATE_HINT_VOCAB: frozenset[str] = frozenset(
     {
         ESCALATE_HINT_SKIP_TO_KERNEL,
         ESCALATE_HINT_SKIP_TO_SWEEP,
         ESCALATE_HINT_SKIP_TO_CLOSE,
-        ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
-        ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
     }
 )
 
@@ -485,8 +481,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Operator-defined specialist (``--custom-specialist-*``); empty prompt means not configured.
     custom_specialist_prompt: str = ""
     custom_specialist_description: str = ""
-    # Set once a custom_specialist task has started; drives the at-least-once dispatch.
-    custom_specialist_dispatched: bool = False
+    # ``HYPERLOOM_CUSTOM_SPECIALIST_ONLY``: FRAMEWORK_AGENT runs the custom specialist and its bench alone.
+    custom_specialist_only: bool = False
     # ``--extra-env NAME=VALUE`` pins.
     operator_extra_env: dict[str, str] = field(default_factory=dict)
     # Operator-supplied custom-workload paths.
@@ -602,6 +598,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Why this stack can never record GPU kernels; set once from a parsed trace with host ops and no kernels, so the
     # Coordinator stops auto-enqueueing analysis that cannot succeed. Empty means GPU tracing is still presumed usable.
     gpu_trace_unsupported_reason: str = ""
+    # Analysis failures that recur on the same input, keyed by that input; ``analysis_failures`` owns the schema.
+    analysis_failures: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     # Feature toggles (mirrored from ``cli.py`` flags at session start).
     framework_agent_phase_enabled: bool = True
@@ -778,10 +776,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # consumer, domain, gap_canonical_id, read_id, experience_ids, experiences, prompt_block}. Coordinator-only writer.
     experience_kb_injections: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock budget share per phase: seeded once at phase init from CLI flags/defaults with disabled phases' shares
-    # redistributed, raised by ``extend_*_budget`` hints, kept on resume unless a --*-pct flag is given.
+    # redistributed, kept on resume unless a --*-pct flag is given.
     phase_budget_pct: dict[str, float] = field(default_factory=dict)
-    # ``phase_budget_pct`` as seeded, before any hint raised it: what the hints' ceiling is read off. Re-seeded with it.
-    configured_phase_budget_pct: dict[str, float] = field(default_factory=dict)
     # Cyclic phase machine macro-cycle counter (cycle 0 is the first pass; each SWEEP→FRAMEWORK_AGENT loopback
     # increments it).
     macro_cycle: int = 0
@@ -791,6 +787,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # no-gain cycle streak.
     gain_at_cycle_start: float = 0.0
     no_gain_cycle_streak: int = 0
+    # Decision points the PrimaTune predictor has been asked about (``predictor/pump.py``); each is asked once.
+    predictor_asked_keys: list[str] = field(default_factory=list)
     # Cyclic bottleneck re-direction: set when a cyclic config plateau winds the cycle down; the next macro-cycle's
     # prompt surfaces a redirect advisory off ``last_cycle_bottleneck``.
     pending_bottleneck_switch: bool = False
@@ -1465,18 +1463,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             return ""
         self.pending_escalate_hint = ""
         return hint
-
-    def bump_phase_budget(self, hint: str) -> None:
-        """Raise the phase share an ``extend_*_budget`` hint names, to at most a cap above its configured share."""
-        from ..phases.machine_state import PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, apply_escalate_budget_bump
-
-        phase = {
-            ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: PHASE_FRAMEWORK_AGENT,
-            ESCALATE_HINT_EXTEND_KERNEL_BUDGET: PHASE_KERNEL_AGENT,
-        }[hint]
-        self.phase_budget_pct = apply_escalate_budget_bump(
-            self.phase_budget_pct, phase=phase, configured_budget_pct=self.configured_phase_budget_pct
-        )
 
     def discard_pending_escalate_hint(self) -> str:
         """Pop the pending hint because an unrelated transition fired without acting on it; returns cleared hint."""
@@ -2699,6 +2685,15 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if usable is None:
             return None
         return time.monotonic() + usable
+
+    @property
+    def has_validated_gain_stamp(self) -> bool:
+        """Whether a cumulative gain has been validated against the current anchor."""
+        return bool(
+            self.cumulative_gain_validated_ts
+            or self.cumulative_gain_validated_stack_len
+            or self.cumulative_gain_validated
+        )
 
     def optimization_stack_has_unvalidated_keeps(self) -> bool:
         """True iff ``current_best`` changed since the last validated measurement (stack grew or a lift landed)."""

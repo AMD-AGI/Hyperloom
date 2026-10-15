@@ -382,8 +382,9 @@ def _platform_fingerprint(gpu_type: str | None = None) -> dict[str, Any]:
     return platform_fingerprint(gpu_type, multi_node=multi_node)
 
 
-def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) -> None:
+def _format_composite_perf_section(summary: dict[str, Any]) -> list[str]:
     """Render recorded grading; summaries predating the snapshot keep their legacy layout."""
+    lines: list[str] = []
     comparison = summary.get("performance_comparison")
     if comparison is not None:
         from hyperloom.common.perf_metric import GRADED_OUTPUT, INTVTY_OBJECTIVES, INTVTY_V1
@@ -409,12 +410,13 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
         if graded_on_intvty:
             lines.append(f"- reference tput      : `{comparison['tput_reference']:.1f}` tok/s (total, diagnostic)")
             lines.append(f"- candidate tput      : `{comparison['tput_candidate']:.1f}` tok/s (total, diagnostic)")
-        return
+        return lines
 
     from hyperloom.common.gain_math import gain_pct
     from hyperloom.common.perf_metric import (
         GRADED_INTVTY,
         INTVTY_V1,
+        intvty_grading_enabled,
         intvty_of,
         parse_intvty_noise_pct,
         perf_snapshot_from_mapping,
@@ -423,11 +425,10 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
 
     baseline = perf_snapshot_from_mapping(summary.get("baseline_perf"))
     if not baseline:
-        return
+        return lines
     cb = summary.get("current_best") or {}
     cb_snap = perf_snapshot_from_mapping(cb) if isinstance(cb, dict) else None
-    lines.append("## AgentX perf (interactivity objective, per-chip tput guard)")
-    lines.append("")
+    lines.extend(["## AgentX perf (interactivity objective, per-chip tput guard)", ""])
     lines.append(f"- baseline intvty P90 : `{intvty_of(baseline):.1f}` tok/s/user (slow tail)")
     lines.append(f"- baseline total tput : `{total_tput_of(baseline):.1f}` tok/s")
     if cb_snap:
@@ -448,12 +449,11 @@ def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) ->
     elif objective:
         lines.append(f"- grading mode        : `{objective}`")
     else:
-        from hyperloom.common.perf_metric import intvty_grading_enabled
-
         if intvty_grading_enabled(benchmark_mode=str(summary.get("benchmark_mode") or "")):
             lines.append(f"- grading mode        : `{INTVTY_V1}` (noise band `{parse_intvty_noise_pct():.1f}%`)")
         else:
             lines.append("- grading mode        : `output_throughput` (AgentX grading not in effect)")
+    return lines
 
 
 def _cumulative_validation_status(summary: dict[str, Any]) -> str:
@@ -657,7 +657,7 @@ def _format_md(summary: dict[str, Any]) -> str:
         lines.append(f"- ttft_mean      : `{cb.get('ttft_mean_ms'):.1f}` ms")
     if cb.get("e2el_mean_ms") is not None:
         lines.append(f"- e2el_mean      : `{cb.get('e2el_mean_ms'):.1f}` ms")
-    _append_composite_perf_section(lines, summary)
+    lines.extend(_format_composite_perf_section(summary))
     lines.append("")
     lines.extend(_format_completeness_annotations(summary))
     lines.append("## Run summary")

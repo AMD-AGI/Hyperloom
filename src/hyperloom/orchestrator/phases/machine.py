@@ -24,6 +24,15 @@ _BUDGET_EXIT_STOP_REASONS = {
     "sweep_budget_cap": "time_exhausted",
 }
 
+# The FRAMEWORK_AGENT exit reason for a plateau or an LLM hint; budget and terminal exits never wait.
+_LEVERAGE_EXIT_REASON = "optimize_no_more_leverage"
+
+
+def is_leverage_exit(next_phase: tuple[str, str, dict[str, Any]]) -> bool:
+    """Whether a FRAMEWORK_AGENT transition is the plateau or LLM-hint exit, the one operator work may hold."""
+    _target, reason, evidence = next_phase
+    return _LEVERAGE_EXIT_REASON in (reason, str((evidence or {}).get("passed_through_reason") or ""))
+
 
 @dataclass(frozen=True)
 class Transition:
@@ -65,8 +74,8 @@ class MachinePhase(CoordinatorCollaborator):
         """Set ``phase`` + persist ``phase_budget_pct`` once per session (idempotent).
 
         When *budget_pct* is given, or when state has no budget yet (fresh session),
-        the budget is redistributed and written, and recorded as the configured one; on
-        resume without explicit overrides the prior budget is kept.
+        the budget is redistributed and written; on resume without explicit overrides the
+        prior budget is kept.
         """
         state = self.shared_state
         if budget_pct or not state.phase_budget_pct:
@@ -75,10 +84,6 @@ class MachinePhase(CoordinatorCollaborator):
                 optimize_enabled=self.optimize_enabled(),
                 kernel_enabled=self.kernel_enabled(),
             )
-            state.configured_phase_budget_pct = dict(state.phase_budget_pct)
-        elif not state.configured_phase_budget_pct:
-            # Recorded before the configured shares were; the ones it resumes with are the closest record of them.
-            state.configured_phase_budget_pct = dict(state.phase_budget_pct)
         current = (state.phase or "").strip().upper()
         # Only an unset phase means fresh; an unknown one would otherwise re-run PRELUDE over the earlier build's
         # baseline and KEPT stack.
@@ -195,6 +200,26 @@ class MachinePhase(CoordinatorCollaborator):
         if not state.stop_reason:
             state.set_stop_reason(_BUDGET_EXIT_STOP_REASONS.get(reason, reason), strict=True)
 
+    async def _next_phase(
+        self, *, optimize_enabled: bool, enablement_in_flight: bool, kernel_work_in_flight: bool
+    ) -> tuple[str, str, dict[str, Any]] | None:
+        """The transition the predicates ask for, held while the operator-defined specialist's work is pending."""
+        state = self.shared_state
+        next_phase = _phase_state.compute_next_phase(
+            state,
+            kernel_enabled=self.kernel_enabled(),
+            optimize_enabled=optimize_enabled,
+            enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
+            enablement_in_flight=enablement_in_flight,
+            kernel_work_in_flight=kernel_work_in_flight,
+        )
+        if next_phase is None or str(state.phase or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+            return next_phase
+        if not is_leverage_exit(next_phase) or not await self._coord.phase_framework.operator_work_pending():
+            return next_phase
+        log.info("phase_machine: holding %s exit (reason=%s) for operator work", state.phase, next_phase[1])
+        return None
+
     async def advance_phase_if_needed(self) -> None:
         """Scan exit conditions and transition phase at most once per tick."""
         state = self.shared_state
@@ -209,17 +234,10 @@ class MachinePhase(CoordinatorCollaborator):
         kernel_facts = await self._coord.phase_kernel.exit_facts()
         optimize_enabled = self.optimize_enabled()
         in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
-        if str(state.phase or "").upper() == _phase_state.PHASE_PRELUDE or in_enablement:
-            # Both phases hold their exit for this marker. A cancelled analysis, or one that ended before a
-            # restart booked it, never reaches the writeback that clears it, so the hold would run to its
-            # allowance.
-            await self._coord.phase_kernel.release_finished_roofline_gate()
+        await self._release_holds_no_task_will_settle()
         enablement_in_flight = in_enablement and await self._coord.enablement_lane.enablement_in_flight()
-        next_phase = _phase_state.compute_next_phase(
-            state,
-            kernel_enabled=self.kernel_enabled(),
+        next_phase = await self._next_phase(
             optimize_enabled=optimize_enabled,
-            enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
             enablement_in_flight=enablement_in_flight,
             kernel_work_in_flight=kernel_facts.agent_in_flight,
         )
@@ -351,6 +369,19 @@ class MachinePhase(CoordinatorCollaborator):
             )
         if save_error is not None:
             raise save_error
+
+    async def _release_holds_no_task_will_settle(self) -> None:
+        """Settle what the current phase's exit is waiting on when the task that would have settled it is gone.
+
+        A task cancelled outside the run (``hyperloom recover``) or ended before a restart booked it never reaches
+        the writeback that settles the phase's hold, so the hold would run to its allowance.
+        """
+        phase = str(self.shared_state.phase or "").upper()
+        if phase in (_phase_state.PHASE_PRELUDE, _phase_state.PHASE_ENABLEMENT):
+            # Both phases hold their exit for this marker.
+            await self._coord.phase_kernel.release_finished_roofline_gate()
+        # SWEEP waits for its conc_sweep's outcome; checked on a resumed process's first decision only.
+        await self._coord.phase_sweep.resume_unsettled_sweep()
 
     async def _drain_for_transition(self, *, prior: str, target: str, reason: str, evidence: Any) -> bool:
         """Clear the way to ``target`` and return whether the transition may commit on this tick.

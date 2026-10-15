@@ -421,6 +421,15 @@ def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
     }
 
 
+def _custom_specialist_fields(args: argparse.Namespace) -> dict[str, Any]:
+    """The operator-defined specialist's SharedState fields from the parsed ``--custom-specialist-*`` flags."""
+    return {
+        "custom_specialist_prompt": str(getattr(args, "custom_specialist_prompt", "") or ""),
+        "custom_specialist_description": str(getattr(args, "custom_specialist_description", "") or ""),
+        "custom_specialist_only": bool(getattr(args, "custom_specialist_only", False)),
+    }
+
+
 def _seed_shared_state(
     session_dir: Path,
     args: argparse.Namespace,
@@ -539,8 +548,7 @@ def _seed_shared_state(
         # rather than from argv.
         operator_server_args=str(getattr(args, "server_args", "") or "").strip(),
         operator_extra_env=parse_operator_extra_env(args),
-        custom_specialist_prompt=str(getattr(args, "custom_specialist_prompt", "") or ""),
-        custom_specialist_description=str(getattr(args, "custom_specialist_description", "") or ""),
+        **_custom_specialist_fields(args),
         bypass_scripts_dir=os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip(),
         framework_repo_path=os.environ.get("FRAMEWORK_REPO_PATH", "").strip(),
         benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),

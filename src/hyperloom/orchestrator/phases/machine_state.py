@@ -144,12 +144,6 @@ PHASE_COORDINATOR_RESERVED: dict[str, frozenset[str]] = {
 }
 
 
-def coordinator_reserved_in_phase(action_name: str, phase: str) -> bool:
-    """Return True iff ``phase`` reserves ``action_name`` for the Coordinator."""
-    reserved = PHASE_COORDINATOR_RESERVED.get((phase or "").strip().upper(), frozenset())
-    return (action_name or "").strip() in reserved
-
-
 def allowed_actions_for(phase: str) -> tuple[str, ...]:
     """Return the phase's LLM-proposable actions as a sorted tuple (deterministic)."""
     key = (phase or "").strip().upper()
@@ -161,7 +155,7 @@ def render_phase_action_bullets(
     *,
     disabled_suffix: dict[str, str] | None = None,
 ) -> list[str]:
-    """Render per-phase action bullets for the prompt (informational, not enforced)."""
+    """Render per-phase action bullets for the prompt; admission refuses anything outside them."""
     suffix = disabled_suffix or {}
     out: list[str] = []
     for phase in PHASE_NAMES:
@@ -342,35 +336,6 @@ def kernel_inline_step_running(state: Any, *, now_unix: float | None = None) -> 
         return False
     now = float(now_unix if now_unix is not None else _now_unix(state))
     return 0.0 <= (now - seen) <= KERNEL_INLINE_STEP_STALE_SECONDS
-
-
-# ``extend_*_budget`` hints raise a phase budget by DELTA, to at most CAP above the share the operator configured. An
-# agent can send one every tick, so CAP is the real bound on how far hints stretch a phase.
-ESCALATE_HINT_BUDGET_BUMP_DELTA: float = 0.05  # +5 percentage points per hint
-ESCALATE_HINT_BUDGET_BUMP_CAP: float = 0.10  # at most 10 points above the configured share
-
-
-def apply_escalate_budget_bump(
-    current_budget_pct: dict[str, float] | None,
-    *,
-    phase: str,
-    configured_budget_pct: dict[str, float] | None = None,
-    delta: float = ESCALATE_HINT_BUDGET_BUMP_DELTA,
-    cap: float = ESCALATE_HINT_BUDGET_BUMP_CAP,
-) -> dict[str, float]:
-    """Return a budget map with ``phase`` raised by ``delta``, to at most ``cap`` above its configured share.
-
-    The ceiling is read off ``configured_budget_pct`` (the defaults when empty), not the current share, so repeated
-    hints stop at the same place. A hint never lowers a share, nor raises one past the whole session.
-    """
-    phase_key = (phase or "").strip().upper()
-    if phase_key not in PHASE_NAMES:
-        return dict(current_budget_pct or {})
-    out = normalize_budget_pct(current_budget_pct)
-    current = float(out.get(phase_key, 0.0))
-    ceiling = min(1.0, float(normalize_budget_pct(configured_budget_pct).get(phase_key, 0.0)) + float(cap))
-    out[phase_key] = max(current, min(ceiling, max(0.0, current + float(delta or 0.0))))
-    return out
 
 
 def normalize_budget_pct(
@@ -2213,8 +2178,6 @@ __all__ = [
     "DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK",
     "DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT",
     "DEFAULT_PLATEAU_EXPLORE_LOOKBACK",
-    "ESCALATE_HINT_BUDGET_BUMP_CAP",
-    "ESCALATE_HINT_BUDGET_BUMP_DELTA",
     "LIFECYCLE_STATUS_END",
     "LIFECYCLE_STATUS_ENTER",
     "LIFECYCLE_STATUS_ERROR",
@@ -2241,14 +2204,12 @@ __all__ = [
     "is_long_run",
     "resolve_keep_threshold",
     "allowed_actions_for",
-    "apply_escalate_budget_bump",
     "bank_phase_segment",
     "compute_next_phase",
     "cycle_reloop_decision",
     "initial_workflow_predicate_inputs",
     "replay_next_phase",
     "workflow_predicate_inputs",
-    "coordinator_reserved_in_phase",
     "per_lever_dryness",
     "append_phase_evidence_row",
     "append_phase_history_event",
