@@ -600,7 +600,9 @@ class IntentRouter(CoordinatorCollaborator):
                     ),
                 },
             )
-        denied = self._coord.dispatcher.admission_denial_for_action(action_name, params=intent.payload.get("params"))
+        denied = await self._coord.dispatcher.admission_denial_for_action(
+            action_name, params=intent.payload.get("params")
+        )
         if denied is not None:
             await self.record_policy_denied(source, intent, denied)
             return
@@ -914,7 +916,9 @@ class IntentRouter(CoordinatorCollaborator):
                     ),
                 },
             )
-        denied = self._coord.dispatcher.admission_denial_for_action(action_name, params=intent.payload.get("params"))
+        denied = await self._coord.dispatcher.admission_denial_for_action(
+            action_name, params=intent.payload.get("params")
+        )
         if denied is not None:
             await self.record_policy_denied(
                 source,

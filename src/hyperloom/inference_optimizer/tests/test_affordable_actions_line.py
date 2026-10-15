@@ -20,9 +20,8 @@ def _collaborator(*, phase: str, unaffordable: set[str], queued: tuple = ()) -> 
             return PolicyDenied(f"{action} denied", rule="phase_time_budget")
         return None
 
-    class _Tasks:
-        async def queued(self):
-            return list(queued)
+    async def queued_cost(**_kw: object) -> float:
+        return 12.0 * len(queued)
 
     collaborator = ConversationCollaborator.__new__(ConversationCollaborator)
     # ``shared_state`` is derived from the coordinator, so the fake lives there.
@@ -30,8 +29,7 @@ def _collaborator(*, phase: str, unaffordable: set[str], queued: tuple = ()) -> 
         shared_state=SimpleNamespace(phase=phase),
         dispatcher=SimpleNamespace(
             time_budget_denial_for_action=denial,
-            tasks=_Tasks(),
-            expected_cost_minutes_for=lambda kind: 12.0,
+            queued_cost_minutes=queued_cost,
         ),
     )
     return collaborator
