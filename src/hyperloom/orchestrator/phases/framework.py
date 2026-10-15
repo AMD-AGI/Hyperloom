@@ -51,6 +51,27 @@ _AUTHORED_LANE_MAX_ATTEMPTS: int = 3
 _PATCH_OVERLAP_MIN_RATIO: float = 0.5
 
 
+#: The one ledger outcome that reports a round which reached a measurement. The
+#: others name a round that ended before one: a patch that would not apply, a
+#: server that failed its smoke, a parity check that could not conclude. Their
+#: ``tps_delta_pct`` is the zero the record defaults to, not a result.
+_LEDGER_OUTCOME_MEASURED: str = "integrated"
+
+
+def _measured_short_of_keep(rec: dict[str, Any], keep_threshold_pct: float) -> bool:
+    """Whether a ledger record is a completed measurement that did not clear the KEEP bar.
+
+    Separating this from "the round never measured" is what keeps a direction
+    alive: a GLM-5.3 session spent three rounds on enabling the prefix cache and
+    all three died before the server was serving, which says nothing about the
+    idea --- and the idea was worth 94% of the run's prefill. Recorded as a
+    result, it would have retired a correct direction permanently.
+    """
+    if str(rec.get("outcome") or "") != _LEDGER_OUTCOME_MEASURED:
+        return False
+    return to_float(rec.get("tps_delta_pct"), default=0.0) < keep_threshold_pct
+
+
 def _framework_config_levers_from_done(
     done_payload: dict[str, Any] | None,
     *,
@@ -3188,7 +3209,7 @@ class FrameworkPhase(ProposalBench):
         return pending
 
     def _config_lever_known_bad(self, config_levers: dict[str, Any]) -> bool:
-        """True when this exact config already lost an accuracy gate.
+        """True when this exact config already lost an accuracy gate, or already measured short of KEEP.
 
         Different upstream PRs often reduce to the same server args / envs, so
         the ledger is keyed by content fingerprint rather than by PR.
@@ -3205,6 +3226,7 @@ class FrameworkPhase(ProposalBench):
                 unset_envs=config_levers.get("unset_envs"),
                 args_mode=str(config_levers.get("args_mode") or "append"),
             )
+            threshold = _phase_state.resolve_keep_threshold(self.state)
             for rec in read_pr_ledger():
                 if str(rec.get("applicability") or "") != fingerprint:
                     continue
@@ -3213,6 +3235,15 @@ class FrameworkPhase(ProposalBench):
                         "FRAMEWORK: skipping config lever %s — accuracy %.2f%% on %s",
                         fingerprint,
                         to_float(rec.get("accuracy_delta_pct"), default=0.0),
+                        rec.get("pr_url") or "a prior candidate",
+                    )
+                    return True
+                if _measured_short_of_keep(rec, threshold):
+                    log.info(
+                        "FRAMEWORK: skipping config lever %s — already measured at %+.2f%% against a %.2f%% bar on %s",
+                        fingerprint,
+                        to_float(rec.get("tps_delta_pct"), default=0.0),
+                        threshold,
                         rec.get("pr_url") or "a prior candidate",
                     )
                     return True
