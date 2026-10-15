@@ -898,7 +898,8 @@ output tokens per request, so output-only grading optimises about 1% of the
 token budget, and a variant can lift decode tok/s while degrading user-perceived
 latency with no visible cost.
 
-A Magpie AgentX YAML passed with `--benchmark-config` adopts the 2-D grading shape InferenceX uses. Upstream
+`HYPERLOOM_AGENTX=1` (native YAML generated from Hyperloom flags), or an explicit
+Magpie AgentX YAML passed with `--benchmark-config`, adopts the 2-D grading shape InferenceX uses. Upstream
 sweeps a concurrency ladder, keeps TTFT / ITL / TPOT percentiles separately, and
 publishes a **Pareto frontier** with E2E normalised interactivity as the x-axis
 and token throughput per chip as the y-axis. It never collapses the axes into one
@@ -933,7 +934,7 @@ TTFT is included in E2EL, unlike per-user `1/ITL`; on a ~114k-prompt replay TTFT
 is most of what a user waits for so grading on `1/ITL` would miss it.
 
 Default-on for AgentX runs, explicit opt-in via `HYPERLOOM_PERF_METRIC=intvty_v1`
-otherwise. Either AgentX signal turns it on: the bound Magpie YAML, or
+otherwise. Any AgentX signal turns it on: `HYPERLOOM_AGENTX=1`, the bound Magpie YAML, or
 `benchmark_mode=agentx` stamped at seed — so a round in a subprocess that never
 inherited the env var still grades on the agentic axis. Serving frameworks only;
 scriptable frameworks (xDiT, custom) keep output-throughput grading.
@@ -973,7 +974,7 @@ answering, checks that the listener belongs to the server it booted, and checks
 
 | Variable | Default | Description |
 |---|---|---|
-| `HYPERLOOM_AGENTIC_BACKEND` | — | `mlperf` selects the separate MLPerf client together with `HYPERLOOM_AGENTX=1`. Native AgentX is selected by the Magpie YAML. |
+| `HYPERLOOM_AGENTIC_BACKEND` | — | `mlperf` selects the separate MLPerf client together with `HYPERLOOM_AGENTX=1`. Otherwise `HYPERLOOM_AGENTX=1` selects native Magpie AgentX; an explicit Magpie AgentX YAML also selects it. |
 | `MLPERF_ENDPOINTS_DIR` | `/opt/mlperf-endpoints` | Checkout of `mlcommons/endpoints` holding `utility/run_agentic.sh`. Checked at preflight. |
 | `AGENTIC_DATASET_PATH` | — (required) | Path to `agentic_combined_v6.jsonl`. Checked at preflight; its stem is recorded as the corpus. |
 | `MLPERF_TOKENIZER_DIR` | — (required) | Kimi-K3 fast-tokenizer directory the harness counts tokens with. Checked at preflight. |
@@ -986,6 +987,10 @@ Kimi. With `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC` unset, the benchmark cap
 defaults to `trajectories × 26 s × 2 + 1800 s` (26 s per trajectory measured on
 8×MI355X at concurrency 16, doubled for a cold first round, plus boot), and never
 below the stock 7800 s: about 9600 s for smoke and 33,700 s for `full`.
+
+With `HYPERLOOM_AGENTX=1`, Hyperloom generates and archives the native Magpie YAML
+from its ordinary workload flags. `--docker-image` supplies an explicit serving
+image identity, required for custom models.
 
 Native AgentX profiling is configured in the Magpie YAML's
 `benchmark.profiler.torch_profiler` mapping: `num_steps`, `num_profiles`,

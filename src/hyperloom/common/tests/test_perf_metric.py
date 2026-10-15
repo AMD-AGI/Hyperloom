@@ -61,8 +61,8 @@ def _graded_gain(candidate: dict[str, float], anchor: dict[str, float]) -> float
         ("synthetic", "0", False),
         ("agentx", "0", True),
         (" AgentX ", "", True),
-        ("synthetic", "true", False),
-        (None, "1", False),
+        ("synthetic", "true", True),
+        (None, "1", True),
     ],
 )
 def test_agentx_active_uses_workload_identity_not_grading_override(monkeypatch, mode, env, expected):

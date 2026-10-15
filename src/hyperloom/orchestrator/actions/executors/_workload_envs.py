@@ -1208,14 +1208,27 @@ def materialize_benchmark_config(config_path: Path, output_dir: Path, **override
     args = merge_server_args(inherited, overrides.get("extra_server_args", ""))
     from hyperloom.common.env import is_truthy
 
-    server_env = dict(overrides.get("extra_envs") or {})
+    unset_envs = to_str_list(overrides.get("unset_envs"))
+    server_env, dropped = filter_untrusted_env_mapping(
+        {
+            key: value
+            for key, value in _operator_extra_env().items()
+            if key not in {"MODEL_PATH", "FRAMEWORK", "PRECISION", "TP", "EP", "CONC"}
+            and key not in unset_envs
+            and not key.startswith(("HYPERLOOM_", "INFERENCE_OPTIMIZER_"))
+        },
+        allow_predicate=is_allowed_variant_env_key,
+    )
+    for key in dropped:
+        log.warning("Dropping extra_envs key %s before AgentX materialization", key)
+    server_env.update(overrides.get("extra_envs") or {})
     if is_truthy(server_env.pop("RUN_EVAL", False)):
         raise ValueError("AgentX uses Magpie's replay validity; RUN_EVAL cannot enable GSM8K for this workload")
     changes = LaunchChanges(
         args,
         server_env,
         to_str_list(overrides.get("remove_args")),
-        to_str_list(overrides.get("unset_envs")),
+        unset_envs,
         replacing,
     )
     return materialize_agentx(

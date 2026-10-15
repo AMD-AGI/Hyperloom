@@ -1002,7 +1002,7 @@ Operator server flags have one supported CLI entry point:
 profile, explore, and sweep. Explicit `--max-model-len` / `$MAX_MODEL_LEN`
 wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
 `4,16,128` is accepted for compatibility; baseline uses the first value.
-Use `--conc-sweep-concs` to override the synthetic ladder SWEEP measures (`256,128,64,32,16,8,4,2`). Native AgentX uses `--benchmark-config` and a fixed YAML `envs.CONC`; start a separate session to measure another concurrency.
+Use `--conc-sweep-concs` to override the synthetic ladder SWEEP measures (`256,128,64,32,16,8,4,2`). Native AgentX uses `HYPERLOOM_AGENTX=1` with the ordinary workload flags, or `--benchmark-config` for advanced Magpie settings. Hyperloom archives the resolved workload as `benchmark.yaml`; CONC is fixed per session, so start a separate session to measure another concurrency.
 
 Operator server flags are the workload baseline, but they are not sacred. When
 the configuration arm has evidence or an operator hint that a pinned flag may

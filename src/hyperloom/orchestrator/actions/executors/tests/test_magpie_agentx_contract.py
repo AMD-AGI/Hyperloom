@@ -55,14 +55,15 @@ def test_yaml_binds_workload_and_is_snapshotted(source, tmp_path):
     assert args.enable_conc_sweep is False
     session = tmp_path / "session"
     session.mkdir()
-    bind_benchmark(session)
+    bind_benchmark(session, args)
     assert (session / "benchmark.yaml").read_text() == source.read_text()
 
 
-def test_legacy_switch_is_explicitly_rejected(source, monkeypatch):
+def test_agentx_switch_accepts_explicit_yaml(source, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    with pytest.raises(ValueError, match="retired"):
-        configure_benchmark(_build_parser().parse_args(["optimize", "--benchmark-config", str(source)]))
+    args = _build_parser().parse_args(["optimize", "--benchmark-config", str(source)])
+    configure_benchmark(args)
+    assert args.conc == 8
 
 
 def test_materializer_does_not_turn_native_workload_into_synthetic(source, tmp_path, monkeypatch):

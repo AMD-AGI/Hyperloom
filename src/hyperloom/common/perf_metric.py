@@ -90,10 +90,8 @@ VERDICT_REVERT = "REVERT"
 
 
 def agentx_enabled(env: Mapping[str, str] | None = None) -> bool:
-    """Return whether the AgentX benchmark wrapper is explicitly enabled."""
-    from hyperloom.common.agentx_workload import is_mlperf_backend
-
-    return is_magpie_agentx(configured_benchmark(env)) or (is_mlperf_backend(env) and env_bool(_AGENTX_ENV, env=env))
+    """Return whether CLI workload translation or a bound YAML selects AgentX."""
+    return is_magpie_agentx(configured_benchmark(env)) or env_bool(_AGENTX_ENV, env=env)
 
 
 def is_agentx_mode(benchmark_mode: Any) -> bool:

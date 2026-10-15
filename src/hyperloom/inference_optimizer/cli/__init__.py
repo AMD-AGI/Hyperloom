@@ -2206,6 +2206,9 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
     # Single-optimizer guard: take the lock so the contract holds uniformly and the owner pid is published for the
     # session diagnostics.
     session_lock = _acquire_session_lock_or_exit(session_dir)
+    from .benchmark_config import bind_benchmark
+
+    bind_benchmark(session_dir, args)
     manifest = write_manifest(session_dir, args=args)
     _persist_install_event(args, session_dir)
     # One-shot Langfuse startup marker so a run killed before a breakdown still leaves a correlatable trace.
@@ -2245,9 +2248,6 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
     )
     gpu_power = resolve_launch_gpu_power(args, nodes=nodes_resolved)
     _publish_gpu_power_settings(gpu_power)
-    from .benchmark_config import bind_benchmark
-
-    bind_benchmark(session_dir)
     _seed_shared_state(
         session_dir,
         args,

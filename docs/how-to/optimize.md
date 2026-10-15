@@ -61,7 +61,7 @@ Requirements:
 
 ```{note}
 `ISL` / `OSL` describe the synthetic request shape. Under the opt-in agentic
-Magpie AgentX trace-replay mode (`--benchmark-config agentx.yaml`) request lengths come from the recorded
+Magpie AgentX trace-replay mode (`HYPERLOOM_AGENTX=1` or `--benchmark-config agentx.yaml`) request lengths come from the recorded
 trace corpus instead, so these two values do not affect what is measured — the
 server's context window comes from Magpie's resolved recipe or custom-model
 configuration.
@@ -123,22 +123,48 @@ If a run fails on first launch, see [Troubleshooting Hyperloom](../reference/tro
 
 ## Optimize an AgentX workload
 
-Use a Magpie YAML as the workload definition. Hyperloom runs **single-node** SGLang
-or vLLM and invokes Magpie in local mode, so start it inside the serving image
-named in the YAML. Model, image, precision, TP/EP and concurrency come from that
-file; specify positive `envs.TP` and `envs.CONC` so Hyperloom can reserve resources.
-Start with `src/hyperloom/inference_optimizer/assets/configs/agentx_sglang.yaml`:
+Use the ordinary Hyperloom workload flags with `HYPERLOOM_AGENTX=1`. Hyperloom
+translates them into Magpie's native AgentX YAML and saves it in the session:
+
+```bash
+HYPERLOOM_AGENTX=1 hyperloom optimize \
+  --model deepseek-ai/DeepSeek-V4-Pro-0813 \
+  --framework sglang --precision fp4 \
+  --tp 8 --ep 8 --conc 32 \
+  --max-hours 12
+```
+
+This path is **single-node** SGLang or vLLM. Hyperloom invokes Magpie in local
+mode: run Hyperloom inside your serving image. `--docker-image IMAGE` records
+that runtime image; it does not launch a container. A registered recipe can
+supply its image when the flag is omitted. Custom models require an explicit
+`--docker-image`, including local runs.
+
+`--model`, `--framework`, `--precision`, `--tp`, `--ep` and `--conc` use
+Hyperloom's existing resolution rules. `--server-args` and serving `--extra-env`
+pins become Magpie server launch overrides, with candidate changes applied on
+top. ISL/OSL are not injected: request lengths come from the AgentX trace corpus.
+Concurrency stays fixed for the session.
+
+For recipe selectors, profiling settings or other advanced Magpie options,
+provide a YAML directly. Start with
+`src/hyperloom/inference_optimizer/assets/configs/agentx_sglang.yaml`:
 
 ```bash
 hyperloom optimize --benchmark-config /workspace/agentx.yaml --max-hours 12
 ```
 
+The YAML defines the workload, including positive `envs.TP` and `envs.CONC` for
+resource accounting. Conflicting CLI workload flags are rejected. Both entrypoints
+use the same materialization, execution and result-validation path.
+
 Magpie resolves the pinned InferenceX recipe and owns server startup, replay,
 profiling and cleanup. If the model has no registered recipe, Magpie's custom-model
-resolver uses the explicit YAML fields. Set `envs.MODEL_PATH` to the local checkpoint
-containing `config.json`, while keeping the canonical model identifier in `model`.
-The model must support the replay's context length and protocol; custom resolution
-does not make an arbitrary small-context model a valid canonical AgentX target.
+resolver uses the generated or supplied configuration. For a local custom checkpoint,
+pass its path with `--model`. In an explicit YAML, `envs.MODEL_PATH` can name the local
+checkpoint while `model` retains its canonical identifier. The model must support
+the replay's context length and protocol; custom resolution does not make an
+arbitrary small-context model a valid canonical AgentX target.
 
 Hyperloom changes serving arguments and environment through
 `agentx.launch_overrides`, applies reviewed source/kernel patches, and compares
@@ -148,13 +174,16 @@ identity. GEAK's search measurements are provisional until the candidate passes
 the same canonical Magpie workload and Hyperloom's KEEP gate.
 
 The profile phase enables `profiler.torch_profiler` on a separate copy of the YAML.
-Set capture steps, count, interval and annotation options there, leaving `enabled`
-false in the benchmark input. Magpie owns capture timing; Hyperloom selects a
+The generated YAML uses Magpie's capture defaults. For custom capture steps, count,
+interval or annotation options, supply a YAML with those settings and leave
+`enabled` false in the benchmark input. Magpie owns capture timing; Hyperloom selects a
 primary rank and passes each capture window separately to TraceLens. Profiled
 measurements never replace the unprofiled performance baseline.
 
-The session archives its input as `benchmark.yaml`; resume reuses that file.
-Changing the workload requires a new session. The old `HYPERLOOM_AGENTX=1` AIPerf
-entrypoint and its session history are not migrated. Do not combine this entrypoint
+The session archives its resolved workload as `benchmark.yaml` before writing the
+manifest. `hyperloom optimize --resume-from SESSION_DIR` reuses that file without
+requiring the switch or original YAML again. Changing the workload requires a new
+session. Old AIPerf session history is not migrated; `HYPERLOOM_AGENTX=1` selects
+Magpie for new sessions. Do not combine this entrypoint
 with CLI ISL/OSL, concurrency sweeps, quantization or benchmark-script overrides.
 The independent MLPerf agentic backend keeps its existing entrypoint.

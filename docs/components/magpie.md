@@ -38,6 +38,11 @@ cmd = [
 ]
 ```
 
+`HYPERLOOM_AGENTX=1 hyperloom optimize --model ... --tp ... --conc ...` converts
+Hyperloom workload flags into native AgentX YAML. `--benchmark-config` accepts an
+explicit YAML for advanced settings. Both paths archive `benchmark.yaml` in the
+session and use the same Magpie execution contract.
+
 Each run produces a `benchmark_report.json` that Hyperloom parses to extract
 throughput/measurements and pick winners. Native AgentX uses Magpie’s managed
 server/replay/profiling contract and public validity verdict; Hyperloom does not
