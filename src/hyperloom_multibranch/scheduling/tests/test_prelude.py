@@ -33,7 +33,7 @@ from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
 from hyperloom_multibranch.scheduling.prelude import Prelude, PreludeFailed, PreludeResult, prelude_argv
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
 from hyperloom_multibranch.scheduling.requests import SessionTests
-from hyperloom_multibranch.scheduling.settings import Workload
+from hyperloom_multibranch.scheduling.settings import KernelOptimizer, Workload
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     LAUNCH_FLAG,
     MbFakeChildRegistry,
@@ -62,6 +62,7 @@ WORKLOAD = Workload(
     conc=16,
     precision="bf16",
     gpu_type="mi355x",
+    kernel_optimizer=KernelOptimizer.GEAK,
 )
 
 
@@ -189,6 +190,7 @@ async def test_finished_child_roots_the_session_before_any_baseline_test(tmp_pat
     assert profile == result.profile
     assert (profile.session_id, profile.hardware, profile.framework_version) == (layout.session_id, "mi355x", "0.4.1")
     assert dict(profile.roofline_ceiling) == {MB_FAKE_PRIMARY_METRIC: ROOFLINE_PEAK}
+    assert profile.kernel_optimizer == "geak"
     assert peers.toolbox.requests == {}
 
 

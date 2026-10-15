@@ -6,14 +6,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 
 
+class KernelOptimizer(str, Enum):
+    """The kernel optimizer a session's recipes are scoped to in the Recipe KB."""
+
+    FORGE = "forge"
+    GEAK = "geak"
+
+
 @dataclass(frozen=True)
 class Workload:
-    """The fixed InferenceX workload, spelled as the single-lineage command line spells it.
+    """The fixed InferenceX workload, spelled as the single-lineage command line spells it, and the kernel optimizer
+    its recipes are scoped to.
 
     ``gpu_type`` is named, not detected: the toolbox writes it into every measurement spec, built before PRELUDE runs.
     """
@@ -26,6 +35,7 @@ class Workload:
     conc: int
     precision: str
     gpu_type: str
+    kernel_optimizer: KernelOptimizer
 
     @property
     def model_basename(self) -> str:
@@ -42,4 +52,4 @@ class RunSettings:
     judge_interval_seconds: float
 
 
-__all__ = ["RunSettings", "Workload"]
+__all__ = ["KernelOptimizer", "RunSettings", "Workload"]

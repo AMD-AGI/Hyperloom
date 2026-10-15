@@ -41,7 +41,7 @@ from hyperloom_multibranch.scheduling.final import (
 )
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, BranchOrigin, BranchStop, StopCause
-from hyperloom_multibranch.scheduling.settings import Workload
+from hyperloom_multibranch.scheduling.settings import KernelOptimizer, Workload
 from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     BASELINE_VALUE,
@@ -60,7 +60,7 @@ from hyperloom_multibranch.toolbox.fake_model import Fate
 
 METRIC = "output_throughput"
 CONC = 64
-WORKLOAD = Workload("org/model", "vllm", 8, 1024, 1024, CONC, "fp8", "mi355x")
+WORKLOAD = Workload("org/model", "vllm", 8, 1024, 1024, CONC, "fp8", "mi355x", KernelOptimizer.FORGE)
 START = 100.0
 INTEGRATION = FinalCandidate("integration", INTEGRATION_BRANCH, "i1", 1040.0)
 BRANCH = FinalCandidate("best_branch", "b02", "c7", 1060.0)

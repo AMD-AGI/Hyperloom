@@ -34,14 +34,14 @@ from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.peers import PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
-from hyperloom_multibranch.scheduling.settings import Workload
+from hyperloom_multibranch.scheduling.settings import KernelOptimizer, Workload
 from hyperloom_multibranch.scheduling.tests.peer_fakes import RecordedSessions
 from hyperloom_multibranch.specialist.runtime import SpecialistRuntime
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
-WORKLOAD = Workload("/models/Llama-3-8B", "sglang", 2, 1024, 512, 16, "bf16", "mi355x")
+WORKLOAD = Workload("/models/Llama-3-8B", "sglang", 2, 1024, 512, 16, "bf16", "mi355x", KernelOptimizer.FORGE)
 HOST = MeasurementHost((0, 1, 2, 3), "local", MB_FAKE_BASE_IMAGE_DIGEST, "a" * 40, "b" * 40)
 
 
@@ -63,7 +63,7 @@ def test_the_model_is_exported_as_the_directory_a_server_loads_it_from(
 ) -> None:
     (tmp_path / "Llama-3-8B").mkdir()
     monkeypatch.setenv("HL_MODEL_BASE", str(tmp_path))
-    hub_id = Workload("meta-llama/Llama-3-8B", "vllm", 1, 1, 1, 1, "fp8", "mi355x")
+    hub_id = Workload("meta-llama/Llama-3-8B", "vllm", 1, 1, 1, 1, "fp8", "mi355x", KernelOptimizer.FORGE)
     assert workload_environment(hub_id)["MODEL_PATH"] == str(tmp_path / "Llama-3-8B")
 
 

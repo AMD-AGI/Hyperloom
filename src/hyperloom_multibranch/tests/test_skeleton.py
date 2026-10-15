@@ -43,7 +43,7 @@ from hyperloom_multibranch.scheduling.lifecycle import CUT_SHORT, Session, Sessi
 from hyperloom_multibranch.scheduling.llm import CompletionFailed
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
 from hyperloom_multibranch.scheduling.roster import BranchStatus, RosterCaps, StopCause
-from hyperloom_multibranch.scheduling.settings import RunSettings, Workload
+from hyperloom_multibranch.scheduling.settings import KernelOptimizer, RunSettings, Workload
 from hyperloom_multibranch.scheduling.stops import (
     STOP_OVERRAN,
     TOOLBOX_CLOSE_OVERRAN,
@@ -72,7 +72,7 @@ from hyperloom_multibranch.scheduling.tests.child_sessions import child_with_pat
 
 START = 1_700_000_000.0
 CONC = 16
-WORKLOAD = Workload("/models/Llama-3-8B", "sglang", 1, 1024, 1024, CONC, "bf16", "mi355x")
+WORKLOAD = Workload("/models/Llama-3-8B", "sglang", 1, 1024, 1024, CONC, "bf16", "mi355x", KernelOptimizer.FORGE)
 SETTINGS = RunSettings(WORKLOAD, max_hours=0.5, caps=RosterCaps(3, 2, 8), judge_interval_seconds=600.0)
 STEP_SECONDS = 30.0
 CLAIM_TTL_SECONDS = 1e6

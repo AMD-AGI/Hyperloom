@@ -240,6 +240,7 @@ def _session_profile(session_id: str, workload: Workload, artifacts: PreludeArti
         conc=workload.conc,
         isl=workload.isl,
         osl=workload.osl,
+        kernel_optimizer=workload.kernel_optimizer.value,
         roofline_ceiling=dict(artifacts.roofline_ceiling),
     )
 

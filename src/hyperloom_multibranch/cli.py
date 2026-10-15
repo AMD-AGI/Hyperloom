@@ -4,9 +4,11 @@
 """``hyperloom-multibranch``: command-line entry for a multi-branch session.
 
 ``run`` takes the fixed InferenceX workload, spelled as ``hyperloom optimize`` spells it, the wall-clock budget and
-the hard limits the judge works within. Exit codes: 0 when the session ran its course, 1 when it failed or was
-stopped, 2 on a usage error. The peers a session needs are loaded before anything is created, so a missing one
-fails the command without leaving a session directory behind.
+the kernel optimizer its recipes are scoped to, and the hard limits the judge works within. Exit codes: 0 when the
+session ran its course, 1 when it failed or was stopped, 2 on a usage error. The environment and the peers a session
+needs are checked before anything is created, so a missing one fails the command without leaving a session directory
+behind: the Experience KB the session's CLOSE publishes to must be configured, and the RSI archive defaults to
+:data:`RSI_ARCHIVE_DEFAULT`, set in this process's environment for every reader of it.
 """
 
 from __future__ import annotations
@@ -14,11 +16,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
+from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.inference_optimizer.session.paths import workspace_root
+from hyperloom_kb.remote import RemoteClientError, RemoteConfig
+from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS, MB_MIN_PRELUDE_HOURS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.exports import exports_from_env
@@ -29,7 +35,7 @@ from hyperloom_multibranch.scheduling.local_peers import load_peers, machine_par
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import RosterCaps
-from hyperloom_multibranch.scheduling.settings import RunSettings, Workload
+from hyperloom_multibranch.scheduling.settings import KernelOptimizer, RunSettings, Workload
 
 PROG = "hyperloom-multibranch"
 EXIT_FAILED = 1
@@ -38,6 +44,13 @@ DEFAULT_MAX_BRANCHES = 4
 DEFAULT_MAX_K_PER_BRANCH = 2
 DEFAULT_JUDGE_INTERVAL_SECONDS = 600.0
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+#: The shared folder of archived search trees, used when ``HYPERLOOM_RSI_ARCHIVE`` names none.
+RSI_ARCHIVE_DEFAULT = "/shared_nfs/hyperloom/rsi-archive/"
+EXPERIENCE_KB_UNSET = "the Experience KB is not configured: set HYPERLOOM_KB_URL and HYPERLOOM_KB_TOKEN"
+
+
+class EnvironmentIncomplete(RuntimeError):
+    """The environment lacks what a session needs; the message names the variables to set."""
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -50,6 +63,12 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("--tp", "--isl", "--osl", "--conc"):
         run.add_argument(name, type=int, required=True)
     run.add_argument("--precision", required=True)
+    run.add_argument(
+        "--kernel-optimizer",
+        choices=[optimizer.value for optimizer in KernelOptimizer],
+        default=KernelOptimizer.FORGE.value,
+        help="Kernel optimizer the session's recipes are scoped to.",
+    )
     run.add_argument(
         "--max-hours", type=float, default=MB_DEFAULT_MAX_HOURS, help="Wall-clock budget, PRELUDE included; 0 = none."
     )
@@ -90,10 +109,36 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
     if parallel > fitting:
         raise ValueError(f"--max-parallel-tests must be at most {fitting}, the tests the machine's cards run at TP")
     workload = Workload(
-        args.model, args.framework, args.tp, args.isl, args.osl, args.conc, args.precision, args.gpu_type
+        args.model,
+        args.framework,
+        args.tp,
+        args.isl,
+        args.osl,
+        args.conc,
+        args.precision,
+        args.gpu_type,
+        KernelOptimizer(args.kernel_optimizer),
     )
     caps = RosterCaps(args.max_branches, args.max_k_per_branch, parallel)
     return RunSettings(workload, args.max_hours, caps, args.judge_interval_sec)
+
+
+def require_experience_kb(env: Mapping[str, str]) -> None:
+    """Raise :class:`EnvironmentIncomplete` unless ``env`` configures the Experience KB, URL and token."""
+
+    try:
+        configured = RemoteConfig.from_env(env)
+    except RemoteClientError as exc:
+        raise EnvironmentIncomplete(f"the Experience KB is not configured: {exc}") from exc
+    if configured is None:
+        raise EnvironmentIncomplete(EXPERIENCE_KB_UNSET)
+
+
+def default_rsi_archive(env: MutableMapping[str, str]) -> None:
+    """Point ``HYPERLOOM_RSI_ARCHIVE`` at :data:`RSI_ARCHIVE_DEFAULT` when ``env`` names no archive."""
+
+    if not env.get(ARCHIVE_ENV, "").strip():
+        env[ARCHIVE_ENV] = RSI_ARCHIVE_DEFAULT
 
 
 def run_session(settings: RunSettings, peer_factory: PeerFactory) -> int:
@@ -139,11 +184,23 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format=LOG_FORMAT)
     try:
+        require_experience_kb(os.environ)
+        default_rsi_archive(os.environ)
         peer_factory = load_peers()
-    except PeersUnavailable as exc:
+    except (EnvironmentIncomplete, PeersUnavailable) as exc:
         print(f"{PROG}: cannot run a session, {exc}", file=sys.stderr)
         return EXIT_FAILED
     return run_session(settings, peer_factory)
 
 
-__all__ = ["PROG", "build_parser", "main", "run_session", "settings_from"]
+__all__ = [
+    "PROG",
+    "RSI_ARCHIVE_DEFAULT",
+    "EnvironmentIncomplete",
+    "build_parser",
+    "default_rsi_archive",
+    "main",
+    "require_experience_kb",
+    "run_session",
+    "settings_from",
+]
