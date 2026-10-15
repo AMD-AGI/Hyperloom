@@ -28,8 +28,10 @@ queued behind the lane or GPUs it holds.
   on the wrong question, or to answer its `residual_questions`.
 - `extend_lease{task_id, extra_sec, reason}` — grows the lease TTL and the
   expiry of the lanes and GPUs the task holds, in bounded steps, and moves a
-  running specialist's wall-clock kill deadline out by `extra_sec`. An
-  expired lease stops nothing by itself; extend a specialist whose work
+  running specialist's wall-clock kill deadline out by `extra_sec`, never
+  past the phase end. The observation's `wall_budget_extension_sec` is how
+  far the deadline has moved in total; `0` means the phase has no room left.
+  An expired lease stops nothing by itself; extend a specialist whose work
   needs longer than its wall-clock budget.
 
 There is no single-task cancel. The only cancel is `prune_branch`, and it

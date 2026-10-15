@@ -36,9 +36,10 @@ HIT_TABLE = re.compile(r"is tuned on cu_num\s*=\s*\d+\s+in\s+(?P<table>[^,]+)")
 # Which tables the runtime actually loaded (os.pathsep-separated path list).
 MERGE_TABLES = re.compile(r"\[aiter\]\s+merge tuned file under model_configs/ and configs/\s+(?P<paths>\S+)")
 
-# aiter CK MoE dispatch; the tuple carries the dtype combination and token count.
+# aiter CK MoE dispatch; the tuple carries the dtype combination and token count. The tag is one word ("default",
+# "asm") except on a dispatch that names its kernels, which prints them as a parenthesised group.
 FUSED_MOE = re.compile(
-    r"\[aiter\]\s+\[fused_moe\]\s+using\s+(?P<stage>\S+)\s+(?P<tag>\S+)\s+for\s+\((?P<tuple>[^)]*)\)"
+    r"\[aiter\]\s+\[fused_moe\]\s+using\s+(?P<stage>\S+)\s+(?P<tag>\([^)]*\)|\S+)\s+for\s+\((?P<tuple>[^)]*)\)"
 )
 
 # The same tuple, on the line that says the lookup MISSED.
@@ -197,8 +198,8 @@ def _moe_field(raw: str) -> str:
     return value
 
 
-def _moe_tuple(raw: str) -> list[str]:
-    """Split a dispatch tuple into normalised fields."""
+def moe_tuple(raw: str) -> list[str]:
+    """Split a dispatch tuple into its fields, each spelled the way the fmoe CSV spells it."""
     return [_moe_field(p) for p in raw.split(",")]
 
 
@@ -367,7 +368,7 @@ def _record_moe_dispatch(scan: _LogScan, match: re.Match) -> None:
     "saw 1stage" boolean collapses the decode range away and suppresses tuning
     that 2stage would have covered.
     """
-    parts = _moe_tuple(match.group("tuple"))
+    parts = moe_tuple(match.group("tuple"))
     moe = _moe_dispatch_record(scan)
     stage_key = f"{match.group('stage')}/{match.group('tag')}"
     record = moe["by_stage"].setdefault(stage_key, {"tokens": set(), "tuple": parts})
@@ -384,7 +385,7 @@ def _record_moe_miss(scan: _LogScan, match: re.Match) -> None:
     """
     moe = _moe_dispatch_record(scan)
     moe["fallback_flavour"] = match.group("flavour")
-    _record_moe_key(moe, _moe_tuple(match.group("tuple")), miss=True)
+    _record_moe_key(moe, moe_tuple(match.group("tuple")), miss=True)
 
 
 def _moe_dispatch_record(scan: _LogScan) -> dict[str, Any]:

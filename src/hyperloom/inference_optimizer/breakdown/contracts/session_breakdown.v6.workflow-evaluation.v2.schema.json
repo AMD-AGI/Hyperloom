@@ -1046,9 +1046,7 @@
             null,
             "skip_to_kernel",
             "skip_to_sweep",
-            "skip_to_close",
-            "extend_explore_budget",
-            "extend_kernel_budget"
+            "skip_to_close"
           ]
         },
         "sweep_result": {

@@ -51,15 +51,11 @@ resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_m
 ESCALATE_HINT_SKIP_TO_KERNEL: str = "skip_to_kernel"
 ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
 ESCALATE_HINT_SKIP_TO_CLOSE: str = "skip_to_close"
-ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
-ESCALATE_HINT_EXTEND_KERNEL_BUDGET: str = "extend_kernel_budget"
 ESCALATE_HINT_VOCAB: frozenset[str] = frozenset(
     {
         ESCALATE_HINT_SKIP_TO_KERNEL,
         ESCALATE_HINT_SKIP_TO_SWEEP,
         ESCALATE_HINT_SKIP_TO_CLOSE,
-        ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
-        ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
     }
 )
 
@@ -769,10 +765,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # consumer, domain, gap_canonical_id, read_id, experience_ids, experiences, prompt_block}. Coordinator-only writer.
     experience_kb_injections: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock budget share per phase: seeded once at phase init from CLI flags/defaults with disabled phases' shares
-    # redistributed, raised by ``extend_*_budget`` hints, kept on resume unless a --*-pct flag is given.
+    # redistributed, kept on resume unless a --*-pct flag is given.
     phase_budget_pct: dict[str, float] = field(default_factory=dict)
-    # ``phase_budget_pct`` as seeded, before any hint raised it: what the hints' ceiling is read off. Re-seeded with it.
-    configured_phase_budget_pct: dict[str, float] = field(default_factory=dict)
     # Cyclic phase machine macro-cycle counter (cycle 0 is the first pass; each SWEEP→FRAMEWORK_AGENT loopback
     # increments it).
     macro_cycle: int = 0
@@ -1455,18 +1449,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             return ""
         self.pending_escalate_hint = ""
         return hint
-
-    def bump_phase_budget(self, hint: str) -> None:
-        """Raise the phase share an ``extend_*_budget`` hint names, to at most a cap above its configured share."""
-        from ..phases.machine_state import PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, apply_escalate_budget_bump
-
-        phase = {
-            ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: PHASE_FRAMEWORK_AGENT,
-            ESCALATE_HINT_EXTEND_KERNEL_BUDGET: PHASE_KERNEL_AGENT,
-        }[hint]
-        self.phase_budget_pct = apply_escalate_budget_bump(
-            self.phase_budget_pct, phase=phase, configured_budget_pct=self.configured_phase_budget_pct
-        )
 
     def discard_pending_escalate_hint(self) -> str:
         """Pop the pending hint because an unrelated transition fired without acting on it; returns cleared hint."""

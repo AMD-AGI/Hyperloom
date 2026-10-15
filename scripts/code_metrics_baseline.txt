@@ -105,7 +105,7 @@ cognitive-complexity src/hyperloom/orchestrator/kernel/attempt_summary.py::_rend
 cognitive-complexity src/hyperloom/orchestrator/kernel/attempt_summary.py::build_kernel_optimization_summary 59
 cognitive-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::_sweep_one_arm_single_server 71
 cognitive-complexity src/hyperloom/orchestrator/kernel/conc_sweep.py::run_conc_sweep 60
-cognitive-complexity src/hyperloom/orchestrator/kernel/controller_patch_integration.py::integrate_controller_patches 42
+cognitive-complexity src/hyperloom/orchestrator/kernel/controller_patch_integration.py::integrate_controller_patches 38
 cognitive-complexity src/hyperloom/orchestrator/kernel/forge_fusion.py::_normalize_manifest 44
 cognitive-complexity src/hyperloom/orchestrator/kernel/forge_fusion.py::salvage_forge_fusion_from_workspace 41
 cognitive-complexity src/hyperloom/orchestrator/kernel/gemm_shape_coverage.py::align_shapes_to_aiter_keys 33
@@ -639,7 +639,7 @@ function-lines src/hyperloom/orchestrator/kernel/conc_sweep.py::_build_roofline_
 function-lines src/hyperloom/orchestrator/kernel/conc_sweep.py::_sweep_one_arm_single_server 335
 function-lines src/hyperloom/orchestrator/kernel/conc_sweep.py::run_conc_sweep 243
 function-lines src/hyperloom/orchestrator/kernel/conc_sweep_plot.py::_render 113
-function-lines src/hyperloom/orchestrator/kernel/controller_patch_integration.py::integrate_controller_patches 262
+function-lines src/hyperloom/orchestrator/kernel/controller_patch_integration.py::integrate_controller_patches 261
 function-lines src/hyperloom/orchestrator/kernel/forge_fusion.py::_normalize_manifest 147
 function-lines src/hyperloom/orchestrator/kernel/forge_fusion.py::salvage_forge_fusion_from_workspace 82
 function-lines src/hyperloom/orchestrator/kernel/forge_handoff.py::build_serving_context_md 84
@@ -649,7 +649,7 @@ function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_fill_inte
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_grade_integrate_accuracy 121
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_persist_forge_gemm_csv_durably 95
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_resolve_integrate_payload 140
-function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_fusion 147
+function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_fusion 144
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_gemm_tuning 467
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_geak_gemm_tuning 124
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_integrate_rebaseline_with_lock_retry 111
@@ -678,7 +678,7 @@ function-lines src/hyperloom/orchestrator/loop/coordinator.py::Coordinator.__ini
 function-lines src/hyperloom/orchestrator/loop/coordinator.py::Coordinator._reactor_turn 97
 function-lines src/hyperloom/orchestrator/loop/coordinator.py::Coordinator._run_ticks 150
 function-lines src/hyperloom/orchestrator/loop/coordinator.py::_infer_model_class_from_config 83
-function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator._spawn_fitting_queued 242
+function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator._spawn_fitting_queued 240
 function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator.reap_dispatched_task 157
 function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator.run_task_registered 109
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_request 214
@@ -721,8 +721,8 @@ function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._record_
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._record_geak_candidate 99
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._record_gemm_tuning_timeline 88
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_geak_kernel_phase 465
-function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_kernel_rewrite_controller 129
-function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 427
+function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_kernel_rewrite_controller 128
+function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 425
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.promote_geak_from_candidate 165
 function-lines src/hyperloom/orchestrator/phases/kernel_stack.py::KernelStackPhase._run_kernel_stack_validation_e2e 220
 function-lines src/hyperloom/orchestrator/phases/machine.py::MachinePhase.advance_phase_if_needed 152
@@ -950,7 +950,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/report.py 1391
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1303
 module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2659
 module-lines src/hyperloom/orchestrator/kernel/conc_sweep.py 1429
-module-lines src/hyperloom/orchestrator/kernel/request_handlers.py 5184
+module-lines src/hyperloom/orchestrator/kernel/request_handlers.py 5138
 module-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py 1785
 module-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py 1318
 module-lines src/hyperloom/orchestrator/knowledge/remote_recipe/values.py 1284
@@ -960,15 +960,15 @@ module-lines src/hyperloom/orchestrator/loop/intent_router.py 1548
 module-lines src/hyperloom/orchestrator/loop/writeback.py 4748
 module-lines src/hyperloom/orchestrator/phases/framework.py 3097
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4227
-module-lines src/hyperloom/orchestrator/phases/machine_state.py 2265
+module-lines src/hyperloom/orchestrator/phases/machine_state.py 2239
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2640
 module-lines src/hyperloom/orchestrator/policy/gate.py 1626
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2571
 module-lines src/hyperloom/orchestrator/roles/critic_agent.py 1299
 module-lines src/hyperloom/orchestrator/specialists/runner.py 1533
-module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1795
-module-lines src/hyperloom/orchestrator/state/shared_state.py 2689
+module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1747
+module-lines src/hyperloom/orchestrator/state/shared_state.py 2681
 module-lines src/hyperloom/orchestrator/trace_analysis/_bypass_report.py 1231
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py 6121
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py 1505

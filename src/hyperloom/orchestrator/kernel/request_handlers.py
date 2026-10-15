@@ -32,6 +32,7 @@ from hyperloom.orchestrator.trace_analysis._capture_shapes import (
     is_capture_fragment as _shared_is_capture_fragment,
 )
 from hyperloom.common import codex_session, llm_config
+from hyperloom.common.checkpoint_quant import checkpoint_format
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
 from hyperloom.common.gpu_identity import is_gfx_arch
@@ -50,8 +51,10 @@ from ..actions.stop_attribution import stopped_by_the_run_class
 from . import apply_kernel_patch, forge_fusion, forge_gemm_tuning
 from .gemm_shape_coverage import canonical_dtype, traced_gemm_shapes
 from .lane_budget import (
+    INSUFFICIENT_BUDGET,
     LANE_FUSION,
     LANE_GEMM,
+    LaneAllocation,
     allocate as _allocate_lane_budgets,
     gemm_per_tuner_timeout_sec,
 )
@@ -243,9 +246,9 @@ def _reusable_source_roots() -> tuple[str, ...]:
 # whole-pipeline GEAK delegate (``geak``); per-kernel selection is opt-in via
 # KERNEL_OPT_BACKEND_ORDER=forge.
 _DEFAULT_KERNEL_PHASE_BACKEND_ORDER = ("geak",)
-# Outer subprocess cap for the whole GEMM-tuning run (all shapes/tuners); sized
-# for large models with many GEMM shapes. Independent of the session --max-hours
-# budget; override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC (or payload timeout_sec).
+# Outer subprocess cap for the whole GEMM-tuning run (all shapes/tuners) when there is
+# no lane share to take, as in an unbounded session; sized for large models with many
+# GEMM shapes. Override via HYPERLOOM_GEMM_TUNING_TIMEOUT_SEC (or payload timeout_sec).
 _DEFAULT_GEMM_TUNING_TIMEOUT_SEC = 5 * 60 * 60
 
 
@@ -704,12 +707,7 @@ def _normalize_precision(value: Any) -> str:
     return str(value or "").strip().lower()
 
 
-def _lane_budget(
-    state: Any,
-    lane: str,
-    *,
-    gemm_target_costs_sec: tuple[int, ...] = (),
-):
+def _lane_budget(state: Any, lane: str, *, gemm_target_costs_sec: tuple[int, ...] = ()) -> LaneAllocation | None:
     """Derive one lane's share of the phase's remaining time.
 
     Wraps :func:`lane_budget.allocate`, which divides the remaining time between
@@ -724,12 +722,23 @@ def _lane_budget(
             only the gemm lane's target ceiling consumes them.
 
     Returns:
-        That lane's ``LaneAllocation``. An unbounded session yields a zero budget
-        and thus ``max_targets == 0`` (``is_fundable`` False), which the caller
+        That lane's ``LaneAllocation``, or ``None`` when the session is bounded and
+        the share cannot fund one target, so the lane must not start. An unbounded
+        session yields a zero budget and ``max_targets == 0``, which the caller
         reads as "no allocation to make".
     """
     remaining = _lane_remaining_minutes(state)
-    return _allocate_lane_budgets(remaining, gemm_target_costs_sec=gemm_target_costs_sec)[lane]
+    allocation = _allocate_lane_budgets(remaining, gemm_target_costs_sec=gemm_target_costs_sec)[lane]
+    if remaining is not None and not allocation.is_fundable:
+        return None
+    return allocation
+
+
+def _unfunded_lane_skip(lane: str) -> HandlerResult:
+    """What a forge lane returns instead of starting when the phase cannot fund it: a skip, not a verdict."""
+    reason = f"what is left of the KERNEL phase time budget cannot fund one {lane} target"
+    log.info("forge %s lane skipped: %s", lane, reason)
+    return {"status": "skipped", "error_class": INSUFFICIENT_BUDGET, "skip_reason": reason, "backend": "forge"}
 
 
 def _lane_remaining_minutes(state: Any) -> float | None:
@@ -767,9 +776,9 @@ def _gemm_tuning_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int:
 
     Args:
         payload (dict): Request payload that may carry ``timeout_sec``.
-        lane_budget_sec (int): The gemm lane's share of the phase. ``0`` means no
-            allocation could be derived, which keeps the module default rather
-            than collapsing an unattended lane to a zero-second timeout.
+        lane_budget_sec (int): The gemm lane's share of the phase. ``0`` means there
+            is no share to take, as in an unbounded session, and keeps the module
+            default rather than collapsing an unattended lane to a zero-second timeout.
 
     Returns:
         int: The resolved timeout in seconds (>= 60).
@@ -839,14 +848,20 @@ def _gemm_router_targets(
     return tuple((str(spec.name), max(0, int(spec.estimated_minutes * 60))) for spec in specs if spec.should_run)
 
 
+async def _priced_gemm_lane(state: Any, **router_inputs: Any) -> LaneAllocation | None:
+    """The gemm lane's share, priced on the router's own per-tuner estimates for ``_gemm_router_targets`` inputs."""
+    targets = await asyncio.to_thread(_gemm_router_targets, **router_inputs)
+    return _lane_budget(state, LANE_GEMM, gemm_target_costs_sec=tuple(cost for _, cost in targets))
+
+
 def _forge_fusion_timeout_sec(payload: dict, *, lane_budget_sec: int = 0) -> int:
     """Resolve the forge-fusion subprocess timeout in seconds.
 
     Args:
         payload (dict): Request payload that may carry ``timeout``/``timeout_sec``.
-        lane_budget_sec (int): The fusion lane's share of the phase. ``0`` means no
-            allocation could be derived, which keeps the module default rather
-            than collapsing an unattended lane to a one-second timeout.
+        lane_budget_sec (int): The fusion lane's share of the phase. ``0`` means there
+            is no share to take, as in an unbounded session, and keeps the module
+            default rather than collapsing an unattended lane to a one-second timeout.
 
     Returns:
         int: The resolved timeout in seconds (>= 1).
@@ -1196,13 +1211,17 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     if quantization_arg in ("fp4", "mxfp4"):
         return quantization_arg, "fp4"
 
-    # Fall back to session precision.
+    # Fall back to session precision. When that is just the format a Quark or compressed-tensors checkpoint nests, it
+    # is one label for layers the checkpoint can store differently (MXFP4 experts, fp8 attention), and forge can tell
+    # them apart only when it is left to route each lane itself.
     precision = _normalize_precision(state.precision)
+    quant_type = str(payload.get("quant_type") or "auto").strip()
+    model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
+    if precision and precision == checkpoint_format((_read_model_config(model_path) or {}).get("quantization_config")):
+        return "auto", quant_type
     if not precision:
         precision = "bf16"
-    quant_type = str(payload.get("quant_type") or "auto").strip()
     if precision == "fp8" and quant_type.lower() == "auto":
-        model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
         gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
         quant_type = _resolve_fp8_quant_type(model_path, gpu_type, framework)
     return precision, quant_type
@@ -2071,49 +2090,12 @@ _AITER_SERVING_MARKERS = {
     "fused_moe": ("[aiter] [fused_moe]", "Mxfp4 MoE backend"),
 }
 
-#: aiter logs every fused-MoE problem it dispatches as a 14-field tuple. The
-#: wording before it varies -- measured across 2948 real lines there are three
-#: forms, and one of them interposes its own parenthesised kernel names:
-#:
-#:   [fused_moe] using 2stage default for ('gfx950', 256, 256, 4096, ...)
-#:   [fused_moe] no tuned FlyDSL config for ('gfx950', 256, 256, 4096, ...)
-#:   [fused_moe] using 2stage (kernelName1='...', kernelName2='...') for ('gfx950', ...)
-#:
-#: so the tuple is anchored on `` for (`` rather than on the wording. The field
-#: order matches aiter's untuned CSV columns after dropping gfx and cu_num, which
-#: the runtime supplies itself.
-_AITER_FUSED_MOE_TUPLE_RE = re.compile(
-    r"\[fused_moe\].*? for \("
-    r"'(?P<gfx>[^']*)', "
-    r"(?P<cu_num>\d+), (?P<token>\d+), (?P<model_dim>\d+), (?P<inter_dim>\d+), "
-    r"(?P<expert>\d+), (?P<topk>\d+), "
-    r"'(?P<act_type>[^']*)', '(?P<dtype>[^']*)', "
-    r"'(?P<q_dtype_a>[^']*)', '(?P<q_dtype_w>[^']*)', '(?P<q_type>[^']*)', "
-    r"(?P<use_g1u1>True|False), (?P<doweight_stage1>True|False)\)"
-)
-
 #: Which dtypes fall in each of aiter's width buckets. Mirrors ``bit16_list`` /
 #: ``bit8_list`` / ``bit4_list`` in
 #: ``csrc/ck_gemm_moe_2stages_codegen/gemm_moe_ck2stages_common.py``.
 _AITER_BIT16_DTYPES = frozenset({"bfloat16", "float16"})
 _AITER_BIT8_DTYPES = frozenset({"float8_e4m3fn", "float8_e4m3fnuz", "int8"})
 _AITER_BIT4_DTYPES = frozenset({"float4_e2m1fn_x2", "uint32", "int4"})
-
-#: The fields that identify one MoE problem, ignoring the token count (which the
-#: tuner sweeps) and cu_num/gfx (which the runtime supplies).
-_FMOE_SHAPE_FIELDS = (
-    "model_dim",
-    "inter_dim",
-    "expert",
-    "topk",
-    "act_type",
-    "dtype",
-    "q_dtype_a",
-    "q_dtype_w",
-    "q_type",
-    "use_g1u1",
-    "doweight_stage1",
-)
 
 
 def _aiter_moe_dtype_pair_supported(q_dtype_a: str, q_dtype_w: str) -> bool:
@@ -2137,29 +2119,21 @@ def _aiter_moe_dtype_pair_supported(q_dtype_a: str, q_dtype_w: str) -> bool:
     return act in _AITER_BIT4_DTYPES and weight in _AITER_BIT4_DTYPES
 
 
-def _aiter_fused_moe_dispatch_keys(server_log: str) -> list[dict[str, str]]:
+def _aiter_fused_moe_dispatch_keys(server_log: str) -> list[dict[str, Any]]:
     """Return the distinct MoE problems a server log shows aiter dispatching.
 
-    Deduplicated on everything but the token count, preserving first-seen order.
-    One model routinely yields several problems -- the same checkpoint dispatches
-    both a BF16-activation and an FP8-activation variant, and the EP path appends
-    a masked fake-expert slot so ``expert``/``topk`` arrive one higher than the
+    Deduplicated on everything but the token count, most-missed first. One model
+    routinely yields several problems -- the same checkpoint dispatches both a
+    BF16-activation and an FP8-activation variant, and the EP path appends a
+    masked fake-expert slot so ``expert``/``topk`` arrive one higher than the
     model config states. Neither is derivable from the config, which is why the
     log is the authoritative source for what to tune.
     """
     if not server_log:
         return []
-    try:
-        text = Path(server_log).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-    seen: dict[tuple[str, ...], dict[str, str]] = {}
-    for match in _AITER_FUSED_MOE_TUPLE_RE.finditer(text):
-        fields = match.groupdict()
-        identity = tuple(fields[name] for name in _FMOE_SHAPE_FIELDS)
-        if identity not in seen:
-            seen[identity] = fields
-    return list(seen.values())
+    from kernelforge.gemm_tune.evidence import moe_dispatch_keys, parse_log_file
+
+    return moe_dispatch_keys(parse_log_file(server_log))
 
 
 def _aiter_ck_moe_tuner_supports(server_log: str) -> bool:
@@ -2184,11 +2158,6 @@ def _aiter_ck_moe_tuner_supports(server_log: str) -> bool:
         return True
     return any(_aiter_moe_dtype_pair_supported(key["q_dtype_a"], key["q_dtype_w"]) for key in keys)
 
-
-#: Header aiter's MoE tuner expects for its untuned input CSV.
-_FMOE_UNTUNED_CSV_HEADER = (
-    "token,model_dim,inter_dim,expert,topk,act_type,dtype,q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1"
-)
 
 #: forge wordings that carry nothing deployable, each distinct from an honest
 #: ``no_improvement``. ``build_report`` checks ``has_candidate`` first, so a run
@@ -2249,6 +2218,8 @@ def _write_fmoe_untuned_csv_from_log(
     Problems whose dtype pair aiter's codegen rejects are dropped rather than
     passed through, because one unsupported row aborts the whole tuner run.
     """
+    from kernelforge.gemm_tune.evidence import MOE_SHAPE_FIELDS, moe_untuned_csv_text
+
     report: dict[str, Any] = {
         "observed": 0,
         "tunable": 0,
@@ -2260,12 +2231,12 @@ def _write_fmoe_untuned_csv_from_log(
     if not keys:
         return "", report
 
-    tunable: list[dict[str, str]] = []
+    tunable: list[dict[str, Any]] = []
     for key in keys:
         pair = (key["q_dtype_a"], key["q_dtype_w"])
         if _aiter_moe_dtype_pair_supported(*pair):
             tunable.append(key)
-            report["keys"].append({name: key[name] for name in _FMOE_SHAPE_FIELDS})
+            report["keys"].append({name: key[name] for name in MOE_SHAPE_FIELDS})
         else:
             combo = f"{pair[0]}/{pair[1]}"
             if combo not in report["dropped_unsupported"]:
@@ -2275,16 +2246,8 @@ def _write_fmoe_untuned_csv_from_log(
         return "", report
 
     token_list = _fmoe_token_list(tokens)
-    lines = [_FMOE_UNTUNED_CSV_HEADER]
-    for key in tunable:
-        for token in token_list:
-            lines.append(
-                f"{token},{key['model_dim']},{key['inter_dim']},"
-                f"{key['expert']},{key['topk']},{key['act_type']},{key['dtype']},"
-                f"{key['q_dtype_a']},{key['q_dtype_w']},{key['q_type']},"
-                f"{1 if key['use_g1u1'] == 'True' else 0},"
-                f"{1 if key['doweight_stage1'] == 'True' else 0}"
-            )
+    rendered = [moe_untuned_csv_text(key, tokens=token_list).splitlines() for key in tunable]
+    lines = rendered[0][:1] + [row for key_lines in rendered for row in key_lines[1:]]
 
     csv_path = workspace / "untuned_fmoe_from_runtime.csv"
     try:
@@ -3230,7 +3193,25 @@ async def _run_forge_gemm_tuning(
         )
         and not block_fp8_profile_capture
     )
+    priced_gemm_lane = functools.partial(
+        _priced_gemm_lane,
+        state,
+        model_path=resolved_model_path,
+        framework=forge_framework,
+        precision=precision,
+        quant_type=quant_type,
+        gpu_type=gpu_type,
+        kernel_signature_log=kernel_sig_log,
+    )
     if block_fp8_profile_capture or tunableop_capture:
+        # A capture costs a full extra server boot, wasted on a lane the phase cannot fund once it has the shapes.
+        lane_after_capture = await priced_gemm_lane(
+            has_untuned_csv=tunableop_capture and bool(untuned_csv),
+            has_shapes_json=block_fp8_profile_capture,
+            has_tunableop_input=tunableop_capture,
+        )
+        if lane_after_capture is None:
+            return _unfunded_lane_skip(LANE_GEMM)
         capture_payload = dict(payload)
         if block_fp8_profile_capture:
             capture_payload["_shape_capture_mode"] = "block_fp8_profile"
@@ -3287,33 +3268,15 @@ async def _run_forge_gemm_tuning(
     if demand_json and not _path_is_existing_file(demand_json):
         demand_json = ""
 
-    # The lane's share, priced on the router's own per-tuner estimates. A share
-    # funding none of them degrades to the module default, not to a doomed run.
-    gemm_targets = await asyncio.to_thread(
-        _gemm_router_targets,
-        model_path=resolved_model_path,
-        framework=forge_framework,
-        precision=precision,
-        quant_type=quant_type,
-        gpu_type=gpu_type,
-        kernel_signature_log=kernel_sig_log,
+    gemm_lane = await priced_gemm_lane(
         has_untuned_csv=bool(untuned_csv),
         has_shapes_json=bool(shapes_json or shapes_manifest or demand_json),
         has_tunableop_input=bool(tunableop_input),
     )
-    gemm_lane = _lane_budget(
-        state,
-        LANE_GEMM,
-        gemm_target_costs_sec=tuple(cost for _, cost in gemm_targets),
-    )
-    timeout = _gemm_tuning_timeout_sec(
-        payload,
-        lane_budget_sec=gemm_lane.budget_sec if gemm_lane.is_fundable else 0,
-    )
-    try:
-        requested_tuners = int(payload.get("max_tuners") or 0)
-    except (TypeError, ValueError):
-        requested_tuners = 0
+    if gemm_lane is None:
+        return _unfunded_lane_skip(LANE_GEMM)
+    timeout = _gemm_tuning_timeout_sec(payload, lane_budget_sec=gemm_lane.budget_sec)
+    requested_tuners = _positive_int(payload.get("max_tuners"))
     # An explicit payload value stays an operator/test escape hatch; a named
     # ``tuner`` already narrows the set to one, so no ceiling is needed then.
     if str(payload.get("tuner") or "").strip():
@@ -4002,14 +3965,11 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "kept": False,
         }
     max_turns = int(payload.get("max_turns") or os.environ.get("FORGE_FUSION_MAX_TURNS") or 100)
-    # The lane's share of the phase; a zero share means none could be derived, and
-    # the module default is safer for an unattended lane than a one-second session.
     fusion_lane = _lane_budget(state, LANE_FUSION)
+    if fusion_lane is None:
+        return {**_unfunded_lane_skip(LANE_FUSION), "engine": "forge_fusion"}
     timeout = _forge_fusion_timeout_sec(payload, lane_budget_sec=fusion_lane.budget_sec)
-    try:
-        requested_recipes = int(payload.get("max_recipes") or 0)
-    except (TypeError, ValueError):
-        requested_recipes = 0
+    requested_recipes = _positive_int(payload.get("max_recipes"))
     # An explicit payload value stays an operator/test escape hatch.
     fusion_recipe_ceiling = requested_recipes if requested_recipes > 0 else fusion_lane.max_targets
 
