@@ -28,6 +28,7 @@ from hyperloom.common.io import atomic_write_json
 from hyperloom.common.provenance import detect_code_revision
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.versions import socket_versions
+from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import ManifestFingerprint
 from hyperloom_multibranch.notebook import LocalNotebook
@@ -40,7 +41,7 @@ from hyperloom_multibranch.scheduling.close import CloseReport, Closer
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, integration_row
-from hyperloom_multibranch.scheduling.exports import ExportsFactory
+from hyperloom_multibranch.scheduling.exports import SessionExports
 from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalChoice, FinalSelector, choose_candidates
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import Integrator, LlmPatchResolver
@@ -101,7 +102,8 @@ class Session:
     """Wires one session's scheduler, integrator and notebook handles onto the peers ``peer_factory`` builds.
 
     ``processes`` registers every process the session starts itself; production passes a registry on
-    ``layout.pids``. ``exports`` builds the CLOSE exports, Recipe KB write-back included.
+    ``layout.pids``. ``recipe_kb`` is the Recipe KB PRELUDE reads the warm-start leads from and CLOSE writes the
+    final recipe back to; ``None`` when none is configured.
     """
 
     def __init__(
@@ -113,7 +115,7 @@ class Session:
         *,
         judge_completion: Completion,
         resolver_completion: Completion,
-        exports: ExportsFactory,
+        recipe_kb: RemoteRecipeClient | None,
         clock: Clock,
     ) -> None:
         self._settings = settings
@@ -143,7 +145,15 @@ class Session:
         dashboard = SessionDashboard(self._notebook, progress, peers.toolbox, PRIMARY_METRIC, layout.dashboard)
         resolver = LlmPatchResolver(resolver_completion, peers.repo)
         self._prelude = Prelude(
-            layout, processes, self._notebook, peers.repo, peers.gate, tests, self._decisions, clock
+            layout,
+            processes,
+            self._notebook,
+            peers.repo,
+            peers.gate,
+            tests,
+            self._decisions,
+            clock,
+            recipe_kb=recipe_kb,
         )
         self._explorer = Explorer(
             self._roster,
@@ -159,7 +169,9 @@ class Session:
             clock,
         )
         self._selector = FinalSelector(tests, peers.gate, settings.workload, PRIMARY_METRIC, clock)
-        closing = exports(layout, self._notebook, peers.repo, blobs, dashboard, PRIMARY_METRIC, budget)
+        closing = SessionExports(
+            layout, self._notebook, peers.repo, blobs, dashboard, PRIMARY_METRIC, budget, kb_client=recipe_kb
+        )
         self._closer = Closer(layout, self._stopper, closing, clock)
         self._signals = StopSignals()
 

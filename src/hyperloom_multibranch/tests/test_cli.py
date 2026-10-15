@@ -114,9 +114,14 @@ def test_usage_errors_exit_two(argv: list[str], tmp_path: Path, monkeypatch: pyt
 
 
 @pytest.fixture
-def experience_kb(monkeypatch: pytest.MonkeyPatch) -> None:
+def experience_kb(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
+    """The Experience KB configured, no Recipe KB, and a writable RSI archive outside the test's workspace."""
+
     monkeypatch.setenv("HYPERLOOM_KB_URL", "http://127.0.0.1:9/kb")
     monkeypatch.setenv("HYPERLOOM_KB_TOKEN", "dummy-token")
+    monkeypatch.delenv("KB_STORE_URL", raising=False)
+    monkeypatch.delenv("KB_STORE_TOKEN", raising=False)
+    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path_factory.mktemp("rsi-archive")))
 
 
 @pytest.mark.usefixtures("experience_kb")
@@ -157,7 +162,26 @@ def test_run_without_the_experience_kb_fails_loudly_before_creating_anything(
 
     captured = capsys.readouterr()
     assert "Experience KB" in captured.err and named in captured.err
+    assert "KB_STORE_URL and KB_STORE_TOKEN configure the Recipe KB only" in captured.err
     assert MB_FAKE_MISSING_SESSION_FACTORY not in captured.err
+    assert captured.out == ""
+    assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("unset", ["KB_STORE_URL", "KB_STORE_TOKEN"])
+@pytest.mark.usefixtures("experience_kb")
+def test_a_half_configured_recipe_kb_fails_loudly_before_creating_anything(
+    unset: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv("KB_STORE_URL", "http://127.0.0.1:9/kb-store")
+    monkeypatch.setenv("KB_STORE_TOKEN", "dummy-token")
+    monkeypatch.delenv(unset)
+
+    assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
+
+    captured = capsys.readouterr()
+    assert "Recipe KB" in captured.err and unset in captured.err
     assert captured.out == ""
     assert not any(tmp_path.iterdir())
 
@@ -165,7 +189,6 @@ def test_run_without_the_experience_kb_fails_loudly_before_creating_anything(
 @pytest.mark.usefixtures("experience_kb")
 def test_the_rsi_archive_defaults_to_the_shared_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.setenv(ARCHIVE_ENV, "")
     monkeypatch.delenv(ARCHIVE_ENV)
 
     cli.main(["run", *WORKLOAD_ARGS])
@@ -175,12 +198,29 @@ def test_the_rsi_archive_defaults_to_the_shared_one(tmp_path: Path, monkeypatch:
 
 @pytest.mark.usefixtures("experience_kb")
 def test_a_named_rsi_archive_is_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "archive"))
+    archive = tmp_path / "archive"
+    archive.mkdir()
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
+    monkeypatch.setenv(ARCHIVE_ENV, str(archive))
 
     cli.main(["run", *WORKLOAD_ARGS])
 
-    assert os.environ[ARCHIVE_ENV] == str(tmp_path / "archive")
+    assert os.environ[ARCHIVE_ENV] == str(archive)
+
+
+@pytest.mark.usefixtures("experience_kb")
+def test_an_rsi_archive_that_is_not_a_writable_directory_fails_loudly_before_creating_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path.parent / "no-such-archive"))
+
+    assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
+
+    captured = capsys.readouterr()
+    assert ARCHIVE_ENV in captured.err and "no-such-archive" in captured.err
+    assert MB_FAKE_MISSING_SESSION_FACTORY not in captured.err
+    assert not any(tmp_path.iterdir())
 
 
 def test_importing_the_command_and_the_session_loads_no_main_flow_runtime() -> None:

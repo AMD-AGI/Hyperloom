@@ -14,9 +14,7 @@ steps' receipts land in ``MB-reports/``, and the dashboard is rebuilt a last tim
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 
 from hyperloom.contracts.recipe import RecipeError
@@ -126,17 +124,4 @@ class SessionExports:
             return RemoteWriteResult(KB_FAILED, f"{type(exc).__name__}: {exc}")
 
 
-#: Builds a session's exports from the session's layout, scheduler notebook handle, repository, blob store,
-#: dashboard, metric and budget.
-ExportsFactory = Callable[
-    [SessionLayout, Notebook, ExperimentRepo, BlobStore, SessionDashboard, str, float], SessionExports
-]
-
-
-def exports_from_env() -> ExportsFactory:
-    """Session exports with the Recipe KB client the environment configures, resolved now; none when it has none."""
-
-    return partial(SessionExports, kb_client=RemoteRecipeClient.from_env_optional())
-
-
-__all__ = ["KB_DISABLED", "KB_FAILED", "CloseExports", "ExportsFactory", "SessionExports", "exports_from_env"]
+__all__ = ["KB_DISABLED", "KB_FAILED", "CloseExports", "SessionExports"]

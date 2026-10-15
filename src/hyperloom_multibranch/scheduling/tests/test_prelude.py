@@ -11,8 +11,9 @@ import re
 import sys
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -20,9 +21,16 @@ import hyperloom
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
+from hyperloom.orchestrator.knowledge.remote_recipe.client import KBStoreError
+from hyperloom.orchestrator.knowledge.remote_recipe.models import RecipeScope
+from hyperloom.orchestrator.knowledge.remote_recipe.values import (
+    CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+    RECORD_KIND_HYPERLOOM_RECIPE,
+)
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.notebook.knowledge.warm_start import RecipeReader
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -111,12 +119,54 @@ def _notebook(layout: SessionLayout) -> LocalNotebook:
     return LocalNotebook(layout.notebook, Writer(Role.SCHEDULER, "scheduler"), clock=_clock().now)
 
 
+@dataclass
+class OneChampionKB:
+    """A Recipe KB holding one champion in whatever scope it is asked for, or one that cannot be reached."""
+
+    unreachable: bool = False
+    searched: list[dict[str, Any]] = field(default_factory=list)
+
+    def search_identities(
+        self,
+        *,
+        scheme: str,
+        match: dict[str, str],
+        hardware_in: list[str] | None = None,
+        offset: int = 0,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        if self.unreachable:
+            raise KBStoreError("connection refused")
+        self.searched.append({"scheme": scheme, "match": match})
+        return {"items": [{"canonical_id": f"{scheme}:champion"}], "next_offset": None}
+
+    def get_view(self, canonical_id: str, scope: RecipeScope) -> dict[str, Any] | None:
+        knowledge = {
+            "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+            "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
+            "validated_e2e_gain": 12.0,
+            "value": {"config": {"extra_server_args": "--enable-expert-parallel"}, "patch": {}, "kernel": {}},
+        }
+        return {"canonical_id": canonical_id, "session_id": "earlier", "knowledge": knowledge}
+
+
 def _prelude(
-    layout: SessionLayout, processes: ProcessRegistry, peers: PreludePeers, clock: Clock | None = None
+    layout: SessionLayout,
+    processes: ProcessRegistry,
+    peers: PreludePeers,
+    clock: Clock | None = None,
+    recipe_kb: RecipeReader | None = None,
 ) -> Prelude:
     clock = clock or _clock()
     decisions = DecisionLog(layout.decisions, clock)
-    return Prelude(layout, processes, _notebook(layout), peers.repo, peers.gate, peers.tests, decisions, clock)
+    return Prelude(
+        layout, processes, _notebook(layout), peers.repo, peers.gate, peers.tests, decisions, clock, recipe_kb=recipe_kb
+    )
+
+
+def _warm_start_decision(layout: SessionLayout) -> dict[str, Any]:
+    logged = [json.loads(line) for line in layout.decisions.read_text().splitlines()]
+    return next(entry["detail"] for entry in logged if entry["reason"] == "warm start read")
 
 
 async def _run(prelude: Prelude, budget: SessionBudget) -> PreludeResult:
@@ -192,6 +242,41 @@ async def test_finished_child_roots_the_session_before_any_baseline_test(tmp_pat
     assert profile.kernel_optimizer == "geak"
     assert (profile.model_type, profile.architectures) == ("", ())
     assert peers.toolbox.requests == {}
+
+
+async def test_the_recipe_kb_champions_for_the_profile_become_warm_start_leads(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    kb = OneChampionKB()
+    budget = SessionBudget.from_hours(2.0, NOW)
+
+    prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), _peers(layout), recipe_kb=kb)
+    result = await prelude.root(WORKLOAD, budget, HardStop(budget, _clock()))
+
+    [lead] = result.warm_leads
+    assert (lead.canonical_id, lead.server_args, lead.gain_pct) == (
+        "inference:champion",
+        "--enable-expert-parallel",
+        12.0,
+    )
+    assert kb.searched[0]["match"]["hardware"] == result.profile.hardware
+    assert _warm_start_decision(layout) == {"leads": [lead.describe()], "unread": ""}
+
+
+@pytest.mark.parametrize(
+    ("recipe_kb", "unread"),
+    [(None, "no Recipe KB is configured"), (OneChampionKB(unreachable=True), "KBStoreError: connection refused")],
+)
+async def test_without_a_readable_recipe_kb_the_session_roots_with_no_leads(
+    recipe_kb: RecipeReader | None, unread: str, tmp_path: Path
+) -> None:
+    layout = _layout(tmp_path)
+    budget = SessionBudget.from_hours(2.0, NOW)
+
+    prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), _peers(layout), recipe_kb=recipe_kb)
+    result = await prelude.root(WORKLOAD, budget, HardStop(budget, _clock()))
+
+    assert result.warm_leads == ()
+    assert _warm_start_decision(layout) == {"leads": [], "unread": unread}
 
 
 async def test_the_profile_names_the_model_type_and_architectures_of_the_models_config(tmp_path: Path) -> None:

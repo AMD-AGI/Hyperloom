@@ -21,7 +21,6 @@ import os
 import signal
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from functools import partial
 from pathlib import Path
 
 import pytest
@@ -40,7 +39,6 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.notebook.tests.factories import delta, intent
 from hyperloom_multibranch.scheduling.budget import SessionBudget
-from hyperloom_multibranch.scheduling.exports import SessionExports
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL
 from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
@@ -258,7 +256,7 @@ class Stage:
             self.processes,
             judge_completion=self.judge,
             resolver_completion=ScriptedCompletion(),
-            exports=partial(SessionExports, kb_client=None),
+            recipe_kb=None,
             clock=self.time.clock,
         )
         return await session.run()

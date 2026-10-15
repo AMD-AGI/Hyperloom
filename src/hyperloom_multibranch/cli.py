@@ -7,8 +7,11 @@
 the kernel optimizer its recipes are scoped to, and the hard limits the judge works within. Exit codes: 0 when the
 session ran its course, 1 when it failed or was stopped, 2 on a usage error. The environment and the peers a session
 needs are checked before anything is created, so a missing one fails the command without leaving a session directory
-behind: the Experience KB the session's CLOSE publishes to must be configured, and the RSI archive defaults to
-:data:`RSI_ARCHIVE_DEFAULT`, set in this process's environment for every reader of it.
+behind: the Experience KB the session's CLOSE publishes to must be configured (``HYPERLOOM_KB_URL`` and
+``HYPERLOOM_KB_TOKEN``); the Recipe KB that PRELUDE reads warm-start leads from and CLOSE writes the final recipe back
+to is configured by ``KB_STORE_URL`` and ``KB_STORE_TOKEN``, both or neither, and is not used without them; the RSI
+archive defaults to :data:`RSI_ARCHIVE_DEFAULT`, set in this process's environment for every reader of it, and must be
+a writable directory.
 """
 
 from __future__ import annotations
@@ -22,11 +25,11 @@ from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 
 from hyperloom.inference_optimizer.session.paths import workspace_root
+from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient, RemoteRecipeConfigurationError
 from hyperloom_kb.remote import RemoteClientError, RemoteConfig
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS, MB_MIN_PRELUDE_HOURS
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.exports import exports_from_env
 from hyperloom_multibranch.scheduling.layout import create_session
 from hyperloom_multibranch.scheduling.lifecycle import Session
 from hyperloom_multibranch.scheduling.llm import anthropic_completion, default_model
@@ -45,7 +48,10 @@ DEFAULT_JUDGE_INTERVAL_SECONDS = 600.0
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 #: The shared folder of archived search trees, used when ``HYPERLOOM_RSI_ARCHIVE`` names none.
 RSI_ARCHIVE_DEFAULT = "/shared_nfs/hyperloom/rsi-archive/"
-EXPERIENCE_KB_UNSET = "the Experience KB is not configured: set HYPERLOOM_KB_URL and HYPERLOOM_KB_TOKEN"
+RECIPE_KB_ONLY = "KB_STORE_URL and KB_STORE_TOKEN configure the Recipe KB only"
+EXPERIENCE_KB_UNSET = (
+    f"the Experience KB is not configured: set HYPERLOOM_KB_URL and HYPERLOOM_KB_TOKEN ({RECIPE_KB_ONLY})"
+)
 #: The GPU types Magpie has a benchmark script of their own for. ``hyperloom optimize`` runs mi308x and mi325x on
 #: mi300x's script through a mapping its package keeps private, so a session accepts only these until it is public.
 MAGPIE_RUNNER_GPU_TYPES = ("mi300x", "mi355x")
@@ -131,35 +137,50 @@ def require_experience_kb(env: Mapping[str, str]) -> None:
     try:
         configured = RemoteConfig.from_env(env)
     except RemoteClientError as exc:
-        raise EnvironmentIncomplete(f"the Experience KB is not configured: {exc}") from exc
+        raise EnvironmentIncomplete(f"the Experience KB is not configured: {exc} ({RECIPE_KB_ONLY})") from exc
     if configured is None:
         raise EnvironmentIncomplete(EXPERIENCE_KB_UNSET)
 
 
-def default_rsi_archive(env: MutableMapping[str, str]) -> None:
-    """Point ``HYPERLOOM_RSI_ARCHIVE`` at :data:`RSI_ARCHIVE_DEFAULT` when ``env`` names no archive."""
+def recipe_kb_from_env() -> RemoteRecipeClient | None:
+    """The Recipe KB client ``KB_STORE_URL`` and ``KB_STORE_TOKEN`` configure, ``None`` when neither is set; raises
+    :class:`EnvironmentIncomplete` when only one is."""
+
+    try:
+        return RemoteRecipeClient.from_env_optional()
+    except RemoteRecipeConfigurationError as exc:
+        raise EnvironmentIncomplete(f"the Recipe KB is half configured: {exc}") from exc
+
+
+def require_rsi_archive(env: MutableMapping[str, str]) -> None:
+    """Point ``HYPERLOOM_RSI_ARCHIVE`` at :data:`RSI_ARCHIVE_DEFAULT` when ``env`` names no archive; raise
+    :class:`EnvironmentIncomplete` unless the archive is a writable directory."""
 
     if not env.get(ARCHIVE_ENV, "").strip():
         env[ARCHIVE_ENV] = RSI_ARCHIVE_DEFAULT
+    archive = Path(env[ARCHIVE_ENV].strip())
+    if not (archive.is_dir() and os.access(archive, os.W_OK)):
+        raise EnvironmentIncomplete(
+            f"the RSI archive {archive} is not a writable directory: mount it, or set {ARCHIVE_ENV} to one"
+        )
 
 
-def run_session(settings: RunSettings, peer_factory: PeerFactory) -> int:
+def run_session(settings: RunSettings, peer_factory: PeerFactory, recipe_kb: RemoteRecipeClient | None) -> int:
     """Create the session directory, print it on one stdout line, run the session and return its exit code.
 
-    The model and the Recipe KB client are resolved first, so an environment that cannot provide them fails before
-    any session directory exists. The session and its peers are built on the event loop they run on, which the
-    specialist tools of the MCP service hand every toolbox call to.
+    The model is resolved first, so an environment that cannot provide it fails before any session directory exists.
+    The session and its peers are built on the event loop they run on, which the specialist tools of the MCP service
+    hand every toolbox call to.
     """
 
-    return asyncio.run(_run_session(settings, peer_factory))
+    return asyncio.run(_run_session(settings, peer_factory, recipe_kb))
 
 
-async def _run_session(settings: RunSettings, peer_factory: PeerFactory) -> int:
+async def _run_session(settings: RunSettings, peer_factory: PeerFactory, recipe_kb: RemoteRecipeClient | None) -> int:
     clock = Clock()
     model = default_model()
     judge = anthropic_completion(model, component=PROG, operation="judge")
     resolver = anthropic_completion(model, component=PROG, operation="patch_resolve")
-    exports = exports_from_env()
     layout = create_session(workspace_root(), settings.workload.model_basename, clock)
     print(layout.root, flush=True)
     logging.getLogger().addHandler(_file_handler(layout.scheduler_log))
@@ -170,7 +191,7 @@ async def _run_session(settings: RunSettings, peer_factory: PeerFactory) -> int:
         ProcessRegistry(layout.pids, clock),
         judge_completion=judge,
         resolver_completion=resolver,
-        exports=exports,
+        recipe_kb=recipe_kb,
         clock=clock,
     )
     return (await session.run()).exit_code
@@ -192,12 +213,13 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format=LOG_FORMAT)
     try:
         require_experience_kb(os.environ)
-        default_rsi_archive(os.environ)
+        recipe_kb = recipe_kb_from_env()
+        require_rsi_archive(os.environ)
         peer_factory = load_peers()
     except (EnvironmentIncomplete, PeersUnavailable) as exc:
         print(f"{PROG}: cannot run a session, {exc}", file=sys.stderr)
         return EXIT_FAILED
-    return run_session(settings, peer_factory)
+    return run_session(settings, peer_factory, recipe_kb)
 
 
 __all__ = [
@@ -206,9 +228,10 @@ __all__ = [
     "RSI_ARCHIVE_DEFAULT",
     "EnvironmentIncomplete",
     "build_parser",
-    "default_rsi_archive",
     "main",
+    "recipe_kb_from_env",
     "require_experience_kb",
+    "require_rsi_archive",
     "run_session",
     "settings_from",
 ]

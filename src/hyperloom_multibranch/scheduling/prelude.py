@@ -6,7 +6,9 @@
 The child is ``hyperloom optimize`` with every optimization lever off, given the whole remaining session budget. Its
 session is read by :mod:`~hyperloom_multibranch.scheduling.prelude_reader` alone and folded into the root recipe,
 whose kept patches go to the session's blob store and which the experiment repository stores as the root commit, and
-the session profile is written. The baseline every recorded value is anchored to is measured through the toolbox in a
+the session profile is written. The Recipe KB's champions for that profile are read as warm-start leads for the
+specialists; no Recipe KB, or none of its champions in this session's scope, gives none, and a KB that cannot be read
+is recorded and gives none either. The baseline every recorded value is anchored to is measured through the toolbox in a
 second step, once the caller has put the integration branch on the roster and given the toolbox its K: as many tests
 of the root as the rule gate asks for, from which the gate writes the baseline and its bar.
 """
@@ -25,12 +27,14 @@ from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import PatchRef, Recipe
 from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
 from hyperloom.measure.compile import BlobError
+from hyperloom.orchestrator.knowledge.remote_recipe.client import KBStoreError
 from hyperloom_multibranch.contracts.gate import SessionGate
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Notebook
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent, SessionProfile
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
+from hyperloom_multibranch.notebook.knowledge.warm_start import RecipeReader, WarmLead, warm_leads
 from hyperloom_multibranch.scheduling.budget import BudgetExhausted, HardStop, SessionBudget
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
@@ -74,11 +78,12 @@ class PreludeFailed(RuntimeError):
 
 @dataclass(frozen=True)
 class PreludeResult:
-    """The root commit the session starts from and the profile it runs on; the rest is in the notebook and
-    ``MB-prelude/``."""
+    """The root commit the session starts from, the profile it runs on and the Recipe KB's leads for it; the rest is
+    in the notebook and ``MB-prelude/``."""
 
     root_commit: str
     profile: SessionProfile
+    warm_leads: tuple[WarmLead, ...]
 
 
 def prelude_argv(workload: Workload, max_hours: float, launch_info: Path) -> tuple[str, ...]:
@@ -96,7 +101,7 @@ def prelude_argv(workload: Workload, max_hours: float, launch_info: Path) -> tup
 
 
 class Prelude:
-    """Runs PRELUDE for one session."""
+    """Runs PRELUDE for one session; ``recipe_kb`` is ``None`` when no Recipe KB is configured."""
 
     def __init__(
         self,
@@ -108,8 +113,11 @@ class Prelude:
         tests: SessionTests,
         decisions: DecisionLog,
         clock: Clock,
+        *,
+        recipe_kb: RecipeReader | None,
     ) -> None:
         self._layout = layout
+        self._recipe_kb = recipe_kb
         self._processes = processes
         self._notebook = notebook
         self._repo = repo
@@ -151,7 +159,21 @@ class Prelude:
                 },
             )
         )
-        return PreludeResult(root, profile)
+        return PreludeResult(root, profile, await self._warm_start(profile))
+
+    async def _warm_start(self, profile: SessionProfile) -> tuple[WarmLead, ...]:
+        """The Recipe KB's leads for ``profile``; the ``PRELUDE`` decision names them, or why the KB was not read."""
+
+        leads: tuple[WarmLead, ...] = ()
+        unread = "no Recipe KB is configured" if self._recipe_kb is None else ""
+        if self._recipe_kb is not None:
+            try:
+                leads = await asyncio.to_thread(warm_leads, self._recipe_kb, profile)
+            except KBStoreError as exc:
+                unread = f"{type(exc).__name__}: {exc}"
+        detail = {"leads": [lead.describe() for lead in leads], "unread": unread}
+        self._decisions.record(Decision(DecisionKind.PRELUDE, "warm start read", INTEGRATION_BRANCH, detail))
+        return leads
 
     async def _run_child(self, workload: Workload, budget: SessionBudget, hard_stop: HardStop) -> Path:
         try:
