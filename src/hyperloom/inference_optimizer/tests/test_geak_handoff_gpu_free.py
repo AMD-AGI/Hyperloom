@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hyperloom.common.rocm_smi import GpuVram
+from hyperloom.common.amd_smi import GpuVram
 from hyperloom.orchestrator.actions.executors import _server_lifecycle as sl
 from hyperloom.orchestrator.actions.executors._gpu_pin import (
     _resolve_handoff_gpu_ids,
@@ -41,7 +41,7 @@ def host(monkeypatch):
         return state.readings.pop(0) if len(state.readings) > 1 else state.readings[0]
 
     monkeypatch.setattr(sl, "reap_orphaned_servers", _reap)
-    monkeypatch.setattr(sl.rocm_smi, "gpu_vram_usage", _probe)
+    monkeypatch.setattr(sl.amd_smi, "gpu_vram_usage", _probe)
     monkeypatch.setattr(sl, "time", SimpleNamespace(monotonic=time.monotonic, sleep=state.sleeps.append))
     monkeypatch.setattr(sl, "_serving_process_groups", lambda: [HOLDER])
     return state
@@ -89,7 +89,7 @@ def test_unreadable_vram_still_reaps_but_verifies_nothing(host, tmp_path):
 
     gpus = sl.free_gpus_for_handoff(tmp_path, [0, 1], timeout_sec=60)
 
-    assert (gpus.busy, gpus.unverified) == ([], "rocm-smi could not report VRAM")
+    assert (gpus.busy, gpus.unverified) == ([], "amd-smi could not report VRAM")
     assert host.reap_calls == [tmp_path]
 
 
@@ -102,7 +102,7 @@ def test_unresolved_cards_still_reap_but_verify_nothing(host, tmp_path):
     assert host.probes == 0
 
 
-def test_a_card_rocm_smi_does_not_report_is_unverified(host, tmp_path):
+def test_a_card_amd_smi_does_not_report_is_unverified(host, tmp_path):
     host.readings = [[HELD, HELD]]
 
     gpus = sl.free_gpus_for_handoff(tmp_path, [0, 5], timeout_sec=0)

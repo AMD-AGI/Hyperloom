@@ -517,7 +517,7 @@ def gemm_tune():
 @click.option("--tunableop-input", default="", help="PyTorch TunableOp shape file")
 @click.option("--kernel-signature-log", default="", help="Server log for 1-stage ASM detection")
 @click.option("--gpu-ids", default="", help="Comma-separated GPU IDs to use")
-@click.option("--skip-gpu-check", is_flag=True, help="Skip rocm-smi preflight check")
+@click.option("--skip-gpu-check", is_flag=True, help="Skip amd-smi preflight check")
 @click.option("--kb-current-lib", default="", help="Current backend lib_version recorded as artifact provenance")
 @click.option("--verbose", "-v", is_flag=True, help="Verbose logging")
 def run(

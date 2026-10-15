@@ -1470,7 +1470,7 @@ def _normalize_hip_visible_devices() -> None:
 
 
 def _check_gpu_visibility() -> dict[str, Any]:
-    """Best-effort informational check of visible GPU count vs ``$TP`` (silent when rocm-smi is absent)."""
+    """Best-effort informational check of visible GPU count vs ``$TP`` (silent when amd-smi is absent)."""
     # External multi-node: GPUs are on remote pods, not this sandbox.
     from hyperloom.inference_optimizer.multi_node._internal.external_state import external_service_url
     from hyperloom.orchestrator.actions.executors._multi_node_env import is_multi_node
@@ -1482,40 +1482,29 @@ def _check_gpu_visibility() -> dict[str, Any]:
             "skip_reason": "external_multi_node",
             "detail": {"visible": None, "tp_requested": None, "warn": None},
         }
+    from hyperloom.common import amd_smi
+
+    if not amd_smi.amd_smi_available():
+        return {
+            "status": "skipped",
+            "skip_reason": "amd_smi_unavailable",
+            "detail": {"visible": None, "tp_requested": None, "warn": None},
+        }
     try:
-        proc = subprocess.run(
-            ["rocm-smi", "--showid"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
+        payload = amd_smi.amd_smi_json(["list"], timeout_s=5.0)
+    except amd_smi.AmdSmiError:
         return {
             "status": "skipped",
-            "skip_reason": "rocm_smi_unavailable",
+            "skip_reason": "amd_smi_failed",
             "detail": {"visible": None, "tp_requested": None, "warn": None},
         }
-    if proc.returncode != 0:
-        return {
-            "status": "skipped",
-            "skip_reason": "rocm_smi_failed",
-            "detail": {"visible": None, "tp_requested": None, "warn": None},
-        }
-    # rocm-smi --showid emits multiple GPU[ lines per GPU; deduplicate by GPU index.
-    visible_indices: set[str] = set()
-    for line in (proc.stdout or "").splitlines():
-        stripped = line.strip()
-        if stripped.startswith("GPU["):
-            idx, _, _ = stripped[4:].partition("]")
-            if idx:
-                visible_indices.add(idx)
-    visible = len(visible_indices)
+    visible = len(amd_smi.gpu_rows(payload))
     try:
         wanted = int(os.environ.get("TP", "1") or "1")
     except ValueError:
         wanted = 1
     if visible == 0:
-        warning = "rocm-smi sees 0 GPUs; benchmark will fail"
+        warning = "amd-smi sees 0 GPUs; benchmark will fail"
         print(f"Preflight: WARNING — {warning}")
         return {
             "status": "warned",
@@ -1523,7 +1512,7 @@ def _check_gpu_visibility() -> dict[str, Any]:
             "detail": {"visible": visible, "tp_requested": wanted, "warn": warning},
         }
     if wanted > visible:
-        warning = f"TP={wanted} but rocm-smi sees {visible} GPU(s); sglang/vllm may fail to load weights"
+        warning = f"TP={wanted} but amd-smi sees {visible} GPU(s); sglang/vllm may fail to load weights"
         print(f"Preflight: WARNING — {warning}. Lower TP or adjust ROCR_VISIBLE_DEVICES.")
         return {
             "status": "warned",

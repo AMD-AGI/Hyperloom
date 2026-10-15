@@ -24,7 +24,6 @@ import logging
 import math
 import os
 import re
-import shutil
 import subprocess
 from functools import cache
 from pathlib import Path
@@ -1041,7 +1040,7 @@ def _visible_gpu_count() -> int:
     """Return how many GPUs are visible to this pod (0 = none / unknown).
 
     Prefers ``torch.cuda.device_count`` (no shell-out, keeps subprocess-mock
-    tests happy), falls back to ``rocm-smi --showid``. Returns 0 on every
+    tests happy), falls back to ``amd-smi list``. Returns 0 on every
     failure so callers skip the clamp. Override via
     ``$INFERENCE_OPTIMIZER_VISIBLE_GPU_COUNT``.
 
@@ -1065,28 +1064,9 @@ def _visible_gpu_count() -> int:
             return count
     except (ImportError, RuntimeError):
         pass
-    if shutil.which("rocm-smi"):
-        try:
-            proc = subprocess.run(
-                ["rocm-smi", "--showid"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-        except (subprocess.TimeoutExpired, PermissionError, OSError):
-            return 0
-        if proc.returncode == 0:
-            # ``rocm-smi --showid`` emits multiple ``GPU[N]`` lines per device;
-            # dedup by index.
-            indices: set[str] = set()
-            for line in (proc.stdout or "").splitlines():
-                stripped = line.strip()
-                if stripped.startswith("GPU["):
-                    idx, _, _ = stripped[4:].partition("]")
-                    if idx:
-                        indices.add(idx)
-            return len(indices)
-    return 0
+    from hyperloom.common.amd_smi import gpu_count
+
+    return gpu_count()
 
 
 def _tracelens_patch_enabled() -> bool:

@@ -16,7 +16,7 @@ from typing import Any, NamedTuple
 
 import yaml
 
-from hyperloom.common import rocm_smi
+from hyperloom.common import amd_smi
 from hyperloom.common.agentx_workload import AGENTX_SERVER_PIDFILE
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.proctree import group_members, running
@@ -487,7 +487,7 @@ def free_gpus_for_handoff(
 
     Args:
         session_dir: The session whose ``runs/`` pidfiles name the leftovers.
-        cards: Physical card indices as rocm-smi numbers them; ``None`` when the caller could not resolve them, which
+        cards: Physical card indices as amd-smi numbers them; ``None`` when the caller could not resolve them, which
             still reaps but verifies nothing.
         timeout_sec: How long the cards are given to drain.
         poll_sec: How often VRAM is re-read meanwhile.
@@ -501,17 +501,17 @@ def free_gpus_for_handoff(
         return GpuHandoff(reaped, [], [], "the cards could not be resolved to physical GPU indices")
     deadline = time.monotonic() + max(0.0, timeout_sec)
     while True:
-        usage = rocm_smi.gpu_vram_usage()
+        usage = amd_smi.gpu_vram_usage()
         if usage is None:
-            return GpuHandoff(reaped, [], [], "rocm-smi could not report VRAM")
+            return GpuHandoff(reaped, [], [], "amd-smi could not report VRAM")
         if any(not 0 <= card < len(usage) for card in cards):
             return GpuHandoff(
-                reaped, [], [], f"rocm-smi reports {len(usage)} GPU(s), which does not cover cards {list(cards)}"
+                reaped, [], [], f"amd-smi reports {len(usage)} GPU(s), which does not cover cards {list(cards)}"
             )
         busy = [
             (card, gpu.used_mib, gpu.total_mib)
             for card, gpu in enumerate(usage)
-            if card in cards and rocm_smi.vram_busy(gpu)
+            if card in cards and amd_smi.vram_busy(gpu)
         ]
         if not busy:
             return GpuHandoff(reaped, [], [], "")
