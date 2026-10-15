@@ -264,16 +264,62 @@ serving card or no power reading stays unmeasured. The benchmark report's
 sampler ran on: on one node it reads a single card over the whole process
 lifetime, boot and idle tail included.
 
-The optimizer never changes power settings. The power cap and DPM performance
-level decide how much of the card's throughput is available at what power, so
-they are part of the measurement contract, and setting them is privileged and
-card-wide. Set them with `amd-smi set --power-cap` / `--perf-level` before
-launch; `--gpu-power-cap-w` and `--gpu-perf-level` then assert them, the way
-`--compute-partition-mode` asserts a partition mode: the session refuses to
-start (and to resume) if a card it uses is at a different value. The observed
-cap and perf level are recorded in the platform fingerprint whether or not
-they are asserted. Neither can be checked on a multi-node session, so asserting
-one there refuses.
+The optimizer never changes power settings during a session. The power cap and
+DPM performance level decide how much of the card's throughput is available at
+what power, so they are part of the measurement contract, and setting them is
+privileged and card-wide. By default, set them with `amd-smi set --power-cap` /
+`--perf-level` before launch; `--gpu-power-cap-w` and `--gpu-perf-level` then
+assert them, the way `--compute-partition-mode` asserts a partition mode: the
+session refuses to start (and to resume) if a card it uses is at a different
+value. The observed cap and perf level are recorded in the platform
+fingerprint whether or not they are asserted. Neither can be checked on a
+multi-node session, so asserting one there refuses.
+
+### Applying the power settings (opt-in)
+
+`--apply-gpu-power-settings` permits the session to set the declared
+`--gpu-power-cap-w` / `--gpu-perf-level` itself, once at launch, and to keep
+them for the whole session. The same read-back check then verifies them, and
+the fingerprint records them as applied by Hyperloom along with the originals.
+It needs `amd-smi set` privileges and refuses, with nothing left changed:
+
+- without an integer `ROCR_VISIBLE_DEVICES` / `HIP_VISIBLE_DEVICES` mask. It
+  sets exactly the masked cards, never the whole host;
+- on multi-node;
+- on a masked card `amd-smi` does not report, or whose current value cannot be
+  read, since nothing could restore it;
+- on a card that already holds more than 2 GB of VRAM before the session
+  starts (someone else's resident model, which a card-wide cap would change
+  too), or whose VRAM use cannot be read;
+- when a set fails.
+
+Only the settings that were declared are changed, and only those are put back.
+The originals are written to a per-card record under
+`/var/tmp/hyperloom/gpu_power_settings/` before anything is set. That path is
+host-local and fixed, whatever `HYPERLOOM_RUNTIME_DIR` or `USER_DATA_PATH` say,
+so every session on the host finds the same records. Inside a container it is
+the container's own `/var/tmp`, so mount the host's `/var/tmp/hyperloom` into
+every container that applies settings, or sessions in different containers
+will not see each other's records. Each record is stamped with the host's boot
+id, so one written before a reboot is ignored. The session holds an exclusive
+`flock` on each record until it restores the card, which keeps two sessions
+from setting the same card. A restore sets whatever a record says, usually as
+root, so records are readable by every account (for the warning below) but
+writable only by their owner. A record, or a directory holding them, that is
+owned by another unprivileged account or writable by others (other than a
+sticky directory) is refused rather than read.
+
+The originals are restored when the session ends: at a stop reason, an operator
+stop, an error exit, or a SIGTERM / SIGHUP at any point after the cards were set,
+including startup and the close sequence. A stop signal during the restore
+itself is ignored so it cannot cut it short. A SIGKILL (an OOM kill, or a
+scheduler escalating after its grace period, such as Slurm's `KillWait`) cannot
+be caught: the cards stay at the applied settings, and the record is left with
+its lock free. The next launch on that host that passes the flag restores those
+cards before doing anything else; a launch without the flag warns that the
+cards were left changed and names their original values. Give a scheduler's
+grace period enough time for the session to close. On resume the flag must be
+passed again, since the settings were restored when the previous leg exited.
 
 ### Power budget (constraint on KEEP)
 

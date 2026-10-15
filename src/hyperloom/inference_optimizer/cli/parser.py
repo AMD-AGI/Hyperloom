@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import NoReturn
 
 from .. import framework_registry
-from .constraint_args import add_constraint_arguments, positive_watts_arg
+from .constraint_args import add_constraint_arguments
+from .gpu_power_args import add_gpu_power_arguments
 from .backends import CRITIC_PROTOCOL_CHOICES
 from .recover import RECOVER_DESCRIPTION, RECOVER_HELP, add_cleanup_confirmation_arguments
 from hyperloom.common import predictor_config
@@ -591,27 +592,7 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     add_constraint_arguments(opt)
-    opt.add_argument(
-        "--gpu-power-cap-w",
-        type=positive_watts_arg,
-        default=None,
-        help=(
-            "Declare the power cap (W) the GPUs are already set to. An assertion, not a request: the optimizer "
-            "never changes power settings, which are privileged and card-wide. Set it with "
-            "`amd-smi set --power-cap` before launch; the session refuses to start if any card it uses is at a "
-            "different cap. The observed cap is recorded whether or not this flag is passed."
-        ),
-    )
-    opt.add_argument(
-        "--gpu-perf-level",
-        type=str,
-        default=None,
-        metavar="LEVEL",
-        help=(
-            "Declare the DPM performance level the GPUs are already set to (e.g. auto, high, determinism). "
-            "An assertion like --gpu-power-cap-w: set it with `amd-smi set --perf-level` before launch."
-        ),
-    )
+    add_gpu_power_arguments(opt)
     opt.add_argument(
         "--resume-from",
         type=str,
