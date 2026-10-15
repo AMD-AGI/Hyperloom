@@ -129,7 +129,8 @@ class Specialist:
 async def build_stack(root: Path, variant: Variant, baseline: Recipe, *, k: int = 1) -> AsyncIterator[Stack]:
     """Build the system under ``root`` and close it, whatever the test did."""
     session = root / "session"
-    repo = await GitExperimentRepo.create(root / "experiments.git", baseline)
+    repo = GitExperimentRepo(root / "experiments.git", variant.spec.blobs)
+    await repo.init_root(baseline)
     notebook = LocalNotebook(root / "notebook", Writer(Role.TOOLBOX, "toolbox"))
     compiler = EnvironmentCompiler(variant.spec.blobs, variant.image_digest, variant.locator)
     planner = variant.wrap_planner(HostedPlanner(compiler, variant.canonical, root / "points"))

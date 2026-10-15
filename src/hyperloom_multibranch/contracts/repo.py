@@ -1,13 +1,19 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The session's experiment repository: one git repository, a recipe per commit, one writer per branch."""
+"""The session's experiment repository: one git repository, a recipe per commit, one writer per branch.
+
+A commit holds only its recipe; the patch and kernel files the recipe names live in the session's blob store, where
+the toolbox reads them to build a test's environment.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Protocol
 
-from hyperloom.contracts.recipe import Recipe
+from hyperloom.contracts.recipe import PatchRef, Recipe, RecipeDelta
 
 
 class BranchMoved(RuntimeError):
@@ -26,6 +32,9 @@ class ExperimentRepo(Protocol):
     ``hyperloom.contracts.recipe.diff`` on the recipes read here.
     """
 
+    async def init_root(self, recipe: Recipe) -> str:
+        """The baseline as the root commit, which starts ``INTEGRATION_BRANCH``; a repository takes one root."""
+
     async def read_recipe(self, commit: str) -> Recipe: ...
 
     async def create_branch(self, branch: str, at_commit: str) -> None: ...
@@ -34,7 +43,19 @@ class ExperimentRepo(Protocol):
 
     async def commit(self, branch: str, parent: str, recipe: Recipe, message: str) -> str: ...
 
+    async def commit_integration(self, onto: str, delta: RecipeDelta, merged_from: Sequence[str]) -> str:
+        """``delta`` on ``onto`` as a merge of ``merged_from``, landing on ``INTEGRATION_BRANCH`` as ``commit`` does."""
+
     async def rewind(self, branch: str, commit: str, parent: str) -> None: ...
+
+    async def store_patch(self, component: str, text: str) -> PatchRef:
+        """Keep a patch file of ``component`` for a later delta to add; the same text gets the same reference."""
+
+    async def patch_text(self, commit: str, path: str) -> str:
+        """The patch file ``path`` of ``commit``'s recipe; ``KeyError`` when the recipe names no such patch."""
+
+    async def checkout(self, commit: str, destination: Path) -> None:
+        """Write every patch and kernel file ``commit``'s recipe names under ``destination``, at the path it names."""
 
 
 __all__ = ["BranchMoved", "ExperimentRepo"]

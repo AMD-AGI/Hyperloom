@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The experiment repository as a bare git repository, one per session; every commit holds one recipe document."""
+"""The experiment repository as a bare git repository, one per session; every commit holds one recipe document.
+
+The patch and kernel files a recipe names are kept in the session's blob store under their sha256, where the toolbox
+reads them when it builds a test's environment.
+"""
 
 from __future__ import annotations
 
@@ -9,10 +13,12 @@ import asyncio
 import json
 import os
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom.contracts.recipe import Recipe
+from hyperloom.contracts.recipe import PATCH_ROOT, PatchRef, Recipe, RecipeDelta, apply
+from hyperloom.measure.compile import BlobStore
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved
 
@@ -54,22 +60,20 @@ class GitExperimentRepo:
     branch leave exactly one commit on it.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, blobs: BlobStore) -> None:
         self._path = path.resolve()
+        self._blobs = blobs
         # An inherited GIT_* (GIT_DIR inside a hook or `git rebase --exec`) would aim every command at another
         # repository, so none reaches git and GIT_DIR names this one.
         inherited = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
         self._env = {**inherited, **_IDENTITY, "GIT_DIR": str(self._path)}
 
-    @classmethod
-    async def create(cls, path: Path, baseline: Recipe) -> GitExperimentRepo:
-        """A new repository at ``path`` whose root commit, the baseline, starts ``INTEGRATION_BRANCH``."""
-        await asyncio.to_thread(path.mkdir, parents=True)
-        repo = cls(path)
-        await repo._git("init", "--bare", "--quiet", f"--initial-branch={INTEGRATION_BRANCH}")
-        root = await repo._write(baseline, (), "baseline")
-        await repo._git(_UPDATE_REF, _ref(INTEGRATION_BRANCH), root, _NO_COMMIT)
-        return repo
+    async def init_root(self, recipe: Recipe) -> str:
+        await asyncio.to_thread(self._path.mkdir, parents=True)
+        await self._git("init", "--bare", "--quiet", f"--initial-branch={INTEGRATION_BRANCH}")
+        root = await self._write(recipe, (), "baseline")
+        await self._git(_UPDATE_REF, _ref(INTEGRATION_BRANCH), root, _NO_COMMIT)
+        return root
 
     async def read_recipe(self, commit: str) -> Recipe:
         resolved = await self._commit_of(commit)
@@ -91,21 +95,52 @@ class GitExperimentRepo:
         return found
 
     async def commit(self, branch: str, parent: str, recipe: Recipe, message: str) -> str:
+        return await self._land(branch, parent, recipe, (parent,), message)
+
+    async def commit_integration(self, onto: str, delta: RecipeDelta, merged_from: Sequence[str]) -> str:
+        recipe = apply(await self.read_recipe(onto), delta)
+        merged = [await self._commit_of(commit) for commit in merged_from]
+        return await self._land(INTEGRATION_BRANCH, onto, recipe, (onto, *merged), f"merge {', '.join(merged)}")
+
+    async def rewind(self, branch: str, commit: str, parent: str) -> None:
+        moved = await self._run(_UPDATE_REF, _ref(branch), await self._commit_of(parent), commit)
+        if moved.code != 0:
+            raise BranchMoved(f"{branch} is no longer at {commit}: {moved.err}")
+
+    async def store_patch(self, component: str, text: str) -> PatchRef:
+        sha256 = await asyncio.to_thread(self._blobs.put, text.encode())
+        return PatchRef(f"{PATCH_ROOT}/{component}/{sha256}.patch", sha256)
+
+    async def patch_text(self, commit: str, path: str) -> str:
+        recipe = await self.read_recipe(commit)
+        for patch in (patch for component in recipe.components for patch in component.patches):
+            if patch.path == path:
+                return (await asyncio.to_thread(self._blobs.get, patch.sha256)).decode()
+        raise KeyError(f"the recipe of {commit} names no patch {path}")
+
+    async def checkout(self, commit: str, destination: Path) -> None:
+        recipe = await self.read_recipe(commit)
+        files = [(patch.path, patch.sha256) for component in recipe.components for patch in component.patches]
+        files += [(kernel.ref, kernel.sha256) for kernel in recipe.kernels]
+        await asyncio.to_thread(self._write_files, files, destination)
+
+    def _write_files(self, files: Sequence[tuple[str, str]], destination: Path) -> None:
+        for path, sha256 in files:
+            target = destination / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(self._blobs.get(sha256))
+
+    async def _land(self, branch: str, parent: str, recipe: Recipe, parents: tuple[str, ...], message: str) -> str:
         current = await self.head(branch)
         if current != parent:
             raise BranchMoved(f"{branch} is at {current}, not {parent}")
-        made = await self._write(recipe, (parent,), message)
+        made = await self._write(recipe, parents, message)
         moved = await self._run(_UPDATE_REF, _ref(branch), made, parent)
         if moved.code == 0:
             return made
         if await self.head(branch) != parent:
             raise BranchMoved(f"{branch} moved off {parent} while {made} was written")
         raise GitError(f"cannot move {branch} to {made}: {moved.err}")
-
-    async def rewind(self, branch: str, commit: str, parent: str) -> None:
-        moved = await self._run(_UPDATE_REF, _ref(branch), await self._commit_of(parent), commit)
-        if moved.code != 0:
-            raise BranchMoved(f"{branch} is no longer at {commit}: {moved.err}")
 
     async def _write(self, recipe: Recipe, parents: tuple[str, ...], message: str) -> str:
         document = json.dumps(recipe.to_document(), indent=2, sort_keys=True) + "\n"
