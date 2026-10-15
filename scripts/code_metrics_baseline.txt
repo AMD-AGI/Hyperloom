@@ -580,7 +580,7 @@ function-args src/hyperloom/inference_optimizer/breakdown/recorder/warm_start_ev
 function-args src/hyperloom/inference_optimizer/breakdown/reporters/compose.py::_stitch 6
 function-args src/hyperloom/inference_optimizer/breakdown/session_package.py::_build_manifest 9
 function-args src/hyperloom/inference_optimizer/canonical_fingerprint.py::workload_signature 6
-function-args src/hyperloom/inference_optimizer/cli/__init__.py::_build_orchestration_prompt 16
+function-args src/hyperloom/inference_optimizer/cli/__init__.py::_build_orchestration_prompt 15
 function-args src/hyperloom/inference_optimizer/cli/__init__.py::_emit_launch_info 8
 function-args src/hyperloom/inference_optimizer/cli/__init__.py::_export_partition_shape 8
 function-args src/hyperloom/inference_optimizer/cli/__init__.py::_reexport_session_environment 6
@@ -773,7 +773,7 @@ function-args src/hyperloom/orchestrator/phases/machine_state.py::record_phase_t
 function-args src/hyperloom/orchestrator/phases/machine_state.py::workflow_predicate_inputs 7
 function-args src/hyperloom/orchestrator/predictor/payload.py::build_request 6
 function-args src/hyperloom/orchestrator/prompts/prompt_builder.py::_section_session_context 12
-function-args src/hyperloom/orchestrator/prompts/prompt_builder.py::build_orchestration_prompt 22
+function-args src/hyperloom/orchestrator/prompts/prompt_builder.py::build_orchestration_prompt 21
 function-args src/hyperloom/orchestrator/rehearsal/launch.py::ScriptedLaunchBackend._record 8
 function-args src/hyperloom/orchestrator/rehearsal/launch.py::ScriptedLaunchBackend.run 6
 function-args src/hyperloom/orchestrator/roles/_runtime_bridge.py::invoke_runtime_cli 6
