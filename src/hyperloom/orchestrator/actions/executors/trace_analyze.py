@@ -417,10 +417,6 @@ def _build_trace_analyze_cmd(
         cmd += ["--require-single-rank"]
         cmd += _optional_flags(("--tensor-parallel-size", optional_positive_int(getattr(state, "tp", None))))
 
-    # Model identity informs source resolution for every framework, not only the
-    # diffusion roofline. Keep the standard payload > state > environment
-    # precedence so ordinary sglang/vLLM production requests carry config.json
-    # selectors into the bounded model context.
     model_path = str(
         payload.get("model_path") or getattr(state, "model_path", "") or os.environ.get("MODEL_PATH") or ""
     ).strip()
@@ -437,16 +433,10 @@ def _build_trace_analyze_cmd(
     )
 
     if scriptable:
-        # --skip-split is TraceLens-only; the bypass backend has its own windowing.
-        if not is_bypass:
-            cmd += ["--skip-split"]
-        # Forward the denoise-step count for per-step roofline timings.
-        # Priority: payload override > baseline workload metadata.
         num_denoise = optional_positive_int(payload.get("num_denoise_steps") or workload.get("num_inference_steps"))
         cmd += _optional_flags(("--num-denoise-steps", num_denoise))
-    else:
-        # Splitter workload hints. Priority: payload override > baseline metadata
-        # > drop the flag. A zero hint is a real workload value and is forwarded.
+    elif not is_bypass:
+        cmd += ["--split-llm-inference"]
         for flag, payload_key, workload_key in (
             ("--split-conc", "split_conc", "conc"),
             ("--split-osl", "split_osl", "osl"),
@@ -459,11 +449,12 @@ def _build_trace_analyze_cmd(
     capture_folder = (
         payload.get("capture_folder") or payload.get("graph_capture_path") or payload.get("capture_folder_path")
     )
-    # Forward TraceLens splitter steady-state mode via payload or env.
-    steady_state_mode = payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
-    steady_state_mode = str(steady_state_mode).strip()
-    # Post-kernel-opt roofline writes a separate report so it never overwrites
-    # the baseline kernel_roofline.json.
+    if scriptable and not is_bypass:
+        steady_state_mode = "generic"
+    else:
+        steady_state_mode = str(
+            payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
+        ).strip()
     roofline_output_name = str(payload.get("roofline_output_name") or "").strip()
     cmd += _optional_flags(
         ("--capture-folder", capture_folder),

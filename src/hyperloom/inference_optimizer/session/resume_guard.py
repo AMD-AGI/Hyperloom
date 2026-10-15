@@ -377,6 +377,25 @@ def _confirmation_entry(
     return entry
 
 
+def confirmed_stopped_scope(history: object) -> str | None:
+    """Read back the confirmation :func:`_confirmation_entry` wrote, when it is the task's last outcome.
+
+    Returns:
+        ``None`` unless the latest recorded outcome is an operator confirmation
+        that the task's execution stopped and its cleanup is complete; otherwise
+        the owner scope confirmed gone with it, or ``""`` when the confirmation
+        named this one task rather than a whole vanished execution environment.
+    """
+    for entry in reversed(history if isinstance(history, list) else []):
+        evidence = entry.get("evidence") if isinstance(entry, dict) else None
+        if not isinstance(evidence, dict) or not isinstance(evidence.get("outcome"), dict):
+            continue
+        if evidence.get("reason") != "operator_confirmed_stopped" or evidence.get("cleanup_confirmed") is not True:
+            return None
+        return str(evidence.get("confirmed_scope_gone") or "")
+    return None
+
+
 def _write_confirmation(
     db: sqlite3.Connection,
     *,

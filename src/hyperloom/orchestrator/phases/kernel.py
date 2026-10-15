@@ -27,6 +27,7 @@ from . import machine_state as _phase_state
 from .kernel_round_budget import controller_round_stop, integrate_within_phase, measurement_round_sec
 from hyperloom.common.env import env_bool, env_float, env_int
 from hyperloom.common.io import atomic_write_json
+from hyperloom.common.launch_log_evidence import recipe_server_launch
 from hyperloom.common.perf_metric import axis_of, graded_axes_of
 from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
@@ -48,6 +49,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     OUTCOME_KEEP,
     JournalEntry,
 )
+from ..state.analysis_failures import analysis_skip_reason, remembered_trace_failure
 from ..state.shared_state import resolve_graded_comparison
 from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound
 from ..bus.message_bus import Message
@@ -410,7 +412,7 @@ class KernelPhase(CoordinatorCollaborator):
                 ran=False,
                 task_kind=task_kind,
                 trigger=trigger,
-                skipped_reason=denied.rule if denied else "gpu_trace_unsupported",
+                skipped_reason=denied.rule if denied else analysis_skip_reason(self.shared_state),
                 idempotency_reason=idempotency_reason,
                 snapshot_id_before=snapshot_id_before,
             )
@@ -1278,6 +1280,19 @@ class KernelPhase(CoordinatorCollaborator):
                 cb.get("measurement") if isinstance(cb, Mapping) and isinstance(cb.get("measurement"), Mapping) else {}
             )
         )
+        if agentx and not str(spec_config.get("server_launch_flags") or "").strip():
+            # An agentic recipe builds its server command inside the script, so
+            # only the launch it recorded says what GEAK has to serve.
+            evidence = measurement.get("launch_evidence")
+            server_log = str(evidence.get("actual_server_log_path") or "") if isinstance(evidence, Mapping) else ""
+            recipe_launch = recipe_server_launch(server_log)
+            if recipe_launch.flags or recipe_launch.env:
+                env_spec = self._coord.writeback.build_env_spec(
+                    measurement=measurement,
+                    server_launch_flags=recipe_launch.flags,
+                    server_launch_envs=recipe_launch.env,
+                )
+                spec_config = env_spec["config"]
         expected_identity = str(env_spec.get("launch_identity") or "")
         measured_identity = str(measurement.get("declared_launch_identity") or measurement.get("launch_identity") or "")
         identity_matches = bool(expected_identity and expected_identity == measured_identity)
@@ -1460,9 +1475,16 @@ class KernelPhase(CoordinatorCollaborator):
         if env_spec:
             handoff["baseline_env_spec"] = env_spec
         if agentx:
-            # The saved recipe names aiperf_client.sh, not a server launcher.
-            handoff["bench_launcher"] = "native"
             log.info("GEAK results remain proposal proxies; canonical AgentX validation remains in Hyperloom.")
+            # Force native only when the recipe builtin could not be named. The
+            # AgentX client delegates its server phase to that builtin, so with it
+            # in hand (set as ``launch_server_script`` above) GEAK derives the
+            # Magpie launcher -- which writes a pid and recovers the non-flag
+            # presets -- instead of its adapter default; without it there is no
+            # Magpie server phase to launch. Flags/env stay aligned either way:
+            # baseline_env_spec still folds the recorded EXTRA_ATOM_ARGS.
+            if not launch_server_script:
+                handoff["bench_launcher"] = "native"
 
         out_dir = self.session_dir / "geak"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -4249,9 +4271,15 @@ class KernelPhase(CoordinatorCollaborator):
         return True
 
     def cached_kernel_request(self, kind: str, payload: dict[str, Any]) -> dict[str, Any] | None:
-        """Return a cached programmatic_handler result if applicable (cache key last_trace_analyze)."""
+        """Return the result to serve without running the handler: the trace's last successful analysis
+        (``last_trace_analyze``), else a failure the same trace is known to reproduce; ``None`` to run it.
+        """
         if kind != "trace_analyze":
             return None
+        return self._cached_trace_analysis(payload) or remembered_trace_failure(self.shared_state, payload)
+
+    def _cached_trace_analysis(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        """The last successful analysis of ``payload``'s trace, when its candidates are still on disk."""
         cached = self.shared_state.last_trace_analyze or {}
         if not isinstance(cached, dict) or not cached:
             return None

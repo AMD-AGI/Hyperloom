@@ -188,7 +188,7 @@ def _launch_mock_runner(coord: Coordinator, monkeypatch: pytest.MonkeyPatch, tmp
 
 @pytest.mark.parametrize("framework", ["sglang", "vllm"])
 @pytest.mark.asyncio
-async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
+async def test_agentx_handoff_keeps_supported_schema_and_hands_geak_the_recipe_launcher(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, framework: str
 ) -> None:
     coord = _coord(tmp_path, framework=framework)
@@ -202,7 +202,9 @@ async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
 
     assert handoff["schema_version"] == 3
     assert handoff["bench_client"] == "auto"
-    assert handoff["bench_launcher"] == "native"
+    # The builtin is resolvable (asserted next), so GEAK derives the Magpie
+    # launcher from launch_server_script and Hyperloom leaves bench_launcher unset.
+    assert "bench_launcher" not in handoff
     assert not {"bench_client_config", "benchmark_mode", "workload_identity"} & handoff.keys()
     assert handoff["launch_server_script"] == str(tmp_path / "InferenceX" / "benchmarks" / f"{framework}_mi355x.sh")
     recipe = yaml.safe_load(Path(coord.shared_state.baseline_config_path).read_text(encoding="utf-8"))
@@ -230,6 +232,78 @@ async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
     assert spec["config"]["remove_args"] == ["--obsolete-flag"]
     assert spec["config"]["unset_envs"] == ["OBSOLETE_SETTING"]
     assert spec["config"]["args_mode"] == "replace"
+
+
+_RECIPE_SERVER_COMMAND = (
+    "python -m atom.entrypoints.openai_server --model /models/accepted --served-model-name /models/accepted"
+    " --host 0.0.0.0 --server-port 8000 --tensor-parallel-size 2 --kv_cache_dtype fp8 --block-size 128"
+    " --gpu-memory-utilization 0.95 --cudagraph-capture-sizes \\[1\\,2\\,4\\]"
+    ' --online_quant_config \\{\\"global_quant_config\\":\\"ptpc_fp8\\"\\}'
+    " --method eagle3 --draft-model Inferact/MiniMax-M3-EAGLE3-GQA --num-speculative-tokens 3"
+    " --trust-remote-code\n"
+)
+_RECIPE_STDERR_TRACE = (
+    "++ export PYTHONDONTWRITEBYTECODE=1\n"
+    "+ export HIP_VISIBLE_DEVICES=0,1\n"
+    "+ export AIPERF_SERVER_METRICS_URLS=http://localhost:8000/metrics\n"
+    "+ export AITER_LOG_LEVEL\n"
+    "+ export AITER_QUICK_REDUCE_QUANTIZATION=INT4\n"
+    "+ export ATOM_FORCE_ATTN_TRITON=1\n"
+    "+ write_command /run/server_command.txt python -m atom.entrypoints.openai_server\n"
+    "+ export AFTER_LAUNCH=1\n"
+)
+
+
+@pytest.mark.asyncio
+async def test_agentx_handoff_forwards_the_recipe_measured_server_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coord = _coord(tmp_path, framework="atom")
+    run_dir = tmp_path / "runs" / "baseline" / "benchmark_atom"
+    run_dir.mkdir(parents=True)
+    (run_dir / "server.log").write_text("atom server log without an argv line\n", encoding="utf-8")
+    (run_dir / "server_command.txt").write_text(_RECIPE_SERVER_COMMAND, encoding="utf-8")
+    (run_dir / "benchmark_stderr.log").write_text(_RECIPE_STDERR_TRACE, encoding="utf-8")
+    measurement = coord.shared_state.current_best["measurement"]
+    measurement.pop("resolved_server_launch_flags")
+    measurement["launch_evidence"] = {"framework": "atom", "actual_server_log_path": str(run_dir / "server.log")}
+
+    handoff = await _handoff(coord, monkeypatch)
+
+    config = handoff["baseline_env_spec"]["config"]
+    assert config["server_launch_flags"] == (
+        "--kv_cache_dtype fp8 --block-size 128 --gpu-memory-utilization 0.95"
+        " --method eagle3 --draft-model Inferact/MiniMax-M3-EAGLE3-GQA --num-speculative-tokens 3"
+        " --trust-remote-code"
+    )
+    assert config["extra_envs"] == {
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "AITER_QUICK_REDUCE_QUANTIZATION": "INT4",
+        "ATOM_FORCE_ATTN_TRITON": "1",
+        "ACCEPTED_SETTING": "1",
+    }
+    assert handoff["accepted_env"] == "ACCEPTED_SETTING=1"
+    assert handoff["mem_fraction"] == 0.95
+    # Builtin resolvable here too, so the launcher is derived, not frozen native.
+    assert "bench_launcher" not in handoff
+
+
+@pytest.mark.asyncio
+async def test_agentx_handoff_freezes_native_when_no_builtin_is_resolvable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # With the AgentX client in benchmark_script and no resolvable server builtin
+    # on disk, GEAK has no Magpie server phase to launch: handing it the client
+    # would boot/replay/teardown and return no pid. Hyperloom therefore omits
+    # launch_server_script and freezes the launcher to native, so GEAK boots from
+    # baseline_env_spec instead.
+    coord = _coord(tmp_path, framework="atom")
+    (tmp_path / "InferenceX" / "benchmarks" / "atom_mi355x.sh").unlink()
+
+    handoff = await _handoff(coord, monkeypatch)
+
+    assert "launch_server_script" not in handoff
+    assert handoff["bench_launcher"] == "native"
 
 
 @pytest.mark.parametrize(
