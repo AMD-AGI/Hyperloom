@@ -144,6 +144,31 @@ def _decision_fields(gv: Any) -> dict[str, Any]:
     }
 
 
+def _ablation_realized(remove_args: Any, launch_evidence: Any) -> dict[str, Any] | None:
+    """Whether the flags a variant asked to drop are gone from the line the server actually ran.
+
+    A variant that ablates a flag and then measures nothing has two readings --
+    the flag never came off, or it came off and the hypothesis was wrong -- and
+    they lead opposite ways. Without this the agentic GLM-5.3 session read a
+    null radix-cache result as the ablation being blocked, and spent five
+    source patches and a hundred-odd re-proposals trying to force a flag that
+    had in fact already been removed.
+
+    Returns:
+        ``None`` when nothing was ablated or the launch was never observed, so
+        a caller cannot mistake "unknown" for "confirmed".
+    """
+    wanted = [text for text in (str(arg).strip() for arg in (remove_args or [])) if text]
+    if not wanted:
+        return None
+    observed = str((launch_evidence or {}).get("observed_server_launch_flags") or "")
+    if not observed:
+        return None
+    present = {token.split("=", 1)[0] for token in observed.split()}
+    still = [flag for flag in wanted if flag.split("=", 1)[0] in present]
+    return {"requested": wanted, "still_present": still, "took_effect": not still}
+
+
 def _variant_with_eval_off(gv: Any) -> Any:
     """Return a copy of ``gv`` with ``RUN_EVAL`` forced off.
 
@@ -1793,6 +1818,9 @@ class ExploreExecutor:
                             "provenance": provenance,
                             "error_class": r.error_class or "",
                             "server_log_path": r.server_log_path,
+                            "ablation_realized": _ablation_realized(
+                                control_fields.get("remove_args"), r.launch_evidence
+                            ),
                         }
                     )
                     losers.append(
@@ -1899,6 +1927,9 @@ class ExploreExecutor:
                     "reason": reasons_by_fp.get(fp_key, ""),
                     "error_class": str(te.get("error_class") or ""),
                     "failure_attribution": failure_attribution,
+                    # Whether the ablation this variant asked for reached the server, so a null
+                    # result is not read as the ablation having been blocked.
+                    "ablation_realized": te.get("ablation_realized"),
                     "server_log_path": te.get("server_log_path"),
                     "workspace": te.get("workspace"),
                     "raw_result_path": te.get("raw_result_path"),
