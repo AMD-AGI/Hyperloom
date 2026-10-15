@@ -9,8 +9,8 @@ environment compiler reads from the session's blob store at ``MB-blobs``. The sp
 a :data:`LifecycleFactory`; that runtime has no implementation yet, so :func:`load_peers` refuses and the command
 line fails before it creates anything.
 
-The toolbox and its measurement points load the main flow's renderer, so they are imported inside
-:func:`local_peers`: importing this module, the command line or the session loads none of the main-flow runtime.
+The toolbox and its measurement points load the main flow's renderer, so they are imported inside the functions that
+use them: importing this module, the command line or the session loads none of the main-flow runtime.
 """
 
 from __future__ import annotations
@@ -43,8 +43,6 @@ if TYPE_CHECKING:
 TOOLBOX_WRITER = "toolbox"
 CANONICAL_DIR = "canonical"
 POINTS_DIR = "points"
-#: MB1 runs on one machine of eight cards.
-GPUS_PER_MACHINE = 8
 
 #: The modules a real session needs and that hold no implementation yet; emptied as each module lands, and deleted
 #: with :func:`mb_fake_specialist_lifecycles` once the last one has.
@@ -129,15 +127,27 @@ def local_peers(host: MeasurementHost, lifecycles: LifecycleFactory, setup: Peer
 
 
 def mb_fake_measurement_host() -> MeasurementHost:
-    """This machine's cards, the root recipe's base image and :data:`MB_FAKE_TOOL_COMMIT` for both tools.
+    """The cards of one node as the toolbox counts them, the root recipe's base image and :data:`MB_FAKE_TOOL_COMMIT`
+    for both tools.
 
     Stands in for the measurement host enablement or the command line will name; replaced once one of them does.
     """
 
-    cards = tuple(range(GPUS_PER_MACHINE))
+    from hyperloom_multibranch.toolbox.local_hosted import MAX_CARDS_PER_NODE
+
+    cards = tuple(range(MAX_CARDS_PER_NODE))
     return MeasurementHost(
         cards, MB_FAKE_IMAGE_REF, MB_FAKE_BASE_IMAGE_DIGEST, MB_FAKE_TOOL_COMMIT, MB_FAKE_TOOL_COMMIT
     )
+
+
+def machine_parallel_tests(tp: int) -> int:
+    """How many tests of ``tp`` cards the local toolbox runs at once on this machine's cards; raises ``ValueError``
+    when a test of ``tp`` cards does not fit on them."""
+
+    from hyperloom_multibranch.toolbox.local_hosted import max_parallel_tests
+
+    return max_parallel_tests(len(mb_fake_measurement_host().cards), tp)
 
 
 def mb_fake_specialist_lifecycles() -> LifecycleFactory:
@@ -160,12 +170,12 @@ def load_peers() -> PeerFactory:
 
 
 __all__ = [
-    "GPUS_PER_MACHINE",
     "MB_FAKE_MISSING_PEER_MODULES",
     "LifecycleFactory",
     "MeasurementHost",
     "load_peers",
     "local_peers",
+    "machine_parallel_tests",
     "mb_fake_measurement_host",
     "mb_fake_specialist_lifecycles",
     "workload_environment",

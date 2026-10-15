@@ -25,7 +25,7 @@ from hyperloom_multibranch.scheduling.exports import exports_from_env
 from hyperloom_multibranch.scheduling.layout import create_session
 from hyperloom_multibranch.scheduling.lifecycle import Session
 from hyperloom_multibranch.scheduling.llm import anthropic_completion, default_model
-from hyperloom_multibranch.scheduling.local_peers import GPUS_PER_MACHINE, load_peers
+from hyperloom_multibranch.scheduling.local_peers import load_peers, machine_parallel_tests
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import RosterCaps
@@ -57,7 +57,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-branches", type=int, default=DEFAULT_MAX_BRANCHES, help="Specialist branches not stopped, at most."
     )
     run.add_argument(
-        "--max-parallel-tests", type=int, default=None, help=f"Tests running at once; default {GPUS_PER_MACHINE} // TP."
+        "--max-parallel-tests",
+        type=int,
+        default=None,
+        help="Tests running at once; default as many as the machine's cards run at TP.",
     )
     run.add_argument("--max-k-per-branch", type=int, default=DEFAULT_MAX_K_PER_BRANCH, help="Highest K of a branch.")
     run.add_argument(
@@ -77,14 +80,15 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
     errors = _positive(args, ("tp", "isl", "osl", "conc", "judge_interval_sec"))
     if args.max_hours < 0 or 0 < args.max_hours < MB_MIN_PRELUDE_HOURS:
         errors.append(f"--max-hours must be 0 (no limit) or at least {MB_MIN_PRELUDE_HOURS:.4f} (one minute)")
-    if args.tp > GPUS_PER_MACHINE:
-        errors.append(f"--tp must be at most {GPUS_PER_MACHINE}, the cards of the machine")
     if errors:
         raise ValueError("; ".join(errors))
-    fitting = GPUS_PER_MACHINE // args.tp
+    try:
+        fitting = machine_parallel_tests(args.tp)
+    except ValueError as exc:
+        raise ValueError(f"--tp does not fit the machine: {exc}") from exc
     parallel = fitting if args.max_parallel_tests is None else args.max_parallel_tests
     if parallel > fitting:
-        raise ValueError(f"--max-parallel-tests must be at most {fitting} ({GPUS_PER_MACHINE} cards // TP)")
+        raise ValueError(f"--max-parallel-tests must be at most {fitting}, the tests the machine's cards run at TP")
     workload = Workload(
         args.model, args.framework, args.tp, args.isl, args.osl, args.conc, args.precision, args.gpu_type
     )

@@ -15,6 +15,7 @@ out can be traced to it.
 from __future__ import annotations
 
 import json
+import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,12 +24,14 @@ from hyperloom.common.jsonio import read_json
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, PatchRef, Recipe, RecipeError
 from hyperloom.inference_optimizer.breakdown.stop_reasons import outcome_status
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
-from hyperloom_multibranch.scheduling.git import GitFailed, git_output
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST, MB_FAKE_PRIMARY_METRIC
 
 #: ``LATEST_STATE_SCHEMA_VERSION`` of src/hyperloom/orchestrator/state/shared_state.py, which this package may not
 #: import; a test compares the two.
 MB_LATEST_STATE_SCHEMA_VERSION = 6
+
+#: How long one read-only git command may take before the checkout counts as unreadable.
+GIT_TIMEOUT_SECONDS = 60.0
 
 MB_STATE_FILE = "state.json"
 #: src/hyperloom/orchestrator/enablement/artifacts.py ``write_setting_script``, under the child session directory.
@@ -309,10 +312,17 @@ def _toplevel(root: Path) -> Path:
 
 
 def _git(root: Path, *args: str) -> str:
+    """The stripped standard output of ``git -C root args``. Blocks."""
+
     try:
-        return git_output(root, *args)
-    except GitFailed as exc:
-        raise PreludeReadError(str(exc)) from exc
+        completed = subprocess.run(
+            ("git", "-C", str(root), *args), capture_output=True, text=True, check=True, timeout=GIT_TIMEOUT_SECONDS
+        )
+    except subprocess.CalledProcessError as exc:
+        raise PreludeReadError(f"git {' '.join(args)} in {root} failed: {exc.stderr.strip()}") from exc
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise PreludeReadError(f"git {' '.join(args)} in {root} failed: {exc}") from exc
+    return completed.stdout.strip()
 
 
 __all__ = [
