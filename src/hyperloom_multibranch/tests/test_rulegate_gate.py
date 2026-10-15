@@ -132,9 +132,12 @@ async def test_a_fix_that_costs_performance_asks_for_a_fork(setup, status, concl
     scheduler = RecordingScheduler(status)
     gate = RuleGate(notebook, repo, scheduler)
 
-    await gate.fork(measured, _judged(Verdict.REGRESSED, fixes_correctness=True), "repro/moe-oob.py", "oob at 8k")
+    admission = await gate.fork(measured, _judged(Verdict.REGRESSED, fixes_correctness=True), "oob at 8k")
 
-    assert [(fork.parent_commit, fork.repro_case) for fork in scheduler.forks] == [("c0", "repro/moe-oob.py")]
+    assert [(fork.from_branch, fork.parent_commit, fork.reason) for fork in scheduler.forks] == [
+        ("s1", "c0", "oob at 8k")
+    ]
+    assert bool(admission.branch) is (status is AdmissionStatus.ACCEPTED)
     assert (await notebook.record("r1")).conclusion is conclusion
     assert await repo.head("s1") == "c0"
 
@@ -205,6 +208,6 @@ async def test_the_gate_refuses_a_step_the_table_does_not_call_for(setup):
     gate = RuleGate(notebook, repo, RecordingScheduler(AdmissionStatus.ACCEPTED))
 
     with pytest.raises(ValueError, match="calls for commit"):
-        await gate.fork(measured, _judged(Verdict.IMPROVED), "repro/x.py", "not a fix")
+        await gate.fork(measured, _judged(Verdict.IMPROVED), "not a fix")
     with pytest.raises(ValueError, match="calls for commit"):
         await gate.decline(measured, _judged(Verdict.IMPROVED))

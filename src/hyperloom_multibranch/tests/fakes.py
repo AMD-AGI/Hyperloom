@@ -7,7 +7,7 @@ git or processes."""
 from __future__ import annotations
 
 from hyperloom.contracts.recipe import Recipe
-from hyperloom_multibranch.contracts.fork import Admission, AdmissionStatus, ForkRequest, RepairRequest
+from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLaunch
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved
@@ -54,20 +54,26 @@ class InMemoryRepo:
 
 
 class RecordingScheduler:
-    """Answers every branch request with ``status`` and keeps what it was asked."""
+    """Answers every fork and repair request with ``status``, naming branch ``fork-<n>`` on acceptance, and keeps what
+    it was asked."""
 
     def __init__(self, status: AdmissionStatus) -> None:
         self.status = status
         self.forks: list[ForkRequest] = []
         self.repairs: list[RepairRequest] = []
 
-    async def request_fork(self, request: ForkRequest) -> Admission:
+    async def admit(self, request: ForkRequest) -> ForkAdmission:
         self.forks.append(request)
-        return Admission(self.status)
+        return self._answer()
 
-    async def request_repair(self, request: RepairRequest) -> Admission:
+    async def admit_repair(self, request: RepairRequest) -> ForkAdmission:
         self.repairs.append(request)
-        return Admission(self.status)
+        return self._answer()
+
+    def _answer(self) -> ForkAdmission:
+        if self.status is not AdmissionStatus.ACCEPTED:
+            return ForkAdmission(self.status)
+        return ForkAdmission(self.status, branch=f"fork-{len(self.forks) + len(self.repairs)}")
 
 
 class RecordingLifecycle:

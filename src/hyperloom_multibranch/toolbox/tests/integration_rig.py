@@ -26,7 +26,7 @@ from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
 from hyperloom.measure.compile import EnvironmentCompiler, LocalBlobStore, PackageLocator, locate_installed_package
 from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.points import CanonicalMeasurement
-from hyperloom_multibranch.contracts.fork import Admission, ForkRequest, RepairRequest
+from hyperloom_multibranch.contracts.fork import ForkAdmission, ForkRequest, RepairRequest
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST
@@ -44,10 +44,10 @@ Planner = Callable[[HostedPlanner], Any]
 class NoScheduler:
     """The rule gate's scheduler: this round asks for no fork and no repair, so any request is a defect."""
 
-    async def request_fork(self, request: ForkRequest) -> Admission:
+    async def admit(self, request: ForkRequest) -> ForkAdmission:
         raise AssertionError(f"unexpected fork request {request}")
 
-    async def request_repair(self, request: RepairRequest) -> Admission:
+    async def admit_repair(self, request: RepairRequest) -> ForkAdmission:
         raise AssertionError(f"unexpected repair request {request}")
 
 

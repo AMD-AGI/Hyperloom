@@ -9,7 +9,13 @@ from __future__ import annotations
 import asyncio
 
 from hyperloom.contracts.recipe import apply
-from hyperloom_multibranch.contracts.fork import Admission, AdmissionStatus, BranchRequests, ForkRequest, RepairRequest
+from hyperloom_multibranch.contracts.fork import (
+    AdmissionStatus,
+    ForkAdmission,
+    ForkAdmissionService,
+    ForkRequest,
+    RepairRequest,
+)
 from hyperloom_multibranch.contracts.intent import Intent
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook.interfaces import JudgementSink
@@ -36,7 +42,7 @@ def _require(judgement: Judgement, *actions: Action) -> None:
 class RuleGate:
     """``settle`` lands a commit or a record; a retest, a diagnosis and a fork are its caller's next step."""
 
-    def __init__(self, notebook: JudgementSink, repo: ExperimentRepo, scheduler: BranchRequests) -> None:
+    def __init__(self, notebook: JudgementSink, repo: ExperimentRepo, scheduler: ForkAdmissionService) -> None:
         self._notebook = notebook
         self._repo = repo
         self._scheduler = scheduler
@@ -61,11 +67,10 @@ class RuleGate:
         _require(judgement, Action.DIAGNOSE)
         return await self._record(request, judgement)
 
-    async def fork(self, request: TestRequest, judgement: Judgement, repro_case: str, reason: str) -> Admission:
+    async def fork(self, request: TestRequest, judgement: Judgement, reason: str) -> ForkAdmission:
+        """Asks for the fork and records where the candidate stands; cutting the branch is not part of this call."""
         _require(judgement, Action.REQUEST_FORK)
-        admission = await self._scheduler.request_fork(
-            ForkRequest(request.parent_commit, request.delta, repro_case, reason)
-        )
+        admission = await self._scheduler.admit(ForkRequest(request.branch, request.parent_commit, reason))
         if admission.status is AdmissionStatus.REJECTED:
             conclusion = _recorded_as(judgement)
         elif admission.status is AdmissionStatus.PENDING:
@@ -75,8 +80,8 @@ class RuleGate:
         await self._notebook.write_judgement(request.request_id, judgement, conclusion)
         return admission
 
-    async def repair(self, request: TestRequest, judgement: Judgement, intent: Intent, diagnosis: str) -> Admission:
-        admission = await self._scheduler.request_repair(RepairRequest(intent, request.delta, judgement, diagnosis))
+    async def repair(self, request: TestRequest, judgement: Judgement, intent: Intent, diagnosis: str) -> ForkAdmission:
+        admission = await self._scheduler.admit_repair(RepairRequest(intent, request.delta, judgement, diagnosis))
         rejected = admission.status is AdmissionStatus.REJECTED
         conclusion = _recorded_as(judgement) if rejected else Conclusion.REPAIR_REQUESTED
         await self._notebook.write_judgement(request.request_id, judgement, conclusion)

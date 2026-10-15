@@ -2,7 +2,12 @@
 # SPDX-License-Identifier: MIT
 
 """Requests to the scheduler for a new branch, to carry a correctness fix that costs its branch performance or to
-repair the defect that blocked a gain, and the scheduler's answer."""
+repair the defect that blocked a gain, and the scheduler's answer.
+
+On ``ACCEPTED`` the answer names the new branch; for a fork the gate cuts it and lands the fix on it before the
+scheduler starts the branch's specialist. The requesting specialist stays on its own branch either way. ``PENDING``
+waits for a free branch slot.
+"""
 
 from __future__ import annotations
 
@@ -17,15 +22,10 @@ from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 
 @dataclass(frozen=True)
 class ForkRequest:
-    """Asks for a new branch, cut at ``parent_commit``, that carries the fix the requesting branch leaves out.
+    """Asks for a new branch, cut at ``parent_commit``, to carry the fix ``from_branch`` leaves out."""
 
-    ``repro_case`` locates the case that fails on ``parent_commit`` and passes with the fix; descendants of the fork
-    keep running it.
-    """
-
+    from_branch: str
     parent_commit: str
-    fix_delta: RecipeDelta
-    repro_case: str
     reason: str
 
 
@@ -55,19 +55,24 @@ class AdmissionStatus(str, Enum):
 
 
 @dataclass(frozen=True)
-class Admission:
-    """``PENDING`` waits for a free branch slot and is the first thing the next refill starts."""
+class ForkAdmission:
+    """The answer to a fork or a repair request; ``branch`` names the new branch, exactly when it is accepted."""
 
     status: AdmissionStatus
     reason: str = ""
+    branch: str = ""
+
+    def __post_init__(self) -> None:
+        if (self.status is AdmissionStatus.ACCEPTED) != bool(self.branch):
+            raise ValueError("an accepted request, and only an accepted one, names its new branch")
 
 
-class BranchRequests(Protocol):
+class ForkAdmissionService(Protocol):
     """The scheduler admits a new branch against the branch cap, or queues it."""
 
-    async def request_fork(self, request: ForkRequest) -> Admission: ...
+    async def admit(self, request: ForkRequest) -> ForkAdmission: ...
 
-    async def request_repair(self, request: RepairRequest) -> Admission: ...
+    async def admit_repair(self, request: RepairRequest) -> ForkAdmission: ...
 
 
-__all__ = ["Admission", "AdmissionStatus", "BranchRequests", "ForkRequest", "RepairRequest"]
+__all__ = ["AdmissionStatus", "ForkAdmission", "ForkAdmissionService", "ForkRequest", "RepairRequest"]
