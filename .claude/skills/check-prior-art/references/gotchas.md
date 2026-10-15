@@ -39,9 +39,10 @@ branch contains.
 A framework installed into a container usually has no `.git`. Its version often carries the
 commit it was built from as a local version segment, `<version>+g<sha>`; read it with
 `python -c 'import importlib.metadata as m; print(m.version("<distribution>"))'`. Clone the
-upstream repository (`git clone --filter=blob:none`; the probe does not fetch missing objects, it
-reports them) and pass that sha as `--commit`. A version without `+g<sha>` names no commit: write
-`SKIPPED: inclusion -- <distribution> <version> names no commit`.
+upstream repository and pass that sha as `--commit`. A `--filter=blob:none` clone answers by
+subject and by merge-commit ancestry; a cherry-pick matched by patch-id needs the blobs, and the
+probe, which fetches nothing, answers `unknown` without them. A version without `+g<sha>` names no
+commit: write `SKIPPED: inclusion -- <distribution> <version> names no commit`.
 
 ## G5 — A fork may carry a cherry-pick without ancestry
 
