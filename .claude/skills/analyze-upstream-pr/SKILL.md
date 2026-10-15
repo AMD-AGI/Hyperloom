@@ -161,20 +161,19 @@ both `included` means the tree carries neither change.
 
 ## Step 5 — Expected effect
 
-`$WORK/effect.txt`, five lines:
+`$WORK/effect.txt`, four lines:
 
 ```
 metric: <throughput, TTFT, TPOT, end-to-end latency, peak memory, accuracy, or a crash or hang removed>
 direction: <better|worse|none> at the target operating point
 why: <the chain from Step 1's mechanism to that metric, citing path:symbol in diff.txt>
 reported: <the author's numbers from operating_point.txt with their operating point, or none>
-label: PREDICTED
 ```
 
-The label is always `PREDICTED`. A number in the body is the author's measurement at the author's
-operating point: it reaches the report as `quoted`, never as the effect on the target. An all
-`OFF-PATH` Step 3 makes the direction `none`. Name each `GAP` that could flip the sign: a win at
-the author's batch size can be a loss at yours.
+The effect is always `predicted`. A number in the body is the author's measurement at the author's
+operating point, and reaches the report as `quoted`. An all `OFF-PATH` Step 3 makes the direction
+`none`. Name each `GAP` that could flip the sign: a win at the author's batch size can be a loss at
+yours.
 
 ## Step 6 — Other PRs, and the diff at the target
 
@@ -204,20 +203,25 @@ write `SKIPPED: apply -- <why>`.
 ## Step 7 — Risks
 
 One line per lens in [`references/dimensions.md`](references/dimensions.md) into `$WORK/risks.txt`:
+`<lens> RISK blocking|RISK watch|CLEAR|N/A -- <path:line in diff.txt or the tree, and the
+condition>`. A `blocking` risk, if real, makes the PR wrong, inert or a regression on the target; a
+`watch` risk deserves a check once it lands but does not decide. `CLEAR` names what you checked;
+`N/A` says why the lens cannot apply. A missing lens reads as unchecked.
 
-```
-<lens> RISK blocking|RISK watch|CLEAR|N/A -- <path:line in diff.txt or the tree, and the condition>
-```
+## Step 8 — Measurement plan (optional)
 
-A `blocking` risk, if real, makes the PR wrong, inert or a regression on the target; a `watch` risk
-deserves a check once it lands but does not decide. `CLEAR` claims you looked, and its reason names
-what you checked; `N/A` says why the lens cannot apply. A missing lens reads as unchecked.
-
-## Step 8 — Empirical track (optional)
-
-When the recommendation hinges on a number, or the user asks, write `$WORK/measure.md` from
-[`references/measurement.md`](references/measurement.md): a control-versus-change plan the user runs
-in their environment, never this skill. Otherwise write `SKIPPED: empirical track -- <why>`.
+When the recommendation hinges on a number, or the user asks, write `$WORK/measure.md`, a plan the
+user runs in their own environment, never this skill; otherwise write `SKIPPED: measurement plan
+-- <why>`. Two arms differ by the PR alone: the same tree or image at `commit`, model, weights,
+flags, environment and workload, the change arm with `diff.txt` applied or the tree moved past the
+merge commit; anything else that moves between them (an image rebuilt another day, a floating
+dependency, another node) is a second change. Run the control arm twice: an effect inside that gap
+is no effect. When the diff touches numerics, weights, kernels or sampling, check accuracy on a
+fixed evaluation set for both arms before any timing. Use the target's operating point, plus the
+author's when a `GAP` leaves the sign open. Write Step 5's metric, the repetitions and the rule that
+turns numbers into a verdict before the first run, and ask for a profile, trace or log line showing
+the change arm ran the changed code. The user's numbers return labeled `measured`, with where and
+when they ran, and Steps 9 and 10 are rerun with them.
 
 ## Step 9 — Refutation
 
@@ -269,5 +273,6 @@ into the report. A `SKIPPED` artifact means that axis was **not checked**, never
 
 ## Budget
 
-This file is budgeted at 292 lines and holds only what every analysis needs: the risk lenses and
-measurement plan live in `references/`, the duplicate search and the collection in check-prior-art. Raising the budget makes this file less likely to be read in full; say why in the commit.
+This file is budgeted at 280 lines and holds only what every analysis needs: the risk lenses live
+in `references/`, the search for other PRs and the collection in check-prior-art. Raising the
+budget makes this file less likely to be read in full; say why in the commit.
