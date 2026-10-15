@@ -13,6 +13,7 @@ from hyperloom.common.env import env_bool
 
 from ..state.task_registry import Task
 from ..collaborator import CoordinatorCollaborator
+from . import machine_state as _phase_state
 
 log = _logging.getLogger(__name__)
 
@@ -137,16 +138,17 @@ class InternalTasksPhase(CoordinatorCollaborator):
         self,
         *,
         reason: str,
+        slug: str,
     ) -> "Task | None":
-        """Enqueue the Coordinator-owned read-only static-recon specialist task."""
+        """Enqueue the Coordinator-owned read-only static-recon specialist task; ``slug`` scopes the idempotency key so a later pass is not deduplicated against the first."""
         state = self.shared_state
         if not bool(state.static_recon_enabled):
             return None
-        idempotency_key = "internal-static-recon-prelude"
+        idempotency_key = f"internal-static-recon-{slug}"
         params: dict[str, Any] = {
             "domain": "static_recon_specialist",
             "source_phase": str(state.phase or "PRELUDE").strip().upper(),
-            "gap_canonical_id": "gap.static_recon.prelude",
+            "gap_canonical_id": f"gap.static_recon.{slug}",
             "gap_symptom": (
                 "Grep the framework source for un-bridged capability switches "
                 "(predicates that silently disable a faster path for this "
@@ -207,6 +209,27 @@ class InternalTasksPhase(CoordinatorCollaborator):
             return
         await self._enqueue_internal_static_recon_task(
             reason="prelude_initial",
+            slug="prelude",
+        )
+
+    async def maybe_enqueue_config_plateau_static_recon(self) -> None:
+        """Re-run static recon once per macro-cycle when the config arm goes dry.
+
+        The PRELUDE pass greps the source before any measurement exists. Once
+        the grids stop paying, the profile says which subsystem to look at, so a
+        second pass reads the predicates that matter rather than all of them.
+        """
+        state = self.shared_state
+        if not bool(state.static_recon_enabled):
+            return
+        if str(state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+            return
+        _, evidence = _phase_state.per_lever_dryness(state)
+        if not bool(evidence.get("config_arm_plateaued")):
+            return
+        await self._enqueue_internal_static_recon_task(
+            reason="config_arm_plateau",
+            slug=f"cycle{int(state.macro_cycle or 0)}",
         )
 
     async def maybe_enqueue_trajectory_reviewer(self) -> None:
