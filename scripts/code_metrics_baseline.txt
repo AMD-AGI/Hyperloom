@@ -289,7 +289,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/_kernel_agent_tool.p
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_published_service_ready_async 87
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 137
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::restart_server_for_round 135
-function-lines src/hyperloom/orchestrator/actions/executors/_nogit_patch.py::_apply_patch_no_git 141
+function-lines src/hyperloom/orchestrator/actions/executors/_nogit_patch.py::_apply_patch_no_git 140
 function-lines src/hyperloom/orchestrator/actions/executors/_partition_shape.py::validate_session_shape 127
 function-lines src/hyperloom/orchestrator/actions/executors/_patch_snapshot.py::replayed_stack_ops 81
 function-lines src/hyperloom/orchestrator/actions/executors/_ray_serving.py::ServingLease._await_or_cancel 135
@@ -456,7 +456,7 @@ module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1417
 module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2045
 module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1578
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2126
-module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4050
+module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4048
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1834
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1393
 module-lines src/hyperloom/orchestrator/actions/executors/report.py 1351
