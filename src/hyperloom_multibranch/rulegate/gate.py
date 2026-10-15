@@ -16,7 +16,7 @@ from hyperloom_multibranch.contracts.notebook.interfaces import JudgementSink
 from hyperloom_multibranch.contracts.notebook.peers import TestRequest
 from hyperloom_multibranch.contracts.notebook.records import TestRecord
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion
-from hyperloom_multibranch.contracts.repo import ExperimentRepo
+from hyperloom_multibranch.contracts.repo import BranchMoved, ExperimentRepo
 from hyperloom_multibranch.rulegate.decision import Action, decide
 
 
@@ -42,11 +42,16 @@ class RuleGate:
         self._scheduler = scheduler
 
     async def settle(self, request: TestRequest, judgement: Judgement) -> Action:
-        """The judgement is written against ``request``, the first measurement of the candidate."""
+        """The judgement is written against ``request``, the first measurement of the candidate.
+
+        A commit whose branch has moved past ``request.parent_commit`` is recorded only, and ``RECORD_ONLY`` returned:
+        a gain measured against one parent must not land on another.
+        """
         action = decide(judgement)
         if action is Action.COMMIT:
             # The scheduler may stop a specialist at any moment; a stop must not split a commit from its judgement.
-            await asyncio.shield(self._commit(request, judgement))
+            if not await asyncio.shield(self._commit(request, judgement)):
+                return Action.RECORD_ONLY
         elif action is Action.RECORD_ONLY:
             await self._record(request, judgement)
         return action
@@ -77,11 +82,15 @@ class RuleGate:
         await self._notebook.write_judgement(request.request_id, judgement, conclusion)
         return admission
 
-    async def _commit(self, request: TestRequest, judgement: Judgement) -> None:
+    async def _commit(self, request: TestRequest, judgement: Judgement) -> bool:
         # The repository commit comes first: the judgement names the commit it made.
         recipe = apply(await self._repo.read_recipe(request.parent_commit), request.delta)
         message = f"{request.request_id}: {judgement.verdict.value} {judgement.gain_pct:+.2f}%"
-        commit = await self._repo.commit(request.branch, request.parent_commit, recipe, message)
+        try:
+            commit = await self._repo.commit(request.branch, request.parent_commit, recipe, message)
+        except BranchMoved:
+            await self._record(request, judgement)
+            return False
         conclusion = Conclusion.COMMITTED_WITH_REPRO if judgement.fixes_correctness else Conclusion.COMMITTED
         try:
             await self._notebook.write_judgement(request.request_id, judgement, conclusion, commit, recipe.digest())
@@ -89,6 +98,7 @@ class RuleGate:
             # Whatever kept the judgement out, a commit no judgement names would block the branch for good.
             await self._repo.rewind(request.branch, commit, request.parent_commit)
             raise
+        return True
 
     async def _record(self, request: TestRequest, judgement: Judgement) -> TestRecord:
         return await self._notebook.write_judgement(request.request_id, judgement, _recorded_as(judgement))

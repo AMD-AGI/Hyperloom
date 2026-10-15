@@ -158,6 +158,18 @@ class _Stalled:
         return await self.inner.write_judgement(*args, **kwargs)
 
 
+async def test_a_gain_whose_branch_moved_on_is_recorded_only(setup):
+    notebook, repo, measured = setup
+    gate = RuleGate(notebook, repo, RecordingScheduler(Admission(AdmissionStatus.ACCEPTED)))
+    landed_first = await repo.commit("s1", "c0", BASELINE, "another candidate of c0")
+
+    assert await gate.settle(measured, _judged(Verdict.IMPROVED)) is Action.RECORD_ONLY
+
+    assert await repo.head("s1") == landed_first
+    record = await notebook.record("r1")
+    assert (record.conclusion, record.commit_id) == (Conclusion.RECORDED_ONLY, None)
+
+
 async def test_a_commit_whose_judgement_cannot_be_written_is_taken_back(setup):
     _notebook, repo, measured = setup
     gate = RuleGate(_FullDisk(), repo, RecordingScheduler(Admission(AdmissionStatus.ACCEPTED)))
