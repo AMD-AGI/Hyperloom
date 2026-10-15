@@ -1,0 +1,182 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Whether the learnings shown to a branch bore on what it did next: one session's retrieval, evaluated (MB2).
+
+Read beside the session's retrieval log (``learnings.jsonl``, :class:`learning_search.RetrievalLog`) and its notebook,
+each learning of this session shown to a branch counts once, at its first showing, when it names a direction (a target
+or a mechanism):
+
+* a pitfall is *avoided* when the branch requested no test in its direction afterwards;
+* an insight or a hypothesis is *taken up* when the branch's next test is in its direction.
+
+Then every test a branch requested after its first retrieval counts once: *in a shown direction* when a learning shown
+to the branch before it named the test's direction, *elsewhere* otherwise; how many of each led to a commit sets the
+learnings' directions beside the rest. Past sessions' learnings are logged by Experience id only, so they are counted,
+not matched. Every share comes with its counts; what they mean for the retrieval, vector search included, is MB2's
+call to make with them.
+"""
+
+from __future__ import annotations
+
+from collections import Counter, defaultdict
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from hyperloom.common.jsonio import read_jsonl
+from hyperloom_multibranch.contracts.notebook.peers import Intent, TestKind
+from hyperloom_multibranch.contracts.notebook.records import Learning, NotebookSnapshot, Writer
+from hyperloom_multibranch.contracts.notebook.vocab import COMMITTING, LearningKind, Role
+from hyperloom_multibranch.notebook.local.notebook import LocalNotebook
+from hyperloom_multibranch.notebook.rsi.report import share, table
+
+STUDY_WRITER = "rsi-study"
+_TAKEN_UP = frozenset({LearningKind.INSIGHT, LearningKind.HYPOTHESIS})
+
+
+@dataclass(frozen=True)
+class LearningEvaluation:
+    """What one session's retrievals showed, and what the branches did after them."""
+
+    retrievals: int
+    by_source: Mapping[str, int]
+    pitfalls_shown: int
+    pitfalls_avoided: int
+    insights_shown: int
+    insights_taken_up: int
+    tests_in_shown_directions: int
+    committed_in_shown_directions: int
+    tests_elsewhere: int
+    committed_elsewhere: int
+    past_shown: int
+    past_distinct: int
+
+    def render(self) -> str:
+        """The evaluation as markdown: a table of the measures, each with its counts."""
+
+        sources = ", ".join(f"{source} {count}" for source, count in sorted(self.by_source.items())) or "none"
+        rows = [
+            ("pitfalls avoided", share(self.pitfalls_avoided, self.pitfalls_shown)),
+            ("insights and hypotheses taken up", share(self.insights_taken_up, self.insights_shown)),
+            (
+                "tests committed, in a shown direction",
+                share(self.committed_in_shown_directions, self.tests_in_shown_directions),
+            ),
+            ("tests committed, elsewhere", share(self.committed_elsewhere, self.tests_elsewhere)),
+        ]
+        return "\n".join(
+            [
+                f"Learnings retrieval: {self.retrievals} retrievals ({sources}); past sessions' learnings shown "
+                f"{self.past_shown} times, {self.past_distinct} distinct.",
+                "",
+                *table(("measure", "share"), rows),
+            ]
+        )
+
+
+@dataclass(frozen=True)
+class _Test:
+    at: float
+    intent: Intent | None
+    committed: bool
+
+
+def _words(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
+def names(learning: Learning, intent: Intent | None) -> bool:
+    """Whether ``learning`` names ``intent``'s direction: its target and mechanism, those it gives, the same."""
+
+    if intent is None or not (learning.target or learning.mechanism):
+        return False
+    same_target = not learning.target or _words(learning.target) == _words(intent.target)
+    return same_target and (not learning.mechanism or _words(learning.mechanism) == _words(intent.mechanism))
+
+
+def _tests(snapshot: NotebookSnapshot) -> dict[str, list[_Test]]:
+    found: dict[str, list[_Test]] = defaultdict(list)
+    for record in sorted(snapshot.records, key=lambda item: item.requested_at):
+        if record.request.kind is TestKind.TEST:
+            intent = snapshot.intents.get(record.request.intent_fingerprint)
+            found[record.request.branch].append(_Test(record.requested_at, intent, record.conclusion in COMMITTING))
+    return found
+
+
+def _first_shown(log: Sequence[Mapping[str, Any]]) -> dict[tuple[str, str], float]:
+    shown: dict[tuple[str, str], float] = {}
+    for line in sorted(log, key=lambda item: float(item["at"])):
+        for entry_id in line["here"]:
+            shown.setdefault((str(line["branch"]), str(entry_id)), float(line["at"]))
+    return shown
+
+
+def _uptake(
+    shown: Mapping[tuple[str, str], float], learnings: Mapping[str, Learning], tests: Mapping[str, list[_Test]]
+) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for (branch, entry_id), at in shown.items():
+        learning = learnings.get(entry_id)
+        if learning is None or not (learning.target or learning.mechanism):
+            continue
+        later = [test for test in tests.get(branch, ()) if test.at > at]
+        if learning.kind is LearningKind.PITFALL:
+            counts["pitfalls"] += 1
+            counts["avoided"] += not any(names(learning, test.intent) for test in later)
+        elif learning.kind in _TAKEN_UP:
+            counts["insights"] += 1
+            counts["taken_up"] += bool(later) and names(learning, later[0].intent)
+    return counts
+
+
+def _outcomes(
+    shown: Mapping[tuple[str, str], float], learnings: Mapping[str, Learning], tests: Mapping[str, list[_Test]]
+) -> Counter[str]:
+    by_branch: dict[str, list[tuple[float, Learning]]] = defaultdict(list)
+    for (branch, entry_id), at in shown.items():
+        if entry_id in learnings:
+            by_branch[branch].append((at, learnings[entry_id]))
+    counts: Counter[str] = Counter()
+    for branch, seen in by_branch.items():
+        first = min(at for at, _ in seen)
+        for test in (item for item in tests.get(branch, ()) if item.at > first):
+            bucket = "shown" if any(at < test.at and names(learning, test.intent) for at, learning in seen) else "else"
+            counts[bucket] += 1
+            counts[f"{bucket}_committed"] += test.committed
+    return counts
+
+
+def evaluate_learnings(snapshot: NotebookSnapshot, log: Sequence[Mapping[str, Any]]) -> LearningEvaluation:
+    """The retrieval of ``snapshot``'s session, read off its retrieval ``log`` (decoded lines)."""
+
+    learnings = {record.entry_id: record.learning for record in snapshot.learnings}
+    tests = _tests(snapshot)
+    shown = _first_shown(log)
+    uptake, outcomes = _uptake(shown, learnings, tests), _outcomes(shown, learnings, tests)
+    past = [str(item) for line in log for item in line.get("past", ())]
+    return LearningEvaluation(
+        retrievals=len(log),
+        by_source=dict(Counter(str(line["source"]) for line in log)),
+        pitfalls_shown=uptake["pitfalls"],
+        pitfalls_avoided=uptake["avoided"],
+        insights_shown=uptake["insights"],
+        insights_taken_up=uptake["taken_up"],
+        tests_in_shown_directions=outcomes["shown"],
+        committed_in_shown_directions=outcomes["shown_committed"],
+        tests_elsewhere=outcomes["else"],
+        committed_elsewhere=outcomes["else_committed"],
+        past_shown=len(past),
+        past_distinct=len(set(past)),
+    )
+
+
+async def read_session(notebook_root: Path, log_path: Path) -> LearningEvaluation:
+    """The evaluation of the session whose notebook is ``notebook_root``, read as an observer, and its log."""
+
+    snapshot = await LocalNotebook(notebook_root, Writer(Role.OBSERVER, STUDY_WRITER)).snapshot()
+    return evaluate_learnings(snapshot, read_jsonl(log_path, skip_malformed=True, skip_non_dict=True))
+
+
+__all__ = ["STUDY_WRITER", "LearningEvaluation", "evaluate_learnings", "names", "read_session"]

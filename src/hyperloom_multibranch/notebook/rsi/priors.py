@@ -11,6 +11,8 @@ it ran the same model, TP and GPU.
 
 * Sessions that measured in the requested environment give the prior: the median of their dispersions.
 * Single-host measurements are only a floor for hosted measurement: they raise any value below them.
+* Without such sessions, for hosted measurement, the shadow runs' hosted dispersion stands when the caller passes it
+  (``shadow``, from yihan's consistency check, :mod:`rsi.shadow`); their hosted-minus-local offset comes with any prior.
 * Without either, the noise bands old sessions graded under stand in.
 * With nothing, the global statistics stand: the median (0.38%) or the p90 (3.30%) of every session, whichever the
   caller chooses. Pulse is not read yet.
@@ -24,6 +26,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from hyperloom_multibranch.notebook.rsi.archive import SINGLE_HOST, SearchTree
+from hyperloom_multibranch.notebook.rsi.shadow import ShadowNoise
 
 GLOBAL_MEDIAN_PCT = 0.38
 GLOBAL_P90_PCT = 3.30
@@ -33,6 +36,7 @@ ANY_ENVIRONMENT = "any"
 
 class PriorSource(str, Enum):
     ARCHIVE = "archive"
+    SHADOW = "shadow"
     NOISE_BAND = "noise_band"
     GLOBAL = "global"
 
@@ -49,7 +53,9 @@ _GLOBAL = {GlobalFallback.MEDIAN: GLOBAL_MEDIAN_PCT, GlobalFallback.P90: GLOBAL_
 class DispersionPrior:
     """The dispersion to expect, where it comes from, and the measurement environment it describes.
 
-    ``lower_bound_pct`` is the single-host dispersion of matching sessions, when any measured on one host.
+    ``lower_bound_pct`` is the single-host dispersion of matching sessions, when any measured on one host;
+    ``offset_pct`` how far hosted reads from local in the shadow runs, when the caller passed them. From the shadow
+    runs, ``samples`` counts their tests.
     """
 
     dispersion_pct: float
@@ -58,6 +64,7 @@ class DispersionPrior:
     samples: int = 0
     sessions: tuple[str, ...] = ()
     lower_bound_pct: float | None = None
+    offset_pct: float | None = None
 
 
 def _same(left: str | None, right: str) -> bool:
@@ -88,8 +95,12 @@ def dispersion_prior(
     gpu: str,
     environment: str = HOSTED,
     fallback: GlobalFallback = GlobalFallback.P90,
+    shadow: ShadowNoise | None = None,
 ) -> DispersionPrior:
-    """The dispersion to expect measuring ``model`` with ``tp`` on ``gpu`` in ``environment``."""
+    """The dispersion to expect measuring ``model`` with ``tp`` on ``gpu`` in ``environment``.
+
+    ``shadow`` is the shadow runs' noise for this task (:func:`rsi.shadow.shadow_noise`), none by default.
+    """
 
     matched = matching(history, model=model, tp=tp, gpu=gpu)
     measured = [tree for tree in matched if tree.noise.dispersion_pct is not None]
@@ -97,10 +108,13 @@ def dispersion_prior(
     single_host = [tree.noise.dispersion_pct for tree in measured if _environments(tree) == {SINGLE_HOST}]
     floor = statistics.median(single_host) if single_host and environment != SINGLE_HOST else None
     bands = [tree for tree in matched if tree.noise.noise_band_pct is not None]
+    hosted_shadow = shadow.hosted_cv_pct if shadow is not None and environment == HOSTED else None
     if here:
         value = statistics.median(tree.noise.dispersion_pct for tree in here)
         prior = DispersionPrior(value, PriorSource.ARCHIVE, environment, sum(tree.noise.samples for tree in here))
         chosen = here
+    elif shadow is not None and hosted_shadow is not None:
+        prior, chosen = DispersionPrior(hosted_shadow, PriorSource.SHADOW, HOSTED, len(shadow.test_ids)), []
     elif bands:
         value = statistics.median(tree.noise.noise_band_pct for tree in bands)
         prior = DispersionPrior(value, PriorSource.NOISE_BAND, SINGLE_HOST)
@@ -114,6 +128,7 @@ def dispersion_prior(
         samples=prior.samples,
         sessions=tuple(tree.session_id for tree in chosen),
         lower_bound_pct=floor,
+        offset_pct=shadow.offset_pct if shadow is not None else None,
     )
 
 
