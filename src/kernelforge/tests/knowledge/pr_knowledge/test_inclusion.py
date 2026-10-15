@@ -336,18 +336,6 @@ def test_mcp_tool_checks_the_tree_head_without_the_service(cherry_picked, monkey
     assert _head(root) in result["evidence"]
 
 
-def test_mcp_tool_uses_the_merge_sha_and_commit_it_is_given(cherry_picked):
-    root, upstream = cherry_picked
-    git("commit", "--quiet", "--amend", "-m", "[ROCm] Port the epilogue fusion", cwd=root)
-    head = _head(root)
-
-    result = _tool({"number": 42, "tree": str(root), "commit": head, "merge_commit_sha": upstream})
-
-    assert result["commit"] == head
-    assert result["inclusion"] == Inclusion.INCLUDED.value
-    assert result["method"] == InclusionMethod.MERGE_COMMIT.value
-
-
 @pytest.mark.parametrize(
     "arguments",
     [

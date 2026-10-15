@@ -108,12 +108,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "method that decided it and the evidence. included means a commit "
             "reachable from the checked commit has a subject that names the PR: "
             "a trailing (#N), as a squash merge or a cherry-pick of one writes it, "
-            "or 'Merge pull request #N from ...'; or, when you pass "
-            "merge_commit_sha (the PR's merge or squash commit upstream), that "
-            "every commit it brought in is there by sha or patch-id. Anything "
-            "else is unknown, never absent: a backport that was edited, renamed "
-            "or folded into another commit looks like no backport at all, so look "
-            "for the change itself before treating the PR as missing."
+            "or 'Merge pull request #N from ...'. Anything else is unknown, never "
+            "absent: a backport that was edited, renamed or folded into another "
+            "commit looks like no backport at all, so look for the change itself "
+            "before treating the PR as missing."
         ),
         "inputSchema": {
             "type": "object",
@@ -121,7 +119,6 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 _PR_NUMBER: _PR_NUMBER_SCHEMA,
                 "tree": {"type": "string", "description": "A directory inside the git work tree to check."},
                 "commit": {"type": "string", "description": "Revision to check; defaults to the tree's HEAD."},
-                "merge_commit_sha": {"type": "string", "description": "The PR's merge or squash commit upstream."},
             },
             "required": [_PR_NUMBER, "tree"],
         },
@@ -272,12 +269,7 @@ def _check_inclusion(arguments: dict[str, Any]) -> dict[str, Any]:
     if not tree or not Path(tree).is_dir():
         raise InvalidParamsError("tree must name an existing directory")
     commit = str(arguments.get("commit") or "").strip() or "HEAD"
-    verdict = probe_inclusion(
-        tree=Path(tree),
-        commit=commit,
-        number=number,
-        merge_commit_sha=str(arguments.get("merge_commit_sha") or "").strip() or None,
-    )
+    verdict = probe_inclusion(tree=Path(tree), commit=commit, number=number, merge_commit_sha=None)
     return {"number": number, "tree": tree, "commit": commit, **verdict.to_record()}
 
 
