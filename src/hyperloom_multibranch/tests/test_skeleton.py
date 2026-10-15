@@ -457,6 +457,9 @@ async def test_a_specialist_that_never_stops_at_the_end_of_explore_does_not_hold
     assert outcome.final is not None and outcome.final.chosen is not None
     [stop] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b01"]
     assert [failure.split(":")[0] for failure in stop["detail"]["failures"]] == ["TimeoutError"]
+    assert stage.lifecycle.stopped.count("b01") == 2 and "b01" in stage.lifecycle.running
+    assert "the specialist of b01 did not confirm its stop" in outcome.close.stop.failures
+    assert not outcome.completed and outcome.exit_code == 1
 
 
 async def test_a_judge_stop_that_never_returns_does_not_freeze_explore(tmp_path: Path) -> None:

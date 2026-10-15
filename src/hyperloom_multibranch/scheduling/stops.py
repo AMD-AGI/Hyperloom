@@ -108,8 +108,8 @@ class StopReport:
     """What outlived a session stop: registered processes still running and tests the toolbox still holds.
 
     ``queue`` is what the toolbox held once every branch was stopped, ``None`` when it did not report it in time;
-    ``failures`` are the branch stops that failed, branch stops that overran their time, and a toolbox close that
-    raised or overran its own.
+    ``failures`` are the branch stops that failed, branch stops that overran their time, specialists that never
+    confirmed their stop, and a toolbox close that raised or overran its own.
     """
 
     leftovers: tuple[ProcessRecord, ...]
@@ -202,19 +202,23 @@ class SessionStopper:
         """What the branch stops leave; the queue is read before the toolbox closes and forgets it.
 
         Every test is withdrawn before any specialist is asked to stop: a specialist that hangs in its stop would
-        otherwise hold its branch's withdrawal past the hard stop.
+        otherwise hold its branch's withdrawal past the hard stop. Every specialist whose stop the runtime has not
+        confirmed, at the end of EXPLORE or here, is asked once more, and one that still does not confirm it is a
+        failure of the session stop.
         """
 
         withdrawn = await settled(self._toolbox.withdraw_all(reason.value))
         failures = [withdrawn] if isinstance(withdrawn, BaseException) else []
         failures += await self._stop_open(reason, frozenset(BranchKind))
+        unconfirmed = await self._branches.stop_unconfirmed_specialists()
         status = await settled(self._toolbox.queue_state())
         if isinstance(status, BaseException):
             logger.error("the toolbox did not report its queue after the stop", exc_info=status)
         for failure in failures:
             logger.error("a step of the session stop failed", exc_info=failure)
         queue = None if isinstance(status, BaseException) else status
-        return StopReport((), queue, tuple(map(failure_text, failures)))
+        unstopped = tuple(f"the specialist of {branch} did not confirm its stop" for branch in unconfirmed)
+        return StopReport((), queue, (*map(failure_text, failures), *unstopped))
 
     async def _stop_open(self, reason: SessionStopReason, kinds: frozenset[BranchKind]) -> list[BaseException]:
         stop = BranchStop(StopCause.SESSION_END, reason.value, self._clock.now())

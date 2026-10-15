@@ -5,11 +5,11 @@
 
 The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it starts the forks and repairs the fork desk admitted, consults
 the MB2 placeholders, and every judge interval asks the judge and applies what it decided. The judge reads the
-frontier-scored progress and how similar archived sessions went; a judge call that has not
-answered by the EXPLORE deadline counts as failed, so it never eats into FINAL. The integrator merges in a
-background task of its own, in rounds as wide as the integration branch's K. When EXPLORE ends that task is
-cancelled and the integrator abandons its round, so the integration head the FINAL candidates are read from no
-longer moves and no merge test competes with FINAL's measurements.
+frontier-scored progress and how similar archived sessions went; a judge call that has not answered by the EXPLORE
+deadline counts as failed, and a branch that has not opened by then is withdrawn, so neither eats into FINAL. The
+integrator merges in a background task of its own, in rounds as wide as the integration branch's K. When EXPLORE ends
+that task is cancelled and the integrator abandons its round, so the integration head the FINAL candidates are read
+from no longer moves and no merge test competes with FINAL's measurements.
 """
 
 from __future__ import annotations
@@ -102,7 +102,7 @@ class Explorer:
         if self._clock.now() >= window.explore_end:
             return SessionStopReason.TIME_EXHAUSTED
         count, k = (opening.open_count, opening.open_k) if opening is not None else (1, 1)
-        await self._branches.open_branches(count, window.root_commit, k, BranchOrigin.FIRST_BATCH)
+        await self._branches.open_branches(count, window.root_commit, k, BranchOrigin.FIRST_BATCH, window.explore_end)
         merging = asyncio.ensure_future(self._merge_forever())
         try:
             return await self._steer(window, merging)
@@ -117,8 +117,8 @@ class Explorer:
         while (now := self._clock.now()) < window.explore_end:
             if merging.done():
                 merging.result()
-            await self._start_admitted()
-            await self._consult_placeholders(window.root_commit)
+            await self._start_admitted(window.explore_end)
+            await self._consult_placeholders(window)
             if now >= next_judge:
                 next_judge = now + self._interval
                 decision = await self._ask(window, opening=False)
@@ -133,16 +133,16 @@ class Explorer:
             if not await self._integrator.integrate_next(width):
                 await self._clock.sleep(EXPLORE_TICK_SECONDS)
 
-    async def _start_admitted(self) -> None:
+    async def _start_admitted(self, deadline: float) -> None:
         for admitted in self._desk.drain():
-            await self._branches.start_admitted(admitted)
+            await self._branches.start_admitted(admitted, deadline)
 
-    async def _consult_placeholders(self, root_commit: str) -> None:
+    async def _consult_placeholders(self, window: ExploreWindow) -> None:
         for branch in mb_fake_similar_branches(self._roster):
             await self._stop(branch, SIMILAR_BRANCH_REASON)
         extra = min(mb_fake_branches_to_add(self._roster), self._roster.free_slots())
         if extra:
-            await self._branches.open_branches(extra, root_commit, 1, BranchOrigin.REFILL)
+            await self._branches.open_branches(extra, window.root_commit, 1, BranchOrigin.REFILL, window.explore_end)
 
     async def _ask(self, window: ExploreWindow, *, opening: bool) -> JudgeDecision | None:
         now = self._clock.now()

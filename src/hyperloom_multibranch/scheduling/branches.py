@@ -6,21 +6,25 @@ notebook in step.
 
 Opening a branch records its ``OPEN`` lineage, cuts it in the experiment repository at its start commit and starts its
 specialist there with its K; a fork or repair the fork desk admitted is opened the same way once it is drained, its
-specialist briefed with the change it builds on. Stopping a branch withdraws everything of it: its specialist unless it
-never started, its queued and running tests and tool jobs, the processes the scheduler registered for it, its claims,
-and the forks and repairs of it that are admitted but not started yet, as the fork desk admits nothing for a stopped
-branch; the notebook gets the ``STOP`` lineage of a branch that started, the integration branch included, which only
-the end of the session stops. A specialist gets :data:`SPECIALIST_STOP_SECONDS` to stop; one that overruns them is
-recorded as a failed step, and the rest of the stop still runs. The commits it already made stay in the notebook, so the
-integrator may still merge them. The roster entry is stopped first, so an admitted branch drained while its
-parent is being stopped is never started. The toolbox gets a branch's K before its specialist starts, so the first
-tests it submits already queue by it. A peer failure on one branch never ends the session: a branch that does not
-open, its specialist's start included, within :data:`SPECIALIST_START_SECONDS` is withdrawn like a stopped one, and a
-failed step of a stop or of a new K is recorded in its decision.
+specialist briefed with the change it builds on. Stopping a branch withdraws everything of it: its specialist, its
+queued and running tests and tool jobs, the processes the scheduler registered for it, its claims, and the forks and
+repairs of it that are admitted but not started yet, as the fork desk admits nothing for a stopped branch; the notebook
+gets the ``STOP`` lineage of a branch that started, the integration branch included, which only the end of the session
+stops. A specialist counts as possibly running from the moment its start is asked for until the runtime confirms its
+stop; only a start the runtime itself failed leaves nothing to stop. A call to a specialist gets
+:data:`SPECIALIST_CALL_SECONDS`; a stop or a new K that overruns them, or fails, is recorded as a failed step, the rest
+of the stop still runs, and the session stop asks once more for every stop that was not confirmed. The commits a
+specialist already made stay in the notebook, so the integrator may still merge them. The roster entry is stopped
+first, so an admitted branch drained while its parent is being stopped is never started. The toolbox gets a branch's K
+before its specialist starts, so the first tests it submits already queue by it. A peer failure on one branch never
+ends the session: a branch that does not open, its specialist's start included, within
+:data:`SPECIALIST_START_SECONDS` or by the deadline its caller gives, whichever comes first, is withdrawn like a
+stopped one.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
@@ -37,7 +41,6 @@ from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.settle import failure_text, settled
 from hyperloom_multibranch.scheduling.roster import (
     BranchEntry,
-    BranchKind,
     BranchOrigin,
     BranchStatus,
     BranchStop,
@@ -50,8 +53,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: Clock seconds a specialist gets to stop before its stop counts as failed; CLOSE kills what it leaves behind.
-SPECIALIST_STOP_SECONDS = 60.0
+#: Clock seconds a specialist gets to stop or to take a new K before the call counts as failed.
+SPECIALIST_CALL_SECONDS = 60.0
 #: Clock seconds a branch gets to open, its specialist's start included, before the branch counts as not started.
 SPECIALIST_START_SECONDS = 300.0
 
@@ -78,34 +81,37 @@ class BranchControl:
         self._processes = processes
         self._decisions = decisions
         self._clock = clock
+        self._specialists: set[str] = set()
 
     async def open_branches(
-        self, count: int, start_commit: str, k: int, origin: BranchOrigin
+        self, count: int, start_commit: str, k: int, origin: BranchOrigin, deadline: float
     ) -> tuple[BranchEntry, ...]:
-        """Open ``count`` specialist branches of ``origin`` from ``start_commit``, record ``OPEN``, start them."""
+        """Open ``count`` specialist branches of ``origin`` from ``start_commit``, record ``OPEN``, start them, each
+        by ``deadline`` (clock seconds)."""
 
         opened = []
         for _ in range(count):
             entry = self._roster.open(self._roster.next_branch_id(), origin=origin, start_commit=start_commit, k=k)
-            opened.append(await self._open(entry, start_commit, None))
+            opened.append(await self._open(entry, start_commit, None, deadline))
         return tuple(opened)
 
-    async def start_admitted(self, admitted: AdmittedBranch) -> BranchEntry | None:
-        """Open a fork or repair the fork desk admitted and start its specialist; ``None`` when it was stopped
-        meanwhile."""
+    async def start_admitted(self, admitted: AdmittedBranch, deadline: float) -> BranchEntry | None:
+        """Open a fork or repair the fork desk admitted and start its specialist by ``deadline`` (clock seconds);
+        ``None`` when it was stopped meanwhile."""
 
         if self._roster.entry(admitted.branch).stop is not None:
             return None
         entry = self._roster.started(admitted.branch, admitted.start_commit)
-        return await self._open(entry, admitted.start_commit, admitted.brief)
+        return await self._open(entry, admitted.start_commit, admitted.brief, deadline)
 
-    async def _open(self, entry: BranchEntry, start_commit: str, brief: str | None) -> BranchEntry:
+    async def _open(self, entry: BranchEntry, start_commit: str, brief: str | None, deadline: float) -> BranchEntry:
         """Record ``OPEN``, give the toolbox the branch's K, cut the branch and start its specialist; a branch any of
-        that fails for, or that is not done within :data:`SPECIALIST_START_SECONDS`, is stopped with the failure as
-        the reason."""
+        that fails for, or that is not done within :data:`SPECIALIST_START_SECONDS` or by ``deadline``, is stopped
+        with the failure as the reason."""
 
         launch = SpecialistLaunch(entry.branch, start_commit, entry.k, brief)
-        started = await settled(self._clock.wait_for(self._launch(entry, launch), SPECIALIST_START_SECONDS))
+        seconds = min(SPECIALIST_START_SECONDS, deadline - self._clock.now())
+        started = await settled(self._clock.wait_for(self._launch(entry, launch), seconds))
         if isinstance(started, BaseException):
             logger.error("the specialist of %s did not start", entry.branch, exc_info=started)
             stop = BranchStop(StopCause.START_FAILED, failure_text(started), self._clock.now())
@@ -127,7 +133,7 @@ class BranchControl:
             if self._roster.entry(branch).stop is not None:
                 continue
             entry = self._roster.set_k(branch, k)
-            failure = await self._send_k(entry) if entry.kind is BranchKind.SPECIALIST and entry.start_commit else ""
+            failure = await self._send_k(entry) if branch in self._specialists else ""
             detail = {"asked": k, "failure": failure}
             self._decisions.record(Decision(DecisionKind.SET_K, f"K {entry.k}", branch, detail))
         await self.push_quota()
@@ -146,8 +152,8 @@ class BranchControl:
         self._roster.stop(branch, stop)
         forks = await self._stop_admitted_forks(branch, stop)
         steps = [await settled(self.push_quota())]
-        if entry.kind is BranchKind.SPECIALIST and entry.start_commit and stop.cause is not StopCause.START_FAILED:
-            steps.append(await settled(self._clock.wait_for(self._lifecycle.stop(branch), SPECIALIST_STOP_SECONDS)))
+        if branch in self._specialists:
+            steps.append(await self._stop_specialist(branch))
         withdrawn = await settled(self._toolbox.cancel_branch(branch, stop.summary))
         steps.append(await settled(self._processes.kill_branch(branch)))
         released = await settled(self._notebook.release_branch(branch))
@@ -162,6 +168,19 @@ class BranchControl:
         }
         self._decisions.record(Decision(DecisionKind.STOP, stop.summary, branch, detail))
         return (*raised, *forks)
+
+    async def stop_unconfirmed_specialists(self) -> tuple[str, ...]:
+        """Ask again, concurrently, for every specialist stop the runtime has not confirmed; returns the branches whose
+        specialist still did not confirm it."""
+
+        await asyncio.gather(*map(self._stop_specialist, sorted(self._specialists)))
+        return tuple(sorted(self._specialists))
+
+    async def _stop_specialist(self, branch: str) -> None | BaseException:
+        stopped = await settled(self._clock.wait_for(self._lifecycle.stop(branch), SPECIALIST_CALL_SECONDS))
+        if not isinstance(stopped, BaseException):
+            self._specialists.discard(branch)
+        return stopped
 
     async def _stop_admitted_forks(self, parent: str, stop: BranchStop) -> list[BaseException]:
         reason = f"parent {parent} stopped: {stop.reason}"
@@ -181,16 +200,22 @@ class BranchControl:
         )
         await self.push_quota()
         await self._repo.create_branch(launch.branch, launch.start_commit)
-        await self._lifecycle.start(launch)
+        self._specialists.add(launch.branch)
+        started = await settled(self._lifecycle.start(launch))
+        if isinstance(started, BaseException):
+            self._specialists.discard(launch.branch)
+            raise started
 
     async def _send_k(self, entry: BranchEntry) -> str:
         """Hand the specialist its K; the failure's text, or ``""``."""
 
-        sent = await settled(self._lifecycle.set_k(entry.branch, entry.k))
+        sent = await settled(
+            self._clock.wait_for(self._lifecycle.set_k(entry.branch, entry.k), SPECIALIST_CALL_SECONDS)
+        )
         if not isinstance(sent, BaseException):
             return ""
         logger.error("the specialist of %s did not take K %d", entry.branch, entry.k, exc_info=sent)
         return failure_text(sent)
 
 
-__all__ = ["SPECIALIST_START_SECONDS", "SPECIALIST_STOP_SECONDS", "BranchControl"]
+__all__ = ["SPECIALIST_CALL_SECONDS", "SPECIALIST_START_SECONDS", "BranchControl"]

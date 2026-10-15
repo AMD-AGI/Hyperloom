@@ -30,6 +30,7 @@ from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStop, Ro
 from hyperloom_multibranch.scheduling.tests.peer_fakes import DownToolbox, MbFakeLifecycle, RecordingToolbox
 
 NOW = 1_700_000_000.0
+OPEN_BY = NOW + 3600.0
 CLOCK = Clock(now=lambda: NOW)
 BASELINE = Recipe(MB_FAKE_BASE_IMAGE_DIGEST)
 
@@ -69,6 +70,23 @@ class HangingStartLifecycle(MbFakeLifecycle):
         await super().start(launch)
 
 
+class StartedThenHangingLifecycle(MbFakeLifecycle):
+    """A runtime whose start of ``b01`` brings the specialist up and then never returns; a failure double, not a
+    placeholder."""
+
+    async def start(self, launch: SpecialistLaunch) -> None:
+        await super().start(launch)
+        if launch.branch == "b01":
+            await asyncio.Event().wait()
+
+
+class HangingSetKLifecycle(MbFakeLifecycle):
+    """A runtime that never returns from a new K; a failure double, not a placeholder."""
+
+    async def set_k(self, branch: str, k: int) -> None:
+        await asyncio.Event().wait()
+
+
 class Bench:
     def __init__(self, tmp_path: Path, refusing: frozenset[str] = frozenset()) -> None:
         self.notebook = LocalNotebook(tmp_path / "nb", Writer(Role.SCHEDULER, "scheduler"), clock=CLOCK.now)
@@ -101,7 +119,7 @@ class Bench:
 async def test_the_opening_batch_is_recorded_started_and_given_quota(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).rooted()
 
-    opened = await bench.control.open_branches(2, bench.root, 5, BranchOrigin.FIRST_BATCH)
+    opened = await bench.control.open_branches(2, bench.root, 5, BranchOrigin.FIRST_BATCH, OPEN_BY)
 
     assert [entry.branch for entry in opened] == ["b01", "b02"]
     assert bench.lifecycle.started == {"b01": bench.root, "b02": bench.root}
@@ -115,11 +133,11 @@ async def test_the_opening_batch_is_recorded_started_and_given_quota(tmp_path: P
 
 async def test_an_admitted_branch_opens_at_its_commit_with_its_brief_and_its_quota(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).rooted()
-    await bench.control.open_branches(1, bench.root, 1, BranchOrigin.FIRST_BATCH)
+    await bench.control.open_branches(1, bench.root, 1, BranchOrigin.FIRST_BATCH, OPEN_BY)
     fix = await bench.repo.commit("b01", bench.root, BASELINE, "a fix")
     bench.roster.open("b02", origin=BranchOrigin.REPAIR, start_commit="", k=2, from_branch="b01")
 
-    await bench.control.start_admitted(AdmittedBranch("b02", fix, "repair the KV scales"))
+    await bench.control.start_admitted(AdmittedBranch("b02", fix, "repair the KV scales"), OPEN_BY)
 
     assert await bench.repo.head("b02") == fix
     assert (bench.lifecycle.started["b02"], bench.lifecycle.briefs["b02"]) == (fix, "repair the KV scales")
@@ -132,7 +150,7 @@ async def test_an_admitted_branch_opens_at_its_commit_with_its_brief_and_its_quo
 
 async def test_a_failing_specialist_stop_is_returned_and_still_withdraws_and_records_the_branch(tmp_path: Path) -> None:
     bench = await Bench(tmp_path, refusing=frozenset({"b01"})).rooted()
-    await bench.control.open_branches(1, bench.root, 1, BranchOrigin.FIRST_BATCH)
+    await bench.control.open_branches(1, bench.root, 1, BranchOrigin.FIRST_BATCH, OPEN_BY)
 
     failures = await bench.control.stop_branch("b01", BranchStop(StopCause.JUDGE, "flat", NOW))
 
@@ -148,7 +166,7 @@ async def test_a_failing_specialist_stop_is_returned_and_still_withdraws_and_rec
 
 async def test_stopping_a_branch_withdraws_it_once_and_its_admitted_fork_never_starts(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).rooted()
-    await bench.control.open_branches(1, bench.root, 1, BranchOrigin.FIRST_BATCH)
+    await bench.control.open_branches(1, bench.root, 1, BranchOrigin.FIRST_BATCH, OPEN_BY)
     bench.roster.open("b02", origin=BranchOrigin.FORK, start_commit="", k=1, from_branch="b01")
     stop = BranchStop(StopCause.JUDGE, "flat", NOW)
 
@@ -159,7 +177,7 @@ async def test_stopping_a_branch_withdraws_it_once_and_its_admitted_fork_never_s
     assert bench.toolbox.cancelled == ["b02", "b01"]
     assert bench.roster.entry("b01").stop == stop
     assert bench.roster.entry("b02").stop == BranchStop(StopCause.JUDGE, "parent b01 stopped: flat", NOW)
-    assert await bench.control.start_admitted(AdmittedBranch("b02", bench.root, "")) is None
+    assert await bench.control.start_admitted(AdmittedBranch("b02", bench.root, ""), OPEN_BY) is None
     assert "b02" not in bench.lifecycle.started
     assert "b02" not in {branch.branch for branch in (await bench.notebook.lineage()).branches}
     stops = {branch.branch: branch.stop_reason for branch in (await bench.notebook.lineage()).branches}
@@ -169,7 +187,7 @@ async def test_stopping_a_branch_withdraws_it_once_and_its_admitted_fork_never_s
 
 async def test_k_orders_skip_stopped_branches_and_clamp(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).rooted()
-    await bench.control.open_branches(2, bench.root, 1, BranchOrigin.FIRST_BATCH)
+    await bench.control.open_branches(2, bench.root, 1, BranchOrigin.FIRST_BATCH, OPEN_BY)
     await bench.control.stop_branch("b02", BranchStop(StopCause.JUDGE, "flat", NOW))
 
     await bench.control.apply_k({"b01": 9, "b02": 2, INTEGRATION_BRANCH: 2})
@@ -194,7 +212,7 @@ async def test_a_specialist_that_does_not_start_is_withdrawn_without_a_stop_and_
         CLOCK,
     )
 
-    opened = await bench.control.open_branches(2, bench.root, 1, BranchOrigin.FIRST_BATCH)
+    opened = await bench.control.open_branches(2, bench.root, 1, BranchOrigin.FIRST_BATCH, OPEN_BY)
     await bench.control.apply_k({"b02": 2})
 
     assert [entry.branch for entry in opened] == ["b01", "b02"]
@@ -230,7 +248,7 @@ async def test_a_start_that_does_not_finish_in_time_is_withdrawn_and_the_others_
         CLOCK,
     )
 
-    await bench.control.open_branches(2, bench.root, 1, BranchOrigin.FIRST_BATCH)
+    await bench.control.open_branches(2, bench.root, 1, BranchOrigin.FIRST_BATCH, OPEN_BY)
 
     stop = bench.roster.entry("b01").stop
     assert stop is not None and stop.cause is StopCause.START_FAILED
@@ -253,7 +271,7 @@ async def test_a_toolbox_failing_while_a_branch_opens_fails_that_branch_alone(tm
         CLOCK,
     )
 
-    opened = await bench.control.open_branches(1, bench.root, 1, BranchOrigin.FIRST_BATCH)
+    opened = await bench.control.open_branches(1, bench.root, 1, BranchOrigin.FIRST_BATCH, OPEN_BY)
 
     assert [entry.branch for entry in opened] == ["b01"]
     stop = bench.roster.entry("b01").stop
@@ -262,3 +280,72 @@ async def test_a_toolbox_failing_while_a_branch_opens_fails_that_branch_alone(tm
         "ConnectionError: toolbox service down",
     )
     assert bench.lifecycle.started == {}
+
+
+def _control(bench: Bench, tmp_path: Path, lifecycle: MbFakeLifecycle) -> BranchControl:
+    return BranchControl(
+        bench.roster,
+        bench.notebook,
+        lifecycle,
+        bench.toolbox,
+        bench.repo,
+        ProcessRegistry(tmp_path / "MB-pids.jsonl", CLOCK),
+        DecisionLog(tmp_path / "MB-decisions.jsonl", CLOCK),
+        CLOCK,
+    )
+
+
+async def test_a_specialist_that_came_up_before_its_start_timed_out_is_stopped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(branches, "SPECIALIST_START_SECONDS", 0.2)
+    bench = await Bench(tmp_path).rooted()
+    lifecycle = StartedThenHangingLifecycle()
+    bench.control = _control(bench, tmp_path, lifecycle)
+
+    await bench.control.open_branches(1, bench.root, 1, BranchOrigin.FIRST_BATCH, OPEN_BY)
+
+    stop = bench.roster.entry("b01").stop
+    assert stop is not None and stop.cause is StopCause.START_FAILED
+    assert lifecycle.stopped == ["b01"] and lifecycle.running == {}
+    assert await bench.control.stop_unconfirmed_specialists() == ()
+
+
+async def test_a_start_still_running_at_the_callers_deadline_is_withdrawn(tmp_path: Path) -> None:
+    bench = await Bench(tmp_path).rooted()
+    lifecycle = HangingStartLifecycle()
+    bench.control = _control(bench, tmp_path, lifecycle)
+
+    await bench.control.open_branches(1, bench.root, 1, BranchOrigin.FIRST_BATCH, NOW + 0.2)
+
+    stop = bench.roster.entry("b01").stop
+    assert stop is not None and stop.cause is StopCause.START_FAILED and stop.reason.startswith("TimeoutError")
+    assert bench.toolbox.cancelled == ["b01"]
+
+
+async def test_a_new_k_the_specialist_never_takes_is_a_failed_step_after_its_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(branches, "SPECIALIST_CALL_SECONDS", 0.2)
+    bench = await Bench(tmp_path).rooted()
+    bench.control = _control(bench, tmp_path, HangingSetKLifecycle())
+    await bench.control.open_branches(1, bench.root, 1, BranchOrigin.FIRST_BATCH, OPEN_BY)
+
+    await bench.control.apply_k({"b01": 2})
+
+    logged = [json.loads(line) for line in (tmp_path / "MB-decisions.jsonl").read_text().splitlines()]
+    assert [row["detail"]["failure"] for row in logged if row["kind"] == "set_k"] == [
+        "TimeoutError: no result within 0.2 clock seconds"
+    ]
+    assert bench.roster.entry("b01").stop is None
+
+
+async def test_a_specialist_stop_that_fails_is_asked_again_until_the_runtime_confirms_it(tmp_path: Path) -> None:
+    bench = await Bench(tmp_path, refusing=frozenset({"b01"})).rooted()
+    await bench.control.open_branches(1, bench.root, 1, BranchOrigin.FIRST_BATCH, OPEN_BY)
+    await bench.control.stop_branch("b01", BranchStop(StopCause.JUDGE, "flat", NOW))
+
+    assert await bench.control.stop_unconfirmed_specialists() == ("b01",)
+    bench.lifecycle.refusing = frozenset()
+    assert await bench.control.stop_unconfirmed_specialists() == ()
+    assert bench.lifecycle.stopped == ["b01", "b01", "b01"] and bench.lifecycle.running == {}

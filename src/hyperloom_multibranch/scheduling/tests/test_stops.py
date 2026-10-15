@@ -23,6 +23,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
+from hyperloom_multibranch.scheduling import branches
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
@@ -92,7 +93,7 @@ class Stage:
         self.root = await self.repo.init_root(baseline)
         await self.notebook.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=self.root))
         self.roster.add_integration(self.root, k=1)
-        await self.branches.open_branches(2, self.root, 1, BranchOrigin.FIRST_BATCH)
+        await self.branches.open_branches(2, self.root, 1, BranchOrigin.FIRST_BATCH, HARD_STOP)
         await self.branches.stop_branch("b02", JUDGE_STOP)
         self.roster.open("b03", origin=BranchOrigin.FORK, start_commit="", k=1, from_branch="b01")
         self.lifecycle.stopped.clear()
@@ -175,9 +176,26 @@ async def test_a_failed_branch_stop_is_reported_and_every_process_still_killed(t
     report = await session.stopper.stop_everything(SessionStopReason.PRELUDE_FAILED, HARD_STOP)
 
     assert not report.clean
-    assert report.failures == ("RuntimeError: the runtime refused to stop b01",)
+    assert report.failures == (
+        "RuntimeError: the runtime refused to stop b01",
+        "the specialist of b01 did not confirm its stop",
+    )
+    assert session.lifecycle.stopped == ["b01", "b01"]
     assert not any(running(pid) for pid in pids)
     assert await session.processes.leftovers() == ()
+
+
+async def test_a_specialist_that_did_not_stop_at_the_end_of_explore_is_asked_again_and_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(branches, "SPECIALIST_CALL_SECONDS", 0.1)
+    session = await Stage(tmp_path, MbFakeLifecycle(hanging=frozenset({"b01"}))).opened()
+    await session.stopper.end_exploration(SessionStopReason.GLOBAL_CONVERGED)
+
+    report = await session.stopper.stop_everything(SessionStopReason.GLOBAL_CONVERGED, HARD_STOP)
+
+    assert session.lifecycle.stopped == ["b01", "b01"] and "b01" in session.lifecycle.running
+    assert report.failures == ("the specialist of b01 did not confirm its stop",) and not report.clean
 
 
 async def test_a_stop_that_overruns_the_hard_stop_is_cut_and_every_process_killed(tmp_path: Path) -> None:
