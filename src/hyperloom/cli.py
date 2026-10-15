@@ -8,6 +8,8 @@ from __future__ import annotations
 import importlib
 import sys
 
+from hyperloom.common.sandbox import reexec_if_required
+
 _IO = "hyperloom.inference_optimizer"
 
 # command -> (module whose ``main(argv)`` runs it, argv prefix, one-line help)
@@ -56,6 +58,11 @@ def main(argv: list[str] | None = None) -> int:
         print(_usage(), file=sys.stderr)
         return 2
     command, rest = args[0], args[1:]
+    # Before dispatch, and before any command imports torch or starts Ray: when
+    # HYPERLOOM_SANDBOX_MODE asks for one, this replaces the process with itself
+    # running inside bubblewrap, so every subprocess a command later spawns is a
+    # descendant of the sandbox. Returns untouched when the mode is off.
+    reexec_if_required()
     if command != "session":
         module, prefix, _ = _COMMANDS[command]
         return _run(module, [*prefix, *rest])
