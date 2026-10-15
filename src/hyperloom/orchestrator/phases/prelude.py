@@ -39,6 +39,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     Verdict,
 )
 from ..actions.executors.baseline import _revert_warm_patch_state, revert_warm_kernel_patches
+from ..state.analysis_failures import RECIPE_PARAM, repeated_roofline_failure, roofline_recipe
 from ..state.shared_state import inject_stack_base_params, resolve_graded_comparison
 from ..state.task_registry import Task
 from ..loop.time_budget import (
@@ -2615,7 +2616,22 @@ class PreludePhase(CoordinatorCollaborator):
                 {"reason": reason, "gpu_trace_unsupported_reason": unsupported},
             )
             return None
-        params: dict[str, Any] = {"source": "coordinator_internal", "reason": str(reason)}
+        recipe = roofline_recipe(state, reason)
+        repeated = repeated_roofline_failure(state, recipe)
+        if repeated is not None:
+            log.warning(
+                "internal-analysis (%s): not run -- the roofline on %s already failed with %s, which recurs on the "
+                "same input; a KEEP that changes the recipe re-arms it",
+                reason,
+                recipe,
+                repeated.get("failure"),
+            )
+            self._record_prelude_arm_dropped(
+                "internal_analysis",
+                {"reason": reason, "recipe": recipe, "repeated_failure": dict(repeated)},
+            )
+            return None
+        params: dict[str, Any] = {"source": "coordinator_internal", "reason": str(reason), RECIPE_PARAM: recipe}
         if inline_event:
             params[INLINE_EVENT_PARAM] = str(inline_event)
         if reason != "prelude_initial":
