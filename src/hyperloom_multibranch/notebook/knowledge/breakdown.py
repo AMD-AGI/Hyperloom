@@ -15,7 +15,8 @@ export has its own schema version and its own sections:
 * ``measurement_sandboxes``: per node, GPU model, backend and image, the tests run there, their GPU time and failed
   attempts.
 * ``close``: the commit final selection chose and its recipe, how the scheduler chose it, and the Recipe KB
-  write-back, as the single-lineage export reports it.
+  write-back, as the single-lineage export reports it; when the scheduler passes them, what CLOSE's knowledge steps
+  did (``knowledge``: the Experiences, the learnings and the archived search tree).
 """
 
 from __future__ import annotations
@@ -85,13 +86,22 @@ def build_breakdown(
     final: FinalRecipe | None = None,
     selection: Mapping[str, object] | None = None,
     kb_write_back: RemoteWriteResult | None = None,
+    knowledge: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """The breakdown document of ``snapshot``, stamped with the time the snapshot was taken.
 
     ``final`` is the commit final selection chose; ``selection`` is how the scheduler chose it, such as its candidates
-    and their measurements, as JSON-ready data.
+    and their measurements, as JSON-ready data. ``knowledge`` is what CLOSE's knowledge steps did, as the
+    ``rsi.session`` close reports them (``KnowledgeClose.document()``); ``close`` has it only when given.
     """
 
+    close: dict[str, object] = {
+        "final": _final(final),
+        "selection": dict(selection or {}),
+        "kb_write_back": encode(kb_write_back),
+    }
+    if knowledge is not None:
+        close["knowledge"] = dict(knowledge)
     return {
         "schema_version": SCHEMA_VERSION,
         "exporter_version": EXPORTER_VERSION,
@@ -106,11 +116,7 @@ def build_breakdown(
         "committed": encode(snapshot.committed),
         "tests": encode(snapshot.records),
         "measurement_sandboxes": encode(measurement_usage(snapshot.records)),
-        "close": {
-            "final": _final(final),
-            "selection": dict(selection or {}),
-            "kb_write_back": encode(kb_write_back),
-        },
+        "close": close,
     }
 
 
