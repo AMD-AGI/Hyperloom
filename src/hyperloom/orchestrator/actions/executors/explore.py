@@ -8,7 +8,6 @@ from __future__ import annotations
 import functools
 import logging
 import os
-import shlex
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
@@ -19,7 +18,7 @@ import yaml
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
-from hyperloom.common.launch_log_evidence import launch_flag_setting_name, settings_the_engine_rewrote
+from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
     GRADED_DURATION,
@@ -95,6 +94,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
 )
 from ._ray_serving import maybe_serving_lease
 
+from ._launch_restatement import config_envs, named_settings, restates_the_baseline
 from ._server_argv import config_server_argv
 from ._server_lifecycle import (
     resolve_lifecycle_params,
@@ -434,40 +434,6 @@ def observed_launch_from_state(state: Any) -> tuple[dict[str, Any], dict[str, st
     return config, env
 
 
-def _config_envs(config_path: Path) -> dict[str, str]:
-    """Read ``benchmark.envs`` out of a built config file as a ``str -> str`` dict.
-
-    Drops the framework's server-args key (``EXTRA_SGLANG_ARGS`` and friends),
-    which holds the launch argv rather than an env value. Returns an empty dict
-    when the file carries no ``benchmark.envs`` mapping.
-    """
-    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    bench = cfg.get("benchmark") if isinstance(cfg, Mapping) else None
-    envs = bench.get("envs") if isinstance(bench, Mapping) else None
-    if not isinstance(envs, Mapping):
-        return {}
-    args_env = server_args_env_name(str(bench.get("framework") or ""))
-    return {str(k): str(v) for k, v in envs.items() if str(k) != args_env}
-
-
-def _named_settings(argv_text: str, framework: str) -> dict[str, list[str]]:
-    """Map each setting ``argv_text`` names to its value tokens, last occurrence winning like the engine."""
-    try:
-        tokens = shlex.split(argv_text)
-    except ValueError:
-        return {}
-    settings: dict[str, list[str]] = {}
-    current = ""
-    for token in tokens:
-        if token.startswith("-"):
-            name, separator, attached = token.partition("=")
-            current = launch_flag_setting_name(name, framework)
-            settings[current] = [attached] if separator else []
-        elif current:
-            settings[current].append(token)
-    return settings
-
-
 def _setting_already_holds(proposed: list[str], observed: Any) -> bool:
     """Whether ``observed`` is already the value ``proposed`` asks for."""
     if not proposed:
@@ -505,10 +471,10 @@ def _launch_delta(
     resolves to ``3600.0`` -- so weighing it would reject every variant. Those
     rewrites hit base and variant alike, so the delta cancels them.
     """
-    base_settings = _named_settings(base_argv, framework)
+    base_settings = named_settings(base_argv, framework)
     settings = {
         name: values
-        for name, values in _named_settings(variant_argv, framework).items()
+        for name, values in named_settings(variant_argv, framework).items()
         if base_settings.get(name) != values
     }
     envs = {name: value for name, value in variant_envs.items() if base_envs.get(name) != value}
@@ -610,7 +576,7 @@ def filter_baseline_noop_variants(
                 base_unset_envs=base_unset_envs,
             )
             base_argv = config_server_argv(base_path).text
-            base_envs = _config_envs(base_path)
+            base_envs = config_envs(base_path)
         except (OSError, ValueError, yaml.YAMLError) as exc:
             log.warning(
                 "explore: baseline-noop probe could not materialize the baseline (%s); keeping every variant", exc
@@ -638,17 +604,19 @@ def filter_baseline_noop_variants(
                     base_unset_envs=base_unset_envs,
                 )
                 variant_argv = config_server_argv(out_path).text
-                variant_envs = _config_envs(out_path)
+                variant_envs = config_envs(out_path)
             except (OSError, ValueError, yaml.YAMLError) as exc:
                 log.warning("explore: baseline-noop probe failed for variant %s (%s); keeping it", gv.name, exc)
                 kept.append(gv)
                 continue
             delta_settings, delta_envs = _launch_delta(variant_argv, variant_envs, base_argv, base_envs, framework)
             if not delta_settings and not delta_envs:
-                # A change the merged config does not express leaves no delta, and
-                # so does a variant that only restates the baseline. The two are
-                # indistinguishable here, so the variant runs rather than risk
-                # dropping a real experiment for a missed drop.
+                # A change the merged config hides leaves no delta either: only a request
+                # that itself restates the baseline marks the variant as a noop.
+                restated = restates_the_baseline(gv.extra_server_args, gv.extra_envs, base_argv, base_envs, framework)
+                if restated and gv.args_mode == "append":
+                    dropped.append((gv.name, "names only settings the baseline launch already holds (baseline noop)"))
+                    continue
                 kept.append(gv)
                 continue
             if _settings_already_hold(delta_settings, observed_config) and _envs_already_hold(delta_envs, observed_env):
