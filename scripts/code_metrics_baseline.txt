@@ -506,7 +506,7 @@ function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/session.py::render 93
 function-lines src/hyperloom/inference_optimizer/breakdown/session_package.py::package_session_artifacts 105
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_export_partition_shape 103
-function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 277
+function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 275
 function-lines src/hyperloom/inference_optimizer/cli/bootstrap.py::_seed_shared_state 155
 function-lines src/hyperloom/inference_optimizer/cli/executors.py::_build_specialist_executor 99
 function-lines src/hyperloom/inference_optimizer/cli/kb.py::_bootstrap_recipe_kb 91
@@ -678,7 +678,7 @@ function-lines src/hyperloom/orchestrator/loop/coordinator.py::Coordinator.__ini
 function-lines src/hyperloom/orchestrator/loop/coordinator.py::Coordinator._reactor_turn 97
 function-lines src/hyperloom/orchestrator/loop/coordinator.py::Coordinator._run_ticks 150
 function-lines src/hyperloom/orchestrator/loop/coordinator.py::_infer_model_class_from_config 83
-function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator._spawn_fitting_queued 240
+function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator._spawn_fitting_queued 239
 function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator.reap_dispatched_task 157
 function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator.run_task_registered 109
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_request 214
@@ -726,7 +726,7 @@ function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_ker
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 425
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.promote_geak_from_candidate 165
 function-lines src/hyperloom/orchestrator/phases/kernel_stack.py::KernelStackPhase._run_kernel_stack_validation_e2e 220
-function-lines src/hyperloom/orchestrator/phases/machine.py::MachinePhase.advance_phase_if_needed 152
+function-lines src/hyperloom/orchestrator/phases/machine.py::MachinePhase.advance_phase_if_needed 149
 function-lines src/hyperloom/orchestrator/phases/machine_state.py::record_phase_transition 93
 function-lines src/hyperloom/orchestrator/phases/machine_state.py::replay_next_phase 167
 function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._judge_warm_replay_accuracy 123
@@ -960,7 +960,7 @@ module-lines src/hyperloom/orchestrator/phases/framework.py 3139
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4227
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 2239
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2640
-module-lines src/hyperloom/orchestrator/policy/gate.py 1626
+module-lines src/hyperloom/orchestrator/policy/gate.py 1608
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2571
 module-lines src/hyperloom/orchestrator/roles/critic_agent.py 1299

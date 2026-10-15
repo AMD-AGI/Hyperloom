@@ -374,8 +374,10 @@ One phase, two levers worked in parallel:
 `specialist` serves both levers — investigation, patch authoring, and
 candidate discovery are all dispatches of the one specialist action. An
 operator can add one domain of their own, `custom_specialist`, whose focus is
-the text they supply at launch; until one has started, the Coordinator
-requests it at most once per macro cycle in this phase.
+the text they supply at launch. The Coordinator alone dispatches it, once per
+macro cycle on entering this phase; it and the grid benching its proposals run
+ahead of all other queued work, and a plateau exit waits for both within the
+phase budget.
 
 With a [PrimaTune](../reference/primatune-predictor.md) endpoint configured,
 the phase also asks that predictor for a launch recipe once per decision point:
