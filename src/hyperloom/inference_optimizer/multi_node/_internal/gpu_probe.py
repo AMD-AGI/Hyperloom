@@ -18,12 +18,15 @@ from .external_state import build_external_state_from_env, external_service_url
 
 log = logging.getLogger(__name__)
 
-# One command that prints the product name, falling back to torch's gcnArchName (gfx942 / gfx950) when rocm-smi is
-# unavailable on PATH.
+# One remote command that prints amd-smi's ASIC market name and target gfx arch.
 _PROBE_CMD = (
-    "rocm-smi --showproductname 2>/dev/null || "
-    'python3 -c "import torch;'
-    'print(torch.cuda.get_device_properties(0).gcnArchName)" 2>/dev/null'
+    "amd-smi static --asic --json 2>/dev/null | "
+    "python3 -c 'import json,sys;"
+    "d=json.load(sys.stdin);"
+    '[print(x) for g in d.get("gpu_data", []) '
+    'for a in [g.get("asic") or {}] '
+    'for x in (a.get("market_name"), a.get("target_graphics_version")) if x]'
+    "' 2>/dev/null"
 )
 
 # Ray Dashboard job terminal states (mirror multi_node.cli).
@@ -31,8 +34,8 @@ _TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "STOPPED"}
 
 
 def _parse_gpu_type(text: str) -> str | None:
-    """Map rocm-smi / gcnArchName output to a known AMD runner type."""
-    upper = (text or "").upper()
+    """Map amd-smi ASIC output to a known AMD runner type."""
+    upper = "".join((text or "").upper().split())
     for tag in _PRODUCT_TAGS:
         if tag in upper:
             candidate = tag.lower()
@@ -67,7 +70,7 @@ def remote_autodetect_gpu_type(*, timeout_s: int = 60) -> str | None:
 
 
 def _probe_via_ray_head(state: dict[str, Any], *, timeout_s: int) -> str | None:
-    """Submit ``rocm-smi`` on the Ray head and parse its logs."""
+    """Submit the ``amd-smi`` probe on the Ray head and parse its logs."""
     head = str(state.get("head_pod_ip") or "").strip()
     if not head:
         return None
@@ -82,8 +85,8 @@ def _probe_via_ray_head(state: dict[str, Any], *, timeout_s: int) -> str | None:
                 break
             time.sleep(2)
         if status != "SUCCEEDED":
-            # Logged, not fatal: _PROBE_CMD's `||` fallback can print a usable name and still exit non-zero, so the
-            # logs are parsed either way and an unparsable result already degrades to None.
+            # Logged, not fatal: the probe can print a usable name before a non-zero exit, so the logs are parsed either
+            # way and an unparsable result already degrades to None.
             log.warning("remote GPU probe: ray job %s ended %r", sub_id, status or "no terminal status")
         logs = ray.get_job_logs(sub_id)
     return _parse_gpu_type(logs)
@@ -99,7 +102,7 @@ def _first_gpu_pod(state: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _probe_via_infera_ssh(state: dict[str, Any], *, timeout_s: int) -> str | None:
-    """SSH into the first Infera GPU pod and parse ``rocm-smi`` output."""
+    """SSH into the first Infera GPU pod and parse the ``amd-smi`` probe output."""
     pod = _first_gpu_pod(state)
     key_path = str(state.get("ssh_key_path") or "").strip()
     if not pod or not key_path:
@@ -131,7 +134,7 @@ def _probe_via_infera_ssh(state: dict[str, Any], *, timeout_s: int) -> str | Non
         if scratch is not None:
             shutil.rmtree(scratch, ignore_errors=True)
     if cp.returncode != 0:
-        # Logged, not fatal: _PROBE_CMD's `||` fallback can print a usable name and still exit non-zero, so the output
-        # is parsed either way and an unparsable result already degrades to None.
+        # Logged, not fatal: the probe can print a usable name before a non-zero exit, so the output is parsed either way
+        # and an unparsable result already degrades to None.
         log.warning("remote GPU probe: ssh to %s exited %s", host, cp.returncode)
     return _parse_gpu_type(f"{cp.stdout or ''}\n{cp.stderr or ''}")
