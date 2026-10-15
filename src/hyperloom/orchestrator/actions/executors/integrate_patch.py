@@ -2269,7 +2269,7 @@ class IntegratePatchExecutor:
     ) -> dict[str, Any] | None:
         """Setup replay, patch/artifact apply, pending_integrate sentinel.
 
-        Returns an early-exit result dict on failure/no-patches/apply_only,
+        Returns an early-exit result dict on failure/no-patches/already_present/apply_only,
         or None to continue to bench+gate. Records mutations on the attempt.
         """
         specialist_task_id = attempt.specialist_task_id
