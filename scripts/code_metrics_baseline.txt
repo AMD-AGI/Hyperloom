@@ -945,7 +945,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1905
 module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4799
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1565
 module-lines src/hyperloom/orchestrator/actions/executors/report.py 1391
-module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1302
+module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1303
 module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2659
 module-lines src/hyperloom/orchestrator/kernel/conc_sweep.py 1429
 module-lines src/hyperloom/orchestrator/kernel/request_handlers.py 5138
@@ -968,7 +968,7 @@ module-lines src/hyperloom/orchestrator/specialists/runner.py 1533
 module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1747
 module-lines src/hyperloom/orchestrator/state/shared_state.py 2683
 module-lines src/hyperloom/orchestrator/trace_analysis/_bypass_report.py 1231
-module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py 5431
+module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py 5433
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py 1505
 module-lines src/kernelforge/fusion/author.py 1370
 module-lines src/kernelforge/fusion/command.py 1584
