@@ -113,6 +113,18 @@ def test_the_rows_with_reasoning_become_experiences_and_the_rest_say_why_not(sna
     assert collected["r2"].outcome["decision"] == "revert"
 
 
+def test_the_measured_baseline_is_the_parent_recipe_once_its_digest_is_recorded(snapshot: NotebookSnapshot) -> None:
+    digest = "sha256:" + "1" * 64
+    commits = tuple(
+        dataclasses.replace(commit, recipe_digest=digest) if commit.commit_id == "c0" else commit
+        for commit in snapshot.lineage.commits
+    )
+    named = dataclasses.replace(snapshot, lineage=dataclasses.replace(snapshot.lineage, commits=commits))
+
+    assert (_rows(snapshot)["r1"]["parent_state"], _rows(named)["r1"]["parent_state"]) == ("c0", digest)
+    assert _rows(named)["r4"]["parent_state"] == "c1"
+
+
 def test_a_candidate_that_broke_the_server_is_a_failed_experience(snapshot: NotebookSnapshot) -> None:
     why = BranchLogEntry("s2", BranchLogType.ATTEMPT, "chunked prefill should overlap prefill with decode", ("r3",))
     logs = {**snapshot.branch_logs, "s2": (*snapshot.branch_logs["s2"], BranchLogRecord("e9", 0.0, why))}

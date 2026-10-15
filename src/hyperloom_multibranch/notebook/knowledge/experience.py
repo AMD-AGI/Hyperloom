@@ -155,6 +155,13 @@ def _measured(record: TestRecord, metric: str) -> dict[str, object]:
     }
 
 
+def _state(snapshot: NotebookSnapshot, commit_id: str) -> str:
+    """The parent's recipe digest, the same in every session that measured that recipe; else its commit id."""
+
+    node = snapshot.lineage.commit(commit_id)
+    return node.recipe_digest if node is not None and node.recipe_digest else commit_id
+
+
 def candidate_row(
     record: TestRecord, snapshot: NotebookSnapshot, profile: SessionProfile, metric: str
 ) -> dict[str, object] | None:
@@ -172,7 +179,7 @@ def candidate_row(
         "request_id": record.request_id,
         "branch": request.branch,
         "parent_commit": request.parent_commit,
-        "parent_state": request.parent_commit,
+        "parent_state": _state(snapshot, request.parent_commit),
         "commit_id": record.commit_id or "",
         "created_at": _iso(record.requested_at),
         "completed_at": _iso(record.judged_at or record.measured_at or record.requested_at),
