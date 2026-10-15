@@ -54,7 +54,13 @@ from hyperloom_multibranch.scheduling.requests import SessionTests
 from hyperloom_multibranch.scheduling.roster import QUOTA_POLICY_VERSION, Roster
 from hyperloom_multibranch.scheduling.rule_judge import MbFakeRuleJudge
 from hyperloom_multibranch.scheduling.settings import RunSettings
-from hyperloom_multibranch.scheduling.stops import SessionStopper, SessionStopReason, StopReport, StopSignals
+from hyperloom_multibranch.scheduling.stops import (
+    TOOLBOX_CLOSE_SECONDS,
+    SessionStopper,
+    SessionStopReason,
+    StopReport,
+    StopSignals,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -303,7 +309,7 @@ class Session:
         """CLOSE abandoned after a stop signal: release the toolbox and every registered process, and report what is
         still alive."""
 
-        released = await self._stopper.release()
+        released = await self._stopper.release(TOOLBOX_CLOSE_SECONDS)
         error = "; ".join(filter(None, (ending.error, CUT_SHORT)))
         stop = StopReport(await self._processes.leftovers(), None, (CUT_SHORT, *released))
         report = CloseReport(ending.stop_reason, ending.final, None, stop, error)

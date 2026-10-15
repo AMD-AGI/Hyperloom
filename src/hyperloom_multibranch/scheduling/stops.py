@@ -6,9 +6,10 @@
 Ending exploration stops every specialist branch and keeps the integration branch for FINAL; a branch stop that fails
 there is logged, not raised. Stopping everything stops every branch including integration, which withdraws every
 test, then releases what the session holds: it closes the toolbox, which releases the sandboxes it holds, and kills
-every process the scheduler started, then reports what is still alive. The branch stops get until
-:data:`TOOLBOX_CLOSE_SECONDS` before the hard stop, and the release runs whether or not they finished, the toolbox
-close bounded by those seconds. Both close the roster first, so no fork is admitted and no branch opened afterwards.
+every process the scheduler started, then reports what is still alive. The toolbox close gets
+:data:`TOOLBOX_CLOSE_SECONDS`, or half the time left before the hard stop when that is less, the branch stops the rest,
+and the release runs whether or not they finished. Both close the roster first, so no fork is admitted and no branch
+opened afterwards.
 The main flow's signal drain lives in its loop package, which this package does not import.
 """
 
@@ -27,7 +28,7 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.processes import ProcessRecord, ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import BranchKind, BranchStop, Roster, StopCause
-from hyperloom_multibranch.scheduling.settle import settled
+from hyperloom_multibranch.scheduling.settle import failure_text, settled
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
@@ -153,17 +154,18 @@ class SessionStopper:
         """Close the roster, stop every branch, read the queue, :meth:`release` what the session holds, and report.
 
         Branches stop concurrently, each withdrawing its tests, and a failed branch stop is reported, not raised, so
-        every other branch is still stopped. That gets until :data:`TOOLBOX_CLOSE_SECONDS` before ``hard_stop_at``
-        (clock seconds); the release runs afterwards whatever became of it.
+        every other branch is still stopped. That gets the time before ``hard_stop_at`` (clock seconds) the toolbox
+        close does not; the release runs afterwards whatever became of it.
         """
 
         self._roster.close()
+        left = max(hard_stop_at - self._clock.now(), 0.0)
+        closing = min(TOOLBOX_CLOSE_SECONDS, left / 2)
         try:
-            halting = hard_stop_at - TOOLBOX_CLOSE_SECONDS - self._clock.now()
-            halted = await self._clock.wait_for(self._halt(reason), halting)
+            halted = await self._clock.wait_for(self._halt(reason), left - closing)
         except asyncio.TimeoutError:
             halted = StopReport((), None, (STOP_OVERRAN,))
-        released = await self.release()
+        released = await self.release(closing)
         report = replace(halted, leftovers=await self._processes.leftovers(), failures=(*halted.failures, *released))
         self._decisions.record(
             Decision(
@@ -178,35 +180,46 @@ class SessionStopper:
         )
         return report
 
-    async def release(self) -> tuple[str, ...]:
-        """Close the toolbox, giving it :data:`TOOLBOX_CLOSE_SECONDS`, then kill every registered process; returns the
+    async def release(self, closing: float) -> tuple[str, ...]:
+        """Close the toolbox, giving it ``closing`` clock seconds, then kill every registered process; returns the
         close's failure, if it had one.
 
         A CLOSE cut short releases through here too, so the sandboxes and the processes go whatever else did not
         finish.
         """
 
-        closed = await settled(self._clock.wait_for(self._toolbox.close(), TOOLBOX_CLOSE_SECONDS))
+        closed = await settled(self._clock.wait_for(self._toolbox.close(), closing))
         await self._processes.kill_all()
         if isinstance(closed, asyncio.TimeoutError):
             logger.error(TOOLBOX_CLOSE_OVERRAN)
             return (TOOLBOX_CLOSE_OVERRAN,)
         if isinstance(closed, BaseException):
             logger.error("the toolbox did not close", exc_info=closed)
-            return (f"{type(closed).__name__}: {closed}",)
+            return (failure_text(closed),)
         return ()
 
     async def _halt(self, reason: SessionStopReason) -> StopReport:
-        """What the branch stops leave; the queue is read before the toolbox closes and forgets it."""
+        """What the branch stops leave; the queue is read before the toolbox closes and forgets it.
 
-        failures = await self._stop_open(reason, frozenset(BranchKind))
+        Every branch's tests are withdrawn before any specialist is asked to stop: a specialist that hangs in its stop
+        would otherwise hold its branch's withdrawal past the hard stop, and one that overran an earlier stop may
+        still be submitting, which the toolbox does not refuse.
+        """
+
+        failures = await self._withdraw_every_branch(reason)
+        failures += await self._stop_open(reason, frozenset(BranchKind))
         status = await settled(self._toolbox.queue_state())
         if isinstance(status, BaseException):
             logger.error("the toolbox did not report its queue after the stop", exc_info=status)
         for failure in failures:
             logger.error("a step of the session stop failed", exc_info=failure)
         queue = None if isinstance(status, BaseException) else status
-        return StopReport((), queue, tuple(f"{type(failure).__name__}: {failure}" for failure in failures))
+        return StopReport((), queue, tuple(map(failure_text, failures)))
+
+    async def _withdraw_every_branch(self, reason: SessionStopReason) -> list[BaseException]:
+        branches = [entry.branch for entry in self._roster.entries()]
+        outcomes = await asyncio.gather(*(settled(self._toolbox.cancel_branch(b, reason.value)) for b in branches))
+        return [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
 
     async def _stop_open(self, reason: SessionStopReason, kinds: frozenset[BranchKind]) -> list[BaseException]:
         stop = BranchStop(StopCause.SESSION_END, reason.value, self._clock.now())

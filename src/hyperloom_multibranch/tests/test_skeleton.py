@@ -323,7 +323,7 @@ async def test_a_stop_signal_skips_to_close_and_stops_every_branch(tmp_path: Pat
     assert outcome.stop_reason is SessionStopReason.SIGNAL and outcome.exit_code == 1
     assert outcome.final is None and outcome.close is not None
     assert sorted(stage.lifecycle.stopped) == ["b01", "b02"]
-    assert sorted(stage.toolbox.cancelled) == sorted(("b01", "b02", INTEGRATION_BRANCH))
+    assert set(stage.toolbox.cancelled) == {"b01", "b02", INTEGRATION_BRANCH}
     assert stage.toolbox.closed == 1
     late = await stage.setup.desk.request_fork(ForkRequest(await stage.root(), tagged("late"), REPRO_CASE, "late fix"))
     assert late.status is AdmissionStatus.REJECTED

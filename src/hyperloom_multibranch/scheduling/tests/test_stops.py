@@ -135,7 +135,7 @@ async def test_stop_everything_withdraws_every_branch_closes_the_toolbox_and_lea
 
     report = await session.stopper.stop_everything(SessionStopReason.SIGNAL, HARD_STOP)
 
-    assert sorted(session.toolbox.cancelled) == sorted(("b01", "b03", INTEGRATION_BRANCH))
+    assert set(session.toolbox.cancelled) == {"b01", "b02", "b03", INTEGRATION_BRANCH}
     assert session.toolbox.closed == 1
     ended = _ended(SessionStopReason.SIGNAL)
     fork = _ended_with_b01(SessionStopReason.SIGNAL)
@@ -166,6 +166,8 @@ async def test_a_stop_that_overruns_the_hard_stop_is_cut_and_every_process_kille
     report = await session.stopper.stop_everything(SessionStopReason.TIME_EXHAUSTED, NOW + SHORT_GRACE)
 
     assert STOP_OVERRAN in report.failures and not report.clean
+    assert session.lifecycle.stopped == ["b01"]
+    assert set(session.toolbox.cancelled) == {"b01", "b02", "b03", INTEGRATION_BRANCH}
     assert not any(running(pid) for pid in pids)
     assert session.roster.closed
 
@@ -182,15 +184,25 @@ async def test_a_failing_toolbox_is_reported_and_every_branch_still_stopped(tmp_
     assert sorted(session.lifecycle.stopped) == ["b01"]
 
 
-async def test_a_test_the_toolbox_still_holds_makes_the_report_unclean(tmp_path: Path) -> None:
+async def test_a_test_submitted_after_its_branch_stopped_is_withdrawn(tmp_path: Path) -> None:
     session = await Stage(tmp_path).opened()
     session.toolbox.executor.gate.clear()
-    session.roster.stop("b02", JUDGE_STOP)
-    await session.toolbox.submit_test(TestRequest(TestKind.TEST, Purpose.EXPLORE, "b02", session.root))
+    late = await session.toolbox.submit_test(TestRequest(TestKind.TEST, Purpose.EXPLORE, "b02", session.root))
 
     report = await session.stopper.stop_everything(SessionStopReason.GLOBAL_CONVERGED, HARD_STOP)
 
-    assert report.queue is not None and report.queue.running_by_branch == {"b02": 1}
+    assert late in session.toolbox.withdrawn
+    assert report.queue is not None and report.queue.running == 0 and report.clean
+
+
+async def test_a_test_the_toolbox_still_holds_makes_the_report_unclean(tmp_path: Path) -> None:
+    session = await Stage(tmp_path).opened()
+    session.toolbox.executor.gate.clear()
+    await session.toolbox.submit_test(TestRequest(TestKind.TEST, Purpose.EXPLORE, "unlisted", session.root))
+
+    report = await session.stopper.stop_everything(SessionStopReason.GLOBAL_CONVERGED, HARD_STOP)
+
+    assert report.queue is not None and report.queue.running_by_branch == {"unlisted": 1}
     assert not report.clean
     assert report.leftovers == ()
 
