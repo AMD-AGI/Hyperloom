@@ -62,7 +62,7 @@ def _config_lever_from_proposal(entry: Mapping[str, Any]) -> dict[str, Any]:
         fault = (
             "has server args unsupported by Magpie's unquoted argv transport"
             if isinstance(args, str)
-            else "has unparseable server args"
+            else "has unparsable server args"
         )
     if fault:
         log.warning(
