@@ -527,6 +527,12 @@ The loop adapts through facts, not through retired score tables:
   the current phase does not offer is refused (`phase_incompatible`)
   before a task exists, and the phase transition drops incompatible tasks
   still queued from the previous phase.
+- The baseline anchor every gain is measured against moves only to a
+  higher re-baseline (or a hot pass correcting a cold anchor), and only
+  until a cumulative gain has been validated
+  against it; after that a re-baseline is recorded (`anchor_held`) but the
+  anchor stays, except for an ENABLEMENT revalidation, whose patch changed
+  what the anchor measures.
 
 ## What is retired
 

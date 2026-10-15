@@ -2677,6 +2677,15 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             return None
         return time.monotonic() + usable
 
+    @property
+    def has_validated_gain_stamp(self) -> bool:
+        """Whether a cumulative gain has been validated against the current anchor."""
+        return bool(
+            self.cumulative_gain_validated_ts
+            or self.cumulative_gain_validated_stack_len
+            or self.cumulative_gain_validated
+        )
+
     def optimization_stack_has_unvalidated_keeps(self) -> bool:
         """True iff ``current_best`` changed since the last validated measurement (stack grew or a lift landed)."""
         return len(self.optimization_stack) > int(self.cumulative_gain_validated_stack_len) or int(
