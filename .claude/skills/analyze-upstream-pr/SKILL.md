@@ -205,10 +205,9 @@ One line per conflict into `$WORK/conflicts.txt`:
 100 files, and its `PARTIAL` lines name the PRs cut; an upstream repository has thousands open.
 Whether another PR does the same thing is check-prior-art's question: follow its Steps 0 to 6 in
 `$WORK/prior-art`, with Step 1's mechanism and `files.txt` as the planned paths; its path scan
-pages every open PR. It finds this PR too, a match on every planned path, so before its Step 4
-run `bash .claude/skills/analyze-upstream-pr/drop_self.sh "$WORK/prior-art" <owner/name> <N>` and
-keep `<owner/name>#<N>` out of the shortlist and classes. Carry its `DUPLICATE` and `OVERLAPPING`
-classes here, and its `scan.txt` lines that are not `COMPLETE` to the report's coverage.
+pages every open PR. Keep `<owner/name>#<N>` out of its shortlist and classes: its search and path
+scan find this PR too. Carry its `DUPLICATE` and `OVERLAPPING` classes here, and its `scan.txt`
+lines that are not `COMPLETE` to the report's coverage.
 
 **Local patches.** List each patch's paths with `git apply --numstat <patch>`; one also in
 `files.txt` is `OVERLAP`. Then, in a scratch worktree
