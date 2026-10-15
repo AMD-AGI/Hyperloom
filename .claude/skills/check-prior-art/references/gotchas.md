@@ -14,8 +14,8 @@ match, or a real absence, turns into a wrong verdict.
 numbers both from one counter per repository. A "fixes #N" link usually names the issue the PR
 closes, not another PR; open it before following it as a successor. The counter is also per
 repository, so `#N` in one repository and `#N` in another, a fork included, are unrelated. The
-inclusion probe matches `(#N)` in commit subjects, so run it only against a tree of the PR's own
-repository or a fork that carries it, and compare the matched subject with the PR's title.
+inclusion probe matches the PR number in commit subjects, so run it only against a tree of the PR's
+own repository or a fork that carries it, and compare the matched subject with the PR's title.
 
 ## G2 — A duplicate may fix a different failure mode
 
@@ -46,16 +46,15 @@ reports them) and pass that sha as `--commit`. A version without `+g<sha>` names
 ## G5 — A fork may carry a cherry-pick without ancestry
 
 A fork that cherry-picks an upstream PR, or squashes it into a merge of its own, never contains
-the upstream merge commit, so ancestry answers "no" while the change is there. The probe also reads
-`(#N)` subject suffixes, which is how most cherry-picks record their origin, and compares
-patch-ids, which finds a cherry-pick with the same diff under any subject. A backport that was
-edited, had a conflict resolved, applied next to lines the fork changed, or was folded into a
-larger commit still reads as `not_included`. Before reporting `not_included` for a fork, search its
-log for the change itself: `git log -S<symbol>` for a function or constant the diff adds, and
-`git log --grep=<words from the title>`. An open upstream PR can be carried by a fork the same way,
-which is why Step 5 runs the probe on open DUPLICATEs when the tree is a fork. When the probe or
-that log search finds one, the verdict is `EXISTS-OPEN -- in your tree`, and its next step is
-`EXISTS-MERGED-INCLUDED`'s: the baseline already runs the change.
+the upstream merge commit. The probe still finds the carry when a commit subject names the PR, a
+trailing `(#N)` or `Merge pull request #N from`, which is how most cherry-picks record their origin,
+and, given the merge commit, when every commit the PR brought in has the same patch-id in the tree.
+A backport that was edited, had a conflict resolved, applied next to lines the fork changed, or was
+folded into a larger commit matches neither and reads `unknown`. So Step 6 searches the tree's log
+for the change itself before a verdict calls it unchecked: `git log -S<symbol>` for a function or
+constant the diff adds, and `git log --grep=<words from the title>`. An open upstream PR can be
+carried the same way; it has no merge commit, so only its subject or that log search finds it, and
+a fork that carries it gets `EXISTS-OPEN -- in your tree`, not a second measurement.
 
 ## G6 — A validated operating point may differ from yours
 

@@ -1,6 +1,6 @@
 ---
 name: check-prior-art
-description: "Check whether a planned optimization already exists upstream before building it. Invoke with a one-sentence mechanism, the files, symbols or kernels it touches (or a local diff), the upstream repositories to search, and optionally a local tree and commit. Searches open and merged pull requests by keyword, scans open pull requests for the planned paths, deep-reads and classifies the top candidates, checks merged ones against the tree with the inclusion probe, refutes every match, and writes one verdict with its evidence and search coverage. Reads GitHub, never writes to it."
+description: "Check whether a planned optimization already exists upstream before building it. Invoke with a one-sentence mechanism, the files, symbols or kernels it touches (or a local diff), the upstream repositories to search, and optionally a local tree and commit. Searches open and merged pull requests by keyword, scans open pull requests for the planned paths, deep-reads and classifies the top candidates, checks each duplicate against the tree with the inclusion probe and the tree's log, refutes every match, and writes one verdict with its evidence and search coverage. Reads GitHub, never writes to it."
 ---
 
 <!--
@@ -23,11 +23,13 @@ when one applies: the reader acts on the whole line. The first verdict that appl
 
 | Verdict | When | Qualifier |
 |---|---|---|
-| `EXISTS-MERGED-INCLUDED` | a DUPLICATE is merged and your tree contains it: the probe answered `included`, or Step 6 found it | |
-| `EXISTS-MERGED-NOT-IN-TREE` | a DUPLICATE is merged and your tree was not shown to contain it: `not_included`, `unknown`, or no tree was given | `-- inclusion unchecked` when the probe was skipped or `unknown` |
-| `EXISTS-OPEN` | a DUPLICATE is open or draft | `-- in your tree` when Step 5 or 6 found that open PR in your tree (G5) |
+| `EXISTS-MERGED` | a DUPLICATE is merged | `-- in your tree` when Step 5 or 6 found it there, otherwise `-- inclusion unchecked` |
+| `EXISTS-OPEN` | a DUPLICATE is open or draft | as for `EXISTS-MERGED` |
 | `PARTIAL-OVERLAP` | no DUPLICATE is left; an OVERLAPPING PR is | `-- incomplete, see Coverage` when, after the reruns of Steps 2 and 3, a `queries.tsv` row is not `OK`, a `scan.txt` line (per-PR ones too) is not `COMPLETE`, or a step wrote `SKIPPED:` |
 | `NOT-FOUND` | neither is left | as for `PARTIAL-OVERLAP` |
+
+Local git can show that a PR is in a tree, never that it is absent, so every DUPLICATE that
+nothing found in your tree is `-- inclusion unchecked`, and so is every one when no tree was given.
 
 **2. Evidence**: a table with one row per PR in `classes.txt`, the UNRELATED ones included, whose
 `why` names the mechanism, file or symbol in its diff that decided the class.
@@ -40,10 +42,9 @@ every `SKIPPED:` line. A verdict is a claim about what was searched; this part s
 
 | Verdict | Next step |
 |---|---|
-| `EXISTS-MERGED-INCLUDED` | drop the plan: your baseline already runs it. If you expected a gain from it, find why the baseline does not show one (an operating point the PR does not cover, a gate that keeps it off) |
-| `EXISTS-MERGED-NOT-IN-TREE` | take the upstream commit (move the tree past its merge commit, or cherry-pick it) and measure that, instead of writing it again |
-| `EXISTS-OPEN -- in your tree` | your fork already carries it: follow `EXISTS-MERGED-INCLUDED`'s next step, and carry results to that PR |
-| `EXISTS-OPEN` | apply the open PR's diff to your tree and measure it; carry results or review to that PR rather than opening a second one |
+| `EXISTS-MERGED -- in your tree`, `EXISTS-OPEN -- in your tree` | drop the plan: your baseline already runs it. If you expected a gain from it, find why the baseline does not show one (G6); for an open PR, carry results to it |
+| `EXISTS-MERGED -- inclusion unchecked` | take the upstream commit (move the tree past its merge commit, or cherry-pick it) and measure that, instead of writing it again; a cherry-pick that comes out empty was already there |
+| `EXISTS-OPEN -- inclusion unchecked` | apply the open PR's diff to your tree and measure it, and carry results or review to that PR rather than opening a second one; a diff that applies only in reverse was already there |
 | `PARTIAL-OVERLAP` | build on or next to the overlapping PR: name it and the shared files in your PR description (G8), and expect a conflict on those files |
 | `NOT-FOUND` | proceed, and quote the coverage part where the target repo's contributor guide asks for a duplicate-work statement (G8) |
 
@@ -162,8 +163,7 @@ link to this one). Read the diff, not the title (G1, G2). One line per PR into `
 
 ## Step 5 — Inclusion in your tree
 
-For each merged DUPLICATE or OVERLAPPING PR, and each open one when the tree is a fork that may
-carry it (G5), run the probe against your tree and append its answer:
+For each DUPLICATE, open or merged, run the probe against your tree and append its answer:
 
 ```bash
 out=$(python -m kernelforge.knowledge.pr_knowledge.inclusion --tree "$TREE" --commit "$COMMIT" \
@@ -171,19 +171,21 @@ out=$(python -m kernelforge.knowledge.pr_knowledge.inclusion --tree "$TREE" --co
 printf '%s#%s exit=%s %s\n' <owner/name> <N> "$status" "$out" >> "$WORK/inclusion.txt"
 ```
 
-Leave out `--merge-commit-sha` when `meta.txt` says `-`. Exit 0 is `included`, 4 `not_included`, 3
-`unknown`, 2 a usage error, 1 a crash and no answer. PR numbers are per repository, so the tree must
-be the PR's repository or a fork of it (G1); a `subject_suffix` answer whose commit subject is not
-the PR's title is a collision, so `unknown`. With no tree, or a probe that cannot run, write
-`SKIPPED: inclusion -- <why>` into `inclusion.txt`. Gotchas G3, G4 and G5 apply.
+Leave out `--merge-commit-sha` when `meta.txt` says `-`. Exit 0 is `included`, 3 `unknown`, 2 a
+usage error, 1 a crash and no answer; `unknown` means nothing in local git showed the PR, never that
+it is absent. PR numbers are per repository, so the tree must be the PR's repository or a fork of it
+(G1); a `subject` answer whose commit subject is not the PR's title is a collision, so `unknown`.
+With no tree, or a probe that cannot run, write `SKIPPED: inclusion -- <why>` into `inclusion.txt`.
+Gotchas G3, G4 and G5 apply.
 
 ## Step 6 — Refutation
 
-Try to kill each DUPLICATE and OVERLAPPING class, and each `not_included` answer, before it
-reaches the report. One block each in `$WORK/refutations.txt`:
+Try to kill each DUPLICATE and OVERLAPPING class, and each DUPLICATE's inclusion answer that is
+not `included`, open PRs too, before it reaches the report. One block each in
+`$WORK/refutations.txt`:
 
 ```
-FINDING: <owner/name#N> DUPLICATE|OVERLAPPING|not_included
+FINDING: <owner/name#N> DUPLICATE|OVERLAPPING|unknown
 ATTEMPT: <what you opened or ran to kill it -- must name a file, function, condition or command>
 OUTCOME: SURVIVES|DOWNGRADED <class>|DROPPED -- <what that showed>
 ```
@@ -197,9 +199,12 @@ does it fix the same failure mode (G2); does it cover your operating point (G6);
 | DUPLICATE | every attack failed | `OVERLAPPING`: another mechanism, failure mode or operating point on a planned file or function; `SUPERSEDED`: reverted | it shares no planned file or function |
 | OVERLAPPING | `files.txt` or the diff shows a planned path or function | `SUPERSEDED`: reverted | neither shows one |
 
-Attack `not_included` with `git -C <tree> log -S<symbol>` and `--grep=<title words>` (G5): a hit is
-a cherry-pick without the `(#N)` suffix, `DROPPED` with inclusion `included` at that commit. With
-nothing to refute, write `FINDING: none -- <reason>`; an empty file reads as a skipped step.
+Attack an inclusion answer in the tree's own history (G5): `git -C "$TREE" log --oneline
+-S<symbol> "$COMMIT"` for a function or constant the diff adds, and `--grep=<title words>`. A hit
+whose diff is the PR's change is a carry the probe could not match, `DROPPED` with inclusion
+`included` at that commit; with no hit it `SURVIVES` as `unknown`. A `SKIPPED: inclusion` line has
+no tree to search and stands. With nothing to refute, write `FINDING: none -- <reason>`; an empty
+file reads as a skipped step.
 
 ## Step 7 — Report
 
