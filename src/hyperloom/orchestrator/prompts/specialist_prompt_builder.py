@@ -171,7 +171,7 @@ def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
         "- `sglang/python/sglang/srt/scheduler/` and `sglang/python/sglang/srt/managers/`.",
         "- KB anchor `framework.*` (cuda_graph / batching / chunked_prefill / kv_cache).",
         "",
-        "**Config levers (cheap, try first — these are env/flag changes)**",
+        "**Config levers (cheap to validate — these are env/flag changes)**",
         "- `--enable-chunked-prefill` + matched `--max-num-batched-tokens`.",
         "- `--enforce-eager=false` + cuda graph capture for stable batch sizes.",
         "- `--kv-cache-dtype fp8_e4m3` when the gap is HBM-bound (gate accuracy!).",
@@ -989,9 +989,11 @@ def _authors_patches(inp: SpecialistPromptInputs) -> bool:
     return inp.mode == MODE_PATCH
 
 
-#: Domains whose KEEP gate is throughput. ``enablement_specialist`` is absent on
-#: purpose: its ladder book says climb only as far as runnability needs, so
-#: pushing it toward source work would argue against its own gate.
+#: Throughput domains whose focus block offers flags first, so the coda has
+#: something to raise the sights from. ``enablement_specialist`` is absent
+#: because its ladder book says climb only as far as runnability needs;
+#: ``framework_rewrite_specialist`` because it authors source rewrites and
+#: nothing else, and already carries its own "Where the wins are" taxonomy.
 _THROUGHPUT_AUTHORING_DOMAINS = frozenset(
     {
         "serving_specialist",
@@ -999,7 +1001,6 @@ _THROUGHPUT_AUTHORING_DOMAINS = frozenset(
         "comm_specialist",
         "compiler_specialist",
         "system_specialist",
-        "framework_rewrite_specialist",
     }
 )
 

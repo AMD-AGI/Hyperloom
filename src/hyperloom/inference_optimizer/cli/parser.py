@@ -1012,7 +1012,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="static_recon",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Auto-dispatch a read-only static-recon specialist at PRELUDE "
+        help="Auto-dispatch a read-only static-recon specialist at PRELUDE, and "
+        "again once per macro-cycle when the configuration arm plateaus, "
         "that greps the framework source for un-bridged capability "
         "switches (predicates that silently disable a faster path for "
         "this model/GPU/precision, e.g. a CUDA-only ``*_supported()`` "

@@ -401,7 +401,8 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   therefore not an argument for another config round. On consecutive
   config-only rounds, dispatch a `mode='patch'` specialist at a
   high-ceiling move: bridge a predicate that takes this model / GPU /
-  precision off a faster path (the `bridge_candidates` in `gaps[]`),
+  precision off a faster path (the `[static_recon/...]` rows in
+  `=== Current gaps ===`),
   restore a path the runtime findings report disabled or falling back,
   fix the framework bug behind the symptom, or re-sequence how
   this architecture drives its components. Promote via
