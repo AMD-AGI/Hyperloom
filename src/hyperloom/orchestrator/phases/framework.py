@@ -122,7 +122,7 @@ def _framework_config_levers_from_done(
                 parsed_args = tokenize_server_args_preserving_json(" ".join(arg_tokens))
                 if parsed_args is None:
                     log.warning(
-                        "FRAMEWORK config lever %r has unparsable server args; dropping the args%s",
+                        "FRAMEWORK config lever %r has unparseable server args; dropping the args%s",
                         entry.get("name"),
                         " while preserving its environment overrides" if extra_envs else "",
                     )
@@ -1889,7 +1889,6 @@ class FrameworkPhase(ProposalBench):
             "kept",
             "kept_inert",
             "reverted",
-            "already_present",
             "no_patch",
             "enqueue_failed",
             FRAMEWORK_CRITIC_DENIED_STATUS,
@@ -2577,11 +2576,20 @@ class FrameworkPhase(ProposalBench):
         if not cand_id:
             return
         batch_id = str(params.get("framework_batch_id") or "")
+        # Map the cached audit verdict to a terminal status.
+        audit = params.get("framework_audit") if isinstance(params.get("framework_audit"), dict) else {}
+        sem = str((audit or {}).get("semantic_status") or "").strip().lower()
+        if sem in ("already_equivalent", "already_superset"):
+            status = "already_present"
+        elif sem in ("not_present", "partially_present"):
+            status = "not_applicable"
+        else:
+            status = "author_empty"
         reason = str(inner.get("summary") or "").strip()[:500]
         recorded = self._stamp_framework_progress(
             candidate_id=cand_id,
             batch_id=batch_id,
-            status="author_empty",
+            status=status,
             kept=False,
             rationale=reason,
             provenance="authored_empty",
@@ -2593,7 +2601,12 @@ class FrameworkPhase(ProposalBench):
         )
         if not recorded:
             return
-        log.info("FRAMEWORK: authoring specialist empty deliverable candidate=%s batch=%s", cand_id, batch_id)
+        log.info(
+            "FRAMEWORK: authoring specialist empty deliverable candidate=%s batch=%s status=%s",
+            cand_id,
+            batch_id,
+            status,
+        )
 
     async def _candidate_discovery_inflight(self) -> bool:
         """True while a candidate-discovery specialist is queued or running."""
