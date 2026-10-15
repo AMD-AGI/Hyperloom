@@ -47,6 +47,7 @@ class EntryKind(str, Enum):
     REGRESSION = "regression"
     QUARANTINE = "quarantine"
     BRANCH_LOG = "branch_log"
+    LEARNING = "learning"
     TOOL_RESULT = "tool_result"
     CLAIM = "claim"
     SESSION_PROFILE = "session_profile"

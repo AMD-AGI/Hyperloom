@@ -26,6 +26,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
     DedupStatus,
     FrontierBasis,
     InboxKind,
+    LearningKind,
     LineageKind,
     MergeOutcome,
     QuarantineAction,
@@ -229,6 +230,32 @@ class BranchLogRecord:
 
 
 @dataclass(frozen=True)
+class Learning:
+    """What a specialist learnt, in its own words, for the next decision of any branch, now or in a later session.
+
+    ``target``, ``mechanism`` and ``layer`` name the direction it is about, when it is about one; ``request_ids`` the
+    tests behind it; ``supersedes`` an earlier learning of the same branch that it replaces. The conditions it holds
+    under are the session's, which the notebook knows; the specialist does not repeat them.
+    """
+
+    branch: str
+    kind: LearningKind
+    content: str
+    target: str = ""
+    mechanism: str = ""
+    layer: IntentLayer | None = None
+    request_ids: tuple[str, ...] = ()
+    supersedes: str | None = None
+
+
+@dataclass(frozen=True)
+class LearningRecord:
+    entry_id: str
+    at: float
+    learning: Learning
+
+
+@dataclass(frozen=True)
 class FrontierScore:
     """Expected gain over the PRELUDE baseline from one more unit of budget, its parts, and what it rests on."""
 
@@ -425,6 +452,7 @@ class NotebookSnapshot:
     regressions: tuple[RegressionCase, ...]
     quarantined: tuple[QuarantineEvent, ...]
     branch_logs: Mapping[str, tuple[BranchLogRecord, ...]]
+    learnings: tuple[LearningRecord, ...] = ()
 
     @property
     def baseline(self) -> BaselineRecord | None:
@@ -455,6 +483,8 @@ __all__ = [
     "FrontierScore",
     "InboxItem",
     "InboxPage",
+    "Learning",
+    "LearningRecord",
     "LineageEvent",
     "LineageView",
     "ManifestFingerprint",

@@ -111,6 +111,17 @@ class QuarantineAction(str, Enum):
     LIFT = "lift"
 
 
+class LearningKind(str, Enum):
+    """What a specialist's learning is: a way to fail, how the system behaves here, how a tool or setting behaves, what
+    a hypothesis came to, or something else."""
+
+    PITFALL = "pitfall"
+    INSIGHT = "insight"
+    TOOLING = "tooling"
+    HYPOTHESIS = "hypothesis"
+    OTHER = "other"
+
+
 class FrontierBasis(str, Enum):
     """What a frontier score rests on, so its reader knows how far to trust it.
 
@@ -137,6 +148,7 @@ __all__ = [
     "DedupStatus",
     "FrontierBasis",
     "InboxKind",
+    "LearningKind",
     "LineageKind",
     "MergeOutcome",
     "QuarantineAction",

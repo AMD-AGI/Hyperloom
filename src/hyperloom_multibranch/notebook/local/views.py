@@ -299,6 +299,7 @@ def snapshot(state: NotebookState, claims: tuple[Claim, ...], taken_at: float) -
         regressions=tuple(state.regressions),
         quarantined=quarantined(state),
         branch_logs={branch: tuple(records) for branch, records in state.branch_logs.items()},
+        learnings=tuple(state.learnings),
     )
 
 

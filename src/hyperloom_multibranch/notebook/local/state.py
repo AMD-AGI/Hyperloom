@@ -20,6 +20,8 @@ from hyperloom_multibranch.contracts.notebook.peers import (
 from hyperloom_multibranch.contracts.notebook.records import (
     BaselineRecord,
     BranchLogRecord,
+    Learning,
+    LearningRecord,
     LineageEvent,
     ManifestFingerprint,
     MergeAttempt,
@@ -72,6 +74,7 @@ PAYLOADS: dict[EntryKind, type] = {
     EntryKind.REGRESSION: RegressionCase,
     EntryKind.QUARANTINE: QuarantineEvent,
     EntryKind.BRANCH_LOG: BranchLogEntry,
+    EntryKind.LEARNING: Learning,
     EntryKind.TOOL_RESULT: ToolResultPointer,
     EntryKind.CLAIM: ClaimDecision,
     EntryKind.SESSION_PROFILE: SessionProfile,
@@ -96,6 +99,7 @@ class NotebookState:
         self.regressions: list[RegressionCase] = []
         self.quarantine: list[QuarantineEvent] = []
         self.branch_logs: dict[str, list[BranchLogRecord]] = {}
+        self.learnings: list[LearningRecord] = []
         self.intents: dict[str, Intent] = {}
         self.profiles: list[SessionProfile] = []
         self.fingerprints: list[ManifestFingerprint] = []
@@ -116,6 +120,7 @@ class NotebookState:
             EntryKind.REGRESSION: lambda _entry, value: self.regressions.append(value),
             EntryKind.QUARANTINE: lambda _entry, value: self.quarantine.append(value),
             EntryKind.BRANCH_LOG: self._branch_log,
+            EntryKind.LEARNING: self._learning,
             EntryKind.TOOL_RESULT: lambda _entry, _value: None,
             EntryKind.CLAIM: self._claim,
         }
@@ -148,6 +153,9 @@ class NotebookState:
 
     def _branch_log(self, entry: Entry, log_entry: BranchLogEntry) -> None:
         self.branch_logs.setdefault(log_entry.branch, []).append(BranchLogRecord(entry.entry_id, entry.at, log_entry))
+
+    def _learning(self, entry: Entry, learning: Learning) -> None:
+        self.learnings.append(LearningRecord(entry.entry_id, entry.at, learning))
 
     def _claim(self, _entry: Entry, decision: ClaimDecision) -> None:
         self.intents.setdefault(decision.intent.fingerprint, decision.intent)

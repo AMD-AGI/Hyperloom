@@ -28,6 +28,7 @@ from hyperloom_multibranch.contracts.notebook.peers import (
     BranchLogEntry,
     BranchLogType,
     HypothesisStatus,
+    IntentLayer,
     Purpose,
     TestKind,
     TestRequest,
@@ -36,6 +37,7 @@ from hyperloom_multibranch.contracts.notebook.peers import (
 )
 from hyperloom_multibranch.contracts.notebook.records import (
     BaselineRecord,
+    Learning,
     LineageEvent,
     MergeAttempt,
     QuarantineEvent,
@@ -46,6 +48,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
     Conclusion,
     DedupStatus,
     InboxKind,
+    LearningKind,
     LineageKind,
     MergeOutcome,
     QuarantineAction,
@@ -67,7 +70,7 @@ async def _tested(open_as: Open, request_id: str, branch: str = "s1", parent: st
 def test_the_local_notebook_implements_every_interface_method() -> None:
     names = [name for name, member in inspect.getmembers(interfaces.Notebook) if inspect.iscoroutinefunction(member)]
 
-    assert len(names) == 36
+    assert len(names) == 38
     assert all(getattr(LocalNotebook, name) is not getattr(interfaces.Notebook, name) for name in names)
 
 
@@ -337,6 +340,76 @@ async def test_a_branch_log_is_its_runtimes_alone_and_its_current_plan_is_the_la
         await s1.append_branch_log(BranchLogEntry("s1", BranchLogType.PLAN, "x", supersedes="nope:1"))
     with pytest.raises(NotRecorded):
         await s1.branch_log("s1", after="nope:1")
+
+
+async def test_a_branch_writes_its_own_learnings_and_every_branch_reads_them_all(open_as: Open) -> None:
+    await _tested(open_as, "r1")
+    s1, s2 = open_as(Role.SPECIALIST_RUNTIME, "s1"), open_as(Role.SPECIALIST_RUNTIME, "s2")
+    pitfall = await s1.append_learning(
+        Learning(
+            "s1",
+            LearningKind.PITFALL,
+            "  fp8 KV cache   fails the accuracy gate on this model  ",
+            "kv cache",
+            "fp8 kv cache",
+            IntentLayer.CONFIG,
+            ("r1",),
+        )
+    )
+    tooling = await s2.append_learning(Learning("s2", LearningKind.TOOLING, "vLLM 0.11 ignores VLLM_USE_V1=0 here"))
+    corrected = await s1.append_learning(
+        Learning(
+            "s1",
+            LearningKind.PITFALL,
+            "fp8 KV cache passes accuracy with --calculate-kv-scales",
+            supersedes=pitfall.entry_id,
+        )
+    )
+
+    assert pitfall.learning.content == "fp8 KV cache fails the accuracy gate on this model"
+    assert [record.entry_id for record in await s2.learnings()] == [
+        pitfall.entry_id,
+        tooling.entry_id,
+        corrected.entry_id,
+    ]
+    assert await s2.learnings(branch="s1") == (pitfall, corrected)
+    assert (await s1.snapshot()).learnings == (pitfall, tooling, corrected)
+    assert [hit.entry_id for hit in await s2.search("ignores")] == [tooling.entry_id]
+
+
+@pytest.mark.parametrize(
+    ("learning", "refusal"),
+    [
+        (Learning("s2", LearningKind.INSIGHT, "attention dominates decode at conc 64"), WriterNotAllowed),
+        (Learning("s1", LearningKind.INSIGHT, "no gain"), ValueError),
+        (Learning("s1", LearningKind.INSIGHT, "too short"), ValueError),
+        (Learning("s1", LearningKind.INSIGHT, "x" * 601), ValueError),
+        (
+            Learning("s1", LearningKind.INSIGHT, "attention dominates decode at conc 64", request_ids=("r9",)),
+            NotRecorded,
+        ),
+        (
+            Learning("s1", LearningKind.INSIGHT, "attention dominates decode at conc 64", supersedes="nope:1"),
+            NotRecorded,
+        ),
+    ],
+)
+async def test_a_learning_the_notebook_cannot_use_is_refused(
+    open_as: Open, learning: Learning, refusal: type[Exception]
+) -> None:
+    with pytest.raises(refusal):
+        await open_as(Role.SPECIALIST_RUNTIME, "s1").append_learning(learning)
+
+
+async def test_a_branch_supersedes_only_its_own_learnings(open_as: Open) -> None:
+    other = await open_as(Role.SPECIALIST_RUNTIME, "s2").append_learning(
+        Learning("s2", LearningKind.INSIGHT, "attention dominates decode at conc 64")
+    )
+
+    with pytest.raises(NotRecorded):
+        await open_as(Role.SPECIALIST_RUNTIME, "s1").append_learning(
+            Learning("s1", LearningKind.INSIGHT, "gemm dominates decode at conc 256", supersedes=other.entry_id)
+        )
 
 
 async def test_a_tool_result_pointer_reaches_only_its_branch_and_a_bad_cursor_is_refused(open_as: Open) -> None:

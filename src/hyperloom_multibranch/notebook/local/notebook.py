@@ -7,7 +7,7 @@ The directory holds ``segments/`` (one append-only file per handle) and ``claims
 same on a local disk and on a shared NFS folder. A handle writes as one :class:`Writer`, and each write checks that the
 writer's role owns the state it writes: test requests, results and withdrawals the toolbox, specialist-branch
 judgements the rule gate, integration-branch judgements and merge attempts the integrator, branch starts and stops the
-scheduler, claims and branch logs the specialist runtime of that branch.
+scheduler, claims, branch logs and learnings the specialist runtime of that branch.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from hyperloom_multibranch.contracts.notebook.interfaces import (
     GateRecords,
     Inbox,
     JudgementSink,
+    LearningStore,
     LineageSink,
     NodeHealth,
     NotebookError,
@@ -62,6 +63,8 @@ from hyperloom_multibranch.contracts.notebook.records import (
     CommittedCommit,
     DedupAnswer,
     InboxPage,
+    Learning,
+    LearningRecord,
     LineageEvent,
     LineageView,
     ManifestFingerprint,
@@ -113,6 +116,29 @@ _LINEAGE_FIELDS: dict[LineageKind, tuple[str, ...]] = {
     LineageKind.STOP: (),
 }
 _RECIPE_DIGEST = re.compile(re.escape(DIGEST_PREFIX) + "[0-9a-f]{64}")
+LEARNING_MIN_CHARS = 20
+LEARNING_MAX_CHARS = 600
+#: Learnings too generic for a later decision to use.
+GENERIC_LEARNINGS = frozenset(
+    {"improve performance", "improve throughput", "optimize", "optimization", "test", "try", "it works", "no gain"}
+)
+
+
+def _check_learning(learning: Learning, state: NotebookState) -> Learning:
+    """``learning`` with its text trimmed; raises ``ValueError`` or :class:`NotRecorded` for what the store refuses."""
+
+    content = " ".join(learning.content.split())
+    if len(content) < LEARNING_MIN_CHARS or content.lower().rstrip(".") in GENERIC_LEARNINGS:
+        raise ValueError(f"a learning says what was learnt, in at least {LEARNING_MIN_CHARS} characters: {content!r}")
+    if len(content) > LEARNING_MAX_CHARS:
+        raise ValueError(f"a learning is at most {LEARNING_MAX_CHARS} characters, got {len(content)}")
+    unknown = [request_id for request_id in learning.request_ids if request_id not in state.requests]
+    if unknown:
+        raise NotRecorded(f"no test request {', '.join(unknown)}")
+    own = {record.entry_id for record in state.learnings if record.learning.branch == learning.branch}
+    if learning.supersedes is not None and learning.supersedes not in own:
+        raise NotRecorded(f"branch {learning.branch} has no learning {learning.supersedes}")
+    return replace(learning, content=content, target=learning.target.strip(), mechanism=learning.mechanism.strip())
 
 
 def _refusal(answer: DedupAnswer, reason: str) -> NotebookError | None:
@@ -178,6 +204,7 @@ class LocalNotebook(
     LineageSink,
     ClaimService,
     BranchLogStore,
+    LearningStore,
     Inbox,
     ProgressQuery,
     CommitQuery,
@@ -553,6 +580,17 @@ class LocalNotebook(
         plans = [r for r in records if r.entry.kind is BranchLogType.PLAN and r.entry_id not in superseded]
         return plans[-1] if plans else None
 
+    async def append_learning(self, learning: Learning) -> LearningRecord:
+        self._require(Role.SPECIALIST_RUNTIME)
+        self._own_branch(learning.branch)
+        checked = _check_learning(learning, self._state())
+        summary = f"learning/{checked.kind.value}: {checked.content}"
+        written = self._append(EntryKind.LEARNING, checked, branch=checked.branch, parent="", summary=summary)
+        return LearningRecord(written.entry_id, written.at, checked)
+
+    async def learnings(self, *, branch: str = "") -> tuple[LearningRecord, ...]:
+        return tuple(record for record in self._state().learnings if not branch or record.learning.branch == branch)
+
     async def poll(self, branch: str, cursor: str = "") -> InboxPage:
         return feeds.poll(self._state(), branch, cursor)
 
@@ -625,4 +663,11 @@ class LocalNotebook(
         return views.snapshot(self._state(), claims, now)
 
 
-__all__ = ["CLAIMS_DIR", "SEGMENTS_DIR", "LocalNotebook"]
+__all__ = [
+    "CLAIMS_DIR",
+    "GENERIC_LEARNINGS",
+    "LEARNING_MAX_CHARS",
+    "LEARNING_MIN_CHARS",
+    "SEGMENTS_DIR",
+    "LocalNotebook",
+]

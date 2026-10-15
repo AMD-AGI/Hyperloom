@@ -32,6 +32,8 @@ from hyperloom_multibranch.contracts.notebook.records import (
     CommittedCommit,
     DedupAnswer,
     InboxPage,
+    Learning,
+    LearningRecord,
     LineageEvent,
     LineageView,
     ManifestFingerprint,
@@ -189,6 +191,19 @@ class BranchLogStore(Protocol):
     async def current_plan(self, branch: str) -> BranchLogRecord | None: ...
 
 
+class LearningStore(Protocol):
+    """What the specialists learnt: a branch's own runtime appends its learnings, and every branch reads them all.
+
+    An append raises ``ValueError`` for a learning too short, too long or too generic to help a later decision, and
+    :class:`NotRecorded` when it cites a test or supersedes a learning the notebook does not hold.
+    """
+
+    async def append_learning(self, learning: Learning) -> LearningRecord: ...
+
+    async def learnings(self, *, branch: str = "") -> tuple[LearningRecord, ...]:
+        """The learnings of ``branch``, every branch's when empty, oldest first, the superseded ones included."""
+
+
 class Inbox(Protocol):
     """Pointers pushed to one branch; the tool layer turns polling into pushes."""
 
@@ -260,6 +275,7 @@ class Notebook(
     LineageSink,
     ClaimService,
     BranchLogStore,
+    LearningStore,
     Inbox,
     ProgressQuery,
     CommitQuery,
@@ -283,6 +299,7 @@ __all__ = [
     "GateRecords",
     "Inbox",
     "JudgementSink",
+    "LearningStore",
     "LineageSink",
     "NodeHealth",
     "NotRecorded",
