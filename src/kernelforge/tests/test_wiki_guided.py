@@ -30,8 +30,15 @@ from kernelforge.loop.wiki_guidance import (
     parse_playbook,
     record_outcome,
 )
-from kernelforge.orchestrator.contracts import OrchestrationRunResult
-from kernelforge.orchestrator.orchestration import OrchestrationAgent, OrchestrationInfrastructureError
+from kernelforge.orchestrator import orchestration as orchestration_module
+from kernelforge.orchestrator.contracts import OrchestrationRunResult, SpecialistOutcome, SynthesizedPlan
+from kernelforge.orchestrator.orchestration import (
+    OrchestrationAgent,
+    OrchestrationInfrastructureError,
+    OrchestrationService,
+    default_specialist_definitions,
+)
+from kernelforge.orchestrator.specialists import SpecialistRunResult
 from kernelforge.tests.test_forge_loop_resume import _install_cli_fakes, _invoke_forge_loop
 from kernelforge.tests.test_forge_orchestration import _context
 from kernelforge.tests.test_loop_runner import _AMPLE_BUDGET_SEC, _lane_agent_factory, _make_loop, _unused_supervisor
@@ -510,6 +517,147 @@ def test_planning_tasks_point_at_the_guidance_only_when_there_is_some():
     assert guided.to_prompt_dict()["wiki_guidance"]["phase"] == "GUIDED"
     with pytest.raises(ValueError, match="wiki_guidance"):
         replace(plain, wiki_guidance=["not", "a", "mapping"])
+
+
+# --- GUIDED rounds analyze each playbook group whole ----------------------------------------------------------------
+
+
+class _PlanningAgent:
+    """The planning agent's turns, recorded; a dispatch planner that should not be asked in GUIDED."""
+
+    def __init__(self):
+        self.dispatched_from: list[list[str]] = []
+        self.synthesized_from: list[list[str]] = []
+        self.structured_output_diagnostics: dict = {}
+        self.phase_durations_sec: dict = {}
+
+    async def plan_dispatch(self, context, definitions, *, usage=None):
+        self.dispatched_from.append(sorted(definitions))
+        return orchestration_module._bound_dispatch_plan(
+            context, [("compute", [case.case_id for case in context.cases], "angle analysis")], ()
+        )
+
+    async def synthesize_lane_plan_results(self, context, outcomes, dispatch_plan, coverage, *, lanes, usage=None):
+        self.synthesized_from.append([outcome.content for outcome in outcomes])
+        return [SynthesizedPlan(text="the plan")]
+
+
+class _RecordingPool:
+    def __init__(self, roles):
+        self.roles = set(roles)
+        self.assignments = []
+
+    def has_role(self, role_id):
+        return role_id in self.roles
+
+    async def run(self, assignments, context, *, usage=None):
+        self.assignments.extend(assignments)
+        return SpecialistRunResult(
+            outcomes=tuple(
+                SpecialistOutcome(
+                    assignment_id=assignment.assignment_id,
+                    role_id=assignment.role_id,
+                    duration_sec=0.1,
+                    content=f"analysis: {assignment.reason}",
+                )
+                for assignment in assignments
+            )
+        )
+
+
+def _guided_context(phase="GUIDED"):
+    payload = json.loads(json.dumps(PLAYBOOK))
+    payload["groups"].append({"id": "G3", "title": "epilogue"})
+    payload["items"].append({"id": "P3", "group": "G3", "title": "nontemporal stores", "wiki_pages": ["page"]})
+    state = GuidanceState(phase=phase, reason_codes=[] if phase == "GUIDED" else ["GUIDED_STALL"])
+    state.adopt(parse_playbook(json.dumps(payload))[0])
+    state.ledger["P2"].status = "APPLIED"
+    state.ledger["P3"].status = "FAILED"
+    return replace(_context(), wiki_guidance=guidance.render_for_planning(state))
+
+
+def _service(roles):
+    agent = _PlanningAgent()
+    pool = _RecordingPool(roles)
+    service = OrchestrationService(
+        agent=agent,
+        specialist_pool=pool,
+        definitions=default_specialist_definitions(),
+    )
+    return service, agent, pool
+
+
+def test_a_guided_round_analyzes_each_open_group_whole_without_the_dispatch_planner():
+    service, agent, pool = _service({"compute", "memory", "algorithm", orchestration_module.PLAYBOOK_GROUP_ROLE})
+
+    result = asyncio.run(service.run(_guided_context(), lanes=3))
+
+    assert agent.dispatched_from == []
+    # G2's only item is applied, so the open groups are G1 and G3 (its item failed once and may be retried).
+    assert [assignment.role_id for assignment in pool.assignments] == ["playbook_group", "playbook_group"]
+    assert [assignment.reason.split(" (")[0] for assignment in pool.assignments] == [
+        "Playbook group G1",
+        "Playbook group G3",
+    ]
+    assert "P1 deferred normalization" in pool.assignments[0].reason
+    assert all(
+        assignment.target_case_ids == tuple(c.case_id for c in _context().cases) for assignment in pool.assignments
+    )
+    assert len(agent.synthesized_from[0]) == 2
+    assert result.structured_output_diagnostics["dispatch"]["mode"] == "playbook_groups"
+
+
+def test_a_one_lane_guided_round_takes_the_highest_priority_open_group():
+    service, _agent, pool = _service({"compute", "memory", "algorithm", orchestration_module.PLAYBOOK_GROUP_ROLE})
+
+    asyncio.run(service.run(_guided_context(), lanes=1))
+
+    assert [assignment.reason.split(" (")[0] for assignment in pool.assignments] == ["Playbook group G1"]
+
+
+def test_free_rounds_and_unguided_campaigns_keep_the_angle_specialists():
+    service, agent, pool = _service({"compute", "memory", "algorithm", orchestration_module.PLAYBOOK_GROUP_ROLE})
+    asyncio.run(service.run(_guided_context(phase="FREE"), lanes=3))
+    asyncio.run(service.run(_context(), lanes=3))
+
+    assert agent.dispatched_from == [["algorithm", "compute", "memory"]] * 2
+    assert {assignment.role_id for assignment in pool.assignments} == {"compute"}
+
+
+def test_a_pool_without_the_group_analyst_plans_a_guided_round_as_before():
+    service, agent, pool = _service({"compute", "memory", "algorithm"})
+
+    asyncio.run(service.run(_guided_context(), lanes=3))
+
+    assert agent.dispatched_from == [["algorithm", "compute", "memory"]]
+    assert {assignment.role_id for assignment in pool.assignments} == {"compute"}
+
+
+def test_the_factory_adds_the_group_analyst_only_with_a_knowledge_base(monkeypatch):
+    runtime = SimpleNamespace(timeout_sec=1800)
+    monkeypatch.setattr(
+        orchestration_module,
+        "create_registered_backend",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            runtime=runtime, name="test", capabilities=AgentCapabilities(mcp=True)
+        ),
+    )
+    config = SimpleNamespace(
+        agent_runtime=lambda: runtime,
+        workspace="/workspace",
+        max_turns=50,
+        specialist_probe=False,
+        specialist_probe_max=6,
+        specialist_probe_budget_sec=600.0,
+        specialist_probe_scratch_root="",
+        knowledge_wiki_root="",
+        knowledge_wiki_log="",
+    )
+
+    service = orchestration_module.make_orchestration_service(config=config)
+
+    assert set(service._specialist_pool._agents) == {"compute", "memory", "algorithm"}
+    assert not service._specialist_pool.has_role(orchestration_module.PLAYBOOK_GROUP_ROLE)
 
 
 # --- the CLI --------------------------------------------------------------------------------------------------------

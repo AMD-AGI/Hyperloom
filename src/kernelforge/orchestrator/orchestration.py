@@ -304,6 +304,135 @@ class OrchestrationOutputError(ValueError):
     """Report a non-infrastructure response that cannot serve as a plan."""
 
 
+def _bound_dispatch_plan(
+    context: OrchestrationContext,
+    entries: Sequence[tuple[str, Sequence[str], str]],
+    notes: Sequence[str],
+) -> DispatchPlan:
+    """Bind each (role, cases, reason) entry to an assignment ID and its exact evidence paths."""
+    global_kinds = {
+        "analysis_artifact_catalog",
+        "analysis_bundle",
+        "analysis_cumulative_diff",
+        "analysis_summary",
+        "analysis_source_map",
+        "analysis_workflow",
+        "latest_lesson",
+        "supervisor_guidance",
+    }
+    global_refs = [reference for reference in context.evidence_refs if reference.kind in global_kinds]
+    source_ref = EvidenceRef(
+        kind="source_map",
+        path=context.source_map_path,
+        summary="Current source map or anchor source.",
+    )
+    case_by_id = {case.case_id: case for case in context.cases}
+    assignments = []
+    for index, (role_id, case_ids, reason) in enumerate(entries, start=1):
+        refs = {reference.path: reference for reference in global_refs}
+        refs[source_ref.path] = source_ref
+        target_cases = tuple(case_ids)
+        for case_id in target_cases:
+            case = case_by_id[case_id]
+            measurement = EvidenceRef(
+                kind="measurement",
+                path=f"case:{case_id}",
+                summary=(f"Canonical timing and Analysis flags for {case_id}."),
+            )
+            refs[measurement.path] = measurement
+            if case.profile_summary_path:
+                profiled = any(
+                    flag
+                    in {
+                        "analysis_profiled",
+                        "analysis_profile_incremental",
+                        "analysis_checkpoint_profile_interpretation",
+                        "analysis_checkpoint_normalized_only",
+                        "analysis_checkpoint_raw_profile_only",
+                    }
+                    for flag in case.flags
+                )
+                reference = EvidenceRef(
+                    kind=("profile" if profiled else "analysis_interpretation"),
+                    path=case.profile_summary_path,
+                    summary=("Measured profile" if profiled else "Analysis interpretation")
+                    + f" for {case_id}. Flags: "
+                    + f"{', '.join(case.flags) or '(none)'}.",
+                )
+                refs[reference.path] = reference
+        assignments.append(
+            SpecialistAssignment(
+                assignment_id=f"{role_id}-{index}",
+                role_id=role_id,
+                target_case_ids=target_cases,
+                evidence_refs=tuple(refs.values()),
+                reason=reason,
+            )
+        )
+    return DispatchPlan(
+        analysis_commit=context.analysis_commit,
+        assignments=tuple(assignments),
+        normalization_notes=tuple(notes),
+    )
+
+
+# A GUIDED round's analyses: one per playbook group, each covering its group whole. Registered beside the angle
+# specialists only when the campaign has a knowledge base, and never offered to the dispatch planner, so an
+# unguided round can never be assigned one.
+PLAYBOOK_GROUP_ROLE = "playbook_group"
+_OPEN_PLAYBOOK_STATUSES = frozenset({"PENDING", "FAILED"})
+
+
+def playbook_group_definition() -> SpecialistDefinition:
+    return SpecialistDefinition(
+        role_id=PLAYBOOK_GROUP_ROLE,
+        description="Knowledge base playbook step analyst",
+        instructions=(
+            "Analyze the playbook group named in the assignment as one implementation step, across compute, "
+            "memory and algorithm together rather than from any one angle. Read the knowledge base pages its "
+            "items cite, locate the exact code each item changes, check each item's precondition against the "
+            "measured evidence, and state how the items interact, the launch configuration the step needs, the "
+            "risks, and how to verify that each item took effect. Recommend skipping an item only with the "
+            "evidence that it does not apply, and recommend nothing outside the group unless a cited item cannot "
+            "pay off without it."
+        ),
+        capabilities=("playbook", "compute", "memory", "algorithm"),
+    )
+
+
+def playbook_group_dispatch(context: OrchestrationContext, *, lanes: int) -> DispatchPlan | None:
+    """A GUIDED round's assignments, one per open playbook group in priority order; None outside GUIDED."""
+    guidance = context.wiki_guidance
+    if not guidance or guidance.get("phase") != "GUIDED":
+        return None
+    playbook = guidance.get("playbook") or {}
+    items = {str(item.get("id")): item for item in playbook.get("items") or [] if isinstance(item, Mapping)}
+    entries = []
+    for group in playbook.get("groups") or []:
+        if not isinstance(group, Mapping):
+            continue
+        open_items = [
+            items[item_id]
+            for item_id in group.get("items") or []
+            if item_id in items and items[item_id].get("status") in _OPEN_PLAYBOOK_STATUSES
+        ]
+        if not open_items:
+            continue
+        listed = "; ".join(f"{item['id']} {item.get('title', '')}".strip() for item in open_items)
+        entries.append(
+            (
+                PLAYBOOK_GROUP_ROLE,
+                [case.case_id for case in context.cases],
+                f"Playbook group {group.get('id')} ({group.get('title', '')}), one step: {listed}",
+            )
+        )
+        if len(entries) >= max(1, int(lanes)):
+            break
+    if not entries:
+        return None
+    return _bound_dispatch_plan(context, entries, ("framework-assigned one analysis per open playbook group",))
+
+
 class OrchestrationAgent:
     """Run dispatch and synthesis turns through an injected read-only backend."""
 
@@ -531,69 +660,10 @@ class OrchestrationAgent:
             ]
             notes.append(f"added missing cases to {first_role!r}: {', '.join(missing)}")
 
-        global_kinds = {
-            "analysis_artifact_catalog",
-            "analysis_bundle",
-            "analysis_cumulative_diff",
-            "analysis_summary",
-            "analysis_source_map",
-            "analysis_workflow",
-            "latest_lesson",
-            "supervisor_guidance",
-        }
-        global_refs = [reference for reference in context.evidence_refs if reference.kind in global_kinds]
-        source_ref = EvidenceRef(
-            kind="source_map",
-            path=context.source_map_path,
-            summary="Current source map or anchor source.",
-        )
-        case_by_id = {case.case_id: case for case in context.cases}
-        assignments = []
-        for index, (role_id, item) in enumerate(merged.items(), start=1):
-            refs = {reference.path: reference for reference in global_refs}
-            refs[source_ref.path] = source_ref
-            target_cases = tuple(item["case_ids"])
-            for case_id in target_cases:
-                case = case_by_id[case_id]
-                measurement = EvidenceRef(
-                    kind="measurement",
-                    path=f"case:{case_id}",
-                    summary=(f"Canonical timing and Analysis flags for {case_id}."),
-                )
-                refs[measurement.path] = measurement
-                if case.profile_summary_path:
-                    profiled = any(
-                        flag
-                        in {
-                            "analysis_profiled",
-                            "analysis_profile_incremental",
-                            "analysis_checkpoint_profile_interpretation",
-                            "analysis_checkpoint_normalized_only",
-                            "analysis_checkpoint_raw_profile_only",
-                        }
-                        for flag in case.flags
-                    )
-                    reference = EvidenceRef(
-                        kind=("profile" if profiled else "analysis_interpretation"),
-                        path=case.profile_summary_path,
-                        summary=("Measured profile" if profiled else "Analysis interpretation")
-                        + f" for {case_id}. Flags: "
-                        + f"{', '.join(case.flags) or '(none)'}.",
-                    )
-                    refs[reference.path] = reference
-            assignments.append(
-                SpecialistAssignment(
-                    assignment_id=f"{role_id}-{index}",
-                    role_id=role_id,
-                    target_case_ids=target_cases,
-                    evidence_refs=tuple(refs.values()),
-                    reason=str(item["reason"]),
-                )
-            )
-        return DispatchPlan(
-            analysis_commit=context.analysis_commit,
-            assignments=tuple(assignments),
-            normalization_notes=tuple(notes),
+        return _bound_dispatch_plan(
+            context,
+            [(role_id, item["case_ids"], str(item["reason"])) for role_id, item in merged.items()],
+            notes,
         )
 
     async def synthesize_optimization_plan(
@@ -1403,13 +1473,28 @@ class OrchestrationService:
         self._agent.phase_durations_sec = {}
         phase_durations = self._agent.phase_durations_sec
         run_started_at = time.monotonic()
+        # A GUIDED round already knows its steps: the playbook's open groups, each analyzed whole. The angle
+        # specialists and the dispatch planner that chooses among them serve every other round.
+        group_dispatch = (
+            playbook_group_dispatch(context, lanes=lanes)
+            if self._specialist_pool.has_role(PLAYBOOK_GROUP_ROLE)
+            else None
+        )
         with _phase_timer(phase_durations, "dispatch"):
-            dispatch_plan = await self._agent.plan_dispatch(
-                context,
-                self._definitions,
-                usage=usage,
-            )
+            if group_dispatch is not None:
+                dispatch_plan = group_dispatch
+            else:
+                dispatch_plan = await self._agent.plan_dispatch(
+                    context,
+                    self._definitions,
+                    usage=usage,
+                )
         diagnostics = dict(self._agent.structured_output_diagnostics)
+        if group_dispatch is not None:
+            diagnostics["dispatch"] = {
+                "mode": "playbook_groups",
+                "assignments": [assignment.reason for assignment in group_dispatch.assignments],
+            }
 
         with _phase_timer(phase_durations, "specialists"):
             specialist_run = await self._specialist_pool.run(
@@ -1984,6 +2069,11 @@ def make_orchestration_service(
     )
     specialist_probe = _specialist_probe_config(config)
     knowledge_wiki = KnowledgeWikiTool.from_config(config)
+    # The dispatch planner chooses among ``resolved_definitions`` only; the playbook group analyst is in the pool for
+    # the GUIDED rounds a knowledge base makes possible, and no unguided round can be assigned one.
+    pool_definitions = dict(resolved_definitions)
+    if knowledge_wiki is not None and PLAYBOOK_GROUP_ROLE not in pool_definitions:
+        pool_definitions[PLAYBOOK_GROUP_ROLE] = playbook_group_definition()
     specialist_agents = {
         role_id: SpecialistAgent(
             definition=definition,
@@ -1997,7 +2087,7 @@ def make_orchestration_service(
             probe=specialist_probe,
             knowledge_wiki=knowledge_wiki,
         )
-        for role_id, definition in resolved_definitions.items()
+        for role_id, definition in pool_definitions.items()
     }
     return OrchestrationService(
         agent=OrchestrationAgent(

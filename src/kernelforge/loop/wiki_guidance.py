@@ -93,8 +93,10 @@ GUIDED_INSTRUCTIONS = (
     "4. Adapt each item to this kernel's evidence (profile, cases, code). Its knowledge base pages are available "
     "through the knowledge tools; read them before planning the item.\n"
     "5. Do not re-plan REFUTED or SKIPPED items. A FAILED item may be retried once, with the failure fixed.\n"
-    "6. Specialists: analyze how this round's playbook items apply to this kernel (preconditions, exact code sites, "
-    "the launch configuration they need) rather than surveying the kernel broadly.\n"
+    "6. This round's analyses are one per open playbook group (role `playbook_group`, the group named in each "
+    "assignment), each covering its group whole across compute, memory and algorithm. Build each lane from one "
+    "group's analysis; an analyst of another role, when there is one, analyzes how this round's playbook items "
+    "apply to this kernel rather than surveying it broadly.\n"
     "Add work outside the playbook only when the evidence shows a cited item cannot pay off without it."
 )
 
