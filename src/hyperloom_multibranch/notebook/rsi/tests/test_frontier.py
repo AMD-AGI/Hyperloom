@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis, Lineag
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree
 from hyperloom_multibranch.notebook.rsi.frontier import (
+    FRONTIER_LOG_FORMAT,
     OBSERVATION_SECONDS,
     WINDOW_SECONDS,
     FrontierPolicy,
@@ -152,3 +154,33 @@ async def test_the_scoring_is_the_notebooks_progress_query(tmp_path: Path) -> No
 
     assert rows["s1"].frontier is not None and rows["s1"].frontier.expected_gain_pct == pytest.approx(3.5)
     assert (await scoring.lineage()) == (await notebook.lineage())
+
+
+async def test_with_a_log_every_round_that_scored_a_branch_is_appended(tmp_path: Path) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    path = tmp_path / "session" / "frontier.jsonl"
+    policy = FrontierPolicy.for_budget(METRIC, 2 * 3600.0)
+    scoring = FrontierScoring(notebook, policy, log=path)
+
+    await scoring.progress()
+    await scoring.progress()
+    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    assert len(lines) == 2 and lines[0]["at"] < lines[1]["at"]
+    first = lines[0]
+    assert (first["format"], first["metric"], first["window_seconds"]) == (FRONTIER_LOG_FORMAT, METRIC, 900.0)
+    assert first["t_s"] > 0
+    assert [row["branch"] for row in first["branches"]] == ["s1"]
+    s1 = first["branches"][0]
+    assert (s1["tests"], s1["commits"], s1["head_value"]) == (2, 1, {METRIC: 1040.0})
+    assert s1["frontier"]["expected_gain_pct"] == pytest.approx(4.0) and s1["frontier"]["basis"] == "trend"
+
+
+async def test_a_round_that_scored_nothing_writes_no_line(tmp_path: Path) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    path = tmp_path / "frontier.jsonl"
+    unmeasured = FrontierPolicy("a metric the baseline never recorded")
+
+    await FrontierScoring(notebook, unmeasured, log=path).progress()
+
+    assert not path.exists()

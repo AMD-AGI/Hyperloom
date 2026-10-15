@@ -19,11 +19,18 @@ The expected gain is the prior where there is one, else the trend; a branch unde
 since its trend cannot be anything but zero; the headroom caps it, and it is never negative. ``basis`` names which of
 them the score rests on. The formula is a prototype: what the score means is the scheduler's call (gongzheng's), and it
 stays here until then.
+
+Given a ``log`` path, the scoring appends one :data:`FRONTIER_LOG_FORMAT` line per round it scored anything: when, on
+the session clock too, and each scored branch's spend, head value and score. Checking the scores against the gains that
+followed is how they get calibrated.
 """
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
 from hyperloom_multibranch.contracts.notebook.interfaces import ProgressQuery, SnapshotQuery
@@ -35,6 +42,8 @@ from hyperloom_multibranch.contracts.notebook.records import (
     NotebookSnapshot,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, FrontierBasis
+from hyperloom_multibranch.notebook.codec import encode
+from hyperloom_multibranch.notebook.local.files import encode_json
 from hyperloom_multibranch.notebook.rsi.archive import (
     SearchTree,
     TreeBranch,
@@ -44,6 +53,9 @@ from hyperloom_multibranch.notebook.rsi.archive import (
 )
 from hyperloom_multibranch.notebook.rsi.similarity import MIN_SIMILARITY, TaskConditions
 
+log = logging.getLogger(__name__)
+
+FRONTIER_LOG_FORMAT = "multibranch.frontier-log.v1"
 WINDOW_SECONDS = 1800.0
 OBSERVATION_SECONDS = 3600.0
 OBSERVATION_FLOOR_PCT = 0.5
@@ -175,22 +187,69 @@ def score_progress(
     )
 
 
+def frontier_log_line(
+    snapshot: NotebookSnapshot, rows: Sequence[BranchProgress], policy: FrontierPolicy
+) -> dict[str, object] | None:
+    """One round of scores as a log line; ``None`` when the round scored no branch."""
+
+    scored = [row for row in rows if row.frontier is not None]
+    if not scored:
+        return None
+    return {
+        "format": FRONTIER_LOG_FORMAT,
+        "at": snapshot.taken_at,
+        "t_s": snapshot.taken_at - session_start(snapshot),
+        "metric": policy.metric,
+        "window_seconds": policy.window_seconds,
+        "observation_seconds": policy.observation_seconds,
+        "branches": [
+            {
+                "branch": row.branch,
+                "tests": row.tests,
+                "commits": row.commits,
+                "gpu_seconds": row.gpu_seconds,
+                "head_value": dict(row.head_value),
+                "frontier": encode(row.frontier),
+            }
+            for row in scored
+        ],
+    }
+
+
 @dataclass(frozen=True)
 class FrontierScoring(ProgressQuery):
-    """The notebook's progress with frontier scores, against the archived ``history``."""
+    """The notebook's progress with frontier scores, against the archived ``history``; ``log`` keeps every round."""
 
     notebook: SnapshotQuery
     policy: FrontierPolicy
     history: tuple[SearchTree, ...] = ()
+    log: Path | None = None
 
     async def progress(self) -> tuple[BranchProgress, ...]:
-        return score_progress(await self.notebook.snapshot(), self.history, self.policy)
+        snapshot = await self.notebook.snapshot()
+        rows = score_progress(snapshot, self.history, self.policy)
+        if self.log is not None:
+            line = frontier_log_line(snapshot, rows, self.policy)
+            if line is not None:
+                self._append(self.log, encode_json(line))
+        return rows
+
+    @staticmethod
+    def _append(path: Path, data: bytes) -> None:
+        # Losing a round of the log costs the calibration one sample; the scheduler's decision must not wait on it.
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("ab") as handle:
+                handle.write(data)
+        except OSError as exc:
+            log.warning("could not append the frontier scores to %s: %s", path, exc)
 
     async def lineage(self) -> LineageView:
         return (await self.notebook.snapshot()).lineage
 
 
 __all__ = [
+    "FRONTIER_LOG_FORMAT",
     "MIN_EFFECTIVE_SESSIONS",
     "NEW_BRANCH_FLOOR_PCT",
     "OBSERVATION_FLOOR_PCT",
@@ -200,6 +259,7 @@ __all__ = [
     "FrontierPolicy",
     "FrontierScoring",
     "RemainingPrior",
+    "frontier_log_line",
     "remaining_prior",
     "score_branch",
     "score_progress",
