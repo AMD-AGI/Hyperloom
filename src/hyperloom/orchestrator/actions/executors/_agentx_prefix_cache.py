@@ -39,8 +39,10 @@ def _server_reused_cached_tokens(server_log_path: str) -> bool | None:
 
 
 def _sglang_evidence(server_config: Mapping[str, Any], server_log: str) -> str:
-    if server_config.get("disable_radix_cache") is True:
-        return "the SGLang server ran with disable_radix_cache=True"
+    """The resolved setting decides when the server printed one; prefill reuse is read only when it did not."""
+    radix_off = server_config.get("disable_radix_cache")
+    if radix_off is not None:
+        return "the SGLang server ran with disable_radix_cache=True" if radix_off is True else ""
     if server_log and _server_reused_cached_tokens(server_log) is False:
         return "no SGLang prefill batch reused a cached token"
     return ""
@@ -54,8 +56,8 @@ def _atom_evidence(requested_server_args: str) -> str:
 def prefix_cache_off_evidence(result: Mapping[str, Any]) -> str:
     """Why this AgentX measurement ran with the prefix cache off, or ``""``.
 
-    Each engine is read from its own account of the launch: SGLang's resolved ``disable_radix_cache`` or a server log
-    whose prefill batches never reused a cached token, vLLM's launch record (which lists ``enable_prefix_caching`` only
+    Each engine is read from its own account of the launch: SGLang's resolved ``disable_radix_cache`` (or, when the
+    server printed none, a log whose prefill batches never reused a cached token), vLLM's launch record (which lists ``enable_prefix_caching`` only
     when the launch turned it off), and, since ATOM prints no record and keeps the cache off by default, the server
     args it was launched with. A run none of these can be read from is left alone.
     """

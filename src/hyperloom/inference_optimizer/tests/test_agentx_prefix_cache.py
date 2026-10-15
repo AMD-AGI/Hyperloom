@@ -11,9 +11,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import yaml
 
 from hyperloom.common.launch_log_evidence import observed_server_config_from_log
 from hyperloom.orchestrator.actions.executors import _agentx_prefix_cache as pc
+from hyperloom.orchestrator.actions.executors._launch_evidence import build_launch_evidence
 from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -69,14 +71,16 @@ def _atom(requested_server_args: str) -> dict[str, Any]:
 @pytest.mark.parametrize(
     ("radix_off", "cached", "refused"),
     [
-        # The observed server config alone settles it.
+        # The resolved setting settles it whatever the prefill log says: a cache that is on but found nothing to
+        # reuse (cold requests, eviction) is still on.
         (True, None, True),
         (True, [0, 4096], True),
-        # The server log alone settles it: every prefill batch reused nothing.
-        (None, [0, 0, 0], True),
-        (False, [0, 0], True),
-        # Any reused token clears it.
+        (False, [0, 0], False),
         (False, [0, 4096], False),
+        # With no resolved setting, the server log settles it: every prefill batch reused nothing.
+        (None, [0, 0, 0], True),
+        # Any reused token clears it.
+        (None, [0, 4096], False),
         # Nothing readable about the cache: left alone.
         (None, None, False),
     ],
@@ -109,6 +113,22 @@ def test_vllm(tmp_path, non_default_args, refused):
 )
 def test_atom(requested_server_args, refused):
     assert bool(pc.prefix_cache_off_evidence(_atom(requested_server_args))) is refused
+
+
+@pytest.mark.parametrize(
+    ("extra_atom_args", "refused"), [("--level 2", True), ("--level 2 --enable_prefix_caching", False)]
+)
+def test_atom_reads_the_server_args_the_materialized_config_launches_with(tmp_path, extra_atom_args, refused):
+    config = tmp_path / "benchmark.yaml"
+    config.write_text(
+        yaml.safe_dump(
+            {"benchmark": {"framework": "atom", "model": "m", "envs": {"EXTRA_ATOM_ARGS": extra_atom_args}}}
+        ),
+        encoding="utf-8",
+    )
+    evidence = build_launch_evidence(config_path=config, actual_server_log=None, framework="atom", slot=tmp_path)
+    measured = {"status": "succeeded", "server_log_path": "", "launch_evidence": evidence}
+    assert bool(pc.prefix_cache_off_evidence(measured)) is refused
 
 
 def test_an_unrecorded_launch_is_left_alone():
