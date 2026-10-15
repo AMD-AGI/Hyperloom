@@ -25,6 +25,7 @@ def _sglang(radix_off: bool | None) -> dict[str, Any]:
     return {
         "status": "succeeded",
         "output_throughput": 221.8,
+        "completed_requests": 64,
         "launch_evidence": {
             "framework": "sglang",
             "observed_server_config": {} if radix_off is None else {"disable_radix_cache": radix_off},
@@ -210,7 +211,7 @@ def test_a_candidate_validated_as_a_baseline_kind_task_is_not_judged(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_writeback_stops_on_the_first_refusal_without_opening_enablement(session_dir, monkeypatch):
+async def test_writeback_refuses_to_anchor_and_stops_without_opening_enablement(session_dir, monkeypatch):
     """The server booted and measured, so the refusal is no boot failure: nothing is left for enablement to author."""
     from hyperloom.orchestrator.loop import writeback
     from hyperloom.orchestrator.state.task_registry import Task
@@ -224,6 +225,9 @@ async def test_writeback_stops_on_the_first_refusal_without_opening_enablement(s
     pc.refuse_cacheless_agentx_baseline(refused)
     task = Task(task_id="bl-cache-off", kind="baseline", state="running", params={}, idempotency_key="bl-cache-off")
 
+    # The refused round measured real throughput, so it is a valid measurement; it still must not anchor.
+    assert coord.writeback.is_promotable_result("baseline", refused) is False
+    assert coord.writeback.is_promotable_result("baseline", _sglang(False)) is True
     await coord.writeback.handle_unpromotable_result(task, refused)
 
     assert coord.shared_state.stop_reason == "baseline_failed"

@@ -886,7 +886,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
         if task_kind == "baseline":
             # A baseline whose accuracy eval failed measured throughput but must
             # not anchor; route it to handle_unpromotable_result for enablement.
-            if bool(result.get("baseline_eval_failed")):
+            # One refused for a cold prefix cache measured too, but must not anchor
+            # either; handle_unpromotable_result stops the run on it.
+            if bool(result.get("baseline_eval_failed")) or result.get("error_class") == PREFIX_CACHE_OFF_ERROR_CLASS:
                 return False
             return is_valid_measurement(result)
         if task_kind == "profile":
