@@ -3,11 +3,11 @@
 
 """The check-prior-art scripts record what they searched, so a short result never reads as "none".
 
-Each script runs against a stub ``gh`` that answers from a fake GitHub, and applies ``--jq`` with
-the real ``jq`` as gh does: search results keyed by the exact query; open pull requests that
-GraphQL pages by cursor the way the real API does (synthetic ones fill a repository up to its open
-total); and per-PR detail for the deep read and for pull requests the open scan lists again. An
-answer can fail. A stub ``sleep`` returns at once.
+Each script runs against a stub ``gh`` that answers from a fake GitHub, applies ``--jq`` with the
+real ``jq`` and prints only the ``--json`` fields asked for, as gh does: search results keyed by
+the exact query; open pull requests that GraphQL pages by cursor the way the real API does
+(synthetic ones fill a repository up to its open total); and per-PR detail for the deep read and
+for pull requests the open scan lists again. An answer can fail. A stub ``sleep`` returns at once.
 """
 
 from __future__ import annotations
@@ -62,7 +62,8 @@ if positional[0] == "pr":
     pr = world["prs"][options["-R"] + "#" + positional[2]]
     if positional[1] == "diff" and pr["diff"] is None:
         fail("could not find pull request diff: HTTP 406: Sorry, the diff exceeded the maximum number of files (300).")
-    sys.stdout.write(pr["diff"] if positional[1] == "diff" else json.dumps(pr["view"]))
+    view = {key: value for key, value in pr["view"].items() if key in options.get("--json", "").split(",")}
+    sys.stdout.write(pr["diff"] if positional[1] == "diff" else json.dumps(view))
 elif endpoint == "search/issues":
     hits = world["search"].get(fields["q"], {"total_count": 0, "incomplete_results": False, "items": []})
     if "error" in hits:
