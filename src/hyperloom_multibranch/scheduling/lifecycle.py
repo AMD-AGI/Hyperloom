@@ -37,6 +37,7 @@ from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget, budget_seconds
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.close import CloseReport, Closer
+from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, integration_row
 from hyperloom_multibranch.scheduling.exports import ExportsFactory
@@ -125,7 +126,8 @@ class Session:
         self._decisions = DecisionLog(layout.decisions, clock)
         desk = ForkDesk(self._roster, self._decisions)
         merges = DecisionLog(layout.merges, clock)
-        peers = peer_factory(PeerSetup(layout, settings.workload, desk, processes, LocalBlobStore(layout.blobs)))
+        blobs = LocalBlobStore(layout.blobs)
+        peers = peer_factory(PeerSetup(layout, settings.workload, desk, processes, blobs))
         self._toolbox = peers.toolbox
         tests = SessionTests(peers.toolbox, clock)
         budget = budget_seconds(settings.max_hours)
@@ -138,6 +140,7 @@ class Session:
         progress = session_frontier(
             self._notebook, PRIMARY_METRIC, budget_seconds=budget, log_path=layout.reports / FRONTIER_LOG
         )
+        dashboard = SessionDashboard(self._notebook, progress, peers.toolbox, PRIMARY_METRIC, layout.dashboard)
         resolver = LlmPatchResolver(resolver_completion, peers.repo)
         self._prelude = Prelude(
             layout, processes, self._notebook, peers.repo, peers.gate, tests, self._decisions, clock
@@ -150,12 +153,13 @@ class Session:
             Integrator(merger, peers.repo, tests, peers.gate, resolver, merges),
             progress,
             self._notebook,
+            dashboard,
             self._decisions,
             settings.judge_interval_seconds,
             clock,
         )
         self._selector = FinalSelector(tests, peers.gate, settings.workload, PRIMARY_METRIC, clock)
-        closing = exports(layout, self._notebook, peers.repo, progress, PRIMARY_METRIC, budget)
+        closing = exports(layout, self._notebook, peers.repo, blobs, dashboard, PRIMARY_METRIC, budget)
         self._closer = Closer(layout, self._stopper, closing, clock)
         self._signals = StopSignals()
 

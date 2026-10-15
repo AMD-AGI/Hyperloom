@@ -493,6 +493,7 @@ class RecordingToolbox(FakeToolbox):
         self.policies: list[QueuePolicy] = []
         self.cancelled: list[str] = []
         self.withdrawals: list[str] = []
+        self.queue_reads = 0
         self.closed = 0
 
     async def start(self) -> None:
@@ -512,6 +513,10 @@ class RecordingToolbox(FakeToolbox):
     async def withdraw_all(self, reason: str = "session stopped") -> tuple[str, ...]:
         self.withdrawals.append(reason)
         return await super().withdraw_all(reason)
+
+    async def queue_state(self) -> QueueState:
+        self.queue_reads += 1
+        return await super().queue_state()
 
     async def close(self) -> None:
         self.closed += 1

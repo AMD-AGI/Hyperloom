@@ -4,7 +4,7 @@
 """EXPLORE: open the opening batch, then let the judge steer the branches until the EXPLORE deadline or a soft stop.
 
 The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it starts the forks and repairs the fork desk admitted, consults
-the MB2 placeholders, and every judge interval asks the judge and applies what it decided. The judge reads the
+the MB2 placeholders, and every judge interval asks the judge, applies what it decided and rebuilds the dashboard. The judge reads the
 frontier-scored progress and how similar archived sessions went; a judge call that has not answered by the EXPLORE
 deadline counts as failed, and a branch that has not opened by then is withdrawn, so neither eats into FINAL. The
 integrator merges in a background task of its own, in rounds as wide as the integration branch's K. When EXPLORE ends
@@ -27,6 +27,7 @@ from hyperloom_multibranch.notebook.rsi.frontier import FrontierScoring
 from hyperloom_multibranch.notebook.rsi.session import judge_history
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import Integrator
@@ -61,7 +62,8 @@ def integration_row(progress: tuple[BranchProgress, ...]) -> BranchProgress | No
 
 class Explorer:
     """Runs EXPLORE once; ``progress`` is the frontier-scored progress the judge reads, against the archived sessions
-    it holds, and ``notebook`` the snapshot the judge's digest of those sessions compares with them."""
+    it holds, ``notebook`` the snapshot the judge's digest of those sessions compares with them, and ``dashboard`` is
+    rebuilt once the opening batch is open and after every later judge call."""
 
     def __init__(
         self,
@@ -72,6 +74,7 @@ class Explorer:
         integrator: Integrator,
         progress: FrontierScoring,
         notebook: SnapshotQuery,
+        dashboard: SessionDashboard,
         decisions: DecisionLog,
         judge_interval_seconds: float,
         clock: Clock,
@@ -83,6 +86,7 @@ class Explorer:
         self._integrator = integrator
         self._progress = progress
         self._notebook = notebook
+        self._dashboard = dashboard
         self._decisions = decisions
         self._interval = judge_interval_seconds
         self._clock = clock
@@ -100,6 +104,7 @@ class Explorer:
             return SessionStopReason.TIME_EXHAUSTED
         count, k = (opening.open_count, opening.open_k) if opening is not None else (1, 1)
         await self._branches.open_branches(count, window.root_commit, k, BranchOrigin.FIRST_BATCH, window.explore_end)
+        await self._dashboard.refresh()
         merging = asyncio.ensure_future(self._merge_forever())
         try:
             return await self._steer(window, merging)
@@ -121,6 +126,7 @@ class Explorer:
                 decision = await self._ask(window, opening=False)
                 if decision is not None and await self._apply(decision):
                     return SessionStopReason.GLOBAL_CONVERGED
+                await self._dashboard.refresh()
             await self._clock.sleep(min(EXPLORE_TICK_SECONDS, window.explore_end - now))
         return SessionStopReason.TIME_EXHAUSTED
 

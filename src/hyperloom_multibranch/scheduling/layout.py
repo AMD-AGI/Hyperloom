@@ -46,7 +46,6 @@ PRELUDE_CHILD_FILE = "MB-prelude-child.json"
 ROOT_RECIPE_FILE = "MB-root-recipe.json"
 PRELUDE_LOG_FILE = "MB-prelude.log"
 MERGES_FILE = "MB-merges.jsonl"
-FINAL_CHECKOUT_DIR = "MB-checkout"
 REPORT_FILE = "MB-report.json"
 REPORT_MARKDOWN_FILE = "MB-report.md"
 SCHEDULER_LOG_FILE = "MB-scheduler.log"
@@ -175,11 +174,6 @@ class SessionLayout:
     def merges(self) -> Path:
         """One line per merge attempt: the candidate, the integration head, the outcome and overridden values."""
         return self.integration / MERGES_FILE
-
-    @property
-    def final_checkout(self) -> Path:
-        """The patch and kernel files of the chosen commit, as the Recipe KB write-back hands them on."""
-        return self.final / FINAL_CHECKOUT_DIR
 
     @property
     def report(self) -> Path:

@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.proctree import running
 from hyperloom.contracts.measurement import Purpose, TestRequest
 from hyperloom.contracts.recipe import Recipe, RecipeDelta, apply
@@ -358,7 +359,11 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
 
     assert all(entry["status"] == BranchStatus.STOPPED.value for entry in roster["entries"])
     assert outcome.close is not None and outcome.close.stop.clean and outcome.close.exports is not None
-    assert set(json.loads(stage.layout.manifest.read_text())["code_version"]) == {"package", "git_sha"}
+    manifest = json.loads(stage.layout.manifest.read_text())
+    assert set(manifest["code_version"]) == {"package", "git_sha"} and manifest["metric"] == GRADED_OUTPUT
+    judge_calls = len(stage.layout.judge.read_text().splitlines())
+    # One dashboard rebuild after each judge call during EXPLORE, and the stop's own read of the queue.
+    assert judge_calls >= 2 and stage.toolbox.queue_reads == judge_calls + 1
     assert await stage.processes.leftovers() == ()
     for path in (
         stage.layout.manifest,

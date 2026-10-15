@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shutil
 from pathlib import Path
 
 import pytest
 
 from hyperloom.contracts.recipe import Recipe
+from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
@@ -32,6 +32,7 @@ from hyperloom_multibranch.notebook.tests.factories import FakeClock
 from hyperloom_multibranch.notebook.tests.sessions import METRIC, scripted_session
 from hyperloom_multibranch.scheduling.close import Closer
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.exports import SessionExports
 from hyperloom_multibranch.scheduling.final import FinalCandidate, FinalChoice
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
@@ -89,7 +90,7 @@ class StuckNotebook:
 
 
 class ChosenRepo:
-    """The experiment repository as CLOSE reads it: the chosen commit's recipe and its files; a test double, not a
+    """The experiment repository as CLOSE reads it: the chosen commit's recipe only; a test double, not a
     placeholder."""
 
     def __init__(self, final: FinalRecipe) -> None:
@@ -99,9 +100,12 @@ class ChosenRepo:
         assert commit == CHOSEN
         return self.final.recipe
 
-    async def checkout(self, commit: str, destination: Path) -> None:
-        assert commit == CHOSEN
-        shutil.copytree(self.final.files_root, destination, dirs_exist_ok=True)
+
+class AfterStopToolbox:
+    """A toolbox already closed by the stop; CLOSE must not ask it for its queue. A failure double."""
+
+    async def queue_state(self) -> QueueState:
+        raise AssertionError("CLOSE rebuilds the dashboard with the queue the stop reported")
 
 
 class UnreachableStore(FakeRecipeStore):
@@ -136,11 +140,27 @@ def _closer(
     recipe: FinalRecipe,
     kb_client: RemoteRecipeClient | None,
 ) -> Closer:
-    """CLOSE with ``recipe`` committed as :data:`CHOSEN`."""
+    """CLOSE with ``recipe`` committed as :data:`CHOSEN`, its files in the session's blob store and not in the
+    repository."""
 
     progress = FrontierScoring(notebook, FrontierPolicy(metric=METRIC))  # type: ignore[arg-type]
-    repo = ChosenRepo(recipe)
-    exports = SessionExports(layout, notebook, repo, progress, METRIC, BUDGET_SECONDS, kb_client=kb_client)  # type: ignore[arg-type]
+    blobs = LocalBlobStore(layout.blobs)
+    for path in (
+        *(patch.path for component in recipe.recipe.components for patch in component.patches),
+        *(kernel.ref for kernel in recipe.recipe.kernels),
+    ):
+        blobs.put((recipe.files_root / path).read_bytes())
+    dashboard = SessionDashboard(notebook, progress, AfterStopToolbox(), METRIC, layout.dashboard)  # type: ignore[arg-type]
+    exports = SessionExports(
+        layout,
+        notebook,
+        ChosenRepo(recipe),
+        blobs,
+        dashboard,
+        METRIC,
+        BUDGET_SECONDS,
+        kb_client=kb_client,  # type: ignore[arg-type]
+    )
     return Closer(layout, stopper, exports, CLOCK)  # type: ignore[arg-type]
 
 
@@ -165,7 +185,8 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
 
     assert report.exports is not None and report.exports.kb_write_back.status == "written"
     assert store.promoted is not None and store.promoted[2] == 1041.0
-    assert sorted(path.name for path in layout.final_checkout.iterdir()) == ["kernel", "patch"]
+    recipe_files = sorted(path.read_bytes() for path in final.files_root.rglob("*") if path.is_file())
+    assert sorted(store.uploads.values()) == recipe_files and not any(layout.final.iterdir())
     assert (stopper.reasons, stopper.events) == ([SessionStopReason.TIME_EXHAUSTED], [f"stop by {HARD_STOP}"])
     assert report.exports.breakdown == layout.reports / "session_breakdown.json"
     breakdown = json.loads(report.exports.breakdown.read_text())
