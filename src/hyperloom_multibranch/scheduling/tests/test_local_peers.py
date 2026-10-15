@@ -13,12 +13,13 @@ import pytest
 
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
-from hyperloom_multibranch.contracts.fork import Admission, AdmissionStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.decisions import DecisionLog
+from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.layout import SESSION_PREFIX, create_session
 from hyperloom_multibranch.scheduling.local_peers import (
     MB_FAKE_MISSING_PEER_MODULES,
@@ -31,8 +32,9 @@ from hyperloom_multibranch.scheduling.local_peers import (
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.peers import PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
+from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
 from hyperloom_multibranch.scheduling.settings import Workload
-from hyperloom_multibranch.tests.fakes import RecordingLifecycle, RecordingScheduler
+from hyperloom_multibranch.scheduling.tests.peer_fakes import MbFakeLifecycle
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.toolbox import RealToolbox
@@ -83,12 +85,12 @@ async def test_the_real_peers_live_inside_the_session_directory(
     monkeypatch.delenv("GPU_TYPE", raising=False)
     clock = Clock()
     layout = create_session(tmp_path, WORKLOAD.model_basename, clock)
-    desk = RecordingScheduler(Admission(AdmissionStatus.REJECTED, "test"))
+    desk = ForkDesk(Roster(RosterCaps(1, 1, 1), layout.roster, clock), DecisionLog(layout.decisions, clock))
     setup = PeerSetup(layout, WORKLOAD, desk, ProcessRegistry(layout.pids, clock), LocalBlobStore(layout.blobs))
-    lifecycle = RecordingLifecycle()
+    lifecycle = MbFakeLifecycle()
     built: list[tuple[PeerSetup, ExperimentRepo, RealToolbox]] = []
 
-    def lifecycles(given: PeerSetup, repo: ExperimentRepo, toolbox: RealToolbox) -> RecordingLifecycle:
+    def lifecycles(given: PeerSetup, repo: ExperimentRepo, toolbox: RealToolbox) -> MbFakeLifecycle:
         built.append((given, repo, toolbox))
         return lifecycle
 
