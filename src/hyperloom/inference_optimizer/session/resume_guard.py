@@ -1,19 +1,23 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Read-only resume admission and explicit operator confirmation of legacy cleanup."""
+"""Read-only resume admission and explicit operator confirmation of cleanup the ledger cannot prove."""
 
 from __future__ import annotations
 
 import json
 import os
 import sqlite3
+from collections.abc import Callable
 from contextlib import closing
+from datetime import datetime
 from pathlib import Path
 
+from hyperloom.common.owner_scope import process_started_at, same_environment
 from hyperloom.common.timeutil import now_iso
 
 from . import lock as session_lock
+from . import session_paths
 from .paths import db_path_for
 
 
@@ -23,6 +27,17 @@ class ResumeBlocked(RuntimeError):
 
 class CleanupConfirmationError(RuntimeError):
     """An operator confirmation cannot safely update the retained ownership ledger."""
+
+
+_CONFIRMED = "confirmed"
+
+
+def _tables(db: sqlite3.Connection) -> set[str]:
+    return {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+
+def _lease_columns(db: sqlite3.Connection) -> set[str]:
+    return {row[1] for row in db.execute("PRAGMA table_info(leases)")}
 
 
 def _label(value: object) -> str:
@@ -59,7 +74,7 @@ def _terminal_uncertainty(state: str, history_json: str) -> str:
 
 
 def _inspect(db: sqlite3.Connection, owner_scope: str) -> list[str]:
-    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    tables = _tables(db)
     diagnostics: list[str] = []
     total = 0
 
@@ -72,7 +87,7 @@ def _inspect(db: sqlite3.Connection, owner_scope: str) -> list[str]:
     local_tasks: set[str] = set()
     round_leases: list[sqlite3.Row] = []
     if "leases" in tables:
-        columns = {row[1] for row in db.execute("PRAGMA table_info(leases)")}
+        columns = _lease_columns(db)
         query = (
             "SELECT lane, holder_id, task_id, pid, owner_scope FROM leases"
             if "owner_scope" in columns
@@ -86,7 +101,7 @@ def _inspect(db: sqlite3.Connection, owner_scope: str) -> list[str]:
                 pid = int(row["pid"] or 0)
             except (TypeError, ValueError):
                 pid = 0
-            if owner_scope and row["owner_scope"] == owner_scope and pid > 0:
+            if same_environment(row["owner_scope"], owner_scope) and pid > 0:
                 local_tasks.add(row["task_id"])
                 continue
             blocked(row["task_id"], row["lane"], row["holder_id"], "execution owner scope or PID is unobservable")
@@ -136,6 +151,18 @@ def _inspect(db: sqlite3.Connection, owner_scope: str) -> list[str]:
     return diagnostics
 
 
+def _other_scopes(db: sqlite3.Connection, owner_scope: str) -> list[str]:
+    """Name up to five recorded execution scopes other than ``owner_scope``, for a blocked resume."""
+    if "owner_scope" not in _lease_columns(db):
+        return []
+    rows = db.execute(
+        "SELECT DISTINCT owner_scope FROM leases WHERE owner_scope NOT IN ('', ?) ORDER BY owner_scope LIMIT 5",
+        (owner_scope,),
+    )
+    scopes = [_label(row[0]) for row in rows]
+    return ["other owner scopes: " + " ".join(scopes)] if scopes else []
+
+
 def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
     """Reject unobservable residual work without migrating or repairing the DB.
 
@@ -150,6 +177,8 @@ def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
             db.row_factory = sqlite3.Row
             db.execute("BEGIN")
             diagnostics = _inspect(db, owner_scope)
+            if diagnostics:
+                diagnostics += _other_scopes(db, owner_scope)
     except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
         raise ResumeBlocked(
             "cannot inspect persisted execution ownership read-only; resume is blocked. "
@@ -163,8 +192,35 @@ def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
             "before retrying; do not start replacement work on the same resources. "
             "For legacy empty-scope ownership only, after verifying the task's entire process tree and any "
             "remote workers/Ray actors have stopped, record that confirmation with hyperloom recover "
-            "--session-dir <session> --confirm-stopped <task-id> --confirmation-reason <reason>."
+            "--session-dir <session> --confirm-stopped <task-id> --confirmation-reason <reason>. "
+            "If the environment of another owner scope is gone, record that with hyperloom recover "
+            "--session-dir <session> --confirm-scope-gone <owner-scope> --confirmation-reason <reason>."
         )
+
+
+def _task_leases(db: sqlite3.Connection, tables: set[str], task_id: str, owner_scope: str) -> list[dict]:
+    """Return the execution leases a confirmation releases; every one must carry ``owner_scope``.
+
+    The empty scope is the legacy unattributed ownership confirmed task by task. A
+    bring-up round's lane never records a scope and stays with the round reconciler.
+    """
+    if "leases" not in tables:
+        return []
+    columns = _lease_columns(db)
+    query = (
+        "SELECT lane, holder_id, owner_scope FROM leases WHERE task_id=?"
+        if "owner_scope" in columns
+        else "SELECT lane, holder_id, '' AS owner_scope FROM leases WHERE task_id=?"
+    )
+    rows = list(db.execute(query, (task_id,)))
+    scoped = [row for row in rows if not owner_scope or row["lane"] != "bringup_round"]
+    if any(row["owner_scope"] != owner_scope for row in scoped):
+        raise CleanupConfirmationError(
+            "confirmation is limited to strictly empty owner scope on every target lease"
+            if not owner_scope
+            else f"task={_label(task_id)} holds a lease outside the confirmed owner scope"
+        )
+    return [{"lane": row["lane"], "holder_id": row["holder_id"]} for row in rows if row["lane"] != "bringup_round"]
 
 
 def _confirm_task_stopped_in_transaction(
@@ -174,9 +230,10 @@ def _confirm_task_stopped_in_transaction(
     reason: str,
     operator: str,
     confirmed_at: str,
+    owner_scope: str = "",
 ) -> dict:
     """Update one task using the caller's existing IMMEDIATE transaction and Row factory."""
-    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    tables = _tables(db)
     if "tasks" not in tables:
         raise CleanupConfirmationError("confirmation requires an existing tasks table")
     task = db.execute("SELECT state, history FROM tasks WHERE task_id=?", (task_id,)).fetchone()
@@ -193,22 +250,7 @@ def _confirm_task_stopped_in_transaction(
     if not isinstance(history, list):
         raise CleanupConfirmationError("task history must be a list")
 
-    leases = []
-    if "leases" in tables:
-        columns = {row[1] for row in db.execute("PRAGMA table_info(leases)")}
-        query = (
-            "SELECT lane, holder_id, owner_scope FROM leases WHERE task_id=?"
-            if "owner_scope" in columns
-            else "SELECT lane, holder_id, '' AS owner_scope FROM leases WHERE task_id=?"
-        )
-        rows = list(db.execute(query, (task_id,)))
-        if any(row["owner_scope"] != "" for row in rows):
-            raise CleanupConfirmationError(
-                "confirmation is limited to strictly empty owner scope on every target lease"
-            )
-        leases = [
-            {"lane": row["lane"], "holder_id": row["holder_id"]} for row in rows if row["lane"] != "bringup_round"
-        ]
+    leases = _task_leases(db, tables, task_id, owner_scope)
     gpu_leases = []
     if "gpu_leases" in tables:
         gpu_leases = [
@@ -266,6 +308,7 @@ def _confirm_task_stopped_in_transaction(
         "confirmation_reason": reason,
         "released_leases": leases,
         "released_gpu_leases": gpu_leases,
+        **({"confirmed_scope_gone": owner_scope} if owner_scope else {}),
         "outcome": {
             "task_id": task_id,
             "state": "cancelled",
@@ -293,21 +336,126 @@ def _confirm_task_stopped_in_transaction(
         db.execute("DELETE FROM leases WHERE task_id=? AND lane IS NOT 'bringup_round'", (task_id,))
     if gpu_leases:
         db.execute("DELETE FROM gpu_leases WHERE task_id=?", (task_id,))
-    result.update(status="confirmed", released_leases=len(leases), released_gpu_leases=len(gpu_leases))
+    result.update(status=_CONFIRMED, released_leases=len(leases), released_gpu_leases=len(gpu_leases))
     return result
 
 
-def confirm_task_stopped(session_dir: Path, *, task_id: str, reason: str) -> dict:
-    """Record an operator's explicit physical-cleanup confirmation for one legacy task.
+def confirmed_stopped_scope(history: object) -> str | None:
+    """Read back the confirmation :func:`_confirm_task_stopped_in_transaction` wrote, when it is the task's last outcome.
 
-    This does not stop or inspect processes or Ray actors. The operator must first
-    verify their exit. Only empty-scope execution ownership is eligible. The session
-    lock writes its own metadata; the ownership DB changes atomically or not at all.
+    Returns:
+        ``None`` unless the latest recorded outcome is an operator confirmation
+        that the task's execution stopped and its cleanup is complete; otherwise
+        the owner scope confirmed gone with it, or ``""`` when the confirmation
+        named this one task rather than a whole vanished execution environment.
     """
-    if not isinstance(task_id, str) or not task_id.strip() or task_id != task_id.strip():
-        raise CleanupConfirmationError("confirmation requires one exact nonempty task ID")
-    if not isinstance(reason, str) or not reason.strip():
-        raise CleanupConfirmationError("confirmation requires a nonempty reason")
+    for entry in reversed(history if isinstance(history, list) else []):
+        evidence = entry.get("evidence") if isinstance(entry, dict) else None
+        if not isinstance(evidence, dict) or not isinstance(evidence.get("outcome"), dict):
+            continue
+        if evidence.get("reason") != "operator_confirmed_stopped" or evidence.get("cleanup_confirmed") is not True:
+            return None
+        return str(evidence.get("confirmed_scope_gone") or "")
+    return None
+
+
+def _lease_is_live(expires_at: object, now: datetime) -> bool:
+    """A lease counts as live until its recorded expiry; an unreadable expiry counts as live."""
+    try:
+        expires = datetime.fromisoformat(str(expires_at))
+    except ValueError:
+        return True
+    if expires.tzinfo is None:
+        return True
+    return expires > now
+
+
+def _confirm_scope_gone_in_transaction(
+    db: sqlite3.Connection,
+    *,
+    owner_scope: str,
+    reason: str,
+    operator: str,
+    confirmed_at: str,
+    check_holders: bool = False,
+) -> dict:
+    """Cancel and release every execution recorded under one vanished owner scope.
+
+    Uses the caller's IMMEDIATE transaction. Refuses while any lease outside that
+    scope is unexpired: another execution environment may still be writing. With
+    ``check_holders`` (an older two-part scope of this boot and PID namespace, which an
+    earlier container may have left), refuses while a holder process that started before
+    its lease still runs here.
+    """
+    tables = _tables(db)
+    columns = _lease_columns(db) if "leases" in tables else set()
+    if "owner_scope" not in columns:
+        raise CleanupConfirmationError("the ownership ledger records no owner scopes; use --confirm-stopped")
+    now = datetime.fromisoformat(confirmed_at)
+    target_tasks: set[str] = set()
+    for row in db.execute("SELECT lane, holder_id, task_id, pid, owner_scope, acquired_at, expires_at FROM leases"):
+        if row["lane"] == "bringup_round":
+            continue
+        if row["owner_scope"] == owner_scope:
+            if check_holders and _holder_runs_here(row["pid"], row["acquired_at"]):
+                raise CleanupConfirmationError(
+                    f"lane={_label(row['lane'])} holder={_label(row['holder_id'])} pid={_label(row['pid'])} still "
+                    "runs in this execution environment; the named owner scope is not gone"
+                )
+            target_tasks.add(row["task_id"])
+        elif _lease_is_live(row["expires_at"], now):
+            raise CleanupConfirmationError(
+                f"lane={_label(row['lane'])} holder={_label(row['holder_id'])} is held by live owner scope "
+                f"{_label(row['owner_scope'])} until {_label(row['expires_at'])}; another execution may be "
+                "writing this session"
+            )
+    tasks = [
+        _confirm_task_stopped_in_transaction(
+            db,
+            task_id=task_id,
+            reason=reason,
+            operator=operator,
+            confirmed_at=confirmed_at,
+            owner_scope=owner_scope,
+        )
+        for task_id in sorted(target_tasks)
+    ]
+    cancelled = [task["task_id"] for task in tasks if task["status"] == _CONFIRMED]
+    return {
+        "status": _CONFIRMED if cancelled else "nothing_to_confirm",
+        "owner_scope": owner_scope,
+        "tasks": tasks,
+        "cancelled_tasks": cancelled,
+        "released_leases": sum(task["released_leases"] for task in tasks),
+        "released_gpu_leases": sum(task["released_gpu_leases"] for task in tasks),
+    }
+
+
+def _holder_runs_here(pid: object, acquired_at: object) -> bool:
+    """Whether the lease's recorded holder runs here: its PID is live and started no later
+    than the lease was taken. A later start is a reused PID; an unreadable record counts as
+    running."""
+    try:
+        holder = int(pid or 0)
+        taken = datetime.fromisoformat(str(acquired_at))
+    except (TypeError, ValueError):
+        return True
+    if holder <= 0:
+        return False
+    started = process_started_at(holder)
+    if started is None:
+        return False
+    if taken.tzinfo is None:
+        return True
+    return (started - taken).total_seconds() <= 1.0
+
+
+def _in_locked_ledger(session_dir: Path, update: Callable[[sqlite3.Connection, str, str], dict]) -> dict:
+    """Run ``update(db, operator, confirmed_at)`` in one IMMEDIATE transaction under the session lock.
+
+    The session lock writes its own metadata; the ownership DB changes atomically
+    or not at all.
+    """
     if session_lock.fcntl is None:
         raise CleanupConfirmationError("confirmation requires POSIX fcntl session locking")
     try:
@@ -322,13 +470,7 @@ def confirm_task_stopped(session_dir: Path, *, task_id: str, reason: str) -> dic
 
                 db.row_factory = sqlite3.Row
                 db.execute("BEGIN IMMEDIATE")
-                return _confirm_task_stopped_in_transaction(
-                    db,
-                    task_id=task_id,
-                    reason=reason,
-                    operator=pwd.getpwuid(os.getuid()).pw_name,
-                    confirmed_at=now_iso(),
-                )
+                return update(db, pwd.getpwuid(os.getuid()).pw_name, now_iso())
         finally:
             lock.release()
     except (session_lock.SessionAlreadyRunning, session_lock.SessionLockPathError) as exc:
@@ -337,3 +479,76 @@ def confirm_task_stopped(session_dir: Path, *, task_id: str, reason: str) -> dic
         raise CleanupConfirmationError(
             "cannot confirm cleanup in the existing ownership database; no changes committed"
         ) from exc
+
+
+def confirm_task_stopped(session_dir: Path, *, task_id: str, reason: str) -> dict:
+    """Record an operator's explicit physical-cleanup confirmation for one legacy task.
+
+    This does not stop or inspect processes or Ray actors. The operator must first
+    verify their exit. Only empty-scope execution ownership is eligible.
+    """
+    if not isinstance(task_id, str) or not task_id.strip() or task_id != task_id.strip():
+        raise CleanupConfirmationError("confirmation requires one exact nonempty task ID")
+    if not isinstance(reason, str) or not reason.strip():
+        raise CleanupConfirmationError("confirmation requires a nonempty reason")
+    return _in_locked_ledger(
+        session_dir,
+        lambda db, operator, confirmed_at: _confirm_task_stopped_in_transaction(
+            db, task_id=task_id, reason=reason, operator=operator, confirmed_at=confirmed_at
+        ),
+    )
+
+
+def confirm_scope_gone(session_dir: Path, *, owner_scope: str, reason: str, current_scope: str) -> dict:
+    """Record a caller's assertion that a whole execution environment no longer exists.
+
+    Cancels the unfinished tasks recorded under ``owner_scope`` so their work is
+    redone rather than counted, and releases their leases and GPU leases. Nothing
+    is stopped or inspected: the caller vouches that the machine or container that
+    owned the scope is gone. Refuses the current scope, and refuses while another
+    scope holds an unexpired lease. The confirmation is appended to the session's
+    owner ledger once the database change has committed.
+    """
+    if not isinstance(owner_scope, str) or not owner_scope.strip() or owner_scope != owner_scope.strip():
+        raise CleanupConfirmationError("confirmation requires one exact nonempty owner scope")
+    if not isinstance(reason, str) or not reason.strip():
+        raise CleanupConfirmationError("confirmation requires a nonempty reason")
+    if not current_scope:
+        raise CleanupConfirmationError("the current execution scope is unobservable; cannot tell it from the named one")
+    if owner_scope == current_scope:
+        raise CleanupConfirmationError("the named owner scope is the current execution environment")
+    here = same_environment(owner_scope, current_scope)
+    result = _in_locked_ledger(
+        session_dir,
+        lambda db, operator, confirmed_at: {
+            **_confirm_scope_gone_in_transaction(
+                db,
+                owner_scope=owner_scope,
+                reason=reason,
+                operator=operator,
+                confirmed_at=confirmed_at,
+                check_holders=here,
+            ),
+            "operator": operator,
+            "confirmed_at": confirmed_at,
+        },
+    )
+    record = {
+        "event": "owner_scope_gone_confirmed",
+        "owner_scope": owner_scope,
+        "confirmed_by_scope": current_scope,
+        "operator": result["operator"],
+        "confirmed_at": result["confirmed_at"],
+        "confirmation_reason": reason,
+        "cancelled_tasks": result["cancelled_tasks"],
+        "released_leases": result["released_leases"],
+        "released_gpu_leases": result["released_gpu_leases"],
+    }
+    try:
+        with session_paths.pod_history_path(session_dir).open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
+    except OSError:
+        result["ledger_recorded"] = False
+    else:
+        result["ledger_recorded"] = True
+    return result

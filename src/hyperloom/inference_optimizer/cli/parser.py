@@ -13,6 +13,7 @@ from typing import NoReturn
 
 from .. import framework_registry
 from .backends import CRITIC_PROTOCOL_CHOICES
+from .recover import add_cleanup_confirmation_arguments
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.llm_config import is_anthropic_only, is_openai_only, provider_model_defaults
 
@@ -1182,8 +1183,8 @@ def _build_parser() -> argparse.ArgumentParser:
     rec = sub.add_parser(
         "recover",
         parents=[common],
-        help="Rebuild + push the session_breakdown for a session that exited "
-        "abnormally (crash / SIGKILL) so its breakdown lands on Langfuse.",
+        help="Rebuild + push the session_breakdown to Langfuse for a session that exited abnormally (crash / SIGKILL); "
+        "or, with --confirm-scope-gone / --confirm-stopped, record the cleanup confirmation a blocked resume asks for.",
     )
     rec.add_argument(
         "--session-dir",
@@ -1196,19 +1197,6 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-run even when the session already looks complete (close_sequence_done / breakdown already recorded).",
     )
-    rec.add_argument(
-        "--confirm-stopped",
-        metavar="TASK_ID",
-        help="Attest that one task's complete process tree, remote workers and Ray actor have stopped, "
-        "then cancel unfinished work and release only its unattributed execution/GPU ownership records. Requires POSIX session locking "
-        "and --confirmation-reason; rejects recorded nonempty owner scopes. Does not stop processes, "
-        "accept old results, rebuild reports or resume execution.",
-    )
-    rec.add_argument(
-        "--confirmation-reason",
-        metavar="TEXT",
-        help="Required audit reason for --confirm-stopped. Both options must be provided together "
-        "and cannot be combined with --force.",
-    )
+    add_cleanup_confirmation_arguments(rec)
 
     return p

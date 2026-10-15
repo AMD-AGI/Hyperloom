@@ -141,7 +141,7 @@ The following table describes the key lifecycle events for a Hyperloom session.
 | Session start   | API call / Job creation                            | Coordinator creates `$SESSION_DIR` and writes `manifest.json`, `state.json`. |
 | Heartbeat       | Every Coordinator tick (`--tick-interval-sec`, default `0` = no sleep) | Coordinator atomically rewrites `state.json` (temp `.state.json.*.tmp` + `os.replace`) inside `$SESSION_DIR`. |
 | Session end     | `target_reached` / `time_exhausted` / `global_converged` | Coordinator writes `session_breakdown.json`, exits 0. |
-| Crash recovery  | Pod OOM / preemption                               | Re-launch with `--resume-from "$SESSION_DIR"`; reads `manifest.json` + `state.json`. |
+| Crash recovery  | Pod OOM / preemption                               | Re-launch with `--resume-from "$SESSION_DIR"`; reads `manifest.json` + `state.json`. A resume blocked by ownership the lost pod recorded first needs `hyperloom recover --confirm-scope-gone` (or `--confirm-stopped` for legacy empty-scope ownership); see [Scenario A](#scenario-a-pod-was-oom-killed-mid-session). |
 
 ---
 
@@ -211,7 +211,8 @@ Launchers can rely on these outputs of `hyperloom optimize`.
 | 3 | The session lock is held by another optimizer |
 | 4 | The `--quantize` prelude failed; the run refuses to optimize the unquantized model |
 
-`hyperloom recover` exits 0 on success, 1 when the breakdown rebuild fails and 2 on invalid arguments.
+`hyperloom recover` exits 0 on success (for `--confirm-stopped` / `--confirm-scope-gone`, also when there was nothing to confirm),
+1 when the breakdown rebuild fails, and 2 on invalid arguments or a refused confirmation.
 
 **Launch line**
 
@@ -259,6 +260,47 @@ ingest it whole on session end.
 3. Coordinator reads `manifest.json` + `state.json`, re-enters the
    loop at the last completed action. The current in-flight action
    (if any) is re-played from scratch.
+4. If the resume exits 2 with `resume blocked: prior execution exit cannot be
+   established in this environment`, the session still records execution
+   ownership the new pod cannot observe, usually leases taken by the lost pod.
+   No ownership was cleared. The message lists up to 20 blocking records (and
+   counts the rest) and, when leases record a nonempty owner scope other than
+   this pod's, names up to five of those execution scopes under `other owner
+   scopes:`, as recorded: boot, PID namespace and container start, or only boot
+   and PID namespace for leases taken by earlier versions. Once you have
+   verified that the pod owning a listed scope is gone, record that for the
+   whole scope and resume again; a resume that is still blocked lists what
+   remains:
+   ```bash
+   python3 -m hyperloom recover --session-dir "$SESSION_DIR" \
+     --confirm-scope-gone "$OWNER_SCOPE" --confirmation-reason "pod OOM-killed; replaced"
+   ```
+   Pass the scope as printed, without the quotes. This cancels the unfinished
+   tasks holding a lease in that scope, so their work is redone rather than
+   counted, releases their execution and GPU leases, and then appends the
+   confirmation to `runtime/pod_history.jsonl`. If that append fails, the
+   database change stays committed and the command still exits 0, printing
+   `WARNING: the owner ledger runtime/pod_history.jsonl could not be appended.`
+   on stderr. Each cancelled task's history still records the operator, reason
+   and time, but the session-level ledger entry is missing: record the scope,
+   reason, operator, time and printed task IDs where you keep audit notes. It
+   does not stop processes, rebuild reports or resume execution. It refuses,
+   exits 2 and leaves the ownership database unchanged when the named scope is
+   the current environment's, when the current scope cannot be observed, while
+   a lease of any other scope is unexpired or has an unreadable expiry (another
+   execution may still be writing the session), when a task in the scope also
+   holds an execution lease in another scope (bring-up round leases are left to
+   the round reconciler), when the scope is an older two-part one of this boot
+   and PID namespace whose lease holder still runs here, when the session's
+   ownership database predates owner scopes (use `--confirm-stopped`), and
+   while the session lock is held.
+   Use `--confirm-stopped TASK_ID` instead for legacy ownership recorded with
+   an empty owner scope (no `other owner scopes:` line is printed for it): it
+   confirms one task at a time, after you have verified that its process tree,
+   remote workers and Ray actors stopped, and rejects records with a nonempty
+   owner scope. Each command takes exactly one of the two options with a
+   nonempty `--confirmation-reason`, and neither combines with `--force`.
+
 There is no automatic supervision or resume. Confirm the old Coordinator is gone
 and inspect the failure before relaunching. SIGHUP follows normal terminal drain;
 `--max-hours` is cooperative and cannot guarantee termination of a frozen
@@ -275,7 +317,9 @@ dedicated subcommand instead of `--resume-from`:
 `--force` re-runs even when the session already looks complete. To replay
 `reports/trace/llm_calls.jsonl` as Langfuse generations (only when the live
 emitter never ran), use `hyperloom session backfill --session-dir "$SESSION_DIR"`.
-`--resume-from` = keep optimizing; `recover` = rebuild the breakdown artifact.
+`--resume-from` = keep optimizing; `recover` = rebuild the breakdown artifact,
+or, with `--confirm-scope-gone` / `--confirm-stopped`, record the cleanup
+confirmation a blocked resume asks for (step 4; that rebuilds nothing).
 
 ### Scenario B: PV lost or corrupted
 
