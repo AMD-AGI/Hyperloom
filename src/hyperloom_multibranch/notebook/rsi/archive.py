@@ -3,9 +3,11 @@
 
 """Archived search trees: what each past session's branches did over time, what they cost, how noisy it measured.
 
-A tree keeps what the replay, the frontier priors and the dispersion priors need: when each branch opened and stopped
-and why it opened, when its tests were requested, when its commits landed and the cumulative gain they reached, the GPU
-time it spent, the session's task conditions, its baseline's dispersion and where it measured. Trees are written once,
+A tree keeps what the replay, the frontier priors, the dispersion priors and the history digest need: when each branch
+opened and stopped and why, when its tests were requested, the directions they tried, when its commits landed and the
+cumulative gain they reached, the GPU time it spent, the session's task conditions, its baseline's dispersion and where
+it measured. A tree an older version wrote, or one backfilled from a session that recorded no intents, reads with no
+stop reasons and no directions. Trees are written once,
 under ``<archive>/trees/<session_id>.json``; the archive is a shared folder the deployment names. CLOSE archives its
 session with :func:`archive_session`, which says why when it archives nothing.
 """
@@ -22,10 +24,10 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from hyperloom_multibranch.contracts.notebook import NotRecorded
-from hyperloom_multibranch.contracts.notebook.peers import SandboxFacts
+from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
+from hyperloom_multibranch.contracts.notebook.peers import Intent, IntentLayer, SandboxFacts
 from hyperloom_multibranch.contracts.notebook.records import BranchNode, LineageView, NotebookSnapshot, TestRecord
-from hyperloom_multibranch.contracts.notebook.vocab import CommitOrigin, LineageKind
+from hyperloom_multibranch.contracts.notebook.vocab import COMMITTING, CommitOrigin, Conclusion, LineageKind
 from hyperloom_multibranch.notebook.codec import decode, encode
 from hyperloom_multibranch.notebook.local.files import encode_json, publish_once
 from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions, task_conditions, task_similarity
@@ -47,8 +49,25 @@ class TreeCommit:
 
 
 @dataclass(frozen=True)
+class TreeDirection:
+    """One intent a branch tested: how many tests it took, how many committed, and the best gain any of them was judged
+    at over its parent, among those that kept accuracy; ``None`` when none was."""
+
+    target: str
+    mechanism: str
+    layer: IntentLayer | None
+    tests: int
+    commits: int = 0
+    best_gain_pct: float | None = None
+
+
+@dataclass(frozen=True)
 class TreeBranch:
-    """One branch on the session clock (seconds since the session started); gains are over the session's baseline."""
+    """One branch on the session clock (seconds since the session started); gains are over the session's baseline.
+
+    ``stop_reason`` is the reason the scheduler gave when it stopped the branch; ``directions`` are the intents its tests
+    tried, in the order it first tried them.
+    """
 
     name: str
     origin: LineageKind
@@ -59,6 +78,8 @@ class TreeBranch:
     gpu_seconds: float
     commits: tuple[TreeCommit, ...] = ()
     test_times: tuple[float, ...] = ()
+    stop_reason: str = ""
+    directions: tuple[TreeDirection, ...] = ()
 
     def gain_at(self, t_s: float) -> float:
         """The cumulative gain of the branch's latest commit at ``t_s``, or the gain it forked at."""
@@ -154,6 +175,35 @@ def _environment(snapshot: NotebookSnapshot) -> str:
     return "+".join(sorted({_backend(record) for record in sampled}))
 
 
+def _kept_gain(record: TestRecord) -> float | None:
+    judged = record.judgement
+    if judged is None or not judged.accuracy_ok or record.conclusion is Conclusion.ACCURACY_FAILED:
+        return None
+    return judged.gain_pct
+
+
+def _directions(records: Sequence[TestRecord], intents: Mapping[str, Intent]) -> tuple[TreeDirection, ...]:
+    tried: dict[str, list[TestRecord]] = {}
+    for record in sorted(records, key=lambda item: item.requested_at):
+        if record.withdrawn_at is None and record.request.intent_fingerprint in intents:
+            tried.setdefault(record.request.intent_fingerprint, []).append(record)
+    directions = []
+    for fingerprint, tests in tried.items():
+        intent = intents[fingerprint]
+        gains = [gain for gain in map(_kept_gain, tests) if gain is not None]
+        directions.append(
+            TreeDirection(
+                target=intent.target,
+                mechanism=intent.mechanism,
+                layer=intent.layer,
+                tests=len(tests),
+                commits=sum(1 for record in tests if record.conclusion in COMMITTING),
+                best_gain_pct=max(gains) if gains else None,
+            )
+        )
+    return tuple(directions)
+
+
 def tree_from_snapshot(
     snapshot: NotebookSnapshot,
     metric: str,
@@ -194,6 +244,8 @@ def tree_from_snapshot(
                 if commit.branch == node.branch and commit.origin is not CommitOrigin.ROOT
             ),
             test_times=tuple(sorted(record.requested_at - start for record in tests[node.branch])),
+            stop_reason=node.stop_reason or "",
+            directions=() if node.branch == INTEGRATION_BRANCH else _directions(tests[node.branch], snapshot.intents),
         )
         for node in view.branches
     )
@@ -334,6 +386,7 @@ __all__ = [
     "TreeBranch",
     "TreeCommit",
     "TreeConflict",
+    "TreeDirection",
     "WeightedTree",
     "archive_session",
     "session_start",

@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
+from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, TestRecord
 from hyperloom_multibranch.contracts.notebook.vocab import CommitOrigin, LineageKind
 from hyperloom_multibranch.notebook.rsi.archive import (
@@ -21,6 +22,7 @@ from hyperloom_multibranch.notebook.rsi.archive import (
     SKIPPED,
     ArchiveResult,
     TreeArchive,
+    TreeDirection,
     archive_session,
     similar_trees,
     tree_document,
@@ -53,6 +55,32 @@ def test_the_tree_holds_each_branch_with_its_commits_tests_cost_and_times(snapsh
     assert (
         searched.budget_seconds > 0 and tree_from_snapshot(snapshot, METRIC, budget_seconds=60.0).budget_seconds == 60.0
     )
+
+
+def test_each_branch_keeps_why_it_stopped_and_the_directions_it_tried(snapshot: NotebookSnapshot) -> None:
+    branches = {branch.name: branch for branch in tree_from_snapshot(snapshot, METRIC).branches}
+    s1, s2 = branches["s1"], branches["s2"]
+
+    assert (s1.stop_reason, s2.stop_reason) == ("", "no progress")
+    assert s1.directions == (TreeDirection("moe gemm", "tuned kernel", IntentLayer.KERNEL, 2, 1, pytest.approx(4.0)),)
+    assert s2.directions == (
+        TreeDirection("attention", "split kv", IntentLayer.CONFIG, 1, 0, pytest.approx(-2.0)),
+        TreeDirection("scheduler", "chunked prefill", IntentLayer.CONFIG, 1, 0, None),
+        TreeDirection("kv cache", "fp8 kv cache", IntentLayer.CONFIG, 1, 0, None),
+    )
+    assert branches[INTEGRATION_BRANCH].directions == ()
+
+
+def test_a_tree_written_before_stop_reasons_and_directions_still_reads(snapshot: NotebookSnapshot) -> None:
+    searched = tree_from_snapshot(snapshot, METRIC)
+    document = tree_document(searched)
+    for stored in document["tree"]["branches"]:  # type: ignore[index]
+        del stored["stop_reason"], stored["directions"]
+
+    older = tree_from_document(document)
+
+    assert all(branch.stop_reason == "" and branch.directions == () for branch in older.branches)
+    assert [branch.commits for branch in older.branches] == [branch.commits for branch in searched.branches]
 
 
 @pytest.mark.parametrize(("merge_node", "environment"), [("node-1", SINGLE_HOST), ("node-2", "hosted")])
