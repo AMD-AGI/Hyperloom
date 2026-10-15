@@ -378,16 +378,19 @@ def _load_external_baseline(path: str) -> tuple[float, dict[str, float]]:
     "--wiki-guided/--no-wiki-guided",
     default=False,
     help="Plan from a knowledge base playbook first. The first planning round builds a playbook of techniques "
-    "for this kernel from the knowledge base, and every planner follows it (GUIDED) until it is spent, the "
-    "search policy reports a stall, or --guided-budget-fraction of the time budget is used; planning is free "
-    "(FREE) from then on. Needs a knowledge base (FORGE_KNOWLEDGE_WIKI_ROOT). Off by default.",
+    "for this kernel from the knowledge base and the measured evidence, every GUIDED round ranks its open groups "
+    "against that round's evidence, and every planner follows it (GUIDED) until it is spent, the search policy "
+    "reports a stall, or --guided-budget-fraction is used; planning is free (FREE) from then on. A lane "
+    "candidate a sibling's KEEP stopped applying is ported onto the current kernel rather than dropped. Needs a "
+    "knowledge base (FORGE_KNOWLEDGE_WIKI_ROOT). Off by default.",
 )
 @click.option(
     "--guided-budget-fraction",
     default=DEFAULT_GUIDED_BUDGET_FRACTION,
     type=float,
     show_default=True,
-    help="The largest share of the time budget a --wiki-guided campaign plans from the playbook.",
+    help="The largest share a --wiki-guided campaign plans from the playbook, of the budget left when its first "
+    "GUIDED round began; applied only after two GUIDED rounds.",
 )
 @click.option(
     "--prepare-task/--no-prepare-task",

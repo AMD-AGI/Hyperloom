@@ -5,10 +5,13 @@
 
 Off unless the campaign runs with ``--wiki-guided``. When on, the first planning round first asks a read-only builder
 to turn the knowledge base into a playbook: techniques for this kernel, grouped so that one group is one
-implementation step, each item citing the knowledge base pages behind it. While the campaign is GUIDED every planning
-role sees the playbook and its ledger and plans from it. The campaign leaves GUIDED for FREE once the playbook is
-spent, the search policy reports a stall, or the guided share of the budget is used; from then on the planners see
-what the playbook settled and are told to look beyond it.
+implementation step, each item citing the knowledge base pages behind it. The playbook says what the knowledge base
+supports; which group comes first is the measured evidence's call, so every GUIDED round has a ranker order the open
+groups by what the round's profile says each is worth before anything is planned. While the campaign is GUIDED every
+planning role sees the playbook, in that order, and its ledger, and plans from it. The campaign leaves GUIDED for FREE
+once the playbook is spent, the search policy reports a stall, or -- after at least ``MIN_GUIDED_ROUNDS`` GUIDED
+rounds -- the guided share of the budget left when GUIDED began is used; from then on the planners see what the
+playbook settled and are told to look beyond it.
 
 A plan claims playbook items by citing them as ``[playbook:P1,P3]`` and declines one as ``[playbook-skip:P4]``. The
 ledger is credited from the plan the iteration actually measured, so a claim counts only once a measurement decided
@@ -43,6 +46,9 @@ REASON_GUIDED_STALL = "GUIDED_STALL"
 STALL_REASONS = frozenset({"NO_IMPROVEMENT_STALL", "DIMINISHING_RETURNS", "REPEATED_NO_CHANGES"})
 
 DEFAULT_GUIDED_BUDGET_FRACTION = 0.35
+# The guided budget share cannot end GUIDED before this many GUIDED planning rounds: one round measures only the
+# groups its lanes took, and the second is the first that plans from what the first one measured.
+MIN_GUIDED_ROUNDS = 2
 
 STATUS_PENDING = "PENDING"
 STATUS_APPLIED = "APPLIED"
@@ -81,10 +87,12 @@ _CITED_ID = re.compile(r"\bP\d{1,2}\b", re.IGNORECASE)
 
 GUIDED_INSTRUCTIONS = (
     "GUIDED phase. `playbook` lists techniques the knowledge base supports for this kernel, in groups whose items "
-    "edit the same code and belong in one step. Plan from it:\n"
-    "1. Take the highest-priority group that still has PENDING or FAILED items and implement all of its applicable "
-    "items together in one plan: one Implementer session and one measurement. A group is one step, not a sequence "
-    "of rounds.\n"
+    "edit the same code and belong in one step. The groups are listed in the order this round's measured evidence "
+    "ranks them; a group's `rank_evidence`, when present, says what in the profile and the case timings put it "
+    "there. Plan from it:\n"
+    "1. Take the first group in that order that still has PENDING or FAILED items and implement all of its "
+    "applicable items together in one plan: one Implementer session and one measurement. A group is one step, not "
+    "a sequence of rounds.\n"
     "2. When the round has more than one lane, give another group whose items edit different code its own lane. "
     "Never split one group across lanes.\n"
     "3. On its own line, cite every item a plan implements as [playbook:P1,P3], and every item the evidence shows "
@@ -222,6 +230,15 @@ class GuidanceState:
     # The plan the latest iteration is measuring, kept here so a KEEP finished by resume recovery is still credited.
     inflight_iteration: int = 0
     inflight_plan: str = ""
+    # The latest ranking of the open groups (``parse_ranking``): their ids, first to plan first, and what in the
+    # evidence put each there. Groups it does not name keep the builder's order behind the ones it does.
+    group_order: list[str] = field(default_factory=list)
+    rank_evidence: dict[str, str] = field(default_factory=dict)
+    ranked_at_iteration: int = 0
+    # Seconds of the campaign budget already used when the first GUIDED round began planning; the guided share is
+    # taken of what was left then, so setup before the first round is not charged to GUIDED.
+    guided_started_used_sec: float | None = None
+    guided_rounds: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -236,6 +253,11 @@ class GuidanceState:
             "recorded_iterations": list(self.recorded_iterations),
             "inflight_iteration": self.inflight_iteration,
             "inflight_plan": self.inflight_plan,
+            "group_order": list(self.group_order),
+            "rank_evidence": dict(self.rank_evidence),
+            "ranked_at_iteration": self.ranked_at_iteration,
+            "guided_started_used_sec": self.guided_started_used_sec,
+            "guided_rounds": self.guided_rounds,
         }
 
     @classmethod
@@ -263,6 +285,13 @@ class GuidanceState:
             recorded_iterations=[int(value) for value in payload.get("recorded_iterations") or []],
             inflight_iteration=int(payload.get("inflight_iteration") or 0),
             inflight_plan=str(payload.get("inflight_plan") or ""),
+            group_order=[str(group_id) for group_id in payload.get("group_order") or []],
+            rank_evidence={str(key): str(value) for key, value in (payload.get("rank_evidence") or {}).items()},
+            ranked_at_iteration=int(payload.get("ranked_at_iteration") or 0),
+            guided_started_used_sec=(
+                None if payload.get("guided_started_used_sec") is None else float(payload["guided_started_used_sec"])
+            ),
+            guided_rounds=int(payload.get("guided_rounds") or 0),
         )
 
     def adopt(self, playbook: Playbook) -> None:
@@ -271,6 +300,30 @@ class GuidanceState:
         self.playbook_settled = True
         self.playbook_error = ""
         self.ledger = {item_id: ItemRecord() for item_id in playbook.item_ids()}
+        self.group_order = []
+        self.rank_evidence = {}
+        self.ranked_at_iteration = 0
+
+    def open_group_ids(self) -> list[str]:
+        """The groups that still have a PENDING or FAILED item, in the builder's order."""
+        if self.playbook is None:
+            return []
+        open_items = {
+            item_id for item_id, record in self.ledger.items() if record.status in {STATUS_PENDING, STATUS_FAILED}
+        }
+        return [
+            group.group_id
+            for group in self.playbook.groups
+            if any(item.group == group.group_id and item.item_id in open_items for item in self.playbook.items)
+        ]
+
+    def ordered_groups(self) -> list[PlaybookGroup]:
+        """The playbook's groups, the latest ranking's first and the rest in the builder's order."""
+        if self.playbook is None:
+            return []
+        by_id = {group.group_id: group for group in self.playbook.groups}
+        ranked = [by_id[group_id] for group_id in self.group_order if group_id in by_id]
+        return ranked + [group for group in self.playbook.groups if group.group_id not in self.group_order]
 
     def status_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -370,6 +423,41 @@ def parse_playbook(text: str) -> tuple[Playbook | None, list[str]]:
     return _playbook_from_payload(payload)
 
 
+def parse_ranking(text: str, open_groups: Sequence[str]) -> tuple[list[str], dict[str, str], list[str]]:
+    """Read the ranker's answer: the open groups it ranks, first to plan first, what put each there, and notes.
+
+    Raises ``ValueError`` when the answer ranks no open group.
+    """
+    payload = extract_json_object(text or "", "wiki playbook ranking")
+    known = set(open_groups)
+    order: list[str] = []
+    evidence: dict[str, str] = {}
+    notes: list[str] = []
+    for entry in payload.get("ranking") or []:
+        if not isinstance(entry, Mapping):
+            notes.append("dropped a ranking entry that was not an object")
+            continue
+        group_id = _text(entry.get("group")).upper()
+        if group_id not in known:
+            notes.append(f"dropped {group_id or '?'}: it is not an open group")
+            continue
+        if group_id in order:
+            notes.append(f"dropped a second {group_id}")
+            continue
+        order.append(group_id)
+        parts = (
+            ("cases", _text(entry.get("cases"))),
+            ("expected gain", _text(entry.get("expected_gain"))),
+            ("evidence", _text(entry.get("evidence"))),
+        )
+        reason = "; ".join(f"{label}: {value}" for label, value in parts if value)
+        if reason:
+            evidence[group_id] = reason
+    if not order:
+        raise ValueError("the ranking names no open group")
+    return order, evidence, notes
+
+
 def _ids(blocks: Iterable[str], known: set[str]) -> list[str]:
     found: list[str] = []
     for block in blocks:
@@ -439,14 +527,18 @@ def decide_phase(
     budget_used_fraction: float,
     budget_fraction: float,
 ) -> tuple[str, tuple[str, ...]] | None:
-    """The phase to enter before this iteration plans, or ``None`` to stay."""
+    """The phase to enter before this iteration plans, or ``None`` to stay.
+
+    ``budget_used_fraction`` is GUIDED's own share: of the budget left when the first GUIDED round began, the part
+    used since.
+    """
     if state.phase != PHASE_GUIDED:
         return None
     if state.playbook_settled and state.playbook is None:
         return PHASE_FREE, (REASON_PLAYBOOK_UNAVAILABLE,)
     if exhausted(state):
         return PHASE_FREE, (REASON_PLAYBOOK_EXHAUSTED,)
-    if budget_used_fraction >= budget_fraction:
+    if state.guided_rounds >= MIN_GUIDED_ROUNDS and budget_used_fraction >= budget_fraction:
         return PHASE_FREE, (REASON_GUIDED_BUDGET_SPENT,)
     stall = tuple(sorted(set(search_reasons) & STALL_REASONS))
     if stall and state.playbook is not None:
@@ -474,22 +566,24 @@ def render_for_planning(state: GuidanceState) -> dict[str, Any] | None:
                 "iterations": list(record.iterations),
             }
         )
-    return {
+    groups = []
+    for group in state.ordered_groups():
+        entry = {
+            **group.to_dict(),
+            "items": [item.item_id for item in state.playbook.items if item.group == group.group_id],
+        }
+        if group.group_id in state.rank_evidence:
+            entry["rank_evidence"] = state.rank_evidence[group.group_id]
+        groups.append(entry)
+    rendered = {
         "phase": state.phase,
         "reason_codes": list(state.reason_codes),
         "instructions": instructions,
-        "playbook": {
-            "summary": state.playbook.summary,
-            "groups": [
-                {
-                    **group.to_dict(),
-                    "items": [item.item_id for item in state.playbook.items if item.group == group.group_id],
-                }
-                for group in state.playbook.groups
-            ],
-            "items": items,
-        },
+        "playbook": {"summary": state.playbook.summary, "groups": groups, "items": items},
     }
+    if state.ranked_at_iteration:
+        rendered["ranked_at_iteration"] = state.ranked_at_iteration
+    return rendered
 
 
 def render_for_implementer(state: GuidanceState) -> str:

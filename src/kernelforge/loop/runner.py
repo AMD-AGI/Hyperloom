@@ -75,6 +75,7 @@ from kernelforge.loop.wiki_guidance import (
     WikiGuidanceStore,
     decide_phase,
     parse_playbook,
+    parse_ranking,
     record_outcome,
     render_for_implementer,
     render_for_planning,
@@ -380,6 +381,34 @@ def _patch_paths(patch: str, *, cwd: str) -> list[str]:
             if line.startswith(prefix):
                 paths.append(line[len(prefix) :].strip())
     return sorted({path for path in paths if path})
+
+
+def _lane_port_plan(lane: LaneResult, *, since_diff: str) -> str:
+    """The plan for porting a lane candidate that no longer applies onto the kernel the campaign now has."""
+    sections = [
+        f"# Port lane {lane.lane_id} onto the current kernel",
+        (
+            "This lane was planned and implemented beside other lanes of the same round, each in its own copy of the "
+            "kernel. A sibling lane's change has been measured and kept since, and this lane's diff no longer applies "
+            "to the current kernel, so it has never been measured.\n\n"
+            "Re-implement this lane's change on top of the current kernel. Land the lane's change in full, and keep "
+            "every part of the current kernel the lane did not set out to replace: it was measured and kept. Where "
+            "the lane's change replaces something the kept change also tuned -- for example by routing some cases "
+            "to a new code path -- the lane's change takes effect for what it replaces and the kept change stays for "
+            "everything else. Where both set the same knob for the same cases, keep the current kernel's value "
+            "unless the lane's change cannot work without its own, and say which you kept. The lane's plan and diff "
+            "below are the specification; do not plan anything beyond them."
+        ),
+        "## The lane's plan\n\n" + lane.plan.strip(),
+        "## The lane's diff, against the kernel it was implemented on\n\n```diff\n" + lane.diff.strip() + "\n```",
+    ]
+    if since_diff.strip():
+        sections.append(
+            "## What the kept changes did to the kernel since the lane's copy was made\n\n```diff\n"
+            + since_diff.strip()
+            + "\n```"
+        )
+    return "\n\n".join(sections) + "\n"
 
 
 def _lane_prompt(plan: str, *, serialized_driver: Path) -> str:
@@ -1842,6 +1871,8 @@ class IterationLoop(AnalysisRuntimeMixin):
                 _lane_prompt(lane.plan, serialized_driver=serialized_driver),
             )
 
+        head = git("rev-parse", "HEAD", cwd=self.ic.workspace_dir, check=False)
+        base_commit = head.stdout.strip() if head.returncode == 0 else ""
         results = await run_lanes(
             workspace_dir=self.ic.workspace_dir,
             lanes=[LanePlan(lane_id=str(index + 1), plan=plan) for index, plan in enumerate(lane_plans)],
@@ -1854,7 +1885,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         for result in results:
             if result.error:
                 print(f"  [lane {result.lane_id}] session lost: {result.error}")
-        self._lane_queue = [item for item in results if item.produced_candidate]
+        self._lane_queue = [replace(item, base_commit=base_commit) for item in results if item.produced_candidate]
         print(f"  [lanes] {len(self._lane_queue)} of {len(results)} lanes produced a candidate")
         self._persist_lane_queue()
         # The device is not per-lane.
@@ -1934,6 +1965,12 @@ class IterationLoop(AnalysisRuntimeMixin):
                 continue
             if not self._git_apply_patch(lane.diff):
                 self._git_discard_worktree()
+                if self.ic.wiki_guided:
+                    # The lane's work is the round's second direction, not a stale patch; the rest of the queue waits
+                    # for the iteration after the port.
+                    print(f"  [lane {lane.lane_id}] candidate no longer applies; an Implementer ports it")
+                    self._lane_awaiting_port = lane
+                    return None
                 print(f"  [lane {lane.lane_id}] candidate no longer applies; dropped")
                 continue
             try:
@@ -1948,6 +1985,46 @@ class IterationLoop(AnalysisRuntimeMixin):
                 continue
             return lane
         return None
+
+    def _lane_port_round(self, iteration: int, lane: LaneResult) -> HeldRound | None:
+        """Publish the plan that ports ``lane`` onto the current kernel, as this iteration's plan; None if it cannot."""
+        since_diff = ""
+        if lane.base_commit:
+            changed = git(
+                "diff",
+                lane.base_commit,
+                "HEAD",
+                "--",
+                *self._target_source_files(),
+                cwd=self.ic.workspace_dir,
+                check=False,
+            )
+            since_diff = changed.stdout if changed.returncode == 0 else ""
+        try:
+            plan_path = self._persist_lane_plans(
+                iteration,
+                [_lane_port_plan(lane, since_diff=since_diff)],
+                analysis_commit=self._canonical_commit(),
+            )
+        except (OSError, ValueError) as error:
+            print(f"  [lane {lane.lane_id}] port plan not published ({error}); dropped")
+            return None
+        self._latest_optimization_plan_path = str(plan_path)
+        self._last_orchestration_plan_executable = True
+        try:
+            self.state_store.append_event(
+                make_event(
+                    "lane_port_planned",
+                    iteration,
+                    lane_id=lane.lane_id,
+                    base_commit=lane.base_commit or None,
+                    plan_path=str(plan_path),
+                )
+            )
+        except Exception:
+            log.debug("lane port event append failed", exc_info=True)
+        print(f"  [lane {lane.lane_id}] port plan: {plan_path}")
+        return HeldRound(plan_path, "")
 
     def _git_apply_patch(self, patch: str) -> bool:
         """Apply one archived diff to the working tree, reporting whether it took."""
@@ -4253,12 +4330,29 @@ class IterationLoop(AnalysisRuntimeMixin):
         except Exception:
             log.debug("wiki guidance event append failed", exc_info=True)
 
-    def _budget_used_fraction(self) -> float:
-        """The share of the time budget spent so far, by the clock ``_time_remaining`` reads."""
+    def _budget_used_sec(self) -> float:
+        """Seconds of the time budget spent so far, by the clock ``_time_remaining`` reads."""
         total = float(self.ic.max_time_hours) * 3600.0
-        if total <= 0:
+        return min(total, max(0.0, total - self._time_remaining()))
+
+    def _guided_budget_used_fraction(self) -> float:
+        """GUIDED's share so far: of the budget left when the first GUIDED round began, the part used since."""
+        state = self.wiki_guidance
+        total = float(self.ic.max_time_hours) * 3600.0
+        if state is None or state.guided_started_used_sec is None or total <= 0:
             return 0.0
-        return min(1.0, max(0.0, 1.0 - self._time_remaining() / total))
+        available = total - state.guided_started_used_sec
+        if available <= 0:
+            return 1.0
+        return min(1.0, max(0.0, (self._budget_used_sec() - state.guided_started_used_sec) / available))
+
+    def _start_guided_clock(self) -> None:
+        """Start GUIDED's budget share at its first planning round, playbook build included."""
+        state = self.wiki_guidance
+        if state is None or state.phase != PHASE_GUIDED or state.guided_started_used_sec is not None:
+            return
+        state.guided_started_used_sec = self._budget_used_sec()
+        self._save_wiki_guidance()
 
     def _enter_wiki_guidance_phase(self, iteration: int, phase: str, reasons: Sequence[str]) -> None:
         state = self.wiki_guidance
@@ -4275,7 +4369,8 @@ class IterationLoop(AnalysisRuntimeMixin):
                 phase=phase,
                 reason_codes=list(reasons),
                 items=state.status_counts() or None,
-                budget_used_fraction=round(self._budget_used_fraction(), 4),
+                guided_rounds=state.guided_rounds,
+                guided_budget_used_fraction=round(self._guided_budget_used_fraction(), 4),
             )
         )
         print(f"  [wiki-guided] {phase}: " + ", ".join(reasons))
@@ -4288,7 +4383,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         change = decide_phase(
             state,
             search_reasons=decision.reason_codes,
-            budget_used_fraction=self._budget_used_fraction(),
+            budget_used_fraction=self._guided_budget_used_fraction(),
             budget_fraction=self.ic.guided_budget_fraction,
         )
         if change is not None:
@@ -4363,6 +4458,51 @@ class IterationLoop(AnalysisRuntimeMixin):
         print(f"  [wiki-guided] playbook unavailable ({error})")
         if state.playbook_settled:
             self._enter_wiki_guidance_phase(iteration, PHASE_FREE, (REASON_PLAYBOOK_UNAVAILABLE,))
+
+    async def _rank_wiki_playbook(self, iteration: int, orchestration_service, context):
+        """Order a GUIDED round's open groups by the round's evidence; the context re-rendered in that order.
+
+        A ranker that is unavailable or answers nothing usable leaves the previous order, and the round plans on.
+        """
+        state = self.wiki_guidance
+        guidance = context.wiki_guidance
+        if state is None or state.playbook is None or not guidance or guidance.get("phase") != PHASE_GUIDED:
+            return context
+        ranker = getattr(orchestration_service, "rank_wiki_playbook", None)
+        open_groups = state.open_group_ids()
+        if ranker is None or not open_groups:
+            return context
+        print("  [wiki-guided] ranking the open playbook groups against this round's evidence...")
+        try:
+            order, evidence, notes = parse_ranking(await ranker(context, usage=self._usage), open_groups)
+        except (OrchestrationInfrastructureError, OrchestrationOutputError, ValueError) as error:
+            detail = f"{type(error).__name__}: {error}"
+            self._append_wiki_event(make_event("wiki_playbook_rank_unavailable", iteration, error=detail[:500]))
+            print(f"  [wiki-guided] ranking unavailable ({detail}); planning in the previous order")
+            return context
+        finally:
+            self._checkpoint_llm_usage()
+        state.group_order = order
+        state.rank_evidence = evidence
+        state.ranked_at_iteration = iteration
+        self._save_wiki_guidance()
+        self._append_wiki_event(
+            make_event(
+                "wiki_playbook_ranked",
+                iteration,
+                order=order,
+                unranked=[group_id for group_id in open_groups if group_id not in order] or None,
+            )
+        )
+        print("  [wiki-guided] ranked: " + ", ".join(order) + ("; " + "; ".join(notes) if notes else ""))
+        return self._with_wiki_guidance(context)
+
+    def _count_guided_round(self) -> None:
+        state = self.wiki_guidance
+        if state is None:
+            return
+        state.guided_rounds += 1
+        self._save_wiki_guidance()
 
     def _with_wiki_guidance(self, context):
         """Attach the playbook and its ledger to a planning context, when there is one."""
@@ -4441,9 +4581,12 @@ class IterationLoop(AnalysisRuntimeMixin):
                 else self._build_orchestration_context()
             )
         )
-        # Inside the round's planning clock, so building the playbook is charged to the round that needed it.
+        # Inside the round's planning clock, so building and ranking the playbook are charged to the round that
+        # needed them.
+        self._start_guided_clock()
         await self._ensure_wiki_playbook(iteration, orchestration_service, context)
-        context = self._with_wiki_guidance(context)
+        context = await self._rank_wiki_playbook(iteration, orchestration_service, self._with_wiki_guidance(context))
+        guided_round = bool(context.wiki_guidance) and context.wiki_guidance.get("phase") == PHASE_GUIDED
         try:
             result = await orchestration_service.run(
                 context,
@@ -4456,6 +4599,8 @@ class IterationLoop(AnalysisRuntimeMixin):
             return None, detail
         finally:
             self._checkpoint_llm_usage()
+        if guided_round:
+            self._count_guided_round()
 
         self._record_probe_hazard(iteration, result)
         self._last_lane_plans = [plan for plan in result.optimization_plans if str(plan).strip()]
@@ -4558,6 +4703,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                             "plan": lane.plan,
                             "diff": lane.diff,
                             "rationale": lane.rationale,
+                            "base_commit": lane.base_commit,
                         }
                         for lane in self._lane_queue
                     ]
@@ -4582,6 +4728,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     diff=str(entry["diff"]),
                     # A queue written before rationales were kept has none.
                     rationale=str(entry.get("rationale") or ""),
+                    base_commit=str(entry.get("base_commit") or ""),
                 )
                 for entry in record["candidates"]
             ]
@@ -4879,6 +5026,9 @@ class IterationLoop(AnalysisRuntimeMixin):
         # Candidates from one concurrent fan-out, spent one per iteration so each is measured and judged on its own by
         # the ordinary decision path.
         self._lane_queue: list[LaneResult] = []
+        # A queued candidate whose diff stopped applying after a sibling's KEEP, held for the iteration that has an
+        # Implementer port it onto the current kernel (``--wiki-guided`` only; otherwise it is dropped).
+        self._lane_awaiting_port: LaneResult | None = None
         self._last_lane_plans: list[str] = []
         # Stacked iterations run back to back so far.
         self._merge_precedence_streak = 0
@@ -5437,6 +5587,13 @@ class IterationLoop(AnalysisRuntimeMixin):
                 )
             # A fan-out round already paid for these candidates, so they are measured before anything new is planned.
             queued_lane = None if hazard or merge_diff else self._take_lane_candidate()
+            if self._lane_awaiting_port is not None:
+                lane_to_port, self._lane_awaiting_port = self._lane_awaiting_port, None
+                if agent_fn is not None and orchestration_service is not None:
+                    # Spent through the ordinary session path below, as a plan the round already paid for.
+                    fan_out_plan = self._lane_port_round(iteration, lane_to_port)
+                else:
+                    print(f"  [lane {lane_to_port.lane_id}] no Implementer to port it; dropped")
             if hazard is not None:
                 unmeasured_result = self._unmeasurable_on_a_held_device(
                     iteration=iteration,
