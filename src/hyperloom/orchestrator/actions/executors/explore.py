@@ -542,10 +542,21 @@ def filter_baseline_noop_variants(
     """Drop variants that would launch the server the stack is already running.
 
     The baseline and each variant are materialized through ``_build_variant_yaml``
-    into throwaway configs, and only what the variant *changes* about the baseline
-    is judged: those settings against ``observed_server_config`` -- the engine's
-    own resolved settings -- and those envs against ``observed_server_env``. A
-    variant is dropped only when both halves are already in effect.
+    into throwaway configs, and which rule applies depends on whether the computed
+    settings and env delta of the variant against the baseline (``_launch_delta``)
+    is empty. That delta lists only what the variant sets differently, so a
+    ``"replace"`` variant that drops a baseline flag can still have an empty one:
+
+    1. Empty delta: the variant is dropped only when its ``args_mode`` is
+       ``"append"`` and its own request names only settings and envs the baseline
+       launch already holds (``restates_the_baseline``). This rule reads the
+       baseline config, not the observed launch. Every other empty-delta variant
+       -- a ``"replace"`` request, an empty request, or a change the merged config
+       hides -- is kept without consulting the observed launch.
+    2. Non-empty delta: only what the variant *changes* about the baseline is
+       judged, those settings against ``observed_server_config`` -- the engine's
+       own resolved settings -- and those envs against ``observed_server_env``.
+       The variant is dropped when both halves are already in effect.
 
     A variant that removes something, or names a list-valued flag, is exempt:
     neither is visible here, so both would read as a restatement of the stack.
