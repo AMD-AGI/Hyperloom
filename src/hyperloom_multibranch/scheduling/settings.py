@@ -9,7 +9,12 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom_multibranch.scheduling.roster import RosterCaps
+
+#: The metric an InferenceX session's values are read in: the frontier policy, final selection, the dashboard and
+#: the final recipe's metric.
+PRIMARY_METRIC = GRADED_OUTPUT
 
 
 class KernelOptimizer(str, Enum):
@@ -52,4 +57,4 @@ class RunSettings:
     judge_interval_seconds: float
 
 
-__all__ = ["KernelOptimizer", "RunSettings", "Workload"]
+__all__ = ["PRIMARY_METRIC", "KernelOptimizer", "RunSettings", "Workload"]

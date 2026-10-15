@@ -45,13 +45,12 @@ from hyperloom_multibranch.scheduling.integrator import Integrator, LlmPatchReso
 from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, Judge
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.llm import Completion
-from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_PRIMARY_METRIC
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeerSetup
 from hyperloom_multibranch.scheduling.prelude import Prelude, PreludeFailed, PreludeResult
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.requests import SessionTests
 from hyperloom_multibranch.scheduling.roster import QUOTA_POLICY_VERSION, Roster
-from hyperloom_multibranch.scheduling.settings import RunSettings
+from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC, RunSettings
 from hyperloom_multibranch.scheduling.stops import (
     TOOLBOX_CLOSE_SECONDS,
     SessionStopper,
@@ -136,7 +135,7 @@ class Session:
             self._roster, self._branches, peers.toolbox, peers.mcp, processes, self._decisions, clock
         )
         progress = session_frontier(
-            self._notebook, MB_FAKE_PRIMARY_METRIC, budget_seconds=budget, log_path=layout.reports / FRONTIER_LOG
+            self._notebook, PRIMARY_METRIC, budget_seconds=budget, log_path=layout.reports / FRONTIER_LOG
         )
         resolver = LlmPatchResolver(resolver_completion, peers.repo)
         self._prelude = Prelude(
@@ -154,8 +153,8 @@ class Session:
             settings.judge_interval_seconds,
             clock,
         )
-        self._selector = FinalSelector(tests, peers.gate, settings.workload, MB_FAKE_PRIMARY_METRIC, clock)
-        closing = exports(layout, self._notebook, peers.repo, progress, MB_FAKE_PRIMARY_METRIC, budget)
+        self._selector = FinalSelector(tests, peers.gate, settings.workload, PRIMARY_METRIC, clock)
+        closing = exports(layout, self._notebook, peers.repo, progress, PRIMARY_METRIC, budget)
         self._closer = Closer(layout, self._stopper, closing, clock)
         self._signals = StopSignals()
 
@@ -265,7 +264,7 @@ class Session:
         if integration is None:
             raise RuntimeError("the notebook has no integration branch after PRELUDE recorded its root")
         return choose_candidates(
-            self._roster.entries(), progress, integration.head_commit, integration.head_value, MB_FAKE_PRIMARY_METRIC
+            self._roster.entries(), progress, integration.head_commit, integration.head_value, PRIMARY_METRIC
         )
 
     async def _close(self, ending: SessionOutcome, hard_stop: HardStop) -> SessionOutcome:
@@ -328,7 +327,7 @@ class Session:
             "started_at": budget.started_at,
             "deadline": budget.deadline,
             "settings": encode(self._settings),
-            "metric": MB_FAKE_PRIMARY_METRIC,
+            "metric": PRIMARY_METRIC,
             "policy_versions": POLICY_VERSIONS,
         }
         atomic_write_json(self._layout.manifest, document, indent=2, sort_keys=True)

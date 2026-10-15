@@ -11,7 +11,7 @@ import re
 import sys
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -28,12 +28,11 @@ from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
-from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_PRIMARY_METRIC
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
 from hyperloom_multibranch.scheduling.prelude import Prelude, PreludeFailed, PreludeResult, prelude_argv
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
 from hyperloom_multibranch.scheduling.requests import SessionTests
-from hyperloom_multibranch.scheduling.settings import KernelOptimizer, Workload
+from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC, KernelOptimizer, Workload
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     LAUNCH_FLAG,
     MbFakeChildRegistry,
@@ -189,9 +188,26 @@ async def test_finished_child_roots_the_session_before_any_baseline_test(tmp_pat
     profile = await _notebook(layout).session_profile()
     assert profile == result.profile
     assert (profile.session_id, profile.hardware, profile.framework_version) == (layout.session_id, "mi355x", "0.4.1")
-    assert dict(profile.roofline_ceiling) == {MB_FAKE_PRIMARY_METRIC: ROOFLINE_PEAK}
+    assert dict(profile.roofline_ceiling) == {PRIMARY_METRIC: ROOFLINE_PEAK}
     assert profile.kernel_optimizer == "geak"
+    assert (profile.model_type, profile.architectures) == ("", ())
     assert peers.toolbox.requests == {}
+
+
+async def test_the_profile_names_the_model_type_and_architectures_of_the_models_config(tmp_path: Path) -> None:
+    model = tmp_path / "models" / "Qwen3-8B"
+    model.mkdir(parents=True)
+    (model / "config.json").write_text(json.dumps({"model_type": "qwen3", "architectures": ["Qwen3ForCausalLM"]}))
+    workload = replace(WORKLOAD, model=str(model))
+    layout = _layout(tmp_path)
+    peers = _peers(layout)
+    budget = SessionBudget.from_hours(2.0, NOW)
+
+    prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), peers)
+    result = await prelude.root(workload, budget, HardStop(budget, _clock()))
+
+    assert (result.profile.model_type, result.profile.architectures) == ("qwen3", ("Qwen3ForCausalLM",))
+    assert await _notebook(layout).session_profile() == result.profile
 
 
 async def test_baseline_is_measured_through_the_toolbox(tmp_path: Path) -> None:
@@ -206,8 +222,8 @@ async def test_baseline_is_measured_through_the_toolbox(tmp_path: Path) -> None:
     baseline = await _notebook(layout).baseline()
     assert baseline.root_commit == result.root_commit
     assert sorted(baseline.request_ids) == sorted(requests)
-    assert baseline.values[MB_FAKE_PRIMARY_METRIC] == pytest.approx(1000.0)
-    assert dict(baseline.threshold_pct) == {MB_FAKE_PRIMARY_METRIC: 1.0}
+    assert baseline.values[PRIMARY_METRIC] == pytest.approx(1000.0)
+    assert dict(baseline.threshold_pct) == {PRIMARY_METRIC: 1.0}
     assert set(peers.toolbox.results) == set(requests)
     for request in requests.values():
         assert (request.branch_id, request.parent_commit) == (INTEGRATION_BRANCH, result.root_commit)

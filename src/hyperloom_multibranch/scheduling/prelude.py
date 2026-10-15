@@ -15,12 +15,15 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from hyperloom.common.io import atomic_write_json
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import PatchRef, Recipe
+from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
 from hyperloom.measure.compile import BlobError
 from hyperloom_multibranch.contracts.gate import SessionGate
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Notebook
@@ -132,7 +135,8 @@ class Prelude:
         await self._notebook.record_lineage(
             LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=root, recipe_digest=recipe.digest())
         )
-        profile = _session_profile(self._layout.session_id, workload, artifacts)
+        model_config = await asyncio.to_thread(summarize_model_config, workload.model)
+        profile = _session_profile(self._layout.session_id, workload, artifacts, model_config)
         await self._notebook.write_session_profile(profile)
         self._decisions.record(
             Decision(
@@ -228,7 +232,12 @@ def _succeeded(artifacts: PreludeArtifacts) -> PreludeArtifacts:
     return artifacts
 
 
-def _session_profile(session_id: str, workload: Workload, artifacts: PreludeArtifacts) -> SessionProfile:
+def _session_profile(
+    session_id: str, workload: Workload, artifacts: PreludeArtifacts, model_config: Mapping[str, Any]
+) -> SessionProfile:
+    """``model_config`` is :func:`summarize_model_config` of the model; its type and architectures are left empty
+    when the model's ``config.json`` does not name them."""
+
     return SessionProfile(
         session_id=session_id,
         model=workload.model,
@@ -238,6 +247,8 @@ def _session_profile(session_id: str, workload: Workload, artifacts: PreludeArti
         precision=workload.precision,
         tp=workload.tp,
         conc=workload.conc,
+        model_type=model_config.get("model_type", ""),
+        architectures=tuple(model_config.get("architectures", ())),
         isl=workload.isl,
         osl=workload.osl,
         kernel_optimizer=workload.kernel_optimizer.value,

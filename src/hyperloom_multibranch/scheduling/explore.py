@@ -31,12 +31,9 @@ from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, D
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import Integrator
 from hyperloom_multibranch.scheduling.judge import Judge, JudgeDecision, JudgeView
-from hyperloom_multibranch.scheduling.mb_fakes import (
-    MB_FAKE_PRIMARY_METRIC,
-    mb_fake_branches_to_add,
-    mb_fake_similar_branches,
-)
+from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_branches_to_add, mb_fake_similar_branches
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStop, Roster, StopCause
+from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 
 logger = logging.getLogger(__name__)
@@ -158,13 +155,13 @@ class Explorer:
             progress=progress,
             integration_value=dict(integration.head_value) if integration is not None else {},
             roofline_ceiling=window.roofline_ceiling,
-            metric=MB_FAKE_PRIMARY_METRIC,
+            metric=PRIMARY_METRIC,
             opening=opening,
             free_slots=self._roster.free_slots(),
             history=judge_history(
                 await self._notebook.snapshot(),
                 self._progress.history,
-                MB_FAKE_PRIMARY_METRIC,
+                PRIMARY_METRIC,
                 budget_seconds=window.budget_seconds,
             ),
         )

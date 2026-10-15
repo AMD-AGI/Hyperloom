@@ -9,18 +9,12 @@ what is left to replace, and each docstring or comment names what it stands in f
 
 from __future__ import annotations
 
-from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission
 from hyperloom_multibranch.scheduling.roster import Roster
 
 #: Stands in for the image digest of the root recipe. The main flow builds no image; replaced when enablement or
 #: hosted measurement produce one.
 MB_FAKE_BASE_IMAGE_DIGEST = "sha256:" + "0" * 64
-
-#: The metric the session's values are read in: the InferenceX rule's throughput. It feeds the frontier policy, final
-#: selection, the dashboard and the final recipe's metric. Stands in for the per-workload choice (AgentX judges P50
-#: interactivity); replaced once the workload names the benchmark it is judged on.
-MB_FAKE_PRIMARY_METRIC = GRADED_OUTPUT
 
 
 def mb_fake_refused_fork(refusal: str) -> ForkAdmission:
@@ -65,7 +59,6 @@ def mb_fake_regression_passes(commit: str) -> bool:
 
 __all__ = [
     "MB_FAKE_BASE_IMAGE_DIGEST",
-    "MB_FAKE_PRIMARY_METRIC",
     "mb_fake_branches_to_add",
     "mb_fake_refused_fork",
     "mb_fake_regression_passes",

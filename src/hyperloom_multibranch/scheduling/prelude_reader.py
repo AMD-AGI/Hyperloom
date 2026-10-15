@@ -24,7 +24,8 @@ from hyperloom.common.jsonio import read_json
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, PatchRef, Recipe, RecipeError
 from hyperloom.inference_optimizer.breakdown.stop_reasons import outcome_status
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
-from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST, MB_FAKE_PRIMARY_METRIC
+from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
+from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC
 
 #: ``LATEST_STATE_SCHEMA_VERSION`` of src/hyperloom/orchestrator/state/shared_state.py, which this package may not
 #: import; a test compares the two.
@@ -275,7 +276,7 @@ def _roofline_ceiling(snapshots: object, baseline_ceiling: object) -> Mapping[st
     for snapshot in (*reversed(_snapshot_list(snapshots)), _mapping(baseline_ceiling, "baseline_roofline_ceiling")):
         peak = snapshot.get(MB_ROOFLINE_PEAK_KEY) if isinstance(snapshot, Mapping) else None
         if isinstance(peak, (int, float)) and not isinstance(peak, bool) and peak > 0:
-            return {MB_FAKE_PRIMARY_METRIC: float(peak)}
+            return {PRIMARY_METRIC: float(peak)}
     return {}
 
 
