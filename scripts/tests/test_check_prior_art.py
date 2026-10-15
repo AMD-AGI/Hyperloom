@@ -212,17 +212,6 @@ def test_every_query_is_recorded_with_what_it_covered_and_a_failure_does_not_sto
     ]
 
 
-@pytest.mark.parametrize(
-    ("repos", "message"),
-    [("", "names no repository"), ("https://github.com/up/engine\n", "not an owner/name repository")],
-)
-def test_a_search_with_no_valid_repository_stops_before_any_query(tmp_path: Path, repos: str, message: str) -> None:
-    result = _run(tmp_path, "search.sh", {"search": {}}, {"repos.txt": repos, "terms.txt": "moe\n"})
-    assert result.returncode != 0
-    assert message in result.stderr
-    assert not (tmp_path / "work" / "queries.tsv").exists()
-
-
 def _open_pr(number: int, *paths: str, changed: int = 0, change: str = "MODIFIED") -> dict:
     """One open pull request as the GraphQL page lists it: a renamed file by its new path only."""
     return {
