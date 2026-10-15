@@ -236,13 +236,21 @@ def _settle(root: Path, git_tree: bool, message: str) -> None:
         git_commit_all(root, message)
 
 
+# What ``git format-patch`` puts before the diff.
+_MAIL_HEADER = (
+    "From 0 Mon Sep 17 00:00:00 2001\nFrom: t <t@t>\nSubject: [PATCH] delete alpha\n\n---\n"
+    " mod/alpha.py | 3 ---\n 1 file changed, 3 deletions(-)\n\n"
+)
+
+
+@pytest.mark.parametrize("header", ["", _MAIL_HEADER], ids=["diff", "format_patch"])
 @pytest.mark.parametrize("git_tree", [True, False])
-def test_deletion_of_a_drifted_file_is_a_failure_not_present(tmp_path, git_tree):
+def test_deletion_of_a_drifted_file_is_a_failure_not_present(tmp_path, git_tree, header):
     """The file the patch deletes is still there with other content, so undoing the deletion cannot prove presence."""
     src = _channel_tree(tmp_path, git_tree)
     (src / "mod" / "alpha.py").write_text("header\ndrifted\nfooter\n", encoding="utf-8")
     _settle(src, git_tree, "drift")
-    patch = _patch(tmp_path, "delete.patch", _DELETE_ALPHA)
+    patch = _patch(tmp_path, "delete.patch", header + _DELETE_ALPHA)
 
     result = _apply_one(git_tree, src, patch, tmp_path / "bak")
 
@@ -259,28 +267,6 @@ def test_deletion_already_carried_out_is_present(tmp_path, git_tree, check):
     (src / "mod" / "alpha.py").unlink()
     _settle(src, git_tree, "deleted upstream")
     patch = _patch(tmp_path, "delete.patch", _DELETE_ALPHA)
-
-    result = _apply_one(git_tree, src, patch, tmp_path / "bak")
-
-    assert result.ok, result.error
-    assert result.present_by is check
-
-
-# Shapes ``git apply`` and ``patch`` accept whose leading block names no file, so the manifest cannot be parsed.
-_FORMAT_PATCH = (
-    "From 0 Mon Sep 17 00:00:00 2001\nSubject: [PATCH] alpha\n\n---\ndiff --git a/mod/alpha.py b/mod/alpha.py\n"
-)
-_DIFF_RUN = "diff -ruN a/mod/alpha.py b/mod/alpha.py\n"
-
-
-@pytest.mark.parametrize("preamble", [_FORMAT_PATCH, _DIFF_RUN], ids=["format_patch", "diff_ruN"])
-@pytest.mark.parametrize(("git_tree", "check"), _CHANNEL_CHECKS)
-def test_patch_with_unparseable_manifest_is_probed_at_every_level(tmp_path, git_tree, check, preamble):
-    """A patch the manifest parser rejects is still reported present when the tree holds it."""
-    src = _channel_tree(tmp_path, git_tree)
-    (src / "mod" / "alpha.py").write_text("header\nnew_alpha\nfooter\n", encoding="utf-8")
-    _settle(src, git_tree, "already merged")
-    patch = _patch(tmp_path, "mail.patch", preamble + _SUBSET)
 
     result = _apply_one(git_tree, src, patch, tmp_path / "bak")
 

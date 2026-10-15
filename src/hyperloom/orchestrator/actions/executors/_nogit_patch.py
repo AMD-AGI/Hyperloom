@@ -17,7 +17,7 @@ from typing import Any, NamedTuple
 
 from ...delivery.ledger import append_record, mark_prepared
 from ...delivery import file_digest as _file_digest
-from ...specialists.patch_safety import path_resolves_at
+from ...specialists.patch_safety import patch_file_targets, path_resolves_at
 from ._apply_feedback import ApplyFeedback, PatchApplyResult, PresenceCheck, read_patch_source_context
 
 log = logging.getLogger(__name__)
@@ -94,7 +94,8 @@ def _reverse_probe_levels(framework_root: Path, patch_path: Path) -> tuple[int, 
 
     Undoing a file deletion creates the file, which succeeds at any level where
     the stripped path happens to be absent, so a level counts only when some
-    file the patch names resolves at it. A deletion already carried out leaves
+    file the patch names resolves at it, read from the ``---``/``+++`` headers
+    as the target preflight reads them. A deletion already carried out leaves
     nothing to resolve, and then every level counts.
 
     Args:
@@ -102,16 +103,14 @@ def _reverse_probe_levels(framework_root: Path, patch_path: Path) -> tuple[int, 
         patch_path: The unified-diff patch file to probe.
 
     Returns:
-        The levels to probe, in priority order: every level when the manifest
-        cannot be parsed, and none when the patch cannot be read.
+        The levels to probe, in priority order; none when the patch cannot be read.
     """
     try:
-        manifest = parse_patch_manifest(patch_path.read_text(encoding="utf-8", errors=_DECODE_ERRORS))
+        pairs = patch_file_targets(patch_path.read_text(encoding="utf-8", errors=_DECODE_ERRORS))
     except OSError:
         return ()
-    except ValueError:
-        return _P_LEVELS
-    anchored = tuple(lvl for lvl in _P_LEVELS if any(path_resolves_at(framework_root, t.path, lvl) for t in manifest))
+    paths = {path for pair in pairs for path in pair if path != _PATCH_DEV_NULL}
+    anchored = tuple(lvl for lvl in _P_LEVELS if any(path_resolves_at(framework_root, p, lvl) for p in paths))
     return anchored or _P_LEVELS
 
 
