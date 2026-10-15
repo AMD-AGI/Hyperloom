@@ -74,9 +74,21 @@ def _varying_positions(suffixes: list[str]) -> list[dict[str, Any]]:
 
 
 def variant_counts(cache_root: str | Path | None) -> list[dict[str, Any]]:
-    """Per base kernel, how many variants a session compiled and where they differ, worst first."""
+    """Per base kernel, how many variants a session compiled and where they differ, worst first.
+
+    A cache this process cannot stat counts as a cache with nothing to report.
+    The callers render a hand-off document and a gap set from several censuses
+    at once, and a session whose cache a privileged earlier run left unreadable
+    would otherwise lose the launch, graph and front-end findings along with
+    this one.
+    """
     root = Path(str(cache_root or "")).expanduser()
-    if not str(cache_root or "").strip() or not root.is_dir():
+    if not str(cache_root or "").strip():
+        return []
+    try:
+        if not root.is_dir():
+            return []
+    except OSError:
         return []
     by_kernel: dict[str, list[str]] = {}
     for meta in root.glob("**/*.json"):

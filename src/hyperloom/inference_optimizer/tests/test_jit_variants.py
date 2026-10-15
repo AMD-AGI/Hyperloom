@@ -85,6 +85,17 @@ def test_an_absent_or_empty_cache_reports_nothing(tmp_path):
     assert jv.variant_counts(tmp_path / "empty") == []
 
 
+def test_a_cache_this_process_cannot_stat_reports_nothing(tmp_path):
+    """Raising here sank the whole hand-off document, which several other censuses also write."""
+    denied = tmp_path / "denied"
+    denied.mkdir()
+    (tmp_path).chmod(0o000)
+    try:
+        assert jv.variant_counts(denied) == []
+    finally:
+        (tmp_path).chmod(0o755)
+
+
 def test_an_unreadable_entry_does_not_sink_the_census(tmp_path):
     _grid_leak(tmp_path, "_ok_kernel", 20)
     broken = tmp_path / "HASHbroken"
