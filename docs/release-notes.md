@@ -64,7 +64,59 @@ is a patch release on top of 1.1.3. The per-change history is on the
   where its text reads the same predicate the exit rule does. The
   `--plateau-explore-*` flags are untouched.
 
+- **The old command-line entry points.** `inference_optimizer`,
+  `quantization-agent`, `python -m hyperloom.inference_optimizer.{cli,multi_node,setup}`
+  and the `python -m ...tools.*` session tools are gone; every command now runs
+  as `hyperloom <command>` (see *Changed*). Removed with them:
+  `--kernel-codex` / `--kernel-claude` / `--kernel-prompt` (ignored no-ops),
+  the `--max-minutes-*-pct` and `--phase-budget-explore-pct` aliases,
+  `recover --backfill-trace` (use `hyperloom session backfill`),
+  `INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX`, and the critic runtime's
+  `init-session`, `close-session`, `list-priors`, `write-verdict`,
+  `write-kb-drafts` and `add-contradiction` subcommands, which nothing called.
+  A removed flag now fails argument parsing instead of being ignored.
+
+- **In-process specialist dispatch.** `--specialist-dispatch-mode` and
+  `--specialist-per-turn-max-seconds` are no longer accepted: every specialist
+  runs as a Claude CLI subprocess in its own worktree. A session that finds no
+  claude CLI (`HYPERLOOM_CLAUDE_CLI_PATH`, `GEAK_CLAUDE_BIN` or `PATH`) stops at
+  startup instead of silently running every specialist in-process without
+  source roots or tools. A specialist that ends without `specialist_done.json`
+  is recorded as `no_specialist_done_emitted`.
+
+- **Kernelforge readers for its own historical workspace formats.**
+  `forge-loop --resume` on a workspace written by an older kernelforge now fails
+  with a missing/unknown-field error instead of migrating it; start a fresh
+  campaign. Workspace JSON artifacts and the forge-loop result's `checkpoint`
+  no longer carry `schema_version`. `forge-rewrite-by-flydsl --op-name` is gone
+  (use `--logical-op-name`), agent providers registered only under the
+  `kernel_agents.agent_providers` entry-point group are no longer loaded
+  (register under `kernelforge.agent_providers`), and the already-ignored
+  `KERNEL_AGENTS_MAX_TURNS` no longer warns.
+
 ### Changed
+
+- **One `hyperloom <command>` entry point.** Setup, preflight, optimization,
+  recovery, quantization, the session tools and the multi-node CLI all run as
+  `hyperloom <command>` (or `python -m hyperloom <command>`), and
+  `hyperloom --help` lists them: `hyperloom setup`, `hyperloom check`,
+  `hyperloom optimize`, `hyperloom recover` (was `recover-session`),
+  `hyperloom quantize`, `hyperloom session breakdown|report|backfill|events|state`
+  and `hyperloom multi-node <sub>`. `--verbose` now goes after the command, and
+  a failed `--quantize` prelude exits `4` (exit `3` is only "session lock
+  held"). Invalid PD combinations on rayjob now fail at startup instead of being
+  dropped. External launchers must switch; the old-to-new table is in
+  [Upgrade Hyperloom version](reference/upgrade.md).
+
+- **The installer owns the one claude CLI every consumer runs.** It installs
+  Claude Code with the native installer into `~/.local/bin`, puts that first on
+  `PATH` before GEAK's bootstrap runs, and writes the same file into
+  `GEAK_CLAUDE_BIN`, so GEAK, the specialists and Forge resolve one copy. An
+  install that cannot provide claude (no curl, or `claude.ai` unreachable) now
+  exits with an error instead of a warning. `HYPERLOOM_CLAUDE_CODE_VERSION`
+  takes the native installer's targets (`stable`, `latest` or an exact
+  `X.Y.Z`) rather than an npm version spec, and the installer no longer installs
+  Node.js.
 
 - **Bump validated SGLang stack to 0.5.21 (ROCm 10 docker).** Updates
   `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
@@ -78,10 +130,14 @@ is a patch release on top of 1.1.3. The per-change history is on the
   `INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD`,
   `INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC`,
   `INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS`,
-  `INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS`, `SWEEP_VARIANT_TIMEOUT_SEC`,
-  `HYPERLOOM_FUSION_KEEP_PCT`, `GEAK_E2E_TIMEOUT_S`, `GEAK_BUDGET_MARGIN_S`,
-  `GEAK_MIN_RUN_S` and `GEAK_TERM_GRACE_S` now raise `EnvValueError` naming the
-  variable and the value when they are set to something that is not a number.
+  `INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS`,
+  `INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC`, `SWEEP_VARIANT_TIMEOUT_SEC`,
+  `HYPERLOOM_FUSION_KEEP_PCT`, `HYPERLOOM_GEMM_PAIRED_PAIRS`, `GEAK_E2E_TIMEOUT_S`,
+  `GEAK_BUDGET_MARGIN_S`, `GEAK_MIN_RUN_S` and `GEAK_TERM_GRACE_S`, and
+  `MAX_MODEL_LEN` and `GPU_MEMORY_UTILIZATION` where they stand in for a
+  `--max-model-len` / `--gpu-memory-utilization` the baseline server arguments
+  do not carry, now raise `EnvValueError` naming the variable and the value when
+  they are set to something that is not a number.
   A typo used to be swallowed: the run proceeded on the default, so a session
   launched with `GEAK_MIN_RUN_S=600s` or `SWEEP_VARIANT_TIMEOUT_SEC=40m` spent
   its hours under limits nobody had chosen, and the report gave no sign the
