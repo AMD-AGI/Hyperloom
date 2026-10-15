@@ -23,6 +23,7 @@ from typing import Any
 from hyperloom.inference_optimizer.session.session_paths import jit_cache_dir
 from hyperloom.orchestrator.measurement.host_input_cost import input_cost
 from hyperloom.orchestrator.measurement.jit_variants import variant_counts
+from hyperloom.orchestrator.state._shared_state.phase_state import GAP_SEVERITY_HIGH
 from kernelforge.foldable_launches import foldable_launches
 from kernelforge.graph_coverage import graph_coverage
 from kernelforge.trace_events import resolve_capture
@@ -79,7 +80,7 @@ def _recompile_gaps(session_dir: Any) -> list[dict[str, Any]]:
                 "a constant is tracking a runtime quantity, and every new call shape stalls the engine to compile. "
                 "Making that argument runtime rather than constexpr removes the recompiles without changing what "
                 "the kernel computes.",
-                severity="high",
+                severity=GAP_SEVERITY_HIGH,
                 domain_hint=KERNEL_DOMAIN,
             )
         )
@@ -128,7 +129,7 @@ def _graph_gaps(trace_path: Any) -> list[dict[str, Any]]:
                 "replay a captured graph. Establish whether the backend refuses to capture this class on this "
                 "platform or whether the module carries nothing for the capture to walk; the two have different "
                 "fixes.",
-                severity="high",
+                severity=GAP_SEVERITY_HIGH,
                 domain_hint=SERVING_DOMAIN,
             )
         )
@@ -151,7 +152,7 @@ def _input_cost_gaps(workspace: Any) -> list[dict[str, Any]]:
             f"{cost['high_isl'] // 1000}k). On a cached prefix the engine does little work for those tokens, so "
             "the cost is in front of it: rendering the template, tokenising the whole prompt again, pickling it "
             "to the scheduler.",
-            severity="high",
+            severity=GAP_SEVERITY_HIGH,
             domain_hint=SERVING_DOMAIN,
         )
     ]

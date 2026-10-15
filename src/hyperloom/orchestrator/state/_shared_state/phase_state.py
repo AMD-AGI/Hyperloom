@@ -77,8 +77,13 @@ def _merge_rejected(prior: Any, update: Any) -> list[dict[str, Any]]:
     return list(merged.values())
 
 
+# The gap ``severity`` vocabulary, named here because this is where its order lives.
+GAP_SEVERITY_HIGH: str = "high"
+GAP_SEVERITY_MEDIUM: str = "medium"
+GAP_SEVERITY_LOW: str = "low"
+
 # Gap ``severity`` by urgency; an unknown severity ranks below ``low``.
-GAP_SEVERITY_RANK: dict[str, int] = {"high": 3, "medium": 2, "low": 1}
+GAP_SEVERITY_RANK: dict[str, int] = {GAP_SEVERITY_HIGH: 3, GAP_SEVERITY_MEDIUM: 2, GAP_SEVERITY_LOW: 1}
 
 
 def gap_actionability_key(gap: dict[str, Any]) -> tuple[int, int, str]:
