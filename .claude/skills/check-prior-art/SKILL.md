@@ -152,9 +152,10 @@ names the mechanism. Read at most 12; a candidate cut for the budget stays in th
 bash .claude/skills/check-prior-art/read.sh "$WORK" <owner/name> <N>
 ```
 
-It writes `prs/<owner>/<name>/<N>/`: `meta.txt` (state, draft, `merge_commit_sha` once merged,
-otherwise `-`), `body.txt`, `files.txt`, `diff.txt`, `comments.txt` and `xrefs.tsv` (the PRs that
-link to this one). Read the diff, not the title (G1, G2). One line per PR into `$WORK/classes.txt`:
+It writes `prs/<owner>/<name>/<N>/`: `pr.json` (`state` `OPEN`, `CLOSED` or `MERGED`, `isDraft`,
+`mergeCommit`, `body`, `comments`, `reviews`), `files.txt` (every changed path), `diff.txt` and
+`xrefs.tsv` (the PRs that link to this one). A diff GitHub will not send is a `SKIPPED: diff` line
+saying how many changed paths `files.txt` still lists. Read the diff, not the title (G1, G2). One line per PR into `$WORK/classes.txt`:
 
 ```
 <owner/name#N> SUPERSEDED|DUPLICATE|OVERLAPPING|UNRELATED -- <what in the PR decides it>
@@ -174,13 +175,14 @@ The class is the first row that applies:
 For each DUPLICATE, open or merged, run the probe against your tree and append its answer:
 
 ```bash
+sha=$(jq -r '.mergeCommit.oid // empty' "$WORK/prs/<owner>/<name>/<N>/pr.json")
 out=$(python -m kernelforge.knowledge.pr_knowledge.inclusion --tree "$TREE" --commit "$COMMIT" \
-  --pr <N> --merge-commit-sha <merge_commit_sha from meta.txt>); status=$?
+  --pr <N> ${sha:+--merge-commit-sha "$sha"}); status=$?
 printf '%s#%s exit=%s %s\n' <owner/name> <N> "$status" "$out" >> "$WORK/inclusion.txt"
 ```
 
-Leave out `--merge-commit-sha` when `meta.txt` says `-`. Exit 0 is `included`, 3 `unknown`, 2 a
-usage error, 1 a crash and no answer; `unknown` means nothing in local git showed the PR, never that
+`mergeCommit` is null until the PR merges, so an open PR is probed by its subject alone. Exit 0
+is `included`, 3 `unknown`, 2 a usage error, 1 a crash and no answer; `unknown` means nothing in local git showed the PR, never that
 it is absent. PR numbers are per repository, so the tree must be the PR's repository or a fork of it
 (G1); a `subject` answer whose commit subject is not the PR's title is a collision, so `unknown`.
 With no tree, or a probe that cannot run, write `SKIPPED: inclusion -- <why>` into `inclusion.txt`.

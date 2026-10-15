@@ -30,9 +30,9 @@ code path is OVERLAPPING at most.
 "Merged upstream" says nothing about the tree or container you measure. A release, a nightly or a
 vendor image is cut from some commit; a PR merged after it is absent however old the image looks,
 and a branch cut before the merge does not gain it later. Decide inclusion from the commit, with
-the probe, never from dates. An open or closed-unmerged PR has no merge commit: its
-`merge_commit_sha` from the API is a test merge that no branch contains, which is why `read.sh`
-writes `-` for it.
+the probe, never from dates. An open or closed-unmerged PR has no merge commit: `mergeCommit`
+in `pr.json` stays null until it merges, while REST's `merge_commit_sha` names a test merge that no
+branch contains.
 
 ## G4 — An installed package is not a tree
 
