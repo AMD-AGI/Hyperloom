@@ -686,7 +686,7 @@ function-lines src/hyperloom/orchestrator/loop/coordinator.py::Coordinator.__ini
 function-lines src/hyperloom/orchestrator/loop/coordinator.py::Coordinator._reactor_turn 97
 function-lines src/hyperloom/orchestrator/loop/coordinator.py::Coordinator._run_ticks 150
 function-lines src/hyperloom/orchestrator/loop/coordinator.py::_infer_model_class_from_config 83
-function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator._spawn_fitting_queued 240
+function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator._spawn_fitting_queued 239
 function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator.reap_dispatched_task 157
 function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator.run_task_registered 109
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_request 214
