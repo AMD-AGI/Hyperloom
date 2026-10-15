@@ -5,25 +5,32 @@
 
 One read per branch, with the context the single-lineage Framework phase sends (identity, workload, objective,
 baseline, observations), so one planner serves both flows. A recalled Experience measured under every condition this
-session queried with is a prior; one measured under another condition is only a lead to re-verify, and the briefing
-names the conditions that differ. The mapping refuses Experiences without evidence, so nothing recalled lacks one.
+session queried with (model, GPU, framework, TP, concurrency, bottleneck, sequence lengths) is a prior; one measured
+under another condition is only a lead to re-verify, and the briefing names the conditions that differ. The mapping
+refuses Experiences without evidence, so nothing recalled lacks one.
 
-Sorting reads each summary's ``identity``. A summary without one matches no condition, so its Experience is one to
-re-verify, never a prior.
+Sorting reads each summary's ``identity``. The service's read summaries carry none yet, so an :class:`IdentityIndex`
+looks the identity up by id in the service's export. An Experience whose identity is found nowhere matches no
+condition, so it is one to re-verify, never a prior.
 """
 
 from __future__ import annotations
 
+import logging
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
-from hyperloom_kb import ReadStatus
+from hyperloom_kb import ReadStatus, RemoteClientError
 from hyperloom_multibranch.contracts.notebook.records import SessionProfile
 from hyperloom_multibranch.notebook.knowledge.experience import experience_identity
 
-CONDITION_KEYS = ("gpu", "framework", "bottleneck", "isl", "osl")
+log = logging.getLogger(__name__)
+
+CONDITION_KEYS = ("model", "gpu", "framework", "tp", "conc", "bottleneck", "isl", "osl")
+EXPORT_PAGE = 100
 WORKLOAD_KEYS = frozenset({"tp", "ep", "conc", "isl", "osl", "max_model_len", "compute_partition_mode", "partitions"})
 DECISION = "Choose the next actions for one branch of a multi-branch inference optimization session."
 DEFAULT_LIMIT = 10
@@ -40,6 +47,58 @@ class ExperienceReader(Protocol):
     def read(self, decision: str, context: Mapping[str, Any], *, limit: int | None = None) -> Any:
         """Rank Experiences for ``decision``; the result has ``status``, ``read_id``, ``experiences``,
         ``rendered_refs`` and ``warnings``."""
+
+
+class ExperienceExport(Protocol):
+    """What looking identities up needs of a service client, such as ``hyperloom_kb.RemoteClient``."""
+
+    def export_page(self, *, after: int = 0, limit: int = 100, schema_ref: str | None = None) -> Any:
+        """One page of complete records in write order; the page has ``items``, ``next_cursor`` and ``has_more``."""
+
+
+class IdentityIndex:
+    """The conditions each Experience of one schema was measured under, by id, read from the service's export.
+
+    The export is paged from the start the first time an id is missing, and later only from where it stopped, so
+    Experiences written since are found too. One index serves every recall of a session; a failed export is logged
+    and leaves the identity unknown.
+    """
+
+    def __init__(self, export: ExperienceExport, schema_ref: str | None = None) -> None:
+        self._export = export
+        self._schema_ref = schema_ref
+        self._cursor = 0
+        self._known: dict[str, dict[str, Any]] = {}
+        self._lock = threading.Lock()
+
+    @classmethod
+    def of(cls, reader: object) -> IdentityIndex | None:
+        """The index of ``reader``'s schema when its service exports, as a ``RemoteExperienceKB``'s does."""
+
+        client = getattr(reader, "client", None)
+        if not callable(getattr(client, "export_page", None)):
+            return None
+        return cls(cast(ExperienceExport, client), getattr(reader, "schema_ref", None))
+
+    def identity(self, experience_id: str) -> Mapping[str, Any]:
+        with self._lock:
+            if experience_id not in self._known:
+                self._advance()
+            return self._known.get(experience_id, {})
+
+    def _advance(self) -> None:
+        try:
+            while True:
+                page = self._export.export_page(after=self._cursor, limit=EXPORT_PAGE, schema_ref=self._schema_ref)
+                for item in page.items:
+                    stored = item.get("experience")
+                    if isinstance(stored, Mapping) and stored.get("id"):
+                        self._known[str(stored["id"])] = dict(stored.get("identity") or {})
+                self._cursor = page.next_cursor
+                if not page.has_more:
+                    return
+        except (RemoteClientError, OSError) as exc:
+            log.warning("could not look Experience identities up in the export: %s", exc)
 
 
 @dataclass(frozen=True)
@@ -137,10 +196,13 @@ def _number(value: Any) -> float | None:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
-def classify(item: Mapping[str, Any], query: Mapping[str, Any]) -> RecalledExperience:
-    """Sort one read summary by whether its identity matches every queried condition."""
+def classify(
+    item: Mapping[str, Any], query: Mapping[str, Any], identities: IdentityIndex | None = None
+) -> RecalledExperience:
+    """Sort one read summary by whether its identity, or the one ``identities`` holds for it, matches every queried
+    condition."""
 
-    identity = item.get("identity") or {}
+    identity = item.get("identity") or (identities.identity(str(item["experience_id"])) if identities else {})
     differing = tuple(key for key, value in query.items() if key not in identity or not _same(identity[key], value))
     return RecalledExperience(
         experience_id=str(item["experience_id"]),
@@ -163,8 +225,12 @@ def recall_experiences(
     branch: str = "",
     intent: str = "",
     limit: int = DEFAULT_LIMIT,
+    identities: IdentityIndex | None = None,
 ) -> Recall:
-    """Read the Experiences relevant to ``bottleneck`` on this session's task; ``reader`` is ``None`` without a KB."""
+    """Read the Experiences relevant to ``bottleneck`` on this session's task; ``reader`` is ``None`` without a KB.
+
+    A summary without an identity is looked up in ``identities``.
+    """
 
     if reader is None:
         return Recall(ReadStatus.DISABLED.value, "", (), (), ())
@@ -174,7 +240,7 @@ def recall_experiences(
     return Recall(
         status=str(result.status),
         read_id=str(result.read_id),
-        experiences=tuple(classify(item, query) for item in result.experiences),
+        experiences=tuple(classify(item, query, identities) for item in result.experiences),
         rendered_refs=tuple(ref.id for ref in result.rendered_refs),
         warnings=tuple(str(warning) for warning in result.warnings),
     )
@@ -183,7 +249,9 @@ def recall_experiences(
 __all__ = [
     "CONDITION_KEYS",
     "DECISION",
+    "ExperienceExport",
     "ExperienceReader",
+    "IdentityIndex",
     "Recall",
     "RecallTier",
     "RecalledExperience",

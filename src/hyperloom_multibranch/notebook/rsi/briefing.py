@@ -26,7 +26,13 @@ from dataclasses import dataclass, replace
 from hyperloom_multibranch.contracts.notebook.interfaces import Notebook, StartupBriefProvider
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, StartupBrief
 from hyperloom_multibranch.notebook.knowledge.lessons import listed
-from hyperloom_multibranch.notebook.knowledge.recall import ExperienceReader, Recall, RecallTier, recall_experiences
+from hyperloom_multibranch.notebook.knowledge.recall import (
+    ExperienceReader,
+    IdentityIndex,
+    Recall,
+    RecallTier,
+    recall_experiences,
+)
 from hyperloom_multibranch.notebook.knowledge.warm_start import WarmLead
 from hyperloom_multibranch.notebook.rsi.analysis import FailureTier, failures_at, repeated_failures
 
@@ -81,6 +87,8 @@ class CrossSessionBriefing(StartupBriefProvider):
 
     ``warm`` are the leads PRELUDE read; ``experiences`` the Experience KB, read for ``focus`` (the bottleneck the
     specialist attacks) on ``branch``; ``metric`` the throughput metric whose baseline the read carries.
+    ``identities`` looks up the conditions a read's summaries leave out; by default one is built on ``experiences``,
+    and passing one index to every briefing of a session reads the export once.
     """
 
     notebook: Notebook
@@ -90,6 +98,11 @@ class CrossSessionBriefing(StartupBriefProvider):
     focus: str = ""
     branch: str = ""
     max_chars: int = DEFAULT_MAX_CHARS
+    identities: IdentityIndex | None = None
+
+    def __post_init__(self) -> None:
+        if self.identities is None and self.experiences is not None:
+            object.__setattr__(self, "identities", IdentityIndex.of(self.experiences))
 
     async def _recall(self, snapshot: NotebookSnapshot) -> Recall | None:
         if self.experiences is None or snapshot.profile is None:
@@ -102,6 +115,7 @@ class CrossSessionBriefing(StartupBriefProvider):
             baseline,
             bottleneck=self.focus,
             branch=self.branch,
+            identities=self.identities,
         )
 
     async def startup_brief(self, start_commit: str) -> StartupBrief:

@@ -21,8 +21,10 @@ from hyperloom_multibranch.contracts.notebook.records import (
 )
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.notebook.knowledge.recall import IdentityIndex
 from hyperloom_multibranch.notebook.knowledge.tests.fakes import (
     FakeExperienceReader,
+    FakeExport,
     completed_read,
     experience_summary,
 )
@@ -31,7 +33,16 @@ from hyperloom_multibranch.notebook.rsi.briefing import CrossSessionBriefing
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, judgement, profile, request, result
 from hyperloom_multibranch.notebook.tests.sessions import METRIC, SPLIT_KV, scripted_session
 
-SAME = {"gpu": "mi355x", "framework": "vllm", "bottleneck": "attention", "isl": 1024, "osl": 1024}
+SAME = {
+    "model": "deepseek-ai/DeepSeek-R1",
+    "gpu": "mi355x",
+    "framework": "vllm",
+    "tp": 8,
+    "conc": 64,
+    "bottleneck": "attention",
+    "isl": 1024,
+    "osl": 1024,
+}
 LEAD = WarmLead(
     canonical_id="inference:older",
     session_id="older",
@@ -130,6 +141,21 @@ async def test_the_first_batch_brief_is_cross_session_only(tmp_path: Path) -> No
         "recipe: inference:older: +10.00% `--enable-expert-parallel` [older]",
         "prior: --block-size 16: keep +10.00% [exp-faster]",
     )
+
+
+async def test_a_recalled_summary_without_conditions_is_sorted_by_the_index_the_briefing_holds(
+    tmp_path: Path,
+) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    bare = {key: value for key, value in _recalled("exp-faster", "keep", 1100.0).items() if key != "identity"}
+    index = IdentityIndex(FakeExport([{"id": "exp-faster", "identity": SAME}]))
+
+    with_index = CrossSessionBriefing(notebook, experiences=_reader(bare), identities=index)
+    without = CrossSessionBriefing(notebook, experiences=_reader(bare))
+
+    assert (await with_index.startup_brief("c0")).leads == ("prior: --block-size 16: keep +10.00% [exp-faster]",)
+    assert without.identities is None
+    assert (await without.startup_brief("c0")).leads == ()
 
 
 async def test_without_a_kb_or_a_profile_or_a_completed_read_nothing_is_recalled(tmp_path: Path) -> None:

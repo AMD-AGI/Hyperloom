@@ -5,18 +5,37 @@
 
 from __future__ import annotations
 
+import logging
+from types import SimpleNamespace
+
 import pytest
 from hyperloom_kb import RemoteReadResult
 
-from hyperloom_multibranch.notebook.knowledge.recall import DECISION, RecallTier, recall_experiences
+from hyperloom_multibranch.notebook.knowledge.recall import (
+    CONDITION_KEYS,
+    DECISION,
+    IdentityIndex,
+    RecallTier,
+    recall_experiences,
+)
 from hyperloom_multibranch.notebook.knowledge.tests.fakes import (
     FakeExperienceReader,
+    FakeExport,
     completed_read,
     experience_summary,
 )
 from hyperloom_multibranch.notebook.tests.factories import profile
 
-SAME = {"gpu": "mi355x", "framework": "vllm", "bottleneck": "attention", "isl": 1024, "osl": 1024}
+SAME = {
+    "model": "deepseek-ai/DeepSeek-R1",
+    "gpu": "mi355x",
+    "framework": "vllm",
+    "tp": 8,
+    "conc": 64,
+    "bottleneck": "attention",
+    "isl": 1024,
+    "osl": 1024,
+}
 
 
 def test_an_experience_measured_under_every_queried_condition_is_a_prior_and_others_are_to_reverify() -> None:
@@ -50,7 +69,76 @@ def test_a_summary_without_an_identity_is_one_to_reverify_never_a_prior() -> Non
 
     (item,) = recall_experiences(reader, profile(), 1000.0, bottleneck="attention").experiences
 
-    assert (item.tier, item.differing) == (RecallTier.REVERIFY, ("gpu", "framework", "bottleneck", "isl", "osl"))
+    assert (item.tier, item.differing) == (RecallTier.REVERIFY, CONDITION_KEYS)
+
+
+def test_another_model_tp_or_concurrency_makes_an_experience_one_to_reverify() -> None:
+    reader = FakeExperienceReader(
+        completed_read(
+            experience_summary("exp-other-model", {**SAME, "model": "Qwen/Qwen3-8B"}),
+            experience_summary("exp-other-tp-conc", {**SAME, "tp": 4, "conc": 128.0}),
+            experience_summary("exp-same-conc-as-float", {**SAME, "conc": 64.0}),
+        )
+    )
+
+    tiers = {
+        item.experience_id: (item.tier, item.differing)
+        for item in recall_experiences(reader, profile(), 1000.0, bottleneck="attention").experiences
+    }
+
+    assert tiers == {
+        "exp-other-model": (RecallTier.REVERIFY, ("model",)),
+        "exp-other-tp-conc": (RecallTier.REVERIFY, ("tp", "conc")),
+        "exp-same-conc-as-float": (RecallTier.PRIOR, ()),
+    }
+
+
+def _bare(experience_id: str) -> dict[str, object]:
+    return {key: value for key, value in experience_summary(experience_id, SAME).items() if key != "identity"}
+
+
+def test_a_summary_without_an_identity_is_sorted_by_the_identity_the_export_holds() -> None:
+    export = FakeExport(
+        [
+            {"id": "exp-a", "identity": SAME},
+            {"id": "exp-b", "identity": {**SAME, "gpu": "mi300x"}},
+            {"id": "exp-c", "identity": SAME},
+        ]
+    )
+    index = IdentityIndex(export, "schema:sha256:" + "0" * 64)
+    reader = FakeExperienceReader(completed_read(_bare("exp-a"), _bare("exp-b")))
+
+    first = recall_experiences(reader, profile(), 1000.0, bottleneck="attention", identities=index)
+    export.records.append({"id": "exp-d", "identity": SAME})
+    reader.result = completed_read(_bare("exp-c"), _bare("exp-d"))
+    later = recall_experiences(reader, profile(), 1000.0, bottleneck="attention", identities=index)
+
+    assert [(item.experience_id, item.tier, item.differing) for item in first.experiences] == [
+        ("exp-a", RecallTier.PRIOR, ()),
+        ("exp-b", RecallTier.REVERIFY, ("gpu",)),
+    ]
+    assert [item.tier for item in later.experiences] == [RecallTier.PRIOR, RecallTier.PRIOR]
+    # The whole export once, two records a page; then only from where it stopped, for exp-d.
+    assert export.afters == [0, 2, 3]
+
+
+def test_an_export_that_fails_leaves_the_experience_one_to_reverify(caplog: pytest.LogCaptureFixture) -> None:
+    index = IdentityIndex(FakeExport(failing=True))
+    reader = FakeExperienceReader(completed_read(_bare("exp-a")))
+
+    with caplog.at_level(logging.WARNING, logger="hyperloom_multibranch.notebook.knowledge.recall"):
+        (item,) = recall_experiences(reader, profile(), 1000.0, bottleneck="attention", identities=index).experiences
+
+    assert (item.tier, item.differing) == (RecallTier.REVERIFY, CONDITION_KEYS)
+    assert "unreachable" in caplog.text
+
+
+def test_an_index_is_built_only_on_a_reader_whose_service_exports() -> None:
+    remote = SimpleNamespace(client=FakeExport(), schema_ref="schema:sha256:" + "1" * 64)
+
+    assert isinstance(IdentityIndex.of(remote), IdentityIndex)
+    assert IdentityIndex.of(FakeExperienceReader(completed_read())) is None
+    assert IdentityIndex.of(None) is None
 
 
 def test_the_read_carries_the_sessions_identity_workload_baseline_and_bottleneck() -> None:

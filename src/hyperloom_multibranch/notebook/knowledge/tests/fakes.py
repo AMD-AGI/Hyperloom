@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hyperloom_kb import RemoteReadResult, RenderedRef
+from hyperloom_kb import RemoteClientError, RemoteReadResult, RenderedRef
 
 SEARCH_PAGE = 2
 
@@ -52,6 +52,31 @@ class FakeExperienceReader:
     def read(self, decision: str, context: Mapping[str, Any], *, limit: int | None = None) -> RemoteReadResult:
         self.calls.append((decision, context, limit))
         return self.result
+
+
+@dataclass(frozen=True)
+class ExportPage:
+    items: tuple[dict[str, Any], ...]
+    next_cursor: int
+    has_more: bool
+
+
+@dataclass
+class FakeExport:
+    """A service's export in write order, ``page`` records at a time; ``failing`` makes every page fail."""
+
+    records: list[dict[str, Any]] = field(default_factory=list)
+    page: int = 2
+    failing: bool = False
+    afters: list[int] = field(default_factory=list)
+
+    def export_page(self, *, after: int = 0, limit: int = 100, schema_ref: str | None = None) -> ExportPage:
+        self.afters.append(after)
+        if self.failing:
+            raise RemoteClientError("the Experience KB service is unreachable")
+        chunk = self.records[after : after + min(limit, self.page)]
+        items = tuple({"sequence": after + n + 1, "experience": record} for n, record in enumerate(chunk))
+        return ExportPage(items, after + len(chunk), after + len(chunk) < len(self.records))
 
 
 @dataclass
