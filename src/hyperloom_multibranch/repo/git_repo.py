@@ -17,10 +17,18 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom.contracts.recipe import PATCH_ROOT, PatchRef, Recipe, RecipeDelta, apply
-from hyperloom.measure.compile import BlobStore
+from hyperloom.contracts.recipe import PATCH_ROOT, ComponentPatches, PatchRef, Recipe, RecipeDelta, apply
+from hyperloom.measure.compile import (
+    COMPONENT_LAYOUTS,
+    BlobStore,
+    PackageLocator,
+    UnsupportedComponentError,
+    apply_patch_stack,
+    locate_installed_package,
+)
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.repo import BranchMoved
+from hyperloom_multibranch.contracts.repo import BranchMoved, RepoMerge
+from hyperloom_multibranch.repo.merge import carry
 
 RECIPE_FILE = "recipe.json"
 _UPDATE_REF = "update-ref"
@@ -60,9 +68,10 @@ class GitExperimentRepo:
     branch leave exactly one commit on it.
     """
 
-    def __init__(self, path: Path, blobs: BlobStore) -> None:
+    def __init__(self, path: Path, blobs: BlobStore, locator: PackageLocator = locate_installed_package) -> None:
         self._path = path.resolve()
         self._blobs = blobs
+        self._locator = locator
         # An inherited GIT_* (GIT_DIR inside a hook or `git rebase --exec`) would aim every command at another
         # repository, so none reaches git and GIT_DIR names this one.
         inherited = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
@@ -97,6 +106,14 @@ class GitExperimentRepo:
     async def commit(self, branch: str, parent: str, recipe: Recipe, message: str) -> str:
         return await self._land(branch, parent, recipe, (parent,), message)
 
+    async def merge(self, candidate: str, onto: str) -> RepoMerge:
+        resolved = await self._commit_of(candidate)
+        parent = await self._resolve(f"{resolved}^1")
+        if parent is None:
+            raise ValueError(f"{candidate} is the root commit; it carries no change")
+        recipes = [await self.read_recipe(commit) for commit in (parent, resolved, onto)]
+        return await asyncio.to_thread(carry, onto, *recipes, self._apply_to_package)
+
     async def commit_integration(self, onto: str, delta: RecipeDelta, merged_from: Sequence[str]) -> str:
         recipe = apply(await self.read_recipe(onto), delta)
         merged = [await self._commit_of(commit) for commit in merged_from]
@@ -123,6 +140,12 @@ class GitExperimentRepo:
         files = [(patch.path, patch.sha256) for component in recipe.components for patch in component.patches]
         files += [(kernel.ref, kernel.sha256) for kernel in recipe.kernels]
         await asyncio.to_thread(self._write_files, files, destination)
+
+    def _apply_to_package(self, component: ComponentPatches) -> None:
+        layout = COMPONENT_LAYOUTS.get(component.component)
+        if layout is None:
+            raise UnsupportedComponentError(f"{component.component} has no package layout; its patches cannot apply")
+        apply_patch_stack(component, layout, self._locator(layout), self._blobs)
 
     def _write_files(self, files: Sequence[tuple[str, str]], destination: Path) -> None:
         for path, sha256 in files:
