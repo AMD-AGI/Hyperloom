@@ -309,12 +309,16 @@ changed, when:
 * `--confirmation-reason` is missing or empty, or the option is combined with
   `--confirm-stopped` or `--force`.
 
-Use `--confirm-stopped TASK_ID` instead for ownership recorded without an owner
-scope (by earlier versions; such records name no scope, so the refusal lists no
-scope for them and `--confirm-scope-gone` releases nothing for them): it
-confirms one task at a time, after you have verified that task's whole process
-tree and any remote workers or Ray actors have stopped, and it refuses tasks
-recorded under a nonempty owner scope.
+If the relaunch is still refused after the scope confirmation for tasks that
+name no owner scope, confirm each of them with `--confirm-stopped TASK_ID`, then
+relaunch. Such a task holds no ownership record under any owner scope, so
+`--confirm-scope-gone` releases nothing for it; a CLOSE-phase step, for example,
+runs without a lane and so is recorded without one. The refusal names owner
+scopes only on its `other owner scopes:` line, not per task, so let
+`--confirm-stopped` check: it refuses, with exit code 2 and nothing changed, a
+task recorded under a nonempty owner scope. It confirms one task at a time,
+after you have verified that task's whole process tree and any remote workers
+or Ray actors have stopped.
 
 To rebuild only the `session_breakdown` (and push it to Langfuse) for a run
 that exited abnormally — without re-running the optimization loop — use the

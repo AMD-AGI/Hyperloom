@@ -226,11 +226,12 @@ def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
             + "\n  ".join(diagnostics)
             + "\nNo ownership was cleared. Inspect and finish cleanup in the original execution environment "
             "before retrying; do not start replacement work on the same resources. "
-            "For legacy empty-scope ownership only, after verifying the task's entire process tree and any "
-            "remote workers/Ray actors have stopped, record that confirmation with hyperloom recover "
-            "--session-dir <session> --confirm-stopped <task-id> --confirmation-reason <reason>. "
             "If the environment of another owner scope is gone, record that with hyperloom recover "
-            "--session-dir <session> --confirm-scope-gone <owner-scope> --confirmation-reason <reason>."
+            "--session-dir <session> --confirm-scope-gone <owner-scope> --confirmation-reason <reason>. "
+            "For a listed task that names no owner scope (such as a lane-less CLOSE-phase step), after "
+            "verifying its entire process tree and any remote workers/Ray actors have stopped, record that "
+            "confirmation with hyperloom recover --session-dir <session> --confirm-stopped <task-id> "
+            "--confirmation-reason <reason>; it refuses, changing nothing, a task recorded under an owner scope."
         )
 
 
@@ -594,7 +595,7 @@ def _in_locked_ledger(session_dir: Path, update: Callable[[sqlite3.Connection, s
 
 
 def confirm_task_stopped(session_dir: Path, *, task_id: str, reason: str) -> dict:
-    """Record an operator's explicit physical-cleanup confirmation for one legacy task.
+    """Record an operator's explicit physical-cleanup confirmation for one task that names no owner scope.
 
     This does not stop or inspect processes or Ray actors. The operator must first
     verify their exit. Only empty-scope execution ownership is eligible.

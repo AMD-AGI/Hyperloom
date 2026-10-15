@@ -22,7 +22,7 @@ RECOVER_HELP = (
 RECOVER_DESCRIPTION = (
     "Without a confirmation option, rebuild and push the session_breakdown of a session that exited abnormally. "
     "With --confirm-scope-gone OWNER_SCOPE (an execution environment that no longer exists) or --confirm-stopped "
-    "TASK_ID (one task recorded without an owner scope), plus --confirmation-reason, instead record the cleanup "
+    "TASK_ID (one blocked task that names no owner scope), plus --confirmation-reason, instead record the cleanup "
     "confirmation a refused --resume-from asks for; nothing is rebuilt. Exit codes: 0 success, 1 breakdown rebuild "
     "failed, 2 invalid arguments or a refused confirmation."
 )
