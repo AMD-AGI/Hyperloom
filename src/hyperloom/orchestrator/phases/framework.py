@@ -72,6 +72,22 @@ def _measured_short_of_keep(rec: dict[str, Any], keep_threshold_pct: float) -> b
     return to_float(rec.get("tps_delta_pct"), default=0.0) < keep_threshold_pct
 
 
+def _measured_on_this_stack(rec: dict[str, Any], state: Any) -> bool:
+    """Whether a ledger record's throughput was measured on the model, GPU and precision running now.
+
+    The ledger is one file under the workspace root, shared by every session
+    that root has ever served, and a config's throughput is a property of the
+    stack as much as of the config: a lever worth +0.4% on Qwen3-8B/MI300X says
+    nothing about GLM-5.3 on MI355X. The accuracy gate above this one matches
+    on the fingerprint alone because an accuracy regression travels with the
+    config; a throughput number does not.
+    """
+    return all(
+        str(rec.get(field) or "").strip() == str(getattr(state, field, "") or "").strip()
+        for field in ("model_class", "gpu_type", "precision")
+    )
+
+
 def _framework_config_levers_from_done(
     done_payload: dict[str, Any] | None,
     *,
@@ -3238,7 +3254,7 @@ class FrameworkPhase(ProposalBench):
                         rec.get("pr_url") or "a prior candidate",
                     )
                     return True
-                if _measured_short_of_keep(rec, threshold):
+                if _measured_on_this_stack(rec, self.state) and _measured_short_of_keep(rec, threshold):
                     log.info(
                         "FRAMEWORK: skipping config lever %s — already measured at %+.2f%% against a %.2f%% bar on %s",
                         fingerprint,
