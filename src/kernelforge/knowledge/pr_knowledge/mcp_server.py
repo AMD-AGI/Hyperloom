@@ -104,16 +104,15 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         "name": "pr_check_inclusion",
         "description": (
             "Check from local git history, with no network, whether an upstream "
-            "pull request is already in a source tree. Returns inclusion "
-            "(included, not_included or unknown), the method that decided it "
-            "and the evidence. Pass merge_commit_sha, the PR's merge or squash "
-            "commit upstream, when you know it: without it, or when that commit "
-            "is not fetched into the tree, the answer is never not_included. "
-            "A cherry-pick is found by its (#N) subject suffix or, with "
-            "merge_commit_sha, by patch-id, which matches only an identical diff, "
-            "context lines included. So a backport with no (#N) suffix that was "
-            "edited, landed next to fork changes, or was split, squashed or "
-            "folded into a larger commit can still read as not_included."
+            "pull request is already in a source tree. Returns inclusion, the "
+            "method that decided it and the evidence. included means a commit "
+            "reachable from the checked commit has a subject ending in (#N), as a "
+            "squash merge or a cherry-pick of one writes it, or, when you pass "
+            "merge_commit_sha (the PR's merge or squash commit upstream), that "
+            "every commit it brought in is there by sha or patch-id. Anything "
+            "else is unknown, never absent: a backport that was edited, renamed "
+            "or folded into another commit looks like no backport at all, so look "
+            "for the change itself before treating the PR as missing."
         ),
         "inputSchema": {
             "type": "object",

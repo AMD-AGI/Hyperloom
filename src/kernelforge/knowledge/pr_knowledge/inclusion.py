@@ -3,51 +3,39 @@
 
 """Whether an upstream pull request is already in a local git tree, answered from local git alone.
 
-The evidence is read in this order:
+Local history can show that a PR is in a tree, never that it is absent: a backport that was
+edited, had a conflict resolved, or was folded into a larger commit looks the same as no carry
+at all. So the answer is ``included``, with the git evidence, or ``unknown``, with the reason
+nothing showed it. The evidence is read in this order:
 
-1. With the PR's merge commit sha (its merge or squash commit upstream) present in the tree,
-   ``git merge-base --is-ancestor`` says whether ``commit`` contains it.
-2. A commit reachable from ``commit`` whose subject ends with the squash-merge suffix ``(#N)``
-   is cherry-pick evidence, the way a fork carries an upstream PR. The suffix may sit in a
-   trailing run such as ``(#N) (#M)``, which a fork leaves when it merges the cherry-pick
-   through a PR of its own; ``(#N)`` anywhere else in the subject, or only in the body,
-   does not count.
-3. Otherwise the commits the merge commit brought in (a squash commit itself, or the PR's
-   commits under a merge commit) are compared by patch-id with those reachable from
-   ``commit``, which finds a cherry-pick with the same diff under any subject. All of them
-   there, by sha or by patch-id, is ``included``. None there is ``not_included`` when the
-   merge brought in one commit, and ``unknown`` when it brought in several, because a carry
-   that folded them into one commit (``git cherry-pick -m 1`` of the merge, or a squash) has
-   a patch-id of its own. Some there is ``unknown``.
+1. A commit reachable from ``commit`` whose subject names the PR: a trailing ``(#N)``, alone or
+   in a run such as ``(#N) (#M)``, the way a squash merge and a fork's cherry-pick of it record
+   the PR. ``(#N)`` anywhere else in the subject, or only in the body, does not count. A
+   subject carries only the number, so a fork that numbers its own PRs the same way can
+   collide; the evidence names the commit and its subject so a caller can compare titles.
+2. When the PR's merge commit sha (its merge or squash commit upstream) is given: every
+   non-merge commit that merge commit brought in is in ``commit``, by sha or by patch-id. That
+   holds when the merge commit is an ancestor, and for a cherry-pick under any subject whose
+   diff, whitespace and line numbers aside, is identical. A rebase merge records only the PR's
+   last commit, so that commit alone is compared.
 
-``not_included`` therefore needs a definite not-ancestor answer from a complete (not
-shallow) history, no such subject, and a single commit brought in with no patch-id match.
-Every other outcome is ``unknown``, with the reason in the evidence, so a merge sha that
-was not supplied or is not fetched, or a shallow clone, never reads as absence. Nothing is
-fetched: a sha that a partial clone lacks counts as not fetched, and a patch-id that needs
-a blob it lacks is ``unknown``. ``included`` means the PR's change is in the history; a
-later revert is not looked for. A subject carries only the number, so a fork that numbers
-its own PRs into the same suffix can collide; the evidence names the matching commit and
-its subject so a caller can compare titles.
+Nothing is fetched. The checked commit and the merge commit are read through
+``rev-list --missing=print``, which turns lazy fetching off, so a sha that a partial clone lacks
+fails the git call, and so does a patch-id that needs a blob a blob-filtered clone lacks. A git
+call that fails, cannot start or does not answer in time makes the answer ``unknown``, with the
+error, git's own message for a failed call, as the evidence. ``included`` means the PR's change
+is in the history; a later revert is not looked for.
 
-A patch-id hashes the diff together with its context lines, ignoring only whitespace and
-line numbers, so it matches only a commit whose diff is otherwise identical to the commit
-the merge brought in. A backport without the suffix still reads as ``not_included`` when it
-was edited or had a conflict resolved, when it applied where the fork had changed lines
-next to a hunk, when it carries a squash-merged PR as the PR's own commits picked one by
-one, or when it is folded into a larger commit. A rebase merge records only the PR's last
-commit, so that commit alone is compared, and a fork that squashed the PR's commits into
-one also reads as ``not_included``.
-
-Command line::
+The ``pr_check_inclusion`` MCP tool and the command line both run this probe; the
+check-prior-art contributor skill runs the command line with the merge commit sha it reads
+from the GitHub API::
 
     python -m kernelforge.knowledge.pr_knowledge.inclusion --tree PATH --commit SHA --pr N \\
         [--merge-commit-sha SHA]
 
-prints the verdict as one JSON object with ``inclusion``, ``method`` and ``evidence``, and
-exits 0 when the PR is included, 4 when it is not, 3 when that is unknown, and 2 on a
-usage error. No verdict exits 1, the status of an uncaught error, so a crash never reads
-as a verdict.
+It prints the verdict as one JSON object with ``inclusion``, ``method`` and ``evidence``, and
+exits 0 when the PR is included, 3 when that is unknown, and 2 on a usage error. No verdict
+exits 1, the status of an uncaught error, so a crash never reads as a verdict.
 """
 
 from __future__ import annotations
@@ -61,32 +49,27 @@ from enum import Enum
 from pathlib import Path
 
 from hyperloom.common.git_safety import safe_directory_args
-from kernelforge.llm.git import git_bytes
+from kernelforge.llm.git import GitError, git_bytes
 
-
-# Each call is a local plumbing command; one that runs this long is stuck on the filesystem, not working.
-_GIT_TIMEOUT_SEC = 30.0
-_NO_ANSWER = f"git did not run or did not answer within {_GIT_TIMEOUT_SEC:g}s"
+# At most three calls run, so a probe ends inside the 60 s the Forge agent gives one pr_monitor tool call.
+_GIT_TIMEOUT_SEC = 15.0
 _SUFFIX_RUN = re.compile(r"(?:\s*\(#\d+\))+\s*$")
-_SUFFIX_NUMBER = re.compile(r"\(#(\d+)\)")
 # Any --missing action but error turns lazy fetching off, so a partial clone reads only the objects it has.
 _LOCAL_REV_LIST = ("rev-list", "--missing=print")
 
 
 class Inclusion(str, Enum):
-    """Whether a pull request is in a tree."""
+    """Whether a pull request is in a tree, as far as local history can show."""
 
     INCLUDED = "included"
-    NOT_INCLUDED = "not_included"
     UNKNOWN = "unknown"
 
 
 class InclusionMethod(str, Enum):
-    """The git evidence a verdict rests on; ``none`` when nothing decided it."""
+    """The git evidence a verdict rests on; ``none`` when nothing showed the PR."""
 
-    MERGE_ANCESTRY = "merge_ancestry"
-    SUBJECT_SUFFIX = "subject_suffix"
-    PATCH_ID = "patch_id"
+    SUBJECT = "subject"
+    MERGE_COMMIT = "merge_commit"
     NONE = "none"
 
 
@@ -117,144 +100,54 @@ def probe_inclusion(*, tree: Path, commit: str, number: int, merge_commit_sha: s
         number: The upstream pull request number.
         merge_commit_sha: The PR's merge or squash commit upstream, when known.
     """
-    head = _resolve_commit(tree, commit)
-    if head is None:
-        return InclusionVerdict.unknown(f"git cannot resolve {commit} to a commit in {tree}")
-    merge = _resolve_commit(tree, merge_commit_sha) if merge_commit_sha else None
-    ancestry = _merge_ancestry(tree, head, merge) if merge else _merge_unavailable(merge_commit_sha)
-    if ancestry.inclusion is Inclusion.INCLUDED:
-        return ancestry
-    subjects = _subject_suffix(tree, head, number)
-    if subjects.inclusion is Inclusion.INCLUDED:
-        return subjects
-    evidence = f"{ancestry.evidence}; {subjects.evidence}"
-    if merge is None or Inclusion.UNKNOWN in (ancestry.inclusion, subjects.inclusion):
-        return InclusionVerdict.unknown(evidence)
-    patches = _patch_equivalence(tree, head, merge)
-    return InclusionVerdict(patches.inclusion, patches.method, f"{evidence}; {patches.evidence}")
-
-
-def _git(tree: Path, *args: str) -> subprocess.CompletedProcess | None:
-    """Run one read-only git command in ``tree``; None when git cannot start there or does not answer in time."""
     try:
-        completed = git_bytes(
-            *safe_directory_args(list(args), cwd=tree), cwd=tree, check=False, timeout=_GIT_TIMEOUT_SEC
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return subprocess.CompletedProcess(
-        completed.args,
-        completed.returncode,
-        completed.stdout.decode(errors="replace"),
-        completed.stderr.decode(errors="replace"),
-    )
+        head = _git(tree, *_LOCAL_REV_LIST, "--no-walk", "--end-of-options", f"{commit}^{{commit}}", "--").strip()
+        return _subject_naming(tree, head, number) or _merge_commit_carried(tree, head, number, merge_commit_sha)
+    except (GitError, subprocess.TimeoutExpired, OSError) as error:
+        return InclusionVerdict.unknown(f"git gave no answer: {error}")
 
 
-def _resolve_commit(tree: Path, revision: str) -> str | None:
-    """The full sha ``revision`` names in ``tree``, or None when it names no commit there."""
-    # A leading dash would reach git as an option rather than a revision.
-    if revision.startswith("-"):
-        return None
-    # rev-parse would fetch a sha that a partial clone lacks.
-    completed = _git(tree, *_LOCAL_REV_LIST, "--no-walk", f"{revision}^{{commit}}", "--")
-    if completed is None or completed.returncode != 0:
-        return None
-    return completed.stdout.strip()
+def _git(tree: Path, *args: str) -> str:
+    """Stdout of one read-only git command in ``tree``, decoded whatever the log encoding."""
+    completed = git_bytes(*safe_directory_args(list(args), cwd=tree), cwd=tree, timeout=_GIT_TIMEOUT_SEC)
+    return completed.stdout.decode(errors="replace")
 
 
-def _merge_unavailable(merge_commit_sha: str | None) -> InclusionVerdict:
-    """Why ancestry cannot answer when the tree has no merge commit to check."""
-    if not merge_commit_sha:
-        return InclusionVerdict.unknown("no merge commit sha was supplied")
-    return InclusionVerdict.unknown(
-        f"merge commit {merge_commit_sha} is not in the tree (not fetched, or cut off by a shallow clone)"
-    )
-
-
-def _merge_ancestry(tree: Path, head: str, merge: str) -> InclusionVerdict:
-    """What ancestry says: included, a definite not-ancestor, or unknown with the reason."""
-    completed = _git(tree, "merge-base", "--is-ancestor", merge, head)
-    if completed is None:
-        return InclusionVerdict.unknown(_NO_ANSWER)
-    if completed.returncode == 0:
-        return InclusionVerdict(
-            Inclusion.INCLUDED, InclusionMethod.MERGE_ANCESTRY, f"merge commit {merge} is an ancestor of {head}"
-        )
-    if completed.returncode != 1:
-        return InclusionVerdict.unknown(f"git merge-base failed: {completed.stderr.strip()}")
-    if _is_shallow(tree):
-        return InclusionVerdict.unknown(f"merge commit {merge} is not an ancestor of {head}, but the clone is shallow")
-    return InclusionVerdict(
-        Inclusion.NOT_INCLUDED, InclusionMethod.MERGE_ANCESTRY, f"merge commit {merge} is not an ancestor of {head}"
-    )
-
-
-def _is_shallow(tree: Path) -> bool:
-    """Whether the history may be cut short; a tree git cannot vouch for counts as shallow."""
-    completed = _git(tree, "rev-parse", "--is-shallow-repository")
-    return completed is None or completed.stdout.strip() != "false"
-
-
-def _subject_suffix(tree: Path, head: str, number: int) -> InclusionVerdict:
-    """What subjects say: included, searched without a match, or unknown when git could not search."""
-    completed = _git(tree, "log", "--fixed-strings", f"--grep=(#{number})", "--format=%H%x00%s", head)
-    if completed is None:
-        return InclusionVerdict.unknown(_NO_ANSWER)
-    if completed.returncode != 0:
-        return InclusionVerdict.unknown(f"git log failed: {completed.stderr.strip()}")
+def _subject_naming(tree: Path, head: str, number: int) -> InclusionVerdict | None:
+    """The verdict of the first commit reachable from ``head`` whose subject names PR ``number``, if any."""
+    found = _git(tree, "log", "--fixed-strings", f"--grep=(#{number})", "--format=%H%x00%s", head)
     # %s never holds a newline, but may hold other characters that splitlines() would break on.
-    for line in completed.stdout.split("\n"):
+    for line in found.split("\n"):
         sha, _, subject = line.partition("\0")
-        if _suffix_names(subject, number):
+        run = _SUFFIX_RUN.search(subject)
+        if run is not None and f"(#{number})" in run.group():
             return InclusionVerdict(
                 Inclusion.INCLUDED,
-                InclusionMethod.SUBJECT_SUFFIX,
+                InclusionMethod.SUBJECT,
                 f"commit {sha} reachable from {head} has the subject {subject!r}",
             )
-    return InclusionVerdict(
-        Inclusion.NOT_INCLUDED,
-        InclusionMethod.SUBJECT_SUFFIX,
-        f"no commit subject reachable from {head} ends with (#{number})",
-    )
+    return None
 
 
-def _suffix_names(subject: str, number: int) -> bool:
-    """Whether the trailing run of ``(#k)`` suffixes on ``subject`` includes ``number``."""
-    run = _SUFFIX_RUN.search(subject)
-    return run is not None and any(int(found) == number for found in _SUFFIX_NUMBER.findall(run.group()))
-
-
-def _patch_equivalence(tree: Path, head: str, merge: str) -> InclusionVerdict:
-    """Whether ``head`` has each non-merge commit ``merge`` brought in, by sha or by patch-id."""
-    counted = _git(tree, *_LOCAL_REV_LIST, "--count", "--no-merges", f"{merge}^1..{merge}", "--")
-    if counted is None:
-        return InclusionVerdict.unknown(_NO_ANSWER)
-    if counted.returncode != 0:
-        return InclusionVerdict.unknown(f"git rev-list --count failed: {counted.stderr.strip()}")
-    total = int(counted.stdout)
-    if total == 0:
-        return InclusionVerdict.unknown(f"merge commit {merge} brought in no non-merge commit to compare")
-    # --cherry lists the ones head lacks by sha: "=" when head has a commit with the same patch-id, "+" when not.
-    marked = _git(tree, *_LOCAL_REV_LIST, "--cherry", f"{head}...{merge}", f"^{merge}^1", "--")
-    if marked is None:
-        return InclusionVerdict.unknown(_NO_ANSWER)
-    if marked.returncode != 0:
-        return InclusionVerdict.unknown(f"git rev-list --cherry failed: {marked.stderr.strip()}")
-    absent = sum(line.startswith("+") for line in marked.stdout.split())
-    tally = f"{total - absent} of the {total} commits merge commit {merge} brought in are in {head} by sha or patch-id"
-    if absent == 0:
-        return InclusionVerdict(Inclusion.INCLUDED, InclusionMethod.PATCH_ID, tally)
-    if total == 1:
-        return InclusionVerdict(Inclusion.NOT_INCLUDED, InclusionMethod.PATCH_ID, tally)
-    if absent == total:
+def _merge_commit_carried(tree: Path, head: str, number: int, merge: str | None) -> InclusionVerdict:
+    """Whether ``head`` has every non-merge commit ``merge`` brought in, by sha or by patch-id."""
+    searched = f"no commit subject reachable from {head} names #{number}"
+    if not merge:
+        return InclusionVerdict.unknown(f"{searched}, and no merge commit sha was given")
+    # --cherry-pick drops each commit head has by patch-id; ^merge^1 keeps only what the merge brought in.
+    uncarried = _git(
+        tree, *_LOCAL_REV_LIST, "--no-merges", "--cherry-pick", "--right-only", f"{head}...{merge}", f"^{merge}^1", "--"
+    ).split()
+    if uncarried:
         return InclusionVerdict.unknown(
-            f"{tally}; a carry that folded them into one commit, such as git cherry-pick -m 1 or a squash, "
-            "has another patch-id"
+            f"{searched}, and {len(uncarried)} non-merge commit(s) merge commit {merge} brought in, such as "
+            f"{uncarried[0]}, are not in it by sha or by patch-id"
         )
-    return InclusionVerdict.unknown(tally)
-
-
-_EXIT_STATUS = {Inclusion.INCLUDED: 0, Inclusion.NOT_INCLUDED: 4, Inclusion.UNKNOWN: 3}
+    return InclusionVerdict(
+        Inclusion.INCLUDED,
+        InclusionMethod.MERGE_COMMIT,
+        f"every non-merge commit merge commit {merge} brought in is in {head}, by sha or by patch-id",
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -262,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m kernelforge.knowledge.pr_knowledge.inclusion",
         description="Check from local git whether an upstream pull request is in a tree.",
-        epilog="Exit status: 0 included, 4 not included, 3 unknown, 2 usage error.",
+        epilog="Exit status: 0 included, 3 unknown, 2 usage error.",
     )
     parser.add_argument("--tree", type=Path, required=True, help="a directory inside the git work tree")
     parser.add_argument("--commit", required=True, help="the revision to check, such as a sha or HEAD")
@@ -275,7 +168,7 @@ def main(argv: list[str] | None = None) -> int:
         tree=args.tree, commit=args.commit, number=args.pr, merge_commit_sha=args.merge_commit_sha
     )
     print(json.dumps(verdict.to_record()))
-    return _EXIT_STATUS[verdict.inclusion]
+    return 0 if verdict.inclusion is Inclusion.INCLUDED else 3
 
 
 if __name__ == "__main__":
