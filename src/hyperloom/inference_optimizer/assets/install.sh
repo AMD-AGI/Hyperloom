@@ -19,9 +19,11 @@
 #       upstream, so no benchmarker.py rewrite is applied here.
 #   3. InferenceX checkout: clone from upstream pinned to INFERENCEX_REF
 #      (a commit SHA), sets INFERENCEX_PATH for runtime
-#   4. Kernel-agent tools: ray + ray-head bring-up, TraceLens, GEAK, the
-#      Claude CLI and the LLM gateway env, from the steps in the sibling
-#      install_kernel_tools.sh (sourced, not run on its own).
+#   4. Kernel-agent tools: ray + ray-head bring-up, TraceLens, GEAK and the
+#      Claude gateway env (credentials and model, not the CLI binary), from
+#      the steps in the sibling install_kernel_tools.sh (sourced, not run on
+#      its own). node/npm and the claude and codex CLIs come from the
+#      container image; this script does not install them.
 
 set -euo pipefail
 
