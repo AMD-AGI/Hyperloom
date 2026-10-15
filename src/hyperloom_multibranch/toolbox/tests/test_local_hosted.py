@@ -6,17 +6,20 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from hyperloom.contracts.measurement import FailureClass, TestResult, Validity
+from hyperloom.measure.runner.tools import ToolError, ensure_inferencex
 from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.measure.tests.test_hosted_real_runner import _git_repo, _point
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
-from hyperloom_multibranch.toolbox.local_hosted import build_local_toolbox, max_parallel_tests
+from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox, build_local_toolbox, max_parallel_tests
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanner
@@ -32,12 +35,26 @@ def test_a_test_that_needs_more_cards_than_the_pool_is_refused() -> None:
         max_parallel_tests(2, 4)
 
 
-async def test_the_factory_builds_a_toolbox_that_runs_a_test_end_to_end(tmp_path: Path) -> None:
-    repo = tmp_path / "inferencex"
-    commit = _git_repo(repo)
-    session = tmp_path / "session"
-    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
-    toolbox = build_local_toolbox(
+def _require_tool_checkout(repo: Path, commit: str, home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The precondition of the end-to-end test: the runner can check the stand-in repository out as it runs it.
+
+    The runner fetches the tools by hash under an empty home, like a sandbox. Where that fails (no usable ``git``, a
+    refused local fetch) the test would otherwise show only ``measurement_failed``, so it fails here and says why.
+    """
+    monkeypatch.setenv("INFERENCEX_REPO", str(repo))
+    monkeypatch.setenv("HOME", str(home))
+    try:
+        ensure_inferencex(commit, home / "cache")
+    except ToolError as error:
+        pytest.fail(
+            f"this machine cannot check the stand-in InferenceX repository out, so no runner can start: {error}"
+        )
+
+
+def _toolbox_of(
+    notebook: LocalNotebook, tmp_path: Path, session: Path, commit: str, **extra: Any
+) -> LocalHostedToolbox:
+    return build_local_toolbox(
         session_dir=session,
         run_id="run-1",
         cards=range(8),
@@ -50,10 +67,47 @@ async def test_the_factory_builds_a_toolbox_that_runs_a_test_end_to_end(tmp_path
         active_image_digest=IMAGE,
         workload_kind=WorkloadKind.AGENTX,
         policy=QueuePolicy(per_branch_k=2, global_concurrency=64),
-        runner_envs={"INFERENCEX_REPO": str(repo)},
         poll_interval_sec=0.1,
         timeout_sec=120,
+        **extra,
     )
+
+
+async def test_a_runner_that_cannot_start_says_why_and_leaves_no_log_traceback(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The runner fails before it writes ``out/files``: the result carries its message and saving logs stays quiet."""
+    repo = tmp_path / "inferencex"
+    commit = _git_repo(repo)
+    session = tmp_path / "session"
+    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
+    envs = {"INFERENCEX_REPO": str(repo) + "-missing"}
+    toolbox = _toolbox_of(notebook, tmp_path, session, commit, runner_envs=envs, max_infra_retries=0)
+    try:
+        await toolbox.start()
+        request_id = await toolbox.submit_test(req())
+        with caplog.at_level(logging.DEBUG):
+            await asyncio.wait_for(toolbox.drain(), 120)
+        entry = toolbox._log.get(request_id)
+        assert entry is not None and entry.outcome is not None and "result" in entry.outcome, entry.outcome
+        result = TestResult.from_document(entry.outcome["result"])
+        assert result.validity is Validity.MEASUREMENT_FAILED and result.failure_class is FailureClass.INFRA
+        assert result.failure_reason and "runner_start_failed" in result.failure_reason
+        assert "git fetch failed" in result.failure_reason, result.failure_reason
+        assert "could not be saved" not in caplog.text, "a runner with no out/files has no logs: that is not a warning"
+    finally:
+        await toolbox.close()
+
+
+async def test_the_factory_builds_a_toolbox_that_runs_a_test_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = tmp_path / "inferencex"
+    commit = _git_repo(repo)
+    _require_tool_checkout(repo, commit, tmp_path / "home", monkeypatch)
+    session = tmp_path / "session"
+    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
+    toolbox = _toolbox_of(notebook, tmp_path, session, commit, runner_envs={"INFERENCEX_REPO": str(repo)})
     try:
         assert toolbox._queue.policy.global_concurrency == 8, "the policy is held to 8 / TP"
         await toolbox.start()

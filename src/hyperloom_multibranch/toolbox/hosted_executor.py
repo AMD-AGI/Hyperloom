@@ -20,6 +20,7 @@ import asyncio
 import hashlib
 import json
 import math
+import re
 import subprocess
 import sys
 import time
@@ -59,6 +60,8 @@ _MANIFEST = "manifest.json"
 _UNFINISHED = (STATE_SUBMITTED, STATE_SENT)
 _SWEEP = "conc_sweep"
 _ACCURACY = "accuracy"
+_REASON_DETAIL_CHARS = 300
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
 
 
 class HostedExecutor:
@@ -166,7 +169,7 @@ class HostedExecutor:
             request_id=request_id,
             validity=_validity_of(failure),
             failure_class=failure,
-            failure_reason=outcome.failure_reason if failure is not None else None,
+            failure_reason=_failure_reason(outcome, failure),
             rounds=rounds,
             accuracy=accuracy,
             sandbox=facts,
@@ -233,6 +236,21 @@ def _refuse_unless_measured(outcome: TestOutcome) -> None:
         raise asyncio.CancelledError(verdict.failure_reason)  # the run is stopping: the test is picked up at restart
     detail = (outcome.stderr or "").strip()[-300:]
     raise MeasurementRefused(f"{verdict.failure_reason or 'unclassified end'}: {detail}".strip(": "))
+
+
+def _failure_reason(outcome: TestOutcome, failure: FailureClass | None) -> str | None:
+    """The reason of a failed outcome; an infrastructure failure also says what the runner reported.
+
+    Without the runner's own message a runner that could not start is only ``runner_start_failed``, and nobody can tell
+    a missing tool checkout from a broken interpreter.
+    """
+    if failure is None:
+        return None
+    reason = outcome.failure_reason
+    detail = _CONTROL_CHARS.sub(" ", (outcome.stderr or "").strip()[-_REASON_DETAIL_CHARS:]).strip()
+    if failure is not FailureClass.INFRA or not detail or detail == reason:
+        return reason
+    return detail if reason and detail.startswith(reason) else f"{reason}: {detail}"
 
 
 def _validity_of(failure: FailureClass | None) -> Validity:

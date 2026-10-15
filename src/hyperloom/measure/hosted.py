@@ -650,6 +650,8 @@ class HostedMeasurementBackend:
             output.mkdir(parents=True, exist_ok=True)
             for name in names:
                 handle.copy_out(f"{FILES_ROOT}/{name}", output / f"hosted-{name}")
+        except FileNotFoundError:
+            log.debug("the runner wrote no files directory, so there are no logs to save")  # it failed before measuring
         except (SandboxError, OSError):
             log.warning("the runner's logs could not be saved", exc_info=True)
 
