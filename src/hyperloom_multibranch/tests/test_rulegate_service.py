@@ -26,7 +26,11 @@ EFFECTS = {FAST.fingerprint(): 0.05, WRONG.fingerprint(): 0.05, FLAT.fingerprint
 
 
 def _request(
-    purpose: Purpose, change: RecipeDelta | None = None, *, kind: TestKind = TestKind.TEST, accuracy: bool = True
+    purpose: Purpose,
+    change: RecipeDelta | None = None,
+    *,
+    kind: TestKind = TestKind.TEST,
+    concurrency: tuple[int, ...] = (),
 ) -> TestRequest:
     return TestRequest(
         kind=kind,
@@ -34,7 +38,8 @@ def _request(
         branch_id=INTEGRATION_BRANCH,
         parent_commit=ROOT,
         delta=change or RecipeDelta(),
-        accuracy=accuracy,
+        accuracy=True,
+        concurrency=concurrency,
     )
 
 
@@ -143,10 +148,10 @@ async def test_a_withdrawn_test_is_not_measured(tmp_path):
     await session.toolbox.close()
 
 
-async def test_a_merge_run_without_its_eval_is_not_measured(session):
-    merge = await session.toolbox.submit_test(_request(Purpose.INTEGRATION, FAST, accuracy=False))
+async def test_a_merge_measured_off_the_graded_concurrency_is_not_measured(session):
+    merge = await session.toolbox.submit_test(_request(Purpose.INTEGRATION, FAST, concurrency=(CONC // 8,)))
 
-    with pytest.raises(NotMeasured, match="no eval score"):
+    with pytest.raises(NotMeasured, match=f"no measure-phase round at concurrency {CONC}"):
         await session.gate.compare(merge)
 
 
