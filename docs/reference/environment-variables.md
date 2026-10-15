@@ -108,10 +108,11 @@ when `--gpu-type` is omitted.
   back to the benchmark report's reading, and either power budget is refused at
   launch, since it could not be measured) and `HYPERLOOM_GPU_POWER_INTERVAL_S`
   sets its cadence (default 2 s, minimum 0.5 s).
-- **GPU power settings:** `--gpu-power-cap-w`, `--gpu-perf-level`. By default
-  asserted: set them with `amd-smi set` before launch; the session refuses to
-  start or resume if a card it uses differs, and records what the cards report
-  either way. `--apply-gpu-power-settings` lets the session set them itself on
+- **GPU power settings:** `--gpu-power-cap-w`, `--gpu-perf-level`,
+  `--gpu-sclk-max-mhz` (graphics clock maximum; holds only at the `manual`
+  perf level). By default asserted: set them with `amd-smi set` before launch;
+  the session refuses to start or resume if a card it uses differs, and
+  records what the cards report either way. `--apply-gpu-power-settings` lets the session set them itself on
   the cards of its integer visible-device mask for the whole session, and
   restore the originals when it ends (records under
   `/var/tmp/hyperloom/gpu_power_settings/`).

@@ -33,17 +33,70 @@ _PERF = {
 }
 
 
+def _gfx(*max_mhz: float) -> dict:
+    """``metric --clock`` for one card: one ``gfx_<n>`` block per XCD, as MI355X reports it."""
+    blocks = {
+        f"gfx_{n}": {"clk": {"value": 1700, "unit": "MHz"}, "max_clk": {"value": mhz, "unit": "MHz"}}
+        for n, mhz in enumerate(max_mhz)
+    }
+    return {**blocks, "mem_0": {"max_clk": {"value": 2000, "unit": "MHz"}}}
+
+
+_CLOCK = {"gpu_data": [{"gpu": 0, "clock": _gfx(*[2400] * 8)}, {"gpu": 1, "clock": _gfx(*[2000] * 8)}]}
+
+
 def _fake_run(cmd, **_kwargs):
-    payload = _LIMIT if "--limit" in cmd else _PERF
+    payload = _LIMIT if "--limit" in cmd else _CLOCK if "--clock" in cmd else _PERF
     return subprocess.CompletedProcess(cmd, 0, json.dumps(payload), "")
 
 
 def test_the_settings_are_read_from_amd_smi_json():
     settings = read_gpu_power_settings(run=_fake_run)
     assert settings == {
-        0: {"power_cap_w": 1400.0, "perf_level": "auto"},
-        1: {"power_cap_w": 1000.0, "perf_level": "determinism"},
+        0: {"power_cap_w": 1400.0, "perf_level": "auto", "sclk_max_mhz": 2400.0},
+        1: {"power_cap_w": 1000.0, "perf_level": "determinism", "sclk_max_mhz": 2000.0},
     }
+
+
+def test_a_failing_clock_read_leaves_the_cap_and_level_checkable():
+    def _no_clock(cmd, **kwargs):
+        if "--clock" in cmd:
+            return subprocess.CompletedProcess(cmd, 2, "", "unsupported")
+        return _fake_run(cmd, **kwargs)
+
+    settings = read_gpu_power_settings(run=_no_clock)
+    assert settings[0] == {"power_cap_w": 1400.0, "perf_level": "auto", "sclk_max_mhz": None}
+    assert declared_setting_problems(settings, power_cap_w=1400.0, gpus={0}) == []
+    assert declared_setting_problems(settings, sclk_max_mhz=2400.0, gpus={0}) == [
+        "GPU 0 sclk max is unreadable, declared 2400 MHz"
+    ]
+
+
+def test_an_sclk_limit_the_xcds_disagree_on_is_unread():
+    """A partial set leaves XCDs at different limits; reporting either one would assert a cap that does not hold."""
+    from hyperloom.common.gpu_power_settings import _sclk_max_mhz
+
+    assert _sclk_max_mhz(_gfx(2000, 2000, 2400)) is None
+    assert _sclk_max_mhz({"mem_0": {"max_clk": {"value": 2000}}}) is None
+
+
+def test_a_declared_sclk_max_is_asserted_like_the_cap():
+    settings = read_gpu_power_settings(run=_fake_run)
+    assert declared_setting_problems(settings, sclk_max_mhz=2000.0, gpus={1}) == []
+    assert declared_setting_problems(settings, sclk_max_mhz=2000.0, gpus={0}) == [
+        "GPU 0 sclk max is 2400 MHz, declared 2000 MHz"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("level", "refused"), [("auto", True), ("determinism", True), ("manual", False), (None, False)]
+)
+def test_an_sclk_max_holds_only_at_the_manual_perf_level(level, refused):
+    from hyperloom.common.gpu_power_settings import declared_combination_error
+
+    error = declared_combination_error(perf_level=level, sclk_max_mhz=2000.0)
+    assert bool(error) is refused
+    assert declared_combination_error(perf_level=level, sclk_max_mhz=None) == ""
 
 
 def test_a_failing_amd_smi_is_an_error_not_an_empty_reading():
@@ -80,7 +133,7 @@ class TestResolve:
         record, error = self._resolve(monkeypatch)
         assert error == ""
         assert record["declared"] == {}
-        assert record["observed"]["1"] == {"power_cap_w": 1000.0, "perf_level": "determinism"}
+        assert record["observed"]["1"] == {"power_cap_w": 1000.0, "perf_level": "determinism", "sclk_max_mhz": 2000.0}
 
     def test_a_declared_cap_the_cards_are_not_at_refuses(self, monkeypatch):
         _, error = self._resolve(monkeypatch, power_cap_w=1000.0)

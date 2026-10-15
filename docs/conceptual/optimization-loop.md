@@ -264,22 +264,27 @@ serving card or no power reading stays unmeasured. The benchmark report's
 sampler ran on: on one node it reads a single card over the whole process
 lifetime, boot and idle tail included.
 
-The optimizer never changes power settings during a session. The power cap and
-DPM performance level decide how much of the card's throughput is available at
-what power, so they are part of the measurement contract, and setting them is
-privileged and card-wide. By default, set them with `amd-smi set --power-cap` /
-`--perf-level` before launch; `--gpu-power-cap-w` and `--gpu-perf-level` then
-assert them, the way `--compute-partition-mode` asserts a partition mode: the
-session refuses to start (and to resume) if a card it uses is at a different
-value. The observed cap and perf level are recorded in the platform
-fingerprint whether or not they are asserted. Neither can be checked on a
+The optimizer never changes power settings during a session. The power cap,
+the DPM performance level and the graphics clock's maximum (sclk) decide how
+much of the card's throughput is available at what power, so they are part of
+the measurement contract, and setting them is privileged and card-wide. By
+default, set them with `amd-smi set --power-cap` / `--perf-level` /
+`--clk-limit sclk max` before launch; `--gpu-power-cap-w`, `--gpu-perf-level`
+and `--gpu-sclk-max-mhz` then assert them, the way `--compute-partition-mode`
+asserts a partition mode: the session refuses to start (and to resume) if a
+card it uses is at a different value. The observed values are recorded in the
+platform fingerprint whether or not they are asserted. None can be checked on a
 multi-node session, so asserting one there refuses.
+
+A clock limit holds only at the `manual` perf level: `amd-smi` puts a card in
+`manual` when the limit is set, and setting any other level resets the limit.
+So `--gpu-sclk-max-mhz` refuses with any other `--gpu-perf-level`.
 
 ### Applying the power settings (opt-in)
 
 `--apply-gpu-power-settings` permits the session to set the declared
-`--gpu-power-cap-w` / `--gpu-perf-level` itself, once at launch, and to keep
-them for the whole session. The same read-back check then verifies them, and
+`--gpu-power-cap-w` / `--gpu-perf-level` / `--gpu-sclk-max-mhz` itself, once at
+launch, and to keep them for the whole session. The same read-back check then verifies them, and
 the fingerprint records them as applied by Hyperloom along with the originals.
 It needs `amd-smi set` privileges and refuses, with nothing left changed:
 
@@ -294,6 +299,9 @@ It needs `amd-smi set` privileges and refuses, with nothing left changed:
 - when a set fails.
 
 Only the settings that were declared are changed, and only those are put back.
+An sclk cap also puts the card in `manual`, so its perf level is recorded and put
+back too: the level first, then the limit, and from a level other than `manual`
+the level alone, since it resets the limit itself.
 The originals are written to a per-card record under
 `/var/tmp/hyperloom/gpu_power_settings/` before anything is set. That path is
 host-local and fixed, whatever `HYPERLOOM_RUNTIME_DIR` or `USER_DATA_PATH` say,

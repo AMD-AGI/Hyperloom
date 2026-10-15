@@ -34,8 +34,8 @@ from hyperloom.inference_optimizer.cli.parser import _build_parser
 _MASK = {4, 5, 6, 7}
 
 
-def _cards(cap: float = 1400.0, level: str = "auto", gpus=range(8)) -> dict[int, dict]:
-    return {gpu: {"power_cap_w": cap, "perf_level": level} for gpu in gpus}
+def _cards(cap: float = 1400.0, level: str = "auto", gpus=range(8), sclk: float = 2400.0) -> dict[int, dict]:
+    return {gpu: {"power_cap_w": cap, "perf_level": level, "sclk_max_mhz": sclk} for gpu in gpus}
 
 
 class _AmdSmi:
@@ -66,10 +66,16 @@ def _hooks(*, observed=None, vram=None, mask=_MASK, smi=None) -> tuple[_Hooks, _
     return hooks, smi
 
 
-def _apply(tmp_path, *, nodes=1, power_cap_w=1000.0, perf_level=None, **hook_kw):
+def _apply(tmp_path, *, nodes=1, power_cap_w=1000.0, perf_level=None, sclk_max_mhz=None, **hook_kw):
     hooks, smi = _hooks(**hook_kw)
     applied = apply_declared_gpu_power_settings(
-        power_cap_w=power_cap_w, perf_level=perf_level, nodes=nodes, owner="sess", ledger_dir=tmp_path, hooks=hooks
+        power_cap_w=power_cap_w,
+        perf_level=perf_level,
+        sclk_max_mhz=sclk_max_mhz,
+        nodes=nodes,
+        owner="sess",
+        ledger_dir=tmp_path,
+        hooks=hooks,
     )
     return applied, smi
 
@@ -239,7 +245,7 @@ class TestApplyDeclared:
 
     @pytest.mark.parametrize(
         ("kw", "needle"),
-        [({"nodes": 2}, "multi-node"), ({"power_cap_w": None, "perf_level": None}, "needs --gpu-power-cap-w")],
+        [({"nodes": 2}, "multi-node"), ({"power_cap_w": None, "perf_level": None}, "needs at least one of")],
     )
     def test_refusals_before_touching_anything(self, tmp_path, kw, needle):
         smi = _AmdSmi()
@@ -253,6 +259,41 @@ class TestApplyDeclared:
         assert ["amd-smi", "set", "-g", "4", "5", "6", "7", "-l", "DETERMINISM"] in smi.calls
         applied.restore()
         assert smi.calls[-1] == ["amd-smi", "set", "-g", "4", "5", "6", "7", "-l", "AUTO"]
+
+    def test_an_sclk_cap_alone_restores_the_perf_level_it_changed(self, tmp_path):
+        """A clock limit puts the card in manual; from auto, restoring auto also resets the limit, so no sclk set."""
+        applied, smi = _apply(tmp_path, power_cap_w=None, sclk_max_mhz=2000.0)
+        assert smi.calls == [["amd-smi", "set", "-g", "4", "5", "6", "7", "-L", "sclk", "max", "2000"]]
+        assert applied.record["originals"]["4"] == {"sclk_max_mhz": 2400.0, "perf_level": "auto"}
+        applied.restore()
+        assert smi.calls[1:] == [["amd-smi", "set", "-g", "4", "5", "6", "7", "-l", "AUTO"]]
+
+    def test_an_sclk_cap_from_manual_restores_level_then_limit(self, tmp_path):
+        manual = _cards(level="manual", sclk=2100.0)
+        applied, smi = _apply(
+            tmp_path, power_cap_w=None, perf_level="manual", sclk_max_mhz=2000.0, observed=[manual, manual]
+        )
+        assert smi.calls == [
+            ["amd-smi", "set", "-g", "4", "5", "6", "7", "-l", "MANUAL"],
+            ["amd-smi", "set", "-g", "4", "5", "6", "7", "-L", "sclk", "max", "2000"],
+        ], "the level first: setting a level resets the clock limit"
+        applied.restore()
+        assert smi.calls[2:] == [
+            ["amd-smi", "set", "-g", "4", "5", "6", "7", "-l", "MANUAL"],
+            ["amd-smi", "set", "-g", "4", "5", "6", "7", "-L", "sclk", "max", "2100"],
+        ]
+
+    def test_an_sclk_cap_with_another_perf_level_is_refused_untouched(self, tmp_path):
+        smi = _AmdSmi()
+        with pytest.raises(GpuPowerSettingsError, match="holds only at the manual perf level"):
+            _apply(tmp_path, perf_level="auto", sclk_max_mhz=2000.0, smi=smi)
+        assert smi.calls == []
+        assert list(tmp_path.iterdir()) == []
+
+    def test_an_unreadable_sclk_limit_refuses(self, tmp_path):
+        split = {**_cards(), 5: {"power_cap_w": 1400.0, "perf_level": "auto", "sclk_max_mhz": None}}
+        with pytest.raises(GpuPowerSettingsError, match=r"sclk max .*GPU\(s\) 5"):
+            _apply(tmp_path, power_cap_w=None, sclk_max_mhz=2000.0, observed=[split, split])
 
     @pytest.mark.parametrize(
         ("observed", "perf_level", "unreadable_gpu"),

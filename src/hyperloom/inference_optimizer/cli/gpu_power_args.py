@@ -1,13 +1,27 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The GPU power-settings flags: ``--gpu-power-cap-w``, ``--gpu-perf-level`` and ``--apply-gpu-power-settings``."""
+"""The GPU power-settings flags: ``--gpu-power-cap-w``, ``--gpu-perf-level``, ``--gpu-sclk-max-mhz`` and
+``--apply-gpu-power-settings``."""
 
 from __future__ import annotations
 
 import argparse
 
+from math import isfinite
+
 from .constraint_args import positive_watts_arg
+
+
+def _positive_mhz_arg(value: str) -> float:
+    """A finite, positive clock frequency in MHz."""
+    try:
+        mhz = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected a frequency in MHz, got {value!r}") from exc
+    if not isfinite(mhz) or mhz <= 0:
+        raise argparse.ArgumentTypeError(f"expected a positive frequency in MHz, got {value!r}")
+    return mhz
 
 
 def add_gpu_power_arguments(opt: argparse._ActionsContainer) -> None:
@@ -38,12 +52,25 @@ def add_gpu_power_arguments(opt: argparse._ActionsContainer) -> None:
         ),
     )
     opt.add_argument(
+        "--gpu-sclk-max-mhz",
+        type=_positive_mhz_arg,
+        default=None,
+        metavar="MHZ",
+        help=(
+            "Declare the graphics clock (sclk) maximum the GPUs are limited to, in MHz. Asserted like "
+            "--gpu-power-cap-w (set it with `amd-smi set --clk-limit sclk max MHZ` before launch), or set by the "
+            "session with --apply-gpu-power-settings. A clock limit holds only at the manual perf level, so it "
+            "refuses with any other --gpu-perf-level."
+        ),
+    )
+    opt.add_argument(
         "--apply-gpu-power-settings",
         action="store_true",
         default=False,
         help=(
-            "Permit the session to set --gpu-power-cap-w / --gpu-perf-level on the cards of its integer "
-            "ROCR_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES mask, once at launch and for the whole session; the "
+            "Permit the session to set --gpu-power-cap-w / --gpu-perf-level / --gpu-sclk-max-mhz on the cards of "
+            "its integer ROCR_VISIBLE_DEVICES / HIP_VISIBLE_DEVICES mask, once at launch and for the whole "
+            "session; the "
             "optimizer never changes them afterwards. Needs amd-smi set privileges. The originals are recorded on "
             "host-local storage before anything is set and restored when the session ends, including on SIGTERM "
             "or SIGHUP; after a SIGKILL the cards stay at the applied settings until the next launch that passes "

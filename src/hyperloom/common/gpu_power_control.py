@@ -24,7 +24,13 @@ import subprocess  # nosec B404 - fixed amd-smi invocations.
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from hyperloom.common.gpu_power_settings import GpuPowerSettingsError, _gpu_rows, _watts, normalize_perf_level
+from hyperloom.common.gpu_power_settings import (
+    PERF_LEVEL_MANUAL,
+    GpuPowerSettingsError,
+    _gpu_rows,
+    _watts,
+    normalize_perf_level,
+)
 
 __all__ = [
     "GPU_POWER_LEDGER_DIR",
@@ -43,6 +49,8 @@ GPU_POWER_LEDGER_DIR = Path("/var/tmp/hyperloom/gpu_power_settings")
 _BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 _POWER_CAP_W = "power_cap_w"
 _PERF_LEVEL = "perf_level"
+_SCLK_MAX_MHZ = "sclk_max_mhz"
+_SET = "set"
 _BOOT_ID = "boot_id"
 _UTF8 = "utf-8"
 
@@ -86,19 +94,33 @@ def read_resident_vram_mb(
 
 
 def _set_commands(settings: Mapping[int, Mapping[str, Any]]) -> list[list[str]]:
-    """``amd-smi set`` argument lists, one per distinct value, so cards sharing a value are set in one call."""
+    """``amd-smi set`` argument lists, one per distinct value, so cards sharing a value are set in one call.
+
+    Ordered cap, perf level, then sclk limit: setting a perf level resets the clock limit, so the limit goes last. A
+    card being put at a perf level other than manual gets no sclk command: that level already reset the limit, and
+    setting one would put the card back in manual.
+    """
     by_cap: dict[float, list[int]] = {}
     by_level: dict[str, list[int]] = {}
+    by_sclk: dict[float, list[int]] = {}
     for gpu, row in sorted(settings.items()):
         cap = row.get(_POWER_CAP_W)
-        if isinstance(cap, (int, float)) and not isinstance(cap, bool):
+        if _is_number(cap):
             by_cap.setdefault(float(cap), []).append(gpu)
         level = normalize_perf_level(row.get(_PERF_LEVEL))
         if level:
             by_level.setdefault(level, []).append(gpu)
-    commands = [["set", "-g", *map(str, gpus), "-o", "ppt0", f"{cap:g}"] for cap, gpus in by_cap.items()]
-    commands += [["set", "-g", *map(str, gpus), "-l", level.upper()] for level, gpus in by_level.items()]
+        sclk = row.get(_SCLK_MAX_MHZ)
+        if _is_number(sclk) and level in ("", PERF_LEVEL_MANUAL):
+            by_sclk.setdefault(float(sclk), []).append(gpu)
+    commands = [[_SET, "-g", *map(str, gpus), "-o", "ppt0", f"{cap:g}"] for cap, gpus in by_cap.items()]
+    commands += [[_SET, "-g", *map(str, gpus), "-l", level.upper()] for level, gpus in by_level.items()]
+    commands += [[_SET, "-g", *map(str, gpus), "-L", "sclk", "max", f"{mhz:g}"] for mhz, gpus in by_sclk.items()]
     return commands
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def restore_gpu_power_settings(
@@ -126,15 +148,18 @@ def apply_gpu_power_settings(
     *,
     power_cap_w: float | None,
     perf_level: str | None,
+    sclk_max_mhz: float | None = None,
     run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
     timeout: float = 60.0,
 ) -> None:
-    """Set the declared cap and perf level on ``gpus``.
+    """Set the declared cap, perf level and sclk limit on ``gpus``.
 
     Raises:
         GpuPowerSettingsError: a set failed (typically not privileged). The caller restores from its record.
     """
-    wanted = {gpu: {_POWER_CAP_W: power_cap_w, _PERF_LEVEL: perf_level or ""} for gpu in gpus}
+    wanted = {
+        gpu: {_POWER_CAP_W: power_cap_w, _PERF_LEVEL: perf_level or "", _SCLK_MAX_MHZ: sclk_max_mhz} for gpu in gpus
+    }
     for args in _set_commands(wanted):
         _run_amd_smi(run, args, timeout)
 

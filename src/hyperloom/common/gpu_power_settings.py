@@ -3,9 +3,10 @@
 
 """Read-only view of the GPU power settings a session is measured under.
 
-The power cap and the DPM performance level decide how much of a card's throughput is available and at what power,
-so they are part of the measurement contract. Nothing here changes them: setting either is privileged and card-wide,
-and belongs to the operator before launch (``amd-smi set --power-cap`` / ``--perf-level``), the same way
+The power cap, the DPM performance level and the graphics clock's maximum (sclk) decide how much of a card's
+throughput is available and at what power, so they are part of the measurement contract. Nothing here changes them:
+setting any of them is privileged and card-wide, and belongs to the operator before launch (``amd-smi set
+--power-cap`` / ``--perf-level`` / ``--clk-limit sclk max``) or to ``--apply-gpu-power-settings``, the same way
 ``--compute-partition-mode`` asserts a mode rather than setting one. This module reads what the cards are at, so a
 session can record it and refuse to start when an operator's declared value did not take effect.
 """
@@ -23,6 +24,8 @@ from hyperloom.common.env import env_flag
 __all__ = [
     "GPU_POWER_SAMPLING_ENV",
     "GpuPowerSettingsError",
+    "PERF_LEVEL_MANUAL",
+    "declared_combination_error",
     "declared_setting_problems",
     "gpu_power_sampling_unavailable",
     "normalize_perf_level",
@@ -31,6 +34,9 @@ __all__ = [
 ]
 
 _PERF_LEVEL_PREFIX = "AMDSMI_DEV_PERF_LEVEL_"
+#: The perf level a clock limit puts a card in, and the only one at which the limit holds.
+PERF_LEVEL_MANUAL = "manual"
+_UNREADABLE = "unreadable"
 
 #: Escape hatch for a host where running ``amd-smi`` every couple of seconds is not acceptable.
 GPU_POWER_SAMPLING_ENV = "HYPERLOOM_GPU_POWER_SAMPLING"
@@ -96,12 +102,43 @@ def _power_cap_w(limit: Any) -> float | None:
     return None
 
 
+def _sclk_max_mhz(clock: Any) -> float | None:
+    """The graphics clock's maximum limit, read on every XCD; ``None`` when unread or the XCDs disagree.
+
+    ``amd-smi metric --clock`` reports one ``gfx_<n>`` block per XCD, and ``max_clk`` is the limit in force: an
+    ``amd-smi set -L sclk max`` shows there, not in ``static --clock``.
+    """
+    if not isinstance(clock, dict):
+        return None
+    limits = {
+        _watts(block.get("max_clk"))
+        for name, block in clock.items()
+        if str(name).startswith("gfx_") and isinstance(block, dict)
+    }
+    return limits.pop() if len(limits) == 1 else None
+
+
+def declared_combination_error(*, perf_level: str | None, sclk_max_mhz: float | None) -> str:
+    """Why the declared settings cannot hold together, or ``""``.
+
+    Setting a clock limit puts a card in the MANUAL perf level, and setting any other level resets the limit, so a
+    declared sclk cap holds only at MANUAL.
+    """
+    level = normalize_perf_level(perf_level) if perf_level else ""
+    if sclk_max_mhz is not None and level and level != PERF_LEVEL_MANUAL:
+        return (
+            f"--gpu-sclk-max-mhz holds only at the manual perf level, and --gpu-perf-level declares {level!r}: "
+            "amd-smi puts a card in manual when a clock limit is set, and any other level resets the limit"
+        )
+    return ""
+
+
 def read_gpu_power_settings(
     *,
     run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
     timeout: float = 30.0,
 ) -> dict[int, dict[str, Any]]:
-    """``{gpu: {"power_cap_w": float | None, "perf_level": str}}`` for every card ``amd-smi`` lists.
+    """``{gpu: {"power_cap_w": float | None, "perf_level": str, "sclk_max_mhz": float | None}}`` per listed card.
 
     Raises:
         GpuPowerSettingsError: ``amd-smi`` is absent, failed, or printed something that is not its JSON.
@@ -128,9 +165,19 @@ def read_gpu_power_settings(
         settings.setdefault(row["gpu"], {})["power_cap_w"] = _power_cap_w(row.get("limit"))
     for row in _gpu_rows(_query("metric", "--perf-level")):
         settings.setdefault(row["gpu"], {})["perf_level"] = normalize_perf_level(row.get("perf_level"))
+    try:
+        clocks = _gpu_rows(_query("metric", "--clock"))
+    except GpuPowerSettingsError:
+        # Where only the clock read fails, the sclk limit reads as unread: that refuses a declared --gpu-sclk-max-mhz,
+        # not a cap or perf level that can still be checked.
+        clocks = []
+    for row in clocks:
+        if row["gpu"] in settings:
+            settings[row["gpu"]]["sclk_max_mhz"] = _sclk_max_mhz(row.get("clock"))
     for entry in settings.values():
         entry.setdefault("power_cap_w", None)
         entry.setdefault("perf_level", "")
+        entry.setdefault("sclk_max_mhz", None)
     return settings
 
 
@@ -139,6 +186,7 @@ def declared_setting_problems(
     *,
     power_cap_w: float | None = None,
     perf_level: str | None = None,
+    sclk_max_mhz: float | None = None,
     gpus: set[int] | None = None,
 ) -> list[str]:
     """Why the cards are not at the declared settings; empty when they are, or when nothing is declared.
@@ -147,7 +195,7 @@ def declared_setting_problems(
     """
     wanted_level = normalize_perf_level(perf_level) if perf_level else ""
     checked = {gpu: row for gpu, row in settings.items() if gpus is None or gpu in gpus}
-    if (power_cap_w is not None or wanted_level) and not checked:
+    if (power_cap_w is not None or wanted_level or sclk_max_mhz is not None) and not checked:
         return ["no GPU the session can use was reported by amd-smi"]
     problems: list[str] = []
     for gpu, row in sorted(checked.items()):
@@ -155,10 +203,17 @@ def declared_setting_problems(
             cap = row.get("power_cap_w")
             if not isinstance(cap, (int, float)) or abs(float(cap) - float(power_cap_w)) > 0.5:
                 problems.append(
-                    f"GPU {gpu} power cap is {cap if cap is not None else 'unreadable'} W, declared {power_cap_w:g} W"
+                    f"GPU {gpu} power cap is {cap if cap is not None else _UNREADABLE} W, declared {power_cap_w:g} W"
                 )
         if wanted_level and row.get("perf_level") != wanted_level:
             problems.append(
-                f"GPU {gpu} perf level is {row.get('perf_level') or 'unreadable'!r}, declared {wanted_level!r}"
+                f"GPU {gpu} perf level is {row.get('perf_level') or _UNREADABLE!r}, declared {wanted_level!r}"
             )
+        if sclk_max_mhz is not None:
+            sclk = row.get("sclk_max_mhz")
+            if not isinstance(sclk, (int, float)) or abs(float(sclk) - float(sclk_max_mhz)) > 0.5:
+                problems.append(
+                    f"GPU {gpu} sclk max is {f'{sclk:g} MHz' if sclk is not None else _UNREADABLE}, "
+                    f"declared {sclk_max_mhz:g} MHz"
+                )
     return problems

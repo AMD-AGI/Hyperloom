@@ -276,6 +276,7 @@ _MAX_PER_GPU_POWER_W = "max_per_gpu_power_w"
 _NODES = "nodes"
 _GPU_POWER_CAP_W = "gpu_power_cap_w"
 _GPU_PERF_LEVEL = "gpu_perf_level"
+_GPU_SCLK_MAX_MHZ = "gpu_sclk_max_mhz"
 _DECLARED = "declared"
 
 
@@ -304,7 +305,13 @@ def constraint_budget_resume_conflict(args: Any, state: Any) -> str:
 
 
 def _established_gpu_power_settings(
-    *, power_cap_w: float | None, perf_level: str | None, nodes: int, apply: bool, owner: str
+    *,
+    power_cap_w: float | None,
+    perf_level: str | None,
+    sclk_max_mhz: float | None,
+    nodes: int,
+    apply: bool,
+    owner: str,
 ) -> tuple[dict[str, Any], str]:
     """Apply the declared settings when permitted, then check and record them; ``(record, error)``.
 
@@ -318,13 +325,15 @@ def _established_gpu_power_settings(
     try:
         if apply:
             applied = gpu_power_apply.apply_for_session(
-                power_cap_w=power_cap_w, perf_level=perf_level, nodes=nodes, owner=owner
+                power_cap_w=power_cap_w, perf_level=perf_level, sclk_max_mhz=sclk_max_mhz, nodes=nodes, owner=owner
             )
         else:
             gpu_power_apply.warn_about_orphaned_cards()
     except GpuPowerSettingsError as exc:
         return {}, f"cannot apply the declared GPU power settings: {exc}"
-    record, error = resolve_gpu_power_settings(power_cap_w=power_cap_w, perf_level=perf_level, nodes=nodes)
+    record, error = resolve_gpu_power_settings(
+        power_cap_w=power_cap_w, perf_level=perf_level, sclk_max_mhz=sclk_max_mhz, nodes=nodes
+    )
     if applied:
         record["applied"] = applied
     return record, error
@@ -355,6 +364,7 @@ def resolve_launch_gpu_power(args: Any, *, nodes: int, owner: str) -> dict[str, 
         gpu_power, error = _established_gpu_power_settings(
             power_cap_w=getattr(args, _GPU_POWER_CAP_W, None),
             perf_level=getattr(args, _GPU_PERF_LEVEL, None),
+            sclk_max_mhz=getattr(args, _GPU_SCLK_MAX_MHZ, None),
             nodes=nodes,
             apply=bool(getattr(args, "apply_gpu_power_settings", False)),
             owner=owner,
@@ -379,6 +389,7 @@ def resume_gpu_power_settings(args: Any, state: Any) -> tuple[dict[str, Any], st
     record, error = _established_gpu_power_settings(
         power_cap_w=getattr(args, _GPU_POWER_CAP_W, None) or declared.get("power_cap_w"),
         perf_level=getattr(args, _GPU_PERF_LEVEL, None) or declared.get("perf_level"),
+        sclk_max_mhz=getattr(args, _GPU_SCLK_MAX_MHZ, None) or declared.get("sclk_max_mhz"),
         nodes=max(int(getattr(args, _NODES, 1) or 1), int(getattr(state, _NODES, 1) or 1)),
         apply=apply,
         owner=str(getattr(state, "session_id", "") or ""),
@@ -396,16 +407,19 @@ def resolve_gpu_power_settings(
     power_cap_w: float | None,
     perf_level: str | None,
     nodes: int,
+    sclk_max_mhz: float | None = None,
     read: Any = None,
 ) -> tuple[dict[str, Any], str]:
     """Read the cards' power settings and check the declared ones; ``(record, error)``.
 
     ``record`` is what the session stores and the platform fingerprint shows: the declared values and what each card
     reported. ``error`` is non-empty when a declared value does not hold, or cannot be checked, and the launch must stop.
-    Nothing is set here; the operator sets power cap and perf level with ``amd-smi set`` before launch.
+    Nothing is set here: the operator sets the cap, perf level and sclk limit with ``amd-smi set`` before launch, or
+    ``--apply-gpu-power-settings`` set them just before this check.
     """
     from hyperloom.common.gpu_power_settings import (
         GpuPowerSettingsError,
+        declared_combination_error,
         declared_setting_problems,
         normalize_perf_level,
         read_gpu_power_settings,
@@ -417,12 +431,16 @@ def resolve_gpu_power_settings(
         declared["power_cap_w"] = float(power_cap_w)
     if perf_level:
         declared["perf_level"] = normalize_perf_level(perf_level)
+    if sclk_max_mhz is not None:
+        declared["sclk_max_mhz"] = float(sclk_max_mhz)
+    if conflict := declared_combination_error(perf_level=perf_level, sclk_max_mhz=sclk_max_mhz):
+        return {_DECLARED: declared}, conflict
     if nodes >= 2:
         if declared:
             return {}, (
-                "--gpu-power-cap-w / --gpu-perf-level cannot be checked on a multi-node session: they describe the "
-                "benchmark nodes' cards, which this process cannot read, and an unverifiable assertion is not a "
-                "satisfied one"
+                "--gpu-power-cap-w / --gpu-perf-level / --gpu-sclk-max-mhz cannot be checked on a multi-node "
+                "session: they describe the benchmark nodes' cards, which this process cannot read, and an "
+                "unverifiable assertion is not a satisfied one"
             )
         return {}, ""
     try:
@@ -440,6 +458,7 @@ def resolve_gpu_power_settings(
         observed,
         power_cap_w=declared.get("power_cap_w"),
         perf_level=declared.get("perf_level"),
+        sclk_max_mhz=declared.get("sclk_max_mhz"),
         gpus=gpus,
     )
     if problems:
