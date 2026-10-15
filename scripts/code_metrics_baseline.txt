@@ -180,7 +180,7 @@ cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase.
 cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._settle_warm_replay 113
 cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._warm_kernel_extra_envs 42
 cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase.inject_warm_recipe_history_into_ledger 31
-cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase.maybe_enqueue_warm_replay 190
+cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase.maybe_enqueue_warm_replay 189
 cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::_merge_named_current_recipe_configs 39
 cognitive-complexity src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_payload_paths 39
 cognitive-complexity src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_warm_replay_targets 39

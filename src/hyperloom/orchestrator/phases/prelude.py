@@ -17,7 +17,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
     GATE_PROMOTION,
     GATE_QUALITY,
     GATE_TPUT_VALID,
-    SKIP_BEST_CONFIG_EMPTY,
     SKIP_CONFIDENCE_BELOW_THRESHOLD,
     SKIP_DISABLED_BY_FLAG,
     SKIP_ENQUEUE_FAILED,
@@ -31,6 +30,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
 )
 
 from . import machine_state as _phase_state
+from .warm_recipe_change import replay_skip_code
 from hyperloom.inference_optimizer.grid_server_args import merge_cumulative_extra_server_args
 from hyperloom.inference_optimizer.session.optimization_journal import (
     KIND_OTHER,
@@ -1309,12 +1309,12 @@ class PreludePhase(CoordinatorCollaborator):
                     details={"root_kind": "framework", "recorded_roots": list(blocking_roots)},
                 )
                 return None
-        if not bc_args and not bc_envs and not wsc_patches and not kernel_pending:
+        if skip := replay_skip_code(state, bc_args, bc_envs, patches=wsc_patches, kernel_pending=kernel_pending):
             self._skip_warm_replay(
-                code=SKIP_BEST_CONFIG_EMPTY,
+                code=skip,
                 outcome={
                     "status": "skipped",
-                    "reason": "best_config_empty",
+                    "reason": skip,
                     "warm_recipe_tier": tier,
                     "warm_recipe_conf": conf,
                     **donor_metadata,

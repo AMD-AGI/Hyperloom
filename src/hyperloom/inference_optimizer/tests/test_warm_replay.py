@@ -728,6 +728,35 @@ async def test_warm_replay_skips_when_best_config_empty(tmp_path):
     assert coord.shared_state.warm_replay_outcome["reason"] == "best_config_empty"
 
 
+def _launched_with(coord: Coordinator, server_args: str) -> None:
+    """Record the baseline's launch as the measurement ``current_best`` holds."""
+    coord.shared_state.current_best_measurement = {
+        "launch_evidence": {"requested_server_args": server_args, "requested_server_env": {}}
+    }
+
+
+@pytest.mark.asyncio
+async def test_warm_replay_skips_a_recipe_the_baseline_already_launches_with(tmp_path):
+    """Every recipe flag is already in the baseline launch, so replaying it re-measures the baseline."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1(extra_server_args="--attention-backend AITER"))
+    _launched_with(coord, "--mem-fraction-static 0.9 --attention-backend AITER")
+    task = await coord.phase_prelude.maybe_enqueue_warm_replay(baseline_tput=600.0)
+    assert task is None
+    assert coord.tasks.calls == []
+    assert coord.shared_state.warm_replay_outcome["status"] == "skipped"
+    assert coord.shared_state.warm_replay_outcome["reason"] == "recipe_already_in_baseline"
+
+
+@pytest.mark.asyncio
+async def test_warm_replay_runs_a_recipe_that_changes_the_baseline_launch(tmp_path):
+    """A recipe flag the baseline does not launch with is a real change, so the replay is enqueued."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1(extra_server_args="--attention-backend AITER"))
+    _launched_with(coord, "--mem-fraction-static 0.9")
+    task = await coord.phase_prelude.maybe_enqueue_warm_replay(baseline_tput=600.0)
+    assert task is not None
+    assert [call["kind"] for call in coord.tasks.calls] == ["replay_warm_recipe"]
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
