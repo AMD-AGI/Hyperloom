@@ -20,7 +20,7 @@ from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.orchestrator.kernel.request_handlers import resolve_gemm_tuning_backend
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
-from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant
+from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, SpecialistTokens
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
@@ -121,9 +121,13 @@ async def test_the_real_peers_live_inside_the_session_directory(
     desk = ForkDesk(Roster(RosterCaps(1, 1, 1), layout.roster, clock), DecisionLog(layout.decisions, clock))
     setup = PeerSetup(layout, WORKLOAD, desk, ProcessRegistry(layout.pids, clock), LocalBlobStore(layout.blobs))
     built: list[tuple[PeerSetup, ExperimentRepo, RealToolbox]] = []
+    granted: list[SpecialistTokens] = []
 
-    def sessions(given: PeerSetup, repo: ExperimentRepo, toolbox: RealToolbox) -> RecordedSessions:
+    def sessions(
+        given: PeerSetup, repo: ExperimentRepo, toolbox: RealToolbox, tokens: SpecialistTokens
+    ) -> RecordedSessions:
         built.append((given, repo, toolbox))
+        granted.append(tokens)
         return RecordedSessions(toolbox, repo, LocalNotebook(layout.notebook, Writer(Role.OBSERVER, "observer")))
 
     peers = local_peers(HOST, sessions, setup)
@@ -147,7 +151,10 @@ async def test_the_real_peers_live_inside_the_session_directory(
         await peers.toolbox.set_policy(QueuePolicy(per_branch_k=1, global_concurrency=2))
         state = await peers.toolbox.queue_state()
         assert (state.queued, state.running) == (0, 0)
-        grant = McpSpecialistTokens(peers.mcp).issue("b01", frozenset({SCOPE_SPECIALIST}))
+        [tokens] = granted
+        assert isinstance(tokens, McpSpecialistTokens)
+        grant = tokens.issue("b01", frozenset({SCOPE_SPECIALIST}))
+        assert grant.url == peers.mcp.url
         reply = await asyncio.to_thread(_call_tool, grant, "queue_state")
         assert reply["result"]["isError"] is False
     finally:

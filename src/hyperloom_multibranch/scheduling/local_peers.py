@@ -11,8 +11,8 @@ MCP service listens on loopback for the whole session and hands every toolbox ca
 on; its learnings tool recalls past sessions' from the Experience KB the environment names. The gate's session
 service and the specialist runtime judge on one InferenceX rule at the workload's conc; the runtime settles through a
 rule gate that asks the scheduler's fork desk for branches. The runtime's specialist sessions come from
-a :data:`SpecialistSessions`; no session backed by a model exists yet, so :func:`load_peers` refuses and the command
-line fails before it creates anything.
+a :data:`SpecialistSessions`, given the MCP service's specialist tokens to issue each branch's grant with; no session
+backed by a model exists yet, so :func:`load_peers` refuses and the command line fails before it creates anything.
 
 The toolbox and its measurement points load the main flow's renderer, so they are imported inside the functions that
 use them: importing this module, the command line or the session loads none of the main-flow runtime.
@@ -32,6 +32,7 @@ from hyperloom.common.io import atomic_write_json
 from hyperloom.common.model_paths import resolve_serving_model_path
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
+from hyperloom_multibranch.contracts.toolbox import SpecialistTokens
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
@@ -65,8 +66,10 @@ MB_FAKE_IMAGE_REF = "local"
 #: of this shape, but a runner cannot fetch it. Replaced when enablement or the command line name the real commits.
 MB_FAKE_TOOL_COMMIT = "0" * 40
 
-#: Builds the specialist runtime's session factory on the peer setup, the repository and the toolbox the branches use.
-SpecialistSessions = Callable[[PeerSetup, ExperimentRepo, "RealToolbox"], SessionFactory]
+#: Builds the specialist runtime's session factory on the peer setup, the repository and the toolbox the branches use,
+#: and the tokens that grant a branch's specialist the MCP service's tools; a grant names the service's URL, so it is
+#: issued once the service runs, when a specialist starts.
+SpecialistSessions = Callable[[PeerSetup, ExperimentRepo, "RealToolbox", SpecialistTokens], SessionFactory]
 
 
 @dataclass(frozen=True)
@@ -135,7 +138,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall
     from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
     from hyperloom_multibranch.toolbox.local_hosted import build_local_toolbox
-    from hyperloom_multibranch.toolbox.mcp_tools import register_specialist_tools
+    from hyperloom_multibranch.toolbox.mcp_tools import McpSpecialistTokens, register_specialist_tools
     from hyperloom_multibranch.toolbox.planner import HostedPlanner
 
     layout, workload = setup.layout, setup.workload
@@ -170,9 +173,6 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     def runtime_notebook(branch: str) -> LocalNotebook:
         return LocalNotebook(layout.notebook, Writer(Role.SPECIALIST_RUNTIME, branch, branch))
 
-    runtime = SpecialistRuntime(
-        runtime_notebook, RuleGate(gate_notebook, repo, setup.desk), toolbox, rule, sessions(setup, repo, toolbox)
-    )
     mcp = McpServer(McpServerConfig(host_token=secrets.token_hex(32)), campaign=layout.session_id)
     register_specialist_tools(
         mcp,
@@ -182,6 +182,8 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
         toolbox_loop=asyncio.get_running_loop(),
         learnings=LearningRecall.from_env(log=RetrievalLog(layout.reports / LEARNINGS_LOG)),
     )
+    factory = sessions(setup, repo, toolbox, McpSpecialistTokens(mcp))
+    runtime = SpecialistRuntime(runtime_notebook, RuleGate(gate_notebook, repo, setup.desk), toolbox, rule, factory)
     mcp.start()
     return Peers(runtime, toolbox, repo, GateService(gate_notebook, toolbox, rule), mcp)
 
