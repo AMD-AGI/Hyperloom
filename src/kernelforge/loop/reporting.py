@@ -17,7 +17,7 @@ from pathlib import Path
 from hyperloom.common.unified_diff import touched_paths
 
 from kernelforge.llm.git import git_bytes
-from kernelforge.loop.scoring import aggregate_regression_detail
+from kernelforge.evaluation.scoring import aggregate_regression_detail
 from kernelforge.durable_io import atomic_write_text, fsync_directory, fsync_tree
 
 # What every published best version must contain.

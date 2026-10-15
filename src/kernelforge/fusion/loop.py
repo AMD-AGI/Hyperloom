@@ -17,7 +17,7 @@ from kernelforge.experience_distillation import (
     extract_signature,
     render_ledger,
 )
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 from .validate import DEFAULT_TARGET_SPEEDUP
 

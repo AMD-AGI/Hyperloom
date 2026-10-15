@@ -13,7 +13,7 @@ import kernelforge.kernel_backends as _kernel_backends_pkg
 from kernelforge.config import Config
 from kernelforge.kernel_backends.base import build_single_kernel_backend_prompt
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
-from kernelforge.loop.scoring import canonical_gate_prompt, runs_task_suite_acceptance
+from kernelforge.evaluation.scoring import canonical_gate_prompt, runs_task_suite_acceptance
 
 
 _GPU = "gfx950"

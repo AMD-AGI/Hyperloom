@@ -25,7 +25,7 @@ from kernelforge.llm.workspace_policy import TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.mcp_server.pr_stdio_server import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.loop.insession_gate import GateMeasurement, GateScope, InSessionGate
 from kernelforge.loop.lessons import SessionEnd
-from kernelforge.loop.scoring import (
+from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     KEEP_MIN_MARGIN_FRACTION,
     keep_t_critical,

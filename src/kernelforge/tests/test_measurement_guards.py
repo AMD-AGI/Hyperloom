@@ -29,7 +29,7 @@ from kernelforge.loop.recovery import CallerRecovery, publish_warm_start_recover
 from kernelforge.loop.run_state import IterationVerdict, LoopStanding, LoopStateStore, RunState, apply_iteration
 from kernelforge.loop import runner as runner_module
 from kernelforge.loop.runner import IterationResult, _decision_label
-from kernelforge.loop.scoring import (
+from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     KEEP_MIN_MARGIN_FRACTION,
     SIGMA_REMEASURE_BATCH,

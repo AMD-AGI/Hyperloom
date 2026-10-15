@@ -131,7 +131,7 @@ from kernelforge.loop.new_path_allowlist import (
     normalize_commit_new_paths,
 )
 from kernelforge.durable_io import atomic_write_text
-from kernelforge.loop.scoring import (
+from kernelforge.evaluation.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
     KEEP_MEASUREMENT_COUNT,
     SIGMA_REMEASURE_BATCH,

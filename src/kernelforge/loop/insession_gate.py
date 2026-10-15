@@ -26,7 +26,7 @@ from kernelforge.llm.workspace_policy import (
 from kernelforge.llm.git import git
 from kernelforge.loop.gate_settings import GateMeasurement, GateScope
 from kernelforge.loop.jit_rebuild import JitRebuildUnavailable, force_jit_rebuild_for_changes
-from kernelforge.loop.scoring import (
+from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     keep_score,
     passes_keep_threshold,

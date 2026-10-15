@@ -10,7 +10,7 @@ import re
 import sys
 
 from ._subprocess import kill_process_group
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 
 async def test_correctness(

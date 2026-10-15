@@ -9,7 +9,7 @@ import pathlib
 
 from kernelforge.loop.gate_settings import GateMeasurement
 from kernelforge.loop.insession_gate import InSessionGate
-from kernelforge.loop.scoring import (
+from kernelforge.evaluation.scoring import (
     keep_score,
     passes_keep_threshold,
     required_keep_speedup,

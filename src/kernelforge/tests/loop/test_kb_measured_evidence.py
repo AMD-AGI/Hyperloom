@@ -10,7 +10,7 @@ import pytest
 from kernelforge.config import Config
 from kernelforge.loop import knowledge_integration as integration
 from kernelforge.knowledge.kb_store import writer as sink
-from kernelforge.loop.scoring import passes_keep_threshold
+from kernelforge.evaluation.scoring import passes_keep_threshold
 from kernelforge.knowledge.kb_store.config import (
     KnowledgeConfig,
     knowledge_config_from_runtime,

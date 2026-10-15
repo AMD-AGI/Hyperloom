@@ -64,7 +64,7 @@ from kernelforge.loop.runner import (
     IterationResult,
     WindowGain,
 )
-from kernelforge.loop.scoring import passes_keep_threshold
+from kernelforge.evaluation.scoring import passes_keep_threshold
 from kernelforge.loop.search_policy import (
     MARGINAL_GAIN_WINDOW,
     OBJECTIVE_DISCOVER_NEW_MECHANISM,

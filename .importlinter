@@ -126,6 +126,33 @@ ignore_imports =
 unmatched_ignore_imports_alerting = none
 
 
+[importlinter:contract:kf-evaluation-foundation]
+name = kernelforge evaluation does not depend on product or entry layers
+type = forbidden
+source_modules = kernelforge.evaluation
+forbidden_modules =
+    kernelforge.agent_backends
+    kernelforge.assembly
+    kernelforge.cli
+    kernelforge.fusion
+    kernelforge.gemm_tune
+    kernelforge.kernel_backends
+    kernelforge.kernel_rewrite_controller
+    kernelforge.knowledge
+    kernelforge.loop
+    kernelforge.mcp_server
+    kernelforge.orchestrator
+    kernelforge.rewrite_by_flydsl
+    kernelforge.roofline_ceiling
+    kernelforge.tracker
+ignore_imports =
+    hyperloom.**.tests.** -> **
+    kernelforge.tests.** -> **
+    kernelforge.**.tests.** -> **
+    kernelforge.conftest -> **
+unmatched_ignore_imports_alerting = none
+
+
 [importlinter:contract:common-is-leaf]
 name = hyperloom.common imports nothing else from the project
 type = forbidden
@@ -350,19 +377,13 @@ ignore_imports =
     kernelforge.assembly.prepare -> kernelforge.loop.canonical_correctness
     kernelforge.assembly.prepare -> kernelforge.loop.numerical
     kernelforge.assembly.prepare -> kernelforge.loop.validation
-    kernelforge.fusion.campaign -> kernelforge.loop.scoring
-    kernelforge.fusion.loop -> kernelforge.loop.scoring
     kernelforge.fusion.shadow_repo -> kernelforge.loop.path_ownership
-    kernelforge.fusion.validate -> kernelforge.loop.scoring
     kernelforge.gemm_tune.dense_shapes -> kernelforge.gemm_tune.tuners._aiter_dense_common
-    kernelforge.kernel_backends.base -> kernelforge.loop.scoring
     kernelforge.kernel_backends.fusion.prompts -> kernelforge.fusion.harness_contract
     kernelforge.kernel_backends.fusion.prompts -> kernelforge.fusion.validate
     kernelforge.knowledge.kb_store.recipe -> kernelforge.config
     kernelforge.mcp_server.tools._subprocess -> kernelforge.loop.aiter_cache
-    kernelforge.mcp_server.tools.test -> kernelforge.loop.scoring
     kernelforge.orchestrator.agent -> kernelforge.loop.insession_gate
     kernelforge.orchestrator.agent -> kernelforge.loop.lessons
-    kernelforge.orchestrator.agent -> kernelforge.loop.scoring
     kernelforge.orchestrator.specialists -> kernelforge.loop.fanout
 unmatched_ignore_imports_alerting = error

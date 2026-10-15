@@ -69,7 +69,7 @@ from kernelforge.loop.recovery import (
     publish_warm_start_recovery,
     rollback_unpublished_warm_start,
 )
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB, aggregate_regression_detail
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB, aggregate_regression_detail
 from kernelforge.tracker.schema import ExperimentSubject
 
 if TYPE_CHECKING:
