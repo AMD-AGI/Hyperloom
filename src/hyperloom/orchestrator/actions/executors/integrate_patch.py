@@ -2749,7 +2749,9 @@ class IntegratePatchExecutor:
         """End an attempt whose every patch the tree already holds, and that changes nothing else: no benchmark.
 
         Args:
-            attempt: The attempt; it applied nothing, so it reports nothing reverted.
+            attempt: The attempt. Its ``applied`` list is emptied, because
+                :meth:`_finish_attempt` reports that list as reverted, and
+                nothing was applied.
             params: Task params, read for the KB record and the enablement lane.
             extra: The runner ``extra`` mapping, read for the KB record.
             evidence: One ``{patch, check}`` row per patch: the reverse check that found it present.
@@ -2773,7 +2775,6 @@ class IntegratePatchExecutor:
             "specialist_task_id": attempt.specialist_task_id,
             "already_present": evidence,
             "patches_applied": [],
-            "patches_reverted": [],
             "reason": "the framework tree already holds every change in this candidate, so there is nothing to measure",
         }
         if params.get("enablement"):
