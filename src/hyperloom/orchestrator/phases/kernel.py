@@ -27,6 +27,7 @@ from . import machine_state as _phase_state
 from .kernel_round_budget import controller_round_stop, integrate_within_phase, measurement_round_sec
 from hyperloom.common.env import env_bool, env_float, env_int
 from hyperloom.common.io import atomic_write_json
+from hyperloom.common.launch_log_evidence import recipe_server_launch
 from hyperloom.common.perf_metric import axis_of, graded_axes_of
 from hyperloom.orchestrator.lever import (
     LEVER_CONFIG,
@@ -1278,6 +1279,19 @@ class KernelPhase(CoordinatorCollaborator):
                 cb.get("measurement") if isinstance(cb, Mapping) and isinstance(cb.get("measurement"), Mapping) else {}
             )
         )
+        if agentx and not str(spec_config.get("server_launch_flags") or "").strip():
+            # An agentic recipe builds its server command inside the script, so
+            # only the launch it recorded says what GEAK has to serve.
+            evidence = measurement.get("launch_evidence")
+            server_log = str(evidence.get("actual_server_log_path") or "") if isinstance(evidence, Mapping) else ""
+            recipe_launch = recipe_server_launch(server_log)
+            if recipe_launch.flags or recipe_launch.env:
+                env_spec = self._coord.writeback.build_env_spec(
+                    measurement=measurement,
+                    server_launch_flags=recipe_launch.flags,
+                    server_launch_envs=recipe_launch.env,
+                )
+                spec_config = env_spec["config"]
         expected_identity = str(env_spec.get("launch_identity") or "")
         measured_identity = str(measurement.get("declared_launch_identity") or measurement.get("launch_identity") or "")
         identity_matches = bool(expected_identity and expected_identity == measured_identity)
@@ -1460,9 +1474,16 @@ class KernelPhase(CoordinatorCollaborator):
         if env_spec:
             handoff["baseline_env_spec"] = env_spec
         if agentx:
-            # The saved recipe names aiperf_client.sh, not a server launcher.
-            handoff["bench_launcher"] = "native"
             log.info("GEAK results remain proposal proxies; canonical AgentX validation remains in Hyperloom.")
+            # Force native only when the recipe builtin could not be named. The
+            # AgentX client delegates its server phase to that builtin, so with it
+            # in hand (set as ``launch_server_script`` above) GEAK derives the
+            # Magpie launcher -- which writes a pid and recovers the non-flag
+            # presets -- instead of its adapter default; without it there is no
+            # Magpie server phase to launch. Flags/env stay aligned either way:
+            # baseline_env_spec still folds the recorded EXTRA_ATOM_ARGS.
+            if not launch_server_script:
+                handoff["bench_launcher"] = "native"
 
         out_dir = self.session_dir / "geak"
         out_dir.mkdir(parents=True, exist_ok=True)
