@@ -6,46 +6,16 @@
 from __future__ import annotations
 
 import logging
-import re
-from pathlib import Path
 from typing import Any, Mapping
-
-from hyperloom.common.perf_metric import agentx_active
 
 log = logging.getLogger(__name__)
 
-#: The ``error_class`` of a baseline refused for running its replay with the prefix cache off.
+#: The ``error_class`` of a baseline refused for running its replay with the prefix cache off. Writeback owns what
+#: happens next: it stops the run on the first occurrence and keeps the refusal out of the enablement lane.
 PREFIX_CACHE_OFF_ERROR_CLASS = "agentx_baseline_prefix_cache_off"
-
-_CACHED_TOKEN_RE = re.compile(rb"#cached-token:\s*(\d+)")
 
 #: ATOM's prefix cache is off unless this flag is passed, and ATOM prints no launch record to read it back from.
 _ATOM_PREFIX_CACHE_FLAG = "enable_prefix_caching"
-
-
-def _server_reused_cached_tokens(server_log_path: str) -> bool | None:
-    """Whether any SGLang prefill batch reused a cached token; ``None`` when the log names no prefill batch."""
-    seen = False
-    try:
-        with Path(server_log_path).open("rb") as handle:
-            for line in handle:
-                for match in _CACHED_TOKEN_RE.finditer(line):
-                    if int(match.group(1)) > 0:
-                        return True
-                    seen = True
-    except OSError:
-        return None
-    return False if seen else None
-
-
-def _sglang_evidence(server_config: Mapping[str, Any], server_log: str) -> str:
-    """The resolved setting decides when the server printed one; prefill reuse is read only when it did not."""
-    radix_off = server_config.get("disable_radix_cache")
-    if radix_off is not None:
-        return "the SGLang server ran with disable_radix_cache=True" if radix_off is True else ""
-    if server_log and _server_reused_cached_tokens(server_log) is False:
-        return "no SGLang prefill batch reused a cached token"
-    return ""
 
 
 def _atom_evidence(requested_server_args: str) -> str:
@@ -56,18 +26,18 @@ def _atom_evidence(requested_server_args: str) -> str:
 def prefix_cache_off_evidence(result: Mapping[str, Any]) -> str:
     """Why this AgentX measurement ran with the prefix cache off, or ``""``.
 
-    Each engine is read from its own account of the launch: SGLang's resolved ``disable_radix_cache`` (or, when the
-    server printed none, a log whose prefill batches never reused a cached token), vLLM's launch record (which lists ``enable_prefix_caching`` only
-    when the launch turned it off), and, since ATOM prints no record and keeps the cache off by default, the server
-    args it was launched with. A run none of these can be read from is left alone.
+    Each engine is read from its own account of the launch: SGLang's resolved ``disable_radix_cache``, vLLM's launch
+    record (which lists ``enable_prefix_caching`` only when the launch turned it off), and, since ATOM prints no record
+    and keeps the cache off by default, the server args it was launched with. A run none of these can be read from is
+    left alone.
     """
     evidence = result.get("launch_evidence")
     if not isinstance(evidence, Mapping):
         return ""
     server_config = evidence.get("observed_server_config") or {}
     framework = str(evidence.get("framework") or "")
-    if framework == "sglang":
-        return _sglang_evidence(server_config, str(result.get("server_log_path") or ""))
+    if framework == "sglang" and server_config.get("disable_radix_cache") is True:
+        return "the SGLang server ran with disable_radix_cache=True"
     if framework == "vllm" and server_config.get("enable_prefix_caching") is False:
         return "the vLLM server ran with enable_prefix_caching=False"
     if framework == "atom":
@@ -75,17 +45,13 @@ def prefix_cache_off_evidence(result: Mapping[str, Any]) -> str:
     return ""
 
 
-def refuse_cacheless_agentx_baseline(ctx: Any, result: dict[str, Any]) -> None:
-    """Fail a succeeded AgentX baseline measured with the prefix cache off, and stop the run.
+def refuse_cacheless_agentx_baseline(result: dict[str, Any]) -> None:
+    """Mark a succeeded AgentX baseline measured with the prefix cache off as failed.
 
-    The caller runs it only for a genuine baseline, the measurement every later candidate is graded against; a
-    candidate validated through a ``baseline``-kind task (``quality_ref_exempt``) is measured as it ran. It stops on the
-    first one rather than retrying, because the next attempt would launch the same server.
+    The caller runs it only for a genuine AgentX baseline, the measurement every later candidate is graded against; a
+    candidate validated through a ``baseline``-kind task (``quality_ref_exempt``) is measured as it ran.
     """
-    shared_state = (getattr(ctx, "extra", None) or {}).get("shared_state")
-    if result.get("status") != "succeeded" or not agentx_active(
-        benchmark_mode=getattr(shared_state, "benchmark_mode", "")
-    ):
+    if result.get("status") != "succeeded":
         return
     evidence = prefix_cache_off_evidence(result)
     if not evidence:
@@ -99,5 +65,3 @@ def refuse_cacheless_agentx_baseline(ctx: Any, result: dict[str, Any]) -> None:
         "--no-enable-prefix-caching; ATOM: pass --enable_prefix_caching), as upstream's agentic recipes do."
     )
     log.error("baseline_executor: %s", result["error"])
-    if shared_state is not None:
-        shared_state.set_stop_reason("baseline_failed")

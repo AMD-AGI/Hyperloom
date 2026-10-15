@@ -4210,8 +4210,9 @@ class BaselineExecutor(BenchmarkRunExecutor):
         )
         try:
             result = await self._run_retrying(ctx, recorder=recorder)
-            if _should_establish_quality_ref(getattr(ctx.task, "kind", ""), params):
-                await asyncio.to_thread(refuse_cacheless_agentx_baseline, ctx, result)
+            shared_state = (getattr(ctx, "extra", None) or {}).get("shared_state")
+            if _should_establish_quality_ref(getattr(ctx.task, "kind", ""), params) and agentx_active(shared_state):
+                refuse_cacheless_agentx_baseline(result)
         except BaseException as exc:
             if recorder is not None:
                 recorder.finish_crashed(exc)

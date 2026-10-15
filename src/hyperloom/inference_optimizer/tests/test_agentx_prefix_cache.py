@@ -20,21 +20,11 @@ from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
-def _sglang(tmp_path: Path, *, radix_off: bool | None, cached: list[int] | None) -> dict[str, Any]:
-    """A succeeded SGLang measurement whose resolved config and prefill log say what they say."""
-    log = tmp_path / "server.log"
-    log.write_text(
-        "".join(
-            f"Prefill batch. #new-seq: 1, #new-token: 8192, #cached-token: {n}, token usage: 0.01\n" for n in cached
-        )
-        if cached is not None
-        else "server up\n",
-        encoding="utf-8",
-    )
+def _sglang(radix_off: bool | None) -> dict[str, Any]:
+    """A succeeded SGLang measurement whose resolved config says what it says."""
     return {
         "status": "succeeded",
         "output_throughput": 221.8,
-        "server_log_path": str(log),
         "launch_evidence": {
             "framework": "sglang",
             "observed_server_config": {} if radix_off is None else {"disable_radix_cache": radix_off},
@@ -69,24 +59,24 @@ def _atom(requested_server_args: str) -> dict[str, Any]:
 
 
 @pytest.mark.parametrize(
-    ("radix_off", "cached", "refused"),
+    ("radix_off", "refused"),
     [
-        # The resolved setting settles it whatever the prefill log says: a cache that is on but found nothing to
-        # reuse (cold requests, eviction) is still on.
-        (True, None, True),
-        (True, [0, 4096], True),
-        (False, [0, 0], False),
-        (False, [0, 4096], False),
-        # With no resolved setting, the server log settles it: every prefill batch reused nothing.
-        (None, [0, 0, 0], True),
-        # Any reused token clears it.
-        (None, [0, 4096], False),
-        # Nothing readable about the cache: left alone.
-        (None, None, False),
+        (True, True),
+        (False, False),
+        # No resolved setting was read (no record, or one past the cap): left alone, as an unread vLLM record is.
+        (None, False),
     ],
 )
-def test_sglang(tmp_path, radix_off, cached, refused):
-    assert bool(pc.prefix_cache_off_evidence(_sglang(tmp_path, radix_off=radix_off, cached=cached))) is refused
+def test_sglang(radix_off, refused):
+    assert bool(pc.prefix_cache_off_evidence(_sglang(radix_off))) is refused
+
+
+def test_sglang_reads_the_resolved_setting_the_launch_record_parser_returns(tmp_path):
+    log = tmp_path / "server.log"
+    log.write_text("server_args=ServerArgs(model_path='m', disable_radix_cache=True, tp_size=8)\n", encoding="utf-8")
+    measured = _sglang(None)
+    measured["launch_evidence"]["observed_server_config"] = observed_server_config_from_log(str(log), "sglang")
+    assert "disable_radix_cache=True" in pc.prefix_cache_off_evidence(measured)
 
 
 @pytest.mark.parametrize(
@@ -164,42 +154,41 @@ def _no_ambient_agentx(monkeypatch):
 @pytest.mark.parametrize(
     ("build", "says"),
     [
-        (lambda p: _sglang(p, radix_off=True, cached=None), "disable_radix_cache=True"),
-        (lambda p: _sglang(p, radix_off=None, cached=[0, 0]), "no SGLang prefill batch reused a cached token"),
+        (lambda p: _sglang(True), "disable_radix_cache=True"),
         (lambda p: _vllm(p, "{'enable_prefix_caching': False}"), "enable_prefix_caching=False"),
         (lambda p: _atom("--level 2"), "without --enable_prefix_caching"),
     ],
 )
-def test_an_agentx_baseline_measured_with_the_cache_off_is_refused_and_stops_the_run(tmp_path, build, says):
+def test_an_agentx_baseline_measured_with_the_cache_off_is_refused(tmp_path, build, says):
     result, state = _run_baseline(build(tmp_path))
     assert result["status"] == "failed"
     assert result["error_class"] == pc.PREFIX_CACHE_OFF_ERROR_CLASS
     assert says in result["error"]
-    assert state.stop_reason == "baseline_failed"
+    # The executor only marks the result; writeback decides what the run does with it.
+    assert not state.stop_reason
 
 
 def test_agentx_enabled_by_the_environment_alone_is_judged(tmp_path, monkeypatch):
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    result, state = _run_baseline(_sglang(tmp_path, radix_off=True, cached=None), benchmark_mode="")
+    result, _ = _run_baseline(_sglang(True), benchmark_mode="")
     assert result["error_class"] == pc.PREFIX_CACHE_OFF_ERROR_CLASS
-    assert state.stop_reason == "baseline_failed"
 
 
 def test_a_synthetic_baseline_is_not_judged(tmp_path):
-    result, state = _run_baseline(_sglang(tmp_path, radix_off=True, cached=[0]), benchmark_mode="")
+    result, state = _run_baseline(_sglang(True), benchmark_mode="")
     assert result["status"] == "succeeded"
     assert not state.stop_reason
 
 
 def test_a_baseline_that_reused_the_cache_is_kept(tmp_path):
-    result, state = _run_baseline(_sglang(tmp_path, radix_off=False, cached=[0, 512]))
+    result, state = _run_baseline(_sglang(False))
     assert result["status"] == "succeeded"
     assert "error_class" not in result
     assert not state.stop_reason
 
 
 def test_a_baseline_that_already_failed_keeps_its_own_cause(tmp_path):
-    measured = _sglang(tmp_path, radix_off=True, cached=[0])
+    measured = _sglang(True)
     measured.update(status="failed", error_class="server_boot_failed")
     result, state = _run_baseline(measured)
     assert result["error_class"] == "server_boot_failed"
@@ -208,13 +197,37 @@ def test_a_baseline_that_already_failed_keeps_its_own_cause(tmp_path):
 
 @pytest.mark.parametrize("kind", ["explore", "profile"])
 def test_candidates_are_not_judged(tmp_path, kind):
-    result, state = _run_baseline(_sglang(tmp_path, radix_off=True, cached=[0]), kind=kind)
+    result, state = _run_baseline(_sglang(True), kind=kind)
     assert result["status"] == "succeeded"
     assert not state.stop_reason
 
 
 def test_a_candidate_validated_as_a_baseline_kind_task_is_not_judged(tmp_path):
-    measured = _sglang(tmp_path, radix_off=True, cached=[0])
+    measured = _sglang(True)
     result, state = _run_baseline(measured, params={"quality_ref_exempt": True})
     assert result["status"] == "succeeded"
     assert not state.stop_reason
+
+
+@pytest.mark.asyncio
+async def test_writeback_stops_on_the_first_refusal_without_opening_enablement(session_dir, monkeypatch):
+    """The server booted and measured, so the refusal is no boot failure: nothing is left for enablement to author."""
+    from hyperloom.orchestrator.loop import writeback
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    from .conftest import make_coordinator
+
+    triggers: list[dict[str, Any]] = []
+    monkeypatch.setattr(writeback.enablement_event, "record_trigger", lambda **kw: triggers.append(kw))
+    coord = make_coordinator(session_dir, shared_state_overrides={"enablement_mode": "all", "benchmark_mode": "agentx"})
+    refused = _sglang(True)
+    pc.refuse_cacheless_agentx_baseline(refused)
+    task = Task(task_id="bl-cache-off", kind="baseline", state="running", params={}, idempotency_key="bl-cache-off")
+
+    await coord.writeback.handle_unpromotable_result(task, refused)
+
+    assert coord.shared_state.stop_reason == "baseline_failed"
+    assert triggers == []
+    assert not (coord.shared_state.enablement.launch_log or "").strip()
+    assert not str(coord.shared_state.enablement.origin or "")
+    assert coord.shared_state.baseline_failure_streak == 0

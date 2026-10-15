@@ -990,12 +990,12 @@ An AgentX baseline whose server ran with the prefix cache off fails with
 `error_class=agentx_baseline_prefix_cache_off` and stops the run with
 `stop_reason='baseline_failed'` on the first occurrence, whichever AgentX client
 replayed it. Each engine is read from its own launch account: SGLang's resolved
-`disable_radix_cache=True` or prefill batches that never reused a cached token,
-vLLM's launch record showing `enable_prefix_caching=False`, and, because ATOM
-keeps the cache off by default and prints no record, ATOM server args without
-`--enable_prefix_caching`. Do not propose `--disable-radix-cache` or
-`--no-enable-prefix-caching` for an AgentX baseline; on ATOM pass
-`--server-args "--enable_prefix_caching"`.
+`disable_radix_cache=True`, vLLM's launch record showing
+`enable_prefix_caching=False`, and, because ATOM keeps the cache off by default
+and prints no record, ATOM server args without `--enable_prefix_caching`. A
+launch whose account cannot be read is left alone. Do not propose
+`--disable-radix-cache` or `--no-enable-prefix-caching` for an AgentX baseline;
+on ATOM pass `--server-args "--enable_prefix_caching"`.
 
 Operator server flags have one supported CLI entry point:
 `optimize --server-args "<framework serve flags>"`. The CLI exports this as

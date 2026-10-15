@@ -45,6 +45,7 @@ from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..actions.executors.explore import STACK_REVALIDATE_SOURCE, is_stack_revalidation
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+from ..actions.executors._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
 from hyperloom.inference_optimizer.breakdown.stop_reasons import (
@@ -109,6 +110,15 @@ _MIN_KERNEL_ENGAGED_GAIN_PCT: float = 2.0
 
 # Combined baseline-failure backstop: fast-fail after this many TOTAL baseline failures.
 _BASELINE_MAX_TOTAL_FAILURES: int = 3
+#: Baseline failures a retry cannot change, each mapped to the stop reason it ends the run with on its FIRST
+#: occurrence, with no streak.
+_STOPS_ON_FIRST_OCCURRENCE: dict[str, str] = {
+    # A retry recomposes the same argv the installed parser already refused.
+    ARGV_INVALID: ARGV_INVALID,
+    # The server booted and measured a cold cache. The next attempt launches the same server and no framework patch
+    # changes the operator's flag; ``_authorable_launch_log`` keeps it out of enablement.
+    PREFIX_CACHE_OFF_ERROR_CLASS: "baseline_failed",
+}
 # Default resume-drift floor (%): a re-measured current_best below this fraction of its recorded tput is flagged as
 # drift.
 _DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
@@ -127,7 +137,11 @@ def _authorable_launch_log(result_payload: dict[str, Any] | None, *, err_class: 
     """
     if not isinstance(result_payload, dict) or _is_ray_cluster_infeasible(result_payload):
         return ""
-    if err_class in ("fast_exit_arg_error", AGENTX_PREFLIGHT_ERROR_CLASS) or stopped_by_the_run_class(err_class):
+    if err_class in (
+        "fast_exit_arg_error",
+        AGENTX_PREFLIGHT_ERROR_CLASS,
+        PREFIX_CACHE_OFF_ERROR_CLASS,
+    ) or stopped_by_the_run_class(err_class):
         return ""
     parts: list[str] = []
     for key in ("error", "stderr", "log_tail", "log_excerpt", "traceback", "reason"):
@@ -1266,10 +1280,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     err_class,
                     self.shared_state.baseline_failure_streak,
                 )
-            elif err_class == ARGV_INVALID:
-                # A retry recomposes the same argv the installed parser already
-                # refused: terminal on the first occurrence, with no streak.
-                self.shared_state.set_stop_reason(ARGV_INVALID)
+            elif err_class in _STOPS_ON_FIRST_OCCURRENCE:
+                self.shared_state.set_stop_reason(_STOPS_ON_FIRST_OCCURRENCE[err_class])
             elif err_class == "fast_exit_arg_error":
                 self.shared_state.baseline_arg_error_streak += 1
                 if self.shared_state.baseline_arg_error_streak >= 2:
