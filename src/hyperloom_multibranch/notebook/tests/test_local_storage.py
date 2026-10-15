@@ -78,8 +78,9 @@ def test_a_line_still_being_written_is_skipped_until_it_is_whole(tmp_path: Path)
 def test_a_reopened_writer_continues_its_sequence_and_refuses_another_writers_entry(tmp_path: Path) -> None:
     SegmentWriter(tmp_path, "a.h.1.0000").append(_entry("a.h.1.0000", START + 1))
     reopened = SegmentWriter(tmp_path, "a.h.1.0000")
+    appended = reopened.append(_entry("a.h.1.0000", START + 2))
 
-    assert reopened.append(_entry("a.h.1.0000", START + 2)).seq == 2
+    assert appended.seq == 2
     with pytest.raises(ValueError):
         reopened.append(_entry("b.h.2.0000", START + 3))
 

@@ -3,9 +3,8 @@
 
 """Whole-file writes for files every participant of a session reads.
 
-``hyperloom.common.io`` writes owner-only files by design; the notebook may live on a shared folder that participants
-running as other users read, so its files are group readable, and those users share the writer's group. A reader never
-sees a partial file.
+The files are owner-only, as ``tempfile.mkstemp`` creates them and as ``hyperloom.common.io`` writes its own: every
+participant of a session runs as the session's user. A reader never sees a partial file.
 """
 
 from __future__ import annotations
@@ -15,8 +14,6 @@ import os
 import tempfile
 from contextlib import suppress
 from pathlib import Path
-
-SHARED_FILE_MODE = 0o640
 
 
 def encode_json(value: object) -> bytes:
@@ -30,7 +27,6 @@ def _staged(path: Path, data: bytes) -> Path:
     fd, staged = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
     with os.fdopen(fd, "wb") as handle:
         handle.write(data)
-    os.chmod(staged, SHARED_FILE_MODE)
     return Path(staged)
 
 
@@ -52,4 +48,4 @@ def publish_once(path: Path, data: bytes) -> bool:
     return True
 
 
-__all__ = ["SHARED_FILE_MODE", "encode_json", "publish_once"]
+__all__ = ["encode_json", "publish_once"]
