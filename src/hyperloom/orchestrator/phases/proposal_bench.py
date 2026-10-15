@@ -69,7 +69,7 @@ class ProposalBench(CoordinatorCollaborator):
         return await self.tasks.find_by_idempotency_key(self._bench_key(custom, operator_priority=True)) is None
 
     async def _maybe_finish_custom_only_cycle(self) -> None:
-        """Under ``--custom-specialist-only``, hint ``skip_to_sweep`` once this cycle's custom work has all run."""
+        """In custom-specialist-only mode, hint ``skip_to_sweep`` once this cycle's custom work has all run."""
         from ..specialists.domains import custom_specialist_key
         from ..state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
         from ..state.task_registry import TERMINAL_STATES

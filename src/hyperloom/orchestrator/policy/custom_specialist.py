@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Rules keeping the operator-defined specialist Coordinator-owned, and the scope of ``--custom-specialist-only``."""
+"""Rules keeping the operator-defined specialist Coordinator-owned, and the scope of its only mode."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ __all__ = [
     "skips_reactor_turn",
 ]
 
-# What Orchestration may not run in FRAMEWORK_AGENT under ``--custom-specialist-only``.
+# What Orchestration may not run in FRAMEWORK_AGENT under ``HYPERLOOM_CUSTOM_SPECIALIST_ONLY``.
 CUSTOM_ONLY_DENIED_ACTIONS: frozenset[str] = frozenset({"specialist", "explore", "integrate_patch"})
 # Mirrors ``machine_state.PHASE_FRAMEWORK_AGENT``: the policy package may not import the phase machine.
 _FRAMEWORK_AGENT_PHASE: str = "FRAMEWORK_AGENT"
@@ -35,7 +35,7 @@ def deny_custom_specialist_delegate(params: dict[str, Any]) -> None:
 
 
 def custom_only_framework(shared_state: Any) -> bool:
-    """Whether the session is in FRAMEWORK_AGENT under ``--custom-specialist-only``, where only the custom work runs."""
+    """Whether the session is in FRAMEWORK_AGENT in custom-specialist-only mode, where only the custom work runs."""
     if not getattr(shared_state, "custom_specialist_only", False):
         return False
     return str(shared_state.phase or "").strip().upper() == _FRAMEWORK_AGENT_PHASE
@@ -47,10 +47,10 @@ def skips_reactor_turn(agent_name: str, shared_state: Any) -> bool:
 
 
 def deny_search_under_custom_only(shared_state: Any, action_name: str) -> None:
-    """Refuse Orchestration's FRAMEWORK_AGENT search under ``--custom-specialist-only``; the Coordinator runs it."""
+    """Refuse Orchestration's FRAMEWORK_AGENT search in custom-specialist-only mode; the Coordinator runs it."""
     if action_name in CUSTOM_ONLY_DENIED_ACTIONS and custom_only_framework(shared_state):
         raise PolicyDenied(
-            f"{action_name!r}: --custom-specialist-only runs FRAMEWORK_AGENT on the custom specialist alone",
+            f"{action_name!r}: custom-specialist-only mode runs FRAMEWORK_AGENT on the custom specialist alone",
             rule="custom_specialist_only",
             hint="Wait for the phase to move on; the Coordinator dispatches and benches the custom specialist itself.",
         )

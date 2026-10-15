@@ -479,7 +479,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Operator-defined specialist (``--custom-specialist-*``); empty prompt means not configured.
     custom_specialist_prompt: str = ""
     custom_specialist_description: str = ""
-    # ``--custom-specialist-only``: FRAMEWORK_AGENT runs the custom specialist and the bench of its output alone.
+    # ``HYPERLOOM_CUSTOM_SPECIALIST_ONLY``: FRAMEWORK_AGENT runs the custom specialist and its bench alone.
     custom_specialist_only: bool = False
     # ``--extra-env NAME=VALUE`` pins.
     operator_extra_env: dict[str, str] = field(default_factory=dict)
