@@ -187,7 +187,8 @@ paths>` line per OVERLAPPING PR.
 
 ```bash
 git -C "$TREE" worktree add --detach "$WORK/scratch" "$COMMIT"
-git -C "$WORK/scratch" apply --check "$PR/diff.txt"
+BIN=$(awk '/^diff --git /{f=substr($3, 3) " --exclude=" substr($4, 3)} /^Binary files /{print "--exclude=" f}' "$PR/diff.txt")
+git -C "$WORK/scratch" apply --check $BIN "$PR/diff.txt"
 ```
 
 Write `apply@<commit> APPLIES`, or `FAILS -- <the first failing hunk>`: drift between the PR's base
@@ -196,9 +197,10 @@ it fails, check again with `--reverse`; `REVERSE`, a diff that applies only back
 tree already has the change, so a Step 4 `unknown` becomes `included` by that check. Then, per
 local patch: `local:<patch> OVERLAP` when its `git apply --numstat` lists a path in `files.txt`;
 apply it in the worktree and check the diff again, where a failure only after it is `CONFLICT`,
-with the hunk, else `CLEAR`. Remove the worktree with
-`git -C "$TREE" worktree remove --force "$WORK/scratch"`. With no tree, or a `SKIPPED: diff`,
-write `SKIPPED: apply -- <why>`.
+with the hunk, else `CLEAR`. Every check passes `$BIN`: GitHub abbreviates a binary file's index,
+so its stanza never applies, and each such path gets `SKIPPED: apply -- <path>: binary`. Remove
+the worktree with `git -C "$TREE" worktree remove --force "$WORK/scratch"`. With no tree, or a
+`SKIPPED: diff`, write `SKIPPED: apply -- <why>`.
 
 ## Step 7 — Risks
 
