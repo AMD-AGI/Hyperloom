@@ -161,7 +161,7 @@ def _add_custom_specialist_args(opt: argparse.ArgumentParser) -> None:
         "per macro cycle in FRAMEWORK_AGENT, ahead of other queued work, and benches its proposals first; "
         "Orchestration cannot. Persisted for --resume-from; passing it on a "
         "resume replaces the stored definition. The text is written in clear to state.json and every task's "
-        "prompt.md: do not put credentials in it.",
+        "prompt.md: do not put credentials in it. HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1 runs FRAMEWORK_AGENT on it alone.",
     )
     opt.add_argument(
         "--custom-specialist-description",
@@ -170,15 +170,6 @@ def _add_custom_specialist_args(opt: argparse.ArgumentParser) -> None:
         default=None,
         help="One line (max 200 chars) describing custom_specialist in its own prompt. Requires "
         "--custom-specialist-prompt-file.",
-    )
-    opt.add_argument(
-        "--custom-specialist-only",
-        dest="custom_specialist_only",
-        action="store_true",
-        default=False,
-        help="FRAMEWORK_AGENT runs only the custom specialist and the bench of its proposals and patches, then hands "
-        "over to the next phase (KERNEL_AGENT when enabled, else SWEEP); other phases run as usual. Requires the "
-        "--custom-specialist-* pair (or a stored definition on --resume-from). Persisted.",
     )
 
 

@@ -844,14 +844,64 @@ async def test_framework_holds_a_leverage_exit_for_queued_custom_work_but_not_a_
     assert (state.phase, [t.params.get("domain", t.kind) for t in await coord.tasks.queued()]) == expected
 
 
-# --custom-specialist-only
+# HYPERLOOM_CUSTOM_SPECIALIST_ONLY
+@pytest.mark.parametrize(("value", "expected"), [(None, False), ("1", True), ("0", False)])
+def test_only_mode_is_read_from_the_environment(monkeypatch, value, expected):
+    if value is None:
+        monkeypatch.delenv("HYPERLOOM_CUSTOM_SPECIALIST_ONLY", raising=False)
+    else:
+        monkeypatch.setenv("HYPERLOOM_CUSTOM_SPECIALIST_ONLY", value)
+    args = _ns()
+
+    _load_custom_specialist_args(args)
+
+    assert args.custom_specialist_only is expected
+
+
+def test_an_unreadable_only_mode_value_is_refused(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_CUSTOM_SPECIALIST_ONLY", "maybe")
+    with pytest.raises(ValueError, match="HYPERLOOM_CUSTOM_SPECIALIST_ONLY='maybe' is not a boolean"):
+        _load_custom_specialist_args(_ns())
+
+
+@pytest.mark.parametrize(
+    ("argv", "env", "message"),
+    [
+        (["--custom-specialist-only"], None, "unrecognized arguments: --custom-specialist-only"),
+        (
+            [],
+            "1",
+            "HYPERLOOM_CUSTOM_SPECIALIST_ONLY requires --custom-specialist-prompt-file and "
+            "--custom-specialist-description",
+        ),
+    ],
+)
+def test_only_mode_is_no_cli_flag_and_needs_a_custom_specialist_at_launch(monkeypatch, capsys, argv, env, message):
+    import hyperloom.inference_optimizer.cli as cli
+
+    run_optimize = AsyncMock(return_value=0)
+    monkeypatch.setattr(cli, "_run_optimize", run_optimize)
+    if env is None:
+        monkeypatch.delenv("HYPERLOOM_CUSTOM_SPECIALIST_ONLY", raising=False)
+    else:
+        monkeypatch.setenv("HYPERLOOM_CUSTOM_SPECIALIST_ONLY", env)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["optimize", *argv])
+
+    assert exc.value.code == 2
+    assert message in capsys.readouterr().err
+    run_optimize.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     ("args_kw", "state_kw", "expected"),
     [
         (
             {"custom_specialist_only": True},
             {},
-            "--custom-specialist-only requires --custom-specialist-prompt-file and --custom-specialist-description",
+            "HYPERLOOM_CUSTOM_SPECIALIST_ONLY requires --custom-specialist-prompt-file and "
+            "--custom-specialist-description",
         ),
         ({"custom_specialist_only": True}, {"custom_specialist_prompt": _PROMPT}, ""),
         (

@@ -977,14 +977,17 @@ def _resolve_critic_choice(args: argparse.Namespace) -> str:
 
 _CUSTOM_SPECIALIST_PROMPT_MAX_BYTES = 16 * 1024
 _CUSTOM_SPECIALIST_DESCRIPTION_MAX_CHARS = 200
+# FRAMEWORK_AGENT runs the custom specialist and the bench of its output alone; persisted like the pair.
+CUSTOM_SPECIALIST_ONLY_ENV = "HYPERLOOM_CUSTOM_SPECIALIST_ONLY"
 
 
 def _load_custom_specialist_args(args: argparse.Namespace) -> None:
-    """Validate the ``--custom-specialist-*`` pair and set ``args.custom_specialist_prompt``.
+    """Validate the ``--custom-specialist-*`` pair, set ``args.custom_specialist_prompt``, and read only mode.
 
     Raises:
-        ValueError: When only one flag is given or either value is unusable.
+        ValueError: When only one flag is given, either value is unusable, or the only-mode env is not a boolean.
     """
+    args.custom_specialist_only = env_bool(CUSTOM_SPECIALIST_ONLY_ENV)
     path = getattr(args, "custom_specialist_prompt_file", None)
     description = getattr(args, "custom_specialist_description", None)
     args.custom_specialist_prompt = ""
@@ -1012,7 +1015,10 @@ def _load_custom_specialist_args(args: argparse.Namespace) -> None:
 
 
 def _apply_custom_specialist_resume(args: argparse.Namespace, state: SharedState) -> None:
-    """Flags passed on a resume replace the stored custom specialist; otherwise the stored one stays."""
+    """Flags passed on a resume replace the stored custom specialist; otherwise the stored one stays.
+
+    The only-mode env turns only mode on and never off.
+    """
     if getattr(args, "custom_specialist_only", False):
         state.custom_specialist_only = True
     prompt = getattr(args, "custom_specialist_prompt", "")
@@ -1029,9 +1035,7 @@ def _custom_specialist_conflict(args: argparse.Namespace, state: SharedState) ->
     stored = "" if getattr(args, "reset_state", False) else state.custom_specialist_prompt
     if not (getattr(args, "custom_specialist_prompt", "") or stored):
         if getattr(args, "custom_specialist_only", False):
-            return (
-                "--custom-specialist-only requires --custom-specialist-prompt-file and --custom-specialist-description"
-            )
+            return f"{CUSTOM_SPECIALIST_ONLY_ENV} requires --custom-specialist-prompt-file and --custom-specialist-description"
         return ""
     if bool(getattr(args, "no_framework_agent", False)) or not state.framework_agent_phase_enabled:
         return "the FRAMEWORK_AGENT phase is disabled, so custom_specialist cannot be guaranteed to run"
