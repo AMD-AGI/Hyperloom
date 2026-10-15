@@ -30,6 +30,7 @@ from hyperloom.common.proctree import running
 from hyperloom.contracts.measurement import Purpose, TestRequest
 from hyperloom.contracts.recipe import Recipe, RecipeDelta, apply
 from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
+from hyperloom.measure.versions import socket_versions
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind
@@ -304,7 +305,9 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     root, c1, c2 = await stage.root(), await stage.repo.head("b01"), await stage.repo.head("b02")
     assert lineage.commit(root) is not None and (await stage.repo.read_recipe(root)).components
     assert (await observer.session_profile()).session_id == stage.layout.session_id
-    assert [fp.policy_versions["judge_prompt"] for fp in await observer.manifest_fingerprints()] == ["mb1-judge-2"]
+    [fingerprint] = await observer.manifest_fingerprints()
+    assert fingerprint.policy_versions["judge_prompt"] == "mb1-judge-2"
+    assert dict(fingerprint.sockets) == socket_versions()
 
     fix = await stage.repo.head("b03")
     assert fix != c1 and stage.sessions.started == {"b01": root, "b02": root, "b03": fix}

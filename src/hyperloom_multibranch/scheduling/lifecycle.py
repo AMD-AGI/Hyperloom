@@ -27,6 +27,7 @@ from typing import Any
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.provenance import detect_code_revision
 from hyperloom.measure.compile import LocalBlobStore
+from hyperloom.measure.versions import socket_versions
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import ManifestFingerprint
 from hyperloom_multibranch.notebook import LocalNotebook
@@ -229,8 +230,9 @@ class Session:
             prelude = await self._root_session(budget, hard_stop)
         except PreludeFailed as exc:
             return SessionOutcome(SessionStopReason.PRELUDE_FAILED, None, None, str(exc))
+        sockets = await asyncio.to_thread(socket_versions)
         await self._notebook.write_manifest_fingerprint(
-            ManifestFingerprint(activity=self._layout.session_id, policy_versions=POLICY_VERSIONS)
+            ManifestFingerprint(activity=self._layout.session_id, sockets=sockets, policy_versions=POLICY_VERSIONS)
         )
         deadlines = budget.phases_after_prelude(self._clock.now())
         self._phase("explore", explore_end=deadlines.explore_end, final_end=deadlines.final_end)
