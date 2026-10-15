@@ -271,14 +271,15 @@ def _role_value(
 
 
 def _summary(declaration: ExperienceDeclaration, experience: Experience) -> dict[str, JsonValue]:
-    """A list line: the record's id and run, and the values its schema gives the summary, decision, and
-    measurement roles."""
+    """A list line: the record's id and run, the conditions it was measured under, and the values its schema gives
+    the summary, decision, and measurement roles."""
 
     summary = _role_value(declaration, experience, "change", FieldRole.SUMMARY)
     decision = _role_value(declaration, experience, "outcome", FieldRole.DECISION)
     return {
         "experience_id": experience.id,
         "source_run_id": experience.run_id,
+        "identity": cast(JsonValue, dict(experience.identity)),
         "change_summary": summary if isinstance(summary, str) else "",
         "decision": decision if isinstance(decision, str) else "",
         "baseline_value": cast(JsonValue, _role_value(declaration, experience, "baseline", FieldRole.MEASUREMENT)),
