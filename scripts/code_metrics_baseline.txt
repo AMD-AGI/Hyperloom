@@ -216,7 +216,6 @@ cognitive-complexity src/hyperloom/orchestrator/trace_analysis/bypass_trace_anal
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/bypass_trace_analysis.py::main 72
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/trace_selfcert.py::StepPass.scan 59
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_apply_vendor_operator_playbook_grouping 31
-cognitive-complexity src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_check_chunk_quality 33
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_enrich_kernel_contract 35
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_finalize_candidates 59
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_inject_collective_candidates 131
@@ -786,7 +785,7 @@ function-lines src/hyperloom/orchestrator/trace_analysis/_trace_shape_manifest.p
 function-lines src/hyperloom/orchestrator/trace_analysis/bypass_trace_analysis.py::main 488
 function-lines src/hyperloom/orchestrator/trace_analysis/trace_selfcert.py::build_verdict 104
 function-lines src/hyperloom/orchestrator/trace_analysis/trace_selfcert.py::certify_trace_dir 185
-function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_check_chunk_quality 96
+function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_check_chunk_quality 88
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_enrich_kernel_contract 91
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_finalize_candidates 129
 function-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py::_inject_collective_candidates 150
@@ -969,7 +968,7 @@ module-lines src/hyperloom/orchestrator/specialists/runner.py 1533
 module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1747
 module-lines src/hyperloom/orchestrator/state/shared_state.py 2683
 module-lines src/hyperloom/orchestrator/trace_analysis/_bypass_report.py 1231
-module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py 5458
+module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py 5431
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py 1505
 module-lines src/kernelforge/fusion/author.py 1370
 module-lines src/kernelforge/fusion/command.py 1584

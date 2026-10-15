@@ -361,6 +361,52 @@ def _resolve_min_busy_ratio() -> float:
         return _DEFAULT_CHUNK_QUALITY_MIN_BUSY_RATIO
 
 
+def _read_busy_ratio(row: "dict[str, str] | None") -> "float | None":
+    """Read ``busy_ratio`` from a splitter CSV row, falling back to
+    ``gpu_busy_duration / gpu_duration`` when the column is absent."""
+    if row is None:
+        return None
+    raw = row.get("busy_ratio", "")
+    if raw not in (None, ""):
+        try:
+            return max(0.0, min(1.0, float(raw)))
+        except (TypeError, ValueError):
+            pass  # Unparseable; fall through to gpu_busy_duration/gpu_duration fallback.
+    try:
+        dur = float(row.get("gpu_duration") or "0")
+        busy = float(row.get("gpu_busy_duration") or "0")
+        if dur > 0:
+            return max(0.0, min(1.0, busy / dur))
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    return None
+
+
+def _num_gpu_events(row: "dict[str, str] | None") -> int:
+    """Read ``num_gpu_events`` from a splitter CSV row."""
+    if row is None:
+        return 0
+    try:
+        return int(float(row.get("num_gpu_events") or "0"))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _row_for_chunk(rows: "list[dict[str, str]]", chunk_path: "Path") -> "dict[str, str] | None":
+    """Find the splitter CSV row whose ``output_path`` matches ``chunk_path``."""
+    resolved = str(chunk_path.resolve())
+    for row in rows:
+        out_path = row.get("output_path", "")
+        if not out_path:
+            continue
+        try:
+            if str(Path(out_path).resolve()) == resolved:
+                return row
+        except (OSError, ValueError):
+            continue
+    return None
+
+
 def _check_chunk_quality(
     *,
     split_dir: "Path",
@@ -370,25 +416,9 @@ def _check_chunk_quality(
 ) -> "dict[str, Any] | None":
     """Quality gate on the selected steady-state chunk.
 
-    Reads ``busy_ratio`` directly from the splitter's ``execution_details.csv``
-    (the fraction of the chunk window during which the GPU was executing kernels,
-    as computed by the splitter from ``gpu_busy_duration / gpu_duration``).
-
-    A chunk whose ``busy_ratio`` is below the configured threshold is refused
-    when a materially better alternative mode exists.  A chunk with zero GPU
-    events is refused unconditionally.
-
-    Args:
-        split_dir: Directory holding the splitter's ``execution_details.csv``.
-        selected_chunk: The chunk file selected by the steady-state mode.
-        mode: The requested ``--steady-state-mode``.
-        available_modes: Mapping of mode to its ``(label, chunks)`` for
-            evaluating better alternatives.
-
-    Returns:
-        ``None`` when the chunk is acceptable (busy_ratio >= threshold), no
-        alternate is materially better, or the CSV/row is absent. Otherwise a
-        ``steady_state_chunk_low_quality`` warning dict.
+    A chunk with zero GPU events is refused unconditionally.  A chunk whose
+    ``busy_ratio`` is below threshold is refused when a materially better
+    alternative exists.
     """
     details_path = split_dir / "execution_details.csv"
     if not details_path.is_file():
@@ -399,93 +429,35 @@ def _check_chunk_quality(
     except (OSError, csv.Error):
         return None
 
-    def _row_for(chunk_path: "Path") -> "dict[str, str] | None":
-        """Find the splitter CSV row whose ``output_path`` is the chunk.
-
-        Args:
-            chunk_path (Path): Chunk file to match against ``output_path``.
-
-        Returns:
-            dict[str, str] | None: The matching CSV row, or ``None`` when no
-                row resolves to the same path.
-        """
-        resolved = str(chunk_path.resolve())
-        for row in rows:
-            out_path = row.get("output_path", "")
-            if not out_path:
-                continue
-            try:
-                if str(Path(out_path).resolve()) == resolved:
-                    return row
-            except (OSError, ValueError):
-                continue
-        return None
-
-    def _read_busy_ratio(row: "dict[str, str] | None") -> "float | None":
-        """Read ``busy_ratio`` from the splitter CSV row.
-
-        Returns the ratio clamped to ``[0, 1]``, falling back to
-        ``gpu_busy_duration / gpu_duration`` when the ``busy_ratio``
-        column is absent (older splitter).  Returns ``None`` when the
-        row is ``None`` or neither field is available.
-        """
-        if row is None:
-            return None
-        raw = row.get("busy_ratio", "")
-        if raw not in (None, ""):
-            try:
-                return max(0.0, min(1.0, float(raw)))
-            except (TypeError, ValueError):
-                pass
-        try:
-            dur = float(row.get("gpu_duration") or "0")
-            busy = float(row.get("gpu_busy_duration") or "0")
-            if dur > 0:
-                return max(0.0, min(1.0, busy / dur))
-        except (TypeError, ValueError, ZeroDivisionError):
-            # Best-effort parsing: if fallback fields are missing/invalid,
-            # treat busy ratio as unavailable for this row.
-            return None
-        return None
-
-    def _num_gpu_events(row: "dict[str, str] | None") -> int:
-        """Read ``num_gpu_events`` from the splitter CSV row for observability.
-
-        Args:
-            row (dict[str, str] | None): A splitter CSV row, or ``None``.
-
-        Returns:
-            int: The GPU event count, or ``0`` when absent or unparseable.
-        """
-        if row is None:
-            return 0
-        try:
-            return int(float(row.get("num_gpu_events") or "0"))
-        except (TypeError, ValueError):
-            return 0
-
-    selected_row = _row_for(selected_chunk)
+    selected_row = _row_for_chunk(rows, selected_chunk)
     if selected_row is None:
         return None
+    sel_events = _num_gpu_events(selected_row)
     sel_ratio = _read_busy_ratio(selected_row)
-    if sel_ratio is None:
+    if sel_ratio is None and sel_events > 0:
         return None
+    if sel_ratio is None:
+        sel_ratio = 0.0
     threshold = _resolve_min_busy_ratio()
     if sel_ratio >= threshold:
         return None
 
-    # Below threshold: look for an alternate mode with materially higher busy_ratio.
+    # Below threshold: look for an alternate mode with better busy_ratio.
+    # When the selected chunk has no GPU work, any alternate carrying GPU events
+    # is strictly better — skip the anti-thrash margin so the retry path has a target.
     alternates: list[tuple[str, float]] = []
     for other_mode, (_label, chunks) in available_modes.items():
         if other_mode == mode or not chunks:
             continue
-        other_row = _row_for(chunks[0])
+        other_row = _row_for_chunk(rows, chunks[0])
         oth_ratio = _read_busy_ratio(other_row)
         if oth_ratio is None:
             continue
-        if oth_ratio >= threshold and (oth_ratio - sel_ratio) >= _CHUNK_QUALITY_ALTERNATE_MARGIN:
+        if sel_events == 0:
+            if oth_ratio > 0.0:
+                alternates.append((other_mode, oth_ratio))
+        elif oth_ratio >= threshold and (oth_ratio - sel_ratio) >= _CHUNK_QUALITY_ALTERNATE_MARGIN:
             alternates.append((other_mode, oth_ratio))
-    sel_events = _num_gpu_events(selected_row)
     if not alternates and sel_events > 0:
         return None  # No better mode exists; let roofline_failure_streak path handle.
 
