@@ -151,15 +151,17 @@ otherwise `-`), `body.txt`, `files.txt`, `diff.txt`, `comments.txt` and `xrefs.t
 link to this one). Read the diff, not the title (G1, G2). One line per PR into `$WORK/classes.txt`:
 
 ```
-<owner/name#N> DUPLICATE|OVERLAPPING|SUPERSEDED|UNRELATED -- <what in its diff decides it>
+<owner/name#N> SUPERSEDED|DUPLICATE|OVERLAPPING|UNRELATED -- <what in the PR decides it>
 ```
 
-| class | the diff |
+The class is the first row that applies:
+
+| class | the PR |
 |---|---|
-| `DUPLICATE` | does what the mechanism says, in the same code path |
-| `OVERLAPPING` | changes the same files or functions, or carries part of the mechanism |
-| `SUPERSEDED` | is closed, or its body, comments or `xrefs.tsv` name a replacement: its `why` says what closed it, and the replacement is read and classified on its own line |
-| `UNRELATED` | does something else, whatever its title says |
+| `SUPERSEDED` | is closed or reverted, or its body, comments or `xrefs.tsv` name a replacement: its `why` says what ended it, and the replacement is read and classified on its own line |
+| `DUPLICATE` | its diff does what the mechanism says, in the same code path |
+| `OVERLAPPING` | its diff changes a planned file or function, or carries part of the mechanism in any file, a sibling backend's included |
+| `UNRELATED` | its diff does something else, whatever its title says |
 
 ## Step 5 — Inclusion in your tree
 
@@ -192,12 +194,9 @@ OUTCOME: SURVIVES|DOWNGRADED <class>|DROPPED -- <what that showed>
 
 Attack a class in this order: does the diff do what the mechanism says, or only touch the same file;
 does it fix the same failure mode (G2); does it cover your operating point (G6); was it reverted (a
-`Revert` in `xrefs.tsv` or the tree's log). The outcome sets the report's class:
-
-| finding | `SURVIVES` | `DOWNGRADED <class>` | `DROPPED`, now `UNRELATED` |
-|---|---|---|---|
-| DUPLICATE | every attack failed | `OVERLAPPING`: another mechanism, failure mode or operating point on a planned file or function; `SUPERSEDED`: reverted | it shares no planned file or function |
-| OVERLAPPING | `files.txt` or the diff shows a planned path or function | `SUPERSEDED`: reverted | neither shows one |
+`Revert` in `xrefs.tsv` or the tree's log). The PR's class is then the first row of Step 4's table
+it still meets: `SURVIVES` when that is the class attacked, `DOWNGRADED <class>` when it is another,
+`DROPPED` when only `UNRELATED` is left.
 
 Attack an inclusion answer in the tree's own history (G5): `git -C "$TREE" log --oneline
 -S<symbol> "$COMMIT"` for a function or constant the diff adds, and `--grep=<title words>`. A hit
