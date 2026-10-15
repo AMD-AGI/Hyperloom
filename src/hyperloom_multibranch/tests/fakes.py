@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from hyperloom.contracts.recipe import Recipe
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
-from hyperloom_multibranch.contracts.lifecycle import SpecialistLaunch
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved
 
@@ -77,17 +76,17 @@ class RecordingScheduler:
 
 
 class RecordingLifecycle:
-    """Keeps the launch and the current K of every running branch."""
+    """Keeps the start commit and the current K of every running branch."""
 
     def __init__(self) -> None:
-        self.running: dict[str, SpecialistLaunch] = {}
+        self.running: dict[str, str] = {}
         self.k: dict[str, int] = {}
 
-    async def start(self, launch: SpecialistLaunch) -> None:
-        if launch.branch in self.running:
-            raise ValueError(f"branch {launch.branch!r} already has a specialist")
-        self.running[launch.branch] = launch
-        self.k[launch.branch] = launch.k
+    async def start(self, branch: str, start_commit: str) -> None:
+        if branch in self.running:
+            raise ValueError(f"branch {branch!r} already has a specialist")
+        self.running[branch] = start_commit
+        self.k[branch] = 1
 
     async def stop(self, branch: str) -> None:
         del self.running[branch]

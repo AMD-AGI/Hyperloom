@@ -4,7 +4,7 @@
 import pytest
 
 from hyperloom.contracts.recipe import ConfigDelta, LaunchConfig, Recipe, RecipeDelta, apply
-from hyperloom_multibranch.contracts.lifecycle import SpecialistLaunch, SpecialistLifecycle
+from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved, ExperimentRepo
 from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingLifecycle
@@ -55,7 +55,8 @@ async def test_the_repo_refuses_unknown_commits_and_branches():
 async def test_the_lifecycle_tracks_running_branches_and_their_k():
     recording = RecordingLifecycle()
     lifecycle: SpecialistLifecycle = recording
-    await lifecycle.start(SpecialistLaunch(branch="b1", start_commit="c0", k=2))
+    await lifecycle.start("b1", "c0")
+    assert (recording.running, recording.k) == ({"b1": "c0"}, {"b1": 1})
     await lifecycle.set_k("b1", 4)
     assert recording.k == {"b1": 4}
 
@@ -67,6 +68,8 @@ async def test_the_lifecycle_tracks_running_branches_and_their_k():
 
 
 @pytest.mark.parametrize("k", [0, -1])
-def test_a_launch_needs_room_for_a_test(k):
-    with pytest.raises(ValueError, match="at least one test"):
-        SpecialistLaunch(branch="b1", start_commit="c0", k=k)
+async def test_a_branch_keeps_room_for_a_test(k):
+    lifecycle = RecordingLifecycle()
+    await lifecycle.start("b1", "c0")
+    with pytest.raises(ValueError, match="stop the branch"):
+        await lifecycle.set_k("b1", k)
