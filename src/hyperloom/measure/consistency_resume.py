@@ -84,7 +84,7 @@ STALE_AFTER_SEC = 120.0
 LOCKED_RC = 12
 ESTIMATE_FACTOR = 1.25
 _UTF8 = "utf-8"
-_FILE_MODE = 0o644
+_FILE_MODE = 0o600
 
 
 @dataclasses.dataclass(frozen=True)

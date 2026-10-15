@@ -270,30 +270,40 @@ def _lock(tmp: Path, node: str = NODE, pid: int = 100, **kwargs) -> resume.RunLo
 
 def test_a_second_run_cannot_take_a_lock_that_is_held_and_fresh(tmp_path: Path) -> None:
     first, second = _lock(tmp_path, pid=1), _lock(tmp_path, node="node-b", pid=2)
-    assert first.acquire() and not second.acquire()
+    took = first.acquire()
+    refused = not second.acquire()
+    assert took and refused
     first.release()
-    assert second.acquire(), "released: the next run may go"
+    taken = second.acquire()
+    assert taken, "released: the next run may go"
 
 
 def test_a_lock_of_a_dead_process_on_this_node_is_taken_over_at_once(tmp_path: Path) -> None:
-    assert _lock(tmp_path, pid=1).acquire()
-    assert _lock(tmp_path, pid=2, pid_alive=lambda _pid: False).acquire()
-    assert not _lock(tmp_path, pid=3, pid_alive=lambda _pid: True).acquire(), "a live holder keeps it"
+    taken = _lock(tmp_path, pid=1).acquire()
+    assert taken
+    taken = _lock(tmp_path, pid=2, pid_alive=lambda _pid: False).acquire()
+    assert taken
+    taken = _lock(tmp_path, pid=3, pid_alive=lambda _pid: True).acquire()
+    assert not taken, "a live holder keeps it"
 
 
 def test_a_lock_from_another_node_is_taken_over_only_when_its_heartbeat_stopped(tmp_path: Path) -> None:
     import os
     import time
 
-    assert _lock(tmp_path, node="node-a", pid=1).acquire()
+    taken = _lock(tmp_path, node="node-a", pid=1).acquire()
+    assert taken
     lost = lambda _pid: pytest.fail("the pid of another node means nothing here")  # noqa: E731
     now = [time.time()]
     other = _lock(tmp_path, node="node-b", pid=2, stale_after_sec=120.0, now=lambda: now[0], pid_alive=lost)
-    assert not other.acquire(), "held a moment ago"
+    taken = other.acquire()
+    assert not taken, "held a moment ago"
     now[0] += 119.0
-    assert not other.acquire()
+    taken = other.acquire()
+    assert not taken
     now[0] += 2.0
-    assert other.acquire(), "silent for over 120 s: the machine that held it is gone"
+    taken = other.acquire()
+    assert taken, "silent for over 120 s: the machine that held it is gone"
     os.utime(other.path)
     assert any(p.name.startswith("c.jsonl.lock.stale.") for p in tmp_path.iterdir()), "the old lock is kept aside"
 
@@ -303,7 +313,8 @@ def test_the_heartbeat_keeps_a_lock_from_going_stale(tmp_path: Path) -> None:
     import time
 
     lock = _lock(tmp_path)
-    assert lock.acquire()
+    taken = lock.acquire()
+    assert taken
     os.utime(lock.path, (1.0, 1.0))
     lock.start_heartbeat(0.01)
     deadline = time.time() + 5
@@ -316,10 +327,13 @@ def test_the_heartbeat_keeps_a_lock_from_going_stale(tmp_path: Path) -> None:
 def test_wait_polls_until_the_holder_lets_go_or_the_time_is_up(tmp_path: Path) -> None:
     holder = _lock(tmp_path, pid=1)
     waiter = _lock(tmp_path, node="node-b", pid=2)
-    assert holder.acquire()
+    taken = holder.acquire()
+    assert taken
     naps: list[float] = []
-    assert not waiter.wait(0.0, sleep=naps.append) and naps == []
-    assert waiter.wait(60.0, poll_sec=5.0, sleep=lambda s: (naps.append(s), holder.release())) and naps == [5.0]
+    gave_up = waiter.wait(0.0, sleep=naps.append)
+    assert not gave_up and naps == []
+    got_it = waiter.wait(60.0, poll_sec=5.0, sleep=lambda s: (naps.append(s), holder.release()))
+    assert got_it and naps == [5.0]
 
 
 def test_the_entry_point_stops_with_12_and_measures_nothing_while_another_run_holds_the_file(
@@ -332,7 +346,8 @@ def test_the_entry_point_stops_with_12_and_measures_nothing_while_another_run_ho
     config.write_text("{}")
     monkeypatch.setattr(resume, "build_backends", lambda _c: pytest.fail("a locked file must not start a backend"))
     held = resume.RunLock(Path(f"{rig.jsonl}.lock"), node="node-b", pid=7)
-    assert held.acquire()
+    taken = held.acquire()
+    assert taken
     argv = ["--checklist", str(checklist), "--config", str(config), "--resume", str(rig.jsonl), "--lock-wait-sec", "0"]
     assert resume.main(argv) == resume.LOCKED_RC
     assert "another run" in capsys.readouterr().err and rig.lines() == []
