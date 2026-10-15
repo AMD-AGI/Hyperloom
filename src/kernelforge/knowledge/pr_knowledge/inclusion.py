@@ -57,20 +57,11 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 from hyperloom.common.git_safety import safe_directory_args
 from kernelforge.llm.git import git_bytes
-
-try:  # Python 3.11+
-    from enum import StrEnum
-except ImportError:  # pragma: no cover - Python 3.10 StrEnum shim
-    from enum import Enum
-
-    class StrEnum(str, Enum):
-        def __str__(self) -> str:
-            """Return the enum's string value (mirrors 3.11 ``StrEnum``)."""
-            return str(self.value)
 
 
 # Each call is a local plumbing command; one that runs this long is stuck on the filesystem, not working.
@@ -82,7 +73,7 @@ _SUFFIX_NUMBER = re.compile(r"\(#(\d+)\)")
 _LOCAL_REV_LIST = ("rev-list", "--missing=print")
 
 
-class Inclusion(StrEnum):
+class Inclusion(str, Enum):
     """Whether a pull request is in a tree."""
 
     INCLUDED = "included"
@@ -90,7 +81,7 @@ class Inclusion(StrEnum):
     UNKNOWN = "unknown"
 
 
-class InclusionMethod(StrEnum):
+class InclusionMethod(str, Enum):
     """The git evidence a verdict rests on; ``none`` when nothing decided it."""
 
     MERGE_ANCESTRY = "merge_ancestry"
