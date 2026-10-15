@@ -10,7 +10,7 @@ from hyperloom.common.accuracy import ACCURACY_METRICS
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind, TestRequest, Validity
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta
-from hyperloom_multibranch.contracts.fork import Admission, AdmissionStatus
+from hyperloom_multibranch.contracts.fork import AdmissionStatus
 from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, Verdict
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
@@ -73,7 +73,7 @@ class _Session:
         self.gate_notebook = LocalNotebook(root, Writer(Role.GATE, "gate"))
         self.runtime = LocalNotebook(root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH))
         self.repo = InMemoryRepo(RECIPE)
-        self.gate = RuleGate(self.gate_notebook, self.repo, RecordingScheduler(Admission(AdmissionStatus.ACCEPTED)))
+        self.gate = RuleGate(self.gate_notebook, self.repo, RecordingScheduler(AdmissionStatus.ACCEPTED))
         self.judge = self.new_judge()
 
     def new_judge(self) -> BranchJudge:

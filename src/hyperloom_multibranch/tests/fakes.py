@@ -7,7 +7,7 @@ git or processes."""
 from __future__ import annotations
 
 from hyperloom.contracts.recipe import Recipe
-from hyperloom_multibranch.contracts.fork import Admission, ForkRequest, RepairRequest
+from hyperloom_multibranch.contracts.fork import Admission, AdmissionStatus, ForkRequest, RepairRequest
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLaunch
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved
@@ -54,20 +54,20 @@ class InMemoryRepo:
 
 
 class RecordingScheduler:
-    """Answers every branch request with ``admission`` and keeps what it was asked."""
+    """Answers every branch request with ``status`` and keeps what it was asked."""
 
-    def __init__(self, admission: Admission) -> None:
-        self.admission = admission
+    def __init__(self, status: AdmissionStatus) -> None:
+        self.status = status
         self.forks: list[ForkRequest] = []
         self.repairs: list[RepairRequest] = []
 
     async def request_fork(self, request: ForkRequest) -> Admission:
         self.forks.append(request)
-        return self.admission
+        return Admission(self.status)
 
     async def request_repair(self, request: RepairRequest) -> Admission:
         self.repairs.append(request)
-        return self.admission
+        return Admission(self.status)
 
 
 class RecordingLifecycle:

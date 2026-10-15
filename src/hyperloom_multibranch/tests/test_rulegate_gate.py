@@ -7,7 +7,7 @@ import dataclasses
 import pytest
 
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, apply
-from hyperloom_multibranch.contracts.fork import Admission, AdmissionStatus
+from hyperloom_multibranch.contracts.fork import AdmissionStatus
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, Conclusion
@@ -47,7 +47,7 @@ async def setup(tmp_path):
 
 async def test_an_improvement_lands_on_its_branch_and_in_the_notebook(setup):
     notebook, repo, measured = setup
-    gate = RuleGate(notebook, repo, RecordingScheduler(Admission(AdmissionStatus.ACCEPTED)))
+    gate = RuleGate(notebook, repo, RecordingScheduler(AdmissionStatus.ACCEPTED))
 
     assert await gate.settle(measured, _judged(Verdict.IMPROVED)) is Action.COMMIT
 
@@ -68,7 +68,7 @@ async def test_an_improvement_lands_on_its_branch_and_in_the_notebook(setup):
 )
 async def test_a_candidate_only_recorded_leaves_its_branch_alone(setup, judgement, conclusion):
     notebook, repo, measured = setup
-    gate = RuleGate(notebook, repo, RecordingScheduler(Admission(AdmissionStatus.ACCEPTED)))
+    gate = RuleGate(notebook, repo, RecordingScheduler(AdmissionStatus.ACCEPTED))
 
     assert await gate.settle(measured, judgement) is Action.RECORD_ONLY
 
@@ -81,7 +81,7 @@ async def test_a_candidate_only_recorded_leaves_its_branch_alone(setup, judgemen
 )
 async def test_a_retest_or_a_diagnosis_is_the_callers_next_step(setup, verdict, action):
     notebook, repo, measured = setup
-    gate = RuleGate(notebook, repo, RecordingScheduler(Admission(AdmissionStatus.ACCEPTED)))
+    gate = RuleGate(notebook, repo, RecordingScheduler(AdmissionStatus.ACCEPTED))
 
     assert await gate.settle(measured, _judged(verdict, accuracy_ok=False)) is action
 
@@ -98,7 +98,7 @@ async def test_a_retest_or_a_diagnosis_is_the_callers_next_step(setup, verdict, 
 )
 async def test_a_blocked_gain_goes_to_the_scheduler_for_a_repair(setup, status, conclusion):
     notebook, repo, measured = setup
-    scheduler = RecordingScheduler(Admission(status))
+    scheduler = RecordingScheduler(status)
     gate = RuleGate(notebook, repo, scheduler)
     blocked = _judged(Verdict.BLOCKED, accuracy_ok=False)
 
@@ -111,7 +111,7 @@ async def test_a_blocked_gain_goes_to_the_scheduler_for_a_repair(setup, status, 
 
 async def test_a_blocked_gain_with_no_repair_is_recorded(setup):
     notebook, repo, measured = setup
-    gate = RuleGate(notebook, repo, RecordingScheduler(Admission(AdmissionStatus.ACCEPTED)))
+    gate = RuleGate(notebook, repo, RecordingScheduler(AdmissionStatus.ACCEPTED))
     blocked = dataclasses.replace(_judged(Verdict.BLOCKED), refused_by=("p90_regressed",))
 
     record = await gate.decline(measured, blocked)
@@ -129,7 +129,7 @@ async def test_a_blocked_gain_with_no_repair_is_recorded(setup):
 )
 async def test_a_fix_that_costs_performance_asks_for_a_fork(setup, status, conclusion):
     notebook, repo, measured = setup
-    scheduler = RecordingScheduler(Admission(status))
+    scheduler = RecordingScheduler(status)
     gate = RuleGate(notebook, repo, scheduler)
 
     await gate.fork(measured, _judged(Verdict.REGRESSED, fixes_correctness=True), "repro/moe-oob.py", "oob at 8k")
@@ -160,7 +160,7 @@ class _Stalled:
 
 async def test_a_gain_whose_branch_moved_on_is_recorded_only(setup):
     notebook, repo, measured = setup
-    gate = RuleGate(notebook, repo, RecordingScheduler(Admission(AdmissionStatus.ACCEPTED)))
+    gate = RuleGate(notebook, repo, RecordingScheduler(AdmissionStatus.ACCEPTED))
     landed_first = await repo.commit("s1", "c0", BASELINE, "another candidate of c0")
 
     assert await gate.settle(measured, _judged(Verdict.IMPROVED)) is Action.RECORD_ONLY
@@ -172,7 +172,7 @@ async def test_a_gain_whose_branch_moved_on_is_recorded_only(setup):
 
 async def test_a_commit_whose_judgement_cannot_be_written_is_taken_back(setup):
     _notebook, repo, measured = setup
-    gate = RuleGate(_FullDisk(), repo, RecordingScheduler(Admission(AdmissionStatus.ACCEPTED)))
+    gate = RuleGate(_FullDisk(), repo, RecordingScheduler(AdmissionStatus.ACCEPTED))
 
     with pytest.raises(OSError, match="no space"):
         await gate.settle(measured, _judged(Verdict.IMPROVED))
@@ -183,7 +183,7 @@ async def test_a_commit_whose_judgement_cannot_be_written_is_taken_back(setup):
 async def test_a_specialist_stopped_mid_commit_still_records_the_commit(setup):
     notebook, repo, measured = setup
     stalled = _Stalled(notebook)
-    gate = RuleGate(stalled, repo, RecordingScheduler(Admission(AdmissionStatus.ACCEPTED)))
+    gate = RuleGate(stalled, repo, RecordingScheduler(AdmissionStatus.ACCEPTED))
     settling = asyncio.create_task(gate.settle(measured, _judged(Verdict.IMPROVED)))
     await stalled.writing.wait()
 
@@ -202,7 +202,7 @@ async def test_a_specialist_stopped_mid_commit_still_records_the_commit(setup):
 
 async def test_the_gate_refuses_a_step_the_table_does_not_call_for(setup):
     notebook, repo, measured = setup
-    gate = RuleGate(notebook, repo, RecordingScheduler(Admission(AdmissionStatus.ACCEPTED)))
+    gate = RuleGate(notebook, repo, RecordingScheduler(AdmissionStatus.ACCEPTED))
 
     with pytest.raises(ValueError, match="calls for commit"):
         await gate.fork(measured, _judged(Verdict.IMPROVED), "repro/x.py", "not a fix")
