@@ -19,7 +19,8 @@ from hyperloom_multibranch.notebook.tests.factories import delta
 from hyperloom_multibranch.rulegate.baseline import write_inferencex_baseline
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.inferencex import GAIN_NOT_CONFIRMED
-from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, InferenceXRule
+from hyperloom_multibranch.rulegate.rules import InferenceXRule
+from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge
 from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
 from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig, NoiseModel
