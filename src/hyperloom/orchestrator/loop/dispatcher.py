@@ -1427,12 +1427,27 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             meta, measured_baseline_sec=measured_baseline_runtime_sec(self.shared_state)
         )
 
-    async def queued_cost_minutes(self) -> float:
-        """Minutes of work the queue has already committed this phase to."""
+    async def queued_cost_minutes(self, action_name: str = "") -> float:
+        """Minutes the queue has committed on the lanes ``action_name`` needs.
+
+        Only work that contends for the same lane delays it. A queue of
+        specialists holds ``research_lane`` while an explore round needs
+        ``server_lifecycle`` and ``benchmark_lane``: summing both would refuse
+        a round the phase can in fact run alongside them.
+        """
+        wanted = set(self._lanes_for_action(action_name))
         total = 0.0
         for task in await self.tasks.queued():
-            total += self.expected_cost_minutes_for(str(getattr(task, "kind", "") or ""))
+            kind = str(getattr(task, "kind", "") or "")
+            if wanted and not wanted.intersection(self._lanes_for_action(kind)):
+                continue
+            total += self.expected_cost_minutes_for(kind)
         return total
+
+    def _lanes_for_action(self, action_name: str) -> tuple[str, ...]:
+        """The lanes one action holds while it runs."""
+        meta = self.action_registry.get(str(action_name or "").strip())
+        return tuple(getattr(meta, "requires_lanes", ()) or ()) if meta is not None else ()
 
     async def admission_denial_for_action(
         self,
@@ -1471,7 +1486,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         return self.time_budget_denial_for_action(
             action_name,
             params=params,
-            already_committed_minutes=await self.queued_cost_minutes(),
+            already_committed_minutes=await self.queued_cost_minutes(action_name),
         )
 
     async def _cancel_queued_task_over_budget(self, task: Task) -> bool:
