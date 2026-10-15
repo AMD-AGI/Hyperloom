@@ -10,7 +10,7 @@
 #
 # Two fields are FALLBACK ONLY and overridden at run time by the executor:
 #   - `benchmark.model`     <- --model / $MODEL_PATH
-#   - `benchmark.runner_type` <- --gpu-type / $GPU_TYPE / rocm-smi probe
+#   - `benchmark.runner_type` <- --gpu-type / $GPU_TYPE / amd-smi static --asic probe
 # At materialize time Hyperloom pins benchmark_script to xdit_{runner_type}.sh
 # (e.g. xdit_mi355x.sh), so it is intentionally NOT set here.
 #

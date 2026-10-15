@@ -94,7 +94,7 @@ LLVM #131954 trap.
 
 ## 9. Recovery from GPU hang
 ```bash
-rocm-smi                 # 100% usage, no progress → hang (barrier deadlock / OOB / infinite loop)
+amd-smi metric --usage   # 100% usage, no progress → hang (barrier deadlock / OOB / infinite loop)
 sudo amdgpu-reset        # or reboot
 ```
 Common causes: divergent `__syncthreads()` (not all lanes reach the barrier), wrong loop bounds, OOB

@@ -2410,7 +2410,7 @@ def _resolve_run_topology(args: argparse.Namespace) -> int:
         gpus_per_node_resolved = 8
 
     # Project before ``_preflight``: ``check_gpu_visibility`` reads ``$TP`` to warn when the run asks for more
-    # shards than rocm-smi can see.
+    # shards than amd-smi can see.
     if not _is_resume:
         _export_workload_envs_for_optimize(args, tp_resolved=tp_resolved, ep_resolved=ep_resolved)
 

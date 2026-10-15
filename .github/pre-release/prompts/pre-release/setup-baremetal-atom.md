@@ -62,7 +62,7 @@ interactive questions; use the values already in `.env` and the environment:
 - Do **not** modify any GPU-related environment variable (`ROCR_VISIBLE_DEVICES`,
   `HIP_VISIBLE_DEVICES`, `GPUS_PER_NODE`, etc.). The pod already exposes exactly one
   GPU; do not override device visibility.
-- Do **not** run `docker` and do **not** choose GPUs via `rocm-smi`. This is a
+- Do **not** run `docker` and do **not** choose GPUs via `amd-smi`. This is a
   baremetal leg; setup runs on the host.
 - Do **not** print, echo, or copy secret values (API keys) into output or logs.
 - Do **not** modify `USER_DATA_PATH`.

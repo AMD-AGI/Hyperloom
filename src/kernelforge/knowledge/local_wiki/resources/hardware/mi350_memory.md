@@ -97,7 +97,7 @@ fixes.
 - ISA dump: count `global_load_dwordx4` vs `global_load_dword` in the hot loop — wide forms should
   dominate.
 - `rocm-bandwidth-test` or a streaming-copy microbench for achievable HBM and Fabric BW.
-- `rocm-smi --showmeminfo` / `amd-smi` for HBM capacity and partition layout.
+- `amd-smi metric --mem-usage` / `amd-smi partition` for HBM capacity and partition layout.
 
 ## Related
 `mi350_lds.md` (the level below) · `mi350_chiplet.md` (per-XCD L2 and locality) ·

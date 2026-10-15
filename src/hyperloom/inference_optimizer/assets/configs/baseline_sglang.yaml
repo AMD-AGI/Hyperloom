@@ -6,7 +6,7 @@
 #
 # Two fields are FALLBACK ONLY and overridden at run time by the executor:
 #   - `benchmark.model`     <- --model / $MODEL_PATH
-#   - `benchmark.runner_type` <- --gpu-type / $GPU_TYPE / rocm-smi probe
+#   - `benchmark.runner_type` <- --gpu-type / $GPU_TYPE / amd-smi static --asic probe
 # So the hardcoded `model:` below is just a placeholder; `runner_type:` is
 # deliberately omitted so Magpie auto-detects the GPU when this YAML is
 # used directly with `Magpie -v benchmark`.

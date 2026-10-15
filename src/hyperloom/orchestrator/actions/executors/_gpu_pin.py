@@ -379,7 +379,7 @@ def _resolve_handoff_gpu_ids_space(*, gpu_pin: Mapping[str, Any] | None) -> str:
 def _resolve_handoff_physical_gpus(
     *, gpu_ids: str, gpu_ids_space: str, gpu_pin: Mapping[str, Any] | None
 ) -> list[int] | None:
-    """The physical cards, numbered as rocm-smi numbers them, that ``gpu_ids`` puts GEAK's servers on.
+    """The physical cards, by their absolute device index, that ``gpu_ids`` puts GEAK's servers on.
 
     Absolute ids are the cards themselves; logical ids index into the ROCr pin's own numeric ids.
 

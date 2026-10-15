@@ -12,7 +12,7 @@ Two fields in each YAML are **fallback only** — the optimizer overrides them a
 runtime:
 
 - `benchmark.model` <- `--model` / `$MODEL_PATH`
-- `benchmark.runner_type` <- `--gpu-type` / `$GPU_TYPE` / rocm-smi auto-detect
+- `benchmark.runner_type` <- `--gpu-type` / `$GPU_TYPE` / amd-smi static --asic auto-detect
 
 `benchmark.benchmark_script` is deliberately NOT set in the shipped YAMLs. At
 materialize time Hyperloom pins it to `{framework}_{runner_type}.sh` (e.g.
