@@ -4,7 +4,7 @@
 import pytest
 
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
-from hyperloom_multibranch.contracts.fork import RepairRequest
+from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, RepairRequest
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 
@@ -54,3 +54,13 @@ def test_only_a_blocked_gain_is_sent_for_repair():
     assert request.intent.parent_commit == "c1"
     with pytest.raises(ValueError, match="only a blocked gain"):
         RepairRequest(_intent(), delta, _judgement(Verdict.INCONCLUSIVE), "the defect did not reproduce")
+
+
+@pytest.mark.parametrize(
+    ("status", "branch"),
+    [(AdmissionStatus.ACCEPTED, ""), (AdmissionStatus.PENDING, "s9"), (AdmissionStatus.REJECTED, "s9")],
+)
+def test_an_admission_names_the_new_branch_exactly_when_it_accepts(status, branch):
+    assert ForkAdmission(AdmissionStatus.ACCEPTED, branch="s9").branch == "s9"
+    with pytest.raises(ValueError, match="names its new branch"):
+        ForkAdmission(status, branch=branch)
