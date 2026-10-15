@@ -58,6 +58,17 @@ class UnknownTestRequest(ToolboxError, LookupError):
     """The toolbox accepted no request with this ``request_id``."""
 
 
+class TestWithdrawn(ToolboxError):
+    """The test was withdrawn before it produced a result; ``reason`` is what the toolbox wrote to the notebook."""
+
+    __test__ = False
+
+    def __init__(self, request_id: str, reason: str) -> None:
+        super().__init__(f"{request_id} was withdrawn: {reason}")
+        self.request_id = request_id
+        self.reason = reason
+
+
 #: The checks acceptance can refuse on, as the ``code`` of :class:`RequestRejected`.
 REJECTION_CODES = (
     "invalid_request",  # the request breaks the contract of 3.7
@@ -170,6 +181,7 @@ __all__ = [
     "SpecialistGrant",
     "SpecialistTokens",
     "TestRecordSink",
+    "TestWithdrawn",
     "Toolbox",
     "ToolboxError",
     "UnknownTestRequest",

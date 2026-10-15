@@ -33,6 +33,7 @@ from hyperloom_multibranch.contracts.toolbox import (
     QueueState,
     RequestRejected,
     TestRecordSink,
+    TestWithdrawn,
     UnknownTestRequest,
     WorkloadKind,
 )
@@ -98,6 +99,7 @@ class RealToolbox:
         self._tool_jobs: dict[str, list[str]] = {}
         self._lock = asyncio.Lock()
         self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._outcome_events: dict[str, asyncio.Event] = {}
         self._renewer: asyncio.Task[None] | None = None
 
     # --- lifecycle ---------------------------------------------------------------------------------------------
@@ -170,14 +172,53 @@ class RealToolbox:
         self._queue.reprioritise()
         self._pump()
 
+    async def outcome(self, request_id: str) -> TestResult:
+        """Wait for the final outcome of an accepted test and return its result.
+
+        Raises :class:`TestWithdrawn` when the test was withdrawn instead, :class:`UnknownTestRequest` for an id the
+        toolbox never accepted. A ``measurement_failed`` result is returned like any other: it is a result.
+        """
+
+        entry = self._log.get(request_id)
+        if entry is None or entry.aborted:
+            raise UnknownTestRequest(request_id)
+        while entry.outcome is None:
+            await self._outcome_events.setdefault(request_id, asyncio.Event()).wait()
+        if "result" in entry.outcome:
+            return TestResult.from_document(entry.outcome["result"])
+        raise TestWithdrawn(request_id, str(entry.outcome["withdrawal"]))
+
     async def cancel_branch(self, branch_id: str, reason: str = "branch stopped") -> int:
         """Withdraw every queued and running test of a stopped branch; returns how many."""
 
-        pending = [e for e in self._log.entries() if e.branch == branch_id and e.waiting]
+        tests = await self._withdraw_tests(lambda entry: entry.branch == branch_id, reason)
+        return len(tests) + self._cancel_tool_jobs(branch_id)
+
+    async def withdraw_branch(self, branch_id: str, reason: str = "branch stopped") -> tuple[str, ...]:
+        """Like :meth:`cancel_branch`, returning the request ids of the tests it withdrew."""
+
+        tests = await self._withdraw_tests(lambda entry: entry.branch == branch_id, reason)
+        self._cancel_tool_jobs(branch_id)
+        return tests
+
+    async def withdraw_all(self, reason: str = "session stopped") -> tuple[str, ...]:
+        """Withdraw every queued and running test of every branch; returns their request ids."""
+
+        tests = await self._withdraw_tests(lambda entry: True, reason)
+        for branch in list(self._tool_jobs):
+            self._cancel_tool_jobs(branch)
+        return tests
+
+    async def _withdraw_tests(self, wanted: Callable[[LogEntry], bool], reason: str) -> tuple[str, ...]:
+        pending = [e for e in self._log.entries() if e.waiting and wanted(e)]
         for entry in pending:
             await self._withdraw(entry, reason)
-        cancelled = sum(self._tools.cancel(job) for job in self._tool_jobs.pop(branch_id, [])) if self._tools else 0
-        return len(pending) + cancelled
+        return tuple(entry.request_id for entry in pending)
+
+    def _cancel_tool_jobs(self, branch_id: str) -> int:
+        if self._tools is None:
+            return 0
+        return sum(self._tools.cancel(job) for job in self._tool_jobs.pop(branch_id, []))
 
     def submit_tool(self, request: ToolRequest) -> str:
         """Start an asynchronous tool (profile, roofline, build, ...) for a branch; returns its job id at once.
@@ -329,6 +370,9 @@ class RealToolbox:
 
     async def _record_and_write(self, entry: LogEntry, outcome: dict[str, object]) -> None:
         self._log.record_outcome(entry.request_id, outcome)
+        waiter = self._outcome_events.pop(entry.request_id, None)
+        if waiter is not None:
+            waiter.set()
         await self._write_outcome(entry)
 
     async def _write_outcome(self, entry: LogEntry) -> None:
