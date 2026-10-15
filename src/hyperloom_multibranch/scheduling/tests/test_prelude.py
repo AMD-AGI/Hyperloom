@@ -38,6 +38,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     LAUNCH_FLAG,
     MbFakeChildRegistry,
     RecordingToolbox,
+    measure_no_throughput,
     session_gate,
 )
 from hyperloom_multibranch.toolbox.fake_model import Fate
@@ -249,6 +250,17 @@ async def test_a_baseline_below_the_accuracy_floor_fails_prelude(tmp_path: Path)
     with pytest.raises(PreludeFailed, match="the baseline anchors nothing: baseline accuracy"):
         await _run(prelude, SessionBudget.from_hours(2.0, NOW))
     assert len(peers.toolbox.results) == BASELINE_TESTS
+
+
+async def test_a_baseline_measuring_no_throughput_fails_prelude(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    measure_no_throughput(monkeypatch)
+    layout = _layout(tmp_path)
+    peers = _peers(layout)
+    prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), peers)
+    with pytest.raises(PreludeFailed, match="the baseline anchors nothing: a throughput must be positive"):
+        await _run(prelude, SessionBudget.from_hours(2.0, NOW))
 
 
 async def test_refused_baseline_test_fails_prelude_and_takes_the_accepted_ones_back(tmp_path: Path) -> None:

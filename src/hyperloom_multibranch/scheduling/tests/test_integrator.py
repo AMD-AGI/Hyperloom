@@ -60,6 +60,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     Curves,
     RecordingToolbox,
     ScriptedCompletion,
+    measure_no_throughput,
     recipe_effect,
     session_gate,
 )
@@ -299,6 +300,19 @@ async def test_a_merge_that_does_not_improve_is_not_stackable(
     record = await bench.handle(Role.OBSERVER).record(str(report.request_id))
     assert (record.conclusion, record.commit_id) == (Conclusion.NOT_STACKABLE, None)
     assert await bench.outcome("c1") is MergeOutcome.NOT_STACKABLE
+
+
+async def test_a_merge_measuring_no_throughput_is_not_stackable_and_merging_goes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bench = await _bench(tmp_path)
+    measure_no_throughput(monkeypatch)
+
+    report = await _one(bench)
+
+    assert report is not None and report.outcome is MergeOutcome.NOT_STACKABLE
+    assert report.reason.startswith("the merge test failed: ") and "positive" in report.reason
+    assert await bench.repo.head(INTEGRATION_BRANCH) == bench.root
 
 
 async def test_each_commit_is_tried_once_per_integration_head(tmp_path: Path) -> None:

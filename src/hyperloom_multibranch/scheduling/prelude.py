@@ -22,13 +22,12 @@ from hyperloom.common.io import atomic_write_json
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import PatchRef, Recipe
 from hyperloom.measure.compile import BlobError
-from hyperloom_multibranch.contracts.gate import NotMeasured, SessionGate
+from hyperloom_multibranch.contracts.gate import SessionGate
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Notebook
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent, SessionProfile
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
-from hyperloom_multibranch.rulegate.accuracy import BaselineAccuracyError
 from hyperloom_multibranch.scheduling.budget import BudgetExhausted, HardStop, SessionBudget
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
@@ -42,7 +41,7 @@ from hyperloom_multibranch.scheduling.prelude_reader import (
     root_recipe,
 )
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
-from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
+from hyperloom_multibranch.scheduling.requests import GATE_UNJUDGEABLE, SessionTests, integration_test_request
 from hyperloom_multibranch.scheduling.settings import Workload
 
 #: The ``hyperloom`` console script, run as a module so the child runs on the same install as the scheduler.
@@ -208,7 +207,7 @@ class Prelude:
             raise PreludeFailed(f"the toolbox refused the baseline test: {exc}") from exc
         try:
             baseline = await self._gate.establish_baseline(root, request_ids)
-        except (NotMeasured, BaselineAccuracyError) as exc:
+        except GATE_UNJUDGEABLE as exc:
             raise PreludeFailed(f"the baseline anchors nothing: {exc}") from exc
         self._decisions.record(
             Decision(

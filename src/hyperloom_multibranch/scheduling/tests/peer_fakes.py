@@ -27,8 +27,10 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+import pytest
+
 from hyperloom.common.perf_metric import GRADED_OUTPUT
-from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest, TestResult
 from hyperloom.contracts.recipe import ConfigDelta, PatchRef, Recipe, RecipeDelta, apply
 from hyperloom.measure.compile import BlobStore
 from hyperloom_multibranch.contracts.fork import Admission
@@ -38,7 +40,11 @@ from hyperloom_multibranch.contracts.notebook.interfaces import RecordSearch
 from hyperloom_multibranch.contracts.repo import ExperimentRepo, RepoMerge
 from hyperloom_multibranch.contracts.toolbox import CancelOutcome, QueueState
 from hyperloom_multibranch.repo.git_repo import RECIPE_FILE, GitExperimentRepo
+from hyperloom_multibranch.rulegate import baseline as rulegate_baseline
+from hyperloom_multibranch.rulegate import rules as rulegate_rules
 from hyperloom_multibranch.rulegate.gate import RuleGate
+from hyperloom_multibranch.rulegate.inferencex import InferenceXReading
+from hyperloom_multibranch.rulegate.readings import inferencex_reading
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
 from hyperloom_multibranch.rulegate.service import GateNotebook, GateService
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -224,6 +230,21 @@ def session_gate(notebook: GateNotebook, toolbox: FakeToolbox) -> GateService:
 
     (conc,) = toolbox.config.main_concurrency
     return GateService(notebook, toolbox, InferenceXRule(notebook, conc), poll_seconds=GATE_POLL_SECONDS)
+
+
+def measure_no_throughput(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test the rule gate reads, baseline or candidate, reports a graded throughput of 0, which the fake
+    toolbox itself cannot measure."""
+
+    def zeroed(result: TestResult, concurrency: int) -> InferenceXReading:
+        rounds = tuple(
+            replace(row, metrics={**row.metrics, GRADED_OUTPUT: 0.0}) if GRADED_OUTPUT in row.metrics else row
+            for row in result.rounds
+        )
+        return inferencex_reading(replace(result, rounds=rounds), concurrency)
+
+    monkeypatch.setattr(rulegate_baseline, "inferencex_reading", zeroed)
+    monkeypatch.setattr(rulegate_rules, "inferencex_reading", zeroed)
 
 
 class MbFakeChildRegistry(ProcessRegistry):

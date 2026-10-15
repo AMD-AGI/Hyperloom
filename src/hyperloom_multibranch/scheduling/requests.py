@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest, TestResult
 from hyperloom.contracts.recipe import RecipeDelta
+from hyperloom_multibranch.contracts.gate import NotMeasured
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.toolbox import Backpressure
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -26,6 +27,10 @@ if TYPE_CHECKING:
 NO_DELTA = RecipeDelta()
 #: Clock seconds before a request the toolbox refused with backpressure is submitted again.
 RESUBMIT_SECONDS = 30.0
+
+#: What the rule gate raises for a test it cannot judge. Its readings and its bar raise a plain ``ValueError`` for a
+#: throughput that is not positive and finite, which ``GateService`` does not turn into ``NotMeasured`` yet.
+GATE_UNJUDGEABLE = (NotMeasured, ValueError)
 
 T = TypeVar("T")
 
@@ -112,6 +117,7 @@ async def together(*measurements: asyncio.Future[Any]) -> None:
 
 
 __all__ = [
+    "GATE_UNJUDGEABLE",
     "NO_DELTA",
     "RESUBMIT_SECONDS",
     "SessionTests",

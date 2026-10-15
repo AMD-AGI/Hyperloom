@@ -29,7 +29,7 @@ from hyperloom.common.jsonio import extract_last_json_with_key
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import PatchRef, Recipe, RecipeDelta, RecipeError, ValueChange, apply
 from hyperloom.measure.compile import BlobError
-from hyperloom_multibranch.contracts.gate import NotMeasured, SessionGate
+from hyperloom_multibranch.contracts.gate import SessionGate
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Notebook
 from hyperloom_multibranch.contracts.notebook.records import CommittedCommit, MergeAttempt
@@ -39,7 +39,7 @@ from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed
 from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_regression_passes
-from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
+from hyperloom_multibranch.scheduling.requests import GATE_UNJUDGEABLE, SessionTests, integration_test_request
 
 logger = logging.getLogger(__name__)
 
@@ -229,7 +229,7 @@ class Integrator:
         tested = MergeReport(candidate, merge.onto, MergeOutcome.PENDING, "", request_id, None, merge.config_conflicts)
         try:
             judgement = await self._gate.compare(request_id)
-        except NotMeasured as exc:
+        except GATE_UNJUDGEABLE as exc:
             return replace(tested, outcome=MergeOutcome.NOT_STACKABLE, reason=f"the merge test failed: {exc}")
         return _TestedMerge(tested, delta, judgement)
 
