@@ -10,9 +10,11 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
-from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis
+from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.notebook.records import LineageEvent, NotebookSnapshot
+from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis, LineageKind
+from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.notebook.rsi.archive import SearchTree
 from hyperloom_multibranch.notebook.rsi.frontier import (
     OBSERVATION_SECONDS,
     WINDOW_SECONDS,
@@ -21,7 +23,7 @@ from hyperloom_multibranch.notebook.rsi.frontier import (
     remaining_prior,
     score_progress,
 )
-from hyperloom_multibranch.notebook.rsi.similarity import task_conditions
+from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions, task_conditions, task_similarity
 from hyperloom_multibranch.notebook.rsi.tests.trees import branch, tree
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, profile
 from hyperloom_multibranch.notebook.tests.sessions import METRIC, scripted_session
@@ -32,6 +34,17 @@ PAYS_LATE = tree(
     "late", branch("s1", [(600.0, 2.0), (1800.0, 6.0)], test_times=(0.0, 600.0, 1200.0, 1800.0)), task=TASK
 )
 PAYS_SOON = tree("soon", branch("s1", [(1800.0, 3.0)], test_times=(0.0, 900.0, 1800.0)), task=TASK)
+# The same GPU on another framework: 3 of 5 label weights match.
+SAME_GPU = TaskConditions(labels={"gpu": TASK.labels["gpu"], "framework": "sglang"})
+# The same GPU and nothing else: 3 of 7.
+ONLY_THE_GPU = TaskConditions(
+    labels={"gpu": TASK.labels["gpu"], "framework": "sglang", "model": "Qwen/Qwen3-8B", "precision": "bf16"}
+)
+
+
+def _sessions(task: TaskConditions, count: int) -> tuple[SearchTree, ...]:
+    gains = [(1800.0, 3.0)]
+    return tuple(tree(f"t{n}", branch("s1", gains, test_times=(0.0, 900.0, 1800.0)), task=task) for n in range(count))
 
 
 def _scores(snapshot: NotebookSnapshot, *history: object, policy: FrontierPolicy = POLICY) -> dict[str, object]:
@@ -60,6 +73,37 @@ def test_the_history_prior_replaces_the_trend_once_enough_similar_sessions_back_
     assert backed.components["prior_effective_sessions"] == pytest.approx(2.0)
     assert alone is not None and alone.expected_gain_pct == pytest.approx(4.0)
     assert alone.basis is FrontierBasis.TREND
+
+
+def test_a_prior_needs_sessions_at_least_half_similar_that_add_up_to_one_and_a_half(
+    snapshot: NotebookSnapshot,
+) -> None:
+    two, three = remaining_prior(_sessions(SAME_GPU, 2), TASK, 2), remaining_prior(_sessions(SAME_GPU, 3), TASK, 2)
+    short = _scores(snapshot, *_sessions(SAME_GPU, 2))["s1"]
+    backed = _scores(snapshot, *_sessions(SAME_GPU, 3))["s1"]
+
+    assert task_similarity(TASK, SAME_GPU) == pytest.approx(0.6)
+    assert task_similarity(TASK, ONLY_THE_GPU) == pytest.approx(3 / 7)
+    assert remaining_prior(_sessions(ONLY_THE_GPU, 5), TASK, 2) is None
+    assert two is not None and two.effective_sessions == pytest.approx(1.2)
+    assert three is not None and three.effective_sessions == pytest.approx(1.8)
+    assert short is not None and short.basis is FrontierBasis.TREND
+    assert backed is not None and backed.basis is FrontierBasis.PRIOR and backed.expected_gain_pct == pytest.approx(3.0)
+
+
+async def test_a_branch_too_young_for_a_trend_keeps_a_floor_until_a_window_has_passed(tmp_path: Path) -> None:
+    clock = FakeClock()
+    observer = await scripted_session(tmp_path / "notebook", clock)
+    scheduler = LocalNotebook(tmp_path / "notebook", Writer(Role.SCHEDULER, "scheduler"), clock=clock)
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s3", from_commit="c1", reason="fill"))
+
+    fresh = _scores(await observer.snapshot())["s3"]
+    clock.advance(WINDOW_SECONDS)
+    settled = _scores(await observer.snapshot())["s3"]
+
+    assert fresh is not None and fresh.expected_gain_pct == POLICY.new_branch_floor_pct
+    assert fresh.basis is FrontierBasis.NEW and fresh.components["trend_pct"] == 0.0
+    assert settled is not None and settled.expected_gain_pct == 0.0 and settled.basis is FrontierBasis.TREND
 
 
 def test_the_prior_counts_only_branches_that_spent_as_many_tests() -> None:

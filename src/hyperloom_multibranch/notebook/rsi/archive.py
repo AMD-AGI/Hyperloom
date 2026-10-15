@@ -218,11 +218,14 @@ class WeightedTree:
     weight: float
 
 
-def similar_trees(history: Sequence[SearchTree], task: TaskConditions) -> tuple[WeightedTree, ...]:
-    """The archived trees that share a condition with ``task``, most similar first."""
+def similar_trees(
+    history: Sequence[SearchTree], task: TaskConditions, *, minimum: float = 0.0
+) -> tuple[WeightedTree, ...]:
+    """The archived trees that share a condition with ``task``, at least ``minimum`` similar, most similar first."""
 
     weighted = (WeightedTree(tree, task_similarity(task, tree.task)) for tree in history)
-    return tuple(sorted((item for item in weighted if item.weight > 0), key=lambda item: -item.weight))
+    kept = (item for item in weighted if item.weight > 0 and item.weight >= minimum)
+    return tuple(sorted(kept, key=lambda item: -item.weight))
 
 
 class TreeArchive:

@@ -28,6 +28,8 @@ LABEL_WEIGHTS = {
 }
 SIZE_WEIGHTS = {"tp": 1.0, "conc": 1.0, "isl": 1.0, "osl": 1.0, "ep": 0.5}
 PROFILE_WEIGHT = 2.0
+#: Below this, a past session shares too little with this one to teach it anything: one matching GPU is not enough.
+MIN_SIMILARITY = 0.5
 # A size eight times larger or smaller no longer counts as similar.
 _LOG2_SPAN = 3.0
 
@@ -97,6 +99,7 @@ def effective_sessions(weights: Iterable[float]) -> float:
 
 __all__ = [
     "LABEL_WEIGHTS",
+    "MIN_SIMILARITY",
     "PROFILE_WEIGHT",
     "SIZE_WEIGHTS",
     "TaskConditions",

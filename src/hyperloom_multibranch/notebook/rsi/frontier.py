@@ -10,13 +10,15 @@
 * ``tests`` and ``gpu_hours``: what the branch has spent;
 * ``headroom_pct``: how far the head's recorded value is from the roofline bound PRELUDE recorded for the metric;
 * ``prior_remaining_pct``: what similar archived branches still gained after spending as many tests, weighted by task
-  similarity, with ``prior_effective_sessions``; left out while the similar sessions count for fewer than 1.5;
+  similarity, with ``prior_effective_sessions``, the sessions behind it each counted by its similarity; a session less
+  than half similar does not count, and the prior is left out while they add up to less than 1.5;
 * ``observing``: 1 while a kernel-layer direction the branch tested lately may still be paying off.
 
 The expected gain is the prior where there is one, else the trend; a branch under observation keeps at least
-``observation_floor_pct``; the headroom caps it, and it is never negative. ``basis`` names which of them the score
-rests on. The formula is a prototype: what the score means is the scheduler's call (gongzheng's), and it stays here
-until then.
+``observation_floor_pct``, and so does a branch scored by its trend that has not yet been open a window nor committed,
+since its trend cannot be anything but zero; the headroom caps it, and it is never negative. ``basis`` names which of
+them the score rests on. The formula is a prototype: what the score means is the scheduler's call (gongzheng's), and it
+stays here until then.
 """
 
 from __future__ import annotations
@@ -40,11 +42,12 @@ from hyperloom_multibranch.notebook.rsi.archive import (
     similar_trees,
     tree_from_snapshot,
 )
-from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions, effective_sessions
+from hyperloom_multibranch.notebook.rsi.similarity import MIN_SIMILARITY, TaskConditions
 
 WINDOW_SECONDS = 1800.0
 OBSERVATION_SECONDS = 3600.0
 OBSERVATION_FLOOR_PCT = 0.5
+NEW_BRANCH_FLOOR_PCT = OBSERVATION_FLOOR_PCT
 MIN_EFFECTIVE_SESSIONS = 1.5
 #: The session length the default window and observation suit; a shorter session scales both down in proportion.
 REFERENCE_BUDGET_SECONDS = 4 * 3600.0
@@ -58,7 +61,9 @@ class FrontierPolicy:
     window_seconds: float = WINDOW_SECONDS
     observation_seconds: float = OBSERVATION_SECONDS
     observation_floor_pct: float = OBSERVATION_FLOOR_PCT
+    new_branch_floor_pct: float = NEW_BRANCH_FLOOR_PCT
     min_effective_sessions: float = MIN_EFFECTIVE_SESSIONS
+    min_similarity: float = MIN_SIMILARITY
 
     @classmethod
     def for_budget(cls, metric: str, budget_seconds: float) -> FrontierPolicy:
@@ -79,25 +84,24 @@ class RemainingPrior:
     effective_sessions: float
 
 
-def remaining_prior(history: tuple[SearchTree, ...], task: TaskConditions, tests: int) -> RemainingPrior | None:
+def remaining_prior(
+    history: tuple[SearchTree, ...], task: TaskConditions, tests: int, *, min_similarity: float = MIN_SIMILARITY
+) -> RemainingPrior | None:
     """What similar archived branches still gained after their ``tests``-th test; ``None`` when none got that far.
 
-    A tree's weight is its similarity, shared among its branches that count, so a wide tree weighs as much as a
-    narrow one.
+    Only trees at least ``min_similarity`` similar count. A tree's weight is its similarity, shared among its branches
+    that count, so a wide tree weighs as much as a narrow one; the prior's ``effective_sessions`` is the sum of those
+    weights, so three sessions a tenth similar count as a third of one.
     """
 
     total = weighted = 0.0
-    weights = []
-    for item in similar_trees(history, task):
+    for item in similar_trees(history, task, minimum=min_similarity):
         reached = [branch for branch in _specialists(item.tree.branches) if len(branch.test_times) >= tests]
-        if not reached:
-            continue
-        weights.append(item.weight)
         for branch in reached:
             since = sorted(branch.test_times)[tests - 1] if tests else branch.opened_s
             total += item.weight / len(reached)
             weighted += item.weight / len(reached) * (branch.final_gain_pct - branch.gain_at(since))
-    return RemainingPrior(weighted / total, effective_sessions(weights)) if total else None
+    return RemainingPrior(weighted / total, total) if total else None
 
 
 def _specialists(branches: tuple[TreeBranch, ...]) -> list[TreeBranch]:
@@ -136,12 +140,15 @@ def score_branch(
         "observing": float(_observing(snapshot, row.branch, snapshot.taken_at - policy.observation_seconds)),
     }
     expected, basis = trend, FrontierBasis.TREND
-    prior = remaining_prior(history, tree.task, len(branch.test_times))
+    prior = remaining_prior(history, tree.task, len(branch.test_times), min_similarity=policy.min_similarity)
     if prior is not None and prior.effective_sessions >= policy.min_effective_sessions:
         components.update(prior_remaining_pct=prior.remaining_pct, prior_effective_sessions=prior.effective_sessions)
         expected, basis = prior.remaining_pct, FrontierBasis.PRIOR
     if components["observing"] and expected < policy.observation_floor_pct:
         expected, basis = policy.observation_floor_pct, FrontierBasis.OBSERVING
+    young = now - branch.opened_s < policy.window_seconds and not branch.commits
+    if basis is FrontierBasis.TREND and young and expected < policy.new_branch_floor_pct:
+        expected, basis = policy.new_branch_floor_pct, FrontierBasis.NEW
     ceiling = snapshot.profile.roofline_ceiling.get(policy.metric) if snapshot.profile is not None else None
     head = row.head_value.get(policy.metric)
     if ceiling and head:
@@ -185,6 +192,7 @@ class FrontierScoring(ProgressQuery):
 
 __all__ = [
     "MIN_EFFECTIVE_SESSIONS",
+    "NEW_BRANCH_FLOOR_PCT",
     "OBSERVATION_FLOOR_PCT",
     "OBSERVATION_SECONDS",
     "REFERENCE_BUDGET_SECONDS",
