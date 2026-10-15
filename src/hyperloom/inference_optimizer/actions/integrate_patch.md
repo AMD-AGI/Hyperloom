@@ -114,7 +114,7 @@ hash and `optimization_stack` is the authoritative ledger.
 | Symptom | Cause | Mitigation |
 |---|---|---|
 | `git apply` rejects | base HEAD drifted under specialist | reject patch, record `apply_failed`, REVERT path |
-| every patch is already in the tree | the change landed upstream or in an earlier round | `already_present`, with the reverse check per patch under `already_present`; framework KB row `already_present` |
+| every patch is already in the tree | the change landed upstream or in an earlier round | `already_present`, with the reverse check per patch under `already_present`; framework KB row `already_present` when the candidate carries an upstream PR identity |
 | server fails to start | broken patch | `git checkout` + restart prior config, mark REVERT |
 | accuracy drops >0.05 absolute | semantic regression | REVERT, record into pitfalls KB |
 | throughput unchanged within keep_threshold | no-op patch | REVERT, log low-confidence specialist for the gap |

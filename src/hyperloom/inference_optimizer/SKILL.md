@@ -450,8 +450,8 @@ it came from. KEEP commits to the live tree so the next candidate stacks on
 top; REVERT does `git reset --hard`. A candidate the tree already holds is not
 benchmarked: when every patch in the set reverse-applies cleanly and the round
 changes nothing else, it ends `already_present`, with that evidence on the
-result and an `already_present` row in the framework KB. Resume skips
-completed candidates by idempotency key.
+result and, for a candidate with an upstream PR identity, an `already_present`
+row in the framework KB. Resume skips completed candidates by idempotency key.
 
 The phase exits when both arms are dry or when its budget is spent.
 
