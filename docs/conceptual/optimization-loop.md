@@ -374,8 +374,10 @@ One phase, two levers worked in parallel:
 `specialist` serves both levers — investigation, patch authoring, and
 candidate discovery are all dispatches of the one specialist action. An
 operator can add one domain of their own, `custom_specialist`, whose focus is
-the text they supply at launch; until one has started, the Coordinator
-requests it at most once per macro cycle in this phase.
+the text they supply at launch. The Coordinator alone dispatches it, once per
+macro cycle on entering this phase; it and the grid benching its proposals run
+ahead of all other queued work, and a plateau exit waits for both within the
+phase budget.
 
 With a [PrimaTune](../reference/primatune-predictor.md) endpoint configured,
 the phase also asks that predictor for a launch recipe once per decision point:
@@ -523,8 +525,16 @@ The loop adapts through facts, not through retired score tables:
 - Critic verdicts gate risky patches and framework candidates.
 - PolicyGate blocks unsafe paths, invalid envelopes, and actions whose
   structural requirements are not met before they mutate runtime state.
-  Phase fit is guided by the prompt and enforced at the phase transition
-  by dropping incompatible queued tasks.
+  Phase fit is enforced at admission: a proposal or delegate whose action
+  the current phase does not offer is refused (`phase_incompatible`)
+  before a task exists, and the phase transition drops incompatible tasks
+  still queued from the previous phase.
+- The baseline anchor every gain is measured against moves only to a
+  higher re-baseline (or a hot pass correcting a cold anchor), and only
+  until a cumulative gain has been validated
+  against it; after that a re-baseline is recorded (`anchor_held`) but the
+  anchor stays, except for an ENABLEMENT revalidation, whose patch changed
+  what the anchor measures.
 
 ## What is retired
 

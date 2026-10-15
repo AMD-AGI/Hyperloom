@@ -246,8 +246,9 @@ def _parses_as_json(value: str) -> bool:
 
 
 # A JSON "bareword": an identifier-like token that appears where a double-quoted JSON key or string value should be
-# (letters/digits/underscore plus the ``.``, ``/``, ``-`` common in model ids and paths).
-_JSON_BAREWORD = r"[+-]?[A-Za-z_][A-Za-z0-9_./-]*"
+# (letters/digits/underscore plus the ``.``, ``/``, ``-`` common in model ids and paths). It may start with ``/`` so an
+# absolute path value (a spec-decode draft ``model``) is quoted too; a bare number never matches and stays numeric.
+_JSON_BAREWORD = r"[+-]?[A-Za-z_/][A-Za-z0-9_./-]*"
 _UNQUOTED_KEY_RE = re.compile(r"([{,]\s*)(" + _JSON_BAREWORD + r")(\s*:)")
 _UNQUOTED_VALUE_RE = re.compile(r"([:\[,]\s*)(" + _JSON_BAREWORD + r")")
 

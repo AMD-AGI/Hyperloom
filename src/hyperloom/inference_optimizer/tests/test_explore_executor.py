@@ -40,6 +40,10 @@ from hyperloom.orchestrator.actions.executors.explore import (
     filter_baseline_noop_variants,
     observed_launch_from_state,
 )
+from hyperloom.orchestrator.actions.executors._launch_restatement import (
+    config_launch_restated_by,
+    restates_the_baseline,
+)
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.common.env import is_truthy
 from hyperloom.common.perf_metric import perf_snapshot_from_mapping
@@ -378,6 +382,114 @@ def test_a_setting_the_engine_rewrote_is_not_already_in_effect(tmp_path):
         # Only the rewritten settings are unknown: a plain restatement still drops.
         _, dropped = filter_baseline_noop_variants([_variant(_RESTATES_ARGV)], **kwargs)
         assert [name for name, _ in dropped] == [_CANDIDATE]
+
+
+# The operator baseline's own argv, as a vLLM stack carries it: both flags a
+# restating variant names are already set here.
+_VLLM_BASE_ARGV = "--kv-cache-dtype fp8 --enable-prefix-caching --max-num-seqs 64"
+
+
+def _vllm_noop_filter_kwargs(tmp_path: Path) -> dict:
+    base_yaml = tmp_path / "vllm_base.yaml"
+    base_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "vllm",
+                    "envs": {"VLLM_ROCM_USE_AITER": "1", "EXTRA_VLLM_ARGS": _VLLM_BASE_ARGV},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return _noop_filter_kwargs(
+        tmp_path,
+        framework="vllm",
+        base_yaml_path=base_yaml,
+        observed_server_config={"kv_cache_dtype": "fp8", "enable_prefix_caching": True, "max_num_seqs": 64},
+        observed_server_env={"VLLM_ROCM_USE_AITER": "1"},
+    )
+
+
+def test_a_variant_that_only_restates_the_baseline_launch_is_dropped(tmp_path):
+    """A variant naming flags the baseline already sets launches the baseline again, and costs a full measurement.
+
+    Its merged launch has no delta from the baseline, which is also what a change
+    the merged config cannot express looks like; the variant's own request is
+    what tells the two apart.
+    """
+    grid = [
+        GridVariant("kv-cache-fp8", extra_server_args="--kv-cache-dtype fp8"),
+        GridVariant("maxseqs-64", extra_server_args="--max-num-seqs=64"),
+        GridVariant("aiter-on", extra_envs={"VLLM_ROCM_USE_AITER": "1"}),
+        GridVariant("maxseqs-128", extra_server_args="--max-num-seqs 128"),
+        GridVariant("restates-one-changes-one", extra_server_args="--kv-cache-dtype fp8 --block-size 128"),
+    ]
+    kept, dropped = filter_baseline_noop_variants(grid, **_vllm_noop_filter_kwargs(tmp_path))
+
+    assert [name for name, _ in dropped] == ["kv-cache-fp8", "maxseqs-64", "aiter-on"]
+    assert all("baseline noop" in reason for _, reason in dropped)
+    assert [gv.name for gv in kept] == ["maxseqs-128", "restates-one-changes-one"]
+
+
+def test_a_replacing_variant_is_not_a_restatement(tmp_path):
+    """``args_mode=replace`` drops every baseline arg it does not name, which the merged-delta probe cannot show."""
+    variant = GridVariant("replace-with-a-subset", extra_server_args="--kv-cache-dtype fp8", args_mode="replace")
+    kept, dropped = filter_baseline_noop_variants([variant], **_vllm_noop_filter_kwargs(tmp_path))
+    assert [gv.name for gv in kept] == ["replace-with-a-subset"]
+    assert dropped == []
+
+
+def test_restated_args_with_a_kernel_overlay_are_not_a_restatement(tmp_path):
+    """The overlay changes the code launched; only the merged config shows it, so the variant runs."""
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    variant = GridVariant("kv-cache-fp8-with-kernel", extra_server_args="--kv-cache-dtype fp8")
+    variant.overlay_pythonpath = str(overlay)  # type: ignore[attr-defined]
+    kept, dropped = filter_baseline_noop_variants([variant], **_vllm_noop_filter_kwargs(tmp_path))
+    assert [gv.name for gv in kept] == ["kv-cache-fp8-with-kernel"]
+    assert dropped == []
+
+
+def test_a_null_baseline_env_is_unset_not_the_string_none(tmp_path):
+    """The launch leaves a null env unset, so a request for the string ``None`` sets something new."""
+    config = tmp_path / "baseline.yaml"
+    config.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "vllm", "envs": {"FOO": None, "EXTRA_VLLM_ARGS": _VLLM_BASE_ARGV}}}),
+        encoding="utf-8",
+    )
+    assert config_launch_restated_by(str(config), "", {"FOO": "None"}, "vllm") is False
+    assert config_launch_restated_by(str(config), "--kv-cache-dtype fp8", {}, "vllm") is True
+    assert config_launch_restated_by(str(tmp_path / "missing.yaml"), "--kv-cache-dtype fp8", {}, "vllm") is False
+
+
+@pytest.mark.parametrize(
+    ("argv", "envs", "base_argv", "expected"),
+    [
+        pytest.param("--kv-cache-dtype fp8", {}, _VLLM_BASE_ARGV, True, id="restated_flag"),
+        pytest.param("--enable-prefix-caching", {}, _VLLM_BASE_ARGV, True, id="restated_bare_flag"),
+        pytest.param("", {"VLLM_ROCM_USE_AITER": "1"}, _VLLM_BASE_ARGV, True, id="restated_env"),
+        pytest.param("", {}, _VLLM_BASE_ARGV, False, id="empty_request"),
+        pytest.param("--kv-cache-dtype auto", {}, _VLLM_BASE_ARGV, False, id="different_value"),
+        pytest.param("--block-size 128", {}, _VLLM_BASE_ARGV, False, id="setting_the_baseline_lacks"),
+        pytest.param("", {"VLLM_ROCM_USE_AITER": "0"}, _VLLM_BASE_ARGV, False, id="different_env"),
+        pytest.param("", {"NEW_ENV": "1"}, _VLLM_BASE_ARGV, False, id="env_the_baseline_lacks"),
+        pytest.param("fp8 --kv-cache-dtype fp8", {}, _VLLM_BASE_ARGV, False, id="positional_token"),
+        pytest.param("--kv-cache-dtype 'fp8", {}, _VLLM_BASE_ARGV, False, id="unparsable"),
+        pytest.param(
+            "--enable-prefix-caching",
+            {},
+            "--enable-prefix-caching --no-enable-prefix-caching",
+            False,
+            id="negated_spelling_in_the_baseline",
+        ),
+        pytest.param("--cuda-graph-bs 1 2 4", {}, "--cuda-graph-bs 1 2 4", True, id="list_restated_in_full"),
+        pytest.param("--cuda-graph-bs 1 2", {}, "--cuda-graph-bs 1 2 4", False, id="list_restated_in_part"),
+    ],
+)
+def test_restates_the_baseline(argv, envs, base_argv, expected):
+    """Only a request every part of which the baseline already sets is a restatement; anything unreadable is not."""
+    assert restates_the_baseline(argv, envs, base_argv, {"VLLM_ROCM_USE_AITER": "1"}, "vllm") is expected
 
 
 def test_record_explore_accepted_dedup_by_fingerprint():

@@ -672,24 +672,6 @@ def test_build_kernel_optimizations_from_state(coord: Coordinator) -> None:
 
 
 # -- phase denial gate -----------------------------------------------------
-def test_phase_denial_for_action(coord: Coordinator) -> None:
-    ss = coord.shared_state
-    ss.phase = "PRELUDE"
-    assert coord.dispatcher._phase_denial_for_action("baseline") is None
-    # ENABLEMENT runs its baseline through the Coordinator's revalidation, so an
-    # agent asking for one is refused.
-    ss.phase = "ENABLEMENT"
-    denied = coord.dispatcher._phase_denial_for_action("baseline")
-    assert denied is not None and denied.rule == "phase_incompatible"
-    assert coord.dispatcher._phase_denial_for_action("specialist") is None
-    assert coord.dispatcher._phase_denial_for_action("integrate_patch") is None
-    # The gate reserves named actions only; it is not a phase-membership check.
-    assert coord.dispatcher._phase_denial_for_action("explore") is None
-    # An unknown phase reserves nothing, so the gate abstains.
-    ss.phase = ""
-    assert coord.dispatcher._phase_denial_for_action("baseline") is None
-
-
 def test_the_coordinator_revalidation_baseline_is_not_phase_denied(coord: Coordinator) -> None:
     """The revalidation pump prices its own action and never runs the phase gate."""
     coord.shared_state.phase = "ENABLEMENT"

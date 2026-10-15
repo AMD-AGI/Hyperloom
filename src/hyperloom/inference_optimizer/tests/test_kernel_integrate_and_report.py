@@ -2450,9 +2450,10 @@ async def test_report_executor_writes_md_and_json(session_dir, record_alert):
                 payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
             ),
         )
-        # The real baseline action would have set this on completion; explore requires baseline_tput > 0
-        # (execution_order) to be proposable next.
+        # The real baseline action would have set this on completion, and PRELUDE would have handed over to
+        # FRAMEWORK_AGENT, where explore is proposable.
         c.shared_state.baseline_tput = 800.0
+        c.shared_state.phase = "FRAMEWORK_AGENT"
         await c.router.handle_intent(
             "orchestration",
             Intent(

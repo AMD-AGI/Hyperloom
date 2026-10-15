@@ -47,7 +47,6 @@ from ..bus.resource_lock import (
     _expand_lanes,
 )
 from .sub_agent_runner import SubAgentResult
-from ..specialists.domains import is_custom_specialist_dispatch
 from ..specialists.wall_budget import limit_wall_budget_extension
 from ..state.task_registry import Task, TaskNotFound
 from .time_budget import (
@@ -777,7 +776,6 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             atask.add_done_callback(self._report_spawned_failure(task))
             if task.kind == "specialist":
                 self.shared_state.note_specialist_dispatched(str((task.params or {}).get("domain") or ""))
-                self.shared_state.custom_specialist_dispatched |= is_custom_specialist_dispatch(task.params or {})
 
     @staticmethod
     def _report_spawned_failure(task: Task) -> "Callable[[asyncio.Task[Any]], None]":
@@ -985,7 +983,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         """How long a specialist of this shape is worth running, ignoring the session.
 
         A mode-tiered base (research 10min / patch 60min) amplified by the macro-cycle
-        count and hard-capped at 4h. Bench-capable patch specialists are floored
+        count and hard-capped at 4h; a no-lease-extension dispatch gets the cap. Bench-capable patch specialists are floored
         at the rebench helper's timeout plus a 10-minute startup allowance, since
         a budget under that guarantees the kill lands mid-benchmark::
 
@@ -1004,11 +1002,13 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         Returns:
             float: A positive wall-clock budget in seconds.
         """
-        from ..specialists.profile import resolve_specialist_profile, wall_budget_base_min
+        from ..specialists.profile import NO_LEASE_EXTENSION, resolve_specialist_profile, wall_budget_base_min
         from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
         macro_cycle = int(self.shared_state.macro_cycle or 0)
-        budget_sec = min(wall_budget_base_min(params) * (macro_cycle + 1), 240.0) * 60.0
+        cap_min = 240.0
+        base_min = wall_budget_base_min(params) * (macro_cycle + 1)
+        budget_sec = (cap_min if (params or {}).get(NO_LEASE_EXTENSION) else min(base_min, cap_min)) * 60.0
         if resolve_specialist_profile(params).reserves_benchmark_lane:
             budget_sec = max(budget_sec, resolve_benchmark_timeouts()[1] + 10 * 60)
         return budget_sec
@@ -1305,27 +1305,27 @@ class DispatcherCollaborator(CoordinatorCollaborator):
                 return False
         return True
 
-    def _phase_denial_for_action(
-        self,
-        action_name: str,
-    ) -> PolicyDenied | None:
-        """Refuse an action the current phase reserves for the Coordinator.
+    def _phase_denial_for_action(self, action_name: str) -> PolicyDenied | None:
+        """Refuse an action the current phase does not let an agent propose.
+
+        Before the phase machine has entered its first phase there is no
+        contract to hold the action to, so the gate abstains.
 
         Args:
             action_name: The proposed/delegated action name.
 
         Returns:
-            A :class:`PolicyDenied` when the phase reserves the action, else
-            ``None``.
+            A :class:`PolicyDenied` when the phase does not offer the action, else ``None``.
         """
         action = str(action_name or "").strip()
         phase = str(self.shared_state.phase or "").strip().upper()
-        if not _phase_state.coordinator_reserved_in_phase(action, phase):
+        proposable = _phase_state.allowed_actions_for(phase)
+        if not phase or action in proposable:
             return None
         return PolicyDenied(
-            f"action={action!r} is Coordinator-dispatched while the phase is {phase!r}",
+            f"action={action!r} is not proposable while the phase is {phase!r}",
             rule="phase_incompatible",
-            hint=f"{phase} proposes: {', '.join(_phase_state.allowed_actions_for(phase)) or '(none)'}",
+            hint=f"{phase} proposes: {', '.join(proposable) or '(none)'}",
         )
 
     def _sequence_denial_for_action(

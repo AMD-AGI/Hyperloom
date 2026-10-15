@@ -1820,6 +1820,40 @@ class WritebackCollaborator(CoordinatorCollaborator):
         "conc_sweep": "_promote_conc_sweep",
     }
 
+    def _anchor_held_reason(self, result: dict, *, is_revalidation: bool) -> str:
+        """Why a baseline result does not replace the anchor, or ``""`` when it does.
+
+        The anchor is the best measurement of the unmodified stack. A later, lower re-baseline must not replace it, or
+        downstream gains end up measured against a different reference than the one they claim. A revalidation is
+        exempt: the enablement patch changed the stack, so the prior anchor no longer describes anything reproducible.
+        """
+        tput = result.get("output_throughput")
+        if not (isinstance(tput, (int, float)) and tput > 0):
+            return "no_measurement"
+        prior_anchor = float(self.shared_state.baseline_tput or 0.0)
+        if prior_anchor <= 0.0 or is_revalidation:
+            return ""
+        # A stamped cumulative gain is measured against this anchor; moving it afterwards leaves every stamp
+        # describing a reference that no longer exists, which the report then classifies as `inconsistent`.
+        if self.shared_state.has_validated_gain_stamp:
+            return "anchor_load_bearing"
+        # A hot pass measured against a recorded COLD anchor is a correction, not a regression, so it lands even when
+        # the number is lower. The two are not comparable -- that is what the cold marker says -- and a cold figure
+        # can read higher than the hot one that replaces it whenever the "cold" pass was not really cold: weights in
+        # page cache and a JIT cache a prior run populated leave it paying none of the startup its depressed
+        # reputation assumes. Without this the session cannot escape the marker. PRELUDE refuses to finish while it
+        # is set, the retry that would clear it is rejected for measuring lower, and the run re-measures whole
+        # baseline rounds until the clock kills it.
+        hot_pass_ran = result.get("measure_round_runtime_sec")
+        corrects_a_cold_anchor = (
+            bool(self.shared_state.baseline_measure_round_dropped)
+            and isinstance(hot_pass_ran, (int, float))
+            and hot_pass_ran > 0
+        )
+        if float(tput) > prior_anchor or corrects_a_cold_anchor:
+            return ""
+        return "below_anchor"
+
     async def _promote_baseline(
         self,
         result: dict,
@@ -1842,33 +1876,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
             task_params.get("reason") == ENABLEMENT_REVALIDATION_REASON
             or (tracked_tid and tracked_tid == promoting_tid)
         )
-        # The anchor is the best measurement of the unmodified stack. A later,
-        # lower re-baseline must not replace it, or downstream gains end up
-        # measured against a different reference than the one they claim. A
-        # revalidation is exempt: the enablement patch changed the stack, so the
-        # prior anchor no longer describes anything reproducible.
         prior_anchor = float(self.shared_state.baseline_tput or 0.0)
-        # A hot pass measured against a recorded COLD anchor is a correction, not
-        # a regression, so it lands even when the number is lower. The two are not
-        # comparable -- that is what the cold marker says -- and a cold figure can
-        # read higher than the hot one that replaces it whenever the "cold" pass
-        # was not really cold: weights in page cache and a JIT cache a prior run
-        # populated leave it paying none of the startup its depressed reputation
-        # assumes. Without this the session cannot escape the marker. PRELUDE
-        # refuses to finish while it is set, the retry that would clear it is
-        # rejected for measuring lower, and the run re-measures whole baseline
-        # rounds until the clock kills it.
-        hot_pass_ran = result.get("measure_round_runtime_sec")
-        corrects_a_cold_anchor = (
-            bool(self.shared_state.baseline_measure_round_dropped)
-            and isinstance(hot_pass_ran, (int, float))
-            and hot_pass_ran > 0
-        )
-        anchor_accepted = bool(
-            isinstance(tput, (int, float))
-            and tput > 0
-            and (prior_anchor <= 0.0 or float(tput) > prior_anchor or is_revalidation or corrects_a_cold_anchor)
-        )
+        held_reason = self._anchor_held_reason(result, is_revalidation=is_revalidation)
+        anchor_accepted = not held_reason
         if isinstance(tput, (int, float)) and tput > 0:
             if anchor_accepted:
                 # The anchor is the hot measure round; the cold warmup round is
@@ -1876,10 +1886,11 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 self.shared_state.baseline_tput = float(tput)
             else:
                 log.info(
-                    "baseline anchor: keeping %.1f; re-baseline measured %.1f (task=%s)",
+                    "baseline anchor: keeping %.1f; re-baseline measured %.1f (task=%s reason=%s)",
                     prior_anchor,
                     float(tput),
                     promoting_tid,
+                    held_reason,
                 )
             self.shared_state.baseline_failure_streak = 0
             # A genuine baseline is what revalidates an enablement KEEP.
@@ -2082,6 +2093,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         }
         if not anchor_accepted and isinstance(tput, (int, float)) and tput > 0:
             audit_extras["anchor_kept_tput"] = prior_anchor
+            audit_extras["anchor_held"] = {"reason": held_reason, "prior": prior_anchor, "measured": float(tput)}
         # Present only when the probe cut a runaway eval short; explains a ~0 accuracy.
         if result.get("eval_probe"):
             audit_extras["eval_probe"] = result["eval_probe"]

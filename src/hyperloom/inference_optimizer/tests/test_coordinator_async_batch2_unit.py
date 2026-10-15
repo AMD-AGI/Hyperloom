@@ -2551,6 +2551,7 @@ def _delegate(action_name: str, key: str, params=None) -> Intent:
 @pytest.mark.asyncio
 async def test_handle_delegate_pruned_advisory(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
     monkeypatch.setattr(coord.shared_state, "is_pruned", lambda a: True)
     monkeypatch.setattr(coord.dispatcher, "_sequence_denial_for_action", lambda a: None)
     await coord.router.handle_delegate("orchestration", _delegate("explore", "d-pruned"))
@@ -2561,6 +2562,7 @@ async def test_handle_delegate_pruned_advisory(coord: Coordinator, monkeypatch) 
 async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) -> None:
     from hyperloom.orchestrator.policy.gate import PolicyDenied
 
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
     monkeypatch.setattr(
         coord.dispatcher,
         "_sequence_denial_for_action",
@@ -2577,12 +2579,13 @@ async def test_handle_delegate_sequence_denied(coord: Coordinator, monkeypatch) 
 
     monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
     await coord.router.handle_delegate("orchestration", _delegate("explore", "d-seq"))
-    assert recorded
+    assert [d.rule for d in recorded] == ["exec_order"]
 
 
 @pytest.mark.asyncio
 async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monkeypatch) -> None:
     coord.shared_state.baseline_tput = 800.0
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
     monkeypatch.setattr(coord.dispatcher, "_sequence_denial_for_action", lambda a: None)
     await coord.router.handle_delegate("orchestration", _delegate("explore", "d-same"))
     recorded: list = []
@@ -2593,7 +2596,7 @@ async def test_handle_delegate_duplicate_running_denied(coord: Coordinator, monk
     monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
     # Same key while the first task is still queued (non-terminal) -> denied.
     await coord.router.handle_delegate("orchestration", _delegate("explore", "d-same"))
-    assert recorded
+    assert [d.rule for d in recorded] == ["duplicate_idempotency_key_running"]
 
 
 # -- maybe_autosubmit_specialist_patches early returns ---------------------

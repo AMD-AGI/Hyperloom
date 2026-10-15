@@ -77,6 +77,7 @@ from ._inferencex_patcher import (
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 from ...measurement.runtime_findings import persist_runtime_findings, scan_server_log
 from ._server_argv import seal_server_argv
+from ._spec_decode_pin import SPECULATIVE_DECODING_PINNED, refuse_unpinned_speculative_change
 
 # Re-exported from sibling modules to keep the module namespace intact.
 from ._grid_base import (
@@ -429,17 +430,14 @@ def _build_variant_yaml(
     )
     extra_args_env = server_args_env_name(bench.get("framework"))
 
-    variant_remove = to_str_list(getattr(variant, "remove_args", []))
-    # A replacing base drops the inherited string wholesale, so only the
-    # variant's own removals still name flags that survive to be stripped.
-    effective_remove = (
-        variant_remove if replacing else list(dict.fromkeys(to_str_list(base_remove_args) + variant_remove))
-    )
+    # A replacing base drops the inherited string wholesale, so its own removals have nothing left to strip.
+    inherited, base_remove = ("", []) if replacing else (str(envs.get(extra_args_env, "")), base_remove_args)
+    base_args = compose_server_args(inherited_args=inherited, base_extra_args=base_extra_args, remove_args=base_remove)
     combined = compose_server_args(
-        inherited_args="" if replacing else str(envs.get(extra_args_env, "")),
+        inherited_args=inherited,
         base_extra_args=base_extra_args,
         variant_extra_args=variant.extra_server_args,
-        remove_args=effective_remove,
+        remove_args=to_str_list(base_remove) + to_str_list(getattr(variant, "remove_args", [])),
         args_mode=getattr(variant, "args_mode", "append"),
     )
     # A grid variant never injects a MoE runner backend itself, but it does inherit one -- from the baseline recipe it
@@ -467,6 +465,7 @@ def _build_variant_yaml(
         envs.pop(k, None)
     for k, v in (base_extra_envs or {}).items():
         envs[str(k)] = str(v)
+    base_envs = dict(envs)
     for k in getattr(variant, "unset_envs", []) or []:
         # Unsetting a pin retargets the benchmark rather than toggling a knob.
         if str(k).strip().upper() in BLOCKED_EXTERNAL_ENV_NAMES:
@@ -510,6 +509,7 @@ def _build_variant_yaml(
     _rt_override = getattr(variant, "runtime_override", None) or {}
     if _rt_override:
         apply_runtime_override(envs, _rt_override)
+    refuse_unpinned_speculative_change(base_args, base_envs, combined, envs)
 
     # PATH guard: the xdit wrapper needs both `/venv/bin` (the `xdit` console script) and `/opt/rocm/bin` (`hipcc`);
     # force-prepend both so an LLM-supplied PATH can't drop one.
@@ -1119,7 +1119,7 @@ async def run_grid(
                     base_unset_envs=base_unset_envs,
                 )
             except Exception as exc:  # noqa: BLE001
-                build_error = "yaml_build_error"
+                build_error = getattr(exc, "error_class", "yaml_build_error")
                 log.warning(
                     "grid_runner: variant %d/%d name=%s aborted: %s: %r",
                     i + 1,
@@ -2090,6 +2090,7 @@ def _attach_grid_launch_evidence(
             "capability_unsupported",
             "yaml_build_error",
             "warmup_yaml_build_error",
+            SPECULATIVE_DECODING_PINNED,
         }:
             continue
         slot = output_root / f"variant_{idx:02d}_{_safe(grid[idx].name)}"

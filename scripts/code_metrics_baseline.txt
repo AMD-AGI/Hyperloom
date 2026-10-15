@@ -145,7 +145,7 @@ cognitive-complexity src/hyperloom/orchestrator/loop/intent_router.py::IntentRou
 cognitive-complexity src/hyperloom/orchestrator/loop/sub_agent_runner.py::SubAgentRunner.run_task 52
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._drain_agent_keep_outbox 34
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._keep_patch_sources 42
-cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_baseline 100
+cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_baseline 97
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_explore 237
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_integrate_patch 63
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._replay_keep_from_result 40
@@ -1069,7 +1069,7 @@ function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/session.py::render 93
 function-lines src/hyperloom/inference_optimizer/breakdown/session_package.py::package_session_artifacts 105
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_export_partition_shape 103
-function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 277
+function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 275
 function-lines src/hyperloom/inference_optimizer/cli/bootstrap.py::_seed_shared_state 155
 function-lines src/hyperloom/inference_optimizer/cli/executors.py::_build_specialist_executor 99
 function-lines src/hyperloom/inference_optimizer/cli/kb.py::_bootstrap_recipe_kb 91
@@ -1103,7 +1103,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/_framework_rewrite_e
 function-lines src/hyperloom/orchestrator/actions/executors/_framework_switch_manifest.py::parse_manifest 95
 function-lines src/hyperloom/orchestrator/actions/executors/_geak_sweep.py::sweep_via_geak 217
 function-lines src/hyperloom/orchestrator/actions/executors/_gpu_pin.py::resolve_gpu_pin 105
-function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_build_variant_yaml 138
+function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_build_variant_yaml 137
 function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_run_magpie 125
 function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 1040
 function-lines src/hyperloom/orchestrator/actions/executors/_kernel_agent_tool.py::materialize_unified_patch_snapshot 94
@@ -1241,7 +1241,7 @@ function-lines src/hyperloom/orchestrator/loop/coordinator.py::Coordinator.__ini
 function-lines src/hyperloom/orchestrator/loop/coordinator.py::Coordinator._reactor_turn 97
 function-lines src/hyperloom/orchestrator/loop/coordinator.py::Coordinator._run_ticks 150
 function-lines src/hyperloom/orchestrator/loop/coordinator.py::_infer_model_class_from_config 83
-function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator._spawn_fitting_queued 240
+function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator._spawn_fitting_queued 239
 function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator.reap_dispatched_task 157
 function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator.run_task_registered 109
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_request 214
@@ -1249,7 +1249,7 @@ function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._h
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter.handle_delegate 179
 function-lines src/hyperloom/orchestrator/loop/proposals.py::ProposalsCollaborator.materialize_approved_proposal 124
 function-lines src/hyperloom/orchestrator/loop/sub_agent_runner.py::SubAgentRunner.run_task 177
-function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_baseline 301
+function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_baseline 279
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_explore 493
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_integrate_patch 152
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_profile 98
@@ -1289,7 +1289,7 @@ function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_ker
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 425
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.promote_geak_from_candidate 165
 function-lines src/hyperloom/orchestrator/phases/kernel_stack.py::KernelStackPhase._run_kernel_stack_validation_e2e 220
-function-lines src/hyperloom/orchestrator/phases/machine.py::MachinePhase.advance_phase_if_needed 152
+function-lines src/hyperloom/orchestrator/phases/machine.py::MachinePhase.advance_phase_if_needed 149
 function-lines src/hyperloom/orchestrator/phases/machine_state.py::record_phase_transition 93
 function-lines src/hyperloom/orchestrator/phases/machine_state.py::replay_next_phase 167
 function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._judge_warm_replay_accuracy 123
@@ -1504,7 +1504,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1615
 module-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py 1240
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2261
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4253
-module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1905
+module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1880
 module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4799
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1565
 module-lines src/hyperloom/orchestrator/actions/executors/report.py 1391
@@ -1521,9 +1521,9 @@ module-lines src/hyperloom/orchestrator/loop/intent_router.py 1548
 module-lines src/hyperloom/orchestrator/loop/writeback.py 4748
 module-lines src/hyperloom/orchestrator/phases/framework.py 3139
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4227
-module-lines src/hyperloom/orchestrator/phases/machine_state.py 2239
+module-lines src/hyperloom/orchestrator/phases/machine_state.py 2232
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2640
-module-lines src/hyperloom/orchestrator/policy/gate.py 1626
+module-lines src/hyperloom/orchestrator/policy/gate.py 1608
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2571
 module-lines src/hyperloom/orchestrator/roles/critic_agent.py 1299

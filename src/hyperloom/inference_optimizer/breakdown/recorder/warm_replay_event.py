@@ -86,6 +86,7 @@ SKIP_RECIPE_NOT_REPLAYABLE = "recipe_not_replayable"
 SKIP_RECIPE_READ_FAILED = "recipe_read_failed"
 SKIP_CONFIDENCE_BELOW_THRESHOLD = "confidence_below_threshold"
 SKIP_BEST_CONFIG_EMPTY = "best_config_empty"
+SKIP_RESTATES_BASELINE = "restates_baseline"
 SKIP_WORKLOAD_CONFIG_INCOMPATIBLE = "workload_config_incompatible"
 SKIP_FRAMEWORK_ROOT_MISSING = "framework_root_missing"
 SKIP_KERNEL_ROOT_MISSING = "kernel_root_missing"
@@ -141,6 +142,7 @@ __all__ = [
     "SKIP_NO_WARM_START_RECIPE",
     "SKIP_RECIPE_NOT_REPLAYABLE",
     "SKIP_RECIPE_READ_FAILED",
+    "SKIP_RESTATES_BASELINE",
     "SKIP_WORKLOAD_CONFIG_INCOMPATIBLE",
     "STATUS_BY_OUTCOME",
     "WarmReplayEventRecorder",
