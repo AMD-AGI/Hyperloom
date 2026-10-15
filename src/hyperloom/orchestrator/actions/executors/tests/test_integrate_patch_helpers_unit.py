@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.actions.executors import _git as gitmod
+from hyperloom.orchestrator.actions.executors import _patch_set_apply as psa
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 
 
@@ -598,9 +599,10 @@ def test_a_patch_that_does_not_apply_leaves_the_tree_untouched(tmp_path):
         "diff --git a/g.py b/g.py\nnew file mode 100644\n--- /dev/null\n+++ b/g.py\n@@ -0,0 +1 @@\n+created\n"
     )
 
-    ok, _, feedback = ip._git_apply_collect_feedback(repo, patch)
+    result = psa._git_apply_collect_feedback(repo, patch)
 
-    assert not ok and feedback is not None
+    assert not result.ok and result.feedback is not None
+    assert result.present_by is None
     assert _git_out(repo, "status", "--porcelain") == ""
 
 

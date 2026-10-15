@@ -1359,18 +1359,16 @@ def _apply_warm_patches(
         try:
             if use_nogit:
                 backup_root = patch_log_dir / "patch_backups"
-                ok, err, backups, _feedback = _apply_patch_no_git(
+                nogit_apply = _apply_patch_no_git(
                     target_path,
                     patch_path,
                     backup_root,
                     seq_offset=len(nogit_backups),
                 )
-                if not ok:
-                    raise RuntimeError(err or "nogit patch apply failed")
-                nogit_backups.extend(backups)
-                # A real apply backs up every file it writes, so an empty set is the
-                # applier reporting an overlay the tree already carried.
-                method = "applied_nogit" if backups else "already_present"
+                if not nogit_apply.ok:
+                    raise RuntimeError(nogit_apply.error or "nogit patch apply failed")
+                nogit_backups.extend(nogit_apply.backups)
+                method = "already_present" if nogit_apply.present_by else "applied_nogit"
             else:
                 checked = subprocess.run(
                     ["git", "apply", "--check", str(patch_path)],

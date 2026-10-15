@@ -22,9 +22,9 @@ from hyperloom.orchestrator.tests._helpers import (
 
 from hyperloom.orchestrator.actions.executors import _setup_replay as sr_mod
 from hyperloom.orchestrator.actions.executors._accuracy_gate import framework_run_eval_envs
+from hyperloom.orchestrator.actions.executors._nogit_patch import _apply_patch_no_git
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
-    _apply_patch_no_git,
     _git_apply,
     _git_apply_reverse,
     _is_git_tree,
@@ -2061,11 +2061,11 @@ def test_apply_patch_no_git_rejects_path_traversal_before_apply(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    ok, err, backups, *_ = _apply_patch_no_git(framework_root, patch_file, tmp_path / "backups")
+    result = _apply_patch_no_git(framework_root, patch_file, tmp_path / "backups")
 
-    assert ok is False
-    assert "escapes framework root" in err
-    assert backups == []
+    assert result.ok is False
+    assert "escapes framework root" in result.error
+    assert result.backups == []
     assert outside.read_text(encoding="utf-8") == "SAFE\n"
     assert len(calls) == 1
 
@@ -2653,7 +2653,7 @@ async def test_executor_refuses_an_unvetted_blob_without_invoking_git(tmp_path: 
         raise AssertionError("git apply was reached with an unvetted patch")
 
     monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.integrate_patch._git_apply_collect_feedback",
+        "hyperloom.orchestrator.actions.executors._patch_set_apply._git_apply_collect_feedback",
         _explode,
     )
 
