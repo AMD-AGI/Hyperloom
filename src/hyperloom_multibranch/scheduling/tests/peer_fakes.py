@@ -3,10 +3,9 @@
 
 """Stand-ins for the peers a session runs on, the toolbox's own fake, and a virtual clock, for the tests.
 
-Each ``MbFake`` class stands in for another owner's module until it lands: the specialist runtime
-(``hyperloom_multibranch.specialist``) as its lifecycle and a specialist's candidate loop, plus the main-flow child of
-PRELUDE. Every scheduling test uses these, scripted through their fields, and subclasses them only for a failure
-double; they are replaced by the real modules once those land. The toolbox is the toolbox module's
+Each ``MbFake`` class stands in for another owner's module until it lands: the main-flow child of PRELUDE. The
+specialist lifecycle is the specialist runtime itself on scripted sessions (:class:`RecordedSessions`,
+:func:`specialist_runtime`). The toolbox is the toolbox module's
 :class:`~hyperloom_multibranch.toolbox.fake.FakeToolbox`, noise-free and noting what the scheduler asked of it; what a
 test measures follows from the recipe it measures (:func:`recipe_effect`). The experiment repository and the rule gate
 are their owners' own; :func:`session_gate` is the gate's session service as the session's peers build it.
@@ -30,12 +29,13 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.perf_metric import GRADED_OUTPUT
-from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest, TestResult
+from hyperloom.contracts.measurement import TestRequest, TestResult
 from hyperloom.contracts.recipe import ConfigDelta, PatchRef, Recipe, RecipeDelta, apply
 from hyperloom.measure.compile import BlobStore
-from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission
+from hyperloom_multibranch.contracts.fork import ForkAdmission, ForkAdmissionService, ForkRequest, RepairRequest
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
-from hyperloom_multibranch.contracts.notebook.interfaces import RecordSearch
+from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.notebook.interfaces import SnapshotQuery
 from hyperloom_multibranch.contracts.repo import ExperimentRepo, RepoMerge
 from hyperloom_multibranch.contracts.toolbox import CancelOutcome, QueueState
 from hyperloom_multibranch.repo.git_repo import RECIPE_FILE, GitExperimentRepo
@@ -46,9 +46,12 @@ from hyperloom_multibranch.rulegate.inferencex import InferenceXReading
 from hyperloom_multibranch.rulegate.readings import inferencex_reading
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
 from hyperloom_multibranch.rulegate.service import GateNotebook, GateService
+from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.local_peers import GATE_WRITER
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
-from hyperloom_multibranch.scheduling.requests import SessionTests
+from hyperloom_multibranch.specialist.runtime import SessionFactory, SpecialistRuntime
+from hyperloom_multibranch.specialist.scripted import BranchHeads, ScriptedSession
 from hyperloom_multibranch.toolbox.fake import FakeToolbox, ToolboxNotebook
 from hyperloom_multibranch.toolbox.fake_model import DEFAULT_BASELINE, FakeToolboxConfig, NoiseModel
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
@@ -73,7 +76,8 @@ if float(linger):
 sys.exit(int(code))
 """
 
-SpecialistScript = Callable[[str, str], Awaitable[None]]
+#: What a test's specialist does on its branch before it proposes its script.
+SessionStep = Callable[[str], Awaitable[None]]
 
 
 class _HoldingExecutor(ThreadPoolExecutor):
@@ -300,60 +304,127 @@ class MbFakeHeldRegistry(MbFakeChildRegistry):
             self._time.release()
 
 
-class MbFakeLifecycle:
-    """Stands in for the specialist runtime's lifecycle: runs each started branch's scripted specialist as a task, and
-    holds the scheduler to the lifecycle contract, raising on a second start of a branch and on a stop or a K of a
-    branch it does not run.
+#: Real seconds the specialist runtime of the tests and its scripted sessions wait between two reads of the notebook.
+SPECIALIST_POLL_SECONDS = 0.01
 
-    ``running`` and ``k`` are the branches running now, at their start commit, and their K; ``started`` and ``last_k``
-    keep every branch's start commit and the last K it was given after it stopped; ``stopped`` lists every stop asked for. Stopping a branch in
-    ``refusing`` raises, and stopping one in ``hanging`` never returns. Deleted once ``hyperloom_multibranch.specialist``
-    ships a real lifecycle and these tests run on it.
+
+class RecordedSession:
+    """One run of :class:`RecordedSessions`: its branch's ``step``, if any, then its scripted session."""
+
+    def __init__(self, owner: RecordedSessions, branch: str, inner: ScriptedSession, step: SessionStep | None) -> None:
+        self._owner = owner
+        self._branch = branch
+        self._inner = inner
+        self._step = step
+
+    async def run(self) -> None:
+        if self._step is not None:
+            await self._step(self._branch)
+        await self._inner.run()
+
+    async def set_k(self, k: int) -> None:
+        self._owner.k[self._branch] = k
+        await self._inner.set_k(k)
+
+    async def stop(self) -> None:
+        self._owner.stopped.append(self._branch)
+        if self._branch in self._owner.hanging:
+            await asyncio.Event().wait()
+        await self._inner.stop()
+        self._owner.running.discard(self._branch)
+
+
+class RecordedSessions:
+    """The specialist runtime's session factory in the tests: every run is a
+    :class:`~hyperloom_multibranch.specialist.scripted.ScriptedSession` of its branch's script, after the branch's
+    ``step`` when one is given; a branch without a script idles until it is stopped.
+
+    ``started`` keeps the start commit of every branch a run started on, ``k`` its last K and ``quota_at_start`` the K
+    the toolbox's policy gave it as its first run started; ``running`` holds the branches whose last run was not
+    stopped, and ``stopped`` every stop a run was asked for. A run of a branch in ``hanging`` never returns from its
+    stop, a failure double. Not a placeholder: the scripted session is the specialist runtime's own.
     """
 
     def __init__(
         self,
-        scripts: Mapping[str, SpecialistScript] | None = None,
-        refusing: frozenset[str] = frozenset(),
+        toolbox: RecordingToolbox,
+        repo: BranchHeads,
+        notebook: SnapshotQuery,
+        *,
+        scripts: Mapping[str, Sequence[RecipeDelta]] | None = None,
+        steps: Mapping[str, SessionStep] | None = None,
         hanging: frozenset[str] = frozenset(),
     ) -> None:
-        self.scripts = dict(scripts or {})
-        self.refusing = refusing
+        self._toolbox = toolbox
+        self._repo = repo
+        self._notebook = notebook
+        self._scripts = dict(scripts or {})
+        self._steps = dict(steps or {})
         self.hanging = hanging
-        self.running: dict[str, str] = {}
-        self.k: dict[str, int] = {}
         self.started: dict[str, str] = {}
-        self.last_k: dict[str, int] = {}
+        self.k: dict[str, int] = {}
+        self.quota_at_start: dict[str, int | None] = {}
+        self.running: set[str] = set()
         self.stopped: list[str] = []
-        self._tasks: dict[str, asyncio.Future[None]] = {}
 
-    async def start(self, branch: str, start_commit: str) -> None:
-        if branch in self.running:
-            raise ValueError(f"branch {branch!r} already has a specialist")
-        self.running[branch] = self.started[branch] = start_commit
-        self.k[branch] = self.last_k[branch] = 1
-        if branch in self.scripts:
-            self._tasks[branch] = asyncio.ensure_future(self.scripts[branch](branch, start_commit))
+    def __call__(self, branch: str, start_commit: str, k: int) -> RecordedSession:
+        if branch not in self.started:
+            policies = self._toolbox.policies
+            self.quota_at_start[branch] = policies[-1].branch_k.get(branch) if policies else None
+        self.started.setdefault(branch, start_commit)
+        self.k[branch] = k
+        self.running.add(branch)
+        script = self._scripts.get(branch, ())
+        inner = ScriptedSession(
+            branch, script, k, self._toolbox, self._repo, self._notebook, poll_seconds=SPECIALIST_POLL_SECONDS
+        )
+        return RecordedSession(self, branch, inner, self._steps.get(branch))
+
+
+class RefusingRuntime(SpecialistRuntime):
+    """The specialist runtime, refusing to stop a branch while it is in ``refusing`` and leaving it running; a
+    failure double, not a placeholder."""
+
+    refusing: frozenset[str] = frozenset()
 
     async def stop(self, branch: str) -> None:
-        self.stopped.append(branch)
         if branch in self.refusing:
             raise RuntimeError(f"the runtime refused to stop {branch}")
-        if branch in self.hanging:
-            await asyncio.Event().wait()
-        del self.running[branch], self.k[branch]
-        task = self._tasks.pop(branch, None)
-        if task is not None:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        await super().stop(branch)
 
-    async def set_k(self, branch: str, k: int) -> None:
-        if branch not in self.running:
-            raise KeyError(branch)
-        if k < 1:
-            raise ValueError("stop the branch instead of giving it no room")
-        self.k[branch] = self.last_k[branch] = k
+
+class NoForks:
+    """Branch requests no specialist of these tests makes; a test double, not a placeholder."""
+
+    async def admit(self, request: ForkRequest) -> ForkAdmission:
+        raise AssertionError("no fork is asked for here")
+
+    async def admit_repair(self, request: RepairRequest) -> ForkAdmission:
+        raise AssertionError("no repair is asked for here")
+
+
+def specialist_runtime(
+    notebook: Path,
+    toolbox: RecordingToolbox,
+    repo: ExperimentRepo,
+    sessions: SessionFactory,
+    *,
+    now: Callable[[], float],
+    desk: ForkAdmissionService | None = None,
+    runtime: type[RefusingRuntime] = RefusingRuntime,
+) -> RefusingRuntime:
+    """The specialist runtime of the notebook at ``notebook`` on the tests' toolbox, judging on the InferenceX rule at
+    the conc ``toolbox`` measures at, as the session's peers build it; ``desk`` answers its branch requests."""
+
+    gate_notebook = LocalNotebook(notebook, Writer(Role.GATE, GATE_WRITER), clock=now)
+    (conc,) = toolbox.config.main_concurrency
+
+    def notebook_for(branch: str) -> LocalNotebook:
+        return LocalNotebook(notebook, Writer(Role.SPECIALIST_RUNTIME, branch, branch), clock=now)
+
+    gate = RuleGate(gate_notebook, repo, desk or NoForks())
+    rule = InferenceXRule(gate_notebook, conc)
+    return runtime(notebook_for, gate, toolbox, rule, sessions, poll_seconds=SPECIALIST_POLL_SECONDS)
 
 
 #: What a recipe measures, by the tags its server arguments carry: its primary-metric value per conc, the main
@@ -506,50 +577,6 @@ def judged(verdict: Verdict, gain_pct: float, request_id: str, value: float) -> 
 
 
 @dataclass
-class MbFakeSpecialist:
-    """Stands in for a specialist's candidate loop: measures a scripted change on its branch through the toolbox and
-    lands the judgement scripted for it through the rule gate, which commits, records or asks for a fork.
-
-    Deleted once ``hyperloom_multibranch.specialist`` ships a real specialist and the skeleton runs on it.
-    """
-
-    gate: RuleGate
-    tests: SessionTests
-    notebook: RecordSearch
-    repo: ExperimentRepo
-
-    async def measure(self, branch: str, change: RecipeDelta) -> TestRequest:
-        parent = await self.repo.head(branch)
-        test = TestRequest(
-            kind=TestKind.TEST, purpose=Purpose.EXPLORE, branch_id=branch, parent_commit=parent, delta=change
-        )
-        measured = await self.tests.result(test)
-        return (await self.notebook.record(measured.request_id)).request
-
-    async def commit(self, branch: str, change: RecipeDelta, value: float) -> str:
-        """``change`` on ``branch``, confirmed at ``value``; returns the commit it made."""
-
-        measured = await self.measure(branch, change)
-        gain = (value / BASELINE_VALUE - 1.0) * 100.0
-        await self.gate.settle(measured, judged(Verdict.IMPROVED, gain, measured.request_id, value))
-        return await self.repo.head(branch)
-
-    async def fork(self, branch: str, fix: RecipeDelta, reason: str) -> ForkAdmission:
-        """A correctness fix on ``branch`` that regresses there, asked onto a branch of its own; an accepted fork is cut
-        and the fix landed on it, as the fork contract has the gate's caller do."""
-
-        measured = await self.measure(branch, fix)
-        slower = replace(judged(Verdict.REGRESSED, -2.0, measured.request_id, 980.0), fixes_correctness=True)
-        admission = await self.gate.fork(measured, slower, reason)
-        if admission.status is AdmissionStatus.ACCEPTED:
-            parent = measured.parent_commit
-            await self.repo.create_branch(admission.branch, parent)
-            fixed = apply(await self.repo.read_recipe(parent), fix)
-            await self.repo.commit(admission.branch, parent, fixed, reason)
-        return admission
-
-
-@dataclass
 class ScriptedCompletion:
     """A model for the tests: raises ``error`` when it is set, else the scripted replies in order, then ``fallback``.
 
@@ -581,14 +608,18 @@ __all__ = [
     "HeldGitRepo",
     "MbFakeChildRegistry",
     "MbFakeHeldRegistry",
-    "MbFakeLifecycle",
-    "MbFakeSpecialist",
+    "NoForks",
+    "RecordedSession",
+    "RecordedSessions",
     "RecordingToolbox",
+    "RefusingRuntime",
+    "SPECIALIST_POLL_SECONDS",
     "ScriptedCompletion",
-    "SpecialistScript",
+    "SessionStep",
     "StuckToolbox",
     "VirtualClock",
     "session_gate",
+    "specialist_runtime",
     "judged",
     "recipe_effect",
     "recipe_tags",

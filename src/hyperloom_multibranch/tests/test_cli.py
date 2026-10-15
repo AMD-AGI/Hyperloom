@@ -13,7 +13,7 @@ import pytest
 
 from hyperloom_multibranch import cli
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS
-from hyperloom_multibranch.scheduling.local_peers import MB_FAKE_MISSING_PEER_MODULES
+from hyperloom_multibranch.scheduling.local_peers import MB_FAKE_MISSING_SESSION_FACTORY
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import RunSettings, Workload
 
@@ -112,7 +112,7 @@ def test_run_without_peers_fails_loudly_before_creating_anything(
     assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
 
     captured = capsys.readouterr()
-    assert all(module in captured.err for module in MB_FAKE_MISSING_PEER_MODULES)
+    assert MB_FAKE_MISSING_SESSION_FACTORY in captured.err
     assert captured.out == ""
     assert not any(tmp_path.iterdir())
 

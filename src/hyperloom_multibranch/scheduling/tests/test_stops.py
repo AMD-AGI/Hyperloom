@@ -38,7 +38,13 @@ from hyperloom_multibranch.scheduling.roster import (
     StopCause,
 )
 from hyperloom_multibranch.scheduling.stops import STOP_OVERRAN, SessionStopper, SessionStopReason, StopSignals
-from hyperloom_multibranch.scheduling.tests.peer_fakes import TOOLBOX_DOWN, DownToolbox, MbFakeLifecycle
+from hyperloom_multibranch.scheduling.tests.peer_fakes import (
+    SPECIALIST_POLL_SECONDS,
+    TOOLBOX_DOWN,
+    DownToolbox,
+    RecordedSessions,
+    specialist_runtime,
+)
 from hyperloom_multibranch.toolbox.queue import BRANCH_STOPPED
 
 NOW = 1_700_000_000.0
@@ -62,12 +68,15 @@ class KeepingToolbox(DownToolbox):
 
 class Stage:
     """A roster with the integration branch, ``b01`` running, ``b02`` stopped by the judge and ``b03`` an admitted fork,
-    stopped through the real :class:`BranchControl` over the peer stand-ins."""
+    stopped through the real :class:`BranchControl` and specialist runtime over the peer stand-ins; the runtime refuses
+    to stop a branch in ``refusing``, and the run of a branch in ``hanging`` never confirms its stop."""
 
     def __init__(
         self,
         tmp_path: Path,
-        lifecycle: MbFakeLifecycle | None = None,
+        *,
+        refusing: frozenset[str] = frozenset(),
+        hanging: frozenset[str] = frozenset(),
         toolbox_type: type[DownToolbox] = DownToolbox,
     ) -> None:
         clock = Clock(now=lambda: NOW)
@@ -79,12 +88,14 @@ class Stage:
         self.toolbox = toolbox_type(
             LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"), clock=clock.now)
         )
-        self.lifecycle = lifecycle or MbFakeLifecycle()
         self.repo_path = tmp_path / "repo"
         self.root = ""
         self.repo = GitExperimentRepo(self.repo_path, LocalBlobStore(tmp_path / "blobs"))
+        self.sessions = RecordedSessions(self.toolbox, self.repo, self.notebook, hanging=hanging)
+        self.runtime = specialist_runtime(tmp_path / "notebook", self.toolbox, self.repo, self.sessions, now=clock.now)
+        self.runtime.refusing = refusing
         self.branches = BranchControl(
-            self.roster, self.notebook, self.lifecycle, self.toolbox, self.repo, self.processes, decisions, clock
+            self.roster, self.notebook, self.runtime, self.toolbox, self.repo, self.processes, decisions, clock
         )
         self.stopper = SessionStopper(self.roster, self.branches, self.toolbox, self.processes, decisions, clock)
 
@@ -94,9 +105,10 @@ class Stage:
         await self.notebook.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=self.root))
         self.roster.add_integration(self.root, k=1)
         await self.branches.open_branches(2, self.root, 1, BranchOrigin.FIRST_BATCH, HARD_STOP)
+        await asyncio.sleep(SPECIALIST_POLL_SECONDS)
         await self.branches.stop_branch("b02", JUDGE_STOP)
         self.roster.open("b03", origin=BranchOrigin.FORK, start_commit="", k=1, from_branch="b01")
-        self.lifecycle.stopped.clear()
+        self.sessions.stopped.clear()
         self.toolbox.cancelled.clear()
         return self
 
@@ -132,7 +144,7 @@ async def test_end_exploration_stops_open_specialists_and_keeps_integration(tmp_
     ended = _ended(SessionStopReason.TIME_EXHAUSTED)
     fork = _ended_with_b01(SessionStopReason.TIME_EXHAUSTED)
     assert session.stops() == {INTEGRATION_BRANCH: None, "b01": ended, "b02": JUDGE_STOP, "b03": fork}
-    assert session.lifecycle.stopped == ["b01"]
+    assert session.sessions.stopped == ["b01"]
     assert dict(session.toolbox.policies[-1].branch_k) == {INTEGRATION_BRANCH: 1}
     assert session.roster.free_slots() == 0
     with pytest.raises(RosterFull):
@@ -140,7 +152,7 @@ async def test_end_exploration_stops_open_specialists_and_keeps_integration(tmp_
 
 
 async def test_a_failed_branch_stop_does_not_hold_up_the_end_of_exploration(tmp_path: Path) -> None:
-    session = await Stage(tmp_path, MbFakeLifecycle(refusing=frozenset({"b01"}))).opened()
+    session = await Stage(tmp_path, refusing=frozenset({"b01"})).opened()
 
     await session.stopper.end_exploration(SessionStopReason.GLOBAL_CONVERGED)
 
@@ -170,7 +182,7 @@ async def test_stop_everything_withdraws_every_branch_closes_the_toolbox_and_lea
 
 
 async def test_a_failed_branch_stop_is_reported_and_every_process_still_killed(tmp_path: Path) -> None:
-    session = await Stage(tmp_path, MbFakeLifecycle(refusing=frozenset({"b01"}))).opened()
+    session = await Stage(tmp_path, refusing=frozenset({"b01"})).opened()
     pids = await session.spawn_trees(tmp_path, ("b01",))
 
     report = await session.stopper.stop_everything(SessionStopReason.PRELUDE_FAILED, HARD_STOP)
@@ -180,7 +192,7 @@ async def test_a_failed_branch_stop_is_reported_and_every_process_still_killed(t
         "RuntimeError: the runtime refused to stop b01",
         "the specialist of b01 did not confirm its stop",
     )
-    assert session.lifecycle.stopped == ["b01", "b01"]
+    assert session.sessions.stopped == [] and session.sessions.running == {"b01"}
     assert not any(running(pid) for pid in pids)
     assert await session.processes.leftovers() == ()
 
@@ -189,23 +201,23 @@ async def test_a_specialist_that_did_not_stop_at_the_end_of_explore_is_asked_aga
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(branches, "SPECIALIST_CALL_SECONDS", 0.1)
-    session = await Stage(tmp_path, MbFakeLifecycle(hanging=frozenset({"b01"}))).opened()
+    session = await Stage(tmp_path, hanging=frozenset({"b01"})).opened()
     await session.stopper.end_exploration(SessionStopReason.GLOBAL_CONVERGED)
 
     report = await session.stopper.stop_everything(SessionStopReason.GLOBAL_CONVERGED, HARD_STOP)
 
-    assert session.lifecycle.stopped == ["b01", "b01"] and "b01" in session.lifecycle.running
+    assert session.sessions.stopped == ["b01"] and session.sessions.running == {"b01"}
     assert report.failures == ("the specialist of b01 did not confirm its stop",) and not report.clean
 
 
 async def test_a_stop_that_overruns_the_hard_stop_is_cut_and_every_process_killed(tmp_path: Path) -> None:
-    session = await Stage(tmp_path, MbFakeLifecycle(hanging=frozenset({"b01"}))).opened()
+    session = await Stage(tmp_path, hanging=frozenset({"b01"})).opened()
     pids = await session.spawn_trees(tmp_path, ("b01", "b03"))
 
     report = await session.stopper.stop_everything(SessionStopReason.TIME_EXHAUSTED, NOW + SHORT_GRACE)
 
     assert STOP_OVERRAN in report.failures and not report.clean
-    assert session.lifecycle.stopped == ["b01"]
+    assert session.sessions.stopped == ["b01"]
     assert session.toolbox.withdrawals == [SessionStopReason.TIME_EXHAUSTED.value]
     assert not any(running(pid) for pid in pids)
     assert session.roster.closed
@@ -220,7 +232,7 @@ async def test_a_failing_toolbox_is_reported_and_every_branch_still_stopped(tmp_
     assert report.failures and set(report.failures) == {f"ConnectionError: {TOOLBOX_DOWN}"}
     assert report.queue is None and not report.clean
     assert all(stop is not None for stop in session.stops().values())
-    assert sorted(session.lifecycle.stopped) == ["b01"]
+    assert session.sessions.stopped == ["b01"]
 
 
 async def test_a_test_of_a_stopped_branch_is_refused(tmp_path: Path) -> None:
@@ -236,7 +248,7 @@ async def test_every_test_is_withdrawn_whatever_branch_it_is_of(tmp_path: Path) 
     session = await Stage(tmp_path).opened()
     session.toolbox.executor.gate.clear()
     held = await session.toolbox.submit_test(TestRequest(TestKind.TEST, Purpose.EXPLORE, "b01", session.root))
-    session.lifecycle.hanging = frozenset({"b01"})
+    session.sessions.hanging = frozenset({"b01"})
 
     report = await session.stopper.stop_everything(SessionStopReason.GLOBAL_CONVERGED, NOW + SHORT_GRACE)
 

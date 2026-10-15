@@ -45,8 +45,9 @@ class PeerSetup:
     ``workload`` is the measurement surface: the toolbox measures every test and sweep of the session on it, so a
     test request carries no operating point of its own. ``desk`` is what the specialist runtime builds its rule gates
     on. ``processes`` is the session's process registry: the session stop kills what is registered there even when a
-    peer's own stop hangs, and reports what outlives that kill; the specialist runtime starts every process of its
-    own through it. The toolbox's sandboxes are its own: the session stop releases them by closing the toolbox. ``blobs``
+    peer's own stop hangs, and reports what outlives that kill; the specialist runtime registers every process the AI
+    work socket starts for it with ``processes.adopt``. The toolbox's sandboxes are its own: the session stop releases
+    them by closing the toolbox. ``blobs``
     holds the patch and kernel files the recipes name; the toolbox's environment compiler reads them from it.
     """
 
@@ -61,11 +62,11 @@ PeerFactory = Callable[[PeerSetup], Peers]
 
 
 class PeersUnavailable(RuntimeError):
-    """A peer module a session needs has no implementation; ``modules`` names them."""
+    """A peer a session needs has no implementation yet; ``missing`` names it."""
 
-    def __init__(self, modules: tuple[str, ...]) -> None:
-        super().__init__("no implementation yet in: " + ", ".join(modules))
-        self.modules = modules
+    def __init__(self, missing: str) -> None:
+        super().__init__(f"no implementation yet of {missing}")
+        self.missing = missing
 
 
 __all__ = [

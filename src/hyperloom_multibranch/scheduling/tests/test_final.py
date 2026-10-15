@@ -20,7 +20,7 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
-from hyperloom_multibranch.contracts.fork import ForkAdmission, ForkRequest, RepairRequest
+from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
@@ -44,12 +44,14 @@ from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, Bra
 from hyperloom_multibranch.scheduling.settings import Workload
 from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
+    BASELINE_VALUE,
     GATE_POLL_SECONDS,
     MAIN_POINT,
     Curves,
-    MbFakeSpecialist,
+    NoForks,
     RecordingToolbox,
     VirtualClock,
+    judged,
     recipe_effect,
     session_gate,
     tagged,
@@ -196,14 +198,24 @@ class Bench:
         self.gate = session_gate(self.handle(Role.GATE), self.toolbox)
         baseline = integration_test_request(TestKind.TEST, Purpose.BASELINE, root)
         await self.gate.establish_baseline(root, [await self.tests.submit(baseline) for _ in range(BASELINE_TESTS)])
+        settler = RuleGate(self.handle(Role.GATE), self.repo, NoForks())
         for branch, tag, value in (("b01", "i1", 1040.0), ("b02", "c7", 1060.0)):
             await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit=root, reason="first"))
             await self.repo.create_branch(branch, root)
-            specialist = MbFakeSpecialist(
-                RuleGate(self.handle(Role.GATE), self.repo, _NoForks()), self.tests, scheduler, self.repo
-            )
-            self.commits[tag] = await specialist.commit(branch, tagged(tag), value)
+            self.commits[tag] = await self._commit(settler, branch, tag, value)
         return self
+
+    async def _commit(self, settler: RuleGate, branch: str, tag: str, value: float) -> str:
+        """``tag``'s change measured on ``branch`` and settled as a gain recorded at ``value``, as the specialist
+        runtime settles a confirmed one; returns the commit it made."""
+
+        parent = await self.repo.head(branch)
+        test = TestRequest(TestKind.TEST, Purpose.EXPLORE, branch, parent, tagged(tag))
+        measured = await self.tests.result(test)
+        request = (await self.handle(Role.OBSERVER).record(measured.request_id)).request
+        gain = (value / BASELINE_VALUE - 1.0) * 100.0
+        await settler.settle(request, judged(Verdict.IMPROVED, gain, measured.request_id, value))
+        return await self.repo.head(branch)
 
     def candidates(self, both: bool = True) -> FinalCandidates:
         integration = replace(INTEGRATION, commit=self.commits["i1"])
@@ -225,16 +237,6 @@ class Bench:
 
     def final_tests(self) -> dict[str, TestRequest]:
         return {rid: test for rid, test in self.toolbox.requests.items() if test.purpose is Purpose.FINAL}
-
-
-class _NoForks:
-    """Branch requests the scripted specialists here never make; a test double, not a placeholder."""
-
-    async def admit(self, request: ForkRequest) -> ForkAdmission:
-        raise AssertionError("no fork is asked for here")
-
-    async def admit_repair(self, request: RepairRequest) -> ForkAdmission:
-        raise AssertionError("no repair is asked for here")
 
 
 async def test_each_candidate_is_swept_and_reproduced_with_accuracy_as_a_session_measurement(

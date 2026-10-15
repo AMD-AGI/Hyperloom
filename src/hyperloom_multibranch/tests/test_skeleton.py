@@ -1,14 +1,16 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The end-to-end skeleton: one session driven in-process on peer stand-ins and a virtual clock.
+"""The end-to-end skeleton: one session driven in-process on the specialist runtime, peer stand-ins and a virtual
+clock.
 
-PRELUDE roots the session on a scripted child session in a git repository; the judge opens two branches; ``b01``
-commits ``c1`` through the rule gate and asks for a fork of a fix, which opens ``b03`` at ``c1`` (a second fork is
-refused at the cap); ``b02`` commits ``c2a`` and then ``c2``, the best single-branch value, holds a claim and a process,
-and is stopped by the judge; the integrator merges ``c1`` and refuses ``c2`` and ``c2a``; FINAL weighs the
-judge-stopped ``b02`` against the integration head and passes over it, because its head does not reproduce its
-recorded value; CLOSE leaves nothing running.
+PRELUDE roots the session on a scripted child session in a git repository; the judge opens two branches, whose
+scripted specialists the runtime runs and judges; on ``b01`` the runtime confirms and commits ``c1``, and a fix of it is
+asked for as a fork, which opens ``b03`` at the fix (a second fork is refused at the cap); on ``b02`` it commits ``c2``,
+the best single-branch value, whose specialist holds a claim and a process the AI work socket started, and the judge
+stops ``b02``; the integrator merges ``c1`` and refuses ``c2``; FINAL weighs the judge-stopped ``b02`` against the
+integration head and passes over it, because its head does not reproduce its recorded value; CLOSE leaves nothing
+running.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import asyncio
 import json
 import os
 import signal
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -24,14 +27,14 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.proctree import running
-from hyperloom.contracts.recipe import Recipe
+from hyperloom.contracts.measurement import Purpose, TestRequest
+from hyperloom.contracts.recipe import Recipe, RecipeDelta, apply
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.notebook.tests.factories import delta, intent
-from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.scheduling.budget import SessionBudget
 from hyperloom_multibranch.scheduling.exports import SessionExports
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL
@@ -39,7 +42,6 @@ from hyperloom_multibranch.scheduling.layout import SessionLayout, create_sessio
 from hyperloom_multibranch.scheduling.lifecycle import CUT_SHORT, Session, SessionOutcome
 from hyperloom_multibranch.scheduling.llm import CompletionFailed
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
-from hyperloom_multibranch.scheduling.requests import SessionTests
 from hyperloom_multibranch.scheduling.roster import BranchStatus, RosterCaps, StopCause
 from hyperloom_multibranch.scheduling.settings import RunSettings, Workload
 from hyperloom_multibranch.scheduling.stops import (
@@ -50,18 +52,20 @@ from hyperloom_multibranch.scheduling.stops import (
 )
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     MAIN_POINT,
-    MbFakeHeldRegistry,
-    MbFakeLifecycle,
-    MbFakeSpecialist,
+    SPECIALIST_POLL_SECONDS,
     HeldGitRepo,
+    MbFakeHeldRegistry,
+    RecordedSessions,
     RecordingToolbox,
+    RefusingRuntime,
     ScriptedCompletion,
-    SpecialistScript,
+    SessionStep,
     StuckToolbox,
     VirtualClock,
     recipe_effect,
     recipe_tags,
     session_gate,
+    specialist_runtime,
     tagged,
 )
 from hyperloom_multibranch.scheduling.tests.child_sessions import child_with_patch
@@ -74,15 +78,23 @@ STEP_SECONDS = 30.0
 CLAIM_TTL_SECONDS = 1e6
 STOP_REASON = "no gain left"
 CONVERGED_REASON = "every branch is flat"
-#: The root, ``c1`` alone (the integration head once merged) and ``b02``'s head, which sweeps higher than the
-#: integration head but measures below its recorded 1060 when reproduced; every other recipe measures 1000.
+#: What the scheduler's own tests measure: the root, ``c1`` alone (the integration head once merged) and ``c2``, which
+#: sweeps higher than the integration head but measures the root's value when reproduced; every other recipe measures
+#: 1000.
 CURVES = {
     frozenset(): {MAIN_POINT: 1000.0, CONC: 1000.0},
     frozenset({"c1"}): {MAIN_POINT: 1040.0, CONC: 1040.0},
-    frozenset({"c2a", "c2"}): {MAIN_POINT: 1000.0, CONC: 1065.0},
+    frozenset({"c2"}): {MAIN_POINT: 1000.0, CONC: 1065.0},
 }
+#: What the specialists' tests and their retests measure: ``c2`` at 1060, which FINAL does not reproduce.
+EXPLORED = {**CURVES, frozenset({"c2"}): {MAIN_POINT: 1060.0}}
+SCRIPTS = {"b01": (tagged("c1"),), "b02": (tagged("c2"),)}
 FIX_REASON = "fix f1 regresses"
 KB_URL = "HYPERLOOM_KB_URL"
+#: An agent CLI as the AI work socket starts one: leading a session of its own.
+AGENT_ARGV = ("sleep", "600")
+#: Real seconds a scripted specialist's change gets to be judged and committed while virtual time stands still.
+COMMIT_SECONDS = 30.0
 
 
 def _reply(document: dict[str, object]) -> str:
@@ -101,8 +113,19 @@ def no_knowledge_targets(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(ARCHIVE_ENV, raising=False)
 
 
-class InsistingLifecycle(MbFakeLifecycle):
-    """A lifecycle whose stop hangs after the operator signals again; a failure double, not a placeholder."""
+def _measured(repo: Path) -> Callable[[TestRequest], float]:
+    """What a test measures: :data:`EXPLORED` for the specialists' tests and retests, :data:`CURVES` otherwise."""
+
+    explored, measured = recipe_effect(repo, EXPLORED), recipe_effect(repo, CURVES)
+
+    def effect(request: TestRequest) -> float:
+        return (explored if request.purpose in (Purpose.EXPLORE, Purpose.CONFIRM) else measured)(request)
+
+    return effect
+
+
+class InsistingRuntime(RefusingRuntime):
+    """A runtime whose stop hangs after the operator signals again; a failure double, not a placeholder."""
 
     async def stop(self, branch: str) -> None:
         os.kill(os.getpid(), signal.SIGINT)
@@ -139,46 +162,86 @@ class SilentModel(ScriptedCompletion):
 
 @dataclass
 class Stage:
+    """One session on the specialist runtime: ``scripts`` and ``steps`` are what each branch's specialist does,
+    the runtime refuses to stop a branch in ``refusing`` and a run of a branch in ``hanging`` never confirms its stop."""
+
     layout: SessionLayout
     time: VirtualClock
     processes: MbFakeHeldRegistry
-    lifecycle: MbFakeLifecycle
     judge: ScriptedCompletion
     pids: list[int]
+    scripts: Mapping[str, Sequence[RecipeDelta]] = field(default_factory=dict)
+    steps: Mapping[str, SessionStep] = field(default_factory=dict)
+    refusing: frozenset[str] = frozenset()
+    hanging: frozenset[str] = frozenset()
+    runtime_type: type[RefusingRuntime] = RefusingRuntime
     stuck: frozenset[str] = frozenset()
     toolbox_type: type[RecordingToolbox] = RecordingToolbox
     repo_type: type[HeldGitRepo] = HeldGitRepo
     toolbox: RecordingToolbox = field(init=False)
-    specialist: MbFakeSpecialist = field(init=False)
+    sessions: RecordedSessions = field(init=False)
     repo: HeldGitRepo = field(init=False)
     setup: PeerSetup = field(init=False)
     forks: list[ForkAdmission] = field(default_factory=list)
+    watchers: list[asyncio.Future[None]] = field(default_factory=list)
     signalled_at: float = 0.0
 
     def handle(self, role: Role, branch: str = "") -> LocalNotebook:
         return LocalNotebook(self.layout.notebook, Writer(role, branch or role.value, branch), clock=self.time.now)
 
     def factory(self, setup: PeerSetup) -> Peers:
-        toolbox = self.toolbox_type(self.handle(Role.TOOLBOX), recipe_effect(setup.layout.repo, CURVES), conc=CONC)
+        toolbox = self.toolbox_type(self.handle(Role.TOOLBOX), _measured(setup.layout.repo), conc=CONC)
         if isinstance(toolbox, StuckToolbox) and self.stuck:
             toolbox.stuck = self.stuck
-        gate_notebook = self.handle(Role.GATE)
         repo = self.repo_type(setup.layout.repo, setup.blobs, self.time)
-        gate = RuleGate(gate_notebook, repo, setup.desk)
-        tests = SessionTests(toolbox, self.time.clock)
-        self.specialist = MbFakeSpecialist(gate, tests, gate_notebook, repo)
+        self.sessions = RecordedSessions(
+            toolbox, repo, self.handle(Role.OBSERVER), scripts=self.scripts, steps=self.steps, hanging=self.hanging
+        )
+        runtime = specialist_runtime(
+            setup.layout.notebook,
+            toolbox,
+            repo,
+            self.sessions,
+            now=self.time.now,
+            desk=setup.desk,
+            runtime=self.runtime_type,
+        )
+        runtime.refusing = self.refusing
         self.toolbox, self.repo, self.setup = toolbox, repo, setup
-        return Peers(self.lifecycle, toolbox, repo, session_gate(gate_notebook, toolbox))
+        return Peers(runtime, toolbox, repo, session_gate(self.handle(Role.GATE), toolbox))
 
     async def root(self) -> str:
         return (await self.handle(Role.OBSERVER).baseline()).root_commit
 
-    async def spawn_specialist_process(self, branch: str) -> None:
-        """A process of ``branch``'s specialist, started the way a lifecycle starts one: through the peer setup."""
+    async def start_agent(self, branch: str) -> None:
+        """An agent CLI of ``branch``'s specialist, started the way the AI work socket starts one and adopted by the
+        session's process registry, as the runtime adopts every process it has started."""
 
-        log = self.layout.branch_dir(branch).with_suffix(".log")
-        held = await self.setup.processes.spawn(("sleep", "600"), branch=branch, log=log)
-        self.pids.append(held.record.pid)
+        agent = await asyncio.create_subprocess_exec(*AGENT_ARGV, start_new_session=True)
+        self.setup.processes.adopt(agent.pid, branch=branch, argv=AGENT_ARGV)
+        self.pids.append(agent.pid)
+
+    def once_committed(self, then: Callable[[str, str], Awaitable[None]]) -> SessionStep:
+        """A step that stops virtual time until the runtime has committed on the branch, then runs ``then`` with the
+        branch and its new head."""
+
+        async def step(branch: str) -> None:
+            self.time.hold()
+            self.watchers.append(asyncio.ensure_future(self._after_commit(branch, then)))
+
+        return step
+
+    async def _after_commit(self, branch: str, then: Callable[[str, str], Awaitable[None]]) -> None:
+        try:
+            start = await self.repo.head(branch)
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + COMMIT_SECONDS
+            while (head := await self.repo.head(branch)) == start:
+                assert loop.time() < deadline, f"nothing was committed on {branch}"
+                await asyncio.sleep(SPECIALIST_POLL_SECONDS)
+            await then(branch, head)
+        finally:
+            self.time.release()
 
     async def run(self) -> SessionOutcome:
         self.time.hold_threads()
@@ -201,34 +264,33 @@ def _stage(tmp_path: Path, *, child: Path | None, exit_code: int = 0) -> Stage:
     session = "" if child is None else str(child)
     processes = MbFakeHeldRegistry(layout.pids, time, session=session, exit_code=exit_code)
     judge = ScriptedCompletion([OPENING, STEER])
-    return Stage(layout, time, processes, MbFakeLifecycle(), judge, [])
+    return Stage(layout, time, processes, judge, [])
 
 
-def _scripts(stage: Stage) -> dict[str, SpecialistScript]:
-    async def first(branch: str, start: str) -> None:
-        specialist = stage.specialist
-        await stage.time.sleep(STEP_SECONDS)
-        await specialist.commit(branch, tagged("c1"), 1045.0)
-        await stage.time.sleep(STEP_SECONDS)
-        stage.forks.append(await specialist.fork(branch, tagged("f1"), FIX_REASON))
-        stage.forks.append(await specialist.fork(branch, tagged("f2"), "fix f2 regresses"))
+def _script(stage: Stage) -> None:
+    """``b01`` commits ``c1`` and asks for two forks of a fix of it; ``b02`` commits ``c2``, then holds a claim on it
+    and a process."""
 
-    async def second(branch: str, start: str) -> None:
-        specialist = stage.specialist
-        await stage.time.sleep(STEP_SECONDS)
-        await specialist.commit(branch, tagged("c2a"), 1010.0)
-        head = await specialist.commit(branch, tagged("c2"), 1060.0)
+    async def forks(branch: str, c1: str) -> None:
+        accepted = await stage.setup.desk.admit(ForkRequest(branch, c1, FIX_REASON))
+        stage.forks.append(accepted)
+        await stage.repo.create_branch(accepted.branch, c1)
+        fixed = apply(await stage.repo.read_recipe(c1), tagged("f1"))
+        await stage.repo.commit(accepted.branch, c1, fixed, FIX_REASON)
+        stage.forks.append(await stage.setup.desk.admit(ForkRequest(branch, c1, "fix f2 regresses")))
+
+    async def holds(branch: str, c2: str) -> None:
         runtime = stage.handle(Role.SPECIALIST_RUNTIME, branch)
-        await runtime.acquire(intent(branch, head), delta().fingerprint(), ttl_seconds=CLAIM_TTL_SECONDS)
-        await stage.spawn_specialist_process(branch)
-        await asyncio.Event().wait()
+        await runtime.acquire(intent(branch, c2), delta().fingerprint(), ttl_seconds=CLAIM_TTL_SECONDS)
+        await stage.start_agent(branch)
 
-    return {"b01": first, "b02": second}
+    stage.scripts = SCRIPTS
+    stage.steps = {"b01": stage.once_committed(forks), "b02": stage.once_committed(holds)}
 
 
 async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
-    stage.lifecycle.scripts = _scripts(stage)
+    _script(stage)
 
     outcome = await stage.run()
 
@@ -243,14 +305,16 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert [fp.policy_versions["judge_prompt"] for fp in await observer.manifest_fingerprints()] == ["mb1-judge-2"]
 
     fix = await stage.repo.head("b03")
-    assert fix != c1 and stage.lifecycle.started == {"b01": root, "b02": root, "b03": fix}
+    assert fix != c1 and stage.sessions.started == {"b01": root, "b02": root, "b03": fix}
+    assert recipe_tags(await stage.repo.read_recipe(c1)) == {"c1"}
+    assert recipe_tags(await stage.repo.read_recipe(c2)) == {"c2"}
     assert [(admission.status, admission.branch) for admission in stage.forks] == [
         (AdmissionStatus.ACCEPTED, "b03"),
         (AdmissionStatus.REJECTED, ""),
     ]
     assert (branches["b03"].origin, branches["b03"].start_commit) == (LineageKind.OPEN, fix)
 
-    assert stage.lifecycle.last_k["b01"] == 2 and stage.lifecycle.running == {}
+    assert stage.sessions.k["b01"] == 2 and stage.sessions.running == set()
     specialist_ks = [
         k for policy in stage.toolbox.policies for b, k in policy.branch_k.items() if b != INTEGRATION_BRANCH
     ]
@@ -266,14 +330,14 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert branches["b02"].stop_reason == f"judge: {STOP_REASON}"
     assert branches[INTEGRATION_BRANCH].stopped_at is not None
     assert branches[INTEGRATION_BRANCH].stop_reason == f"session_end: {SessionStopReason.TIME_EXHAUSTED.value}"
-    assert "b02" in stage.lifecycle.stopped and "b02" in stage.toolbox.cancelled
+    assert "b02" in stage.sessions.stopped and "b02" in stage.toolbox.cancelled
     assert stage.toolbox.serving and stage.toolbox.closed == 1 and stage.toolbox.results
     assert not any(running(pid) for pid in stage.pids)
     claims = (await observer.snapshot()).claims
     assert [claim.status for claim in claims if claim.holder == "b02"] == [ClaimStatus.RELEASED]
 
     merged = {item.commit_id: item.last_merge.outcome.value for item in await observer.committed() if item.last_merge}
-    assert merged[c1] == "merged" and merged[c2] == "not_stackable" and len(merged) == 3
+    assert merged == {c1: "merged", c2: "not_stackable"}
     head = await stage.repo.head(INTEGRATION_BRANCH)
     assert recipe_tags(await stage.repo.read_recipe(head)) == {"c1"}
 
@@ -321,18 +385,17 @@ async def test_a_failed_prelude_skips_to_close(tmp_path: Path) -> None:
 async def test_a_stop_signal_skips_to_close_and_stops_every_branch(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
 
-    async def interrupted(branch: str, start: str) -> None:
+    async def interrupted(branch: str) -> None:
         await stage.time.sleep(STEP_SECONDS)
         os.kill(os.getpid(), signal.SIGTERM)
-        await asyncio.Event().wait()
 
-    stage.lifecycle.scripts = {"b01": interrupted}
+    stage.steps = {"b01": interrupted}
 
     outcome = await stage.run()
 
     assert outcome.stop_reason is SessionStopReason.SIGNAL and outcome.exit_code == 1
     assert outcome.final is None and outcome.close is not None
-    assert sorted(stage.lifecycle.stopped) == ["b01", "b02"]
+    assert sorted(stage.sessions.stopped) == ["b01", "b02"]
     assert set(stage.toolbox.cancelled) == {"b01", "b02", INTEGRATION_BRANCH}
     assert stage.toolbox.closed == 1
     late = await stage.setup.desk.admit(ForkRequest("b01", await stage.root(), "late fix"))
@@ -343,22 +406,21 @@ async def test_a_stop_signal_skips_to_close_and_stops_every_branch(tmp_path: Pat
     )
 
 
-def _signalling(stage: Stage) -> SpecialistScript:
-    """A specialist that starts a process of its branch, then the operator stops the session."""
+def _signalling(stage: Stage) -> dict[str, SessionStep]:
+    """``b01``'s specialist has an agent CLI started, then the operator stops the session."""
 
-    async def interrupted(branch: str, start: str) -> None:
+    async def interrupted(branch: str) -> None:
         await stage.time.sleep(STEP_SECONDS)
-        await stage.spawn_specialist_process(branch)
+        await stage.start_agent(branch)
         stage.signalled_at = stage.time.now()
         os.kill(os.getpid(), signal.SIGTERM)
-        await asyncio.Event().wait()
 
-    return interrupted
+    return {"b01": interrupted}
 
 
 async def test_close_after_a_signal_waits_the_close_grace_not_the_budget(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
-    stage.lifecycle = MbFakeLifecycle(scripts={"b01": _signalling(stage)}, hanging=frozenset({"b01", "b02"}))
+    stage.steps, stage.hanging = _signalling(stage), frozenset({"b01", "b02"})
 
     outcome = await stage.run()
 
@@ -371,7 +433,7 @@ async def test_close_after_a_signal_waits_the_close_grace_not_the_budget(tmp_pat
 async def test_a_toolbox_that_cannot_stop_after_a_signal_does_not_hold_close_up(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
     stage.toolbox_type, stage.stuck = StuckToolbox, frozenset({INTEGRATION_BRANCH})
-    stage.lifecycle.scripts = {"b01": _signalling(stage)}
+    stage.steps = _signalling(stage)
 
     outcome = await stage.run()
 
@@ -385,7 +447,7 @@ async def test_a_toolbox_that_cannot_stop_after_a_signal_does_not_hold_close_up(
 async def test_after_a_signal_the_session_ends_within_one_close_grace(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
     stage.toolbox_type, stage.stuck = StuckToolbox, frozenset({INTEGRATION_BRANCH})
-    stage.lifecycle = MbFakeLifecycle(scripts={"b01": _signalling(stage)}, hanging=frozenset({"b01", "b02"}))
+    stage.steps, stage.hanging = _signalling(stage), frozenset({"b01", "b02"})
 
     outcome = await stage.run()
 
@@ -397,8 +459,7 @@ async def test_after_a_signal_the_session_ends_within_one_close_grace(tmp_path: 
 
 async def test_a_signal_during_a_hanging_close_cuts_it_short_and_leaves_no_process(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
-
-    stage.lifecycle = InsistingLifecycle(scripts={"b01": _signalling(stage)})
+    stage.steps, stage.runtime_type = _signalling(stage), InsistingRuntime
 
     outcome = await stage.run()
 
@@ -420,7 +481,7 @@ async def test_a_judge_that_never_answers_gives_up_at_the_explore_deadline_and_o
     outcome = await stage.run()
 
     assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
-    assert outcome.final is not None and stage.lifecycle.started == {}
+    assert outcome.final is not None and stage.sessions.started == {}
     decisions = [json.loads(line) for line in stage.layout.decisions.read_text().splitlines()]
     assert [row["reason"] for row in decisions if row["kind"] == "judge_failed"] == [
         "no answer by the EXPLORE deadline"
@@ -445,13 +506,13 @@ async def test_a_judge_soft_stop_ends_explore_early_and_still_runs_final(tmp_pat
     assert [row["commit"] for row in final_phase["detail"]["candidates"]] == [root]
     assert outcome.final is not None and outcome.final.chosen is not None
     assert outcome.final.chosen.commit == root
-    assert sorted(stage.lifecycle.stopped) == ["b01", "b02"]
+    assert sorted(stage.sessions.stopped) == ["b01", "b02"]
 
 
 async def test_a_specialist_that_never_stops_at_the_end_of_explore_does_not_hold_final_up(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
     stage.judge = ScriptedCompletion([OPENING, _reply({"open": 0, "stop_session": {"reason": CONVERGED_REASON}})])
-    stage.lifecycle = MbFakeLifecycle(hanging=frozenset({"b01"}))
+    stage.hanging = frozenset({"b01"})
 
     outcome = await stage.run()
 
@@ -459,14 +520,15 @@ async def test_a_specialist_that_never_stops_at_the_end_of_explore_does_not_hold
     assert outcome.final is not None and outcome.final.chosen is not None
     [stop] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b01"]
     assert [failure.split(":")[0] for failure in stop["detail"]["failures"]] == ["TimeoutError"]
-    assert stage.lifecycle.stopped.count("b01") == 2 and "b01" in stage.lifecycle.running
+    assert stage.sessions.stopped.count("b01") == 1 and "b01" in stage.sessions.running
     assert "the specialist of b01 did not confirm its stop" in outcome.close.stop.failures
     assert not outcome.completed and outcome.exit_code == 1
 
 
 async def test_a_judge_stop_that_never_returns_does_not_freeze_explore(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
-    stage.lifecycle = MbFakeLifecycle(scripts=_scripts(stage), hanging=frozenset({"b02"}))
+    _script(stage)
+    stage.hanging = frozenset({"b02"})
 
     outcome = await stage.run()
 
@@ -514,7 +576,7 @@ async def test_a_soft_stop_on_the_opening_call_opens_no_branch(tmp_path: Path) -
     outcome = await stage.run()
 
     assert (outcome.stop_reason, outcome.error) == (SessionStopReason.GLOBAL_CONVERGED, "")
-    assert stage.lifecycle.started == {} and outcome.final is not None
+    assert stage.sessions.started == {} and outcome.final is not None
 
 
 async def test_a_failed_opening_judge_call_opens_one_branch_at_k_one(tmp_path: Path) -> None:
@@ -524,15 +586,16 @@ async def test_a_failed_opening_judge_call_opens_one_branch_at_k_one(tmp_path: P
     outcome = await stage.run()
 
     assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
-    assert stage.lifecycle.started == {"b01": await stage.root()}
-    assert stage.lifecycle.last_k == {"b01": 1}
+    assert stage.sessions.started == {"b01": await stage.root()}
+    assert stage.sessions.k == {"b01": 1}
     failed = [row["reason"] for row in _decisions(stage) if row["kind"] == "judge_failed"]
     assert failed and set(failed) == {"kept the status quo"}
 
 
 async def test_a_judge_stop_the_runtime_refuses_does_not_end_the_session(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
-    stage.lifecycle = MbFakeLifecycle(scripts=_scripts(stage), refusing=frozenset({"b02"}))
+    _script(stage)
+    stage.refusing = frozenset({"b02"})
 
     outcome = await stage.run()
 
