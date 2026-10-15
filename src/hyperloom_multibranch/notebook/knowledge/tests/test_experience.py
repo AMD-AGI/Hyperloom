@@ -7,24 +7,12 @@ from __future__ import annotations
 
 import dataclasses
 import sys
-import threading
 from pathlib import Path
 from typing import Any
 
 import pytest
-from hyperloom_kb import (
-    Experience,
-    ExperienceHTTPService,
-    HTTPServiceConfig,
-    LLMQueryPlanner,
-    PlannerConfiguration,
-    RemoteClient,
-    RemoteConfig,
-    RemoteExperienceKB,
-    create_http_server,
-)
+from hyperloom_kb import Experience, RemoteExperienceKB
 from hyperloom_kb.collect import collect, load_mapping
-from hyperloom_kb.database import open_database
 
 from hyperloom.contracts.recipe import (
     ComponentChange,
@@ -51,11 +39,11 @@ from hyperloom_multibranch.notebook.knowledge.experience import (
     export_document,
     publish_experiences,
 )
+from hyperloom_multibranch.notebook.knowledge.tests.kb_service import experience_service
 from hyperloom_multibranch.notebook.tests.factories import profile, result
 from hyperloom_multibranch.notebook.tests.sessions import METRIC
 
 NO_REASONING = "decision reasoning is missing or non-specific"
-TOKEN = "multibranch-test-token"
 
 
 def _rows(snapshot: NotebookSnapshot) -> dict[str, dict[str, Any]]:
@@ -251,39 +239,17 @@ def test_without_a_profile_there_is_nothing_to_export_and_agentx_publishes_nothi
     assert {item.reason for item in agentx.skipped} == {"session_not_measured_on_output_throughput"}
 
 
-class _UnusedPlanner:
-    model = "unused-planner"
-
-    def complete(self, **_kwargs: Any) -> str:
-        raise AssertionError("publishing never plans a read")
-
-
 @pytest.mark.skipif(sys.platform == "win32", reason="the Experience KB's local store locks files with fcntl")
 def test_the_experience_service_stores_each_experience_once_with_its_identity(
     snapshot: NotebookSnapshot, tmp_path: Path
 ) -> None:
     declaration = load_mapping(MAPPING_PATH).declaration
-    planner = LLMQueryPlanner(_UnusedPlanner(), PlannerConfiguration.create("unused-planner"))
-    home = tmp_path / "service"
-    server = create_http_server(
-        ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), declaration, planner, database=open_database(home)),
-        "127.0.0.1",
-        0,
-    )
-    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
-    thread.start()
-    try:
-        host, port = server.server_address[:2]
-        client = RemoteClient(RemoteConfig(f"http://{host!s}:{port}", TOKEN, spool_root=tmp_path / "spool"))
+    with experience_service(tmp_path, declaration) as client:
         kb = RemoteExperienceKB(client, declaration)
         first = publish_experiences(snapshot, METRIC, kb=kb, receipt=tmp_path / "receipt.json")
         again = publish_experiences(snapshot, METRIC, kb=kb)
         listed = client.list_experiences()
         exported = client.export_page()
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
 
     assert [row.status for row in first.collected] == ["created", "created"]
     assert [row.status for row in again.collected] == ["unchanged", "unchanged"]

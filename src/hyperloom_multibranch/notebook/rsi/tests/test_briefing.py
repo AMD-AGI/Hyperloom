@@ -14,12 +14,14 @@ from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, W
 from hyperloom_multibranch.contracts.notebook.peers import Verdict
 from hyperloom_multibranch.contracts.notebook.records import (
     BaselineRecord,
+    Learning,
     LineageEvent,
     NotebookSnapshot,
     StartupBrief,
     TestRecord,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind
+from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LearningKind, LineageKind
+from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.knowledge.recall import IdentityIndex
 from hyperloom_multibranch.notebook.knowledge.tests.fakes import (
@@ -156,6 +158,39 @@ async def test_a_recalled_summary_without_conditions_is_sorted_by_the_index_the_
     assert (await with_index.startup_brief("c0")).leads == ("prior: --block-size 16: keep +10.00% [exp-faster]",)
     assert without.identities is None
     assert (await without.startup_brief("c0")).leads == ()
+
+
+async def test_the_lessons_hold_what_this_session_and_past_sessions_learnt_about_the_focus(tmp_path: Path) -> None:
+    clock = FakeClock()
+    notebook = await scripted_session(tmp_path / "notebook", clock)
+    s2 = LocalNotebook(tmp_path / "notebook", Writer(Role.SPECIALIST_RUNTIME, "s2", "s2"), clock=clock)
+    learnt = await s2.append_learning(
+        Learning(
+            "s2", LearningKind.PITFALL, "split kv regresses when attention is not the bottleneck", request_ids=("r2",)
+        )
+    )
+    past = {
+        "experience_id": "exp-past",
+        "source_run_id": "sess-0",
+        "identity": {**SAME, "tp": 4},
+        "change_summary": "attention split kv pays only past conc 128",
+        "decision": "measured",
+    }
+    recall = LearningRecall(FakeExperienceReader(completed_read(past)))
+
+    brief = await CrossSessionBriefing(notebook, focus="attention split kv", learnings=recall).startup_brief("c0")
+    alone = await CrossSessionBriefing(notebook, focus="attention split kv").startup_brief("c0")
+
+    assert (
+        f"learnt here: [s2, pitfall] split kv regresses when attention is not the bottleneck "
+        f"(r2: regressed -2.00%, recorded_only) [{learnt.entry_id}]"
+    ) in brief.lessons
+    assert (
+        "learnt before: [sess-0, tp differ, measured] attention split kv pays only past conc 128 [exp-past]"
+        in brief.lessons
+    )
+    assert not any(lesson.startswith("learnt before") for lesson in alone.lessons)
+    assert any(lesson.startswith("learnt here") for lesson in alone.lessons)
 
 
 async def test_without_a_kb_or_a_profile_or_a_completed_read_nothing_is_recalled(tmp_path: Path) -> None:

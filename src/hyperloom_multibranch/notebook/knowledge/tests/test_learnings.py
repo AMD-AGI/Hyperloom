@@ -6,23 +6,11 @@
 from __future__ import annotations
 
 import dataclasses
-import threading
 from pathlib import Path
-from typing import Any
 
 import pytest
-from hyperloom_kb import (
-    ExperienceHTTPService,
-    HTTPServiceConfig,
-    LLMQueryPlanner,
-    PlannerConfiguration,
-    RemoteClient,
-    RemoteConfig,
-    RemoteExperienceKB,
-    create_http_server,
-)
+from hyperloom_kb import RemoteExperienceKB
 from hyperloom_kb.collect import load_mapping
-from hyperloom_kb.database import open_database
 
 from hyperloom_multibranch.contracts.notebook import NotRecorded
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
@@ -32,13 +20,12 @@ from hyperloom_multibranch.notebook.knowledge.experience import MAPPING_PATH as 
 from hyperloom_multibranch.notebook.knowledge.learnings import (
     EXPORT_FORMAT,
     MAPPING_PATH,
-    current_learnings,
     export_document,
     publish_learnings,
 )
+from hyperloom_multibranch.notebook.knowledge.tests.kb_service import experience_service
+from hyperloom_multibranch.notebook.learning_search import current_learnings
 from hyperloom_multibranch.notebook.tests.factories import START
-
-TOKEN = "multibranch-test-token"
 
 GEMM = Learning(
     "s1",
@@ -131,38 +118,16 @@ def test_without_a_profile_there_is_nothing_to_export(snapshot: NotebookSnapshot
         export_document(dataclasses.replace(_with_learnings(snapshot), profile=None))
 
 
-class _UnusedPlanner:
-    model = "unused-planner"
-
-    def complete(self, **_kwargs: Any) -> str:
-        raise AssertionError("publishing never plans a read")
-
-
 def test_a_service_started_on_the_recipe_schema_registers_the_learning_schema_on_the_first_write(
     snapshot: NotebookSnapshot, tmp_path: Path
 ) -> None:
     recipes = load_mapping(EXPERIENCE_MAPPING).declaration
     learnings = load_mapping(MAPPING_PATH).declaration
-    planner = LLMQueryPlanner(_UnusedPlanner(), PlannerConfiguration.create("unused-planner"))
-    home = tmp_path / "service"
-    server = create_http_server(
-        ExperienceHTTPService(HTTPServiceConfig(home, TOKEN), recipes, planner, database=open_database(home)),
-        "127.0.0.1",
-        0,
-    )
-    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
-    thread.start()
-    try:
-        host, port = server.server_address[:2]
-        client = RemoteClient(RemoteConfig(f"http://{host!s}:{port}", TOKEN, spool_root=tmp_path / "spool"))
+    with experience_service(tmp_path, recipes) as client:
         first = publish_learnings(_with_learnings(snapshot), kb=RemoteExperienceKB(client, learnings))
         again = publish_learnings(_with_learnings(snapshot), kb=RemoteExperienceKB(client, learnings))
         listed = client.list_experiences(schema_ref=learnings.schema_ref)
         recipe_listed = client.list_experiences(schema_ref=recipes.schema_ref)
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
 
     assert [row.status for row in first.collected] == ["created"] * 4
     assert [row.status for row in again.collected] == ["unchanged"] * 4

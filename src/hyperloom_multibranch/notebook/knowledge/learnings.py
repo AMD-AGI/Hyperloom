@@ -25,34 +25,10 @@ from hyperloom_multibranch.contracts.notebook import NotRecorded
 from hyperloom_multibranch.contracts.notebook.peers import Validity
 from hyperloom_multibranch.contracts.notebook.records import LearningRecord, NotebookSnapshot, TestRecord
 from hyperloom_multibranch.notebook.knowledge.experience import experience_identity
+from hyperloom_multibranch.notebook.learning_search import current_learnings, outcome_of
 
 MAPPING_PATH = Path(__file__).with_name("mappings") / "multibranch-learning-v1.yaml"
 EXPORT_FORMAT = "multibranch.notebook.learnings.v1"
-
-
-def current_learnings(snapshot: NotebookSnapshot) -> tuple[LearningRecord, ...]:
-    """The learnings no later learning of the same branch superseded, oldest first."""
-
-    superseded = {record.learning.supersedes for record in snapshot.learnings if record.learning.supersedes}
-    return tuple(record for record in snapshot.learnings if record.entry_id not in superseded)
-
-
-def outcome_of(record: TestRecord) -> str:
-    """How a cited test came out, in a few words."""
-
-    result, judged = record.result, record.judgement
-    if record.withdrawn_at is not None:
-        return "withdrawn"
-    if result is None:
-        return "in flight"
-    if result.validity is Validity.MEASUREMENT_FAILED:
-        return "not measured"
-    if result.validity is Validity.CANDIDATE_FAILED:
-        return f"the candidate failed ({result.failure_reason or 'no reason given'})"
-    if judged is None:
-        return "measured, not judged yet"
-    conclusion = f", {record.conclusion.value}" if record.conclusion is not None else ""
-    return f"{judged.verdict.value} {judged.gain_pct:+.2f}%{conclusion}"
 
 
 def _measures(record: TestRecord) -> bool:
@@ -118,9 +94,7 @@ def publish_learnings(
 __all__ = [
     "EXPORT_FORMAT",
     "MAPPING_PATH",
-    "current_learnings",
     "export_document",
     "learning_row",
-    "outcome_of",
     "publish_learnings",
 ]

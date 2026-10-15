@@ -11,6 +11,9 @@ import pytest
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import FakeClock
+from hyperloom_multibranch.notebook.tests.sessions import snapshot
+
+__all__ = ["clock", "open_as", "root", "snapshot"]
 
 
 @pytest.fixture

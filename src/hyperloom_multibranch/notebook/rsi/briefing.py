@@ -7,9 +7,10 @@
 Its brief has three parts:
 
 * tried: what specialists tried on the start commit and on every state it builds on, from the notebook;
-* lessons: this session's repeated failures in one direction on those states (from the lineage analysis), then
-  Experiences recalled from other sessions, labelled ``prior`` when measured under this session's conditions and
-  ``to re-verify`` otherwise, then the pitfalls and failures the warm-start records list;
+* lessons: this session's repeated failures in one direction on those states (from the lineage analysis), then what
+  this session's specialists learnt about ``focus``, then Experiences recalled from other sessions, labelled
+  ``prior`` when measured under this session's conditions and ``to re-verify`` otherwise, then what specialists of
+  past sessions learnt about it, then the pitfalls and failures the warm-start records list;
 * leads: the Recipe KB champions the warm start read, and recalled priors with a positive gain.
 
 At the root before anything was tried, the brief is the first batch's: cross-session content only. Lessons and leads
@@ -25,6 +26,7 @@ from dataclasses import dataclass, replace
 
 from hyperloom_multibranch.contracts.notebook.interfaces import Notebook, StartupBriefProvider
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, StartupBrief
+from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall
 from hyperloom_multibranch.notebook.knowledge.lessons import listed
 from hyperloom_multibranch.notebook.knowledge.recall import (
     ExperienceReader,
@@ -34,10 +36,13 @@ from hyperloom_multibranch.notebook.knowledge.recall import (
     recall_experiences,
 )
 from hyperloom_multibranch.notebook.knowledge.warm_start import WarmLead
+from hyperloom_multibranch.notebook.learning_search import render_session_learning, session_matches
 from hyperloom_multibranch.notebook.rsi.analysis import FailureTier, failures_at, repeated_failures
 
 DEFAULT_MAX_CHARS = 4000
 KEPT = "keep"
+#: How many learnings of this session, and how many of past sessions, a brief lists at most.
+LEARNINGS = 5
 
 
 @dataclass(frozen=True)
@@ -88,7 +93,8 @@ class CrossSessionBriefing(StartupBriefProvider):
     ``warm`` are the leads PRELUDE read; ``experiences`` the Experience KB, read for ``focus`` (the bottleneck the
     specialist attacks) on ``branch``; ``metric`` the throughput metric whose baseline the read carries.
     ``identities`` looks up the conditions a read's summaries leave out; by default one is built on ``experiences``,
-    and passing one index to every briefing of a session reads the export once.
+    and passing one index to every briefing of a session reads the export once. ``learnings`` is the session's one
+    recall of the specialists' learnings; without it the brief holds this session's only.
     """
 
     notebook: Notebook
@@ -99,6 +105,7 @@ class CrossSessionBriefing(StartupBriefProvider):
     branch: str = ""
     max_chars: int = DEFAULT_MAX_CHARS
     identities: IdentityIndex | None = None
+    learnings: LearningRecall | None = None
 
     def __post_init__(self) -> None:
         if self.identities is None and self.experiences is not None:
@@ -118,6 +125,12 @@ class CrossSessionBriefing(StartupBriefProvider):
             identities=self.identities,
         )
 
+    async def _past_learnings(self, snapshot: NotebookSnapshot) -> list[str]:
+        if self.learnings is None or snapshot.profile is None:
+            return []
+        found = await asyncio.to_thread(self.learnings.past, snapshot.profile, self.focus, limit=LEARNINGS)
+        return [f"learnt before: {item.render()[2:]}" for item in found.items]
+
     async def startup_brief(self, start_commit: str) -> StartupBrief:
         tried = await self.notebook.startup_brief(start_commit)
         snapshot = await self.notebook.snapshot()
@@ -127,14 +140,20 @@ class CrossSessionBriefing(StartupBriefProvider):
             for direction, count in repeated_failures(on_line)
         ]
         recalled = _recalled(await self._recall(snapshot))
+        learnt_here = [
+            f"learnt here: {render_session_learning(record, snapshot)[2:]}"
+            for record in session_matches(snapshot, self.focus, limit=LEARNINGS)
+        ]
+        learnt_before = await self._past_learnings(snapshot)
         kb_lessons = [
             f"{lead.canonical_id}: {text}" for lead in self.warm for text in (*lead.pitfalls, *lead.what_failed)
         ]
         ordered = [
             *(_Item(True, text) for text in listed(repeated)),
+            *(_Item(True, text) for text in learnt_here),
             *(_Item(False, f"recipe: {lead.describe()}") for lead in self.warm),
             *(_Item(False, text) for text in listed(recalled.leads)),
-            *(_Item(True, text) for text in listed([*recalled.lessons, *kb_lessons])),
+            *(_Item(True, text) for text in listed([*recalled.lessons, *learnt_before, *kb_lessons])),
         ]
         lessons, leads = _fit(ordered, self.max_chars)
         return replace(tried, lessons=lessons, leads=leads)
