@@ -9,7 +9,15 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 
-from hyperloom.contracts.measurement import Purpose, RoundValue, TestKind, TestRequest, TestResult, Validity
+from hyperloom.contracts.measurement import (
+    FailureClass,
+    Purpose,
+    RoundValue,
+    TestKind,
+    TestRequest,
+    TestResult,
+    Validity,
+)
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.fork import Admission, ForkRequest, RepairRequest
@@ -256,7 +264,7 @@ async def test_each_candidate_is_swept_and_reproduced_with_accuracy_as_a_session
     assert (choice.metric, choice.primary_conc) == (METRIC, CONC)
 
 
-async def test_an_unmeasured_test_a_missing_primary_point_or_a_failed_accuracy_disqualifies(tmp_path: Path) -> None:
+async def test_an_unmeasured_test_a_failed_sweep_or_a_failed_accuracy_disqualifies(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).build({frozenset({"i1"}): {MAIN_POINT: 1040.0}})
     bench.fail("c7", Fate.MEASUREMENT)
     bench.fail("i1", Fate.CANDIDATE, TestKind.SWEEP)
@@ -264,7 +272,7 @@ async def test_an_unmeasured_test_a_missing_primary_point_or_a_failed_accuracy_d
     choice = await bench.selector().select(bench.candidates(), START + 3600.0)
 
     assert choice.chosen is None
-    assert "no output_throughput at the primary conc" in choice.checks[0].error
+    assert choice.checks[0].error == "the sweep ended candidate_failed (serve_flag)"
     assert "measurement_failed" in choice.checks[1].error
 
     bench = await Bench(tmp_path / "again").build({frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0}})
@@ -272,6 +280,33 @@ async def test_an_unmeasured_test_a_missing_primary_point_or_a_failed_accuracy_d
     bench.gate = RefusingAccuracyGate(gate, bench.toolbox, InferenceXRule(gate, CONC), poll_seconds=GATE_POLL_SECONDS)
     alone = await bench.selector().select(bench.candidates(both=False), START + 3600.0)
     assert alone.chosen is None and not alone.checks[0].accuracy_passed and alone.checks[0].reproduced
+
+
+class CrashedSweepTests(SessionTests):
+    """Session tests whose sweeps all end ``candidate_failed`` after measuring every conc; a failure double, not a
+    placeholder."""
+
+    async def result(self, request: TestRequest) -> TestResult:
+        measured = await super().result(request)
+        if request.kind is not TestKind.SWEEP:
+            return measured
+        return replace(
+            measured,
+            validity=Validity.CANDIDATE_FAILED,
+            failure_class=FailureClass.CANDIDATE,
+            failure_reason="server crashed",
+        )
+
+
+async def test_a_sweep_that_failed_after_measuring_the_primary_conc_disqualifies(tmp_path: Path) -> None:
+    bench = await Bench(tmp_path).build({frozenset({"i1"}): {MAIN_POINT: 1040.0}})
+    bench.tests = CrashedSweepTests(bench.toolbox, bench.time.clock)
+
+    choice = await bench.selector().select(bench.candidates(both=False), START + 3600.0)
+
+    [check] = choice.checks
+    assert choice.chosen is None and check.reproduced and check.accuracy_passed
+    assert (check.curve, check.error) == ({}, "the sweep ended candidate_failed (server crashed)")
 
 
 async def test_a_candidate_unfinished_at_the_deadline_is_not_eligible_and_its_tests_are_taken_back(

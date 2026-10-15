@@ -21,7 +21,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
-from hyperloom.contracts.measurement import Purpose, TestKind, TestResult
+from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Validity
 from hyperloom_multibranch.contracts.gate import SessionGate
 from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
@@ -234,23 +234,27 @@ class FinalSelector:
         sweep = asyncio.ensure_future(self._sweep(candidate.commit))
         repro = asyncio.ensure_future(self._reproduction(candidate.commit))
         await together(sweep, repro)
+        swept = sweep.result()
+        measured = swept.validity is Validity.SUCCEEDED
         check = CandidateCheck(
             candidate,
-            sweep.result(),
+            sweep_curve(swept, self._metric) if measured else {},
             repro.result().accuracy_passed,
             repro.result().reproduced,
             mb_fake_regression_passes(candidate.commit),
         )
+        if not measured:
+            reason = swept.failure_reason or "no reason given"
+            return replace(check, error=f"the sweep ended {swept.validity.value} ({reason})")
         if self._workload.conc not in check.curve:
             return replace(check, error=f"the sweep has no {self._metric} at the primary conc {self._workload.conc}")
         return check
 
-    async def _sweep(self, commit: str) -> dict[int, float]:
+    async def _sweep(self, commit: str) -> TestResult:
         concs = sweep_concs(self._workload.conc)
-        swept = await self._tests.result(
+        return await self._tests.result(
             integration_test_request(TestKind.SWEEP, Purpose.FINAL, commit, concurrency=concs)
         )
-        return sweep_curve(swept, self._metric)
 
     async def _reproduction(self, commit: str) -> _Reproduction:
         request = integration_test_request(TestKind.TEST, Purpose.FINAL, commit)
