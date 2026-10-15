@@ -1159,8 +1159,8 @@ class ProfileExecutor(BenchmarkRunExecutor):
                 prof_task.cancel()
                 try:
                     await prof_task
-                except (_asyncio.CancelledError, OSError, RuntimeError, ValueError):
-                    pass
+                except (_asyncio.CancelledError, OSError, RuntimeError, ValueError) as exc:
+                    log.debug("profile_executor: bounded profile task ended during cleanup: %r", exc)
             if _prof_started.get("v"):
                 await trigger_infera_engine_profile("stop")
         self._collect_rewrite_evidence(result)
@@ -1217,7 +1217,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
                     "profile_executor: round trace dir %s does not exist after magpie completed; check sglang server logs for torch profiler errors",
                     round_trace_root,
                 )
-        elif workspace_str and True:
+        elif workspace_str:
             workspace = Path(workspace_str)
             selected_trace_dir: Path | None = None
             selected_trace_files: list[Path] = []
@@ -1227,7 +1227,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
             for trace_dir in candidate_trace_dirs:
                 if not trace_dir.is_dir():
                     continue
-                trace_files = [path for path in _trace_files_for_dir(trace_dir) if True]
+                trace_files = _trace_files_for_dir(trace_dir)
                 if trace_files:
                     selected_trace_dir = trace_dir
                     selected_trace_files = trace_files
@@ -1237,7 +1237,7 @@ class ProfileExecutor(BenchmarkRunExecutor):
                 for trace_dir in candidate_trace_dirs:
                     if not trace_dir.is_dir():
                         continue
-                    sidecars = [path for path in _capture_sidecar_traces_for_dir(trace_dir) if True]
+                    sidecars = _capture_sidecar_traces_for_dir(trace_dir)
                     if sidecars:
                         selected_trace_dir = trace_dir
                         selected_trace_files = sidecars

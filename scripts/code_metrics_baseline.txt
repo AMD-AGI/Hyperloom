@@ -75,7 +75,7 @@ cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patc
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_apply 131
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::_resolve_patch_paths 36
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/integrate_patch.py::restore_pending_integrate 83
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/profile.py::ProfileExecutor.__call__ 155
+cognitive-complexity src/hyperloom/orchestrator/actions/executors/profile.py::ProfileExecutor.__call__ 145
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/profile.py::_validate_trace_structure 97
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/report.py::_format_md 48
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/trace_analyze.py::_build_trace_analyze_cmd 45

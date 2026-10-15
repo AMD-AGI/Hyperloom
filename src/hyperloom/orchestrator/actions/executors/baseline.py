@@ -761,9 +761,8 @@ def nonzero_output_signature(err_class: str, proc_stdout: str | None, proc_stder
 # from this module.
 
 
-# Underscore-prefixed aliases re-exported for callers/tests; canonical names live in `_workload_envs`.
+# Canonical workload configuration defaults live in `_workload_envs`.
 _default_baseline_config = default_baseline_config
-_materialize_config_with_envs = materialize_benchmark_config
 
 
 def _set_materialized_run_eval(config_path: Path, *, enabled: bool) -> None:
