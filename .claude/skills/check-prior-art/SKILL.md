@@ -25,7 +25,7 @@ when one applies: the reader acts on the whole line. The first verdict that appl
 |---|---|---|
 | `EXISTS-MERGED` | a DUPLICATE is merged | `-- in your tree` when Step 5 or 6 found it there, otherwise `-- inclusion unchecked` |
 | `EXISTS-OPEN` | a DUPLICATE is open or draft | as for `EXISTS-MERGED` |
-| `PARTIAL-OVERLAP` | no DUPLICATE is left; an OVERLAPPING PR is | `-- incomplete, see Coverage` when, after the reruns of Steps 2 and 3, a `queries.tsv` row is not `OK`, a `scan.txt` line (per-PR ones too) is not `COMPLETE`, or a step wrote `SKIPPED:` |
+| `PARTIAL-OVERLAP` | no DUPLICATE is left; an OVERLAPPING PR is | `-- incomplete, see Coverage` when, after the reruns of Steps 2 and 3, a `queries.tsv` row is not `OK`, a `scan.txt` line (per-PR ones too) is not `COMPLETE`, `shortlist.txt` has a `# cut:` line, or a step wrote `SKIPPED:` |
 | `NOT-FOUND` | neither is left | as for `PARTIAL-OVERLAP` |
 
 Local git can show that a PR is in a tree, never that it is absent, so every DUPLICATE that
@@ -34,9 +34,14 @@ nothing found in your tree is `-- inclusion unchecked`, and so is every one when
 **2. Evidence**: a table with one row per PR in `classes.txt`, the UNRELATED ones included, whose
 `why` names the mechanism, file or symbol in its diff that decided the class.
 
-**3. Coverage**: the status counts from `queries.tsv` with every non-`OK` query quoted, every line
-of `scan.txt` that is not `COMPLETE` (per-PR lines may be one line listing their numbers), and
-every `SKIPPED:` line. A verdict is a claim about what was searched; this part says what that was.
+**3. Coverage**: a verdict is a claim about what was searched; this part says what that was.
+- the status counts from `queries.tsv`, with every non-`OK` query quoted;
+- every line of `scan.txt` that is not `COMPLETE` (per-PR lines may be one line listing their numbers);
+- `read N of M` from `shortlist.txt`, and the PRs its `# cut:` lines name;
+- every `SKIPPED:` line;
+- what no check searches: closed-unmerged PRs (only `xrefs.tsv` reaches them), issues and RFCs,
+  repositories outside `repos.txt`, and a planned path that does not exist upstream, which matches
+  nothing while `scan.txt` still says `COMPLETE` (G7).
 
 **4. Next step**, from the verdict:
 
@@ -138,9 +143,9 @@ it holds `SKIPPED: pathlog -- no upstream clone`.
 ## Step 4 — Deep read and classify
 
 Write `$WORK/shortlist.txt`, one `owner/name#N -- <why chosen>` per line: every `overlap.tsv`
-row, the `pathlog.txt` PRs, then `candidates.tsv` rows by `hits` and by how closely the title
+row, the `pathlog.txt` PRs, then every `candidates.tsv` row by `hits` and by how closely the title
 names the mechanism. Read at most 12; a candidate cut for the budget stays in the file as
-`# cut: owner/name#N -- <why>`. For each:
+`# cut: owner/name#N -- <why>`, and Coverage counts it. For each:
 
 ```bash
 bash .claude/skills/check-prior-art/read.sh "$WORK" <owner/name> <N>
@@ -221,8 +226,10 @@ Verdict: <WORD> <qualifiers, if any>
 |---|---|---|---|---|
 | ... |
 
-Coverage: <N> queries in <repos> (<counts by status>); path scan: <scan.txt summary>
+Coverage: <N> queries in <repos> (<counts by status>); path scan: <scan.txt summary>;
+read <N> of <M> shortlisted (cut: <owner/name#N, ...>)
 <every SKIPPED: line, one per line>
+Not searched: closed-unmerged PRs, issues and RFCs, repositories outside repos.txt, planned paths absent upstream
 
 Next step: <from the table above, naming the PR it acts on>
 
