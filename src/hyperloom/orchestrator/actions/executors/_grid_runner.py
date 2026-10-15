@@ -120,6 +120,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
     _SGLANG_MOE_RUNNER_BACKEND_RE as _SGLANG_MOE_RUNNER_BACKEND_RE,
     moe_runner_requires_aiter as moe_runner_requires_aiter,
 )
+from .launch_change import compose_variant_args
 from ._grid_variant_filter import (
     resolve_skip_spec as resolve_skip_spec,
     _parse_skip_spec as _parse_skip_spec,
@@ -419,7 +420,6 @@ def _build_variant_yaml(
     with base_yaml_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     bench = cfg.setdefault("benchmark", {})
-    replacing = str(base_args_mode).strip().lower() == "replace"
     envs = apply_runtime_benchmark_overrides(
         bench,
         model_path=model_path,
@@ -429,18 +429,14 @@ def _build_variant_yaml(
     )
     extra_args_env = server_args_env_name(bench.get("framework"))
 
-    variant_remove = to_str_list(getattr(variant, "remove_args", []))
-    # A replacing base drops the inherited string wholesale, so only the
-    # variant's own removals still name flags that survive to be stripped.
-    effective_remove = (
-        variant_remove if replacing else list(dict.fromkeys(to_str_list(base_remove_args) + variant_remove))
-    )
-    combined = compose_server_args(
-        inherited_args="" if replacing else str(envs.get(extra_args_env, "")),
-        base_extra_args=base_extra_args,
-        variant_extra_args=variant.extra_server_args,
-        remove_args=effective_remove,
+    combined = compose_variant_args(
+        str(envs.get(extra_args_env, "")),
+        base_extra_args,
+        extra_args=variant.extra_server_args,
+        remove_args=getattr(variant, "remove_args", []),
         args_mode=getattr(variant, "args_mode", "append"),
+        base_remove_args=base_remove_args or [],
+        base_args_mode=base_args_mode,
     )
     # A grid variant never injects a MoE runner backend itself, but it does inherit one -- from the baseline recipe it
     # was seeded with, or from an explicitly authored variant.

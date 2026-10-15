@@ -44,6 +44,33 @@ class LaunchChange:
         )
 
 
+def compose_variant_args(
+    inherited_args: str,
+    base_extra_args: str,
+    *,
+    extra_args: str,
+    remove_args: Iterable[str],
+    args_mode: str,
+    base_remove_args: Iterable[str],
+    base_args_mode: str,
+) -> str:
+    """The server args a variant launches with: the inherited args, then the round's base args, then its own."""
+    replacing = str(base_args_mode).strip().lower() == "replace"
+    variant_remove = to_str_list(remove_args)
+    # A replacing base drops the inherited string wholesale, so only the
+    # variant's own removals still name flags that survive to be stripped.
+    effective_remove = (
+        variant_remove if replacing else list(dict.fromkeys(to_str_list(base_remove_args) + variant_remove))
+    )
+    return compose_server_args(
+        inherited_args="" if replacing else inherited_args,
+        base_extra_args=base_extra_args,
+        variant_extra_args=extra_args,
+        remove_args=effective_remove,
+        args_mode=args_mode,
+    )
+
+
 def stack_launch_evidence(state: Any) -> Mapping[str, Any]:
     """The launch record of the measurement ``current_best`` holds; empty before anything was measured."""
     measurement = getattr(state, "current_best_measurement", None)
