@@ -1675,13 +1675,21 @@ def _check_kernel_tuning_clis() -> dict[str, Any]:
 
 
 def _check_node_claude_cli() -> None:
-    """WARN-only presence check for bundled agent CLIs (node/claude/codex)."""
+    """WARN-only presence check for the agent CLIs the image is expected to carry.
+
+    The image provides these, not ``install.sh`` -- ``assets/slurm/_incontainer.sh.in``
+    says so where it refuses to start without them. Naming the wrong remedy here
+    costs a whole run: an operator reruns install.sh, nothing changes, the
+    backend falls back to direct HTTP, and the retries stretch every tick until
+    the session's own timeouts stop bounding what they name.
+    """
     missing = [t for t in ("node", "claude", "codex") if shutil.which(t) is None]
     if missing:
         print(
             f"Preflight: WARNING — CLI(s) not on PATH: {missing}. "
-            f"ClaudeBackend / CodexBackend may fall back to direct HTTP. "
-            f"Run src/hyperloom/inference_optimizer/assets/install.sh to bring them in."
+            f"ClaudeBackend / CodexBackend fall back to direct HTTP, which is slower and retries more. "
+            f"These come from the container image, not from install.sh: run on an image that carries them, "
+            f"or put them on PATH before launching."
         )
 
 
