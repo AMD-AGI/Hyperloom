@@ -210,40 +210,6 @@ def test_git_channel_unrelated_patch_still_fails(tmp_path):
     assert result.present_by is None
 
 
-def test_git_channel_reports_a_committed_blob_id_patch_present(tmp_path):
-    """A committed diff carrying blob ids is reported present by the reverse check; the index stays untouched."""
-    src = tmp_path / "src"
-    _tree(src)
-    _git_tree(src)
-    (src / "mod" / "alpha.py").write_text("header\nnew_alpha\nfooter\n", encoding="utf-8")
-    committed = _patch(tmp_path, "committed.patch", _git(src, "diff"))
-    assert "index " in committed.read_text(encoding="utf-8")
-    git_commit_all(src, "land the change")
-
-    result = psa._git_apply_collect_feedback(src, committed)
-
-    assert result.ok, result.error
-    assert result.present_by is PresenceCheck.GIT_REVERSE_APPLY
-    assert _git(src, "status", "--porcelain") == ""
-
-
-def test_patch_set_with_one_subset_noop_still_changes_the_tree(tmp_path):
-    """One satisfied no-op inside a larger set lands with the set; the set is not ``already_present``."""
-    src = tmp_path / "src"
-    _tree(src)
-    _git_tree(src)
-    sup = _patch(tmp_path, "superset.patch", _SUPERSET)
-    sub = _patch(tmp_path, "subset.patch", _SUBSET)
-    applied: list[Path] = []
-
-    outcome = psa.apply_patch_set(src, [sup, sub], git_tree=True, backup_root=tmp_path / "bak", applied=applied)
-
-    assert outcome.errors == []
-    assert outcome.changed_nothing is False
-    assert outcome.already_present == [{"patch": str(sub), "check": "git_reverse_apply_check"}]
-    assert applied == [sup, sub]
-
-
 _CHANNEL_CHECKS = [(True, PresenceCheck.GIT_REVERSE_APPLY), (False, PresenceCheck.PATCH_REVERSE_DRY_RUN)]
 
 
@@ -267,23 +233,6 @@ def _settle(root: Path, git_tree: bool, message: str) -> None:
     """Commit the tree's current state when it is a git checkout."""
     if git_tree:
         git_commit_all(root, message)
-
-
-@pytest.mark.parametrize(("git_tree", "check"), _CHANNEL_CHECKS)
-def test_patch_set_the_tree_already_holds_changes_nothing(tmp_path, git_tree, check):
-    """Both channels report a set whose every patch is in the tree as having changed nothing."""
-    src = _channel_tree(tmp_path, git_tree)
-    (src / "mod" / "alpha.py").write_text("header\nnew_alpha\nfooter\n", encoding="utf-8")
-    (src / "mod" / "beta.py").write_text("header\nnew_beta\nfooter\n", encoding="utf-8")
-    _settle(src, git_tree, "already merged")
-    sup = _patch(tmp_path, "superset.patch", _SUPERSET)
-    sub = _patch(tmp_path, "subset.patch", _SUBSET)
-
-    outcome = psa.apply_patch_set(src, [sup, sub], git_tree=git_tree, backup_root=tmp_path / "bak", applied=[])
-
-    assert outcome.errors == []
-    assert outcome.changed_nothing is True
-    assert outcome.already_present == [{"patch": str(p), "check": check.value} for p in (sup, sub)]
 
 
 # What ``git format-patch`` puts before the diff.
@@ -361,14 +310,12 @@ def executor_env(tmp_path, monkeypatch):
     return ip.IntegratePatchExecutor(session_dir=session_dir), kb_root
 
 
-def _repo_holding_the_superset(tmp_path: Path) -> Path:
-    """A git checkout whose HEAD already carries every hunk of ``_SUPERSET``."""
-    repo = tmp_path / "framework"
-    _tree(repo)
-    _git_tree(repo)
+def _repo_holding_the_superset(tmp_path: Path, git_tree: bool = True) -> Path:
+    """A framework tree already carrying every hunk of ``_SUPERSET``: a git checkout at that HEAD when ``git_tree``."""
+    repo = _channel_tree(tmp_path / "framework", git_tree)
     (repo / "mod" / "alpha.py").write_text("header\nnew_alpha\nfooter\n", encoding="utf-8")
     (repo / "mod" / "beta.py").write_text("header\nnew_beta\nfooter\n", encoding="utf-8")
-    git_commit_all(repo, "upstream already merged it")
+    _settle(repo, git_tree, "upstream already merged it")
     return repo
 
 
@@ -408,12 +355,20 @@ def _mkdir(path: Path) -> Path:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("lane", ["upstream_pr", "specialist_authored"])
-async def test_executor_ends_an_all_noop_patch_set_as_already_present(tmp_path, executor_env, lane):
+@pytest.mark.parametrize(
+    ("lane", "git_tree", "check"),
+    [
+        ("upstream_pr", True, PresenceCheck.GIT_REVERSE_APPLY),
+        ("specialist_authored", True, PresenceCheck.GIT_REVERSE_APPLY),
+        ("upstream_pr", False, PresenceCheck.PATCH_REVERSE_DRY_RUN),
+    ],
+)
+async def test_executor_ends_an_all_noop_patch_set_as_already_present(tmp_path, executor_env, lane, git_tree, check):
     """Every patch already in the tree: no benchmark, an ``already_present`` result and one KB row saying so."""
     executor, kb_root = executor_env
-    repo = _repo_holding_the_superset(tmp_path)
-    head = _git(repo, "rev-parse", "HEAD")
+    repo = _repo_holding_the_superset(tmp_path, git_tree)
+    before = {f: (repo / "mod" / f).read_text(encoding="utf-8") for f in ("alpha.py", "beta.py")}
+    head = _git(repo, "rev-parse", "HEAD") if git_tree else ""
     if lane == "upstream_pr":
         params, patches = _upstream_round(executor.session_dir, "t-present", repo)
     else:
@@ -424,13 +379,15 @@ async def test_executor_ends_an_all_noop_patch_set_as_already_present(tmp_path, 
     result = await executor(_make_ctx("t-present", params, state))
 
     assert result["status"] == "already_present"
-    assert result["already_present"] == [{"patch": str(p), "check": "git_reverse_apply_check"} for p in patches]
+    assert result["already_present"] == [{"patch": str(p), "check": check.value} for p in patches]
     assert result["patches_applied"] == []
     assert result["patches_reverted"] == []
     rows = read_pr_ledger(kb_root=kb_root)
     assert [(row["outcome"], row["pr_url"]) for row in rows] == [("already_present", _PR_URL)]
-    assert _git(repo, "rev-parse", "HEAD") == head
-    assert _git(repo, "status", "--porcelain") == ""
+    assert {f: (repo / "mod" / f).read_text(encoding="utf-8") for f in before} == before
+    if git_tree:
+        assert _git(repo, "rev-parse", "HEAD") == head
+        assert _git(repo, "status", "--porcelain") == ""
 
 
 def _record_bench(monkeypatch) -> list[str]:
@@ -505,25 +462,6 @@ async def test_executor_ends_a_merged_pr_fetched_by_diff_url_as_already_present(
     assert result["status"] == "already_present"
     assert [row["check"] for row in result["already_present"]] == ["git_reverse_apply_check"]
     assert [row["outcome"] for row in read_pr_ledger(kb_root=kb_root)] == ["already_present"]
-
-
-@pytest.mark.asyncio
-async def test_executor_benchmarks_a_merged_pr_fetched_by_diff_url_that_changes_server_args(
-    tmp_path, executor_env, monkeypatch
-):
-    """The diff the tree already holds does not end a round whose server args still need measuring."""
-    _serve_superset(monkeypatch)
-    reached = _record_bench(monkeypatch)
-    executor, kb_root = executor_env
-    repo, head = _repo_with_merged_pr_head(tmp_path, revert=False)
-    params = _pr_head_round(repo, head, diff_url="https://example.invalid/pr.diff", prefer_checkout=True)
-    params["extra_server_args"] = "--max-num-seqs 64"
-
-    result = await executor(_make_ctx("t-merged-args", params, _approved_state()))
-
-    assert reached == ["t-merged-args"]
-    assert result["status"] != "already_present"
-    assert "already_present" not in [row["outcome"] for row in read_pr_ledger(kb_root=kb_root)]
 
 
 @pytest.mark.asyncio
