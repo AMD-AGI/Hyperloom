@@ -76,7 +76,14 @@ class GapsStateMixin:
             existing["last_updated_ts"] = now
             incoming_attempts = list(entry.get("attempts") or [])
             if incoming_attempts:
-                merged_attempts = list(existing.get("attempts") or []) + incoming_attempts
+                # ``refresh_gaps`` re-derives every attempt from the whole failure log on each call, so an equal
+                # attempt (same failure: action, error class, variant and ts) is the same one, not a new one. Equal
+                # rows take the incoming position so a re-derived log keeps its newest-last order under the cap.
+                older = [a for a in existing.get("attempts") or [] if a not in incoming_attempts]
+                merged_attempts: list[Any] = []
+                for attempt in older + incoming_attempts:
+                    if attempt not in merged_attempts:
+                        merged_attempts.append(attempt)
                 # Capped tail; callers supply newest-last lists (convention).
                 if len(merged_attempts) > _GAPS_ATTEMPTS_HISTORY:
                     merged_attempts = merged_attempts[-_GAPS_ATTEMPTS_HISTORY:]
