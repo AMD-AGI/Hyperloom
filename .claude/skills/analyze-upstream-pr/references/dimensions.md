@@ -17,7 +17,7 @@ accepted: shapes, dtypes, memory layout, output order, the defaults of new param
 it now raises or swallows.
 
 **RISK** when a caller on the target's path gets a different value for an input it already
-passes, and no test in `testfiles.txt` pins the old one.
+passes, and no changed test in `files.txt` pins the old one.
 
 **CLEAR** when the change is additive: a new path behind a condition the target does not meet, or
 a new parameter whose default keeps the old behaviour. Name which.
@@ -25,11 +25,11 @@ a new parameter whose default keeps the old behaviour. Name which.
 ## L2 — Premise
 
 **Look at** the problem the body says the PR fixes and the measurement it rests on, then the
-comments and `linked.txt` after it.
+comments and `xrefs.tsv` after it.
 
 **RISK** when the premise belongs to the author's platform (a bottleneck that only exists there, a
-library version or a bug the target's tree never had), or when a later comment, a `reverted-by` or
-a `superseded-by` row says it no longer holds.
+library version or a bug the target's tree never had), or when a later comment, a revert or a
+successor says it no longer holds.
 
 **CLEAR** when the premise does not depend on the platform, or the target shows the same symptom.
 
@@ -107,17 +107,19 @@ parallel layout exercises it unchanged.
 
 ## L9 — Tests, and whether ROCm CI runs them
 
-**Look at** `testfiles.txt`, `ci.txt`, and the skip conditions and markers on the new tests.
+**Look at** the changed tests in `files.txt`, `checks.json`, and the skip conditions and markers on
+the new tests.
 
-**RISK** when the new tests skip on ROCm or are marked for one platform, or `ci.txt` shows no ROCm
-job ran at the head: the PR's green says nothing about the target.
+**RISK** when the new tests skip on ROCm or are marked for one platform, or `checks.json` shows no
+ROCm job ran at the head: the PR's green says nothing about the target.
 
-**CLEAR** when a ROCm job in `ci.txt` ran the changed tests at the head and passed. Name the job.
+**CLEAR** when a ROCm job in `checks.json` ran the changed tests at the head and passed. Name the
+job.
 
 ## L10 — Blast radius
 
-**Look at** `numstat.txt`, and how many call sites and model families reach the changed code on
-the target: once at load, once per request, or on every forward pass.
+**Look at** `files.txt`'s line counts, and how many call sites and model families reach the changed
+code on the target: once at load, once per request, or on every forward pass.
 
 **RISK** when a small diff sits on a hot path every request crosses, or a large one spreads over
 subsystems the target uses. Size it by the callers on the target's path, not by lines.
@@ -127,13 +129,12 @@ exercise, or not at all.
 
 ## L11 — Upstream fit
 
-**Look at** `meta.txt` (state, mergeable), the `draft` line of `inclusion.txt`, the reviews in
-`comments_untrusted.txt` and their authors' roles, `commits.txt`, `linked.txt`, and
-`conflicts.txt`.
+**Look at** `pr.json` (state, `isDraft`, the reviews and their authors' roles), `inline.jsonl`,
+`xrefs.tsv` and `conflicts.txt`.
 
 **RISK** when maintainers asked for another design, the PR is a draft or has gone quiet, it
 conflicts with an open PR likely to land first, or it closed unmerged: what you carry is not what
 upstream will land, and the next rebase meets a different change.
 
 **CLEAR** when a maintainer approved with no change request open, or the PR merged and no merged
-`reverted-by` row undid it.
+revert undid it.
