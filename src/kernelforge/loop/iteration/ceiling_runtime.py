@@ -183,6 +183,15 @@ class CeilingMixin:
             return False
         return standing.mean >= target
 
+    def _is_speedup_target_met(self) -> bool:
+        """Whether the incumbent's mean per-case speedup has reached the target the operator set.
+
+        Like the roofline target, this decides only whether to buy another round; KEEP stays a measurement against
+        the incumbent.
+        """
+        target = float(self.ic.target_mean_case_speedup or 0.0)
+        return target > 0 and self.best_mean_case_speedup is not None and self.best_mean_case_speedup >= target
+
     def _render_roofline_progress(self) -> str:
         """One log line with the incumbent's mean attainment, or ``""`` when the campaign has no ceiling.
 

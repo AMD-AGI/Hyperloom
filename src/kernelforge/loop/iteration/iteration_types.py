@@ -128,6 +128,9 @@ class IterationConfig:
     # nothing left worth buying and stops. Zero disables the gate, which is the default: a ceiling is an estimate
     # with no framework-side check on its arithmetic, so stopping on one is something an operator opts into.
     roofline_target: float = 0.0
+    # Mean per-case speedup over the baseline (the KEEP objective) at which the campaign stops, however much budget
+    # remains. Zero disables the gate, which is the default.
+    target_mean_case_speedup: float = 0.0
 
     def __post_init__(self) -> None:
         # Validated here rather than at the CLI boundary alone, so a pattern can never reach the commit/delete sites

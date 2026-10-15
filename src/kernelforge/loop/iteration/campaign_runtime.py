@@ -413,6 +413,14 @@ class CampaignMixin:
                     f"({entry.t_current_ms:.6g} ms vs ceiling {entry.t_ideal_ms:.6g} ms)"
                 )
             return True, None
+        if self._is_speedup_target_met():
+            self.termination_reason = "speedup_target_met"
+            print(
+                f"\nSPEEDUP TARGET MET at iteration {iteration}: mean case speedup "
+                f"{self.best_mean_case_speedup:.6f}x, at or above the "
+                f"{float(self.ic.target_mean_case_speedup):.6f}x target"
+            )
+            return True, None
         if self.run_state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_OPEN:
             self.termination_reason = "orchestration_failed"
             print(
