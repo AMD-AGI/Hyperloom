@@ -10,12 +10,14 @@ import asyncio
 import json
 import os
 import urllib.request
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
+from hyperloom.orchestrator.kernel.request_handlers import resolve_gemm_tuning_backend
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant
@@ -71,7 +73,18 @@ def test_the_workload_reaches_the_renderer_as_hyperloom_optimize_exports_it(monk
         "OSL": "512",
         "PRECISION": "bf16",
         "GPU_TYPE": "mi355x",
+        "TARGET_GPU_TYPE": "mi355x",
+        "KERNEL_OPT_BACKEND_ORDER": "forge",
     }
+
+
+@pytest.mark.parametrize("optimizer", list(KernelOptimizer))
+def test_the_kernel_optimizer_flag_picks_the_backend_kernel_tuning_runs(
+    optimizer: KernelOptimizer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name, value in workload_environment(replace(WORKLOAD, kernel_optimizer=optimizer)).items():
+        monkeypatch.setenv(name, value)
+    assert resolve_gemm_tuning_backend({}) == optimizer.value
 
 
 def test_the_model_is_exported_as_the_directory_a_server_loads_it_from(

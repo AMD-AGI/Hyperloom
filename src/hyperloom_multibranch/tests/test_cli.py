@@ -100,6 +100,8 @@ def test_parallel_tests_default_fills_the_machine() -> None:
         ["run", *WORKLOAD_ARGS, "--conc", "many"],
         ["run", *WORKLOAD_ARGS[:-2]],
         ["run", *WORKLOAD_ARGS, "--gpu-type", "h100"],
+        ["run", *WORKLOAD_ARGS, "--gpu-type", "mi325x"],
+        ["run", *WORKLOAD_ARGS, "--gpu-type", "mi308x"],
         ["run", *WORKLOAD_ARGS, "--kernel-optimizer", "triton"],
     ],
 )

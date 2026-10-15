@@ -21,7 +21,6 @@ import sys
 from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 
-from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom_kb.remote import RemoteClientError, RemoteConfig
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
@@ -47,6 +46,9 @@ LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 #: The shared folder of archived search trees, used when ``HYPERLOOM_RSI_ARCHIVE`` names none.
 RSI_ARCHIVE_DEFAULT = "/shared_nfs/hyperloom/rsi-archive/"
 EXPERIENCE_KB_UNSET = "the Experience KB is not configured: set HYPERLOOM_KB_URL and HYPERLOOM_KB_TOKEN"
+#: The GPU types Magpie has a benchmark script of their own for. ``hyperloom optimize`` runs mi308x and mi325x on
+#: mi300x's script through a mapping its package keeps private, so a session accepts only these until it is public.
+MAGPIE_RUNNER_GPU_TYPES = ("mi300x", "mi355x")
 
 
 class EnvironmentIncomplete(RuntimeError):
@@ -59,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     run = commands.add_parser("run", help="Run one session: PRELUDE, EXPLORE, FINAL and CLOSE.")
     run.add_argument("--model", required=True, help="Model path or id.")
     run.add_argument("--framework", required=True, help="Inference framework, e.g. vllm or sglang.")
-    run.add_argument("--gpu-type", required=True, choices=sorted(AMD_GPU_DISPATCH_IDENTITIES), help="GPU type.")
+    run.add_argument("--gpu-type", required=True, choices=MAGPIE_RUNNER_GPU_TYPES, help="GPU type.")
     for name in ("--tp", "--isl", "--osl", "--conc"):
         run.add_argument(name, type=int, required=True)
     run.add_argument("--precision", required=True)
@@ -199,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 __all__ = [
+    "MAGPIE_RUNNER_GPU_TYPES",
     "PROG",
     "RSI_ARCHIVE_DEFAULT",
     "EnvironmentIncomplete",
