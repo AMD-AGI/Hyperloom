@@ -9,12 +9,16 @@ import logging
 import os
 import signal
 import time
+from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import yaml
 
-from ._subprocess_kill import TERM_GRACE_SECONDS, _process_group_alive, _signal_group
+from hyperloom.common.agentx_workload import AGENTX_SERVER_PIDFILE
+from hyperloom.common.proctree import group_members, running
+
+from ._subprocess_kill import TERM_GRACE_SECONDS, _signal_group
 
 
 log = logging.getLogger(__name__)
@@ -33,8 +37,13 @@ _SERVER_CMDLINE_MARKERS: tuple[str, ...] = (
     # branch below needs them too.
     "EngineCore",
     "VLLM::Worker",
+    "sglang::",
     "launch_server",
 )
+
+#: How long a SIGKILL'd group is given to disappear. A rank that held VRAM can sit in uninterruptible sleep while the
+#: driver releases its memory.
+_KILL_CONFIRM_SECONDS = 30.0
 
 
 # Magpie built-in benchmark scripts that support the server_lifecycle reuse protocol.
@@ -227,14 +236,32 @@ def teardown_lifecycle_server(
             pass
 
 
-def _terminate_group(pgid: int) -> None:
-    """SIGTERM a process group, then SIGKILL it if any member outlives the grace."""
+def _terminate_group(pgid: int) -> bool:
+    """SIGTERM a process group, then SIGKILL it if any member outlives the grace; return whether it is gone."""
     _signal_group(pgid, signal.SIGTERM)
-    deadline = time.monotonic() + TERM_GRACE_SECONDS
-    while time.monotonic() < deadline and _process_group_alive(pgid):
+    if _group_gone_within(pgid, TERM_GRACE_SECONDS):
+        return True
+    _signal_group(pgid, signal.SIGKILL)
+    return _group_gone_within(pgid, _KILL_CONFIRM_SECONDS)
+
+
+def _group_has_live_member(pgid: int) -> bool:
+    """Whether ``pgid`` still has a member that is not a zombie.
+
+    A server re-parented to an init that never waits stays a zombie once it exits. A zombie holds no memory and takes
+    no signal, so it is not a survivor.
+    """
+    return any(state != "Z" for _pid, _start, state in group_members(pgid))
+
+
+def _group_gone_within(pgid: int, window_sec: float) -> bool:
+    """Wait up to ``window_sec`` for ``pgid`` to have no live member; return whether it got there."""
+    deadline = time.monotonic() + window_sec
+    while _group_has_live_member(pgid):
+        if time.monotonic() >= deadline:
+            return False
         time.sleep(0.1)
-    if _process_group_alive(pgid):
-        _signal_group(pgid, signal.SIGKILL)
+    return True
 
 
 def _pid_cmdline(pid: int) -> str:
@@ -276,6 +303,15 @@ def _process_group_looks_like_server(pgid: int) -> bool:
     return False
 
 
+class ServerReap(NamedTuple):
+    """What reaping the servers a set of pidfiles names did."""
+
+    #: Recorded pids whose process group was signalled.
+    reaped: list[int]
+    #: The subset of ``reaped`` whose group still had a live member after SIGKILL.
+    survivors: list[int]
+
+
 def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
     """Reap serving processes orphaned by a prior monitor-process death, or by a run that simply ended with a server up.
 
@@ -283,36 +319,42 @@ def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
     process (SIGTERM -> grace -> SIGKILL on the group), so a co-located session's server and a recycled pid are never
     touched.
     """
-    if os.name != "posix":
-        return []
-    runs_dir = Path(session_dir) / "runs"
-    if not runs_dir.is_dir():
-        return []
+    return reap_recorded_servers(Path(session_dir) / "runs").reaped
 
-    reaped: list[int] = []
-    for pid_file in sorted(runs_dir.rglob("*.pid")):
-        try:
-            parts = pid_file.read_text(encoding="utf-8").split()
-        except OSError:
-            continue
-        if not parts:
-            _unlink_quietly(pid_file)
-            continue
-        try:
-            server_pid = int(parts[0])
-            recorded_pgid = int(parts[1]) if len(parts) > 1 else server_pid
-        except ValueError:
-            _unlink_quietly(pid_file)
-            continue
 
-        pid_alive = _pid_alive_simple(server_pid)
+def stop_agentx_servers(root: Path | str) -> list[int]:
+    """Stop any server an AgentX client under ``root`` booted and left running; return the pids alive after SIGKILL.
+
+    Its :data:`AGENTX_SERVER_PIDFILE` is the only handle on that server once the round's process tree is gone.
+    """
+    return reap_recorded_servers(root, AGENTX_SERVER_PIDFILE).survivors
+
+
+def reap_recorded_servers(root: Path | str, pidfile_glob: str = "*.pid") -> ServerReap:
+    """Reap every serving process still up that a pidfile matching ``pidfile_glob`` under ``root`` names.
+
+    Nothing is signalled on the recorded pid alone: a live pid must still look like a serving process, and a gone
+    leader's group is signalled only while a live member of it does, so a recycled pid or pgid is left untouched. A
+    pidfile is removed once nothing it names is left; a survivor's stays for the next reap.
+    """
+    reap = ServerReap(reaped=[], survivors=[])
+    root = Path(root)
+    if os.name != "posix" or not root.is_dir():
+        return reap
+
+    own_pgid = os.getpgrp()
+    for pid_file in sorted(root.rglob(pidfile_glob)):
+        recorded = _read_pidfile(pid_file)
+        if recorded is None:
+            continue
+        server_pid, recorded_pgid = recorded
+
+        # A leader that exited but was never waited on is a zombie: gone for this purpose, while its ranks may not be.
+        pid_alive = running(server_pid)
+        server_pgid = recorded_pgid
         if pid_alive:
-            try:
+            with suppress(OSError):
                 server_pgid = os.getpgid(server_pid)
-            except OSError:
-                server_pgid = recorded_pgid
-        else:
-            server_pgid = recorded_pgid
 
         if pid_alive and not _looks_like_server_process(server_pid):
             # Live pid but not one of our servers (pid reuse): do not touch the process; leave the pidfile for a later
@@ -323,7 +365,7 @@ def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
                 pid_file,
             )
             continue
-        if not pid_alive and not _process_group_alive(server_pgid):
+        if not pid_alive and not _group_has_live_member(server_pgid):
             # Stale pidfile from a fully-exited server tree; just clean it up.
             _unlink_quietly(pid_file)
             _unlink_quietly(pid_file.with_suffix(".json"))
@@ -338,12 +380,27 @@ def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
                 server_pgid,
             )
             continue
+        if server_pgid == own_pgid:
+            log.error(
+                "orphan-reaper: pid=%d from %s is in this process's own group pgid=%d; refusing to signal it",
+                server_pid,
+                pid_file,
+                server_pgid,
+            )
+            continue
 
-        _terminate_group(server_pgid)
-        reaped.append(server_pid)
+        reap.reaped.append(server_pid)
+        if not _terminate_group(server_pgid):
+            reap.survivors.append(server_pid)
+            log.error(
+                "orphan-reaper: server pid=%d pgid=%d from %s is still alive after SIGKILL; keeping its pidfile",
+                server_pid,
+                server_pgid,
+                pid_file,
+            )
+            continue
         log.warning(
-            "orphan-reaper: reaped leftover server pid=%d pgid=%d from %s "
-            "(likely orphaned by a prior monitor-process crash)",
+            "orphan-reaper: reaped leftover server pid=%d pgid=%d from %s",
             server_pid,
             server_pgid,
             pid_file,
@@ -351,7 +408,25 @@ def reap_orphaned_servers(session_dir: Path | str) -> list[int]:
         _unlink_quietly(pid_file)
         _unlink_quietly(pid_file.with_suffix(".json"))
 
-    return reaped
+    return reap
+
+
+def _read_pidfile(pid_file: Path) -> tuple[int, int] | None:
+    """Return the ``(pid, pgid)`` a server pidfile records, or ``None``; an empty or malformed pidfile is removed."""
+    try:
+        parts = pid_file.read_text(encoding="utf-8").split()
+    except OSError:
+        return None
+    if not parts:
+        _unlink_quietly(pid_file)
+        return None
+    try:
+        server_pid = int(parts[0])
+        recorded_pgid = int(parts[1]) if len(parts) > 1 else server_pid
+    except ValueError:
+        _unlink_quietly(pid_file)
+        return None
+    return server_pid, recorded_pgid
 
 
 def _pid_alive_simple(pid: int) -> bool:

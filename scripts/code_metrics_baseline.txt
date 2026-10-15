@@ -49,8 +49,8 @@ cognitive-complexity src/hyperloom/inference_optimizer/reference_script.py::_ext
 cognitive-complexity src/hyperloom/inference_optimizer/roofline_ceiling.py::compute_roofline_from_perfmodel 40
 cognitive-complexity src/hyperloom/inference_optimizer/roofline_snapshot.py::build_profiler_digest 36
 cognitive-complexity src/hyperloom/inference_optimizer/session/manifest.py::build_manifest 45
-cognitive-complexity src/hyperloom/inference_optimizer/session/resume_guard.py::_confirm_task_stopped_in_transaction 65
-cognitive-complexity src/hyperloom/inference_optimizer/session/resume_guard.py::_inspect 51
+cognitive-complexity src/hyperloom/inference_optimizer/session/resume_guard.py::_confirm_task_stopped_in_transaction 53
+cognitive-complexity src/hyperloom/inference_optimizer/session/resume_guard.py::_inspect 48
 cognitive-complexity src/hyperloom/inference_optimizer/tools/backfill_langfuse.py::ingest 44
 cognitive-complexity src/hyperloom/inference_optimizer/trace/decision_trace.py::write_decision_trace 53
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_accuracy_gate.py::parse_eval_results 34
@@ -338,7 +338,7 @@ cyclomatic-complexity src/hyperloom/inference_optimizer/multi_node/cli.py::cmd_r
 cyclomatic-complexity src/hyperloom/inference_optimizer/multi_node/scripts/apply_tracelens_patch_multinode.py::_apply_on_pod 28
 cyclomatic-complexity src/hyperloom/inference_optimizer/multi_node/scripts/kill_multinode.py::_kill_remote 35
 cyclomatic-complexity src/hyperloom/inference_optimizer/multi_node/scripts/launch_multinode.py::main 28
-cyclomatic-complexity src/hyperloom/inference_optimizer/session/resume_guard.py::_confirm_task_stopped_in_transaction 24
+cyclomatic-complexity src/hyperloom/inference_optimizer/session/resume_guard.py::_confirm_task_stopped_in_transaction 22
 cyclomatic-complexity src/hyperloom/inference_optimizer/session/resume_guard.py::_inspect 22
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_framework_switch_manifest.py::parse_manifest 27
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 70
@@ -630,7 +630,7 @@ function-lines src/hyperloom/inference_optimizer/reference_script.py::render_ref
 function-lines src/hyperloom/inference_optimizer/roofline_ceiling.py::compute_roofline_from_perfmodel 102
 function-lines src/hyperloom/inference_optimizer/roofline_snapshot.py::format_roofline_metrics_table 93
 function-lines src/hyperloom/inference_optimizer/session/manifest.py::build_manifest 119
-function-lines src/hyperloom/inference_optimizer/session/resume_guard.py::_confirm_task_stopped_in_transaction 128
+function-lines src/hyperloom/inference_optimizer/session/resume_guard.py::_confirm_task_stopped_in_transaction 115
 function-lines src/hyperloom/inference_optimizer/tools/backfill_langfuse.py::ingest 148
 function-lines src/hyperloom/inference_optimizer/trace/decision_trace.py::write_decision_trace 151
 function-lines src/hyperloom/orchestrator/actions/executors/_accuracy_gate.py::parse_eval_results 108
@@ -684,7 +684,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_perf 459
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._keep_inert_switches 111
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._maybe_write_framework_kb_record 114
-function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_apply 521
+function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_apply 515
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_gate 84
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_localize_source 81
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._stage_provision_attempt_runtime 107
@@ -794,7 +794,7 @@ function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborat
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_integrate_patch 152
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_profile 98
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_roofline 89
-function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._recover_pending_integrate_from_task 91
+function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._recover_pending_integrate_from_task 84
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._replay_keep_from_result 90
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._resume_consistency_pass 129
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._resume_recover_orphaned_keeps 101
@@ -829,7 +829,7 @@ function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_ker
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 427
 function-lines src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.promote_geak_from_candidate 165
 function-lines src/hyperloom/orchestrator/phases/kernel_stack.py::KernelStackPhase._run_kernel_stack_validation_e2e 220
-function-lines src/hyperloom/orchestrator/phases/machine.py::MachinePhase.advance_phase_if_needed 192
+function-lines src/hyperloom/orchestrator/phases/machine.py::MachinePhase.advance_phase_if_needed 188
 function-lines src/hyperloom/orchestrator/phases/machine_state.py::record_phase_transition 93
 function-lines src/hyperloom/orchestrator/phases/machine_state.py::replay_next_phase 167
 function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._judge_warm_replay_accuracy 123
@@ -1060,7 +1060,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lif
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2261
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4253
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1905
-module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4886
+module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4881
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1590
 module-lines src/hyperloom/orchestrator/actions/executors/report.py 1399
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1308
