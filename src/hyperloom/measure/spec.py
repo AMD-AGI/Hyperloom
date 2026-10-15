@@ -43,6 +43,10 @@ KINDS = ("test", "profile", _ACCURACY, "repro")
 PURPOSES = tuple(purpose.value for purpose in Purpose)
 DEFAULT_MAX_TOTAL_BYTES = 4 * 1024**3
 #: The platform variables a sheet may carry reference values for (4.8.1): RCCL and HSA variables SaFE adds to a Pod.
+#: ``NCCL_MIN_NCHANNELS`` changes how every RCCL collective is split, so a sandbox without the Pod's value measures
+#: under other conditions than the local run. The interface-selection variables (``NCCL_SOCKET_IFNAME``,
+#: ``NCCL_IB_HCA``, ``NCCL_IB_GID_INDEX``, ``GLOO_SOCKET_IFNAME``) are not listed: on one node they do not touch the
+#: data path, and a sheet without them would delete them where a multi-node job needs them.
 PLATFORM_ENV_NAMES = (
     "HSA_ENABLE_SDMA",
     "NCCL_CHECKS_DISABLE",
@@ -51,6 +55,7 @@ PLATFORM_ENV_NAMES = (
     "NCCL_IB_RETRY_CNT",
     "NCCL_IB_QPS_PER_CONNECTION",
     "NCCL_IB_SL",
+    "NCCL_MIN_NCHANNELS",
 )
 #: Keys of the materialised YAML whose value is a location, replaced by a placeholder in the fingerprint.
 #: ``benchmark.envs`` keys that differ from point to point of one arm: the request values and the counts that follow

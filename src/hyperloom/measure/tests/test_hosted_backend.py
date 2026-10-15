@@ -477,6 +477,18 @@ def test_the_sheet_carries_only_whitelisted_variables_and_never_a_credential(rig
     assert "secret" not in r.backend.journal.load_spec("req-1", 1).decode()
 
 
+def test_the_sheet_carries_the_pods_rccl_channel_count_but_not_its_interface_names(rig, tmp_path) -> None:
+    pod = {
+        "NCCL_MIN_NCHANNELS": "112",
+        "NCCL_SOCKET_IFNAME": "eth0",
+        "NCCL_IB_HCA": "rdma0",
+        "GLOO_SOCKET_IFNAME": "eth0",
+    }
+    r = rig(spec={"platform_env": pod})
+    assert r.backend.run_test(make_call(tmp_path)).returncode == 0
+    assert dict(_spec_of(r, "req-1").platform_env) == {"NCCL_MIN_NCHANNELS": "112"}
+
+
 def test_an_env_override_the_old_flow_refuses_refuses_the_sheet(rig, tmp_path) -> None:
     r = rig()
     outcome = r.backend.run_test(make_call(tmp_path, env_overrides={"HF_TOKEN": "x"}))
