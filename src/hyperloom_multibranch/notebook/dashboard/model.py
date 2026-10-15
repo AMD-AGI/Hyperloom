@@ -5,8 +5,8 @@
 
 * ``branches``: each branch's progress, its head's gain over the baseline, and its frontier score when the progress
   rows carry one (pass :class:`FrontierScoring`'s rows to show them);
-* ``in_flight``: tests requested and neither measured nor withdrawn yet, and the claims held now. The toolbox's own
-  queue, once it reports one, is passed in as ``queue`` and shown as it is;
+* ``in_flight``: tests requested and neither measured nor withdrawn yet, and the claims held now;
+* ``queue``: the toolbox's queue lengths and latest cold start, when the caller passes ``Toolbox.queue_state()``;
 * ``lineage`` and ``splits``: every commit, every branch, and the branches split off for a correctness fix;
 * ``sandboxes``: per measurement environment, the tests run there and their GPU time;
 * ``quarantined``: the nodes and GPU sets out of service.
@@ -26,6 +26,7 @@ from typing import Any
 from hyperloom.common.io import atomic_write_json, atomic_write_text
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, NotebookSnapshot
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind
+from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.dashboard.page import render_html
 from hyperloom_multibranch.notebook.knowledge.breakdown import measurement_usage
@@ -93,12 +94,24 @@ def _in_flight(snapshot: NotebookSnapshot) -> dict[str, Any]:
     }
 
 
+def _queue(queue: QueueState) -> dict[str, Any]:
+    # String keys only: dashboard.json must read back equal to what was built.
+    return {
+        "queued": queue.queued,
+        "running": queue.running,
+        "queued_by_priority": {str(priority): count for priority, count in sorted(queue.queued_by_priority.items())},
+        "queued_by_branch": dict(sorted(queue.queued_by_branch.items())),
+        "running_by_branch": dict(sorted(queue.running_by_branch.items())),
+        "cold_start_seconds": queue.cold_start_seconds,
+    }
+
+
 def build_dashboard(
     snapshot: NotebookSnapshot,
     progress: Sequence[BranchProgress] | None = None,
     *,
     metric: str = "",
-    queue: Mapping[str, Any] | None = None,
+    queue: QueueState | None = None,
 ) -> dict[str, Any]:
     """The dashboard of ``snapshot``; ``progress`` defaults to the snapshot's rows, ``metric`` names the gains."""
 
@@ -112,7 +125,7 @@ def build_dashboard(
         "baseline": encode(baseline),
         "branches": _branches(snapshot, rows, metric),
         "in_flight": _in_flight(snapshot),
-        "queue": dict(queue) if queue is not None else None,
+        "queue": _queue(queue) if queue is not None else None,
         "lineage": encode(snapshot.lineage),
         "splits": [
             {"branch": node.branch, "from_branch": node.from_branch, "start_commit": node.start_commit}

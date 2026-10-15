@@ -20,6 +20,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     TestRecord,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind, QuarantineAction
+from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.dashboard import build_dashboard, render_html, write_dashboard
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, score_progress
@@ -55,7 +56,8 @@ def busy(snapshot: NotebookSnapshot) -> NotebookSnapshot:
 def test_the_dashboard_holds_branches_in_flight_work_lineage_and_infrastructure(busy: NotebookSnapshot) -> None:
     rows = score_progress(busy, (), FrontierPolicy(METRIC))
 
-    dashboard = build_dashboard(busy, rows, metric=METRIC, queue={"queued": 3})
+    queue = QueueState({0: 1, 1: 0, 2: 2, 3: 0, 4: 0}, {"s1": 1}, {"s1": 3}, cold_start_seconds=812.0)
+    dashboard = build_dashboard(busy, rows, metric=METRIC, queue=queue)
 
     branches = {row["branch"]: row for row in dashboard["branches"]}
     assert branches["s1"]["gain_pct"] == pytest.approx(4.0)
@@ -67,7 +69,15 @@ def test_the_dashboard_holds_branches_in_flight_work_lineage_and_infrastructure(
     assert [(claim["branch"], claim["expires_in_s"]) for claim in dashboard["in_flight"]["claims"]] == [("s1", 45.0)]
     assert dashboard["splits"] == [{"branch": "s1-fix", "from_branch": "s1", "start_commit": "c1"}]
     assert [(row["node"], row["tests"]) for row in dashboard["sandboxes"]] == [("node-1", 5), ("node-2", 1)]
-    assert dashboard["quarantined"][0]["node"] == "node-3" and dashboard["queue"] == {"queued": 3}
+    assert dashboard["quarantined"][0]["node"] == "node-3"
+    assert dashboard["queue"] == {
+        "queued": 3,
+        "running": 1,
+        "queued_by_priority": {"0": 1, "1": 0, "2": 2, "3": 0, "4": 0},
+        "queued_by_branch": {"s1": 3},
+        "running_by_branch": {"s1": 1},
+        "cold_start_seconds": 812.0,
+    }
     assert json.loads(json.dumps(dashboard)) == dashboard
 
 
@@ -82,7 +92,7 @@ def test_the_page_is_self_contained_and_escapes_every_value(busy: NotebookSnapsh
 
 
 def test_the_dashboard_is_written_as_json_and_html(busy: NotebookSnapshot, tmp_path: Path) -> None:
-    dashboard = build_dashboard(busy, metric=METRIC, queue={"queued": 0})
+    dashboard = build_dashboard(busy, metric=METRIC, queue=QueueState(running_by_branch={"s1": 1}))
 
     files = write_dashboard(tmp_path / "out", dashboard)
 
