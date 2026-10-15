@@ -13,7 +13,7 @@ import os
 import pathlib
 import sys
 
-from hyperloom.common import rocm_smi
+from hyperloom.common import amd_smi
 
 
 #: Command-line fragments that identify a leftover optimizer or serving
@@ -92,14 +92,14 @@ def _print_torch_visibility() -> bool:
 
 def _check_gpu_occupancy() -> bool:
     """Print per-GPU VRAM usage and report whether every GPU is idle."""
-    snapshots = rocm_smi.gpu_vram_usage()
+    snapshots = amd_smi.gpu_vram_usage()
     if snapshots is None:
         print("gpu_vram=unreadable")
         return False
 
     idle = True
     for idx, snap in enumerate(snapshots):
-        busy = rocm_smi.vram_busy(snap)
+        busy = amd_smi.vram_busy(snap)
         print(
             f"gpu{idx}_vram_used={snap.used_mib:.1f}/{snap.total_mib:.1f} MiB"
             f" ({snap.used_mib / snap.total_mib:.2%}) {'BUSY' if busy else 'idle'}"

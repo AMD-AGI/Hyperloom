@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from hyperloom.common import amd_smi
 from hyperloom.common.env_safety import OPERATOR_EXTRA_ENV_VAR
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 from hyperloom.orchestrator.actions.executors import _workload_envs as we
@@ -184,26 +185,24 @@ def test_visible_gpu_count_override_invalid_then_torch(monkeypatch):
     assert we._visible_gpu_count() == 2
 
 
-def test_visible_gpu_count_rocm_smi(monkeypatch):
+def test_visible_gpu_count_amd_smi(monkeypatch):
     _clear_env(monkeypatch)
     fake_torch = SimpleNamespace(cuda=SimpleNamespace(device_count=lambda: 0))
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
-    monkeypatch.setattr(we.shutil, "which", lambda name: "/usr/bin/rocm-smi")
-    out = "GPU[0]\t: foo\nGPU[0]\t: bar\nGPU[1]\t: baz\nother\n"
-    monkeypatch.setattr(we.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=out))
+    out = json.dumps([{"gpu": 0, "bdf": "0000:c5:00.0"}, {"gpu": 1, "bdf": "0000:c6:00.0"}])
+    monkeypatch.setattr(amd_smi.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=out))
     assert we._visible_gpu_count() == 2
 
 
-def test_visible_gpu_count_rocm_smi_error(monkeypatch):
+def test_visible_gpu_count_amd_smi_error(monkeypatch):
     _clear_env(monkeypatch)
     fake_torch = SimpleNamespace(cuda=SimpleNamespace(device_count=lambda: 0))
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
-    monkeypatch.setattr(we.shutil, "which", lambda name: "/usr/bin/rocm-smi")
 
     def _raise(*a, **k):
         raise OSError("denied")
 
-    monkeypatch.setattr(we.subprocess, "run", _raise)
+    monkeypatch.setattr(amd_smi.subprocess, "run", _raise)
     assert we._visible_gpu_count() == 0
 
 

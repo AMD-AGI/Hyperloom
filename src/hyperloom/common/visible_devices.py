@@ -196,7 +196,7 @@ def hip_mask_within_rocr(env: Any) -> str | None:
 
 
 def detect_gpu_count() -> int:
-    """Best-effort visible-GPU count: env masks first, then ``rocm-smi``; 0 when nothing can be probed.
+    """Best-effort visible-GPU count: env masks first, then ``amd-smi``; 0 when nothing can be probed.
 
     ``ROCR_VISIBLE_DEVICES`` is consulted first because it is the canonical ROCm
     pinning mask per the repo's GPU runner convention (and the CLI preflight
@@ -208,7 +208,7 @@ def detect_gpu_count() -> int:
         int: the number of visible GPUs derived from the
             ``ROCR_VISIBLE_DEVICES`` / ``HIP_VISIBLE_DEVICES`` /
             ``CUDA_VISIBLE_DEVICES`` env masks (first one set wins), else the
-            count parsed from ``rocm-smi``; 0 when nothing can be probed.
+            count ``amd-smi`` enumerates; 0 when nothing can be probed.
     """
     for env_name in COUNTING_VISIBLE_DEVICE_VARS:
         raw = os.environ.get(env_name)
@@ -220,27 +220,9 @@ def detect_gpu_count() -> int:
         ids = [tok for tok in raw.split(",") if tok.strip() != ""]
         if ids:
             return len(ids)
-    import subprocess
+    from hyperloom.common.amd_smi import gpu_count
 
-    try:
-        proc = subprocess.run(
-            ["rocm-smi", "--showid"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, OSError, ValueError, subprocess.TimeoutExpired):
-        return 0
-    if proc.returncode != 0:
-        return 0
-    indices: set[str] = set()
-    for line in (proc.stdout or "").splitlines():
-        stripped = line.strip()
-        if stripped.startswith("GPU["):
-            idx, _, _ = stripped[4:].partition("]")
-            if idx:
-                indices.add(idx)
-    return len(indices)
+    return gpu_count()
 
 
 def parse_device_list(raw: Any) -> list[int]:
