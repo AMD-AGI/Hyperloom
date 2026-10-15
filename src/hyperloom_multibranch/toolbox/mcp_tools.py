@@ -23,7 +23,7 @@ import enum
 import functools
 import threading
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from hyperloom.contracts.measurement import PRIORITY_HIGHEST, PRIORITY_LOWEST, Purpose, TestKind
 from hyperloom.contracts.measurement import TestRequest as MeasuredRequest
@@ -44,6 +44,9 @@ from hyperloom_multibranch.contracts.toolbox import (
     ToolboxError,
 )
 from hyperloom_multibranch.notebook.tools import ERROR, notebook_tools
+
+if TYPE_CHECKING:
+    from hyperloom_multibranch.notebook.learning_search import LearningFinder
 
 SPECIALIST_TOKEN_ENV = "HYPERLOOM_SPECIALIST_MCP_TOKEN"
 _OBJECT = "object"
@@ -233,11 +236,12 @@ def _poll_inbox(notebooks: NotebookFor) -> Callable[[dict[str, Any], CallContext
 
 
 def _notebook_handler(
-    name: str, notebooks: NotebookFor, ttl_seconds: float
+    name: str, notebooks: NotebookFor, ttl_seconds: float, learnings: LearningFinder | None = None
 ) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> str:
         branch = ctx.principal.branch
-        tools = {tool.name: tool for tool in notebook_tools(notebooks(branch), branch=branch, ttl_seconds=ttl_seconds)}
+        bound = notebook_tools(notebooks(branch), branch=branch, ttl_seconds=ttl_seconds, learnings=learnings)
+        tools = {tool.name: tool for tool in bound}
         text = await tools[name].handler(arguments)
         if text.startswith(ERROR):
             raise ToolError(text[len(ERROR) :].strip())
@@ -253,12 +257,15 @@ def register_specialist_tools(
     notebooks: NotebookFor,
     claim_ttl_seconds: float = 600.0,
     toolbox_loop: asyncio.AbstractEventLoop | None = None,
+    learnings: LearningFinder | None = None,
 ) -> None:
     """Register every specialist tool; ``notebooks(branch)`` is the notebook handle that writes as that branch.
 
     ``toolbox_loop`` is the loop the toolbox was started on; every call to the toolbox is made on it. When omitted it is
     the running loop of the caller, so registering from the coroutine that started the toolbox is enough; without a
     running loop the toolbox is called on the loop of each request, which suits a toolbox that keeps no tasks.
+    ``learnings`` is the session's one finder of the specialists' learnings (the notebook's ``LearningRecall``, which
+    adds past sessions' from the Experience KB); without it ``notebook_learnings`` finds this session's only.
     """
     if toolbox_loop is None:
         with contextlib.suppress(RuntimeError):
@@ -305,7 +312,7 @@ def register_specialist_tools(
             tool.name,
             description=tool.description,
             schema=tool.input_schema,
-            handler=_notebook_handler(tool.name, notebooks, claim_ttl_seconds),
+            handler=_notebook_handler(tool.name, notebooks, claim_ttl_seconds, learnings),
             **own,
         )
 
