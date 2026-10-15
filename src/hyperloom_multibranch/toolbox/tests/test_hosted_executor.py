@@ -18,6 +18,7 @@ from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.socket import TestOutcome
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
+from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
@@ -83,7 +84,9 @@ def _toolbox(tmp_path: Path, r: Rig, *modes: str, policy: QueuePolicy = POLICY) 
     point = point_yaml(tmp_path, "planned.yaml")
     scripted = ScriptedBackend(r.backend, point, list(modes))
     executor = HostedExecutor(scripted, tmp_path / "session")  # type: ignore[arg-type]
-    return build(tmp_path, executor=executor, planner=PointPlanner(point), policy=policy), scripted  # type: ignore[arg-type]
+    return build(
+        tmp_path, executor=executor, planner=PointPlanner(point), policy=policy, workload_kind=WorkloadKind.AGENTX
+    ), scripted  # type: ignore[arg-type]
 
 
 async def _run(tb: ToolboxRig) -> tuple[str, TestResult]:
@@ -147,7 +150,13 @@ async def test_the_compiled_environment_reaches_the_instruction_sheet(tmp_path: 
     r = rig()
     point = point_yaml(tmp_path, "planned.yaml")
     executor = HostedExecutor(r.backend, tmp_path / "session")
-    tb = build(tmp_path, executor=executor, planner=PointPlanner(point, _Overlay()), policy=POLICY)
+    tb = build(
+        tmp_path,
+        executor=executor,
+        planner=PointPlanner(point, _Overlay()),
+        policy=POLICY,
+        workload_kind=WorkloadKind.AGENTX,
+    )
     request_id, result = await _run(tb)
     assert result.validity is Validity.SUCCEEDED
     sheet = json.loads(r.backend.journal.load_spec(request_id, 1))
@@ -238,7 +247,9 @@ async def test_a_timeout_is_an_unclear_failure_of_the_attempt(tmp_path: Path, ri
     point = point_yaml(tmp_path, "planned.yaml")
     backend = Timing(r.backend, point, [OK])
     executor = HostedExecutor(backend, tmp_path / "session")  # type: ignore[arg-type]
-    tb = build(tmp_path, executor=executor, planner=PointPlanner(point), policy=POLICY)
+    tb = build(
+        tmp_path, executor=executor, planner=PointPlanner(point), policy=POLICY, workload_kind=WorkloadKind.AGENTX
+    )
     _, result = await _run(tb)
     assert result.validity is Validity.SUCCEEDED, "the rerun succeeded"
     assert result.attempts[0].failure_class is FailureClass.INFRA, "an unclear failure that did not reproduce"
@@ -261,7 +272,11 @@ async def test_a_restarted_toolbox_re_attaches_to_the_sandbox_that_is_still_meas
 
     dying._wait = die  # type: ignore[method-assign]
     first = build(
-        tmp_path, executor=HostedExecutor(dying, tmp_path / "session"), planner=PointPlanner(point), policy=POLICY
+        tmp_path,
+        executor=HostedExecutor(dying, tmp_path / "session"),
+        planner=PointPlanner(point),
+        policy=POLICY,
+        workload_kind=WorkloadKind.AGENTX,
     )
     await first.toolbox.start()
     request_id = await first.toolbox.submit_test(req())
@@ -280,6 +295,7 @@ async def test_a_restarted_toolbox_re_attaches_to_the_sandbox_that_is_still_meas
         executor=HostedExecutor(second_backend, tmp_path / "session"),
         planner=PointPlanner(point),
         policy=POLICY,
+        workload_kind=WorkloadKind.AGENTX,
     )
     await second.toolbox.start()
     await asyncio.wait_for(second.toolbox.drain(), 60)

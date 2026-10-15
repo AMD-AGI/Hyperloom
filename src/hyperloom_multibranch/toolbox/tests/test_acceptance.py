@@ -9,7 +9,7 @@ import pytest
 
 from hyperloom.contracts.measurement import Purpose
 from hyperloom.contracts.recipe import ComponentChange, Recipe, RecipeDelta
-from hyperloom_multibranch.contracts.toolbox import RequestRejected
+from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
 from hyperloom_multibranch.toolbox.tests.helpers import BAD_DELTA, IMAGE, OTHER_IMAGE, FakeRepo, build, req
 
 
@@ -81,3 +81,39 @@ async def test_a_valid_request_is_accepted_and_written_to_the_notebook(tmp_path:
     row = rig.notebook._state().requests[request_id]
     assert (row.request_id, row.branch, row.purpose, row.priority) == (request_id, "b1", "confirm", 0)
     assert row.retest_of is not None
+
+
+# --- an InferenceX campaign runs explore and confirm with accuracy (board topic 14) -------------------------------
+
+
+async def _accepted_accuracy(rig, request) -> tuple[bool, bool]:
+    """(the accuracy flag the submit log recorded, the flag the executor received)."""
+
+    request_id = await rig.toolbox.submit_test(request)
+    await rig.toolbox.drain()
+    logged = next(e for e in rig.toolbox._log.entries() if e.request_id == request_id)
+    ran = next(j for j in rig.executor.jobs if j.request.request_id == request_id)
+    return bool(logged.request["accuracy"]), ran.request.accuracy
+
+
+async def test_an_inferencex_explore_is_accepted_with_accuracy(tmp_path: Path) -> None:
+    rig = build(tmp_path)
+    assert await _accepted_accuracy(rig, req(purpose=Purpose.EXPLORE)) == (True, True)
+
+
+async def test_an_inferencex_confirm_is_accepted_with_accuracy(tmp_path: Path) -> None:
+    rig = build(tmp_path)
+    first = await rig.toolbox.submit_test(req())
+    assert await _accepted_accuracy(rig, req(purpose=Purpose.CONFIRM, retest_of=first)) == (True, True)
+
+
+async def test_an_inferencex_baseline_and_final_keep_the_flag_off(tmp_path: Path) -> None:
+    rig = build(tmp_path)
+    assert await _accepted_accuracy(rig, req(purpose=Purpose.BASELINE)) == (False, False)
+    assert await _accepted_accuracy(rig, req(purpose=Purpose.FINAL)) == (False, False)
+
+
+async def test_an_agentx_explore_is_left_as_submitted(tmp_path: Path) -> None:
+    rig = build(tmp_path, workload_kind=WorkloadKind.AGENTX)
+    assert await _accepted_accuracy(rig, req(purpose=Purpose.EXPLORE)) == (False, False)
+    assert await _accepted_accuracy(rig, req(purpose=Purpose.EXPLORE, accuracy=True)) == (True, True)

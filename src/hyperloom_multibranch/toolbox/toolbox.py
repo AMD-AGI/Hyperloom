@@ -34,6 +34,7 @@ from hyperloom_multibranch.contracts.toolbox import (
     RequestRejected,
     TestRecordSink,
     UnknownTestRequest,
+    WorkloadKind,
 )
 from hyperloom_multibranch.toolbox.acceptance import Acceptance, MeasurementPlanner
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, AttemptRunner, Executor, TestJob
@@ -49,7 +50,12 @@ WRITE_RETRIES = 3
 
 
 class RealToolbox:
-    """Implements :class:`~hyperloom_multibranch.contracts.toolbox.Toolbox`; call :meth:`start` before use."""
+    """Implements :class:`~hyperloom_multibranch.contracts.toolbox.Toolbox`; call :meth:`start` before use.
+
+    ``workload_kind`` is the campaign's workload (default InferenceX, the MB1 scenario, design 7.3): in an InferenceX
+    campaign every ``explore`` and ``confirm`` request is accepted with ``accuracy=True``; AgentX leaves requests as
+    submitted.
+    """
 
     def __init__(
         self,
@@ -61,6 +67,7 @@ class RealToolbox:
         executor: Executor,
         planner: MeasurementPlanner,
         active_image_digest: str | None,
+        workload_kind: WorkloadKind = WorkloadKind.INFERENCEX,
         policy: QueuePolicy | None = None,
         claims: ClaimService | None = None,
         records: RecordSearch | None = None,
@@ -73,7 +80,11 @@ class RealToolbox:
         self._queue = WorkQueue(policy or QueuePolicy())
         self._quarantine = Quarantine(health)
         self._acceptance = Acceptance(
-            repo, planner, active_image_digest=active_image_digest, is_accepted=self._is_accepted
+            repo,
+            planner,
+            active_image_digest=active_image_digest,
+            is_accepted=self._is_accepted,
+            workload_kind=workload_kind,
         )
         self._runner = AttemptRunner(
             executor,
@@ -123,6 +134,7 @@ class RealToolbox:
 
     async def submit_test(self, request: TestRequest) -> str:
         async with self._lock:
+            request = self._acceptance.with_required_accuracy(request)
             prepared = await self._acceptance.prepare(request)
             self._queue.check_backpressure(request)
             priority = self._queue.policy.priority_of(request)

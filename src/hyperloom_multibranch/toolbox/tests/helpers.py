@@ -25,6 +25,7 @@ from hyperloom.measure.surface import SurfaceViolation
 from hyperloom.contracts.recipe import ConfigDelta, Recipe, RecipeDelta, RecipeError
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
@@ -166,6 +167,7 @@ def build(
     wrap_sink: Callable[[LocalNotebook], object] | None = None,
     planner: object | None = None,
     tools: Callable[[LocalNotebook], object] | None = None,
+    workload_kind: WorkloadKind = WorkloadKind.INFERENCEX,
 ) -> Rig:
     """A toolbox over a notebook directory and a submit log under ``tmp_path``; building again over the same
     ``tmp_path`` is a restart."""
@@ -185,6 +187,7 @@ def build(
         executor=executor,
         planner=planner,
         active_image_digest=active_image,
+        workload_kind=workload_kind,
         policy=policy,
         claims=notebook if with_claims else None,
         records=notebook,

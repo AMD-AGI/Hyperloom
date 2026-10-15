@@ -15,6 +15,7 @@ from hyperloom.measure.tests.hosted_fixtures import spec_context
 from hyperloom.measure.tests.test_hosted_real_runner import _git_repo, _point
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.local_hosted import build_local_toolbox, max_parallel_tests
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req
@@ -47,6 +48,7 @@ async def test_the_factory_builds_a_toolbox_that_runs_a_test_end_to_end(tmp_path
             tmp_path, inferencex_commit=commit, benchmark_backend="bypass", blob_root=str(session / "hosted" / "blobs")
         ),
         active_image_digest=IMAGE,
+        workload_kind=WorkloadKind.AGENTX,
         policy=QueuePolicy(per_branch_k=2, global_concurrency=64),
         runner_envs={"INFERENCEX_REPO": str(repo)},
         poll_interval_sec=0.1,

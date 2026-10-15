@@ -12,15 +12,18 @@ hosted measurement (``hyperloom.measure``) through the one :class:`MeasurementPl
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
-from hyperloom.contracts.measurement import TestRequest
+from hyperloom.contracts.measurement import Purpose, TestRequest
 from hyperloom.contracts.recipe import Recipe, RecipeError, apply
 from hyperloom.measure.compile import BaseImageMismatchError
 from hyperloom.measure.surface import SurfaceViolation
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
-from hyperloom_multibranch.contracts.toolbox import RequestRejected
+from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
+
+
+_ACCURACY_PURPOSES = (Purpose.EXPLORE, Purpose.CONFIRM)
 
 
 class MeasurementPlanner(Protocol):
@@ -49,11 +52,24 @@ class Acceptance:
         *,
         active_image_digest: str | None,
         is_accepted: Callable[[str], bool],
+        workload_kind: WorkloadKind = WorkloadKind.INFERENCEX,
     ) -> None:
         self._repo = repo
         self._planner = planner
         self._image = active_image_digest
         self._is_accepted = is_accepted
+        self._workload = workload_kind
+
+    def with_required_accuracy(self, request: TestRequest) -> TestRequest:
+        """The request an InferenceX campaign runs: ``explore`` and ``confirm`` tests always carry accuracy.
+
+        The rule gate refuses to judge an InferenceX result that has no score, so acceptance sets the flag (the
+        accepted request records it) rather than refusing. AgentX campaigns and every other purpose are unchanged.
+        """
+
+        if self._workload is WorkloadKind.INFERENCEX and request.purpose in _ACCURACY_PURPOSES and not request.accuracy:
+            return replace(request, accuracy=True)
+        return request
 
     async def prepare(self, request: TestRequest, *, replay: bool = False) -> Prepared:
         """Run the checks; ``replay`` re-prepares an already accepted request after a restart (it has its id)."""

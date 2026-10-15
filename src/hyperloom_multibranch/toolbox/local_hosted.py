@@ -22,6 +22,7 @@ from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.local_templates import local_runner_template
 from hyperloom.sandbox.local import LocalSandboxProvider
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
+from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.toolbox.acceptance import MeasurementPlanner
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
@@ -77,6 +78,7 @@ def build_local_toolbox(
     spec: SpecContext,
     active_image_digest: str | None,
     tp: int = 1,
+    workload_kind: WorkloadKind = WorkloadKind.INFERENCEX,
     policy: QueuePolicy | None = None,
     runner_envs: Mapping[str, str] | None = None,
     archive: ResultArchive | None = None,
@@ -102,6 +104,8 @@ def build_local_toolbox(
         spec: What the instruction sheet needs besides the call: image, GPU type, commits, blob store.
         active_image_digest: The active framework image; a recipe on another image is refused. ``None`` skips the check.
         tp: The tensor-parallel size of every test, that is the cards of one runner sandbox.
+        workload_kind: The campaign's workload; in an InferenceX campaign (the default) every ``explore`` and
+            ``confirm`` test is accepted with ``accuracy=True``, AgentX leaves requests as submitted.
         policy: Quota and priority policy; its ``global_concurrency`` is lowered to ``8 // tp`` when higher.
         runner_envs: Environment the runner template carries (for example ``INFERENCEX_REPO``).
         archive: The result archive; a directory archive below ``session_dir`` when omitted.
@@ -135,6 +139,7 @@ def build_local_toolbox(
         executor=HostedExecutor(backend, session, timeout_sec=timeout_sec, magpie_python=python),
         planner=planner,
         active_image_digest=active_image_digest,
+        workload_kind=workload_kind,
         policy=replace(base, global_concurrency=min(base.global_concurrency, parallel)),
         claims=notebook,  # type: ignore[arg-type]
         records=notebook,  # type: ignore[arg-type]

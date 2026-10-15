@@ -69,6 +69,13 @@ REJECTION_CODES = (
 )
 
 
+class WorkloadKind(str, Enum):
+    """The kind of workload a campaign measures; the judging rule differs (multi-branch design 7.3, K2)."""
+
+    INFERENCEX = "inferencex"  # fixed workload: the rule gate refuses a result without an accuracy score
+    AGENTX = "agentx"  # accuracy is a separate ``accuracy`` test after a positive result
+
+
 class CancelOutcome(str, Enum):
     WITHDRAWN = "withdrawn"  # queued or running and not finished: the toolbox wrote a withdrawal
     FINISHED = "finished"  # the result was already written; nothing was changed
@@ -166,4 +173,5 @@ __all__ = [
     "Toolbox",
     "ToolboxError",
     "UnknownTestRequest",
+    "WorkloadKind",
 ]

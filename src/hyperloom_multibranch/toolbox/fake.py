@@ -27,7 +27,7 @@ from hyperloom.contracts.measurement import TestKind, TestRequest, TestResult, V
 from hyperloom.contracts.recipe import Recipe
 from hyperloom_multibranch.contracts.notebook.interfaces import ClaimService, RecordSearch
 from hyperloom_multibranch.contracts.notebook.records import QuarantineEvent, Withdrawal
-from hyperloom_multibranch.contracts.toolbox import CancelOutcome, QueueState, RequestRejected
+from hyperloom_multibranch.contracts.toolbox import CancelOutcome, QueueState, RequestRejected, WorkloadKind
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.fake_model import (
     AttemptOutcome,
@@ -189,6 +189,7 @@ class FakeToolbox(RealToolbox):
         log_path: Path | None = None,
         claims: ClaimService | None = None,
         records: RecordSearch | None = None,
+        workload_kind: WorkloadKind = WorkloadKind.INFERENCEX,
     ) -> None:
         self.config = config or FakeToolboxConfig()
         self.executor = FakeExecutor(self.config, autorun=autorun)
@@ -205,6 +206,7 @@ class FakeToolbox(RealToolbox):
             executor=self.executor,
             planner=_NoPlanner(),
             active_image_digest=self.config.image_digest,
+            workload_kind=workload_kind,
             policy=self._policy(self.config.default_k),
             claims=claims,
             records=records,
