@@ -6,7 +6,8 @@
 A tree keeps what the replay, the frontier priors and the dispersion priors need: when each branch opened and stopped
 and why it opened, when its tests were requested, when its commits landed and the cumulative gain they reached, the GPU
 time it spent, the session's task conditions, its baseline's dispersion and where it measured. Trees are written once,
-under ``<archive>/trees/<session_id>.json``; the archive is a shared folder the deployment names.
+under ``<archive>/trees/<session_id>.json``; the archive is a shared folder the deployment names. CLOSE archives its
+session with :func:`archive_session`, which says why when it archives nothing.
 """
 
 from __future__ import annotations
@@ -228,6 +229,10 @@ def similar_trees(
     return tuple(sorted(kept, key=lambda item: -item.weight))
 
 
+class TreeConflict(FileExistsError):
+    """The archive already holds another tree under the session's id."""
+
+
 class TreeArchive:
     """The shared folder of archived search trees."""
 
@@ -250,7 +255,7 @@ class TreeArchive:
         if publish_once(path, encode_json(tree_document(tree))):
             return
         if tree_from_document(json.loads(path.read_text(encoding="utf-8"))) != tree:
-            raise FileExistsError(f"{path} already holds another tree for session {tree.session_id}")
+            raise TreeConflict(f"{path} already holds another tree for session {tree.session_id}")
 
     def load(self) -> list[SearchTree]:
         """Every readable archived tree; one this version cannot read is skipped with a warning."""
@@ -264,17 +269,73 @@ class TreeArchive:
         return trees
 
 
+ARCHIVED = "archived"
+SKIPPED = "skipped"
+
+
+@dataclass(frozen=True)
+class ArchiveResult:
+    """What :func:`archive_session` did: ``archived``, or ``skipped`` with the ``reason``."""
+
+    status: str
+    reason: str = ""
+    session_id: str = ""
+
+
+def archive_session(
+    snapshot: NotebookSnapshot,
+    metric: str,
+    archive: TreeArchive | None = None,
+    *,
+    budget_seconds: float | None = None,
+    bottlenecks: Mapping[str, float] | None = None,
+) -> ArchiveResult:
+    """CLOSE: archive the session's search tree in ``archive``, by default the one :data:`ARCHIVE_ENV` names.
+
+    ``budget_seconds`` is the session's configured budget; later sessions compare their progress with this one's at
+    the same fraction of its budget, so it beats the default, the time the notebook spans. Nothing is archived, and the
+    result says why, when no archive is configured, the session lacks its profile or baseline, its id cannot name a
+    file, the archive already holds another tree for it, or the archive cannot be written.
+    """
+
+    target = archive if archive is not None else TreeArchive.from_env()
+    if target is None:
+        return ArchiveResult(SKIPPED, "no_archive_configured")
+    try:
+        tree = tree_from_snapshot(snapshot, metric, budget_seconds=budget_seconds, bottlenecks=bottlenecks)
+    except NotRecorded:
+        return ArchiveResult(SKIPPED, "no_profile_or_baseline")
+    except ValueError:
+        return ArchiveResult(SKIPPED, "baseline_lacks_metric", snapshot.profile.session_id if snapshot.profile else "")
+    try:
+        target.put(tree)
+    except ValueError:
+        return ArchiveResult(SKIPPED, "session_id_not_a_file_name", tree.session_id)
+    except TreeConflict:
+        log.warning("the archive already holds another search tree for session %s", tree.session_id)
+        return ArchiveResult(SKIPPED, "another_tree_archived", tree.session_id)
+    except OSError as exc:
+        log.warning("could not archive the search tree of session %s in %s: %s", tree.session_id, target.root, exc)
+        return ArchiveResult(SKIPPED, "archive_unwritable", tree.session_id)
+    return ArchiveResult(ARCHIVED, session_id=tree.session_id)
+
+
 __all__ = [
+    "ARCHIVED",
     "ARCHIVE_ENV",
     "SINGLE_HOST",
+    "SKIPPED",
     "SOURCE_NOTEBOOK",
     "TREE_FORMAT",
+    "ArchiveResult",
     "MeasurementNoise",
     "SearchTree",
     "TreeArchive",
     "TreeBranch",
     "TreeCommit",
+    "TreeConflict",
     "WeightedTree",
+    "archive_session",
     "session_start",
     "similar_trees",
     "tree_document",

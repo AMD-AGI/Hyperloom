@@ -16,8 +16,12 @@ from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, T
 from hyperloom_multibranch.contracts.notebook.vocab import CommitOrigin, LineageKind
 from hyperloom_multibranch.notebook.rsi.archive import (
     ARCHIVE_ENV,
+    ARCHIVED,
     SINGLE_HOST,
+    SKIPPED,
+    ArchiveResult,
     TreeArchive,
+    archive_session,
     similar_trees,
     tree_document,
     tree_from_document,
@@ -91,6 +95,47 @@ def test_the_archive_keeps_each_tree_once_and_skips_what_it_cannot_read(
         assert archive.load() == [searched]
     assert "broken.json" in caplog.text
     assert tree_from_document(tree_document(searched)) == searched
+
+
+def test_close_archives_the_session_once_with_its_budget(snapshot: NotebookSnapshot, tmp_path: Path) -> None:
+    archive = TreeArchive(tmp_path / "archive")
+
+    first = archive_session(snapshot, METRIC, archive, budget_seconds=7200.0)
+    again = archive_session(snapshot, METRIC, archive, budget_seconds=7200.0)
+
+    assert first == again == ArchiveResult(ARCHIVED, session_id="sess-1")
+    assert archive.load() == [tree_from_snapshot(snapshot, METRIC, budget_seconds=7200.0)]
+
+
+def test_close_archives_in_the_archive_the_environment_names(
+    snapshot: NotebookSnapshot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path))
+
+    assert archive_session(snapshot, METRIC).status == ARCHIVED
+    assert (tmp_path / "trees" / "sess-1.json").is_file()
+
+
+def test_close_says_why_it_archived_nothing(
+    snapshot: NotebookSnapshot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv(ARCHIVE_ENV, raising=False)
+    archive = TreeArchive(tmp_path / "archive")
+    archive_session(snapshot, METRIC, archive, budget_seconds=7200.0)
+    blocked = TreeArchive(tmp_path / "a-file")
+    (tmp_path / "a-file").write_text("not a folder", encoding="utf-8")
+
+    assert archive_session(snapshot, METRIC) == ArchiveResult(SKIPPED, "no_archive_configured")
+    assert archive_session(dataclasses.replace(snapshot, profile=None), METRIC, archive).reason == (
+        "no_profile_or_baseline"
+    )
+    assert archive_session(snapshot, "ttft", archive) == ArchiveResult(SKIPPED, "baseline_lacks_metric", "sess-1")
+    assert archive_session(snapshot, METRIC, archive, budget_seconds=60.0) == ArchiveResult(
+        SKIPPED, "another_tree_archived", "sess-1"
+    )
+    assert archive_session(snapshot, METRIC, blocked).reason == "archive_unwritable"
+    renamed = dataclasses.replace(snapshot, profile=dataclasses.replace(snapshot.profile, session_id="../escape"))
+    assert archive_session(renamed, METRIC, archive).reason == "session_id_not_a_file_name"
 
 
 def test_the_archive_lives_where_the_deployment_says(tmp_path: Path) -> None:
