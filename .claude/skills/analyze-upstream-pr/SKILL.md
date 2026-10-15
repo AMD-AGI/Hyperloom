@@ -123,7 +123,7 @@ From the body and comments in `pr.json` and `inline.jsonl`, one line per dimensi
 number and its metric). A comment can move the operating point (a reviewer's rerun elsewhere, a
 correction after a push): keep both, the later last. A quote not verbatim in its artifact is not
 evidence. Then one `GAP: <dimension> -- validated <value>, target <value>` line per dimension where
-`target.txt` differs.
+`target.txt` differs (G6).
 
 ## Step 3 — On our path
 
@@ -193,12 +193,13 @@ git -C "$WORK/scratch" apply --check "$PR/diff.txt"
 ```
 
 Write `apply@<commit> APPLIES`, or `FAILS -- <the first failing hunk>`: drift between the PR's base
-and `commit`, which qualifies the recommendation. When it fails, check again with `--reverse`;
-`REVERSE`, a diff that applies only backwards, means the tree already has the change, so a Step 4
-`unknown` becomes `included` by that check. Then, per local patch: `local:<patch> OVERLAP` when its
-`git apply --numstat` lists a path in `files.txt`; apply it in the worktree and check the diff
-again, where a failure only after it is `CONFLICT -- <the hunk>`, else `CLEAR`. Remove the worktree
-with `git -C "$TREE" worktree remove --force "$WORK/scratch"`. With no tree, or a `SKIPPED: diff`,
+and `commit`, or a path the tree lays out elsewhere (G7), which qualifies the recommendation. When
+it fails, check again with `--reverse`; `REVERSE`, a diff that applies only backwards, means the
+tree already has the change, so a Step 4 `unknown` becomes `included` by that check. Then, per
+local patch: `local:<patch> OVERLAP` when its `git apply --numstat` lists a path in `files.txt`;
+apply it in the worktree and check the diff again, where a failure only after it is `CONFLICT`,
+with the hunk, else `CLEAR`. Remove the worktree with
+`git -C "$TREE" worktree remove --force "$WORK/scratch"`. With no tree, or a `SKIPPED: diff`,
 write `SKIPPED: apply -- <why>`.
 
 ## Step 7 — Risks
