@@ -77,11 +77,17 @@ class ProposalBench(CoordinatorCollaborator):
         state = self.shared_state
         key = custom_specialist_key(int(state.macro_cycle or 0), str(state.custom_specialist_prompt or "").strip())
         custom = await self.tasks.find_by_idempotency_key(key)
-        if custom is None or custom.state not in TERMINAL_STATES:
+        # A cycle whose dispatch admission refused has nothing left to run.
+        refused = custom is None and key == self._coord.specialist_dispatch.refused_custom_key
+        if not refused and (custom is None or custom.state not in TERMINAL_STATES):
             return
         # A succeeded task's round, which carries its proposals, may not be booked yet.
-        if custom.state == "succeeded" and not any(
-            isinstance(r, dict) and r.get("task_id") == custom.task_id for r in state.specialist_rounds or []
+        if (
+            custom is not None
+            and custom.state == "succeeded"
+            and not any(
+                isinstance(r, dict) and r.get("task_id") == custom.task_id for r in state.specialist_rounds or []
+            )
         ):
             return
         if await self.operator_work_pending():

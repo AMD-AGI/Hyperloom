@@ -79,6 +79,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         super().__init__(coordinator)
         # Advisory only: scores proposals, never gates them.
         self._proposal_scorer = proposal_scorer
+        # Key of the custom dispatch admission last refused; it is not requested again until the key changes.
+        self.refused_custom_key = ""
 
     async def warm_specialist_params(self, params: dict[str, Any]) -> None:
         """Fill specialist task params with KnowledgePlane data before enqueue (mutates in place); missing fields stay empty.
@@ -665,7 +667,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         from .profile import MODE_RESEARCH, NO_LEASE_EXTENSION
 
         key = custom_specialist_key(int(state.macro_cycle or 0), prompt)
-        if await self.tasks.find_by_idempotency_key(key) is not None:
+        if key == self.refused_custom_key or await self.tasks.find_by_idempotency_key(key) is not None:
             return
         from ..state._shared_state.phase_state import gap_actionability_key
 
@@ -706,6 +708,10 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             payload={"action_name": "specialist", "params": params, "idempotency_key": key},
         )
         await self._coord.router.handle_delegate("orchestration", intent)
+        if await self.tasks.find_by_idempotency_key(key) is None:
+            self.refused_custom_key = key
+            log.warning("custom specialist: dispatch %s refused (see the policy denial); not retried this cycle", key)
+            return
         log.info(
             "custom specialist: requested key=%s gap=%s mode=%s",
             key,

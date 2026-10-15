@@ -624,6 +624,29 @@ async def test_the_coordinator_custom_task_passes_the_dispatch_time_gate_and_run
     assert ran == ["custom_specialist"]
 
 
+async def test_a_refused_custom_dispatch_is_requested_once_per_cycle(tmp_path, monkeypatch):
+    state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION)
+    # Below the research-mode base, so admission refuses it.
+    state.max_minutes = 5
+    state.framework = "sglang"
+    coord = _coordinator(tmp_path, state)
+    denials: list[tuple[int, str]] = []
+    record = coord.router.record_policy_denied
+
+    async def _record(source, intent, denied, **kwargs):
+        denials.append((coord.shared_state.macro_cycle, denied.rule))
+        await record(source, intent, denied, **kwargs)
+
+    monkeypatch.setattr(coord.router, "record_policy_denied", _record)
+    for cycle in (0, 0, 0, 1, 1):
+        coord.shared_state.macro_cycle = cycle
+        await coord.specialist_dispatch.ensure_custom_specialist()
+
+    assert [cycle for cycle, _ in denials] == [0, 1]
+    assert await coord.tasks.queued() == []
+    assert coord.specialist_dispatch.refused_custom_key == _custom_key(1)
+
+
 async def test_stalled_domain_force_ignores_a_custom_hinted_gap_when_not_configured(custom_coord):
     state = custom_coord.shared_state
     state.custom_specialist_prompt = ""
@@ -721,6 +744,7 @@ def _framework(*, rounds, queued=(), running=(), phase_done=False):
         tasks=_BenchTasks(queued, running),
         dispatcher=dispatcher,
         state=SimpleNamespace(pending_proposals={}),
+        specialist_dispatch=SimpleNamespace(refused_custom_key=""),
     )
     coord.phase_framework = FrameworkPhase(coord)
     return coord.phase_framework
@@ -795,6 +819,29 @@ def test_only_a_plateau_exit_from_framework_waits_for_operator_work(next_phase, 
     from hyperloom.orchestrator.phases.machine import is_leverage_exit
 
     assert is_leverage_exit(next_phase) is held
+
+
+@pytest.mark.parametrize(
+    ("hint", "elapsed_min", "expected"),
+    [("skip_to_sweep", 0, ("FRAMEWORK_AGENT", ["custom_specialist"])), ("", 600, ("KERNEL_AGENT", ["kernel_agent"]))],
+)
+async def test_framework_holds_a_leverage_exit_for_queued_custom_work_but_not_a_budget_exit(
+    tmp_path, hint, elapsed_min, expected
+):
+    import time
+
+    state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION)
+    state.max_minutes = 120
+    state.framework = "sglang"
+    coord = _coordinator(tmp_path, state)
+    state = coord.shared_state
+    await coord.specialist_dispatch.ensure_custom_specialist()
+    state.pending_escalate_hint = hint
+    state.phase_started_unix = time.time() - elapsed_min * 60
+
+    await coord.phase_machine.advance_phase_if_needed()
+
+    assert (state.phase, [t.params.get("domain", t.kind) for t in await coord.tasks.queued()]) == expected
 
 
 # --custom-specialist-only
@@ -940,11 +987,12 @@ async def test_only_mode_benches_no_proposal_but_the_custom_ones():
     assert fp._coord.tasks.created == []
 
 
-def _only_cycle(*, custom_state, rounds=(), queued=(), pending=False):
+def _only_cycle(*, custom_state, rounds=(), queued=(), pending=False, refused=""):
     from hyperloom.orchestrator.specialists.domains import custom_specialist_key
 
     fp = _framework(rounds=rounds, queued=queued)
     fp.shared_state.custom_specialist_only = True
+    fp._coord.specialist_dispatch.refused_custom_key = refused
     if custom_state:
         fp._coord.tasks.known[custom_specialist_key(0, _PROMPT)] = SimpleNamespace(
             task_id="custom-task", state=custom_state
@@ -965,6 +1013,8 @@ _SILENT_CUSTOM_ROUND = {**_bench_round("custom-task", "custom_specialist"), "pro
         ({"custom_state": "succeeded", "rounds": [_SILENT_CUSTOM_ROUND]}, "skip_to_sweep"),
         ({"custom_state": "failed"}, "skip_to_sweep"),
         ({"custom_state": None}, ""),
+        ({"custom_state": None, "refused": _custom_key(0)}, "skip_to_sweep"),
+        ({"custom_state": None, "refused": _custom_key(1)}, ""),
         ({"custom_state": "running"}, ""),
         ({"custom_state": "succeeded"}, ""),
         ({"custom_state": "succeeded", "rounds": [_bench_round("custom-task", "custom_specialist", "idx-4")]}, ""),
