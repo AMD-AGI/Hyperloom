@@ -18,7 +18,8 @@ The expected gain is the prior where there is one, else the trend; a branch unde
 ``observation_floor_pct``, and so does a branch scored by its trend that has not yet been open a window nor committed,
 since its trend cannot be anything but zero; the headroom caps it, and it is never negative. ``basis`` names which of
 them the score rests on. The formula is a prototype: what the score means is the scheduler's call (gongzheng's), and it
-stays here until then.
+stays here until then. :func:`score_at` is the formula alone, on a branch as an archived tree has it, so the live
+scoring and the calibration score with the same one.
 
 Given a ``log`` path, the scoring appends one :data:`FRONTIER_LOG_FORMAT` line per round it scored anything: when, on
 the session clock too, and each scored branch's spend, head value and score. Checking the scores against the gains that
@@ -134,6 +135,53 @@ def _observing(snapshot: NotebookSnapshot, branch: str, since: float) -> bool:
     return tested or held
 
 
+def headroom_pct(ceiling: float | None, head: float | None) -> float | None:
+    """How far ``head`` is below the roofline ``ceiling``, in percent of the head; ``None`` without either."""
+
+    return max(0.0, (ceiling / head - 1.0) * 100.0) if ceiling and head else None
+
+
+def score_at(
+    branch: TreeBranch,
+    t_s: float,
+    task: TaskConditions,
+    history: tuple[SearchTree, ...],
+    policy: FrontierPolicy,
+    *,
+    observing: bool = False,
+    headroom: float | None = None,
+) -> FrontierScore:
+    """The frontier score of ``branch`` as it stood at ``t_s`` on its session's clock: the one formula.
+
+    ``observing`` is whether a kernel-layer direction the branch tested within the observation period may still be
+    paying off, and ``headroom`` how far its head is below the roofline bound (:func:`headroom_pct`). The scoring reads
+    both off the notebook; the calibration reads them, and the branch as of ``t_s``, off an archived tree.
+    """
+
+    trend = branch.gain_at(t_s) - branch.gain_at(t_s - policy.window_seconds)
+    components = {
+        "trend_pct": trend,
+        "tests": float(len(branch.test_times)),
+        "gpu_hours": branch.gpu_seconds / HOUR,
+        "observing": float(observing),
+    }
+    expected, basis = trend, FrontierBasis.TREND
+    prior = remaining_prior(history, task, len(branch.test_times), min_similarity=policy.min_similarity)
+    if prior is not None and prior.effective_sessions >= policy.min_effective_sessions:
+        components.update(prior_remaining_pct=prior.remaining_pct, prior_effective_sessions=prior.effective_sessions)
+        expected, basis = prior.remaining_pct, FrontierBasis.PRIOR
+    if observing and expected < policy.observation_floor_pct:
+        expected, basis = policy.observation_floor_pct, FrontierBasis.OBSERVING
+    young = t_s - branch.opened_s < policy.window_seconds and not branch.commits
+    if basis is FrontierBasis.TREND and young and expected < policy.new_branch_floor_pct:
+        expected, basis = policy.new_branch_floor_pct, FrontierBasis.NEW
+    if headroom is not None:
+        components["headroom_pct"] = headroom
+        if headroom < expected:
+            expected, basis = headroom, FrontierBasis.HEADROOM
+    return FrontierScore(expected_gain_pct=max(0.0, expected), components=components, basis=basis)
+
+
 def score_branch(
     snapshot: NotebookSnapshot,
     row: BranchProgress,
@@ -144,31 +192,16 @@ def score_branch(
     """The frontier score of one running specialist branch of ``tree``, the session's own search tree."""
 
     branch = next(item for item in tree.branches if item.name == row.branch)
-    now = snapshot.taken_at - session_start(snapshot)
-    trend = branch.gain_at(now) - branch.gain_at(now - policy.window_seconds)
-    components = {
-        "trend_pct": trend,
-        "tests": float(len(branch.test_times)),
-        "gpu_hours": branch.gpu_seconds / HOUR,
-        "observing": float(_observing(snapshot, row.branch, snapshot.taken_at - policy.observation_seconds)),
-    }
-    expected, basis = trend, FrontierBasis.TREND
-    prior = remaining_prior(history, tree.task, len(branch.test_times), min_similarity=policy.min_similarity)
-    if prior is not None and prior.effective_sessions >= policy.min_effective_sessions:
-        components.update(prior_remaining_pct=prior.remaining_pct, prior_effective_sessions=prior.effective_sessions)
-        expected, basis = prior.remaining_pct, FrontierBasis.PRIOR
-    if components["observing"] and expected < policy.observation_floor_pct:
-        expected, basis = policy.observation_floor_pct, FrontierBasis.OBSERVING
-    young = now - branch.opened_s < policy.window_seconds and not branch.commits
-    if basis is FrontierBasis.TREND and young and expected < policy.new_branch_floor_pct:
-        expected, basis = policy.new_branch_floor_pct, FrontierBasis.NEW
     ceiling = snapshot.profile.roofline_ceiling.get(policy.metric) if snapshot.profile is not None else None
-    head = row.head_value.get(policy.metric)
-    if ceiling and head:
-        components["headroom_pct"] = max(0.0, (ceiling / head - 1.0) * 100.0)
-        if components["headroom_pct"] < expected:
-            expected, basis = components["headroom_pct"], FrontierBasis.HEADROOM
-    return FrontierScore(expected_gain_pct=max(0.0, expected), components=components, basis=basis)
+    return score_at(
+        branch,
+        snapshot.taken_at - session_start(snapshot),
+        tree.task,
+        history,
+        policy,
+        observing=_observing(snapshot, row.branch, snapshot.taken_at - policy.observation_seconds),
+        headroom=headroom_pct(ceiling, row.head_value.get(policy.metric)),
+    )
 
 
 def score_progress(
@@ -261,7 +294,9 @@ __all__ = [
     "FrontierScoring",
     "RemainingPrior",
     "frontier_log_line",
+    "headroom_pct",
     "remaining_prior",
+    "score_at",
     "score_branch",
     "score_progress",
 ]

@@ -30,7 +30,8 @@ from hyperloom_multibranch.notebook.rsi.archive import (
     tree_from_snapshot,
 )
 from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions
-from hyperloom_multibranch.notebook.rsi.tests.trees import TASK, tree
+from hyperloom_multibranch.notebook.rsi.tests.trees import HOUR, LATE_BLOOMER, TASK, branch, tree
+from hyperloom_multibranch.notebook.tests.factories import profile
 from hyperloom_multibranch.notebook.tests.sessions import METRIC
 
 
@@ -55,6 +56,31 @@ def test_the_tree_holds_each_branch_with_its_commits_tests_cost_and_times(snapsh
     assert (
         searched.budget_seconds > 0 and tree_from_snapshot(snapshot, METRIC, budget_seconds=60.0).budget_seconds == 60.0
     )
+
+
+def test_the_tree_keeps_when_kernel_tests_ran_and_the_roofline_bound_over_the_baseline(
+    snapshot: NotebookSnapshot,
+) -> None:
+    searched = tree_from_snapshot(snapshot, METRIC)
+    branches = {branch.name: branch for branch in searched.branches}
+    unbound = dataclasses.replace(snapshot, profile=profile(roofline_ceiling={}))
+
+    assert len(branches["s1"].kernel_test_times) == 2 and branches["s1"].kernel_test_times == branches["s1"].test_times
+    assert branches["s2"].kernel_test_times == ()
+    assert searched.roofline_ceiling_pct == pytest.approx(50.0)
+    assert tree_from_snapshot(unbound, METRIC).roofline_ceiling_pct is None
+    assert tree_from_document(tree_document(searched)) == searched
+
+
+def test_a_branch_as_of_a_time_has_only_what_it_had_by_then() -> None:
+    times = (0.0, 1800.0, 3600.0, 7200.0)
+    grown = branch("s1", LATE_BLOOMER, test_times=times, kernel_test_times=(1800.0, 7200.0), closed_s=7200.0)
+    then = grown.as_of(3600.0)
+
+    assert [commit.t_s for commit in then.commits] == [1800.0, 3600.0] and then.final_gain_pct == pytest.approx(2.3)
+    assert (then.test_times, then.kernel_test_times) == ((0.0, 1800.0, 3600.0), (1800.0,))
+    assert then.closed_s is None and then.gpu_seconds == pytest.approx(3 * HOUR)
+    assert grown.as_of(7200.0).closed_s == 7200.0
 
 
 def test_each_branch_keeps_why_it_stopped_and_the_directions_it_tried(snapshot: NotebookSnapshot) -> None:

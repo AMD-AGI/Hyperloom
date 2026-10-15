@@ -3,11 +3,12 @@
 
 """Archived search trees: what each past session's branches did over time, what they cost, how noisy it measured.
 
-A tree keeps what the replay, the frontier priors, the dispersion priors and the history digest need: when each branch
-opened and stopped and why, when its tests were requested, the directions they tried, when its commits landed and the
-cumulative gain they reached, the GPU time it spent, the session's task conditions, its baseline's dispersion and where
-it measured. A tree an older version wrote, or one backfilled from a session that recorded no intents, reads with no
-stop reasons and no directions. Trees are written once,
+A tree keeps what the replay, the frontier priors and their calibration, the dispersion priors and the history digest
+need: when each branch opened and stopped and why, when its tests were requested (its kernel-layer ones apart), the
+directions they tried, when its commits landed and the cumulative gain they reached, the GPU time it spent, the
+session's task conditions, its roofline bound, its baseline's dispersion and where it measured. A tree an older version
+wrote, or one backfilled from a session that recorded no intents, reads with no stop reasons, no directions, no kernel
+test times and no roofline bound. Trees are written once,
 under ``<archive>/trees/<session_id>.json``; the archive is a shared folder the deployment names. CLOSE archives its
 session with :func:`archive_session`, which says why when it archives nothing.
 """
@@ -21,7 +22,7 @@ import os
 import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
@@ -66,7 +67,8 @@ class TreeBranch:
     """One branch on the session clock (seconds since the session started); gains are over the session's baseline.
 
     ``stop_reason`` is the reason the scheduler gave when it stopped the branch; ``directions`` are the intents its tests
-    tried, in the order it first tried them.
+    tried, in the order it first tried them; ``kernel_test_times`` when its kernel-layer tests were requested, which the
+    frontier calibration reads the observation period off.
     """
 
     name: str
@@ -80,6 +82,7 @@ class TreeBranch:
     test_times: tuple[float, ...] = ()
     stop_reason: str = ""
     directions: tuple[TreeDirection, ...] = ()
+    kernel_test_times: tuple[float, ...] = ()
 
     def gain_at(self, t_s: float) -> float:
         """The cumulative gain of the branch's latest commit at ``t_s``, or the gain it forked at."""
@@ -93,6 +96,24 @@ class TreeBranch:
 
     def tests_by(self, t_s: float) -> int:
         return sum(1 for when in self.test_times if when <= t_s)
+
+    def as_of(self, t_s: float) -> TreeBranch:
+        """The branch as it stood at ``t_s``: its commits and tests by then, open unless it had stopped by then.
+
+        The GPU time is the share of the branch's tests requested by then, the archive keeping only the total; the
+        directions, which the archive does not date, are left out.
+        """
+
+        tests = tuple(when for when in self.test_times if when <= t_s)
+        return replace(
+            self,
+            closed_s=self.closed_s if self.closed_s is not None and self.closed_s <= t_s else None,
+            gpu_seconds=self.gpu_seconds * len(tests) / len(self.test_times) if self.test_times else 0.0,
+            commits=tuple(commit for commit in self.commits if commit.t_s <= t_s),
+            test_times=tests,
+            directions=(),
+            kernel_test_times=tuple(when for when in self.kernel_test_times if when <= t_s),
+        )
 
 
 @dataclass(frozen=True)
@@ -112,7 +133,11 @@ class MeasurementNoise:
 
 @dataclass(frozen=True)
 class SearchTree:
-    """One past session as the RSI replays it."""
+    """One past session as the RSI replays it.
+
+    ``roofline_ceiling_pct`` is the roofline bound PRELUDE recorded for the gain metric, as a gain over the baseline;
+    ``None`` when it recorded none, or the tree is older.
+    """
 
     session_id: str
     source: str
@@ -122,6 +147,7 @@ class SearchTree:
     branches: tuple[TreeBranch, ...]
     noise: MeasurementNoise = field(default_factory=MeasurementNoise)
     policy_versions: Mapping[str, str] = field(default_factory=dict)
+    roofline_ceiling_pct: float | None = None
 
 
 def tree_document(tree: SearchTree) -> dict[str, object]:
@@ -229,6 +255,8 @@ def tree_from_snapshot(
     tests: dict[str, list[TestRecord]] = defaultdict(list)
     for record in snapshot.records:
         tests[record.request.branch].append(record)
+    kernel = {fingerprint for fingerprint, intent in snapshot.intents.items() if intent.layer is IntentLayer.KERNEL}
+    ceiling = profile.roofline_ceiling.get(metric)
     branches = tuple(
         TreeBranch(
             name=node.branch,
@@ -246,6 +274,13 @@ def tree_from_snapshot(
             test_times=tuple(sorted(record.requested_at - start for record in tests[node.branch])),
             stop_reason=node.stop_reason or "",
             directions=() if node.branch == INTEGRATION_BRANCH else _directions(tests[node.branch], snapshot.intents),
+            kernel_test_times=tuple(
+                sorted(
+                    record.requested_at - start
+                    for record in tests[node.branch]
+                    if record.request.intent_fingerprint in kernel
+                )
+            ),
         )
         for node in view.branches
     )
@@ -262,6 +297,7 @@ def tree_from_snapshot(
             environment=_environment(snapshot),
         ),
         policy_versions=dict(snapshot.fingerprints[-1].policy_versions) if snapshot.fingerprints else {},
+        roofline_ceiling_pct=(ceiling / anchor - 1.0) * 100.0 if ceiling else None,
     )
 
 
