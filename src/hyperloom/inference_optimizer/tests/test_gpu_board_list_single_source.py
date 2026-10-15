@@ -68,7 +68,7 @@ def test_the_preflight_warning_names_the_boards_the_cli_accepts(capsys, monkeypa
 
 
 def test_a_tag_never_precedes_one_it_is_a_prefix_of():
-    """Tags are substring-matched against rocm-smi output, so order decides."""
+    """Tags are substring-matched against amd-smi output, so order decides."""
     for i, tag in enumerate(_PRODUCT_TAGS):
         for later in _PRODUCT_TAGS[i + 1 :]:
             assert not later.startswith(tag), f"{tag} shadows {later}"

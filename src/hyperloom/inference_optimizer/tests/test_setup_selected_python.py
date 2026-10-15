@@ -134,7 +134,11 @@ def _run_setup(
     runner = _write(
         tmp_path / "runner.sh",
         (f"{before}\n" if before else "") + f"source {shlex.quote(library.as_posix())}\n"
-        "rocm-smi() { printf 'test MI300X\\n'; }\n"
+        "amd-smi() {\n"
+        '  if [ "$1" = static ] && [ "$2" = --asic ]; then\n'
+        '    printf \'%s\\n\' \'{"gpu_data":[{"asic":{"market_name":"test MI300X"}}]}\'\n'
+        "  fi\n"
+        "}\n"
         "rocminfo() { printf 'gfx942\\n'; }\n"
         "check_torch_rocm_shared_libs() { :; }\n"
         "check_rocm_toolchain_alignment() { :; }\n"
