@@ -30,7 +30,7 @@ is in the history; a later revert is not looked for.
 
 The ``pr_check_inclusion`` MCP tool answers from subjects alone, because nothing the agent can
 call returns a merge commit sha. The command line also takes the sha; the check-prior-art
-contributor skill runs it with the one it reads from the GitHub API::
+contributor skill runs it with the PR's ``mergeCommit``, which it reads with ``gh pr view``::
 
     python -m kernelforge.knowledge.pr_knowledge.inclusion --tree PATH --commit SHA --pr N \\
         [--merge-commit-sha SHA]
