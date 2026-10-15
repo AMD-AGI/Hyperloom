@@ -104,9 +104,11 @@ async def test_a_baseline_carries_the_run_into_the_optimisation_phase_with_work(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("backend_order", "result_field", "result_key", "expected"),
+    # Neither route starts its work: with no measured baseline, the round held back to measure it is the benchmark
+    # hard cap, which outlasts this KERNEL slice.
     [
         ("", "geak_result", "error_class", "insufficient_budget"),
-        ("forge", "kernel_rewrite_controller_result", "status", "no_opportunity"),
+        ("forge", "kernel_rewrite_controller_result", "status", "no_result"),
     ],
     ids=["geak", "forge"],
 )

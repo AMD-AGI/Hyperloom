@@ -264,7 +264,7 @@ def test_run_optimization_request_no_longer_blocked_by_stale_trace_analyze(
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
     s.last_trace_analyze = {}
-    assert coord.dispatcher.sequence_denial_for_request("kernel_agent", "run_optimization") is None
+    assert coord.dispatcher.admission_denial_for_request("kernel_agent", "run_optimization") is None
 
 
 def test_trace_analyze_request_itself_passes(session_dir):
@@ -275,7 +275,7 @@ def test_trace_analyze_request_itself_passes(session_dir):
     s.baseline_tput = 100.0
     s.last_profile_trace = "/tmp/profile.tar.gz"
     s.last_trace_analyze = {}
-    assert coord.dispatcher.sequence_denial_for_request("kernel_agent", "trace_analyze") is None
+    assert coord.dispatcher.admission_denial_for_request("kernel_agent", "trace_analyze") is None
 
 
 def test_legacy_select_kernels_request_kind_no_longer_recognised(session_dir):
@@ -303,4 +303,4 @@ def test_trace_analyze_gate_clears_run_opt_request_when_cache_fresh(session_dir)
         "trace_input": "/tmp/profile.tar.gz",
         "candidates_path": "/tmp/cands.json",
     }
-    assert coord.dispatcher.sequence_denial_for_request("kernel_agent", "run_optimization") is None
+    assert coord.dispatcher.admission_denial_for_request("kernel_agent", "run_optimization") is None

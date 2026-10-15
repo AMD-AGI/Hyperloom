@@ -737,7 +737,7 @@ async def test_extend_lease_reports_degraded_when_gpu_refresh_fails(coordinator_
 async def test_extend_lease_grants_live_subprocess_extension(coordinator_with_mocks):
     """The handler must hand the grant to the reaper, not just move DB rows."""
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-    from hyperloom.orchestrator.specialists import subprocess_ as _sub
+    from hyperloom.orchestrator.specialists import wall_budget as _sub
 
     c = coordinator_with_mocks
     try:
@@ -777,7 +777,7 @@ async def test_extend_lease_grants_live_subprocess_extension(coordinator_with_mo
 async def test_extend_lease_survives_wall_budget_grant_failure(coordinator_with_mocks):
     """A wall-budget failure retains DB changes but reports a degraded extension."""
     from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-    from hyperloom.orchestrator.specialists import subprocess_ as _sub
+    from hyperloom.orchestrator.loop import intent_router as _sub
 
     c = coordinator_with_mocks
     try:

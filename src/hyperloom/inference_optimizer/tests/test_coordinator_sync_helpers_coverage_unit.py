@@ -95,6 +95,46 @@ def test_a_spent_session_yields_an_expired_specialist_deadline(coord: Coordinato
     assert ample.remaining() < fresh.remaining()
 
 
+def _phase_with_minutes_left(coord: Coordinator, monkeypatch: pytest.MonkeyPatch, phase: str, minutes: float) -> None:
+    from hyperloom.orchestrator.phases import machine_state
+
+    coord.shared_state.baseline_tput = 800.0
+    coord.shared_state.phase = phase
+    monkeypatch.setattr(machine_state, "phase_budget_remaining_seconds", lambda _state, **_kw: minutes * 60.0)
+
+
+def test_a_specialist_dispatched_in_a_gated_phase_stops_at_the_phase_end(
+    coord: Coordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither its dispatch deadline nor a later lease extension carries a specialist past its phase's end."""
+    from types import SimpleNamespace
+
+    from hyperloom.orchestrator.specialists import wall_budget
+
+    _phase_with_minutes_left(coord, monkeypatch, "FRAMEWORK_AGENT", 15)
+    task = SimpleNamespace(task_id="spec-phase-end", kind="specialist", params={"mode": "patch"})
+
+    context = coord.dispatcher._dispatch_context(task)
+
+    try:
+        assert context["specialist_deadline"].remaining() == pytest.approx(15 * 60, abs=2)
+        assert wall_budget.grant_wall_budget_extension(task.task_id, 600) == 0.0
+    finally:
+        wall_budget.limit_wall_budget_extension(task.task_id, None)
+        wall_budget.clear_wall_budget_extension(task.task_id)
+
+
+def test_a_specialist_is_admitted_when_its_shortest_run_fits_the_phase(
+    coord: Coordinator, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Admission asks for a mode's base budget, not the full wall budget the dispatch then tightens."""
+    _phase_with_minutes_left(coord, monkeypatch, "FRAMEWORK_AGENT", 30)
+
+    assert coord.dispatcher.admission_denial_for_action("specialist", params={"mode": "research"}) is None
+    denied = coord.dispatcher.admission_denial_for_action("specialist", params={"mode": "patch"})
+    assert denied is not None and denied.rule == "phase_time_budget"
+
+
 # -- GPU lease TTL re-source + structured-finally release -------------------
 def test_gpu_lease_ttl_grace_over_wall_budget(coord: Coordinator) -> None:
     # TTL = wall_budget × (1 + grace); lease must outlive the kill.
@@ -674,16 +714,26 @@ def test_sequence_denial_for_action(coord: Coordinator) -> None:
     assert coord.dispatcher._sequence_denial_for_action("explore") is None
 
 
-def test_sequence_denial_for_request(coord: Coordinator) -> None:
+def test_admission_denial_for_request(coord: Coordinator) -> None:
     ss = coord.shared_state
     ss.stop_reason = ""
     ss.baseline_tput = 0.0
     # non-kernel target -> not gated
-    assert coord.dispatcher.sequence_denial_for_request("orchestration", "anything") is None
+    assert coord.dispatcher.admission_denial_for_request("orchestration", "anything") is None
     # trace_analyze always allowed
-    assert coord.dispatcher.sequence_denial_for_request("kernel_agent", "trace_analyze") is None
+    assert coord.dispatcher.admission_denial_for_request("kernel_agent", "trace_analyze") is None
     # unknown handler kind -> not gated
-    assert coord.dispatcher.sequence_denial_for_request("kernel_agent", "no_such_kind") is None
+    assert coord.dispatcher.admission_denial_for_request("kernel_agent", "no_such_kind") is None
+
+
+def test_a_kernel_request_the_phase_cannot_fit_is_refused(coord: Coordinator, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A request runs its handler inline, so admission is the only point the phase budget can refuse it."""
+    _phase_with_minutes_left(coord, monkeypatch, "KERNEL_AGENT", 10)
+
+    denied = coord.dispatcher.admission_denial_for_request("kernel_agent", "apply_patch")
+
+    assert denied is not None and denied.rule == "phase_time_budget"
+    assert "action='integrate'" in str(denied)
 
 
 def test_skip_gemm_tuning_env(coord: Coordinator, monkeypatch) -> None:
