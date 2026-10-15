@@ -50,10 +50,11 @@ def test_a_recompiled_kernel_becomes_a_gap_naming_the_constant(tmp_path):
 
     (gap,) = reg.run_evidence_gaps(session_dir=tmp_path, trace_path="", workspace="")
 
-    assert gap["layer"] == "run_evidence"
+    assert gap["layer"] == "kernel_agent"
+    assert gap["source"] == "run_evidence"
     assert gap["provenance"] == "recompile"
     assert gap["severity"] == "high"
-    assert gap["domain_hint"] == "kernel"
+    assert gap["domain_hint"] == reg.KERNEL_DOMAIN
     assert "_GRID_MN_" in gap["symptom"] and "40 variants" in gap["symptom"]
     assert "runtime rather than constexpr" in gap["symptom"]
 
@@ -64,7 +65,7 @@ def test_an_eager_step_class_becomes_a_gap_that_says_what_to_establish(tmp_path)
     (gap,) = reg.run_evidence_gaps(session_dir=tmp_path, trace_path=_trace(tmp_path, events), workspace="")
 
     assert gap["provenance"] == "ungraphed_step"
-    assert gap["domain_hint"] == "framework"
+    assert gap["domain_hint"] == reg.SERVING_DOMAIN
     assert "EXTEND bs=1 runs 100%" in gap["symptom"]
     assert "the two have different" in gap["symptom"]
 
@@ -104,9 +105,26 @@ def test_a_front_end_cost_becomes_a_gap(tmp_path):
 
     (gap,) = gaps
     assert gap["provenance"] == "front_end_input_cost"
-    assert gap["domain_hint"] == "framework"
+    assert gap["layer"] == "framework"
+    assert gap["domain_hint"] == reg.SERVING_DOMAIN
     assert "per 100k input tokens" in gap["symptom"]
     assert "in front of it" in gap["symptom"]
+
+
+def test_every_gap_names_a_lane_a_phase_reads_and_a_domain_a_specialist_answers_to(tmp_path):
+    """A phase asks whether its lane has a gap; a dispatcher asks which specialist owns it. Both have to match."""
+    _jit_leak(tmp_path, "_fused_fp8_bmm_rope", 40)
+    events = eager_step("step[EXTEND bs=1 toks=900]", start=0.0, count=10)
+
+    gaps = reg.run_evidence_gaps(
+        session_dir=tmp_path, trace_path=_trace(tmp_path, events), workspace=_requests(tmp_path, ms_per_100k=200.0)
+    )
+
+    assert len(gaps) >= 3
+    for gap in gaps:
+        assert gap["domain_hint"] in {reg.KERNEL_DOMAIN, reg.SERVING_DOMAIN}
+        expected = "kernel_agent" if gap["domain_hint"] == reg.KERNEL_DOMAIN else "framework"
+        assert gap["layer"] == expected, gap["canonical_id"]
 
 
 def test_a_front_end_that_costs_nothing_raises_nothing(tmp_path):
