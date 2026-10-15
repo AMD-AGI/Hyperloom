@@ -34,7 +34,7 @@ def _record() -> records.TestRecord:
         request_id="r1",
         validity=peers.Validity.SUCCEEDED,
         rounds=(peers.RoundValue("measure", concurrency=64, metrics={"output_tps": 1010.5}),),
-        accuracy=(peers.AccuracyValue("gsm8k", "exact_match", 0.91),),
+        accuracy=(peers.AccuracyValue("gsm8k", "exact_match", 0.91, version="lm_eval=0.4.13;gsm8k=3"),),
         sandbox=peers.SandboxFacts("sandbox-1", node_name="node-1", gpu_ids=(0, 1), power_cap_w=750.0, backend="local"),
         attempts=(peers.Attempt(lost, peers.FailureClass.INFRA, "node lost", 10.0, 20.0),),
         manifest_sha256="a" * 64,
