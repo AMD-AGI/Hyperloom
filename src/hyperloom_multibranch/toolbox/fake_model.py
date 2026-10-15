@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Literal
 
+from hyperloom.measure.accuracy import RESULT_METRICS
 from hyperloom.contracts.measurement import (
     AccuracyValue,
     FailureClass,
@@ -186,7 +187,8 @@ class FakeToolboxConfig:
     effect_fn: Callable[[TestRequest], float] | None = None
     default_effect: float = 0.0
     accuracy_task: str = "gsm8k"
-    accuracy_metric: str = "exact_match"
+    #: The metric lm-eval reports first and the rule gate reads first (strict-match), not a bare ``exact_match``.
+    accuracy_metric: str = RESULT_METRICS[0]
     accuracy_score: float = 0.93
     #: Accuracy by delta fingerprint, for a test that should fall below the floor.
     accuracy_scores: Mapping[str, float] = field(default_factory=dict)

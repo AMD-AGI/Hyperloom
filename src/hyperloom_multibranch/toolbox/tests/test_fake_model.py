@@ -242,3 +242,7 @@ def test_the_error_rate_follows_the_delta_and_fills_the_failed_requests() -> Non
     assert {r.metrics[GRADED_ERROR_RATE] for r in measured} == {2.5}
     assert {r.failed_requests for r in measured} == {25}
     assert _measure(config, _request())[GRADED_ERROR_RATE] == 0.0
+
+
+def test_the_accuracy_metric_defaults_to_the_one_the_rule_gate_reads_first() -> None:
+    assert FakeToolboxConfig().accuracy_metric == "exact_match,strict-match"
