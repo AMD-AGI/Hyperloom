@@ -177,12 +177,13 @@ yours.
 
 ## Step 6 — Other PRs, and the diff at the target
 
-**Other PRs.** Run check-prior-art through its verdict, its Steps 0 to 7, in `$WORK/prior-art`:
-Step 1's mechanism, this skill's `tree` and `commit`, the PR's repository and any other where the
-change could land, and the changed non-test paths of `files.txt` as the planned paths. Keep
-`<owner/name>#<N>` out of its shortlist and classes: its search and path scan find this PR too.
-Write its verdict line into `$WORK/conflicts.txt` as `prior-art <verdict> -- <ref>`, and one
-`<ref> OVERLAP -- <the shared paths>` line per OVERLAPPING PR.
+**Other PRs.** Run check-prior-art through its verdict, its Steps 0 to 7, with `$WORK/prior-art`
+as its work directory, so `$WORK` stays this skill's: Step 1's mechanism, this skill's `tree` and
+`commit`, the PR's repository and any other where the change could land, and the changed non-test
+paths of `files.txt` as the planned paths. Keep `<owner/name>#<N>` out of its shortlist and
+classes: its search and path scan find this PR too. Write its verdict line into
+`$WORK/conflicts.txt` as `prior-art <verdict> -- <ref>`, and one `<ref> OVERLAP -- <the shared
+paths>` line per OVERLAPPING PR.
 
 **The diff at the target.** Always, in a scratch worktree, so nothing touches the user's tree:
 
