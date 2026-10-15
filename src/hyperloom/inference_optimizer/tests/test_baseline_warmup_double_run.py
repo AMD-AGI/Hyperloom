@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -19,6 +20,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from hyperloom.common.agentx_workload import AGENTX_SERVER_PIDFILE
 from hyperloom.orchestrator.actions.executors.baseline import (
     MEASURE_ROUND_DROPPED_WARNING,
     BaselineExecutor,
@@ -1611,6 +1613,57 @@ def test_baseline_single_round_when_script_not_builtin(tmp_path):
     assert state["calls"] == 1
     assert result["output_throughput"] == pytest.approx(_COLD_TPUT)
     assert "server_lifecycle" not in captured[0]["benchmark"]
+
+
+@pytest.mark.parametrize("returncode", [0, ORCHESTRATOR_CANCELLED_RETURNCODE])
+def test_baseline_single_round_stops_the_server_its_agentx_client_booted(tmp_path, returncode):
+    """An AgentX client boots its server setsid'd, outside the round's process tree, and records it in
+    agentx_server.pid; the round's cleanup stops it however the round ended, so the next round finds the port and
+    the GPUs free.
+    """
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+    servers: list[subprocess.Popen] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        ws = _fake_workspace(slot, tput=_COLD_TPUT)
+        server = subprocess.Popen(
+            [sys.executable, "-c", "import time; _='vllm.entrypoints'; time.sleep(120)"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        servers.append(server)
+        (ws / AGENTX_SERVER_PIDFILE).write_text(f"{server.pid}\n", encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, returncode, "", "")
+
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+            "benchmark_script": "dsr1_fp8_mi300x.sh",
+        }
+    )
+
+    try:
+        with patch(
+            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            side_effect=fake_run,
+        ):
+            _run(executor(ctx))
+
+        [server] = servers
+        assert server.wait(timeout=5) == -signal.SIGTERM
+        assert not list(output_dir.rglob(AGENTX_SERVER_PIDFILE))
+    finally:
+        for server in servers:
+            if server.poll() is None:
+                server.kill()
+            server.wait(timeout=5)
 
 
 def test_baseline_warmup_round_failure_short_circuits(tmp_path, monkeypatch):

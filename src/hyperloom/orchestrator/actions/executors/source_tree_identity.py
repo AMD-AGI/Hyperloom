@@ -63,6 +63,7 @@ def ensure_tree_instance(root: Path) -> str:
     try:
         os.link(fh.name, path)
     except FileExistsError:
+        # Another creator linked its identifier first; that one stands and is read back below.
         pass
     finally:
         os.unlink(fh.name)
