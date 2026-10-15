@@ -132,12 +132,34 @@ def _framework_config_levers_from_done(
                         continue
                 else:
                     extra_server_args = parsed_args[0]
-        if extra_server_args or extra_envs:
+        controls = _lever_controls(entry)
+        if extra_server_args or extra_envs or controls.get("remove_args") or controls.get("unset_envs"):
             return {
+                "name": str(entry.get("name") or ""),
                 "extra_server_args": extra_server_args,
                 "extra_envs": extra_envs,
+                **controls,
             }
     return {}
+
+
+def _lever_controls(entry: dict[str, Any]) -> dict[str, Any]:
+    """The ablation half of a config lever: what it drops, not only what it appends.
+
+    A proposal that only removes a flag -- the way a baked-in
+    ``--disable-radix-cache`` is turned off -- carries no ``extra_args`` at all,
+    so a reader that looks only at what is appended sees an empty lever and
+    walks past it to the next proposal. That is how the agentic GLM-5.3 session
+    launched one proposal's name against another proposal's arguments.
+    """
+    remove_args = [text for text in (str(a).strip() for a in (entry.get("remove_args") or [])) if text]
+    unset_envs = [text for text in (str(e).strip() for e in (entry.get("unset_envs") or [])) if text]
+    mode = str(entry.get("args_mode") or "append").strip().lower()
+    return {
+        "remove_args": remove_args,
+        "unset_envs": unset_envs,
+        "args_mode": mode if mode in {"append", "replace"} else "append",
+    }
 
 
 def _resolvable_artifacts_from_done(
@@ -3055,16 +3077,19 @@ class FrameworkPhase(CoordinatorCollaborator):
             return
         if integrate_review_in_flight(self.state.pending_proposals, sid):
             return
-        proposals = done_payload.get("proposal_set") or []
-        patch_name = ""
-        if isinstance(proposals, list) and proposals and isinstance(proposals[0], dict):
-            patch_name = str(proposals[0].get("name") or "")
+        # The name has to come from the proposal the levers came from. Reading
+        # ``proposal_set[0]`` instead launched one proposal's name against
+        # another's arguments whenever the first proposal was ablation-only.
         integrate_params: dict[str, Any] = {
             "specialist_task_id": sid,
             "provenance": "specialist",
-            "patch_name": patch_name,
+            "patch_name": str(config_levers.get("name") or ""),
             "extra_server_args": str(config_levers.get("extra_server_args") or ""),
             "extra_envs": dict(config_levers.get("extra_envs") or {}),
+            # Without these a lever that only drops a flag reaches the launcher as a no-op.
+            "remove_args": list(config_levers.get("remove_args") or []),
+            "unset_envs": list(config_levers.get("unset_envs") or []),
+            "args_mode": str(config_levers.get("args_mode") or "append"),
         }
         _forward_integrate_source(
             spec_params,
@@ -3155,6 +3180,9 @@ class FrameworkPhase(CoordinatorCollaborator):
             fingerprint = canonical_fingerprint(
                 config_levers.get("extra_server_args"),
                 config_levers.get("extra_envs"),
+                remove_args=config_levers.get("remove_args"),
+                unset_envs=config_levers.get("unset_envs"),
+                args_mode=str(config_levers.get("args_mode") or "append"),
             )
             for rec in read_pr_ledger():
                 if str(rec.get("applicability") or "") != fingerprint:
