@@ -29,6 +29,8 @@ def _dispatcher(*, queued_kinds: tuple[str, ...], phase_minutes_left: float) -> 
     dispatcher._sequence_denial_for_action = lambda _a: None
     dispatcher.time_budget_denial_for_action = time_gate
     dispatcher.expected_cost_minutes_for = lambda _kind: 12.0
+    # No lanes on record: every queued task is treated as contending.
+    dispatcher._coord.action_registry = {}
     dispatcher._seen = seen
     return dispatcher
 
@@ -72,3 +74,35 @@ def test_an_earlier_gate_still_wins():
     denied = asyncio.run(d.admission_denial_for_action("explore"))
 
     assert denied is not None and denied.rule == "phase_action"
+
+
+def _with_lanes(d, registry: dict) -> None:
+    """Give the dispatcher a lane map; the registry is read through the coordinator."""
+    d._coord.action_registry = registry
+
+
+def test_a_queue_on_another_lane_does_not_delay_this_round():
+    """A specialist holds research_lane; an explore round needs server_lifecycle and benchmark_lane.
+
+    Summed regardless of lane, two queued specialists refuse an explore round
+    the phase can in fact run alongside them.
+    """
+    d = _dispatcher(queued_kinds=("specialist", "specialist"), phase_minutes_left=20.0)
+    _with_lanes(
+        d,
+        {
+            "explore": SimpleNamespace(requires_lanes=("server_lifecycle", "benchmark_lane")),
+            "specialist": SimpleNamespace(requires_lanes=("research_lane",)),
+        },
+    )
+
+    assert asyncio.run(d.admission_denial_for_action("explore")) is None
+    assert d._seen["charged"] == 0.0
+
+
+def test_a_queue_on_the_same_lane_still_counts():
+    d = _dispatcher(queued_kinds=("explore", "explore"), phase_minutes_left=20.0)
+    _with_lanes(d, {"explore": SimpleNamespace(requires_lanes=("server_lifecycle", "benchmark_lane"))})
+
+    assert asyncio.run(d.admission_denial_for_action("explore")) is not None
+    assert d._seen["charged"] == 24.0
