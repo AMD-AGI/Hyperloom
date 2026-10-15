@@ -511,30 +511,56 @@ def _wait_health(port: int, timeout_s: int, pid: int | None) -> bool:
     return False
 
 
+#: ``amd-smi`` subcommand and flags the pod sampler records, covering the same four telemetry domains as the
+#: ``--showuse --showmemuse --showpower --showtemp`` it replaces. ``--clock`` is deliberately absent: it adds ~115
+#: columns of which one is useful, and the consumer's clock field was already unpopulated under rocm-smi.
+#: ``benchmark_result._row_to_gpu_sample`` consumes the header this produces, and the round-trip test in
+#: ``tests/test_gpu_sampler_round_trip.py`` reads this tuple so the two cannot drift apart silently.
+GPU_SAMPLER_AMD_SMI_ARGS: tuple[str, ...] = ("metric", "--usage", "--mem-usage", "--power", "--temperature")
+
+
 def _start_gpu_sampler(out_csv: Path, pid_file: Path, interval_s: int) -> None:
-    """Start a detached rocm-smi sampler for this pod's GPUs."""
+    """Start a detached amd-smi sampler for this pod's GPUs.
+
+    Args:
+        out_csv: CSV to append timestamped per-card rows to, read later by the orchestrator's harvest.
+        pid_file: File to record the sampler's pid in, so a later launch can kill it.
+        interval_s: Seconds between samples (floored at 1).
+    """
     import shutil
 
-    rocm = shutil.which("rocm-smi") or "/opt/rocm/bin/rocm-smi"
-    if not Path(rocm).exists():
-        _log("rocm-smi not found; skipping GPU sampler")
+    # No ``/opt/rocm/bin`` fallback: the ROCm 10 pip/TheRock stack has no ``/opt/rocm`` at all and keeps amd-smi in
+    # the active venv's bin, so a hardcoded path would only mask a PATH problem with a wrong answer.
+    amd_smi = shutil.which("amd-smi")
+    if not amd_smi:
+        _log("amd-smi not found on PATH; skipping GPU sampler")
         return
     try:
         out_csv.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         return
     q_csv = shlex.quote(str(out_csv))
-    q_rocm = shlex.quote(rocm)
+    q_smi = shlex.quote(amd_smi)
+    q_args = " ".join(shlex.quote(a) for a in GPU_SAMPLER_AMD_SMI_ARGS)
     interval = max(1, int(interval_s))
-    # header once, then loop: prepend epoch ts to each rocm-smi --csv data row.
+    # Header once, then loop: prepend epoch ts to each amd-smi --csv data row. The header is captured from the same
+    # command the rows come from, and a pre-existing file whose header disagrees is rotated out of the consumer's
+    # ``gpu_metrics_*.csv`` glob rather than appended to -- an amd-smi upgrade between pod runs changes the column
+    # set, and appending across that boundary would misalign every later row against the first header.
     script = (
         "set +e; "
-        f'H="ts,$({q_rocm} --showuse --showmemuse --showpower --showtemp --csv 2>/dev/null | head -1)"; '
+        f'R="$({q_smi} {q_args} --csv 2>/dev/null | head -1)"; '
+        '[ -n "$R" ] || exit 0; '
+        'H="ts,$R"; '
+        f'if [ -s {q_csv} ] && [ "$(head -1 {q_csv})" != "$H" ]; then '
+        f"mv {q_csv} {q_csv}.$(date +%s).bak; fi; "
         f'[ -s {q_csv} ] || echo "$H" > {q_csv}; '
         "while true; do "
         "TS=$(date +%s); "
-        f"{q_rocm} --showuse --showmemuse --showpower --showtemp --csv 2>/dev/null "
-        f'| tail -n +2 | sed "s/^/$TS,/" >> {q_csv}; '
+        f"{q_smi} {q_args} --csv 2>/dev/null "
+        # amd-smi --csv ends every invocation with a blank line, which would otherwise be timestamped into a row of
+        # one cell; rocm-smi did not, so this guard is new with the port.
+        f'| tail -n +2 | sed "/^[[:space:]]*$/d; s/^/$TS,/" >> {q_csv}; '
         f"sleep {interval}; done"
     )
     proc = subprocess.Popen(
@@ -667,7 +693,7 @@ def main() -> int:
         "log_file": str(log_file),
     }
 
-    # Self-contained GPU metrics: run rocm-smi sampling on this GPU pod (same fields as the single-node Magpie
+    # Self-contained GPU metrics: run amd-smi sampling on this GPU pod (same fields as the single-node Magpie
     # GPUMonitor) and stream to shared FS for the client to harvest.
     if _samp_csv:
         try:
