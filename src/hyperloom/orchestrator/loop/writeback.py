@@ -1167,6 +1167,15 @@ class WritebackCollaborator(CoordinatorCollaborator):
             return True
         return not retries_suppressed and (streak >= 3 or (streak >= 2 and repeated))
 
+    def _arms_baseline_failure_gates(self, err_class: str) -> bool:
+        """Whether a failed baseline goes through the streak and stop gates.
+
+        Only while no baseline has succeeded yet, except a cache-off refusal:
+        a re-baseline refused for it stops the run as the first baseline does,
+        since the next round would launch the same server.
+        """
+        return self.shared_state.baseline_tput <= 0 or err_class == PREFIX_CACHE_OFF_ERROR_CLASS
+
     async def handle_unpromotable_result(
         self,
         task: Task,
@@ -1235,8 +1244,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # slow-baseline retry budget on deterministic failures.
         baseline_event_payload: dict[str, Any] | None = None
         # Only arm/streak while no baseline has succeeded yet (tput <= 0).
-        if task.kind == "baseline" and self.shared_state.baseline_tput <= 0:
-            err_class = result_payload.get("error_class", "")
+        err_class = result_payload.get("error_class", "")
+        if task.kind == "baseline" and self._arms_baseline_failure_gates(err_class):
             # A round the run itself stopped -- the session budget reaped it, or
             # the orchestrator cancelled the action -- measured nothing, so it
             # says nothing about whether this baseline boots. Charging it to the
