@@ -200,7 +200,7 @@ cognitive-complexity src/hyperloom/orchestrator/state/_shared_state/phase_state.
 cognitive-complexity src/hyperloom/orchestrator/state/_shared_state/render.py::_RenderMixin._format_variant_line 36
 cognitive-complexity src/hyperloom/orchestrator/state/_shared_state/render.py::_RenderMixin.to_proposal_scores_summary 74
 cognitive-complexity src/hyperloom/orchestrator/state/_shared_state/render.py::_RenderMixin.to_warm_start_summary 42
-cognitive-complexity src/hyperloom/orchestrator/state/gaps.py::GapsStateMixin.upsert_gap 33
+cognitive-complexity src/hyperloom/orchestrator/state/gaps.py::GapsStateMixin.upsert_gap 31
 cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState._append_roofline_snapshot_history 43
 cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState._build_explore_search 45
 cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState._build_hot_kernel_summaries 36
