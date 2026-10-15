@@ -10,9 +10,11 @@ nothing showed it. The evidence is read in this order:
 
 1. A commit reachable from ``commit`` whose subject names the PR: a trailing ``(#N)``, alone or
    in a run such as ``(#N) (#M)``, the way a squash merge and a fork's cherry-pick of it record
-   the PR. ``(#N)`` anywhere else in the subject, or only in the body, does not count. A
-   subject carries only the number, so a fork that numbers its own PRs the same way can
-   collide; the evidence names the commit and its subject so a caller can compare titles.
+   the PR, or a ``Merge pull request #N from ...`` subject, the way a merge commit and a
+   ``git cherry-pick -m 1`` of it do. ``(#N)`` anywhere else in the subject, or only in the
+   body, does not count. A subject carries only the number, so a fork that numbers its own PRs
+   the same way can collide; the evidence names the commit and its subject so a caller can
+   compare titles.
 2. When the PR's merge commit sha (its merge or squash commit upstream) is given: every
    non-merge commit that merge commit brought in is in ``commit``, by sha or by patch-id. That
    holds when the merge commit is an ancestor, and for a cherry-pick under any subject whose
@@ -115,12 +117,15 @@ def _git(tree: Path, *args: str) -> str:
 
 def _subject_naming(tree: Path, head: str, number: int) -> InclusionVerdict | None:
     """The verdict of the first commit reachable from ``head`` whose subject names PR ``number``, if any."""
-    found = _git(tree, "log", "--fixed-strings", f"--grep=(#{number})", "--format=%H%x00%s", head)
+    merge_subject = f"Merge pull request #{number} from "
+    found = _git(
+        tree, "log", "--fixed-strings", f"--grep=(#{number})", f"--grep={merge_subject}", "--format=%H%x00%s", head
+    )
     # %s never holds a newline, but may hold other characters that splitlines() would break on.
     for line in found.split("\n"):
         sha, _, subject = line.partition("\0")
         run = _SUFFIX_RUN.search(subject)
-        if run is not None and f"(#{number})" in run.group():
+        if subject.startswith(merge_subject) or (run is not None and f"(#{number})" in run.group()):
             return InclusionVerdict(
                 Inclusion.INCLUDED,
                 InclusionMethod.SUBJECT,

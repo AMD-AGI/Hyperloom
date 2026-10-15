@@ -70,9 +70,11 @@ def _probe(root: Path, number: int, merge_commit_sha: str | None = None, commit:
     [
         pytest.param("Tune the kernel (#12)", "", 12, Inclusion.INCLUDED, id="exact"),
         pytest.param("Tune the kernel (#7) (#12)", "", 12, Inclusion.INCLUDED, id="in-a-trailing-run"),
+        pytest.param("Merge pull request #12 from contributor/tune", "", 12, Inclusion.INCLUDED, id="merge-commit"),
         pytest.param("Tune the kernel\u2028for small batches (#12)", "", 12, Inclusion.INCLUDED, id="line-separator"),
         pytest.param("Tune the kernel (#123)", "", 12, Inclusion.UNKNOWN, id="prefix-of-a-longer-number"),
         pytest.param("Tune the kernel (#112)", "", 12, Inclusion.UNKNOWN, id="suffix-of-a-longer-number"),
+        pytest.param("Merge pull request #123 from contributor/tune", "", 12, Inclusion.UNKNOWN, id="merge-longer"),
         pytest.param("Tune (#12) for small batches", "", 12, Inclusion.UNKNOWN, id="mid-subject"),
         pytest.param('Revert "Tune the kernel (#12)" (#200)', "", 12, Inclusion.UNKNOWN, id="revert"),
         pytest.param("Tune the kernel", "Backport of (#12)", 12, Inclusion.UNKNOWN, id="body-only"),
