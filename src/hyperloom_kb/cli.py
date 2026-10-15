@@ -23,7 +23,11 @@ _Run = Callable[[RemoteClient, argparse.Namespace], dict[str, JsonValue]]
 _Failed = Callable[[dict[str, JsonValue]], bool]
 _Command = Callable[..., "argparse.ArgumentParser | None"]
 _DEFAULT_SCHEMA = "the schema the service reads by default"
+_EVERY_SCHEMA = "every schema"
+_DRAFT = "draft"
 _DRAFT_HELP = "The draft: a JSON file, or - for stdin."
+_ENTRY_ID, _EXPERIENCE_ID = "entry_id", "experience_id"
+_FLAG = "store_true"
 
 
 class CommandInputError(ValueError):
@@ -88,7 +92,7 @@ def _schema_option(parser: argparse.ArgumentParser, default: str | None, unset: 
 def _page_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--after", type=int, default=0, help="The previous page's next_cursor.")
     parser.add_argument("--limit", type=int, default=100)
-    parser.add_argument("--include-excluded", action="store_true", help="Also name the ones reads do not see.")
+    parser.add_argument("--include-excluded", action=_FLAG, help="Also name the ones reads do not see.")
 
 
 def _list(client: RemoteClient, args: argparse.Namespace) -> dict[str, JsonValue]:
@@ -115,14 +119,18 @@ def _export(client: RemoteClient, args: argparse.Namespace) -> dict[str, JsonVal
 
 
 def add_commands(
-    commands: argparse._SubParsersAction[argparse.ArgumentParser], *, schema_ref: str | None = None
+    commands: argparse._SubParsersAction[argparse.ArgumentParser],
+    *,
+    schema_ref: str | None = None,
+    distill_dir: Path | None = None,
 ) -> None:
     """Register every ``hyperloom-kb`` command whose name ``commands`` does not hold yet.
 
     A tool replaces a command by registering its own under that name first; ``schema``, ``experience``, and
     ``distill`` each group their subcommands, replaced together. A command that names no schema acts on
     ``schema_ref``; when that is ``None``, a pull must name one, list, export, and the Distill changes and sync cover
-    every schema, and the rest act on the service's default schema.
+    every schema, and the rest act on the service's default schema. ``distill sync`` writes ``distill_dir`` unless
+    it names a directory, and must name one when that is ``None``.
     """
 
     command = _adder(commands)
@@ -151,8 +159,9 @@ def add_commands(
     _add_state_commands(command, schema_ref)
     _add_record_commands(command, schema_ref)
     if distill := command("distill", "Explore Experiences, and write, read, and sync the Distills drawn from them."):
-        subcommands = distill.add_subparsers(dest="distill_command", required=True)
-        _add_distill_commands(_adder(subcommands, "distill "), schema_ref)
+        subcommand = _adder(distill.add_subparsers(dest="distill_command", required=True), "distill ")
+        _add_distill_authoring_commands(subcommand, schema_ref)
+        _add_distill_upkeep_commands(subcommand, schema_ref, distill_dir)
 
 
 def _add_state_commands(command: _Command, schema_ref: str | None) -> None:
@@ -180,7 +189,7 @@ def _add_state_commands(command: _Command, schema_ref: str | None) -> None:
         "Hide an Experience from reads; one written here is no longer pushed either.",
         lambda c, a: c.exclude(a.experience_id, reason=a.reason),
     ):
-        exclude.add_argument("experience_id")
+        exclude.add_argument(_EXPERIENCE_ID)
         exclude.add_argument("--reason", required=True, help="Why it is excluded; kept in the exclusion history.")
     if include := command(
         "include",
@@ -188,7 +197,7 @@ def _add_state_commands(command: _Command, schema_ref: str | None) -> None:
         "outside.",
         lambda c, a: c.include(a.experience_id),
     ):
-        include.add_argument("experience_id")
+        include.add_argument(_EXPERIENCE_ID)
     if exclusions := command(
         "exclusions",
         "List a schema's exclusions and the history of every exclude and include.",
@@ -199,12 +208,12 @@ def _add_state_commands(command: _Command, schema_ref: str | None) -> None:
 
 def _add_record_commands(command: _Command, schema_ref: str | None) -> None:
     if listing := command("list", "Summaries of the Experiences written here, one page in write order.", _list):
-        _schema_option(listing, schema_ref, "every schema")
+        _schema_option(listing, schema_ref, _EVERY_SCHEMA)
         _page_options(listing)
     if export := command(
         "export", "Complete records of the Experiences written here, one page in write order.", _export
     ):
-        _schema_option(export, schema_ref, "every schema")
+        _schema_option(export, schema_ref, _EVERY_SCHEMA)
         _page_options(export)
     if schema := command("schema", "Look at a schema."):
         show = _adder(schema.add_subparsers(dest="schema_command", required=True), "schema ")(
@@ -220,20 +229,20 @@ def _add_record_commands(command: _Command, schema_ref: str | None) -> None:
             "One held Experience in full, whether reads see it, and where the service holds its files.",
             lambda c, a: c.experience(a.experience_id),
         )
-        get.add_argument("experience_id")
+        get.add_argument(_EXPERIENCE_ID)
 
 
 def _new_draft(client: RemoteClient, args: argparse.Namespace) -> JsonValue:
     """The draft file of a new Distill, of the default schema when it names none."""
 
-    draft = _json_file(args.draft, "draft")
+    draft = _json_file(args.draft, _DRAFT)
     if isinstance(draft, dict) and "schema_ref" not in draft:
         draft["schema_ref"] = _default_schema(client, args)
     return draft
 
 
 def _preview(client: RemoteClient, args: argparse.Namespace) -> dict[str, JsonValue]:
-    draft = _json_file(args.draft, "draft") if args.entry else _new_draft(client, args)
+    draft = _json_file(args.draft, _DRAFT) if args.entry else _new_draft(client, args)
     return client.preview_distill(draft, entry_id=args.entry)
 
 
@@ -242,8 +251,9 @@ def _sync(client: RemoteClient, args: argparse.Namespace) -> dict[str, JsonValue
     return sync_directory(client, Path(args.dir), schemas, representatives=args.representatives)
 
 
-def _add_distill_commands(command: _Command, schema_ref: str | None) -> None:
-    every_schema = "every schema"
+def _add_distill_authoring_commands(command: _Command, schema_ref: str | None) -> None:
+    """The commands that explore a schema's Experiences and write a Distill from a draft."""
+
     if explore := command(
         "explore",
         "The group a scope selects among a schema's visible Experiences: counts, runs, decisions, and outcome "
@@ -280,7 +290,7 @@ def _add_distill_commands(command: _Command, schema_ref: str | None) -> None:
         failed=lambda result: result["valid"] is not True,
     ):
         _schema_option(preview, schema_ref, f"the draft's, else {_DEFAULT_SCHEMA}")
-        preview.add_argument("draft", help=_DRAFT_HELP)
+        preview.add_argument(_DRAFT, help=_DRAFT_HELP)
         preview.add_argument("--entry", help="The Distill an update would change.")
     if create := command(
         "create",
@@ -288,14 +298,20 @@ def _add_distill_commands(command: _Command, schema_ref: str | None) -> None:
         lambda c, a: c.create_distill(_new_draft(c, a)),
     ):
         _schema_option(create, schema_ref, f"the draft's, else {_DEFAULT_SCHEMA}")
-        create.add_argument("draft", help=_DRAFT_HELP)
+        create.add_argument(_DRAFT, help=_DRAFT_HELP)
     if update := command(
         "update",
         "Add a version to a Distill: the draft in a JSON file (- for stdin) in full, its evidence drawn again.",
-        lambda c, a: c.update_distill(a.entry_id, _json_file(a.draft, "draft")),
+        lambda c, a: c.update_distill(a.entry_id, _json_file(a.draft, _DRAFT)),
     ):
-        update.add_argument("entry_id")
-        update.add_argument("draft", help=_DRAFT_HELP)
+        update.add_argument(_ENTRY_ID)
+        update.add_argument(_DRAFT, help=_DRAFT_HELP)
+
+
+def _add_distill_upkeep_commands(command: _Command, schema_ref: str | None, distill_dir: Path | None) -> None:
+    """The commands that read Distills, keep them current, and sync them into a directory, ``distill_dir`` by
+    default."""
+
     if get := command(
         "get",
         "One version of a Distill: its claim and evidence, how the evidence moved, and the members representing it.",
@@ -308,18 +324,18 @@ def _add_distill_commands(command: _Command, schema_ref: str | None) -> None:
             representatives=a.representatives,
         ),
     ):
-        get.add_argument("entry_id")
+        get.add_argument(_ENTRY_ID)
         get.add_argument("--version", type=int, help="A version other than the one the Distill shows.")
-        get.add_argument("--follow-evidence", action="store_true", help="Add a page of the Experiences it rests on.")
+        get.add_argument("--follow-evidence", action=_FLAG, help="Add a page of the Experiences it rests on.")
         get.add_argument("--after", type=int, default=0, help="The evidence page's previous next.")
         get.add_argument("--limit", type=int, help="How many Experiences an evidence page holds.")
         get.add_argument("--representatives", type=int, help="How many representing members to name (default 5).")
     if draft := command(
-        "draft",
+        _DRAFT,
         "The draft that writes a Distill's version again over the KB as it is, to edit and pass to update.",
-        lambda c, a: c.distill(a.entry_id, version=a.version)["draft"],
+        lambda c, a: c.distill(a.entry_id, version=a.version)[_DRAFT],
     ):
-        draft.add_argument("entry_id")
+        draft.add_argument(_ENTRY_ID)
         draft.add_argument("--version", type=int, help="A version other than the one the Distill shows.")
     if listing := command(
         "list",
@@ -327,22 +343,22 @@ def _add_distill_commands(command: _Command, schema_ref: str | None) -> None:
         lambda c, a: c.list_distills(_default_schema(c, a), include_deleted=a.include_deleted),
     ):
         _schema_option(listing, schema_ref, _DEFAULT_SCHEMA)
-        listing.add_argument("--include-deleted", action="store_true", help="Also list the deleted ones.")
+        listing.add_argument("--include-deleted", action=_FLAG, help="Also list the deleted ones.")
     if changes := command(
         "changes",
         "The visible Distills whose evidence moved in a way their author should look at, and what moved.",
         lambda c, a: c.distill_changes(schema_ref=a.schema_ref),
     ):
-        _schema_option(changes, schema_ref, every_schema)
+        _schema_option(changes, schema_ref, _EVERY_SCHEMA)
     if delete := command(
         "delete",
         "Hide a Distill from listings and syncs, with a reason; it stays readable and restore-entry brings it back.",
         lambda c, a: c.exclude(a.entry_id, reason=a.reason),
     ):
-        delete.add_argument("entry_id")
+        delete.add_argument(_ENTRY_ID)
         delete.add_argument("--reason", required=True, help="Why it is deleted; kept in the exclusion history.")
     if restore_entry := command("restore-entry", "Bring back a deleted Distill.", lambda c, a: c.include(a.entry_id)):
-        restore_entry.add_argument("entry_id")
+        restore_entry.add_argument(_ENTRY_ID)
     if sync := command(
         "sync",
         "Mirror the visible Distills into a directory, one markdown page each, for a Curated Wiki to search; pages "
@@ -350,7 +366,13 @@ def _add_distill_commands(command: _Command, schema_ref: str | None) -> None:
         _sync,
     ):
         _schema_option(sync, schema_ref, "every schema with Distills")
-        sync.add_argument("--dir", required=True, help="The directory the KB owns; only its Distill pages change.")
+        where = "The directory the KB owns; only its Distill pages change"
+        sync.add_argument(
+            "--dir",
+            default=distill_dir,
+            required=distill_dir is None,
+            help=where + ("." if distill_dir is None else f" (default: {distill_dir})."),
+        )
         sync.add_argument("--representatives", type=int, help="How many representing members a page names (default 5).")
 
 

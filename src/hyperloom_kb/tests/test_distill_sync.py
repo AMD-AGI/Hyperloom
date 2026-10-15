@@ -7,15 +7,38 @@ wrote differently."""
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import pytest
 
+from hyperloom_kb import ExperienceHTTPService, RemoteClient
 from hyperloom_kb.tests.distills import IDS, PLOTTED, RULE, SCHEMA, make_draft, make_experience, serving
 from hyperloom_kb.tests.logs import LOG, LOG_PATH
 
 NOTHING = {"created": 0, "unchanged": 0, "skipped": 0, "held_back": 0}
+
+
+class _Team(NamedTuple):
+    """A global KB, and two KBs syncing with it: ``a`` holds the corpus and the rule form, ``b`` nothing yet."""
+
+    global_app: ExperienceHTTPService
+    shared: RemoteClient
+    a: RemoteClient
+    b: RemoteClient
+
+
+@contextmanager
+def _team(tmp_path: Path) -> Iterator[_Team]:
+    with (
+        serving(tmp_path / "global", seeded=False) as (global_app, shared),
+        serving(tmp_path / "a", global_url=shared.config.base_url) as (_, a),
+        serving(tmp_path / "b", global_url=shared.config.base_url, seeded=False) as (_, b),
+    ):
+        a.register_distill_form(SCHEMA.schema_ref, RULE.to_dict())
+        yield _Team(global_app, shared, a, b)
 
 
 def _shown(client: Any) -> dict[str, int]:
@@ -23,12 +46,7 @@ def _shown(client: Any) -> dict[str, int]:
 
 
 def test_a_push_sends_each_visible_distills_latest_version_and_a_pull_brings_it_to_a_teammate(tmp_path: Path) -> None:
-    with (
-        serving(tmp_path / "global", seeded=False) as (_, shared),
-        serving(tmp_path / "a", global_url=shared.config.base_url) as (_, a),
-        serving(tmp_path / "b", global_url=shared.config.base_url, seeded=False) as (_, b),
-    ):
-        a.register_distill_form(SCHEMA.schema_ref, RULE.to_dict())
+    with _team(tmp_path) as (_, shared, a, b):
         rule = str(a.create_distill(make_draft())["entry_id"])
         a.update_distill(rule, make_draft(tags=["attention", "qwen3"]))
         a.put_file(LOG, LOG_PATH)
@@ -59,12 +77,7 @@ def test_a_push_sends_each_visible_distills_latest_version_and_a_pull_brings_it_
 def test_a_pull_keeps_a_later_version_here_and_neither_side_overwrites_a_version_written_differently(
     tmp_path: Path,
 ) -> None:
-    with (
-        serving(tmp_path / "global", seeded=False) as (_, shared),
-        serving(tmp_path / "a", global_url=shared.config.base_url) as (_, a),
-        serving(tmp_path / "b", global_url=shared.config.base_url, seeded=False) as (_, b),
-    ):
-        a.register_distill_form(SCHEMA.schema_ref, RULE.to_dict())
+    with _team(tmp_path) as (_, _, a, b):
         entry_id = str(a.create_distill(make_draft())["entry_id"])
         a.push()
         b.pull(SCHEMA.schema_ref)
@@ -89,12 +102,7 @@ def test_a_pull_keeps_a_later_version_here_and_neither_side_overwrites_a_version
 
 
 def test_a_teammate_refreshes_a_pulled_distill_from_its_draft_under_the_authors_judgement(tmp_path: Path) -> None:
-    with (
-        serving(tmp_path / "global", seeded=False) as (_, shared),
-        serving(tmp_path / "a", global_url=shared.config.base_url) as (_, a),
-        serving(tmp_path / "b", global_url=shared.config.base_url, seeded=False) as (_, b),
-    ):
-        a.register_distill_form(SCHEMA.schema_ref, RULE.to_dict())
+    with _team(tmp_path) as (_, _, a, b):
         entry_id = str(a.create_distill(make_draft(annotations={IDS[2]: "support"}))["entry_id"])
         a.push()
         b.pull(SCHEMA.schema_ref)
@@ -110,12 +118,7 @@ def test_a_teammate_refreshes_a_pulled_distill_from_its_draft_under_the_authors_
 def test_a_push_waits_for_a_distill_to_show_its_latest_version_and_a_pull_shows_the_global_one_again(
     tmp_path: Path,
 ) -> None:
-    with (
-        serving(tmp_path / "global", seeded=False) as (_, shared),
-        serving(tmp_path / "a", global_url=shared.config.base_url) as (_, a),
-        serving(tmp_path / "b", global_url=shared.config.base_url, seeded=False) as (_, b),
-    ):
-        a.register_distill_form(SCHEMA.schema_ref, RULE.to_dict())
+    with _team(tmp_path) as (_, _, a, b):
         entry_id = str(a.create_distill(make_draft())["entry_id"])
         first = a.create_label(name="first")
         a.update_distill(entry_id, make_draft(tags=["second"]))
@@ -141,15 +144,10 @@ def test_a_push_waits_for_a_distill_to_show_its_latest_version_and_a_pull_shows_
 def test_a_global_kb_older_than_distills_still_syncs_experiences_and_takes_distills_once_upgraded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    with (
-        serving(tmp_path / "global", seeded=False) as (global_app, shared),
-        serving(tmp_path / "a", global_url=shared.config.base_url) as (_, a),
-        serving(tmp_path / "b", global_url=shared.config.base_url, seeded=False) as (_, b),
-    ):
+    with _team(tmp_path) as (global_app, _, a, b):
         health = global_app.health
         # A global KB older than Distills reports none in its health.
         monkeypatch.setattr(global_app, "health", lambda: {k: v for k, v in health().items() if k != "distills"})
-        a.register_distill_form(SCHEMA.schema_ref, RULE.to_dict())
         entry_id = str(a.create_distill(make_draft())["entry_id"])
         old_push, old_pull = a.push(), b.pull(SCHEMA.schema_ref)
         before_upgrade = _shown(b)

@@ -59,6 +59,7 @@ _SPOOLED_FILES = "files"
 _PRIVATE_DIRECTORY, _PRIVATE_FILE = 0o700, 0o600
 _GET, _POST, _PUT, _DELETE = "GET", "POST", "PUT", "DELETE"
 _JSON = "application/json"
+_TRUE = "true"
 _T = TypeVar("_T")
 
 #: Where each file a record names is read from on this host, by its sha256.
@@ -530,7 +531,7 @@ class RemoteClient:
         if schema_ref is not None:
             values["schema_ref"] = schema_ref
         if include_excluded:
-            values["include_excluded"] = "true"
+            values["include_excluded"] = _TRUE
         return urllib.parse.urlencode(values)
 
     def list_experiences(
@@ -698,7 +699,7 @@ class RemoteClient:
         if representatives is not None:
             values["representatives"] = representatives
         if follow_evidence:
-            values.update(follow_evidence="true", after=after)
+            values.update(follow_evidence=_TRUE, after=after)
             if limit is not None:
                 values["limit"] = limit
         query = f"?{urllib.parse.urlencode(values)}" if values else ""
@@ -707,7 +708,7 @@ class RemoteClient:
     def list_distills(self, schema_ref: str, *, include_deleted: bool = False) -> dict[str, JsonValue]:
         """A schema's Distills, each with its ``evidence_status`` and ``current`` counts beside its snapshot's."""
 
-        values = {"schema_ref": schema_ref, **({"include_deleted": "true"} if include_deleted else {})}
+        values = {"schema_ref": schema_ref, **({"include_deleted": _TRUE} if include_deleted else {})}
         return self._request(_GET, f"/v1/distill/entries?{urllib.parse.urlencode(values)}")
 
     def distill_changes(self, *, schema_ref: str | None = None) -> dict[str, JsonValue]:

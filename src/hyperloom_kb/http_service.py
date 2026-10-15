@@ -1312,24 +1312,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                 ),
             )
             return
-        if (
-            self._dispatch_state(app, parsed.path, query)
-            or self._dispatch_files(app, parsed.path)
-            or self._dispatch_distill(app, parsed.path, query)
-        ):
+        if self._dispatch_state(app, parsed.path, query) or self._dispatch_files(app, parsed.path):
             return
-        if self.command == _POST and parsed.path == "/v1/push":
-            _reject_unknown(self._body(), frozenset())
-            self._write(HTTPStatus.OK, app.push())
-            return
-        if self.command == _POST and parsed.path == "/v1/pull":
-            body = self._body()
-            _reject_unknown(body, frozenset({"schema_ref"}))
-            self._write(HTTPStatus.OK, app.pull(_required_text(body.get("schema_ref"), "schema_ref")))
-            return
-        if self.command == _POST and parsed.path == "/v1/rebind":
-            _reject_unknown(self._body(), frozenset())
-            self._write(HTTPStatus.OK, app.rebind())
+        if self._dispatch_distill(app, parsed.path, query) or self._dispatch_sync(app, parsed.path):
             return
         if self.command == _POST and parsed.path == "/v1/read":
             body = self._body()
@@ -1370,6 +1355,23 @@ class RequestHandler(BaseHTTPRequestHandler):
             )
             return
         self._write(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+
+    def _dispatch_sync(self, app: ExperienceHTTPService, path: str) -> bool:
+        """Serve the push, pull, and rebind routes; ``False`` when ``path`` is none of them."""
+
+        if self.command == _POST and path == "/v1/push":
+            _reject_unknown(self._body(), frozenset())
+            self._write(HTTPStatus.OK, app.push())
+        elif self.command == _POST and path == "/v1/pull":
+            body = self._body()
+            _reject_unknown(body, frozenset({"schema_ref"}))
+            self._write(HTTPStatus.OK, app.pull(_required_text(body.get("schema_ref"), "schema_ref")))
+        elif self.command == _POST and path == "/v1/rebind":
+            _reject_unknown(self._body(), frozenset())
+            self._write(HTTPStatus.OK, app.rebind())
+        else:
+            return False
+        return True
 
     def _dispatch_state(self, app: ExperienceHTTPService, path: str, query: Mapping[str, list[str]]) -> bool:
         """Serve the label and exclusion routes; ``False`` when ``path`` is none of them."""

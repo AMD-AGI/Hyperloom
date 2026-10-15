@@ -56,6 +56,12 @@ FORM_VERSION = 1
 OBJECTIVE_PATH = "objective"
 _ENTRY_ID_RE = re.compile(r"^dst-[0-9a-f]{32}$")
 _FORM_REF_RE = re.compile(r"^form:sha256:[0-9a-f]{64}$")
+_NAME, _DESCRIPTION, _CLAIM = "name", "description", "claim"
+_SCOPE, _EVIDENCE, _RELATIONS, _DERIVATION = "scope", "evidence", "relations", "derivation"
+_KIND, _VERSION, _SCHEMA_REF, _FORM_REF, _CREATED_AT = "kind", "version", "schema_ref", "form_ref", "created_at"
+_MEMBERS, _TARGET, _URI = "members", "target", "uri"
+_STATS = ("supports", "contradicts", "irrelevant", "runs")
+_CREATED_AT_WHERE = "distill.created_at"
 
 Scalar = str | int | float | bool
 
@@ -70,7 +76,7 @@ def require_entry_id(value: Any, name: str = "entry id") -> str:
     return value
 
 
-def require_form_ref(value: Any, name: str = "form_ref") -> str:
+def require_form_ref(value: Any, name: str = _FORM_REF) -> str:
     if not isinstance(value, str) or not _FORM_REF_RE.fullmatch(value):
         raise SchemaValidationError(f"{name} must be form:sha256:<64 lowercase hex>")
     return value
@@ -203,7 +209,7 @@ class Scope:
         _unique(tuple(item.path for item in conditions), "scope paths")
         object.__setattr__(self, "conditions", conditions)
 
-    def validate(self, declaration: ExperienceDeclaration, where: str = "scope") -> None:
+    def validate(self, declaration: ExperienceDeclaration, where: str = _SCOPE) -> None:
         for condition in self.conditions:
             condition.validate(declaration, where)
 
@@ -227,7 +233,7 @@ class Scope:
         return {condition.path: list(condition.values) for condition in self.conditions}
 
     @classmethod
-    def from_dict(cls, value: Any, name: str = "scope") -> Scope:
+    def from_dict(cls, value: Any, name: str = _SCOPE) -> Scope:
         data = _mapping(value, name)
         return cls(
             tuple(
@@ -272,7 +278,7 @@ class FormDeclaration:
     def summary_field(self) -> FieldDeclaration | None:
         return next((item for item in self.claim if item.role is FieldRole.SUMMARY), None)
 
-    def validate_claim(self, claim: dict[str, FieldValue], where: str = "claim") -> None:
+    def validate_claim(self, claim: dict[str, FieldValue], where: str = _CLAIM) -> None:
         declared = {item.name: item for item in self.claim}
         unknown = sorted(set(claim) - set(declared))
         if unknown:
@@ -296,11 +302,11 @@ class FormDeclaration:
     @classmethod
     def from_dict(cls, value: Any) -> FormDeclaration:
         data = _mapping(value, "form")
-        _reject_unknown(data, {"form_version", "name", "description", "claim"}, "form")
+        _reject_unknown(data, {"form_version", _NAME, _DESCRIPTION, _CLAIM}, "form")
         return cls(
             form_version=data.get("form_version", FORM_VERSION),
-            name=_required(data, "name", "form.name"),
-            description=_required(data, "description", "form.description"),
+            name=_required(data, _NAME, "form.name"),
+            description=_required(data, _DESCRIPTION, "form.description"),
             claim=tuple(FieldDeclaration.from_dict(item) for item in _list(data.get("claim", []), "form.claim")),
         )
 
@@ -341,27 +347,17 @@ class EvidenceStats:
     runs: int
 
     def __post_init__(self) -> None:
-        for name in ("supports", "contradicts", "irrelevant", "runs"):
+        for name in _STATS:
             _int(getattr(self, name), f"evidence stats {name}", minimum=0)
 
     def to_dict(self) -> dict[str, JsonValue]:
-        return {
-            "supports": self.supports,
-            "contradicts": self.contradicts,
-            "irrelevant": self.irrelevant,
-            "runs": self.runs,
-        }
+        return {name: getattr(self, name) for name in _STATS}
 
     @classmethod
     def from_dict(cls, value: Any) -> EvidenceStats:
         data = _mapping(value, "evidence stats")
-        _reject_unknown(data, {"supports", "contradicts", "irrelevant", "runs"}, "evidence stats")
-        return cls(
-            **{
-                name: _required(data, name, f"evidence stats {name}")
-                for name in ("supports", "contradicts", "irrelevant", "runs")
-            }
-        )
+        _reject_unknown(data, set(_STATS), "evidence stats")
+        return cls(**{name: _required(data, name, f"evidence stats {name}") for name in _STATS})
 
 
 @dataclass(frozen=True)
@@ -433,13 +429,13 @@ class Evidence:
     def from_dict(cls, value: Any) -> Evidence:
         data = _mapping(value, "evidence")
         _reject_unknown(
-            data, {"members", "stats", "check", "added", "removed", "representatives", "annotated"}, "evidence"
+            data, {_MEMBERS, "stats", "check", "added", "removed", "representatives", "annotated"}, _EVIDENCE
         )
         check = data.get("check")
         return cls(
             members=tuple(
                 EvidenceMember.from_dict(item)
-                for item in _list(_required(data, "members", "evidence.members"), "evidence.members")
+                for item in _list(_required(data, _MEMBERS, "evidence.members"), "evidence.members")
             ),
             stats=EvidenceStats.from_dict(_required(data, "stats", "evidence.stats")),
             check=None if check is None else Scope.from_dict(check, "evidence.check"),
@@ -466,14 +462,14 @@ class Relation:
     @classmethod
     def from_dict(cls, value: Any) -> Relation:
         data = _mapping(value, "relation")
-        _reject_unknown(data, {"kind", "target"}, "relation")
+        _reject_unknown(data, {_KIND, _TARGET}, "relation")
         try:
-            kind = RelationKind(_required(data, "kind", "relation.kind"))
+            kind = RelationKind(_required(data, _KIND, "relation.kind"))
         except ValueError as exc:
             raise SchemaValidationError(
                 f"relation kind must be one of: {', '.join(k.value for k in RelationKind)}"
             ) from exc
-        return cls(kind, _required(data, "target", "relation.target"))
+        return cls(kind, _required(data, _TARGET, "relation.target"))
 
 
 @dataclass(frozen=True)
@@ -486,7 +482,7 @@ class ExternalRef:
     def __post_init__(self) -> None:
         object.__setattr__(self, "uri", _require_string(self.uri, "external reference uri"))
         if self.version:
-            object.__setattr__(self, "version", _require_string(self.version, "external reference version"))
+            object.__setattr__(self, _VERSION, _require_string(self.version, "external reference version"))
 
     def to_dict(self) -> dict[str, JsonValue]:
         return {"uri": self.uri, "version": self.version}
@@ -494,8 +490,8 @@ class ExternalRef:
     @classmethod
     def from_dict(cls, value: Any) -> ExternalRef:
         data = _mapping(value, "external reference")
-        _reject_unknown(data, {"uri", "version"}, "external reference")
-        return cls(_required(data, "uri", "external reference uri"), data.get("version", ""))
+        _reject_unknown(data, {_URI, _VERSION}, "external reference")
+        return cls(_required(data, _URI, "external reference uri"), data.get("version", ""))
 
 
 @dataclass(frozen=True)
@@ -519,8 +515,8 @@ class Relations:
 
     @classmethod
     def from_dict(cls, value: Any) -> Relations:
-        data = _mapping(value, "relations")
-        _reject_unknown(data, {"entries", "external"}, "relations")
+        data = _mapping(value, _RELATIONS)
+        _reject_unknown(data, {"entries", "external"}, _RELATIONS)
         return cls(
             tuple(Relation.from_dict(item) for item in _list(data.get("entries", []), "relations.entries")),
             tuple(ExternalRef.from_dict(item) for item in _list(data.get("external", []), "relations.external")),
@@ -542,16 +538,16 @@ class Derivation:
 
     @classmethod
     def from_dict(cls, value: Any) -> Derivation:
-        data = _mapping(value, "derivation")
-        _reject_unknown(data, {"kb_state"}, "derivation")
+        data = _mapping(value, _DERIVATION)
+        _reject_unknown(data, {"kb_state"}, _DERIVATION)
         return cls(data.get("kb_state", ""))
 
 
 #: What a version says: when it holds, what it concludes, what it rests on, what it relates to, and how it is found.
-DISTILL_KNOWLEDGE_FIELDS = frozenset({"scope", "claim", "evidence", "relations", "tags", "notes"})
+DISTILL_KNOWLEDGE_FIELDS = frozenset({_SCOPE, _CLAIM, _EVIDENCE, _RELATIONS, "tags", "notes"})
 #: What keeps a version: its identity, the schema and form it is written under, and how it came to be.
 DISTILL_METADATA_FIELDS = frozenset(
-    {"kind", "id", "version", "schema_ref", "form_ref", "created_at", "author", "provenance", "derivation"}
+    {_KIND, "id", _VERSION, _SCHEMA_REF, _FORM_REF, _CREATED_AT, "author", "provenance", _DERIVATION}
 )
 
 
@@ -576,21 +572,21 @@ class DistillEntry:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "id", require_entry_id(self.id))
-        object.__setattr__(self, "version", _int(self.version, "distill version", minimum=1))
+        object.__setattr__(self, _VERSION, _int(self.version, "distill version", minimum=1))
         object.__setattr__(self, "schema_ref", _require_schema_ref(self.schema_ref, "distill.schema_ref"))
         object.__setattr__(self, "form_ref", require_form_ref(self.form_ref, "distill.form_ref"))
-        object.__setattr__(self, "created_at", _aware_datetime(self.created_at, "distill.created_at"))
+        object.__setattr__(self, _CREATED_AT, _aware_datetime(self.created_at, _CREATED_AT_WHERE))
         if not isinstance(self.provenance, Provenance):
             raise SchemaValidationError("distill.provenance is invalid")
         for name, kind in (
-            ("scope", Scope),
-            ("evidence", Evidence),
-            ("derivation", Derivation),
-            ("relations", Relations),
+            (_SCOPE, Scope),
+            (_EVIDENCE, Evidence),
+            (_DERIVATION, Derivation),
+            (_RELATIONS, Relations),
         ):
             if not isinstance(getattr(self, name), kind):
                 raise SchemaValidationError(f"distill.{name} is invalid")
-        object.__setattr__(self, "claim", _field_values(self.claim, "claim"))
+        object.__setattr__(self, _CLAIM, _field_values(self.claim, _CLAIM))
         if self.author:
             object.__setattr__(self, "author", _require_string(self.author, "distill.author"))
         tags = tuple(_require_string(tag, "distill tag") for tag in self.tags)
@@ -606,7 +602,7 @@ class DistillEntry:
             raise SchemaValidationError("distill schema_ref does not match the declaration")
         if self.form_ref != form.form_ref:
             raise SchemaValidationError("distill form_ref does not match the form")
-        self.scope.validate(declaration, "scope")
+        self.scope.validate(declaration, _SCOPE)
         if self.evidence.check is not None:
             self.evidence.check.validate(declaration, "evidence.check")
         form.validate_claim(self.claim)
@@ -648,22 +644,22 @@ class DistillEntry:
 
     @classmethod
     def from_dict(cls, value: Any) -> DistillEntry:
-        data = _mapping(value, "distill")
-        _reject_unknown(data, DISTILL_KNOWLEDGE_FIELDS | DISTILL_METADATA_FIELDS, "distill")
+        data = _mapping(value, DISTILL_KIND)
+        _reject_unknown(data, DISTILL_KNOWLEDGE_FIELDS | DISTILL_METADATA_FIELDS, DISTILL_KIND)
         if data.get("kind") != DISTILL_KIND:
             raise SchemaValidationError(f"distill.kind must be {DISTILL_KIND!r}")
         return cls(
             id=_required(data, "id", "distill.id"),
-            version=_required(data, "version", "distill.version"),
-            schema_ref=_required(data, "schema_ref", "distill.schema_ref"),
-            form_ref=_required(data, "form_ref", "distill.form_ref"),
-            created_at=_parse_datetime(_required(data, "created_at", "distill.created_at"), "distill.created_at"),
+            version=_required(data, _VERSION, "distill.version"),
+            schema_ref=_required(data, _SCHEMA_REF, "distill.schema_ref"),
+            form_ref=_required(data, _FORM_REF, "distill.form_ref"),
+            created_at=_parse_datetime(_required(data, _CREATED_AT, _CREATED_AT_WHERE), _CREATED_AT_WHERE),
             author=data.get("author", ""),
             provenance=Provenance.from_dict(_required(data, "provenance", "distill.provenance")),
             derivation=Derivation.from_dict(data.get("derivation", {})),
             scope=Scope.from_dict(data.get("scope", {})),
             claim=data.get("claim", {}),
-            evidence=Evidence.from_dict(_required(data, "evidence", "distill.evidence")),
+            evidence=Evidence.from_dict(_required(data, _EVIDENCE, "distill.evidence")),
             relations=Relations.from_dict(data.get("relations", {})),
             tags=tuple(_list(data.get("tags", []), "distill.tags")),
             notes=data.get("notes", {}),

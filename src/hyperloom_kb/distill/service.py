@@ -72,13 +72,14 @@ REPRESENTATIVES, MAX_REPRESENTATIVES = 5, 50
 MAX_GROUP_BY = 2
 EVIDENCE_HISTOGRAM = "hyperloom_kb_distill_evidence_seconds"
 _AUDIT = "audit"
+_SCOPE, _CHECK = "scope", "check"
 _DRAFT_FIELDS = frozenset(
     {
         "schema_ref",
         "form_ref",
-        "scope",
+        _SCOPE,
         "claim",
-        "check",
+        _CHECK,
         "add",
         "remove",
         "annotations",
@@ -292,7 +293,7 @@ class DistillService:
         """The group ``scope`` selects among the schema's visible Experiences, and its cross table over ``group_by``."""
 
         declaration = self._host.declaration_for(schema_ref)
-        scope.validate(declaration, "scope")
+        scope.validate(declaration, _SCOPE)
         if len(group_by) > MAX_GROUP_BY or len(set(group_by)) != len(group_by):
             raise SchemaValidationError(f"group_by names at most {MAX_GROUP_BY} distinct paths")
         for path in group_by:
@@ -392,9 +393,9 @@ class DistillService:
             for relation in draft.relations.entries:
                 if self._store.schema_of(connection, relation.target) != schema_ref:
                     raise SchemaValidationError(f"relation target {relation.target} is a Distill of another schema")
-        draft.scope.validate(declaration, "scope")
+        draft.scope.validate(declaration, _SCOPE)
         if draft.check is not None:
-            draft.check.validate(declaration, "check")
+            draft.check.validate(declaration, _CHECK)
         with self._host.metrics.timed(EVIDENCE_HISTOGRAM, operation=operation):
             visible = self._host.visible_experiences(schema_ref)
             population = newest_first(select(visible, draft.scope))

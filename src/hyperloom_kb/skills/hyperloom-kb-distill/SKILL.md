@@ -113,9 +113,10 @@ A create is visible at once; there is no review step. `sync` makes `DIR`
 mirror the visible Distills, one `<entry_id>.md` page each under a
 `schema-<digest>` subdirectory: it rewrites changed pages, removes the page
 of a Distill no longer visible, and leaves every other file alone. Run it
-after creating, updating, deleting, restoring, or pulling, and report its
-`needs_attention` list. Use the directory the user keeps for it, typically
-inside their Curated Wiki's tree; never edit its pages by hand.
+after creating, updating, deleting, or restoring Distills, and report its
+`needs_attention` list. Write to the directory the user keeps for it, often
+inside their Curated Wiki's tree; a tool that embeds these commands may give
+`--dir` a default. Never edit its pages by hand.
 
 ## 6. Keep Distills current
 
@@ -129,8 +130,8 @@ hyperloom-kb distill restore-entry ENTRY_ID
 
 `distill draft` prints the draft that writes the Distill's version again,
 with its check, edits, and annotations; ids no longer visible are left out.
-Start every update from it, a pulled Distill included, so the author's
-annotations carry over.
+Start every update from it, so the author's annotations carry over, also on
+a Distill someone else wrote.
 
 `changes` lists the Distills whose evidence moved in a way that needs the
 author: `contradicted` (new members contradict it), `weakened` (supporting
@@ -163,10 +164,3 @@ and its `representatives`. `--follow-evidence` adds a page of its members
 with each one's record and file paths; repeat with `--after <next>` while
 `has_more` is true. A page in the directory names its id in the frontmatter:
 read it this way when an agent needs more than the page.
-
-## Share
-
-A push to the global KB sends the latest version of each visible Distill after
-the Experiences, and a pull of a schema brings the global KB's. A version both
-sides wrote differently under one number is reported under `rejected`; an
-update here writes the next version, which settles it.

@@ -17,7 +17,7 @@ from typing import Any, BinaryIO, Protocol
 from hyperloom_kb.database import Database, WriteSource
 from hyperloom_kb.distill.model import DistillEntry, FormDeclaration
 from hyperloom_kb.local_state import UnknownStateItem
-from hyperloom_kb.remote import RemoteClient, RemoteClientError, RemoteConfig
+from hyperloom_kb.remote import ExportPage, RemoteClient, RemoteClientError, RemoteConfig
 from hyperloom_kb.schema import Experience, ExperienceDeclaration, FileRef, JsonValue
 from hyperloom_kb.storage import StorageContractError
 
@@ -355,6 +355,15 @@ class _Global:
     holds_distills: bool
 
 
+@dataclass(frozen=True)
+class _PullPage:
+    """A page of the schema a pull batch brings, and the position and Experience on the global KB it follows."""
+
+    page: ExportPage
+    position: int
+    anchor: str
+
+
 class GlobalSync:
     """One service's sync with its global KB; one push or pull batch runs at a time."""
 
@@ -504,6 +513,26 @@ class GlobalSync:
                     return _report("incomplete", url, counts, rejected, distills=distills, error=error)
             return _report("completed", url, counts, rejected, distills=distills, has_more=has_more)
 
+    def _next_page(self, target: RemoteClient, schema_ref: str) -> _PullPage:
+        """The page of ``schema_ref`` a pull batch brings, after the cursor, or from the start again when the global KB
+        no longer holds what the cursor names or shows the schema differently."""
+
+        url = target.config.base_url
+        position, anchor = self._ledger.cursor(url, f"{_PULL} {schema_ref}")
+        page = target.export_page(after=position, limit=SYNC_BATCH, schema_ref=schema_ref)
+        lost = bool(position) and page.after_id != anchor
+        if lost or (position and page.state != self._ledger.pulled_state(url, schema_ref)):
+            # Either the global KB no longer holds at the cursor what this service pulled there, as after a
+            # restore from an older backup, so what it holds now may sit before the cursor; or its exclusions
+            # or restores changed, so Experiences the cursor passed while they were hidden may show now.
+            # The ones already here come back unchanged.
+            page = target.export_page(after=0, limit=SYNC_BATCH, schema_ref=schema_ref)
+            position, anchor = 0, ""
+        if lost:
+            # What it lost may include what this service pushed, so the next push sends everything again.
+            self._ledger.advance(url, _PUSH, 0)
+        return _PullPage(page, position, anchor)
+
     def pull(self, schema_ref: str) -> dict[str, JsonValue]:
         """Bring ``schema_ref``'s state to everything the global KB holds of it, one batch per call.
 
@@ -523,22 +552,11 @@ class GlobalSync:
                 return _report("refused", url, error=str(exc))
             target, global_kb_id = connected.client, connected.kb_id
             direction = f"{_PULL} {schema_ref}"
-            position, anchor = self._ledger.cursor(url, direction)
             try:
-                page = target.export_page(after=position, limit=SYNC_BATCH, schema_ref=schema_ref)
-                lost = bool(position) and page.after_id != anchor
-                if lost or (position and page.state != self._ledger.pulled_state(url, schema_ref)):
-                    # Either the global KB no longer holds at the cursor what this service pulled there, as after a
-                    # restore from an older backup, so what it holds now may sit before the cursor; or its exclusions
-                    # or restores changed, so Experiences the cursor passed while they were hidden may show now.
-                    # The ones already here come back unchanged.
-                    page = target.export_page(after=0, limit=SYNC_BATCH, schema_ref=schema_ref)
-                    position, anchor = 0, ""
+                batch = self._next_page(target, schema_ref)
             except RemoteClientError as exc:
                 return _report("incomplete", url, error=str(exc))
-            if lost:
-                # What it lost may include what this service pushed, so the next push sends everything again.
-                self._ledger.advance(url, _PUSH, 0)
+            page, position, anchor = batch.page, batch.position, batch.anchor
             if page.declaration is not None:
                 self._service.register(page.declaration)
             saved: dict[str, JsonValue] | None = None

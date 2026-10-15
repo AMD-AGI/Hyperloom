@@ -8,87 +8,26 @@ from __future__ import annotations
 import argparse
 import json
 import socket
-import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from hyperloom_kb import (
-    Experience,
-    ExperienceDeclaration,
-    ExperienceHTTPService,
-    ExperienceStatus,
-    FieldDeclaration,
-    FieldKind,
-    FieldRole,
-    HTTPServiceConfig,
-    ObjectiveDeclaration,
-    Provenance,
-    RemoteClient,
-    RemoteConfig,
-    create_http_server,
-    derive_experience_id,
-)
+from hyperloom_kb import Experience, RemoteClient
 from hyperloom_kb.cli import add_commands, main, run_command
-from hyperloom_kb.tests.conftest import fresh_database
-
-TOKEN = "cli-token"
-NOW = datetime(2026, 10, 1, tzinfo=timezone.utc)
-SCHEMA = ExperienceDeclaration(
-    objectives=(ObjectiveDeclaration("throughput@v1", "Maximize throughput."),),
-    identity=(FieldDeclaration("model", "Model."),),
-    baseline=(FieldDeclaration("config", "Baseline.", group=True),),
-    change=(
-        FieldDeclaration("knob", "Knob.", group=True),
-        FieldDeclaration("summary", "What changed.", role=FieldRole.SUMMARY),
-    ),
-    outcome=(
-        FieldDeclaration("decision", "Decision.", role=FieldRole.DECISION, values=("keep", "revert")),
-        FieldDeclaration("value", "Throughput.", kind=FieldKind.NUMBER, role=FieldRole.MEASUREMENT),
-    ),
-    reflection=(FieldDeclaration("text", "Reflection.", kind=FieldKind.TEXT),),
-)
+from hyperloom_kb.tests.distills import SCHEMA, TOKEN, make_experience, serving
 
 
 def _experience(seq: int, run_id: str = "cli-run") -> Experience:
-    return Experience(
-        id=derive_experience_id("cli-test", run_id, seq),
-        run_id=run_id,
-        seq=seq,
-        created_at=NOW,
-        completed_at=NOW,
-        identity={"model": "qwen3"},
-        objective="throughput@v1",
-        baseline={"config": "default"},
-        provenance=Provenance("cli-test", "1"),
-        schema_ref=SCHEMA.schema_ref,
-        status=ExperienceStatus.COMPLETE,
-        rationale={"reasoning": f"Try knob {seq}."},
-        change={"knob": f"knob_{seq}", "summary": f"Set knob {seq}."},
-        outcome={"decision": "keep", "value": 110.0 + seq},
-        reflection={"text": "Measured."},
-    )
+    return make_experience(seq, run_id, "qwen3", "triton", "keep", 110.0 + seq)
 
 
 @contextmanager
 def _serving(home: Path, global_url: str | None = None) -> Iterator[RemoteClient]:
-    global_kb = None if global_url is None else RemoteClient(RemoteConfig(global_url, TOKEN))
-    app = ExperienceHTTPService(
-        HTTPServiceConfig(home, TOKEN), SCHEMA, None, database=fresh_database(), global_kb=global_kb
-    )
-    server = create_http_server(app, "127.0.0.1", 0)
-    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
-    thread.start()
-    try:
-        yield RemoteClient(RemoteConfig(f"http://127.0.0.1:{server.server_address[1]}", TOKEN))
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=5)
+    with serving(home, global_url=global_url, seeded=False) as (_, client):
+        yield client
 
 
 @pytest.fixture
@@ -173,7 +112,7 @@ def test_a_tool_embeds_every_command_with_its_own_schema_and_its_own_versions(tm
     parser = argparse.ArgumentParser(prog="tool")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("push").set_defaults(own=True)
-    add_commands(commands, schema_ref=SCHEMA.schema_ref)
+    add_commands(commands, schema_ref=SCHEMA.schema_ref, distill_dir=tmp_path / "pages")
 
     assert set(commands.choices) == {
         *("health", "push", "pull", "rebind", "labels", "label", "restore", "exclude", "include", "exclusions"),
@@ -184,6 +123,9 @@ def test_a_tool_embeds_every_command_with_its_own_schema_and_its_own_versions(tm
         assert parser.parse_args([name]).schema_ref == SCHEMA.schema_ref
     for argv in (["schema", "show"], ["distill", "list"], ["distill", "changes"], ["distill", "sync", "--dir", "d"]):
         assert parser.parse_args(argv).schema_ref == SCHEMA.schema_ref
+    # The tool's directory is where a sync writes unless it names another.
+    assert parser.parse_args(["distill", "sync"]).dir == tmp_path / "pages"
+    assert parser.parse_args(["distill", "sync", "--dir", "d"]).dir == "d"
     with _serving(tmp_path / "kb") as client:
         client.write(_experience(0), declaration=SCHEMA)
         status = run_command(client, parser.parse_args(["export"]))
@@ -193,9 +135,10 @@ def test_a_tool_embeds_every_command_with_its_own_schema_and_its_own_versions(tm
     assert exported["declaration"] == SCHEMA.to_dict()
     assert exported["state"]
     assert [item["experience"]["id"] for item in exported["items"]] == [_experience(0).id]
-    # Without a tool's schema, a pull has none to fall back on.
-    with pytest.raises(SystemExit):
-        main(["pull"])
+    # Without a tool's schema, a pull has none to fall back on, and without its directory a sync has none.
+    for argv in (["pull"], ["distill", "sync"]):
+        with pytest.raises(SystemExit):
+            main(argv)
 
 
 def _subcommands(parser: argparse.ArgumentParser) -> list[str]:
