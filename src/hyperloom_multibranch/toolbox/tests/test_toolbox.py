@@ -8,9 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.measurement import FailureClass, Purpose
+from hyperloom.contracts.measurement import FailureClass, Purpose, Validity
 from hyperloom_multibranch.contracts.notebook import Role
-from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus
+from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, DedupStatus
 from hyperloom_multibranch.contracts.toolbox import Backpressure, CancelOutcome, RequestRejected, UnknownTestRequest
 from hyperloom_multibranch.notebook.tests.factories import TTL, intent
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
@@ -194,7 +194,7 @@ async def test_a_candidate_failure_is_final_without_a_rerun(tmp_path: Path) -> N
     assert record.result is not None and record.result.failure_reason == "import_error"
 
 
-async def test_infra_failures_retry_on_other_sandboxes_up_to_the_limit_then_the_test_is_withdrawn(
+async def test_infra_failures_retry_up_to_the_limit_then_measurement_failed_is_stored_as_the_result(
     tmp_path: Path,
 ) -> None:
     nodes = iter(["n1", "n2", "n3", "n4", "n5"])
@@ -204,9 +204,29 @@ async def test_infra_failures_retry_on_other_sandboxes_up_to_the_limit_then_the_
     await rig.toolbox.drain()
     assert len(executor.jobs) == 4, "one try and three retries"
     record = await _record(rig, request_id)
-    assert record.result is None, "measurement_failed is not a negative result"
-    assert record.withdrawn_at is not None and "measurement_failed" in record.withdrawal_reason
+    assert record.result is not None and record.result.validity is Validity.MEASUREMENT_FAILED
+    assert record.withdrawn_at is None and request_id not in rig.notebook._state().withdrawals
+    assert rig.toolbox._log.get(request_id).settled  # type: ignore[union-attr]
     assert {event.node for event in await rig.notebook.quarantined()} == {"n1", "n2", "n3", "n4"}
+
+
+async def test_a_measurement_failed_result_releases_its_claim_and_dedup_does_not_call_it_tested(
+    tmp_path: Path,
+) -> None:
+    executor = ScriptedExecutor([lambda j: failed(j, FailureClass.INFRA, "n1", "pull failed")])
+    rig = build(tmp_path, executor=executor)
+    specialist = rig.open_notebook(Role.SPECIALIST_RUNTIME, "b1")
+    target, action = intent("b1", PARENT), delta()
+    claim = await specialist.acquire(target, action.fingerprint(), ttl_seconds=TTL)
+    request_id = await rig.toolbox.submit_test(req(intent=target.fingerprint, change=action))
+    await rig.toolbox.drain()
+    record = await _record(rig, request_id)
+    assert record.result is not None and record.result.validity is Validity.MEASUREMENT_FAILED
+    answer = await specialist.lookup(claim.key, action.fingerprint())
+    assert answer.claim is None, "the claim was released, not held or completed"
+    assert answer.status is not DedupStatus.TESTED and answer.status is not DedupStatus.IN_PROGRESS
+    await rig.toolbox.tick()
+    assert len(rig.notebook._state().results) == 1, "written once, never again"
 
 
 async def test_an_infra_failure_then_success_is_the_result(tmp_path: Path) -> None:
@@ -218,7 +238,7 @@ async def test_an_infra_failure_then_success_is_the_result(tmp_path: Path) -> No
     assert record.result is not None and len(record.result.attempts) == 2
 
 
-async def test_a_refused_measurement_is_not_retried_and_is_withdrawn(tmp_path: Path) -> None:
+async def test_a_refused_measurement_is_not_retried_and_is_stored_as_measurement_failed(tmp_path: Path) -> None:
     executor = ScriptedExecutor()
     executor.refuse = "spec_rejected: model hash differs"
     rig = build(tmp_path, executor=executor)
@@ -226,10 +246,11 @@ async def test_a_refused_measurement_is_not_retried_and_is_withdrawn(tmp_path: P
     await rig.toolbox.drain()
     record = await _record(rig, request_id)
     assert len(executor.jobs) == 1
-    assert record.result is None and "spec_rejected" in record.withdrawal_reason
+    assert record.withdrawn_at is None and record.result is not None
+    assert record.result.validity is Validity.MEASUREMENT_FAILED and "spec_rejected" in record.result.failure_reason
 
 
-async def test_a_crashing_executor_is_a_withdrawal_not_a_lost_test(tmp_path: Path) -> None:
+async def test_a_crashing_executor_is_a_measurement_failed_result_not_a_lost_test(tmp_path: Path) -> None:
     class Crashing(ScriptedExecutor):
         async def run(self, job):
             raise RuntimeError("executor bug")
@@ -238,7 +259,8 @@ async def test_a_crashing_executor_is_a_withdrawal_not_a_lost_test(tmp_path: Pat
     request_id = await rig.toolbox.submit_test(req())
     await rig.toolbox.drain()
     record = await _record(rig, request_id)
-    assert record.withdrawn_at is not None and "executor bug" in record.withdrawal_reason
+    assert record.withdrawn_at is None and record.result is not None
+    assert record.result.validity is Validity.MEASUREMENT_FAILED and "executor bug" in record.result.failure_reason
 
 
 async def test_on_a_single_node_avoiding_it_still_runs_there_and_marks_same_node(tmp_path: Path) -> None:

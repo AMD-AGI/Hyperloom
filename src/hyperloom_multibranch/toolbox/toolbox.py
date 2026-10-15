@@ -285,7 +285,7 @@ class RealToolbox:
             result = await self._execute(item)
             entry = self._log.get(item.request_id)
             if entry is not None:
-                await self._record_and_write(entry, self._outcome_of(result))
+                await self._record_and_write(entry, {"result": result.to_document()})
         finally:
             self._queue.remove(item.request_id)
             self._tasks.pop(item.request_id, None)
@@ -305,12 +305,6 @@ class RealToolbox:
                 queued_at=item.queued_at,
             )
         return replace(result, request_id=item.request_id, queued_at=item.queued_at)
-
-    @staticmethod
-    def _outcome_of(result: TestResult) -> dict[str, object]:
-        if result.validity is Validity.MEASUREMENT_FAILED:
-            return {"withdrawal": f"measurement_failed: {result.failure_reason}", "result": result.to_document()}
-        return {"result": result.to_document()}
 
     async def _withdraw(self, entry: LogEntry, reason: str) -> None:
         self._queue.remove(entry.request_id)

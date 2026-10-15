@@ -178,7 +178,7 @@ async def test_infrastructure_failures_end_as_measurement_failed_after_the_retri
     assert scripted.calls == 4 and len(result.attempts) == 4 and "node_fault" in (result.failure_reason or "")
     assert len(set(_journal_attempts(r, request_id).values())) == 4
     notebook_record = await tb.notebook.record(request_id)
-    assert notebook_record.result is None or notebook_record.withdrawn_at is not None
+    assert notebook_record.withdrawn_at is None and notebook_record.result == result
 
 
 async def test_an_unclear_failure_is_rerun_once_and_the_rerun_decides(tmp_path: Path, rig) -> None:
