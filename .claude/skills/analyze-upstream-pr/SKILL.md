@@ -38,14 +38,12 @@ others leave. The reader acts on the whole row.
 `ADOPT-NOW` and `CARRY-AS-PATCH` add `-- does not apply at <commit>` when Step 6's apply check
 failed: the next step then starts by resolving the hunk it names.
 
-**2. What it does**: Step 1's two sentences. **3. Evidence**: one row per claim the
-recommendation rests on (on-path, inclusion, other PRs, effect, each surviving risk and conflict),
-with its label and the `path:line` or artifact line behind it. Labels: `verified` (code read,
-condition named), `quoted` (an author's or reviewer's words, with the artifact line), `predicted`
-(reasoned from the diff), `measured` (a run the user made on the target, with its source),
-`inferred` (not confirmed; never the only support for a recommendation). **4. Coverage**: every
-`SKIPPED:` line, check-prior-art's Coverage when its verdict says `-- incomplete`, and the Step 2
-dimensions `NOT STATED`. **5. Next step**: the row's, naming the commit, patch or plan it acts on.
+**2. What it does**: Step 1's two sentences. **3. Evidence**: one row per claim the recommendation
+rests on (on-path, inclusion, other PRs, effect, each surviving risk and conflict), with its label
+and the `path:line` or artifact line behind it. Labels: `verified` (code read, condition named),
+`quoted` (an author's or reviewer's words, with the artifact line), `predicted` (reasoned from the
+diff), `measured` (a run the user made on the target, with its source), `inferred` (not confirmed;
+never the only support for a recommendation). **4. Coverage**, **5. Next step**: as in Step 10.
 
 This skill never posts to GitHub: no comment, review, label or reaction. It never starts a server,
 a benchmark or a GPU job: Step 8 writes a plan, and only the user runs it.
@@ -94,12 +92,11 @@ gh api --paginate "repos/<owner/name>/pulls/<N>/comments?per_page=100" --jq '.[]
   role: .author_association, at: .created_at, path, line: (.line // .original_line), body}' > "$PR/inline.jsonl"
 ```
 
-`read.sh` is check-prior-art's Step 4 collection: `pr.json` (`state`, `isDraft`, `mergeCommit`,
-null until the PR merges, `body`, `comments`, `reviews`), `files.txt` (`status additions deletions
-path` for every changed path), `diff.txt` (or a `SKIPPED: diff` line, carried to the report) and
-`xrefs.tsv`, every PR that links to this one. `checks.json` holds the head sha, the base branch and
-the checks at the head; `inline.jsonl` the inline review comments, which `pr.json` lacks. A command
-that exits non-zero collected nothing: rerun it once, then stop with its error.
+`read.sh` writes what check-prior-art's Step 4 lists: `pr.json` (`mergeCommit` is null until the
+PR merges), `files.txt`, `diff.txt` (or a `SKIPPED: diff` line, carried to the report) and
+`xrefs.tsv`. `checks.json` holds the head sha, the base branch and the checks at the head;
+`inline.jsonl` the inline review comments, which `pr.json` lacks. A command that exits non-zero
+collected nothing: rerun it once, then stop with its error.
 
 ## Step 1 — What it does
 
@@ -147,8 +144,7 @@ capability checks (gfx names, `gcnArchName`, capability tuples), dtype dispatch,
 registries and priority lists, environment variables read at selection, shape-keyed tuning tables.
 When `selection` names another tree, as for a kernel library's op, walk the callers there, at its
 commit. A changed path the tree lacks at `commit` stays `UNKNOWN` until mapped (G7). With no tree,
-every line is `UNKNOWN` under `SKIPPED: on-path -- no tree; whether the deployment runs this code
-is unchecked`.
+every line is `UNKNOWN` under `SKIPPED: on-path -- no tree; the deployment's path is unchecked`.
 
 ## Step 4 — In-tree inclusion
 
@@ -172,8 +168,7 @@ reported: <the author's numbers from operating_point.txt with their operating po
 
 The effect is always `predicted`. A number in the body is the author's measurement at the author's
 operating point, and reaches the report as `quoted`. An all `OFF-PATH` Step 3 makes the direction
-`none`. Name each `GAP` that could flip the sign: a win at the author's batch size can be a loss at
-yours.
+`none`. Name each `GAP` that could flip the sign: a win at the author's batch can lose at yours.
 
 ## Step 6 — Other PRs, and the diff at the target
 
