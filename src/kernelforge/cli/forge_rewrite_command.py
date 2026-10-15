@@ -17,7 +17,7 @@ from kernelforge.cli.options import (
 )
 from kernelforge.config import Config
 from kernelforge.knowledge.kb_store.config import KnowledgeConfig
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 
 def _validate_rewrite_framework(_ctx, _param, value):

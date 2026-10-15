@@ -15,7 +15,7 @@ from kernelforge.loop.reporting import (
     BestResultPublisher,
     is_best_manifest,
 )
-from kernelforge.loop.scoring import warm_start_improvement_flags
+from kernelforge.evaluation.scoring import warm_start_improvement_flags
 
 
 def atomic_write_json(path: str | Path, payload: dict) -> None:

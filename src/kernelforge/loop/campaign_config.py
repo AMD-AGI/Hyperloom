@@ -28,7 +28,7 @@ from kernelforge.knowledge.kb_store.identity.implementation import (
 from kernelforge.loop.new_path_allowlist import normalize_commit_new_paths
 from kernelforge.mcp_server.tools.pmc import derive_kernel_names
 from kernelforge.durable_io import atomic_write_text
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 
 # The trailing lookahead skips rocminfo's generic ISA names (``gfx12-generic``), listed beside the concrete target.
