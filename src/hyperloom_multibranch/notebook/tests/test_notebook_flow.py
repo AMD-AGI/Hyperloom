@@ -209,8 +209,9 @@ async def test_the_split_branch_is_the_same_whichever_the_gate_writes_first(sess
     assert view.commit("c2").branch == "s1-fix"
 
 
+@pytest.mark.parametrize("waiting", [Conclusion.SPLIT_REQUESTED, Conclusion.SPLIT_PENDING])
 async def test_a_correctness_fix_that_costs_performance_splits_and_its_case_guards_the_descendants(
-    session: Session,
+    session: Session, waiting: Conclusion
 ) -> None:
     fix = intent("s1", "c1", "fp8 overflow", "clamp scales")
     await _measure(session, session.s1, "r3", fix, delta("--kv-cache-dtype fp8"))
@@ -220,7 +221,7 @@ async def test_a_correctness_fix_that_costs_performance_splits_and_its_case_guar
     )
     await session.toolbox.write_request(repro)
     slower = judgement(-2.0, ("r3",), verdict=Verdict.REGRESSED, fixes_correctness=True, foundation_fix=True)
-    await session.gate.write_judgement("r3", slower, Conclusion.SPLIT_REQUESTED)
+    await session.gate.write_judgement("r3", slower, waiting)
     split = LineageEvent(LineageKind.SPLIT, "s1-fix", commit_id="c2", from_commit="c1", from_branch="s1", reason="fix")
     await session.gate.record_lineage(split)
     await session.gate.write_judgement("r3", slower, Conclusion.SPLIT_COMMITTED, "c2")

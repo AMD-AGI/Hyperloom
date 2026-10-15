@@ -21,6 +21,7 @@ from hyperloom.contracts.recipe import (
     Recipe,
     RecipeError,
 )
+from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom.orchestrator.knowledge.remote_recipe.values import knowledge_to_warm_recipe
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
@@ -121,6 +122,36 @@ def test_a_file_that_differs_from_its_pinned_hash_stops_the_write(
     (final.files_root / "kernel" / "gemm" / "moe.json").unlink()
     with pytest.raises(RecipeError, match="not in the checkout"):
         publish_final_recipe(RemoteRecipeClient(store), snapshot, final)
+    assert store.uploads == {}
+
+
+def test_with_the_session_blob_store_the_files_come_from_it_by_hash(
+    snapshot: NotebookSnapshot, final: FinalRecipe, tmp_path: Path
+) -> None:
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    blobs.put(PATCH)
+    blobs.put(KERNEL)
+    empty_checkout = tmp_path / "recipe-only"
+    empty_checkout.mkdir()
+    store = FakeRecipeStore(champion=_champion(1000.0))
+
+    outcome = publish_final_recipe(
+        RemoteRecipeClient(store), snapshot, dataclasses.replace(final, files_root=empty_checkout, blobs=blobs)
+    )
+
+    assert outcome.status == "written"
+    assert store.uploads == {OVERLAY: PATCH, "kernel/gemm/moe.json": KERNEL}
+
+
+def test_a_blob_missing_from_the_store_stops_the_write(
+    snapshot: NotebookSnapshot, final: FinalRecipe, tmp_path: Path
+) -> None:
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    blobs.put(PATCH)
+    store = FakeRecipeStore()
+
+    with pytest.raises(RecipeError, match="not in the blob store"):
+        publish_final_recipe(RemoteRecipeClient(store), snapshot, dataclasses.replace(final, blobs=blobs))
     assert store.uploads == {}
 
 

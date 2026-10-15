@@ -6,8 +6,9 @@
 The record carries the columns the single-lineage CLOSE writes: the identity and scope come from the session profile
 PRELUDE wrote, ``value`` from :func:`to_recipe_kb_value`, the experience lists from :func:`session_lessons`. The base
 image digest and runtime snapshot, which ``value`` leaves out, travel in the provenance. Patch and kernel files are
-copied out of the final commit's checkout under the refs ``value`` names, each checked against the hash the recipe
-pins, so the KB stores exactly what was measured.
+read from the session's blob store by the hash the recipe pins (the experiment repository holds recipes only), or
+copied out of a checkout when no store is given, and staged under the refs ``value`` names; each is checked against
+its pinned hash, so the KB stores exactly what was measured.
 
 InferenceX sessions compare ``optimized_throughput`` with the champion of their partition. An AgentX champion compares
 an interactivity gain graded on two axes the multi-branch gate does not record yet, so AgentX sessions are skipped,
@@ -18,7 +19,6 @@ digest is skipped too (``recipe_digest_mismatch``): CLOSE was handed some other 
 from __future__ import annotations
 
 import hashlib
-import shutil
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -26,6 +26,7 @@ from pathlib import Path
 
 from hyperloom.contracts.recipe import Recipe, RecipeError
 from hyperloom.inference_optimizer.recipe_snapshot_constants import recipe_canonical_id
+from hyperloom.measure.compile import BlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom.orchestrator.knowledge.remote_recipe.models import (
     Artifact,
@@ -53,15 +54,18 @@ AGENTX = "agentx"
 
 @dataclass(frozen=True)
 class FinalRecipe:
-    """The commit CLOSE publishes, its recipe, and the checkout holding the patch and kernel files the recipe names.
+    """The commit CLOSE publishes, its recipe, and where the patch and kernel files the recipe names are read from.
 
-    ``metric`` is the recorded-value metric that is the session's output throughput.
+    ``metric`` is the recorded-value metric that is the session's output throughput. With ``blobs`` (the session's
+    blob store) every file is read from it by its pinned sha256 and ``files_root`` is not read; without it the files
+    are taken from the checkout at ``files_root``.
     """
 
     commit_id: str
     recipe: Recipe
     files_root: Path
     metric: str
+    blobs: BlobStore | None = None
 
 
 def recipe_identity(profile: SessionProfile) -> tuple[str, RecipeScope]:
@@ -120,28 +124,35 @@ def knowledge_document(
     )
 
 
-def stage_files(recipe: Recipe, files_root: Path, staging: Path) -> list[Artifact]:
-    """Copy each patch and kernel file under the ref ``value`` names it by; raises on a file the recipe does not pin."""
+def stage_files(recipe: Recipe, files_root: Path, staging: Path, blobs: BlobStore | None = None) -> list[Artifact]:
+    """Stage each patch and kernel file under the ref ``value`` names it by; raises on a file the recipe does not pin.
+
+    The bytes come from ``blobs`` by sha256 when it is given, otherwise from the checkout at ``files_root``.
+    """
+
+    def stage(path: str, ref: str, sha256: str) -> Artifact:
+        content = blobs.get(sha256) if blobs is not None else _checked_out(files_root / path)
+        found = hashlib.sha256(content).hexdigest()
+        if found != sha256:
+            raise RecipeError(f"{path} has sha256 {found}; the recipe pins {sha256}")
+        destination = staging / ref
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(content)
+        return Artifact(path=ref, source=destination, kind=ref.split("/", 1)[0])
 
     artifacts = [
-        _stage(files_root / patch.path, staging, overlay_ref(stack, member, patch.path), patch.sha256)
+        stage(patch.path, overlay_ref(stack, member, patch.path), patch.sha256)
         for stack, component in enumerate(recipe.components)
         for member, patch in enumerate(component.patches)
     ]
-    artifacts.extend(_stage(files_root / kernel.ref, staging, kernel.ref, kernel.sha256) for kernel in recipe.kernels)
+    artifacts.extend(stage(kernel.ref, kernel.ref, kernel.sha256) for kernel in recipe.kernels)
     return artifacts
 
 
-def _stage(source: Path, staging: Path, ref: str, sha256: str) -> Artifact:
+def _checked_out(source: Path) -> bytes:
     if not source.is_file():
         raise RecipeError(f"{source} is not in the checkout")
-    found = hashlib.sha256(source.read_bytes()).hexdigest()
-    if found != sha256:
-        raise RecipeError(f"{source} has sha256 {found}; the recipe pins {sha256}")
-    destination = staging / ref
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(source, destination)
-    return Artifact(path=ref, source=destination, kind=ref.split("/", 1)[0])
+    return source.read_bytes()
 
 
 def publish_final_recipe(
@@ -164,7 +175,7 @@ def publish_final_recipe(
     knowledge = knowledge_document(snapshot, profile, final, scope)
     with tempfile.TemporaryDirectory(prefix="hyperloom-multibranch-recipe-") as temporary:
         staging = Path(temporary)
-        bundle = KnowledgeBundle(knowledge, stage_files(final.recipe, final.files_root, staging))
+        bundle = KnowledgeBundle(knowledge, stage_files(final.recipe, final.files_root, staging, final.blobs))
         return client.write_if_better(
             canonical_id,
             profile.session_id,
