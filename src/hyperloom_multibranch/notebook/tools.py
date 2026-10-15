@@ -9,8 +9,9 @@ with ``error:``, which the tool layer reports as an error result. The tools are 
 specialist the server serves, so the caller is the handle's writer and never an argument.
 
 The tools are a specialist's reads and its own writes: lookup, claim, release, search, record, branch_log,
-append_branch_log and brief. Renewing a claim is the runtime's heartbeat, and what only a program writes (requests,
-results, judgements, lineage, baselines, quarantine) has no tool.
+append_branch_log, learn, learnings and brief. A granted claim also lists this session's learnings about its
+direction. Renewing a claim is the runtime's heartbeat, and what only a program writes (requests, results, judgements,
+lineage, baselines, quarantine) has no tool.
 
 An intent is named by its target, mechanism and layer, and a change by its recipe delta document, whose fingerprint
 the tool computes. Output stays small: a line is at most 160 characters, a list at most 20 lines, a reply at most
@@ -45,15 +46,26 @@ from hyperloom_multibranch.contracts.notebook.records import (
     Claim,
     ClaimKey,
     DedupAnswer,
+    Learning,
     StartupBrief,
     TestRecord,
     TriedDirection,
 )
+from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
+from hyperloom_multibranch.notebook.learning_search import (
+    LearningFinder,
+    SessionLearnings,
+    fit_lines,
+    render_session_learning,
+    session_matches,
+)
+from hyperloom_multibranch.notebook.local.notebook import LEARNING_MAX_CHARS, LEARNING_MIN_CHARS
 
 TOOL_PREFIX = "notebook_"
 LINE_CHARS = 160
 MAX_LINES = 20
 MAX_REPLY_CHARS = 4000
+CLAIM_LEARNINGS = 3
 ERROR = "error:"
 UNKNOWN = "unknown"
 
@@ -179,6 +191,7 @@ class _SpecialistTools:
 
     notebook: Notebook
     briefing: StartupBriefProvider
+    finder: LearningFinder
     branch: str
     ttl_seconds: float
 
@@ -191,7 +204,12 @@ class _SpecialistTools:
         intent = Intent(self.branch, key.parent_commit, target, mechanism, IntentLayer(arguments["layer"]))
         reason = str(arguments.get("reason") or "")
         held = await self.notebook.acquire(intent, _action(arguments), ttl_seconds=self.ttl_seconds, reason=reason)
-        return render_claim(held)
+        snapshot = await self.notebook.snapshot()
+        related = session_matches(snapshot, f"{target} {mechanism}", limit=CLAIM_LEARNINGS)
+        if not related:
+            return render_claim(held)
+        learnt = [render_session_learning(record, snapshot) for record in related]
+        return "\n".join([render_claim(held), "This session's learnings about it:", *learnt])
 
     async def release(self, arguments: Arguments) -> str:
         released = await self.notebook.release(_key(arguments))
@@ -224,6 +242,25 @@ class _SpecialistTools:
         )
         return f"logged {(await self.notebook.append_branch_log(entry)).entry_id}"
 
+    async def learn(self, arguments: Arguments) -> str:
+        layer = arguments.get("layer")
+        learning = Learning(
+            self.branch,
+            LearningKind(arguments["kind"]),
+            str(arguments["content"]),
+            str(arguments.get("target") or ""),
+            str(arguments.get("mechanism") or ""),
+            IntentLayer(layer) if layer else None,
+            tuple(str(request_id) for request_id in arguments.get("request_ids") or ()),
+            str(arguments["supersedes"]) if arguments.get("supersedes") else None,
+        )
+        return f"learnt {(await self.notebook.append_learning(learning)).entry_id}"
+
+    async def learnings(self, arguments: Arguments) -> str:
+        limit = min(int(arguments.get("limit") or MAX_LINES), MAX_LINES)
+        found = await self.finder.lines(await self.notebook.snapshot(), str(arguments["query"]), limit=limit)
+        return "\n".join(fit_lines(found, MAX_REPLY_CHARS)) or "nothing matched"
+
     async def brief(self, arguments: Arguments) -> str:
         return render_brief(await self.briefing.startup_brief(str(arguments["start_commit"])))
 
@@ -247,6 +284,10 @@ def _schema(properties: Mapping[str, Any], *required: str) -> dict[str, Any]:
 
 def _text(**more: Any) -> dict[str, Any]:
     return {"type": "string", **more}
+
+
+def _list(items: Mapping[str, Any]) -> dict[str, Any]:
+    return {"type": "array", "items": dict(items)}
 
 
 _INTENT = {
@@ -296,7 +337,7 @@ _SPECS = (
     _Spec(
         "branch_log",
         "This branch's long-term memory, oldest first, of the given kinds, after the given entry.",
-        _schema({"kinds": {"type": "array", "items": _KIND}, "after": _text()}),
+        _schema({"kinds": _list(_KIND), "after": _text()}),
     ),
     _Spec(
         "append_branch_log",
@@ -305,13 +346,38 @@ _SPECS = (
             {
                 "kind": _KIND,
                 "content": _text(),
-                "request_ids": {"type": "array", "items": _text()},
+                "request_ids": _list(_text()),
                 "supersedes": _text(),
                 "hypothesis_status": _text(enum=[status.value for status in HypothesisStatus]),
             },
             "kind",
             "content",
         ),
+    ),
+    _Spec(
+        "learn",
+        "Write down what this branch learnt, for the next decision of every branch, now and in later sessions: a "
+        "pitfall, an insight, how a tool or setting behaves, what a hypothesis came to. Name the direction and the "
+        "tests behind it when there are; supersedes names this branch's learning it replaces.",
+        _schema(
+            {
+                "kind": _text(enum=[kind.value for kind in LearningKind]),
+                "content": _text(minLength=LEARNING_MIN_CHARS, maxLength=LEARNING_MAX_CHARS),
+                "target": _text(),
+                "mechanism": _text(),
+                "layer": _text(enum=[layer.value for layer in IntentLayer]),
+                "request_ids": _list(_text()),
+                "supersedes": _text(),
+            },
+            "kind",
+            "content",
+        ),
+    ),
+    _Spec(
+        "learnings",
+        "What specialists learnt that bears on a query: this session's learnings of every branch, then past sessions' "
+        "from the Experience KB, each saying whether it was learnt under this session's conditions and tested.",
+        _schema({"query": _text(), "limit": {"type": "integer", "minimum": 1, "maximum": MAX_LINES}}, "query"),
     ),
     _Spec(
         "brief",
@@ -322,11 +388,20 @@ _SPECS = (
 
 
 def notebook_tools(
-    notebook: Notebook, briefing: StartupBriefProvider | None = None, *, branch: str, ttl_seconds: float
+    notebook: Notebook,
+    briefing: StartupBriefProvider | None = None,
+    *,
+    branch: str,
+    ttl_seconds: float,
+    learnings: LearningFinder | None = None,
 ) -> tuple[NotebookTool, ...]:
-    """The tools of the specialist on ``branch``; ``briefing`` gives the brief, the notebook's own by default."""
+    """The tools of the specialist on ``branch``; ``briefing`` gives the brief, the notebook's own by default.
 
-    bound = _SpecialistTools(notebook, briefing or notebook, branch, ttl_seconds)
+    ``learnings`` finds the learnings for the learnings tool: the session's one ``LearningRecall`` adds past sessions'
+    from the Experience KB; without it the tool finds this session's only.
+    """
+
+    bound = _SpecialistTools(notebook, briefing or notebook, learnings or SessionLearnings(), branch, ttl_seconds)
     return tuple(
         NotebookTool(TOOL_PREFIX + spec.name, spec.description, spec.input_schema, _guarded(getattr(bound, spec.name)))
         for spec in _SPECS

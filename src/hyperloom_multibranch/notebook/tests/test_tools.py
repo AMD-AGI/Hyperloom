@@ -12,7 +12,7 @@ import pytest
 
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.peers import Validity
-from hyperloom_multibranch.contracts.notebook.records import StartupBrief, TestRecord
+from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, StartupBrief, TestRecord
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, intent, request, result
 from hyperloom_multibranch.notebook.tests.sessions import scripted_session
@@ -31,9 +31,10 @@ async def tools_of(tmp_path: Path) -> Tools:
     root = tmp_path / "notebook"
     await scripted_session(root, clock)
 
-    def bind(branch: str, briefing: object = None) -> dict[str, NotebookTool]:
+    def bind(branch: str, briefing: object = None, learnings: object = None) -> dict[str, NotebookTool]:
         handle = LocalNotebook(root, Writer(Role.SPECIALIST_RUNTIME, branch, branch), clock=clock)
-        return {tool.name: tool for tool in notebook_tools(handle, briefing, branch=branch, ttl_seconds=60.0)}
+        bound = notebook_tools(handle, briefing, branch=branch, ttl_seconds=60.0, learnings=learnings)
+        return {tool.name: tool for tool in bound}
 
     return bind
 
@@ -47,7 +48,18 @@ async def test_every_tool_is_named_for_the_notebook_and_takes_only_its_declared_
 
     assert sorted(tools) == sorted(
         f"notebook_{name}"
-        for name in ("lookup", "claim", "release", "search", "record", "branch_log", "append_branch_log", "brief")
+        for name in (
+            "lookup",
+            "claim",
+            "release",
+            "search",
+            "record",
+            "branch_log",
+            "append_branch_log",
+            "learn",
+            "learnings",
+            "brief",
+        )
     )
     assert all(tool.input_schema["additionalProperties"] is False for tool in tools.values())
     assert tools["notebook_claim"].input_schema["required"] == ["parent_commit", "target", "mechanism", "layer"]
@@ -109,6 +121,71 @@ async def test_the_branch_log_is_this_branchs_to_read_and_to_add_to(tools_of: To
     status = await _call(tools, "append_branch_log", kind="hypothesis", content="x", hypothesis_status="open")
     assert status.startswith("logged ")
     assert await _call(tools_of("s3"), "branch_log") == "no entries"
+
+
+async def test_a_learning_is_written_for_this_branch_and_a_vague_one_comes_back_as_an_error(tools_of: Tools) -> None:
+    tools = tools_of("s1")
+
+    learnt = await _call(
+        tools,
+        "learn",
+        kind="pitfall",
+        content="tuning the moe gemm again on c1 gave nothing over the first tuning",
+        target="moe gemm",
+        mechanism="tuned kernel",
+        layer="kernel",
+        request_ids=["r4"],
+    )
+    vague = await _call(tools, "learn", kind="insight", content="optimize")
+    unknown = await _call(tools, "learn", kind="rumour", content="the scheduler favours short branches")
+
+    assert learnt.startswith("learnt ")
+    assert vague.startswith("error: ValueError") and "at least 20 characters" in vague
+    assert unknown.startswith("error: ValueError")
+    assert tools["notebook_learn"].input_schema["required"] == ["kind", "content"]
+    assert tools["notebook_learn"].input_schema["properties"]["content"]["maxLength"] == 600
+
+
+async def test_a_granted_claim_lists_this_sessions_learnings_about_its_direction(tools_of: Tools) -> None:
+    s1, s2 = tools_of("s1"), tools_of("s2")
+    pitfall = "flash decode needs block size 16 on this image"
+    await _call(s2, "learn", kind="pitfall", content=pitfall, target="flash decode", mechanism="block size")
+    await _call(s2, "learn", kind="tooling", content="the profiler needs --record-shapes to name the gemm shapes")
+
+    claimed = (await _call(s1, "claim", **FLASH_ON_C1)).splitlines()
+    plain = await _call(
+        s1,
+        "claim",
+        parent_commit="c1",
+        target="sampler",
+        mechanism="top-k fusion",
+        layer="config",
+        change={"config": {"extra_server_args": "--enable-sampler-fusion"}},
+    )
+
+    assert len(claimed) == 3 and claimed[1] == "This session's learnings about it:"
+    assert claimed[2].startswith(f"- [s2, pitfall about flash decode / block size] {pitfall} [")
+    assert len(plain.splitlines()) == 1 and plain.startswith("claimed sampler / top-k fusion on c1")
+
+
+async def test_the_learnings_tool_finds_this_sessions_and_what_its_finder_adds(tools_of: Tools) -> None:
+    class _Past:
+        async def lines(self, snapshot: NotebookSnapshot, query: str, *, limit: int) -> list[str]:
+            return ["Past sessions' learnings:", f"- [sess-0, same conditions, measured] {query} paid off [exp-1]"]
+
+    s1 = tools_of("s1")
+    await _call(s1, "learn", kind="insight", content="attention dominates decode at conc 64 on this model")
+
+    found = (await _call(s1, "learnings", query="attention decode")).splitlines()
+    none = await _call(s1, "learnings", query="speculative draft tokens")
+    past = await _call(tools_of("s1", learnings=_Past()), "learnings", query="fp8 kv cache")
+
+    assert found[0] == "This session's learnings:" and "attention dominates decode at conc 64" in found[1]
+    assert none == "nothing matched"
+    assert past.splitlines() == [
+        "Past sessions' learnings:",
+        "- [sess-0, same conditions, measured] fp8 kv cache paid off [exp-1]",
+    ]
 
 
 async def test_the_brief_comes_from_the_briefing_the_tools_are_given(tools_of: Tools) -> None:
