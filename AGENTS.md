@@ -19,7 +19,7 @@ handlers and integrating external components.
 |---|---|
 | Optimization loop, phase chain, orchestration model | [`docs/conceptual/optimization-loop.md`](docs/conceptual/optimization-loop.md) |
 | Profiling → TraceLens → kernel value chain | [`docs/reference/kernel-execution-path.md`](docs/reference/kernel-execution-path.md) |
-| External components (Magpie, TraceLens, GEAK, IntelliKit, AgentKernelArena) | [`docs/components/`](docs/components/) |
+| External components (Magpie, TraceLens, GEAK, IntelliKit, AgentKernelArena, SIKL) | [`docs/components/`](docs/components/) |
 | Agent instructions / runtime behavior | [`src/hyperloom/inference_optimizer/SKILL.md`](src/hyperloom/inference_optimizer/SKILL.md) |
 | Workflow & PR process | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
 | Style, module layout, tests, shell/YAML, commit hygiene, REUSE, local setup | [`docs/contributing/style-guide.md`](docs/contributing/style-guide.md) |
