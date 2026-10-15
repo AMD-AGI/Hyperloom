@@ -1,6 +1,6 @@
 ---
 name: analyze-upstream-pr
-description: "Analyze whether an upstream pull request applies to an AMD/ROCm deployment. Invoke with the PR's repository and number, the target GPU architecture, dtypes and deployment, and optionally a local tree, its commit and the local patches on top of it. Collects the PR with check-prior-art's read.sh, states its mechanism and the operating point it was validated at, finds the selection site that decides whether the deployment runs the changed code, checks the tree with the inclusion probe, runs check-prior-art for other PRs that carry the change, predicts the effect, checks conflicts and risks, refutes every claim once, and writes one recommendation with its evidence. Reads GitHub, never writes to it, and never runs a benchmark."
+description: "Analyze whether an upstream pull request applies to an AMD/ROCm deployment. Invoke with the PR's repository and number, the target GPU architecture, dtypes and deployment, a local tree and commit of the code the deployment runs (and of the code that selects the changed code, when another repository holds it), and the local patches on top. Collects the PR with check-prior-art's read.sh, states its mechanism and the operating point it was validated at, finds the selection site that decides whether the deployment runs the changed code, checks the tree with the inclusion probe, runs check-prior-art for other PRs that carry the change, checks the diff against the target commit, refutes every claim once, and writes one recommendation with its evidence. Reads GitHub, never writes to it, and never runs a benchmark."
 ---
 
 <!--
@@ -34,6 +34,9 @@ others leave. The reader acts on the whole row.
 | `ADOPT-NOW` | merged, `ON-PATH`, no `blocking` risk survived; add `-- inclusion unchecked` when Step 4 is `unknown` or `SKIPPED` | move the tree past the merge commit, or cherry-pick it; confirm the effect with `measure.md` |
 | `CARRY-AS-PATCH` | open, or closed unmerged with no successor; `ON-PATH`; no `blocking` risk survived; add `-- conflicts with <patch>` from Step 6 | apply `diff.txt` as a local patch named with the PR and its head sha, so the rebase that brings the merge drops it |
 | `NOT-APPLICABLE -- <lens>: <condition>` | no row above applies, as when a `blocking` risk survived Step 9 that the code at `tree@commit` or upstream's history settles | name the risk and what would settle it |
+
+`ADOPT-NOW` and `CARRY-AS-PATCH` add `-- does not apply at <commit>` when Step 6's apply check
+failed: the next step then starts by resolving the hunk it names.
 
 **2. What it does**: Step 1's two sentences. **3. Evidence**: one row per claim the
 recommendation rests on (on-path, inclusion, other PRs, effect, each surviving risk and conflict),
@@ -72,13 +75,17 @@ pr: <number>
 arch: <the GPU architecture the deployment runs, such as gfx942 or gfx950>
 dtype: <weight, activation and KV-cache dtypes, and the quantization method>
 deployment: <model, parallelism, concurrency, sequence lengths; the server's flags and environment>
-tree: <a local git work tree of the code the deployment runs, the PR's repository or a fork, or ->
+tree: <a local git work tree of the PR's repository or a fork of it, or ->
 commit: <the revision of that tree the deployment runs, or ->
-patches: <the local patches applied on top of it, one path each, or ->
+selection: <work tree>@<commit> of the code that selects the changed code when tree does not hold it, as the framework that calls a kernel library's op, or ->
+patches: <the local patches applied on top of commit, one path each, or ->
 ```
 
-A `deployment` naming no model or flags cannot settle Step 3: ask. With an installed package and no
-checkout, see G4.
+Ask the user for what is missing before collecting. A `deployment` naming no model or flags cannot
+settle Step 3. Without a `tree`, Steps 3 and 4 and Step 6's apply check are `SKIPPED`, and the
+recommendation rests on nothing the target runs. For a kernel-library PR, ask for `selection` as
+well: the library's tree answers inclusion, the framework's whether the deployment calls the
+changed op. With an installed package and no checkout, see G4.
 
 ```bash
 PR=$(bash .claude/skills/check-prior-art/read.sh "$WORK" <owner/name> <N>)
@@ -134,14 +141,14 @@ naming the changed kernel or function also counts, labeled `measured` with its s
 cites the condition that excludes the target: a platform or arch check, a quantization method the
 checkpoint does not select, a backend the flags do not choose.
 
-Find the site by walking the changed symbol's callers in the tree at `commit`, not at the PR's base:
-platform checks (`is_rocm`, `is_cuda`, `torch.version.hip`, `USE_ROCM`, `__HIP_PLATFORM_AMD__`),
-arch and capability checks (gfx names, `gcnArchName`, capability tuples), dtype dispatch, backend
+Find the site by walking the changed symbol's callers at `commit`, not at the PR's base: platform
+checks (`is_rocm`, `is_cuda`, `torch.version.hip`, `USE_ROCM`, `__HIP_PLATFORM_AMD__`), arch and
+capability checks (gfx names, `gcnArchName`, capability tuples), dtype dispatch, backend
 registries and priority lists, environment variables read at selection, shape-keyed tuning tables.
-The site can live in another repository than the PR, as when a framework picks a kernel library's
-op: cite it in the tree that holds it, at the version the deployment runs. A changed path the tree
-lacks at `commit` stays `UNKNOWN` until mapped (G7). With no tree, every line is `UNKNOWN` under
-`SKIPPED: on-path -- no tree; whether the deployment runs this code is unchecked`.
+When `selection` names another tree, as for a kernel library's op, walk the callers there, at its
+commit. A changed path the tree lacks at `commit` stays `UNKNOWN` until mapped (G7). With no tree,
+every line is `UNKNOWN` under `SKIPPED: on-path -- no tree; whether the deployment runs this code
+is unchecked`.
 
 ## Step 4 — In-tree inclusion
 
@@ -149,8 +156,8 @@ Run check-prior-art's Step 5 snippet, which reads `mergeCommit` from `pr.json` u
 and appends to `$WORK/inclusion.txt`: once for the PR, and once for each merged revert. Exit 0 is
 `included` and 3 `unknown`; 1 or 2 is no answer, and its line becomes `SKIPPED: inclusion --
 <owner/name>#<N>: <the probe's error>`. `unknown` means nothing in local git showed the PR, never
-that it is absent, and Step 9 attacks it (G3, G4, G5). The PR and its revert both `included` means
-the tree carries neither change.
+that it is absent: Step 6's apply check and Step 9 attack it (G3, G4, G5). The PR and its revert
+both `included` means the tree carries neither change.
 
 ## Step 5 — Expected effect
 
@@ -169,7 +176,7 @@ operating point: it reaches the report as `quoted`, never as the effect on the t
 `OFF-PATH` Step 3 makes the direction `none`. Name each `GAP` that could flip the sign: a win at
 the author's batch size can be a loss at yours.
 
-## Step 6 — Other PRs and conflicts
+## Step 6 — Other PRs, and the diff at the target
 
 **Other PRs.** Run check-prior-art through its verdict, its Steps 0 to 7, in `$WORK/prior-art`:
 Step 1's mechanism, this skill's `tree` and `commit`, the PR's repository and any other where the
@@ -178,14 +185,21 @@ change could land, and the changed non-test paths of `files.txt` as the planned 
 Write its verdict line into `$WORK/conflicts.txt` as `prior-art <verdict> -- <ref>`, and one
 `<ref> OVERLAP -- <the shared paths>` line per OVERLAPPING PR.
 
-**Local patches.** One `local:<patch> OVERLAP|CONFLICT|CLEAR -- <the shared paths or the failing
-hunk>` line each in `conflicts.txt`. List each patch's paths with `git apply --numstat <patch>`;
-one also in `files.txt` is `OVERLAP`. Then, in a scratch worktree
-(`git -C "$TREE" worktree add --detach "$WORK/scratch" "$COMMIT"`), run
-`git apply --check "$PR/diff.txt"` before and after applying the local patches. A failure only
-after them is `CONFLICT`, with the first failing hunk; one before them is drift between the PR's
-base and `commit`, so say that instead. Remove the worktree afterwards: nothing is applied in the
-user's tree. With no local patches, write `local:- CLEAR -- no local patches given`.
+**The diff at the target.** Always, in a scratch worktree, so nothing touches the user's tree:
+
+```bash
+git -C "$TREE" worktree add --detach "$WORK/scratch" "$COMMIT"
+git -C "$WORK/scratch" apply --check "$PR/diff.txt"
+```
+
+Write `apply@<commit> APPLIES`, or `FAILS -- <the first failing hunk>`: drift between the PR's base
+and `commit`, which qualifies the recommendation. When it fails, check again with `--reverse`;
+`REVERSE`, a diff that applies only backwards, means the tree already has the change, so a Step 4
+`unknown` becomes `included` by that check. Then, per local patch: `local:<patch> OVERLAP` when its
+`git apply --numstat` lists a path in `files.txt`; apply it in the worktree and check the diff
+again, where a failure only after it is `CONFLICT -- <the hunk>`, else `CLEAR`. Remove the worktree
+with `git -C "$TREE" worktree remove --force "$WORK/scratch"`. With no tree, or a `SKIPPED: diff`,
+write `SKIPPED: apply -- <why>`.
 
 ## Step 7 — Risks
 
