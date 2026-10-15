@@ -27,7 +27,20 @@ def inferencex_reading(result: TestResult, concurrency: int) -> InferenceXReadin
     missing = [r for r in rounds if GRADED_OUTPUT not in r.metrics]
     if missing:
         raise UnreadableResult(f"{result.request_id} reports no {GRADED_OUTPUT} in {len(missing)} of its rounds")
-    return InferenceXReading(statistics.fmean(r.metrics[GRADED_OUTPUT] for r in rounds), _eval_score(result))
+    return InferenceXReading(statistics.fmean(r.metrics[GRADED_OUTPUT] for r in rounds), eval_score(result))
+
+
+def eval_score(result: TestResult) -> float:
+    """Read as the old flow reads it: the first task reporting one of ``ACCURACY_METRICS``, by that order."""
+    _require_measurement(result)
+    by_task: dict[str, dict[str, float]] = {}
+    for value in result.accuracy:
+        by_task.setdefault(value.task, {})[value.metric] = value.score
+    for scores in by_task.values():
+        for metric in ACCURACY_METRICS:
+            if metric in scores:
+                return scores[metric]
+    raise UnreadableResult(f"{result.request_id} has no eval score of {', '.join(ACCURACY_METRICS)}")
 
 
 def agentx_reading(result: TestResult) -> dict[str, float]:
@@ -46,21 +59,13 @@ def agentx_reading(result: TestResult) -> dict[str, float]:
 
 
 def _measured(result: TestResult) -> list[RoundValue]:
-    if result.validity is not Validity.SUCCEEDED:
-        raise UnreadableResult(f"{result.request_id} is {result.validity.value}, not a measurement")
+    _require_measurement(result)
     return [r for r in result.rounds if r.phase == _MEASURE]
 
 
-def _eval_score(result: TestResult) -> float:
-    """Read as the old flow reads it: the first task reporting one of ``ACCURACY_METRICS``, by that order."""
-    by_task: dict[str, dict[str, float]] = {}
-    for value in result.accuracy:
-        by_task.setdefault(value.task, {})[value.metric] = value.score
-    for scores in by_task.values():
-        for metric in ACCURACY_METRICS:
-            if metric in scores:
-                return scores[metric]
-    raise UnreadableResult(f"{result.request_id} has no eval score of {', '.join(ACCURACY_METRICS)}")
+def _require_measurement(result: TestResult) -> None:
+    if result.validity is not Validity.SUCCEEDED:
+        raise UnreadableResult(f"{result.request_id} is {result.validity.value}, not a measurement")
 
 
-__all__ = ["UnreadableResult", "agentx_reading", "inferencex_reading"]
+__all__ = ["UnreadableResult", "agentx_reading", "eval_score", "inferencex_reading"]

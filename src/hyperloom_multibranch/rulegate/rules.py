@@ -3,23 +3,29 @@
 
 """How a session's workload is judged, read from the notebook's records.
 
-The specialist runtime judges a branch's candidates with it and the scheduler's gate a merge or a final candidate, so
-both hold a test to the same bar, the same accuracy gate and the same confirming retest.
+The specialist runtime judges a branch's candidates with it, and the scheduler's gate the PRELUDE baseline, a merge and
+a final candidate, so every test is held to the same bar, the same accuracy gate and the same confirming retest.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from hyperloom.common.perf_metric import GRADED_ERROR_RATE
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest, TestResult
 from hyperloom_multibranch.contracts.judgement import Judgement
-from hyperloom_multibranch.contracts.notebook.interfaces import CommitQuery
-from hyperloom_multibranch.contracts.notebook.records import TestRecord
+from hyperloom_multibranch.contracts.notebook.interfaces import CommitQuery, GateRecords
+from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, TestRecord
 from hyperloom_multibranch.rulegate import agentx, inferencex
-from hyperloom_multibranch.rulegate.baseline import read_inferencex_baseline
-from hyperloom_multibranch.rulegate.readings import UnreadableResult, agentx_reading, inferencex_reading
+from hyperloom_multibranch.rulegate.accuracy import agentx_accuracy_ok, inferencex_accuracy_ok
+from hyperloom_multibranch.rulegate.baseline import (
+    read_inferencex_baseline,
+    write_agentx_baseline,
+    write_inferencex_baseline,
+)
+from hyperloom_multibranch.rulegate.readings import UnreadableResult, agentx_reading, eval_score, inferencex_reading
 
 
 class Rule(Protocol):
@@ -27,18 +33,25 @@ class Rule(Protocol):
 
     accuracy_round: bool
 
+    async def baseline(self, store: GateRecords, root_commit: str, records: Sequence[TestRecord]) -> BaselineRecord: ...
+
     async def first(self, record: TestRecord, parent: Mapping[str, float]) -> Judgement: ...
 
     async def retest(self, first: Judgement, record: TestRecord, parent: Mapping[str, float]) -> Judgement: ...
 
+    async def accuracy_passes(self, record: TestRecord) -> bool: ...
+
 
 @dataclass(frozen=True)
-class InferenceXRule:
+class InferenceXRule(Rule):
     """Throughput at the graded concurrency against the PRELUDE bar, the eval score against the baseline's."""
 
     notebook: CommitQuery
     concurrency: int
     accuracy_round = True
+
+    async def baseline(self, store: GateRecords, root_commit: str, records: Sequence[TestRecord]) -> BaselineRecord:
+        return await write_inferencex_baseline(store, root_commit, records, self.concurrency)
 
     async def first(self, record: TestRecord, parent: Mapping[str, float]) -> Judgement:
         reading = inferencex_reading(_result(record), self.concurrency)
@@ -49,17 +62,27 @@ class InferenceXRule:
         baseline = await read_inferencex_baseline(self.notebook)
         return inferencex.confirm(first, reading, baseline, parent, record.request_id)
 
+    async def accuracy_passes(self, record: TestRecord) -> bool:
+        baseline = await read_inferencex_baseline(self.notebook)
+        return inferencex_accuracy_ok(baseline.accuracy, eval_score(_result(record)))
 
-class AgentXRule:
+
+class AgentXRule(Rule):
     """P50 interactivity with its guards; the error rate the run reports is its accuracy."""
 
     accuracy_round = False
+
+    async def baseline(self, store: GateRecords, root_commit: str, records: Sequence[TestRecord]) -> BaselineRecord:
+        return await write_agentx_baseline(store, root_commit, records)
 
     async def first(self, record: TestRecord, parent: Mapping[str, float]) -> Judgement:
         return agentx.compare(agentx_reading(_result(record)), parent, record.request_id)
 
     async def retest(self, first: Judgement, record: TestRecord, parent: Mapping[str, float]) -> Judgement:
         return agentx.confirm(first, agentx_reading(_result(record)), parent, record.request_id)
+
+    async def accuracy_passes(self, record: TestRecord) -> bool:
+        return agentx_accuracy_ok(agentx_reading(_result(record)).get(GRADED_ERROR_RATE))
 
 
 def repeats(retest: TestRecord, first: TestRecord, rule: Rule) -> bool:
