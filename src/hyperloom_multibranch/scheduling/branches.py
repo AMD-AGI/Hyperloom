@@ -4,9 +4,11 @@
 """Opening, re-sizing and stopping branches: the roster, the repository, the specialists, the toolbox quota and the
 notebook in step.
 
-Opening a branch records its ``OPEN`` lineage, cuts it in the experiment repository at its start commit and starts its
-specialist there with its K; a fork or repair the fork desk admitted is opened the same way once it is drained, its
-specialist briefed with the change it builds on. Stopping a branch withdraws everything of it: its specialist, its
+Opening a branch records its ``OPEN`` lineage, cuts it in the experiment repository at its start commit, starts its
+specialist there and gives it its K. A repair the fork desk admitted is opened the same way at the commit its blocked
+candidate was measured against; a fork is cut by the rule gate, which lands the fix on it first, so it is opened at its
+head once that head has moved past the commit it was cut at, and stopped as not started when that has not happened
+within :data:`SPECIALIST_START_SECONDS` of its admission. Stopping a branch withdraws everything of it: its specialist, its
 queued and running tests and tool jobs, the processes the scheduler registered for it, its claims, and the forks and
 repairs of it that are admitted but not started yet, as the fork desk admits nothing for a stopped branch; the notebook
 gets the ``STOP`` lineage of a branch that started, the integration branch included, which only the end of the session
@@ -15,7 +17,7 @@ stop; only a start the runtime itself failed leaves nothing to stop. A call to a
 :data:`SPECIALIST_CALL_SECONDS`; a stop or a new K that overruns them, or fails, is recorded as a failed step, the rest
 of the stop still runs, and the session stop asks once more for every stop that was not confirmed. The commits a
 specialist already made stay in the notebook, so the integrator may still merge them. The roster entry is stopped
-first, so an admitted branch drained while its parent is being stopped is never started. The toolbox gets a branch's K
+first, so an admitted branch whose parent is being stopped is never started. The toolbox gets a branch's K
 before its specialist starts, so the first tests it submits already queue by it. A peer failure on one branch never
 ends the session: a branch that does not open, its specialist's start included, within
 :data:`SPECIALIST_START_SECONDS` or by the deadline its caller gives, whichever comes first, is withdrawn like a
@@ -29,7 +31,7 @@ import logging
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
-from hyperloom_multibranch.contracts.lifecycle import SpecialistLaunch, SpecialistLifecycle
+from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle
 from hyperloom_multibranch.contracts.notebook import Notebook
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
@@ -57,6 +59,8 @@ logger = logging.getLogger(__name__)
 SPECIALIST_CALL_SECONDS = 60.0
 #: Clock seconds a branch gets to open, its specialist's start included, before the branch counts as not started.
 SPECIALIST_START_SECONDS = 300.0
+#: The K the lifecycle contract gives a specialist that has just started.
+STARTED_K = 1
 
 
 class BranchControl:
@@ -92,36 +96,60 @@ class BranchControl:
         opened = []
         for _ in range(count):
             entry = self._roster.open(self._roster.next_branch_id(), origin=origin, start_commit=start_commit, k=k)
-            opened.append(await self._open(entry, start_commit, None, deadline))
+            opened.append(await self._open(entry, start_commit, deadline))
         return tuple(opened)
 
-    async def start_admitted(self, admitted: AdmittedBranch, deadline: float) -> BranchEntry | None:
-        """Open a fork or repair the fork desk admitted and start its specialist by ``deadline`` (clock seconds);
-        ``None`` when it was stopped meanwhile."""
+    async def start_admitted(self, admitted: AdmittedBranch, deadline: float) -> bool:
+        """Open a fork or repair the fork desk admitted and start its specialist by ``deadline`` (clock seconds).
 
-        if self._roster.entry(admitted.branch).stop is not None:
-            return None
-        entry = self._roster.started(admitted.branch, admitted.start_commit)
-        return await self._open(entry, admitted.start_commit, admitted.brief, deadline)
+        False while a fork waits for its fix; true once the branch started, failed to, or was stopped meanwhile.
+        """
 
-    async def _open(self, entry: BranchEntry, start_commit: str, brief: str | None, deadline: float) -> BranchEntry:
+        entry = self._roster.entry(admitted.branch)
+        if entry.stop is not None:
+            return True
+        start_commit = await settled(self._admitted_start(entry, admitted.parent_commit))
+        if isinstance(start_commit, BaseException):
+            await self._fail_start(entry, failure_text(start_commit))
+        elif start_commit:
+            await self._open(self._roster.started(entry.branch, start_commit), start_commit, deadline)
+        elif self._clock.now() - entry.opened_at < SPECIALIST_START_SECONDS:
+            return False
+        else:
+            await self._fail_start(entry, f"no fix landed on the fork past {admitted.parent_commit}")
+        return True
+
+    async def _admitted_start(self, entry: BranchEntry, parent_commit: str) -> str:
+        """The commit an admitted branch starts at; ``""`` while the rule gate has not landed a fork's fix."""
+
+        if entry.origin.cut_by_scheduler:
+            return parent_commit
+        try:
+            head = await self._repo.head(entry.branch)
+        except KeyError:
+            return ""
+        return "" if head == parent_commit else head
+
+    async def _open(self, entry: BranchEntry, start_commit: str, deadline: float) -> BranchEntry:
         """Record ``OPEN``, give the toolbox the branch's K, cut the branch and start its specialist; a branch any of
         that fails for, or that is not done within :data:`SPECIALIST_START_SECONDS` or by ``deadline``, is stopped
         with the failure as the reason."""
 
-        launch = SpecialistLaunch(entry.branch, start_commit, entry.k, brief)
         seconds = min(SPECIALIST_START_SECONDS, deadline - self._clock.now())
-        started = await settled(self._clock.wait_for(self._launch(entry, launch), seconds))
+        started = await settled(self._clock.wait_for(self._launch(entry, start_commit), seconds))
         if isinstance(started, BaseException):
             logger.error("the specialist of %s did not start", entry.branch, exc_info=started)
-            stop = BranchStop(StopCause.START_FAILED, failure_text(started), self._clock.now())
-            for failure in await self.stop_branch(entry.branch, stop):
-                logger.error("%s did not stop cleanly after its failed start", entry.branch, exc_info=failure)
+            await self._fail_start(entry, failure_text(started))
             return entry
         detail = {"start_commit": start_commit, "k": entry.k, "from_branch": entry.from_branch}
         kind = DECISION_KINDS.get(entry.origin, DecisionKind.OPEN)
         self._decisions.record(Decision(kind, f"{entry.origin.value} branch started", entry.branch, detail))
         return entry
+
+    async def _fail_start(self, entry: BranchEntry, reason: str) -> None:
+        stop = BranchStop(StopCause.START_FAILED, reason, self._clock.now())
+        for failure in await self.stop_branch(entry.branch, stop):
+            logger.error("%s did not stop cleanly after its failed start", entry.branch, exc_info=failure)
 
     async def apply_k(self, orders: Mapping[str, int]) -> None:
         """Give each live branch its new K, clamped by the roster; stopped branches are left alone.
@@ -193,18 +221,21 @@ class BranchControl:
     async def push_quota(self) -> None:
         await self._toolbox.set_policy(self._roster.quota_policy())
 
-    async def _launch(self, entry: BranchEntry, launch: SpecialistLaunch) -> None:
+    async def _launch(self, entry: BranchEntry, start_commit: str) -> None:
         reason = f"{entry.origin.value} branch" + (f" of {entry.from_branch}" if entry.from_branch else "")
         await self._notebook.record_lineage(
-            LineageEvent(LineageKind.OPEN, entry.branch, from_commit=launch.start_commit, reason=reason)
+            LineageEvent(LineageKind.OPEN, entry.branch, from_commit=start_commit, reason=reason)
         )
         await self.push_quota()
-        await self._repo.create_branch(launch.branch, launch.start_commit)
-        self._specialists.add(launch.branch)
-        started = await settled(self._lifecycle.start(launch))
+        if entry.origin.cut_by_scheduler:
+            await self._repo.create_branch(entry.branch, start_commit)
+        self._specialists.add(entry.branch)
+        started = await settled(self._lifecycle.start(entry.branch, start_commit))
         if isinstance(started, BaseException):
-            self._specialists.discard(launch.branch)
+            self._specialists.discard(entry.branch)
             raise started
+        if entry.k != STARTED_K:
+            await self._lifecycle.set_k(entry.branch, entry.k)
 
     async def _send_k(self, entry: BranchEntry) -> str:
         """Hand the specialist its K; the failure's text, or ``""``."""

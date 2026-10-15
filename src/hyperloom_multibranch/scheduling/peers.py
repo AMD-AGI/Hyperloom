@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from hyperloom.measure.compile import BlobStore
-from hyperloom_multibranch.contracts.fork import BranchRequests
+from hyperloom_multibranch.contracts.fork import ForkAdmissionService
 from hyperloom_multibranch.contracts.gate import SessionGate
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
@@ -45,15 +45,14 @@ class PeerSetup:
     ``workload`` is the measurement surface: the toolbox measures every test and sweep of the session on it, so a
     test request carries no operating point of its own. ``desk`` is what the specialist runtime builds its rule gates
     on. ``processes`` is the session's process registry: the session stop kills what is registered there even when a
-    peer's own stop hangs, and reports what outlives that kill. The lifecycle contract does not require a lifecycle to
-    register its processes there, so a specialist process it does not register is stopped only by the lifecycle's own
-    ``stop``. The toolbox's sandboxes are its own: the session stop releases them by closing the toolbox. ``blobs``
+    peer's own stop hangs, and reports what outlives that kill; the specialist runtime starts every process of its
+    own through it. The toolbox's sandboxes are its own: the session stop releases them by closing the toolbox. ``blobs``
     holds the patch and kernel files the recipes name; the toolbox's environment compiler reads them from it.
     """
 
     layout: SessionLayout
     workload: Workload
-    desk: BranchRequests
+    desk: ForkAdmissionService
     processes: ProcessRegistry
     blobs: BlobStore
 

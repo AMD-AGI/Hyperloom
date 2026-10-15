@@ -13,7 +13,6 @@ import pytest
 
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
-from hyperloom_multibranch.contracts.lifecycle import SpecialistLaunch
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
@@ -43,19 +42,19 @@ class QuotaCheckingLifecycle(MbFakeLifecycle):
         self.toolbox = toolbox
         self.quota_at_start: dict[str, int | None] = {}
 
-    async def start(self, launch: SpecialistLaunch) -> None:
+    async def start(self, branch: str, start_commit: str) -> None:
         policies = self.toolbox.policies
-        self.quota_at_start[launch.branch] = policies[-1].branch_k.get(launch.branch) if policies else None
-        await super().start(launch)
+        self.quota_at_start[branch] = policies[-1].branch_k.get(branch) if policies else None
+        await super().start(branch, start_commit)
 
 
 class BrokenLifecycle(MbFakeLifecycle):
     """A runtime that cannot start ``b01`` and cannot re-size any specialist; a failure double, not a placeholder."""
 
-    async def start(self, launch: SpecialistLaunch) -> None:
-        if launch.branch == "b01":
-            raise RuntimeError(f"no GPU left for {launch.branch}")
-        await super().start(launch)
+    async def start(self, branch: str, start_commit: str) -> None:
+        if branch == "b01":
+            raise RuntimeError(f"no GPU left for {branch}")
+        await super().start(branch, start_commit)
 
     async def set_k(self, branch: str, k: int) -> None:
         raise RuntimeError(f"{branch} did not take K {k}")
@@ -64,19 +63,19 @@ class BrokenLifecycle(MbFakeLifecycle):
 class HangingStartLifecycle(MbFakeLifecycle):
     """A runtime whose start of ``b01`` never returns; a failure double, not a placeholder."""
 
-    async def start(self, launch: SpecialistLaunch) -> None:
-        if launch.branch == "b01":
+    async def start(self, branch: str, start_commit: str) -> None:
+        if branch == "b01":
             await asyncio.Event().wait()
-        await super().start(launch)
+        await super().start(branch, start_commit)
 
 
 class StartedThenHangingLifecycle(MbFakeLifecycle):
     """A runtime whose start of ``b01`` brings the specialist up and then never returns; a failure double, not a
     placeholder."""
 
-    async def start(self, launch: SpecialistLaunch) -> None:
-        await super().start(launch)
-        if launch.branch == "b01":
+    async def start(self, branch: str, start_commit: str) -> None:
+        await super().start(branch, start_commit)
+        if branch == "b01":
             await asyncio.Event().wait()
 
 
@@ -123,7 +122,7 @@ async def test_the_opening_batch_is_recorded_started_and_given_quota(tmp_path: P
 
     assert [entry.branch for entry in opened] == ["b01", "b02"]
     assert bench.lifecycle.started == {"b01": bench.root, "b02": bench.root}
-    assert bench.lifecycle.k == {"b01": 2, "b02": 2} and bench.lifecycle.briefs == {"b01": None, "b02": None}
+    assert bench.lifecycle.k == {"b01": 2, "b02": 2}
     assert [await bench.repo.head(branch) for branch in ("b01", "b02")] == [bench.root, bench.root]
     view = await bench.notebook.lineage()
     assert {branch.branch: branch.start_commit for branch in view.branches}["b02"] == bench.root
@@ -131,21 +130,55 @@ async def test_the_opening_batch_is_recorded_started_and_given_quota(tmp_path: P
     assert bench.lifecycle.quota_at_start == {"b01": 2, "b02": 2}
 
 
-async def test_an_admitted_branch_opens_at_its_commit_with_its_brief_and_its_quota(tmp_path: Path) -> None:
+async def test_an_admitted_repair_is_cut_and_opens_at_its_commit_with_its_k_and_its_quota(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).rooted()
     await bench.control.open_branches(1, bench.root, 1, BranchOrigin.FIRST_BATCH, OPEN_BY)
     fix = await bench.repo.commit("b01", bench.root, BASELINE, "a fix")
     bench.roster.open("b02", origin=BranchOrigin.REPAIR, start_commit="", k=2, from_branch="b01")
 
-    await bench.control.start_admitted(AdmittedBranch("b02", fix, "repair the KV scales"), OPEN_BY)
+    assert await bench.control.start_admitted(AdmittedBranch("b02", fix), OPEN_BY)
 
     assert await bench.repo.head("b02") == fix
-    assert (bench.lifecycle.started["b02"], bench.lifecycle.briefs["b02"]) == (fix, "repair the KV scales")
+    assert (bench.lifecycle.started["b02"], bench.lifecycle.k["b02"]) == (fix, 2)
     assert bench.lifecycle.quota_at_start["b02"] == 2
     view = {branch.branch: branch for branch in (await bench.notebook.lineage()).branches}
     assert (view["b02"].start_commit, view["b02"].origin) == (fix, LineageKind.OPEN)
     logged = json.loads((tmp_path / "MB-decisions.jsonl").read_text().splitlines()[-1])
     assert (logged["kind"], logged["branch"]) == ("repair", "b02")
+
+
+async def test_a_fork_waits_for_the_gate_to_land_its_fix_and_opens_at_it(tmp_path: Path) -> None:
+    bench = await Bench(tmp_path).rooted()
+    await bench.control.open_branches(1, bench.root, 1, BranchOrigin.FIRST_BATCH, OPEN_BY)
+    bench.roster.open("b02", origin=BranchOrigin.FORK, start_commit="", k=2, from_branch="b01")
+    admitted = AdmittedBranch("b02", bench.root)
+
+    assert not await bench.control.start_admitted(admitted, OPEN_BY)
+    await bench.repo.create_branch("b02", bench.root)
+    assert not await bench.control.start_admitted(admitted, OPEN_BY)
+    fix = await bench.repo.commit("b02", bench.root, BASELINE, "the fix")
+    assert await bench.control.start_admitted(admitted, OPEN_BY)
+
+    assert (bench.lifecycle.started["b02"], bench.lifecycle.k["b02"]) == (fix, 2)
+    view = {branch.branch: branch for branch in (await bench.notebook.lineage()).branches}
+    assert view["b02"].start_commit == fix
+    logged = json.loads((tmp_path / "MB-decisions.jsonl").read_text().splitlines()[-1])
+    assert (logged["kind"], logged["branch"], logged["detail"]["from_branch"]) == ("fork", "b02", "b01")
+
+
+async def test_a_fork_whose_fix_does_not_land_in_time_is_withdrawn_as_not_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(branches, "SPECIALIST_START_SECONDS", 0.0)
+    bench = await Bench(tmp_path).rooted()
+    bench.roster.open("b01", origin=BranchOrigin.FIRST_BATCH, start_commit=bench.root, k=1)
+    bench.roster.open("b02", origin=BranchOrigin.FORK, start_commit="", k=1, from_branch="b01")
+
+    assert await bench.control.start_admitted(AdmittedBranch("b02", bench.root), OPEN_BY)
+
+    stop = bench.roster.entry("b02").stop
+    assert stop is not None and stop.cause is StopCause.START_FAILED
+    assert "b02" not in bench.lifecycle.started and bench.toolbox.cancelled == ["b02"]
 
 
 async def test_a_failing_specialist_stop_is_returned_and_still_withdraws_and_records_the_branch(tmp_path: Path) -> None:
@@ -177,7 +210,7 @@ async def test_stopping_a_branch_withdraws_it_once_and_its_admitted_fork_never_s
     assert bench.toolbox.cancelled == ["b02", "b01"]
     assert bench.roster.entry("b01").stop == stop
     assert bench.roster.entry("b02").stop == BranchStop(StopCause.JUDGE, "parent b01 stopped: flat", NOW)
-    assert await bench.control.start_admitted(AdmittedBranch("b02", bench.root, ""), OPEN_BY) is None
+    assert await bench.control.start_admitted(AdmittedBranch("b02", bench.root), OPEN_BY)
     assert "b02" not in bench.lifecycle.started
     assert "b02" not in {branch.branch for branch in (await bench.notebook.lineage()).branches}
     stops = {branch.branch: branch.stop_reason for branch in (await bench.notebook.lineage()).branches}

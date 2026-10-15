@@ -20,7 +20,7 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
-from hyperloom_multibranch.contracts.fork import Admission, ForkRequest, RepairRequest
+from hyperloom_multibranch.contracts.fork import ForkAdmission, ForkRequest, RepairRequest
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
@@ -230,10 +230,10 @@ class Bench:
 class _NoForks:
     """Branch requests the scripted specialists here never make; a test double, not a placeholder."""
 
-    async def request_fork(self, request: ForkRequest) -> Admission:
+    async def admit(self, request: ForkRequest) -> ForkAdmission:
         raise AssertionError("no fork is asked for here")
 
-    async def request_repair(self, request: RepairRequest) -> Admission:
+    async def admit_repair(self, request: RepairRequest) -> ForkAdmission:
         raise AssertionError("no repair is asked for here")
 
 

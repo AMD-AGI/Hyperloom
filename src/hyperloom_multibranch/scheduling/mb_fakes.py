@@ -10,7 +10,7 @@ what is left to replace, and each docstring or comment names what it stands in f
 from __future__ import annotations
 
 from hyperloom.common.perf_metric import GRADED_OUTPUT
-from hyperloom_multibranch.contracts.fork import Admission, AdmissionStatus
+from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission
 from hyperloom_multibranch.scheduling.roster import Roster
 
 #: Stands in for the image digest of the root recipe. The main flow builds no image; replaced when enablement or
@@ -23,14 +23,14 @@ MB_FAKE_BASE_IMAGE_DIGEST = "sha256:" + "0" * 64
 MB_FAKE_PRIMARY_METRIC = GRADED_OUTPUT
 
 
-def mb_fake_refused_fork(refusal: str) -> Admission:
+def mb_fake_refused_fork(refusal: str) -> ForkAdmission:
     """The answer to a fork or repair the roster cannot take now (``refusal`` says why): always a rejection.
 
     Stands in for the MB2 branch request policy, which keeps such a request pending and starts it first when a slot
     frees up; replaced when MB2 schedules that queue. A request is never left pending here.
     """
 
-    return Admission(AdmissionStatus.REJECTED, refusal)
+    return ForkAdmission(AdmissionStatus.REJECTED, refusal)
 
 
 def mb_fake_branches_to_add(roster: Roster) -> int:

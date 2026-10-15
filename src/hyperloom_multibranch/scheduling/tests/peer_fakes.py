@@ -33,9 +33,8 @@ from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest, TestResult
 from hyperloom.contracts.recipe import ConfigDelta, PatchRef, Recipe, RecipeDelta, apply
 from hyperloom.measure.compile import BlobStore
-from hyperloom_multibranch.contracts.fork import Admission
+from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
-from hyperloom_multibranch.contracts.lifecycle import SpecialistLaunch
 from hyperloom_multibranch.contracts.notebook.interfaces import RecordSearch
 from hyperloom_multibranch.contracts.repo import ExperimentRepo, RepoMerge
 from hyperloom_multibranch.contracts.toolbox import CancelOutcome, QueueState
@@ -59,7 +58,6 @@ BASELINE_VALUE = DEFAULT_BASELINE[GRADED_OUTPUT]
 TOOLBOX_DOWN = "toolbox service down"
 #: The server argument a scripted change carries its tag in; :func:`recipe_effect` reads a recipe's tags from it.
 TAG_FLAG = "--mb-tag-"
-REPRO_CASE = "repro/case.py"
 #: Loop turns and real seconds the virtual clock lets pass before it decides the loop is quiet and jumps.
 SETTLE_YIELDS = 20
 SETTLE_REAL_SECONDS = 0.0005
@@ -307,8 +305,8 @@ class MbFakeLifecycle:
     holds the scheduler to the lifecycle contract, raising on a second start of a branch and on a stop or a K of a
     branch it does not run.
 
-    ``running`` and ``k`` are the branches running now and their K; ``launches`` and ``last_k`` keep every launch and
-    the last K each branch was given after it stopped; ``stopped`` lists every stop asked for. Stopping a branch in
+    ``running`` and ``k`` are the branches running now, at their start commit, and their K; ``started`` and ``last_k``
+    keep every branch's start commit and the last K it was given after it stopped; ``stopped`` lists every stop asked for. Stopping a branch in
     ``refusing`` raises, and stopping one in ``hanging`` never returns. Deleted once ``hyperloom_multibranch.specialist``
     ships a real lifecycle and these tests run on it.
     """
@@ -322,29 +320,20 @@ class MbFakeLifecycle:
         self.scripts = dict(scripts or {})
         self.refusing = refusing
         self.hanging = hanging
-        self.running: dict[str, SpecialistLaunch] = {}
+        self.running: dict[str, str] = {}
         self.k: dict[str, int] = {}
-        self.launches: dict[str, SpecialistLaunch] = {}
+        self.started: dict[str, str] = {}
         self.last_k: dict[str, int] = {}
         self.stopped: list[str] = []
         self._tasks: dict[str, asyncio.Future[None]] = {}
 
-    @property
-    def started(self) -> dict[str, str]:
-        return {branch: launch.start_commit for branch, launch in self.launches.items()}
-
-    @property
-    def briefs(self) -> dict[str, str | None]:
-        return {branch: launch.brief for branch, launch in self.launches.items()}
-
-    async def start(self, launch: SpecialistLaunch) -> None:
-        if launch.branch in self.running:
-            raise ValueError(f"branch {launch.branch!r} already has a specialist")
-        self.running[launch.branch] = self.launches[launch.branch] = launch
-        self.k[launch.branch] = self.last_k[launch.branch] = launch.k
-        if launch.branch in self.scripts:
-            script = self.scripts[launch.branch](launch.branch, launch.start_commit)
-            self._tasks[launch.branch] = asyncio.ensure_future(script)
+    async def start(self, branch: str, start_commit: str) -> None:
+        if branch in self.running:
+            raise ValueError(f"branch {branch!r} already has a specialist")
+        self.running[branch] = self.started[branch] = start_commit
+        self.k[branch] = self.last_k[branch] = 1
+        if branch in self.scripts:
+            self._tasks[branch] = asyncio.ensure_future(self.scripts[branch](branch, start_commit))
 
     async def stop(self, branch: str) -> None:
         self.stopped.append(branch)
@@ -545,12 +534,19 @@ class MbFakeSpecialist:
         await self.gate.settle(measured, judged(Verdict.IMPROVED, gain, measured.request_id, value))
         return await self.repo.head(branch)
 
-    async def fork(self, branch: str, fix: RecipeDelta, reason: str) -> Admission:
-        """A correctness fix on ``branch`` that regresses there, asked onto a branch of its own."""
+    async def fork(self, branch: str, fix: RecipeDelta, reason: str) -> ForkAdmission:
+        """A correctness fix on ``branch`` that regresses there, asked onto a branch of its own; an accepted fork is cut
+        and the fix landed on it, as the fork contract has the gate's caller do."""
 
         measured = await self.measure(branch, fix)
         slower = replace(judged(Verdict.REGRESSED, -2.0, measured.request_id, 980.0), fixes_correctness=True)
-        return await self.gate.fork(measured, slower, REPRO_CASE, reason)
+        admission = await self.gate.fork(measured, slower, reason)
+        if admission.status is AdmissionStatus.ACCEPTED:
+            parent = measured.parent_commit
+            await self.repo.create_branch(admission.branch, parent)
+            fixed = apply(await self.repo.read_recipe(parent), fix)
+            await self.repo.commit(admission.branch, parent, fixed, reason)
+        return admission
 
 
 @dataclass
@@ -578,7 +574,6 @@ __all__ = [
     "CHILD_SCRIPT",
     "LAUNCH_FLAG",
     "MAIN_POINT",
-    "REPRO_CASE",
     "TAG_FLAG",
     "TOOLBOX_DOWN",
     "Curves",

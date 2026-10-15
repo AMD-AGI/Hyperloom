@@ -134,8 +134,9 @@ class Explorer:
                 await self._clock.sleep(EXPLORE_TICK_SECONDS)
 
     async def _start_admitted(self, deadline: float) -> None:
-        for admitted in self._desk.drain():
-            await self._branches.start_admitted(admitted, deadline)
+        for admitted in self._desk.waiting():
+            if await self._branches.start_admitted(admitted, deadline):
+                self._desk.release(admitted.branch)
 
     async def _consult_placeholders(self, window: ExploreWindow) -> None:
         for branch in mb_fake_similar_branches(self._roster):

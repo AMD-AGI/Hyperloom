@@ -37,6 +37,12 @@ class BranchOrigin(str, Enum):
     FORK = "fork"
     REPAIR = "repair"
 
+    @property
+    def cut_by_scheduler(self) -> bool:
+        """Whether the scheduler cuts the branch in the repository; the rule gate cuts a fork and lands its fix."""
+
+        return self is not BranchOrigin.FORK
+
 
 class BranchStatus(str, Enum):
     """``ADMITTED`` is a fork or repair the scheduler accepted whose specialist has not started yet."""

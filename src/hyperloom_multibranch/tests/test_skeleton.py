@@ -25,7 +25,7 @@ import pytest
 
 from hyperloom.common.proctree import running
 from hyperloom.contracts.recipe import Recipe
-from hyperloom_multibranch.contracts.fork import Admission, AdmissionStatus, ForkRequest
+from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
@@ -50,7 +50,6 @@ from hyperloom_multibranch.scheduling.stops import (
 )
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     MAIN_POINT,
-    REPRO_CASE,
     MbFakeHeldRegistry,
     MbFakeLifecycle,
     MbFakeSpecialist,
@@ -153,7 +152,7 @@ class Stage:
     specialist: MbFakeSpecialist = field(init=False)
     repo: HeldGitRepo = field(init=False)
     setup: PeerSetup = field(init=False)
-    forks: list[Admission] = field(default_factory=list)
+    forks: list[ForkAdmission] = field(default_factory=list)
     signalled_at: float = 0.0
 
     def handle(self, role: Role, branch: str = "") -> LocalNotebook:
@@ -243,10 +242,13 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert (await observer.session_profile()).session_id == stage.layout.session_id
     assert [fp.policy_versions["judge_prompt"] for fp in await observer.manifest_fingerprints()] == ["mb1-judge-2"]
 
-    assert stage.lifecycle.started == {"b01": root, "b02": root, "b03": c1}
-    assert [admission.status for admission in stage.forks] == [AdmissionStatus.ACCEPTED, AdmissionStatus.REJECTED]
-    assert (branches["b03"].origin, branches["b03"].start_commit) == (LineageKind.OPEN, c1)
-    assert await stage.repo.head("b03") == c1 and FIX_REASON in str(stage.lifecycle.briefs["b03"])
+    fix = await stage.repo.head("b03")
+    assert fix != c1 and stage.lifecycle.started == {"b01": root, "b02": root, "b03": fix}
+    assert [(admission.status, admission.branch) for admission in stage.forks] == [
+        (AdmissionStatus.ACCEPTED, "b03"),
+        (AdmissionStatus.REJECTED, ""),
+    ]
+    assert (branches["b03"].origin, branches["b03"].start_commit) == (LineageKind.OPEN, fix)
 
     assert stage.lifecycle.last_k["b01"] == 2 and stage.lifecycle.running == {}
     specialist_ks = [
@@ -333,7 +335,7 @@ async def test_a_stop_signal_skips_to_close_and_stops_every_branch(tmp_path: Pat
     assert sorted(stage.lifecycle.stopped) == ["b01", "b02"]
     assert set(stage.toolbox.cancelled) == {"b01", "b02", INTEGRATION_BRANCH}
     assert stage.toolbox.closed == 1
-    late = await stage.setup.desk.request_fork(ForkRequest(await stage.root(), tagged("late"), REPRO_CASE, "late fix"))
+    late = await stage.setup.desk.admit(ForkRequest("b01", await stage.root(), "late fix"))
     assert late.status is AdmissionStatus.REJECTED
     roster = json.loads(stage.layout.roster.read_text())
     assert roster["closed"] and all(

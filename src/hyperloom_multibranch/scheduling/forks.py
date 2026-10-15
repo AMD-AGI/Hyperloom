@@ -3,83 +3,46 @@
 
 """The scheduler's answer to the rule gate's branch requests: a fork for a correctness fix, a repair of a blocked gain.
 
-:class:`ForkDesk` is the scheduler's :class:`~hyperloom_multibranch.contracts.fork.BranchRequests`. A request is
-admitted when the roster may open a branch; what one the roster cannot take gets is :func:`mb_fake_refused_fork`. An
-admitted branch is put on the roster at once, admitted but not started, so it takes a slot of the branch cap, and
-:meth:`ForkDesk.drain` hands it to the branch control, which opens it at the requested commit and starts its specialist
-with a brief that carries the change to build on: the fix a fork lands first, or the blocked candidate and its
-diagnosis a repair starts from. The desk needs no peer, so it is built before them and handed to the specialist
-runtime, which builds its rule gates on it.
+:class:`ForkDesk` is the scheduler's :class:`~hyperloom_multibranch.contracts.fork.ForkAdmissionService`. A request is
+admitted when the roster may open a branch and the branch that asks is on the roster and not stopped, as stopping a
+branch withdraws everything of it; what the roster cannot take is answered by :func:`mb_fake_refused_fork`. An intent
+is repaired at most once per commit. An admitted branch is put on the roster at once, admitted but not started, with
+the K of the branch that asked, so it takes a slot of the branch cap, and it waits on the desk until the branch control
+starts it: a repair at the commit the blocked candidate was measured against, a fork once the gate has cut it and
+landed the fix on it. The desk needs no peer, so it is built before them and handed to the specialist runtime, which
+builds its rule gates on it.
 
-A repair names the branch that asks, through its intent, and inherits its K; one of a branch the roster does not hold,
-or of one already stopped, is refused, as stopping a branch withdraws everything of it, and an intent is repaired at
-most once per commit. :class:`~hyperloom_multibranch.contracts.fork.ForkRequest` does not name the branch that asks
-and the rule gate records no ``SPLIT`` for it, so a fork starts at K 1 and its ``OPEN`` names only the commit it starts
-at: the notebook shows it as a new branch, not as a fork of its parent, until the fork contract names that branch.
+The specialist runtime reads a new branch's brief from the notebook, so neither the fix a fork lands nor a repair's
+diagnosis reaches the new specialist from here; the diagnosis is kept in the ``REPAIR`` decision.
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 
-from hyperloom.contracts.recipe import RecipeDelta
-from hyperloom_multibranch.contracts.fork import Admission, AdmissionStatus, ForkRequest, RepairRequest
+from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_refused_fork
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, Roster
 
-#: The K a fork starts with: the fork contract names no branch to inherit one from.
-FORK_K = 1
 DECISION_KINDS = {BranchOrigin.FORK: DecisionKind.FORK, BranchOrigin.REPAIR: DecisionKind.REPAIR}
 
 
 @dataclass(frozen=True)
 class AdmittedBranch:
-    """A fork or repair the desk admitted: its specialist starts at ``start_commit`` with ``brief``."""
+    """A fork or repair the desk admitted, cut from ``parent_commit``."""
 
     branch: str
-    start_commit: str
-    brief: str
+    parent_commit: str
 
 
 @dataclass(frozen=True)
 class _Ask:
     origin: BranchOrigin
-    start_commit: str
+    parent_commit: str
     from_branch: str
-    brief: str
     reason: str
-
-
-def _change(delta: RecipeDelta) -> str:
-    return json.dumps(delta.to_document(), indent=2, sort_keys=True)
-
-
-def fork_brief(request: ForkRequest) -> str:
-    return "\n".join(
-        (
-            "This branch carries a correctness fix that cost the branch it was found on performance.",
-            f"Why: {request.reason}",
-            f"Reproduction case, which fails without the fix: {request.repro_case}",
-            "Land the fix first, then optimize on top of it. The fix, as a recipe change:",
-            _change(request.fix_delta),
-        )
-    )
-
-
-def repair_brief(request: RepairRequest) -> str:
-    intent, judgement = request.intent, request.judgement
-    return "\n".join(
-        (
-            f"This branch repairs a gain the rule gate blocked on {intent.branch}: {intent.mechanism} on "
-            f"{intent.target} ({intent.layer.value}), {judgement.gain_pct:+.2f}% held back by "
-            f"{', '.join(judgement.refused_by) or 'the accuracy gate'}.",
-            f"Diagnosis and repair plan: {request.diagnosis}",
-            "The blocked candidate, as a recipe change:",
-            _change(request.candidate_delta),
-        )
-    )
+    detail: dict[str, object]
 
 
 def _parent_refusal(roster: Roster, from_branch: str) -> str:
@@ -95,49 +58,56 @@ class ForkDesk:
     def __init__(self, roster: Roster, decisions: DecisionLog) -> None:
         self._roster = roster
         self._decisions = decisions
-        self._admitted: list[AdmittedBranch] = []
+        self._waiting: dict[str, AdmittedBranch] = {}
         self._repairs: set[tuple[str, str]] = set()
 
-    async def request_fork(self, request: ForkRequest) -> Admission:
-        ask = _Ask(BranchOrigin.FORK, request.parent_commit, "", fork_brief(request), request.reason)
-        return self._admit(ask, "")
+    async def admit(self, request: ForkRequest) -> ForkAdmission:
+        ask = _Ask(BranchOrigin.FORK, request.parent_commit, request.from_branch, request.reason, {})
+        return self._admit(ask, _parent_refusal(self._roster, request.from_branch))
 
-    async def request_repair(self, request: RepairRequest) -> Admission:
+    async def admit_repair(self, request: RepairRequest) -> ForkAdmission:
         intent = request.intent
         key = (intent.parent_commit, intent.fingerprint)
         refusal = _parent_refusal(self._roster, intent.branch)
         if not refusal and key in self._repairs:
             refusal = f"a repair of this intent on {intent.parent_commit} is already open"
         reason = f"repair of {intent.mechanism} on {intent.target}"
-        answer = self._admit(
-            _Ask(BranchOrigin.REPAIR, intent.parent_commit, intent.branch, repair_brief(request), reason), refusal
-        )
+        ask = _Ask(BranchOrigin.REPAIR, intent.parent_commit, intent.branch, reason, {"diagnosis": request.diagnosis})
+        answer = self._admit(ask, refusal)
         if answer.status is AdmissionStatus.ACCEPTED:
             self._repairs.add(key)
         return answer
 
-    def _admit(self, ask: _Ask, refusal: str) -> Admission:
-        branch = ""
+    def _admit(self, ask: _Ask, refusal: str) -> ForkAdmission:
         roster_refusal = self._roster.open_refusal()
         if refusal:
-            answer = Admission(AdmissionStatus.REJECTED, refusal)
+            answer = ForkAdmission(AdmissionStatus.REJECTED, refusal)
         elif roster_refusal:
             answer = mb_fake_refused_fork(roster_refusal)
         else:
-            k = self._roster.entry(ask.from_branch).k if ask.from_branch else FORK_K
             branch = self._roster.next_branch_id()
+            k = self._roster.entry(ask.from_branch).k
             self._roster.open(branch, origin=ask.origin, start_commit="", k=k, from_branch=ask.from_branch)
-            self._admitted.append(AdmittedBranch(branch, ask.start_commit, ask.brief))
-            answer = Admission(AdmissionStatus.ACCEPTED, ask.reason)
-        detail = {"status": answer.status.value, "from_branch": ask.from_branch, "start_commit": ask.start_commit}
-        self._decisions.record(Decision(DECISION_KINDS[ask.origin], answer.reason, branch, detail))
+            self._waiting[branch] = AdmittedBranch(branch, ask.parent_commit)
+            answer = ForkAdmission(AdmissionStatus.ACCEPTED, ask.reason, branch)
+        detail = {
+            "status": answer.status.value,
+            "from_branch": ask.from_branch,
+            "parent_commit": ask.parent_commit,
+            **ask.detail,
+        }
+        self._decisions.record(Decision(DECISION_KINDS[ask.origin], answer.reason, answer.branch, detail))
         return answer
 
-    def drain(self) -> tuple[AdmittedBranch, ...]:
-        """The branches admitted since the last call, oldest first; never waits."""
+    def waiting(self) -> tuple[AdmittedBranch, ...]:
+        """The admitted branches not started yet, oldest first."""
 
-        drained, self._admitted = tuple(self._admitted), []
-        return drained
+        return tuple(self._waiting.values())
+
+    def release(self, branch: str) -> None:
+        """Take ``branch`` off the desk: it started, or it never will."""
+
+        del self._waiting[branch]
 
 
-__all__ = ["DECISION_KINDS", "FORK_K", "AdmittedBranch", "ForkDesk", "fork_brief", "repair_brief"]
+__all__ = ["DECISION_KINDS", "AdmittedBranch", "ForkDesk"]
