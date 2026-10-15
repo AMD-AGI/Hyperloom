@@ -201,7 +201,6 @@ def _validate(**overrides: Any) -> dict[str, Any]:
             "severity": "ok",
             "blocking_reasons": [],
             "warnings": [],
-            "recommended_splitter_mode": "decode_only",
             "measures": {"attributed_pct": 91.0, "graph_launch_coverage": 0.9},
             "thresholds_effective": {"graph_launch_coverage_max": 0.2},
         },
@@ -802,7 +801,6 @@ def _certificate(*, density: dict[str, Any], verdict: dict[str, Any], rank_count
             {
                 "rank": 0,
                 "density": density,
-                "split_forecast": {"viable_modes": ["mixed"], "viable_consumer_modes": ["mixed"]},
             }
         ],
         "verdict": {"thresholds_effective": {"graph_launch_coverage_max": 0.5}, **verdict},
@@ -833,10 +831,7 @@ def test_trace_validate_keeps_the_two_verdict_axes_apart() -> None:
     assert out["verdict"]["decode_conclusions_valid"] is False
     assert out["verdict"]["silently_wrong"] is True
     assert out["probe_status"] == "ok"
-    # Chunks do not exist until the splitter runs, so the profile stage records the forecast the analysis stage will
-    # later be measured against instead.
     assert out["chunk_level"] == []
-    assert out["steady_state_forecast"]["viable_modes"] == ["mixed"]
 
     coverage = next(row for row in out["checks"] if row["check_id"] == CHECK_GRAPH_LAUNCH_COVERAGE)
     assert coverage["status"] == "failed"
