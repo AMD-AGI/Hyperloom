@@ -855,6 +855,35 @@ class IntentRouter(CoordinatorCollaborator):
         elif verdict == "needs_review":
             await self._coord.phase_framework.maybe_reauthor_from_critic_feedback(pending, advisory)
 
+    async def _explore_grid_covered(
+        self, action_name: str, source: str, intent: Intent, params: dict[str, Any], idempotency_key: str
+    ) -> bool:
+        """Refuse an explore grid that adds nothing new, recording the denial; report whether it was refused.
+
+        A task already queued or running under ``idempotency_key`` is not counted against the grid: re-sending the key
+        is answered as a duplicate by the enqueue below, not as coverage.
+        """
+        if action_name != "explore":
+            return False
+        from ..actions.executors.explore import framework_lever_grid
+        from ..actions.executors.measured_variants import explore_grid_already_covered
+
+        if framework_lever_grid(self.shared_state):
+            # The executor adds its pending rewrite levers to this grid, so the grid is not all there is to measure.
+            return False
+
+        retry_prefix = f"{idempotency_key}-retry"
+        active = [
+            task
+            for task in (*await self.tasks.queued(), *await self.tasks.running())
+            if task.idempotency_key != idempotency_key and not task.idempotency_key.startswith(retry_prefix)
+        ]
+        covered = explore_grid_already_covered(params, active, self.shared_state.explore_search)
+        if covered is None:
+            return False
+        await self.record_policy_denied(source, intent, covered, action_name="explore")
+        return True
+
     async def handle_delegate(self, source: str, intent: Intent) -> None:
         """Validate and enqueue a delegated action as a TaskRegistry task."""
         action_name = intent.payload["action_name"]
@@ -956,6 +985,8 @@ class IntentRouter(CoordinatorCollaborator):
             ).hexdigest()[:10]
             raw_key = f"{source}:{action_name}:t{int(self.shared_state.tick or 0)}:{content_fp}"
         idempotency_key = str(raw_key)
+        if await self._explore_grid_covered(action_name, source, intent, params, idempotency_key):
+            return
         # The grid's attempts join its proposal row through this id, as an approved proposal's do. Added after the
         # key is derived, so an identical re-emit still lands on the task already running.
         proposal_id = uuid.uuid4().hex if action_name == "explore" else ""

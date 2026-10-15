@@ -3472,3 +3472,435 @@ async def test_explore_grades_the_rounds_own_gpu_power_against_the_budget(
     coord.shared_state = state
     await coord.writeback._promote_explore(out, None, wb._PromoteOutcome(verdict=wb.Verdict.RECORDED))
     assert state.current_best["variant_name"] == "v_power"
+
+
+async def _run_explore_round(
+    sub,
+    tr,
+    tmp_path,
+    state,
+    *,
+    key: str,
+    grid: list[dict],
+    base_args: str,
+    bench_calls,
+    extra_params=None,
+    keep="",
+    fail="",
+):
+    """Run one explore round on ``state`` and fold its ledger update back, as write-back does.
+
+    Every variant measures within noise of the 800 anchor (REVERT) except the one named ``keep``, which KEEPs, and
+    the one named ``fail``, whose benchmark exits non-zero.
+    """
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        bench_calls.append(slot.name)
+        if fail and slot.name.endswith(f"_{fail}"):
+            return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="boom")
+        _fake_workspace(slot, tput=900.0 if keep and slot.name.endswith(f"_{keep}") else 801.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    base = tmp_path / "base.yaml"
+    if not base.exists():
+        _write_baseline_yaml(base)
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / key),
+            "base_tput": 800.0,
+            "base_extra_args": base_args,
+            "grid": grid,
+            **(extra_params or {}),
+        },
+        idempotency_key=key,
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        out = (await sub.run_task(task)).result
+    state.apply_explore_search_update(out["explore_search_update"])
+    return out
+
+
+@pytest.mark.asyncio
+async def test_a_variant_measured_on_the_same_stack_is_not_measured_again(sub_agent_runner, tmp_path, monkeypatch):
+    """A later round skips a launch an earlier round already gave a verdict on; the new variant still runs."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    first: list[str] = []
+    await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="round-1",
+        grid=[{"name": "max_running_48", "extra_args": "--max-running-requests 48"}],
+        base_args="--base-flag 1",
+        bench_calls=first,
+    )
+    assert len(first) == 1
+
+    second: list[str] = []
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="round-2",
+        grid=[
+            # Same launch under another name.
+            {"name": "mrr_48", "extra_args": "--max-running-requests 48"},
+            {"name": "fresh", "extra_args": "--fresh-flag"},
+        ],
+        base_args="--base-flag 1",
+        bench_calls=second,
+    )
+    assert len(second) == 1
+    assert [v["name"] for v in out["losers"]] == ["fresh"]
+    skipped = {d["name"]: d for d in out["skipped_dup"]}
+    assert skipped["mrr_48"]["reason"] == "already_measured"
+    assert "max_running_48" in skipped["mrr_48"]["detail"]
+    assert out["status"] == "succeeded"
+
+    # A round with nothing left to measure is answered from the ledger, not failed.
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="round-3",
+        grid=[{"name": "mrr_48", "extra_args": "--max-running-requests 48"}],
+        base_args="--base-flag 1",
+        bench_calls=second,
+    )
+    assert len(second) == 1
+    assert out["status"] == "succeeded"
+
+    # A skipped variant does not make a round whose only new variant failed look successful.
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="round-4",
+        grid=[
+            {"name": "mrr_48", "extra_args": "--max-running-requests 48"},
+            {"name": "broken", "extra_args": "--broken-flag"},
+        ],
+        base_args="--base-flag 1",
+        bench_calls=second,
+        fail="broken",
+    )
+    assert out["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_a_budget_stop_after_a_skipped_variant_is_still_reported(sub_agent_runner, tmp_path, monkeypatch):
+    """Skipping a measured variant does not hide that the budget stopped the new one before it ran."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    measured = {"name": "max_running_48", "extra_args": "--max-running-requests 48"}
+    calls: list[str] = []
+    await _run_explore_round(sub, tr, tmp_path, state, key="r1", grid=[measured], base_args="", bench_calls=calls)
+    state.max_minutes = 3.0  # ~60s usable
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r2",
+        grid=[measured, {"name": "fresh", "extra_args": "--fresh-flag"}],
+        base_args="",
+        bench_calls=calls,
+        extra_params={"baseline_runtime_sec": 600.0},
+    )
+    assert len(calls) == 1
+    assert [d["reason"] for d in out["skipped_dup"]] == ["already_measured"]
+    assert out["status"] == "failed"
+    assert out["error_class"] == "session_time_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_a_measured_variant_with_removals_is_not_measured_again(sub_agent_runner, tmp_path, monkeypatch):
+    """A variant's own removals are part of the launch it measured, so the same removal is the same launch."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    grid = [{"name": "drop_base", "extra_args": "--x 1", "remove_args": ["--base-flag"]}]
+    calls: list[str] = []
+    await _run_explore_round(
+        sub, tr, tmp_path, state, key="r1", grid=grid, base_args="--base-flag 1", bench_calls=calls
+    )
+    out = await _run_explore_round(
+        sub, tr, tmp_path, state, key="r2", grid=grid, base_args="--base-flag 1", bench_calls=calls
+    )
+    assert len(calls) == 1
+    assert [d["reason"] for d in out["skipped_dup"]] == ["already_measured"]
+
+
+@pytest.mark.asyncio
+async def test_a_measured_variant_runs_after_a_keep_earlier_in_the_same_round(sub_agent_runner, tmp_path, monkeypatch):
+    """A KEEP advances the stack mid-round, so a variant measured on the round's opening stack is measured again."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    measured = {"name": "max_running_48", "extra_args": "--max-running-requests 48"}
+    calls: list[str] = []
+    await _run_explore_round(sub, tr, tmp_path, state, key="r1", grid=[measured], base_args="", bench_calls=calls)
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r2",
+        grid=[{"name": "winner", "extra_args": "--winner 1"}, measured],
+        base_args="",
+        bench_calls=calls,
+        keep="winner",
+    )
+    assert [v["name"] for v in out["winners"]] == ["winner"]
+    assert [v["name"] for v in out["losers"]] == ["max_running_48"]
+    assert out["skipped_dup"] == []
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_measured_variant_runs_again_once_the_stack_moved(sub_agent_runner, tmp_path, monkeypatch):
+    """The verdict belongs to the stack it was measured on; on a different base launch the variant is measured anew."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    grid = [{"name": "max_running_48", "extra_args": "--max-running-requests 48"}]
+    calls: list[str] = []
+    await _run_explore_round(
+        sub, tr, tmp_path, state, key="r1", grid=grid, base_args="--base-flag 1", bench_calls=calls
+    )
+    out = await _run_explore_round(
+        sub, tr, tmp_path, state, key="r2", grid=grid, base_args="--base-flag 2", bench_calls=calls
+    )
+    assert len(calls) == 2
+    assert out["skipped_dup"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_throughput_revert_is_measured_again_once_the_bar_decays_below_its_gain(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """The round's variants measure +0.125%: refused under a 1.0% bar, worth another look under a 0.1% bar."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    grid = [{"name": "max_running_48", "extra_args": "--max-running-requests 48"}]
+    calls: list[str] = []
+    await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r1",
+        grid=grid,
+        base_args="",
+        bench_calls=calls,
+        extra_params={"keep_threshold_pct": 1.0},
+    )
+    (row,) = state.explore_search["tested"].values()
+    assert row["outcome"] == "REVERT" and row["reason"] == "gain_below_threshold"
+    assert row["graded_gain_pct"] == pytest.approx(0.125)
+
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r2",
+        grid=grid,
+        base_args="",
+        bench_calls=calls,
+        extra_params={"keep_threshold_pct": 0.5},
+    )
+    assert len(calls) == 1
+    assert [d["reason"] for d in out["skipped_dup"]] == ["already_measured"]
+
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r3",
+        grid=grid,
+        base_args="",
+        bench_calls=calls,
+        extra_params={"keep_threshold_pct": 0.1},
+    )
+    assert len(calls) == 2
+    assert out["skipped_dup"] == []
+
+
+@pytest.mark.asyncio
+async def test_an_accuracy_revert_stays_answered_when_the_bar_decays(sub_agent_runner, tmp_path, monkeypatch):
+    """Only the throughput gate moves with the bar: a variant refused on accuracy is not re-measured for a lower bar."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    grid = [{"name": "max_running_48", "extra_args": "--max-running-requests 48"}]
+    calls: list[str] = []
+    await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r1",
+        grid=grid,
+        base_args="",
+        bench_calls=calls,
+        extra_params={"keep_threshold_pct": 0.1},
+    )
+    (row,) = state.explore_search["tested"].values()
+    row.update(outcome="REVERT", reason="accuracy_drop", graded_gain_pct=5.0)
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r2",
+        grid=grid,
+        base_args="",
+        bench_calls=calls,
+        extra_params={"keep_threshold_pct": 0.1},
+    )
+    assert len(calls) == 1
+    assert [d["reason"] for d in out["skipped_dup"]] == ["already_measured"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_variant_is_not_treated_as_measured(sub_agent_runner, tmp_path, monkeypatch):
+    """A FAILED row carries no verdict on the launch, so the variant may run again on the same stack."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    grid = [{"name": "max_running_48", "extra_args": "--max-running-requests 48"}]
+    calls: list[str] = []
+    await _run_explore_round(sub, tr, tmp_path, state, key="r1", grid=grid, base_args="", bench_calls=calls)
+    for row in state.explore_search["tested"].values():
+        row["outcome"] = "FAILED"
+    await _run_explore_round(sub, tr, tmp_path, state, key="r2", grid=grid, base_args="", bench_calls=calls)
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_stack_revalidation_measures_again(sub_agent_runner, tmp_path, monkeypatch):
+    """A revalidation exists to re-measure, so a verdict already in the ledger does not skip it."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    grid = [{"name": "max_running_48", "extra_args": "--max-running-requests 48"}]
+    calls: list[str] = []
+    await _run_explore_round(sub, tr, tmp_path, state, key="r1", grid=grid, base_args="", bench_calls=calls)
+    await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r2",
+        grid=grid,
+        base_args="",
+        bench_calls=calls,
+        extra_params={"source": "stack_revalidate"},
+    )
+    assert len(calls) == 2
+
+
+def test_measured_verdict_holds_only_for_the_same_workload_and_stack():
+    from hyperloom.orchestrator.actions.executors.measured_variants import (
+        MeasuredOn,
+        grid_fingerprints,
+        measured_verdict,
+        stack_of,
+    )
+
+    params = {"base_tput": 800.0, "base_extra_args": "--a 1", "grid": [{"name": "v", "extra_args": "--b 2"}]}
+    (fp,) = grid_fingerprints(params)
+    stack = stack_of(params)
+    variant = params["grid"][0]
+    row = {
+        "outcome": "REVERT",
+        "workload_signature": "w1",
+        "extra_server_args": "--b 2",
+        "extra_envs": {},
+        "measured_against": {"throughput": 800.0, "extra_server_args": "--a 1", "extra_envs": {}},
+    }
+    ledger = {"tested": {fp: row}}
+
+    def verdict(ledger=ledger, variant=variant, stack=stack, signature="w1"):
+        return measured_verdict(ledger, fp, variant=variant, now=MeasuredOn(stack, signature, 1.0))
+
+    assert verdict() is not None
+    assert verdict(signature="w2") is None
+    assert verdict(stack=stack_of({**params, "base_extra_envs": {"E": "1"}})) is None
+    assert verdict(ledger={"tested": {fp: {**row, "measured_against": None}}}) is None
+    # The key was fingerprinted against its round's opening controls; a KEEP in that round can move them, so a row
+    # under the same key whose own change differs (here: it removed nothing) does not speak for this variant.
+    assert verdict(variant={**variant, "remove_args": ["--c"]}) is None
+    # The bar decays per macro-cycle: a throughput-gate REVERT stands only while its gain is below the current bar.
+    missed = {**row, "reason": "gain_below_threshold", "graded_gain_pct": 0.7}
+    assert verdict(ledger={"tested": {fp: missed}}) is not None
+    assert verdict(ledger={"tested": {fp: {**missed, "graded_gain_pct": 1.0}}}) is None
+    # Accuracy and tail-guard REVERTs do not depend on the bar, whatever gain they measured.
+    for reason in ("accuracy_drop", "accuracy_unavailable", "p90_regressed"):
+        assert verdict(ledger={"tested": {fp: {**missed, "reason": reason, "graded_gain_pct": 5.0}}}) is not None
+    # An overlay changes the launch without changing args or envs, so it has no comparable identity.
+    assert grid_fingerprints(
+        {**params, "grid": [{"name": "v", "extra_args": "--b 2", "overlay_pythonpath": "/o"}]}
+    ) == [""]
+
+
+@pytest.mark.asyncio
+async def test_a_kernel_overlay_variant_is_not_skipped_by_a_plain_one(sub_agent_runner, tmp_path, monkeypatch):
+    """An overlay changes the launch without changing args or envs, so a measured plain twin does not skip it."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    calls: list[str] = []
+    plain = {"name": "plain", "extra_args": "--max-running-requests 48"}
+    await _run_explore_round(sub, tr, tmp_path, state, key="r1", grid=[plain], base_args="", bench_calls=calls)
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r2",
+        grid=[{**plain, "name": "with_overlay", "overlay_pythonpath": str(overlay)}],
+        base_args="",
+        bench_calls=calls,
+    )
+    assert len(calls) == 2
+    assert out["skipped_dup"] == []
