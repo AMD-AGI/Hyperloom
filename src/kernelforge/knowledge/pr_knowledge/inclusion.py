@@ -28,9 +28,9 @@ call that fails, cannot start or does not answer in time makes the answer ``unkn
 error, git's own message for a failed call, as the evidence. ``included`` means the PR's change
 is in the history; a later revert is not looked for.
 
-The ``pr_check_inclusion`` MCP tool and the command line both run this probe; the
-check-prior-art contributor skill runs the command line with the merge commit sha it reads
-from the GitHub API::
+The ``pr_check_inclusion`` MCP tool answers from subjects alone, because nothing the agent can
+call returns a merge commit sha. The command line also takes the sha; the check-prior-art
+contributor skill runs it with the one it reads from the GitHub API::
 
     python -m kernelforge.knowledge.pr_knowledge.inclusion --tree PATH --commit SHA --pr N \\
         [--merge-commit-sha SHA]
