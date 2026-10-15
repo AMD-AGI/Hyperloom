@@ -4,7 +4,8 @@
 """EXPLORE: open the opening batch, then let the judge steer the branches until the EXPLORE deadline or a soft stop.
 
 The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it starts the forks and repairs the fork desk admitted, consults
-the MB2 placeholders, and every judge interval asks the judge and applies what it decided; a judge call that has not
+the MB2 placeholders, and every judge interval asks the judge and applies what it decided. The judge reads the
+frontier-scored progress and how similar archived sessions went; a judge call that has not
 answered by the EXPLORE deadline counts as failed, so it never eats into FINAL. The integrator merges in a
 background task of its own, in rounds as wide as the integration branch's K. When EXPLORE ends that task is
 cancelled and the integrator abandons its round, so the integration head the FINAL candidates are read from no
@@ -20,8 +21,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.interfaces import ProgressQuery
+from hyperloom_multibranch.contracts.notebook.interfaces import SnapshotQuery
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress
+from hyperloom_multibranch.notebook.rsi.frontier import FrontierScoring
+from hyperloom_multibranch.notebook.rsi.session import judge_history
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
@@ -45,12 +48,14 @@ SIMILAR_BRANCH_REASON = "duplicates another branch"
 
 @dataclass(frozen=True)
 class ExploreWindow:
-    """The commit branches start from, the roofline ceiling, and the clock times EXPLORE and the budget end at."""
+    """The commit branches start from, the roofline ceiling, the clock times EXPLORE and the budget end at, and the
+    session's whole budget."""
 
     root_commit: str
     roofline_ceiling: Mapping[str, float]
     explore_end: float
     session_deadline: float
+    budget_seconds: float
 
 
 def integration_row(progress: tuple[BranchProgress, ...]) -> BranchProgress | None:
@@ -58,7 +63,8 @@ def integration_row(progress: tuple[BranchProgress, ...]) -> BranchProgress | No
 
 
 class Explorer:
-    """Runs EXPLORE once; ``progress`` is the frontier-scored progress the judge reads."""
+    """Runs EXPLORE once; ``progress`` is the frontier-scored progress the judge reads, against the archived sessions
+    it holds, and ``notebook`` the snapshot the judge's digest of those sessions compares with them."""
 
     def __init__(
         self,
@@ -67,7 +73,8 @@ class Explorer:
         desk: ForkDesk,
         judge: Judge,
         integrator: Integrator,
-        progress: ProgressQuery,
+        progress: FrontierScoring,
+        notebook: SnapshotQuery,
         decisions: DecisionLog,
         judge_interval_seconds: float,
         clock: Clock,
@@ -78,6 +85,7 @@ class Explorer:
         self._judge = judge
         self._integrator = integrator
         self._progress = progress
+        self._notebook = notebook
         self._decisions = decisions
         self._interval = judge_interval_seconds
         self._clock = clock
@@ -152,6 +160,12 @@ class Explorer:
             metric=MB_FAKE_PRIMARY_METRIC,
             opening=opening,
             free_slots=self._roster.free_slots(),
+            history=judge_history(
+                await self._notebook.snapshot(),
+                self._progress.history,
+                MB_FAKE_PRIMARY_METRIC,
+                budget_seconds=window.budget_seconds,
+            ),
         )
         try:
             decision = await self._clock.wait_for(self._judge.decide(view), window.explore_end - now)

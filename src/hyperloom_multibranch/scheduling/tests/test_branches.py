@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.recipe import Recipe
+from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLaunch
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
@@ -77,7 +78,7 @@ class Bench:
         )
         self.lifecycle = QuotaCheckingLifecycle(self.toolbox, refusing)
         self.repo_path = tmp_path / "repo"
-        self.repo = GitExperimentRepo(self.repo_path)
+        self.repo = GitExperimentRepo(self.repo_path, LocalBlobStore(tmp_path / "blobs"))
         self.root = ""
         self.control = BranchControl(
             self.roster,
@@ -91,7 +92,7 @@ class Bench:
         )
 
     async def rooted(self) -> Bench:
-        self.root = await (await GitExperimentRepo.create(self.repo_path, BASELINE)).head(INTEGRATION_BRANCH)
+        self.root = await self.repo.init_root(BASELINE)
         await self.notebook.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=self.root))
         self.roster.add_integration(self.root, k=1)
         return self

@@ -11,13 +11,16 @@ from pathlib import Path
 
 from hyperloom.contracts.measurement import Purpose, RoundValue, TestKind, TestRequest, TestResult, Validity
 from hyperloom.contracts.recipe import Recipe
+from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.fork import Admission, ForkRequest, RepairRequest
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import BranchProgress, LineageEvent, TestRecord
+from hyperloom_multibranch.contracts.notebook.records import BranchProgress, LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.gate import RuleGate
+from hyperloom_multibranch.rulegate.rules import InferenceXRule
+from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
 from hyperloom_multibranch.scheduling.final import (
     CandidateCheck,
     FinalCandidate,
@@ -31,15 +34,16 @@ from hyperloom_multibranch.scheduling.final import (
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, BranchOrigin, BranchStop, StopCause
 from hyperloom_multibranch.scheduling.settings import Workload
-from hyperloom_multibranch.scheduling.requests import SessionTests
-from hyperloom_multibranch.scheduling.rule_judge import MbFakeRuleJudge
+from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
+    GATE_POLL_SECONDS,
     MAIN_POINT,
     Curves,
     MbFakeSpecialist,
     RecordingToolbox,
     VirtualClock,
     recipe_effect,
+    session_gate,
     tagged,
 )
 from hyperloom_multibranch.toolbox.fake_model import Fate
@@ -148,15 +152,19 @@ def test_a_sweep_is_read_per_conc_from_its_measured_rounds() -> None:
         RoundValue("measure", 128, {"ttft": 3.0}),
         RoundValue("measure", None, {METRIC: 5.0}),
     )
-    request = TestRequest(TestKind.SWEEP, Purpose.FINAL, INTEGRATION_BRANCH, "i1", concurrency=(32, CONC, 128))
-    record = TestRecord(request, TestResult("r1", Validity.SUCCEEDED, rounds=rounds))
+    assert sweep_curve(TestResult("r1", Validity.SUCCEEDED, rounds=rounds), METRIC) == {32: 905.0, CONC: 1040.0}
+    assert sweep_curve(TestResult("r2", Validity.SUCCEEDED), METRIC) == {}
 
-    assert sweep_curve(record, METRIC) == {32: 905.0, CONC: 1040.0}
-    assert sweep_curve(TestRecord(request), METRIC) == {}
+
+class RefusingAccuracyGate(GateService):
+    """The rule gate's session service, whose accuracy gate refuses every test; a failure double, not a placeholder."""
+
+    async def accuracy_passes(self, request_id: str) -> bool:
+        return False
 
 
 class Bench:
-    """FINAL's toolbox fake, git repository and rule, on a virtual clock and an anchored notebook.
+    """FINAL's toolbox fake, git repository and rule gate, on a virtual clock and an anchored notebook.
 
     ``i1`` (recorded at 1040) is committed on ``b01`` and ``c7`` (recorded at 1060) on ``b02``; what a test of either
     measures is its curve in ``curves``.
@@ -171,14 +179,15 @@ class Bench:
         return LocalNotebook(self.tmp_path / "notebook", Writer(role, role.value), clock=self.time.now)
 
     async def build(self, curves: Curves) -> Bench:
-        self.repo = await GitExperimentRepo.create(self.tmp_path / "repo", Recipe(MB_FAKE_BASE_IMAGE_DIGEST))
-        root = await self.repo.head(INTEGRATION_BRANCH)
+        self.repo = GitExperimentRepo(self.tmp_path / "repo", LocalBlobStore(self.tmp_path / "blobs"))
+        root = await self.repo.init_root(Recipe(MB_FAKE_BASE_IMAGE_DIGEST))
         scheduler = self.handle(Role.SCHEDULER)
         await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=root))
         self.toolbox = RecordingToolbox(self.handle(Role.TOOLBOX), recipe_effect(self.tmp_path / "repo", curves))
-        self.tests = SessionTests(self.toolbox, scheduler, self.time.clock)
-        self.judge = MbFakeRuleJudge(self.handle(Role.GATE), self.tests)
-        await self.judge.establish_baseline(root)
+        self.tests = SessionTests(self.toolbox, self.time.clock)
+        self.gate = session_gate(self.handle(Role.GATE), self.toolbox)
+        baseline = integration_test_request(TestKind.TEST, Purpose.BASELINE, root)
+        await self.gate.establish_baseline(root, [await self.tests.submit(baseline) for _ in range(BASELINE_TESTS)])
         for branch, tag, value in (("b01", "i1", 1040.0), ("b02", "c7", 1060.0)):
             await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit=root, reason="first"))
             await self.repo.create_branch(branch, root)
@@ -193,7 +202,7 @@ class Bench:
         return FinalCandidates(integration, replace(BRANCH, commit=self.commits["c7"]) if both else None)
 
     def selector(self) -> FinalSelector:
-        return FinalSelector(self.tests, self.judge, WORKLOAD, METRIC, self.time.clock)
+        return FinalSelector(self.tests, self.gate, WORKLOAD, METRIC, self.time.clock)
 
     def fail(self, tag: str, fate: Fate, kind: TestKind | None = None) -> None:
         """Every FINAL test of ``tag``'s commit (of ``kind`` when given) ends in ``fate``."""
@@ -220,7 +229,7 @@ class _NoForks:
         raise AssertionError("no repair is asked for here")
 
 
-async def test_each_candidate_is_swept_accuracy_checked_and_reproduced_as_a_session_measurement(
+async def test_each_candidate_is_swept_and_reproduced_with_accuracy_as_a_session_measurement(
     tmp_path: Path,
 ) -> None:
     curves = {
@@ -234,12 +243,7 @@ async def test_each_candidate_is_swept_accuracy_checked_and_reproduced_as_a_sess
     assert [check.reproduced for check in choice.checks] == [True, False]
     assert dict(choice.checks[0].curve) == {32: 1040.0, CONC: 1040.0, 128: 1040.0}
     expected = sorted(
-        (kind.value, concurrency)
-        for kind, concurrency in (
-            (TestKind.ACCURACY, ()),
-            (TestKind.TEST, ()),
-            (TestKind.SWEEP, sweep_concs(CONC)),
-        )
+        (kind.value, concurrency) for kind, concurrency in ((TestKind.TEST, ()), (TestKind.SWEEP, sweep_concs(CONC)))
     )
     tests = bench.final_tests().values()
     for commit in bench.commits.values():
@@ -248,11 +252,11 @@ async def test_each_candidate_is_swept_accuracy_checked_and_reproduced_as_a_sess
     assert {(test.branch_id, test.intent_fingerprint, test.priority) for test in tests} == {
         (INTEGRATION_BRANCH, None, None)
     }
-    assert all(test.accuracy == (test.kind is TestKind.ACCURACY) for test in tests)
+    assert all(test.accuracy for test in tests) and all(check.accuracy_passed for check in choice.checks)
     assert (choice.metric, choice.primary_conc) == (METRIC, CONC)
 
 
-async def test_a_withdrawn_test_a_missing_primary_point_or_a_failed_accuracy_disqualifies(tmp_path: Path) -> None:
+async def test_an_unmeasured_test_a_missing_primary_point_or_a_failed_accuracy_disqualifies(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).build({frozenset({"i1"}): {MAIN_POINT: 1040.0}})
     bench.fail("c7", Fate.MEASUREMENT)
     bench.fail("i1", Fate.CANDIDATE, TestKind.SWEEP)
@@ -261,10 +265,11 @@ async def test_a_withdrawn_test_a_missing_primary_point_or_a_failed_accuracy_dis
 
     assert choice.chosen is None
     assert "no output_throughput at the primary conc" in choice.checks[0].error
-    assert "withdrawn" in choice.checks[1].error
+    assert "measurement_failed" in choice.checks[1].error
 
     bench = await Bench(tmp_path / "again").build({frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0}})
-    bench.fail("i1", Fate.CANDIDATE, TestKind.ACCURACY)
+    gate = bench.handle(Role.GATE)
+    bench.gate = RefusingAccuracyGate(gate, bench.toolbox, InferenceXRule(gate, CONC), poll_seconds=GATE_POLL_SECONDS)
     alone = await bench.selector().select(bench.candidates(both=False), START + 3600.0)
     assert alone.chosen is None and not alone.checks[0].accuracy_passed and alone.checks[0].reproduced
 
@@ -286,11 +291,11 @@ async def test_a_withdrawn_test_cancels_the_candidates_other_measurements(tmp_pa
     bench = await Bench(tmp_path).build({})
     bench.toolbox.executor.gate.clear()
     selecting = asyncio.ensure_future(bench.selector().select(bench.candidates(both=False), START + 3600.0))
-    while len(bench.final_tests()) < 3:
+    while len(bench.final_tests()) < 2:
         await asyncio.sleep(0)
-    [accuracy] = [rid for rid, request in bench.final_tests().items() if request.kind is TestKind.ACCURACY]
+    [sweep] = [rid for rid, request in bench.final_tests().items() if request.kind is TestKind.SWEEP]
 
-    await bench.toolbox.cancel(accuracy)
+    await bench.toolbox.cancel(sweep)
     choice = await selecting
 
     assert "withdrawn" in choice.checks[0].error

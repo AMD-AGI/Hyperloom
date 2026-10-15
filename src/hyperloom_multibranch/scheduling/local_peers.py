@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The real peers of a session on one machine: the git experiment repository and the local hosted toolbox.
+"""The real peers of a session on one machine: the git experiment repository, the local hosted toolbox and the rule
+gate's session service on them.
 
 :func:`local_peers` builds them inside the session directory: the repository at ``MB-repo``, the toolbox's
 sandboxes, archive, submit log and measurement points under ``MB-toolbox``, and the patch and kernel files its
-environment compiler reads from the session's blob store at ``MB-blobs``. The specialist runtime's lifecycle comes from
+environment compiler reads, like the repository, from the session's blob store at ``MB-blobs``. The gate judges on the
+InferenceX rule at the workload's conc. The specialist runtime's lifecycle comes from
 a :data:`LifecycleFactory`; that runtime has no implementation yet, so :func:`load_peers` refuses and the command
 line fails before it creates anything.
 
@@ -27,20 +29,17 @@ from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
+from hyperloom_multibranch.rulegate.rules import InferenceXRule
+from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
-from hyperloom_multibranch.scheduling.peers import (
-    PeerFactory,
-    Peers,
-    PeerSetup,
-    PeersUnavailable,
-    git_root_writer,
-)
+from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.settings import Workload
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
 TOOLBOX_WRITER = "toolbox"
+GATE_WRITER = "rule-gate"
 CANONICAL_DIR = "canonical"
 POINTS_DIR = "points"
 
@@ -100,7 +99,7 @@ def local_peers(host: MeasurementHost, lifecycles: LifecycleFactory, setup: Peer
 
     layout, workload = setup.layout, setup.workload
     os.environ.update(workload_environment(workload))
-    repo = GitExperimentRepo(layout.repo)
+    repo = GitExperimentRepo(layout.repo, setup.blobs)
     canonical = default_canonical(layout.toolbox / CANONICAL_DIR, primary_concurrency=workload.conc)
     compiler = EnvironmentCompiler(setup.blobs, host.image_digest)
     spec = SpecContext(
@@ -123,7 +122,9 @@ def local_peers(host: MeasurementHost, lifecycles: LifecycleFactory, setup: Peer
         active_image_digest=host.image_digest,
         tp=workload.tp,
     )
-    return Peers(lifecycles(setup, repo, toolbox), toolbox, repo, git_root_writer(layout.repo))
+    gate_notebook = LocalNotebook(layout.notebook, Writer(Role.GATE, GATE_WRITER))
+    gate = GateService(gate_notebook, toolbox, InferenceXRule(gate_notebook, workload.conc))
+    return Peers(lifecycles(setup, repo, toolbox), toolbox, repo, gate)
 
 
 def mb_fake_measurement_host() -> MeasurementHost:
@@ -170,6 +171,7 @@ def load_peers() -> PeerFactory:
 
 
 __all__ = [
+    "GATE_WRITER",
     "MB_FAKE_MISSING_PEER_MODULES",
     "LifecycleFactory",
     "MeasurementHost",

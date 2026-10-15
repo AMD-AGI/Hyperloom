@@ -31,9 +31,9 @@ from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import ManifestFingerprint
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.codec import encode
-from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring
+from hyperloom_multibranch.notebook.rsi.session import FRONTIER_LOG, session_frontier
 from hyperloom_multibranch.scheduling.branches import BranchControl
-from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget
+from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget, budget_seconds
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.close import CloseReport, Closer
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
@@ -46,13 +46,11 @@ from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, Judge
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.llm import Completion
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_PRIMARY_METRIC
-from hyperloom_multibranch.scheduling.patches import PatchStore
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeerSetup
 from hyperloom_multibranch.scheduling.prelude import Prelude, PreludeFailed, PreludeResult
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.requests import SessionTests
 from hyperloom_multibranch.scheduling.roster import QUOTA_POLICY_VERSION, Roster
-from hyperloom_multibranch.scheduling.rule_judge import MbFakeRuleJudge
 from hyperloom_multibranch.scheduling.settings import RunSettings
 from hyperloom_multibranch.scheduling.stops import (
     TOOLBOX_CLOSE_SECONDS,
@@ -66,9 +64,6 @@ logger = logging.getLogger(__name__)
 
 SCHEDULER_WRITER = "scheduler"
 INTEGRATOR_WRITER = "integrator"
-#: The rule gate's role, which the scheduler's stand-in for the rule gate's judging service writes the baseline with;
-#: deleted with :class:`~hyperloom_multibranch.scheduling.rule_judge.MbFakeRuleJudge`.
-MB_FAKE_RULE_JUDGE_WRITER = "mb-fake-rule-judge"
 POLICY_VERSIONS = {"quota": QUOTA_POLICY_VERSION, "judge_prompt": JUDGE_PROMPT_VERSION}
 #: Stop reasons a session ends with when it ran its course; any other one, or an error, is a failed session.
 COMPLETED_REASONS = frozenset({SessionStopReason.TIME_EXHAUSTED, SessionStopReason.GLOBAL_CONVERGED})
@@ -126,39 +121,39 @@ class Session:
         self._clock = clock
         self._notebook = LocalNotebook(layout.notebook, Writer(Role.SCHEDULER, SCHEDULER_WRITER), clock=clock.now)
         merger = LocalNotebook(layout.notebook, Writer(Role.INTEGRATOR, INTEGRATOR_WRITER), clock=clock.now)
-        rules = LocalNotebook(layout.notebook, Writer(Role.GATE, MB_FAKE_RULE_JUDGE_WRITER), clock=clock.now)
         self._roster = Roster(settings.caps, layout.roster, clock)
         self._decisions = DecisionLog(layout.decisions, clock)
         desk = ForkDesk(self._roster, self._decisions)
         merges = DecisionLog(layout.merges, clock)
-        blobs = LocalBlobStore(layout.blobs)
-        patches = PatchStore(blobs)
-        peers = peer_factory(PeerSetup(layout, settings.workload, desk, processes, blobs))
+        peers = peer_factory(PeerSetup(layout, settings.workload, desk, processes, LocalBlobStore(layout.blobs)))
         self._toolbox = peers.toolbox
-        tests = SessionTests(peers.toolbox, self._notebook, clock)
-        judge = MbFakeRuleJudge(rules, tests)
+        tests = SessionTests(peers.toolbox, clock)
+        budget = budget_seconds(settings.max_hours)
         self._branches = BranchControl(
             self._roster, self._notebook, peers.lifecycle, peers.toolbox, peers.repo, processes, self._decisions, clock
         )
         self._stopper = SessionStopper(self._roster, self._branches, peers.toolbox, processes, self._decisions, clock)
-        progress = FrontierScoring(self._notebook, FrontierPolicy(metric=MB_FAKE_PRIMARY_METRIC))
-        resolver = LlmPatchResolver(resolver_completion, patches)
+        progress = session_frontier(
+            self._notebook, MB_FAKE_PRIMARY_METRIC, budget_seconds=budget, log_path=layout.reports / FRONTIER_LOG
+        )
+        resolver = LlmPatchResolver(resolver_completion, peers.repo)
         self._prelude = Prelude(
-            layout, processes, self._notebook, peers.write_root, patches, judge, self._decisions, clock
+            layout, processes, self._notebook, peers.repo, peers.gate, tests, self._decisions, clock
         )
         self._explorer = Explorer(
             self._roster,
             self._branches,
             desk,
             Judge(judge_completion, layout.judge, clock),
-            Integrator(merger, peers.repo, tests, judge, resolver, merges),
+            Integrator(merger, peers.repo, tests, peers.gate, resolver, merges),
             progress,
+            self._notebook,
             self._decisions,
             settings.judge_interval_seconds,
             clock,
         )
-        self._selector = FinalSelector(tests, judge, settings.workload, MB_FAKE_PRIMARY_METRIC, clock)
-        closing = exports(layout, self._notebook, peers.repo, patches, progress, MB_FAKE_PRIMARY_METRIC)
+        self._selector = FinalSelector(tests, peers.gate, settings.workload, MB_FAKE_PRIMARY_METRIC, clock)
+        closing = exports(layout, self._notebook, peers.repo, progress, MB_FAKE_PRIMARY_METRIC, budget)
         self._closer = Closer(layout, self._stopper, closing, clock)
         self._signals = StopSignals()
 
@@ -239,7 +234,11 @@ class Session:
         deadlines = budget.phases_after_prelude(self._clock.now())
         self._phase("explore", explore_end=deadlines.explore_end, final_end=deadlines.final_end)
         window = ExploreWindow(
-            prelude.root_commit, prelude.profile.roofline_ceiling, deadlines.explore_end, budget.deadline
+            prelude.root_commit,
+            prelude.profile.roofline_ceiling,
+            deadlines.explore_end,
+            budget.deadline,
+            budget.total_seconds,
         )
         reason = await self._explorer.run(window)
         candidates = await self._final_candidates()

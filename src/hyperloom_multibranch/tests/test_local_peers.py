@@ -17,6 +17,7 @@ from hyperloom_multibranch.contracts.fork import Admission, AdmissionStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
+from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.layout import SESSION_PREFIX, create_session
 from hyperloom_multibranch.scheduling.local_peers import (
@@ -97,8 +98,11 @@ async def test_the_real_peers_live_inside_the_session_directory(
         assert isinstance(peers.toolbox, LocalHostedToolbox) and isinstance(peers.repo, GitExperimentRepo)
         assert (layout.toolbox / "canonical" / "canonical.yaml").is_file()
         assert {name: os.environ[name] for name in workload_environment(WORKLOAD)} == workload_environment(WORKLOAD)
-        root = await peers.write_root(Recipe(MB_FAKE_BASE_IMAGE_DIGEST))
+        root = await peers.repo.init_root(Recipe(MB_FAKE_BASE_IMAGE_DIGEST))
         assert await peers.repo.head(INTEGRATION_BRANCH) == root
+        patch = await peers.repo.store_patch("sglang", "--- a/x\n+++ b/x\n")
+        assert LocalBlobStore(layout.blobs).get(patch.sha256) == b"--- a/x\n+++ b/x\n"
+        assert isinstance(peers.gate, GateService) and await peers.gate.baseline_test_count() == BASELINE_TESTS
         await peers.toolbox.start()
         await peers.toolbox.set_policy(QueuePolicy(per_branch_k=1, global_concurrency=2))
         state = await peers.toolbox.queue_state()

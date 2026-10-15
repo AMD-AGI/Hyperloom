@@ -61,6 +61,7 @@ def report_document(report: CloseReport, session_id: str, closed_at: float) -> d
         if exports is None
         else {
             "kb_write_back": encode(exports.kb_write_back),
+            "knowledge": exports.knowledge.document(),
             "breakdown": str(exports.breakdown),
             "dashboard": {"json": str(exports.dashboard.json), "html": str(exports.dashboard.html)},
         },
@@ -112,8 +113,11 @@ def _export_lines(exports: CloseExports | None) -> list[str]:
     if exports is None:
         return ["Exports: not finished"]
     kb = exports.kb_write_back
+    knowledge = exports.knowledge
+    steps = {"Experiences": knowledge.experiences, "Learnings": knowledge.learnings, "Archive": knowledge.archive}
     return [
         f"Recipe KB write-back: {kb.status} {kb.reason}".rstrip(),
+        *(f"{name}: {step.status} {step.reason}".rstrip() for name, step in steps.items()),
         f"Breakdown: {exports.breakdown}",
         f"Dashboard: {exports.dashboard.html}",
     ]

@@ -10,10 +10,11 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.roster import (
-    UNLISTED_BRANCH_K,
     BranchOrigin,
     BranchStatus,
     BranchStop,
@@ -23,6 +24,7 @@ from hyperloom_multibranch.scheduling.roster import (
     RosterFull,
     StopCause,
 )
+from hyperloom_multibranch.toolbox.queue import BRANCH_STOPPED, WorkQueue
 
 NOW = 1000.0
 ROOT = "root"
@@ -115,7 +117,11 @@ def test_unknown_branch_and_duplicate_open_raise(tmp_path: Path) -> None:
         roster.open(branch, origin=BranchOrigin.FIRST_BATCH, start_commit=ROOT, k=1)
 
 
-def test_quota_covers_started_live_branches_with_integration(tmp_path: Path) -> None:
+def _submitted_by(queue: WorkQueue, branch: str) -> None:
+    queue.check_branch_listed(TestRequest(TestKind.TEST, Purpose.EXPLORE, branch, ROOT))
+
+
+def test_quota_lists_only_started_live_branches_and_the_toolbox_refuses_the_rest(tmp_path: Path) -> None:
     roster = _roster(tmp_path, max_branches=3)
     roster.add_integration(ROOT, k=1)
     running = _open(roster, k=2)
@@ -126,19 +132,14 @@ def test_quota_covers_started_live_branches_with_integration(tmp_path: Path) -> 
     policy = roster.quota_policy()
     assert policy.global_concurrency == 8
     assert dict(policy.branch_k) == {INTEGRATION_BRANCH: 1, running: 2}
-    assert policy.k_for(stopped) == policy.k_for(fork) == UNLISTED_BRANCH_K
+    queue = WorkQueue(policy)
+    _submitted_by(queue, running)
+    for refused in (stopped, fork):
+        with pytest.raises(RequestRejected) as rejection:
+            _submitted_by(queue, refused)
+        assert rejection.value.code == BRANCH_STOPPED
     assert roster.started(fork, "fix").status is BranchStatus.RUNNING
     assert roster.quota_policy().k_for(fork) == 1
-
-
-def test_integration_takes_the_global_cap_while_no_specialist_runs(tmp_path: Path) -> None:
-    roster = _roster(tmp_path)
-    roster.add_integration(ROOT, k=1)
-    assert roster.quota_policy().k_for(INTEGRATION_BRANCH) == 8
-    branch = _open(roster)
-    assert roster.quota_policy().k_for(INTEGRATION_BRANCH) == 1
-    roster.stop(branch, _judge_stop())
-    assert roster.quota_policy().k_for(INTEGRATION_BRANCH) == 8
 
 
 def test_every_k_of_the_quota_is_at_least_one_and_under_the_caps(tmp_path: Path) -> None:

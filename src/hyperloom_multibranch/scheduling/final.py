@@ -5,9 +5,9 @@
 
 The candidates are the integration head and the specialist head with the highest recorded value, whatever stopped
 its branch. Each is validated through the toolbox as a session measurement: one ``SWEEP`` test over the concs
-:data:`SWEEP_FACTORS` places around the workload's conc, read per conc from its rounds, an accuracy test held to the
-accuracy gate, and a cold-start reproduction judged by the rule against the commit's own recorded value. The toolbox
-measures a sweep over the concs its request names and the primary one alone when it names none, so FINAL names them.
+:data:`SWEEP_FACTORS` places around the workload's conc, read per conc from its rounds, and a cold-start reproduction
+the rule gate judges against the commit's own recorded value and holds to the accuracy gate. The toolbox measures a
+sweep over the concs its request names and the primary one alone when it names none, so FINAL names them.
 The primary operating point (the workload's conc) decides; a candidate
 whose other sweep points fall more than :data:`MB_SWEEP_DEGRADATION_PCT` below the other candidate's at the same conc
 is passed over while the other one does not degrade in turn.
@@ -21,15 +21,16 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
-from hyperloom.contracts.measurement import Purpose, TestKind
+from hyperloom.contracts.measurement import Purpose, TestKind, TestResult
+from hyperloom_multibranch.contracts.gate import NotMeasured, SessionGate
+from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.records import BranchProgress, TestRecord
-from hyperloom_multibranch.contracts.toolbox import RequestRejected
+from hyperloom_multibranch.contracts.notebook.records import BranchProgress
+from hyperloom_multibranch.contracts.toolbox import RequestRejected, TestWithdrawn
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_regression_passes
-from hyperloom_multibranch.scheduling.requests import SessionTests, TestWithdrawn, integration_test_request, together
+from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request, together
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind
-from hyperloom_multibranch.scheduling.rule_judge import MbFakeRuleJudge, NotMeasured, measured_rounds
 from hyperloom_multibranch.scheduling.settings import Workload
 
 #: How far below the other candidate a non-primary sweep point may fall before the candidate is passed over.
@@ -37,6 +38,8 @@ MB_SWEEP_DEGRADATION_PCT = 5.0
 
 #: The sweep's concs as multiples of the workload's conc; the primary operating point is one of them.
 SWEEP_FACTORS = (0.5, 1.0, 2.0)
+
+MEASURE_PHASE = "measure"
 
 INTEGRATION_LABEL = "integration"
 BEST_BRANCH_LABEL = "best_branch"
@@ -48,12 +51,12 @@ def sweep_concs(conc: int) -> tuple[int, ...]:
     return tuple(sorted({max(round(conc * factor), 1) for factor in SWEEP_FACTORS}))
 
 
-def sweep_curve(record: TestRecord, metric: str) -> dict[int, float]:
-    """The mean of ``metric`` over a sweep's measured rounds at each conc; a conc it measured nothing at is left out."""
+def sweep_curve(result: TestResult, metric: str) -> dict[int, float]:
+    """The mean of ``metric`` over a sweep's measure rounds at each conc; a conc it measured nothing at is left out."""
 
     values: defaultdict[int, list[float]] = defaultdict(list)
-    for row in measured_rounds(record, metric):
-        if row.concurrency is not None:
+    for row in result.rounds:
+        if row.phase == MEASURE_PHASE and row.concurrency is not None and metric in row.metrics:
             values[row.concurrency].append(row.metrics[metric])
     return {conc: statistics.fmean(measured) for conc, measured in values.items()}
 
@@ -185,14 +188,21 @@ def pick_final(checks: tuple[CandidateCheck, ...], metric: str, conc: int) -> Fi
     return FinalChoice(chosen.candidate, marked, reason, metric, conc)
 
 
-class FinalSelector:
-    """Validates the candidates through the toolbox and the rule."""
+@dataclass(frozen=True)
+class _Reproduction:
+    """A cold start of a candidate: ``reproduced`` when it holds the commit's own recorded value, that is anything but
+    a regression past the bar, and ``accuracy_passed`` when it clears the accuracy gate."""
 
-    def __init__(
-        self, tests: SessionTests, judge: MbFakeRuleJudge, workload: Workload, metric: str, clock: Clock
-    ) -> None:
+    reproduced: bool
+    accuracy_passed: bool
+
+
+class FinalSelector:
+    """Validates the candidates through the toolbox and the rule gate."""
+
+    def __init__(self, tests: SessionTests, gate: SessionGate, workload: Workload, metric: str, clock: Clock) -> None:
         self._tests = tests
-        self._judge = judge
+        self._gate = gate
         self._workload = workload
         self._metric = metric
         self._clock = clock
@@ -213,34 +223,37 @@ class FinalSelector:
         except RequestRejected as exc:
             return CandidateCheck(candidate, error=f"the toolbox refused a validation test: {exc}")
         except NotMeasured as exc:
-            return CandidateCheck(candidate, error=f"the reproduction measured nothing: {exc}")
+            return CandidateCheck(candidate, error=f"the gate had nothing to judge: {exc}")
 
     async def _check(self, candidate: FinalCandidate) -> CandidateCheck:
         sweep = asyncio.ensure_future(self._sweep(candidate.commit))
-        accuracy = asyncio.ensure_future(self._accuracy_passes(candidate.commit))
-        repro = asyncio.ensure_future(self._reproduces(candidate.commit))
-        await together(sweep, accuracy, repro)
+        repro = asyncio.ensure_future(self._reproduction(candidate.commit))
+        await together(sweep, repro)
         check = CandidateCheck(
-            candidate, sweep.result(), accuracy.result(), repro.result(), mb_fake_regression_passes(candidate.commit)
+            candidate,
+            sweep.result(),
+            repro.result().accuracy_passed,
+            repro.result().reproduced,
+            mb_fake_regression_passes(candidate.commit),
         )
         if self._workload.conc not in check.curve:
             return replace(check, error=f"the sweep has no {self._metric} at the primary conc {self._workload.conc}")
         return check
 
     async def _sweep(self, commit: str) -> dict[int, float]:
-        swept = await self._measure(TestKind.SWEEP, commit, concurrency=sweep_concs(self._workload.conc))
+        concs = sweep_concs(self._workload.conc)
+        swept = await self._tests.result(
+            integration_test_request(TestKind.SWEEP, Purpose.FINAL, commit, concurrency=concs)
+        )
         return sweep_curve(swept, self._metric)
 
-    async def _measure(self, kind: TestKind, commit: str, concurrency: tuple[int, ...] = ()) -> TestRecord:
-        accuracy = kind is TestKind.ACCURACY
-        request = integration_test_request(kind, Purpose.FINAL, commit, accuracy=accuracy, concurrency=concurrency)
-        return await self._tests.run(request)
+    async def _reproduction(self, commit: str) -> _Reproduction:
+        request = integration_test_request(TestKind.TEST, Purpose.FINAL, commit)
+        return await self._tests.judged(request, self._judge_reproduction)
 
-    async def _accuracy_passes(self, commit: str) -> bool:
-        return await self._judge.accuracy_passes(await self._measure(TestKind.ACCURACY, commit))
-
-    async def _reproduces(self, commit: str) -> bool:
-        return await self._judge.reproduces(await self._measure(TestKind.TEST, commit))
+    async def _judge_reproduction(self, request_id: str) -> _Reproduction:
+        judgement = await self._gate.compare(request_id)
+        return _Reproduction(judgement.verdict is not Verdict.REGRESSED, await self._gate.accuracy_passes(request_id))
 
 
 __all__ = [

@@ -34,6 +34,11 @@ MB_SECONDS_PER_HOUR = 3600.0
 _SHARE_TOTAL = MB_EXPLORE_SHARE + MB_FINAL_SHARE + MB_CLOSE_SHARE
 
 
+def budget_seconds(max_hours: float) -> float:
+    """``--max-hours`` in seconds; 0 means unlimited, capped like the main flow."""
+    return (max_hours or MB_UNLIMITED_HOURS) * MB_SECONDS_PER_HOUR
+
+
 class BudgetExhausted(RuntimeError):
     """Too little wall-clock time is left to start the phase that asked."""
 
@@ -55,9 +60,8 @@ class SessionBudget:
 
     @classmethod
     def from_hours(cls, max_hours: float, started_at: float) -> SessionBudget:
-        """Build from ``--max-hours``, which the command line checked; 0 means unlimited, capped like the main flow."""
-        hours = max_hours or MB_UNLIMITED_HOURS
-        return cls(started_at=started_at, total_seconds=hours * MB_SECONDS_PER_HOUR)
+        """Build from ``--max-hours``, which the command line checked."""
+        return cls(started_at=started_at, total_seconds=budget_seconds(max_hours))
 
     @property
     def deadline(self) -> float:
@@ -131,4 +135,5 @@ __all__ = [
     "HardStop",
     "PhaseDeadlines",
     "SessionBudget",
+    "budget_seconds",
 ]

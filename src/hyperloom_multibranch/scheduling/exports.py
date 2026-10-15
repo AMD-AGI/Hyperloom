@@ -1,11 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The CLOSE exports: the Recipe KB write-back of the final choice, the session breakdown and the dashboard.
+"""The CLOSE exports: the Recipe KB write-back of the final choice, the session's knowledge, the session breakdown
+and the dashboard.
 
-They read a notebook that no longer changes. The write-back goes first because the breakdown records its outcome
-next to the chosen commit's recipe and how FINAL chose it; ``session_breakdown.json`` lands in ``MB-reports/`` and the
-dashboard, with frontier-scored progress, in ``MB-dashboard/``.
+They read a notebook that no longer changes. The write-back goes first, then the notebook's knowledge steps (the
+Experiences and the specialists' learnings to the Experience KB, the search tree to the archive), because the
+breakdown records both outcomes next to the chosen commit's recipe and how FINAL chose it; ``session_breakdown.json``
+and the knowledge steps' receipts land in ``MB-reports/`` and the dashboard, with frontier-scored progress, in
+``MB-dashboard/``.
 """
 
 from __future__ import annotations
@@ -29,9 +32,9 @@ from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.dashboard import DashboardFiles, build_dashboard, write_dashboard
 from hyperloom_multibranch.notebook.knowledge.breakdown import build_breakdown, write_breakdown
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import SKIPPED, FinalRecipe, publish_final_recipe
+from hyperloom_multibranch.notebook.rsi.session import KnowledgeClose, close_knowledge
 from hyperloom_multibranch.scheduling.final import FinalChoice
 from hyperloom_multibranch.scheduling.layout import SessionLayout
-from hyperloom_multibranch.scheduling.patches import PatchStore
 
 #: The single-lineage CLOSE's status when no Recipe KB is configured.
 KB_DISABLED = "disabled"
@@ -40,9 +43,10 @@ KB_FAILED = "failed"
 
 @dataclass(frozen=True)
 class CloseExports:
-    """What CLOSE handed on: the Recipe KB write-back, the breakdown file and the dashboard files."""
+    """What CLOSE handed on: the Recipe KB write-back, the knowledge steps, the breakdown file and the dashboard files."""
 
     kb_write_back: RemoteWriteResult
+    knowledge: KnowledgeClose
     breakdown: Path
     dashboard: DashboardFiles
 
@@ -50,8 +54,9 @@ class CloseExports:
 class SessionExports:
     """Exports one stopped session into ``layout``; ``kb_client`` is ``None`` when no Recipe KB is configured.
 
-    ``notebook`` is the scheduler's handle, ``patches`` holds the files the chosen recipe names, ``progress`` is the
-    frontier-scored progress and ``metric`` the recorded-value metric.
+    ``notebook`` is the scheduler's handle, ``progress`` the frontier-scored progress, ``metric`` the recorded-value
+    metric and ``budget_seconds`` the session's budget. The Experience KB and the archive
+    are the environment's.
     """
 
     def __init__(
@@ -59,9 +64,9 @@ class SessionExports:
         layout: SessionLayout,
         notebook: Notebook,
         repo: ExperimentRepo,
-        patches: PatchStore,
         progress: ProgressQuery,
         metric: str,
+        budget_seconds: float,
         *,
         kb_client: RemoteRecipeClient | None,
     ) -> None:
@@ -69,9 +74,9 @@ class SessionExports:
         self._kb_client = kb_client
         self._notebook = notebook
         self._repo = repo
-        self._patches = patches
         self._progress = progress
         self._metric = metric
+        self._budget_seconds = budget_seconds
 
     async def export(self, final: FinalChoice | None, queue: QueueState | None) -> CloseExports:
         """Write the exports; ``queue`` is what the toolbox reported after the stop."""
@@ -79,11 +84,24 @@ class SessionExports:
         snapshot = await self._notebook.snapshot()
         chosen = await self._final_recipe(final)
         kb_write_back = await self._publish(snapshot, chosen)
+        knowledge = await asyncio.to_thread(
+            close_knowledge,
+            snapshot,
+            self._metric,
+            budget_seconds=self._budget_seconds,
+            receipts=self._layout.reports,
+        )
         selection = encode(final) if final is not None else None
-        document = build_breakdown(snapshot, final=chosen, selection=selection, kb_write_back=kb_write_back)
+        document = build_breakdown(
+            snapshot,
+            final=chosen,
+            selection=selection,
+            kb_write_back=kb_write_back,
+            knowledge=knowledge.document(),
+        )
         breakdown = write_breakdown(self._layout.reports, document)
-        dashboard = build_dashboard(snapshot, await self._progress.progress(), metric=self._metric, queue=encode(queue))
-        return CloseExports(kb_write_back, breakdown, write_dashboard(self._layout.dashboard, dashboard))
+        dashboard = build_dashboard(snapshot, await self._progress.progress(), metric=self._metric, queue=queue)
+        return CloseExports(kb_write_back, knowledge, breakdown, write_dashboard(self._layout.dashboard, dashboard))
 
     async def _final_recipe(self, final: FinalChoice | None) -> FinalRecipe | None:
         """The chosen commit's recipe, whose files the write-back checks out into the layout's final checkout."""
@@ -100,15 +118,15 @@ class SessionExports:
         if final_recipe is None:
             return RemoteWriteResult(SKIPPED, "no final choice")
         try:
-            await asyncio.to_thread(self._patches.checkout, final_recipe.recipe, final_recipe.files_root)
+            await self._repo.checkout(final_recipe.commit_id, final_recipe.files_root)
             return await asyncio.to_thread(publish_final_recipe, self._kb_client, snapshot, final_recipe)
         except (RecipeError, RemoteRecipeValidationError, KBStoreError, BlobError, OSError) as exc:
             return RemoteWriteResult(KB_FAILED, f"{type(exc).__name__}: {exc}")
 
 
-#: Builds a session's exports from the session's layout, scheduler notebook handle, repository, patch store, progress
-#: and metric.
-ExportsFactory = Callable[[SessionLayout, Notebook, ExperimentRepo, PatchStore, ProgressQuery, str], SessionExports]
+#: Builds a session's exports from the session's layout, scheduler notebook handle, repository, progress, metric and
+#: budget.
+ExportsFactory = Callable[[SessionLayout, Notebook, ExperimentRepo, ProgressQuery, str, float], SessionExports]
 
 
 def exports_from_env() -> ExportsFactory:

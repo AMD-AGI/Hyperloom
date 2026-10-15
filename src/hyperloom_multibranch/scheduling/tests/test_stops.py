@@ -14,11 +14,13 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.proctree import descendants, running
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import Recipe
+from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
-from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
+from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling.branches import BranchControl
@@ -36,6 +38,7 @@ from hyperloom_multibranch.scheduling.roster import (
 )
 from hyperloom_multibranch.scheduling.stops import STOP_OVERRAN, SessionStopper, SessionStopReason, StopSignals
 from hyperloom_multibranch.scheduling.tests.peer_fakes import TOOLBOX_DOWN, DownToolbox, MbFakeLifecycle
+from hyperloom_multibranch.toolbox.queue import BRANCH_STOPPED
 
 NOW = 1_700_000_000.0
 HARD_STOP = NOW + 60.0
@@ -44,32 +47,49 @@ SHORT_GRACE = 0.3
 JUDGE_STOP = BranchStop(StopCause.JUDGE, "no headroom", NOW - 1)
 
 
+class KeepingToolbox(DownToolbox):
+    """A toolbox that withdraws nothing it was asked to; a failure double, not a placeholder."""
+
+    async def cancel_branch(self, branch_id: str, reason: str = "branch stopped") -> int:
+        self.cancelled.append(branch_id)
+        return 0
+
+    async def withdraw_all(self, reason: str = "session stopped") -> tuple[str, ...]:
+        self.withdrawals.append(reason)
+        return ()
+
+
 class Stage:
     """A roster with the integration branch, ``b01`` running, ``b02`` stopped by the judge and ``b03`` an admitted fork,
     stopped through the real :class:`BranchControl` over the peer stand-ins."""
 
-    def __init__(self, tmp_path: Path, lifecycle: MbFakeLifecycle | None = None) -> None:
+    def __init__(
+        self,
+        tmp_path: Path,
+        lifecycle: MbFakeLifecycle | None = None,
+        toolbox_type: type[DownToolbox] = DownToolbox,
+    ) -> None:
         clock = Clock(now=lambda: NOW)
         self.roster = Roster(RosterCaps(4, 2, 8), tmp_path / "MB-roster.json", clock)
         self.processes = ProcessRegistry(tmp_path / "MB-pids.jsonl", clock)
         self.decisions_file = tmp_path / "MB-decisions.jsonl"
         decisions = DecisionLog(self.decisions_file, clock)
         self.notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.SCHEDULER, "scheduler"), clock=clock.now)
-        self.toolbox = DownToolbox(
+        self.toolbox = toolbox_type(
             LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"), clock=clock.now)
         )
         self.lifecycle = lifecycle or MbFakeLifecycle()
         self.repo_path = tmp_path / "repo"
         self.root = ""
-        repo = GitExperimentRepo(self.repo_path)
+        self.repo = GitExperimentRepo(self.repo_path, LocalBlobStore(tmp_path / "blobs"))
         self.branches = BranchControl(
-            self.roster, self.notebook, self.lifecycle, self.toolbox, repo, self.processes, decisions, clock
+            self.roster, self.notebook, self.lifecycle, self.toolbox, self.repo, self.processes, decisions, clock
         )
         self.stopper = SessionStopper(self.roster, self.branches, self.toolbox, self.processes, decisions, clock)
 
     async def opened(self) -> Stage:
         baseline = Recipe(MB_FAKE_BASE_IMAGE_DIGEST)
-        self.root = await (await GitExperimentRepo.create(self.repo_path, baseline)).head(INTEGRATION_BRANCH)
+        self.root = await self.repo.init_root(baseline)
         await self.notebook.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=self.root))
         self.roster.add_integration(self.root, k=1)
         await self.branches.open_branches(2, self.root, 1, BranchOrigin.FIRST_BATCH)
@@ -112,7 +132,7 @@ async def test_end_exploration_stops_open_specialists_and_keeps_integration(tmp_
     fork = _ended_with_b01(SessionStopReason.TIME_EXHAUSTED)
     assert session.stops() == {INTEGRATION_BRANCH: None, "b01": ended, "b02": JUDGE_STOP, "b03": fork}
     assert session.lifecycle.stopped == ["b01"]
-    assert session.toolbox.policies[-1].k_for(INTEGRATION_BRANCH) == session.roster.caps.max_parallel_tests
+    assert dict(session.toolbox.policies[-1].branch_k) == {INTEGRATION_BRANCH: 1}
     assert session.roster.free_slots() == 0
     with pytest.raises(RosterFull):
         session.roster.open("b04", origin=BranchOrigin.FORK, start_commit="", k=1)
@@ -135,7 +155,8 @@ async def test_stop_everything_withdraws_every_branch_closes_the_toolbox_and_lea
 
     report = await session.stopper.stop_everything(SessionStopReason.SIGNAL, HARD_STOP)
 
-    assert set(session.toolbox.cancelled) == {"b01", "b02", "b03", INTEGRATION_BRANCH}
+    assert session.toolbox.withdrawals == [SessionStopReason.SIGNAL.value]
+    assert set(session.toolbox.cancelled) == {"b01", "b03", INTEGRATION_BRANCH}
     assert session.toolbox.closed == 1
     ended = _ended(SessionStopReason.SIGNAL)
     fork = _ended_with_b01(SessionStopReason.SIGNAL)
@@ -167,7 +188,7 @@ async def test_a_stop_that_overruns_the_hard_stop_is_cut_and_every_process_kille
 
     assert STOP_OVERRAN in report.failures and not report.clean
     assert session.lifecycle.stopped == ["b01"]
-    assert set(session.toolbox.cancelled) == {"b01", "b02", "b03", INTEGRATION_BRANCH}
+    assert session.toolbox.withdrawals == [SessionStopReason.TIME_EXHAUSTED.value]
     assert not any(running(pid) for pid in pids)
     assert session.roster.closed
 
@@ -184,25 +205,35 @@ async def test_a_failing_toolbox_is_reported_and_every_branch_still_stopped(tmp_
     assert sorted(session.lifecycle.stopped) == ["b01"]
 
 
-async def test_a_test_submitted_after_its_branch_stopped_is_withdrawn(tmp_path: Path) -> None:
+async def test_a_test_of_a_stopped_branch_is_refused(tmp_path: Path) -> None:
+    session = await Stage(tmp_path).opened()
+
+    with pytest.raises(RequestRejected) as refused:
+        await session.toolbox.submit_test(TestRequest(TestKind.TEST, Purpose.EXPLORE, "b02", session.root))
+
+    assert refused.value.code == BRANCH_STOPPED
+
+
+async def test_every_test_is_withdrawn_whatever_branch_it_is_of(tmp_path: Path) -> None:
     session = await Stage(tmp_path).opened()
     session.toolbox.executor.gate.clear()
-    late = await session.toolbox.submit_test(TestRequest(TestKind.TEST, Purpose.EXPLORE, "b02", session.root))
+    held = await session.toolbox.submit_test(TestRequest(TestKind.TEST, Purpose.EXPLORE, "b01", session.root))
+    session.lifecycle.hanging = frozenset({"b01"})
 
-    report = await session.stopper.stop_everything(SessionStopReason.GLOBAL_CONVERGED, HARD_STOP)
+    report = await session.stopper.stop_everything(SessionStopReason.GLOBAL_CONVERGED, NOW + SHORT_GRACE)
 
-    assert late in session.toolbox.withdrawn
-    assert report.queue is not None and report.queue.running == 0 and report.clean
+    assert STOP_OVERRAN in report.failures
+    assert held in session.toolbox.withdrawn and "b01" not in session.toolbox.cancelled
 
 
 async def test_a_test_the_toolbox_still_holds_makes_the_report_unclean(tmp_path: Path) -> None:
-    session = await Stage(tmp_path).opened()
+    session = await Stage(tmp_path, toolbox_type=KeepingToolbox).opened()
     session.toolbox.executor.gate.clear()
-    await session.toolbox.submit_test(TestRequest(TestKind.TEST, Purpose.EXPLORE, "unlisted", session.root))
+    await session.toolbox.submit_test(TestRequest(TestKind.TEST, Purpose.EXPLORE, "b01", session.root))
 
     report = await session.stopper.stop_everything(SessionStopReason.GLOBAL_CONVERGED, HARD_STOP)
 
-    assert report.queue is not None and report.queue.running_by_branch == {"unlisted": 1}
+    assert report.queue is not None and report.queue.running_by_branch == {"b01": 1}
     assert not report.clean
     assert report.leftovers == ()
 

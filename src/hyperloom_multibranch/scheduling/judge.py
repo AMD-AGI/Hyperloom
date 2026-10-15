@@ -3,8 +3,8 @@
 
 """The judge: an LLM that, inside the scheduler's hard caps, decides the branches' K, the opening count and the stops.
 
-The scheduler hands the judge a :class:`JudgeView` (the roster, each branch's frontier progress, the remaining budget
-and the integration branch's recorded value). The judge answers with one JSON object, which :func:`parse_decision`
+The scheduler hands the judge a :class:`JudgeView` (the roster, each branch's frontier progress, the remaining budget,
+the integration branch's recorded value and how similar archived sessions went). The judge answers with one JSON object, which :func:`parse_decision`
 reads and :func:`cap_decision` cuts to the caps and to the branches that are still live. A failed call or an
 unreadable reply gives ``None``, and the scheduler keeps the status quo. The judge never calls a peer; the scheduler
 applies its decision.
@@ -24,7 +24,7 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, RosterCaps
 
-JUDGE_PROMPT_VERSION = "mb1-judge-1"
+JUDGE_PROMPT_VERSION = "mb1-judge-2"
 
 _KEY_OPEN = "open"
 _KEY_OPEN_K = "open_k"
@@ -57,7 +57,8 @@ List only the branches whose K should change. Branches not named keep their K an
 class JudgeView:
     """What the judge sees; ``opening`` is true only for the call that sizes the opening batch.
 
-    ``free_slots`` is the roster's own count of branches that may still be opened.
+    ``free_slots`` is the roster's own count of branches that may still be opened; ``history`` is the notebook's
+    digest of similar archived sessions, empty when the archive holds none.
     """
 
     now: float
@@ -71,6 +72,7 @@ class JudgeView:
     metric: str
     opening: bool
     free_slots: int
+    history: str
 
 
 @dataclass(frozen=True)
@@ -162,7 +164,8 @@ def render_prompt(view: JudgeView) -> str:
         },
         _KEY_BRANCHES: [_branch_row(entry, progress.get(entry.branch)) for entry in view.roster],
     }
-    return f"Session state:\n{json.dumps(state, indent=2, sort_keys=True)}\n\n{_REPLY_FORMAT}"
+    history = f"How similar past sessions went:\n{view.history}\n\n" if view.history else ""
+    return f"Session state:\n{json.dumps(state, indent=2, sort_keys=True)}\n\n{history}{_REPLY_FORMAT}"
 
 
 def _int_field(item: Mapping[str, object], key: str) -> int:

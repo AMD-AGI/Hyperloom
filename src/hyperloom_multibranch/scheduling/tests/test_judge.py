@@ -61,7 +61,9 @@ ROSTER = (
 OPENING_ROSTER = (_entry(INTEGRATION_BRANCH, kind=BranchKind.INTEGRATION),)
 
 
-def _view(*, opening: bool = False, roster: tuple[BranchEntry, ...] = ROSTER, free_slots: int = 2) -> JudgeView:
+def _view(
+    *, opening: bool = False, roster: tuple[BranchEntry, ...] = ROSTER, free_slots: int = 2, history: str = ""
+) -> JudgeView:
     return JudgeView(
         now=NOW,
         explore_remaining_seconds=3600.0,
@@ -86,6 +88,7 @@ def _view(*, opening: bool = False, roster: tuple[BranchEntry, ...] = ROSTER, fr
         metric=METRIC,
         opening=opening,
         free_slots=free_slots,
+        history=history,
     )
 
 
@@ -108,6 +111,16 @@ def test_prompt_shows_frontier_roster_caps_budget_and_headroom() -> None:
     assert state["session_remaining_seconds"] == 4000
     assert state["integration"]["headroom_pct"] == 75.0
     assert '"stop_session"' in prompt and "ONE JSON object" in JUDGE_SYSTEM_PROMPT
+
+
+def test_prompt_carries_the_archive_digest_only_when_there_is_one() -> None:
+    digest = "3 similar sessions: kernel-layer branches paid off after an hour"
+
+    with_history = render_prompt(_view(history=digest))
+
+    assert f"How similar past sessions went:\n{digest}" in with_history
+    assert with_history.index(digest) < with_history.index("Reply with")
+    assert "similar past sessions" not in render_prompt(_view())
 
 
 def test_parse_reads_the_last_decision_object() -> None:

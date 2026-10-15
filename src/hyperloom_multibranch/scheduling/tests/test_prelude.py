@@ -11,17 +11,16 @@ import re
 import sys
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 import hyperloom
-from hyperloom.contracts.measurement import Purpose, RoundValue, TestKind, TestRequest, TestResult, Validity
+from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import TestRecord
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
@@ -30,14 +29,17 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_PRIMARY_METRIC
-from hyperloom_multibranch.scheduling.patches import PatchStore
-from hyperloom_multibranch.scheduling.peers import git_root_writer
+from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
 from hyperloom_multibranch.scheduling.prelude import Prelude, PreludeFailed, PreludeResult, prelude_argv
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
 from hyperloom_multibranch.scheduling.requests import SessionTests
-from hyperloom_multibranch.scheduling.rule_judge import MB_FAKE_BASELINE_TESTS, MbFakeRuleJudge
 from hyperloom_multibranch.scheduling.settings import Workload
-from hyperloom_multibranch.scheduling.tests.peer_fakes import LAUNCH_FLAG, MbFakeChildRegistry, RecordingToolbox
+from hyperloom_multibranch.scheduling.tests.peer_fakes import (
+    LAUNCH_FLAG,
+    MbFakeChildRegistry,
+    RecordingToolbox,
+    session_gate,
+)
 from hyperloom_multibranch.toolbox.fake_model import Fate
 from hyperloom_multibranch.scheduling.tests.child_sessions import (
     PATCH_TEXT,
@@ -69,41 +71,30 @@ class StubbornRegistry(ProcessRegistry):
         return await super().spawn(STUBBORN_CHILD, branch=branch, log=log)
 
 
-class ZeroThroughputTests:
-    """Settles every test as measuring an output throughput of zero; a failure double, not a placeholder."""
-
-    def __init__(self) -> None:
-        self.settled = 0
-
-    async def run(self, request: TestRequest) -> TestRecord:
-        self.settled += 1
-        accepted = request.accepted(f"zero-{self.settled}")
-        measured = RoundValue("measure", None, {MB_FAKE_PRIMARY_METRIC: 0.0})
-        return TestRecord(accepted, TestResult(accepted.request_id, Validity.SUCCEEDED, rounds=(measured,)))
-
-
 @dataclass
 class PreludePeers:
-    """The repository, patch store, toolbox and rule PRELUDE works with, on the session's notebook; ``tests`` waits
-    for the toolbox's outcomes without real sleeps."""
+    """The repository, toolbox and rule gate PRELUDE works with, on the session's notebook; ``tests`` waits for the
+    toolbox's outcomes without real sleeps."""
 
     repo: GitExperimentRepo
-    patches: PatchStore
     toolbox: RecordingToolbox
     tests: SessionTests
-    judge: MbFakeRuleJudge
+    gate: GateService
 
 
 async def _instant(seconds: float) -> None:
     await asyncio.sleep(0)
 
 
-def _peers(layout: SessionLayout) -> PreludePeers:
-    toolbox = RecordingToolbox(LocalNotebook(layout.notebook, Writer(Role.TOOLBOX, "toolbox"), clock=_clock().now))
-    tests = SessionTests(toolbox, _notebook(layout), Clock(now=_clock().now, sleep=_instant))
-    judge = MbFakeRuleJudge(LocalNotebook(layout.notebook, Writer(Role.GATE, "gate"), clock=_clock().now), tests)
-    patches = PatchStore(LocalBlobStore(layout.blobs))
-    return PreludePeers(GitExperimentRepo(layout.repo), patches, toolbox, tests, judge)
+def _peers(layout: SessionLayout, accuracy: float | None = None) -> PreludePeers:
+    """``accuracy`` is the eval score every baseline test measures, the fake's own when ``None``."""
+
+    scores = {} if accuracy is None else {RecipeDelta().fingerprint(): accuracy}
+    toolbox_notebook = LocalNotebook(layout.notebook, Writer(Role.TOOLBOX, "toolbox"), clock=_clock().now)
+    toolbox = RecordingToolbox(toolbox_notebook, accuracy=scores, conc=WORKLOAD.conc)
+    tests = SessionTests(toolbox, Clock(now=_clock().now, sleep=_instant))
+    gate = session_gate(LocalNotebook(layout.notebook, Writer(Role.GATE, "gate"), clock=_clock().now), toolbox)
+    return PreludePeers(GitExperimentRepo(layout.repo, LocalBlobStore(layout.blobs)), toolbox, tests, gate)
 
 
 def _clock(times: list[float] | None = None) -> Clock:
@@ -124,8 +115,7 @@ def _prelude(
 ) -> Prelude:
     clock = clock or _clock()
     decisions = DecisionLog(layout.decisions, clock)
-    write_root = git_root_writer(layout.repo)
-    return Prelude(layout, processes, _notebook(layout), write_root, peers.patches, peers.judge, decisions, clock)
+    return Prelude(layout, processes, _notebook(layout), peers.repo, peers.gate, peers.tests, decisions, clock)
 
 
 async def _run(prelude: Prelude, budget: SessionBudget) -> PreludeResult:
@@ -186,7 +176,8 @@ async def test_finished_child_roots_the_session_before_any_baseline_test(tmp_pat
     assert result.root_commit == await peers.repo.head(INTEGRATION_BRANCH)
     recipe = await peers.repo.read_recipe(result.root_commit)
     [component] = recipe.components
-    assert [peers.patches.text(patch) for patch in component.patches] == [PATCH_TEXT]
+    texts = [await peers.repo.patch_text(result.root_commit, patch.path) for patch in component.patches]
+    assert texts == [PATCH_TEXT]
     assert json.loads(layout.root_recipe.read_text()) == recipe.to_document()
     assert json.loads(layout.prelude_child.read_text())["session_dir"] == str(child)
     assert await processes.leftovers() == ()
@@ -208,11 +199,11 @@ async def test_baseline_is_measured_through_the_toolbox(tmp_path: Path) -> None:
     result = await _run(prelude, SessionBudget.from_hours(2.0, NOW))
 
     requests = peers.toolbox.requests
-    assert len(requests) == MB_FAKE_BASELINE_TESTS
+    assert len(requests) == BASELINE_TESTS
     baseline = await _notebook(layout).baseline()
     assert baseline.root_commit == result.root_commit
     assert sorted(baseline.request_ids) == sorted(requests)
-    assert dict(baseline.values) == {MB_FAKE_PRIMARY_METRIC: pytest.approx(1000.0)}
+    assert baseline.values[MB_FAKE_PRIMARY_METRIC] == pytest.approx(1000.0)
     assert dict(baseline.threshold_pct) == {MB_FAKE_PRIMARY_METRIC: 1.0}
     assert set(peers.toolbox.results) == set(requests)
     for request in requests.values():
@@ -242,32 +233,29 @@ async def test_child_without_a_baseline_fails_prelude(tmp_path: Path) -> None:
     assert not layout.repo.exists()
 
 
-async def test_withdrawn_baseline_test_fails_prelude(tmp_path: Path) -> None:
+async def test_baseline_tests_that_fail_to_measure_fail_prelude(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     peers = _peers(layout)
     peers.toolbox.script(lambda request: request.purpose is Purpose.BASELINE, [Fate.MEASUREMENT])
     prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), peers)
-    with pytest.raises(PreludeFailed, match="withdrawn"):
+    with pytest.raises(PreludeFailed, match="the baseline anchors nothing: 0 of 3 root tests measured"):
         await _run(prelude, SessionBudget.from_hours(2.0, NOW))
 
 
-async def test_a_baseline_measuring_zero_throughput_fails_prelude(tmp_path: Path) -> None:
+async def test_a_baseline_below_the_accuracy_floor_fails_prelude(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
-    peers = _peers(layout)
-    gate = LocalNotebook(layout.notebook, Writer(Role.GATE, "gate"), clock=_clock().now)
-    tests = ZeroThroughputTests()
-    peers = replace(peers, judge=MbFakeRuleJudge(gate, tests))  # type: ignore[arg-type]
+    peers = _peers(layout, accuracy=0.0)
     prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), peers)
-    with pytest.raises(PreludeFailed, match="the baseline anchors nothing"):
+    with pytest.raises(PreludeFailed, match="the baseline anchors nothing: baseline accuracy"):
         await _run(prelude, SessionBudget.from_hours(2.0, NOW))
-    assert tests.settled == MB_FAKE_BASELINE_TESTS
+    assert len(peers.toolbox.results) == BASELINE_TESTS
 
 
 async def test_refused_baseline_test_fails_prelude_and_takes_the_accepted_ones_back(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     peers = _peers(layout)
     peers.toolbox.executor.gate.clear()
-    accepted = iter(range(MB_FAKE_BASELINE_TESTS - 1))
+    accepted = iter(range(BASELINE_TESTS - 1))
     refusal = RequestRejected("the base image moved", code="base_image_mismatch")
     peers.toolbox.reject_if(lambda request: None if next(accepted, None) is not None else refusal)
     prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), peers)
@@ -275,7 +263,7 @@ async def test_refused_baseline_test_fails_prelude_and_takes_the_accepted_ones_b
     with pytest.raises(PreludeFailed, match="refused the baseline test: base_image_mismatch"):
         await _run(prelude, SessionBudget.from_hours(2.0, NOW))
 
-    assert len(peers.toolbox.requests) == MB_FAKE_BASELINE_TESTS - 1
+    assert len(peers.toolbox.requests) == BASELINE_TESTS - 1
     assert set(peers.toolbox.withdrawn) == set(peers.toolbox.requests)
     assert peers.toolbox.results == {}
 

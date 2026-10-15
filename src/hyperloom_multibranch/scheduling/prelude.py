@@ -7,7 +7,8 @@ The child is ``hyperloom optimize`` with every optimization lever off, given the
 session is read by :mod:`~hyperloom_multibranch.scheduling.prelude_reader` alone and folded into the root recipe,
 whose kept patches go to the session's blob store and which the experiment repository stores as the root commit, and
 the session profile is written. The baseline every recorded value is anchored to is measured through the toolbox in a
-second step, once the caller has put the integration branch on the roster and given the toolbox its K.
+second step, once the caller has put the integration branch on the roster and given the toolbox its K: as many tests
+of the root as the rule gate asks for, from which the gate writes the baseline and its bar.
 """
 
 from __future__ import annotations
@@ -18,18 +19,20 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.io import atomic_write_json
+from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import PatchRef, Recipe
 from hyperloom.measure.compile import BlobError
+from hyperloom_multibranch.contracts.gate import NotMeasured, SessionGate
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Notebook
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent, SessionProfile
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
+from hyperloom_multibranch.contracts.repo import ExperimentRepo
+from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.rulegate.accuracy import BaselineAccuracyError
 from hyperloom_multibranch.scheduling.budget import BudgetExhausted, HardStop, SessionBudget
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.layout import SessionLayout
-from hyperloom_multibranch.scheduling.patches import PatchStore
-from hyperloom_multibranch.scheduling.peers import RootWriter
 from hyperloom_multibranch.scheduling.prelude_reader import (
     PreludeArtifacts,
     PreludeReadError,
@@ -39,9 +42,7 @@ from hyperloom_multibranch.scheduling.prelude_reader import (
     root_recipe,
 )
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
-from hyperloom_multibranch.contracts.toolbox import RequestRejected
-from hyperloom_multibranch.scheduling.requests import TestWithdrawn
-from hyperloom_multibranch.scheduling.rule_judge import MbFakeRuleJudge, NotMeasured
+from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
 from hyperloom_multibranch.scheduling.settings import Workload
 
 #: The ``hyperloom`` console script, run as a module so the child runs on the same install as the scheduler.
@@ -62,6 +63,7 @@ PRELUDE_BRANCH = "prelude"
 #: A cancelled PRELUDE gives it at most this, and never more than half the time left before the hard stop, so CLOSE
 #: keeps the other half.
 PRELUDE_TERMINATE_GRACE_SECONDS = 120.0
+BASELINE_REFUSED = "another baseline test was refused"
 
 
 class PreludeFailed(RuntimeError):
@@ -99,18 +101,18 @@ class Prelude:
         layout: SessionLayout,
         processes: ProcessRegistry,
         notebook: Notebook,
-        write_root: RootWriter,
-        patches: PatchStore,
-        judge: MbFakeRuleJudge,
+        repo: ExperimentRepo,
+        gate: SessionGate,
+        tests: SessionTests,
         decisions: DecisionLog,
         clock: Clock,
     ) -> None:
         self._layout = layout
         self._processes = processes
         self._notebook = notebook
-        self._write_root = write_root
-        self._patches = patches
-        self._judge = judge
+        self._repo = repo
+        self._gate = gate
+        self._tests = tests
         self._decisions = decisions
         self._clock = clock
 
@@ -127,7 +129,7 @@ class Prelude:
         except (PreludeReadError, OSError, BlobError) as exc:
             raise PreludeFailed(f"cannot root the session on the baseline prelude in {child}: {exc}") from exc
         atomic_write_json(self._layout.root_recipe, recipe.to_document())
-        root = await self._write_root(recipe)
+        root = await self._repo.init_root(recipe)
         await self._notebook.record_lineage(
             LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=root, recipe_digest=recipe.digest())
         )
@@ -190,19 +192,22 @@ class Prelude:
         patches: list[PatchRef] = []
         for kept in artifacts.kept_patches:
             text = await asyncio.to_thread(kept.patch_file.read_text, encoding="utf-8")
-            patches.append(await asyncio.to_thread(self._patches.store, framework, text))
+            patches.append(await self._repo.store_patch(framework, text))
         return await asyncio.to_thread(root_recipe, artifacts, framework, pin, tuple(patches))
 
     async def measure_baseline(self, root: str) -> None:
-        """Measure the baseline on ``root``, accuracy included, through the toolbox and anchor it; raises
-        :class:`PreludeFailed` when a baseline test is refused or withdrawn, or the baseline anchors nothing."""
+        """Measure the baseline on ``root`` through the toolbox and have the rule gate anchor it; raises
+        :class:`PreludeFailed` when a baseline test is refused, which takes back the ones accepted before it, or the
+        baseline anchors nothing."""
 
+        request = integration_test_request(TestKind.TEST, Purpose.BASELINE, root)
         try:
-            baseline = await self._judge.establish_baseline(root)
+            request_ids = [await self._tests.submit(request) for _ in range(await self._gate.baseline_test_count())]
         except RequestRejected as exc:
+            await self._tests.withdraw_integration(BASELINE_REFUSED)
             raise PreludeFailed(f"the toolbox refused the baseline test: {exc}") from exc
-        except TestWithdrawn as exc:
-            raise PreludeFailed(f"a baseline test was withdrawn: {exc}") from exc
+        try:
+            baseline = await self._gate.establish_baseline(root, request_ids)
         except (NotMeasured, BaselineAccuracyError) as exc:
             raise PreludeFailed(f"the baseline anchors nothing: {exc}") from exc
         self._decisions.record(

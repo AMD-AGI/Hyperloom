@@ -19,9 +19,7 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 
 #: Names how :meth:`Roster.quota_policy` hands out K; recorded in the manifest fingerprint.
-QUOTA_POLICY_VERSION = "mb1-quota-2"
-#: The K of a branch the roster gives none: one that is stopped or not started, whose specialist submits nothing.
-UNLISTED_BRANCH_K = 1
+QUOTA_POLICY_VERSION = "mb1-quota-3"
 
 
 class BranchKind(str, Enum):
@@ -220,16 +218,12 @@ class Roster:
     def quota_policy(self) -> QueuePolicy:
         """The toolbox's queue policy: every running branch's K under the global cap on running tests.
 
-        While no specialist branch runs, in PRELUDE and FINAL, the integration branch's session measurements are all
-        there is to run, so its K is the global cap rather than its own; the toolbox counts them against it.
+        Only the running branches may submit: the toolbox refuses a test of a branch that is stopped or not started.
+        The session measurements of PRELUDE and FINAL take no slot of the integration branch's K.
         """
 
-        running = [entry for entry in self._entries.values() if entry.status is BranchStatus.RUNNING]
-        alone = not any(entry.kind is BranchKind.SPECIALIST for entry in running)
-        ks = {entry.branch: entry.k for entry in running}
-        if alone and INTEGRATION_BRANCH in ks:
-            ks[INTEGRATION_BRANCH] = self.caps.max_parallel_tests
-        return QueuePolicy(per_branch_k=UNLISTED_BRANCH_K, global_concurrency=self.caps.max_parallel_tests, branch_k=ks)
+        ks = {entry.branch: entry.k for entry in self._entries.values() if entry.status is BranchStatus.RUNNING}
+        return QueuePolicy(global_concurrency=self.caps.max_parallel_tests, branch_k=ks, listed_branches_only=True)
 
     def _live(self, branch: str) -> BranchEntry:
         entry = self._entries[branch]
@@ -279,7 +273,6 @@ def _entry_record(entry: BranchEntry) -> dict[str, object]:
 
 __all__ = [
     "QUOTA_POLICY_VERSION",
-    "UNLISTED_BRANCH_K",
     "BranchEntry",
     "BranchKind",
     "BranchOrigin",

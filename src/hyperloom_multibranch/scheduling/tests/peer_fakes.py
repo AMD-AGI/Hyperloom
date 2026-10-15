@@ -9,7 +9,7 @@ PRELUDE. Every scheduling test uses these, scripted through their fields, and su
 double; they are replaced by the real modules once those land. The toolbox is the toolbox module's
 :class:`~hyperloom_multibranch.toolbox.fake.FakeToolbox`, noise-free and noting what the scheduler asked of it; what a
 test measures follows from the recipe it measures (:func:`recipe_effect`). The experiment repository and the rule gate
-are their owners' own.
+are their owners' own; :func:`session_gate` is the gate's session service as the session's peers build it.
 """
 
 from __future__ import annotations
@@ -29,17 +29,19 @@ from pathlib import Path
 
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
-from hyperloom.contracts.recipe import ConfigDelta, Recipe, RecipeDelta, apply
+from hyperloom.contracts.recipe import ConfigDelta, PatchRef, Recipe, RecipeDelta, apply
+from hyperloom.measure.compile import BlobStore
 from hyperloom_multibranch.contracts.fork import Admission
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLaunch
 from hyperloom_multibranch.contracts.notebook.interfaces import RecordSearch
-from hyperloom_multibranch.contracts.repo import ExperimentRepo
+from hyperloom_multibranch.contracts.repo import ExperimentRepo, RepoMerge
 from hyperloom_multibranch.contracts.toolbox import CancelOutcome, QueueState
 from hyperloom_multibranch.repo.git_repo import RECIPE_FILE, GitExperimentRepo
 from hyperloom_multibranch.rulegate.gate import RuleGate
+from hyperloom_multibranch.rulegate.rules import InferenceXRule
+from hyperloom_multibranch.rulegate.service import GateNotebook, GateService
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.peers import RootWriter, git_root_writer
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
 from hyperloom_multibranch.scheduling.requests import SessionTests
 from hyperloom_multibranch.toolbox.fake import FakeToolbox, ToolboxNotebook
@@ -163,9 +165,13 @@ class HeldGitRepo(GitExperimentRepo):
     """The git experiment repository on a :class:`VirtualClock`: every call holds the clock while git runs, which the
     event loop cannot see through. Not a placeholder: the repository is its owner's own."""
 
-    def __init__(self, path: Path, time: VirtualClock) -> None:
-        super().__init__(path)
+    def __init__(self, path: Path, blobs: BlobStore, time: VirtualClock) -> None:
+        super().__init__(path, blobs)
         self.time = time
+
+    async def init_root(self, recipe: Recipe) -> str:
+        async with self.time.held():
+            return await super().init_root(recipe)
 
     async def read_recipe(self, commit: str) -> Recipe:
         async with self.time.held():
@@ -183,21 +189,41 @@ class HeldGitRepo(GitExperimentRepo):
         async with self.time.held():
             return await super().commit(branch, parent, recipe, message)
 
+    async def merge(self, candidate: str, onto: str) -> RepoMerge:
+        async with self.time.held():
+            return await super().merge(candidate, onto)
+
+    async def commit_integration(self, onto: str, delta: RecipeDelta, merged_from: Sequence[str]) -> str:
+        async with self.time.held():
+            return await super().commit_integration(onto, delta, merged_from)
+
     async def rewind(self, branch: str, commit: str, parent: str) -> None:
         async with self.time.held():
             await super().rewind(branch, commit, parent)
 
+    async def store_patch(self, component: str, text: str) -> PatchRef:
+        async with self.time.held():
+            return await super().store_patch(component, text)
 
-def held_root_writer(path: Path, time: VirtualClock) -> RootWriter:
-    """:func:`~hyperloom_multibranch.scheduling.peers.git_root_writer` holding ``time`` while git runs."""
+    async def patch_text(self, commit: str, path: str) -> str:
+        async with self.time.held():
+            return await super().patch_text(commit, path)
 
-    write_root = git_root_writer(path)
+    async def checkout(self, commit: str, destination: Path) -> None:
+        async with self.time.held():
+            await super().checkout(commit, destination)
 
-    async def held(baseline: Recipe) -> str:
-        async with time.held():
-            return await write_root(baseline)
 
-    return held
+#: Seconds the session gate of the tests waits between two reads of a test's record; the tests' toolbox is the fake.
+GATE_POLL_SECONDS = 0.001
+
+
+def session_gate(notebook: GateNotebook, toolbox: FakeToolbox) -> GateService:
+    """The rule gate's session service on the InferenceX rule at the conc ``toolbox`` measures a test at when its
+    request names none, the workload's; ``notebook`` writes as the gate."""
+
+    (conc,) = toolbox.config.main_concurrency
+    return GateService(notebook, toolbox, InferenceXRule(notebook, conc), poll_seconds=GATE_POLL_SECONDS)
 
 
 class MbFakeChildRegistry(ProcessRegistry):
@@ -363,10 +389,11 @@ def recipe_effect(repo: Path, curves: Curves) -> Callable[[TestRequest], float]:
 
 
 class RecordingToolbox(FakeToolbox):
-    """The toolbox module's fake, without noise, noting every queue policy, branch cancel and close it was given.
+    """The toolbox module's fake, without noise, noting every queue policy, withdrawal and close it was given.
 
-    ``effect`` sets what a test measures (see :func:`recipe_effect`); without one every test measures the baseline.
-    ``accuracy`` is the accuracy score of a change by its fingerprint. Not a placeholder: the fake is the toolbox owner's own.
+    ``withdrawals`` holds the reason of every session-wide withdrawal. ``effect`` sets what a test measures (see :func:`recipe_effect`); without one every test measures the baseline.
+    ``accuracy`` is the accuracy score of a change by its fingerprint, and ``conc`` the workload's conc, which a test
+    whose request names none is measured at. Not a placeholder: the fake is the toolbox owner's own.
     """
 
     def __init__(
@@ -374,13 +401,17 @@ class RecordingToolbox(FakeToolbox):
         notebook: ToolboxNotebook,
         effect: Callable[[TestRequest], float] | None = None,
         accuracy: Mapping[str, float] | None = None,
+        conc: int = FakeToolboxConfig.main_concurrency[0],
     ):
         quiet = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
-        config = FakeToolboxConfig(noise=quiet, effect_fn=effect, accuracy_scores=dict(accuracy or {}))
+        config = FakeToolboxConfig(
+            noise=quiet, effect_fn=effect, accuracy_scores=dict(accuracy or {}), main_concurrency=(conc,)
+        )
         super().__init__(config, notebook=notebook)
         self.serving = False
         self.policies: list[QueuePolicy] = []
         self.cancelled: list[str] = []
+        self.withdrawals: list[str] = []
         self.closed = 0
 
     async def start(self) -> None:
@@ -396,6 +427,10 @@ class RecordingToolbox(FakeToolbox):
     async def cancel_branch(self, branch_id: str, reason: str = "branch stopped") -> int:
         self.cancelled.append(branch_id)
         return await super().cancel_branch(branch_id, reason)
+
+    async def withdraw_all(self, reason: str = "session stopped") -> tuple[str, ...]:
+        self.withdrawals.append(reason)
+        return await super().withdraw_all(reason)
 
     async def close(self) -> None:
         self.closed += 1
@@ -430,6 +465,10 @@ class DownToolbox(RecordingToolbox):
     async def cancel_branch(self, branch_id: str, reason: str = "branch stopped") -> int:
         self._serving()
         return await super().cancel_branch(branch_id, reason)
+
+    async def withdraw_all(self, reason: str = "session stopped") -> tuple[str, ...]:
+        self._serving()
+        return await super().withdraw_all(reason)
 
     async def close(self) -> None:
         self._serving()
@@ -474,7 +513,8 @@ class MbFakeSpecialist:
         test = TestRequest(
             kind=TestKind.TEST, purpose=Purpose.EXPLORE, branch_id=branch, parent_commit=parent, delta=change
         )
-        return (await self.tests.run(test)).request
+        measured = await self.tests.result(test)
+        return (await self.notebook.record(measured.request_id)).request
 
     async def commit(self, branch: str, change: RecipeDelta, value: float) -> str:
         """``change`` on ``branch``, confirmed at ``value``; returns the commit it made."""
@@ -513,6 +553,7 @@ class ScriptedCompletion:
 
 __all__ = [
     "BASELINE_VALUE",
+    "GATE_POLL_SECONDS",
     "CHILD_SCRIPT",
     "LAUNCH_FLAG",
     "MAIN_POINT",
@@ -531,7 +572,7 @@ __all__ = [
     "SpecialistScript",
     "StuckToolbox",
     "VirtualClock",
-    "held_root_writer",
+    "session_gate",
     "judged",
     "recipe_effect",
     "recipe_tags",

@@ -201,12 +201,12 @@ class SessionStopper:
     async def _halt(self, reason: SessionStopReason) -> StopReport:
         """What the branch stops leave; the queue is read before the toolbox closes and forgets it.
 
-        Every branch's tests are withdrawn before any specialist is asked to stop: a specialist that hangs in its stop
-        would otherwise hold its branch's withdrawal past the hard stop, and one that overran an earlier stop may
-        still be submitting, which the toolbox does not refuse.
+        Every test is withdrawn before any specialist is asked to stop: a specialist that hangs in its stop would
+        otherwise hold its branch's withdrawal past the hard stop.
         """
 
-        failures = await self._withdraw_every_branch(reason)
+        withdrawn = await settled(self._toolbox.withdraw_all(reason.value))
+        failures = [withdrawn] if isinstance(withdrawn, BaseException) else []
         failures += await self._stop_open(reason, frozenset(BranchKind))
         status = await settled(self._toolbox.queue_state())
         if isinstance(status, BaseException):
@@ -215,11 +215,6 @@ class SessionStopper:
             logger.error("a step of the session stop failed", exc_info=failure)
         queue = None if isinstance(status, BaseException) else status
         return StopReport((), queue, tuple(map(failure_text, failures)))
-
-    async def _withdraw_every_branch(self, reason: SessionStopReason) -> list[BaseException]:
-        branches = [entry.branch for entry in self._roster.entries()]
-        outcomes = await asyncio.gather(*(settled(self._toolbox.cancel_branch(b, reason.value)) for b in branches))
-        return [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
 
     async def _stop_open(self, reason: SessionStopReason, kinds: frozenset[BranchKind]) -> list[BaseException]:
         stop = BranchStop(StopCause.SESSION_END, reason.value, self._clock.now())

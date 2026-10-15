@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from pathlib import Path
 
 import pytest
 
 from hyperloom.contracts.recipe import Recipe
-from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
@@ -25,7 +25,9 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import FinalRecipe
 from hyperloom_multibranch.notebook.knowledge.tests.fakes import FakeRecipeStore
 from hyperloom_multibranch.notebook.knowledge.tests.test_recipe_writeback import final
+from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, ARCHIVED
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring
+from hyperloom_multibranch.notebook.rsi.session import DISABLED, NO_KB
 from hyperloom_multibranch.notebook.tests.factories import FakeClock
 from hyperloom_multibranch.notebook.tests.sessions import METRIC, scripted_session
 from hyperloom_multibranch.scheduling.close import Closer
@@ -35,7 +37,6 @@ from hyperloom_multibranch.scheduling.final import FinalCandidate, FinalChoice
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.processes import ProcessRecord
 from hyperloom_multibranch.scheduling.stops import SessionStopReason, StopReport
-from hyperloom_multibranch.scheduling.patches import PatchStore
 
 __all__ = ["final"]
 
@@ -50,6 +51,8 @@ CHOICE = FinalChoice(
     FinalCandidate("integration", INTEGRATION_BRANCH, CHOSEN, 1041.0), (), "the higher value", METRIC, 64
 )
 LEFTOVER = ProcessRecord(4242, 4242, 0.0, "b01", ("sleep", "600"), "scope")
+BUDGET_SECONDS = 2 * 3600.0
+KB_URL = "HYPERLOOM_KB_URL"
 
 
 class RecordingStopper:
@@ -86,14 +89,19 @@ class StuckNotebook:
 
 
 class ChosenRepo:
-    """The experiment repository as CLOSE reads it: the chosen commit's recipe; a test double, not a placeholder."""
+    """The experiment repository as CLOSE reads it: the chosen commit's recipe and its files; a test double, not a
+    placeholder."""
 
-    def __init__(self, recipe: Recipe) -> None:
-        self.recipe = recipe
+    def __init__(self, final: FinalRecipe) -> None:
+        self.final = final
 
     async def read_recipe(self, commit: str) -> Recipe:
         assert commit == CHOSEN
-        return self.recipe
+        return self.final.recipe
+
+    async def checkout(self, commit: str, destination: Path) -> None:
+        assert commit == CHOSEN
+        shutil.copytree(self.final.files_root, destination, dirs_exist_ok=True)
 
 
 class UnreachableStore(FakeRecipeStore):
@@ -101,6 +109,14 @@ class UnreachableStore(FakeRecipeStore):
 
     def get_rollup(self, *args: object, **kwargs: object) -> dict[str, object]:
         raise KBStoreError("connection refused")
+
+
+@pytest.fixture(autouse=True)
+def no_knowledge_targets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CLOSE's knowledge steps find no Experience KB and no archive unless a test names one."""
+
+    monkeypatch.delenv(KB_URL, raising=False)
+    monkeypatch.delenv(ARCHIVE_ENV, raising=False)
 
 
 @pytest.fixture
@@ -120,16 +136,11 @@ def _closer(
     recipe: FinalRecipe,
     kb_client: RemoteRecipeClient | None,
 ) -> Closer:
-    """CLOSE with ``recipe`` committed as :data:`CHOSEN` and its files in the session's blob store."""
+    """CLOSE with ``recipe`` committed as :data:`CHOSEN`."""
 
     progress = FrontierScoring(notebook, FrontierPolicy(metric=METRIC))  # type: ignore[arg-type]
-    repo = ChosenRepo(recipe.recipe)
-    blobs = LocalBlobStore(layout.blobs)
-    for path in recipe.files_root.rglob("*"):
-        if path.is_file():
-            blobs.put(path.read_bytes())
-    patches = PatchStore(blobs)
-    exports = SessionExports(layout, notebook, repo, patches, progress, METRIC, kb_client=kb_client)  # type: ignore[arg-type]
+    repo = ChosenRepo(recipe)
+    exports = SessionExports(layout, notebook, repo, progress, METRIC, BUDGET_SECONDS, kb_client=kb_client)  # type: ignore[arg-type]
     return Closer(layout, stopper, exports, CLOCK)  # type: ignore[arg-type]
 
 
@@ -138,8 +149,13 @@ def _clean() -> RecordingStopper:
 
 
 async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
-    layout: SessionLayout, notebook: LocalNotebook, final: FinalRecipe
+    layout: SessionLayout,
+    notebook: LocalNotebook,
+    final: FinalRecipe,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "archive"))
     store = FakeRecipeStore(champion={"metric": "optimized_throughput", "session_id": "older", "value": 1000.0})
     stopper = _clean()
 
@@ -154,6 +170,9 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     assert report.exports.breakdown == layout.reports / "session_breakdown.json"
     breakdown = json.loads(report.exports.breakdown.read_text())
     assert breakdown["close"]["kb_write_back"]["status"] == "written"
+    knowledge = breakdown["close"]["knowledge"]
+    assert (knowledge["experiences"]["status"], knowledge["experiences"]["reason"]) == (DISABLED, NO_KB)
+    assert knowledge["archive"]["status"] == ARCHIVED and any((tmp_path / "archive").iterdir())
     assert breakdown["close"]["final"]["commit_id"] == CHOSEN
     assert breakdown["close"]["selection"]["chosen"]["commit"] == CHOSEN
     assert (breakdown["close"]["selection"]["metric"], breakdown["close"]["selection"]["primary_conc"]) == (METRIC, 64)
@@ -164,8 +183,9 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     assert any(row.get("frontier") for row in dashboard["branches"])
     written = json.loads(layout.report.read_text())
     assert (written["stop_reason"], written["stop"]["clean"]) == ("time_exhausted", True)
-    assert written["final"]["chosen"]["commit"] == CHOSEN
+    assert written["final"]["chosen"]["commit"] == CHOSEN and written["exports"]["knowledge"] == knowledge
     assert "Chosen: integration `i1`" in layout.report_markdown.read_text()
+    assert f"Experiences: {DISABLED} {NO_KB}" in layout.report_markdown.read_text()
 
 
 async def test_without_a_kb_client_or_a_final_choice_the_write_back_is_recorded_as_not_made(

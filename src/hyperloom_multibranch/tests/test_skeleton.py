@@ -17,7 +17,6 @@ import asyncio
 import json
 import os
 import signal
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -30,6 +29,7 @@ from hyperloom_multibranch.contracts.fork import Admission, AdmissionStatus, For
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.notebook.tests.factories import delta, intent
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.scheduling.budget import SessionBudget
@@ -38,7 +38,7 @@ from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.lifecycle import CUT_SHORT, Session, SessionOutcome
 from hyperloom_multibranch.scheduling.llm import CompletionFailed
-from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup, RootWriter
+from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
 from hyperloom_multibranch.scheduling.requests import SessionTests
 from hyperloom_multibranch.scheduling.roster import BranchStatus, RosterCaps, StopCause
 from hyperloom_multibranch.scheduling.settings import RunSettings, Workload
@@ -60,9 +60,9 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     SpecialistScript,
     StuckToolbox,
     VirtualClock,
-    held_root_writer,
     recipe_effect,
     recipe_tags,
+    session_gate,
     tagged,
 )
 from hyperloom_multibranch.scheduling.tests.child_sessions import child_with_patch
@@ -83,6 +83,7 @@ CURVES = {
     frozenset({"c2a", "c2"}): {MAIN_POINT: 1000.0, CONC: 1065.0},
 }
 FIX_REASON = "fix f1 regresses"
+KB_URL = "HYPERLOOM_KB_URL"
 
 
 def _reply(document: dict[str, object]) -> str:
@@ -91,6 +92,14 @@ def _reply(document: dict[str, object]) -> str:
 
 OPENING = _reply({"open": 2, "open_k": 9, "branches": [{"branch": INTEGRATION_BRANCH, "k": 2}], "stop": []})
 STEER = _reply({"open": 0, "branches": [{"branch": "b01", "k": 7}], "stop": [{"branch": "b02", "reason": STOP_REASON}]})
+
+
+@pytest.fixture(autouse=True)
+def no_knowledge_targets(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CLOSE's knowledge steps find no Experience KB and no archive: a test session leaves no knowledge behind."""
+
+    monkeypatch.delenv(KB_URL, raising=False)
+    monkeypatch.delenv(ARCHIVE_ENV, raising=False)
 
 
 class InsistingLifecycle(MbFakeLifecycle):
@@ -113,13 +122,11 @@ class SignallingToolbox(StuckToolbox):
         return await super().cancel_branch(branch_id, reason)
 
 
-def no_object_store(path: Path, time: VirtualClock) -> RootWriter:
+class NoObjectStore(HeldGitRepo):
     """A repository that fails on the root commit with an error the session does not handle; a failure double."""
 
-    async def write_root(baseline: Recipe) -> str:
-        raise LookupError(f"no object store at {path}")
-
-    return write_root
+    async def init_root(self, recipe: Recipe) -> str:
+        raise LookupError(f"no object store at {self.time}")
 
 
 class SilentModel(ScriptedCompletion):
@@ -141,7 +148,7 @@ class Stage:
     pids: list[int]
     stuck: frozenset[str] = frozenset()
     toolbox_type: type[RecordingToolbox] = RecordingToolbox
-    root_writer: Callable[[Path, VirtualClock], RootWriter] = held_root_writer
+    repo_type: type[HeldGitRepo] = HeldGitRepo
     toolbox: RecordingToolbox = field(init=False)
     specialist: MbFakeSpecialist = field(init=False)
     repo: HeldGitRepo = field(init=False)
@@ -153,16 +160,16 @@ class Stage:
         return LocalNotebook(self.layout.notebook, Writer(role, branch or role.value, branch), clock=self.time.now)
 
     def factory(self, setup: PeerSetup) -> Peers:
-        toolbox = self.toolbox_type(self.handle(Role.TOOLBOX), recipe_effect(setup.layout.repo, CURVES))
+        toolbox = self.toolbox_type(self.handle(Role.TOOLBOX), recipe_effect(setup.layout.repo, CURVES), conc=CONC)
         if isinstance(toolbox, StuckToolbox) and self.stuck:
             toolbox.stuck = self.stuck
         gate_notebook = self.handle(Role.GATE)
-        repo = HeldGitRepo(setup.layout.repo, self.time)
+        repo = self.repo_type(setup.layout.repo, setup.blobs, self.time)
         gate = RuleGate(gate_notebook, repo, setup.desk)
-        tests = SessionTests(toolbox, gate_notebook, self.time.clock)
+        tests = SessionTests(toolbox, self.time.clock)
         self.specialist = MbFakeSpecialist(gate, tests, gate_notebook, repo)
         self.toolbox, self.repo, self.setup = toolbox, repo, setup
-        return Peers(self.lifecycle, toolbox, repo, self.root_writer(setup.layout.repo, self.time))
+        return Peers(self.lifecycle, toolbox, repo, session_gate(gate_notebook, toolbox))
 
     async def root(self) -> str:
         return (await self.handle(Role.OBSERVER).baseline()).root_commit
@@ -234,7 +241,7 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     root, c1, c2 = await stage.root(), await stage.repo.head("b01"), await stage.repo.head("b02")
     assert lineage.commit(root) is not None and (await stage.repo.read_recipe(root)).components
     assert (await observer.session_profile()).session_id == stage.layout.session_id
-    assert [fp.policy_versions["judge_prompt"] for fp in await observer.manifest_fingerprints()] == ["mb1-judge-1"]
+    assert [fp.policy_versions["judge_prompt"] for fp in await observer.manifest_fingerprints()] == ["mb1-judge-2"]
 
     assert stage.lifecycle.started == {"b01": root, "b02": root, "b03": c1}
     assert [admission.status for admission in stage.forks] == [AdmissionStatus.ACCEPTED, AdmissionStatus.REJECTED]
@@ -248,7 +255,8 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert max(specialist_ks) == SETTINGS.caps.max_k_per_branch
     steering = [policy for policy in stage.toolbox.policies if "b01" in policy.branch_k]
     assert steering[-1].k_for(INTEGRATION_BRANCH) == 2 and "b02" not in steering[-1].branch_k
-    assert stage.toolbox.policies[-2].k_for(INTEGRATION_BRANCH) == SETTINGS.caps.max_parallel_tests
+    assert all(policy.listed_branches_only for policy in stage.toolbox.policies)
+    assert stage.toolbox.policies[-1].branch_k == {}
 
     roster = json.loads(stage.layout.roster.read_text())
     b02 = next(entry for entry in roster["entries"] if entry["branch"] == "b02")
@@ -481,7 +489,7 @@ async def test_a_first_signal_during_close_cuts_it_short_after_one_close_grace(t
 
 async def test_an_unhandled_error_bounds_close_by_one_close_grace(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
-    stage.toolbox_type, stage.root_writer = StuckToolbox, no_object_store
+    stage.toolbox_type, stage.repo_type = StuckToolbox, NoObjectStore
 
     with pytest.raises(LookupError, match="no object store"):
         await stage.run()

@@ -3,26 +3,23 @@
 
 """The peers a session runs on and what they are built on.
 
-A :data:`PeerFactory` builds the specialist lifecycle, the toolbox and the experiment repository on a
-:class:`PeerSetup`: the session directory, the workload the session optimizes, the scheduler's answer to the rule
-gate's branch requests, the session's process registry and its blob store. The rule gate itself is no peer of the
-scheduler: the specialist runtime builds it on the branch requests.
+A :data:`PeerFactory` builds the specialist lifecycle, the toolbox, the experiment repository and the rule gate's
+session service on a :class:`PeerSetup`: the session directory, the workload the session optimizes, the scheduler's
+answer to the rule gate's branch requests, the session's process registry and its blob store. The specialist runtime
+builds its own rule gates on the branch requests; the session gate judges the tests the scheduler submits itself.
 """
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
 
-from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import BlobStore
 from hyperloom_multibranch.contracts.fork import BranchRequests
+from hyperloom_multibranch.contracts.gate import SessionGate
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
-from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.settings import Workload
@@ -30,30 +27,15 @@ from hyperloom_multibranch.scheduling.settings import Workload
 if TYPE_CHECKING:
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
-#: Writes the baseline recipe as the experiment repository's root commit, which starts the integration branch, and
-#: returns that commit. The repository contract has no such call: its git implementation is created with its root.
-RootWriter = Callable[[Recipe], Awaitable[str]]
-
 
 @dataclass(frozen=True)
 class Peers:
-    """``repo`` is read and written only once ``write_root`` has written the root commit, which PRELUDE does."""
+    """``repo`` holds nothing until PRELUDE roots it with ``init_root``; ``gate`` writes the baseline PRELUDE measures."""
 
     lifecycle: SpecialistLifecycle
     toolbox: RealToolbox
     repo: ExperimentRepo
-    write_root: RootWriter
-
-
-def git_root_writer(path: Path) -> RootWriter:
-    """Creates the session's git experiment repository at ``path`` with the baseline as its root; a
-    :class:`~hyperloom_multibranch.repo.git_repo.GitExperimentRepo` on ``path`` reads and writes it from then on."""
-
-    async def write_root(baseline: Recipe) -> str:
-        created = await GitExperimentRepo.create(path, baseline)
-        return await created.head(INTEGRATION_BRANCH)
-
-    return write_root
+    gate: SessionGate
 
 
 @dataclass(frozen=True)
@@ -92,6 +74,4 @@ __all__ = [
     "PeerSetup",
     "Peers",
     "PeersUnavailable",
-    "RootWriter",
-    "git_root_writer",
 ]
