@@ -116,25 +116,38 @@ def _simulates_acceptance(identity: Mapping[str, Any]) -> bool:
     )
 
 
+def _configures_a_draft(identity: Mapping[str, Any]) -> bool:
+    return any(not key.startswith(_ACCEPTANCE_ENV_PREFIX) for key in identity)
+
+
 def refuse_unpinned_speculative_change(
     base_args: str,
     base_envs: Mapping[str, Any],
     candidate_args: str,
     candidate_envs: Mapping[str, Any],
 ) -> None:
-    """Refuse a candidate that changes the draft or the acceptance simulation of a base launch that simulates it.
+    """Refuse a candidate whose acceptance length is not comparable with its base launch's.
 
-    Both launches are judged as composed, so adding, changing, removing or unsetting a pinned setting, and a
-    replacing argument string that drops one, all count as a change. A base that does not simulate acceptance carries
-    no simulated length a new draft could go stale against, so it pins nothing.
+    A base that simulates acceptance pins its draft and simulated acceptance: both launches are judged as composed,
+    so adding, changing, removing or unsetting a pinned setting, and a replacing argument string that drops one, all
+    count as a change. A base that verifies a real draft leaves the draft open, but its acceptance is measured, so a
+    candidate may not switch to a simulated length. A base with no speculative decoding has no acceptance to compare
+    against, so a candidate may enable it either way.
 
     Raises:
-        SpeculativeDecodingPinnedError: When the base simulates acceptance and the candidate's pinned settings differ.
+        SpeculativeDecodingPinnedError: When the base simulates acceptance and the candidate's pinned settings differ,
+            or the base verifies a real draft and the candidate simulates acceptance.
     """
     base = _speculative_identity(base_args, base_envs)
-    if not _simulates_acceptance(base):
-        return
     candidate = _speculative_identity(candidate_args, candidate_envs)
+    if not _simulates_acceptance(base):
+        if _configures_a_draft(base) and _simulates_acceptance(candidate):
+            raise SpeculativeDecodingPinnedError(
+                f"{SPECULATIVE_DECODING_PINNED}: the base launch verifies a real draft, so its acceptance is measured; "
+                "this candidate switches to a simulated acceptance length, which is declared, so its gain would not be "
+                "comparable. Keep real draft verification and vary the draft or other knobs."
+            )
+        return
     changed = sorted(key for key in base.keys() | candidate.keys() if base.get(key) != candidate.get(key))
     if changed:
         changes = ", ".join(f"{key} ({base.get(key)!r} -> {candidate.get(key)!r})" for key in changed)

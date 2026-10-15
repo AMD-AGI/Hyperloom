@@ -33,11 +33,11 @@ Concretely:
 - Do **not** treat a higher AL as a knob to push for more throughput; AL is
   determined by the golden curve, and forcing it above golden invalidates the
   result.
-- Whether a variant may change a draft-length / gamma / method knob depends on
-  the base launch (see *Pinned when the base simulates acceptance* below). When
-  it may — the base does not simulate acceptance — and the variant uses synthetic
-  acceptance, its AL is looked up for the variant's own draft length; it is
-  never carried over or hand-set.
+- Whether a variant may change a draft-length / gamma / method knob, or turn
+  synthetic acceptance on, depends on the base launch (see *Pinned when the base
+  simulates acceptance* below). Where a variant may use synthetic acceptance — a
+  base with no speculative decoding — its AL is looked up for the variant's own
+  draft length; it is never carried over or hand-set.
 
 ## Do NOT guess the golden-AL filename from the model name
 
@@ -90,12 +90,16 @@ changes a key that does not describe the draft (e.g. `attention_backend`) must
 restate the base's pinned keys unchanged, or set that key alone with vLLM's
 per-key form `--speculative-config.<key> <value>`, which merges over the object.
 
-A base that does **not** simulate acceptance — it verifies a real draft (GLM's
+A base that **verifies a real draft** (GLM's
 `SGLANG_SIMULATE_ACC_TOKEN_MODE=real-draft-token`, Kimi's
-`rejection_sample_method: block`) or runs no speculative decoding at all — pins
-nothing: a variant may change the draft, or enable speculative decoding with
-synthetic acceptance, as long as its AL is the golden value for its own draft
-length per the rules above.
+`rejection_sample_method: block`) measures its acceptance, so a variant may change
+the draft but may not switch to simulated acceptance (adding
+`SGLANG_SIMULATE_ACC_LEN` or a synthetic `--speculative-config`): a declared AL is
+not comparable with a measured one, and the variant is refused the same way.
+
+A base that runs **no speculative decoding** has no acceptance to compare
+against: a variant may enable it with a real draft, or with synthetic acceptance
+whose AL is the golden value for its own draft length per the rules above.
 
 Before proposing or marking `KEEP` on any such variant, cross-check against the
 model's golden AL curve (if one exists per the lookup above):
