@@ -142,7 +142,10 @@ experience:
         tests: $candidate.tests
         interval: $candidate.interval
         gpu_seconds: {number: $candidate.gpu_seconds}
-        reflection_source: {if: {present: $learn}, then: specialist_branch_log, else: deterministic_outcome_summary}
+        reflection_source:
+          if: {present: $learn}
+          then: {first: [{text: $candidate.learn_source}, specialist_branch_log]}
+          else: deterministic_outcome_summary
   change:
     change_family: $change_family
     change_fingerprint:

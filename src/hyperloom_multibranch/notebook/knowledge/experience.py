@@ -14,8 +14,8 @@ the packaged ``multibranch-notebook-v1`` mapping:
 * evidence: the request and the requests its judgement pooled. A test without evidence never reaches the KB: the
   mapping refuses a candidate without reasoning, a recorded parent value, or an outcome.
 
-The reasoning is the hypothesis or attempt the specialist logged citing the request; the reflection is the result it
-logged, else the hypothesis it settled. A test whose measurement failed taught nothing and is not published. The measured-against state is the parent commit,
+The reasoning is the hypothesis or attempt the specialist logged citing the request; the reflection is its latest
+learning citing the request, else the result it logged, else the hypothesis it settled. A test whose measurement failed taught nothing and is not published. The measured-against state is the parent commit,
 the experiment repository commit that pins the exact recipe.
 
 A judged record changes only while its split is pending, so pending splits wait; everything else is published once and
@@ -34,6 +34,7 @@ from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotReco
 from hyperloom_multibranch.contracts.notebook.peers import BranchLogType, HypothesisStatus, Intent, Validity
 from hyperloom_multibranch.contracts.notebook.records import (
     BranchLogRecord,
+    LearningRecord,
     NotebookSnapshot,
     SessionProfile,
     TestRecord,
@@ -123,6 +124,20 @@ def branch_notes(log: Sequence[BranchLogRecord], request_id: str) -> tuple[str, 
     return (reasons[0] if reasons else ""), (learnt[-1] if learnt else "")
 
 
+def cited_learning(learnings: Sequence[LearningRecord], branch: str, request_id: str) -> str:
+    """The latest learning of ``branch`` citing ``request_id`` that no later one superseded; empty when there is none."""
+
+    superseded = {record.learning.supersedes for record in learnings if record.learning.supersedes}
+    citing = [
+        record.learning.content
+        for record in learnings
+        if record.learning.branch == branch
+        and request_id in record.learning.request_ids
+        and record.entry_id not in superseded
+    ]
+    return citing[-1] if citing else ""
+
+
 def _iso(at: float) -> str:
     return datetime.fromtimestamp(at, timezone.utc).isoformat()
 
@@ -174,7 +189,8 @@ def candidate_row(
     if not failed and (record.judgement is None or record.conclusion is None or record.conclusion in _PENDING):
         return None
     request = record.request
-    reasoning, learn = branch_notes(snapshot.branch_logs.get(request.branch, ()), record.request_id)
+    reasoning, logged = branch_notes(snapshot.branch_logs.get(request.branch, ()), record.request_id)
+    learnt = cited_learning(snapshot.learnings, request.branch, record.request_id)
     return {
         "request_id": record.request_id,
         "branch": request.branch,
@@ -190,7 +206,8 @@ def candidate_row(
         "direction": direction(record, snapshot),
         "change": change_document(request.delta),
         "reasoning": reasoning,
-        "learn": learn,
+        "learn": learnt or logged,
+        "learn_source": "specialist_learning" if learnt else "specialist_branch_log" if logged else "",
         "decision": _decision(record),
         "conclusion": record.conclusion.value if record.conclusion is not None else "",
         "baseline_value": snapshot.value_of(request.parent_commit).get(metric),
@@ -239,6 +256,7 @@ __all__ = [
     "branch_notes",
     "candidate_row",
     "change_document",
+    "cited_learning",
     "experience_identity",
     "export_document",
     "intent_conditions",

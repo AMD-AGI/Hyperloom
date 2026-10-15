@@ -36,8 +36,13 @@ from hyperloom.contracts.recipe import (
 )
 from hyperloom_multibranch.contracts.notebook import NotRecorded
 from hyperloom_multibranch.contracts.notebook.peers import BranchLogEntry, BranchLogType, Validity
-from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord, NotebookSnapshot
-from hyperloom_multibranch.contracts.notebook.vocab import Conclusion
+from hyperloom_multibranch.contracts.notebook.records import (
+    BranchLogRecord,
+    Learning,
+    LearningRecord,
+    NotebookSnapshot,
+)
+from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LearningKind
 from hyperloom_multibranch.notebook.knowledge.experience import (
     EXPORT_FORMAT,
     MAPPING_PATH,
@@ -134,6 +139,32 @@ def test_a_candidate_that_broke_the_server_is_a_failed_experience(snapshot: Note
     assert (failed.outcome["decision"], failed.outcome.get("value")) == ("failed", None)
     assert failed.outcome["error_class"] == "server_exited_during_warmup"
     assert failed.baseline["value"] == 1000.0
+
+
+def test_a_learning_citing_the_test_is_its_reflection_unless_a_later_one_superseded_it(
+    snapshot: NotebookSnapshot,
+) -> None:
+    first = Learning("s1", LearningKind.INSIGHT, "the MoE GEMM tuning pays at conc 64, not at 256", request_ids=("r1",))
+    later = dataclasses.replace(first, content="the MoE GEMM tuning pays at every concurrency tried", supersedes="s1:1")
+    other_branch = Learning(
+        "s2", LearningKind.INSIGHT, "split kv lost 2% when the cache was not the bottleneck", request_ids=("r1",)
+    )
+    learnt = dataclasses.replace(
+        snapshot,
+        learnings=(
+            LearningRecord("s1:1", 1.0, first),
+            LearningRecord("s1:2", 2.0, later),
+            LearningRecord("s2:1", 3.0, other_branch),
+        ),
+    )
+
+    row = _rows(learnt)["r1"]
+    kept = _collected(learnt)["r1"]
+
+    assert (row["learn"], row["learn_source"]) == (later.content, "specialist_learning")
+    assert _rows(snapshot)["r1"]["learn_source"] == "specialist_branch_log"
+    assert kept.reflection["text"].startswith("the MoE GEMM tuning pays at every concurrency tried (measured +4.00%")
+    assert kept.provenance.extra["reflection_source"] == "specialist_learning"
 
 
 def test_publishing_again_yields_the_same_experiences(snapshot: NotebookSnapshot) -> None:
