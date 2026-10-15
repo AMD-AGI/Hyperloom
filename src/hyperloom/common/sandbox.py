@@ -35,8 +35,10 @@ SANDBOX_ACTIVE_ENV = "HYPERLOOM_SANDBOX_ACTIVE"
 #: Extra paths to bind read-write, colon-separated. Outputs the operator owns.
 SANDBOX_WRITABLE_ENV = "HYPERLOOM_SANDBOX_WRITABLE"
 
-SANDBOX_MODES: tuple[str, ...] = ("off", "bwrap")
-DEFAULT_SANDBOX_MODE = "off"
+MODE_OFF = "off"
+MODE_BWRAP = "bwrap"
+SANDBOX_MODES: tuple[str, ...] = (MODE_OFF, MODE_BWRAP)
+DEFAULT_SANDBOX_MODE = MODE_OFF
 
 #: Sandbox ``$HOME``. Deliberately not under /home: a tmpfs over the real home
 #: would shadow the uv-managed interpreter, which lives at
@@ -51,6 +53,14 @@ _SYSTEM_ROOTS: tuple[str, ...] = ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/e
 #: GPU character devices. ``--dev-bind`` rather than ``--bind``: a plain bind
 #: mount of a device node does not carry device access through.
 _GPU_DEVICES: tuple[str, ...] = ("/dev/kfd", "/dev/dri")
+
+# bwrap flags, named so the invocation below reads as intent rather than strings.
+_RO_BIND = "--ro-bind"
+_RO_BIND_TRY = "--ro-bind-try"
+_BIND_TRY = "--bind-try"
+_DEV_BIND_TRY = "--dev-bind-try"
+_TMPFS = "--tmpfs"
+_SETENV = "--setenv"
 
 
 class SandboxError(RuntimeError):
@@ -73,9 +83,7 @@ def resolve_sandbox_mode(env: Mapping[str, str] | None = None) -> str:
     source = os.environ if env is None else env
     mode = (source.get(SANDBOX_MODE_ENV) or DEFAULT_SANDBOX_MODE).strip().lower()
     if mode not in SANDBOX_MODES:
-        raise SandboxError(
-            f"{SANDBOX_MODE_ENV}={mode!r} is not one of {', '.join(SANDBOX_MODES)}"
-        )
+        raise SandboxError(f"{SANDBOX_MODE_ENV}={mode!r} is not one of {', '.join(SANDBOX_MODES)}")
     return mode
 
 
@@ -187,27 +195,25 @@ def build_bwrap_args(
     """
     args = [bwrap, "--die-with-parent"]
     for root in _SYSTEM_ROOTS:
-        args += ["--ro-bind-try", root, root]
+        args += [_RO_BIND_TRY, root, root]
     # A fresh /dev, then the GPU nodes bound back in. /dev/shm is its own tmpfs:
     # the one inside bwrap's minimal /dev is not what Ray's object store expects.
-    args += ["--dev", "/dev", "--tmpfs", "/dev/shm"]
+    args += ["--dev", "/dev", _TMPFS, "/dev/shm"]
     for device in _GPU_DEVICES:
-        args += ["--dev-bind-try", device, device]
-    args += ["--proc", "/proc", "--tmpfs", "/tmp"]
-    args += ["--ro-bind", str(venv), str(venv)]
-    if support_dir is not None:
-        args += ["--ro-bind", str(support_dir), str(support_dir)]
-    if package_dir is not None:
-        args += ["--ro-bind", str(package_dir), str(package_dir)]
+        args += [_DEV_BIND_TRY, device, device]
+    args += ["--proc", "/proc", _TMPFS, "/tmp"]
+    for path in (venv, support_dir, package_dir):
+        if path is not None:
+            args += [_RO_BIND, str(path), str(path)]
     for root in writable_roots:
-        args += ["--bind-try", str(root), str(root)]
+        args += [_BIND_TRY, str(root), str(root)]
     # A private home, and TMPDIR pointed inside it. An inherited TMPDIR naming an
     # unbound host path is not a missing-directory error: ROCm JIT-compiles its
     # blit kernels at device init, the compiler cannot write its temporaries, and
     # the process dies with SIGSEGV and no diagnostic.
-    args += ["--tmpfs", SANDBOX_HOME, "--setenv", "HOME", SANDBOX_HOME]
-    args += ["--setenv", "TMPDIR", "/tmp"]
-    args += ["--setenv", SANDBOX_ACTIVE_ENV, "1"]
+    args += [_TMPFS, SANDBOX_HOME, _SETENV, "HOME", SANDBOX_HOME]
+    args += [_SETENV, "TMPDIR", "/tmp"]
+    args += [_SETENV, SANDBOX_ACTIVE_ENV, "1"]
     args.append("--")
     return args
 
@@ -254,13 +260,11 @@ def reexec_if_required(argv: Sequence[str] | None = None) -> None:
             and silently not providing it is the one outcome worse than failing.
     """
     mode = resolve_sandbox_mode()
-    if mode == "off" or is_sandboxed():
+    if mode == MODE_OFF or is_sandboxed():
         return
     bwrap = shutil.which("bwrap")
     if bwrap is None:
-        raise SandboxError(
-            f"{SANDBOX_MODE_ENV}=bwrap requires the bwrap executable on PATH"
-        )
+        raise SandboxError(f"{SANDBOX_MODE_ENV}=bwrap requires the bwrap executable on PATH")
     if not probe_sandbox_capability(bwrap):
         raise SandboxError(
             f"{SANDBOX_MODE_ENV}=bwrap: this kernel refuses to create the sandbox "
