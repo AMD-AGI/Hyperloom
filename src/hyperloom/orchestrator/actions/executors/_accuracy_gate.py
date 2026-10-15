@@ -17,6 +17,7 @@ from typing import Any
 import yaml
 
 from hyperloom.common.accuracy import (
+    ACCURACY_METRICS,
     ACCURACY_THRESHOLD,
     AGENTX_ERROR_RATE_THRESHOLD_PCT,
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
@@ -482,7 +483,7 @@ def parse_eval_results(
 
     results = data.get("results", {})
     for task_name, metrics in results.items():
-        for key in ("exact_match,strict-match", "exact_match,flexible-extract", "exact_match,none", "acc,none"):
+        for key in ACCURACY_METRICS:
             if key in metrics:
                 score = metrics[key]
                 if isinstance(score, (int, float)):

@@ -19,6 +19,10 @@ AGENTX_ERROR_RATE_THRESHOLD_PCT = 10.0
 # diverge.
 DEFAULT_ENABLEMENT_ACCURACY_FLOOR = 0.5
 
+# The lm-eval metrics an eval score is read from, most preferred first; the thresholds above were set on these scores,
+# and the first task that reports one of them gives the score.
+ACCURACY_METRICS = ("exact_match,strict-match", "exact_match,flexible-extract", "exact_match,none", "acc,none")
+
 
 def finite_score(score: Any) -> float | None:
     """Return ``score`` as a finite float, or ``None`` when unusable."""
@@ -50,6 +54,7 @@ def accuracy_passed(
 
 
 __all__ = [
+    "ACCURACY_METRICS",
     "ACCURACY_THRESHOLD",
     "AGENTX_ERROR_RATE_THRESHOLD_PCT",
     "DEFAULT_ENABLEMENT_ACCURACY_FLOOR",

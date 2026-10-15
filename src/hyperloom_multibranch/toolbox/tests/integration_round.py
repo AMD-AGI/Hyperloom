@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from statistics import fmean
 from typing import Any
 
+from hyperloom.common.accuracy import ACCURACY_METRICS
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import AccuracyValue, Purpose, TestKind, TestRequest, TestResult, Validity
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta, apply
@@ -36,7 +37,6 @@ from hyperloom_multibranch.rulegate.inferencex import (
 )
 from hyperloom_multibranch.toolbox.tests.integration_rig import Specialist, Stack
 
-FLEXIBLE = "exact_match,flexible-extract"
 _TOOL_WAIT_SEC = 3300.0
 _POLL_SEC = 0.25
 _SOURCE, _CONFIG = IntentLayer.SOURCE.value, IntentLayer.CONFIG.value
@@ -82,7 +82,7 @@ def throughput(result: TestResult) -> float:
 
 def accuracy_score(result: TestResult) -> float:
     values: tuple[AccuracyValue, ...] = result.accuracy
-    return next(v.score for v in values if v.metric == FLEXIBLE)
+    return next(v.score for metric in ACCURACY_METRICS for v in values if v.metric == metric)
 
 
 def reading(result: TestResult) -> InferenceXReading:
