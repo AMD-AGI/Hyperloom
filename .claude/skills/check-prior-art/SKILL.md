@@ -167,8 +167,10 @@ printf '%s#%s exit=%s %s\n' <owner/name> <N> "$status" "$out" >> "$WORK/inclusio
 `mergeCommit` is null until the PR merges, so an open PR is probed by its subject alone. Exit 0 is
 `included`, 3 `unknown`, 2 a usage error, 1 a crash and no answer; `unknown` means nothing in local
 git showed the PR, never that it is absent. PR numbers are per repository, so the tree must be the
-PR's repository or a fork of it (G1); a `subject` answer whose commit subject is not the PR's title
-is a collision, so `unknown`. With no tree, or a probe that cannot run, write
+PR's repository or a fork of it, and a `subject` answer can be a fork's own PR. Compare the PR's
+title with the subject of the commit the evidence names for `(#N)`, and with that commit's body
+(`git -C "$TREE" log -1 --format=%b <sha>`) for `Merge pull request #N from`. A mismatch G1 does
+not explain is a collision, so `unknown`. With no tree, or a probe that cannot run, write
 `SKIPPED: inclusion -- <why>` into `inclusion.txt`. Gotchas G3, G4 and G5 apply.
 
 ## Step 6 — Refutation
