@@ -15,6 +15,7 @@ a number to improve.
 
 from __future__ import annotations
 
+import logging
 from hashlib import sha1
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,8 @@ from hyperloom.orchestrator.measurement.jit_variants import variant_counts
 from kernelforge.foldable_launches import foldable_launches
 from kernelforge.graph_coverage import graph_coverage
 from kernelforge.trace_events import resolve_capture
+
+log = logging.getLogger(__name__)
 
 #: The specialist domains these censuses hand their findings to. A gap names a
 #: domain the dispatcher knows, or nothing claims it.
@@ -155,14 +158,26 @@ def _input_cost_gaps(workspace: Any) -> list[dict[str, Any]]:
 
 
 def run_evidence_gaps(*, session_dir: Any, trace_path: Any, workspace: Any) -> list[dict[str, Any]]:
-    """Every cause-shaped gap this run's own evidence supports."""
+    """Every cause-shaped gap this run's own evidence supports.
+
+    Each census reads its own artifact and is kept to it: a run whose JIT cache
+    a later process left unreadable still has a trace to count launches in, and
+    the caller catches ``OSError`` around the whole call, so letting one census
+    raise would quietly cost the other three.
+    """
     capture = resolve_capture(trace_path)
-    return [
-        *_recompile_gaps(session_dir),
-        *_graph_gaps(capture),
-        *_input_cost_gaps(workspace),
-        *_foldable_gaps(capture),
-    ]
+    gaps: list[dict[str, Any]] = []
+    for name, census in (
+        ("recompile", lambda: _recompile_gaps(session_dir)),
+        ("graph_coverage", lambda: _graph_gaps(capture)),
+        ("front_end_input_cost", lambda: _input_cost_gaps(workspace)),
+        ("foldable_launch", lambda: _foldable_gaps(capture)),
+    ):
+        try:
+            gaps.extend(census())
+        except OSError:
+            log.warning("run evidence: the %s census could not read its artifact", name, exc_info=True)
+    return gaps
 
 
 __all__ = ["run_evidence_gaps"]
