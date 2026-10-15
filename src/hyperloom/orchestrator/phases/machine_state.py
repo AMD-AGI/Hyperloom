@@ -144,12 +144,6 @@ PHASE_COORDINATOR_RESERVED: dict[str, frozenset[str]] = {
 }
 
 
-def coordinator_reserved_in_phase(action_name: str, phase: str) -> bool:
-    """Return True iff ``phase`` reserves ``action_name`` for the Coordinator."""
-    reserved = PHASE_COORDINATOR_RESERVED.get((phase or "").strip().upper(), frozenset())
-    return (action_name or "").strip() in reserved
-
-
 def allowed_actions_for(phase: str) -> tuple[str, ...]:
     """Return the phase's LLM-proposable actions as a sorted tuple (deterministic)."""
     key = (phase or "").strip().upper()
@@ -161,7 +155,7 @@ def render_phase_action_bullets(
     *,
     disabled_suffix: dict[str, str] | None = None,
 ) -> list[str]:
-    """Render per-phase action bullets for the prompt (informational, not enforced)."""
+    """Render per-phase action bullets for the prompt; admission refuses anything outside them."""
     suffix = disabled_suffix or {}
     out: list[str] = []
     for phase in PHASE_NAMES:
@@ -2211,7 +2205,6 @@ __all__ = [
     "initial_workflow_predicate_inputs",
     "replay_next_phase",
     "workflow_predicate_inputs",
-    "coordinator_reserved_in_phase",
     "per_lever_dryness",
     "append_phase_evidence_row",
     "append_phase_history_event",

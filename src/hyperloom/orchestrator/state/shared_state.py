@@ -479,8 +479,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Operator-defined specialist (``--custom-specialist-*``); empty prompt means not configured.
     custom_specialist_prompt: str = ""
     custom_specialist_description: str = ""
-    # Set once a custom_specialist task has started; drives the at-least-once dispatch.
-    custom_specialist_dispatched: bool = False
+    # ``HYPERLOOM_CUSTOM_SPECIALIST_ONLY``: FRAMEWORK_AGENT runs the custom specialist and its bench alone.
+    custom_specialist_only: bool = False
     # ``--extra-env NAME=VALUE`` pins.
     operator_extra_env: dict[str, str] = field(default_factory=dict)
     # Operator-supplied custom-workload paths.
@@ -589,6 +589,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Why this stack can never record GPU kernels; set once from a parsed trace with host ops and no kernels, so the
     # Coordinator stops auto-enqueueing analysis that cannot succeed. Empty means GPU tracing is still presumed usable.
     gpu_trace_unsupported_reason: str = ""
+    # Analysis failures that recur on the same input, keyed by that input; ``analysis_failures`` owns the schema.
+    analysis_failures: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     # Feature toggles (mirrored from ``cli.py`` flags at session start).
     framework_agent_phase_enabled: bool = True
@@ -2670,6 +2672,15 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if usable is None:
             return None
         return time.monotonic() + usable
+
+    @property
+    def has_validated_gain_stamp(self) -> bool:
+        """Whether a cumulative gain has been validated against the current anchor."""
+        return bool(
+            self.cumulative_gain_validated_ts
+            or self.cumulative_gain_validated_stack_len
+            or self.cumulative_gain_validated
+        )
 
     def optimization_stack_has_unvalidated_keeps(self) -> bool:
         """True iff ``current_best`` changed since the last validated measurement (stack grew or a lift landed)."""

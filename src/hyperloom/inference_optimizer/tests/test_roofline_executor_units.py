@@ -114,7 +114,7 @@ def test_extract_skips_non_dict_warning_entries():
             "not-a-dict",
             123,
             {
-                "code": "steady_state_chunk_empty",
+                "code": "steady_state_chunk_low_quality",
                 "non_empty_modes": ["prefilldecode"],
             },
         ],
@@ -513,10 +513,10 @@ async def test_retry_returns_non_dict_fails_and_keeps_the_previous_analysis(tmp_
     """
     fail = {
         "status": "failed",
-        "error": "steady_state_chunk_empty",
+        "error": "steady_state_chunk_low_quality",
         "trace_health_warnings": [
             {
-                "code": "steady_state_chunk_empty",
+                "code": "steady_state_chunk_low_quality",
                 "requested_mode": "mixed",
                 "non_empty_modes": ["prefilldecode"],
             },

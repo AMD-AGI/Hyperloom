@@ -454,6 +454,11 @@ class TaskRegistry:
             raise TaskNotFound(task_id)
         return Task.from_row(row)
 
+    async def find(self, task_id: str, *, kind: str) -> Task | None:
+        """Fetch the task of ``kind`` with this id, or ``None`` when there is no such row."""
+        row = await self.db.fetchone("SELECT * FROM tasks WHERE task_id=? AND kind=?", (task_id, kind))
+        return Task.from_row(row) if row is not None else None
+
     async def transition(
         self,
         task_id: str,
