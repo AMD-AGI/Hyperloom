@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 
@@ -91,6 +92,89 @@ def test_dirty_source_does_not_export_as_accepted(workload):
     result = export_custom_inference(session, state)
     assert result["status"] == "incomplete"
     assert not (session / "deployment" / hook.name).exists()
+
+
+def test_export_bakes_accepted_switches_into_module(workload):
+    _, hook, session, state = workload
+    state["current_best"]["extra_envs"] = {"HL_FUSE_ATTN": "1", "HL_HOIST": "1"}
+
+    result = export_custom_inference(session, state)
+
+    exported = session / "deployment" / hook.name
+    assert result["status"] == "exported"
+    assert "HL_FUSE_ATTN" in exported.read_text()
+    assert "HL_HOIST" in exported.read_text()
+    assert hook.read_bytes() == b"def hyperloom_optimize(model):\n    return model\n"
+    assert result["files"][hook.name] == hashlib.sha256(exported.read_bytes()).hexdigest()
+    assert result["settings"]["base_sha256"] == hashlib.sha256(hook.read_bytes()).hexdigest()
+
+
+def test_export_reports_untranslatable_settings(workload):
+    _, hook, session, state = workload
+    state["current_best"]["extra_envs"] = {"PYTORCH_HIP_ALLOC_CONF": "expandable_segments:True"}
+
+    result = export_custom_inference(session, state)
+
+    exported_text = (session / "deployment" / hook.name).read_text()
+    assert result["status"] == "exported"
+    assert {
+        "name": "PYTORCH_HIP_ALLOC_CONF",
+        "value": "expandable_segments:True",
+        "reason": "pre_context_init",
+    } in result["settings"]["untranslated"]
+    assert "PYTORCH_HIP_ALLOC_CONF" not in exported_text
+    assert len(result["warnings"]) == 1
+    assert "PYTORCH_HIP_ALLOC_CONF" in result["warnings"][0]
+
+
+def test_export_excludes_benchmark_control_envs(workload):
+    _, hook, session, state = workload
+    state["current_best"]["extra_envs"] = {"RUN_EVAL": "false", "CONC": "1"}
+
+    result = export_custom_inference(session, state)
+
+    exported_text = (session / "deployment" / hook.name).read_text()
+    assert result["status"] == "exported"
+    assert {"name": "RUN_EVAL", "value": "false", "reason": "benchmark_control"} in result["settings"]["excluded"]
+    assert {"name": "CONC", "value": "1", "reason": "benchmark_control"} in result["settings"]["excluded"]
+    assert "RUN_EVAL" not in exported_text
+    assert "CONC" not in exported_text
+
+
+def test_export_is_idempotent_across_closes(workload):
+    _, hook, session, state = workload
+    state["current_best"]["extra_envs"] = {"HL_FUSE_ATTN": "1"}
+
+    first_result = export_custom_inference(session, state)
+    first_bytes = (session / "deployment" / hook.name).read_bytes()
+    second_result = export_custom_inference(session, state)
+    second_bytes = (session / "deployment" / hook.name).read_bytes()
+
+    assert first_result["status"] == "exported"
+    assert second_result["status"] == "exported"
+    assert first_result["files"] == second_result["files"]
+    assert first_bytes == second_bytes
+
+
+def test_export_refuses_credential_shaped_setting(workload):
+    _, _, session, state = workload
+    state["current_best"]["extra_envs"] = {"HF_TOKEN": "x"}
+
+    result = export_custom_inference(session, state)
+
+    assert result["status"] == "incomplete"
+    assert "HF_TOKEN" in result["reasons"][0]
+
+
+def test_pycache_does_not_block_export(workload):
+    root, _, session, state = workload
+    pycache = root / "__pycache__"
+    pycache.mkdir()
+    (pycache / "hyperloom_optimize.cpython-312.pyc").write_bytes(b"junk")
+
+    result = export_custom_inference(session, state)
+
+    assert result["status"] == "exported"
 
 
 def test_scope_refuses_symlink(workload, tmp_path):

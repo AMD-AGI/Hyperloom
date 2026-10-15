@@ -405,7 +405,13 @@ class ClosePhase(CoordinatorCollaborator):
         await self._record_close_step(
             "inference_export",
             status="done" if deployment["status"] == "exported" else "failed",
-            detail=json.dumps({"status": deployment["status"], "reasons": deployment["reasons"]}),
+            detail=json.dumps(
+                {
+                    "status": deployment["status"],
+                    "reasons": deployment["reasons"],
+                    "warnings": deployment.get("warnings") or [],
+                }
+            ),
         )
 
     async def _do_artifact_package(self) -> Path | None:
