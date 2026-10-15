@@ -422,7 +422,7 @@ def test_materialize_config_with_envs_no_clamp_when_visible_zero(
     tmp_path,
     monkeypatch,
 ):
-    """When ``_visible_gpu_count`` returns 0 (CPU-only / rocm-smi failure) the materializer must NOT clamp to 0; it leaves the YAML TP intact."""
+    """When ``_visible_gpu_count`` returns 0 (CPU-only / amd-smi failure) the materializer must NOT clamp to 0; it leaves the YAML TP intact."""
     base = tmp_path / "base.yaml"
     _write_yaml_with_tp(base, tp=2)
     out = tmp_path / "out"
