@@ -1369,6 +1369,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         *,
         fallback_cost_minutes: float | None = None,
         params: dict[str, Any] | None = None,
+        already_committed_minutes: float = 0.0,
     ) -> PolicyDenied | None:
         """Refuse an action whose expected cost cannot fit the remaining session budget or gated phase budget.
 
@@ -1411,7 +1412,20 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             )
         if action == "specialist":
             expected_min = max(expected_min, specialist_admission_minutes(self.shared_state, params))
-        return time_budget_denial(action, expected_min, self.shared_state)
+        # Work already queued has spoken for its minutes even though none have
+        # been spent: pricing against the raw clock calls a phase affordable
+        # while its queue is oversubscribed. Zero at dispatch, where the queue
+        # is what is being drained rather than added to.
+        return time_budget_denial(action, expected_min + already_committed_minutes, self.shared_state)
+
+    def expected_cost_minutes_for(self, action_name: str) -> float:
+        """What one round of ``action_name`` is expected to cost, in minutes."""
+        meta = self.action_registry.get(str(action_name or "").strip())
+        if meta is None:
+            return 0.0
+        return expected_action_cost_minutes(
+            meta, measured_baseline_sec=measured_baseline_runtime_sec(self.shared_state)
+        )
 
     def admission_denial_for_action(
         self,
