@@ -662,7 +662,7 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
         if not prompt or str(getattr(state, "phase", "") or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
         from .domains import CUSTOM_SPECIALIST_KEY, custom_specialist_key
-        from .profile import MODE_RESEARCH
+        from .profile import MODE_RESEARCH, NO_LEASE_EXTENSION
 
         key = custom_specialist_key(int(state.macro_cycle or 0), prompt)
         if await self.tasks.find_by_idempotency_key(key) is not None:
@@ -675,6 +675,8 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             "source": "coordinator_internal",
             "reason": "custom_specialist",
         }
+        if state.custom_specialist_only:
+            params[NO_LEASE_EXTENSION] = True
         gaps = [g for g in state.gaps if isinstance(g, dict) and str(g.get("canonical_id") or "").strip()]
         if gaps:
             params["gap_canonical_id"] = str(min(gaps, key=gap_actionability_key)["canonical_id"]).strip()

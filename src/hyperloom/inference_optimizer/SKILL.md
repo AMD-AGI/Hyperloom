@@ -400,8 +400,9 @@ brief:
   explores, and a plateau exit from FRAMEWORK_AGENT waits for both within the
   phase budget. Orchestration is never offered the domain, and the policy gate
   denies any delegate naming it as domain or tag. With `--custom-specialist-only`
-  FRAMEWORK_AGENT runs nothing else: Orchestration's specialists, grids and
-  patches are denied there, the Coordinator's own discovery, scout, stalled-
+  FRAMEWORK_AGENT runs nothing else: Orchestration takes no turn there (its
+  specialists, grids and patches would be denied), the custom task may run to
+  the phase end with no lease extension, the Coordinator's own discovery, scout, stalled-
   domain force, predictor and general bench are skipped, and the phase hints
   `skip_to_sweep` once the custom task, its grid and its patch reviews are done.
 - **PrimaTune predictor rows**: with `--primatune-endpoint` and

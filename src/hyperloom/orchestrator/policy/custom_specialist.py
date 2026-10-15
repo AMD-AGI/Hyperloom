@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Ingress rules keeping the operator-defined specialist Coordinator-owned."""
+"""Rules keeping the operator-defined specialist Coordinator-owned, and the scope of ``--custom-specialist-only``."""
 
 from __future__ import annotations
 
@@ -10,7 +10,13 @@ from typing import Any
 from ..specialists.domains import is_custom_specialist_dispatch
 from .denial import PolicyDenied
 
-__all__ = ["CUSTOM_ONLY_DENIED_ACTIONS", "deny_custom_specialist_delegate", "deny_search_under_custom_only"]
+__all__ = [
+    "CUSTOM_ONLY_DENIED_ACTIONS",
+    "custom_only_framework",
+    "deny_custom_specialist_delegate",
+    "deny_search_under_custom_only",
+    "skips_reactor_turn",
+]
 
 # What Orchestration may not run in FRAMEWORK_AGENT under ``--custom-specialist-only``.
 CUSTOM_ONLY_DENIED_ACTIONS: frozenset[str] = frozenset({"specialist", "explore", "integrate_patch"})
@@ -28,11 +34,21 @@ def deny_custom_specialist_delegate(params: dict[str, Any]) -> None:
         )
 
 
+def custom_only_framework(shared_state: Any) -> bool:
+    """Whether the session is in FRAMEWORK_AGENT under ``--custom-specialist-only``, where only the custom work runs."""
+    if not getattr(shared_state, "custom_specialist_only", False):
+        return False
+    return str(shared_state.phase or "").strip().upper() == _FRAMEWORK_AGENT_PHASE
+
+
+def skips_reactor_turn(agent_name: str, shared_state: Any) -> bool:
+    """Whether ``agent_name`` sits the tick out: Orchestration under custom-only FRAMEWORK_AGENT, where all it may emit is denied."""
+    return agent_name == "orchestration" and custom_only_framework(shared_state)
+
+
 def deny_search_under_custom_only(shared_state: Any, action_name: str) -> None:
     """Refuse Orchestration's FRAMEWORK_AGENT search under ``--custom-specialist-only``; the Coordinator runs it."""
-    if action_name not in CUSTOM_ONLY_DENIED_ACTIONS or not getattr(shared_state, "custom_specialist_only", False):
-        return
-    if str(shared_state.phase or "").strip().upper() == _FRAMEWORK_AGENT_PHASE:
+    if action_name in CUSTOM_ONLY_DENIED_ACTIONS and custom_only_framework(shared_state):
         raise PolicyDenied(
             f"{action_name!r}: --custom-specialist-only runs FRAMEWORK_AGENT on the custom specialist alone",
             rule="custom_specialist_only",

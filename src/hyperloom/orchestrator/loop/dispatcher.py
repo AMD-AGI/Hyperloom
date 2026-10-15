@@ -983,7 +983,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         """How long a specialist of this shape is worth running, ignoring the session.
 
         A mode-tiered base (research 10min / patch 60min) amplified by the macro-cycle
-        count and hard-capped at 4h. Bench-capable patch specialists are floored
+        count and hard-capped at 4h; a no-lease-extension dispatch gets the cap. Bench-capable patch specialists are floored
         at the rebench helper's timeout plus a 10-minute startup allowance, since
         a budget under that guarantees the kill lands mid-benchmark::
 
@@ -1002,11 +1002,13 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         Returns:
             float: A positive wall-clock budget in seconds.
         """
-        from ..specialists.profile import resolve_specialist_profile, wall_budget_base_min
+        from ..specialists.profile import NO_LEASE_EXTENSION, resolve_specialist_profile, wall_budget_base_min
         from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts
 
         macro_cycle = int(self.shared_state.macro_cycle or 0)
-        budget_sec = min(wall_budget_base_min(params) * (macro_cycle + 1), 240.0) * 60.0
+        cap_min = 240.0
+        base_min = wall_budget_base_min(params) * (macro_cycle + 1)
+        budget_sec = (cap_min if (params or {}).get(NO_LEASE_EXTENSION) else min(base_min, cap_min)) * 60.0
         if resolve_specialist_profile(params).reserves_benchmark_lane:
             budget_sec = max(budget_sec, resolve_benchmark_timeouts()[1] + 10 * 60)
         return budget_sec

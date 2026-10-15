@@ -49,6 +49,7 @@ from ..bus.storage.connection import SqliteConnection, resolve_journal_mode
 from hyperloom.inference_optimizer.protocol.intent import NoIntentEmitted
 from ..bus.message_bus import MessageBus
 from ..state.objective import Objective, TimeOnlyObjective
+from ..policy.custom_specialist import skips_reactor_turn
 from ..policy.gate import PolicyGate
 from ..state.round_store import RoundStore
 from ..bus.gpu_pool import (
@@ -740,17 +741,16 @@ class Coordinator:
             log.exception("phase advance before reactors failed")
             self.record_exception(stage="advance_phase_pre_reactor", exc=exc)
         in_closing = bool(self.shared_state.closing_phase)
-        # One reactor + dispatcher pass; during closing skip LLM passes.
+        # One reactor + dispatcher pass; during closing skip LLM passes, and any turn that would only hold dispatch back.
         if not in_closing:
             for name in self._tick_roles:
                 if self.stop_requested():
                     break
                 if time.monotonic() < self._backend_retry_at.get(name, 0.0):
                     continue
-                await self.await_within_session_bound(
-                    lambda n=name: self.reactor_pass(n),
-                    stage=f"reactor:{name}",
-                )
+                if skips_reactor_turn(name, self.shared_state):
+                    continue
+                await self.await_within_session_bound(lambda n=name: self.reactor_pass(n), stage=f"reactor:{name}")
         if not self.stop_requested():
             await self.dispatcher.pump_dispatcher_once()
         if not in_closing:

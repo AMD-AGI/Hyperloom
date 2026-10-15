@@ -602,8 +602,11 @@ async def test_dispatch_enqueues_one_task_per_cycle_through_the_real_router(tmp_
     ]
 
 
-async def test_the_coordinator_custom_task_passes_the_dispatch_time_gate_and_runs(tmp_path):
-    state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION)
+@pytest.mark.parametrize("only", [False, True])
+async def test_the_coordinator_custom_task_passes_the_dispatch_time_gate_and_runs(tmp_path, only):
+    state = SharedState(
+        custom_specialist_prompt=_PROMPT, custom_specialist_description=_DESCRIPTION, custom_specialist_only=only
+    )
     state.max_minutes = 30
     state.framework = "sglang"
     coord = _coordinator(tmp_path, state)
@@ -982,3 +985,50 @@ async def test_only_mode_leaves_framework_once_the_custom_cycle_is_done(kw, hint
     await fp._maybe_finish_custom_only_cycle()
 
     assert fp.shared_state.pending_escalate_hint == hint
+
+
+@pytest.mark.parametrize(
+    ("phase", "only", "expected"),
+    [
+        ("FRAMEWORK_AGENT", True, ["critic"]),
+        ("FRAMEWORK_AGENT", False, ["orchestration", "critic"]),
+        ("SWEEP", True, ["orchestration", "critic"]),
+    ],
+)
+async def test_only_mode_framework_ticks_without_an_orchestration_turn(tmp_path, monkeypatch, phase, only, expected):
+    import time
+
+    coord = _coordinator(tmp_path, SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_only=only))
+    coord.shared_state.phase = phase
+    turns: list[str] = []
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    async def _turn(name, **kwargs):
+        turns.append(name)
+
+    monkeypatch.setattr(coord, "reactor_pass", _turn)
+    monkeypatch.setattr(coord.reconciler, "run", _noop)
+    monkeypatch.setattr(coord.phase_machine, "advance_phase_if_needed", _noop)
+    monkeypatch.setattr(coord.dispatcher, "pump_dispatcher_once", _noop)
+    monkeypatch.setattr(coord.enablement_lane, "pump_enablement_safely", _noop)
+    coord.phase_machine.pump_table = {"CLOSE": _noop}
+    coord._last_maintenance_ts = time.monotonic()
+
+    await coord._tick_once()
+
+    assert turns == expected
+
+
+@pytest.mark.parametrize(("only", "expected"), [(True, 240 * 60), (False, 10 * 60)])
+async def test_only_mode_custom_specialist_runs_to_the_phase_end_without_an_extension(tmp_path, only, expected):
+    state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_only=only)
+    state.max_minutes = 30
+    state.framework = "sglang"
+    coord = _coordinator(tmp_path, state)
+
+    await coord.specialist_dispatch.ensure_custom_specialist()
+
+    (task,) = await coord.tasks.queued()
+    assert coord.dispatcher._specialist_wall_budget_sec(params=task.params) == expected
