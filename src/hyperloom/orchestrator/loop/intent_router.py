@@ -897,6 +897,38 @@ class IntentRouter(CoordinatorCollaborator):
         elif verdict == "needs_review":
             await self._coord.phase_framework.maybe_reauthor_from_critic_feedback(pending, advisory)
 
+    async def _keep_unqueued_variants(self, source: str, params: dict[str, Any]) -> bool:
+        """Narrow ``params['grid']`` to what the queue is not already measuring; ``False`` when nothing is left.
+
+        Deduplicating a whole grid admits one configuration once per grouping
+        it is proposed in. The variant is what costs a serving lane for a
+        launch and a benchmark, so the variant is what has to be unique at
+        enqueue -- not the grid that happens to carry it.
+        """
+        before = list(params.get("grid") or ())
+        if not before:
+            # No grid supplied is not a deduplicated grid: the executor seeds its own.
+            return True
+        kept = await self._coord.dispatcher.variants_not_already_queued(before)
+        params["grid"] = kept
+        if len(kept) == len(before):
+            return True
+        await self.bus.record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": "explore_variants_deduped",
+                "from_agent": source,
+                "proposed": len(before),
+                "kept": len(kept),
+                "hint": (
+                    "the queue already holds these configurations; propose a direction it does not, "
+                    "or read the measured result first"
+                ),
+            },
+        )
+        return bool(kept)
+
     async def handle_delegate(self, source: str, intent: Intent) -> None:
         """Validate and enqueue a delegated action as a TaskRegistry task."""
         action_name = intent.payload["action_name"]
@@ -990,6 +1022,9 @@ class IntentRouter(CoordinatorCollaborator):
                         self.shared_state.save(self.session_dir)
                     except Exception:
                         log.exception("delegate specialist: source-patch prune save failed")
+                return
+        if action_name == "explore":
+            if not await self._keep_unqueued_variants(source, params):
                 return
         # Idempotency-key chain: grid content for explore -> top-level -> nested compat alias ->
         # content-fingerprint auto-key.
