@@ -245,7 +245,7 @@ the bundle rather than the lever.
 **GPU type.** `--gpu-type` accepts `mi300x`, `mi308x`, `mi325x` and `mi355x`.
 Note that **`mi308x` and `mi325x` map to `runner_type=mi300x`** with a warning,
 since those GPUs share the MI300X runner family. Without the flag, Hyperloom
-auto-detects through `rocm-smi --showproductname`.
+auto-detects through `amd-smi static --asic`.
 
 **Pin GPUs with `ROCR_VISIBLE_DEVICES`, not `HIP_VISIBLE_DEVICES`.** On the known
 ROCm stack the latter can make `torch.cuda.is_available()` return false.

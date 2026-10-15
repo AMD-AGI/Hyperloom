@@ -204,11 +204,11 @@ def _build_parser() -> argparse.ArgumentParser:
         # without a second edit.
         choices=sorted(AMD_GPU_DISPATCH_IDENTITIES),
         default=None,
-        help="Hint for the real target GPU. The rocm-smi probe always "
+        help="Hint for the real target GPU. The amd-smi static --asic probe always "
         "wins when both are present and disagree; a WARN is "
         "emitted to stderr so the operator sees the typo. Used "
         "verbatim only when the probe fails (CPU sandbox / no "
-        "rocm-smi). Magpie runner_type is derived separately; "
+        "amd-smi). Magpie runner_type is derived separately; "
         "mi308x and mi325x currently run with mi300x runner scripts because "
         "Magpie does not yet ship MI308X/MI325X-specific SGLang/vLLM scripts.",
     )

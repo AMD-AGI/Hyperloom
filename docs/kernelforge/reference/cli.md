@@ -355,7 +355,7 @@ Search and execution:
 | `--global-timeout <s>` | `0` (unlimited) | Timeout for the entire session. |
 | `--mp <n>` | `1` | Number of GPUs for parallel tuning. |
 | `--gpu-ids <a,b>` | all | Comma-separated GPU IDs to use. |
-| `--skip-gpu-check` | off | Skip the `rocm-smi` preflight check. |
+| `--skip-gpu-check` | off | Skip the `amd-smi` preflight check. |
 | `--kb-current-lib <v>` | `''` | Current backend `lib_version`, recorded as artifact provenance. |
 | `--verbose` / `-v` | off | Verbose logging. |
 

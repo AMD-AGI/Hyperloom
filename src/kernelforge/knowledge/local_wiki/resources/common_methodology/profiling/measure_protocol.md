@@ -47,7 +47,7 @@ Net rule: **compute achieved TFLOP/s from measured time, never from an assumed c
 2. **Time REPEATS=7.** Report median and spread.
 3. **Apply the noise band.** ~0.5% e2e. Per-kernel microbench bands are tighter but never zero — quote
    the spread either way.
-4. **Control clocks.** Pin a deterministic performance level with `rocm-smi` / `amd-smi` for kernel
+4. **Control clocks.** Pin a deterministic performance level with `amd-smi` for kernel
    microbenchmarks. At minimum monitor with `amd-smi metric` (sclk / mclk / power / temp / throttle)
    during the run and **reject any A/B where the clock drifted between ref and candidate.**
 5. **A/B in one session.** Ref then candidate, back-to-back, same process, same clocks.

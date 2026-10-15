@@ -172,8 +172,8 @@ the bundle rather than the lever.
 ## GPU Runner Type
 
 Pick the GPU explicitly with `--gpu-type` or `$GPU_TYPE`; without either, the
-optimizer auto-detects via `rocm-smi --showproductname` (falling back to
-`torch.cuda.get_device_properties(0).gcnArchName`).
+optimizer auto-detects via `amd-smi static --asic`, using the reported
+market name and gfx target.
 
 ```bash
 python3 -m hyperloom optimize --gpu-type mi355x --model "$MODEL_PATH" --max-hours 2
