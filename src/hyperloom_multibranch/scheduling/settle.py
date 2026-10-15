@@ -19,4 +19,10 @@ async def settled(work: Awaitable[T]) -> T | BaseException:
     return outcome
 
 
-__all__ = ["settled"]
+def failure_text(error: BaseException) -> str:
+    """How a failed step is named in the stop decisions and the stop report."""
+
+    return f"{type(error).__name__}: {error}"
+
+
+__all__ = ["failure_text", "settled"]

@@ -5,8 +5,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
+
+import pytest
 
 from hyperloom.contracts.recipe import Recipe
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLaunch
@@ -15,6 +18,7 @@ from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
+from hyperloom_multibranch.scheduling import branches
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
@@ -22,7 +26,7 @@ from hyperloom_multibranch.scheduling.forks import AdmittedBranch
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStop, Roster, RosterCaps, StopCause
-from hyperloom_multibranch.scheduling.tests.peer_fakes import MbFakeLifecycle, RecordingToolbox
+from hyperloom_multibranch.scheduling.tests.peer_fakes import DownToolbox, MbFakeLifecycle, RecordingToolbox
 
 NOW = 1_700_000_000.0
 CLOCK = Clock(now=lambda: NOW)
@@ -53,6 +57,15 @@ class BrokenLifecycle(MbFakeLifecycle):
 
     async def set_k(self, branch: str, k: int) -> None:
         raise RuntimeError(f"{branch} did not take K {k}")
+
+
+class HangingStartLifecycle(MbFakeLifecycle):
+    """A runtime whose start of ``b01`` never returns; a failure double, not a placeholder."""
+
+    async def start(self, launch: SpecialistLaunch) -> None:
+        if launch.branch == "b01":
+            await asyncio.Event().wait()
+        await super().start(launch)
 
 
 class Bench:
@@ -197,3 +210,54 @@ async def test_a_specialist_that_does_not_start_is_withdrawn_without_a_stop_and_
     assert [row["detail"]["failure"] for row in logged if row["kind"] == "set_k"] == [
         "RuntimeError: b02 did not take K 2"
     ]
+
+
+async def test_a_start_that_does_not_finish_in_time_is_withdrawn_and_the_others_still_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(branches, "SPECIALIST_START_SECONDS", 0.2)
+    bench = await Bench(tmp_path).rooted()
+    lifecycle = HangingStartLifecycle()
+    bench.control = BranchControl(
+        bench.roster,
+        bench.notebook,
+        lifecycle,
+        bench.toolbox,
+        bench.repo,
+        ProcessRegistry(tmp_path / "MB-pids.jsonl", CLOCK),
+        DecisionLog(tmp_path / "MB-decisions.jsonl", CLOCK),
+        CLOCK,
+    )
+
+    await bench.control.open_branches(2, bench.root, 1, BranchOrigin.FIRST_BATCH)
+
+    stop = bench.roster.entry("b01").stop
+    assert stop is not None and stop.cause is StopCause.START_FAILED
+    assert bench.toolbox.cancelled == ["b01"]
+    assert lifecycle.running.keys() == {"b02"} and bench.roster.entry("b02").stop is None
+
+
+async def test_a_toolbox_failing_while_a_branch_opens_fails_that_branch_alone(tmp_path: Path) -> None:
+    bench = await Bench(tmp_path).rooted()
+    toolbox = DownToolbox(LocalNotebook(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=CLOCK.now))
+    toolbox.down = True
+    bench.control = BranchControl(
+        bench.roster,
+        bench.notebook,
+        bench.lifecycle,
+        toolbox,
+        bench.repo,
+        ProcessRegistry(tmp_path / "MB-pids.jsonl", CLOCK),
+        DecisionLog(tmp_path / "MB-decisions.jsonl", CLOCK),
+        CLOCK,
+    )
+
+    opened = await bench.control.open_branches(1, bench.root, 1, BranchOrigin.FIRST_BATCH)
+
+    assert [entry.branch for entry in opened] == ["b01"]
+    stop = bench.roster.entry("b01").stop
+    assert stop is not None and (stop.cause, stop.reason) == (
+        StopCause.START_FAILED,
+        "ConnectionError: toolbox service down",
+    )
+    assert bench.lifecycle.started == {}

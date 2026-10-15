@@ -9,13 +9,14 @@ specialist there with its K; a fork or repair the fork desk admitted is opened t
 specialist briefed with the change it builds on. Stopping a branch withdraws everything of it: its specialist unless it
 never started, its queued and running tests and tool jobs, the processes the scheduler registered for it, its claims,
 and the forks and repairs of it that are admitted but not started yet, as the fork desk admits nothing for a stopped
-branch; the notebook gets the ``STOP`` lineage of a branch that started, the integration branch included, which only the end
-of the session stops. A specialist gets :data:`SPECIALIST_STOP_SECONDS` to stop; one that overruns them is recorded as
-a failed step, and the rest of the stop still runs. The commits it already made stay in the notebook, so the
+branch; the notebook gets the ``STOP`` lineage of a branch that started, the integration branch included, which only
+the end of the session stops. A specialist gets :data:`SPECIALIST_STOP_SECONDS` to stop; one that overruns them is
+recorded as a failed step, and the rest of the stop still runs. The commits it already made stay in the notebook, so the
 integrator may still merge them. The roster entry is stopped first, so an admitted branch drained while its
 parent is being stopped is never started. The toolbox gets a branch's K before its specialist starts, so the first
-tests it submits already queue by it. A peer failure on one branch never ends the session: a branch whose specialist
-does not start is withdrawn like a stopped one, and a failed step of a stop or of a new K is recorded in its decision.
+tests it submits already queue by it. A peer failure on one branch never ends the session: a branch that does not
+open, its specialist's start included, within :data:`SPECIALIST_START_SECONDS` is withdrawn like a stopped one, and a
+failed step of a stop or of a new K is recorded in its decision.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.forks import DECISION_KINDS, AdmittedBranch
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
-from hyperloom_multibranch.scheduling.settle import settled
+from hyperloom_multibranch.scheduling.settle import failure_text, settled
 from hyperloom_multibranch.scheduling.roster import (
     BranchEntry,
     BranchKind,
@@ -51,6 +52,8 @@ logger = logging.getLogger(__name__)
 
 #: Clock seconds a specialist gets to stop before its stop counts as failed; CLOSE kills what it leaves behind.
 SPECIALIST_STOP_SECONDS = 60.0
+#: Clock seconds a branch gets to open, its specialist's start included, before the branch counts as not started.
+SPECIALIST_START_SECONDS = 300.0
 
 
 class BranchControl:
@@ -97,12 +100,21 @@ class BranchControl:
         return await self._open(entry, admitted.start_commit, admitted.brief)
 
     async def _open(self, entry: BranchEntry, start_commit: str, brief: str | None) -> BranchEntry:
-        reason = f"{entry.origin.value} branch" + (f" of {entry.from_branch}" if entry.from_branch else "")
-        await self._notebook.record_lineage(
-            LineageEvent(LineageKind.OPEN, entry.branch, from_commit=start_commit, reason=reason)
-        )
-        await self.push_quota()
-        await self._start(entry, start_commit, brief)
+        """Record ``OPEN``, give the toolbox the branch's K, cut the branch and start its specialist; a branch any of
+        that fails for, or that is not done within :data:`SPECIALIST_START_SECONDS`, is stopped with the failure as
+        the reason."""
+
+        launch = SpecialistLaunch(entry.branch, start_commit, entry.k, brief)
+        started = await settled(self._clock.wait_for(self._launch(entry, launch), SPECIALIST_START_SECONDS))
+        if isinstance(started, BaseException):
+            logger.error("the specialist of %s did not start", entry.branch, exc_info=started)
+            stop = BranchStop(StopCause.START_FAILED, failure_text(started), self._clock.now())
+            for failure in await self.stop_branch(entry.branch, stop):
+                logger.error("%s did not stop cleanly after its failed start", entry.branch, exc_info=failure)
+            return entry
+        detail = {"start_commit": start_commit, "k": entry.k, "from_branch": entry.from_branch}
+        kind = DECISION_KINDS.get(entry.origin, DecisionKind.OPEN)
+        self._decisions.record(Decision(kind, f"{entry.origin.value} branch started", entry.branch, detail))
         return entry
 
     async def apply_k(self, orders: Mapping[str, int]) -> None:
@@ -146,7 +158,7 @@ class BranchControl:
         detail = {
             "withdrawn": 0 if isinstance(withdrawn, BaseException) else withdrawn,
             "released_claims": 0 if isinstance(released, BaseException) else len(released),
-            "failures": [_failure_text(error) for error in raised],
+            "failures": [failure_text(error) for error in raised],
         }
         self._decisions.record(Decision(DecisionKind.STOP, stop.summary, branch, detail))
         return (*raised, *forks)
@@ -162,22 +174,12 @@ class BranchControl:
     async def push_quota(self) -> None:
         await self._toolbox.set_policy(self._roster.quota_policy())
 
-    async def _start(self, entry: BranchEntry, start_commit: str, brief: str | None) -> None:
-        """Cut the branch and start its specialist; one that does not start is stopped, with the failure as the
-        reason."""
-
-        started = await settled(self._launch(SpecialistLaunch(entry.branch, start_commit, entry.k, brief)))
-        if isinstance(started, BaseException):
-            logger.error("the specialist of %s did not start", entry.branch, exc_info=started)
-            stop = BranchStop(StopCause.START_FAILED, _failure_text(started), self._clock.now())
-            for failure in await self.stop_branch(entry.branch, stop):
-                logger.error("%s did not stop cleanly after its failed start", entry.branch, exc_info=failure)
-            return
-        detail = {"start_commit": start_commit, "k": entry.k, "from_branch": entry.from_branch}
-        kind = DECISION_KINDS.get(entry.origin, DecisionKind.OPEN)
-        self._decisions.record(Decision(kind, f"{entry.origin.value} branch started", entry.branch, detail))
-
-    async def _launch(self, launch: SpecialistLaunch) -> None:
+    async def _launch(self, entry: BranchEntry, launch: SpecialistLaunch) -> None:
+        reason = f"{entry.origin.value} branch" + (f" of {entry.from_branch}" if entry.from_branch else "")
+        await self._notebook.record_lineage(
+            LineageEvent(LineageKind.OPEN, entry.branch, from_commit=launch.start_commit, reason=reason)
+        )
+        await self.push_quota()
         await self._repo.create_branch(launch.branch, launch.start_commit)
         await self._lifecycle.start(launch)
 
@@ -188,11 +190,7 @@ class BranchControl:
         if not isinstance(sent, BaseException):
             return ""
         logger.error("the specialist of %s did not take K %d", entry.branch, entry.k, exc_info=sent)
-        return _failure_text(sent)
+        return failure_text(sent)
 
 
-def _failure_text(error: BaseException) -> str:
-    return f"{type(error).__name__}: {error}"
-
-
-__all__ = ["SPECIALIST_STOP_SECONDS", "BranchControl"]
+__all__ = ["SPECIALIST_START_SECONDS", "SPECIALIST_STOP_SECONDS", "BranchControl"]
