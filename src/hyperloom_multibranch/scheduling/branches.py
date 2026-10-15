@@ -6,8 +6,9 @@ notebook in step.
 
 Opening a branch records its ``OPEN`` lineage, cuts it in the experiment repository at its start commit, starts its
 specialist there and gives it its K. A repair the fork desk admitted is opened the same way at the commit its blocked
-candidate was measured against; a fork is cut by the rule gate, which lands the fix on it first, so it is opened at its
-head once that head has moved past the commit it was cut at, and stopped as not started when that has not happened
+candidate was measured against; a fork is cut by the rule gate, which lands the fix on it first and records its
+``SPLIT`` lineage, so it gets no ``OPEN``: it is opened at its head once that head has moved past the commit it was cut
+at, and stopped as not started when that has not happened
 within :data:`SPECIALIST_START_SECONDS` of its admission. Stopping a branch withdraws everything of it: its specialist, its
 queued and running tests and tool jobs, the processes the scheduler registered for it, its claims, and the forks and
 repairs of it that are admitted but not started yet, as the fork desk admits nothing for a stopped branch; the notebook
@@ -131,9 +132,9 @@ class BranchControl:
         return "" if head == parent_commit else head
 
     async def _open(self, entry: BranchEntry, start_commit: str, deadline: float) -> BranchEntry:
-        """Record ``OPEN``, give the toolbox the branch's K, cut the branch and start its specialist; a branch any of
-        that fails for, or that is not done within :data:`SPECIALIST_START_SECONDS` or by ``deadline``, is stopped
-        with the failure as the reason."""
+        """Record ``OPEN`` and cut a branch the scheduler cuts, give the toolbox its K and start its specialist; a
+        branch any of that fails for, or that is not done within :data:`SPECIALIST_START_SECONDS` or by ``deadline``,
+        is stopped with the failure as the reason."""
 
         seconds = min(SPECIALIST_START_SECONDS, deadline - self._clock.now())
         started = await settled(self._clock.wait_for(self._launch(entry, start_commit), seconds))
@@ -222,13 +223,13 @@ class BranchControl:
         await self._toolbox.set_policy(self._roster.quota_policy())
 
     async def _launch(self, entry: BranchEntry, start_commit: str) -> None:
-        reason = f"{entry.origin.value} branch" + (f" of {entry.from_branch}" if entry.from_branch else "")
-        await self._notebook.record_lineage(
-            LineageEvent(LineageKind.OPEN, entry.branch, from_commit=start_commit, reason=reason)
-        )
-        await self.push_quota()
         if entry.origin.cut_by_scheduler:
+            reason = f"{entry.origin.value} branch" + (f" of {entry.from_branch}" if entry.from_branch else "")
+            await self._notebook.record_lineage(
+                LineageEvent(LineageKind.OPEN, entry.branch, from_commit=start_commit, reason=reason)
+            )
             await self._repo.create_branch(entry.branch, start_commit)
+        await self.push_quota()
         self._specialists.add(entry.branch)
         started = await settled(self._lifecycle.start(entry.branch, start_commit))
         if isinstance(started, BaseException):

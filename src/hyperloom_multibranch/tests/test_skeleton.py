@@ -6,8 +6,8 @@ clock.
 
 PRELUDE roots the session on a scripted child session in a git repository; the judge opens two branches, whose
 scripted specialists the runtime runs and judges; on ``b01`` the runtime confirms and commits ``c1``, and a fix of it is
-asked for as a fork, which opens ``b03`` at the fix (a second fork is refused at the cap); on ``b02`` it commits ``c2``,
-the best single-branch value, whose specialist holds a claim and a process the AI work socket started, and the judge
+asked for as a fork, which the stand-in gate splits off as ``b03`` and the scheduler starts at the fix (a second fork
+is refused at the cap); on ``b02`` it commits ``c2``, the best single-branch value, whose specialist holds a claim and a process the AI work socket started, and the judge
 stops ``b02``; the integrator merges ``c1`` and refuses ``c2``; FINAL weighs the judge-stopped ``b02`` against the
 integration head and passes over it, because its head does not reproduce its recorded value; CLOSE leaves nothing
 running.
@@ -34,6 +34,7 @@ from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerCo
 from hyperloom.measure.versions import socket_versions
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
@@ -280,7 +281,9 @@ def _script(stage: Stage) -> None:
         stage.forks.append(accepted)
         await stage.repo.create_branch(accepted.branch, c1)
         fixed = apply(await stage.repo.read_recipe(c1), tagged("f1"))
-        await stage.repo.commit(accepted.branch, c1, fixed, FIX_REASON)
+        fix = await stage.repo.commit(accepted.branch, c1, fixed, FIX_REASON)
+        split = LineageEvent(LineageKind.SPLIT, accepted.branch, commit_id=fix, from_commit=c1, from_branch=branch)
+        await stage.handle(Role.GATE).record_lineage(split)
         stage.forks.append(await stage.setup.desk.admit(ForkRequest(branch, c1, "fix f2 regresses")))
 
     async def holds(branch: str, c2: str) -> None:
@@ -318,7 +321,7 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
         (AdmissionStatus.ACCEPTED, "b03"),
         (AdmissionStatus.REJECTED, ""),
     ]
-    assert (branches["b03"].origin, branches["b03"].start_commit) == (LineageKind.OPEN, fix)
+    assert (branches["b03"].origin, branches["b03"].start_commit) == (LineageKind.SPLIT, c1)
 
     assert stage.sessions.k["b01"] == 2 and stage.sessions.running == set()
     specialist_ks = [

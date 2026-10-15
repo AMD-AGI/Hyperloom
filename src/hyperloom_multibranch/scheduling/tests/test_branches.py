@@ -87,6 +87,7 @@ class Bench:
         runtime: type[RefusingRuntime] = RefusingRuntime,
     ) -> None:
         self.notebook = LocalNotebook(tmp_path / "nb", Writer(Role.SCHEDULER, "scheduler"), clock=CLOCK.now)
+        self.gate_notebook = LocalNotebook(tmp_path / "nb", Writer(Role.GATE, "rule-gate"), clock=CLOCK.now)
         self.roster = Roster(RosterCaps(3, 2, 8), tmp_path / "MB-roster.json", CLOCK)
         self.toolbox = RecordingToolbox(
             LocalNotebook(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=CLOCK.now)
@@ -170,12 +171,14 @@ async def test_a_fork_waits_for_the_gate_to_land_its_fix_and_opens_at_it(tmp_pat
     await bench.repo.create_branch("b02", bench.root)
     assert not await bench.control.start_admitted(admitted, OPEN_BY)
     fix = await bench.repo.commit("b02", bench.root, BASELINE, "the fix")
+    split = LineageEvent(LineageKind.SPLIT, "b02", commit_id=fix, from_commit=bench.root, from_branch="b01")
+    await bench.gate_notebook.record_lineage(split)
     assert await bench.control.start_admitted(admitted, OPEN_BY)
     await _runs_started()
 
     assert (bench.sessions.started["b02"], bench.sessions.k["b02"]) == (fix, 2)
     view = {branch.branch: branch for branch in (await bench.notebook.lineage()).branches}
-    assert view["b02"].start_commit == fix
+    assert (view["b02"].origin, view["b02"].from_branch) == (LineageKind.SPLIT, "b01")
     logged = json.loads((tmp_path / "MB-decisions.jsonl").read_text().splitlines()[-1])
     assert (logged["kind"], logged["branch"], logged["detail"]["from_branch"]) == ("fork", "b02", "b01")
 
