@@ -69,7 +69,7 @@ settings do stop the run, and are marked below.
 | `KERNEL_OPT_BACKEND_BUDGET_MIN`, `KERNEL_OPT_MAX_PARALLEL`, `INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL`, `HYPERLOOM_FORGE_NOMINATION_AUTO`, `HYPERLOOM_LLM_SOURCE_MODEL`, `INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL`, `INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR`, `HYPERLOOM_FORGE_REWRITE_BY_FLYDSL`, `GEMM_TUNING_BACKEND`, `INFERENCE_OPTIMIZER_REQUIRE_FRAMEWORK_ACCURACY`, `INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS`, `HYPERLOOM_REAP_BACKEND` | Delete them; nothing read them, and they are gone from `.env.template` and the env reference. A kernel-agent env file still carrying `HYPERLOOM_FORGE_REWRITE_BY_FLYDSL` now draws preflight's `ignoring unsupported kernel-agent env key` warning. |
 | `SGLANG_FP8_BLOCKSCALE_CK_MAX_M` | Delete it. The SGLang 0.5.12 CK fp8 block-scale serving patch it triggered is retired (it was already inert on 0.5.20 and later). |
 | `HYPERLOOM_CLAUDE_CODE_VERSION` as an npm version spec | Use `stable`, `latest` or an exact `X.Y.Z`. |
-| `ISL`, `OSL`, `CONC`, `TP`, `EP`, `PRECISION`, `MAX_MODEL_LEN` exported in the shell | They now take effect on a fresh launch, where 1.1.3 ignored them: each resolves as flag, then `$NAME`, then the resumed session's value, then the default. Unset any you did not mean. On `--resume-from` the session's recorded values still win over stale shell exports unless a flag or `--extra-env` re-pins them. |
+| `ISL`, `OSL`, `CONC`, `TP`, `EP`, `PRECISION`, `MAX_MODEL_LEN` pinned through `--extra-env` or exported in the shell | Every `--extra-env` pin is now exported under its own name, so a launch script that pinned `TP=4` or `ISL=4096` that way now runs at that shape, where 1.1.3 ran the default and recorded the pin. On a fresh launch each name resolves as flag, then `$NAME`, then the resumed session's value, then the default, so a shell export of `ISL`, `OSL`, `CONC`, `TP`, `EP` or `PRECISION`, which 1.1.3 ignored, now takes effect; unset any you did not mean. On `--resume-from` the session's recorded `ISL` / `OSL` / `CONC` / `TP` / `EP` / `MAX_MODEL_LEN` win over stale shell exports unless a flag or `--extra-env` re-pins them, but an exported `PRECISION` still overrides the recorded precision: unset it before resuming. |
 | A malformed numeric value for a strictly parsed variable | Fix it: the run now stops with `EnvValueError` instead of using the default (list under *Changed*). |
 
 Defaults and gates that move, so the same command behaves differently:
@@ -97,8 +97,11 @@ Defaults and gates that move, so the same command behaves differently:
 - **GLM-5.3 AgentX baselines move.** A GLM-5.3 model now replays the uncapped
   `semianalysis_cc_traces_weka_062126` corpus (mean ISL about 180k, as
   InferenceX does) instead of the 256k-capped one, so its baselines and gains
-  are not comparable with 1.1.3 runs unless `AGENTX_DATASET` pins the old
-  corpus.
+  are not comparable with 1.1.3 runs. To keep the old corpus, declare it
+  canonical with
+  `AGENTX_CANONICAL_DATASET=semianalysis_cc_traces_weka_062126_256k`; pinning
+  it through `AGENTX_DATASET` instead stamps every result
+  `submission_valid=false`, so nothing can KEEP.
 - **A failing LLM backend ends the session.** After one hour without a
   successful turn, or after 50 consecutive agent turns that emit no intent, the
   session stops with `stop_reason=backend_unhealthy` (outcome `aborted`; CLOSE
@@ -130,14 +133,17 @@ Session and report consumers have to follow these changes; no aliases are kept:
   `stack_member_identities` or `stack_validation_started_at`, and an in-flight
   stack checkpoint written by 1.1.4 cannot be resumed by 1.1.3.
 - SBD `phase_action.decision` takes `adopted` / `refused` / `reverted` /
-  `failed` / `recorded`, `optimization_journal.json` outcomes for results that
-  were not adopted use the same vocabulary, and the workflow-evaluation
+  `failed` / `recorded`. `optimization_journal.json` outcomes are derived from
+  that decision: `KEEP` for adopted, `REVERT` for reverted, `no_promote` for
+  refused and failed, and the new `recorded` for steps with nothing to adopt
+  (analysis, specialist, report). The workflow-evaluation
   `prelude_inputs.double_run` key is gone from both schemas. Both workflow
   contract digests change, and new sessions stamp the v2 workflow-evaluation
   contract (older sessions keep v1).
 - Orchestration prompt snapshots are named
   `system_prompt.cN.PHASE.snapshot.md`, and the orchestration agent's
-  `UPDATE_STATE` intent is gone (`intent_type not allowed`).
+  `UPDATE_STATE` intent is gone: an intent that still carries it is refused
+  with `intents[<i>].intent_type '<type>' not in allowed set`.
 - Enablement writes `reports/enablement/enablement_setup.sh` and
   `setup_files/` instead of `reports/enablement/patches/` and
   `reports/enablement/artifacts/`.
@@ -145,7 +151,7 @@ Session and report consumers have to follow these changes; no aliases are kept:
   SHA. A failed roofline profile is no longer retried on the same config, so
   `retry_after_*` reasons and the `all 3 profile attempts failed` prefix are
   gone, and the CUDA-graph diagnosis is written as
-  `diagnostics/roofline_cuda_graph_capture_{task_id}.json`.
+  `diagnostics/roofline_cuda_graph_capture_<task_id>.json`.
 - KernelForge workspace JSON artifacts and the forge-loop checkpoint drop
   `schema_version`, and `forge-loop --resume` on a workspace written by an
   older kernelforge fails instead of migrating it.
@@ -196,9 +202,10 @@ Session and report consumers have to follow these changes; no aliases are kept:
 - **MLPerf agentic backend for AgentX.** `HYPERLOOM_AGENTIC_BACKEND=mlperf`
   (with `HYPERLOOM_AGENTX=1`) runs the MLCommons `run_agentic.sh` harness,
   graded on output throughput with inline-accuracy KEEP gating and a
-  trajectory-sized default benchmark timeout. It accepts every registered
-  serving framework (sglang, vllm, atom) and refuses scriptable and
-  unregistered ones, and `AGENTX_KEEP_ALIVE_ENV` names the server keep-alive
+  trajectory-sized default benchmark timeout. It measures Kimi-K3 only and
+  refuses any other model. On that model it accepts every registered serving
+  framework (sglang, vllm, atom) and refuses scriptable and unregistered ones,
+  and `AGENTX_KEEP_ALIVE_ENV` names the server keep-alive
   variable (default 900 s). **Upgrade note:** the same change makes default
   aiperf AgentX candidates grade accuracy on the request error rate (see
   "Before upgrading from 1.1.3").
@@ -249,7 +256,7 @@ Session and report consumers have to follow these changes; no aliases are kept:
 
 - **Kernel tuning tool and GEAK backend visibility.** Preflight's warn-only
   `check_kernel_tuning_clis` step prints
-  `Preflight: WARNING — {cli} not on PATH` for a missing `hipblaslt-bench` or
+  `Preflight: WARNING — <cli> not on PATH` for a missing `hipblaslt-bench` or
   `ckProfiler` (skipped with `--no-kernel`), and GEAK's `absent_backends`
   appear in the log, in `state.json` `geak_result.absent_backends` and as a
   kernel-summary takeaway.
@@ -281,8 +288,11 @@ Session and report consumers have to follow these changes; no aliases are kept:
   only, annotating the settled outcome with `below_historical_reproduce_pct`
   and `historical_reproduce_bar_pct` and rejecting nothing. Those two keys are
   gone from `warm_replay_outcome` and from the SBD V6 `warm_replay` verdict
-  row; the reproduced/drift decision an operator sees is unchanged, and
-  `--no-warm-replay` and `--warm-replay-min-confidence` are untouched. The
+  row; removing the flag leaves the reproduced/drift decision unchanged (a
+  local legacy replay is now held to the keep threshold rather than any
+  positive gain, but that comes from warm replay honouring graded adoption,
+  below), and `--no-warm-replay` and `--warm-replay-min-confidence` are
+  untouched. The
   flag's cost was a threshold operators could tune for hours without moving an
   adoption.
 
@@ -427,7 +437,7 @@ Session and report consumers have to follow these changes; no aliases are kept:
   dispatched specialists: orchestration and the Critic take turns while work
   runs, so long specialists mean more LLM calls. FRAMEWORK candidates are
   authored in parallel up to `research_lane_capacity`, untested specialist
-  proposals are benched four at a time as `auto-explore-c{cycle}-{hash}`
+  proposals are benched four at a time as `auto-explore-c<cycle>-<hash>`
   explore grids (also on a single node), CPU specialists see no GPUs and use
   workspace-local compiler caches, the specialist wall budget is 60 minutes for
   a patch and 10 minutes for research, and specialists honour
@@ -455,10 +465,8 @@ Session and report consumers have to follow these changes; no aliases are kept:
   being skipped as "likely too old"; the "compatibility probe ... produced no
   help text" warning is gone.
 
-- **Resume no longer type-checks `state.json` fields** such as `crash_count`
-  and `crash_timestamps`; a wrong type no longer stops the load with a
-  `ValueError`, and RULE F2 no longer points orchestration at
-  `INFERENCE_OPTIMIZER_RESCUE_PATHS`, which it could not set.
+- **RULE F2 no longer points orchestration at
+  `INFERENCE_OPTIMIZER_RESCUE_PATHS`**, which it could not set.
 
 - **KernelForge packaged resources move out of `kernelforge/data`.** Example
   tasks live under `src/kernelforge/examples/` (`resource_path('examples')`)
@@ -468,11 +476,11 @@ Session and report consumers have to follow these changes; no aliases are kept:
   `resource_path('local_knowledge')` and `KERNELFORGE_PROJECT_ROOT` overrides
   keep working.
 
-- **Roofline profile retries are logged per attempt.** Every rejected profile
-  attempt logs one
-  `roofline profile attempt N/M failed ({error class}): {message}` warning, and
-  profile timeline rows' `duration_sec` now include the post-attempt liveness
-  probe and capture-evidence collection.
+- **A rejected roofline profile logs one warning.** The profile runs once and
+  a rejected attempt logs
+  `roofline profile failed (<error class>): <message>`, and profile timeline
+  rows' `duration_sec` now include the post-attempt liveness probe and
+  capture-evidence collection.
 
 ### Fixed
 
@@ -497,7 +505,7 @@ Resume and recovery:
   killed at the benchmark cap or cancelled no longer leaves a server holding
   the port and GPU memory for later rungs to measure against or fail on with
   `magpie_nonzero_invalid_measurement`. A server that outlives SIGKILL is
-  reported as `server_survived_teardown:{pid}` in `nonfatal_warnings`.
+  reported as `server_survived_teardown:<pid>` in `nonfatal_warnings`.
 - **On `--resume-from`, recorded workload shape outranks stale shell exports.**
   The session's `ISL` / `OSL` / `CONC` / `TP` / `EP` / `MAX_MODEL_LEN` win over
   exports left in the shell (for example by sourcing a generated repro script)
@@ -525,7 +533,7 @@ Resume and recovery:
   session persisted by v1.1.0 or earlier with a pending non-git warm replay
   stops on resume with `warm_replay_rollback_failed`.
 - **A cancelled `integrate_patch` with a restored critic verdict** always gets
-  its `-reconcile{n}` child: the check uses exact case-sensitive prefix
+  its `-reconcile<n>` child: the check uses exact case-sensitive prefix
   matching instead of SQL `LIKE`, which skipped near-identical keys.
 - **A resumed session leg no longer re-pushes earlier spans and Scores** into
   the shared Langfuse trace, and a flush after CLOSE ships rows recorded after
@@ -599,7 +607,7 @@ Measurement, profiling and AgentX:
   **Upgrade note:** a failed roofline profile is no longer retried on the same
   config (`max_attempts` 1; the `retry_after_*` reasons and
   `PROFILE_ATTEMPT_AFTER_*` exports are gone), and the CUDA-graph diagnosis is
-  renamed to `diagnostics/roofline_cuda_graph_capture_{task_id}.json`.
+  renamed to `diagnostics/roofline_cuda_graph_capture_<task_id>.json`.
 - **Server-bounded AgentX profile captures** (SGLang `num_steps`, vLLM
   `--profiler-config.max_iterations`) end on the server's own step bound
   instead of the client's 20 s window and a redundant `/stop_profile`, so
@@ -616,7 +624,7 @@ Measurement, profiling and AgentX:
   EngineCore child loads HIP, so traces are no longer CPU-only.
 - **SGLang 0.5.18-0.5.21 per-batch-size CUDA-graph capture works on profiling
   rounds.** The TraceLens `sglang_gc_patch` is applied, so DSA models no longer
-  crash during capture, capture traces are named `bs_{n}[_dense|_sparse]`, and
+  crash during capture, capture traces are named `bs_<n>[_dense|_sparse]`, and
   the shape manifest keeps dense, sparse and draft variants apart.
   Multi-node DSA runs need `HYPERLOOM_SGLANG_VERSION_PIN` when the version
   cannot be detected, and `HYPERLOOM_ENABLE_PATCH=0` disables the patch.
@@ -638,9 +646,9 @@ Measurement, profiling and AgentX:
 - **Guard-refused explore variants render with their graded gain and refusal
   reason** in orchestration and critic prompts (new `graded_gain_pct` and
   `reason` keys on tested rows) instead of `no_meas`.
-- **A baseline boot no longer writes `runs/baseline/{id}/aiter_jit_backup/`**
+- **A baseline boot no longer writes `runs/baseline/<id>/aiter_jit_backup/`**
   (about 3.5 GB per sglang session) into the session directory; the dropped
-  aiter modules are parked in `{aiter}/jit/hyperloom_jit_backup`. Explore
+  aiter modules are parked in `<aiter>/jit/hyperloom_jit_backup`. Explore
   tested and winner rows carry every graded axis, adding
   `output_tput_per_gpu`.
 - **MoE PerfModel ceilings follow a runtime `--quantization` / `--dtype`
@@ -680,7 +688,7 @@ Enablement:
 - **A patch already bound to a patch root by an earlier round** keeps that
   tree at KEEP instead of being re-pointed by the KEEP round's done payload.
 - **Credentialed URLs in rejected setup commands are redacted** to
-  `{index_url}` / `{vcs_url}` instead of being echoed verbatim.
+  `<index_url>` / `<vcs_url>` instead of being echoed verbatim.
 
 Install, preflight and environment:
 
@@ -721,7 +729,7 @@ Reports and exports:
 - **Config-arm explore attempts in SBD v6 carry `attempt.proposal_ref`**, and
   Langfuse Generation metadata includes `call_id`.
 - **A failing inbox, recent-outcomes or running-tasks context tool** logs its
-  traceback under `context tool {name} failed`.
+  traceback under `context tool <name> failed`.
 - **Bypass failure reports** carry the configured `profiling_enabled`, a
   `phase=server` never-ready report measures `execution_time` from boot start,
   and in-progress `conc_sweep_summary.json` lists `concs_requested` in caller
