@@ -16,8 +16,10 @@ nothing else.
 
 What a run records, and how an attempt becomes an Experience, is in
 [Framework Experience publication](../experience-kb-framework.md). The record
-itself is in [Experience schema](experience-kb-schema.md), and writing
-Experiences from other logs in [Experience collection](experience-kb-collect.md).
+itself is in [Experience schema](experience-kb-schema.md), writing
+Experiences from other logs in [Experience collection](experience-kb-collect.md),
+and the patterns users draw from groups of Experiences in
+[Distills](experience-kb-distill.md).
 
 ## Configuration
 
@@ -53,8 +55,10 @@ whether each key was written or kept, never the token.
 
 The same entry point runs every [`hyperloom-kb`](#the-hyperloom-kb-command)
 command on the workspace's service (`health`, `labels`, `label`, `restore`,
-`exclude`, `include`, `exclusions`, `list`, `export`), starting it when
-nothing serves and defaulting to the schema the workspace's runs write.
+`exclude`, `include`, `exclusions`, `list`, `export`, `schema`, `experience`,
+and `distill`), starting it when nothing serves and defaulting to the schema
+the workspace's runs write; its `distill sync` writes into `distilled/` under
+the service's data home unless `--dir` names another directory.
 
 ## The `hyperloom-kb` command
 
@@ -72,17 +76,24 @@ its JSON result.
 | `include EXPERIENCE_ID` | `DELETE /v1/exclusions/{experience_id}` |
 | `exclusions [--schema REF]` | `GET /v1/exclusions` |
 | `list`, `export` `[--schema REF] [--include-excluded] [--after N] [--limit N]` | one page of `GET /v1/list`, `GET /v1/export` |
+| `schema show [--schema REF]` | `GET /v1/schemas/{schema_ref}` |
+| `experience get EXPERIENCE_ID` | `GET /v1/experiences/{experience_id}` |
+| `distill explore`, `forms`, `add-form`, `preview`, `create`, `update`, `get`, `draft`, `list`, `changes`, `delete`, `restore-entry`, `sync` | the [Distill](experience-kb-distill.md) requests; `draft` prints a read's draft, and `sync` writes the directory from `list` and `get` |
 
 It exits 0 when the command worked, 1 when the service refused the request,
+a Distill preview found the draft invalid, or a draft file could not be read,
 and 2 when the URL or token is not configured.
 
 A tool embeds the same commands in its own CLI: `add_commands(subparsers,
 schema_ref=...)` registers each one whose name the tool has not registered
 itself, defaulting every command that names no schema to `schema_ref`, and
-`run_command(client, args)` runs one, with the same output and exit status.
-Hyperloom's workspace commands are built this way. The `hyperloom-kb` skill,
-installed beside `hyperloom-setup`,
-describes each command for an agent.
+`run_command(client, args)` runs one, with the same output and exit status;
+`schema`, `experience`, and `distill` each group their subcommands and are
+replaced together, and `distill_dir=...` gives `distill sync` its default
+directory. Hyperloom's workspace commands are built this way. The
+`hyperloom-kb` skill, installed beside `hyperloom-setup`, describes each
+command for an agent, and the `hyperloom-kb-distill` skill how to draw a
+Distill from Experiences.
 
 ## The local service
 
@@ -139,9 +150,11 @@ collection spools without waiting on the service. Requests to a loopback service
 
 | Path | Content |
 |---|---|
-| `database.sqlite3` | The database: the KB's `kb_id`, its schemas, the index of its records in write order and of the files it holds, labels, exclusions and their history, and every write with the KB that sent it. |
+| `database.sqlite3` | The database: the KB's `kb_id`, its schemas, the index of its records in write order and of the files it holds, its Distills' versions and forms, labels, exclusions and their history, and every write with the KB that sent it. |
 | `<kb_id>/records/` | One immutable file per Experience, read only against the content hash the database holds for it. |
 | `<kb_id>/files/` | One file per content a record's file field names, under its SHA-256; see [Files](#files). |
+| `<kb_id>/distill/` | One immutable file per Distill version, `<entry_id>/<version>.json`, read only against its content hash. |
+| `distilled/` | The pages a workspace `distill sync` writes when it names no `--dir`. |
 | `spool/` | Writes the service has not accepted yet, with its own copy of each file they name under `spool/files/`. |
 | `service.log` | The service's log. |
 | `service.lock` | Held by the one service serving this home; names its pid and port. |
@@ -207,6 +220,10 @@ Writing an Experience adds it to the state; nothing is ever deleted.
 A state equals its label again once its changes are undone, such as an
 exclusion lifted. With no label yet, any non-empty state counts as unlabelled.
 
+A schema's [Distills](experience-kb-distill.md#lifecycle) are part of its
+state too: a label keeps the version each one shows, a restore shows those
+versions again, and an exclusion naming a Distill's id deletes it.
+
 List and export name the Experiences written here, and of those only what
 reads see unless `include_excluded` asks for the rest.
 
@@ -228,6 +245,9 @@ reads see unless `include_excluded` asks for the rest.
 | `GET /v1/exclusions` | a schema's exclusions and their history | `exclusions()` |
 | `POST /v1/exclusions` | exclude an Experience from reads | `exclude()` |
 | `DELETE /v1/exclusions/{experience_id}` | let reads see an Experience again | `include()` |
+| `GET /v1/schemas/{schema_ref}` | a schema's declaration, scope paths, roles, and counts | `schema()` |
+| `GET /v1/experiences/{id}` | one held Experience | `experience()` |
+| `/v1/distill/...` | explore, forms, preview, create, update, read, list, and the changes inbox; see [Distills](experience-kb-distill.md#http-api) | |
 | `GET /health` | identity, liveness, schemas, corpus size, process, settings digest | `health()` |
 | `GET /livez` | the process answers; no token | |
 | `GET /readyz` | the service can take traffic; no token | |
@@ -243,8 +263,8 @@ is bounded by its schema, each text field holding at most 32 KiB.
 |---|---|---|---|
 | 400 | `invalid_request` | malformed body, unknown field, invalid Experience, unregistered schema, out-of-range parameter | no |
 | 401 | `unauthorized` | missing or wrong token | after fixing the token |
-| 404 | `not_found` | unknown path, label, Experience, or file | no |
-| 409 | `conflict` | the id already exists with different content | no |
+| 404 | `not_found` | unknown path, label, Experience, file, Distill, or form | no |
+| 409 | `conflict` | the id, or the Distill version, already exists with different content | no |
 | 409 | `missing_files` | the record names files the service does not hold; `missing` lists their sha256 | after sending them |
 | 500 | `internal_error` | storage or service failure | yes |
 
@@ -378,12 +398,15 @@ for a label a restore made, whose `name` says so with its time.
 ### `GET /health`
 
 ```json
-{"status": "ok", "kb_id": "kb-...", "name": "team-hub", "schema_ref": "schema:sha256:...", "experience_count": 3, "schemas": {"schema:sha256:...": 3}, "pid": 4242, "config_digest": "...", "code_digest": "..."}
+{"status": "ok", "kb_id": "kb-...", "name": "team-hub", "schema_ref": "schema:sha256:...", "experience_count": 3, "schemas": {"schema:sha256:...": 3}, "distills": {"schema:sha256:...": {"visible": 2, "deleted": 0, "needs_attention": 1, "checked_at": "2026-10-13T20:00:00+00:00"}}, "pid": 4242, "config_digest": "...", "code_digest": "..."}
 ```
 
 `kb_id` identifies the KB the service's database holds, and `name` is only for people.
 `schema_ref` is the default read schema;
-`experience_count` and `schemas` count what reads see; `config_digest`
+`experience_count` and `schemas` count what reads see; `distills` counts, for
+each schema with Distills, the visible and deleted ones and how many needed
+attention when a listing or the changes inbox last checked them, and when,
+both `null` until one has since the service started; `config_digest`
 fingerprints the settings the service started with, and `code_digest` the
 Experience KB code it runs.
 
@@ -434,6 +457,11 @@ each scrape.
 | `hyperloom_kb_writes_total` | `schema_ref`, `result` | Writes by result: `created`, `unchanged`, `conflict`, `missing_files`. |
 | `hyperloom_kb_file_writes_total` | `result` | File writes by result: `created`, `unchanged`. |
 | `hyperloom_kb_experiences` | `schema_ref`, `state` | Stored Experiences: `visible`, `excluded`, or `outside` the state after a restore. |
+| `hyperloom_kb_distill_entries` | `schema_ref`, `state` | Distills: `visible`, `deleted`, or `outside` the state after a restore. |
+| `hyperloom_kb_distill_writes_total` | `operation`, `result` | Distill versions stored by `create`, `update`, or `receive` (a version another KB wrote), by result. |
+| `hyperloom_kb_distill_evidence_seconds` | `operation` | Histogram of the time to select and classify a group (`explore`, `preview`, `create`, `update`) or check how evidence moved (`check`, `get`). |
+| `hyperloom_kb_distill_changes` | `schema_ref`, `status` | Visible Distills by evidence status, as the last listing or changes inbox found them. |
+| `hyperloom_kb_distill_checked_timestamp_seconds` | `schema_ref` | When that check ran. |
 | `hyperloom_kb_record_bytes`, `hyperloom_kb_database_bytes`, `hyperloom_kb_disk_free_bytes` | | Record files, database, and free disk. |
 | `hyperloom_kb_last_write_timestamp_seconds` | | When the KB last stored a new Experience. |
 | `hyperloom_kb_records_missing` | | Records whose file was missing at start. |
@@ -450,7 +478,7 @@ workspace's service writes them to `service.log`. Every line has `ts`,
 | `event` | When | Fields |
 |---|---|---|
 | `http_request` | every answered request but the probes | `method`, `route`, `status`, `duration_ms`, `bytes_in`, `bytes_out` |
-| `audit` | a schema registered, a label made or deleted, a restore, an exclude, an include | `action` and what it acted on: `schema_ref`, `label_id`, `experience_id`, `reason`, `saved_label_id` |
+| `audit` | a schema registered, a label made or deleted, a restore, an exclude, an include, a Distill form registered, a Distill version stored | `action` and what it acted on: `schema_ref`, `label_id`, `experience_id`, `reason`, `saved_label_id`, `form_ref`, and for `distill_create`, `distill_update`, and `distill_receive` the `entry_id`, `version`, and `result` |
 | `records_verified`, `files_verified` | at start | `records` or `files`, `missing` |
 | `listening`, `stopped` | start and stop | `port`, `home`, `kb_id`, `code_digest` |
 
@@ -461,7 +489,7 @@ Tokens and request bodies are never logged.
 **Which KB sent what.** Every request carries `X-Request-ID`, which the answer
 echoes. The service records every write, refused ones included, with its
 result, the KB that sent it, and its request id, in the database's `writes`
-table.
+table, whose `record_kind` is `experience` or `distill`.
 
 **Log rotation and stopping.** A workspace's `service.log` past 8 MiB is kept
 as `service.log.1`, replacing the one kept before, when the next service

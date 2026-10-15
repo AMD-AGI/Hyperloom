@@ -71,6 +71,12 @@ def spool_root() -> Path:
     return service_home() / "spool"
 
 
+def distill_dir() -> Path:
+    """Where ``distill sync`` writes the workspace's Distill pages unless it names another directory."""
+
+    return service_home() / "distilled"
+
+
 def _port_is_free(port: int) -> bool:
     with socket.socket() as probe:
         try:
@@ -201,6 +207,11 @@ def _summary(direction: str, report: dict[str, JsonValue]) -> str:
     counts = ", ".join(f"{report[key]} {key}" for key in keys)
     rejected = report["rejected"] if isinstance(report["rejected"], list) else []
     line = f"Experience KB {direction} with {report['global_url']}: {counts}, {len(rejected)} rejected"
+    # A service started before Distills, still serving after an upgrade, reports no Distill counts.
+    distills = report.get("distills")
+    if isinstance(distills, dict):
+        distill_keys = ("created", "unchanged", "held_back" if direction == "push" else "skipped")
+        line += "; Distills: " + ", ".join(f"{distills[key]} {key}" for key in distill_keys)
     saved = report.get("saved")
     if isinstance(saved, dict):
         line += f"; the state before it is saved as label {saved['label_id']} ({saved['name']})"
@@ -219,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Bring this workspace's schema to everything the global KB holds of it; an unlabelled state is labelled "
         "first, so the pull can be undone.",
     )
-    add_commands(commands, schema_ref=mapping_schema_ref())
+    add_commands(commands, schema_ref=mapping_schema_ref(), distill_dir=distill_dir())
     args = parser.parse_args(argv)
 
     if args.command == "init-env":

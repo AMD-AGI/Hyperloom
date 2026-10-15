@@ -456,8 +456,9 @@ launch restarts it with them.
 The same entry point also runs the `hyperloom-kb` skill's commands on the
 workspace's service, such as
 `python3 -m hyperloom.inference_optimizer.experience_kb_service labels` or
-`restore <label_id>`, defaulting to this workspace's schema. Setup itself
-runs none of them.
+`restore <label_id>`, and the `hyperloom-kb-distill` skill's `distill`
+commands, defaulting to this workspace's schema. Setup itself runs none of
+them.
 
 ## Step 6: Report Result
 
