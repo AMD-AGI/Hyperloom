@@ -118,38 +118,52 @@ def _archived(
     return CloseStep(result.status, result.reason)
 
 
+@dataclass(frozen=True)
+class CloseTargets:
+    """Where CLOSE's knowledge goes: ``experience_kb`` takes the Experiences, ``learning_kb`` the learnings and
+    ``archive`` the search tree, each the environment's when ``None``; ``receipts`` is the folder for the two
+    collection receipts, none without it."""
+
+    experience_kb: CollectionTarget | None = None
+    learning_kb: CollectionTarget | None = None
+    archive: TreeArchive | None = None
+    receipts: Path | None = None
+
+    def receipt(self, name: str) -> Path | None:
+        return self.receipts / name if self.receipts is not None else None
+
+
 def close_knowledge(
     snapshot: NotebookSnapshot,
     metric: str,
     *,
     budget_seconds: float | None = None,
-    experience_kb: CollectionTarget | None = None,
-    learning_kb: CollectionTarget | None = None,
-    archive: TreeArchive | None = None,
-    receipts: Path | None = None,
+    targets: CloseTargets = CloseTargets(),
     bottlenecks: Mapping[str, float] | None = None,
 ) -> KnowledgeClose:
     """CLOSE, after the Recipe KB write-back: what the session leaves the sessions after it.
 
     ``metric`` is the recorded-value throughput metric. ``budget_seconds`` is the session's configured budget, which
     later sessions compare the archived tree at shares of; without it the archive uses the time the notebook spans.
-    ``experience_kb`` takes the Experiences, ``learning_kb`` the learnings and ``archive`` the search tree, each the
-    environment's by default. ``receipts`` is the folder for the two collection receipts, none without it.
+    ``targets`` says where each step writes, the environment's KB and archive by default.
     """
-
-    def receipt(name: str) -> Path | None:
-        return receipts / name if receipts is not None else None
 
     return KnowledgeClose(
         experiences=_published(
             "publish the Experiences",
-            partial(publish_experiences, snapshot, metric, kb=experience_kb, receipt=receipt(EXPERIENCE_RECEIPT)),
+            partial(
+                publish_experiences,
+                snapshot,
+                metric,
+                kb=targets.experience_kb,
+                receipt=targets.receipt(EXPERIENCE_RECEIPT),
+            ),
         ),
         learnings=_published(
             "publish the learnings",
-            partial(publish_learnings, snapshot, kb=learning_kb, receipt=receipt(LEARNING_RECEIPT)),
+            partial(publish_learnings, snapshot, kb=targets.learning_kb, receipt=targets.receipt(LEARNING_RECEIPT)),
         ),
-        archive=_archived(snapshot, metric, archive, budget_seconds=budget_seconds, bottlenecks=bottlenecks),
+        archive=_archived(snapshot, metric, targets.archive, budget_seconds=budget_seconds, bottlenecks=bottlenecks),
     )
 
 
@@ -214,6 +228,7 @@ __all__ = [
     "STEP_ERRORS",
     "WRITTEN",
     "CloseStep",
+    "CloseTargets",
     "KnowledgeClose",
     "archived_history",
     "close_knowledge",

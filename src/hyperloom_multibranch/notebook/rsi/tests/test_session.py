@@ -34,6 +34,7 @@ from hyperloom_multibranch.notebook.rsi.session import (
     NO_PROFILE,
     WRITTEN,
     CloseStep,
+    CloseTargets,
     KnowledgeClose,
     close_knowledge,
     judge_history,
@@ -88,10 +89,12 @@ def test_a_live_kb_and_an_archive_take_the_experiences_the_learnings_and_the_tre
             learnt,
             METRIC,
             budget_seconds=BUDGET,
-            experience_kb=RemoteExperienceKB(client, recipes),
-            learning_kb=RemoteExperienceKB(client, schema),
-            archive=archive,
-            receipts=reports,
+            targets=CloseTargets(
+                experience_kb=RemoteExperienceKB(client, recipes),
+                learning_kb=RemoteExperienceKB(client, schema),
+                archive=archive,
+                receipts=reports,
+            ),
         )
 
     dry = experience.publish_experiences(learnt, METRIC, dry_run=True)
@@ -113,14 +116,16 @@ def test_a_step_that_raises_is_recorded_and_the_steps_after_it_still_run(
 
     monkeypatch.setattr(session, "publish_experiences", broken)
 
-    done = close_knowledge(snapshot, METRIC, archive=TreeArchive(tmp_path))
+    done = close_knowledge(snapshot, METRIC, targets=CloseTargets(archive=TreeArchive(tmp_path)))
 
     assert done.experiences == CloseStep(FAILED, "ValueError: the mapping does not load")
     assert (done.learnings.status, done.archive.status) == (DISABLED, ARCHIVED)
 
 
 def test_without_a_profile_nothing_is_published_or_archived(snapshot: NotebookSnapshot, tmp_path: Path) -> None:
-    done = close_knowledge(dataclasses.replace(snapshot, profile=None), METRIC, archive=TreeArchive(tmp_path))
+    done = close_knowledge(
+        dataclasses.replace(snapshot, profile=None), METRIC, targets=CloseTargets(archive=TreeArchive(tmp_path))
+    )
 
     assert done == KnowledgeClose(
         experiences=CloseStep(SKIPPED, NO_PROFILE),
