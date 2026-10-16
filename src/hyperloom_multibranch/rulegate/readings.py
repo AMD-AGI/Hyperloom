@@ -27,7 +27,11 @@ def inferencex_reading(result: TestResult, concurrency: int) -> InferenceXReadin
     missing = [r for r in rounds if GRADED_OUTPUT not in r.metrics]
     if missing:
         raise UnreadableResult(f"{result.request_id} reports no {GRADED_OUTPUT} in {len(missing)} of its rounds")
-    return InferenceXReading(statistics.fmean(r.metrics[GRADED_OUTPUT] for r in rounds), eval_score(result))
+    score = eval_score(result)
+    try:
+        return InferenceXReading(statistics.fmean(r.metrics[GRADED_OUTPUT] for r in rounds), score)
+    except ValueError as error:
+        raise UnreadableResult(f"{result.request_id}: {error}") from error
 
 
 def eval_score(result: TestResult) -> float:

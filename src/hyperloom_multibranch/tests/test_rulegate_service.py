@@ -49,12 +49,13 @@ class _Session:
     Nothing is measured before the first drain; from then on every test is measured as soon as it is queued.
     """
 
-    def __init__(self, root):
+    def __init__(self, root, accuracy_score: float = 0.93):
         self.toolbox = FakeToolbox(
             FakeToolboxConfig(
                 noise=QUIET,
                 accuracy_metric=ACCURACY_METRICS[0],
                 effects=EFFECTS,
+                accuracy_score=accuracy_score,
                 accuracy_scores={WRONG.fingerprint(): 0.80},
             ),
             notebook=LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox")),
@@ -100,6 +101,15 @@ async def test_prelude_sets_the_bar_from_the_root_tests_that_measured(tmp_path):
 
     assert record.request_ids == tuple(ids[1:])
     assert await session.notebook.baseline() == record
+    await session.toolbox.close()
+
+
+async def test_prelude_on_root_tests_scoring_below_the_floor_sets_no_bar(tmp_path):
+    session = _Session(tmp_path / "notebook", accuracy_score=0.3)
+    ids = await session.root_tests()
+
+    with pytest.raises(NotMeasured, match="below the floor"):
+        await session.gate.establish_baseline(ROOT, ids)
     await session.toolbox.close()
 
 

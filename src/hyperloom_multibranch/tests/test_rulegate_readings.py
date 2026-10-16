@@ -52,8 +52,17 @@ def test_the_eval_score_is_picked_as_the_old_flow_picks_it(accuracy, score):
         _result(RoundValue(MEASURE, CONC, {GRADED_INTVTY_P50: 40.0})),
         _result(RoundValue(MEASURE, CONC, {GRADED_OUTPUT: 1000.0}), accuracy=()),
         _result(RoundValue(MEASURE, CONC, {GRADED_OUTPUT: 1000.0}), accuracy=(AccuracyValue(GSM8K, "bleu", 0.3),)),
+        _result(RoundValue(MEASURE, CONC, {GRADED_OUTPUT: 0.0})),
     ],
-    ids=["measurement-failed", "candidate-failed", "other-concurrency", "no-throughput", "no-score", "unknown-metric"],
+    ids=[
+        "measurement-failed",
+        "candidate-failed",
+        "other-concurrency",
+        "no-throughput",
+        "no-score",
+        "unknown-metric",
+        "zero-throughput",
+    ],
 )
 def test_inferencex_refuses_what_it_cannot_judge(result):
     with pytest.raises(UnreadableResult):

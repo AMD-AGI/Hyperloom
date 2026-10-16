@@ -20,6 +20,7 @@ from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook.interfaces import CommitQuery, GateRecords, RecordSearch, SnapshotQuery
 from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, TestRecord
 from hyperloom_multibranch.contracts.toolbox import Toolbox
+from hyperloom_multibranch.rulegate.accuracy import BaselineAccuracyError
 from hyperloom_multibranch.rulegate.inferencex import MIN_BASELINES
 from hyperloom_multibranch.rulegate.readings import UnreadableResult
 from hyperloom_multibranch.rulegate.rules import Rule, repeats, retest_request
@@ -96,10 +97,11 @@ class GateService:
 
 @contextmanager
 def _judgeable() -> Iterator[None]:
-    """A result without what the rule reads gives the gate no more to judge than a test that never measured."""
+    """A result without what the rule reads, or root tests scoring below the floor, give the gate no more to judge by
+    than a test that never measured."""
     try:
         yield
-    except UnreadableResult as error:
+    except (UnreadableResult, BaselineAccuracyError) as error:
         raise NotMeasured(str(error)) from error
 
 

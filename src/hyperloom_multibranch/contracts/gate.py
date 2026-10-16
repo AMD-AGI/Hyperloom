@@ -18,7 +18,8 @@ from hyperloom_multibranch.contracts.notebook.records import BaselineRecord
 
 
 class NotMeasured(Exception):
-    """The test gave the gate nothing to judge: withdrawn, not measured, or measured without what the rule reads."""
+    """The tests gave the gate nothing to judge by: withdrawn, not measured, measured without a value the rule reads,
+    or, for the baseline, root tests whose eval score is below the floor."""
 
 
 class SessionGate(Protocol):
@@ -28,7 +29,8 @@ class SessionGate(Protocol):
         """How many root tests PRELUDE submits for the baseline."""
 
     async def establish_baseline(self, root_commit: str, request_ids: Sequence[str]) -> BaselineRecord:
-        """Write the session's baseline and bar from the root tests that measured; the bar needs two of them."""
+        """Write the session's baseline and bar from the root tests that measured; the bar needs two of them, and
+        their eval score must clear the floor."""
 
     async def compare(self, request_id: str) -> Judgement:
         """Judge the test against its parent's recorded value, retesting a gain on another node before it counts."""
