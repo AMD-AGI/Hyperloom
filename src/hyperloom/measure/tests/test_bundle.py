@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from hyperloom.measure.tests.bundle_factory import (
 from hyperloom.measure import bundle as bundle_mod
 from hyperloom.measure import signing
 from hyperloom.measure.bundle import (
+    RecordedBundle,
     MaterializeError,
     RejectReason,
     ResultRejected,
@@ -32,10 +34,10 @@ from hyperloom.measure.bundle import (
 REPORT = "benchmark_sglang_20261005_101500/benchmark_report.json"
 
 
-def _reason(staging: Path, bundle, **overrides) -> RejectReason:
-    args = {**verify_args(bundle), **overrides}
+def _reason(staging: Path, bundle, max_total_bytes: int | None = None, **overrides) -> RejectReason:
+    expected = replace(verify_args(bundle), **overrides)
     with pytest.raises(ResultRejected) as raised:
-        verify_bundle(staging, **args)
+        verify_bundle(staging, expected, max_total_bytes=max_total_bytes)
     return raised.value.reason
 
 
@@ -45,7 +47,7 @@ def bundle(tmp_path: Path):
 
 
 def test_an_authentic_bundle_verifies(bundle) -> None:
-    verified = verify_bundle(bundle.staging, **verify_args(bundle))
+    verified = verify_bundle(bundle.staging, verify_args(bundle))
     assert verified.result.request_id == REQUEST_ID
     assert verified.manifest["runner"]["sandbox_id"] == SANDBOX_ID
     assert verified.signing_key_fingerprint == signing.public_key_fingerprint(bundle.public_pem)
@@ -58,7 +60,7 @@ def test_every_byte_of_the_manifest_is_covered_by_the_signature(bundle) -> None:
         flip_one_byte(bundle.staging / "manifest.json", offset)
         assert _reason(bundle.staging, bundle) is RejectReason.BAD_SIGNATURE, offset
         flip_one_byte(bundle.staging / "manifest.json", offset)
-    verify_bundle(bundle.staging, **verify_args(bundle))
+    verify_bundle(bundle.staging, verify_args(bundle))
 
 
 def test_a_flipped_signature_byte_is_a_bad_signature(bundle) -> None:
@@ -122,12 +124,12 @@ def test_a_manifest_that_measured_other_spec_bytes_is_rejected_unless_the_caller
     bundle,
 ) -> None:
     assert _reason(bundle.staging, bundle, spec_sha256="ff" * 32) is RejectReason.SPEC_HASH_MISMATCH
-    verify_bundle(bundle.staging, **(verify_args(bundle) | {"spec_sha256": None}))
+    verify_bundle(bundle.staging, replace(verify_args(bundle), spec_sha256=None))
 
 
 def test_a_result_larger_than_the_allowed_total_is_rejected(bundle) -> None:
     total = sum(len(data) for data in DEFAULT_FILES.values())
-    verify_bundle(bundle.staging, **verify_args(bundle), max_total_bytes=total)
+    verify_bundle(bundle.staging, verify_args(bundle), max_total_bytes=total)
     assert _reason(bundle.staging, bundle, max_total_bytes=total - 1) is RejectReason.TOO_LARGE
 
 
@@ -189,7 +191,7 @@ def test_a_special_file_is_rejected(bundle) -> None:
 
 
 def test_a_hand_built_verified_bundle_cannot_be_materialized(bundle, tmp_path: Path) -> None:
-    real = verify_bundle(bundle.staging, **verify_args(bundle))
+    real = verify_bundle(bundle.staging, verify_args(bundle))
     forged = VerifiedBundle(
         manifest=real.manifest,
         result=real.result,
@@ -205,7 +207,7 @@ def test_a_hand_built_verified_bundle_cannot_be_materialized(bundle, tmp_path: P
 
 def test_materialize_places_every_file_with_the_same_bytes_and_leaves_nothing_else(bundle, tmp_path: Path) -> None:
     out = tmp_path / "out"
-    materialize(verify_bundle(bundle.staging, **verify_args(bundle)), out)
+    materialize(verify_bundle(bundle.staging, verify_args(bundle)), out)
     assert sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file()) == sorted(DEFAULT_FILES)
     for relative, data in DEFAULT_FILES.items():
         assert (out / relative).read_bytes() == data
@@ -216,7 +218,7 @@ def test_materialize_never_overwrites_and_leaves_the_output_directory_as_it_was(
     out = tmp_path / "out"
     out.mkdir()
     (out / "server.log").write_text("mine")
-    verified = verify_bundle(bundle.staging, **verify_args(bundle))
+    verified = verify_bundle(bundle.staging, verify_args(bundle))
     with pytest.raises(MaterializeError, match="already exists"):
         materialize(verified, out)
     assert sorted(p.name for p in out.iterdir()) == ["server.log"]
@@ -236,7 +238,7 @@ def test_a_symlinked_directory_in_the_output_is_not_followed_and_nothing_is_writ
     out.mkdir()
     os.symlink(outside, out / "benchmark_sglang_20261005_101500")
     with pytest.raises(MaterializeError, match="symlink"):
-        materialize(verify_bundle(bundle.staging, **verify_args(bundle)), out)
+        materialize(verify_bundle(bundle.staging, verify_args(bundle)), out)
     assert list(outside.iterdir()) == []
     assert not (out / "server.log").exists()
 
@@ -244,7 +246,7 @@ def test_a_symlinked_directory_in_the_output_is_not_followed_and_nothing_is_writ
 def test_a_symlink_planted_after_the_precheck_is_not_followed(bundle, tmp_path: Path, monkeypatch) -> None:
     out, outside = tmp_path / "out", _outside(tmp_path)
     out.mkdir()
-    verified = verify_bundle(bundle.staging, **verify_args(bundle))
+    verified = verify_bundle(bundle.staging, verify_args(bundle))
     real_place = bundle_mod._place
     calls = []
 
@@ -279,7 +281,7 @@ def test_a_copy_that_fails_without_hard_links_leaves_no_partial_file(bundle, tmp
     monkeypatch.setattr(bundle_mod.os, "write", failing_write)
     out = tmp_path / "out"
     with pytest.raises(OSError, match="No space"):
-        materialize(verify_bundle(bundle.staging, **verify_args(bundle)), out)
+        materialize(verify_bundle(bundle.staging, verify_args(bundle)), out)
     assert [p for p in out.rglob("*") if p.is_file()] == []
 
 
@@ -288,12 +290,12 @@ def test_a_dangling_symlink_at_the_destination_counts_as_existing(bundle, tmp_pa
     out.mkdir()
     os.symlink(tmp_path / "nowhere", out / "server.log")
     with pytest.raises(MaterializeError):
-        materialize(verify_bundle(bundle.staging, **verify_args(bundle)), out)
+        materialize(verify_bundle(bundle.staging, verify_args(bundle)), out)
     assert not (tmp_path / "nowhere").exists()
 
 
 def test_a_byte_changed_after_verification_never_reaches_the_output_directory(bundle, tmp_path: Path) -> None:
-    verified = verify_bundle(bundle.staging, **verify_args(bundle))
+    verified = verify_bundle(bundle.staging, verify_args(bundle))
     flip_one_byte(bundle.staging / "server.log", 7)
     out = tmp_path / "out"
     with pytest.raises(ResultRejected) as raised:
@@ -304,7 +306,7 @@ def test_a_byte_changed_after_verification_never_reaches_the_output_directory(bu
 
 
 def test_a_symlink_swapped_in_after_verification_is_not_followed(bundle, tmp_path: Path) -> None:
-    verified = verify_bundle(bundle.staging, **verify_args(bundle))
+    verified = verify_bundle(bundle.staging, verify_args(bundle))
     secret = tmp_path / "secret"
     secret.write_bytes(DEFAULT_FILES["server.log"])
     (bundle.staging / "server.log").unlink()
@@ -316,7 +318,7 @@ def test_a_symlink_swapped_in_after_verification_is_not_followed(bundle, tmp_pat
 
 def test_a_failure_while_linking_removes_what_was_already_placed(bundle, tmp_path: Path, monkeypatch) -> None:
     out = tmp_path / "out"
-    verified = verify_bundle(bundle.staging, **verify_args(bundle))
+    verified = verify_bundle(bundle.staging, verify_args(bundle))
     real_link, calls = os.link, []
 
     def failing_link(src, dst, **kwargs):
@@ -340,12 +342,12 @@ def test_without_hard_links_the_files_are_still_placed_exclusively(bundle, tmp_p
 
     monkeypatch.setattr(bundle_mod.os, "link", no_link)
     out = tmp_path / "out"
-    materialize(verify_bundle(bundle.staging, **verify_args(bundle)), out)
+    materialize(verify_bundle(bundle.staging, verify_args(bundle)), out)
     assert (out / "server.log").read_bytes() == DEFAULT_FILES["server.log"]
 
 
 def test_read_file_refuses_a_file_changed_after_verification_and_an_unlisted_name(bundle) -> None:
-    verified = verify_bundle(bundle.staging, **verify_args(bundle))
+    verified = verify_bundle(bundle.staging, verify_args(bundle))
     flip_one_byte(bundle.staging / REPORT, 2)
     with pytest.raises(ResultRejected) as raised:
         verified.read_file(REPORT)
@@ -355,32 +357,29 @@ def test_read_file_refuses_a_file_changed_after_verification_and_an_unlisted_nam
     assert raised.value.reason is RejectReason.UNLISTED_FILE
 
 
-def _record(verified) -> dict:
-    return {
-        "manifest_sha256_expected": verified.manifest_sha256,
-        "signing_key_fingerprint": verified.signing_key_fingerprint,
-    }
+def _record(verified) -> RecordedBundle:
+    return RecordedBundle(verified.manifest_sha256, verified.signing_key_fingerprint)
 
 
 def test_a_record_is_confirmed_by_its_archived_bundle(bundle) -> None:
-    record = _record(verify_bundle(bundle.staging, **verify_args(bundle)))
-    again = reverify_record(bundle.staging, **verify_args(bundle), **record)
-    assert again.manifest_sha256 == record["manifest_sha256_expected"]
+    record = _record(verify_bundle(bundle.staging, verify_args(bundle)))
+    again = reverify_record(bundle.staging, verify_args(bundle), record)
+    assert again.manifest_sha256 == record.manifest_sha256
 
 
 def test_a_record_naming_another_manifest_or_key_fails_the_recheck(bundle) -> None:
-    record = _record(verify_bundle(bundle.staging, **verify_args(bundle)))
-    for field, value in (("manifest_sha256_expected", "0" * 64), ("signing_key_fingerprint", "sha256:" + "0" * 64)):
+    record = _record(verify_bundle(bundle.staging, verify_args(bundle)))
+    for field, value in (("manifest_sha256", "0" * 64), ("signing_key_fingerprint", "sha256:" + "0" * 64)):
         with pytest.raises(ResultRejected) as raised:
-            reverify_record(bundle.staging, **verify_args(bundle), **(record | {field: value}))
+            reverify_record(bundle.staging, verify_args(bundle), replace(record, **{field: value}))
         assert raised.value.reason is RejectReason.RECORD_MISMATCH, field
 
 
 def test_a_record_for_a_bundle_whose_file_changed_fails_the_recheck(bundle) -> None:
-    record = _record(verify_bundle(bundle.staging, **verify_args(bundle)))
+    record = _record(verify_bundle(bundle.staging, verify_args(bundle)))
     flip_one_byte(bundle.staging / REPORT, 1)
     with pytest.raises(ResultRejected) as raised:
-        reverify_record(bundle.staging, **verify_args(bundle), **record)
+        reverify_record(bundle.staging, verify_args(bundle), record)
     assert raised.value.reason is RejectReason.FILE_HASH_MISMATCH
 
 
@@ -392,7 +391,7 @@ def test_placed_files_and_directories_have_fixed_modes_whatever_the_umask(bundle
     out = tmp_path / "out"
     old = os.umask(0)
     try:
-        materialize(verify_bundle(bundle.staging, **verify_args(bundle)), out)
+        materialize(verify_bundle(bundle.staging, verify_args(bundle)), out)
     finally:
         os.umask(old)
     assert (out / "server.log").stat().st_mode & 0o777 == 0o600

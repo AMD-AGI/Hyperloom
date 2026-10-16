@@ -11,9 +11,16 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.measure.sandboxes import NoRunnerTemplate, PoolClosed, SandboxPool, sandbox_priority
+from hyperloom.measure.sandboxes import (
+    AttemptTag,
+    NoRunnerTemplate,
+    PoolClosed,
+    PoolLimits,
+    SandboxPool,
+    sandbox_priority,
+)
 from hyperloom.sandbox.local import LocalSandboxProvider, LocalTemplate
-from hyperloom.sandbox.socket import SandboxGone, SandboxInfo, SandboxUnavailable
+from hyperloom.sandbox.socket import CreateOptions, SandboxGone, SandboxInfo, SandboxUnavailable
 
 
 class _Sandbox:
@@ -44,15 +51,15 @@ class _Provider:
         self._lock = threading.Lock()
         self._count = 0
 
-    def create(self, template, *, role, timeout_sec, metadata, envs=None, wait_sec=60):
+    def create(self, template, *, role, timeout_sec, metadata, options=CreateOptions()):
         self.calls.append(
             {
                 "template": template,
                 "role": role,
                 "timeout_sec": timeout_sec,
                 "metadata": dict(metadata),
-                "envs": envs,
-                "wait_sec": wait_sec,
+                "envs": options.envs,
+                "wait_sec": options.wait_sec,
             }
         )
         if self.failures:
@@ -75,13 +82,14 @@ class _Provider:
 
 
 def _pool(provider, **kwargs) -> SandboxPool:
-    kwargs.setdefault("run_id", "run-1")
-    return SandboxPool(provider, {1: "runner-1", 8: "runner-8"}, **kwargs)
+    run_id = kwargs.pop("run_id", "run-1")
+    return SandboxPool(provider, {1: "runner-1", 8: "runner-8"}, run_id=run_id, limits=PoolLimits(**kwargs))
 
 
 def _acquire(pool: SandboxPool, request_id: str = "req-1", attempt: int = 1, **kwargs):
     kwargs.setdefault("timeout_sec", 100)
-    return pool.acquire(1, request_id=request_id, attempt=attempt, **kwargs)
+    tag = AttemptTag(request_id, attempt, kwargs.pop("avoid_nodes", ()), kwargs.pop("meta", None))
+    return pool.acquire(1, tag, **kwargs)
 
 
 def test_no_more_tests_run_at_once_than_the_cap_allows() -> None:
@@ -211,11 +219,11 @@ def test_the_sandbox_never_outlives_the_run() -> None:
 def test_the_template_follows_the_card_count_and_an_unserved_count_takes_no_slot() -> None:
     provider = _Provider()
     pool = _pool(provider, max_parallel_tests=1)
-    held = pool.acquire(8, request_id="r", attempt=1, timeout_sec=10)
+    held = pool.acquire(8, AttemptTag("r", 1), timeout_sec=10)
     assert provider.calls[0]["template"] == "runner-8"
     assert pool.active == 1, "only the served count holds a slot"
     with pytest.raises(NoRunnerTemplate, match="3 GPU"):
-        pool.acquire(3, request_id="r", attempt=1, timeout_sec=10)
+        pool.acquire(3, AttemptTag("r", 1), timeout_sec=10)
     assert pool.active == 1
     pool.release(held)
 

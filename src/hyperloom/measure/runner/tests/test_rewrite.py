@@ -6,7 +6,7 @@ from __future__ import annotations
 import yaml
 
 from hyperloom.measure.farm import Farm
-from hyperloom.measure.runner.rewrite import rewrite_config
+from hyperloom.measure.runner.rewrite import Placement, rewrite_config
 
 SHEET = """
 benchmark:
@@ -27,11 +27,13 @@ def _rewrite(tmp_path, farm=None, visible="0,1"):
     rewrite_config(
         SHEET,
         out,
-        placed={"aiter": tmp_path / "attach" / "aiter"},
-        pid_dir=tmp_path / "pids",
-        inferencex_path=tmp_path / "ix",
-        visible_devices=visible,
-        farm=farm,
+        Placement(
+            placed={"aiter": tmp_path / "attach" / "aiter"},
+            pid_dir=tmp_path / "pids",
+            inferencex_path=tmp_path / "ix",
+            visible_devices=visible,
+            farm=farm,
+        ),
     )
     return yaml.safe_load(out.read_text())["benchmark"]
 

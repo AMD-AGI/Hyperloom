@@ -11,6 +11,7 @@ import os
 import subprocess
 import time
 from collections.abc import MutableMapping
+from typing import Any
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,7 +27,7 @@ from hyperloom.measure.attachments import AttachmentError, place_attachments
 from hyperloom.measure.farm import Farm, FarmError, build_farm, verify_farm
 from hyperloom.measure.runner.inventory import OutputRejected, inventory, write_farm_inventory
 from hyperloom.measure.runner.platform_env import align_platform_env, take_topology
-from hyperloom.measure.runner.rewrite import rewrite_config
+from hyperloom.measure.runner.rewrite import Placement, rewrite_config
 from hyperloom.measure.runner.rounds import write_rounds
 from hyperloom.measure.runner.service import Progress, RunnerFailure, wait_for_file, write_status
 from hyperloom.measure.runner.tools import ToolError, ensure_inferencex, ensure_magpie
@@ -136,16 +137,15 @@ def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[
         envs = (yaml.safe_load(spec.config[0].yaml).get("benchmark") or {}).get("envs") or {}
         python = str(envs.get("HYPERLOOM_FRAMEWORK_PYTHON") or "python3")
         farm = build_farm(spec.environment.roots, ctx.work / "farm", python=python, read_blob=ctx.read_blob)
+        placement = Placement(
+            placed=placed,
+            pid_dir=ctx.work / "pids",
+            inferencex_path=inferencex,
+            visible_devices=ctx.environ.get("ROCR_VISIBLE_DEVICES"),
+            farm=farm,
+        )
         points = [
-            rewrite_config(
-                point.yaml,
-                ctx.work / f"point_{index}.yaml",
-                placed=placed,
-                pid_dir=ctx.work / "pids",
-                inferencex_path=inferencex,
-                visible_devices=ctx.environ.get("ROCR_VISIBLE_DEVICES"),
-                farm=farm,
-            )
+            rewrite_config(point.yaml, ctx.work / f"point_{index}.yaml", placement)
             for index, point in enumerate(spec.config)
         ]
         if farm is not None:
@@ -225,9 +225,32 @@ def _check_node(before, after, visible: list[int], facts) -> None:
                 raise RunnerFailure("node_fault", f"GPU {gpu} reported new uncorrectable ECC errors")
 
 
-def _write_bundle(ctx, spec, raw, key, document: dict, files, facts, changed, timing, visible) -> None:
+@dataclass(frozen=True)
+class _Signed:
+    """The sheet being answered and the key that signs the answer."""
+
+    spec: MeasurementSpec
+    raw: bytes
+    key: Any
+
+
+@dataclass(frozen=True)
+class _Findings:
+    """What the run observed and the bundle records besides the outcome."""
+
+    files: Any
+    facts: Any
+    changed: Any
+    timing: dict
+    visible: list[int]
+
+
+def _write_bundle(ctx: _Context, signed: _Signed, outcome: dict, found: _Findings) -> None:
+    spec, raw, key = signed.spec, signed.raw, signed.key
+    files, facts, changed, timing, visible = found.files, found.facts, found.changed, found.timing, found.visible
     pem = signing.public_key_pem(key)
     first = facts[0] if facts else None
+    document: dict = {"outcome": outcome}
     document.update(
         {
             "schema": RESULT_SCHEMA,
@@ -289,7 +312,10 @@ def _run_sheet(ctx: _Context, spec_path: Path, key, progress: Progress) -> None:
         "finished_unix": time.time(),
     }
     _write_bundle(
-        ctx, spec, raw, key, {"outcome": _outcome_document(outcome, timed_out)}, files, facts, changed, timing, visible
+        ctx,
+        _Signed(spec, raw, key),
+        _outcome_document(outcome, timed_out),
+        _Findings(files, facts, changed, timing, visible),
     )
 
 

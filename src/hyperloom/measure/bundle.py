@@ -98,30 +98,42 @@ class VerifiedBundle:
         return data
 
 
-def verify_bundle(
-    staging_dir: Path,
-    *,
-    public_key_pem: str,
-    request_id: str,
-    spec_fingerprint: str,
-    spec_sha256: str | None,
-    sandbox_id: str,
-    max_total_bytes: int | None = None,
-) -> VerifiedBundle:
-    """Run the five checks of 4.7; any failure raises :class:`ResultRejected`.
+@dataclass(frozen=True)
+class BundleExpectation:
+    """What the caller knows about a measurement before it reads the bundle that claims to answer it.
 
     ``public_key_pem`` must come from the sandbox information the platform reported, never from the bundle.
     ``sandbox_id`` is the sandbox the bundle was read from: a bundle signed by the right key but made in another
     sandbox is a replay and is refused. ``spec_sha256`` is the hash of the exact bytes written to ``/in/spec.json``;
     ``None`` skips that comparison and is for a caller that only holds the fingerprint (a record book entry).
     """
+
+    public_key_pem: str
+    request_id: str
+    spec_fingerprint: str
+    spec_sha256: str | None
+    sandbox_id: str
+
+
+@dataclass(frozen=True)
+class RecordedBundle:
+    """The two hashes a record book entry holds about the bundle it summarises."""
+
+    manifest_sha256: str
+    signing_key_fingerprint: str
+
+
+def verify_bundle(
+    staging_dir: Path, expected: BundleExpectation, *, max_total_bytes: int | None = None
+) -> VerifiedBundle:
+    """Run the five checks of 4.7 against ``expected``; any failure raises :class:`ResultRejected`."""
     root_fd = _open_staging(Path(staging_dir))
     try:
         manifest_raw = _read_small(root_fd, MANIFEST_NAME, MAX_MANIFEST_BYTES, RejectReason.MANIFEST_MISSING)
         signature = _read_small(root_fd, SIGNATURE_NAME, MAX_SIGNATURE_BYTES, RejectReason.SIGNATURE_MISSING)
-        fingerprint = _check_signature(manifest_raw, signature, public_key_pem)
+        fingerprint = _check_signature(manifest_raw, signature, expected.public_key_pem)
         manifest, document = _parse_manifest(manifest_raw)
-        _check_identity(manifest, fingerprint, request_id, spec_fingerprint, spec_sha256, sandbox_id)
+        _check_identity(manifest, fingerprint, expected)
         if max_total_bytes is not None and manifest.total_size() > max_total_bytes:
             raise ResultRejected(RejectReason.TOO_LARGE, f"{manifest.total_size()} > {max_total_bytes}")
         _check_files(root_fd, manifest)
@@ -137,33 +149,16 @@ def verify_bundle(
     )
 
 
-def reverify_record(
-    bundle_dir: Path,
-    *,
-    public_key_pem: str,
-    request_id: str,
-    spec_fingerprint: str,
-    sandbox_id: str,
-    manifest_sha256_expected: str,
-    signing_key_fingerprint: str,
-    spec_sha256: str | None = None,
-) -> VerifiedBundle:
+def reverify_record(bundle_dir: Path, expected: BundleExpectation, recorded: RecordedBundle) -> VerifiedBundle:
     """Check a record book entry against its archived bundle before a decision rests on it (L26).
 
     The record book can be edited by the processes that share its container, so an entry is trusted only after the
     archived bundle verifies for the same request, spec and sandbox *and* the bundle is the one the entry names.
     """
-    bundle = verify_bundle(
-        bundle_dir,
-        public_key_pem=public_key_pem,
-        request_id=request_id,
-        spec_fingerprint=spec_fingerprint,
-        spec_sha256=spec_sha256,
-        sandbox_id=sandbox_id,
-    )
-    if bundle.manifest_sha256 != manifest_sha256_expected:
+    bundle = verify_bundle(bundle_dir, expected)
+    if bundle.manifest_sha256 != recorded.manifest_sha256:
         raise ResultRejected(RejectReason.RECORD_MISMATCH, "the manifest hash is not the recorded one")
-    if bundle.signing_key_fingerprint != signing_key_fingerprint:
+    if bundle.signing_key_fingerprint != recorded.signing_key_fingerprint:
         raise ResultRejected(RejectReason.RECORD_MISMATCH, "the signing key fingerprint is not the recorded one")
     return bundle
 
@@ -218,23 +213,16 @@ def _parse_manifest(manifest_raw: bytes) -> tuple[ResultManifest, dict[str, Any]
         raise ResultRejected(RejectReason.MANIFEST_INVALID, str(exc)) from None
 
 
-def _check_identity(
-    manifest: ResultManifest,
-    fingerprint: str,
-    request_id: str,
-    spec_fingerprint: str,
-    spec_sha256: str | None,
-    sandbox_id: str,
-) -> None:
+def _check_identity(manifest: ResultManifest, fingerprint: str, expected: BundleExpectation) -> None:
     if manifest.runner.signing_key_fingerprint != fingerprint:
         raise ResultRejected(RejectReason.KEY_FINGERPRINT_MISMATCH, "the manifest names another signing key")
-    if manifest.request_id != request_id:
+    if manifest.request_id != expected.request_id:
         raise ResultRejected(RejectReason.REQUEST_ID_MISMATCH, "the manifest is for another request")
-    if manifest.spec_fingerprint != spec_fingerprint:
+    if manifest.spec_fingerprint != expected.spec_fingerprint:
         raise ResultRejected(RejectReason.SPEC_FINGERPRINT_MISMATCH, "the manifest measured another spec")
-    if spec_sha256 is not None and manifest.spec_sha256 != spec_sha256:
+    if expected.spec_sha256 is not None and manifest.spec_sha256 != expected.spec_sha256:
         raise ResultRejected(RejectReason.SPEC_HASH_MISMATCH, "the manifest measured other spec bytes")
-    if manifest.runner.sandbox_id != sandbox_id:
+    if manifest.runner.sandbox_id != expected.sandbox_id:
         raise ResultRejected(RejectReason.SANDBOX_MISMATCH, "the manifest was made in another sandbox")
 
 

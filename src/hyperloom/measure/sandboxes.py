@@ -24,6 +24,7 @@ from hyperloom.sandbox.socket import (
     PRIORITY_KEY,
     SAME_NODE_KEY,
     SIGNING_PUBLIC_KEY,
+    CreateOptions,
     Role,
     Sandbox,
     SandboxError,
@@ -91,6 +92,30 @@ class RunnerSandbox:
     handle: Sandbox | None = field(default=None, compare=False, repr=False)
 
 
+@dataclass(frozen=True)
+class PoolLimits:
+    """How many sandboxes a pool holds and how long it waits for them.
+
+    ``max_parallel_tests``: how many sandboxes may be held at once; ``acquire`` waits for a free slot.
+    ``timeout_slack_sec``: added to a test's own timeout to give the sandbox its lifetime.
+    ``request_timeout_sec``: how long ``create`` may wait for the sandbox to run.
+    """
+
+    max_parallel_tests: int = DEFAULT_MAX_PARALLEL_TESTS
+    timeout_slack_sec: int = DEFAULT_TIMEOUT_SLACK_SEC
+    request_timeout_sec: float = DEFAULT_RUNNER_START_TIMEOUT_SEC
+
+
+@dataclass(frozen=True)
+class AttemptTag:
+    """Which attempt of which request a sandbox is for, the nodes it must avoid and the test's own metadata."""
+
+    request_id: str
+    attempt: int
+    avoid_nodes: tuple[str, ...] = ()
+    meta: Mapping[str, object] | None = None
+
+
 class SandboxPool:
     """Creates, re-attaches and closes the authoritative sandboxes of one run.
 
@@ -98,21 +123,13 @@ class SandboxPool:
         provider: The ``sandbox`` socket implementation.
         templates: Card count to runner template name.
         run_id: The run's id, the first part of every idempotency key.
-        max_parallel_tests: How many sandboxes may be held at once; ``acquire`` waits for a free slot.
-        timeout_slack_sec: Added to a test's own timeout to give the sandbox its lifetime.
-        request_timeout_sec: How long ``create`` may wait for the sandbox to run.
+        limits: The slot cap and the two waits, see :class:`PoolLimits`.
     """
 
     def __init__(
-        self,
-        provider: SandboxProvider,
-        templates: Mapping[int, str],
-        *,
-        run_id: str,
-        max_parallel_tests: int = DEFAULT_MAX_PARALLEL_TESTS,
-        timeout_slack_sec: int = DEFAULT_TIMEOUT_SLACK_SEC,
-        request_timeout_sec: float = DEFAULT_RUNNER_START_TIMEOUT_SEC,
+        self, provider: SandboxProvider, templates: Mapping[int, str], *, run_id: str, limits: PoolLimits = PoolLimits()
     ) -> None:
+        max_parallel_tests = limits.max_parallel_tests
         if max_parallel_tests < 1:
             raise ValueError("max_parallel_tests must be at least 1")
         if not run_id:
@@ -121,8 +138,8 @@ class SandboxPool:
         self._templates = {int(count): name for count, name in templates.items()}
         self._run_id = run_id
         self._max = max_parallel_tests
-        self._slack = timeout_slack_sec
-        self._request_timeout = request_timeout_sec
+        self._slack = limits.timeout_slack_sec
+        self._request_timeout = limits.request_timeout_sec
         self._cond = threading.Condition()
         self._held: set[str] = set()
         self._claims = 0
@@ -148,18 +165,15 @@ class SandboxPool:
     def acquire(
         self,
         gpu_count: int,
+        tag: AttemptTag,
         *,
-        request_id: str,
-        attempt: int,
-        avoid_nodes: tuple[str, ...] = (),
-        meta: Mapping[str, object] | None = None,
         timeout_sec: float,
         remaining_sec: float | None = None,
         stop: threading.Event | None = None,
     ) -> RunnerSandbox:
         """Create the authoritative sandbox of one test attempt, after a slot is free.
 
-        ``timeout_sec`` is the test's own timeout; the sandbox lives that long plus the slack, but never past
+        ``tag`` names the attempt; ``timeout_sec`` is the test's own timeout; the sandbox lives that long plus the slack, but never past
         ``remaining_sec`` (what is left of the run). ``stop`` ends the wait for a slot with :class:`PoolClosed`.
 
         Raises:
@@ -171,7 +185,7 @@ class SandboxPool:
         lifetime = int(timeout_sec + self._slack)
         if remaining_sec is not None:
             lifetime = min(lifetime, max(1, int(remaining_sec)))
-        metadata = self._metadata(request_id, attempt, avoid_nodes, meta or {})
+        metadata = self._metadata(tag.request_id, tag.attempt, tag.avoid_nodes, tag.meta or {})
         self._take_slot(stop)
         try:
             sandbox = self._provider.create(
@@ -179,7 +193,7 @@ class SandboxPool:
                 role=MEASUREMENT_ROLE,
                 timeout_sec=lifetime,
                 metadata=metadata,
-                wait_sec=self._request_timeout,
+                options=CreateOptions(wait_sec=self._request_timeout),
             )
         except BaseException:
             self._give_slot()

@@ -154,21 +154,21 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+@dataclasses.dataclass(frozen=True)
+class LockProbe:
+    """How a lock decides that its holder is gone: the age limit, the clock and the liveness check of a pid."""
+
+    stale_after_sec: float = STALE_AFTER_SEC
+    now: Callable[[], float] = time.time
+    pid_alive: Callable[[int], bool] = _pid_alive
+
+
 class RunLock:
     """The right to measure into one file; see the module text. ``acquire`` never blocks, ``wait`` polls it."""
 
-    def __init__(
-        self,
-        path: Path,
-        *,
-        node: str,
-        pid: int | None = None,
-        stale_after_sec: float = STALE_AFTER_SEC,
-        now: Callable[[], float] = time.time,
-        pid_alive: Callable[[int], bool] = _pid_alive,
-    ) -> None:
+    def __init__(self, path: Path, *, node: str, pid: int | None = None, probe: LockProbe = LockProbe()) -> None:
         self.path, self._node, self._pid = Path(path), node, pid if pid is not None else os.getpid()
-        self._stale_after, self._now, self._pid_alive = stale_after_sec, now, pid_alive
+        self._stale_after, self._now, self._pid_alive = probe.stale_after_sec, probe.now, probe.pid_alive
         self._beat = threading.Event()
 
     def _stale(self) -> bool:
@@ -361,47 +361,63 @@ def _infrastructure_failed(report: ItemReport) -> bool:
     return not (report.local.usable and report.hosted.usable)
 
 
-def _record(
-    path: Path,
-    unit: Unit,
-    report: ItemReport,
-    who: Mapping[str, Any],
-    prior_attempts: int,
-    max_attempts: int,
-    seconds: float,
-) -> bool:
+@dataclasses.dataclass(frozen=True)
+class _Tally:
+    """How many attempts a unit has had before this one, how many it may have, and how long this one took."""
+
+    prior_attempts: int
+    max_attempts: int
+    seconds: float
+
+
+def _record(path: Path, unit: Unit, report: ItemReport, who: Mapping[str, Any], tally: _Tally) -> bool:
     """Write the line this unit's outcome earns; returns whether the unit is now complete."""
     here = {who["node_name"], *(s.node_name for s in (report.local, report.hosted) if s.node_name)}
     if len(here) > 1:
         append_line(path, _attempt_document(unit, report, who, f"cross_node: {sorted(here)}"))
         return False
-    attempts = prior_attempts + 1
-    if _infrastructure_failed(report) and attempts < max_attempts:
+    attempts = tally.prior_attempts + 1
+    if _infrastructure_failed(report) and attempts < tally.max_attempts:
         append_line(path, _attempt_document(unit, report, who, "side_failed"))
         return False
-    append_line(path, _unit_document(unit, report, who, attempts, seconds))
+    append_line(path, _unit_document(unit, report, who, attempts, tally.seconds))
     return True
+
+
+@dataclasses.dataclass(frozen=True)
+class ResumeFiles:
+    """Where a run keeps its finished units and its per-attempt reports."""
+
+    jsonl: Path
+    report_dir: Path
+
+
+@dataclasses.dataclass(frozen=True)
+class ResumeSettings:
+    """How a run judges and paces itself; every field has the default of the command line."""
+
+    criteria: Criteria = Criteria()
+    lifetime_sec: float = 0.0
+    unit_budget_sec: float = 600.0
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS
+    run_id: str | None = None
+    clock: Callable[[], float] = time.monotonic
 
 
 def run_resumable(
     items: Sequence[ChecklistItem],
-    *,
     backends: Callable[[], tuple[MeasurementBackend, Any]],
-    jsonl: Path,
-    report_dir: Path,
-    criteria: Criteria = Criteria(),
-    lifetime_sec: float = 0.0,
-    unit_budget_sec: float = 600.0,
-    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
-    run_id: str | None = None,
-    clock: Callable[[], float] = time.monotonic,
+    files: ResumeFiles,
+    settings: ResumeSettings = ResumeSettings(),
 ) -> dict[str, Any]:
-    """Measure the units not yet recorded in ``jsonl``, one after the other, and return the summary over all of them.
+    """Measure the units not yet recorded in ``files.jsonl``, one after the other, and return the summary over all.
 
     ``backends`` is called once, only when a unit has to run, and returns the local and the hosted backend.
     """
+    jsonl, report_dir, clock = files.jsonl, files.report_dir, settings.clock
+    lifetime_sec, unit_budget_sec = settings.lifetime_sec, settings.unit_budget_sec
     started = clock()
-    run = run_id or f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{os.getpid()}"
+    run = settings.run_id or f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{os.getpid()}"
     who = {"node_name": node_name(), "run_id": run, "pod": os.environ.get("POD_NAME") or os.environ.get("HOSTNAME")}
     units = plan_units(items)
     pair: tuple[MeasurementBackend, Any] | None = None
@@ -420,9 +436,9 @@ def run_resumable(
         fresh = dataclasses.replace(unit.item, id=f"{unit.item.id}.{run}")
         report = check_repetition(fresh, report_dir / ATTEMPTS_DIR, pair[0], pair[1], unit.rep)
         report = dataclasses.replace(report, id=unit.item.id)
-        _record(jsonl, unit, report, who, prior, max_attempts, clock() - began)
+        _record(jsonl, unit, report, who, _Tally(prior, settings.max_attempts, clock() - began))
         ran += 1
-    return resume_summary(units, read_lines(jsonl), criteria)
+    return resume_summary(units, read_lines(jsonl), settings.criteria)
 
 
 def finish(jsonl: Path, summary: Mapping[str, Any]) -> int:
@@ -466,13 +482,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         summary = run_resumable(
             items,
-            backends=backends,
-            jsonl=args.resume,
-            report_dir=args.report_dir,
-            criteria=Criteria(args.median_pct, args.p90_pct),
-            lifetime_sec=args.lifetime_sec,
-            unit_budget_sec=args.unit_budget_sec,
-            max_attempts=args.max_attempts,
+            backends,
+            ResumeFiles(args.resume, args.report_dir),
+            ResumeSettings(
+                criteria=Criteria(args.median_pct, args.p90_pct),
+                lifetime_sec=args.lifetime_sec,
+                unit_budget_sec=args.unit_budget_sec,
+                max_attempts=args.max_attempts,
+            ),
         )
     finally:
         for backend in built:

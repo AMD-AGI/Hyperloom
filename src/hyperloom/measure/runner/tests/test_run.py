@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 from hyperloom.measure import signing
-from hyperloom.measure.bundle import verify_bundle
+from hyperloom.measure.bundle import BundleExpectation, verify_bundle
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.runner import run as runner
 from hyperloom.measure.runner.hardware import EccCounts, GpuFacts
@@ -131,11 +131,13 @@ def test_a_successful_test_leaves_a_signed_manifest_and_status_last(tmp_path, en
     shutil.copy(out / "manifest.sig", staging)
     verify_bundle(
         staging,
-        public_key_pem=signing.public_key_pem(key),
-        request_id=REQUEST_ID,
-        spec_fingerprint=ResultManifest.from_bytes(raw).spec_fingerprint,
-        spec_sha256=None,
-        sandbox_id="sbx-1",
+        BundleExpectation(
+            public_key_pem=signing.public_key_pem(key),
+            request_id=REQUEST_ID,
+            spec_fingerprint=ResultManifest.from_bytes(raw).spec_fingerprint,
+            spec_sha256=None,
+            sandbox_id="sbx-1",
+        ),
     )
     assert signing.verify(raw, (out / "manifest.sig").read_text(), signing.public_key_pem(key))
     manifest = ResultManifest.from_bytes(raw)

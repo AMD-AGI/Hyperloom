@@ -73,9 +73,8 @@ class Rig:
         return self.local, self.hosted
 
     def run(self, items, **kwargs):
-        return resume.run_resumable(
-            items, backends=self.backends, jsonl=self.jsonl, report_dir=self.report_dir, **kwargs
-        )
+        files = resume.ResumeFiles(self.jsonl, self.report_dir)
+        return resume.run_resumable(items, self.backends, files, resume.ResumeSettings(**kwargs))
 
     def lines(self, kind: str | None = None) -> list[dict]:
         return [x for x in resume.read_lines(self.jsonl) if kind in (None, x["type"])]
@@ -297,8 +296,8 @@ def test_the_entry_point_resumes_from_the_file_and_exits_by_the_verdict(
 # -- one run at a time: a duplicate submission, and a lost run that left a lock behind ---------------------------------
 
 
-def _lock(tmp: Path, node: str = NODE, pid: int = 100, **kwargs) -> resume.RunLock:
-    return resume.RunLock(tmp / "c.jsonl.lock", node=node, pid=pid, **kwargs)
+def _lock(tmp: Path, node: str = NODE, pid: int = 100, **probe) -> resume.RunLock:
+    return resume.RunLock(tmp / "c.jsonl.lock", node=node, pid=pid, probe=resume.LockProbe(**probe))
 
 
 def test_a_second_run_cannot_take_a_lock_that_is_held_and_fresh(tmp_path: Path) -> None:

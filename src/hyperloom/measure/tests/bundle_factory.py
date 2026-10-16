@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.measure import signing
+from hyperloom.measure.bundle import BundleExpectation
 from hyperloom.measure.manifest import RESULT_SCHEMA, encode_manifest
 
 REQUEST_ID = "6c0e0000-0000-5000-8000-000000000001"
@@ -101,14 +102,14 @@ def make_bundle(staging: Path, files: dict[str, bytes] | None = None, *, key: An
     return bundle
 
 
-def verify_args(bundle: Bundle) -> dict[str, Any]:
-    return {
-        "public_key_pem": bundle.public_pem,
-        "request_id": REQUEST_ID,
-        "spec_fingerprint": SPEC_FINGERPRINT,
-        "spec_sha256": SPEC_SHA256,
-        "sandbox_id": SANDBOX_ID,
-    }
+def verify_args(bundle: Bundle) -> BundleExpectation:
+    return BundleExpectation(
+        public_key_pem=bundle.public_pem,
+        request_id=REQUEST_ID,
+        spec_fingerprint=SPEC_FINGERPRINT,
+        spec_sha256=SPEC_SHA256,
+        sandbox_id=SANDBOX_ID,
+    )
 
 
 def flip_one_byte(path: Path, offset: int = 0) -> None:

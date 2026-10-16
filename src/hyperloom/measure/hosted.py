@@ -48,8 +48,10 @@ from hyperloom.measure.sandboxes import (
     DEFAULT_MAX_PARALLEL_TESTS,
     DEFAULT_RUNNER_START_TIMEOUT_SEC,
     DEFAULT_TIMEOUT_SLACK_SEC,
+    AttemptTag,
     NoRunnerTemplate,
     PoolClosed,
+    PoolLimits,
     RunnerSandbox,
     SandboxPool,
 )
@@ -150,18 +152,16 @@ def _outcome(
     rc: int,
     *,
     facts: SandboxFacts | None = None,
-    stdout: str = "",
     stderr: str = "",
-    rounds: tuple[RoundOutcome, ...] = (),
     failure: FailureClassification | None = None,
 ) -> TestOutcome:
     failure_class = failure.failure_class if failure and failure.disposition is Disposition.FAILED else None
     reason = failure.failure_reason if failure else None
     return TestOutcome(
         returncode=rc,
-        stdout=stdout,
+        stdout="",
         stderr=stderr,
-        rounds=rounds,
+        rounds=(),
         sandbox=facts or SandboxFacts(sandbox_id=f"hosted-{call.task_id}", backend=BACKEND_NAME),
         request_id=call.task_id,
         failure_class=failure_class,
@@ -202,9 +202,11 @@ class HostedMeasurementBackend:
             provider,
             config.runner_templates,
             run_id=config.run_id,
-            max_parallel_tests=config.max_parallel_tests,
-            timeout_slack_sec=config.timeout_slack_sec,
-            request_timeout_sec=config.runner_start_timeout_sec,
+            limits=PoolLimits(
+                max_parallel_tests=config.max_parallel_tests,
+                timeout_slack_sec=config.timeout_slack_sec,
+                request_timeout_sec=config.runner_start_timeout_sec,
+            ),
         )
         self._journal: MeasurementJournal | None = None
         self._stop = threading.Event()
@@ -292,10 +294,7 @@ class HostedMeasurementBackend:
         try:
             return self._pool.acquire(
                 gpus,
-                request_id=call.task_id,
-                attempt=number,
-                avoid_nodes=tuple(call.avoid_nodes),
-                meta=_meta_of(call),
+                AttemptTag(call.task_id, number, tuple(call.avoid_nodes), _meta_of(call)),
                 timeout_sec=call.timeout_sec,
                 remaining_sec=remaining,
                 stop=self._stop,
@@ -485,11 +484,13 @@ class HostedMeasurementBackend:
             handle.copy_out(f"{FILES_ROOT}/{entry.path}", target)
         return bundle_mod.verify_bundle(
             staging,
-            public_key_pem=public_key,
-            request_id=attempt.request_id,
-            spec_fingerprint=self._expected_fingerprint(attempt.spec, listed.runner.hyperloom_version),
-            spec_sha256=spec_sha256(attempt.spec_raw),
-            sandbox_id=runner.sandbox_id,
+            bundle_mod.BundleExpectation(
+                public_key_pem=public_key,
+                request_id=attempt.request_id,
+                spec_fingerprint=self._expected_fingerprint(attempt.spec, listed.runner.hyperloom_version),
+                spec_sha256=spec_sha256(attempt.spec_raw),
+                sandbox_id=runner.sandbox_id,
+            ),
             max_total_bytes=attempt.spec.outputs.max_total_bytes,
         )
 

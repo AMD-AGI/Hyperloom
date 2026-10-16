@@ -18,7 +18,7 @@ from hyperloom.measure.bundle import verify_bundle
 @pytest.fixture
 def staged(tmp_path: Path):
     bundle = make_bundle(tmp_path / "staging")
-    verified = verify_bundle(bundle.staging, **verify_args(bundle))
+    verified = verify_bundle(bundle.staging, verify_args(bundle))
     return bundle, verified
 
 
@@ -31,7 +31,7 @@ def test_a_bundle_is_stored_under_its_request_and_manifest_hash_and_verifies_aga
     bundle, verified = staged
     location = archive.put_bundle(REQUEST_ID, verified.manifest_sha256, bundle.staging)
     assert Path(location) == archive.bundle_dir(REQUEST_ID, verified.manifest_sha256)
-    again = verify_bundle(Path(location), **verify_args(bundle))
+    again = verify_bundle(Path(location), verify_args(bundle))
     assert again.manifest_sha256 == verified.manifest_sha256
 
 
