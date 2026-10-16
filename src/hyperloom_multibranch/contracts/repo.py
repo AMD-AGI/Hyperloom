@@ -77,7 +77,10 @@ class ExperimentRepo(Protocol):
         """Carry ``candidate``'s change onto ``onto``, writing nothing; ``RecipeError`` when the two cannot combine."""
 
     async def commit_integration(self, onto: str, delta: RecipeDelta, merged_from: Sequence[str]) -> str:
-        """``delta`` on ``onto`` as a merge of ``merged_from``, landing on ``INTEGRATION_BRANCH`` as ``commit`` does."""
+        """``delta`` on ``onto`` as a merge of ``merged_from``, landing on ``INTEGRATION_BRANCH`` as ``commit`` does.
+
+        The merged recipe names as unexpressed whatever ``onto`` or a merged commit names.
+        """
 
     async def rewind(self, branch: str, commit: str, parent: str) -> None: ...
 

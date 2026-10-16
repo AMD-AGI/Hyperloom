@@ -17,6 +17,7 @@ from hyperloom.contracts.recipe import (
     Recipe,
     RecipeDelta,
     apply,
+    with_unexpressed,
 )
 from hyperloom.measure.compile import BlobError, LocalBlobStore
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
@@ -164,6 +165,16 @@ async def test_an_integration_merge_lands_only_on_the_head_it_was_tested_on(tmp_
     assert _parents(tmp_path / "experiments.git", merged) == [root, tip]
     with pytest.raises(BranchMoved):
         await repo.commit_integration(root, CHUNKING, (tip,))
+
+
+async def test_an_integration_merge_keeps_what_either_side_leaves_unexpressed(repo):
+    root = await repo.head(INTEGRATION_BRANCH)
+    await repo.create_branch("s1", root)
+    tip = await repo.commit("s1", root, with_unexpressed(CHUNKED, ("setup_commands",)), "on an incomplete root")
+
+    merged = await repo.commit_integration(root, CHUNKING, (tip,))
+
+    assert (await repo.read_recipe(merged)).unexpressed == ("setup_commands",)
 
 
 async def test_a_stored_patch_reads_back_from_the_commits_whose_recipe_names_it(repo, blobs):

@@ -17,7 +17,15 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom.contracts.recipe import PATCH_ROOT, ComponentPatches, PatchRef, Recipe, RecipeDelta, apply
+from hyperloom.contracts.recipe import (
+    PATCH_ROOT,
+    ComponentPatches,
+    PatchRef,
+    Recipe,
+    RecipeDelta,
+    apply,
+    with_unexpressed,
+)
 from hyperloom.measure.compile import (
     COMPONENT_LAYOUTS,
     BlobStore,
@@ -117,6 +125,8 @@ class GitExperimentRepo:
     async def commit_integration(self, onto: str, delta: RecipeDelta, merged_from: Sequence[str]) -> str:
         recipe = apply(await self.read_recipe(onto), delta)
         merged = [await self._commit_of(commit) for commit in merged_from]
+        for commit in merged:
+            recipe = with_unexpressed(recipe, (await self.read_recipe(commit)).unexpressed)
         return await self._land(INTEGRATION_BRANCH, onto, recipe, (onto, *merged), f"merge {', '.join(merged)}")
 
     async def rewind(self, branch: str, commit: str, parent: str) -> None:
