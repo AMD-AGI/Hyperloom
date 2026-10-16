@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from hyperloom.orchestrator.trace_analysis import tracelens_analysis as tla
 from hyperloom.orchestrator.trace_analysis import _bypass_report as bypass_report
@@ -645,7 +646,6 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
         model_name="llama",
         framework="sglang",
         target_platform="MI300X",
-        analysis_mode="inference",
         dry_run=False,
     )
 
@@ -780,7 +780,6 @@ def test_write_reports_enriches_head_size_from_model_config(tmp_path):
         model_name=str(model_dir),
         framework="sglang",
         target_platform="MI300X",
-        analysis_mode="inference",
         dry_run=False,
     )
 
@@ -806,7 +805,6 @@ def _make_write_reports_args(trace_path):
         model_name="qwen3-30b-a3b",
         framework="sglang",
         target_platform="MI300X",
-        analysis_mode="inference",
         dry_run=False,
     )
 
@@ -992,34 +990,6 @@ def test_write_reports_tracelens_report_hot_kernels_is_full_set(tmp_path):
 
 
 # SDK runner for TraceLens analysis-orchestrator skill
-def test_124_build_orchestrator_prompt_supplies_step0_inputs(tmp_path):
-    skill = tmp_path / "SKILL.md"
-    trace = tmp_path / "mixed_steady_state_0_trace.json.gz"
-    out = tmp_path / "tracelens"
-    root = tmp_path / "TraceLens-internal"
-    capture = tmp_path / "capture_traces"
-
-    prompt = tlr.build_orchestrator_prompt(
-        skill_path=skill,
-        trace_path=trace,
-        output_dir=out,
-        tracelens_root=root,
-        tracelens_internal_root=tmp_path / "TraceLens-internal",
-        platform="MI300X",
-        framework="vllm",
-        analysis_mode="default",
-        capture_folder=capture,
-    )
-
-    assert str(skill) in prompt
-    assert str(trace) in prompt
-    assert str(out) in prompt
-    assert "Analysis mode: inference" in prompt
-    assert "Inference execution mode: graph_capture" in prompt
-    assert "Comparison scope: standalone" in prompt
-    assert "Do not ask the user" in prompt
-
-
 def test_count_gpu_kernel_events_distinguishes_cpu_only_and_real_traces(tmp_path):
     import gzip
     import json as _json
@@ -1121,9 +1091,34 @@ def test_124_tracelens_analysis_fails_fast_on_cpu_only_trace(tmp_path):
     assert all("TraceLens.TraceUtils.split_trace.main" not in str(p) for cmd in captured for p in cmd), (
         f"splitter must not run on CPU-only trace; captured={captured}"
     )
-    assert all(
-        "TraceLens_generate_perf_report_pytorch_inference" not in str(c[0]) or "--help" in c for c in captured if c
-    ), f"perf-report CLI must not be invoked for CPU-only trace; captured={captured}"
+
+
+@pytest.mark.parametrize(
+    ("framework", "capture", "expected_mode"),
+    [("vllm", True, "inference"), ("custom", False, "default")],
+)
+def test_write_run_config_names_the_one_standalone_job(tmp_path, framework, capture, expected_mode):
+    trace = tmp_path / "trace.json.gz"
+    trace.touch()
+    capture_dir = tmp_path / "capture_traces"
+    capture_dir.mkdir()
+
+    path = tlr.write_run_config(
+        output_dir=tmp_path,
+        trace_path=trace,
+        platform="MI300X",
+        analysis_mode=tlr.tracelens_analysis_mode(framework),
+        capture_folder=capture_dir if capture else None,
+    )
+
+    config = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert path == tmp_path / tlr.RUN_CONFIG_NAME
+    assert config["analysis_mode"] == expected_mode
+    assert config["output_dir"] == str(tmp_path.resolve())
+    job = config["jobs"][0]
+    assert job["trace_path"] == str(trace.resolve())
+    assert job["platform"] == "MI300X"
+    assert job.get("capture_folder") == (str(capture_dir.resolve()) if capture else None)
 
 
 def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
@@ -1157,13 +1152,8 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
     res = asyncio.run(
         tlr.run_tracelens_skill(
             skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
             output_dir=output_dir,
             tracelens_root=tmp_path,
-            tracelens_internal_root=tmp_path / "TraceLens-internal",
-            platform="MI300X",
-            framework="sglang",
-            analysis_mode="default",
             capture_folder=None,
             budget_minutes=1,
             sdk_query_factory=_fake_query,
@@ -1173,7 +1163,10 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
 
     assert res.report_path.exists()
     assert res.artifact_paths["tracelens_agent_report"] == str(res.report_path)
-    assert "analysis-orchestrator" in captured["prompt"] or "skill.md" in captured["prompt"]
+    assert str(tmp_path / "skill.md") in captured["prompt"]
+    assert str(output_dir / tlr.RUN_CONFIG_NAME) in captured["prompt"]
+    assert "standalone" in captured["prompt"]
+    assert "Do not ask questions" in captured["prompt"]
     assert "Bash" in captured["options"]["allowed_tools"]
     assert "Task" in captured["options"]["allowed_tools"]
     assert res.runner == "claude_agent_sdk"
@@ -1220,13 +1213,8 @@ def test_run_tracelens_skill_aligns_cli_background_wait_with_tool_idle_bound(
     asyncio.run(
         tlr.run_tracelens_skill(
             skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
             output_dir=output_dir,
             tracelens_root=tmp_path,
-            tracelens_internal_root=tmp_path / "TraceLens-internal",
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
             capture_folder=None,
             budget_minutes=1,
             model="claude-sonnet-4-5-20250929",
@@ -1305,13 +1293,8 @@ def test_run_tracelens_skill_books_its_requests_on_the_trajectory(tmp_path):
         asyncio.run(
             tlr.run_tracelens_skill(
                 skill_path=tmp_path / "skill.md",
-                trace_path=tmp_path / "trace.json.gz",
                 output_dir=output_dir,
                 tracelens_root=tmp_path,
-                tracelens_internal_root=tmp_path / "TraceLens-internal",
-                platform="MI355X",
-                framework="sglang",
-                analysis_mode="default",
                 capture_folder=None,
                 budget_minutes=1,
                 model="claude-tl",
@@ -1405,13 +1388,8 @@ def test_run_tracelens_skill_records_nothing_outside_a_session(tmp_path):
     res = asyncio.run(
         tlr.run_tracelens_skill(
             skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
             output_dir=output_dir,
             tracelens_root=tmp_path,
-            tracelens_internal_root=tmp_path / "TraceLens-internal",
-            platform="MI355X",
-            framework="sglang",
-            analysis_mode="default",
             capture_folder=None,
             budget_minutes=1,
             sdk_query_factory=_fake_query,
@@ -1460,13 +1438,8 @@ def test_run_tracelens_skill_uses_hermetic_claude_env(tmp_path, monkeypatch):
     asyncio.run(
         tlr.run_tracelens_skill(
             skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
             output_dir=output_dir,
             tracelens_root=tmp_path,
-            tracelens_internal_root=tmp_path / "TraceLens-internal",
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
             capture_folder=None,
             budget_minutes=1,
             model="claude-sonnet-4-5-20250929",
@@ -1521,13 +1494,8 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
     res = asyncio.run(
         tlr.run_tracelens_skill(
             skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
             output_dir=output_dir,
             tracelens_root=tmp_path,
-            tracelens_internal_root=None,
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
             capture_folder=None,
             budget_minutes=30,
             model="gpt-5.5",
@@ -1564,8 +1532,8 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
 def test_run_tracelens_skill_codex_grants_the_capture_folder_write_access(tmp_path, monkeypatch):
     """Graph-capture analysis writes into the capture folder, so it must be writable.
 
-    ``TraceLens_generate_perf_report_pytorch_inference`` classifies the capture
-    folder before it can merge it, and that classification writes
+    The TraceLens report step classifies the capture folder before it can
+    merge it, and that classification writes
     ``execution_details.json`` into the folder itself. With only ``output_dir``
     writable the step dies with ``OSError: [Errno 30] Read-only file system``
     and the turn ends without ``analysis.md``.
@@ -1589,13 +1557,8 @@ def test_run_tracelens_skill_codex_grants_the_capture_folder_write_access(tmp_pa
     asyncio.run(
         tlr.run_tracelens_skill(
             skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
             output_dir=output_dir,
             tracelens_root=tmp_path,
-            tracelens_internal_root=None,
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
             capture_folder=capture_folder,
             budget_minutes=30,
             codex_turn_runner=_fake_codex_turn,
@@ -1624,13 +1587,8 @@ def test_run_tracelens_skill_codex_floors_the_turn_timeout(tmp_path, monkeypatch
     asyncio.run(
         tlr.run_tracelens_skill(
             skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
             output_dir=output_dir,
             tracelens_root=tmp_path,
-            tracelens_internal_root=None,
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
             capture_folder=None,
             budget_minutes=0.1,
             codex_turn_runner=_fake_codex_turn,
@@ -1657,13 +1615,8 @@ def test_run_tracelens_skill_codex_raises_when_report_missing(tmp_path, monkeypa
         asyncio.run(
             tlr.run_tracelens_skill(
                 skill_path=tmp_path / "skill.md",
-                trace_path=tmp_path / "trace.json.gz",
                 output_dir=output_dir,
                 tracelens_root=tmp_path,
-                tracelens_internal_root=None,
-                platform="MI355X",
-                framework="vllm",
-                analysis_mode="inference",
                 capture_folder=None,
                 budget_minutes=5,
                 codex_turn_runner=_failing_codex_turn,
@@ -1691,13 +1644,8 @@ def test_run_tracelens_skill_codex_keeps_report_written_before_failure(tmp_path,
     res = asyncio.run(
         tlr.run_tracelens_skill(
             skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
             output_dir=output_dir,
             tracelens_root=tmp_path,
-            tracelens_internal_root=None,
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
             capture_folder=None,
             budget_minutes=5,
             codex_turn_runner=_late_failure,
@@ -1725,13 +1673,8 @@ def test_run_tracelens_skill_codex_reports_in_band_turn_error(tmp_path, monkeypa
     res = asyncio.run(
         tlr.run_tracelens_skill(
             skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
             output_dir=output_dir,
             tracelens_root=tmp_path,
-            tracelens_internal_root=None,
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
             capture_folder=None,
             budget_minutes=5,
             codex_turn_runner=_in_band_error,
@@ -1789,13 +1732,8 @@ async def _run_and_time(tlr_mod, query, options_cls, tmp_path, output_dir):
     t0 = _time.monotonic()
     res = await tlr_mod.run_tracelens_skill(
         skill_path=tmp_path / "skill.md",
-        trace_path=tmp_path / "trace.json.gz",
         output_dir=output_dir,
         tracelens_root=tmp_path,
-        tracelens_internal_root=tmp_path / "TraceLens-internal",
-        platform="MI300X",
-        framework="sglang",
-        analysis_mode="default",
         capture_folder=None,
         budget_minutes=1,
         sdk_query_factory=query,
@@ -1843,13 +1781,8 @@ def test_t2_run_tracelens_skill_ignores_intermediate_sidecars(tmp_path):
     res = asyncio.run(
         tlr.run_tracelens_skill(
             skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
             output_dir=output_dir,
             tracelens_root=tmp_path,
-            tracelens_internal_root=tmp_path / "TraceLens-internal",
-            platform="MI300X",
-            framework="sglang",
-            analysis_mode="default",
             capture_folder=None,
             budget_minutes=1,
             sdk_query_factory=_fake_query,
@@ -1893,13 +1826,8 @@ def test_t2_missing_analysis_md_still_raises(tmp_path):
         asyncio.run(
             tlr.run_tracelens_skill(
                 skill_path=tmp_path / "skill.md",
-                trace_path=tmp_path / "trace.json.gz",
                 output_dir=output_dir,
                 tracelens_root=tmp_path,
-                tracelens_internal_root=tmp_path / "TraceLens-internal",
-                platform="MI300X",
-                framework="sglang",
-                analysis_mode="default",
                 capture_folder=None,
                 budget_minutes=1,
                 sdk_query_factory=_fake_query,
@@ -2152,10 +2080,6 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
     assert "--CONC" in splitter_cmd and "8" in splitter_cmd, splitter_cmd
     assert "--OSL" in splitter_cmd and "1024" in splitter_cmd, splitter_cmd
 
-    assert all(
-        not (c and "TraceLens_generate_perf_report_pytorch_inference" in str(c[0]) and "--profile_json_path" in c)
-        for c in captured
-    ), f"perf-report CSV fallback must not run; analysis.md is the single source of truth. cmds={captured}"
     out = capsys.readouterr().out
     result = _json.loads(out)
     assert result["status"] == "failed"
@@ -2557,15 +2481,16 @@ def test_skip_split_route_analyses_the_promoted_candidate(tmp_path):
     populated = _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=12)
 
     # The skill runs in-process, so the analysed trace never reaches a subprocess argv the way the splitter's does --
-    # the skill's own arguments are the only place the promotion is observable.
+    # the run config it is handed is the only place the promotion is observable.
     class _StopAfterSkillDispatch(Exception):
         """Ends the run once the skill's input trace has been recorded."""
 
     seen: list[Path] = []
 
-    async def fake_skill(*, trace_path, **_kw):
-        seen.append(trace_path)
-        raise _StopAfterSkillDispatch(trace_path.name)
+    async def fake_skill(*, output_dir, **_kw):
+        config = yaml.safe_load((output_dir / tlr.RUN_CONFIG_NAME).read_text(encoding="utf-8"))
+        seen.append(Path(config["jobs"][0]["trace_path"]))
+        raise _StopAfterSkillDispatch(seen[0].name)
 
     with patch.object(tla, "run_tracelens_skill", fake_skill):
         captured = _drive_main_over_capture_dir(
@@ -2576,8 +2501,39 @@ def test_skip_split_route_analyses_the_promoted_candidate(tmp_path):
 
     assert _find_splitter_cmd(captured) is None, "--skip-split must skip the splitter"
     assert seen, "the TraceLens skill was never reached"
-    assert seen[0] == populated, f"analysed {seen[0].name}, expected {populated.name}"
-    assert empty not in seen
+    assert seen[0] == populated.resolve(), f"analysed {seen[0].name}, expected {populated.name}"
+    assert empty.resolve() not in seen
+
+
+def test_scriptable_workload_with_a_capture_folder_fails_before_the_agent_starts(tmp_path, capsys):
+    from unittest.mock import patch
+
+    trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
+    _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=12)
+    capture = tmp_path / "capture_traces"
+    capture.mkdir()
+
+    async def skill_must_not_run(**_kw):
+        raise AssertionError("the agent must not start on a rejected config")
+
+    with patch.object(tla, "run_tracelens_skill", skill_must_not_run):
+        _drive_main_over_capture_dir(
+            tmp_path,
+            trace_dir,
+            extra_argv=[
+                "--skip-split",
+                "--use-llm-orchestrator",
+                "--framework",
+                "custom",
+                "--capture-folder",
+                str(capture),
+            ],
+        )
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "failed"
+    assert result["error"].startswith("ConfigError")
 
 
 def test_capture_under_an_ancestor_named_trace_split_still_orders_correctly(tmp_path):
@@ -4148,33 +4104,6 @@ def test_build_audit_summary_defaults_trace_health_warnings_to_empty_list():
         task_groups=[],
     )
     assert summary["trace_health_warnings"] == []
-
-
-# atom maps to ``inference`` analysis mode
-def test_infer_analysis_mode_atom_returns_inference():
-    """atom shares inference-mode kernel grouping with sglang/vllm (else falls to ``default``)."""
-    assert tlr.infer_analysis_mode("atom", "") == "inference"
-    assert tlr.infer_analysis_mode("ATOM", "default") == "inference"
-    assert tlr.infer_analysis_mode("  atom  ", "default") == "inference"
-
-
-def test_infer_analysis_mode_sglang_vllm_unchanged():
-    """Regression guard: sglang / vllm remain ``inference``."""
-    assert tlr.infer_analysis_mode("sglang", "") == "inference"
-    assert tlr.infer_analysis_mode("vllm", "default") == "inference"
-
-
-def test_infer_analysis_mode_explicit_request_wins():
-    """Caller-supplied non-default mode bypasses the framework default for every framework."""
-    assert tlr.infer_analysis_mode("atom", "training") == "training"
-    assert tlr.infer_analysis_mode("sglang", "training") == "training"
-    assert tlr.infer_analysis_mode("unknown", "training") == "training"
-
-
-def test_infer_analysis_mode_unknown_framework_stays_default():
-    """Frameworks outside the canonical set fall back to ``default``."""
-    assert tlr.infer_analysis_mode("trtllm", "") == "default"
-    assert tlr.infer_analysis_mode("", "") == "default"
 
 
 # atom entries present in _FRAMEWORK_PKG_FALLBACK_ROOTS

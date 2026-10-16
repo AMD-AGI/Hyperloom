@@ -113,7 +113,6 @@ class TestCallSiteBinding:
             model_name="m",
             framework="xdit",
             target_platform="MI300X",
-            analysis_mode="inference",
             dry_run=False,
             num_denoise_steps=9,
         )
