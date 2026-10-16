@@ -226,6 +226,14 @@ def test_an_id_after_a_comma_opens_an_entry_only_when_its_reason_follows_it():
     assert entries.skipped == ("P6", "P7", "P8", "P9")
     assert entries.reasons == {"P6": "slower", "P7": "spilled 14 VGPRs", "P8": "(no gain)"}
 
+    # A claim names each item with what it is, so any id after a comma is claimed (a real SimpleMatmulModule line).
+    claim = guidance.read_citations(
+        "[playbook:P18 bf16x3 128x128 instantiation (truncated hi), P19 per-shape dispatch (K-based split rule), "
+        "P20a split done at LDS-staging time]",
+        known,
+    )
+    assert claim.claimed == ("P18", "P19")
+
 
 def test_a_skip_of_an_item_whose_precondition_failed_settles_it():
     state = _state_with(THREE_GROUPS)

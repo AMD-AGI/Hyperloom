@@ -96,9 +96,11 @@ _SKIP_CITATION = re.compile(r"\[playbook-skip:([^\]]*)\]", re.IGNORECASE)
 _UNTRIED_CITATION = re.compile(r"\[playbook-untried:([^\]]*)\]", re.IGNORECASE)
 _CITED_ID = re.compile(r"\bP\d{1,3}\b", re.IGNORECASE)
 # Inside one citation, an entry is a run of item ids at the start of the block or after a `;`, `,` or line break,
-# followed by its reason; an id that only appears inside another entry's reason is not cited. After a comma the run
-# opens an entry only when its reason starts right after it ("P6 slower, P7: spilled"): in "slower than the split
-# path, P21 would be needed first" P21 is part of P6's reason.
+# followed by its reason; an id that only appears inside another entry's reason is not cited. In a skip or untried
+# citation, after a comma the run opens an entry only when its reason starts right after it ("P6 slower, P7:
+# spilled"): in "slower than the split path, P21 would be needed first" P21 is part of P6's reason. A claim lists
+# what is in the kernel, each id followed by what it is ("P18 bf16x3 tile, P19 per-shape dispatch"), so there any id
+# after a comma opens an entry.
 _ENTRY_START = re.compile(r"(?:^|[;,\n])\s*(?=P\d)", re.IGNORECASE)
 _ID_RUN = re.compile(r"P\d{1,3}\b(?:\s*(?:,|/|&|\band\b)\s*P\d{1,3}\b)*", re.IGNORECASE)
 _REASON_OPENER = re.compile(r"[ \t]*(?:$|[\n:;(=\-\u2013\u2014])")
@@ -561,7 +563,7 @@ class Citations:
     reasons: Mapping[str, str] = field(default_factory=dict)
 
 
-def _entries(block: str) -> list[tuple[list[str], str]]:
+def _entries(block: str, *, strict_commas: bool) -> list[tuple[list[str], str]]:
     """Each entry of one citation block: the item ids it opens with, and the reason that follows them."""
     opened: list[tuple[re.Match[str], re.Match[str]]] = []
     cursor = 0
@@ -571,7 +573,7 @@ def _entries(block: str) -> list[tuple[list[str], str]]:
         run = _ID_RUN.match(block, start.end())
         if run is None:
             continue
-        if block[start.start()] == "," and not _REASON_OPENER.match(block, run.end()):
+        if strict_commas and block[start.start()] == "," and not _REASON_OPENER.match(block, run.end()):
             continue
         opened.append((start, run))
         cursor = run.end()
@@ -599,7 +601,7 @@ def _cited(pattern: re.Pattern[str], text: str, known: set[str]) -> tuple[list[s
     found: list[str] = []
     reasons: dict[str, str] = {}
     for block in pattern.findall(text):
-        for item_ids, reason in _entries(block):
+        for item_ids, reason in _entries(block, strict_commas=pattern is not _CITATION):
             for item_id in item_ids:
                 if item_id in known and item_id not in found:
                     found.append(item_id)
