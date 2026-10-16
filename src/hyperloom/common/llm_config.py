@@ -980,6 +980,7 @@ def _anthropic_http_params(
     system: str | None,
     max_tokens: int,
     temperature: float | None = None,
+    cache_control: bool = False,
 ) -> dict[str, object]:
     """Assemble the Messages request body, omitting an absent system prompt."""
     params: dict[str, object] = {
@@ -988,7 +989,9 @@ def _anthropic_http_params(
         "max_tokens": int(max_tokens),
     }
     if system:
-        params["system"] = system
+        params["system"] = (
+            [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}] if cache_control else system
+        )
     if temperature is not None:
         params["temperature"] = float(temperature)
     return params
@@ -1020,13 +1023,14 @@ def anthropic_completion(
     max_tokens: int,
     system: str | None = None,
     temperature: float | None = None,
+    cache_control: bool = False,
     env: Mapping[str, str] | None = None,
     timeout: object | None = None,
     timeout_s: float | None = None,
     component: str = "",
     operation: str = "",
 ) -> AnthropicMessageResult:
-    """Issue one single-shot Anthropic completion over whichever transport works."""
+    """Issue one completion; ``cache_control`` marks the system prompt on HTTP only."""
     transport = anthropic_transport(env)
     if transport == ANTHROPIC_TRANSPORT_SDK:
         client = _one_shot_client(timeout_s, env, component, operation)
@@ -1050,6 +1054,7 @@ def anthropic_completion(
                 system=system,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                cache_control=cache_control,
             ),
         )
 
@@ -1061,6 +1066,7 @@ async def aanthropic_completion(
     max_tokens: int,
     system: str | None = None,
     temperature: float | None = None,
+    cache_control: bool = False,
     env: Mapping[str, str] | None = None,
     timeout: object | None = None,
     timeout_s: float | None = None,
@@ -1091,6 +1097,7 @@ async def aanthropic_completion(
                 system=system,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                cache_control=cache_control,
             ),
         )
 

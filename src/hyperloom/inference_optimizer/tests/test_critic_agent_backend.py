@@ -1808,6 +1808,7 @@ async def test_anthropic_protocol_single_proposal_yields_verdict(
     assert call["model"] == "claude-opus-4-8"
     assert call["system"] == "critic system"
     assert call["max_tokens"] == CRITIC_AGENT_MAX_COMPLETION_TOKENS
+    assert call["cache_control"] is True
     user_content = call["messages"][0]["content"]
     assert "JUDGE BUNDLE" in user_content
     assert "critic system" not in user_content
