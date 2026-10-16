@@ -847,6 +847,24 @@ def test_a_session_without_a_plan_is_given_no_reasoning_log(tmp_path, monkeypatc
     assert seen == ["not passed"]
 
 
+def test_the_loop_hides_its_output_folder_from_git(tmp_path, monkeypatch):
+    """The workspace ignores nothing of its own, yet git lists nothing the loop wrote under forge_experiments."""
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
+
+    assert (workspace / "forge_experiments" / ".gitignore").read_text() == "*\n"
+    assert any(path.name != ".gitignore" for path in (workspace / "forge_experiments").rglob("*") if path.is_file())
+    listed = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard"],
+        cwd=workspace,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "forge_experiments" not in listed.stdout
+
+
 def test_a_session_is_handed_what_its_gate_scores_against(tmp_path, monkeypatch):
     """The pristine per-case times and the current best reach the session's gate as one value."""
     loop, _workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={"case": 2.0})
