@@ -31,6 +31,7 @@ def _clear_env(monkeypatch):
         "FRAMEWORK",
         "BENCHMARK_BASE_URL",
         "VLLM_VENV_ROOT",
+        "HYPERLOOM_FRAMEWORK_VENV_PYTHON",
         "FRAMEWORK_ENV",
         "PYTHON",
         "VIRTUAL_ENV",
@@ -213,6 +214,54 @@ def test_no_other_framework_probes_the_vllm_venv(isolated_vllm):
     probed = preflight._framework_probe_interpreters("sglang", "/usr/bin/python3")
 
     assert isolated_vllm not in probed
+
+
+@pytest.fixture
+def framework_venv_python(monkeypatch, tmp_path):
+    """A host venv bind-mounted into the container (rocm-scripts' VENV/--venv)."""
+    venv = tmp_path / "framework-venv"
+    python = venv / "bin" / "python3"
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    python.chmod(0o755)
+    monkeypatch.setenv("HYPERLOOM_FRAMEWORK_VENV_PYTHON", str(python))
+    return str(python)
+
+
+def test_framework_venv_python_is_probed_regardless_of_framework(framework_venv_python):
+    """Unlike VLLM_VENV_ROOT, this is an explicit operator choice, not framework-scoped."""
+    for framework in ("vllm", "sglang", "custom"):
+        probed = preflight._framework_probe_interpreters(framework, "/usr/bin/python3")
+        assert probed[0] == framework_venv_python
+
+
+def test_framework_venv_python_wins_over_the_vllm_isolated_venv(framework_venv_python, isolated_vllm):
+    """An explicit operator choice beats the installer-derived vLLM venv."""
+    probed = preflight._framework_probe_interpreters("vllm", "/usr/bin/python3")
+
+    assert probed[0] == framework_venv_python
+    assert isolated_vllm in probed[1:]
+
+
+def test_a_missing_framework_venv_python_is_not_probed(monkeypatch):
+    """The variable can point at a torn-down mount; a stale path is not a candidate."""
+    stale = "/opt/hyperloom/framework-venv-that-is-gone/bin/python3"
+    monkeypatch.setenv("HYPERLOOM_FRAMEWORK_VENV_PYTHON", stale)
+
+    probed = preflight._framework_probe_interpreters("vllm", "/usr/bin/python3")
+
+    assert stale not in probed
+
+
+def test_framework_venv_python_is_the_recorded_provenance(framework_venv_python, monkeypatch):
+    """The probe's winning candidate is what downstream consumers should read back."""
+    _probe_result(monkeypatch, importable=True, rocm=True)
+    monkeypatch.setattr(preflight, "_in_container", lambda: False)
+
+    preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+
+    assert os.environ[RESOLVED_FRAMEWORK_PYTHON_ENV] == framework_venv_python
+    assert os.environ[RESOLVED_FRAMEWORK_ENV] == "vllm"
 
 
 def test_container_message_omits_the_container_remedy(monkeypatch, capsys):
