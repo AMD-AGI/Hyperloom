@@ -40,6 +40,7 @@ _GIT_IDENTITY = {
     "GIT_COMMITTER_EMAIL": "multibranch@hyperloom.invalid",
 }
 _FIXED_CONFIG = ("-c", "core.autocrlf=false", "-c", "core.safecrlf=false", "-c", "diff.noprefix=false")
+_STAGE = ("add", "--all", "--")
 
 
 class WorktreeError(RuntimeError):
@@ -63,6 +64,11 @@ def _git(cwd: Path, *args: str, stdin: bytes | None = None) -> str:
     return done.stdout.decode()
 
 
+def _commit_all(cwd: Path, message: str) -> None:
+    _git(cwd, *_STAGE)
+    _git(cwd, "commit", "--quiet", "--allow-empty", "-m", message)
+
+
 class SourceBase:
     """The session's base repository at ``path``; its ``installed`` branch holds every component's installed package."""
 
@@ -80,18 +86,17 @@ class SourceBase:
     def build(self, components: Sequence[str]) -> None:
         """Copy each component's installed package to its upstream path and commit it; a session builds one base."""
         self.path.mkdir(parents=True)
-        _git(self.path, "init", "--quiet", f"--initial-branch={BASE_BRANCH}")
+        _git(self.path, "init", f"--initial-branch={BASE_BRANCH}")
         for component in components:
             layout = self._layout(component)
             package = self._locator(layout)
             shutil.copytree(package.path, self.path / layout.upstream_prefix, ignore=shutil.ignore_patterns(*SKIPPED))
-        _git(self.path, "add", "--all")
-        _git(self.path, "commit", "--quiet", "--allow-empty", "-m", BASE_BRANCH)
+        _commit_all(self.path, BASE_BRANCH)
 
     def worktree(self, branch: str, path: Path) -> BranchWorktree:
         """The worktree of ``branch`` at ``path``, added at the installed packages the first time."""
         if not path.exists():
-            _git(self.path, "worktree", "add", "--quiet", "-b", f"mb/{branch}", str(path), BASE_BRANCH)
+            _git(self.path, "worktree", "add", "-b", f"mb/{branch}", str(path), BASE_BRANCH)
         return BranchWorktree(path, self._layouts)
 
     def _layout(self, component: str) -> ComponentLayout:
@@ -132,40 +137,39 @@ class BranchWorktree:
         Uncommitted edits are dropped, so a change made against an older head never reaches a diff against this one.
         """
         if self.head() == head:
-            _git(self.path, "reset", "--quiet", "--hard", "HEAD")
-            _git(self.path, "clean", "-fdx", "--quiet")
+            self._reset("HEAD")
             return
-        _git(self.path, "reset", "--quiet", "--hard", BASE_BRANCH)
-        _git(self.path, "clean", "-fdx", "--quiet")
+        self._reset(BASE_BRANCH)
         with tempfile.TemporaryDirectory(prefix="mb-sync-") as scratch:
             for index, patch in enumerate(patches):
                 patch_file = Path(scratch) / f"{index:04d}.patch"
                 patch_file.write_bytes(patch)
                 _git(self.path, "apply", "--whitespace=nowarn", str(patch_file))
-        _git(self.path, "add", "--all")
-        _git(self.path, "commit", "--quiet", "--allow-empty", "-m", f"{HEAD_SUBJECT}{head}")
+        _commit_all(self.path, f"{HEAD_SUBJECT}{head}")
 
     def diff(self, component: str) -> str:
         """The worktree's change to ``component`` against its head, as the patch the toolbox applies; empty when none."""
-        prefix = self._staged(component)
-        return _git(self.path, "diff", "--cached", "--no-color", "--no-ext-diff", "HEAD", "--", prefix)
+        return self._staged_diff(component, "--no-color", "--no-ext-diff")
 
     def changed(self, component: str) -> Changes:
         """The files the worktree's change to ``component`` writes and deletes against its head."""
-        prefix = self._staged(component)
-        listing = _git(self.path, "diff", "--cached", "--no-renames", "--name-status", "HEAD", "--", prefix)
+        listing = self._staged_diff(component, "--no-renames", "--name-status")
         rows = [line.split("\t", 1) for line in listing.splitlines() if line.strip()]
         return Changes(
             written=tuple(path for status, path in rows if status != "D"),
             deleted=tuple(path for status, path in rows if status == "D"),
         )
 
-    def _staged(self, component: str) -> str:
+    def _reset(self, commit: str) -> None:
+        _git(self.path, "reset", "--hard", commit)
+        _git(self.path, "clean", "-fdx", "--quiet")
+
+    def _staged_diff(self, component: str, *options: str) -> str:
         layout = self._layouts.get(component)
         if layout is None:
             raise UnsupportedComponentError(f"{component} has no package layout")
-        _git(self.path, "add", "--all", "--", layout.upstream_prefix)
-        return layout.upstream_prefix
+        _git(self.path, *_STAGE, layout.upstream_prefix)
+        return _git(self.path, "diff", "--cached", *options, "HEAD", "--", layout.upstream_prefix)
 
 
 __all__ = ["BASE_BRANCH", "HEAD_SUBJECT", "SKIPPED", "BranchWorktree", "Changes", "SourceBase", "WorktreeError"]
