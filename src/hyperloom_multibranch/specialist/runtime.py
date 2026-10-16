@@ -50,9 +50,18 @@ class Session(Protocol):
         """Stop the run, more than once if need be; returns once none of its processes is left."""
 
 
-#: A new run of the specialist on ``branch``, started at ``start_commit`` with the startup ``brief`` and allowed ``k``
-#: tests running at once: ``(branch, start_commit, k, brief)``.
-SessionFactory = Callable[[str, str, int, str], Session]
+@dataclass(frozen=True)
+class SessionStart:
+    """What a run of a branch's specialist starts from: the commit the branch was started at, the startup brief, and
+    how many tests it may have running at once."""
+
+    branch: str
+    start_commit: str
+    brief: str
+    k: int
+
+
+SessionFactory = Callable[[SessionStart], Session]
 
 
 @dataclass
@@ -130,7 +139,7 @@ class SpecialistRuntime:
     async def _supervise(self, state: _Branch) -> None:
         crashes: deque[float] = deque()
         while True:
-            state.session = self._sessions(state.name, state.start_commit, state.k, state.brief)
+            state.session = self._sessions(SessionStart(state.name, state.start_commit, state.brief, state.k))
             try:
                 await state.session.run()
                 return
@@ -184,4 +193,4 @@ def _log_failure(task: asyncio.Task[None]) -> None:
         logger.error("the %s ended", task.get_name(), exc_info=task.exception())
 
 
-__all__ = ["MAX_RESTARTS", "RESTART_WINDOW_S", "Session", "SessionFactory", "SpecialistRuntime"]
+__all__ = ["MAX_RESTARTS", "RESTART_WINDOW_S", "Session", "SessionFactory", "SessionStart", "SpecialistRuntime"]

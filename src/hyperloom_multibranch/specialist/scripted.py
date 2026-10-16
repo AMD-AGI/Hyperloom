@@ -11,7 +11,7 @@ the last one stopped instead of measuring a change twice.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Protocol
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
@@ -19,47 +19,45 @@ from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.notebook.interfaces import SnapshotQuery
 from hyperloom_multibranch.contracts.notebook.records import TestRecord
 from hyperloom_multibranch.contracts.toolbox import Toolbox
+from hyperloom_multibranch.specialist.runtime import SessionStart
 
 
 class BranchHeads(Protocol):
     async def head(self, branch: str) -> str: ...
 
 
-class ScriptedSession:
-    """One run of a scripted specialist on ``branch``."""
+@dataclass(frozen=True)
+class ScriptedSetup:
+    """What every scripted specialist of a session shares: the script, and what it submits through and reads."""
 
-    def __init__(
-        self,
-        branch: str,
-        script: Sequence[RecipeDelta],
-        k: int,
-        toolbox: Toolbox,
-        repo: BranchHeads,
-        notebook: SnapshotQuery,
-        *,
-        poll_seconds: float = 5.0,
-    ) -> None:
-        self._branch = branch
-        self._script = tuple(script)
-        self._k = k
-        self._toolbox = toolbox
-        self._repo = repo
-        self._notebook = notebook
-        self._poll_seconds = poll_seconds
+    script: tuple[RecipeDelta, ...]
+    toolbox: Toolbox
+    repo: BranchHeads
+    notebook: SnapshotQuery
+    poll_seconds: float = 5.0
+
+
+class ScriptedSession:
+    """One run of a scripted specialist on the branch it starts on."""
+
+    def __init__(self, start: SessionStart, setup: ScriptedSetup) -> None:
+        self._branch = start.branch
+        self._k = start.k
+        self._setup = setup
         self._stopped = asyncio.Event()
 
     async def run(self) -> None:
         submitted = {record.request.delta.fingerprint() for record in await self._explored()}
-        for change in self._script:
+        for change in self._setup.script:
             if change.fingerprint() in submitted:
                 continue
             while not self._stopped.is_set() and sum(r.in_flight for r in await self._explored()) >= self._k:
-                await asyncio.sleep(self._poll_seconds)
+                await asyncio.sleep(self._setup.poll_seconds)
             if self._stopped.is_set():
                 return
-            parent = await self._repo.head(self._branch)
+            parent = await self._setup.repo.head(self._branch)
             request = TestRequest(TestKind.TEST, Purpose.EXPLORE, self._branch, parent, change)
-            await self._toolbox.submit_test(request)
+            await self._setup.toolbox.submit_test(request)
         await self._stopped.wait()
 
     async def set_k(self, k: int) -> None:
@@ -69,7 +67,7 @@ class ScriptedSession:
         self._stopped.set()
 
     async def _explored(self) -> list[TestRecord]:
-        snapshot = await self._notebook.snapshot()
+        snapshot = await self._setup.notebook.snapshot()
         return [
             record
             for record in snapshot.records
@@ -77,4 +75,4 @@ class ScriptedSession:
         ]
 
 
-__all__ = ["ScriptedSession"]
+__all__ = ["ScriptedSession", "ScriptedSetup"]

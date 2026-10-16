@@ -22,7 +22,7 @@ from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SpecialistTokens
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSession, Processes
 from hyperloom_multibranch.specialist.prompts import role_prompt
-from hyperloom_multibranch.specialist.runtime import SessionFactory
+from hyperloom_multibranch.specialist.runtime import SessionFactory, SessionStart
 from hyperloom_multibranch.specialist.tools import WorktreeFor
 from hyperloom_multibranch.specialist.worktree import BranchWorktree, SourceBase
 
@@ -60,12 +60,12 @@ def model_sessions(
     def worktrees(branch: str) -> BranchWorktree:
         return base.worktree(branch, branch_dir(branch) / WORKTREE_DIR)
 
-    def factory(branch: str, start_commit: str, k: int, brief: str) -> AgentSession:
+    def factory(start: SessionStart) -> AgentSession:
         return AgentSession(
-            branch,
-            start_commit,
-            k,
-            brief,
+            start.branch,
+            start.start_commit,
+            start.k,
+            start.brief,
             command=command,
             role=role,
             env=env,
@@ -73,9 +73,9 @@ def model_sessions(
             tokens=tokens,
             processes=processes,
             repo=repo,
-            worktree=worktrees(branch),
-            notebook=notebook_for(branch),
-            workspace=branch_dir(branch) / SESSION_DIR,
+            worktree=worktrees(start.branch),
+            notebook=notebook_for(start.branch),
+            workspace=branch_dir(start.branch) / SESSION_DIR,
         )
 
     return ModelSessions(factory, worktrees)

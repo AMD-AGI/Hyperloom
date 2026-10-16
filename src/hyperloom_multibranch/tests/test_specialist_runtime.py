@@ -16,8 +16,8 @@ from hyperloom_multibranch.notebook.tests.factories import delta, intent
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
 from hyperloom_multibranch.specialist.judging import NOTICE
-from hyperloom_multibranch.specialist.runtime import MAX_RESTARTS, RESTART_WINDOW_S, SpecialistRuntime
-from hyperloom_multibranch.specialist.scripted import ScriptedSession
+from hyperloom_multibranch.specialist.runtime import MAX_RESTARTS, RESTART_WINDOW_S, SessionStart, SpecialistRuntime
+from hyperloom_multibranch.specialist.scripted import ScriptedSession, ScriptedSetup
 from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
 from hyperloom_multibranch.toolbox.fake_model import FakeToolboxConfig
@@ -34,8 +34,8 @@ class _Runs:
         self.crashes = crashes
         self.started: list[_Run] = []
 
-    def __call__(self, branch: str, start_commit: str, k: int, brief: str) -> "_Run":
-        run = _Run(self, k, brief)
+    def __call__(self, start: SessionStart) -> "_Run":
+        run = _Run(self, start.k, start.brief)
         self.started.append(run)
         return run
 
@@ -107,7 +107,8 @@ class _Session:
         return found.status
 
     def scripted(self, k: int) -> ScriptedSession:
-        return ScriptedSession(BRANCH, SCRIPT, k, self.toolbox, self.repo, self.reader, poll_seconds=0.01)
+        setup = ScriptedSetup(SCRIPT, self.toolbox, self.repo, self.reader, poll_seconds=0.01)
+        return ScriptedSession(SessionStart(BRANCH, start_commit="", brief="", k=k), setup)
 
     async def notices(self) -> list[str]:
         return [

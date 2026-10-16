@@ -4,6 +4,7 @@
 from hyperloom.measure.compile import PackageBase
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSession
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions, model_sessions
+from hyperloom_multibranch.specialist.runtime import SessionStart
 
 
 def test_a_branch_s_sessions_and_its_worktree_tools_share_one_worktree_on_one_source_base(tmp_path):
@@ -30,7 +31,7 @@ def test_a_branch_s_sessions_and_its_worktree_tools_share_one_worktree_on_one_so
 
     sessions = built()
 
-    assert isinstance(sessions.factory("s1", "c0", 2, "leads"), AgentSession)
+    assert isinstance(sessions.factory(SessionStart("s1", "c0", "leads", 2)), AgentSession)
     worktree = sessions.worktrees("s1")
     assert worktree.path == tmp_path / "MB-branches" / "s1" / "worktree"
     assert (worktree.path / "vllm" / "config.py").read_bytes() == b"max_num_seqs = 128\n"
