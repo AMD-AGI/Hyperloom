@@ -22,14 +22,13 @@ from hyperloom.sikl.tests.conftest import CASES, DEFINITION_NAME, install_harnes
 from kernelforge.mcp_server.tools.bench import parse_case_timings
 
 # The harness stand-in: emits the record shape `sikl.benchmarks.api --json-report` writes.
-FAKE_SIKL = """import json, sys
+FAKE_SIKL = """import json, pathlib, sys
+pathlib.Path(__file__).with_name("argv.json").write_text(json.dumps(sys.argv))
 report = sys.argv[sys.argv.index("--json-report") + 1]
-timed = "--time-baseline" in sys.argv
 records = []
 for index, (uuid, rows) in enumerate({cases!r}):
-    evaluation = {{"status": "PASSED", "correctness": {{"max_absolute_error": 0.5 * (index + 1)}}}}
-    if timed:
-        evaluation["performance"] = {{"latency_ms": 0.01 * (index + 1), "reference_latency_ms": 0.02 * (index + 1)}}
+    evaluation = {{"status": "PASSED", "correctness": {{"max_absolute_error": 0.5 * (index + 1)}},
+                  "performance": {{"latency_ms": 0.01 * (index + 1)}}}}
     records.append({{"workload": {{"uuid": uuid, "axes": {{"m": rows}}}}, "evaluation": evaluation}})
 open(report, "w").write(json.dumps(records))
 """
@@ -89,21 +88,121 @@ def test_correctness_output_carries_the_allclose_fallback(driver_run):
     assert "SNR:" not in stdout
 
 
-def test_bench_records_the_in_window_baseline(driver_run):
-    """The harness times the baseline beside the candidate; keep that number."""
+def test_bench_does_not_time_the_baseline(driver_run):
+    """Timing the baseline beside the candidate doubled a pass, past forge-loop's per-measurement limit."""
     _definition, run, fake = driver_run
     _run_driver(run, fake, "--bench-mode", "--warmup", "1", "--iters", "2")
-    record = json.loads((run.bundle.parent / "sikl_in_window_baseline.json").read_text(encoding="utf-8"))
-    assert set(record) == {uuid for uuid, _ in CASES}
+    argv = json.loads((fake.parent / "sikl" / "benchmarks" / "argv.json").read_text(encoding="utf-8"))
+    assert "--no-time-baseline" in argv and "--time-baseline" not in argv
+
+
+def _import_driver(run):
+    spec = importlib.util.spec_from_file_location("sikl_forge_driver", run.driver)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_driver_is_importable_without_a_gpu(driver_run):
     """forge-loop hashes the driver before it ever runs; importing must not need ROCm."""
     _definition, run, _fake = driver_run
-    spec = importlib.util.spec_from_file_location("sikl_forge_driver", run.driver)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    assert module.DEFINITION == DEFINITION_NAME
+    assert _import_driver(run).DEFINITION == DEFINITION_NAME
+
+
+TRITON_KERNELS = """import triton
+from triton import jit as compile_kernel
+
+
+@triton.autotune(configs=[], key=[])
+@triton.jit
+def _scale(x):
+    pass
+
+
+@compile_kernel(do_not_specialize=["x"])
+def _shift(x):
+    pass
+
+
+def run(a, b):
+    return a @ b.T
+"""
+
+FLYDSL_KERNELS = """import flydsl.compiler as flyc
+
+
+@flyc.kernel
+def _scale(x):
+    pass
+
+
+@flyc.kernel(name="gemm_bf16")
+def _gemm(x):
+    pass
+
+
+def run(a, b):
+    return a @ b.T
+"""
+
+
+@pytest.mark.parametrize(
+    ("language", "source", "launched", "own"),
+    [
+        ("triton", TRITON_KERNELS, "_scale", True),
+        ("triton", TRITON_KERNELS, "_shift_0d1d2d", True),
+        ("triton", TRITON_KERNELS, "run", False),
+        ("triton", FLYDSL_KERNELS, "_scale", False),
+        ("flydsl", FLYDSL_KERNELS, "_scale_0", True),
+        ("flydsl", FLYDSL_KERNELS, "gemm_bf16", True),
+        ("flydsl", FLYDSL_KERNELS, "_gemm_1", False),
+        ("flydsl", FLYDSL_KERNELS, "Cijk_Alik_Bljk_BBS_BH_MT128x128x64", False),
+        ("flydsl", FLYDSL_KERNELS, "void at::native::elementwise_kernel<128, 4>", False),
+    ],
+)
+def test_a_launched_kernel_is_the_candidates_own_only_if_it_defines_it_in_its_language(
+    bundle: Path, tmp_path: Path, language, source, launched, own
+):
+    """The profiler's kernel name is matched to the functions `kernel.py` decorates with the language's own
+    kernel decorator, however it was imported."""
+    definition = load(bundle, DEFINITION_NAME, language=language)
+    driver = _import_driver(workspace.materialize(definition, bundle, tmp_path / "run", sikl_root=tmp_path / "sikl"))
+    assert driver._is_defined_here(launched, driver._kernels_defined_here(source)) is own
+
+
+def _passing_records() -> list[dict]:
+    return [{"workload": {"uuid": uuid}, "evaluation": {"status": "PASSED"}} for uuid, _rows in CASES]
+
+
+def test_a_case_that_launches_a_foreign_kernel_fails_correctness(driver_run, monkeypatch, capsys):
+    """A case SIKL passes still fails when its call launches work `kernel.py` does not define."""
+    _definition, run, _fake = driver_run
+    run.kernel.write_text(TRITON_KERNELS, encoding="utf-8")
+    driver = _import_driver(run)
+    (first, _rows), (second, _rows) = CASES
+    monkeypatch.setattr(driver, "_score", lambda **_options: _passing_records())
+    monkeypatch.setattr(driver, "_foreign_kernels", lambda: {first: [], second: ["Cijk_Alik_Bljk_BBS_BH"]})
+    driver._run_correctness()
+    stdout = capsys.readouterr().out
+    assert f"foreign_kernels: {second} Cijk_Alik_Bljk_BBS_BH" in stdout
+    assert f"case_allclose: {first} True" in stdout
+    assert f"case_allclose: {second} False" in stdout
+    assert "allclose: False" in stdout
+
+
+@pytest.mark.parametrize("origin", ["reference", "baseline"])
+def test_the_definitions_own_kernels_are_exempt_until_edited(driver_run, monkeypatch, capsys, origin):
+    """The reference and the baseline anchor the first measurement; any edit makes the kernel a candidate."""
+    definition, run, _fake = driver_run
+    workspace._write_kernel(definition, run, origin)
+    driver = _import_driver(run)
+    monkeypatch.setattr(driver, "_score", lambda **_options: _passing_records())
+    monkeypatch.setattr(driver, "_foreign_kernels", lambda: {uuid: ["Cijk_Alik_Bljk_BBS_BH"] for uuid, _ in CASES})
+    driver._run_correctness()
+    assert "allclose: True" in capsys.readouterr().out
+    run.kernel.write_text(run.kernel.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    driver._run_correctness()
+    assert "allclose: False" in capsys.readouterr().out
 
 
 def _has_metadata(distribution: str) -> bool:

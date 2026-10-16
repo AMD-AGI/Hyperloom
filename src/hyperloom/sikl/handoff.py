@@ -9,6 +9,7 @@ from pathlib import Path
 
 from hyperloom.common.io import atomic_write_text
 from hyperloom.sikl.definition import Definition
+from hyperloom.sikl.workspace import KERNEL_DECORATORS
 
 DEFINITION_FILENAME = "definition.md"
 
@@ -49,10 +50,10 @@ def build_definition_md(definition: Definition) -> str:
         "",
         "## Measurement ownership",
         "",
-        "Correctness and timing come from `sikl.benchmarks.api`, which applies the",
-        "definition's own `initialize`, `reference` and `compare` callbacks and times the",
-        "baseline in the same window as the candidate. The driver reports what that harness",
-        "returns and computes nothing of its own.",
+        "Numerical correctness and timing come from `sikl.benchmarks.api`, which applies the",
+        "definition's own `initialize`, `reference` and `compare` callbacks. The driver",
+        "reports what that harness returns and measures nothing of its own; the final score",
+        "times the baseline in the same window as the delivered kernel.",
         "",
     ]
     if definition.description:
@@ -85,12 +86,16 @@ def build_program_md(definition: Definition, *, kernel_backend: str, starting_po
             f"- Returns: {', '.join(f'`{name}`' for name in definition.outputs)}",
             "- Inputs are functional. Do not mutate them, and do not cache outputs across",
             "  calls: the harness refills the inputs and replays the measured invocation.",
+            f"- Every GPU kernel `run` launches is one `kernel.py` defines with `@{KERNEL_DECORATORS[kernel_backend]}`.",
+            "  The correctness pass profiles one call per workload and fails a case that launches",
+            "  anything else: a vendor library such as hipBLASLt, an aiter kernel, or one of torch's",
+            "  own kernels, a cast or a copy included.",
             "",
             "## What the starting point is",
             "",
             f"`kernel.py` starts as the definition's {starting_point}, which passes every workload",
             "under the harness, so the first measurement anchors on a working implementation.",
-            "Replace the body.",
+            f"It is the one kernel exempt from the rule above: replace its body with {kernel_backend} kernels.",
             "",
             "## Where the numbers come from",
             "",

@@ -61,7 +61,7 @@ def _find(root: Path, pattern: str, name: str, kind: str) -> Path:
 
 
 def _baseline(bundle: Path, name: str) -> dict:
-    return _read_json(_find(bundle / "solutions" / "baseline", f"*{name}*.json", name, "baseline"))
+    return _read_json(_find(bundle / "solutions" / "baseline", f"{name}/*.json", name, "baseline"))
 
 
 def _baseline_candidate_source(baseline: dict) -> str | None:

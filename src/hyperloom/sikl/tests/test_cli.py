@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from hyperloom.cli import _COMMANDS
 from hyperloom.sikl import cli, forge, workspace
 from hyperloom.sikl.definition import load
@@ -45,7 +47,30 @@ def test_prepare_only_materializes_without_dispatching(bundle: Path, tmp_path: P
     out = capsys.readouterr().out
     assert "scored workloads: 2" in out
     assert "starting kernel: baseline" in out
-    assert "starts as the definition's baseline" in (run_dir / "workspace" / "program.md").read_text(encoding="utf-8")
+    program = (run_dir / "workspace" / "program.md").read_text(encoding="utf-8")
+    assert "starts as the definition's baseline" in program
+    assert "Every GPU kernel `run` launches is one `kernel.py` defines with `@triton.jit`" in program
+
+
+def test_a_backend_whose_kernels_the_driver_cannot_attribute_is_refused(bundle: Path, tmp_path: Path, capsys):
+    with pytest.raises(SystemExit) as exited:
+        cli.main(
+            [
+                "--bundle",
+                str(bundle),
+                "--definition",
+                DEFINITION_NAME,
+                "--sikl-root",
+                str(tmp_path / "sikl"),
+                "--run-dir",
+                str(tmp_path / "run"),
+                "--kernel-backend",
+                "hip",
+            ]
+        )
+    assert exited.value.code == 2
+    assert "invalid choice: 'hip'" in capsys.readouterr().err
+    assert not (tmp_path / "run").exists()
 
 
 def test_no_starting_kernel_that_passes_exits_two_before_the_first_commit(bundle: Path, tmp_path: Path, capsys):

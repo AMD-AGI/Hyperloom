@@ -32,7 +32,7 @@ hyperloom sikl \
   --bundle /path/to/bundle \
   --definition gemm_a16w16_nt_n1536_k7168 \
   --sikl-root /path/to/SIKL \
-  --gpu-target gfx950 --max-hours 4
+  --kernel-backend flydsl --gpu-target gfx950 --max-hours 4
 ```
 
 The harness times only the workloads that pass correctness, and it checks correctness under
@@ -43,6 +43,15 @@ syncs with the host (a data-dependent branch, `.tolist()`) cannot run under capt
 baseline that accumulates in lower precision can miss the reference's tolerance. If
 neither passes, the command stops before dispatching KernelForge.
 
+`--kernel-backend` names the language a candidate is written in: `flydsl`, `triton` or
+`gluon`. Every GPU kernel `run` launches has to be one `kernel.py` defines with that
+language's kernel decorator. Once the harness passes every workload, the driver profiles
+one call of `run` per workload and fails each case that launched anything else — a
+vendor library such as hipBLASLt, an aiter kernel, or a torch kernel. Without that check
+the fastest move on a GEMM definition is to pick a library solution per scored shape,
+which beats the baseline without being a kernel in the declared language. The starting
+kernel is exempt only while it is the definition's reference or baseline byte for byte.
+
 The run directory holds the loop's workspace, a private copy of the bundle, the handoff
 documents, and `summary.md` — the delivered kernel's per-case result, including the
 workloads it loses and the ones that could not be scored. Give each run its own
@@ -52,12 +61,17 @@ candidate is measured from.
 
 ## Who owns the measurement
 
-Correctness and timing come from `sikl.benchmarks.api`, which applies the definition's
-own callbacks and times the baseline in the same window as the candidate. The generated
-driver reports what that harness returns and computes nothing of its own, so the numbers
-the loop optimizes against are produced by the same code SIKL's acceptance gate runs. A
-driver that re-implemented the measurement would eventually disagree with the gate, and a
-candidate tuned against that disagreement is tuned against nothing.
+Numerical correctness and timing come from `sikl.benchmarks.api`, which applies the
+definition's own callbacks. The generated driver reports what that harness returns and
+measures nothing of its own, so the numbers the loop optimizes against are produced by the same
+code SIKL's acceptance gate runs. A driver that re-implemented the measurement would
+eventually disagree with the gate, and a candidate tuned against that disagreement is
+tuned against nothing.
+
+The loop's measurements time the candidate only. Timing the baseline beside it doubles a
+measurement, which on definitions with many workloads runs past forge-loop's limit on a
+single measurement. The final score times the baseline in the same window as the
+delivered kernel.
 
 Read `summary.md` rather than SIKL's acceptance rule. That rule asks for one workload
 above 1.02x, which a kernel with a geometric mean below 1.0 can still satisfy.

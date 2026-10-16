@@ -1,13 +1,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""forge-loop driver that republishes ``kernel.py`` as a SIKL candidate and reports what
-``sikl.benchmarks.api`` returns, the code SIKL's acceptance gate runs; it measures nothing itself.
+"""forge-loop driver that republishes ``kernel.py`` as a SIKL candidate, reports what ``sikl.benchmarks.api``
+returns and times nothing itself, and fails a candidate whose GPU work is not kernels ``kernel.py`` defines.
 ``hyperloom.sikl.workspace`` fills the placeholders below."""
 
 from __future__ import annotations
 
 import argparse
+import ast
+import hashlib
 import importlib.util
 import json
 import os
@@ -23,12 +25,13 @@ DEFINITION = "@DEFINITION@"
 OP_TYPE = "@OP_TYPE@"
 TARGET = json.loads("""@TARGET@""")
 LANGUAGE = "@LANGUAGE@"
+KERNEL_DECORATOR = "@KERNEL_DECORATOR@"
+# The definition's own reference and baseline anchor the loop's first measurement; they are not candidates.
+STARTING_DIGESTS = frozenset(json.loads("""@STARTING_DIGESTS@"""))
 
 CANDIDATE_AUTHOR = "@CANDIDATE_AUTHOR@"
 CANDIDATE_NAME = "@CANDIDATE_NAME@"
 KERNEL = Path(__file__).resolve().parent / "kernel.py"
-# Outside the workspace: a file rewritten there on every measurement reads to the guard as tampering.
-BASELINE_RECORD = BUNDLE.parent / "sikl_in_window_baseline.json"
 # A kernel may not load under another version of its language, so the candidate records the installed one.
 LANGUAGE_DISTRIBUTIONS = {"flydsl": "flydsl", "triton": "triton", "gluon": "triton"}
 
@@ -65,7 +68,7 @@ def _publish_candidate() -> None:
     path.write_text(json.dumps(solution), encoding="utf-8")
 
 
-def _score(*, warmup: int, iterations: int, time_baseline: bool) -> list[dict]:
+def _score(*, warmup: int, iterations: int) -> list[dict]:
     """Run the harness over every workload of this definition and return its records."""
     _publish_candidate()
     handle, report_name = tempfile.mkstemp(suffix=".json", prefix="sikl_forge_")
@@ -88,7 +91,8 @@ def _score(*, warmup: int, iterations: int, time_baseline: bool) -> list[dict]:
         str(iterations),
         "--num-trials",
         "1",
-        "--time-baseline" if time_baseline else "--no-time-baseline",
+        # Timing the baseline too doubles a pass, past forge-loop's per-measurement limit; finalize times it once.
+        "--no-time-baseline",
         "--json-report",
         str(report),
     ]
@@ -108,74 +112,161 @@ def _case_id(record: dict) -> str:
 
 
 def _run_correctness() -> int:
-    """Report SIKL's own per-case verdict; the loop gates on ``allclose``."""
-    records = _score(warmup=0, iterations=1, time_baseline=False)
-    passed, diffs = [], []
+    """Report SIKL's own per-case verdict, failing any case whose kernels ``kernel.py`` does not define in
+    LANGUAGE; the loop gates on ``allclose``."""
+    records = _score(warmup=0, iterations=1)
+    passed, diffs = {}, []
     for record in records:
         evaluation = record["evaluation"]
-        case_passed = evaluation.get("status") == "PASSED"
-        passed.append(case_passed)
-        print(f"case_allclose: {_case_id(record)} {case_passed}")
+        passed[_case_id(record)] = evaluation.get("status") == "PASSED"
         error = (evaluation.get("correctness") or {}).get("max_absolute_error")
         if error is not None:
             diffs.append(float(error))
+    if passed and all(passed.values()) and not _is_starting_kernel():
+        for case_id, names in _foreign_kernels().items():
+            if names:
+                print(f"foreign_kernels: {case_id} {' '.join(names)}")
+                passed[case_id] = False
+    for case_id, case_passed in passed.items():
+        print(f"case_allclose: {case_id} {case_passed}")
     # SIKL compares by matched ratio, not SNR, so the loop takes its allclose fallback rather than a made-up SNR.
-    print(f"allclose: {bool(passed) and all(passed)}")
+    print(f"allclose: {bool(passed) and all(passed.values())}")
     print(f"max_diff: {max(diffs) if diffs else 0.0:.6g}")
     return 0
 
 
-def _run_bench(warmup: int, iterations: int) -> int:
-    """Emit one ``case_ms`` line per workload plus the suite aggregate."""
-    records = _score(warmup=warmup, iterations=iterations, time_baseline=True)
-    baseline, unmeasured, latencies = {}, [], []
-    for record in records:
-        case_id = _case_id(record)
-        performance = record["evaluation"].get("performance") or {}
-        latency = performance.get("latency_ms")
-        if latency is None:
-            unmeasured.append(f"{case_id} ({record['evaluation'].get('status')})")
+def _is_starting_kernel() -> bool:
+    return hashlib.sha256(KERNEL.read_bytes()).hexdigest() in STARTING_DIGESTS
+
+
+def _dotted(node: ast.expr, imports: dict[str, str]) -> str:
+    """The import path an expression such as ``flyc.kernel`` names, or "" if it names no import."""
+    attributes = []
+    while isinstance(node, ast.Attribute):
+        attributes.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name) or node.id not in imports:
+        return ""
+    return ".".join([imports[node.id], *reversed(attributes)])
+
+
+def _kernels_defined_here(source: str) -> set[str]:
+    """Names a profiler shows for the kernels ``source`` defines with KERNEL_DECORATOR: the function's own,
+    or a literal ``name=`` that replaces it."""
+    tree = ast.parse(source)
+    imports = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.asname or alias.name.partition(".")[0]
+                imports[bound] = alias.name if alias.asname else bound
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for alias in node.names:
+                imports[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    names = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        print(f"case_ms: {case_id} {float(latency):.6f}")
-        latencies.append(float(latency))
-        reference = performance.get("reference_latency_ms")
-        if reference is not None:
-            baseline[case_id] = float(reference)
-    if unmeasured:
-        sys.stderr.write("cases without a latency: " + ", ".join(unmeasured) + "\n")
-        return 1
-    # A definition is scored over its whole workload set; ``median_ms`` is the aggregate field the loop reads.
-    print(f"median_ms: {sum(latencies):.6f}")
-    # The loop's anchor is measured once; SIKL's same-window baseline shows afterwards whether it drifted.
-    BASELINE_RECORD.write_text(json.dumps(baseline, indent=2), encoding="utf-8")
-    return 0
+        for decorator in node.decorator_list:
+            called = isinstance(decorator, ast.Call)
+            if _dotted(decorator.func if called else decorator, imports) != KERNEL_DECORATOR:
+                continue
+            literals = [
+                keyword.value.value
+                for keyword in (decorator.keywords if called else [])
+                if keyword.arg == "name" and isinstance(keyword.value, ast.Constant)
+            ]
+            names.add(literals[0] if literals else node.name)
+    return names
 
 
-def _run_profile() -> int:
-    """Dispatch only the candidate on the largest workload, so a profiler sees its kernels. Inputs come
-    from SIKL's own trial construction: a profile over a different draw describes a kernel nobody scores."""
-    sys.path.insert(0, str(SIKL_ROOT))
+def _is_defined_here(launched: str, kernels: set[str]) -> bool:
+    # FlyDSL suffixes a kernel's name with its index in the module.
+    return any(launched == name or launched.startswith(f"{name}_") for name in kernels)
+
+
+def _foreign_kernels() -> dict[str, list[str]]:
+    """Per case, the GPU activity one ``run`` launches that is not a kernel ``kernel.py`` defines."""
     import torch
-    from sikl.benchmarks.api.config import EvalConfig
-    from sikl.benchmarks.api.evaluation.trials import TrialRequest, draw_trials
+
+    kernels = _kernels_defined_here(KERNEL.read_text(encoding="utf-8"))
+    definition, workloads = _schema()
+    candidate = _load_candidate()
+    foreign = {}
+    for record in workloads:
+        keywords = _inputs(definition, record)
+        # Compilation and autotuning launch their own work; the window holds one steady-state call.
+        candidate.run(**keywords)
+        torch.cuda.synchronize()
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as profile:
+            candidate.run(**keywords)
+            torch.cuda.synchronize()
+        launched = {event.name for event in profile.events() if event.device_type == torch.autograd.DeviceType.CUDA}
+        if not launched:
+            raise SystemExit(f"the profiler recorded no GPU activity for case {record.workload.uuid}")
+        foreign[str(record.workload.uuid)] = sorted(name for name in launched if not _is_defined_here(name, kernels))
+    return foreign
+
+
+def _schema():
+    sys.path.insert(0, str(SIKL_ROOT))
     from sikl.core.schema import SchemaCollection
 
     collection = SchemaCollection.from_path(str(BUNDLE))
-    definition = collection.definitions[DEFINITION]
-    workload = max(collection.workloads[DEFINITION], key=lambda record: sum(record.workload.axes.values()))
+    return collection.definitions[DEFINITION], collection.workloads[DEFINITION]
+
+
+def _inputs(definition, record) -> dict:
+    """One workload's inputs from SIKL's own trial construction: inputs from a different draw describe a
+    call nobody scores."""
+    from sikl.benchmarks.api.config import EvalConfig
+    from sikl.benchmarks.api.evaluation.trials import TrialRequest, draw_trials
+
     request = TrialRequest(
         definition=definition,
-        workload=workload.workload,
+        workload=record.workload,
         eval_config=EvalConfig(num_trials=1),
         seed=0,
         schema_collection_root=str(BUNDLE),
     )
     values = draw_trials(request, "cuda").inputs[0]
-    keywords = dict(zip(definition.inputs.keys(), values)) if isinstance(values, (list, tuple)) else dict(values)
+    return dict(zip(definition.inputs.keys(), values)) if isinstance(values, (list, tuple)) else dict(values)
 
+
+def _load_candidate():
     spec = importlib.util.spec_from_file_location("forge_candidate", KERNEL)
     candidate = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(candidate)
+    return candidate
+
+
+def _run_bench(warmup: int, iterations: int) -> int:
+    """Emit one ``case_ms`` line per workload plus the suite aggregate."""
+    records = _score(warmup=warmup, iterations=iterations)
+    unmeasured, latencies = [], []
+    for record in records:
+        case_id = _case_id(record)
+        latency = (record["evaluation"].get("performance") or {}).get("latency_ms")
+        if latency is None:
+            unmeasured.append(f"{case_id} ({record['evaluation'].get('status')})")
+            continue
+        print(f"case_ms: {case_id} {float(latency):.6f}")
+        latencies.append(float(latency))
+    if unmeasured:
+        sys.stderr.write("cases without a latency: " + ", ".join(unmeasured) + "\n")
+        return 1
+    # A definition is scored over its whole workload set; ``median_ms`` is the aggregate field the loop reads.
+    print(f"median_ms: {sum(latencies):.6f}")
+    return 0
+
+
+def _run_profile() -> int:
+    """Dispatch only the candidate on the largest workload, so a profiler sees its kernels."""
+    import torch
+
+    definition, workloads = _schema()
+    keywords = _inputs(definition, max(workloads, key=lambda record: sum(record.workload.axes.values())))
+    candidate = _load_candidate()
     for _ in range(6):
         candidate.run(**keywords)
     torch.cuda.synchronize()

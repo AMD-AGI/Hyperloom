@@ -99,3 +99,12 @@ def test_definition_document_lists_every_scored_workload(bundle: Path, tmp_path:
 def test_missing_definition_names_what_is_absent(bundle: Path):
     with pytest.raises(BundleError, match="no definition"):
         load(bundle, "not_a_definition", language="triton")
+
+
+def test_a_definition_whose_name_prefixes_another_gets_its_own_baseline(bundle: Path):
+    """SIKL ships both `gemm_a16w16_nt_n7168_k3584` and `gemm_a16w16_nt_n7168_k35840`."""
+    own = next((bundle / "solutions" / "baseline").rglob(f"{DEFINITION_NAME}__baseline.json"))
+    longer = own.parents[1] / f"{DEFINITION_NAME}0" / f"{DEFINITION_NAME}0__baseline.json"
+    longer.parent.mkdir()
+    longer.write_text(own.read_text(encoding="utf-8").replace("a @ b.T", "longer"), encoding="utf-8")
+    assert "a @ b.T" in load(bundle, DEFINITION_NAME, language="triton").baseline_source

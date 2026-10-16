@@ -25,7 +25,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--definition", required=True, help="Definition name to optimize")
     parser.add_argument("--sikl-root", required=True, type=Path, help="SIKL checkout that provides sikl.benchmarks")
     parser.add_argument("--run-dir", type=Path, help="Run directory (default: ./sikl-runs/<definition>-<stamp>)")
-    parser.add_argument("--kernel-backend", default="triton", help="Candidate language (default: triton)")
+    parser.add_argument(
+        "--kernel-backend",
+        default="triton",
+        choices=sorted(workspace.KERNEL_DECORATORS),
+        help="Language every kernel a candidate launches is written in (default: triton)",
+    )
     parser.add_argument("--gpu-target", default="gfx950", help="GPU arch passed to forge-loop")
     parser.add_argument("--max-hours", type=float, default=4.0, help="forge-loop wall-clock budget")
     parser.add_argument("--model", default="", help="LLM model for the implementer")

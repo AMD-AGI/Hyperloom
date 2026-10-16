@@ -6,6 +6,7 @@ workspace: the driver rewrites it on every measurement, which the workspace guar
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -28,6 +29,13 @@ forge_experiments/
 """
 
 KERNEL_HEADER = '"""Candidate for {definition}, starting from its {origin}; keep `run`."""\n\n'
+
+# The decorator that defines a GPU kernel in each candidate language, by its import path.
+KERNEL_DECORATORS = {
+    "flydsl": "flydsl.compiler.kernel",
+    "triton": "triton.jit",
+    "gluon": "triton.experimental.gluon.jit",
+}
 
 
 class StartingKernelError(RuntimeError):
@@ -88,6 +96,8 @@ def _render_driver(definition: Definition, run: Run, sikl_root: Path) -> str:
         "@OP_TYPE@": definition.op_type,
         "@TARGET@": json.dumps(definition.target),
         "@LANGUAGE@": definition.language,
+        "@KERNEL_DECORATOR@": KERNEL_DECORATORS[definition.language],
+        "@STARTING_DIGESTS@": json.dumps(sorted(_starting_digests(definition))),
     }
     for placeholder, value in substitutions.items():
         template = template.replace(placeholder, value)
@@ -118,14 +128,28 @@ def materialize(definition: Definition, bundle: Path, root: Path, *, sikl_root: 
     run.handoff.mkdir(parents=True, exist_ok=True)
     shutil.copytree(bundle, run.bundle, dirs_exist_ok=True)
 
-    _write_kernel(definition, run, "reference", definition.reference_source)
+    _write_kernel(definition, run, "reference")
     run.driver.write_text(_render_driver(definition, run, sikl_root), encoding="utf-8")
     (run.workspace / ".gitignore").write_text(GITIGNORE, encoding="utf-8")
     return run
 
 
-def _write_kernel(definition: Definition, run: Run, origin: str, source: str) -> None:
-    run.kernel.write_text(KERNEL_HEADER.format(definition=definition.name, origin=origin) + source, encoding="utf-8")
+def _starting_kernels(definition: Definition) -> dict[str, str]:
+    """Each kernel the run may start from, by origin, as `kernel.py` holds it."""
+    sources = {"reference": definition.reference_source, "baseline": definition.baseline_source}
+    return {
+        origin: KERNEL_HEADER.format(definition=definition.name, origin=origin) + source
+        for origin, source in sources.items()
+        if source is not None
+    }
+
+
+def _starting_digests(definition: Definition) -> set[str]:
+    return {hashlib.sha256(text.encode("utf-8")).hexdigest() for text in _starting_kernels(definition).values()}
+
+
+def _write_kernel(definition: Definition, run: Run, origin: str) -> None:
+    run.kernel.write_text(_starting_kernels(definition)[origin], encoding="utf-8")
 
 
 def _passes_every_workload(run: Run) -> bool:
@@ -140,10 +164,8 @@ def choose_starting_kernel(definition: Definition, run: Run) -> str:
     """Keep the first of the reference and the baseline that passes every workload, and return which.
 
     The harness checks correctness under graph capture, which a reference that syncs with the host fails."""
-    for origin, source in (("reference", definition.reference_source), ("baseline", definition.baseline_source)):
-        if source is None:
-            continue
-        _write_kernel(definition, run, origin, source)
+    for origin in _starting_kernels(definition):
+        _write_kernel(definition, run, origin)
         if _passes_every_workload(run):
             return origin
     raise StartingKernelError(f"neither the reference nor the baseline of {definition.name} passes every workload")
