@@ -947,6 +947,8 @@ Make your change(s) now.
                     usage=usage,
                 ),
             )
+            # The session's whole text; a GUIDED batch session ends each submission with a report of what it landed.
+            session_sink["final_text"] = full or ""
 
         return text[:200]
 

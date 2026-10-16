@@ -52,6 +52,9 @@ class LaneResult:
     # The lane Implementer's own end-of-session rationale, recorded with the iteration that measures this candidate;
     # empty when the session returned none or failed.
     rationale: str = ""
+    # The canonical commit the lane's copy was made from, so a candidate that stops applying can be shown what the
+    # tree did since; empty when the caller did not record it.
+    base_commit: str = ""
     # What this lane's teardown found, carried structured rather than folded
     # into ``error``. The two say different things to different readers: the
     # error is why THIS lane produced nothing, which costs the round one

@@ -20,7 +20,7 @@ import tempfile
 import textwrap
 import time
 import traceback
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -65,6 +65,28 @@ from kernelforge.loop.search_policy import (
     SearchPolicyDecision,
     SearchPolicyEngine,
 )
+from kernelforge.loop.wiki_guidance import (
+    MAX_PLAYBOOK_ATTEMPTS,
+    MIN_BATCH_GAIN,
+    PHASE_FREE,
+    PHASE_GUIDED,
+    REASON_NO_USEFUL_DIRECTION,
+    REASON_PLAYBOOK_UNAVAILABLE,
+    SUPPORT_PROFILING,
+    GuidanceState,
+    WikiGuidanceStore,
+    batch_exit,
+    batch_gain,
+    batch_plan,
+    cited_items,
+    declined,
+    latest_report,
+    parse_playbook,
+    read_citations,
+    record_outcome,
+    render_for_implementer,
+    render_for_planning,
+)
 from kernelforge.loop.round_budget import (
     admit_dispatch,
     admit_round,
@@ -96,6 +118,7 @@ from kernelforge.loop.run_state import (
 )
 from kernelforge.orchestrator.orchestration import (
     OrchestrationInfrastructureError,
+    OrchestrationOutputError,
 )
 from kernelforge.orchestrator.supervisor import (
     clear_latest_supervisor_ruling,
@@ -367,6 +390,34 @@ def _patch_paths(patch: str, *, cwd: str) -> list[str]:
     return sorted({path for path in paths if path})
 
 
+def _lane_port_plan(lane: LaneResult, *, since_diff: str) -> str:
+    """The plan for porting a lane candidate that no longer applies onto the kernel the campaign now has."""
+    sections = [
+        f"# Port lane {lane.lane_id} onto the current kernel",
+        (
+            "This lane was planned and implemented beside other lanes of the same round, each in its own copy of the "
+            "kernel. A sibling lane's change has been measured and kept since, and this lane's diff no longer applies "
+            "to the current kernel, so it has never been measured.\n\n"
+            "Re-implement this lane's change on top of the current kernel. Land the lane's change in full, and keep "
+            "every part of the current kernel the lane did not set out to replace: it was measured and kept. Where "
+            "the lane's change replaces something the kept change also tuned -- for example by routing some cases "
+            "to a new code path -- the lane's change takes effect for what it replaces and the kept change stays for "
+            "everything else. Where both set the same knob for the same cases, keep the current kernel's value "
+            "unless the lane's change cannot work without its own, and say which you kept. The lane's plan and diff "
+            "below are the specification; do not plan anything beyond them."
+        ),
+        "## The lane's plan\n\n" + lane.plan.strip(),
+        "## The lane's diff, against the kernel it was implemented on\n\n```diff\n" + lane.diff.strip() + "\n```",
+    ]
+    if since_diff.strip():
+        sections.append(
+            "## What the kept changes did to the kernel since the lane's copy was made\n\n```diff\n"
+            + since_diff.strip()
+            + "\n```"
+        )
+    return "\n\n".join(sections) + "\n"
+
+
 def _lane_prompt(plan: str, *, serialized_driver: Path) -> str:
     """One lane's plan, with the one thing about the wrapper the session cannot see."""
     return (
@@ -517,6 +568,10 @@ class IterationConfig:
     # Mean per-case speedup over the baseline (the KEEP objective) at which the campaign stops, however much budget
     # remains. Zero disables the gate, which is the default.
     target_mean_case_speedup: float = 0.0
+    # Plan each round as one knowledge base batch (``loop.wiki_guidance``) until the knowledge base and the evidence
+    # support nothing more or a batch brings no gain; then plan freely. Needs the knowledge base
+    # (``Config.knowledge_wiki_root``) and is off by default.
+    wiki_guided: bool = False
 
     def __post_init__(self) -> None:
         # Validated here rather than at the CLI boundary alone, so a pattern can never reach the commit/delete sites
@@ -693,6 +748,20 @@ class IterationLoop(AnalysisRuntimeMixin):
         self.search_policy_engine = SearchPolicyEngine()
         self._search_policy_decision: SearchPolicyDecision | None = None
         self._reported_window_gain_faults: set[str] = set()
+        # Knowledge-base-guided planning; None leaves every planning path as it was. A fresh campaign starts GUIDED
+        # whatever an earlier campaign left in the workspace, and a resumed one continues the phase it recorded.
+        self.wiki_guidance_store: WikiGuidanceStore | None = (
+            WikiGuidanceStore(self.ic.workspace_dir) if self.ic.wiki_guided else None
+        )
+        self.wiki_guidance: GuidanceState | None = None
+        if self.wiki_guidance_store is not None:
+            self.wiki_guidance = self.wiki_guidance_store.load() if resume else GuidanceState()
+            if not resume:
+                # Written now, so a resume after an early crash cannot pick up an earlier campaign's file.
+                self._save_wiki_guidance()
+        # The plan the current iteration measures, read when its outcome credits the playbook ledger.
+        self._iteration_plan_text = ""
+        self._iteration_batch: list[str] = []
         self.handoff_store: HandoffStore | None = None
         # A committed KEEP recovered during synchronous resume preflight waits here until the async run can restore
         # its post-KEEP profile/archive.
@@ -1820,6 +1889,8 @@ class IterationLoop(AnalysisRuntimeMixin):
                 _lane_prompt(lane.plan, serialized_driver=serialized_driver),
             )
 
+        head = git("rev-parse", "HEAD", cwd=self.ic.workspace_dir, check=False)
+        base_commit = head.stdout.strip() if head.returncode == 0 else ""
         results = await run_lanes(
             workspace_dir=self.ic.workspace_dir,
             lanes=[LanePlan(lane_id=str(index + 1), plan=plan) for index, plan in enumerate(lane_plans)],
@@ -1832,7 +1903,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         for result in results:
             if result.error:
                 print(f"  [lane {result.lane_id}] session lost: {result.error}")
-        self._lane_queue = [item for item in results if item.produced_candidate]
+        self._lane_queue = [replace(item, base_commit=base_commit) for item in results if item.produced_candidate]
         print(f"  [lanes] {len(self._lane_queue)} of {len(results)} lanes produced a candidate")
         self._persist_lane_queue()
         # The device is not per-lane.
@@ -1912,6 +1983,12 @@ class IterationLoop(AnalysisRuntimeMixin):
                 continue
             if not self._git_apply_patch(lane.diff):
                 self._git_discard_worktree()
+                if self.ic.wiki_guided:
+                    # The lane's work is the round's second direction, not a stale patch; the rest of the queue waits
+                    # for the iteration after the port.
+                    print(f"  [lane {lane.lane_id}] candidate no longer applies; an Implementer ports it")
+                    self._lane_awaiting_port = lane
+                    return None
                 print(f"  [lane {lane.lane_id}] candidate no longer applies; dropped")
                 continue
             try:
@@ -1926,6 +2003,106 @@ class IterationLoop(AnalysisRuntimeMixin):
                 continue
             return lane
         return None
+
+    def _compose_batch(self, iteration: int, plans: Sequence[str], batch: Sequence[str]) -> None:
+        """Turn a batch round's part plans into this iteration's one session plan; ``batch`` is the round's groups."""
+        groups = [self._plan_group(str(plan)) for plan in plans]
+        if len(plans) == len(batch) and not all(groups):
+            # One part per group, in batch order: a part that cites no item still has its group.
+            groups = [group or batch_group for group, batch_group in zip(groups, batch)]
+        self._last_lane_plans = [
+            batch_plan([(self._group_label(group), str(plan)) for group, plan in zip(groups, plans)])
+        ]
+        # The batch the measurement decides about is the round's, whatever its part plans happen to cite.
+        self._iteration_batch = list(batch)
+        self._append_wiki_event(
+            make_event("wiki_batch_planned", iteration, parts=len(plans), groups=[group or None for group in groups])
+        )
+        print(f"  [batch] {len(plans)} part(s) in one session: " + ", ".join(group or "?" for group in groups))
+
+    def _plan_group(self, plan: str) -> str:
+        """The playbook group a part plan claims items of, or \"\"."""
+        state = self.wiki_guidance
+        if state is None or state.playbook is None:
+            return ""
+        groups = {item.item_id: item.group for item in state.playbook.items}
+        claimed, _ = cited_items(plan, state.ledger)
+        return groups[claimed[0]] if claimed else ""
+
+    def _group_label(self, group_id: str) -> str:
+        state = self.wiki_guidance
+        if not group_id or state is None or state.playbook is None:
+            return ""
+        title = next((group.title for group in state.playbook.groups if group.group_id == group_id), "")
+        return f"playbook group {group_id}" + (f" ({title})" if title else "")
+
+    def _note_batch_report(self, iteration: int, session_sink: Mapping[str, Any]) -> None:
+        """Credit a batch from the items its session reported landing and dropping, when it reported them."""
+        state = self.wiki_guidance
+        if not self._iteration_batch or state is None or state.playbook is None:
+            return
+        report = latest_report(str(session_sink.get("final_text") or ""))
+        cites = read_citations(report, state.ledger)
+        reported = bool(cites.claimed or cites.skipped or cites.untried)
+        if reported:
+            self._note_iteration_plan(iteration, report)
+        self._append_wiki_event(
+            make_event(
+                "wiki_batch_report",
+                iteration,
+                landed=list(cites.claimed) or None,
+                dropped=list(cites.skipped) or None,
+                untried=list(cites.untried) or None,
+                source="session" if reported else "plan",
+            )
+        )
+        if reported:
+            print(
+                f"  [batch] session landed {', '.join(cites.claimed) or 'nothing'}; "
+                f"dropped {', '.join(cites.skipped) or 'nothing'}; did not try {', '.join(cites.untried) or 'nothing'}"
+            )
+        else:
+            print("  [batch] session reported no item lines; the plan's citations are credited")
+
+    def _lane_port_round(self, iteration: int, lane: LaneResult) -> HeldRound | None:
+        """Publish the plan that ports ``lane`` onto the current kernel, as this iteration's plan; None if it cannot."""
+        since_diff = ""
+        if lane.base_commit:
+            changed = git(
+                "diff",
+                lane.base_commit,
+                "HEAD",
+                "--",
+                *self._target_source_files(),
+                cwd=self.ic.workspace_dir,
+                check=False,
+            )
+            since_diff = changed.stdout if changed.returncode == 0 else ""
+        try:
+            plan_path = self._persist_lane_plans(
+                iteration,
+                [_lane_port_plan(lane, since_diff=since_diff)],
+                analysis_commit=self._canonical_commit(),
+            )
+        except (OSError, ValueError) as error:
+            print(f"  [lane {lane.lane_id}] port plan not published ({error}); dropped")
+            return None
+        self._latest_optimization_plan_path = str(plan_path)
+        self._last_orchestration_plan_executable = True
+        try:
+            self.state_store.append_event(
+                make_event(
+                    "lane_port_planned",
+                    iteration,
+                    lane_id=lane.lane_id,
+                    base_commit=lane.base_commit or None,
+                    plan_path=str(plan_path),
+                )
+            )
+        except Exception:
+            log.debug("lane port event append failed", exc_info=True)
+        print(f"  [lane {lane.lane_id}] port plan: {plan_path}")
+        return HeldRound(plan_path, "")
 
     def _git_apply_patch(self, patch: str) -> bool:
         """Apply one archived diff to the working tree, reporting whether it took."""
@@ -2270,6 +2447,14 @@ class IterationLoop(AnalysisRuntimeMixin):
                     checkpoint_metadata=pending,
                 )
             )
+            guidance = self.wiki_guidance
+            if guidance is not None and guidance.inflight_iteration == result.iteration:
+                # The process that measured this KEEP died before crediting it; the plan it measured is on record,
+                # and so is the batch it implemented when it was a GUIDED one.
+                self._iteration_plan_text = guidance.inflight_plan
+                if guidance.phase == PHASE_GUIDED:
+                    self._iteration_batch = list(guidance.batch)
+                self._record_wiki_guidance_outcome(result.iteration, "KEEP", mean_case_speedup=result.mean_case_speedup)
         self.state_store.save(self.run_state)
         persisted = self.state_store.load()
         if persisted.to_dict() != self.run_state.to_dict():
@@ -3643,6 +3828,9 @@ class IterationLoop(AnalysisRuntimeMixin):
                     bench_detail=result.bench_detail,
                     incumbent_case_times=self._scored_incumbent_case_times(),
                 )
+                self._record_wiki_guidance_outcome(
+                    result.iteration, decision_label, mean_case_speedup=result.mean_case_speedup
+                )
             self.state_store.save(self.run_state)
 
             if require_durable:
@@ -3717,6 +3905,10 @@ class IterationLoop(AnalysisRuntimeMixin):
             best_after_mean_case_speedup=(result.mean_case_speedup if result.kept else self.best_mean_case_speedup),
             is_new_best=result.kept,
             diversification_cycle_completed=(self.run_state.diversification_cycle_completed),
+            # The planning phase of a --wiki-guided campaign; absent otherwise.
+            guidance_phase=(self.wiki_guidance.phase if self.wiki_guidance is not None else None),
+            # The playbook groups of the GUIDED batch the iteration implemented; absent otherwise.
+            wiki_batch=list(getattr(self, "_iteration_batch", ()) or ()) or None,
         )
 
     def _record_iteration_handoff(
@@ -4244,6 +4436,196 @@ class IterationLoop(AnalysisRuntimeMixin):
             print(f"  [search-policy] {decision.mode}: " + ", ".join(decision.reason_codes))
         return decision
 
+    def _save_wiki_guidance(self) -> None:
+        """Persist the guidance state; a failure degrades persistence and never the iteration."""
+        if self.wiki_guidance_store is None or self.wiki_guidance is None:
+            return
+        try:
+            self.wiki_guidance_store.save(self.wiki_guidance)
+        except OSError as error:
+            self.persistence_degraded = True
+            self.persistence_errors.append(f"persist wiki guidance: {error}")
+            self.persistence_errors = self.persistence_errors[-10:]
+            log.warning("wiki guidance state not durable: %s", error)
+
+    def _append_wiki_event(self, event: dict) -> None:
+        try:
+            self.state_store.append_event(event)
+        except Exception:
+            log.debug("wiki guidance event append failed", exc_info=True)
+
+    def _enter_wiki_guidance_phase(self, iteration: int, phase: str, reasons: Sequence[str]) -> None:
+        state = self.wiki_guidance
+        if state is None:
+            return
+        state.phase = phase
+        state.reason_codes = list(reasons)
+        state.phase_changed_at_iteration = iteration
+        self._save_wiki_guidance()
+        self._append_wiki_event(
+            make_event(
+                "wiki_guidance_phase",
+                iteration,
+                phase=phase,
+                reason_codes=list(reasons),
+                items=state.status_counts() or None,
+                builds=state.builds,
+            )
+        )
+        print(f"  [wiki-guided] {phase}: " + ", ".join(reasons))
+
+    async def _build_wiki_batch(self, iteration: int, orchestration_service, context) -> None:
+        """Have the builder turn the knowledge base and this round's evidence into the round's batch."""
+        state = self.wiki_guidance
+        if state is None or state.phase != PHASE_GUIDED:
+            return
+        state.batch = []
+        builder = getattr(orchestration_service, "build_wiki_playbook", None)
+        if builder is None:
+            self._wiki_batch_unavailable(iteration, "the orchestration service cannot build a playbook", settled=True)
+            return
+        print("  [wiki-guided] building this round's batch from the knowledge base and the evidence...")
+        try:
+            text = await builder(self._with_wiki_guidance(context), usage=self._usage)
+        except OrchestrationInfrastructureError as outage:
+            # The backend refused, not the answer: the next round asks again, up to the attempt limit.
+            state.build_failures += 1
+            self._wiki_batch_unavailable(
+                iteration,
+                f"{type(outage).__name__}: {outage}",
+                settled=state.build_failures >= MAX_PLAYBOOK_ATTEMPTS,
+            )
+            return
+        except (OrchestrationOutputError, ValueError) as failure:
+            # The backend answered and the answer is unusable; asking again would buy the same answer.
+            self._wiki_batch_unavailable(iteration, f"{type(failure).__name__}: {failure}", settled=True)
+            return
+        finally:
+            self._checkpoint_llm_usage()
+        if self.wiki_guidance_store is not None:
+            try:
+                self.wiki_guidance_store.save_response(text, build=state.builds + 1)
+            except OSError:
+                log.debug("wiki playbook response not saved", exc_info=True)
+        build, notes = parse_playbook(text)
+        if build is None:
+            if declined(text):
+                state.build_failures = 0
+                self._save_wiki_guidance()
+                self._append_wiki_event(make_event("wiki_playbook_declined", iteration, builds=state.builds))
+                print("  [wiki-guided] the knowledge base and the evidence support no further direction")
+                self._enter_wiki_guidance_phase(iteration, PHASE_FREE, (REASON_NO_USEFUL_DIRECTION,))
+            else:
+                self._wiki_batch_unavailable(iteration, "; ".join(notes), settled=True)
+            return
+        if notes:
+            print("  [wiki-guided] playbook notes: " + "; ".join(notes))
+        batch = state.add_build(build, iteration=iteration)
+        self._save_wiki_guidance()
+        new_items = state.playbook.items[-len(build.items) :]
+        added = [item.item_id for item in new_items]
+        profiling = [item.item_id for item in new_items if item.support == SUPPORT_PROFILING]
+        self._append_wiki_event(
+            make_event(
+                "wiki_playbook_built",
+                iteration,
+                build=state.builds,
+                items=added,
+                groups=batch,
+                profiling_only=profiling or None,
+            )
+        )
+        print(
+            f"  [wiki-guided] batch {state.builds}: {len(added)} item(s) in {len(batch)} group(s) ({', '.join(batch)})"
+            + (f"; supported by profiling only: {', '.join(profiling)}" if profiling else "")
+        )
+
+    def _wiki_batch_unavailable(self, iteration: int, error: str, *, settled: bool) -> None:
+        state = self.wiki_guidance
+        state.playbook_error = error
+        self._save_wiki_guidance()
+        self._append_wiki_event(
+            make_event(
+                "wiki_playbook_unavailable",
+                iteration,
+                error=error[:500],
+                attempt=state.build_failures,
+                settled=settled,
+            )
+        )
+        print(f"  [wiki-guided] playbook unavailable ({error})")
+        if settled:
+            self._enter_wiki_guidance_phase(iteration, PHASE_FREE, (REASON_PLAYBOOK_UNAVAILABLE,))
+
+    def _with_wiki_guidance(self, context):
+        """Attach the playbook and its ledger to a planning context, when there is one."""
+        if self.wiki_guidance is None:
+            return context
+        guidance = render_for_planning(self.wiki_guidance)
+        if guidance is None:
+            return context
+        return replace(context, wiki_guidance=guidance)
+
+    def _note_iteration_plan(self, iteration: int, text: str) -> None:
+        """Remember the plan this iteration measures, durably when a playbook will be credited from it."""
+        self._iteration_plan_text = text or ""
+        state = self.wiki_guidance
+        if state is None or state.playbook is None:
+            return
+        if state.inflight_iteration != iteration:
+            # Noted before the iteration is measured, so this is the incumbent the iteration has to improve on.
+            state.inflight_best_before = float(self.best_mean_case_speedup or 0.0)
+        state.inflight_iteration = iteration
+        state.inflight_plan = self._iteration_plan_text
+        self._save_wiki_guidance()
+
+    def _record_wiki_guidance_outcome(
+        self, iteration: int, decision: str, *, mean_case_speedup: float | None = None
+    ) -> None:
+        """Credit the measured plan's playbook citations, and end GUIDED on a batch worth too little; never fails."""
+        state = self.wiki_guidance
+        if state is None or state.playbook is None:
+            return
+        try:
+            changed = record_outcome(state, iteration=iteration, plan_text=self._iteration_plan_text, decision=decision)
+            self._save_wiki_guidance()
+            if changed:
+                self._append_wiki_event(
+                    make_event(
+                        "wiki_playbook_ledger",
+                        iteration,
+                        decision=decision,
+                        items={item_id: state.ledger[item_id].status for item_id in changed},
+                        counts=state.status_counts(),
+                    )
+                )
+                print(
+                    "  [wiki-guided] ledger: "
+                    + ", ".join(f"{item_id} {state.ledger[item_id].status}" for item_id in changed)
+                )
+            if self._iteration_batch and state.phase == PHASE_GUIDED:
+                gain = (
+                    batch_gain(state.inflight_best_before, mean_case_speedup)
+                    if state.inflight_iteration == iteration
+                    else None
+                )
+                reason = batch_exit(decision, gain)
+                self._append_wiki_event(
+                    make_event(
+                        "wiki_batch_measured",
+                        iteration,
+                        decision=decision,
+                        gain=round(gain, 6) if gain is not None else None,
+                        min_gain=MIN_BATCH_GAIN,
+                    )
+                )
+                if gain is not None:
+                    print(f"  [wiki-guided] batch gain {gain * 100:+.1f}% (GUIDED needs {MIN_BATCH_GAIN * 100:.0f}%)")
+                if reason is not None:
+                    self._enter_wiki_guidance_phase(iteration, PHASE_FREE, (reason,))
+        except Exception:
+            log.warning("wiki playbook ledger update failed for iteration %s", iteration, exc_info=True)
+
     async def _plan_round(
         self,
         *,
@@ -4277,6 +4659,17 @@ class IterationLoop(AnalysisRuntimeMixin):
                 else self._build_orchestration_context()
             )
         )
+        # Inside the round's planning clock, so building the batch is charged to the round that needed it.
+        await self._build_wiki_batch(iteration, orchestration_service, context)
+        context = self._with_wiki_guidance(context)
+        guided_round = bool(context.wiki_guidance) and context.wiki_guidance.get("phase") == PHASE_GUIDED
+        batch = list(context.wiki_guidance.get("batch") or []) if guided_round else []
+        if guided_round and not batch:
+            # A builder outage the next round retries: this round plans as without the flag.
+            context = replace(context, wiki_guidance=None)
+        if batch:
+            # One part per group whatever the configured lane width: the whole batch is one session.
+            lanes = len(batch)
         try:
             result = await orchestration_service.run(
                 context,
@@ -4292,6 +4685,8 @@ class IterationLoop(AnalysisRuntimeMixin):
 
         self._record_probe_hazard(iteration, result)
         self._last_lane_plans = [plan for plan in result.optimization_plans if str(plan).strip()]
+        if batch and self._last_lane_plans:
+            self._compose_batch(iteration, self._last_lane_plans, batch)
         self._persist_orchestration_result(iteration, context, result)
         plan_path = self._persist_lane_plans(
             iteration,
@@ -4391,6 +4786,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                             "plan": lane.plan,
                             "diff": lane.diff,
                             "rationale": lane.rationale,
+                            "base_commit": lane.base_commit,
                         }
                         for lane in self._lane_queue
                     ]
@@ -4415,6 +4811,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     diff=str(entry["diff"]),
                     # A queue written before rationales were kept has none.
                     rationale=str(entry.get("rationale") or ""),
+                    base_commit=str(entry.get("base_commit") or ""),
                 )
                 for entry in record["candidates"]
             ]
@@ -5598,6 +5995,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             attempt_diff = self._working_tree_diff()
             reusable_benchmark = None
             session_sink["plan"] = queued_lane.plan
+            self._note_iteration_plan(iteration, queued_lane.plan)
             print(f"  [lane {queued_lane.lane_id}] measuring queued candidate")
         elif merge_diff and merge_pair is not None:
             unmeasured_result = None
@@ -5649,6 +6047,10 @@ class IterationLoop(AnalysisRuntimeMixin):
                     )
                     return None
                 optimization_plan_path = str(plan_path)
+                try:
+                    self._note_iteration_plan(iteration, Path(plan_path).read_text(encoding="utf-8"))
+                except OSError:
+                    self._note_iteration_plan(iteration, "")
                 optimization_plan_executable = (
                     self._last_orchestration_plan_executable
                     if self._last_orchestration_plan_executable is not None
@@ -5699,6 +6101,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             finally:
                 # The SDK result stream has completed (or unwound).
                 self._checkpoint_llm_usage()
+            self._note_batch_report(iteration, session_sink)
 
             return await self._collect_session_candidate(
                 iteration=iteration,
@@ -6039,6 +6442,9 @@ class IterationLoop(AnalysisRuntimeMixin):
                 f"Mode residence remaining after this iteration: {policy.residence_iterations_remaining}"
             )
             history = "\n".join(policy_lines) + "\n\n" + history
+        guidance_note = render_for_implementer(self.wiki_guidance) if self.wiki_guidance is not None else ""
+        if guidance_note:
+            history = f"{guidance_note}\n\n{history}"
         # The latest free-form Supervisor Ruling is durable across KEEP and resume.
         if self._supervisor_ruling:
             history = (
@@ -6124,6 +6530,8 @@ class IterationLoop(AnalysisRuntimeMixin):
 
         # Durable per-iteration marker (facts only; detail lives in files).
         self.run_state.iteration = iteration
+        self._iteration_plan_text = ""
+        self._iteration_batch = []
         self.state_store.append_event(
             make_event(
                 "iteration_started",
@@ -6176,6 +6584,11 @@ class IterationLoop(AnalysisRuntimeMixin):
         # Candidates from one concurrent fan-out, spent one per iteration so each is measured and judged on its own by
         # the ordinary decision path.
         self._lane_queue: list[LaneResult] = []
+        # A queued candidate whose diff stopped applying after a sibling's KEEP, held for the iteration that has an
+        # Implementer port it onto the current kernel (``--wiki-guided`` only; otherwise it is dropped).
+        self._lane_awaiting_port: LaneResult | None = None
+        # The playbook groups of the GUIDED batch this iteration implements in its one session.
+        self._iteration_batch: list[str] = []
         self._last_lane_plans: list[str] = []
         # Stacked iterations run back to back so far.
         self._merge_precedence_streak = 0
@@ -6333,6 +6746,13 @@ class IterationLoop(AnalysisRuntimeMixin):
             )
             # A fan-out round already paid for these candidates, so they are measured before anything new is planned.
             queued_lane = None if hazard or merge_diff else self._take_lane_candidate()
+            if self._lane_awaiting_port is not None:
+                lane_to_port, self._lane_awaiting_port = self._lane_awaiting_port, None
+                if agent_fn is not None and orchestration_service is not None:
+                    # Spent through the ordinary session path below, as a plan the round already paid for.
+                    fan_out_plan = self._lane_port_round(iteration, lane_to_port)
+                else:
+                    print(f"  [lane {lane_to_port.lane_id}] no Implementer to port it; dropped")
             attempt = await self._source_attempt(
                 iteration=iteration,
                 hazard=hazard,

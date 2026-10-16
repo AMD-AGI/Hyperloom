@@ -346,6 +346,12 @@ def build_plan_critic_prompts(
         "task": (
             "Audit the draft plan before implementation. Decide whether to "
             "accept it, revise it, or replace its implementation route."
+        )
+        + (
+            " The campaign plans from a knowledge base playbook: also check that the draft follows the "
+            "instructions in `context.wiki_guidance` and cites the playbook items it implements."
+            if context.wiki_guidance is not None
+            else ""
         ),
         "context": context.to_prompt_dict(),
         "dispatch_plan": dispatch_plan.to_dict(),

@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 
 _IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
@@ -214,6 +214,18 @@ class CaseEvidence:
         return payload
 
 
+WIKI_GUIDANCE_TASK = (
+    " This campaign plans from a knowledge base playbook: `context.wiki_guidance` carries the phase, its "
+    "instructions and every playbook item's ledger status. Follow those instructions; they decide how this round "
+    "uses the playbook and how a plan cites its items."
+)
+
+
+def wiki_guidance_task(context: OrchestrationContext) -> str:
+    """The sentence a planning task carries when the context holds wiki guidance, else nothing."""
+    return WIKI_GUIDANCE_TASK if context.wiki_guidance is not None else ""
+
+
 @dataclass(frozen=True)
 class OrchestrationContext:
     """Immutable evidence bundle shared by orchestration and specialists."""
@@ -248,6 +260,9 @@ class OrchestrationContext:
     last_critic_review: str = ""
     # Present only when the campaign has a roofline ceiling; each case's own figure rides on ``CaseEvidence.roofline``.
     roofline: CampaignRoofline | None = None
+    # Present only for a ``--wiki-guided`` campaign with a playbook (``loop.wiki_guidance.render_for_planning``): the
+    # phase, its instructions, and every playbook item with its ledger status.
+    wiki_guidance: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         _text(self.analysis_commit, "context.analysis_commit")
@@ -325,6 +340,8 @@ class OrchestrationContext:
             raise ValueError("context.cases must have unique case_id values")
         if self.roofline is not None and not isinstance(self.roofline, CampaignRoofline):
             raise ValueError("context.roofline must be a CampaignRoofline or absent")
+        if self.wiki_guidance is not None and not isinstance(self.wiki_guidance, Mapping):
+            raise ValueError("context.wiki_guidance must be a mapping or absent")
 
     @property
     def case_ids(self) -> frozenset[str]:
@@ -383,6 +400,8 @@ class OrchestrationContext:
         # Omitted rather than null, like ``CaseEvidence.roofline``.
         if self.roofline is not None:
             payload["roofline"] = self.roofline.to_dict()
+        if self.wiki_guidance is not None:
+            payload["wiki_guidance"] = dict(self.wiki_guidance)
         return payload
 
 

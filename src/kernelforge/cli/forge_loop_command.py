@@ -29,6 +29,7 @@ from kernelforge.cli.options import (
     _validate_optional_agent_provider,
     _validate_roofline_target,
     _validate_speedup_target,
+    _validate_wiki_guided,
 )
 from kernelforge.cli.pr_references import (
     PR_KB_BUDGET_SEC,
@@ -1365,6 +1366,17 @@ def _program_context(
     "a value at or below 1.0 is refused. It never affects KEEP.",
 )
 @click.option(
+    "--wiki-guided/--no-wiki-guided",
+    default=False,
+    help="Plan each round as one knowledge base batch first (GUIDED). Every GUIDED round builds a batch of the "
+    "directions the knowledge base and the round's measured evidence support (plus the largest levers only the "
+    "evidence supports, marked as such), implements the whole batch in one session without a plan critic and "
+    "measures it once, and the next round builds the next batch from the refreshed profile. Planning is free "
+    "(FREE) once the knowledge base and the evidence support no further direction or a batch gains less than 2%; "
+    "in FREE a lane candidate a sibling's KEEP stopped applying is ported onto the current kernel rather than "
+    "dropped. Needs a knowledge base (FORGE_KNOWLEDGE_WIKI_ROOT). Off by default.",
+)
+@click.option(
     "--prepare-task/--no-prepare-task",
     default=True,
     help="Pre-loop task preparation (default on, fresh campaigns only). "
@@ -1535,6 +1547,7 @@ def forge_loop(
     roofline_ceiling,
     roofline_target,
     target_mean_case_speedup,
+    wiki_guided,
     prepare_task,
     task_type,
     source_files,
@@ -1748,6 +1761,7 @@ def forge_loop(
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
     from kernelforge.orchestrator.agent import make_agent_fn
 
+    wiki_guided = _validate_wiki_guided(wiki_guided, config.knowledge_wiki_root)
     iter_config = IterationConfig(
         kernel_file=kernel,
         driver_script=driver,
@@ -1779,6 +1793,7 @@ def forge_loop(
         # The attainment of the per-shape ceiling that ends the run; the ceiling itself is estimated inside the loop.
         roofline_target=_validate_roofline_target(roofline_target, roofline_ceiling == CEILING_ON),
         target_mean_case_speedup=_validate_speedup_target(target_mean_case_speedup),
+        wiki_guided=wiki_guided,
     )
     if baseline_json:
         # The anchor every speedup divides by, and the wall time published beside it, both come from the caller's
@@ -2069,6 +2084,11 @@ def forge_loop(
     knowledge_wiki = KnowledgeWikiTool.from_config(config)
     if knowledge_wiki is not None:
         print(f"  Knowledge base: {knowledge_wiki.root} (calls logged to {knowledge_wiki.log_path})")
+    if iter_config.wiki_guided:
+        print(
+            "  Wiki-guided planning: on (one knowledge base batch per round, implemented in one session, until the "
+            "knowledge base and the evidence support no further direction or a batch gains less than 2%; then FREE)"
+        )
 
     from kernelforge.orchestrator.orchestration import (
         default_specialist_definitions,

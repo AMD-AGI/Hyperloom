@@ -543,6 +543,8 @@ def test_the_planning_factory_hands_every_role_the_same_knowledge_base(wiki, log
     expected = KnowledgeWikiTool(root=wiki, log_path=log)
     assert service._agent.knowledge_wiki == expected
     assert service._plan_critic.knowledge_wiki == expected
-    assert [agent.knowledge_wiki for agent in service._specialist_pool._agents.values()] == [expected] * len(
-        service._definitions
-    )
+    agents = service._specialist_pool._agents
+    assert [agent.knowledge_wiki for agent in agents.values()] == [expected] * len(agents)
+    # The pool also holds the playbook group analyst for GUIDED rounds, which the dispatch planner is never offered.
+    assert set(agents) == set(service._definitions) | {orchestration_module.PLAYBOOK_GROUP_ROLE}
+    assert orchestration_module.PLAYBOOK_GROUP_ROLE not in service._definitions
