@@ -29,7 +29,13 @@ from kernelforge.loop.wiki_guidance import (
     record_outcome,
 )
 from kernelforge.orchestrator import orchestration as orchestration_module
-from kernelforge.orchestrator.contracts import OrchestrationRunResult, SpecialistOutcome, SynthesizedPlan
+from kernelforge.orchestrator.contracts import (
+    LaneDrop,
+    OrchestrationRunResult,
+    PlanCriticOutcome,
+    SpecialistOutcome,
+    SynthesizedPlan,
+)
 from kernelforge.orchestrator.orchestration import (
     OrchestrationAgent,
     OrchestrationInfrastructureError,
@@ -144,11 +150,83 @@ def test_each_build_joins_the_playbook_under_fresh_ids_and_becomes_the_batch():
 def test_a_plan_claims_and_declines_items_only_by_citation():
     plan = (
         "Implement the loop body change; P2 is mentioned in passing.\n"
-        "[playbook:P1, p2]\n[playbook-skip:P2] the grid is already XCD-ordered\n[playbook:P9]"
+        "[playbook:p1]\n[playbook-skip:P2] the grid is already XCD-ordered\n[playbook:P9]"
     )
     assert cited_items(plan, ["P1", "P2"]) == (["P1"], ["P2"])
     assert cited_items("mentions P1 without a citation", ["P1"]) == ([], [])
     assert cited_items("[playbook:P101]", ["P101", "P10"]) == (["P101"], [])
+
+
+def test_a_session_report_cites_the_ids_that_open_each_entry_and_a_claim_wins():
+    known = [f"P{index}" for index in range(1, 30)]
+    # Closing lines as sessions write them: an id inside another entry's reason is not cited, "none" cites
+    # nothing, and an item the report claims is in the kernel stays claimed whatever else mentions it.
+    report = (
+        "[playbook:P1, P2 (B=1 only), P14]\n"
+        "[playbook-skip:P6 reverted, slower on perf5 (0.160 vs 0.146 ms); P15 needs 96 KB of LDS after P14]\n"
+        "[playbook-skip: none. P21 is the only item in G11, and it is implemented in full]\n"
+        "[playbook-skip:P2 kept only for B=1 shapes]"
+    )
+
+    cites = guidance.read_citations(report, known)
+
+    assert (cites.claimed, cites.skipped, cites.untried) == (("P1", "P2", "P14"), ("P6", "P15"), ())
+    assert cites.reasons == {
+        "P6": "reverted, slower on perf5 (0.160 vs 0.146 ms)",
+        "P15": "needs 96 KB of LDS after P14",
+    }
+
+
+def test_an_item_the_session_did_not_get_to_stays_open_with_its_reason():
+    state = _state_with(THREE_GROUPS)
+    report = "[playbook:P1]\n[playbook-skip:P2 slower on every case; P3 not attempted for lack of time]"
+
+    assert record_outcome(state, iteration=1, plan_text=report, decision="KEEP") == ["P2", "P3", "P1"]
+
+    assert [state.ledger[item].status for item in ("P1", "P2", "P3")] == ["APPLIED", "SKIPPED", "PENDING"]
+    assert state.ledger["P2"].note == "skipped in iteration 1: slower on every case"
+    assert state.ledger["P3"].note == "not tried in iteration 1: not attempted for lack of time"
+    # The explicit line says the same whatever the reason's wording, and the builder sees each reason.
+    record_outcome(state, iteration=2, plan_text="[playbook-untried:P3 the session ran short]", decision="KEEP")
+    assert (state.ledger["P3"].status, state.ledger["P3"].iterations) == ("PENDING", [1, 2])
+    items = {item["id"]: item for item in guidance.render_for_planning(state)["playbook"]["items"]}
+    assert items["P3"]["note"] == "not tried in iteration 2: the session ran short"
+    assert "note" not in items["P1"]
+
+
+def test_a_direction_only_the_evidence_supports_joins_the_batch_marked_as_such():
+    payload = json.loads(json.dumps(PLAYBOOK))
+    payload["items"] += [
+        {
+            "id": "P3",
+            "group": "G1",
+            "title": "BF16x3 emulation",
+            "support": "profiling",
+            "wiki_pages": [],
+            "applies_when": "the numerics probe passes at 0.02x the tolerance and cases 1-6 are MFMA-bound",
+        },
+        {"id": "P4", "group": "G1", "title": "no evidence named", "support": "profiling", "wiki_pages": []},
+        {"id": "P5", "group": "G2", "title": "a page after all", "support": "profiling", "wiki_pages": ["page"]},
+        {"id": "P6", "group": "G2", "title": "a hunch", "support": "hunch", "wiki_pages": []},
+    ]
+
+    build, notes = parse_playbook(json.dumps(payload))
+
+    assert {item.item_id: item.support for item in build.items} == {
+        "P1": "wiki",
+        "P2": "wiki",
+        "P3": "profiling",
+        "P5": "wiki",
+    }
+    assert any("P4" in note and "applies_when" in note for note in notes)
+    assert any("P6" in note and "neither wiki nor profiling" in note for note in notes)
+    state = GuidanceState()
+    state.add_build(build, iteration=1)
+    rendered = guidance.render_for_planning(state)
+    items = {item["id"]: item for item in rendered["playbook"]["items"]}
+    assert (items["P3"]["support"], items["P3"]["wiki_pages"]) == ("profiling", [])
+    assert "`support` is `profiling`" in rendered["instructions"]
+    assert GuidanceState.from_dict(state.to_dict()).playbook.items[2].support == "profiling"
 
 
 def test_the_ledger_settles_items_from_measured_decisions():
@@ -179,18 +257,27 @@ def test_the_ledger_ignores_infrastructure_and_counts_an_iteration_once():
 
 
 @pytest.mark.parametrize(
-    ("decision", "expected"),
+    ("decision", "gain", "expected"),
     [
-        ("KEEP", None),
-        ("REVERT_PERF", guidance.REASON_BATCH_NO_GAIN),
-        ("BUILD_FAILED", guidance.REASON_BATCH_NO_GAIN),
-        ("REVERT_VALIDATION", guidance.REASON_BATCH_NO_GAIN),
-        ("ORCHESTRATION_ERROR", None),
-        ("REVERT_CONTENDED", None),
+        ("KEEP", 0.30, None),
+        ("KEEP", 1.02 / 1.0 - 1.0, None),
+        ("KEEP", 0.019, guidance.REASON_BATCH_LOW_GAIN),
+        ("KEEP", None, None),
+        ("REVERT_PERF", None, guidance.REASON_BATCH_NO_GAIN),
+        ("BUILD_FAILED", None, guidance.REASON_BATCH_NO_GAIN),
+        ("REVERT_VALIDATION", None, guidance.REASON_BATCH_NO_GAIN),
+        ("ORCHESTRATION_ERROR", None, None),
+        ("REVERT_CONTENDED", None, None),
     ],
 )
-def test_only_a_measured_batch_without_a_gain_ends_guided(decision, expected):
-    assert guidance.batch_exit(decision) == expected
+def test_a_measured_batch_without_a_gain_or_with_too_little_ends_guided(decision, gain, expected):
+    assert guidance.batch_exit(decision, gain) == expected
+
+
+def test_a_batch_gain_is_measured_against_the_incumbent_it_began_from():
+    assert guidance.batch_gain(2.0, 2.03) == pytest.approx(0.015)
+    assert guidance.batch_gain(0.0, 2.03) is None
+    assert guidance.batch_gain(2.0, None) is None
 
 
 def test_a_batch_is_one_plan_whose_parts_keep_their_order():
@@ -198,7 +285,7 @@ def test_a_batch_is_one_plan_whose_parts_keep_their_order():
 
     assert plan.startswith("# GUIDED batch: 2 part(s) in one session")
     assert "Submit only after the last part" in plan
-    assert "[playbook-skip:...]" in plan
+    assert "[playbook-skip:...]" in plan and "[playbook-untried:...]" in plan
     assert plan.index("## Part 1 of 2: playbook group G4 (GEMV path)\n\ngemv part") < plan.index(
         "## Part 2 of 2\n\ntile part"
     )
@@ -208,8 +295,8 @@ def test_the_state_survives_a_round_trip_and_an_unreadable_file_starts_afresh(tm
     store = WikiGuidanceStore(tmp_path)
     state = _state_with()
     state.add_build(parse_playbook(json.dumps(SECOND_BUILD))[0], iteration=4)
-    record_outcome(state, iteration=4, plan_text="[playbook:P1]", decision="KEEP")
-    state.inflight_iteration, state.inflight_plan = 5, "[playbook:P3]"
+    record_outcome(state, iteration=4, plan_text="[playbook:P1]\n[playbook-skip:P2 slower]", decision="KEEP")
+    state.inflight_iteration, state.inflight_plan, state.inflight_best_before = 5, "[playbook:P3]", 2.5
     store.save(state)
 
     loaded = store.load()
@@ -327,6 +414,26 @@ def _measured(decisions):
     return measured
 
 
+def _measured_as(outcomes):
+    """Measurements scripted as (decision, mean case speedup) pairs."""
+    queue = list(outcomes)
+
+    async def measured(iteration, plan=""):
+        decision, speedup = queue.pop(0)
+        return IterationResult(
+            iteration=iteration,
+            duration_sec=0.01,
+            validation_passed=True,
+            validation_summary="canonical validation passed",
+            wall_ms=1.0 / speedup,
+            mean_case_speedup=speedup,
+            kept=decision == "KEEP",
+            bench_detail={"case_times": {"case": 1.0 / speedup}},
+        )
+
+    return measured
+
+
 def _events(workspace, kind):
     return [event for event in LoopStateStore(str(workspace)).read_events() if event.get("type") == kind]
 
@@ -437,6 +544,69 @@ def test_a_batch_without_a_gain_ends_guided(tmp_path, monkeypatch):
     assert service.contexts[1].wiki_guidance["phase"] == "FREE"
     ledger = WikiGuidanceStore(workspace).load().ledger
     assert [ledger[item].status for item in ("P1", "P2")] == ["REFUTED", "REFUTED"]
+
+
+def test_a_batch_worth_less_than_the_minimum_gain_ends_guided(tmp_path, monkeypatch):
+    loop, workspace = _guided_loop(tmp_path, monkeypatch, rounds=3)
+    service = _GuidedService(
+        [["body [playbook:P1]"], ["epilogue [playbook:P3]"], ["free plan"]], builds=[PLAYBOOK, SECOND_BUILD, PLAYBOOK]
+    )
+    monkeypatch.setattr(loop, "run_one_iteration", _measured_as([("KEEP", 2.0), ("KEEP", 2.03), ("KEEP", 2.5)]))
+
+    _run(loop, service, _editing_agent([]))
+
+    measured = _events(workspace, "wiki_batch_measured")
+    assert [(event["iter"], event["decision"]) for event in measured] == [(1, "KEEP"), (2, "KEEP")]
+    assert measured[0]["gain"] > guidance.MIN_BATCH_GAIN
+    assert measured[1]["gain"] == pytest.approx(0.015)
+    [changed] = _events(workspace, "wiki_guidance_phase")
+    assert (changed["iter"], changed["phase"], changed["reason_codes"]) == (2, "FREE", ["BATCH_LOW_GAIN"])
+    # The batch still counts: what it landed is applied, and the next round plans freely without a build.
+    assert WikiGuidanceStore(workspace).load().ledger["P3"].status == "APPLIED"
+    assert service.builds == 2
+    assert service.contexts[2].wiki_guidance["phase"] == "FREE"
+
+
+def test_a_one_group_batch_whose_plan_cites_nothing_is_still_the_batch_its_measurement_decides(tmp_path, monkeypatch):
+    loop, workspace = _guided_loop(tmp_path, monkeypatch, rounds=2)
+    service = _GuidedService([["the epilogue part, written without citations"], ["free plan"]], builds=[SECOND_BUILD])
+    monkeypatch.setattr(loop, "run_one_iteration", _measured(["REVERT", "REVERT"]))
+    agent = _editing_agent([], reports=["[playbook-skip:P1 slower on every case]"])
+
+    _run(loop, service, agent)
+
+    assert "## Part 1 of 1: playbook group G1 (epilogue)" in _plan_file(workspace, 1)
+    assert [event.get("wiki_batch") for event in _events(workspace, "iteration_result")] == [["G1"], None]
+    [report] = _events(workspace, "wiki_batch_report")
+    assert (report["source"], report["dropped"]) == ("session", ["P1"])
+    [changed] = _events(workspace, "wiki_guidance_phase")
+    assert (changed["iter"], changed["reason_codes"]) == (1, ["BATCH_NO_GAIN"])
+    assert service.builds == 1
+    assert WikiGuidanceStore(workspace).load().ledger["P1"].status == "SKIPPED"
+
+
+def test_a_recovered_keep_is_judged_against_the_incumbent_its_batch_began_from(tmp_path, monkeypatch):
+    first, workspace = _guided_loop(tmp_path, monkeypatch, rounds=1)
+    service = _GuidedService([["body [playbook:P1]"]], builds=[PLAYBOOK])
+    monkeypatch.setattr(first, "run_one_iteration", _measured_as([("KEEP", 1.01)]))
+
+    def interrupt_before_checkpoint(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    # The process dies after committing the KEEP and before crediting it.
+    monkeypatch.setattr(first, "_finalize_keep_checkpoint", interrupt_before_checkpoint)
+    with pytest.raises(asyncio.CancelledError):
+        _run(first, service, _editing_agent([]))
+    assert WikiGuidanceStore(workspace).load().ledger["P1"].status == "PENDING"
+
+    resumed, _ = _guided_loop(tmp_path, monkeypatch, rounds=0, resume=True)
+    _run(resumed, _GuidedService([]), _editing_agent([]))
+
+    state = WikiGuidanceStore(workspace).load()
+    assert state.ledger["P1"].status == "APPLIED"
+    assert (state.phase, state.reason_codes) == ("FREE", ["BATCH_LOW_GAIN"])
+    [measured] = _events(workspace, "wiki_batch_measured")
+    assert measured["gain"] == pytest.approx(1.01 / state.inflight_best_before - 1.0)
 
 
 def test_nothing_worth_a_batch_on_the_first_round_plans_freely_at_once(tmp_path, monkeypatch):
@@ -646,6 +816,8 @@ def test_the_builder_reads_the_knowledge_base_and_the_earlier_batches(tmp_path):
     assert "wiki_guidance" not in json.loads(first.user_prompt)["context"]
     history = json.loads(second.user_prompt)["context"]["wiki_guidance"]["playbook"]["items"]
     assert [item["status"] for item in history] == ["PENDING", "APPLIED", "FAILED"]
+    # A direction only the evidence ranks may join the batch, marked as such and with the measurement behind it.
+    assert '`"support": "profiling"`' in first.system_prompt and "applies_when" in first.system_prompt
 
 
 def test_the_builder_refuses_without_a_knowledge_base():
@@ -709,6 +881,25 @@ def test_a_batch_round_plans_one_part_per_group_without_dividing_the_round_by_co
     assert agent.structured_output_diagnostics["batch"] == {"parts": ["G2", "G1"], "planned": 2}
 
 
+def test_a_one_group_batch_is_planned_as_its_one_part():
+    backend = _McpBackend("the part's plan")
+    agent = OrchestrationAgent(backend=backend, timeout_sec=60, max_turns=8)
+    context = _batch_context(["G3"])
+    dispatch = orchestration_module.playbook_group_dispatch(context, lanes=1)
+    [assignment] = dispatch.assignments
+    outcome = SpecialistOutcome(
+        assignment_id=assignment.assignment_id,
+        role_id=assignment.role_id,
+        duration_sec=0.1,
+        content="analysis of G3",
+    )
+
+    plans = asyncio.run(agent.synthesize_lane_plan_results(context, [outcome], dispatch, {}, lanes=1))
+
+    assert [plan.ground for plan in plans] == ["batch part 1 of 1: playbook group G3"]
+    assert [spec.system_prompt for spec in backend.specs] == [orchestration_module._BATCH_PART_SYSTEM_PROMPT]
+
+
 def test_a_guided_round_analyzes_its_batch_groups_and_no_others():
     service, _agent, pool = _service({"compute", "memory", "algorithm", orchestration_module.PLAYBOOK_GROUP_ROLE})
 
@@ -723,11 +914,12 @@ def test_a_guided_round_analyzes_its_batch_groups_and_no_others():
 class _PlanningAgent:
     """The planning agent's turns, recorded; a dispatch planner that should not be asked in GUIDED."""
 
-    def __init__(self):
+    def __init__(self, *, plan_per_analysis=False):
         self.dispatched_from: list[list[str]] = []
         self.synthesized_from: list[list[str]] = []
         self.structured_output_diagnostics: dict = {}
         self.phase_durations_sec: dict = {}
+        self.plan_per_analysis = plan_per_analysis
 
     async def plan_dispatch(self, context, definitions, *, usage=None):
         self.dispatched_from.append(sorted(definitions))
@@ -737,7 +929,24 @@ class _PlanningAgent:
 
     async def synthesize_lane_plan_results(self, context, outcomes, dispatch_plan, coverage, *, lanes, usage=None):
         self.synthesized_from.append([outcome.content for outcome in outcomes])
+        if self.plan_per_analysis:
+            return [SynthesizedPlan(text=f"part for {outcome.content}") for outcome in outcomes]
         return [SynthesizedPlan(text="the plan")]
+
+
+class _LaneCritic:
+    """A plan critic that would drop every lane after the first, as it did to GUIDED batches."""
+
+    def __init__(self):
+        self.reviewed: list[int] = []
+
+    async def review(self, *, context, drafts, dispatch_plan, specialist_outcomes, coverage, usage=None):
+        self.reviewed.append(len(drafts))
+        drops = tuple(
+            LaneDrop(lane_id=lane, reason="no-op when run concurrently from canonical")
+            for lane in range(2, len(drafts) + 1)
+        )
+        return PlanCriticOutcome(verdict="ACCEPT", review="fine", lane_drops=drops, narrowing_status="answered")
 
 
 class _RecordingPool:
@@ -772,15 +981,35 @@ def _guided_context(phase="GUIDED"):
     return replace(_context(), wiki_guidance=guidance.render_for_planning(state))
 
 
-def _service(roles):
-    agent = _PlanningAgent()
+def _service(roles, *, critic=None, plan_per_analysis=False):
+    agent = _PlanningAgent(plan_per_analysis=plan_per_analysis)
     pool = _RecordingPool(roles)
     service = OrchestrationService(
         agent=agent,
         specialist_pool=pool,
         definitions=default_specialist_definitions(),
+        plan_critic=critic,
     )
     return service, agent, pool
+
+
+def test_a_guided_batch_round_runs_no_plan_critic_and_keeps_every_part():
+    critic = _LaneCritic()
+    roles = {"compute", "memory", "algorithm", orchestration_module.PLAYBOOK_GROUP_ROLE}
+    service, _agent, _pool = _service(roles, critic=critic, plan_per_analysis=True)
+
+    guided = asyncio.run(service.run(_batch_context(["G1", "G2", "G3"]), lanes=3))
+
+    assert critic.reviewed == []
+    assert len(guided.optimization_plans) == 3
+    assert guided.plan_critic is None and guided.optimization_plan_draft == ""
+    assert guided.structured_output_diagnostics["plan_critic"] == {"status": "skipped_guided_batch"}
+    assert "lane_narrowing" not in guided.structured_output_diagnostics
+    assert guided.structured_output_diagnostics["lanes"]["published"] == 3
+    # FREE rounds keep the critic, and its width ruling.
+    free = asyncio.run(service.run(_guided_context(phase="FREE"), lanes=3))
+    assert critic.reviewed == [1]
+    assert free.plan_critic.verdict == "ACCEPT"
 
 
 def test_a_guided_round_analyzes_each_open_group_whole_without_the_dispatch_planner():

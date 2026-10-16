@@ -67,17 +67,21 @@ from kernelforge.loop.search_policy import (
 )
 from kernelforge.loop.wiki_guidance import (
     MAX_PLAYBOOK_ATTEMPTS,
+    MIN_BATCH_GAIN,
     PHASE_FREE,
     PHASE_GUIDED,
     REASON_NO_USEFUL_DIRECTION,
     REASON_PLAYBOOK_UNAVAILABLE,
+    SUPPORT_PROFILING,
     GuidanceState,
     WikiGuidanceStore,
     batch_exit,
+    batch_gain,
     batch_plan,
     cited_items,
     declined,
     parse_playbook,
+    read_citations,
     record_outcome,
     render_for_implementer,
     render_for_planning,
@@ -1986,13 +1990,17 @@ class IterationLoop(AnalysisRuntimeMixin):
             return lane
         return None
 
-    def _compose_batch(self, iteration: int, plans: Sequence[str]) -> None:
-        """Turn a batch round's part plans into this iteration's one session plan."""
+    def _compose_batch(self, iteration: int, plans: Sequence[str], batch: Sequence[str]) -> None:
+        """Turn a batch round's part plans into this iteration's one session plan; ``batch`` is the round's groups."""
         groups = [self._plan_group(str(plan)) for plan in plans]
+        if len(plans) == len(batch) and not all(groups):
+            # One part per group, in batch order: a part that cites no item still has its group.
+            groups = [group or batch_group for group, batch_group in zip(groups, batch)]
         self._last_lane_plans = [
             batch_plan([(self._group_label(group), str(plan)) for group, plan in zip(groups, plans)])
         ]
-        self._iteration_batch = [group for group in groups if group]
+        # The batch the measurement decides about is the round's, whatever its part plans happen to cite.
+        self._iteration_batch = list(batch)
         self._append_wiki_event(
             make_event("wiki_batch_planned", iteration, parts=len(plans), groups=[group or None for group in groups])
         )
@@ -2020,21 +2028,24 @@ class IterationLoop(AnalysisRuntimeMixin):
         if not self._iteration_batch or state is None or state.playbook is None:
             return
         report = str(session_sink.get("final_text") or "")
-        landed, dropped = cited_items(report, state.ledger)
-        if landed or dropped:
+        cites = read_citations(report, state.ledger)
+        reported = bool(cites.claimed or cites.skipped or cites.untried)
+        if reported:
             self._note_iteration_plan(iteration, report)
         self._append_wiki_event(
             make_event(
                 "wiki_batch_report",
                 iteration,
-                landed=landed or None,
-                dropped=dropped or None,
-                source="session" if landed or dropped else "plan",
+                landed=list(cites.claimed) or None,
+                dropped=list(cites.skipped) or None,
+                untried=list(cites.untried) or None,
+                source="session" if reported else "plan",
             )
         )
-        if landed or dropped:
+        if reported:
             print(
-                f"  [batch] session landed {', '.join(landed) or 'nothing'}; dropped {', '.join(dropped) or 'nothing'}"
+                f"  [batch] session landed {', '.join(cites.claimed) or 'nothing'}; "
+                f"dropped {', '.join(cites.skipped) or 'nothing'}; did not try {', '.join(cites.untried) or 'nothing'}"
             )
         else:
             print("  [batch] session reported no item lines; the plan's citations are credited")
@@ -2384,9 +2395,12 @@ class IterationLoop(AnalysisRuntimeMixin):
             )
             guidance = self.wiki_guidance
             if guidance is not None and guidance.inflight_iteration == result.iteration:
-                # The process that measured this KEEP died before crediting it; the plan it measured is on record.
+                # The process that measured this KEEP died before crediting it; the plan it measured is on record,
+                # and so is the batch it implemented when it was a GUIDED one.
                 self._iteration_plan_text = guidance.inflight_plan
-                self._record_wiki_guidance_outcome(result.iteration, "KEEP")
+                if guidance.phase == PHASE_GUIDED:
+                    self._iteration_batch = list(guidance.batch)
+                self._record_wiki_guidance_outcome(result.iteration, "KEEP", mean_case_speedup=result.mean_case_speedup)
         self.state_store.save(self.run_state)
         persisted = self.state_store.load()
         if persisted.to_dict() != self.run_state.to_dict():
@@ -3760,7 +3774,9 @@ class IterationLoop(AnalysisRuntimeMixin):
                     bench_detail=result.bench_detail,
                     incumbent_case_times=self._scored_incumbent_case_times(),
                 )
-                self._record_wiki_guidance_outcome(result.iteration, decision_label)
+                self._record_wiki_guidance_outcome(
+                    result.iteration, decision_label, mean_case_speedup=result.mean_case_speedup
+                )
             self.state_store.save(self.run_state)
 
             if require_durable:
@@ -4452,12 +4468,22 @@ class IterationLoop(AnalysisRuntimeMixin):
             print("  [wiki-guided] playbook notes: " + "; ".join(notes))
         batch = state.add_build(build, iteration=iteration)
         self._save_wiki_guidance()
-        added = [item.item_id for item in state.playbook.items[-len(build.items) :]]
+        new_items = state.playbook.items[-len(build.items) :]
+        added = [item.item_id for item in new_items]
+        profiling = [item.item_id for item in new_items if item.support == SUPPORT_PROFILING]
         self._append_wiki_event(
-            make_event("wiki_playbook_built", iteration, build=state.builds, items=added, groups=batch)
+            make_event(
+                "wiki_playbook_built",
+                iteration,
+                build=state.builds,
+                items=added,
+                groups=batch,
+                profiling_only=profiling or None,
+            )
         )
         print(
             f"  [wiki-guided] batch {state.builds}: {len(added)} item(s) in {len(batch)} group(s) ({', '.join(batch)})"
+            + (f"; supported by profiling only: {', '.join(profiling)}" if profiling else "")
         )
 
     def _wiki_batch_unavailable(self, iteration: int, error: str, *, settled: bool) -> None:
@@ -4492,12 +4518,17 @@ class IterationLoop(AnalysisRuntimeMixin):
         state = self.wiki_guidance
         if state is None or state.playbook is None:
             return
+        if state.inflight_iteration != iteration:
+            # Noted before the iteration is measured, so this is the incumbent the iteration has to improve on.
+            state.inflight_best_before = float(self.best_mean_case_speedup or 0.0)
         state.inflight_iteration = iteration
         state.inflight_plan = self._iteration_plan_text
         self._save_wiki_guidance()
 
-    def _record_wiki_guidance_outcome(self, iteration: int, decision: str) -> None:
-        """Credit the measured plan's playbook citations; never fails the iteration."""
+    def _record_wiki_guidance_outcome(
+        self, iteration: int, decision: str, *, mean_case_speedup: float | None = None
+    ) -> None:
+        """Credit the measured plan's playbook citations, and end GUIDED on a batch worth too little; never fails."""
         state = self.wiki_guidance
         if state is None or state.playbook is None:
             return
@@ -4519,7 +4550,23 @@ class IterationLoop(AnalysisRuntimeMixin):
                     + ", ".join(f"{item_id} {state.ledger[item_id].status}" for item_id in changed)
                 )
             if self._iteration_batch and state.phase == PHASE_GUIDED:
-                reason = batch_exit(decision)
+                gain = (
+                    batch_gain(state.inflight_best_before, mean_case_speedup)
+                    if state.inflight_iteration == iteration
+                    else None
+                )
+                reason = batch_exit(decision, gain)
+                self._append_wiki_event(
+                    make_event(
+                        "wiki_batch_measured",
+                        iteration,
+                        decision=decision,
+                        gain=round(gain, 6) if gain is not None else None,
+                        min_gain=MIN_BATCH_GAIN,
+                    )
+                )
+                if gain is not None:
+                    print(f"  [wiki-guided] batch gain {gain * 100:+.1f}% (GUIDED needs {MIN_BATCH_GAIN * 100:.0f}%)")
                 if reason is not None:
                     self._enter_wiki_guidance_phase(iteration, PHASE_FREE, (reason,))
         except Exception:
@@ -4585,7 +4632,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         self._record_probe_hazard(iteration, result)
         self._last_lane_plans = [plan for plan in result.optimization_plans if str(plan).strip()]
         if batch and self._last_lane_plans:
-            self._compose_batch(iteration, self._last_lane_plans)
+            self._compose_batch(iteration, self._last_lane_plans, batch)
         self._persist_orchestration_result(iteration, context, result)
         plan_path = self._persist_lane_plans(
             iteration,

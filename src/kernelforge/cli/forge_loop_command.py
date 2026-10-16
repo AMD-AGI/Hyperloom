@@ -377,11 +377,12 @@ def _load_external_baseline(path: str) -> tuple[float, dict[str, float]]:
     "--wiki-guided/--no-wiki-guided",
     default=False,
     help="Plan each round as one knowledge base batch first (GUIDED). Every GUIDED round builds a batch of the "
-    "directions the knowledge base and the round's measured evidence support, implements the whole batch in one "
-    "session and measures it once, and the next round builds the next batch from the refreshed profile. Planning "
-    "is free (FREE) once the knowledge base and the evidence support no further direction or a batch brings no "
-    "gain; in FREE a lane candidate a sibling's KEEP stopped applying is ported onto the current kernel rather "
-    "than dropped. Needs a knowledge base (FORGE_KNOWLEDGE_WIKI_ROOT). Off by default.",
+    "directions the knowledge base and the round's measured evidence support (plus the largest levers only the "
+    "evidence supports, marked as such), implements the whole batch in one session without a plan critic and "
+    "measures it once, and the next round builds the next batch from the refreshed profile. Planning is free "
+    "(FREE) once the knowledge base and the evidence support no further direction or a batch gains less than 2%; "
+    "in FREE a lane candidate a sibling's KEEP stopped applying is ported onto the current kernel rather than "
+    "dropped. Needs a knowledge base (FORGE_KNOWLEDGE_WIKI_ROOT). Off by default.",
 )
 @click.option(
     "--prepare-task/--no-prepare-task",
@@ -1394,7 +1395,7 @@ def forge_loop(
     if iter_config.wiki_guided:
         print(
             "  Wiki-guided planning: on (one knowledge base batch per round, implemented in one session, until the "
-            "knowledge base and the evidence support no further direction or a batch brings no gain; then FREE)"
+            "knowledge base and the evidence support no further direction or a batch gains less than 2%; then FREE)"
         )
 
     from kernelforge.orchestrator.orchestration import (

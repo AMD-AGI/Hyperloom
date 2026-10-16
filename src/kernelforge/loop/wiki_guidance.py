@@ -5,19 +5,23 @@
 
 Off unless the campaign runs with ``--wiki-guided``. When on, every GUIDED planning round first asks a read-only
 builder to turn the knowledge base and that round's measured evidence into the round's batch: every direction the
-evidence supports now, grouped so that one group edits one piece of code, each item citing the knowledge base pages
-behind it, the groups in the order to implement them. The whole batch is one iteration: the round plans one part per
-group, one Implementer session implements every part on the same kernel, and the result is measured once; the next
-round then plans from the profile taken after it. Each round's batch is added to one campaign playbook under fresh
-ids, so the builder sees what earlier batches settled and does not propose it again.
+evidence supports now, grouped so that one group edits one piece of code, the groups in the order to implement them.
+Each item cites the knowledge base pages behind it, or is marked as supported by the profiling evidence alone when the
+evidence ranks it among the largest levers left and no page covers it. The whole batch is one iteration: the round
+plans one part per group, one Implementer session implements every part on the same kernel, and the result is
+measured once; the next round then plans from the profile taken after it. A GUIDED round runs no plan critic: its
+parts are not competing lanes, so none is narrowed away. Each round's batch is added to one campaign playbook under
+fresh ids, so the builder sees what earlier batches settled, and why, and does not propose it again.
 
 The campaign leaves GUIDED for FREE when the builder finds nothing more the knowledge base and the evidence support
-(``NO_USEFUL_DIRECTION``), when a whole batch is measured without a gain (``BATCH_NO_GAIN``), or when no playbook can
-be had (``PLAYBOOK_UNAVAILABLE``); from then on the planners see what the playbook settled and plan freely.
+(``NO_USEFUL_DIRECTION``), when a whole batch is measured without a gain (``BATCH_NO_GAIN``) or with less than
+``MIN_BATCH_GAIN`` (``BATCH_LOW_GAIN``), or when no playbook can be had (``PLAYBOOK_UNAVAILABLE``); from then on the
+planners see what the playbook settled and plan freely.
 
 A plan claims playbook items by citing them as ``[playbook:P1,P3]`` and declines one as ``[playbook-skip:P4]``. A
-batch session ends by citing the items that are in its final kernel and the ones it dropped, and the ledger is credited
-from that report when there is one, else from the plan; either way a claim counts only once a measurement decided it.
+batch session ends by citing the items that are in its final kernel, the ones it tried and dropped, and the ones it did
+not get to (``[playbook-untried:P5]``, which stay open), and the ledger is credited from that report when there is one,
+else from the plan; either way a claim counts only once a measurement decided it.
 """
 
 from __future__ import annotations
@@ -41,6 +45,15 @@ PHASES = frozenset({PHASE_GUIDED, PHASE_FREE})
 REASON_PLAYBOOK_UNAVAILABLE = "PLAYBOOK_UNAVAILABLE"
 REASON_NO_USEFUL_DIRECTION = "NO_USEFUL_DIRECTION"
 REASON_BATCH_NO_GAIN = "BATCH_NO_GAIN"
+REASON_BATCH_LOW_GAIN = "BATCH_LOW_GAIN"
+
+# A KEEP batch that raises the incumbent's mean case speedup by less than this fraction ends GUIDED.
+MIN_BATCH_GAIN = 0.02
+
+# What an item rests on: knowledge base pages, or the round's profiling evidence alone.
+SUPPORT_WIKI = "wiki"
+SUPPORT_PROFILING = "profiling"
+SUPPORTS = frozenset({SUPPORT_WIKI, SUPPORT_PROFILING})
 
 STATUS_PENDING = "PENDING"
 STATUS_APPLIED = "APPLIED"
@@ -78,7 +91,19 @@ _ITEM_ID = re.compile(r"^P\d{1,3}$")
 _GROUP_ID = re.compile(r"^G\d{1,3}$")
 _CITATION = re.compile(r"\[playbook:([^\]]*)\]", re.IGNORECASE)
 _SKIP_CITATION = re.compile(r"\[playbook-skip:([^\]]*)\]", re.IGNORECASE)
+_UNTRIED_CITATION = re.compile(r"\[playbook-untried:([^\]]*)\]", re.IGNORECASE)
 _CITED_ID = re.compile(r"\bP\d{1,3}\b", re.IGNORECASE)
+# Inside one citation, an entry is a run of item ids at the start of the block or after a `;`, `,` or line break,
+# followed by its reason; an id that only appears inside another entry's reason is not cited.
+_ENTRY_START = re.compile(r"(?:^|[;,\n])\s*(?=P\d)", re.IGNORECASE)
+_ID_RUN = re.compile(r"P\d{1,3}\b(?:\s*(?:,|/|&|\band\b)\s*P\d{1,3}\b)*", re.IGNORECASE)
+# A skip whose reason says the item was never tried or not finished leaves it open rather than settling it.
+_UNTRIED_REASON = re.compile(
+    r"not (?:attempted|tried|started|reached|finished|implemented)|untried|"
+    r"(?:lack|out|short) of (?:session )?time|ran out of time|deadline|time budget|no time",
+    re.IGNORECASE,
+)
+_NOTE_CHARS = 300
 
 GUIDED_INSTRUCTIONS = (
     "GUIDED phase. `playbook` lists the techniques the knowledge base supports for this kernel, built round by round "
@@ -91,11 +116,14 @@ GUIDED_INSTRUCTIONS = (
     "2. Plan each part so that the session can keep or drop it on its own: it must stay correct, and say how it "
     "adapts, when an earlier part was dropped.\n"
     "3. On its own line, cite every item a plan implements as [playbook:P1,P3], and every item the evidence shows "
-    "does not apply as [playbook-skip:P4] together with that evidence. Work a plan does not cite is not credited "
-    "to the playbook.\n"
+    "does not apply as [playbook-skip:P4 followed by that evidence]. Work a plan does not cite is not credited to "
+    "the playbook.\n"
     "4. Adapt each item to this kernel's evidence (profile, cases, code). Its knowledge base pages are available "
-    "through the knowledge tools; read them before planning the item.\n"
-    "5. Do not re-plan REFUTED or SKIPPED items. A FAILED item may be retried once, with the failure fixed.\n"
+    "through the knowledge tools; read them before planning the item. An item whose `support` is `profiling` has "
+    "no page: the round's evidence ranks it among the largest levers left, `applies_when` says which measurement, "
+    "and it is planned from that evidence.\n"
+    "5. Do not re-plan REFUTED or SKIPPED items; an item's `note`, when it has one, is what the session reported "
+    "about it. A FAILED item may be retried once, with the failure fixed.\n"
     "6. This round's analyses are one per batch group (role `playbook_group`, the group named in each assignment), "
     "each covering its group whole across compute, memory and algorithm. Build each part from its group's analysis; "
     "an analyst of another role, when there is one, analyzes how this round's playbook items apply to this kernel "
@@ -116,14 +144,17 @@ BATCH_SESSION_INSTRUCTIONS = (
     "the same kernel and measured once, when the session ends. Implement the parts in the order given. After each "
     "part, run the correctness check and time the cases: keep the part when it is correct and not slower than the "
     "kernel was before it, and otherwise revert that part's edits and go on to the next part. Submit only after the "
-    "last part. End the session with two lines of its own: [playbook:...] naming every item whose change is in the "
-    "final kernel, and [playbook-skip:...] naming every item you dropped or reverted, each followed by why."
+    "last part. End the session with these lines of its own, each entry an item id followed by why, entries "
+    "separated by `;`: [playbook:...] naming every item whose change is in the final kernel; [playbook-skip:...] "
+    "naming every item you implemented and dropped or reverted, or whose precondition proved false; and "
+    "[playbook-untried:...] naming every item you did not get to or did not finish, which stays open for a later "
+    "batch."
 )
 
 
 @dataclass(frozen=True)
 class PlaybookItem:
-    """One technique the knowledge base supports for this kernel."""
+    """One direction for this kernel: a technique the knowledge base supports, or one only the evidence ranks."""
 
     item_id: str
     title: str
@@ -134,12 +165,14 @@ class PlaybookItem:
     expected_effect: str = ""
     verify: str = ""
     conflicts_with: tuple[str, ...] = ()
+    support: str = SUPPORT_WIKI
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.item_id,
             "title": self.title,
             "group": self.group,
+            "support": self.support,
             "wiki_pages": list(self.wiki_pages),
             "applies_when": self.applies_when,
             "cases": self.cases,
@@ -200,14 +233,19 @@ class ItemRecord:
     failures: int = 0
     iterations: list[int] = field(default_factory=list)
     last_decision: str = ""
+    # What the latest session that skipped or did not get to the item said about it.
+    note: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "status": self.status,
             "failures": self.failures,
             "iterations": list(self.iterations),
             "last_decision": self.last_decision,
         }
+        if self.note:
+            payload["note"] = self.note
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> ItemRecord:
@@ -219,6 +257,7 @@ class ItemRecord:
             failures=int(payload.get("failures") or 0),
             iterations=[int(value) for value in payload.get("iterations") or []],
             last_decision=str(payload.get("last_decision") or ""),
+            note=str(payload.get("note") or ""),
         )
 
 
@@ -242,6 +281,8 @@ class GuidanceState:
     # The plan the latest iteration is measuring, kept here so a KEEP finished by resume recovery is still credited.
     inflight_iteration: int = 0
     inflight_plan: str = ""
+    # The incumbent's mean case speedup when that iteration began, which its batch's gain is measured against.
+    inflight_best_before: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -257,6 +298,7 @@ class GuidanceState:
             "recorded_iterations": list(self.recorded_iterations),
             "inflight_iteration": self.inflight_iteration,
             "inflight_plan": self.inflight_plan,
+            "inflight_best_before": self.inflight_best_before,
         }
 
     @classmethod
@@ -285,6 +327,7 @@ class GuidanceState:
             recorded_iterations=[int(value) for value in payload.get("recorded_iterations") or []],
             inflight_iteration=int(payload.get("inflight_iteration") or 0),
             inflight_plan=str(payload.get("inflight_plan") or ""),
+            inflight_best_before=float(payload.get("inflight_best_before") or 0.0),
         )
 
     def add_build(self, build: Playbook, *, iteration: int) -> list[str]:
@@ -387,6 +430,8 @@ def _playbook_from_payload(
         title = _text(entry.get("title"))
         group = _text(entry.get("group")).upper()
         pages = _strings(entry.get("wiki_pages"))
+        support = _text(entry.get("support")).lower() or SUPPORT_WIKI
+        applies_when = _text(entry.get("applies_when"))
         if not _ITEM_ID.match(item_id) or not title:
             notes.append(f"dropped item {item_id or '?'}: it needs an id like P1 and a title")
             continue
@@ -396,9 +441,17 @@ def _playbook_from_payload(
         if group not in known_groups:
             notes.append(f"dropped item {item_id}: its group {group or '?'} is not one of the playbook's groups")
             continue
-        if not pages:
-            # The playbook is the knowledge base's contribution; an item no page supports is the builder's own idea.
-            notes.append(f"dropped item {item_id}: it cites no knowledge base page")
+        if support not in SUPPORTS:
+            notes.append(f"dropped item {item_id}: its support {support!r} is neither wiki nor profiling")
+            continue
+        if pages:
+            # A page that supports it makes it a knowledge base item, whatever the answer called it.
+            support = SUPPORT_WIKI
+        elif support != SUPPORT_PROFILING:
+            notes.append(f"dropped item {item_id}: it cites no knowledge base page and is not marked profiling")
+            continue
+        elif not applies_when:
+            notes.append(f"dropped item {item_id}: a profiling item must name the evidence behind it in applies_when")
             continue
         items.append(
             PlaybookItem(
@@ -406,11 +459,12 @@ def _playbook_from_payload(
                 title=title,
                 group=group,
                 wiki_pages=pages,
-                applies_when=_text(entry.get("applies_when")),
+                applies_when=applies_when,
                 cases=_text(entry.get("cases")),
                 expected_effect=_text(entry.get("expected_effect")),
                 verify=_text(entry.get("verify")),
                 conflicts_with=tuple(item.upper() for item in _strings(entry.get("conflicts_with"))),
+                support=support,
             )
         )
         if max_items is not None and len(items) == max_items:
@@ -448,23 +502,71 @@ def declined(text: str) -> bool:
     return not (payload.get("items") or payload.get("groups"))
 
 
-def _ids(blocks: Iterable[str], known: set[str]) -> list[str]:
+@dataclass(frozen=True)
+class Citations:
+    """What a plan or a session report cites: the items it claims, skips and did not try, and why for the last two."""
+
+    claimed: tuple[str, ...] = ()
+    skipped: tuple[str, ...] = ()
+    untried: tuple[str, ...] = ()
+    reasons: Mapping[str, str] = field(default_factory=dict)
+
+
+def _entries(block: str) -> list[tuple[list[str], str]]:
+    """Each entry of one citation block: the item ids it opens with, and the reason that follows them."""
+    starts = list(_ENTRY_START.finditer(block))
+    entries: list[tuple[list[str], str]] = []
+    cursor = 0
+    for start in starts:
+        if start.end() < cursor:
+            continue
+        run = _ID_RUN.match(block, start.end())
+        if run is None:
+            continue
+        cursor = run.end()
+        following = next((other.start() for other in starts if other.end() >= cursor), len(block))
+        reason = _text(block[cursor:following]).strip(" -\u2013\u2014:;,.")
+        entries.append(([match.upper() for match in _CITED_ID.findall(run.group(0))], reason[:_NOTE_CHARS]))
+    return entries
+
+
+def _cited(pattern: re.Pattern[str], text: str, known: set[str]) -> tuple[list[str], dict[str, str]]:
     found: list[str] = []
-    for block in blocks:
-        for match in _CITED_ID.findall(block):
-            item_id = match.upper()
-            if item_id in known and item_id not in found:
-                found.append(item_id)
-    return found
+    reasons: dict[str, str] = {}
+    for block in pattern.findall(text):
+        for item_ids, reason in _entries(block):
+            for item_id in item_ids:
+                if item_id in known and item_id not in found:
+                    found.append(item_id)
+                    if reason:
+                        reasons[item_id] = reason
+    return found, reasons
+
+
+def read_citations(text: str, known: Iterable[str]) -> Citations:
+    """The items ``text`` claims, skips and did not try, among ``known``; a claim wins over any other mention."""
+    known_ids = set(known)
+    text = text or ""
+    claimed, _ = _cited(_CITATION, text, known_ids)
+    skipped, skip_reasons = _cited(_SKIP_CITATION, text, known_ids)
+    untried, untried_reasons = _cited(_UNTRIED_CITATION, text, known_ids)
+    for item_id in list(skipped):
+        if _UNTRIED_REASON.search(skip_reasons.get(item_id, "")):
+            skipped.remove(item_id)
+            if item_id not in untried:
+                untried.append(item_id)
+                untried_reasons[item_id] = skip_reasons[item_id]
+    skipped = [item_id for item_id in skipped if item_id not in claimed]
+    untried = [item_id for item_id in untried if item_id not in claimed and item_id not in skipped]
+    reasons = {item_id: skip_reasons[item_id] for item_id in skipped if item_id in skip_reasons}
+    reasons.update({item_id: untried_reasons[item_id] for item_id in untried if item_id in untried_reasons})
+    return Citations(claimed=tuple(claimed), skipped=tuple(skipped), untried=tuple(untried), reasons=reasons)
 
 
 def cited_items(plan_text: str, known: Iterable[str]) -> tuple[list[str], list[str]]:
-    """The items a plan claims and the ones it declines, among ``known``."""
-    known_ids = set(known)
-    text = plan_text or ""
-    skipped = _ids(_SKIP_CITATION.findall(text), known_ids)
-    claimed = [item_id for item_id in _ids(_CITATION.findall(text), known_ids) if item_id not in skipped]
-    return claimed, skipped
+    """The items a plan claims and the ones it declines (skipped or not tried), among ``known``."""
+    cites = read_citations(plan_text, known)
+    return list(cites.claimed), [*cites.skipped, *cites.untried]
 
 
 def record_outcome(state: GuidanceState, *, iteration: int, plan_text: str, decision: str) -> list[str]:
@@ -476,16 +578,25 @@ def record_outcome(state: GuidanceState, *, iteration: int, plan_text: str, deci
         # Infrastructure, or a session that measured nothing: no evidence about any item.
         return []
     state.recorded_iterations.append(iteration)
-    claimed, skipped = cited_items(plan_text, state.ledger)
+    cites = read_citations(plan_text, state.ledger)
     changed: list[str] = []
-    for item_id in skipped:
+    for item_id in cites.skipped:
         record = state.ledger[item_id]
         if record.status in {STATUS_PENDING, STATUS_FAILED}:
             record.status = STATUS_SKIPPED
             record.iterations.append(iteration)
             record.last_decision = label
+            record.note = f"skipped in iteration {iteration}: {cites.reasons.get(item_id) or 'no reason given'}"
             changed.append(item_id)
-    for item_id in claimed:
+    for item_id in cites.untried:
+        # Not tried is no evidence about the item: it stays open, and a later batch may propose it again.
+        record = state.ledger[item_id]
+        if record.status in {STATUS_PENDING, STATUS_FAILED}:
+            record.iterations.append(iteration)
+            record.last_decision = label
+            record.note = f"not tried in iteration {iteration}: {cites.reasons.get(item_id) or 'no reason given'}"
+            changed.append(item_id)
+    for item_id in cites.claimed:
         record = state.ledger[item_id]
         before = record.status
         record.iterations.append(iteration)
@@ -505,11 +616,20 @@ def record_outcome(state: GuidanceState, *, iteration: int, plan_text: str, deci
     return changed
 
 
-def batch_exit(decision: str) -> str | None:
-    """The reason a measured batch ends GUIDED, or ``None``: a KEEP, or a decision that measured nothing."""
+def batch_gain(best_before: float, mean_case_speedup: float | None) -> float | None:
+    """A batch's gain as a fraction of the incumbent it began from; ``None`` when either side is unknown."""
+    if not best_before or best_before <= 0 or not mean_case_speedup or mean_case_speedup <= 0:
+        return None
+    return mean_case_speedup / best_before - 1.0
+
+
+def batch_exit(decision: str, gain: float | None = None) -> str | None:
+    """The reason a measured batch ends GUIDED, or ``None``: a KEEP worth ``MIN_BATCH_GAIN``, or nothing measured."""
     label = str(decision or "").strip().upper()
     if label in REFUTED_DECISIONS | FAILED_DECISIONS:
         return REASON_BATCH_NO_GAIN
+    if label in APPLIED_DECISIONS and gain is not None and gain < MIN_BATCH_GAIN:
+        return REASON_BATCH_LOW_GAIN
     return None
 
 
@@ -543,6 +663,7 @@ def render_for_planning(state: GuidanceState) -> dict[str, Any] | None:
                 "status": record.status,
                 "failures": record.failures,
                 "iterations": list(record.iterations),
+                **({"note": record.note} if record.note else {}),
             }
         )
     groups = [
@@ -571,7 +692,8 @@ def render_for_implementer(state: GuidanceState) -> str:
         return (
             "## Wiki guidance\n"
             "Phase: GUIDED. The plan implements knowledge base playbook items it cites as [playbook:...]. Implement "
-            "every cited item; when an item's detail matters, read its knowledge base pages with the knowledge tools. "
+            "every cited item; when an item's detail matters, read its knowledge base pages with the knowledge tools "
+            "(an item supported by profiling alone has none, and the plan states its evidence). "
             "A plan headed as a GUIDED batch is implemented whole in this session and measured once at its end: "
             "follow its instructions for keeping or dropping each part and for the two lines that end the session."
         )
