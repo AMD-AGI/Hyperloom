@@ -55,7 +55,7 @@ def _resolve_gpu_type(
 
 
 def _autodetect_gpu_type() -> str | None:
-    """Return mi300x|mi308x|mi325x|mi355x or None if undetectable."""
+    """Return a known board type, or None when its identity is ambiguous."""
     import subprocess
 
     try:
@@ -65,8 +65,9 @@ def _autodetect_gpu_type() -> str | None:
             text=True,
             timeout=5,
         ).stdout.upper()
+        product_name = "".join(out.split())
         for tag in _PRODUCT_TAGS:
-            if tag in out:
+            if tag in product_name:
                 return tag.lower()
     except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
         # rocm-smi missing / slow / not permitted; fall through to the torch gcnArchName probe below (autodetect is
@@ -75,7 +76,12 @@ def _autodetect_gpu_type() -> str | None:
     try:
         import torch
 
-        arch = torch.cuda.get_device_properties(0).gcnArchName
+        properties = torch.cuda.get_device_properties(0)
+        name = "".join(str(getattr(properties, "name", "")).upper().split())
+        for tag in _PRODUCT_TAGS:
+            if tag in name:
+                return tag.lower()
+        arch = properties.gcnArchName
         gfx = arch.split(":", 1)[0].lower()
         return _GFX_TO_RUNNER.get(gfx)
     except Exception:  # noqa: BLE001
