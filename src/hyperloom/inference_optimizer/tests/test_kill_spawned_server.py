@@ -1026,6 +1026,24 @@ def test_server_log_death_excerpt_surfaces_config_validation_arch_miss(tmp_path)
     assert sig.offending_symbol == "deepseek_v4"
 
 
+def test_server_log_death_excerpt_keeps_the_exception_below_the_marker(tmp_path):
+    """``EngineCore failed to start`` precedes its traceback, so the cause sits tens of lines below it."""
+    cause = "(EngineCore pid=7) ValueError: max_num_seqs (256) exceeds available Mamba cache blocks (237)."
+    frames = "".join(f"(EngineCore pid=7)     frame {i}\n" for i in range(55))
+    log_path = tmp_path / "server.log"
+    log_path.write_text(
+        "(EngineCore pid=7) ERROR core.py:1349] EngineCore failed to start.\n"
+        "(EngineCore pid=7) Traceback (most recent call last):\n"
+        f"{frames}{cause}\n"
+        "(APIServer pid=1) RuntimeError: Engine core initialization failed. "
+        "See root cause above. Failed core proc(s): {}\n"
+    )
+    excerpt = server_log_death_excerpt(str(log_path))
+    assert excerpt is not None
+    assert "EngineCore failed to start" in excerpt
+    assert "max_num_seqs (256) exceeds available Mamba cache blocks (237)" in excerpt
+
+
 def test_fatal_text_does_not_kill_a_running_child(tmp_path):
     script = (
         "import pathlib,sys,time; pathlib.Path(sys.argv[1]).write_text('EngineCore failed to start'); time.sleep(.8)"

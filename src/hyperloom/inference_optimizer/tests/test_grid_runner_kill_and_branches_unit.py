@@ -437,6 +437,32 @@ async def test_server_dead_surfaces_log_excerpt(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_server_dead_with_a_capacity_cause_is_engine_capacity(tmp_path, monkeypatch):
+    """A server whose log ends in the capacity error is not a missing workspace."""
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+    cause = "ValueError: max_num_seqs (256) exceeds available Mamba cache blocks (237)."
+
+    def _dead(bench_round, **_k):
+        slog = Path(bench_round.output_dir) / "server.log"
+        slog.parent.mkdir(parents=True, exist_ok=True)
+        frames = "".join(f"    frame {i}\n" for i in range(55))
+        slog.write_text(f"EngineCore failed to start.\nTraceback (most recent call last):\n{frames}{cause}\n")
+        return 1, "", ""
+
+    monkeypatch.setattr(gr, "_run_magpie", _dead)
+    results = await run_grid(
+        grid=[GridVariant("fp8_kv")],
+        output_root=tmp_path / "out",
+        recipe=GridRecipe(base_yaml_path=base),
+    )
+    r = results[0]
+    assert r.status == "failed"
+    assert r.error_class == "engine_capacity"
+    assert cause in (r.error or "")
+
+
+@pytest.mark.asyncio
 async def test_server_dead_cause_read_from_the_harvested_log(tmp_path, monkeypatch):
     """The cause is summarised from the server.log the leak salvage brings into the slot.
 

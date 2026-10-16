@@ -31,6 +31,7 @@ from hyperloom.common.env_safety import (
 )
 
 from ...phases import machine_state as _phase_state
+from ...state.failure_evidence import engine_capacity_cause
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows, report_progress
 from ..stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
@@ -1372,14 +1373,16 @@ def _abort_without_workspace(
             AGENTX_PREFLIGHT_ERROR_CLASS,
         )
     else:
+        death = server_log_death_excerpt(str(server_log))
         found = _RoundError(
-            server_log_death_excerpt(str(server_log))
+            death
             or (
                 redact_secret_values((proc.stderr or proc.stdout)[-2000:])
                 if returncode != 0
                 else "no benchmark_* workspace produced"
             ),
-            "no_benchmark_workspace",
+            # The card holds less than the launch settings ask for: a config limit, not a missing workspace.
+            "engine_capacity" if death and engine_capacity_cause(death) else "no_benchmark_workspace",
         )
     log.warning(
         "grid_runner: variant %s aborted: %s (rc=%s)",
