@@ -30,6 +30,7 @@ _OFFICIAL_OPENAI_BASE_URL = "https://api.openai.com/v1"
 # gateway actually serves, so the order is the fallback ladder.
 _CLAUDE_ALLOWED_MODELS = (
     DEFAULT_CLAUDE_MODEL,
+    "claude-opus-5",
     "claude-opus-4-8",
     "claude-opus-4-7",
     "claude-opus-4-6",

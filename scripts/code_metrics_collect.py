@@ -41,6 +41,7 @@ from typing import NamedTuple
 MODULE = "<module>"
 #: Metric names used by more than one collector.
 COGNITIVE, FUNCTION_LINES, MODULE_LINES = "cognitive-complexity", "function-lines", "module-lines"
+FUNCTION_ARGS = "function-args"
 _JSON, _CONFIG = "json", "--config"
 
 
@@ -59,16 +60,25 @@ METRICS = {
         Metric(COGNITIVE, "Cognitive complexity"),
         Metric(FUNCTION_LINES, "Function length (lines)"),
         Metric("nested-blocks", "Nested block depth"),
+        Metric(FUNCTION_ARGS, "Parameter count"),
         Metric(MODULE_LINES, "Module length (lines)"),
         Metric("duplicated-lines", "Duplicated lines per file"),
         Metric("dead-code", "Dead code (vulture)"),
     )
 }
 
+#: Metrics this copy of the gate can measure but whose threshold may still be absent
+#: from ``pyproject.toml``: a new dimension lands in two steps (style guide § *Size and
+#: complexity*), because the base branch's copy judges the commit that adds the key.
+#: A pending metric is measured only once its threshold is there, and the name leaves
+#: this tuple in the same commit as the key.
+PENDING = (FUNCTION_ARGS,)
+
 #: Ruff rule -> (metric, the ruff setting that carries its threshold).
 RUFF_RULES = {
     "C901": ("cyclomatic-complexity", "lint.mccabe.max-complexity"),
     "PLR1702": ("nested-blocks", "lint.pylint.max-nested-blocks"),
+    "PLR0913": (FUNCTION_ARGS, "lint.pylint.max-args"),
 }
 
 _RUFF_VALUE = re.compile(r"\((\d+) > \d+\)")
@@ -251,9 +261,10 @@ def tool_version(argv: list[str]) -> str:
 
 
 def ruff_findings(root: Path, files: list[str], thresholds: dict[str, int], units: Units) -> list[Finding]:
+    rules = {code: pair for code, pair in RUFF_RULES.items() if pair[0] in thresholds}
     argv = ["ruff", "check", "--isolated", "--no-cache", "--ignore-noqa", "--exit-zero", "--output-format", _JSON]
-    argv += ["--preview", _CONFIG, "lint.explicit-preview-rules=true", "--select", ",".join(RUFF_RULES)]
-    for metric, setting in RUFF_RULES.values():
+    argv += ["--preview", _CONFIG, "lint.explicit-preview-rules=true", "--select", ",".join(rules)]
+    for metric, setting in rules.values():
         argv += [_CONFIG, f"{setting}={thresholds[metric]}"]
     with tempfile.TemporaryDirectory() as work:
         rows = json.loads(_run([*argv, *(str(root / f) for f in files)], work))
