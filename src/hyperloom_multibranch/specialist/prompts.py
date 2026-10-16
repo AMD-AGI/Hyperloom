@@ -37,8 +37,9 @@ operator), the mechanism, and the layer (config, source or kernel). Claim it wit
 it. A refused claim says why: the change was tested or is being tested on this state, so read that result or choose \
 another direction.
 3. Make the change. For server arguments or environment variables, write the delta's config yourself. For source, \
-call worktree_sync, edit the files in your worktree, check that every file you changed still compiles, then call \
-worktree_patch with the component; it returns the delta and the parent commit to test.
+call worktree_sync, edit the files in your worktree, and call worktree_check with the component until it passes (the \
+files compile and the package imports with your change); then worktree_patch returns the delta and the parent commit \
+to test.
 4. Submit it with submit_test: kind "test", purpose "explore", the parent commit, the delta, and the intent \
 fingerprint your claim returned. Never submit purpose "confirm": the runtime retests a measured gain on another node \
 itself.

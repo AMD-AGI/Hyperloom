@@ -13,6 +13,7 @@ TOOLS = (
     "notebook_branch_log",
     "notebook_claim",
     "worktree_sync",
+    "worktree_check",
     "worktree_patch",
     "submit_test",
     "poll_inbox",

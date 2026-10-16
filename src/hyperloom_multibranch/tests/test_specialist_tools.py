@@ -37,6 +37,7 @@ class _Server:
 async def rig(tmp_path):
     package = tmp_path / "site-packages" / "vllm"
     package.mkdir(parents=True)
+    (package / "__init__.py").write_bytes(b"")
     (package / "config.py").write_bytes(b"max_num_seqs = 128\n")
     installed = PackageBase("vllm", package, None, None)
     base = SourceBase(tmp_path / "source", locator=lambda _layout: installed)
@@ -50,7 +51,7 @@ async def rig(tmp_path):
     def worktrees(branch):
         return base.worktree(branch, tmp_path / "worktrees" / branch)
 
-    register_worktree_tools(server, repo=repo, worktrees=worktrees)
+    register_worktree_tools(server, repo=repo, worktrees=worktrees, locator=lambda _layout: installed)
     return SimpleNamespace(
         server=server, repo=repo, blobs=blobs, root=root, config=worktrees(BRANCH).path / "vllm/config.py"
     )
@@ -66,6 +67,18 @@ async def test_a_change_made_after_a_sync_is_a_patch_ready_to_test(rig):
     (stored,) = apply(ROOT, RecipeDelta.from_document(taken["delta"])).component("vllm").patches
     assert stored.to_document() == taken["patch"]
     assert b"+max_num_seqs = 256" in rig.blobs.get(stored.sha256)
+
+
+async def test_a_change_is_checked_on_the_cpu_before_it_is_tested(rig):
+    await rig.server.call("worktree_sync")
+    rig.config.write_bytes(b"max_num_seqs = (\n")
+
+    with pytest.raises(ToolError, match="vllm/config.py does not compile"):
+        await rig.server.call("worktree_check", component="vllm")
+    rig.config.write_bytes(b"max_num_seqs = 256\n")
+    checked = await rig.server.call("worktree_check", component="vllm")
+
+    assert checked == {"component": "vllm", "compiled": 1, "imported": "vllm"}
 
 
 async def test_a_patch_after_the_head_moved_waits_for_the_next_sync(rig):
@@ -86,5 +99,6 @@ async def test_a_patch_after_the_head_moved_waits_for_the_next_sync(rig):
 async def test_a_component_the_worktree_holds_no_source_of_is_refused(rig):
     await rig.server.call("worktree_sync")
 
-    with pytest.raises(InvalidParamsError, match="no source of sglang"):
-        await rig.server.call("worktree_patch", component="sglang")
+    for tool in ("worktree_check", "worktree_patch"):
+        with pytest.raises(InvalidParamsError, match="no source of sglang"):
+            await rig.server.call(tool, component="sglang")

@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The specialist's worktree as tools on the session's MCP service: reset it to the branch head, and turn its change
-into a patch a test can carry.
+"""The specialist's worktree as tools on the session's MCP service: reset it to the branch head, check its change on
+the CPU, and turn the change into a patch a test can carry.
 
 The branch is the caller's token's, as for every specialist tool. The service reads the worktree where the specialist
 left it and stores the patch in the session's blob store, so a test measures the bytes the worktree had when the patch
@@ -17,8 +17,15 @@ from typing import Any
 
 from hyperloom.contracts.recipe import ComponentChange, RecipeDelta
 from hyperloom.hosted.mcp_server import CallContext, InvalidParamsError, McpServer, ToolError
+from hyperloom.measure.compile import (
+    COMPONENT_LAYOUTS,
+    PackageLocator,
+    UnsupportedComponentError,
+    locate_installed_package,
+)
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST
+from hyperloom_multibranch.specialist.precheck import CheckFailed, check_change
 from hyperloom_multibranch.specialist.worktree import BranchWorktree
 
 #: The worktree of a branch; the runtime adds it before the branch's specialist first runs.
@@ -47,13 +54,26 @@ async def sync_to_head(repo: ExperimentRepo, branch: str, worktree: BranchWorktr
     return head
 
 
-def register_worktree_tools(server: McpServer, *, repo: ExperimentRepo, worktrees: WorktreeFor) -> None:
+def register_worktree_tools(
+    server: McpServer,
+    *,
+    repo: ExperimentRepo,
+    worktrees: WorktreeFor,
+    locator: PackageLocator = locate_installed_package,
+) -> None:
     own = {"scopes": frozenset({SCOPE_SPECIALIST})}
     server.register(
         "worktree_sync",
         description="Reset your worktree to your branch's head, dropping uncommitted edits; do it before each change.",
         schema=_NO_ARGUMENTS,
         handler=_sync(repo, worktrees),
+        **own,
+    )
+    server.register(
+        "worktree_check",
+        description="Check your worktree's change to one component: its files compile and the package imports with it.",
+        schema=_PATCH,
+        handler=_check(worktrees, locator),
         **own,
     )
     server.register(
@@ -70,6 +90,22 @@ def _sync(repo: ExperimentRepo, worktrees: WorktreeFor) -> Callable[[dict[str, A
         worktree = worktrees(ctx.principal.branch)
         head = await sync_to_head(repo, ctx.principal.branch, worktree)
         return {"head": head, "worktree": str(worktree.path)}
+
+    return handle
+
+
+def _check(worktrees: WorktreeFor, locator: PackageLocator) -> Callable[[dict[str, Any], CallContext], Any]:
+    async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
+        component = arguments["component"]
+        worktree = worktrees(ctx.principal.branch)
+        layout = COMPONENT_LAYOUTS.get(component)
+        if layout is None or not worktree.holds(component):
+            raise InvalidParamsError(f"your worktree holds no source of {component}")
+        try:
+            compiled = await asyncio.to_thread(check_change, worktree, component, layout, locator(layout))
+        except (CheckFailed, UnsupportedComponentError) as error:
+            raise ToolError(str(error)) from error
+        return {"component": component, "compiled": compiled, "imported": layout.import_name}
 
     return handle
 
