@@ -232,6 +232,13 @@ def test_generated_snapshot_precedes_manifest(tmp_path, monkeypatch):
         asyncio.run(cli._seed_fresh_session(args, nodes_resolved=1))
 
 
+def test_operator_argument_can_be_ablated(tmp_path, monkeypatch):
+    _, source = _launch(tmp_path, monkeypatch, "--server-args=--cuda-graph-max-bs 256")
+    candidate = materialize_benchmark_config(source, tmp_path / "ablate", remove_args=["--cuda-graph-max-bs"])
+    launch = load_benchmark(candidate)["agentx"]["launch_overrides"]
+    assert launch["append_args"] == launch["remove_args"] == []
+
+
 def test_operator_env_can_be_removed_or_replaced_by_a_candidate(tmp_path, monkeypatch):
     _, source = _launch(tmp_path, monkeypatch, "--extra-env", "TEST_SERVER_KNOB=1")
     candidate = materialize_benchmark_config(source, tmp_path / "removed", unset_envs=["TEST_SERVER_KNOB"])

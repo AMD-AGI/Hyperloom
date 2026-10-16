@@ -146,6 +146,15 @@ pins become Magpie server launch overrides, with candidate changes applied on
 top. ISL/OSL are not injected: request lengths come from the AgentX trace corpus.
 Concurrency stays fixed for the session.
 
+Native AgentX rejects `--enable-conc-sweep`, `--isl`, `--osl`, `--profile-osl`,
+`--max-model-len`, `--reference-script`, `--quantize` and `--quantize-scheme`.
+It also rejects multi-node execution and frameworks other than SGLang/vLLM.
+Through `--extra-env`, `ISL`, `OSL`, `RANDOM_RANGE_RATIO`, `MAX_MODEL_LEN`,
+`EP_SIZE` and keys beginning with `AIPERF_`, `AGENTX_` or `AGENTIC_` are unsupported;
+use `--ep` for expert parallelism. Request lengths and model context come from
+Magpie's resolved workload. Prepare any quantized checkpoint before this run,
+and start a separate session for another concurrency.
+
 For recipe selectors, profiling settings or other advanced Magpie options,
 provide a YAML directly. Start with
 `src/hyperloom/inference_optimizer/assets/configs/agentx_sglang.yaml`:

@@ -4,6 +4,7 @@
 """Native AgentX contracts through real CLI, materialization and result boundaries."""
 
 from copy import deepcopy
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -99,6 +100,42 @@ def test_grid_composes_accepted_launch_then_candidate(source, tmp_path):
     assert load_benchmark(base)["agentx"]["launch_overrides"]["env"] == {"SGLANG_TEST": "1"}
 
 
+@pytest.mark.parametrize("appended,recipe", [(True, False), (False, True), (True, True)])
+def test_grid_ablation_removes_the_option_from_its_owning_layers(source, tmp_path, report, appended, recipe):
+    from hyperloom.inference_optimizer.agentx.report import native_launch_evidence
+    from hyperloom.orchestrator.actions.executors._launch_evidence import persist_launch_evidence
+
+    option = "--cuda-graph-max-bs"
+    base = materialize_benchmark_config(source, tmp_path / "base")
+    receipt = report["agentx_metrics"]["server_launch"]
+    receipt["base_argv"] = list(receipt["effective_argv"]) + ([option, "128"] if recipe else [])
+    persist_launch_evidence(native_launch_evidence(extract_benchmark_measurement(report), base), slot=base.parent)
+    candidate = _build_variant_yaml(
+        base,
+        f"{option}=256" if appended else "",
+        GridVariant("ablate", "--mem-fraction-static 0.85", {}, remove_args=[option]),
+        output_subdir=tmp_path / "candidate",
+    )
+    overrides = load_benchmark(candidate)["agentx"]["launch_overrides"]
+    assert overrides["append_args"] == ["--mem-fraction-static", "0.85"]
+    assert overrides["remove_args"] == ([option] if recipe else [])
+
+
+def test_recipe_removal_survives_readding_and_ablating_an_override(source, tmp_path):
+    base = materialize_benchmark_config(
+        source, tmp_path / "base", remove_args=["--cuda-graph-max-bs"], extra_server_args="--cuda-graph-max-bs 256"
+    )
+    candidate = _build_variant_yaml(
+        base,
+        "",
+        GridVariant("ablate", "", {}, remove_args=["--cuda-graph-max-bs"]),
+        output_subdir=tmp_path / "candidate",
+    )
+    overrides = load_benchmark(candidate)["agentx"]["launch_overrides"]
+    assert overrides["append_args"] == []
+    assert overrides["remove_args"] == ["--cuda-graph-max-bs"]
+
+
 def test_source_evidence_is_taken_after_application_and_survives_materialization(source, tmp_path):
     root = tmp_path / "framework"
     root.mkdir()
@@ -144,6 +181,40 @@ def report():
             "latency_seconds": {"e2e_norm_intvty": {"p50": 25.0, "p90": 10.0}, "ttft": {"p50": 0.2}},
         },
     }
+
+
+@pytest.mark.parametrize(
+    "watts,started,veto",
+    [
+        (800.0, 1000.0, ""),
+        (950.0, 1000.0, "power_budget_exceeded"),
+        (None, 1000.0, "power_unmeasured"),
+        (800.0, 500.0, "power_unmeasured"),
+    ],
+)
+def test_native_power_reaches_baseline_and_keep_budgets(report, tmp_path, watts, started, veto):
+    from hyperloom.orchestrator.measurement.baseline_budget import baseline_budget_stop_reason
+
+    workspace = tmp_path / "benchmark_sglang_round"
+    workspace.mkdir()
+    (tmp_path / "gpu_power.json").write_text(
+        json.dumps(
+            {
+                "started_unix": started,
+                "avg_power_w": watts,
+                "serving_gpus": [0],
+                "per_gpu": {"0": {"avg_power_w": watts}},
+            }
+        )
+    )
+    report["gpu_monitor"] = {"sample_count": 10, "power_watts": {"avg": 100.0}}
+    measurement = extract_benchmark_measurement(report, workspace=workspace, subprocess_started_unix=1000.0)
+    state = SimpleNamespace(agentx_backend="magpie", baseline_perf=graded_axes_of(measurement), power_budget_w=900.0)
+    assert constraint_veto_reason(measurement, state) == veto
+    assert baseline_budget_stop_reason(state, measurement) == ("baseline_over_power_budget" if veto else "")
+    if watts is not None and started == 1000.0:
+        assert measurement["gpu_power_avg_w"] == watts
+        assert measurement["gpu_power_by_gpu_w"] == {"0": watts}
 
 
 def test_public_metrics_and_identity_reach_keep_guards(report):

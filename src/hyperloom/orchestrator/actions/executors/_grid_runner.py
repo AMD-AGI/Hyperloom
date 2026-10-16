@@ -19,6 +19,7 @@ from typing import Any, Callable
 import yaml
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.env import env_flag, is_truthy
 from hyperloom.common.perf_metric import constraint_fields
 from hyperloom.common.env_safety import (
@@ -66,6 +67,7 @@ from .benchmark_result import (
 from ._gpu_metrics import write_gpu_metrics_from_report
 from .benchmark_backend import build_benchmark_command
 from .benchmark_config import prepare_benchmark_runtime
+from .magpie_agentx import materialize_variant, recipe_option_names
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
 
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
@@ -359,9 +361,6 @@ def _build_variant_yaml(
     with base_yaml_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     bench = cfg.setdefault("benchmark", {})
-    from hyperloom.common.benchmark_config import is_magpie_agentx
-    from .magpie_agentx import materialize_variant
-
     if is_magpie_agentx(bench):
         return materialize_variant(
             cfg,
@@ -373,6 +372,7 @@ def _build_variant_yaml(
             base_remove=base_remove_args,
             base_unset=base_unset_envs,
             base_args_mode=base_args_mode,
+            recipe_options=recipe_option_names(base_yaml_path),
         )
     replacing = str(base_args_mode).strip().lower() == "replace"
     envs = apply_runtime_benchmark_overrides(

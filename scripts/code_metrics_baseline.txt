@@ -57,7 +57,7 @@ cognitive-complexity src/hyperloom/orchestrator/actions/executors/_nogit_patch.p
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_patch_snapshot.py::_patch_touched_paths_split 32
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_patch_snapshot.py::_restore_patch_snapshot 36
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_ray_serving.py::ServingLease._await_or_cancel 37
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py::_communicate_with_watchdog 71
+cognitive-complexity src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py::_communicate_with_watchdog 62
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_workload_envs.py::materialize_config_with_envs 286
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_once 173
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 120
@@ -290,7 +290,7 @@ cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_s
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::restart_server_for_round 27
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_nogit_patch.py::_apply_patch_no_git 26
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_ray_serving.py::_serving_actor_body 21
-cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py::_communicate_with_watchdog 26
+cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py::_communicate_with_watchdog 23
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_workload_envs.py::materialize_config_with_envs 110
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_once 54
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 39
@@ -535,7 +535,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/_framework_rewrite_e
 function-lines src/hyperloom/orchestrator/actions/executors/_framework_switch_manifest.py::parse_manifest 95
 function-lines src/hyperloom/orchestrator/actions/executors/_geak_sweep.py::sweep_via_geak 217
 function-lines src/hyperloom/orchestrator/actions/executors/_gpu_pin.py::resolve_gpu_pin 105
-function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_build_variant_yaml 137
+function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_build_variant_yaml 135
 function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_run_magpie 93
 function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 1040
 function-lines src/hyperloom/orchestrator/actions/executors/_kernel_agent_tool.py::materialize_unified_patch_snapshot 94
@@ -554,7 +554,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/_patch_source_pr.py:
 function-lines src/hyperloom/orchestrator/actions/executors/_ray_serving.py::ServingLease._await_or_cancel 172
 function-lines src/hyperloom/orchestrator/actions/executors/_server_patcher.py::_apply_atomic 149
 function-lines src/hyperloom/orchestrator/actions/executors/_server_patcher.py::_discover_sglang_plan 92
-function-lines src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py::_communicate_with_watchdog 93
+function-lines src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py::_communicate_with_watchdog 88
 function-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py::materialize_config_with_envs 922
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BaselineExecutor._after_materialize_config 100
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._maybe_stop_on_missing_baseline_accuracy 128

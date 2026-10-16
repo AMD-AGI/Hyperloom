@@ -165,6 +165,56 @@ def test_visible_mask_limits_the_cards_considered(tmp_path):
     assert out["serving_gpus"] == [2, 3]
 
 
+def test_native_power_uses_client_boundaries_and_waits_for_responses(tmp_path, monkeypatch):
+    from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
+    from hyperloom.orchestrator.actions.executors import _gpu_power
+
+    config = tmp_path / "native.yaml"
+    config.write_text("benchmark:\n  agentx: true\n")
+    server = tmp_path / "server.log"
+    server.write_text("Application startup complete\n")
+    client = tmp_path / "aiperf_artifacts" / "logs" / "aiperf.log"
+    client.parent.mkdir(parents=True)
+    query = _Replay(_tp4_on_eight(800.0))
+    monkeypatch.setattr(_gpu_power, "gpu_power_sampling_unavailable", lambda: "")
+    monkeypatch.setattr(_gpu_power, "_query_amd_smi", lambda run: query())
+    monkeypatch.setattr(_gpu_power, "_MIN_INTERVAL_SEC", 0.01)
+    monkeypatch.setenv("HYPERLOOM_GPU_POWER_INTERVAL_S", "0.01")
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_KV_METRICS", "0")
+    recorders = _subprocess_kill._build_round_recorders(str(server), {BENCHMARK_CONFIG_ENV: str(config)})
+    offsets = {}
+
+    def advance(line):
+        with client.open("a") as stream:
+            stream.write(line + "\n")
+        scan = _subprocess_kill._scan_logs_increment(str(server), offsets)
+        if scan.saw_ready:
+            recorders.note_phase("ready", time.monotonic())
+        recorders.note_client_phases(scan, time.monotonic())
+
+    try:
+        advance("Phase warmup (warmup) started")
+        time.sleep(0.03)
+        assert query.calls == 0
+        advance("Phase profiling (profiling) started")
+        deadline = time.monotonic() + 2.0
+        while query.calls < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert query.calls >= 2
+        advance("Phase profiling (profiling) sending complete")
+        before = query.calls
+        time.sleep(0.05)
+        assert query.calls > before, "outstanding responses still belong to the measured window"
+        advance("Phase profiling (profiling) complete")
+        time.sleep(0.03)
+        after = query.calls
+        time.sleep(0.03)
+        assert query.calls == after
+    finally:
+        recorders.close()
+    assert read_measured_gpu_power_by_gpu(tmp_path) == (True, {str(g): 800.0 for g in range(4)})
+
+
 def test_query_failures_leave_the_round_unmeasured_not_zero(tmp_path):
     query = _Replay(RuntimeError("amd-smi exited 1"))
     recorder = GpuPowerRecorder(output_path=str(tmp_path / GPU_POWER_ARTIFACT_NAME), query=query, interval_sec=0.5)

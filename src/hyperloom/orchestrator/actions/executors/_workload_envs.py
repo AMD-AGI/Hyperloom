@@ -1197,15 +1197,15 @@ def materialize_benchmark_config(config_path: Path, output_dir: Path, **override
 
     from hyperloom.common.benchmark_config import is_magpie_agentx
     from hyperloom.common.coerce import to_str_list
-    from hyperloom.inference_optimizer.grid_server_args import merge_server_args
-    from .magpie_agentx import LaunchChanges, materialize_agentx
+    from .magpie_agentx import LaunchChanges, apply_launch_changes, materialize_agentx, recipe_option_names
 
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     if not is_magpie_agentx(config["benchmark"]):
         return materialize_config_with_envs(config_path, output_dir, **overrides)
     replacing = overrides.get("args_mode") == "replace"
     inherited = "" if replacing else os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "")
-    args = merge_server_args(inherited, overrides.get("extra_server_args", ""))
+    recipe_options = recipe_option_names(config_path)
+    apply_launch_changes(config["benchmark"], LaunchChanges(args=inherited), recipe_options=recipe_options)
     from hyperloom.common.env import is_truthy
 
     unset_envs = to_str_list(overrides.get("unset_envs"))
@@ -1225,7 +1225,7 @@ def materialize_benchmark_config(config_path: Path, output_dir: Path, **override
     if is_truthy(server_env.pop("RUN_EVAL", False)):
         raise ValueError("AgentX uses Magpie's replay validity; RUN_EVAL cannot enable GSM8K for this workload")
     changes = LaunchChanges(
-        args,
+        overrides.get("extra_server_args", ""),
         server_env,
         to_str_list(overrides.get("remove_args")),
         unset_envs,
@@ -1237,6 +1237,7 @@ def materialize_benchmark_config(config_path: Path, output_dir: Path, **override
         changes,
         model_path=overrides.get("model_path"),
         inferencex_path=overrides.get("inferencex_path"),
+        recipe_options=recipe_options,
     )
 
 

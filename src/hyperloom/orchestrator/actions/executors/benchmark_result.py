@@ -634,7 +634,9 @@ def extract_benchmark_measurement(
     from .magpie_agentx import native_config
 
     if report.get("scenario") == "agentx" or (config_path is not None and native_config(config_path)):
-        return agentx_measurement(report)
+        measurement = agentx_measurement(report)
+        measurement.update(_round_gpu_power(report, workspace, subprocess_started_unix))
+        return measurement
     throughput = report.get("throughput") or {}
     latency = report.get("latency") or {}
     ttft = latency.get("ttft") or {}
@@ -788,6 +790,8 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
         return False
     output_tput = to_float(result.get("output_throughput"))
     if output_tput is None or output_tput <= 0:
+        return False
+    if result.get("submission_valid") is False:
         return False
     if result.get("benchmark_backend") == "magpie_agentx":
         return result.get("benchmark_valid") is True and result.get("diagnostic_only") is False

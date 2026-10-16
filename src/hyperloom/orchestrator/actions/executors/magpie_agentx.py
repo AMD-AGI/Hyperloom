@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import os
 import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping
+from typing import AbstractSet, Any, Mapping
 
 import yaml
 
@@ -44,7 +45,25 @@ def native_config(path: Path) -> bool:
     return is_magpie_agentx(load_benchmark(path))
 
 
-def apply_launch_changes(benchmark: dict[str, Any], changes: LaunchChanges) -> None:
+def recipe_option_names(config_path: Path) -> set[str]:
+    """Canonical options from this config's verified Magpie launch, when available."""
+    receipt_path = config_path.parent / "launch_evidence.json"
+    if not receipt_path.is_file():
+        return set()
+    receipt = json.loads(receipt_path.read_text(encoding=_ENCODING))
+    digest = "sha256:" + hashlib.sha256(config_path.read_bytes()).hexdigest()
+    if receipt.get("recipe_digest") != digest:
+        return set()
+    return {
+        token.partition("=")[0]
+        for token in receipt.get("magpie_server_launch", {}).get("base_argv", [])
+        if token.startswith("--")
+    }
+
+
+def apply_launch_changes(
+    benchmark: dict[str, Any], changes: LaunchChanges, *, recipe_options: AbstractSet[str] = frozenset()
+) -> None:
     """Compose a candidate; Magpie validates protected args and environment."""
     from hyperloom.inference_optimizer.grid_server_args import compose_server_args, dedupe_extra_server_args
 
@@ -53,6 +72,7 @@ def apply_launch_changes(benchmark: dict[str, Any], changes: LaunchChanges) -> N
         agentx = {"enabled": True}
         benchmark["agentx"] = agentx
     launch = agentx.setdefault("launch_overrides", {"version": 1})
+    appended_options = {token.partition("=")[0] for token in launch.get("append_args", []) if token.startswith("--")}
     inherited = shlex.join(launch.get("append_args", []))
     launch["append_args"] = shlex.split(
         dedupe_extra_server_args(
@@ -65,7 +85,10 @@ def apply_launch_changes(benchmark: dict[str, Any], changes: LaunchChanges) -> N
         )
     )
     launch["replace_args"] = changes.replace_args or launch.get("replace_args", False)
-    launch["remove_args"] = sorted(set(launch.get("remove_args", [])) | set(changes.remove_args))
+    # Magpie matches removals against the recipe, before appending our options. A local-only ablation must not
+    # become a second removal there; options present in both layers must still be removed from both.
+    recipe_removals = set(changes.remove_args) - (appended_options - recipe_options)
+    launch["remove_args"] = sorted(set(launch.get("remove_args", [])) | recipe_removals)
     env = launch.setdefault("env", {})
     for name in changes.unset_env:
         env.pop(name, None)
@@ -80,6 +103,7 @@ def materialize_agentx(
     *,
     model_path: str | None = None,
     inferencex_path: str | None = None,
+    recipe_options: AbstractSet[str] = frozenset(),
 ) -> Path:
     """Keep the workload YAML intact while changing only the server candidate."""
     config = copy.deepcopy(config)
@@ -89,7 +113,7 @@ def materialize_agentx(
         envs["MODEL_PATH"] = model_path
     if inferencex_path:
         bench["inferencex_path"] = inferencex_path
-    apply_launch_changes(bench, changes)
+    apply_launch_changes(bench, changes, recipe_options=recipe_options)
     envs["RUN_EVAL"] = "false"
     bench.pop("server_lifecycle", None)
     bench.pop("benchmark_script", None)
@@ -201,6 +225,7 @@ def materialize_variant(
     base_remove: list[str] | None,
     base_unset: list[str] | None,
     base_args_mode: str,
+    recipe_options: AbstractSet[str] = frozenset(),
 ) -> Path:
     """Compose the accepted launch and candidate, then bind its applied source."""
     apply_launch_changes(
@@ -212,6 +237,7 @@ def materialize_variant(
             base_unset or [],
             base_args_mode == REPLACE,
         ),
+        recipe_options=recipe_options,
     )
     path = materialize_agentx(
         config,
@@ -224,6 +250,7 @@ def materialize_variant(
             variant.args_mode == REPLACE,
         ),
         model_path=model_path,
+        recipe_options=recipe_options,
     )
     bind_source_evidence(path, variant.source_patches)
     apply_native_runtime(path, variant.runtime_override, variant.overlay_pythonpath)
