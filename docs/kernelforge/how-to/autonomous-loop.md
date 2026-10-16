@@ -158,7 +158,10 @@ examined in the code and the evidence, what it changed, what each change
 measured, and which directions it kept or dropped on those measurements. A lane
 session, which works in a workspace copy deleted after the round, is given write
 access to the plan's directory, so its log outlives the copy. Like the rest of
-`forge_experiments/`, the log is never committed with a candidate.
+`forge_experiments/`, the log is never committed with a candidate: when the loop
+starts it hides that folder from git with a `forge_experiments/.gitignore` holding
+`*`, so nothing written there is committed or rejected by the workspace guard as a
+new file, whatever the workspace itself ignores.
 
 After a KEEP, the previous Analysis bundle remains available and is marked
 stale. The loop refreshes it only after the canonical mean-case score has

@@ -11,6 +11,9 @@ import pytest
 
 from kernelforge.agent_backends.base import AgentRunSpec
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
+from kernelforge.workspace.edit_policy import TOOL_OWNED_UNTRACKED_GLOBS, hide_forge_loop_output
+
+REASONING_LOG = "forge_experiments/orchestration/iter_001/optimization_plan.reasoning.md"
 
 
 @pytest.fixture
@@ -110,3 +113,56 @@ def test_assembly_only_edit_after_keep_is_counted(workspace):
 
     assert guard.verify() == ["kernels/kernel.s"]
     assert guard.count_target_edits() == 1
+
+
+def _implementer_session(spec: AgentRunSpec) -> WorkspaceGuard:
+    """A guard shaped like an implementer session's, prepared before the session edits anything."""
+    guard = WorkspaceGuard(
+        replace(spec, allow_dirty_baseline=True, ignored_untracked_globs=list(TOOL_OWNED_UNTRACKED_GLOBS))
+    )
+    guard.prepare()
+    return guard
+
+
+def _edit_kernel_and_keep_reasoning_log(root: Path) -> Path:
+    (root / "kernel.py").write_text("VALUE = 2\n")
+    log = root / REASONING_LOG
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("Summary: Doubles VALUE.\n")
+    return log
+
+
+def test_reasoning_log_in_the_hidden_output_folder_keeps_the_session(workspace):
+    """The workspace ignores nothing of its own; the loop hiding its output folder is what keeps the log out."""
+    root = Path(workspace.cwd)
+    hide_forge_loop_output(root)
+    guard = _implementer_session(workspace)
+    log = _edit_kernel_and_keep_reasoning_log(root)
+
+    assert guard.verify() == ["kernel.py"]
+    assert (root / "kernel.py").read_text() == "VALUE = 2\n"
+    assert log.read_text() == "Summary: Doubles VALUE.\n"
+
+
+def test_reasoning_log_in_a_visible_output_folder_rolls_the_session_back(workspace):
+    root = Path(workspace.cwd)
+    guard = _implementer_session(workspace)
+    log = _edit_kernel_and_keep_reasoning_log(root)
+
+    with pytest.raises(WorkspaceSafetyError, match="new non-ignored files"):
+        guard.verify()
+    assert (root / "kernel.py").read_text() == "VALUE = 1\n"
+    assert not log.exists()
+
+
+def test_hidden_output_folder_exempts_no_new_source_file(workspace):
+    root = Path(workspace.cwd)
+    hide_forge_loop_output(root)
+    guard = _implementer_session(workspace)
+    _edit_kernel_and_keep_reasoning_log(root)
+    (root / "helper.py").write_text("UNEXPECTED = 1\n")
+
+    with pytest.raises(WorkspaceSafetyError, match="new non-ignored files are unsupported: helper.py"):
+        guard.verify()
+    assert (root / "kernel.py").read_text() == "VALUE = 1\n"
+    assert not (root / "helper.py").exists()
