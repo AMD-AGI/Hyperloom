@@ -3,7 +3,23 @@
 
 """Construct canonical GEAK adoption ledger rows."""
 
+from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass(frozen=True)
+class AdoptionMeasurement:
+    """One rebench outcome shared by every kernel in the adopted stack."""
+
+    measured_tput: float
+    rebench_gain: float | None
+    attributable: bool
+    provenance: str
+    ts: str
+    cycle: int
+    overlay_loaded: bool | None
+    basis: str
+    alignment_status: str
 
 
 def adoption_entry(
@@ -11,31 +27,23 @@ def adoption_entry(
     *,
     kid: str,
     spec: dict[str, Any],
-    measured_tput: float,
-    rebench_gain: float | None,
-    attributable: bool,
-    provenance: str,
-    ts: str,
-    cycle: int,
-    overlay_loaded: bool | None,
-    basis: str,
-    alignment_status: str,
+    measurement: AdoptionMeasurement,
 ) -> dict[str, Any]:
     """Preserve the best measured gain while recording this adoption's attribution."""
     entry = dict(previous or {})
     attempts = list(entry.get("attempts") or [])
-    attempt_decision = "KEEP" if attributable else "UNATTRIBUTED"
-    attempt_status = "ok" if attributable else "unvalidated"
+    attempt_decision = "KEEP" if measurement.attributable else "UNATTRIBUTED"
+    attempt_status = "ok" if measurement.attributable else "unvalidated"
     attempts.append(
         {
             "decision": attempt_decision,
             "status": attempt_status,
-            "new_tput": measured_tput,
-            "gain_pct": rebench_gain if attributable else None,
-            "decision_reason": provenance,
+            "new_tput": measurement.measured_tput,
+            "gain_pct": measurement.rebench_gain if measurement.attributable else None,
+            "decision_reason": measurement.provenance,
             "artifact_kind": str(spec.get("kind") or "authored"),
-            "ts": ts,
-            "cycle": cycle,
+            "ts": measurement.ts,
+            "cycle": measurement.cycle,
         }
     )
     # Max over attempts, matching the canonical ledger writer in ``_kernel_decisions.py`` -- ``by_kernel`` and
@@ -54,15 +62,15 @@ def adoption_entry(
             "best_gain_pct": max(gains) if gains else None,
             "last_decision": attempt_decision,
             "last_status": attempt_status,
-            "validated": attributable,
-            "overlay_loaded": bool(overlay_loaded),
-            "basis": basis,
-            "alignment_status": alignment_status,
+            "validated": measurement.attributable,
+            "overlay_loaded": bool(measurement.overlay_loaded),
+            "basis": measurement.basis,
+            "alignment_status": measurement.alignment_status,
             # GEAK's own same-config A/B, kept beside the orchestrator number so the two are never confused
             # for each other.
             "geak_same_config_delta_pct": spec.get("e2e_delta_pct"),
             "geak_isolated_speedup": spec.get("isolated"),
-            "updated_at": ts,
+            "updated_at": measurement.ts,
         }
     )
     return entry

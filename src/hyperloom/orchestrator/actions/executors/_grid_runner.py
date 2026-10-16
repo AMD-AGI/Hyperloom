@@ -67,7 +67,7 @@ from .benchmark_result import (
 from ._gpu_metrics import write_gpu_metrics_from_report
 from .benchmark_backend import build_benchmark_command
 from .benchmark_config import prepare_benchmark_runtime
-from .magpie_agentx import materialize_variant, recipe_option_names
+from .magpie_agentx import LaunchChanges, materialize_variant
 from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
 
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
@@ -358,21 +358,21 @@ def _build_variant_yaml(
     base_unset_envs: list[str] | None = None,
 ) -> Path:
     """Materialize a per-variant Magpie YAML on disk."""
-    with base_yaml_path.open(encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
+    cfg = yaml.safe_load(base_yaml_path.read_text(encoding="utf-8"))
     bench = cfg.setdefault("benchmark", {})
     if is_magpie_agentx(bench):
         return materialize_variant(
-            cfg,
+            base_yaml_path,
             variant,
             output_subdir,
             model_path=model_path,
-            base_args=base_extra_args,
-            base_env=base_extra_envs,
-            base_remove=base_remove_args,
-            base_unset=base_unset_envs,
-            base_args_mode=base_args_mode,
-            recipe_options=recipe_option_names(base_yaml_path),
+            base=LaunchChanges(
+                base_extra_args,
+                base_extra_envs or {},
+                base_remove_args or [],
+                base_unset_envs or [],
+                base_args_mode == "replace",
+            ),
         )
     replacing = str(base_args_mode).strip().lower() == "replace"
     envs = apply_runtime_benchmark_overrides(

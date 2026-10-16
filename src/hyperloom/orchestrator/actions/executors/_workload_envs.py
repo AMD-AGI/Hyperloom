@@ -1231,13 +1231,12 @@ def materialize_benchmark_config(config_path: Path, output_dir: Path, **override
         unset_envs,
         replacing,
     )
+    apply_launch_changes(config["benchmark"], changes, recipe_options=recipe_options)
     return materialize_agentx(
         config,
         output_dir / overrides.get("out_name", "baseline_config.with_envs.yaml"),
-        changes,
         model_path=overrides.get("model_path"),
         inferencex_path=overrides.get("inferencex_path"),
-        recipe_options=recipe_options,
     )
 
 

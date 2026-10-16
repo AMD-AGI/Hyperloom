@@ -279,9 +279,7 @@ def source_rebench_params(
     *,
     reason: str,
     result: dict[str, Any],
-    flags: str,
-    envs: dict[str, str],
-    controls: dict[str, Any],
+    launch: dict[str, Any],
     overlay: str,
 ) -> dict[str, Any] | None:
     """Route native source products through the existing reviewed patch executor."""
@@ -296,9 +294,7 @@ def source_rebench_params(
         return dict(pending["params"])
     params = {
         "reason": reason,
-        "extra_server_args": flags,
-        "extra_envs": envs,
-        **controls,
+        **launch,
         **stack_base_params({**(state.current_best or {}), **coord.writeback.current_best_launch_config()}),
         "config_path": state.baseline_config_path,
         "framework": state.framework,

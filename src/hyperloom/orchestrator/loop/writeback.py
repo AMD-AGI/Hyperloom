@@ -4399,9 +4399,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             self._coord,
             reason=reason,
             result=ps,
-            flags=ps_flags,
-            envs=dict(ps_envs),
-            controls=ps_controls,
+            launch={"extra_server_args": ps_flags, "extra_envs": dict(ps_envs), **ps_controls},
             overlay=ps_overlay,
         )
         if source_params is not None:

@@ -2323,7 +2323,7 @@ class KernelPhase(CoordinatorCollaborator):
         overlay_loaded: bool | None,
     ) -> None:
         """Write one adoption row per accepted GEAK kernel."""
-        from .geak_adoption import adoption_entry
+        from .geak_adoption import AdoptionMeasurement, adoption_entry
 
         if not isinstance(result, dict):
             return
@@ -2351,6 +2351,17 @@ class KernelPhase(CoordinatorCollaborator):
         ledger = self.shared_state.kernel_integrate_attempts
         if not isinstance(ledger, dict):
             return
+        measurement = AdoptionMeasurement(
+            measured_tput=measured_tput,
+            rebench_gain=rebench_gain,
+            attributable=attributable,
+            provenance=provenance,
+            ts=ts,
+            cycle=int(self.shared_state.macro_cycle or 0),
+            overlay_loaded=overlay_loaded,
+            basis=basis,
+            alignment_status=alignment_status,
+        )
         for row in rows:
             kid = row["kernel_id"]
             spec = row["spec"]
@@ -2358,15 +2369,7 @@ class KernelPhase(CoordinatorCollaborator):
                 ledger.get(kid) or {},
                 kid=kid,
                 spec=spec,
-                measured_tput=measured_tput,
-                rebench_gain=rebench_gain,
-                attributable=attributable,
-                provenance=provenance,
-                ts=ts,
-                cycle=int(self.shared_state.macro_cycle or 0),
-                overlay_loaded=overlay_loaded,
-                basis=basis,
-                alignment_status=alignment_status,
+                measurement=measurement,
             )
             ledger[kid] = entry
             # GEAK adopts by writing this ledger directly rather than through

@@ -99,11 +99,9 @@ def apply_launch_changes(
 def materialize_agentx(
     config: dict[str, Any],
     output: Path,
-    changes: LaunchChanges,
     *,
     model_path: str | None = None,
     inferencex_path: str | None = None,
-    recipe_options: AbstractSet[str] = frozenset(),
 ) -> Path:
     """Keep the workload YAML intact while changing only the server candidate."""
     config = copy.deepcopy(config)
@@ -113,7 +111,6 @@ def materialize_agentx(
         envs["MODEL_PATH"] = model_path
     if inferencex_path:
         bench["inferencex_path"] = inferencex_path
-    apply_launch_changes(bench, changes, recipe_options=recipe_options)
     envs["RUN_EVAL"] = "false"
     bench.pop("server_lifecycle", None)
     bench.pop("benchmark_script", None)
@@ -215,33 +212,19 @@ def activate_runtime(config_path: Path, runtime: Mapping[str, str]) -> None:
 
 
 def materialize_variant(
-    config: dict[str, Any],
+    config_path: Path,
     variant: Any,
     output: Path,
     *,
     model_path: str | None,
-    base_args: str,
-    base_env: Mapping[str, Any] | None,
-    base_remove: list[str] | None,
-    base_unset: list[str] | None,
-    base_args_mode: str,
-    recipe_options: AbstractSet[str] = frozenset(),
+    base: LaunchChanges,
 ) -> Path:
     """Compose the accepted launch and candidate, then bind its applied source."""
+    config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
+    recipe_options = recipe_option_names(config_path)
+    apply_launch_changes(config["benchmark"], base, recipe_options=recipe_options)
     apply_launch_changes(
         config["benchmark"],
-        LaunchChanges(
-            base_args,
-            base_env or {},
-            base_remove or [],
-            base_unset or [],
-            base_args_mode == REPLACE,
-        ),
-        recipe_options=recipe_options,
-    )
-    path = materialize_agentx(
-        config,
-        output / "config.yaml",
         LaunchChanges(
             variant.extra_server_args,
             variant.extra_envs,
@@ -249,9 +232,9 @@ def materialize_variant(
             variant.unset_envs,
             variant.args_mode == REPLACE,
         ),
-        model_path=model_path,
         recipe_options=recipe_options,
     )
+    path = materialize_agentx(config, output / "config.yaml", model_path=model_path)
     bind_source_evidence(path, variant.source_patches)
     apply_native_runtime(path, variant.runtime_override, variant.overlay_pythonpath)
     return path
