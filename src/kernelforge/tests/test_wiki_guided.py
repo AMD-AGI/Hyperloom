@@ -398,6 +398,18 @@ def test_free_shows_what_the_playbook_settled_and_no_batch():
     assert guidance.render_for_implementer(GuidanceState()) == ""
 
 
+def test_every_role_keeps_the_tasks_arithmetic_in_either_phase():
+    state = _state_with()
+    texts = [guidance.render_for_planning(state)["instructions"], guidance.render_for_implementer(state)]
+    state.phase, state.reason_codes = guidance.PHASE_FREE, [guidance.REASON_BATCH_LOW_GAIN]
+    texts += [guidance.render_for_planning(state)["instructions"], guidance.render_for_implementer(state)]
+
+    assert all(guidance.PRECISION_RULE in text for text in texts)
+    assert "BF16x3" in guidance.PRECISION_RULE and "XF32/TF32" in guidance.PRECISION_RULE
+    builder = orchestration_module._PLAYBOOK_SYSTEM_PROMPT
+    assert "BF16x3" in builder and "XF32/TF32" in builder and "whatever the tolerance would accept" in builder
+
+
 # --- the loop -------------------------------------------------------------------------------------------------------
 
 
@@ -580,6 +592,7 @@ def test_each_guided_round_builds_its_batch_and_implements_it_in_one_session(tmp
     )
     assert "## Part 1 of 1: playbook group G3 (epilogue)\n\nepilogue part" in _plan_file(workspace, 2)
     assert "Read " in histories[0] and "Phase: GUIDED" in histories[0]
+    assert guidance.PRECISION_RULE in histories[0]
     # The second build sees what the first batch settled, and its items join the playbook under fresh ids.
     assert service.build_contexts[0].wiki_guidance is None
     history = service.build_contexts[1].wiki_guidance["playbook"]["items"]

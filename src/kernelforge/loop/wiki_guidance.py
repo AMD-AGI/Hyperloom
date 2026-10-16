@@ -115,6 +115,12 @@ _UNTRIED_REASON = re.compile(
 )
 _NOTE_CHARS = 300
 
+# A GUIDED round has no plan critic to hold a plan to the task contract's numerical semantics, so every role is told.
+PRECISION_RULE = (
+    "Keep the arithmetic the task computes in: never emulate its multiply type with narrower products (for example "
+    "FP32 through BF16x3 or BF16x2 splits, or XF32/TF32 matrix instructions), whatever the tolerance would accept."
+)
+
 GUIDED_INSTRUCTIONS = (
     "GUIDED phase. `playbook` lists the techniques the knowledge base supports for this kernel, built round by round "
     "from the knowledge base and the profile, each item with the status its measurement settled. `batch` is this "
@@ -138,7 +144,8 @@ GUIDED_INSTRUCTIONS = (
     "each covering its group whole across compute, memory and algorithm. Build each part from its group's analysis; "
     "an analyst of another role, when there is one, analyzes how this round's playbook items apply to this kernel "
     "rather than surveying it broadly.\n"
-    "Add work outside the playbook only when the evidence shows a cited item cannot pay off without it."
+    "Add work outside the playbook only when the evidence shows a cited item cannot pay off without it. "
+    + PRECISION_RULE
 )
 
 FREE_INSTRUCTIONS = (
@@ -146,7 +153,7 @@ FREE_INSTRUCTIONS = (
     "items were measured and did not help in the form tried; SKIPPED items did not apply or were dropped. Optimize "
     "beyond the playbook with your own knowledge and the evidence. The knowledge base stays available, but it is no "
     "longer the source of the plan. Re-try a REFUTED item only when new evidence changes its premise, and say what "
-    "changed."
+    "changed. " + PRECISION_RULE
 )
 
 BATCH_SESSION_INSTRUCTIONS = (
@@ -764,12 +771,13 @@ def render_for_implementer(state: GuidanceState) -> str:
             "every cited item; when an item's detail matters, read its knowledge base pages with the knowledge tools "
             "(an item supported by profiling alone has none, and the plan states its evidence). "
             "A plan headed as a GUIDED batch is implemented whole in this session and measured once at its end: "
-            "follow its instructions for keeping or dropping each part and for the lines that end the session."
+            "follow its instructions for keeping or dropping each part and for the lines that end the session. "
+            + PRECISION_RULE
         )
     return (
         "## Wiki guidance\n"
         f"Phase: FREE ({', '.join(state.reason_codes) or 'unrecorded'}). The knowledge base no longer supplies the "
-        "plan; the plan may go beyond the playbook."
+        "plan; the plan may go beyond the playbook. " + PRECISION_RULE
     )
 
 
