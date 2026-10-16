@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.measure.compile import (
@@ -100,6 +101,14 @@ class SourceBase:
         return layout
 
 
+@dataclass(frozen=True)
+class Changes:
+    """The files a worktree's change writes and deletes, relative to the worktree's root."""
+
+    written: tuple[str, ...]
+    deleted: tuple[str, ...]
+
+
 class BranchWorktree:
     """One branch's checkout of the source base; the experiment commit its HEAD holds is named in HEAD's subject."""
 
@@ -138,12 +147,25 @@ class BranchWorktree:
 
     def diff(self, component: str) -> str:
         """The worktree's change to ``component`` against its head, as the patch the toolbox applies; empty when none."""
+        prefix = self._staged(component)
+        return _git(self.path, "diff", "--cached", "--no-color", "--no-ext-diff", "HEAD", "--", prefix)
+
+    def changed(self, component: str) -> Changes:
+        """The files the worktree's change to ``component`` writes and deletes against its head."""
+        prefix = self._staged(component)
+        listing = _git(self.path, "diff", "--cached", "--no-renames", "--name-status", "HEAD", "--", prefix)
+        rows = [line.split("\t", 1) for line in listing.splitlines() if line.strip()]
+        return Changes(
+            written=tuple(path for status, path in rows if status != "D"),
+            deleted=tuple(path for status, path in rows if status == "D"),
+        )
+
+    def _staged(self, component: str) -> str:
         layout = self._layouts.get(component)
         if layout is None:
             raise UnsupportedComponentError(f"{component} has no package layout")
-        prefix = layout.upstream_prefix
-        _git(self.path, "add", "--all", "--", prefix)
-        return _git(self.path, "diff", "--cached", "--no-color", "--no-ext-diff", "HEAD", "--", prefix)
+        _git(self.path, "add", "--all", "--", layout.upstream_prefix)
+        return layout.upstream_prefix
 
 
-__all__ = ["BASE_BRANCH", "HEAD_SUBJECT", "SKIPPED", "BranchWorktree", "SourceBase", "WorktreeError"]
+__all__ = ["BASE_BRANCH", "HEAD_SUBJECT", "SKIPPED", "BranchWorktree", "Changes", "SourceBase", "WorktreeError"]
