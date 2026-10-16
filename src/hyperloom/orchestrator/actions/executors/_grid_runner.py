@@ -53,6 +53,7 @@ from ._subprocess_kill import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     SESSION_TIME_EXHAUSTED_RETURNCODE,
+    engine_capacity_cause,
     resolve_benchmark_timeouts,
     run_with_session_kill,
     server_log_death_excerpt,
@@ -1629,10 +1630,11 @@ async def run_grid(
                 death_excerpt = server_log_death_excerpt(str(server_log)) or (
                     "server engine/worker init failed; parent process hung and was reaped by the liveness watchdog"
                 )
+                death_class = "engine_capacity" if engine_capacity_cause(death_excerpt) else "server_init_dead"
                 _write_variant_abort_marker(
                     slot,
                     variant_name=variant.name,
-                    error_class="server_init_dead",
+                    error_class=death_class,
                     error_summary=death_excerpt,
                     extra_args=variant.extra_server_args,
                 )
@@ -1645,7 +1647,7 @@ async def run_grid(
                         returncode=rc,
                         runtime_sec=variant_runtime_sec,
                         error=death_excerpt,
-                        error_class="server_init_dead",
+                        error_class=death_class,
                         server_log_path=_existing_log_path(server_log),
                         note=variant.note,
                         nonfatal_warnings=[f"harvested_leaked_artifact:{src}" for src, _ in sd_harvested],

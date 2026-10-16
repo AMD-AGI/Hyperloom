@@ -51,6 +51,9 @@ class TestClassifyFailureAttribution:
     def test_ambiguous_failure_remains_unknown(self):
         assert classify_failure_attribution(error_class="server_init_dead") == FAILURE_ATTRIBUTION_UNKNOWN
 
+    def test_engine_capacity_is_not_attributed_to_the_candidate_or_the_host(self):
+        assert classify_failure_attribution(error_class="engine_capacity") == FAILURE_ATTRIBUTION_UNKNOWN
+
     def test_valid_explicit_attribution_wins(self):
         assert (
             classify_failure_attribution(
