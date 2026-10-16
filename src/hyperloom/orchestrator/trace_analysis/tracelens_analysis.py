@@ -5116,6 +5116,7 @@ def main() -> int:
                                 skill_path=skill,
                                 output_dir=tracelens_dir,
                                 tracelens_root=tl_root,
+                                tracelens_internal_root=tl_internal_root,
                                 capture_folder=capture_folder,
                                 budget_minutes=args.budget_minutes,
                                 model=_resolve_tracelens_model(),

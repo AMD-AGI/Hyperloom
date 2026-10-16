@@ -407,34 +407,62 @@ def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path 
     return None
 
 
-def build_orchestrator_prompt(*, skill_path: Path, output_dir: Path) -> str:
+def build_orchestrator_prompt(
+    *,
+    skill_path: Path,
+    output_dir: Path,
+    tracelens_root: Path,
+    tracelens_internal_root: Path | None,
+) -> str:
     """Prompt an agent to run the TraceLens standalone skill from ``run.yaml``.
 
     Provider-neutral: the same prompt drives the Claude SDK runner and the
-    Codex SDK runner. The run inputs live in the config, so the prompt only
-    names it and answers the skill's environment question.
+    Codex SDK runner. The trace, platform, analysis mode and capture folder
+    live only in the run config; the prompt names it and supplies the
+    execution context the skill would otherwise ask for.
 
     Args:
         skill_path (Path): Path to the TraceLens skill file to follow.
         output_dir (Path): Directory holding ``run.yaml`` and receiving the outputs.
+        tracelens_root (Path): The TraceLens project root.
+        tracelens_internal_root (Path | None): The TraceLens-internal root, or
+            ``None`` in OSS-only mode.
 
     Returns:
         str: The fully assembled orchestrator prompt text.
     """
 
+    internal_root_text = str(tracelens_internal_root) if tracelens_internal_root else "(not installed; OSS-only mode)"
+    tl_extension_text = "TraceLens_internal" if tracelens_internal_root else "(unset)"
     return f"""You are running TraceLens standalone analysis for Hyperloom.
 
 Read and follow the FULL instructions in this skill file:
 {skill_path}
 
 Run it from config {(output_dir / RUN_CONFIG_NAME).resolve()}, standalone.
-Environment: local, no venv. The command prefix is already cached at
-{output_dir / "cache" / "cmd_prefix.txt"}, so use it and do not rebuild it.
-Do not ask questions. Run through Step 12.
+The execution context below answers the remaining Step 0 questions.
+Do not ask the user any questions; proceed with the analysis.
 
-{output_dir / "analysis.md"} must exist before you finish (TraceLens final
-report; REQUIRED).
-Do not run GEAK, kernel optimization, or modify model/framework source.
+Execution context:
+- Environment: local
+- TraceLens root: {tracelens_root}
+- TraceLens-internal root: {internal_root_text}
+- TL_EXTENSION: {tl_extension_text}
+- Command prefix cache: {output_dir / "cache" / "cmd_prefix.txt"}
+- Run config: {(output_dir / RUN_CONFIG_NAME).resolve()}
+- Comparison scope: standalone
+- Output directory: {output_dir}
+
+
+Important requirements:
+1. Use the provided command prefix cache for all shell commands; do not rebuild it.
+2. Run the analysis-orchestrator workflow through Step 12.
+3. Take the trace, platform, analysis mode and capture folder from the run config
+   only. If the Step 0 config check fails, stop and report its error.
+4. Write all TraceLens outputs under the output directory above.
+5. Ensure this file exists before you finish:
+   - {output_dir / "analysis.md"}  (TraceLens final report; REQUIRED)
+6. Do not run GEAK, kernel optimization, or modify model/framework source.
 
 When complete, respond with a short summary of the artifacts you wrote.
 """
@@ -694,6 +722,7 @@ async def run_tracelens_skill(
     skill_path: Path,
     output_dir: Path,
     tracelens_root: Path,
+    tracelens_internal_root: Path | None,
     capture_folder: Path | None,
     budget_minutes: float,
     model: str | None = None,
@@ -714,6 +743,8 @@ async def run_tracelens_skill(
         skill_path (Path): Path to the TraceLens skill file to follow.
         output_dir (Path): Directory holding ``run.yaml`` and receiving the outputs.
         tracelens_root (Path): The TraceLens project root.
+        tracelens_internal_root (Path | None): The TraceLens-internal root, or
+            ``None`` in OSS-only mode.
         capture_folder (Path | None): Graph-capture folder, read only as the
             Codex runner's write scope; the run config already names it.
         budget_minutes (float): Time budget for the run. The Codex path spends
@@ -741,7 +772,12 @@ async def run_tracelens_skill(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     prefix_path = write_local_cmd_prefix(output_dir, tracelens_root)
-    prompt = build_orchestrator_prompt(skill_path=skill_path, output_dir=output_dir)
+    prompt = build_orchestrator_prompt(
+        skill_path=skill_path,
+        output_dir=output_dir,
+        tracelens_root=tracelens_root,
+        tracelens_internal_root=tracelens_internal_root,
+    )
 
     resolved_model = (model or "").strip()
     if _should_use_codex_runner() and (
