@@ -1,0 +1,266 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""A plain ``kernelforge forge-loop`` run: one unit per candidate Kernel Forge archived.
+
+The run is a workspace's ``forge_experiments/`` directory, recognized by its ``campaign_config.json`` and
+``run_state.json``. Every attempt that produced a diff is archived as ``candidates/iter_NNN/meta.json``, and each one
+is a unit: seq N, the candidate iteration N measured and Kernel Forge's decision on it, under the run's
+``campaign_id`` as ``run_id``. The forge-loop's stdout log has no timestamps, so a unit's times come from the run's
+``events.jsonl``, and the log is read only for the Implementer it names and the record of Kernel Forge's own
+experience KB each kept candidate was written as. A log belongs to the run whose kernel it announces. A Claude Code
+transcript under the log root belongs to the unit whose plan's reasoning log its first prompt tells the session to
+keep; the transcript is how a lane's PLAN headline is known, since the lane's ``meta.json`` holds its whole plan.
+
+Kernel Forge writes naive local times, and the units carry them as it wrote them; collection reads a naive time as
+UTC. That is right for a run made in a container, which normally runs in UTC, and shifts the times of a run made on a
+host in another time zone.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from kernelforge.loop.merge_candidates import MERGE_PLAN_PREFIX
+from kernelforge.run_export.archive import (
+    IterationArchive,
+    Transcript,
+    campaign_identity,
+    first_sentences,
+    implementer_fields,
+    is_transcript,
+    read_transcript,
+    reasoning_text,
+)
+from kernelforge.run_export.files import FileRecord, read_json, read_text
+from kernelforge.run_export.units import OBJECTIVE, CandidateOrigin, Run, log_files, read_error
+
+_EXPERIMENTS = "forge_experiments"
+_CONFIG = "campaign_config.json"
+_STATE = "run_state.json"
+#: Kernel Forge's copies of a workspace for a fan-out round's lanes, which carry the run's whole archive.
+_LANE_COPY = "forge-lanes-"
+_STARTED = "iteration_started"
+_RESULT = "iteration_result"
+_LOOP_BANNER = "Starting autonomous iteration loop"
+_KERNEL_LINE = re.compile(r"^  Kernel: (.+)$", re.M)
+_IMPLEMENTER_LINE = re.compile(r"^[ \t]*Implementer: (\S+) / (\S+)[ \t]*$", re.M)
+_ITERATION_HEADER = re.compile(r"^--- Iteration (\d+)\b")
+_KB_WRITTEN = re.compile(r"^\s*\[kb\] experience written: (\S+)")
+_CANDIDATE_DIR = re.compile(r"^iter_(\d+)$")
+_LANE_RATIONALE = re.compile(r"^lane \d+ of a fan-out round$")
+#: The in-session gate's outcome, which Kernel Forge puts in front of the agent's own text.
+_GATE_TAG = re.compile(r"^\[gate edits=[^\]]*\]\s*")
+_CLOCK = re.compile(r"^(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d)$")
+
+
+@dataclass(frozen=True)
+class _LoopLog:
+    """One forge-loop stdout log: the kernels its runs announced, the first Implementer it names, and the KB records
+    its iterations wrote."""
+
+    path: Path
+    kernels: tuple[str, ...]
+    implementer: dict[str, str]
+    kb_records: dict[int, str]
+
+    def announces(self, workspace: Path, kernel_path: str) -> bool:
+        """Whether a run of this log edited ``kernel_path`` in a workspace of this name, wherever it then was."""
+
+        suffix = f"/{workspace.name}/{kernel_path}"
+        return bool(kernel_path) and any(kernel.strip().endswith(suffix) for kernel in self.kernels)
+
+
+def _kb_records(text: str) -> dict[int, str]:
+    """The first record of Kernel Forge's own experience KB written during each iteration, by iteration.
+
+    The forge-loop writes one after each KEEP and may write the best one again after its last iteration, which is why
+    only a kept candidate's unit takes its iteration's record.
+    """
+
+    records: dict[int, str] = {}
+    iteration: int | None = None
+    for line in text.splitlines():
+        if (header := _ITERATION_HEADER.match(line)) is not None:
+            iteration = int(header.group(1))
+        elif iteration is not None and (written := _KB_WRITTEN.match(line)) is not None:
+            records.setdefault(iteration, written.group(1))
+    return records
+
+
+def _loop_logs(records: list[FileRecord], claimed: set[Path]) -> list[_LoopLog]:
+    logs: list[_LoopLog] = []
+    for record in records:
+        if record.path.suffix != ".log" or record.size == 0 or record.path in claimed:
+            continue
+        try:
+            text = read_text(record.path)
+        except OSError:
+            continue
+        if _LOOP_BANNER not in text:
+            continue
+        implementer = _IMPLEMENTER_LINE.search(text)
+        named = {"llm_backend": implementer.group(1), "llm_model": implementer.group(2)} if implementer else {}
+        logs.append(_LoopLog(record.path, tuple(_KERNEL_LINE.findall(text)), named, _kb_records(text)))
+    return logs
+
+
+def _experiments_dirs(records: list[FileRecord], claimed: set[Path], root: Path) -> list[Path]:
+    found: list[Path] = []
+    for record in records:
+        path = record.path
+        if path.name != _CONFIG or path.parent.name != _EXPERIMENTS or path in claimed:
+            continue
+        lane_copy = any(part.startswith(_LANE_COPY) for part in path.relative_to(root).parts)
+        if not lane_copy and (path.parent / _STATE).is_file():
+            found.append(path.parent)
+    return found
+
+
+def _iso(stamp: Any) -> str | None:
+    """A Kernel Forge timestamp, ``%Y-%m-%d %H:%M:%S`` in naive local time, as ISO 8601."""
+
+    match = _CLOCK.match(str(stamp or ""))
+    return f"{match.group(1)}T{match.group(2)}" if match else None
+
+
+def _event_times(path: Path) -> dict[tuple[str, int], str]:
+    """When each iteration last started and when it reported its result, keyed by event type and iteration."""
+
+    times: dict[tuple[str, int], str] = {}
+    lines = read_text(path).splitlines() if path.is_file() else []
+    for raw in lines:
+        try:
+            event = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(event, dict) or event.get("type") not in (_STARTED, _RESULT):
+            continue
+        stamp, iteration = _iso(event.get("ts")), event.get("iter")
+        if stamp and isinstance(iteration, int):
+            times[(event["type"], iteration)] = stamp
+    return times
+
+
+def _origin(meta: dict[str, Any]) -> CandidateOrigin:
+    if str(meta.get("plan") or "").startswith(MERGE_PLAN_PREFIX):
+        return CandidateOrigin.MERGE
+    if _LANE_RATIONALE.match(str(meta.get("rationale") or "")):
+        return CandidateOrigin.LANE
+    return CandidateOrigin.SESSION
+
+
+def _origin_fields(origin: CandidateOrigin, meta: dict[str, Any], plan: str) -> dict[str, Any]:
+    """What ``meta.json`` says of the candidate that depends on where it came from.
+
+    A merge's plan is Kernel Forge's line naming the two stacked candidates, and no agent reasoned about it. A single
+    session's ``rationale`` is the agent's own text. A lane's records neither, only which lane it was.
+    """
+
+    if origin is CandidateOrigin.MERGE:
+        return {"approach": plan.splitlines()[0], "plan": first_sentences(plan)}
+    if origin is CandidateOrigin.SESSION:
+        return {"reasoning": reasoning_text([_GATE_TAG.sub("", str(meta.get("rationale") or ""), count=1)])}
+    return {}
+
+
+@dataclass(frozen=True)
+class _PlainRun:
+    """One plain run: its ``forge_experiments`` directory, the files all its units name, its event times, the KB
+    records its logs show each iteration writing, and the transcripts under its log root ``root``."""
+
+    run: Run
+    experiments: Path
+    files: list[Path]
+    times: dict[tuple[str, int], str]
+    kb_records: dict[int, str]
+    root: Path
+    transcripts: list[Transcript]
+
+    def candidate_unit(self, seq: int) -> dict[str, Any]:
+        """Seq N: the candidate iteration N archived, and Kernel Forge's decision on it."""
+
+        archive = IterationArchive(self.experiments, seq)
+        meta = archive.meta()
+        if meta is None:
+            message = f"{archive.candidate / 'meta.json'} is not a readable JSON object"
+            return read_error(f"{self.run.label}/iteration-{seq}", message, self.files)
+        origin = _origin(meta)
+        plan = str(meta.get("plan") or "").strip()
+        plan_file = archive.plan_file(origin, plan)
+        stamp = _iso(meta.get("timestamp"))
+        kb_record = self.kb_records.get(seq) if meta.get("kept") else None
+        unit = self.run.unit(
+            f"iteration-{seq}", "iteration", seq, [], commit=meta.get("commit_hash"), kb_record=kb_record
+        )
+        unit.update(
+            objective=OBJECTIVE,
+            started_at=self.times.get((_STARTED, seq), stamp),
+            completed_at=self.times.get((_RESULT, seq), stamp),
+            best_mean_case_speedup=meta.get("best_mean_case_speedup_before"),
+            decision=meta.get("decision"),
+            mean_case_speedup=meta.get("mean_case_speedup"),
+            change_kind=origin,
+        )
+        unit.update(archive.fields(origin, meta, plan_file))
+        unit.update(_origin_fields(origin, meta, plan))
+        transcripts = archive.sessions(plan_file, self.transcripts)
+        unit.update(implementer_fields(transcripts, plan_file, self.root))
+        unit["log_files"] = log_files(self.files + archive.files(plan_file) + [item.path for item in transcripts])
+        return unit
+
+
+def _run_units(
+    experiments: Path, logs: list[_LoopLog], transcripts: list[Transcript], root: Path
+) -> list[dict[str, Any]]:
+    workspace = experiments.parent
+    config = read_json(experiments / _CONFIG)
+    state = read_json(experiments / _STATE)
+    kernel_path = str((config or {}).get("kernel_path") or "")
+    run_logs = [log for log in logs if log.announces(workspace, kernel_path)]
+    files = [log.path for log in run_logs] + [experiments / _CONFIG, experiments / _STATE]
+    campaign_id = str((state or {}).get("campaign_id") or "")
+    if config is None or not campaign_id:
+        problem = f"{_CONFIG} is not a readable JSON object" if config is None else f"{_STATE} names no campaign_id"
+        return [read_error(f"{workspace.name}/session", problem, files)]
+    try:
+        times = _event_times(experiments / "events.jsonl")
+    except OSError as error:
+        return [read_error(f"{workspace.name}/session", f"{type(error).__name__}: {error}", files)]
+    run = Run(
+        label=workspace.name,
+        run_id=campaign_id,
+        identity=campaign_identity(config),
+        provenance=next((log.implementer for log in run_logs if log.implementer), {}),
+    )
+    kb_records = {seq: record for log in run_logs for seq, record in log.kb_records.items()}
+    plain = _PlainRun(run, experiments, files, times, kb_records, root, transcripts)
+    candidates = experiments / "candidates"
+    numbers = sorted(
+        int(match.group(1))
+        for path in (candidates.iterdir() if candidates.is_dir() else ())
+        if path.is_dir() and (match := _CANDIDATE_DIR.match(path.name))
+    )
+    return [plain.candidate_unit(seq) for seq in numbers]
+
+
+def forge_loop_runs(records: list[FileRecord], claimed: set[Path], root: Path) -> list[dict[str, Any]]:
+    """The units of every plain forge-loop run under ``root`` whose files no arena layout claimed."""
+
+    runs = _experiments_dirs(records, claimed, root)
+    if not runs:
+        return []
+    logs = _loop_logs(records, claimed)
+    transcripts = sorted(
+        (
+            read_transcript(record.path)
+            for record in records
+            if is_transcript(record.path) and record.path not in claimed
+        ),
+        key=lambda transcript: (transcript.started, str(transcript.path)),
+    )
+    return [unit for experiments in runs for unit in _run_units(experiments, logs, transcripts, root)]

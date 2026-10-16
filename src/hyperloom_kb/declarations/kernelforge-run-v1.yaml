@@ -1,0 +1,155 @@
+# KernelForge runs, one Experience per run: the forge-rewrite PORT step when the session ran forge-rewrite, and each
+# forge-loop iteration, which measures one candidate kernel and keeps or reverts it.
+# Hyperloom gives every declaration the rationale fields reasoning, alternatives, and preconditions, so they are not
+# listed here. rationale.reasoning holds the Summary line the implementer's reasoning log (rationale.reasoning_log)
+# opens with, at most three sentences stating the problem it solved and its approach. When the session kept no such
+# log, or its log has no Summary line, as in every run made before KernelForge asked for the log, it holds the first
+# three sentences of the implementer's own messages from its Claude Code transcript or, without a transcript, of the
+# rationale KernelForge recorded: the Rationale line it logs, which it cuts at 200 characters
+# (kernelforge/loop/runner.py:5417 at 1c14e79e1), or for a plain forge-loop run the candidate's meta.json. Reasoning
+# is required: a run whose logs hold none becomes no Experience, and the review asks for logs that record it.
+# The objective and every identity field always form the repeat group, with the schema: Hyperloom groups Experiences
+# that way by itself (hyperloom_kb/query_view.py repeat_group_key) and accepts group: true only on baseline and change
+# fields, so none is declared here.
+schema_version: 2
+
+objectives:
+  - id: kernel_mean_case_speedup@v1
+    description: >-
+      How many times faster a candidate kernel runs than the original kernel the session started from, averaged with
+      equal weight over the task's benchmark cases: for each case, the original kernel's time divided by the
+      candidate's time, then the mean of those ratios. A forge-loop iteration takes it as the mean of three
+      independent benchmark runs of per-case medians, and keeps the candidate only when it clears a bar KernelForge
+      sets from the best result so far and the spread of those runs; the PORT step measures the ported kernel once.
+    unit: x
+    direction: higher_is_better
+
+identity:
+  - {name: operator, description: "Operator the kernel implements: the operator the task's production baseline calls, or the PyTorch module class the task benchmarks, e.g. gemm_a8w8_blockscale_bpreshuffle, SimpleMatmulModule."}
+  - {name: kernel, description: "Kernel the session optimizes: the task's logical operator, which KernelForge files its KB records under, e.g. gemm_a16w16_nt_n1024_k4096, hip2hip/gpumode_large/SimpleMatmulModule."}
+  - {name: framework, description: "Framework that owns the source operator, e.g. aiter."}
+  - {name: backend, description: "Kernel language of the candidate, e.g. flydsl, hip."}
+  - {name: backend_version, description: "Release of the candidate's kernel language in the session's runtime, e.g. 0.3.2.", kind: version}
+  - {name: gpu, description: "GPU model the candidate was measured on, which also fixes its architecture target, e.g. mi355x (gfx950), mi300x (gfx942)."}
+  - {name: dtype, description: "Data type of the operator's first input in the benchmark cases, e.g. bfloat16, float8_e4m3fn."}
+  - {name: model, description: "Model family the task bundle files the task under, e.g. deepseek-v4-flash."}
+
+baseline:
+  - name: current_best_mean_case_speedup
+    description: >-
+      The score of the best kernel KernelForge had kept when the iteration began, from the iteration's header line
+      or, for a plain forge-loop run, the candidate's meta.json: the score the candidate had to beat, by a margin
+      KernelForge sets from the spread of its benchmark runs. KernelForge raises it only when it keeps a candidate.
+      Until the first KEEP, it is KernelForge's own measurement of the kernel the forge-loop started from: the
+      original kernel, or forge-rewrite's port of it or the KB kernel it accepted instead. A score is how many times
+      faster a kernel runs than the original kernel, averaged over the task's benchmark cases; 1.0 is as fast as the
+      original.
+    kind: number
+    role: measurement
+  - name: source_ms
+    description: >-
+      How long the original kernel took before any change, in milliseconds: its average time per benchmark case,
+      measured once when the session started. It comes from forge-rewrite's source baseline line, or from the baseline
+      wall time KernelForge archived for the iteration. Every score compares a kernel's time on each case with the
+      original kernel's time on that case.
+    kind: number
+
+rationale:
+  - name: plan
+    description: >-
+      What the plan the candidate was built from sets out to do, in at most three sentences: the Summary line the
+      plan opens with, the planner's statement of the problem it addresses and of its goal. For a lane, the plan is
+      the lane's own; for a single session, the round's optimization plan, read from its original draft when
+      KernelForge could not revise the draft and put the critic's review in front of it
+      (kernelforge/orchestrator/orchestration.py:1711 at 1c14e79e1); for a merge, the stacked plans as KernelForge
+      records them. A plan without a Summary line, as every plan written before KernelForge asked for one is, gives
+      its first three sentences instead: lines a planner wrote before the plan's first heading are skipped, as are
+      headings, code blocks, and tables.
+    kind: text
+  - name: plan_file
+    description: >-
+      The whole plan the candidate was built from, as KernelForge archived it in the planning round's
+      orchestration/iter_NNN/: optimization_plan.md for a single session or a round's first lane, lane_NNN.md for
+      the round's other lanes. The Experience links to the file by its name, size, and SHA-256.
+    kind: file
+  - name: reasoning_file
+    description: >-
+      Path of the Claude Code transcript of the session that made the candidate, relative to the directory the logs
+      were collected from: every message the agent wrote, and the record of the iteration it gave KernelForge
+      afterwards. The transcript is also one of the Experience's raw_logs, named by the path's last part. A path, not
+      a file link: Hyperloom's credential screen for linked files flags the transcript's token-usage counters, such
+      as input_tokens. Absent when the logs hold no transcript of that session.
+    kind: text
+  - name: reasoning_log
+    description: >-
+      The whole reasoning log the implementer kept while it worked, beside the plan it executed:
+      orchestration/iter_NNN/<plan>.reasoning.md, such as optimization_plan.reasoning.md or lane_002.reasoning.md.
+      It opens with the Summary line rationale.reasoning holds, followed by the implementer's record of its work: what
+      it examined and the evidence, what it changed, what each change measured, and which directions it kept or
+      dropped on those measurements. The Experience links to the file by
+      its name, size, and SHA-256; the log is also one of its raw_logs. Optional: absent when no session kept one,
+      as for the PORT step, a merge, and every run made before KernelForge asked for the log.
+    kind: file
+    required: false
+
+change:
+  - name: approach
+    description: >-
+      The optimization the candidate tried, in one line: the implementer's own PLAN headline, which KernelForge asks
+      for as a short headline "naming the optimization NOW IN THE FILE" (kernelforge/orchestrator/agent.py:414 at
+      1c14e79e1); for a merge, KernelForge's line naming the two stacked candidates; for the PORT step, the port's op
+      line or the KB kernel forge-rewrite accepted instead.
+    kind: text
+    role: summary
+    search: 4
+  - name: source_code
+    description: >-
+      The kernel file that was measured, as KernelForge archived it in candidates/iter_NNN/. The Experience links to
+      the file by its name, size, and SHA-256; the knowledge base stores the file once, beside the run's raw logs.
+    kind: file
+
+outcome:
+  - name: decision
+    description: >-
+      KernelForge's decision label for an iteration, as its forge-loop runner assigns them, or the PORT step's
+      result.
+    role: decision
+    values:
+      - KEEP
+      - REVERT_PERF
+      - REVERT_VALIDATION
+      - REVERT_VALIDATION_TIMEOUT
+      - REVERT_VALIDATION_ERROR
+      - BUILD_FAILED
+      - CRASH
+      - REVERT_INTEGRITY
+      - REVERT_CONTENDED
+      - NO_CHANGES
+      - API_ERROR
+      - AGENT_ERROR
+      - ORCHESTRATION_ERROR
+      - PORT OK
+      - PORT FAILED
+  - name: mean_case_speedup
+    description: >-
+      The candidate's score: how many times faster it ran than the original kernel, averaged over the task's
+      benchmark cases. For a forge-loop iteration it is the mean of three independent benchmark runs; for the PORT
+      step, its one interim measurement.
+    kind: number
+    role: measurement
+
+reflection:
+  - name: lesson
+    description: >-
+      The first three sentences of KernelForge's lesson for the iteration, which it writes after every iteration that
+      ran an implementer session (kernelforge/loop/runner.py:3796 at 1c14e79e1): the agent's own record of the
+      iteration when KernelForge could get one, otherwise a record KernelForge writes from what the loop observed,
+      opening "(no agent summary)". Optional: lanes get no lesson.
+    kind: text
+    required: false
+  - name: lesson_file
+    description: >-
+      KernelForge's whole lesson for the iteration, lessons/iter_NNN.md. The Experience links to the file by its
+      name, size, and SHA-256. Optional, as lesson is.
+    kind: file
+    required: false
