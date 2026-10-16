@@ -64,7 +64,7 @@ from kernelforge.loop.runner import (
     IterationResult,
     WindowGain,
 )
-from kernelforge.loop.scoring import passes_keep_threshold
+from kernelforge.loop.scoring import GateScoring, passes_keep_threshold
 from kernelforge.loop.search_policy import (
     MARGINAL_GAIN_WINDOW,
     OBJECTIVE_DISCOVER_NEW_MECHANISM,
@@ -837,6 +837,21 @@ def test_a_session_without_a_plan_is_given_no_reasoning_log(tmp_path, monkeypatc
     )
 
     assert seen == ["not passed"]
+
+
+def test_a_session_is_handed_what_its_gate_scores_against(tmp_path, monkeypatch):
+    """The pristine per-case times and the current best reach the session's gate as one value."""
+    loop, _workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={"case": 2.0})
+    seen: list[GateScoring] = []
+
+    async def agent(_kernel_path, _history, session_sink, gate_scoring):
+        seen.append(gate_scoring)
+        session_sink["plan"] = "inspect only"
+        return "No source change was needed."
+
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent, supervisor_fn=_unused_supervisor)))
+
+    assert seen == [GateScoring({"case": 2.0}, 1.0)]
 
 
 def _counting_plan(loop, workspace, rounds, *, plans=("a", "b"), unavailable=False):

@@ -929,7 +929,7 @@ function-lines src/kernelforge/mcp_server/tools/bench.py::aggregate_benchmark_me
 function-lines src/kernelforge/mcp_server/tools/bench.py::bench_wallclock 110
 function-lines src/kernelforge/mcp_server/tools/bench.py::sweep_case 178
 function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 300
-function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn.agent_fn 184
+function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn.agent_fn 183
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._prompts 227
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._run_analysis_session 101
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._write_artifact_catalog 93
