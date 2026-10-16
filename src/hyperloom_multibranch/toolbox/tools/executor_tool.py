@@ -52,14 +52,12 @@ class ExecutorTool:
         *,
         ok_text: str,
         summary_keys: tuple[str, ...] = (),
-        extra: Callable[[Path], Mapping[str, Any]] = lambda workdir: {},
     ) -> None:
         self.name = name
         self._kind = kind
         self._factory = factory
         self._ok_text = ok_text
         self._keys = summary_keys
-        self._extra = extra
 
     def context(self, request: ToolRequest, workdir: Path) -> RunnerContext:
         """The runner context the executor expects, with the job's work directory as its session and workspace."""
@@ -71,8 +69,7 @@ class ExecutorTool:
             params=dict(request.params),
             idempotency_key=job_id,
         )
-        extra: dict[str, Any] = {"workspace": str(workdir), "session_dir": str(workdir)}
-        extra.update(self._extra(workdir))
+        extra = {"workspace": str(workdir), "session_dir": str(workdir)}
         return RunnerContext(task=task, lease=None, extra=extra)
 
     async def run(self, request: ToolRequest, workdir: Path) -> ToolOutput:

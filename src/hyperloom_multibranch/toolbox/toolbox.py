@@ -15,7 +15,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from hyperloom.contracts.measurement import FailureClass, TestRequest, TestResult, Validity
 from hyperloom_multibranch.contracts.notebook.interfaces import (
@@ -50,50 +50,75 @@ CLAIM_TTL_SECONDS = 600.0
 WRITE_RETRIES = 3
 
 
-class RealToolbox:
-    """Implements :class:`~hyperloom_multibranch.contracts.toolbox.Toolbox`; call :meth:`start` before use.
+@dataclass(frozen=True)
+class ToolboxStores:
+    """Where the toolbox keeps what it must not lose: the submit log and the notebook's ports.
+
+    ``sink`` takes the requests, results and withdrawals, ``health`` holds the quarantine list, ``claims`` hands the
+    claim of a request over, ``records`` is searched when a restart recovers unfinished tests (both may be ``None``).
+    """
+
+    log: SubmissionLog
+    sink: TestRecordSink
+    health: NodeHealth
+    claims: ClaimService | None = None
+    records: RecordSearch | None = None
+
+
+@dataclass(frozen=True)
+class AcceptanceSetup:
+    """What acceptance judges a request against: the repository, the planner and the active image.
 
     ``workload_kind`` is the campaign's workload (default InferenceX, the MB1 scenario, design 7.3): in an InferenceX
     campaign every ``explore`` and ``confirm`` request is accepted with ``accuracy=True``; AgentX leaves requests as
-    submitted.
+    submitted. A recipe on an image other than ``active_image_digest`` is refused; ``None`` skips the check.
     """
+
+    repo: ExperimentRepo
+    planner: MeasurementPlanner
+    active_image_digest: str | None
+    workload_kind: WorkloadKind = WorkloadKind.INFERENCEX
+
+
+@dataclass(frozen=True)
+class ToolboxTuning:
+    """The queue policy, the infrastructure retries, the claim lifetime and the clock; the defaults are the real ones."""
+
+    policy: QueuePolicy | None = None
+    max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES
+    claim_ttl_seconds: float = CLAIM_TTL_SECONDS
+    clock: Callable[[], float] = time.time
+
+
+class RealToolbox:
+    """Implements :class:`~hyperloom_multibranch.contracts.toolbox.Toolbox`; call :meth:`start` before use."""
 
     def __init__(
         self,
-        *,
-        log: SubmissionLog,
-        repo: ExperimentRepo,
-        sink: TestRecordSink,
-        health: NodeHealth,
+        stores: ToolboxStores,
         executor: Executor,
-        planner: MeasurementPlanner,
-        active_image_digest: str | None,
-        workload_kind: WorkloadKind = WorkloadKind.INFERENCEX,
-        policy: QueuePolicy | None = None,
-        claims: ClaimService | None = None,
-        records: RecordSearch | None = None,
+        acceptance: AcceptanceSetup,
+        *,
         tools: ToolJobs | None = None,
-        max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES,
-        claim_ttl_seconds: float = CLAIM_TTL_SECONDS,
-        clock: Callable[[], float] = time.time,
+        tuning: ToolboxTuning = ToolboxTuning(),
     ) -> None:
-        self._log, self._sink, self._claims, self._records = log, sink, claims, records
-        self._queue = WorkQueue(policy or QueuePolicy())
-        self._quarantine = Quarantine(health)
+        self._log, self._sink, self._claims, self._records = stores.log, stores.sink, stores.claims, stores.records
+        self._queue = WorkQueue(tuning.policy or QueuePolicy())
+        self._quarantine = Quarantine(stores.health)
         self._acceptance = Acceptance(
-            repo,
-            planner,
-            active_image_digest=active_image_digest,
+            acceptance.repo,
+            acceptance.planner,
+            active_image_digest=acceptance.active_image_digest,
             is_accepted=self._is_accepted,
-            workload_kind=workload_kind,
+            workload_kind=acceptance.workload_kind,
         )
         self._runner = AttemptRunner(
             executor,
             avoid=lambda: self._quarantine.nodes,
             on_node_failure=self._node_failed,
-            max_infra_retries=max_infra_retries,
+            max_infra_retries=tuning.max_infra_retries,
         )
-        self._ttl, self._clock = claim_ttl_seconds, clock
+        self._ttl, self._clock = tuning.claim_ttl_seconds, tuning.clock
         self._tools = tools
         self._closed = False
         self._tool_jobs: dict[str, list[str]] = {}
@@ -411,4 +436,4 @@ class RealToolbox:
             await self.tick()
 
 
-__all__ = ["RealToolbox"]
+__all__ = ["AcceptanceSetup", "RealToolbox", "ToolboxStores", "ToolboxTuning"]

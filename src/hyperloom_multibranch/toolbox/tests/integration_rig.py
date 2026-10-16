@@ -33,10 +33,16 @@ from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.gate import RuleGate
-from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox, build_local_toolbox
+from hyperloom_multibranch.toolbox.local_hosted import (
+    LocalHostedToolbox,
+    LocalOptions,
+    LocalSession,
+    build_local_toolbox,
+)
 from hyperloom_multibranch.toolbox.mcp_tools import McpSpecialistTokens, register_specialist_tools
 from hyperloom_multibranch.toolbox.planner import HostedPlanner
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
+from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 
 Planner = Callable[[HostedPlanner], Any]
 
@@ -135,19 +141,17 @@ async def build_stack(root: Path, variant: Variant, baseline: Recipe, *, k: int 
     compiler = EnvironmentCompiler(variant.spec.blobs, variant.image_digest, variant.locator)
     planner = variant.wrap_planner(HostedPlanner(compiler, variant.canonical, root / "points"))
     toolbox = build_local_toolbox(
-        session_dir=session,
-        run_id="w15",
-        cards=variant.cards,
-        notebook=notebook,
-        repo=repo,
-        planner=planner,
-        spec=variant.spec,
-        active_image_digest=variant.image_digest,
-        policy=QueuePolicy(per_branch_k=k, global_concurrency=len(variant.cards), branch_k={INTEGRATION_BRANCH: 2}),
-        runner_envs=variant.runner_envs,
-        python=variant.python or sys.executable,
-        timeout_sec=variant.timeout_sec,
-        poll_interval_sec=variant.poll_interval_sec,
+        LocalSession(session, "w15", variant.cards),
+        notebook,
+        AcceptanceSetup(repo, planner, variant.image_digest),
+        variant.spec,
+        options=LocalOptions(
+            policy=QueuePolicy(per_branch_k=k, global_concurrency=len(variant.cards), branch_k={INTEGRATION_BRANCH: 2}),
+            runner_envs=variant.runner_envs,
+            python=variant.python or sys.executable,
+            timeout_sec=variant.timeout_sec,
+            poll_interval_sec=variant.poll_interval_sec,
+        ),
     )
     server = McpServer(McpServerConfig(host_token=secrets.token_hex(16)), campaign="w15")
     register_specialist_tools(

@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 from hyperloom.contracts.measurement import (
     Attempt,
@@ -83,6 +83,14 @@ def _facts_nodes(attempts: list[Attempt]) -> list[str]:
     return [attempt.node for attempt in attempts if attempt.node]
 
 
+class _Ending(NamedTuple):
+    """How a request ends: its validity and, when it failed, the failure class and the reason."""
+
+    validity: Validity
+    failure: FailureClass | None
+    reason: str | None
+
+
 class AttemptRunner:
     """Runs a request's attempts with ``executor``; ``avoid`` supplies the quarantine list, ``on_node_failure`` hears of
     a node that failed for an infrastructure reason."""
@@ -110,14 +118,8 @@ class AttemptRunner:
             try:
                 result = await self._executor.run(attempt_job)
             except MeasurementRefused as error:
-                return self._final(
-                    job,
-                    last,
-                    attempts,
-                    Validity.MEASUREMENT_FAILED,
-                    FailureClass.INFRA,
-                    f"measurement refused: {error}",
-                )
+                ending = _Ending(Validity.MEASUREMENT_FAILED, FailureClass.INFRA, f"measurement refused: {error}")
+                return self._final(job, last, attempts, ending)
             result = _mark_same_node(result, avoided)
             attempts.append(_attempt_of(result))
             last = result
@@ -125,16 +127,22 @@ class AttemptRunner:
             if result.validity is Validity.SUCCEEDED:
                 return await self._succeeded(job, result, attempts)
             if failure is FailureClass.CANDIDATE:
-                return self._final(job, result, attempts, Validity.CANDIDATE_FAILED, failure, result.failure_reason)
+                return self._final(
+                    job, result, attempts, _Ending(Validity.CANDIDATE_FAILED, failure, result.failure_reason)
+                )
             if failure is FailureClass.UNCLEAR:
                 if reran:
-                    return self._final(job, result, attempts, Validity.CANDIDATE_FAILED, failure, result.failure_reason)
+                    return self._final(
+                        job, result, attempts, _Ending(Validity.CANDIDATE_FAILED, failure, result.failure_reason)
+                    )
                 reran = True
                 continue
             await self._report(attempts[-1], job, result.failure_reason)
             if infra_retries >= self._max_infra_retries:
                 reason = f"{infra_retries + 1} attempts failed for infrastructure reasons: {result.failure_reason}"
-                return self._final(job, result, attempts, Validity.MEASUREMENT_FAILED, FailureClass.INFRA, reason)
+                return self._final(
+                    job, result, attempts, _Ending(Validity.MEASUREMENT_FAILED, FailureClass.INFRA, reason)
+                )
             infra_retries += 1
 
     async def _succeeded(self, job: TestJob, result: TestResult, attempts: list[Attempt]) -> TestResult:
@@ -143,26 +151,19 @@ class AttemptRunner:
             reason = f"unclear failure did not reproduce on a rerun: {first.failure_reason or 'no reason given'}"
             attempts[0] = replace(first, failure_class=FailureClass.INFRA, failure_reason=reason)
             await self._report(attempts[0], job, reason)
-        return self._final(job, result, attempts, result.validity, None, None)
+        return self._final(job, result, attempts, _Ending(result.validity, None, None))
 
     async def _report(self, attempt: Attempt, job: TestJob, reason: str | None) -> None:
         if attempt.node:
             await self._on_node_failure(attempt.node, reason or "infrastructure failure")
 
     @staticmethod
-    def _final(
-        job: TestJob,
-        result: TestResult | None,
-        attempts: list[Attempt],
-        validity: Validity,
-        failure: FailureClass | None,
-        reason: str | None,
-    ) -> TestResult:
-        base = result or TestResult(request_id=job.request.request_id or "", validity=validity)
+    def _final(job: TestJob, result: TestResult | None, attempts: list[Attempt], ending: _Ending) -> TestResult:
+        base = result or TestResult(request_id=job.request.request_id or "", validity=ending.validity)
         return replace(
             base,
-            validity=validity,
-            failure_class=failure,
-            failure_reason=reason,
+            validity=ending.validity,
+            failure_class=ending.failure,
+            failure_reason=ending.reason,
             attempts=tuple(attempts),
         )

@@ -19,7 +19,14 @@ from hyperloom.measure.tests.test_hosted_real_runner import _git_repo, _point
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
-from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox, build_local_toolbox, max_parallel_tests
+from hyperloom_multibranch.toolbox.local_hosted import (
+    LocalHostedToolbox,
+    LocalOptions,
+    LocalSession,
+    build_local_toolbox,
+    max_parallel_tests,
+)
+from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanner
@@ -55,21 +62,15 @@ def _toolbox_of(
     notebook: LocalNotebook, tmp_path: Path, session: Path, commit: str, **extra: Any
 ) -> LocalHostedToolbox:
     return build_local_toolbox(
-        session_dir=session,
-        run_id="run-1",
-        cards=range(8),
-        notebook=notebook,
-        repo=FakeRepo(),
-        planner=PointPlanner(_point(tmp_path)),
-        spec=spec_context(
+        LocalSession(session, "run-1", range(8)),
+        notebook,
+        AcceptanceSetup(FakeRepo(), PointPlanner(_point(tmp_path)), IMAGE, WorkloadKind.AGENTX),
+        spec_context(
             tmp_path, inferencex_commit=commit, benchmark_backend="bypass", blob_root=str(session / "hosted" / "blobs")
         ),
-        active_image_digest=IMAGE,
-        workload_kind=WorkloadKind.AGENTX,
-        policy=QueuePolicy(per_branch_k=2, global_concurrency=64),
-        poll_interval_sec=0.1,
-        timeout_sec=120,
-        **extra,
+        options=LocalOptions(
+            policy=QueuePolicy(per_branch_k=2, global_concurrency=64), poll_interval_sec=0.1, timeout_sec=120, **extra
+        ),
     )
 
 

@@ -250,23 +250,31 @@ def _notebook_handler(
     return handle
 
 
-def register_specialist_tools(
-    server: McpServer,
-    *,
-    toolbox: Toolbox,
-    notebooks: NotebookFor,
-    claim_ttl_seconds: float = 600.0,
-    toolbox_loop: asyncio.AbstractEventLoop | None = None,
-    learnings: LearningFinder | None = None,
-) -> None:
-    """Register every specialist tool; ``notebooks(branch)`` is the notebook handle that writes as that branch.
+@dataclasses.dataclass(frozen=True)
+class SpecialistToolOptions:
+    """What :func:`register_specialist_tools` may be told besides the toolbox and the notebooks.
 
-    ``toolbox_loop`` is the loop the toolbox was started on; every call to the toolbox is made on it. When omitted it is
+    ``claim_ttl_seconds`` is how long a claim a specialist takes lives. ``toolbox_loop`` is the loop the toolbox was started on; every call to the toolbox is made on it. When omitted it is
     the running loop of the caller, so registering from the coroutine that started the toolbox is enough; without a
     running loop the toolbox is called on the loop of each request, which suits a toolbox that keeps no tasks.
     ``learnings`` is the session's one finder of the specialists' learnings (the notebook's ``LearningRecall``, which
     adds past sessions' from the Experience KB); without it ``notebook_learnings`` finds this session's only.
     """
+
+    claim_ttl_seconds: float = 600.0
+    toolbox_loop: asyncio.AbstractEventLoop | None = None
+    learnings: LearningFinder | None = None
+
+
+def register_specialist_tools(
+    server: McpServer,
+    *,
+    toolbox: Toolbox,
+    notebooks: NotebookFor,
+    options: SpecialistToolOptions = SpecialistToolOptions(),
+) -> None:
+    """Register every specialist tool; ``notebooks(branch)`` is the notebook handle that writes as that branch."""
+    claim_ttl_seconds, toolbox_loop, learnings = options.claim_ttl_seconds, options.toolbox_loop, options.learnings
     if toolbox_loop is None:
         with contextlib.suppress(RuntimeError):
             toolbox_loop = asyncio.get_running_loop()
@@ -321,6 +329,7 @@ __all__ = [
     "SPECIALIST_TOKEN_ENV",
     "NotebookFor",
     "McpSpecialistTokens",
+    "SpecialistToolOptions",
     "jsonable",
     "register_specialist_tools",
 ]

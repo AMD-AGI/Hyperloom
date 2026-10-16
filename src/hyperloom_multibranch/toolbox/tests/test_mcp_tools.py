@@ -34,6 +34,7 @@ from hyperloom_multibranch.toolbox.mcp_tools import (
     SPECIALIST_TOKEN_ENV,
     McpSpecialistTokens,
     jsonable,
+    SpecialistToolOptions,
     register_specialist_tools,
 )
 
@@ -114,7 +115,9 @@ def rig(seeded: tuple[Path, FakeClock]) -> Iterator[Rig]:
     def notebooks(branch: str) -> LocalNotebook:
         return LocalNotebook(root, Writer(Role.SPECIALIST_RUNTIME, branch, branch), clock=clock)
 
-    register_specialist_tools(server, toolbox=toolbox, notebooks=notebooks, claim_ttl_seconds=60.0)
+    register_specialist_tools(
+        server, toolbox=toolbox, notebooks=notebooks, options=SpecialistToolOptions(claim_ttl_seconds=60.0)
+    )
     server.start()
     yield Rig(server, toolbox, root, clock)
     server.stop()

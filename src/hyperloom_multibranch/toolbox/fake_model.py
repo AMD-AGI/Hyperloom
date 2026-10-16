@@ -251,6 +251,16 @@ def _rng(seed: int, *parts: object) -> random.Random:
     return random.Random("/".join(str(part) for part in (seed, *parts)))
 
 
+@dataclass(frozen=True)
+class AttemptConstraints:
+    """Where an attempt may run and how it is forced to end: nodes to prefer not to use (best effort), nodes it cannot
+    use at all (quarantined ones) and a fate to use instead of drawing one."""
+
+    avoid: frozenset[str] = frozenset()
+    unavailable: frozenset[str] = frozenset()
+    forced: Fate | None = None
+
+
 class FakeMeasurer:
     """Draws the fate of an attempt, picks its node and produces its values."""
 
@@ -262,16 +272,14 @@ class FakeMeasurer:
         request: TestRequest,
         request_id: str,
         attempt: int,
-        *,
-        avoid: frozenset[str],
-        unavailable: frozenset[str],
-        forced: Fate | None = None,
+        constraints: AttemptConstraints = AttemptConstraints(),
     ) -> AttemptOutcome:
         """One attempt on a fresh sandbox: ``avoid`` is best effort, ``unavailable`` (quarantined nodes) is not."""
 
         rng = _rng(self.config.seed, request_id, attempt)
+        forced = constraints.forced
         fate = forced if forced is not None else self.config.failures.draw(rng)
-        sandbox = self._sandbox(request_id, attempt, rng, avoid, unavailable)
+        sandbox = self._sandbox(request_id, attempt, rng, constraints)
         if sandbox is None:
             return AttemptOutcome(Fate.INFRA, None)
         if fate is not Fate.OK:
@@ -280,9 +288,10 @@ class FakeMeasurer:
         return AttemptOutcome(Fate.OK, sandbox, self._rounds(request, factor, rng), self._accuracy(request, rng))
 
     def _sandbox(
-        self, request_id: str, attempt: int, rng: random.Random, avoid: frozenset[str], unavailable: frozenset[str]
+        self, request_id: str, attempt: int, rng: random.Random, constraints: AttemptConstraints
     ) -> SandboxFacts | None:
-        usable = sorted(set(self.config.nodes) - unavailable)
+        avoid = constraints.avoid
+        usable = sorted(set(self.config.nodes) - constraints.unavailable)
         if not usable:
             return None
         fresh = [node for node in usable if node not in avoid]

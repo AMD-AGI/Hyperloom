@@ -30,7 +30,7 @@ from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import TTL, FakeClock, intent
-from hyperloom_multibranch.toolbox.fake import FakeToolbox
+from hyperloom_multibranch.toolbox.fake import FakeToolbox, FakeWiring
 from hyperloom_multibranch.toolbox.fake_model import Fate, FailureRatios, FakeToolboxConfig, NoiseModel
 
 DELTA = RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256"))
@@ -106,7 +106,7 @@ async def test_submit_returns_a_stable_uuid_and_writes_the_request_before_return
 
 async def test_a_rejection_raises_with_its_reason_and_writes_nothing() -> None:
     book = Notebook()
-    box = FakeToolbox(notebook=book, autorun=False, parent_exists=lambda commit: commit == "c0")
+    box = FakeToolbox(notebook=book, autorun=False, wiring=FakeWiring(parent_exists=lambda commit: commit == "c0"))
     with pytest.raises(RequestRejected) as raised:
         await box.submit_test(_request(parent_commit="c9"))
     assert raised.value.code == "unknown_parent"
@@ -438,7 +438,10 @@ async def test_the_fake_writes_requests_results_withdrawals_and_quarantine_into_
 ) -> None:
     notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"), clock=FakeClock())
     box = FakeToolbox(
-        FakeToolboxConfig(noise=QUIET), notebook=notebook, claims=notebook, records=notebook, autorun=False
+        FakeToolboxConfig(noise=QUIET),
+        notebook=notebook,
+        wiring=FakeWiring(claims=notebook, records=notebook),
+        autorun=False,
     )
     box.script(lambda r: r.branch_id == "flaky", [Fate.INFRA, Fate.OK])
     box.script(lambda r: r.branch_id == "broken", [Fate.CANDIDATE])

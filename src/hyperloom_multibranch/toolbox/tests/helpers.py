@@ -29,7 +29,7 @@ from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
-from hyperloom_multibranch.toolbox.toolbox import RealToolbox
+from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, RealToolbox, ToolboxStores, ToolboxTuning
 
 IMAGE = "sha256:" + "a" * 64
 OTHER_IMAGE = "sha256:" + "b" * 64
@@ -179,20 +179,19 @@ def build(
     executor = executor or ScriptedExecutor()
     fake, repo = FakePlanner(), repo or FakeRepo()
     planner = planner or fake
-    toolbox = RealToolbox(
+    stores = ToolboxStores(
         log=SubmissionLog(tmp_path / "toolbox" / "submissions.jsonl", "campaign-1"),
-        repo=repo,
         sink=wrap_sink(notebook) if wrap_sink else notebook,  # type: ignore[arg-type]
         health=notebook,
-        executor=executor,
-        planner=planner,
-        active_image_digest=active_image,
-        workload_kind=workload_kind,
-        policy=policy,
         claims=notebook if with_claims else None,
         records=notebook,
+    )
+    toolbox = RealToolbox(
+        stores,
+        executor,
+        AcceptanceSetup(repo, planner, active_image, workload_kind),
         tools=tools(notebook) if tools else None,  # type: ignore[arg-type]
-        clock=clock,
+        tuning=ToolboxTuning(policy=policy, clock=clock),
     )
     return Rig(toolbox, executor, fake, repo, notebook, tmp_path, clock)
 

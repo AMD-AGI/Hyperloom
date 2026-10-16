@@ -25,6 +25,7 @@ from hyperloom_multibranch.toolbox.fake_model import (
     Direction,
     Fate,
     FailureRatios,
+    AttemptConstraints,
     FakeMeasurer,
     FakeToolboxConfig,
     NoiseModel,
@@ -95,7 +96,7 @@ def test_values_without_noise_are_the_baseline_times_the_effect() -> None:
     quiet = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
     request = _request()
     config = FakeToolboxConfig(noise=quiet, default_effect=0.05, measure_rounds=2)
-    outcome = FakeMeasurer(config).run(request, "r1", 0, avoid=frozenset(), unavailable=frozenset())
+    outcome = FakeMeasurer(config).run(request, "r1", 0)
     assert _tps(outcome) == [pytest.approx(1050.0)] * 2
     warm = [r for r in outcome.rounds if r.phase == "warmup"]
     assert warm[0].metrics[GRADED_OUTPUT] == pytest.approx(840.0)
@@ -107,20 +108,18 @@ def test_effect_by_fingerprint_and_by_function() -> None:
     quiet = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
     keyed = FakeToolboxConfig(noise=quiet, effects={delta.fingerprint(): 0.1})
     run = FakeMeasurer(keyed).run
-    assert _tps(run(_request(delta=delta), "r", 0, avoid=frozenset(), unavailable=frozenset()))[0] == pytest.approx(
-        1100
-    )
-    assert _tps(run(_request(), "r", 0, avoid=frozenset(), unavailable=frozenset()))[0] == pytest.approx(1000)
+    assert _tps(run(_request(delta=delta), "r", 0))[0] == pytest.approx(1100)
+    assert _tps(run(_request(), "r", 0))[0] == pytest.approx(1000)
     fn = FakeToolboxConfig(noise=quiet, effect_fn=lambda request: -0.5, effects={delta.fingerprint(): 0.1})
-    got = FakeMeasurer(fn).run(_request(delta=delta), "r", 0, avoid=frozenset(), unavailable=frozenset())
+    got = FakeMeasurer(fn).run(_request(delta=delta), "r", 0)
     assert _tps(got)[0] == pytest.approx(500)
 
 
 def test_a_node_keeps_its_bias_across_tests() -> None:
     config = FakeToolboxConfig(nodes=("only",), noise=NoiseModel(test_noise_sigma=0.0), measure_rounds=1)
     measurer = FakeMeasurer(config)
-    first = measurer.run(_request(), "r1", 0, avoid=frozenset(), unavailable=frozenset())
-    second = measurer.run(_request(), "r2", 0, avoid=frozenset(), unavailable=frozenset())
+    first = measurer.run(_request(), "r1", 0)
+    second = measurer.run(_request(), "r2", 0)
     assert _tps(first) == pytest.approx(_tps(second), rel=1e-3)
     assert _tps(first)[0] != 1000.0
 
@@ -128,7 +127,7 @@ def test_a_node_keeps_its_bias_across_tests() -> None:
 def test_same_seed_same_values_and_another_seed_other_values() -> None:
     def values(seed: int) -> list[float]:
         measurer = FakeMeasurer(FakeToolboxConfig(seed=seed))
-        return _tps(measurer.run(_request(), "r1", 0, avoid=frozenset(), unavailable=frozenset()))
+        return _tps(measurer.run(_request(), "r1", 0))
 
     assert values(5) == values(5)
     assert values(5) != values(6)
@@ -137,35 +136,33 @@ def test_same_seed_same_values_and_another_seed_other_values() -> None:
 def test_a_fresh_sandbox_avoids_the_given_nodes_and_flags_when_it_cannot() -> None:
     config = FakeToolboxConfig(nodes=("a", "b"))
     measurer = FakeMeasurer(config)
-    away = measurer.run(_request(), "r", 0, avoid=frozenset({"a"}), unavailable=frozenset())
+    away = measurer.run(_request(), "r", 0, AttemptConstraints(avoid=frozenset({"a"})))
     assert (away.sandbox.node_name, away.sandbox.same_node) == ("b", False)
-    stuck = measurer.run(_request(), "r", 0, avoid=frozenset({"a", "b"}), unavailable=frozenset())
+    stuck = measurer.run(_request(), "r", 0, AttemptConstraints(avoid=frozenset({"a", "b"})))
     assert stuck.sandbox.same_node is True
 
 
 def test_quarantined_nodes_are_never_used_and_no_node_left_is_an_infra_failure() -> None:
     measurer = FakeMeasurer(FakeToolboxConfig(nodes=("a", "b")))
-    outcome = measurer.run(_request(), "r", 0, avoid=frozenset(), unavailable=frozenset({"a"}))
+    outcome = measurer.run(_request(), "r", 0, AttemptConstraints(unavailable=frozenset({"a"})))
     assert outcome.sandbox.node_name == "b"
-    none_left = measurer.run(_request(), "r", 0, avoid=frozenset(), unavailable=frozenset({"a", "b"}))
+    none_left = measurer.run(_request(), "r", 0, AttemptConstraints(unavailable=frozenset({"a", "b"})))
     assert (none_left.fate, none_left.sandbox) == (Fate.INFRA, None)
 
 
 def test_an_accuracy_test_has_scores_and_no_rounds() -> None:
     config = FakeToolboxConfig(accuracy_score=0.9)
     request = _request(kind=TestKind.ACCURACY, purpose=Purpose.ACCURACY, accuracy=True)
-    outcome = FakeMeasurer(config).run(request, "r", 0, avoid=frozenset(), unavailable=frozenset())
+    outcome = FakeMeasurer(config).run(request, "r", 0)
     assert outcome.rounds == ()
     assert outcome.accuracy[0].score == pytest.approx(0.9, abs=0.01)
-    plain = FakeMeasurer(config).run(_request(), "r", 0, avoid=frozenset(), unavailable=frozenset())
+    plain = FakeMeasurer(config).run(_request(), "r", 0)
     assert plain.accuracy == ()
 
 
 def test_concurrency_of_a_request_sets_the_rounds() -> None:
     config = FakeToolboxConfig(measure_rounds=2)
-    outcome = FakeMeasurer(config).run(
-        _request(concurrency=(8, 16)), "r", 0, avoid=frozenset(), unavailable=frozenset()
-    )
+    outcome = FakeMeasurer(config).run(_request(concurrency=(8, 16)), "r", 0)
     assert [(r.phase, r.concurrency) for r in outcome.rounds] == [
         ("warmup", 8),
         ("measure", 8),
@@ -194,7 +191,7 @@ def test_config_refuses_nonsense(overrides: dict[str, object]) -> None:
 
 
 def _measure(config: FakeToolboxConfig, request: TestRequest) -> dict[str, float]:
-    outcome = FakeMeasurer(config).run(request, "r", 0, avoid=frozenset(), unavailable=frozenset())
+    outcome = FakeMeasurer(config).run(request, "r", 0)
     return dict(next(r for r in outcome.rounds if r.phase == "measure").metrics)
 
 
@@ -237,7 +234,7 @@ def test_a_metric_moves_as_its_declared_direction_says_not_as_its_name_says() ->
 def test_the_error_rate_follows_the_delta_and_fills_the_failed_requests() -> None:
     delta = RecipeDelta(config=ConfigDelta(server_args="--flaky"))
     config = FakeToolboxConfig(error_rates={delta.fingerprint(): 2.5})
-    flaky = FakeMeasurer(config).run(_request(delta=delta), "r", 0, avoid=frozenset(), unavailable=frozenset())
+    flaky = FakeMeasurer(config).run(_request(delta=delta), "r", 0)
     measured = [r for r in flaky.rounds if r.phase == "measure"]
     assert {r.metrics[GRADED_ERROR_RATE] for r in measured} == {2.5}
     assert {r.failed_requests for r in measured} == {25}

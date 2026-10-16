@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import tempfile
+from dataclasses import dataclass
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Protocol
@@ -31,13 +32,14 @@ from hyperloom_multibranch.contracts.toolbox import CancelOutcome, QueueState, R
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.fake_model import (
     AttemptOutcome,
+    AttemptConstraints,
     FakeMeasurer,
     FakeToolboxConfig,
     Fate,
 )
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
-from hyperloom_multibranch.toolbox.toolbox import RealToolbox
+from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, RealToolbox, ToolboxStores, ToolboxTuning
 
 
 class ToolboxNotebook(Protocol):
@@ -126,14 +128,8 @@ class FakeExecutor:
         if self.config.run_delay_s:
             await asyncio.sleep(self.config.run_delay_s)
         request, request_id, index = job.request, job.request.request_id or "", job.attempt - 1
-        outcome = self._measurer.run(
-            request,
-            request_id,
-            index,
-            avoid=frozenset(job.avoid_nodes),
-            unavailable=frozenset(),
-            forced=self._forced(request, index),
-        )
+        constraints = AttemptConstraints(avoid=frozenset(job.avoid_nodes), forced=self._forced(request, index))
+        outcome = self._measurer.run(request, request_id, index, constraints)
         started, self.now = self.now, self.now + self.config.attempt_seconds
         gpus = outcome.sandbox.gpu_count if outcome.sandbox is not None else 0
         spent = self._gpu_seconds[request_id] = self._gpu_seconds.get(request_id, 0.0) + (self.now - started) * gpus
@@ -171,12 +167,28 @@ class FakeExecutor:
         return Validity.MEASUREMENT_FAILED if outcome.fate is Fate.INFRA else Validity.CANDIDATE_FAILED
 
 
+@dataclass(frozen=True)
+class FakeWiring:
+    """What a :class:`FakeToolbox` is connected to besides its notebook; every field is optional.
+
+    ``parent_exists`` answers whether a parent commit is known, ``log_path`` places the submit log, ``claims`` and
+    ``records`` are the notebook's claim and record ports and ``workload_kind`` is the campaign's workload.
+    """
+
+    parent_exists: Callable[[str], bool] | None = None
+    log_path: Path | None = None
+    claims: ClaimService | None = None
+    records: RecordSearch | None = None
+    workload_kind: WorkloadKind = WorkloadKind.INFERENCEX
+
+
 class FakeToolbox(RealToolbox):
     """The real toolbox over a :class:`FakeExecutor`.
 
     ``autorun=False`` holds every attempt until :meth:`drain`; tests that want queued tests use it with a small
-    ``max_parallel_tests``. Without a ``notebook`` the writes go to a :class:`MemoryNotebook`; without ``log_path`` the
-    submit log lives in a temporary directory that goes with the toolbox. The toolbox starts on first use.
+    ``max_parallel_tests``. Without a ``notebook`` the writes go to a :class:`MemoryNotebook`; without
+    ``wiring.log_path`` the submit log lives in a temporary directory that goes with the toolbox. The toolbox starts
+    on first use.
     """
 
     def __init__(
@@ -185,12 +197,9 @@ class FakeToolbox(RealToolbox):
         *,
         notebook: ToolboxNotebook | None = None,
         autorun: bool = True,
-        parent_exists: Callable[[str], bool] | None = None,
-        log_path: Path | None = None,
-        claims: ClaimService | None = None,
-        records: RecordSearch | None = None,
-        workload_kind: WorkloadKind = WorkloadKind.INFERENCEX,
+        wiring: FakeWiring = FakeWiring(),
     ) -> None:
+        log_path = wiring.log_path
         self.config = config or FakeToolboxConfig()
         self.executor = FakeExecutor(self.config, autorun=autorun)
         self.notebook = notebook if notebook is not None else MemoryNotebook()
@@ -198,21 +207,25 @@ class FakeToolbox(RealToolbox):
         path = log_path or Path(self._scratch.name) / "submissions.jsonl"  # type: ignore[union-attr]
         self._rejections: list[Callable[[TestRequest], RequestRejected | None]] = []
         self._started = False
-        super().__init__(
+        stores = ToolboxStores(
             log=SubmissionLog(path, str(self.config.campaign_id)),
-            repo=_Repo(self.config.image_digest, parent_exists),
             sink=self.notebook,  # type: ignore[arg-type]
             health=self.notebook,  # type: ignore[arg-type]
-            executor=self.executor,
-            planner=_NoPlanner(),
-            active_image_digest=self.config.image_digest,
-            workload_kind=workload_kind,
+            claims=wiring.claims,
+            records=wiring.records,
+        )
+        acceptance = AcceptanceSetup(
+            _Repo(self.config.image_digest, wiring.parent_exists),
+            _NoPlanner(),
+            self.config.image_digest,
+            wiring.workload_kind,
+        )
+        tuning = ToolboxTuning(
             policy=self._policy(self.config.default_k),
-            claims=claims,
-            records=records,
             max_infra_retries=self.config.max_infra_retries,
             clock=lambda: self.executor.now,
         )
+        super().__init__(stores, self.executor, acceptance, tuning=tuning)
 
     def _policy(self, k: int) -> QueuePolicy:
         return QueuePolicy(
@@ -304,4 +317,4 @@ class FakeToolbox(RealToolbox):
         self._rejections.append(check)
 
 
-__all__ = ["FakeExecutor", "FakeToolbox", "MemoryNotebook", "ToolboxNotebook"]
+__all__ = ["FakeExecutor", "FakeToolbox", "FakeWiring", "MemoryNotebook", "ToolboxNotebook"]

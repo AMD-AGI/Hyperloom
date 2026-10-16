@@ -36,8 +36,14 @@ from hyperloom.measure.tests._recipes import IMAGE, git_patch, put_patch, recipe
 from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox, build_local_toolbox
+from hyperloom_multibranch.toolbox.local_hosted import (
+    LocalHostedToolbox,
+    LocalOptions,
+    LocalSession,
+    build_local_toolbox,
+)
 from hyperloom_multibranch.toolbox.planner import HostedPlanner
+from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.tests.helpers import FakeRepo, req
 
 MODEL = os.environ.get("HL_W13_MODEL", "")
@@ -97,16 +103,14 @@ def _toolbox(root: Path, name: str) -> tuple[LocalHostedToolbox, LocalNotebook, 
         blob_root=str(blobs.root),
     )
     toolbox = build_local_toolbox(
-        session_dir=session,
-        run_id=name,
-        cards=CARDS,
-        notebook=notebook,
-        repo=FakeRepo(recipe_with()),
-        planner=HostedPlanner(compiler, canonical, root / "points"),
-        spec=spec,
-        active_image_digest=IMAGE,
-        runner_envs={"INFERENCEX_REPO": INFERENCEX, "INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC": "900"},
-        timeout_sec=2400,
+        LocalSession(session, name, CARDS),
+        notebook,
+        AcceptanceSetup(FakeRepo(recipe_with()), HostedPlanner(compiler, canonical, root / "points"), IMAGE),
+        spec,
+        options=LocalOptions(
+            runner_envs={"INFERENCEX_REPO": INFERENCEX, "INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC": "900"},
+            timeout_sec=2400,
+        ),
     )
     return toolbox, notebook, blobs
 

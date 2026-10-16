@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from collections.abc import Iterable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from hyperloom.measure.archive import DirResultArchive, ResultArchive
@@ -21,17 +21,14 @@ from hyperloom.measure.hosted import HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.local_templates import local_runner_template
 from hyperloom.sandbox.local import LocalSandboxProvider
-from hyperloom_multibranch.contracts.repo import ExperimentRepo
-from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.toolbox.acceptance import MeasurementPlanner
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
-from hyperloom_multibranch.toolbox.toolbox import RealToolbox
+from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, RealToolbox, ToolboxStores, ToolboxTuning
 
-__all__ = ["LocalHostedToolbox", "MAX_CARDS_PER_NODE", "build_local_toolbox"]
+__all__ = ["LocalHostedToolbox", "LocalOptions", "LocalSession", "MAX_CARDS_PER_NODE", "build_local_toolbox"]
 
 #: One node serves at most eight cards, so at most ``8 / TP`` tests run at once (handover 5, item 7).
 MAX_CARDS_PER_NODE = 8
@@ -60,11 +57,54 @@ def max_parallel_tests(cards: int, tp: int) -> int:
     return min(cards, MAX_CARDS_PER_NODE) // tp
 
 
-def _provider(
-    session: Path, cards: tuple[int, ...], tp: int, python: str, envs: Mapping[str, str] | None, hostname: str | None
-) -> LocalSandboxProvider:
-    template = local_runner_template(f"runner-{tp}", gpus=tp, python=python, envs=envs)
-    return LocalSandboxProvider([template], gpus=cards, base_dir=session / _SANDBOXES, hostname=hostname)
+@dataclass(frozen=True)
+class LocalSession:
+    """Where and on what the toolbox runs.
+
+    ``session_dir`` is the session directory. Below it: ``sandboxes/`` (the sandboxes), ``archive/`` (verified
+    bundles, unless an archive is given), ``hosted/`` (the backend's journal; a restart re-attaches from it),
+    ``toolbox/submissions.jsonl`` (the submit log) and ``tests/<request_id>/attempt-<n>`` (landed output).
+    ``run_id`` is the run's id, the first part of every sandbox's idempotency key. ``cards`` is the card pool, for
+    example ``[6, 7]``; at most eight are used for concurrency. ``tp`` is the tensor-parallel size of every test, that
+    is the cards of one runner sandbox. ``hostname`` is the node name the local provider reports; this machine's by
+    default.
+    """
+
+    session_dir: Path
+    run_id: str
+    cards: Iterable[int]
+    tp: int = 1
+    hostname: str | None = None
+
+
+@dataclass(frozen=True)
+class LocalOptions:
+    """What :func:`build_local_toolbox` may be told besides the session, the notebook, acceptance and the spec.
+
+    ``policy`` is the quota and priority policy; its ``global_concurrency`` is lowered to ``8 // tp`` when higher.
+    ``runner_envs`` is the environment the runner template carries (for example ``INFERENCEX_REPO``). ``archive`` is
+    the result archive, a directory archive below ``session_dir`` when omitted. ``python`` is the interpreter the
+    runner and the measurement run with. ``timeout_sec`` is the timeout of one attempt, ``max_infra_retries`` the
+    infrastructure retries per test before it ends as ``measurement_failed`` and ``poll_interval_sec`` how often the
+    backend polls a runner for its result.
+    """
+
+    policy: QueuePolicy | None = None
+    runner_envs: Mapping[str, str] | None = None
+    archive: ResultArchive | None = None
+    python: str = sys.executable
+    timeout_sec: int = DEFAULT_TEST_TIMEOUT_SEC
+    max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES
+    poll_interval_sec: float = _POLL_INTERVAL_SEC
+
+
+def _provider(session: LocalSession, cards: tuple[int, ...], options: LocalOptions) -> LocalSandboxProvider:
+    template = local_runner_template(
+        f"runner-{session.tp}", gpus=session.tp, python=options.python, envs=options.runner_envs
+    )
+    return LocalSandboxProvider(
+        [template], gpus=cards, base_dir=Path(session.session_dir) / _SANDBOXES, hostname=session.hostname
+    )
 
 
 def _started(provider: LocalSandboxProvider, config: HostedConfig) -> HostedMeasurementBackend:
@@ -80,82 +120,57 @@ def _capped(policy: QueuePolicy | None, parallel: int) -> QueuePolicy:
 
 
 def build_local_toolbox(
-    *,
-    session_dir: Path,
-    run_id: str,
-    cards: Iterable[int],
+    session: LocalSession,
     notebook: LocalNotebook,
-    repo: ExperimentRepo,
-    planner: MeasurementPlanner,
+    acceptance: AcceptanceSetup,
     spec: SpecContext,
-    active_image_digest: str | None,
-    tp: int = 1,
-    workload_kind: WorkloadKind = WorkloadKind.INFERENCEX,
-    policy: QueuePolicy | None = None,
-    runner_envs: Mapping[str, str] | None = None,
-    archive: ResultArchive | None = None,
-    python: str = sys.executable,
-    timeout_sec: int = DEFAULT_TEST_TIMEOUT_SEC,
-    max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES,
-    hostname: str | None = None,
-    poll_interval_sec: float = _POLL_INTERVAL_SEC,
+    *,
+    options: LocalOptions = LocalOptions(),
 ) -> LocalHostedToolbox:
     """Build a :class:`RealToolbox` whose tests run in local sandboxes; call ``await toolbox.start()`` before use.
 
     Args:
-        session_dir: The session directory. Below it: ``sandboxes/`` (the sandboxes), ``archive/`` (verified bundles,
-            unless ``archive`` is given), ``hosted/`` (the backend's journal; a restart re-attaches from it),
-            ``toolbox/submissions.jsonl`` (the submit log) and ``tests/<request_id>/attempt-<n>`` (landed output).
-        run_id: The run's id; the first part of every sandbox's idempotency key.
-        cards: The card pool, for example ``[6, 7]``; at most eight are used for concurrency.
+        session: Where and on what the toolbox runs, see :class:`LocalSession`.
         notebook: The notebook; it takes the requests and results, holds the quarantine list and the claims, and is
             searched when a restart recovers unfinished tests.
-        repo: The experiment repository the parent recipes are read from.
-        planner: Acceptance steps 2 to 4; its ``plan`` must return a ``hyperloom.measure.points.AcceptedMeasurement``
-            (``HostedPlanner`` does).
+        acceptance: The repository the parent recipes are read from, the planner (its ``plan`` must return a
+            ``hyperloom.measure.points.AcceptedMeasurement``; ``HostedPlanner`` does), the active framework image
+            and the campaign's workload, see :class:`~hyperloom_multibranch.toolbox.toolbox.AcceptanceSetup`.
         spec: What the instruction sheet needs besides the call: image, GPU type, commits, blob store.
-        active_image_digest: The active framework image; a recipe on another image is refused. ``None`` skips the check.
-        tp: The tensor-parallel size of every test, that is the cards of one runner sandbox.
-        workload_kind: The campaign's workload; in an InferenceX campaign (the default) every ``explore`` and
-            ``confirm`` test is accepted with ``accuracy=True``, AgentX leaves requests as submitted.
-        policy: Quota and priority policy; its ``global_concurrency`` is lowered to ``8 // tp`` when higher.
-        runner_envs: Environment the runner template carries (for example ``INFERENCEX_REPO``).
-        archive: The result archive; a directory archive below ``session_dir`` when omitted.
-        python: The interpreter the runner and the measurement run with.
-        timeout_sec: The timeout of one attempt.
-        max_infra_retries: Infrastructure retries per test before it ends as ``measurement_failed``.
-        hostname: The node name the local provider reports; this machine's by default.
-        poll_interval_sec: How often the backend polls a runner for its result.
+        options: Everything else, see :class:`LocalOptions`.
     """
 
-    session, cards = Path(session_dir), tuple(cards)
+    directory, cards, tp = Path(session.session_dir), tuple(session.cards), session.tp
     parallel = max_parallel_tests(len(cards), tp)
     config = HostedConfig(
-        session_dir=session,
-        run_id=run_id,
+        session_dir=directory,
+        run_id=session.run_id,
         spec=spec,
         runner_templates={tp: f"runner-{tp}"},
-        archive=archive or DirResultArchive(session / _ARCHIVE),
+        archive=options.archive or DirResultArchive(directory / _ARCHIVE),
         max_parallel_tests=parallel,
-        poll_interval_sec=poll_interval_sec,
+        poll_interval_sec=options.poll_interval_sec,
     )
-    provider = _provider(session, cards, tp, python, runner_envs, hostname)
+    provider = _provider(session, cards, options)
     backend = _started(provider, config)
+    executor = HostedExecutor(
+        backend,
+        directory,
+        timeout_sec=options.timeout_sec,
+        magpie_python=options.python,
+        workload_kind=acceptance.workload_kind,
+    )
     toolbox = LocalHostedToolbox(
-        log=SubmissionLog(session / _SUBMISSIONS, run_id),
-        repo=repo,
-        sink=notebook,  # type: ignore[arg-type]
-        health=notebook,  # type: ignore[arg-type]
-        executor=HostedExecutor(
-            backend, session, timeout_sec=timeout_sec, magpie_python=python, workload_kind=workload_kind
+        ToolboxStores(
+            log=SubmissionLog(directory / _SUBMISSIONS, session.run_id),
+            sink=notebook,  # type: ignore[arg-type]
+            health=notebook,  # type: ignore[arg-type]
+            claims=notebook,  # type: ignore[arg-type]
+            records=notebook,  # type: ignore[arg-type]
         ),
-        planner=planner,
-        active_image_digest=active_image_digest,
-        workload_kind=workload_kind,
-        policy=_capped(policy, parallel),
-        claims=notebook,  # type: ignore[arg-type]
-        records=notebook,  # type: ignore[arg-type]
-        max_infra_retries=max_infra_retries,
+        executor,
+        acceptance,
+        tuning=ToolboxTuning(policy=_capped(options.policy, parallel), max_infra_retries=options.max_infra_retries),
     )
     toolbox.backend, toolbox.provider = backend, provider
     return toolbox
