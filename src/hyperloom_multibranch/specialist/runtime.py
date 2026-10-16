@@ -43,14 +43,16 @@ class Session(Protocol):
         """Stop the run, more than once if need be; returns once none of its processes is left."""
 
 
-#: A new run of the specialist on ``branch``, started at ``start_commit`` and allowed ``k`` tests running at once.
-SessionFactory = Callable[[str, str, int], Session]
+#: A new run of the specialist on ``branch``, started at ``start_commit`` with the startup ``brief`` and allowed ``k``
+#: tests running at once: ``(branch, start_commit, k, brief)``.
+SessionFactory = Callable[[str, str, int, str], Session]
 
 
 @dataclass
 class _Branch:
     name: str
     start_commit: str
+    brief: str
     notebook: JudgeNotebook
     k: int = 1
     session: Session | None = None
@@ -80,10 +82,10 @@ class SpecialistRuntime:
         self._clock = clock
         self._branches: dict[str, _Branch] = {}
 
-    async def start(self, branch: str, start_commit: str) -> None:
+    async def start(self, branch: str, start_commit: str, brief: str = "") -> None:
         if branch in self._branches:
             raise ValueError(f"branch {branch!r} already has a specialist")
-        state = _Branch(branch, start_commit, self._notebook_for(branch))
+        state = _Branch(branch, start_commit, brief, self._notebook_for(branch))
         self._branches[branch] = state
         judge = BranchJudge(branch, state.notebook, self._gate, self._toolbox, self._rule)
         state.tasks = [
@@ -114,7 +116,7 @@ class SpecialistRuntime:
     async def _supervise(self, state: _Branch) -> None:
         crashes: deque[float] = deque()
         while True:
-            state.session = self._sessions(state.name, state.start_commit, state.k)
+            state.session = self._sessions(state.name, state.start_commit, state.k, state.brief)
             try:
                 await state.session.run()
                 return

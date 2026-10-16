@@ -34,15 +34,15 @@ class _Runs:
         self.crashes = crashes
         self.started: list[_Run] = []
 
-    def __call__(self, branch: str, start_commit: str, k: int) -> "_Run":
-        run = _Run(self, k)
+    def __call__(self, branch: str, start_commit: str, k: int, brief: str) -> "_Run":
+        run = _Run(self, k, brief)
         self.started.append(run)
         return run
 
 
 class _Run:
-    def __init__(self, runs: _Runs, k: int) -> None:
-        self._runs, self.k, self.stopped = runs, k, asyncio.Event()
+    def __init__(self, runs: _Runs, k: int, brief: str) -> None:
+        self._runs, self.k, self.brief, self.stopped = runs, k, brief, asyncio.Event()
 
     async def run(self) -> None:
         if self._runs.crashes:
@@ -138,14 +138,15 @@ async def test_a_started_branch_runs_its_specialist_with_the_k_it_is_given(sessi
         await runtime.set_k(BRANCH, 2)
 
 
-async def test_a_crashed_specialist_is_restarted_with_a_notice_each_time(session):
+async def test_a_crashed_specialist_is_restarted_with_its_brief_and_a_notice_each_time(session):
     runs = _Runs(crashes=2)
     runtime = session.runtime(runs)
 
-    await runtime.start(BRANCH, await session.repo.head(BRANCH))
+    await runtime.start(BRANCH, await session.repo.head(BRANCH), brief="leads: fp8 kv cache")
     await _until(lambda: _true(len(runs.started) == 3), "two restarts")
 
     assert all(run.stopped.is_set() for run in runs.started[:2])
+    assert {run.brief for run in runs.started} == {"leads: fp8 kv cache"}
     assert len([notice for notice in await session.notices() if "is restarted" in notice]) == 2
     await runtime.stop(BRANCH)
 

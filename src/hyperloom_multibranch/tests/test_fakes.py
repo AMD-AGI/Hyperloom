@@ -55,8 +55,12 @@ async def test_the_repo_refuses_unknown_commits_and_branches():
 async def test_the_lifecycle_tracks_running_branches_and_their_k():
     recording = RecordingLifecycle()
     lifecycle: SpecialistLifecycle = recording
-    await lifecycle.start("b1", "c0")
-    assert (recording.running, recording.k) == ({"b1": "c0"}, {"b1": 1})
+    await lifecycle.start("b1", "c0", brief="leads: fp8 kv cache")
+    assert (recording.running, recording.briefs, recording.k) == (
+        {"b1": "c0"},
+        {"b1": "leads: fp8 kv cache"},
+        {"b1": 1},
+    )
     await lifecycle.set_k("b1", 4)
     assert recording.k == {"b1": 4}
 
