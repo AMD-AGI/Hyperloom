@@ -807,6 +807,8 @@ Make your change(s) now.
         # findings, and (via ``summarize``) ask this exact session to record what it explored.
         if session_sink is not None:
             session_sink["plan"] = plan
+            # The session's whole closing message; a GUIDED batch session reports what it landed in it.
+            session_sink["final_text"] = full or ""
             session_sink["session_id"] = run_result.session_id
             session_sink["summarize"] = _make_session_summarizer(
                 backend=backend,

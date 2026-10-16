@@ -62,7 +62,6 @@ from kernelforge.loop.recovery import (
     rollback_unpublished_warm_start,
 )
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
-from kernelforge.loop.wiki_guidance import DEFAULT_GUIDED_BUDGET_FRACTION
 
 
 # A high runaway backstop, not a time bound.
@@ -377,21 +376,12 @@ def _load_external_baseline(path: str) -> tuple[float, dict[str, float]]:
 @click.option(
     "--wiki-guided/--no-wiki-guided",
     default=False,
-    help="Plan from a knowledge base playbook first. The first planning round builds a playbook of techniques "
-    "for this kernel from the knowledge base and the measured evidence. Every GUIDED round then chooses a batch "
-    "of the open groups the round's evidence supports and runs it as steps, one session and one measurement per "
-    "group on the same tree, analyzing and planning again only after the last step. GUIDED lasts until the "
-    "playbook is spent, the search policy reports a stall, or --guided-budget-fraction is used; planning is free "
-    "(FREE) from then on, where a lane candidate a sibling's KEEP stopped applying is ported onto the current "
-    "kernel rather than dropped. Needs a knowledge base (FORGE_KNOWLEDGE_WIKI_ROOT). Off by default.",
-)
-@click.option(
-    "--guided-budget-fraction",
-    default=DEFAULT_GUIDED_BUDGET_FRACTION,
-    type=float,
-    show_default=True,
-    help="The largest share a --wiki-guided campaign plans from the playbook, of the budget left when its first "
-    "GUIDED round began; applied only after two GUIDED rounds.",
+    help="Plan each round as one knowledge base batch first (GUIDED). Every GUIDED round builds a batch of the "
+    "directions the knowledge base and the round's measured evidence support, implements the whole batch in one "
+    "session and measures it once, and the next round builds the next batch from the refreshed profile. Planning "
+    "is free (FREE) once the knowledge base and the evidence support no further direction or a batch brings no "
+    "gain; in FREE a lane candidate a sibling's KEEP stopped applying is ported onto the current kernel rather "
+    "than dropped. Needs a knowledge base (FORGE_KNOWLEDGE_WIKI_ROOT). Off by default.",
 )
 @click.option(
     "--prepare-task/--no-prepare-task",
@@ -565,7 +555,6 @@ def forge_loop(
     roofline_target,
     target_mean_case_speedup,
     wiki_guided,
-    guided_budget_fraction,
     prepare_task,
     task_type,
     source_files,
@@ -798,9 +787,7 @@ def forge_loop(
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
     from kernelforge.orchestrator.agent import make_agent_fn
 
-    wiki_guided, guided_budget_fraction = _validate_wiki_guided(
-        wiki_guided, guided_budget_fraction, config.knowledge_wiki_root
-    )
+    wiki_guided = _validate_wiki_guided(wiki_guided, config.knowledge_wiki_root)
     iter_config = IterationConfig(
         kernel_file=kernel,
         driver_script=driver,
@@ -833,7 +820,6 @@ def forge_loop(
         roofline_target=_validate_roofline_target(roofline_target, roofline_ceiling == CEILING_ON),
         target_mean_case_speedup=_validate_speedup_target(target_mean_case_speedup),
         wiki_guided=wiki_guided,
-        guided_budget_fraction=guided_budget_fraction,
     )
     if baseline_json:
         # The anchor every speedup divides by, and the wall time published beside it, both come from the caller's
@@ -1407,9 +1393,8 @@ def forge_loop(
         print(f"  Knowledge base: {knowledge_wiki.root} (calls logged to {knowledge_wiki.log_path})")
     if iter_config.wiki_guided:
         print(
-            "  Wiki-guided planning: on (GUIDED batches until the playbook is spent, the search stalls or, after "
-            f"two batches, {iter_config.guided_budget_fraction:.0%} of the budget left when GUIDED began is used; "
-            "then FREE)"
+            "  Wiki-guided planning: on (one knowledge base batch per round, implemented in one session, until the "
+            "knowledge base and the evidence support no further direction or a batch brings no gain; then FREE)"
         )
 
     from kernelforge.orchestrator.orchestration import (

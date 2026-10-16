@@ -20,7 +20,7 @@ import tempfile
 import textwrap
 import time
 import traceback
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -66,18 +66,18 @@ from kernelforge.loop.search_policy import (
     SearchPolicyEngine,
 )
 from kernelforge.loop.wiki_guidance import (
-    DEFAULT_GUIDED_BUDGET_FRACTION,
-    MAX_BATCH_STEPS,
     MAX_PLAYBOOK_ATTEMPTS,
     PHASE_FREE,
     PHASE_GUIDED,
+    REASON_NO_USEFUL_DIRECTION,
     REASON_PLAYBOOK_UNAVAILABLE,
     GuidanceState,
     WikiGuidanceStore,
+    batch_exit,
+    batch_plan,
     cited_items,
-    decide_phase,
+    declined,
     parse_playbook,
-    parse_ranking,
     record_outcome,
     render_for_implementer,
     render_for_planning,
@@ -563,18 +563,15 @@ class IterationConfig:
     # Mean per-case speedup over the baseline (the KEEP objective) at which the campaign stops, however much budget
     # remains. Zero disables the gate, which is the default.
     target_mean_case_speedup: float = 0.0
-    # Plan from a knowledge base playbook (``loop.wiki_guidance``) until it is spent, the search policy reports a
-    # stall, or ``guided_budget_fraction`` of the time budget is used; then plan freely. Needs the knowledge base
+    # Plan each round as one knowledge base batch (``loop.wiki_guidance``) until the knowledge base and the evidence
+    # support nothing more or a batch brings no gain; then plan freely. Needs the knowledge base
     # (``Config.knowledge_wiki_root``) and is off by default.
     wiki_guided: bool = False
-    guided_budget_fraction: float = DEFAULT_GUIDED_BUDGET_FRACTION
 
     def __post_init__(self) -> None:
         # Validated here rather than at the CLI boundary alone, so a pattern can never reach the commit/delete sites
         # unvalidated -- including via ``dataclasses.replace``.
         self.commit_new_paths = normalize_commit_new_paths(self.commit_new_paths)
-        if not 0.0 < float(self.guided_budget_fraction) <= 1.0:
-            raise ValueError(f"guided_budget_fraction must be in (0, 1], got {self.guided_budget_fraction!r}")
 
 
 class CaseConfigCoverage(NamedTuple):
@@ -602,37 +599,6 @@ class HeldRound(NamedTuple):
 
     plan_path: Path | None
     error: str
-
-
-@dataclass(frozen=True)
-class BatchStep:
-    """One step of a GUIDED batch, run as its own iteration on the canonical tree."""
-
-    plan: str
-    group: str
-    position: int
-    of: int
-    planned_iteration: int
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "plan": self.plan,
-            "group": self.group,
-            "position": self.position,
-            "of": self.of,
-            "planned_iteration": self.planned_iteration,
-        }
-
-    def plan_text(self) -> str:
-        """The plan as the step's Implementer reads it."""
-        header = f"# Batch step {self.position} of {self.of}" + (f": playbook group {self.group}" if self.group else "")
-        return (
-            f"{header}\n\n"
-            "This step runs on the kernel as the batch's earlier steps left it: the tree already carries every "
-            "earlier step whose measurement kept it. The step is measured on its own when the session ends, and the "
-            "profile it was planned from was taken before the batch began.\n\n"
-            f"{self.plan.strip()}\n"
-        )
 
 
 @dataclass
@@ -775,12 +741,9 @@ class IterationLoop(AnalysisRuntimeMixin):
             if not resume:
                 # Written now, so a resume after an early crash cannot pick up an earlier campaign's file.
                 self._save_wiki_guidance()
-                try:
-                    self._batch_steps_path().unlink(missing_ok=True)
-                except OSError:
-                    log.debug("an earlier campaign's batch queue could not be removed", exc_info=True)
         # The plan the current iteration measures, read when its outcome credits the playbook ledger.
         self._iteration_plan_text = ""
+        self._iteration_batch: list[str] = []
         self.handoff_store: HandoffStore | None = None
         # A committed KEEP recovered during synchronous resume preflight waits here until the async run can restore
         # its post-KEEP profile/archive.
@@ -2023,75 +1986,20 @@ class IterationLoop(AnalysisRuntimeMixin):
             return lane
         return None
 
-    def _next_batch_step(self, iteration: int) -> HeldRound | None:
-        """Publish the batch's next step as this iteration's plan; None once no step could be published."""
-        while self._batch_steps:
-            step = self._batch_steps.pop(0)
-            # Taken off the durable queue before its session, so a crash inside the session does not run it twice.
-            self._persist_batch_steps()
-            try:
-                plan_path = self._persist_lane_plans(
-                    iteration,
-                    [step.plan_text()],
-                    analysis_commit=self._canonical_commit(),
-                )
-            except (OSError, ValueError) as error:
-                print(f"  [batch] step {step.position} of {step.of} not published ({error}); dropped")
-                continue
-            self._latest_optimization_plan_path = str(plan_path)
-            self._last_orchestration_plan_executable = True
-            self._iteration_batch_step = f"{step.position}/{step.of}"
-            self._append_wiki_event(
-                make_event(
-                    "wiki_batch_step",
-                    iteration,
-                    position=step.position,
-                    of=step.of,
-                    group=step.group or None,
-                    planned_iteration=step.planned_iteration,
-                )
-            )
-            print(f"  [batch] step {step.position} of {step.of} ({step.group or 'no playbook group'}): {plan_path}")
-            return HeldRound(plan_path, "")
-        return None
-
-    def _queue_batch(self, iteration: int, plans: Sequence[str]) -> None:
-        """Turn a batch round's plans into steps: the first is this iteration's plan, the rest wait in order."""
-        steps = [
-            BatchStep(
-                plan=str(plan),
-                group=self._batch_step_group(str(plan)),
-                position=index + 1,
-                of=len(plans),
-                planned_iteration=iteration,
-            )
-            for index, plan in enumerate(plans)
+    def _compose_batch(self, iteration: int, plans: Sequence[str]) -> None:
+        """Turn a batch round's part plans into this iteration's one session plan."""
+        groups = [self._plan_group(str(plan)) for plan in plans]
+        self._last_lane_plans = [
+            batch_plan([(self._group_label(group), str(plan)) for group, plan in zip(groups, plans)])
         ]
-        self._last_lane_plans = [steps[0].plan_text()]
-        self._batch_steps = steps[1:]
-        self._persist_batch_steps()
-        self._iteration_batch_step = f"1/{len(steps)}"
+        self._iteration_batch = [group for group in groups if group]
         self._append_wiki_event(
-            make_event("wiki_batch_planned", iteration, steps=len(steps), groups=[step.group or None for step in steps])
+            make_event("wiki_batch_planned", iteration, parts=len(plans), groups=[group or None for group in groups])
         )
-        self._append_wiki_event(
-            make_event(
-                "wiki_batch_step",
-                iteration,
-                position=1,
-                of=len(steps),
-                group=steps[0].group or None,
-                planned_iteration=iteration,
-            )
-        )
-        print(
-            f"  [batch] {len(steps)} steps planned ("
-            + ", ".join(step.group or "?" for step in steps)
-            + "); step 1 runs now, the rest one per iteration before the next analysis"
-        )
+        print(f"  [batch] {len(plans)} part(s) in one session: " + ", ".join(group or "?" for group in groups))
 
-    def _batch_step_group(self, plan: str) -> str:
-        """The playbook group a step plan claims items of, or \"\"."""
+    def _plan_group(self, plan: str) -> str:
+        """The playbook group a part plan claims items of, or \"\"."""
         state = self.wiki_guidance
         if state is None or state.playbook is None:
             return ""
@@ -2099,56 +2007,37 @@ class IterationLoop(AnalysisRuntimeMixin):
         claimed, _ = cited_items(plan, state.ledger)
         return groups[claimed[0]] if claimed else ""
 
-    def _batch_steps_path(self) -> Path:
-        return Path(self.ic.workspace_dir).resolve() / "forge_experiments" / "orchestration" / "batch_steps.json"
+    def _group_label(self, group_id: str) -> str:
+        state = self.wiki_guidance
+        if not group_id or state is None or state.playbook is None:
+            return ""
+        title = next((group.title for group in state.playbook.groups if group.group_id == group_id), "")
+        return f"playbook group {group_id}" + (f" ({title})" if title else "")
 
-    def _persist_batch_steps(self) -> None:
-        """Publish the steps the current batch still has to run."""
-        from kernelforge.loop.recovery import atomic_write_json
-
-        path = self._batch_steps_path()
-        try:
-            if not self._batch_steps:
-                path.unlink(missing_ok=True)
-                return
-            path.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_json(path, {"steps": [step.to_dict() for step in self._batch_steps]})
-        except OSError as error:
-            print(
-                f"  [batch] queue not durable ({error}); {len(self._batch_steps)} step(s) are lost if this process ends"
+    def _note_batch_report(self, iteration: int, session_sink: Mapping[str, Any]) -> None:
+        """Credit a batch from the items its session reported landing and dropping, when it reported them."""
+        state = self.wiki_guidance
+        if not self._iteration_batch or state is None or state.playbook is None:
+            return
+        report = str(session_sink.get("final_text") or "")
+        landed, dropped = cited_items(report, state.ledger)
+        if landed or dropped:
+            self._note_iteration_plan(iteration, report)
+        self._append_wiki_event(
+            make_event(
+                "wiki_batch_report",
+                iteration,
+                landed=landed or None,
+                dropped=dropped or None,
+                source="session" if landed or dropped else "plan",
             )
-
-    def _restore_batch_steps(self) -> None:
-        """Pick up the steps a previous process planned and never ran."""
-        if not self.ic.wiki_guided:
-            return
-        path = self._batch_steps_path()
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-            steps = [
-                BatchStep(
-                    plan=str(entry["plan"]),
-                    group=str(entry.get("group") or ""),
-                    position=int(entry["position"]),
-                    of=int(entry["of"]),
-                    planned_iteration=int(entry.get("planned_iteration") or 0),
-                )
-                for entry in record["steps"]
-            ]
-        except (OSError, ValueError, KeyError, TypeError):
-            log.debug("no readable batch queue at %s", path)
-            return
-        self._batch_steps = [step for step in steps if step.plan.strip()]
-        if self._batch_steps:
-            print(f"  [batch] resuming {len(self._batch_steps)} step(s) an earlier process planned and never ran")
-
-    def _analysis_refresh_decision(self, context, *, supervisor_due: bool = False, iteration: int | None = None):
-        decision = super()._analysis_refresh_decision(context, supervisor_due=supervisor_due, iteration=iteration)
-        if decision.refresh and getattr(self, "_batch_steps", None):
-            # The rest of the batch was planned from the profile it has; a fresh one would only be read by the next
-            # round, which builds it after the last step.
-            return replace(decision, refresh=False, reasons=(*decision.reasons, "DEFERRED_UNTIL_BATCH_ENDS"))
-        return decision
+        )
+        if landed or dropped:
+            print(
+                f"  [batch] session landed {', '.join(landed) or 'nothing'}; dropped {', '.join(dropped) or 'nothing'}"
+            )
+        else:
+            print("  [batch] session reported no item lines; the plan's citations are credited")
 
     def _lane_port_round(self, iteration: int, lane: LaneResult) -> HeldRound | None:
         """Publish the plan that ports ``lane`` onto the current kernel, as this iteration's plan; None if it cannot."""
@@ -3948,8 +3837,8 @@ class IterationLoop(AnalysisRuntimeMixin):
             diversification_cycle_completed=(self.run_state.diversification_cycle_completed),
             # The planning phase of a --wiki-guided campaign; absent otherwise.
             guidance_phase=(self.wiki_guidance.phase if self.wiki_guidance is not None else None),
-            # "position/of" when the iteration ran a step of a GUIDED batch; absent otherwise.
-            wiki_batch_step=getattr(self, "_iteration_batch_step", "") or None,
+            # The playbook groups of the GUIDED batch the iteration implemented; absent otherwise.
+            wiki_batch=list(getattr(self, "_iteration_batch", ()) or ()) or None,
         )
 
     def _record_iteration_handoff(
@@ -4475,7 +4364,6 @@ class IterationLoop(AnalysisRuntimeMixin):
             print(f"  [search-policy] diminishing-returns trigger unavailable: {fault}")
         if decision.mode != previous_mode or decision.reason_codes != previous_reasons:
             print(f"  [search-policy] {decision.mode}: " + ", ".join(decision.reason_codes))
-        self._update_wiki_guidance_phase(iteration, decision)
         return decision
 
     def _save_wiki_guidance(self) -> None:
@@ -4496,30 +4384,6 @@ class IterationLoop(AnalysisRuntimeMixin):
         except Exception:
             log.debug("wiki guidance event append failed", exc_info=True)
 
-    def _budget_used_sec(self) -> float:
-        """Seconds of the time budget spent so far, by the clock ``_time_remaining`` reads."""
-        total = float(self.ic.max_time_hours) * 3600.0
-        return min(total, max(0.0, total - self._time_remaining()))
-
-    def _guided_budget_used_fraction(self) -> float:
-        """GUIDED's share so far: of the budget left when the first GUIDED round began, the part used since."""
-        state = self.wiki_guidance
-        total = float(self.ic.max_time_hours) * 3600.0
-        if state is None or state.guided_started_used_sec is None or total <= 0:
-            return 0.0
-        available = total - state.guided_started_used_sec
-        if available <= 0:
-            return 1.0
-        return min(1.0, max(0.0, (self._budget_used_sec() - state.guided_started_used_sec) / available))
-
-    def _start_guided_clock(self) -> None:
-        """Start GUIDED's budget share at its first planning round, playbook build included."""
-        state = self.wiki_guidance
-        if state is None or state.phase != PHASE_GUIDED or state.guided_started_used_sec is not None:
-            return
-        state.guided_started_used_sec = self._budget_used_sec()
-        self._save_wiki_guidance()
-
     def _enter_wiki_guidance_phase(self, iteration: int, phase: str, reasons: Sequence[str]) -> None:
         state = self.wiki_guidance
         if state is None:
@@ -4535,81 +4399,69 @@ class IterationLoop(AnalysisRuntimeMixin):
                 phase=phase,
                 reason_codes=list(reasons),
                 items=state.status_counts() or None,
-                guided_rounds=state.guided_rounds,
-                guided_budget_used_fraction=round(self._guided_budget_used_fraction(), 4),
+                builds=state.builds,
             )
         )
         print(f"  [wiki-guided] {phase}: " + ", ".join(reasons))
 
-    def _update_wiki_guidance_phase(self, iteration: int, decision: SearchPolicyDecision) -> None:
-        """Leave GUIDED once the playbook is spent, the search stalls, or the guided budget is used."""
+    async def _build_wiki_batch(self, iteration: int, orchestration_service, context) -> None:
+        """Have the builder turn the knowledge base and this round's evidence into the round's batch."""
         state = self.wiki_guidance
-        if state is None:
+        if state is None or state.phase != PHASE_GUIDED:
             return
-        change = decide_phase(
-            state,
-            search_reasons=decision.reason_codes,
-            budget_used_fraction=self._guided_budget_used_fraction(),
-            budget_fraction=self.ic.guided_budget_fraction,
-        )
-        if change is not None:
-            self._enter_wiki_guidance_phase(iteration, *change)
-
-    async def _ensure_wiki_playbook(self, iteration: int, orchestration_service, context) -> None:
-        """Build the playbook on the first GUIDED round that has none; once settled, never again."""
-        state = self.wiki_guidance
-        if state is None or state.phase != PHASE_GUIDED or state.playbook_settled:
-            return
+        state.batch = []
         builder = getattr(orchestration_service, "build_wiki_playbook", None)
-        state.playbook_attempts += 1
-        error = ""
-        playbook = None
         if builder is None:
-            error = "the orchestration service cannot build a playbook"
-            state.playbook_settled = True
-        else:
-            print("  [wiki-guided] building the playbook from the knowledge base...")
-            try:
-                text = await builder(context, usage=self._usage)
-            except OrchestrationInfrastructureError as outage:
-                # The backend refused, not the answer: the next round asks again, up to the attempt limit.
-                error = f"{type(outage).__name__}: {outage}"
-                state.playbook_settled = state.playbook_attempts >= MAX_PLAYBOOK_ATTEMPTS
-            except (OrchestrationOutputError, ValueError) as failure:
-                # The backend answered and the answer is unusable; asking again would buy the same answer.
-                error = f"{type(failure).__name__}: {failure}"
-                state.playbook_settled = True
-            else:
-                if self.wiki_guidance_store is not None:
-                    try:
-                        self.wiki_guidance_store.save_response(text)
-                    except OSError:
-                        log.debug("wiki playbook response not saved", exc_info=True)
-                playbook, notes = parse_playbook(text)
-                state.playbook_settled = True
-                if playbook is None:
-                    error = "; ".join(notes)
-                elif notes:
-                    print("  [wiki-guided] playbook notes: " + "; ".join(notes))
-            finally:
-                self._checkpoint_llm_usage()
-        if playbook is not None:
-            state.adopt(playbook)
-            self._save_wiki_guidance()
-            self._append_wiki_event(
-                make_event(
-                    "wiki_playbook_built",
-                    iteration,
-                    items=list(playbook.item_ids()),
-                    groups=[group.group_id for group in playbook.groups],
-                    attempt=state.playbook_attempts,
-                )
-            )
-            print(
-                f"  [wiki-guided] playbook: {len(playbook.items)} item(s) in "
-                f"{len(playbook.groups)} group(s); planning GUIDED"
+            self._wiki_batch_unavailable(iteration, "the orchestration service cannot build a playbook", settled=True)
+            return
+        print("  [wiki-guided] building this round's batch from the knowledge base and the evidence...")
+        try:
+            text = await builder(self._with_wiki_guidance(context), usage=self._usage)
+        except OrchestrationInfrastructureError as outage:
+            # The backend refused, not the answer: the next round asks again, up to the attempt limit.
+            state.build_failures += 1
+            self._wiki_batch_unavailable(
+                iteration,
+                f"{type(outage).__name__}: {outage}",
+                settled=state.build_failures >= MAX_PLAYBOOK_ATTEMPTS,
             )
             return
+        except (OrchestrationOutputError, ValueError) as failure:
+            # The backend answered and the answer is unusable; asking again would buy the same answer.
+            self._wiki_batch_unavailable(iteration, f"{type(failure).__name__}: {failure}", settled=True)
+            return
+        finally:
+            self._checkpoint_llm_usage()
+        if self.wiki_guidance_store is not None:
+            try:
+                self.wiki_guidance_store.save_response(text, build=state.builds + 1)
+            except OSError:
+                log.debug("wiki playbook response not saved", exc_info=True)
+        build, notes = parse_playbook(text)
+        if build is None:
+            if declined(text):
+                state.build_failures = 0
+                self._save_wiki_guidance()
+                self._append_wiki_event(make_event("wiki_playbook_declined", iteration, builds=state.builds))
+                print("  [wiki-guided] the knowledge base and the evidence support no further direction")
+                self._enter_wiki_guidance_phase(iteration, PHASE_FREE, (REASON_NO_USEFUL_DIRECTION,))
+            else:
+                self._wiki_batch_unavailable(iteration, "; ".join(notes), settled=True)
+            return
+        if notes:
+            print("  [wiki-guided] playbook notes: " + "; ".join(notes))
+        batch = state.add_build(build, iteration=iteration)
+        self._save_wiki_guidance()
+        added = [item.item_id for item in state.playbook.items[-len(build.items) :]]
+        self._append_wiki_event(
+            make_event("wiki_playbook_built", iteration, build=state.builds, items=added, groups=batch)
+        )
+        print(
+            f"  [wiki-guided] batch {state.builds}: {len(added)} item(s) in {len(batch)} group(s) ({', '.join(batch)})"
+        )
+
+    def _wiki_batch_unavailable(self, iteration: int, error: str, *, settled: bool) -> None:
+        state = self.wiki_guidance
         state.playbook_error = error
         self._save_wiki_guidance()
         self._append_wiki_event(
@@ -4617,79 +4469,13 @@ class IterationLoop(AnalysisRuntimeMixin):
                 "wiki_playbook_unavailable",
                 iteration,
                 error=error[:500],
-                attempt=state.playbook_attempts,
-                settled=state.playbook_settled,
+                attempt=state.build_failures,
+                settled=settled,
             )
         )
         print(f"  [wiki-guided] playbook unavailable ({error})")
-        if state.playbook_settled:
+        if settled:
             self._enter_wiki_guidance_phase(iteration, PHASE_FREE, (REASON_PLAYBOOK_UNAVAILABLE,))
-
-    async def _rank_wiki_playbook(self, iteration: int, orchestration_service, context):
-        """Choose a GUIDED round's batch from the round's evidence; the context re-rendered with it.
-
-        A ranker that is unavailable or answers nothing usable leaves the previous order, and the batch is every open
-        group in it.
-        """
-        state = self.wiki_guidance
-        guidance = context.wiki_guidance
-        if state is None or state.playbook is None or not guidance or guidance.get("phase") != PHASE_GUIDED:
-            return context
-        open_groups = state.open_group_ids()
-        if not open_groups:
-            return context
-        ranker = getattr(orchestration_service, "rank_wiki_playbook", None)
-        ranking = None
-        if ranker is not None:
-            print("  [wiki-guided] choosing this round's batch against its evidence...")
-            try:
-                ranking = parse_ranking(await ranker(context, usage=self._usage), open_groups)
-            except (OrchestrationInfrastructureError, OrchestrationOutputError, ValueError) as error:
-                detail = f"{type(error).__name__}: {error}"
-                self._append_wiki_event(make_event("wiki_playbook_rank_unavailable", iteration, error=detail[:500]))
-                print(f"  [wiki-guided] ranking unavailable ({detail}); the batch is every open group, in order")
-            finally:
-                self._checkpoint_llm_usage()
-        if ranking is None:
-            state.batch = state.open_batch()
-            state.batch_excluded = {}
-            self._save_wiki_guidance()
-            return self._with_wiki_guidance(context)
-        batch = list(ranking.batch)
-        # An open group the ranker neither chose nor excluded with a reason still has its premise: it runs last.
-        appended = [group_id for group_id in open_groups if group_id not in batch and group_id not in ranking.excluded][
-            : max(0, MAX_BATCH_STEPS - len(batch))
-        ]
-        state.group_order = batch + appended
-        state.rank_evidence = dict(ranking.evidence)
-        state.ranked_at_iteration = iteration
-        state.batch = batch + appended
-        state.batch_excluded = dict(ranking.excluded)
-        self._save_wiki_guidance()
-        self._append_wiki_event(
-            make_event(
-                "wiki_playbook_ranked",
-                iteration,
-                order=state.batch,
-                appended=appended or None,
-                excluded=dict(ranking.excluded) or None,
-            )
-        )
-        notes = list(ranking.notes)
-        print(
-            "  [wiki-guided] batch: "
-            + ", ".join(state.batch)
-            + (f"; excluded {', '.join(ranking.excluded)}" if ranking.excluded else "")
-            + ("; " + "; ".join(notes) if notes else "")
-        )
-        return self._with_wiki_guidance(context)
-
-    def _count_guided_round(self) -> None:
-        state = self.wiki_guidance
-        if state is None:
-            return
-        state.guided_rounds += 1
-        self._save_wiki_guidance()
 
     def _with_wiki_guidance(self, context):
         """Attach the playbook and its ledger to a planning context, when there is one."""
@@ -4732,6 +4518,10 @@ class IterationLoop(AnalysisRuntimeMixin):
                     "  [wiki-guided] ledger: "
                     + ", ".join(f"{item_id} {state.ledger[item_id].status}" for item_id in changed)
                 )
+            if self._iteration_batch and state.phase == PHASE_GUIDED:
+                reason = batch_exit(decision)
+                if reason is not None:
+                    self._enter_wiki_guidance_phase(iteration, PHASE_FREE, (reason,))
         except Exception:
             log.warning("wiki playbook ledger update failed for iteration %s", iteration, exc_info=True)
 
@@ -4768,15 +4558,16 @@ class IterationLoop(AnalysisRuntimeMixin):
                 else self._build_orchestration_context()
             )
         )
-        # Inside the round's planning clock, so building and ranking the playbook are charged to the round that
-        # needed them.
-        self._start_guided_clock()
-        await self._ensure_wiki_playbook(iteration, orchestration_service, context)
-        context = await self._rank_wiki_playbook(iteration, orchestration_service, self._with_wiki_guidance(context))
+        # Inside the round's planning clock, so building the batch is charged to the round that needed it.
+        await self._build_wiki_batch(iteration, orchestration_service, context)
+        context = self._with_wiki_guidance(context)
         guided_round = bool(context.wiki_guidance) and context.wiki_guidance.get("phase") == PHASE_GUIDED
         batch = list(context.wiki_guidance.get("batch") or []) if guided_round else []
+        if guided_round and not batch:
+            # A builder outage the next round retries: this round plans as without the flag.
+            context = replace(context, wiki_guidance=None)
         if batch:
-            # A batch plans one step per group whatever the configured lane width: its steps run one after another.
+            # One part per group whatever the configured lane width: the whole batch is one session.
             lanes = len(batch)
         try:
             result = await orchestration_service.run(
@@ -4790,13 +4581,11 @@ class IterationLoop(AnalysisRuntimeMixin):
             return None, detail
         finally:
             self._checkpoint_llm_usage()
-        if guided_round:
-            self._count_guided_round()
 
         self._record_probe_hazard(iteration, result)
         self._last_lane_plans = [plan for plan in result.optimization_plans if str(plan).strip()]
-        if batch and len(self._last_lane_plans) > 1:
-            self._queue_batch(iteration, self._last_lane_plans)
+        if batch and self._last_lane_plans:
+            self._compose_batch(iteration, self._last_lane_plans)
         self._persist_orchestration_result(iteration, context, result)
         plan_path = self._persist_lane_plans(
             iteration,
@@ -5222,9 +5011,8 @@ class IterationLoop(AnalysisRuntimeMixin):
         # A queued candidate whose diff stopped applying after a sibling's KEEP, held for the iteration that has an
         # Implementer port it onto the current kernel (``--wiki-guided`` only; otherwise it is dropped).
         self._lane_awaiting_port: LaneResult | None = None
-        # The GUIDED batch's steps still to run, one per iteration, before anything is analyzed or planned again.
-        self._batch_steps: list[BatchStep] = []
-        self._iteration_batch_step = ""
+        # The playbook groups of the GUIDED batch this iteration implements in its one session.
+        self._iteration_batch: list[str] = []
         self._last_lane_plans: list[str] = []
         # Stacked iterations run back to back so far.
         self._merge_precedence_streak = 0
@@ -5505,7 +5293,6 @@ class IterationLoop(AnalysisRuntimeMixin):
 
         # Candidates an earlier round bought and never measured.
         self._restore_lane_queue()
-        self._restore_batch_steps()
 
         # The previous round's verdict, for the same reason: a REPLACE is spent on the round after the one it judged,
         # and the budget often ends between the two.
@@ -5586,7 +5373,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             # Price the round before anything is spent on it.
             self._close_round()
             round_lanes = self.ic.lanes
-            if not self._lane_queue and not self._batch_steps:
+            if not self._lane_queue:
                 admitted_lanes = self._admit_next_round(iteration)
                 if admitted_lanes is None:
                     break
@@ -5711,7 +5498,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             # Durable per-iteration marker (facts only; detail lives in files).
             self.run_state.iteration = iteration
             self._iteration_plan_text = ""
-            self._iteration_batch_step = ""
+            self._iteration_batch = []
             self.state_store.append_event(
                 make_event(
                     "iteration_started",
@@ -5729,12 +5516,8 @@ class IterationLoop(AnalysisRuntimeMixin):
             # What a fan-out round leaves this iteration holding, so the single-session path below spends it instead
             # of buying it again.
             fan_out_plan: HeldRound | None = None
-            if hazard is None and self._batch_steps and agent_fn is not None and orchestration_service is not None:
-                fan_out_plan = self._next_batch_step(iteration)
             if hazard is None and (
-                fan_out_plan is None
-                and not self._batch_steps
-                and not self._lane_queue
+                not self._lane_queue
                 and round_lanes > 1
                 and agent_factory is not None
                 and agent_fn is not None
@@ -6043,6 +5826,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 finally:
                     # The SDK result stream has completed (or unwound).
                     self._checkpoint_llm_usage()
+                self._note_batch_report(iteration, session_sink)
 
                 commit_hash = ""
                 # Either kind of "this candidate exists but must not be measured": protected state was tainted, or the
