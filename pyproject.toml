@@ -524,6 +524,11 @@ function-lines = 80
 # pylint R1702 default: past five nested blocks, the innermost line depends on
 # six conditions at once; extract the inner loop or invert a condition.
 nested-blocks = 5
+# pylint R0913 default: past five, a call site no longer reads as a sentence and the
+# values travel together anyway -- pass the object they come from, or name them in a
+# dataclass. ``self``/``cls`` and ``*args``/``**kwargs`` do not count; keyword-only
+# parameters do.
+function-args = 5
 # Fails above 1200 physical lines: half again the review trigger of 800, the
 # size at which a module almost always holds more than one job.
 module-lines = 1200
