@@ -7,7 +7,10 @@ from __future__ import annotations
 
 from hyperloom.sandbox.socket import (
     CommandResult,
+    CreateOptions,
+    OutputSinks,
     Role,
+    RunSettings,
     Sandbox,
     SandboxDenied,
     SandboxError,
@@ -19,7 +22,10 @@ from hyperloom.sandbox.socket import (
 
 __all__ = [
     "CommandResult",
+    "CreateOptions",
+    "OutputSinks",
     "Role",
+    "RunSettings",
     "Sandbox",
     "SandboxDenied",
     "SandboxError",

@@ -90,6 +90,31 @@ class CommandResult:
     stderr: str
 
 
+@dataclass(frozen=True)
+class RunSettings:
+    """Where and how a command runs: extra environment, working directory and a time limit."""
+
+    envs: Mapping[str, str] | None = None
+    cwd: str | None = None
+    timeout_sec: float | None = None
+
+
+@dataclass(frozen=True)
+class OutputSinks:
+    """Callbacks that receive a foreground command's output line by line while it runs."""
+
+    on_stdout: Callable[[str], None] | None = None
+    on_stderr: Callable[[str], None] | None = None
+
+
+@dataclass(frozen=True)
+class CreateOptions:
+    """What a ``create`` may add: extra environment (refused for a sealed template) and the wait for capacity."""
+
+    envs: Mapping[str, str] | None = None
+    wait_sec: float = 60
+
+
 class Sandbox(Protocol):
     """One isolated execution environment, bound to the role that created it."""
 
@@ -112,11 +137,8 @@ class Sandbox(Protocol):
         cmd: str,
         *,
         background: bool = False,
-        envs: Mapping[str, str] | None = None,
-        cwd: str | None = None,
-        timeout_sec: float | None = None,
-        on_stdout: Callable[[str], None] | None = None,
-        on_stderr: Callable[[str], None] | None = None,
+        settings: RunSettings = RunSettings(),
+        sinks: OutputSinks = OutputSinks(),
     ) -> CommandResult: ...
 
     def set_timeout(self, timeout_sec: int) -> None: ...
@@ -138,8 +160,7 @@ class SandboxProvider(Protocol):
         role: Role,
         timeout_sec: int,
         metadata: Mapping[str, str],
-        envs: Mapping[str, str] | None = None,
-        wait_sec: float = 60,
+        options: CreateOptions = CreateOptions(),
     ) -> Sandbox: ...
 
     def connect(self, sandbox_id: str, *, role: Role) -> Sandbox: ...

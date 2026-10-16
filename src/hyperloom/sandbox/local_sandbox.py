@@ -13,6 +13,7 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import IO
 
@@ -20,6 +21,8 @@ from hyperloom.sandbox.launcher import StatusPipe, launcher_argv
 from hyperloom.sandbox.reaper import kill_launchers, reap_sandbox_processes
 from hyperloom.sandbox.socket import (
     CommandResult,
+    OutputSinks,
+    RunSettings,
     Role,
     SandboxDenied,
     SandboxGone,
@@ -30,7 +33,7 @@ from hyperloom.sandbox.templates import RESERVED_ENV_NAMES, LocalTemplate
 
 log = logging.getLogger(__name__)
 
-__all__ = ["WORK_DIR", "LocalSandbox"]
+__all__ = ["WORK_DIR", "LocalSandbox", "SandboxPlan", "SandboxRuntime"]
 
 #: The working directory every sandbox starts in, under the root the file API shows (``/work``).
 WORK_DIR = "work"
@@ -44,6 +47,29 @@ _CHUNK = 1 << 20
 _Sink = IO[bytes] | int | None
 
 
+@dataclass(frozen=True)
+class SandboxPlan:
+    """What a sandbox is: its id, template, role, directory, metadata, environments and lifetime."""
+
+    sandbox_id: str
+    template: LocalTemplate
+    role: Role
+    directory: Path
+    metadata: Mapping[str, str]
+    create_envs: Mapping[str, str]
+    platform_envs: Mapping[str, str]
+    timeout_sec: float
+
+
+@dataclass(frozen=True)
+class SandboxRuntime:
+    """How a sandbox's processes run: the end callback, the launcher's python and the account they run as."""
+
+    on_end: Callable[[LocalSandbox, bool], None]
+    launcher_python: str
+    user: tuple[int, int] | None = None
+
+
 class LocalSandbox:
     """A sandbox on this machine; every path it shows is mapped under its own root.
 
@@ -52,38 +78,24 @@ class LocalSandbox:
     and is not reachable through the file API.
     """
 
-    def __init__(
-        self,
-        *,
-        sandbox_id: str,
-        template: LocalTemplate,
-        role: Role,
-        directory: Path,
-        metadata: Mapping[str, str],
-        create_envs: Mapping[str, str],
-        platform_envs: Mapping[str, str],
-        timeout_sec: float,
-        on_end: Callable[[LocalSandbox, bool], None],
-        launcher_python: str,
-        user: tuple[int, int] | None = None,
-    ) -> None:
-        self.sandbox_id = sandbox_id
-        self.template = template
-        self.role = role
-        self.directory = directory
-        self.fs = directory / "fs"
-        self.private = directory / "private"
-        self._metadata = dict(metadata)
-        self._base_env = self._build_base_env(create_envs, platform_envs)
-        self._on_end = on_end
-        self._launcher_python = launcher_python
-        self._user = user
+    def __init__(self, plan: SandboxPlan, runtime: SandboxRuntime) -> None:
+        self.sandbox_id = plan.sandbox_id
+        self.template = plan.template
+        self.role = plan.role
+        self.directory = plan.directory
+        self.fs = plan.directory / "fs"
+        self.private = plan.directory / "private"
+        self._metadata = dict(plan.metadata)
+        self._base_env = self._build_base_env(plan.create_envs, plan.platform_envs)
+        self._on_end = runtime.on_end
+        self._launcher_python = runtime.launcher_python
+        self._user = runtime.user
         self._lock = threading.RLock()
         self._ended = False
         self._procs: list[subprocess.Popen[bytes]] = []
         self._timer: threading.Timer | None = None
         self._bg_count = 0
-        self.set_timeout(timeout_sec)
+        self.set_timeout(plan.timeout_sec)
 
     def _build_base_env(self, create_envs: Mapping[str, str], platform_envs: Mapping[str, str]) -> dict[str, str]:
         env = {k: os.environ[k] for k in _INHERITED_ENV if k in os.environ}
@@ -320,11 +332,8 @@ class LocalSandbox:
         cmd: str,
         *,
         background: bool = False,
-        envs: Mapping[str, str] | None = None,
-        cwd: str | None = None,
-        timeout_sec: float | None = None,
-        on_stdout: Callable[[str], None] | None = None,
-        on_stderr: Callable[[str], None] | None = None,
+        settings: RunSettings = RunSettings(),
+        sinks: OutputSinks = OutputSinks(),
     ) -> CommandResult:
         """Run a shell command inside the sandbox.
 
@@ -336,8 +345,8 @@ class LocalSandbox:
             SandboxGone: When the sandbox has ended (also if it ends during the command).
             SandboxUnavailable: When ``timeout_sec`` expires; the command's tree is killed.
         """
-        extra = self._check_run_args(envs)
-        workdir = self._real(self._virtual(cwd)) if cwd else self.fs / WORK_DIR
+        extra = self._check_run_args(settings.envs)
+        workdir = self._real(self._virtual(settings.cwd)) if settings.cwd else self.fs / WORK_DIR
         argv = ["/bin/sh", "-c", cmd]
         if background:
             self._bg_count += 1
@@ -345,7 +354,7 @@ class LocalSandbox:
                 self.spawn(argv, env=extra, cwd=workdir, stdout=log_file, stderr=subprocess.STDOUT)
             return CommandResult(0, "", "")
         proc, status = self.spawn_watched(argv, env=extra, cwd=workdir, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return self._collect(proc, status, timeout_sec, on_stdout, on_stderr)
+        return self._collect(proc, status, settings.timeout_sec, sinks.on_stdout, sinks.on_stderr)
 
     def _collect(
         self,

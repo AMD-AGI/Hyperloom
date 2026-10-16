@@ -21,6 +21,8 @@ from hyperloom.sandbox.socket import (
     NODE_NAME_KEY,
     SAME_NODE_KEY,
     SIGNING_PUBLIC_KEY,
+    CreateOptions,
+    OutputSinks,
     SandboxDenied,
     SandboxGone,
 )
@@ -37,7 +39,9 @@ def _wait_for_file(sandbox, path: str, seconds: float = 20.0) -> bytes:
 
 
 def _create(h, template: str, role: str, **kw):
-    return h.provider.create(template, role=role, timeout_sec=120, metadata=kw.pop("metadata", {}), **kw)
+    return h.provider.create(
+        template, role=role, timeout_sec=120, metadata=kw.pop("metadata", {}), options=CreateOptions(**kw)
+    )
 
 
 def test_info_carries_caller_and_platform_metadata(harness) -> None:
@@ -118,7 +122,7 @@ def test_a_key_only_sees_its_own_sandboxes(harness) -> None:
 def test_dev_sandbox_runs_commands_and_files(harness) -> None:
     sb = _create(harness, harness.dev_template, "dev", envs={"GREETING": "hello"})
     lines: list[str] = []
-    result = sb.run("echo $GREETING; echo oops >&2; exit 3", on_stdout=lines.append)
+    result = sb.run("echo $GREETING; echo oops >&2; exit 3", sinks=OutputSinks(on_stdout=lines.append))
     assert (result.exit_code, result.stdout, result.stderr) == (3, "hello\n", "oops\n")
     assert lines == ["hello\n"]
     sb.write_file("/work/a/b.txt", b"data")

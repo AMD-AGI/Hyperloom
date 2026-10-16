@@ -18,10 +18,12 @@ import pytest
 from hyperloom.common import proctree
 from hyperloom.sandbox import local_sandbox
 from hyperloom.sandbox.gpu_pool import GpuPool
-from hyperloom.sandbox.local import LocalSandboxProvider, LocalTemplate
+from hyperloom.sandbox.local import LocalSandboxProvider, LocalTemplate, ProcessUsers
 from hyperloom.sandbox.socket import (
     IDEMPOTENCY_KEY,
     SIGNING_PUBLIC_KEY,
+    CreateOptions,
+    RunSettings,
     SandboxDenied,
     SandboxGone,
     SandboxUnavailable,
@@ -100,8 +102,9 @@ def _runner(code: str, **kw) -> LocalTemplate:
 
 
 def _create(provider, template: str, role: str, **kw):
+    options = CreateOptions(envs=kw.pop("envs", None), wait_sec=kw.pop("wait_sec", 60))
     return provider.create(
-        template, role=role, timeout_sec=kw.pop("timeout_sec", 120), metadata=kw.pop("metadata", {}), **kw
+        template, role=role, timeout_sec=kw.pop("timeout_sec", 120), metadata=kw.pop("metadata", {}), options=options
     )
 
 
@@ -204,13 +207,16 @@ def test_platform_names_in_envs_are_refused(make) -> None:
         _create(provider, "dev", "dev", envs={"HYPERLOOM_SIGNING_KEY_FILE": "/x"})
     sb = _create(provider, "dev", "dev")
     with pytest.raises(SandboxDenied, match="platform variables"):
-        sb.run("true", envs={"E2B_SANDBOX_ID": "spoof"})
+        sb.run("true", settings=RunSettings(envs={"E2B_SANDBOX_ID": "spoof"}))
 
 
 def test_template_envs_and_create_envs_reach_commands(make) -> None:
     provider = make([LocalTemplate("dev", "dev", envs={"A": "1", "B": "tpl"})])
     sb = _create(provider, "dev", "dev", envs={"B": "create"})
-    assert sb.run('echo "$A $B $C $NODE_NAME"', envs={"C": "call"}).stdout == "1 create call node-a\n"
+    assert (
+        sb.run('echo "$A $B $C $NODE_NAME"', settings=RunSettings(envs={"C": "call"})).stdout
+        == "1 create call node-a\n"
+    )
 
 
 # -- GPU pool ---------------------------------------------------------------------
@@ -237,7 +243,7 @@ def test_eight_cards_at_tp2_allow_exactly_four_concurrent_sandboxes(make) -> Non
     cards = [c for s in seen for c in s.split(",")]
     assert sorted(cards) == [str(i) for i in range(8)]  # disjoint, all used
     with pytest.raises(SandboxUnavailable, match="no 2 free GPUs"):
-        provider.create("runner", role="measurement", timeout_sec=60, metadata={}, wait_sec=0.2)
+        provider.create("runner", role="measurement", timeout_sec=60, metadata={}, options=CreateOptions(wait_sec=0.2))
 
 
 def test_create_waits_for_cards_then_succeeds_when_they_come_back(make) -> None:
@@ -258,7 +264,7 @@ def test_create_gives_up_after_wait_sec(make) -> None:
     _create(provider, "runner", "measurement")
     started = time.monotonic()
     with pytest.raises(SandboxUnavailable, match="no 1 free GPUs within 0.3s"):
-        provider.create("runner", role="measurement", timeout_sec=60, metadata={}, wait_sec=0.3)
+        provider.create("runner", role="measurement", timeout_sec=60, metadata={}, options=CreateOptions(wait_sec=0.3))
     assert 0.25 <= time.monotonic() - started < 5
 
 
@@ -266,7 +272,7 @@ def test_a_template_larger_than_the_pool_fails_at_once(make) -> None:
     provider = make([_runner(_ENV_DUMP, gpus=3)], gpus=[0, 1])
     started = time.monotonic()
     with pytest.raises(SandboxUnavailable, match="pool owns 2"):
-        provider.create("runner", role="measurement", timeout_sec=60, metadata={}, wait_sec=30)
+        provider.create("runner", role="measurement", timeout_sec=60, metadata={}, options=CreateOptions(wait_sec=30))
     assert time.monotonic() - started < 5
 
 
@@ -357,7 +363,7 @@ def test_a_command_timeout_kills_its_tree_and_raises(make) -> None:
     provider = make([LocalTemplate("dev", "dev")])
     sb = _create(provider, "dev", "dev")
     with pytest.raises(SandboxUnavailable, match="command timed out after 0.5s"):
-        sb.run("sleep 300 & echo $! > pid; wait", timeout_sec=0.5)
+        sb.run("sleep 300 & echo $! > pid; wait", settings=RunSettings(timeout_sec=0.5))
     pid = int(sb.read_file("/work/pid"))
     _wait(lambda: not proctree.running(pid), seconds=10)
     assert sb.info().sandbox_id  # the sandbox itself is still usable
@@ -481,7 +487,8 @@ def test_separate_accounts_keep_the_signing_key_from_other_sandboxes(make) -> No
         LocalTemplate("runner", "measurement", command=("/bin/sh", "-c", runner_code), sealed=True, signing=True),
         LocalTemplate("dev", "dev"),
     ]
-    provider = make(templates, sealed_user=(60001, 60001), unsealed_user=(60002, 60002), launcher_python=_SYSTEM_PYTHON)
+    users = ProcessUsers(_SYSTEM_PYTHON, sealed_user=(60001, 60001), unsealed_user=(60002, 60002))
+    provider = make(templates, users=users)
     runner = _create(provider, "runner", "measurement")
     assert _read_when_present(runner, "/out/keyhead") == b"-----BEGIN"  # the runner reads its own key
     assert _read_when_present(runner, "/out/uid").strip() == b"60001"
@@ -500,7 +507,7 @@ def test_separate_accounts_keep_the_signing_key_from_other_sandboxes(make) -> No
 def test_separate_accounts_need_root(make, monkeypatch) -> None:
     monkeypatch.setattr(os, "geteuid", lambda: 1000)
     with pytest.raises(ValueError, match="needs root"):
-        LocalSandboxProvider([LocalTemplate("dev", "dev")], unsealed_user=(1, 1))
+        LocalSandboxProvider([LocalTemplate("dev", "dev")], users=ProcessUsers(unsealed_user=(1, 1)))
 
 
 def test_idempotency_key_is_released_when_create_fails_unexpectedly(make) -> None:

@@ -19,12 +19,13 @@ import tempfile
 import threading
 import uuid
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.sandbox.gpu_pool import GpuPool
 from hyperloom.sandbox.identity import generate_signing_identity
 from hyperloom.sandbox.node import node_name
-from hyperloom.sandbox.local_sandbox import WORK_DIR, LocalSandbox
+from hyperloom.sandbox.local_sandbox import WORK_DIR, LocalSandbox, SandboxPlan, SandboxRuntime
 from hyperloom.sandbox.socket import (
     AVOID_NODES_KEY,
     IDEMPOTENCY_KEY,
@@ -32,6 +33,7 @@ from hyperloom.sandbox.socket import (
     PLATFORM_METADATA_KEYS,
     SAME_NODE_KEY,
     SIGNING_PUBLIC_KEY,
+    CreateOptions,
     Role,
     Sandbox,
     SandboxDenied,
@@ -44,7 +46,31 @@ from hyperloom.sandbox.templates import RESERVED_ENV_NAMES, LocalTemplate
 
 log = logging.getLogger(__name__)
 
-__all__ = ["LocalSandboxProvider", "LocalTemplate"]
+__all__ = ["LocalSandboxProvider", "LocalTemplate", "ProcessUsers"]
+
+
+@dataclass(frozen=True)
+class ProcessUsers:
+    """The python that runs each process's launcher and the accounts the processes run as.
+
+    ``launcher_python`` must be executable by ``sealed_user`` / ``unsealed_user`` when those are set. ``sealed_user``
+    is the optional ``(uid, gid)`` that sealed sandboxes' processes run as, ``unsealed_user`` the one for dev and
+    sub-run sandboxes.
+    """
+
+    launcher_python: str = sys.executable
+    sealed_user: tuple[int, int] | None = None
+    unsealed_user: tuple[int, int] | None = None
+
+
+@dataclass(frozen=True)
+class _Order:
+    """What a create asks of one sandbox once its template and idempotency key are accepted."""
+
+    role: Role
+    timeout_sec: int
+    metadata: Mapping[str, str]
+    envs: Mapping[str, str]
 
 
 class LocalSandboxProvider:
@@ -56,12 +82,9 @@ class LocalSandboxProvider:
         base_dir: Where sandbox directories live; a temporary directory that
             :meth:`close` removes when omitted.
         hostname: The node name to report; ``NODE_NAME`` or this machine's hostname by default (:func:`~hyperloom.sandbox.node.node_name`).
-        launcher_python: The python3 that runs each process's launcher; it must
-            be executable by ``sealed_user`` / ``unsealed_user`` when those are set.
-        sealed_user: Optional ``(uid, gid)`` that sealed sandboxes' processes run as.
-        unsealed_user: Optional ``(uid, gid)`` that dev and sub-run sandboxes' processes run as.
+        users: The launcher's python and the accounts the processes run as, see :class:`ProcessUsers`.
 
-    Without ``sealed_user`` and ``unsealed_user`` every sandbox process runs as the
+    Without a ``sealed_user`` and an ``unsealed_user`` every sandbox process runs as the
     calling account, so one sandbox's processes can read another's files,
     including its signing key: the sandboxes are separated by directory and by
     process tree, not by account. Giving the two kinds different accounts (this
@@ -77,10 +100,9 @@ class LocalSandboxProvider:
         gpus: Iterable[int] = (),
         base_dir: Path | None = None,
         hostname: str | None = None,
-        launcher_python: str = sys.executable,
-        sealed_user: tuple[int, int] | None = None,
-        unsealed_user: tuple[int, int] | None = None,
+        users: ProcessUsers = ProcessUsers(),
     ) -> None:
+        sealed_user, unsealed_user = users.sealed_user, users.unsealed_user
         self._templates: dict[str, LocalTemplate] = {}
         for template in templates:
             if template.name in self._templates:
@@ -89,7 +111,7 @@ class LocalSandboxProvider:
         self._users = {True: sealed_user, False: unsealed_user}
         if (sealed_user or unsealed_user) and os.geteuid() != 0:
             raise ValueError("running sandbox processes as another account needs root")
-        self._launcher_python = launcher_python
+        self._launcher_python = users.launcher_python
         self.pool = GpuPool(gpus)
         self.hostname = hostname or node_name()
         self._owns_base = base_dir is None
@@ -113,8 +135,7 @@ class LocalSandboxProvider:
         role: Role,
         timeout_sec: int,
         metadata: Mapping[str, str],
-        envs: Mapping[str, str] | None = None,
-        wait_sec: float = 60,
+        options: CreateOptions = CreateOptions(),
     ) -> Sandbox:
         """Create a fresh sandbox, or return the one an idempotency key already made.
 
@@ -123,9 +144,8 @@ class LocalSandboxProvider:
             role: The caller's role; it must match the template's role.
             timeout_sec: Lifetime of the sandbox; its processes are reaped then.
             metadata: Caller metadata; platform ``claw.io/`` keys are refused.
-            envs: Extra environment; refused for a sealed template and for
-                platform variable names.
-            wait_sec: How long to wait for GPU cards.
+            options: Extra environment (``envs``; refused for a sealed template and for platform variable names) and
+                how long to wait for GPU cards (``wait_sec``).
 
         Returns:
             Sandbox: The new (or previously created) sandbox.
@@ -138,6 +158,7 @@ class LocalSandboxProvider:
         """
         if timeout_sec <= 0:
             raise ValueError("timeout_sec must be positive")
+        envs, wait_sec = options.envs, options.wait_sec
         tpl = self._check_create(template, role, metadata, envs)
         key = (role, metadata[IDEMPOTENCY_KEY]) if IDEMPOTENCY_KEY in metadata else None
         if key is not None:
@@ -153,7 +174,7 @@ class LocalSandboxProvider:
             self._finish_key(key, None)
             raise
         try:
-            sandbox = self._build(tpl, role, timeout_sec, metadata, envs or {}, cards)
+            sandbox = self._build(tpl, _Order(role, timeout_sec, metadata, envs or {}), cards)
         except SandboxError as exc:
             self._finish_key(key, exc)
             raise
@@ -248,15 +269,8 @@ class LocalSandboxProvider:
                 self._by_key[key] = outcome
             self._cond.notify_all()
 
-    def _build(
-        self,
-        tpl: LocalTemplate,
-        role: Role,
-        timeout_sec: int,
-        metadata: Mapping[str, str],
-        envs: Mapping[str, str],
-        cards: tuple[int, ...],
-    ) -> LocalSandbox:
+    def _build(self, tpl: LocalTemplate, order: _Order, cards: tuple[int, ...]) -> LocalSandbox:
+        role, metadata = order.role, order.metadata
         sandbox_id = f"lsb-{uuid.uuid4().hex}"
         directory = self._base / sandbox_id
         sandbox: LocalSandbox | None = None
@@ -268,19 +282,9 @@ class LocalSandboxProvider:
             (directory / "private").mkdir(mode=0o700)
             self._hand_over(directory, tpl)
             meta, platform_envs = self._platform_view(tpl, sandbox_id, directory, cards, metadata)
-            sandbox = LocalSandbox(
-                sandbox_id=sandbox_id,
-                template=tpl,
-                role=role,
-                directory=directory,
-                metadata=meta,
-                create_envs=envs,
-                platform_envs=platform_envs,
-                timeout_sec=timeout_sec,
-                on_end=self._on_end,
-                launcher_python=self._launcher_python,
-                user=self._users[tpl.sealed],
-            )
+            plan = SandboxPlan(sandbox_id, tpl, role, directory, meta, order.envs, platform_envs, order.timeout_sec)
+            runtime = SandboxRuntime(self._on_end, self._launcher_python, self._users[tpl.sealed])
+            sandbox = LocalSandbox(plan, runtime)
             with self._cond:
                 self._live[sandbox_id] = sandbox
             sandbox.start_template_command()
