@@ -81,8 +81,36 @@ custom model id) present two options — `Use default (<value>)` and `Custom` �
 and only when the user picks `Custom` ask a plain-text follow-up for the exact
 value.
 
-1. Ask how Hyperloom authenticates to Claude with the structured UI. Present
-   exactly these two option labels in this order:
+1. Ask which agent backend Hyperloom should run with the structured UI. Present
+   exactly these three option labels in this order:
+   1. `Claude (Anthropic)` — the Claude side only.
+   2. `Codex (OpenAI)` — the OpenAI side only: an OpenAI-compatible `/v1`
+      endpoint (`api.openai.com`, an AMD Primus-Safe gateway, or a self-hosted
+      proxy). Claude-side features are disabled.
+   3. `Both` — each side with its own base URL and key. When both are
+      configured, orchestration runs on Claude; the OpenAI side serves the
+      OpenAI-protocol features (Codex agents, GEAK's OpenAI path, proposal
+      scoring, `--critic-protocol openai`).
+
+   A side is configured by its own base URL and its own key; never write one
+   side's key or URL for the other.
+
+   With `Codex (OpenAI)` or `Both`, collect the OpenAI side:
+   - Ask `OPENAI_BASE_URL` with exactly these option labels in this order:
+     `Use default (https://api.openai.com/v1)` / `Custom`. With `Custom`, ask a
+     plain-text follow-up for the gateway's `/v1` URL.
+   - Write `OPENAI_API_KEY=<PLEASE_FILL_IN>` unless already set to a
+     non-placeholder value.
+   - Ask `CODEX_MODEL`: options `Use default (gpt-5.6-sol)` / `Custom`. The
+     model must be one that endpoint serves (list them with
+     `curl "$OPENAI_BASE_URL/models"`); a custom endpoint usually needs `Custom`.
+   - The Codex runtime (`openai_codex`, from the `llm` extra) is installed by the
+     runtime installer, which warns when it does not import; an OpenAI-only run
+     cannot start without it.
+
+   With `Claude (Anthropic)` or `Both`, ask how Hyperloom authenticates to
+   Claude with the structured UI. Present exactly these two option labels in
+   this order:
    1. `Anthropic API key` — API-credit billing; the official endpoint, the AMD
       gateway, or a custom gateway.
    2. `Claude subscription (Pro/Max)` — the user's own Claude plan, through a
@@ -258,6 +286,8 @@ Write the Anthropic keys plus the common keys:
 - `Anthropic`, API-key path: `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CLAUDE_MODEL`.
 - `Anthropic`, subscription path: `CLAUDE_CODE_OAUTH_TOKEN`,
   `ANTHROPIC_BASE_URL=https://api.anthropic.com`, `CLAUDE_MODEL`.
+- `OpenAI` (Codex or Both): `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `CODEX_MODEL`.
+  With `Codex (OpenAI)` alone, write no Anthropic key, token or base URL.
 - `Experience KB`: do not write `HYPERLOOM_KB_URL` or `HYPERLOOM_KB_TOKEN` by
   hand. After writing the other keys, run:
 
@@ -320,6 +350,9 @@ Then read `.env` back and confirm:
 - non-secret values are correct;
 - secret values are `set` or `missing`;
 - no secret key still equals `<PLEASE_FILL_IN>`.
+- Codex or Both: `OPENAI_BASE_URL` and `OPENAI_API_KEY` are both set; Codex
+  alone: no Anthropic key, token or base URL is set in `.env` or the shell
+  (preflight refuses a half-configured side).
 - subscription path: `CLAUDE_CODE_OAUTH_TOKEN` is set, and neither
   `ANTHROPIC_API_KEY` nor `ANTHROPIC_AUTH_TOKEN` is set in `.env` or the shell
   (either would take precedence over the subscription).
