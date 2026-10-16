@@ -19,7 +19,7 @@ known, since the lane's ``meta.json`` holds its whole plan.
 
 Kernel Forge writes naive local times, and the units carry them as it wrote them; collection reads a naive time as
 UTC. That is right for a run made in a container, which normally runs in UTC, and shifts the times of a run made on a
-host in another time zone.
+host in another time zone. The arena layouts share this limitation.
 """
 
 from __future__ import annotations
