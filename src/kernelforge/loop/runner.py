@@ -9,7 +9,6 @@ import asyncio
 import copy
 import contextlib
 import hashlib
-import inspect
 import json
 import logging
 import math
@@ -29,9 +28,10 @@ from hyperloom.common.unified_diff import touched_paths
 
 from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON
 from kernelforge.llm.process_reaping import processes_under
-from kernelforge.llm.workspace_policy import is_protected_path
+from kernelforge.llm.workspace_policy import hide_forge_loop_output, is_protected_path
 from kernelforge.llm.git import git
 from kernelforge.config import Config
+from kernelforge.loop.agent_extras import declared_extras
 from kernelforge.loop.canonical_correctness import accept_candidate
 from kernelforge.loop.validation import run_validation_pipeline
 from kernelforge.loop.experience import ExperienceLedger
@@ -97,6 +97,7 @@ from kernelforge.loop.run_state import (
 from kernelforge.orchestrator.orchestration import (
     OrchestrationInfrastructureError,
 )
+from kernelforge.orchestrator.summary_line import reasoning_log_path
 from kernelforge.orchestrator.supervisor import (
     clear_latest_supervisor_ruling,
     latest_supervisor_ruling_path,
@@ -125,6 +126,7 @@ from kernelforge.loop.scoring import (
     KEEP_MEASUREMENT_COUNT,
     SIGMA_REMEASURE_BATCH,
     SIGMA_REMEASURE_MAX_ROUNDS,
+    GateScoring,
     attribute_sigma,
     beats_current_best,
     keep_score,
@@ -1814,6 +1816,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             await agent_factory(str(lane_dir), str(serialized_driver))(
                 str(lane_dir / kernel_relative),
                 _lane_prompt(lane.plan, serialized_driver=serialized_driver),
+                reasoning_log=str(reasoning_log_path(self._lane_plan_path(iteration, int(lane.lane_id)))),
             )
 
         results = await run_lanes(
@@ -4431,7 +4434,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         manifest = self._lane_plan_manifest_path(iteration)
         manifest.unlink(missing_ok=True)
         keep = {self._lane_plan_path(iteration, lane) for lane in range(2, len(published) + 1)}
-        for stale in self._orchestration_root(iteration).glob("lane_*.md"):
+        for stale in self._orchestration_root(iteration).glob("lane_[0-9][0-9][0-9].md"):
             if stale not in keep:
                 stale.unlink()
         for lane, plan in enumerate(published, start=1):
@@ -4624,6 +4627,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         workspace_lock_held: bool = False,
     ) -> list[IterationResult]:
         """Run while exclusively owning this campaign workspace."""
+        hide_forge_loop_output(self.ic.workspace_dir)
         if workspace_lock_held:
             return await self._run_locked(
                 agent_fn=agent_fn,
@@ -5637,18 +5641,14 @@ class IterationLoop(AnalysisRuntimeMixin):
             )
             # Pass extras only to agent_fns that declare them: the in-session gate uses the current best mean case
             # speedup and immutable pristine per-case timings; session_sink hands back findings and the
-            # resumed-session factual-record callback.
-            extra_kwargs = {}
-            try:
-                params = inspect.signature(agent_fn).parameters
-                if "baseline_case_times" in params:
-                    extra_kwargs["baseline_case_times"] = dict(self._baseline_case_times)
-                if "best_mean_case_speedup" in params:
-                    extra_kwargs["best_mean_case_speedup"] = self.best_mean_case_speedup
-                if "session_sink" in params:
-                    extra_kwargs["session_sink"] = session_sink
-            except (ValueError, TypeError):
-                log.debug("could not introspect agent_fn signature", exc_info=True)
+            # resumed-session factual-record callback; the reasoning log is kept beside the plan being executed.
+            extras = {
+                "gate_scoring": GateScoring(dict(self._baseline_case_times), self.best_mean_case_speedup),
+                "session_sink": session_sink,
+            }
+            if optimization_plan_path:
+                extras["reasoning_log"] = str(reasoning_log_path(optimization_plan_path))
+            extra_kwargs = declared_extras(agent_fn, extras)
             agent_error = None
             try:
                 rationale = await agent_fn(

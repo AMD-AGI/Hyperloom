@@ -660,7 +660,7 @@ class _RecordingImplementer:
     def __call__(self, **kwargs):
         self.calls.append(kwargs)
 
-        async def agent(kernel_path: str, plan: str) -> str:
+        async def agent(kernel_path: str, plan: str, reasoning_log: str | None = None) -> str:
             return f"{kernel_path}:{plan}"
 
         return agent

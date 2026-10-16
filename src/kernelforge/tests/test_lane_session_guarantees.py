@@ -39,6 +39,7 @@ from kernelforge.agent_backends.registry import AgentProvider, register_agent_pr
 from kernelforge.cli import lanes as cli_lanes
 from kernelforge.config import Config
 from kernelforge.loop import fanout
+from kernelforge.loop.scoring import GateScoring
 
 
 @pytest.fixture(autouse=True)
@@ -126,6 +127,35 @@ def _run_lane_session(
 
     assert len(specs) == 1
     return specs[0], lane_dir
+
+
+def test_a_lane_may_write_its_reasoning_log_outside_its_copy(tmp_path, monkeypatch):
+    """The copy is deleted after the round, so the log lives beside the plans in the canonical workspace.
+
+    Reaching it takes an explicit extra directory, and the lane's protected-path hooks must not refuse it.
+    """
+    specs = _record_backend_specs(monkeypatch)
+    lane_dir = _tree(tmp_path / "lanes" / "1")
+    log = tmp_path / "workspace" / "forge_experiments" / "orchestration" / "iter_002" / "lane_002.reasoning.md"
+    session = _lane_factory(tmp_path)(str(lane_dir), None)
+
+    asyncio.run(session(str(lane_dir / "src" / "kernel.py"), "plan 2", reasoning_log=str(log)))
+
+    spec = specs[0]
+    assert spec.additional_directories == [str(log.parent)]
+    assert f"`{log}`" in spec.user_prompt
+    assert lane_dir.resolve() not in log.resolve().parents
+    deny_edit = next(
+        hook.callback for hook in spec.hooks.pre_tool_use if hook.matcher == gate_module._EDIT_TOOL_MATCHER
+    )
+    assert asyncio.run(deny_edit({"tool_name": "Write", "tool_input": {"file_path": str(log)}}, None, None)) == {}
+
+
+def test_a_lane_without_a_reasoning_log_is_given_no_extra_directory(tmp_path, monkeypatch):
+    spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch)
+
+    assert spec.additional_directories == []
+    assert "## Reasoning log" not in spec.user_prompt
 
 
 def test_a_hookless_provider_is_given_no_hooks_to_drop(tmp_path, monkeypatch):
@@ -370,7 +400,7 @@ def test_a_lane_keeps_the_prompt_of_the_session_it_actually_runs(tmp_path, monke
 
 
 def test_the_canonical_session_keeps_its_benchmarking_stop_hook(tmp_path, monkeypatch):
-    """Pin the single-session path: it self-corrects, and that has not changed."""
+    """Pin the single-session path: it self-corrects against the scoring it was handed, and that has not changed."""
     specs = _record_backend_specs(monkeypatch)
     workspace = _tree(tmp_path / "workspace")
 
@@ -386,12 +416,15 @@ def test_the_canonical_session_keeps_its_benchmarking_stop_hook(tmp_path, monkey
         insession_gate=True,
         driver_script=str(workspace / "forge_driver.py"),
     )
-    asyncio.run(agent_fn(str(workspace / "src" / "kernel.py"), ""))
+    asyncio.run(agent_fn(str(workspace / "src" / "kernel.py"), "", gate_scoring=GateScoring({"case": 2.0}, 1.25)))
 
     spec = specs[0]
     assert spec.hooks is not None
     assert len(spec.hooks.stop) == 1
     assert "ONE self-correcting session" in spec.system_prompt
+    gate = spec.hooks.stop[0].callback.__self__
+    assert (gate.baseline_case_times, gate.best_mean_case_speedup) == ({"case": 2.0}, 1.25)
+    assert "Current best pristine-relative score: 1.25." in spec.system_prompt
 
 
 @pytest.mark.parametrize("stop_check", [True, False])

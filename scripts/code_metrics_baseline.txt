@@ -984,7 +984,7 @@ function-args src/kernelforge/loop/task_preparer_prompts.py::_build_prompt 7
 function-args src/kernelforge/mcp_server/tools/bench.py::bench_wallclock 7
 function-args src/kernelforge/mcp_server/tools/bench.py::measure_wallclock 7
 function-args src/kernelforge/mcp_server/tools/bench.py::sweep_case 7
-function-args src/kernelforge/orchestrator/agent.py::_build_insession_gate 16
+function-args src/kernelforge/orchestrator/agent.py::_build_insession_gate 15
 function-args src/kernelforge/orchestrator/agent.py::_fill_session_sink 7
 function-args src/kernelforge/orchestrator/agent.py::_target_section 6
 function-args src/kernelforge/orchestrator/agent.py::make_agent_fn 26
@@ -1465,8 +1465,8 @@ function-lines src/kernelforge/mcp_server/probe_stdio_server.py::probe_variant 2
 function-lines src/kernelforge/mcp_server/tools/bench.py::aggregate_benchmark_measurements 97
 function-lines src/kernelforge/mcp_server/tools/bench.py::bench_wallclock 120
 function-lines src/kernelforge/mcp_server/tools/bench.py::sweep_case 178
-function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 332
-function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn.agent_fn 209
+function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 313
+function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn.agent_fn 197
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._finalize_framework_artifacts 83
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._prompts 236
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._run_analysis_session 119
@@ -1542,7 +1542,7 @@ module-lines src/kernelforge/loop/knowledge_integration.py 1457
 module-lines src/kernelforge/loop/runner.py 6051
 module-lines src/kernelforge/loop/task_preparer.py 1299
 module-lines src/kernelforge/orchestrator/analysis.py 2105
-module-lines src/kernelforge/orchestrator/orchestration.py 1960
+module-lines src/kernelforge/orchestrator/orchestration.py 1900
 nested-blocks src/hyperloom/inference_optimizer/assets/agentx/aiperf_phase_gate.py::_read_trace_metadata 6
 nested-blocks src/hyperloom/inference_optimizer/breakdown/session_package.py::package_session_artifacts 6
 nested-blocks src/hyperloom/inference_optimizer/framework_paths.py::_discover_installed_framework_roots 6
