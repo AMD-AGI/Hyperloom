@@ -142,6 +142,7 @@ from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     SIGMA_REMEASURE_BATCH,
     SIGMA_REMEASURE_MAX_ROUNDS,
+    GateScoring,
     SigmaAttribution,
     attribute_sigma,
     beats_current_best,
@@ -5731,8 +5732,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             # speedup and immutable pristine per-case timings; session_sink hands back findings and the
             # resumed-session factual-record callback; the reasoning log is kept beside the plan being executed.
             extras = {
-                "baseline_case_times": dict(self._baseline_case_times),
-                "best_mean_case_speedup": self.best_mean_case_speedup,
+                "gate_scoring": GateScoring(dict(self._baseline_case_times), self.best_mean_case_speedup),
                 "session_sink": session_sink,
             }
             if optimization_plan_path:
