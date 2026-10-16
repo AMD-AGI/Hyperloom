@@ -36,7 +36,13 @@ from typing import Any
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import FrontierScore
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeBranch
-from hyperloom_multibranch.notebook.rsi.frontier import NEW_BRANCH_FLOOR_PCT, FrontierPolicy, headroom_pct, score_at
+from hyperloom_multibranch.notebook.rsi.frontier import (
+    NEW_BRANCH_FLOOR_PCT,
+    FrontierPolicy,
+    ScoringContext,
+    headroom_pct,
+    score_at,
+)
 from hyperloom_multibranch.notebook.rsi.report import number, table
 
 #: The judge's cadence, about: how often a replayed session's branches are scored.
@@ -85,6 +91,17 @@ VARIATIONS = (
     Variation("similarity bar 0.3", min_similarity=0.3),
     Variation("similarity bar 0.7", min_similarity=0.7),
 )
+
+
+@dataclass(frozen=True)
+class CalibrationSettings:
+    """How the sessions are replayed (every ``round_seconds``, gains over ``horizon_seconds`` or until each branch
+    stopped) and the evidence advice needs (``min_sessions`` sessions and ``min_rounds`` rounds)."""
+
+    round_seconds: float = ROUND_SECONDS
+    horizon_seconds: float | None = None
+    min_sessions: int = MIN_SESSIONS
+    min_rounds: int = MIN_ROUNDS
 
 
 @dataclass(frozen=True)
@@ -145,9 +162,7 @@ def score_archived(
     return score_at(
         then,
         t_s,
-        tree.task,
-        history,
-        policy,
+        ScoringContext(tree.task, history, policy),
         observing=any(since <= when <= t_s for when in then.kernel_test_times),
         headroom=headroom_pct(ceiling, 1.0 + then.gain_at(t_s) / _PERCENT),
     )
@@ -279,10 +294,7 @@ def calibrate(
     *,
     variations: Sequence[Variation] = VARIATIONS,
     logs: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
-    round_seconds: float = ROUND_SECONDS,
-    horizon_seconds: float | None = None,
-    min_sessions: int = MIN_SESSIONS,
-    min_rounds: int = MIN_ROUNDS,
+    settings: CalibrationSettings = CalibrationSettings(),
 ) -> CalibrationReport:
     """Every variation's calibration over ``trees``, the first variation being the current policy.
 
@@ -290,6 +302,7 @@ def calibrate(
     beside the gains its archived tree went on to make.
     """
 
+    horizon_seconds = settings.horizon_seconds
     rows = []
     for variation in variations:
         rounds = {
@@ -297,7 +310,7 @@ def calibrate(
                 tree,
                 tuple(other for other in trees if other.session_id != tree.session_id),
                 session_policy(tree, variation),
-                round_seconds,
+                settings.round_seconds,
                 horizon_seconds,
             )
             for tree in trees
@@ -315,7 +328,7 @@ def calibrate(
             if session_id in by_id
         }
         rows.append(_summary(LOGGED, logged))
-    recommended, note = _advice(rows, min_sessions, min_rounds)
+    recommended, note = _advice(rows, settings.min_sessions, settings.min_rounds)
     return CalibrationReport(tuple(rows), horizon_seconds, recommended, note)
 
 
@@ -328,6 +341,7 @@ __all__ = [
     "ROUND_SECONDS",
     "VARIATIONS",
     "CalibrationReport",
+    "CalibrationSettings",
     "PolicyCalibration",
     "Variation",
     "calibrate",

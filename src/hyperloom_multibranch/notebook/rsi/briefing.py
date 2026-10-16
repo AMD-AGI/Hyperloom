@@ -32,11 +32,17 @@ from hyperloom_multibranch.notebook.knowledge.recall import (
     ExperienceReader,
     IdentityIndex,
     Recall,
+    RecallQuery,
     RecallTier,
     recall_experiences,
 )
 from hyperloom_multibranch.notebook.knowledge.warm_start import WarmLead
-from hyperloom_multibranch.notebook.learning_search import RetrievalSource, render_session_learning, session_matches
+from hyperloom_multibranch.notebook.learning_search import (
+    Retrieval,
+    RetrievalSource,
+    render_session_learning,
+    session_matches,
+)
 from hyperloom_multibranch.notebook.rsi.analysis import FailureTier, failures_at, repeated_failures
 
 DEFAULT_MAX_CHARS = 4000
@@ -120,8 +126,7 @@ class CrossSessionBriefing(StartupBriefProvider):
             self.experiences,
             snapshot.profile,
             baseline,
-            bottleneck=self.focus,
-            branch=self.branch,
+            RecallQuery(self.focus, self.branch),
             identities=self.identities,
         )
 
@@ -133,9 +138,7 @@ class CrossSessionBriefing(StartupBriefProvider):
         if self.learnings is not None and snapshot.profile is not None:
             past = await asyncio.to_thread(self.learnings.past, snapshot.profile, self.focus, limit=LEARNINGS)
         if self.learnings is not None:
-            self.learnings.record(
-                snapshot, branch=self.branch, source=RetrievalSource.BRIEF, query=self.focus, here=here, past=past
-            )
+            self.learnings.record(snapshot, Retrieval(self.branch, RetrievalSource.BRIEF, self.focus), here, past)
         learnt_here = [f"learnt here: {render_session_learning(record, snapshot)[2:]}" for record in here]
         learnt_before = [f"learnt before: {item.render()[2:]}" for item in (past.items if past is not None else ())]
         return learnt_here, learnt_before

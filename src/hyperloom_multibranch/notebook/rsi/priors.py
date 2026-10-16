@@ -87,22 +87,29 @@ def _environments(tree: SearchTree) -> set[str]:
     return set(tree.noise.environment.split("+")) if tree.noise.environment else set()
 
 
+@dataclass(frozen=True)
+class DispersionTask:
+    """The task a prior is for: ``model`` with ``tp`` on ``gpu``."""
+
+    model: str
+    tp: int
+    gpu: str
+
+
 def dispersion_prior(
     history: Sequence[SearchTree],
+    task: DispersionTask,
     *,
-    model: str,
-    tp: int,
-    gpu: str,
     environment: str = HOSTED,
     fallback: GlobalFallback = GlobalFallback.P90,
     shadow: ShadowNoise | None = None,
 ) -> DispersionPrior:
-    """The dispersion to expect measuring ``model`` with ``tp`` on ``gpu`` in ``environment``.
+    """The dispersion to expect measuring ``task`` in ``environment``.
 
     ``shadow`` is the shadow runs' noise for this task (:func:`rsi.shadow.shadow_noise`), none by default.
     """
 
-    matched = matching(history, model=model, tp=tp, gpu=gpu)
+    matched = matching(history, model=task.model, tp=task.tp, gpu=task.gpu)
     measured = [tree for tree in matched if tree.noise.dispersion_pct is not None]
     here = [tree for tree in measured if environment in _environments(tree)]
     single_host = [tree.noise.dispersion_pct for tree in measured if _environments(tree) == {SINGLE_HOST}]
@@ -139,6 +146,7 @@ __all__ = [
     "HOSTED",
     "SINGLE_HOST",
     "DispersionPrior",
+    "DispersionTask",
     "GlobalFallback",
     "PriorSource",
     "dispersion_prior",

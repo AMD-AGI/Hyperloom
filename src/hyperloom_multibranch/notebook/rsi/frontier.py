@@ -141,12 +141,19 @@ def headroom_pct(ceiling: float | None, head: float | None) -> float | None:
     return max(0.0, (ceiling / head - 1.0) * 100.0) if ceiling and head else None
 
 
+@dataclass(frozen=True)
+class ScoringContext:
+    """What a branch is scored against: its session's ``task``, the archived ``history`` and the ``policy``."""
+
+    task: TaskConditions
+    history: tuple[SearchTree, ...]
+    policy: FrontierPolicy
+
+
 def score_at(
     branch: TreeBranch,
     t_s: float,
-    task: TaskConditions,
-    history: tuple[SearchTree, ...],
-    policy: FrontierPolicy,
+    context: ScoringContext,
     *,
     observing: bool = False,
     headroom: float | None = None,
@@ -158,6 +165,7 @@ def score_at(
     both off the notebook; the calibration reads them, and the branch as of ``t_s``, off an archived tree.
     """
 
+    policy = context.policy
     trend = branch.gain_at(t_s) - branch.gain_at(t_s - policy.window_seconds)
     components = {
         "trend_pct": trend,
@@ -166,7 +174,7 @@ def score_at(
         "observing": float(observing),
     }
     expected, basis = trend, FrontierBasis.TREND
-    prior = remaining_prior(history, task, len(branch.test_times), min_similarity=policy.min_similarity)
+    prior = remaining_prior(context.history, context.task, len(branch.test_times), min_similarity=policy.min_similarity)
     if prior is not None and prior.effective_sessions >= policy.min_effective_sessions:
         components.update(prior_remaining_pct=prior.remaining_pct, prior_effective_sessions=prior.effective_sessions)
         expected, basis = prior.remaining_pct, FrontierBasis.PRIOR
@@ -196,9 +204,7 @@ def score_branch(
     return score_at(
         branch,
         snapshot.taken_at - session_start(snapshot),
-        tree.task,
-        history,
-        policy,
+        ScoringContext(tree.task, history, policy),
         observing=_observing(snapshot, row.branch, snapshot.taken_at - policy.observation_seconds),
         headroom=headroom_pct(ceiling, row.head_value.get(policy.metric)),
     )
@@ -293,6 +299,7 @@ __all__ = [
     "FrontierPolicy",
     "FrontierScoring",
     "RemainingPrior",
+    "ScoringContext",
     "frontier_log_line",
     "headroom_pct",
     "remaining_prior",

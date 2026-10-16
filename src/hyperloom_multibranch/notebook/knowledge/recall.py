@@ -216,27 +216,37 @@ def classify(
     )
 
 
+@dataclass(frozen=True)
+class RecallQuery:
+    """What one recall asks for: Experiences on ``bottleneck``, for ``branch`` about to try ``intent``, at most
+    ``limit``."""
+
+    bottleneck: str
+    branch: str = ""
+    intent: str = ""
+    limit: int = DEFAULT_LIMIT
+
+
 def recall_experiences(
     reader: ExperienceReader | None,
     profile: SessionProfile,
     baseline_value: float | None,
+    wanted: RecallQuery,
     *,
-    bottleneck: str,
-    branch: str = "",
-    intent: str = "",
-    limit: int = DEFAULT_LIMIT,
     identities: IdentityIndex | None = None,
 ) -> Recall:
-    """Read the Experiences relevant to ``bottleneck`` on this session's task; ``reader`` is ``None`` without a KB.
+    """Read the Experiences relevant to ``wanted`` on this session's task; ``reader`` is ``None`` without a KB.
 
     A summary without an identity is looked up in ``identities``.
     """
 
     if reader is None:
         return Recall(ReadStatus.DISABLED.value, "", (), (), ())
-    context = recall_context(profile, baseline_value, bottleneck=bottleneck, branch=branch, intent=intent)
-    result = reader.read(DECISION, context, limit=limit)
-    query = recall_conditions(profile, bottleneck)
+    context = recall_context(
+        profile, baseline_value, bottleneck=wanted.bottleneck, branch=wanted.branch, intent=wanted.intent
+    )
+    result = reader.read(DECISION, context, limit=wanted.limit)
+    query = recall_conditions(profile, wanted.bottleneck)
     return Recall(
         status=str(result.status),
         read_id=str(result.read_id),
@@ -253,6 +263,7 @@ __all__ = [
     "ExperienceReader",
     "IdentityIndex",
     "Recall",
+    "RecallQuery",
     "RecallTier",
     "RecalledExperience",
     "classify",

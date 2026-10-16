@@ -29,6 +29,7 @@ from hyperloom_multibranch.notebook.knowledge.learnings import MAPPING_PATH
 from hyperloom_multibranch.notebook.knowledge.recall import WORKLOAD_KEYS, ExperienceReader, IdentityIndex, classify
 from hyperloom_multibranch.notebook.learning_search import (
     SESSION_HEADING,
+    Retrieval,
     RetrievalLog,
     RetrievalSource,
     SessionLearnings,
@@ -153,10 +154,7 @@ class LearningRecall(SessionLearnings):
     def record(
         self,
         snapshot: NotebookSnapshot,
-        *,
-        branch: str,
-        source: RetrievalSource,
-        query: str,
+        retrieval: Retrieval,
         here: Sequence[LearningRecord],
         past: PastLearnings | None,
     ) -> None:
@@ -167,10 +165,8 @@ class LearningRecall(SessionLearnings):
         found = past.items if past is not None else ()
         self.log.record(
             snapshot,
-            branch=branch,
-            source=source,
-            query=query,
-            here=here,
+            retrieval,
+            here,
             past=[item.experience_id for item in found],
             past_status=past.status if past is not None else "",
         )
@@ -196,7 +192,7 @@ class LearningRecall(SessionLearnings):
         past = None
         if snapshot.profile is not None and self._reader is not None:
             past = await asyncio.to_thread(self.past, snapshot.profile, query, limit=limit)
-        self.record(snapshot, branch=branch, source=RetrievalSource.TOOL, query=query, here=here, past=past)
+        self.record(snapshot, Retrieval(branch, RetrievalSource.TOOL, query), here, past)
         rendered = [render_session_learning(record, snapshot) for record in here]
         before = _rendered_past(past)
         return [*([SESSION_HEADING, *rendered] if rendered else []), *([PAST_HEADING, *before] if before else [])]

@@ -33,10 +33,10 @@ from typing import Any
 from hyperloom.common.jsonio import read_jsonl
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeArchive
-from hyperloom_multibranch.notebook.rsi.calibration import ROUND_SECONDS, calibrate
+from hyperloom_multibranch.notebook.rsi.calibration import ROUND_SECONDS, CalibrationSettings, calibrate
 from hyperloom_multibranch.notebook.rsi.frontier import MIN_EFFECTIVE_SESSIONS
 from hyperloom_multibranch.notebook.rsi.learning_eval import read_session
-from hyperloom_multibranch.notebook.rsi.priors import HOSTED, DispersionPrior, dispersion_prior
+from hyperloom_multibranch.notebook.rsi.priors import HOSTED, DispersionPrior, DispersionTask, dispersion_prior
 from hyperloom_multibranch.notebook.rsi.replay import TICK_SECONDS, PolicyEvaluation, ReplayPolicy, evaluate
 from hyperloom_multibranch.notebook.rsi.report import number, table
 from hyperloom_multibranch.notebook.rsi.shadow import ShadowNoise, read_shadow, shadow_noise
@@ -135,7 +135,8 @@ def _caps(text: str) -> tuple[int, ...]:
 def _frontier(args: argparse.Namespace) -> Any:
     logs = {session_id: read_jsonl(path, skip_malformed=True, skip_non_dict=True) for session_id, path in args.log}
     trees = TreeArchive(args.archive).load()
-    return calibrate(trees, logs=logs, round_seconds=args.round_seconds, horizon_seconds=args.horizon_seconds)
+    settings = CalibrationSettings(round_seconds=args.round_seconds, horizon_seconds=args.horizon_seconds)
+    return calibrate(trees, logs=logs, settings=settings)
 
 
 def _branch_cap(args: argparse.Namespace) -> Any:
@@ -154,9 +155,8 @@ def _dispersion(args: argparse.Namespace) -> Any:
     labels = json.loads(args.labels.read_text(encoding="utf-8")) if args.labels else None
     noise = shadow_noise(read_shadow(args.shadow), labels=labels, model=args.model, tp=args.tp, gpu=args.gpu)
     history = TreeArchive(args.archive).load() if args.archive else []
-    prior = dispersion_prior(
-        history, model=args.model, tp=args.tp, gpu=args.gpu, environment=args.environment, shadow=noise
-    )
+    task = DispersionTask(args.model, args.tp, args.gpu)
+    prior = dispersion_prior(history, task, environment=args.environment, shadow=noise)
     return DispersionReport(prior, noise)
 
 

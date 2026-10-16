@@ -12,7 +12,7 @@ import pytest
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
 from hyperloom_multibranch.notebook.rsi.archive import SOURCE_NOTEBOOK, SearchTree, TreeBranch, TreeDirection
-from hyperloom_multibranch.notebook.rsi.history import Standing, history_digest, session_history
+from hyperloom_multibranch.notebook.rsi.history import SoFar, Standing, history_digest, session_history
 from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions, task_conditions
 from hyperloom_multibranch.notebook.rsi.tests.trees import HOUR, branch, tree
 from hyperloom_multibranch.notebook.tests.factories import profile
@@ -55,7 +55,7 @@ def test_too_little_similar_history_says_so_instead_of_drawing_from_it() -> None
 
 
 def test_the_digest_sums_up_pace_final_gain_branches_and_directions() -> None:
-    digest = history_digest([WIDE, NARROW, OLD_FLOW], TASK, now_fraction=0.25, current_gain_pct=1.0)
+    digest = history_digest([WIDE, NARROW, OLD_FLOW], TASK, so_far=SoFar(0.25, 1.0))
 
     assert digest.enough and (digest.sessions, digest.multi_branch, digest.backfilled) == (3, 2, 1)
     # By a quarter of the budget: wide had 2 of 5, narrow 2 of 2, the old flow 0 of 4; by half, all of it.
@@ -75,7 +75,7 @@ def test_the_digest_sums_up_pace_final_gain_branches_and_directions() -> None:
 
 
 def test_the_text_keeps_whole_lines_within_its_budget() -> None:
-    digest = history_digest([WIDE, NARROW, OLD_FLOW], TASK, now_fraction=0.25, current_gain_pct=1.0)
+    digest = history_digest([WIDE, NARROW, OLD_FLOW], TASK, so_far=SoFar(0.25, 1.0))
 
     full, short = digest.render(), digest.render(max_chars=300)
 

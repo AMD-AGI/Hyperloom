@@ -48,6 +48,15 @@ class RetrievalSource(str, Enum):
 
 
 @dataclass(frozen=True)
+class Retrieval:
+    """One retrieval of learnings: for ``branch``, through ``source``, for ``query``."""
+
+    branch: str
+    source: RetrievalSource
+    query: str
+
+
+@dataclass(frozen=True)
 class RetrievalLog:
     """The session's log of the learnings shown to its branches; a failed append is logged and holds up nobody.
 
@@ -60,10 +69,7 @@ class RetrievalLog:
     def record(
         self,
         snapshot: NotebookSnapshot,
-        *,
-        branch: str,
-        source: RetrievalSource,
-        query: str,
+        retrieval: Retrieval,
         here: Sequence[LearningRecord],
         past: Sequence[str] = (),
         past_status: str = "",
@@ -71,9 +77,9 @@ class RetrievalLog:
         line = {
             "format": LEARNINGS_LOG_FORMAT,
             "at": snapshot.taken_at,
-            "branch": branch,
-            "source": source.value,
-            "query": query,
+            "branch": retrieval.branch,
+            "source": retrieval.source.value,
+            "query": retrieval.query,
             "here": [record.entry_id for record in here],
             "past": list(past),
             "past_status": past_status,
@@ -177,7 +183,7 @@ class SessionLearnings:
 
         found = session_matches(snapshot, query, limit=limit)
         if self.log is not None:
-            self.log.record(snapshot, branch=branch, source=source, query=query, here=found)
+            self.log.record(snapshot, Retrieval(branch, source, query), found)
         return found
 
     async def lines(self, snapshot: NotebookSnapshot, query: str, *, limit: int, branch: str = "") -> list[str]:
@@ -193,6 +199,7 @@ __all__ = [
     "LEARNINGS_LOG_FORMAT",
     "SESSION_HEADING",
     "LearningFinder",
+    "Retrieval",
     "RetrievalLog",
     "RetrievalSource",
     "SessionLearnings",

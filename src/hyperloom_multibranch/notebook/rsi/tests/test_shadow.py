@@ -12,11 +12,12 @@ from typing import Any
 import pytest
 
 from hyperloom_multibranch.notebook.rsi.archive import MeasurementNoise
-from hyperloom_multibranch.notebook.rsi.priors import HOSTED, PriorSource, dispersion_prior
+from hyperloom_multibranch.notebook.rsi.priors import HOSTED, DispersionTask, PriorSource, dispersion_prior
 from hyperloom_multibranch.notebook.rsi.shadow import ShadowNoise, read_shadow, shadow_noise
 from hyperloom_multibranch.notebook.rsi.tests.trees import TASK, tree
 
 MODEL, GPU, TP = TASK.labels["model"], TASK.labels["gpu"], 8
+PRIOR_TASK = DispersionTask(MODEL, TP, GPU)
 LABELS = {"t1": {"model": MODEL, "tp": TP, "gpu": GPU}, "t2": {"model": "Qwen/Qwen3-8B", "tp": 1, "gpu": GPU}}
 
 
@@ -59,9 +60,9 @@ def test_without_a_matching_hosted_session_the_shadow_runs_give_the_hosted_prior
     noise = shadow_noise(read_shadow(report))
     archived = tree("hosted-a", noise=MeasurementNoise(1.4, None, 3, HOSTED))
 
-    shadowed = dispersion_prior([], model=MODEL, tp=TP, gpu=GPU, shadow=noise)
-    measured = dispersion_prior([archived], model=MODEL, tp=TP, gpu=GPU, shadow=noise)
-    local = dispersion_prior([], model=MODEL, tp=TP, gpu=GPU, environment="local", shadow=noise)
+    shadowed = dispersion_prior([], PRIOR_TASK, shadow=noise)
+    measured = dispersion_prior([archived], PRIOR_TASK, shadow=noise)
+    local = dispersion_prior([], PRIOR_TASK, environment="local", shadow=noise)
 
     assert (shadowed.source, shadowed.dispersion_pct, shadowed.samples, shadowed.offset_pct) == (
         PriorSource.SHADOW,
@@ -71,4 +72,4 @@ def test_without_a_matching_hosted_session_the_shadow_runs_give_the_hosted_prior
     )
     assert (measured.source, measured.dispersion_pct, measured.offset_pct) == (PriorSource.ARCHIVE, 1.4, -2.0)
     assert local.source is PriorSource.GLOBAL
-    assert dispersion_prior([], model=MODEL, tp=TP, gpu=GPU).offset_pct is None
+    assert dispersion_prior([], PRIOR_TASK).offset_pct is None

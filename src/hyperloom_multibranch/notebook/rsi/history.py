@@ -76,6 +76,14 @@ class DirectionHistory:
 
 
 @dataclass(frozen=True)
+class SoFar:
+    """How far this session has come: ``fraction`` of its budget spent (0 to 1), its best gain over its baseline."""
+
+    fraction: float
+    gain_pct: float
+
+
+@dataclass(frozen=True)
 class Standing:
     """This session's best gain at ``fraction`` of its budget, beside the median similar session's at that fraction."""
 
@@ -227,15 +235,13 @@ def history_digest(
     history: Sequence[SearchTree],
     task: TaskConditions,
     *,
-    now_fraction: float | None = None,
-    current_gain_pct: float | None = None,
+    so_far: SoFar | None = None,
     min_similarity: float = MIN_SIMILARITY,
     min_sessions: float = MIN_SESSIONS,
 ) -> HistoryDigest:
     """Digest the archived ``history`` for a session on ``task``.
 
-    With ``now_fraction`` (how much of its budget this session has spent, 0 to 1) and ``current_gain_pct`` (its best
-    gain over its baseline so far), the digest also stands this session beside the similar ones.
+    With ``so_far``, how far this session has come, the digest also stands it beside the similar ones.
     """
 
     similar = similar_trees(history, task, minimum=min_similarity)
@@ -244,15 +250,15 @@ def history_digest(
         return HistoryDigest(enough=False, sessions=len(similar), effective_sessions=worth)
     finals = [(item.tree.final_gain_pct, item.weight) for item in similar]
     standing = None
-    if now_fraction is not None and current_gain_pct is not None:
+    if so_far is not None:
         then = [
-            (_best_by(item.tree, now_fraction * item.tree.budget_seconds), item.weight)
+            (_best_by(item.tree, so_far.fraction * item.tree.budget_seconds), item.weight)
             for item in similar
             if item.tree.budget_seconds > 0
         ]
         typical = _quantile(then, MEDIAN)
         if typical is not None:
-            standing = Standing(now_fraction, current_gain_pct, typical)
+            standing = Standing(so_far.fraction, so_far.gain_pct, typical)
     multi_branch = sum(1 for item in similar if item.tree.source == SOURCE_NOTEBOOK)
     return HistoryDigest(
         enough=True,
@@ -281,7 +287,8 @@ def session_history(
         return HistoryDigest(enough=False, sessions=0, effective_sessions=0.0, note=f"no digest yet: {exc}")
     spent = (snapshot.taken_at - session_start(snapshot)) / budget_seconds if budget_seconds > 0 else None
     fraction = None if spent is None else min(1.0, max(0.0, spent))
-    return history_digest(history, tree.task, now_fraction=fraction, current_gain_pct=tree.final_gain_pct)
+    so_far = None if fraction is None else SoFar(fraction, tree.final_gain_pct)
+    return history_digest(history, tree.task, so_far=so_far)
 
 
 def _pct(value: float) -> str:
@@ -374,6 +381,7 @@ __all__ = [
     "BranchHistory",
     "DirectionHistory",
     "HistoryDigest",
+    "SoFar",
     "Standing",
     "history_digest",
     "session_history",
