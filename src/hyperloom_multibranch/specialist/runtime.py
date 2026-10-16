@@ -7,7 +7,8 @@ A session that crashes is restarted on its branch, at most ``MAX_RESTARTS`` time
 that the branch keeps its judge, which settles what was already measured, and the scheduler stops it as it stops any
 branch that makes no progress. A judge that fails is a defect of this code, not of the specialist: it is not
 restarted, and the branch's session is stopped so no candidate is measured that nothing would judge. Both leave a
-notice in the branch log.
+notice in the branch log. While the specialist writes a change, the runtime renews the claims it holds, so a claim does
+not lapse while a model thinks; once a test carries a claim, the toolbox renews it.
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
+from hyperloom_multibranch.contracts.notebook.interfaces import ClaimService, NotebookError
+from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus
 from hyperloom_multibranch.contracts.toolbox import Toolbox
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.rules import Rule
@@ -30,6 +33,10 @@ logger = logging.getLogger(__name__)
 
 MAX_RESTARTS = 3
 RESTART_WINDOW_S = 600.0
+
+
+class RuntimeNotebook(JudgeNotebook, ClaimService, Protocol):
+    """A branch's runtime handle: what its judge reads and writes, and the claims its specialist holds."""
 
 
 class Session(Protocol):
@@ -53,7 +60,7 @@ class _Branch:
     name: str
     start_commit: str
     brief: str
-    notebook: JudgeNotebook
+    notebook: RuntimeNotebook
     k: int = 1
     session: Session | None = None
     tasks: list[asyncio.Task[None]] = field(default_factory=list)
@@ -64,13 +71,14 @@ class SpecialistRuntime:
 
     def __init__(
         self,
-        notebook_for: Callable[[str], JudgeNotebook],
+        notebook_for: Callable[[str], RuntimeNotebook],
         gate: RuleGate,
         toolbox: Toolbox,
         rule: Rule,
         sessions: SessionFactory,
         *,
         poll_seconds: float = 5.0,
+        claim_ttl_seconds: float = 600.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._notebook_for = notebook_for
@@ -79,6 +87,7 @@ class SpecialistRuntime:
         self._rule = rule
         self._sessions = sessions
         self._poll_seconds = poll_seconds
+        self._claim_ttl_seconds = claim_ttl_seconds
         self._clock = clock
         self._branches: dict[str, _Branch] = {}
 
@@ -91,6 +100,7 @@ class SpecialistRuntime:
         state.tasks = [
             asyncio.create_task(self._supervise(state), name=f"specialist of {branch}"),
             asyncio.create_task(self._judge(state, judge), name=f"judge of {branch}"),
+            asyncio.create_task(self._renew(state), name=f"claim renewal of {branch}"),
         ]
         for task in state.tasks:
             task.add_done_callback(_log_failure)
@@ -99,19 +109,23 @@ class SpecialistRuntime:
         if k < 1:
             raise ValueError("stop the branch instead of giving it no room")
         state = self._branches[branch]
+        if k == state.k:
+            return
         state.k = k
         if state.session is not None:
             await state.session.set_k(k)
+        await _notice(state, f"you may now have {k} tests running at once")
 
     async def stop(self, branch: str) -> None:
         state = self._branches.pop(branch)
-        supervisor, judge = state.tasks
+        supervisor, *others = state.tasks
         supervisor.cancel()
         await asyncio.gather(supervisor, return_exceptions=True)
         if state.session is not None:
             await state.session.stop()
-        judge.cancel()
-        await asyncio.gather(judge, return_exceptions=True)
+        for task in others:
+            task.cancel()
+        await asyncio.gather(*others, return_exceptions=True)
 
     async def _supervise(self, state: _Branch) -> None:
         crashes: deque[float] = deque()
@@ -139,12 +153,25 @@ class SpecialistRuntime:
             await judge.run(self._poll_seconds)
         except Exception as error:
             logger.exception("judging %s failed", state.name)
-            supervisor = state.tasks[0]
+            supervisor, _, renewal = state.tasks
             supervisor.cancel()
-            await asyncio.gather(supervisor, return_exceptions=True)
+            renewal.cancel()
+            await asyncio.gather(supervisor, renewal, return_exceptions=True)
             if state.session is not None:
                 await state.session.stop()
             await _notice(state, f"judging this branch failed ({error!r}); its specialist is stopped")
+
+    async def _renew(self, state: _Branch) -> None:
+        while True:
+            await asyncio.sleep(self._claim_ttl_seconds / 3)
+            snapshot = await state.notebook.snapshot()
+            for claim in snapshot.claims:
+                if claim.holder != state.name or claim.status is not ClaimStatus.HELD or claim.request_id is not None:
+                    continue
+                try:
+                    await state.notebook.renew(claim.key, ttl_seconds=self._claim_ttl_seconds)
+                except NotebookError:
+                    logger.warning("the claim %s of %s ended before its renewal", claim.key, state.name, exc_info=True)
 
 
 async def _notice(state: _Branch, content: str) -> None:

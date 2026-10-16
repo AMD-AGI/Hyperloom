@@ -10,9 +10,9 @@ from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom_multibranch.contracts.fork import AdmissionStatus
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, LineageKind
+from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, ClaimStatus, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import delta
+from hyperloom_multibranch.notebook.tests.factories import delta, intent
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
 from hyperloom_multibranch.specialist.judging import NOTICE
@@ -86,12 +86,25 @@ class _Session:
         await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, BRANCH, from_commit=start))
         return start
 
-    def runtime(self, runs, *, notebook=LocalNotebook, clock=lambda: 0.0) -> SpecialistRuntime:
+    def runtime(self, runs, *, notebook=LocalNotebook, clock=lambda: 0.0, claim_ttl=600.0) -> SpecialistRuntime:
         def notebook_for(branch: str) -> LocalNotebook:
             return notebook(self.root, Writer(Role.SPECIALIST_RUNTIME, branch, branch))
 
         rule = InferenceXRule(self.reader, 64)
-        return SpecialistRuntime(notebook_for, self.gate, self.toolbox, rule, runs, poll_seconds=0.01, clock=clock)
+        return SpecialistRuntime(
+            notebook_for,
+            self.gate,
+            self.toolbox,
+            rule,
+            runs,
+            poll_seconds=0.01,
+            claim_ttl_seconds=claim_ttl,
+            clock=clock,
+        )
+
+    async def claim(self, key) -> ClaimStatus:
+        (found,) = [claim for claim in (await self.reader.snapshot()).claims if claim.key == key]
+        return found.status
 
     def scripted(self, k: int) -> ScriptedSession:
         return ScriptedSession(BRANCH, SCRIPT, k, self.toolbox, self.repo, self.reader, poll_seconds=0.01)
@@ -198,6 +211,33 @@ async def test_a_branch_has_one_specialist_and_keeps_room_for_a_test(session):
     await runtime.stop(BRANCH)
     with pytest.raises(KeyError):
         await runtime.stop(BRANCH)
+
+
+async def test_the_claims_a_specialist_holds_are_renewed_until_its_branch_stops(session):
+    runtime = session.runtime(_Runs(), claim_ttl=0.3)
+    start = await session.repo.head(BRANCH)
+    await runtime.start(BRANCH, start)
+    holder = LocalNotebook(session.root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH))
+    claim = await holder.acquire(intent(BRANCH, start), SCRIPT[0].fingerprint(), ttl_seconds=0.3)
+
+    await asyncio.sleep(0.9)
+    assert await session.claim(claim.key) is ClaimStatus.HELD
+    await runtime.stop(BRANCH)
+    await asyncio.sleep(0.6)
+    assert await session.claim(claim.key) is ClaimStatus.EXPIRED
+
+
+async def test_a_new_k_is_noted_once_in_the_branch_log(session):
+    runtime = session.runtime(_Runs())
+    await runtime.start(BRANCH, await session.repo.head(BRANCH))
+
+    await runtime.set_k(BRANCH, 3)
+    await runtime.set_k(BRANCH, 3)
+
+    assert [notice for notice in await session.notices() if "at once" in notice] == [
+        f"{NOTICE} you may now have 3 tests running at once"
+    ]
+    await runtime.stop(BRANCH)
 
 
 async def test_a_scripted_specialist_keeps_k_of_its_tests_running(session):
