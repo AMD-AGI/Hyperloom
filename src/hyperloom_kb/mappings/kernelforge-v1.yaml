@@ -1,0 +1,86 @@
+format: hyperloom-kb.collect.v2
+description: >-
+  KernelForge runs, one Experience per PORT step and forge-loop iteration, each holding what it started from, the
+  agent's reasoning and plan, the optimization it tried, and what KernelForge measured and decided; from driver.log
+  sessions, from campaign logs with KernelForge's artifacts and the agents' Claude Code transcripts, or from a plain
+  forge-loop run's forge_experiments directory with its forge-loop.log and any Claude Code transcripts beside it
+declaration: kernelforge-run-v1
+producer:
+  name: kernelforge
+  version: "10"
+
+units:
+  - each: $doc.runs
+    as: run
+
+unit_id: {text: $run.unit_id}
+
+require:
+  - reason: >-
+      The logs could not be read as a run: the normalizer needs one arena log, one arena run directory, and one task
+      directory; or a campaign log and the KernelForge artifacts directory it names; or, for a plain forge-loop run,
+      a readable campaign_config.json, a run_state.json naming its campaign_id, and a readable meta.json for each
+      archived candidate. read_error in the normalized document says what it found.
+    check: {absent: $run.read_error}
+  - reason: >-
+      No decision for this forge-loop iteration: the session log shows the forge-loop refused the round for budget
+      (ROUND REFUSED FOR BUDGET) after the iteration header, so no candidate was measured.
+    check: {any: [{ne: [$run.stop, budget-refused]}, {present: $run.completed_at}]}
+  - reason: >-
+      No decision for this forge-loop iteration: the forge-loop crashed (a traceback in the session log) before the
+      iteration logged KEEP, REVERT, or "No tracked source changes".
+    check: {any: [{ne: [$run.stop, crashed]}, {present: $run.completed_at}]}
+  - reason: >-
+      No decision for this forge-loop iteration: the session log shows forge-rewrite terminating the forge-loop during
+      the iteration (optimize cutoff reached), or ends the loop without a loop summary, before a decision line.
+    check: {any: [{ne: [$run.stop, cut-off]}, {present: $run.completed_at}]}
+  - reason: >-
+      No decision for this forge-loop iteration: the session log ends during it, after its "--- Iteration N" header
+      and before a KEEP, REVERT, or "No tracked source changes" line.
+    check: {any: [{ne: [$run.stop, log-ended]}, {present: $run.completed_at}]}
+  - reason: >-
+      No decision for this forge-loop iteration: the session log holds its "--- Iteration N" header but no KEEP,
+      REVERT, or "No tracked source changes" line.
+    check: {any: [{ne: [$run.kind, iteration]}, {present: $run.completed_at}]}
+  - reason: >-
+      No PORT result: the session log holds no "[forge-rewrite] PORT OK" or "PORT FAILED" line.
+    check: {any: [{ne: [$run.kind, port]}, {present: $run.completed_at}]}
+  - reason: >-
+      No reasoning, which every Experience requires: the logs hold no reasoning log with a Summary line for this run's
+      candidate, no Claude Code transcript of the agent that made it, and no rationale KernelForge recorded for it (a
+      "[agent] Rationale:" line, or a single session's meta.json). A merge never has one, since no agent made it.
+      Provide logs that record the agent's reasoning.
+    check: {present: $run.reasoning}
+  - reason: No log files were found for this run.
+    check: {present: $run.log_files}
+
+experience:
+  run_id: {token: $run.run_id}
+  seq: {integer: $run.seq}
+  created_at: {text: $run.started_at}
+  completed_at: {text: $run.completed_at}
+  identity: $run.identity
+  objective: $run.objective
+  baseline:
+    current_best_mean_case_speedup: {number: $run.best_mean_case_speedup}
+    source_ms: {number: $run.source_ms}
+  rationale:
+    reasoning: {text: $run.reasoning}
+    alternatives: $run.alternatives
+    plan: {text: $run.plan}
+    plan_file: $run.plan_file
+    reasoning_file: {text: $run.reasoning_file}
+    reasoning_log: $run.reasoning_log
+  change:
+    approach: {text: $run.approach}
+    source_code: $run.source_code
+  outcome:
+    decision: {text: $run.decision}
+    mean_case_speedup: {number: $run.mean_case_speedup}
+  reflection:
+    lesson: {text: $run.lesson}
+    lesson_file: $run.lesson_file
+  provenance:
+    source_ref: {text: $run.unit_id}
+    extra: $run.provenance
+  raw_logs: $run.log_files

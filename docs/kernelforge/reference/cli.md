@@ -35,6 +35,7 @@ kernelforge gemm-tune run --model-path <M> --framework sglang \
 kernelforge kernel-rewrite-controller --handoff-dir <H> \
     --budget-minutes <m> --output-dir <D>
 kernelforge roofline-ceiling --workspace <W> [options]
+kernelforge export-runs <LOG_ROOT>... --output <file>
 ```
 
 See {doc}`Experience store </kernelforge/reference/experience-store>` for the exact
@@ -506,3 +507,19 @@ profiler or a shell cannot outlive its budget and hold the device.
 
 The result dict (`ideal_ms` per case, `mean_ideal_ms`, `report_path`) is
 printed to stdout wrapped in `__FORGE_ROOFLINE_CEILING_RESULT__` sentinels.
+
+## export-runs
+
+Writes the runs found under one or more directories as one JSON document,
+`{"runs": [...]}`, for `hyperloom-kb-collect --mapping kernelforge-v1` (see
+{doc}`Experience collection </reference/experience-kb-collect>`). A run is a
+plain `forge-loop` run's `forge_experiments/` directory. Each forge-loop
+iteration found is one entry; a run whose logs cannot be read is one entry
+saying why, which collection skips with that reason. Claude Code transcripts
+under a directory, such as a copy of `~/.claude/projects`, are linked to the
+candidates their sessions made.
+
+| Argument / option | Default | Meaning |
+|:--|:--|:--|
+| `LOG_ROOT...` | required | One or more directories to read runs from, in the order given. |
+| `--output <file>` / `-o` | required | Where to write the JSON document. |

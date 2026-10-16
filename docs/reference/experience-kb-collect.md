@@ -2,7 +2,7 @@
 myst:
     html_meta:
         "description": "Write Experiences from any producer log through a declarative mapping with Hyperloom's hyperloom_kb collect engine, including custom schemas."
-        "keywords": "Hyperloom, Experience KB, collect, mapping, schema, declaration, session breakdown, hyperloom-kb-collect"
+        "keywords": "Hyperloom, Experience KB, collect, mapping, schema, declaration, session breakdown, hyperloom-kb-collect, KernelForge, kernelforge-v1"
 ---
 
 # Experience collection
@@ -212,3 +212,42 @@ Maps Hyperloom `session_breakdown.json` (SBD V6) to the packaged
 AgentX sessions are skipped until their Experience identity is supported, and a
 session whose `metadata.grading.objective` is not `output_throughput` is
 skipped because every Experience records `e2e_throughput@v1`.
+
+## Packaged mapping: `kernelforge-v1`
+
+Maps the document `kernelforge export-runs` writes from KernelForge's run logs
+to the packaged `kernelforge-run-v1` declaration: one Experience per forge-loop
+iteration, the one candidate kernel it measured and KernelForge's decision on
+it. Collecting a run takes two steps:
+
+```bash
+kernelforge export-runs <run directory>... -o runs.json
+hyperloom-kb-collect --mapping kernelforge-v1 --document runs.json --dry-run
+```
+
+It reads:
+
+- identity from the run's `campaign_config.json`;
+- `rationale.plan` from the `Summary:` line the candidate's plan opens with,
+  and `rationale.reasoning` from the `Summary:` line of the reasoning log the
+  Implementer kept beside that plan (see the
+  [autonomous loop](../kernelforge/how-to/autonomous-loop.md)), each cut to
+  three sentences. Logs without one, such as every run made before KernelForge
+  asked for it, give the plan's first three sentences, and those of the
+  Implementer's Claude Code transcript or of the rationale KernelForge recorded;
+- the plan, the reasoning log, the measured kernel, and the lesson as files
+  (`rationale.plan_file`, `rationale.reasoning_log`, `change.source_code`,
+  `reflection.lesson_file`), and the transcript by its path under the log
+  directory (`rationale.reasoning_file`);
+- `provenance.extra` from the logs: where the candidate came from, the commit
+  KernelForge kept, the record its own experience KB filed a kept candidate
+  under, and the Implementer's backend and model;
+- the iteration's archive, the run's `forge-loop.log`, and the Implementer's
+  transcript, linked by the reasoning log its first prompt names, into the
+  top-level `raw_logs`.
+
+A unit is skipped when its logs could not be read as a run, when its iteration
+recorded no decision, or when it has no reasoning, which is always the case for
+a merge of two archived candidates because no agent made it. KernelForge writes
+naive local times, which collection reads as UTC; that is right for a run made
+in a container, which normally runs in UTC.
