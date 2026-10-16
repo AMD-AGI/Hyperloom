@@ -518,6 +518,12 @@ def test_ruff_rows_map_to_qualified_units(tmp_path: Path) -> None:
             "location": {"row": 4},
         },
         {
+            "code": "PLR0913",
+            "message": "Too many arguments in function definition (7 > 5)",
+            "filename": str(tmp_path / "src/p.py"),
+            "location": {"row": 2},
+        },
+        {
             "code": "C901",
             "message": "`inner` is too complex (21 > 20)",
             "filename": str(tmp_path / "src/p.py"),
@@ -528,6 +534,7 @@ def test_ruff_rows_map_to_qualified_units(tmp_path: Path) -> None:
     assert got == [
         (CC, "Planner.pick", 11, 2),
         ("nested-blocks", "Planner.pick", 6, 4),
+        (collect.FUNCTION_ARGS, "Planner.pick", 7, 2),
         (CC, "helper.inner", 21, 14),
     ]
     with pytest.raises(collect.ToolError, match="unexpected ruff diagnostic"):
@@ -583,7 +590,8 @@ def test_list_files_splits_tests_and_honours_exclude(tmp_path: Path) -> None:
 def test_repo_config_names_every_metric_with_a_threshold() -> None:
     config = code_metrics.parse_config((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert config is not None
-    assert set(config.thresholds) == set(collect.METRICS)
+    # A pending metric (PENDING) is the one name the table may still be missing.
+    assert set(collect.METRICS) - set(collect.PENDING) <= set(config.thresholds) <= set(collect.METRICS)
     assert config.tools["ruff"] in (ROOT / ".github/workflows/lint.yml").read_text(encoding="utf-8")
     baseline = code_metrics.load_baseline((ROOT / config.baseline).read_text(encoding="utf-8"))
     assert not [path for _metric, path, _unit in baseline if Path(path).name.startswith("code_metrics")]
@@ -599,6 +607,20 @@ def test_comment_poster_never_runs_pull_request_code() -> None:
     gate = yaml.safe_load((ROOT / ".github/workflows/code-metrics.yml").read_text(encoding="utf-8"))
     assert gate["jobs"]["code-metrics"]["name"] == "code-metrics"
     assert gate["name"] in poster[True]["workflow_run"]["workflows"]
+
+
+def test_a_pending_metric_may_lack_a_threshold_and_is_then_not_measured() -> None:
+    text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    pending = collect.PENDING[0]
+    config = code_metrics.parse_config(text.replace(f"{pending} = 5\n", ""))
+    assert config is not None and pending not in config.thresholds
+    assert [code for code, (metric, _) in collect.RUFF_RULES.items() if metric in config.thresholds] == [
+        "C901",
+        "PLR1702",
+    ]
+    for broken in (text.replace("nested-blocks = 5\n", ""), text.replace("nested-blocks =", "mccabe =")):
+        with pytest.raises(collect.ToolError, match="thresholds must name"):
+            code_metrics.parse_config(broken)
 
 
 @pytest.mark.parametrize(
@@ -1240,8 +1262,10 @@ def test_only_module_length_has_a_warning_level_in_the_dimension_table(repo: Rep
     _code, report = repo.gate()
     config = code_metrics.parse_config((repo.path / "pyproject.toml").read_text(encoding="utf-8"))
     rows = [line for line in report.splitlines() if line.startswith("| ") and "fails > " in line]
-    assert len(rows) == len(collect.METRICS)
-    for metric in collect.METRICS.values():
+    # A pending metric has no threshold yet, so the table has no limit to state for it.
+    measured = [metric for metric in collect.METRICS.values() if metric.name in config.thresholds]
+    assert len(rows) == len(measured)
+    for metric in measured:
         limit = f"fails > {config.thresholds[metric.name]}"
         if metric.name == collect.MODULE_LINES:
             limit = f"warns > {config.params['module-lines-warning']}, {limit}"
