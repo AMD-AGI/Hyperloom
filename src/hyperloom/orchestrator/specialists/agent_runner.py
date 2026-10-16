@@ -52,6 +52,7 @@ from .subprocess_ import (
     _write_private_codex_config,
     clear_wall_budget_extension,
 )
+from .subprocess_ import _build_specialist_env as build_specialist_env
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +69,8 @@ __all__ = [
     "HeartbeatSink",
     "LocalAgentRunner",
     "McpEndpoint",
+    "RunnerHost",
+    "build_specialist_env",
 ]
 
 #: No heartbeat or process-log activity for this long means the session is lost.
@@ -318,6 +321,18 @@ class _Session:
     collected: bool = False
 
 
+@dataclass(frozen=True)
+class RunnerHost:
+    """The clocks, the process launcher and the kernel file trees a runner reads; every field is a test seam."""
+
+    monotonic: Callable[[], float] = time.monotonic
+    wall: Callable[[], float] = time.time
+    popen: Callable[..., Any] = subprocess.Popen
+    cgroup_root: Path = Path("/sys/fs/cgroup")
+    proc_root: Path = Path("/proc")
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+
+
 class LocalAgentRunner:
     """Run agent CLIs as local subprocesses of this process (the default implementation)."""
 
@@ -328,29 +343,24 @@ class LocalAgentRunner:
         *,
         session_dir: Path,
         poll_interval_seconds: float = 5.0,
-        monotonic: Callable[[], float] = time.monotonic,
-        wall: Callable[[], float] = time.time,
-        popen: Callable[..., Any] = subprocess.Popen,
-        cgroup_root: Path = Path("/sys/fs/cgroup"),
-        proc_root: Path = Path("/proc"),
         version_probe: Callable[[str, Mapping[str, str]], str] = _probe_version,
-        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         activity_cpu_seconds: float = ACTIVITY_CPU_SECONDS,
+        host: RunnerHost = RunnerHost(),
     ) -> None:
         self._log = ResourceLog(Path(session_dir) / RESOURCES_RELATIVE_PATH)
         self._poll_interval = float(poll_interval_seconds)
-        self._monotonic = monotonic
-        self._wall = wall
-        self._popen = popen
-        self._cgroup_root = Path(cgroup_root)
-        self._proc_root = Path(proc_root)
+        self._monotonic = host.monotonic
+        self._wall = host.wall
+        self._popen = host.popen
+        self._cgroup_root = Path(host.cgroup_root)
+        self._proc_root = Path(host.proc_root)
         self._version_probe = version_probe
         self._dispatcher = SpecialistSubprocessDispatcher(
             SpecialistSubprocessConfig(
                 poll_interval_seconds=self._poll_interval, heartbeat_stale_seconds=LOST_AFTER_SEC
             )
         )
-        self._sleep = sleep
+        self._sleep = host.sleep
         self._activity_cpu = float(activity_cpu_seconds)
         self._live: dict[int, _Session] = {}
         self._claims: set[str] = set()
