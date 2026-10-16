@@ -34,7 +34,7 @@ from hyperloom.hosted.mcp_server import (
     ToolError,
     ToolForbidden,
 )
-from hyperloom_multibranch.contracts.notebook.interfaces import Notebook, NotebookError
+from hyperloom_multibranch.contracts.notebook.interfaces import Notebook, NotebookError, StartupBriefProvider
 from hyperloom_multibranch.contracts.toolbox import (
     SCOPE_SPECIALIST,
     SpecialistGrant,
@@ -97,6 +97,7 @@ _CONFIRM_REFUSED_REASON = (
 )
 
 NotebookFor = Callable[[str], Notebook]
+BriefingFor = Callable[[str], StartupBriefProvider]
 
 
 class McpSpecialistTokens:
@@ -236,11 +237,16 @@ def _poll_inbox(notebooks: NotebookFor) -> Callable[[dict[str, Any], CallContext
 
 
 def _notebook_handler(
-    name: str, notebooks: NotebookFor, ttl_seconds: float, learnings: LearningFinder | None = None
+    name: str,
+    notebooks: NotebookFor,
+    ttl_seconds: float,
+    learnings: LearningFinder | None = None,
+    briefing_for: BriefingFor | None = None,
 ) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> str:
         branch = ctx.principal.branch
-        bound = notebook_tools(notebooks(branch), branch=branch, ttl_seconds=ttl_seconds, learnings=learnings)
+        briefing = briefing_for(branch) if briefing_for is not None else None
+        bound = notebook_tools(notebooks(branch), briefing, branch=branch, ttl_seconds=ttl_seconds, learnings=learnings)
         tools = {tool.name: tool for tool in bound}
         text = await tools[name].handler(arguments)
         if text.startswith(ERROR):
@@ -259,11 +265,14 @@ class SpecialistToolOptions:
     running loop the toolbox is called on the loop of each request, which suits a toolbox that keeps no tasks.
     ``learnings`` is the session's one finder of the specialists' learnings (the notebook's ``LearningRecall``, which
     adds past sessions' from the Experience KB); without it ``notebook_learnings`` finds this session's only.
+    ``briefing_for`` gives the provider of the brief of a branch (the notebook's ``SessionBriefs.for_branch``), called
+    with the caller's branch from the token at every ``notebook_brief``; without it the notebook's own brief is returned.
     """
 
     claim_ttl_seconds: float = 600.0
     toolbox_loop: asyncio.AbstractEventLoop | None = None
     learnings: LearningFinder | None = None
+    briefing_for: BriefingFor | None = None
 
 
 def register_specialist_tools(
@@ -320,13 +329,14 @@ def register_specialist_tools(
             tool.name,
             description=tool.description,
             schema=tool.input_schema,
-            handler=_notebook_handler(tool.name, notebooks, claim_ttl_seconds, learnings),
+            handler=_notebook_handler(tool.name, notebooks, claim_ttl_seconds, learnings, options.briefing_for),
             **own,
         )
 
 
 __all__ = [
     "SPECIALIST_TOKEN_ENV",
+    "BriefingFor",
     "NotebookFor",
     "McpSpecialistTokens",
     "SpecialistToolOptions",

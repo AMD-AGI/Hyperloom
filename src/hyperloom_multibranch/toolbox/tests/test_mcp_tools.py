@@ -20,6 +20,7 @@ import pytest
 from hyperloom.contracts.measurement import TestRequest
 from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
 from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.notebook.records import StartupBrief
 from hyperloom_multibranch.contracts.toolbox import (
     SCOPE_SPECIALIST,
     Backpressure,
@@ -106,8 +107,7 @@ async def seeded(tmp_path: Path) -> tuple[Path, FakeClock]:
     return root, clock
 
 
-@pytest.fixture
-def rig(seeded: tuple[Path, FakeClock]) -> Iterator[Rig]:
+def _running(seeded: tuple[Path, FakeClock], options: SpecialistToolOptions) -> Iterator[Rig]:
     root, clock = seeded
     toolbox = FakeToolbox()
     server = McpServer(McpServerConfig(host_token=HOST_TOKEN), campaign="camp")
@@ -115,12 +115,49 @@ def rig(seeded: tuple[Path, FakeClock]) -> Iterator[Rig]:
     def notebooks(branch: str) -> LocalNotebook:
         return LocalNotebook(root, Writer(Role.SPECIALIST_RUNTIME, branch, branch), clock=clock)
 
-    register_specialist_tools(
-        server, toolbox=toolbox, notebooks=notebooks, options=SpecialistToolOptions(claim_ttl_seconds=60.0)
-    )
+    register_specialist_tools(server, toolbox=toolbox, notebooks=notebooks, options=options)
     server.start()
     yield Rig(server, toolbox, root, clock)
     server.stop()
+
+
+@pytest.fixture
+def rig(seeded: tuple[Path, FakeClock]) -> Iterator[Rig]:
+    yield from _running(seeded, SpecialistToolOptions(claim_ttl_seconds=60.0))
+
+
+class BranchBrief:
+    """A brief provider that says which branch it was made for."""
+
+    def __init__(self, branch: str) -> None:
+        self.branch = branch
+
+    async def startup_brief(self, start_commit: str) -> StartupBrief:
+        return StartupBrief(start_commit, (), lessons=(f"lesson for {self.branch}",))
+
+
+@pytest.fixture
+def briefed_rig(seeded: tuple[Path, FakeClock]) -> Iterator[Rig]:
+    options = SpecialistToolOptions(claim_ttl_seconds=60.0, briefing_for=BranchBrief)
+    yield from _running(seeded, options)
+
+
+def test_the_brief_is_the_providers_for_the_branch_of_the_token(briefed_rig: Rig) -> None:
+    for branch in ("s1", "s2"):
+        text = briefed_rig.ok(briefed_rig.token(branch), "notebook_brief", start_commit="c1")
+        assert f"- lesson for {branch}" in text
+        assert text.count("lesson for") == 1
+
+
+def test_a_branch_named_in_the_arguments_is_refused_not_used(briefed_rig: Rig) -> None:
+    status, reply = briefed_rig.call(briefed_rig.token("s1"), "notebook_brief", start_commit="c1", branch="s2")
+    assert status == 200 and "lesson for" not in json.dumps(reply)
+    assert reply.get("error") is not None or reply["result"]["isError"] is True
+
+
+def test_without_briefing_for_the_brief_is_the_notebooks_own(rig: Rig) -> None:
+    text = rig.ok(rig.token("s1"), "notebook_brief", start_commit="c1")
+    assert text.startswith("Startup brief from c1") and "lesson for" not in text
 
 
 def test_a_specialist_sees_exactly_the_specialist_tools(rig: Rig) -> None:
