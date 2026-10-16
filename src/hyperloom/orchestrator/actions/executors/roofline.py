@@ -22,6 +22,7 @@ from hyperloom.common.provenance import detect_kineto_backend
 from hyperloom.common.timeutil import now_iso
 from ...phases.machine_state import record_lifecycle_event
 from ...loop.sub_agent_runner import RunnerContext
+from ...state.analysis_failures import remember_roofline_failure, remember_trace_failure
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
 from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
@@ -132,9 +133,8 @@ _now_iso = functools.partial(now_iso, "seconds")
 # warning's ``non_empty_modes``.
 _AUTO_RETRY_WARNING_CODES = frozenset(
     {
-        "steady_state_chunk_empty",
         "steady_state_chunk_missing",
-        # low-quality chunk; same recovery path via ``non_empty_modes``.
+        # low-quality or zero-GPU-events chunk; same recovery path via ``non_empty_modes``.
         "steady_state_chunk_low_quality",
     }
 )
@@ -806,10 +806,10 @@ def _flag_attribution_degraded(ta_result: dict[str, Any], profile_result: dict[s
             "trace_analyze returned 0 hot kernels: the profile trace "
             "has no execute_*/user_annotation events, so per-kernel "
             "device time is folded into hipGraphLaunch wrappers under "
-            "cuda-graph capture (#431). Re-profile in eager mode "
-            "(append --enforce-eager to EXTRA_SGLANG_ARGS / "
-            "EXTRA_VLLM_ARGS) so per-step annotations fire, or enable "
-            "a capture-fold fallback over capture_traces/."
+            "cuda-graph capture (#431). Re-profile without capture (append "
+            "--disable-cuda-graph to EXTRA_SGLANG_ARGS, or "
+            "--compilation-config.cudagraph_mode NONE to EXTRA_VLLM_ARGS) so "
+            "per-step annotations fire, or enable a capture-fold fallback over capture_traces/."
         ),
         "capture_traces_present": bool(trace_health.get("capture_traces_present")),
     }
@@ -870,11 +870,13 @@ class RooflineExecutor:
             owns_event=not str(params.get(INLINE_EVENT_PARAM) or ""),
         )
         try:
-            return await self._execute(ctx, recorder=recorder)
+            result = await self._execute(ctx, recorder=recorder)
         except BaseException as exc:
             if recorder is not None:
                 recorder.finish_crashed(exc)
             raise
+        remember_roofline_failure(self.shared_state, params, result)
+        return result
 
     def _resolve_sink(self, ctx: RunnerContext) -> Any:
         """Decide which event this run's rows belong to."""
@@ -914,6 +916,7 @@ class RooflineExecutor:
 
         analysis = await self._analyze(ctx, recorder, payload)
         if not isinstance(analysis, _AnalysisOutcome):
+            remember_trace_failure(self.shared_state, payload, analysis)
             return analysis
         attribution_degraded = _flag_attribution_degraded(analysis.result, profiled.result)
         analysed = _AnalysedProfile(profiled, analysis)

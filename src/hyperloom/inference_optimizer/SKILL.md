@@ -392,12 +392,21 @@ brief:
   and run real benchmark loops. The one invariant is that they must not touch
   the   production serving process, its cards, or port 8888.
 - **Operator-defined specialist**: with `--custom-specialist-prompt-file` and
-  `--custom-specialist-description` set, `custom_specialist` joins the
-  domains Orchestration may dispatch, and its system prompt carries the
-  operator's focus verbatim. Until a `custom_specialist` task has started, the
-  Coordinator requests one at most once per macro cycle in FRAMEWORK_AGENT,
-  in research mode when source patches cannot be authored. Unset, Orchestration
-  is not offered the domain and the policy gate denies it.
+  `--custom-specialist-description` set, the Coordinator dispatches one
+  `custom_specialist` per macro cycle on entering FRAMEWORK_AGENT (research mode
+  when source patches cannot be authored); its system prompt carries the
+  operator's focus verbatim. It and the explore grid benching its proposals
+  dispatch ahead of all other queued work, the grid does not wait for other
+  explores, and a plateau exit from FRAMEWORK_AGENT waits for both within the
+  phase budget. Orchestration is never offered the domain, and the policy gate
+  denies any delegate naming it as domain or tag. With `HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1`
+  FRAMEWORK_AGENT runs nothing else: Orchestration takes no turn there (its
+  specialists, grids and patches would be denied), the custom task may run to
+  the phase end with no lease extension, the Coordinator's own discovery, scout, stalled-
+  domain force, predictor and general bench are skipped, and the phase hints
+  `skip_to_sweep` once the custom task (or its refused admission), its grid and
+  its patch reviews are done; the exit goes to KERNEL_AGENT when that phase is
+  enabled, else SWEEP, and later phases run as usual.
 - **PrimaTune predictor rows**: with `--primatune-endpoint` and
   `--primatune-mode active`, the predictor's proposals lead the untested-proposal
   block. Orchestration copies the ones worth a slot into its next `explore` grid
@@ -762,7 +771,7 @@ and the operator's stated value is lost:
 | Target advisory | `--no-target-advisory` | Disable external-target hints in prompts without disabling final-report comparison. `primary_gap` uses the existing latency/throughput categories; the interactivity axis is displayed as interactivity. |
 | Quantization prelude | `--quantize` | Optional. Natural-language quantization request. Runs the quantization-agent once before the loop and rewrites `--model` to the quantized model. See Step 2b. Never runs on a resume. |
 | Env pins | `--extra-env NAME=VALUE` | Repeatable; forward **every** one verbatim as its own flag (do not drop any or fold into the `Environment:` block). The CLI persists them in `state.json` and serializes them into `$INFERENCE_OPTIMIZER_EXTRA_ENV`; a dropped pin is lost silently — e.g. a missing `SGLANG_USE_AITER=0` leaves the explore aiter-MoE filter blind. A `--resume-from` re-exports the persisted set, so re-pass them only to change the set. |
-| Operator-defined specialist | `--custom-specialist-prompt-file` + `--custom-specialist-description` | Only when the prompt asks for a specialist with its own focus. Write the operator's focus text verbatim to a file and pass its path (max 16 KiB); the description is one line (max 200 chars) telling Orchestration when to pick it. Pass both or neither. The CLI refuses them (exit 2) together with `--orch-prompt`, `--no-framework-agent`, `--research-lane-capacity 0` or `--reset-state`. Persisted in `state.json`; a `--resume-from` keeps the stored definition, so re-pass both only to replace it, or pass `--reset-state` alone to clear it. |
+| Operator-defined specialist | `--custom-specialist-prompt-file` + `--custom-specialist-description` | Only when the prompt asks for a specialist with its own focus. Write the operator's focus text verbatim to a file and pass its path (max 16 KiB); the description is one line (max 200 chars) describing it in its own prompt. Pass both or neither. Export `HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1` before launch only when the prompt asks to run that specialist alone. The CLI refuses them (exit 2) together with `--no-framework-agent`, `--research-lane-capacity 0` or `--reset-state`. Persisted in `state.json`; a `--resume-from` keeps the stored definition, so re-pass both only to replace it, or pass `--reset-state` alone to clear it. |
 | PrimaTune predictor | `--primatune-endpoint` + `--primatune-mode` | Only when the prompt names a PrimaTune service. `active` queues its proposals for benchmarking; `shadow`, the default with an endpoint, only logs them; `off` disables an endpoint the environment exports. Not persisted: a `--resume-from` relaunch needs the flags again unless the shell exports `HYPERLOOM_PREDICTOR_ENDPOINT` / `HYPERLOOM_PREDICTOR_MODE`. See `docs/reference/primatune-predictor.md`. |
 
 ### Step 2b — Optional quantization prelude (`--quantize`)
@@ -850,8 +859,8 @@ auto-`pip install` the SDKs / `ray` / `Magpie` /
 canonical `Preflight diagnostics:` block (paste verbatim into status
 reports). Two checks **abort** the run on failure: the model gate
 (probed against `<OPENAI_BASE_URL>/models`; the allowlist
-{`claude-opus-5` preferred, `claude-opus-4-8`, `claude-opus-4-7`,
-`claude-opus-4-6` fallback}
+{`claude-opus-5-5` preferred, `claude-opus-5`, `claude-opus-4-8`,
+`claude-opus-4-7`, `claude-opus-4-6` fallback}
 binds only under `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0` — otherwise
 the catalog probe is the sole gate; see
 `## Failure Handling`) and, when `--critic-agent` is active, the
@@ -868,8 +877,11 @@ signals. There is no automatic supervision or restart. After inspecting the
 failure and confirming that the old process is gone, explicitly resume the same
 session with `--resume-from "$SESSION_DIR"` when appropriate. Historical stop
 reasons remain readable; they are not instructions to restart automatically.
-`recover` remains an offline artifact-reconstruction tool, not a runtime
-recovery action.
+`recover` is an offline tool, not a runtime recovery action: it reconstructs
+artifacts, or records the cleanup confirmation a refused resume asks for:
+`--confirm-scope-gone` when the lost pod's owner scope must be confirmed gone,
+`--confirm-stopped` for a blocked task that names no owner scope (for example a
+CLOSE-phase step, which runs without a lane; it refuses a scoped task); see Scenario A in `docs/reference/operations.md`.
 
 If the CLI exits with `Claude SDK exit code 1` or `Primus.00009 token not present`,
 the gateway rejected the request. Check that `OPENAI_BASE_URL` / `OPENAI_API_KEY`
@@ -985,6 +997,17 @@ With enablement admitted (`--enablement all/launch/eval`), the first baseline
 failure routes PRELUDE into the ENABLEMENT phase, which authors patches until
 the combo boots. With `--enablement off`, three consecutive failures stop the
 run with `stop_reason='baseline_failed'`.
+
+An AgentX baseline whose server ran with the prefix cache off fails with
+`error_class=agentx_baseline_prefix_cache_off` and stops the run with
+`stop_reason='baseline_failed'` on the first occurrence, whichever AgentX client
+replayed it. Each engine is read from its own launch account: SGLang's resolved
+`disable_radix_cache=True`, vLLM's launch record showing
+`enable_prefix_caching=False`, and, because ATOM keeps the cache off by default
+and prints no record, ATOM server args without `--enable_prefix_caching`. A
+launch whose account cannot be read is left alone. Do not propose
+`--disable-radix-cache` or `--no-enable-prefix-caching` for an AgentX baseline;
+on ATOM pass `--server-args "--enable_prefix_caching"`.
 
 Operator server flags have one supported CLI entry point:
 `optimize --server-args "<framework serve flags>"`. The CLI exports this as
@@ -1630,7 +1653,7 @@ Transient SDK errors retry/resume up to the Coordinator emergency threshold.
 Custom orchestration models are enabled by default and are validated against the
 configured gateway catalog. Set `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`
 only when you intentionally want the strict AMD Claude allowlist
-(`claude-opus-5` / `claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6`).
+(`claude-opus-5-5` / `claude-opus-5` / `claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6`).
 
 | Symptom | Fix |
 |---|---|

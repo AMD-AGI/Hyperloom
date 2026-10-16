@@ -108,6 +108,9 @@ class _FakeTasks:
     async def running(self):
         return []
 
+    async def cancel_if_queued(self, _task_id: str, *, kind: str, reason: str) -> bool:
+        return False
+
 
 def _rounds(session_dir: Path) -> RoundStore:
     """A real round ledger, which is what the lane now counts stalls from."""
@@ -197,6 +200,7 @@ def _lane(session_dir: Path, **overrides: Any):
         setattr(fake, name, types.MethodType(getattr(EnablementLane, name), fake))
     for name in (
         "maybe_enqueue_enablement_baseline_revalidation",
+        "baseline_launch_params",
         "_open_revalidation_row",
         "open_row_past_spent_generations",
         "_open_round_past_spent_generations",

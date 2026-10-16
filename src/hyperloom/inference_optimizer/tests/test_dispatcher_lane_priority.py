@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""FRAMEWORK_AGENT measures a reviewed patch before grids queued ahead of it on the same lanes; other phases keep FIFO."""
+"""FRAMEWORK_AGENT measures a reviewed patch before grids queued ahead of it on the same lanes; ENABLEMENT keeps FIFO
+except for the initial roofline its exit waits for."""
 
 from __future__ import annotations
 
@@ -88,3 +89,22 @@ async def test_enablement_keeps_fifo_so_a_patch_waits_for_the_queued_revalidatio
     await pump_until_settled(coord.dispatcher)
 
     assert order == ["baseline", "integrate_patch"]
+
+
+async def test_enablement_runs_the_initial_roofline_its_exit_waits_for_before_earlier_queued_patches(tmp_path):
+    coord = _build_coord(tmp_path, "ENABLEMENT")
+    order: list[str] = []
+    recorder = _Recorder(order)
+    coord.sub.register_executor("roofline", recorder)
+    coord.sub.register_executor("integrate_patch", recorder)
+    await _queue_approved_patch(coord)
+    await coord.tasks.create_or_return_existing(
+        kind="roofline",
+        params={},
+        idempotency_key="auto-roofline",
+        requires_lanes=["profile_lane"],
+    )
+
+    await pump_until_settled(coord.dispatcher)
+
+    assert order == ["roofline", "integrate_patch"]

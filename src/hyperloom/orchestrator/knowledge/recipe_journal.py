@@ -10,7 +10,7 @@ import os
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Collection, Mapping
 
-from hyperloom.common.coerce import to_float, to_int
+from hyperloom.common.coerce import optional_positive_int, to_float, to_int
 from hyperloom.common.io import append_jsonl
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
@@ -843,16 +843,11 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         """
         ss = self.shared_state
         out: dict[str, Any] = {}
-        framework = str(ss.framework or "").strip()
-        if framework:
-            out["framework"] = framework
-        model_class = str(ss.model_class or "").strip()
-        if model_class:
-            out["model_class"] = model_class
         # model_family is not part of the seven-dimension Recipe identity.
-        model_name = str(ss.model_name or "").strip()
-        if model_name:
-            out["model_name"] = model_name
+        for attr in ("framework", "model_class", "model_name"):
+            text = str(getattr(ss, attr, "") or "").strip()
+            if text:
+                out[attr] = text
         for src_attr, dst_key in (
             ("precision", "precision"),
             ("tp", "tp"),
@@ -865,28 +860,17 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             v = getattr(ss, src_attr, None)
             if v not in (None, "", 0):
                 out[dst_key] = v
-        # EP env fallback when SharedState.ep is unset (legacy SDK callers).
-        if "ep" not in out:
-            raw_ep = (os.environ.get("EP") or "").strip()
-            try:
-                n = int(raw_ep) if raw_ep else 0
-            except ValueError:
-                n = 0
-            if n > 0:
-                out["ep"] = n
-        # PP — no SharedState field (no CLI surface); env-only.
-        raw_pp = (os.environ.get("PP") or "").strip()
-        try:
-            pp_n = int(raw_pp) if raw_pp else 0
-        except ValueError:
-            pp_n = 0
-        if pp_n > 0:
-            out["pp"] = pp_n
+        # The env answers for parallelism SharedState does not carry: ``ep`` on legacy SDK callers, ``pp`` always
+        # (it has no CLI surface and so no field).
+        for env_key, dst_key in (("EP", "ep"), ("PP", "pp")):
+            parallelism = optional_positive_int(os.environ.get(env_key))
+            if parallelism:
+                out.setdefault(dst_key, parallelism)
         # runtime version tags from stack_fingerprint_meta (cli writes at boot, resume reads verbatim).
         fp_meta = ss.stack_fingerprint_meta or {}
         if isinstance(fp_meta, dict):
             # framework_version is whichever of sglang/vllm is active.
-            fw_lc = framework.lower()
+            fw_lc = out.get("framework", "").lower()
             if fw_lc in ("sglang", "vllm"):
                 v = str(fp_meta.get(fw_lc) or "").strip()
                 if v and v != "unknown":
@@ -1151,10 +1135,11 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         primary_metric: str = "",
         primary_value: float = 0.0,
         reason: str = "",
-        error_type: str = "",
+        error: Exception | None = None,
     ) -> None:
         """Append one best-effort, secret-free KB Store publish audit row."""
         try:
+            from .remote_recipe.audit import publish_error_fields
             from hyperloom.inference_optimizer.session.session_paths import (
                 recipe_snapshot_audit_jsonl,
             )
@@ -1195,8 +1180,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 )
             if primary_metric == "optimized_throughput":
                 row["result"]["best_throughput"] = primary_value
-            if error_type:
-                row["error"] = {"type": error_type}
+            if error is not None:
+                row["error"] = publish_error_fields(error)
             append_jsonl(
                 recipe_snapshot_audit_jsonl(self.session_dir),
                 row,
@@ -1427,7 +1412,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                     status="error",
                     canonical_id=remote_cid,
                     session_id=remote_sid,
-                    error_type=type(exc).__name__,
+                    error=exc,
                 )
                 log.exception("Remote Recipe KB finalize failed (non-fatal)")
                 return {
@@ -1436,8 +1421,6 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                     "backend": "kb-store",
                     "canonical_id": remote_cid,
                     "session_id": remote_sid,
-                    # A validation error means the store rejected the bundle we
-                    # built; anything else failed on the way there.
                     "result_type": (
                         _close_out.RESULT_BUNDLE_BUILD_FAILED
                         if type(exc).__name__ == _REMOTE_VALIDATION_ERROR

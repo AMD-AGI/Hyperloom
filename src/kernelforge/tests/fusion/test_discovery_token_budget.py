@@ -16,9 +16,15 @@ def test_discovery_requires_an_injected_llm() -> None:
 
 
 def test_cli_injects_the_registered_agent_backend() -> None:
-    source = inspect.getsource(command.run.callback)
-    assert "registered_agent_llm_fn" in source
-    assert "llm_fn=registered_agent_llm_fn(" in source
+    """Every discovery path reaches the model through the backend the CLI selected.
+
+    None of them may fall back to a client of its own: the selected backend is
+    the one whose model, sandbox mode and prompt log the run reports.
+    """
+    for discovery in (command._discover_anchored, command._discover_by_llm):
+        source = inspect.getsource(discovery)
+        assert "registered_agent_llm_fn" in source, discovery.__name__
+        assert "llm_fn=registered_agent_llm_fn(" in source, discovery.__name__
 
 
 def test_legacy_direct_client_fallback_is_absent() -> None:

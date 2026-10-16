@@ -188,7 +188,7 @@ def test_explicit_claude_wins_over_openai_credentials(clean_agent_env, monkeypat
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
     provider, model = _resolve_agent_choice("claude", None)
     assert provider == "claude"
-    assert model == "claude-opus-5"
+    assert model == "claude-opus-5-5"
 
 
 def test_agent_model_precedence(clean_agent_env, monkeypatch):

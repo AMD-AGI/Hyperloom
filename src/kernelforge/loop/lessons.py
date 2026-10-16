@@ -348,6 +348,78 @@ def _still_pinned(pinned: str, observed: Sequence[str]) -> bool:
     return any(_as_number(value) == number for value in observed)
 
 
+class _ObservedValues:
+    """What a source binds to each wanted name, in the order the values first appear.
+
+    A name the source only mentions -- an argument, an attribute, a keyword
+    bound to something this cannot read -- is present with no values, which is
+    what tells a caller the name exists but its value could not be read.
+    """
+
+    def __init__(self, wanted: set[str]) -> None:
+        self._wanted = wanted
+        self._found: dict[str, list[str]] = {}
+
+    def mention(self, name: str) -> None:
+        """Mark a name as present in the source with no value read for it."""
+        if name in self._wanted:
+            self._found.setdefault(name, [])
+
+    def record(self, name: str, node: ast.AST) -> None:
+        """Record the value a name is bound to."""
+        if name not in self._wanted:
+            return
+        values = self._found.setdefault(name, [])
+        value = _value_text(node)
+        if value not in values:
+            values.append(value)
+
+    def bind(self, target: ast.AST, value: ast.AST) -> None:
+        """Record every name one assignment target binds, descending into unpacking."""
+        if isinstance(target, ast.Tuple | ast.List):
+            pairs = _unpacked_pairs(target, value)
+            if pairs is None:
+                # Bound, but to a share of the right-hand side this cannot read.
+                for name in _assigned_names(target):
+                    self.mention(name)
+                return
+            for element, element_value in pairs:
+                self.bind(element, element_value)
+            return
+        for name in _assigned_names(target):
+            self.record(name, value)
+
+    def as_mapping(self) -> dict[str, tuple[str, ...]]:
+        """The observation as the scan returns it."""
+        return {name: tuple(values) for name, values in self._found.items()}
+
+
+def _observe_node(node: ast.AST, observed: _ObservedValues) -> None:
+    """Feed one AST node's bindings and bare mentions to the observation."""
+    if isinstance(node, ast.Assign):
+        for target in node.targets:
+            observed.bind(target, node.value)
+    elif isinstance(node, ast.AnnAssign) and node.value is not None:
+        observed.bind(node.target, node.value)
+    elif isinstance(node, ast.NamedExpr):
+        observed.bind(node.target, node.value)
+    elif isinstance(node, ast.Dict):
+        for key, value in zip(node.keys, node.values, strict=True):
+            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                observed.record(key.value, value)
+    elif isinstance(node, ast.keyword) and node.arg:
+        if _is_constant_expr(node.value):
+            observed.record(node.arg, node.value)
+        else:
+            observed.mention(node.arg)
+    elif isinstance(node, ast.arg):
+        observed.mention(node.arg)
+    elif isinstance(node, ast.Name):
+        observed.mention(node.id)
+    elif isinstance(node, ast.Attribute):
+        observed.mention(node.attr)
+
+
 def scan_constant_values(source: str, names: Iterable[str]) -> dict[str, tuple[str, ...]] | None:
     """What each named constant is bound to in ``source``."""
     wanted = {name for name in names if name}
@@ -357,60 +429,10 @@ def scan_constant_values(source: str, names: Iterable[str]) -> dict[str, tuple[s
         return None
     if not wanted:
         return {}
-
-    found: dict[str, list[str]] = {}
-
-    def mention(name: str) -> None:
-        """Mark a name as present in the source with no value read for it."""
-        if name in wanted:
-            found.setdefault(name, [])
-
-    def record(name: str, node: ast.AST) -> None:
-        if name not in wanted:
-            return
-        values = found.setdefault(name, [])
-        value = _value_text(node)
-        if value not in values:
-            values.append(value)
-
-    def bind(target: ast.AST, value: ast.AST) -> None:
-        if isinstance(target, ast.Tuple | ast.List):
-            pairs = _unpacked_pairs(target, value)
-            if pairs is None:
-                # Bound, but to a share of the right-hand side this cannot read.
-                for name in _assigned_names(target):
-                    mention(name)
-                return
-            for element, element_value in pairs:
-                bind(element, element_value)
-            return
-        for name in _assigned_names(target):
-            record(name, value)
-
+    observed = _ObservedValues(wanted)
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                bind(target, node.value)
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            bind(node.target, node.value)
-        elif isinstance(node, ast.NamedExpr):
-            bind(node.target, node.value)
-        elif isinstance(node, ast.Dict):
-            for key, value in zip(node.keys, node.values, strict=True):
-                if isinstance(key, ast.Constant) and isinstance(key.value, str):
-                    record(key.value, value)
-        elif isinstance(node, ast.keyword) and node.arg:
-            if _is_constant_expr(node.value):
-                record(node.arg, node.value)
-            else:
-                mention(node.arg)
-        elif isinstance(node, ast.arg):
-            mention(node.arg)
-        elif isinstance(node, ast.Name):
-            mention(node.id)
-        elif isinstance(node, ast.Attribute):
-            mention(node.attr)
-    return {name: tuple(values) for name, values in found.items()}
+        _observe_node(node, observed)
+    return observed.as_mapping()
 
 
 def scan_sources_with_coverage(
