@@ -654,6 +654,15 @@ def _resolve_scan_logs(server_log_path: str) -> list[str]:
             text = str(name)
             if text not in out and name.exists():
                 out.append(text)
+    # Magpie writes its stderr into the run directory it creates under the round's (``benchmark_*/``), which is where
+    # the eval-start marker lands. Reached only through a nested ``server.log``, that stderr went unread whenever the
+    # engine logged to the round's own ``server.log`` (``SERVER_LOG``), and the accuracy eval was folded into the
+    # measured phase.
+    try:
+        nested_stderr = sorted(primary.parent.glob(f"benchmark_*/{_EVAL_LOG_NAME}"))
+    except OSError:
+        nested_stderr = []
+    out.extend(text for text in map(str, nested_stderr) if text not in out)
     return out
 
 

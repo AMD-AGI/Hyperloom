@@ -2513,7 +2513,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             log.warning("failed to preserve SBD V6 preflight failure", exc_info=True)
         raise
 
-    _resolve_models_for_run(
+    # Model resolution makes blocking LLM calls; the subscription-token client refuses to run inside this loop.
+    await asyncio.to_thread(
+        _resolve_models_for_run,
         args,
         resolved_urls,
         claude_follows_codex=claude_follows_codex,

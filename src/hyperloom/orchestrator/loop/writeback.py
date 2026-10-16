@@ -45,6 +45,7 @@ from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..actions.executors.explore import STACK_REVALIDATE_SOURCE, is_stack_revalidation
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+from ..actions.executors._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
 from hyperloom.inference_optimizer.breakdown.stop_reasons import (
@@ -110,6 +111,16 @@ _MIN_KERNEL_ENGAGED_GAIN_PCT: float = 2.0
 
 # Combined baseline-failure backstop: fast-fail after this many TOTAL baseline failures.
 _BASELINE_MAX_TOTAL_FAILURES: int = 3
+_BASELINE_FAILED_STOP_REASON = "baseline_failed"
+#: Baseline failures a retry cannot change, each mapped to the stop reason it ends the run with on its FIRST
+#: occurrence, with no streak.
+_STOPS_ON_FIRST_OCCURRENCE: dict[str, str] = {
+    # A retry recomposes the same argv the installed parser already refused.
+    ARGV_INVALID: ARGV_INVALID,
+    # The server booted and measured a cold cache. The next attempt launches the same server and no framework patch
+    # changes the operator's flag; ``_authorable_launch_log`` keeps it out of enablement.
+    PREFIX_CACHE_OFF_ERROR_CLASS: _BASELINE_FAILED_STOP_REASON,
+}
 # Default resume-drift floor (%): a re-measured current_best below this fraction of its recorded tput is flagged as
 # drift.
 _DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
@@ -128,7 +139,11 @@ def _authorable_launch_log(result_payload: dict[str, Any] | None, *, err_class: 
     """
     if not isinstance(result_payload, dict) or _is_ray_cluster_infeasible(result_payload):
         return ""
-    if err_class in ("fast_exit_arg_error", AGENTX_PREFLIGHT_ERROR_CLASS) or stopped_by_the_run_class(err_class):
+    if err_class in (
+        "fast_exit_arg_error",
+        AGENTX_PREFLIGHT_ERROR_CLASS,
+        PREFIX_CACHE_OFF_ERROR_CLASS,
+    ) or stopped_by_the_run_class(err_class):
         return ""
     parts: list[str] = []
     for key in ("error", "stderr", "log_tail", "log_excerpt", "traceback", "reason"):
@@ -873,7 +888,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
         if task_kind == "baseline":
             # A baseline whose accuracy eval failed measured throughput but must
             # not anchor; route it to handle_unpromotable_result for enablement.
-            if bool(result.get("baseline_eval_failed")):
+            # One refused for a cold prefix cache measured too, but must not anchor
+            # either; handle_unpromotable_result stops the run on it.
+            if bool(result.get("baseline_eval_failed")) or result.get("error_class") == PREFIX_CACHE_OFF_ERROR_CLASS:
                 return False
             return is_valid_measurement(result)
         if task_kind == "profile":
@@ -1152,6 +1169,15 @@ class WritebackCollaborator(CoordinatorCollaborator):
             return True
         return not retries_suppressed and (streak >= 3 or (streak >= 2 and repeated))
 
+    def _arms_baseline_failure_gates(self, err_class: str) -> bool:
+        """Whether a failed baseline goes through the streak and stop gates.
+
+        Only while no baseline has succeeded yet, except a cache-off refusal:
+        a re-baseline refused for it stops the run as the first baseline does,
+        since the next round would launch the same server.
+        """
+        return self.shared_state.baseline_tput <= 0 or err_class == PREFIX_CACHE_OFF_ERROR_CLASS
+
     async def handle_unpromotable_result(
         self,
         task: Task,
@@ -1220,8 +1246,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # slow-baseline retry budget on deterministic failures.
         baseline_event_payload: dict[str, Any] | None = None
         # Only arm/streak while no baseline has succeeded yet (tput <= 0).
-        if task.kind == "baseline" and self.shared_state.baseline_tput <= 0:
-            err_class = result_payload.get("error_class", "")
+        err_class = result_payload.get("error_class", "")
+        if task.kind == "baseline" and self._arms_baseline_failure_gates(err_class):
             # A round the run itself stopped -- the session budget reaped it, or
             # the orchestrator cancelled the action -- measured nothing, so it
             # says nothing about whether this baseline boots. Charging it to the
@@ -1267,10 +1293,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     err_class,
                     self.shared_state.baseline_failure_streak,
                 )
-            elif err_class == ARGV_INVALID:
-                # A retry recomposes the same argv the installed parser already
-                # refused: terminal on the first occurrence, with no streak.
-                self.shared_state.set_stop_reason(ARGV_INVALID)
+            elif err_class in _STOPS_ON_FIRST_OCCURRENCE:
+                self.shared_state.set_stop_reason(_STOPS_ON_FIRST_OCCURRENCE[err_class])
             elif err_class == "fast_exit_arg_error":
                 self.shared_state.baseline_arg_error_streak += 1
                 if self.shared_state.baseline_arg_error_streak >= 2:
@@ -1295,7 +1319,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     result_payload,
                     retries_suppressed=bool(eval_pending_suppress or in_enablement),
                 ):
-                    self.shared_state.set_stop_reason("baseline_failed")
+                    self.shared_state.set_stop_reason(_BASELINE_FAILED_STOP_REASON)
             # Combined backstop: count ALL baseline failures so mixed
             # error_classes that split the per-class streaks still fast-fail.
             if not stopped_by_the_run:
@@ -1306,7 +1330,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 and not eval_pending_suppress
                 and not in_enablement
             ):
-                self.shared_state.set_stop_reason("baseline_failed")
+                self.shared_state.set_stop_reason(_BASELINE_FAILED_STOP_REASON)
             # One-shot eager fallback: a (non-OOM) cuda-graph capture failure is
             # often recoverable by disabling cuda-graph capture.
             if err_class == "cuda_graph_capture_failed" and not self.shared_state.baseline_eager_fallback:

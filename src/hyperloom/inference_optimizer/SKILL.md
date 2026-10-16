@@ -859,8 +859,8 @@ auto-`pip install` the SDKs / `ray` / `Magpie` /
 canonical `Preflight diagnostics:` block (paste verbatim into status
 reports). Two checks **abort** the run on failure: the model gate
 (probed against `<OPENAI_BASE_URL>/models`; the allowlist
-{`claude-opus-5` preferred, `claude-opus-4-8`, `claude-opus-4-7`,
-`claude-opus-4-6` fallback}
+{`claude-opus-5-5` preferred, `claude-opus-5`, `claude-opus-4-8`,
+`claude-opus-4-7`, `claude-opus-4-6` fallback}
 binds only under `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0` — otherwise
 the catalog probe is the sole gate; see
 `## Failure Handling`) and, when `--critic-agent` is active, the
@@ -877,8 +877,11 @@ signals. There is no automatic supervision or restart. After inspecting the
 failure and confirming that the old process is gone, explicitly resume the same
 session with `--resume-from "$SESSION_DIR"` when appropriate. Historical stop
 reasons remain readable; they are not instructions to restart automatically.
-`recover` remains an offline artifact-reconstruction tool, not a runtime
-recovery action.
+`recover` is an offline tool, not a runtime recovery action: it reconstructs
+artifacts, or records the cleanup confirmation a refused resume asks for:
+`--confirm-scope-gone` when the lost pod's owner scope must be confirmed gone,
+`--confirm-stopped` for a blocked task that names no owner scope (for example a
+CLOSE-phase step, which runs without a lane; it refuses a scoped task); see Scenario A in `docs/reference/operations.md`.
 
 If the CLI exits with `Claude SDK exit code 1` or `Primus.00009 token not present`,
 the gateway rejected the request. Check that `OPENAI_BASE_URL` / `OPENAI_API_KEY`
@@ -994,6 +997,17 @@ With enablement admitted (`--enablement all/launch/eval`), the first baseline
 failure routes PRELUDE into the ENABLEMENT phase, which authors patches until
 the combo boots. With `--enablement off`, three consecutive failures stop the
 run with `stop_reason='baseline_failed'`.
+
+An AgentX baseline whose server ran with the prefix cache off fails with
+`error_class=agentx_baseline_prefix_cache_off` and stops the run with
+`stop_reason='baseline_failed'` on the first occurrence, whichever AgentX client
+replayed it. Each engine is read from its own launch account: SGLang's resolved
+`disable_radix_cache=True`, vLLM's launch record showing
+`enable_prefix_caching=False`, and, because ATOM keeps the cache off by default
+and prints no record, ATOM server args without `--enable_prefix_caching`. A
+launch whose account cannot be read is left alone. Do not propose
+`--disable-radix-cache` or `--no-enable-prefix-caching` for an AgentX baseline;
+on ATOM pass `--server-args "--enable_prefix_caching"`.
 
 Operator server flags have one supported CLI entry point:
 `optimize --server-args "<framework serve flags>"`. The CLI exports this as
@@ -1646,7 +1660,7 @@ Transient SDK errors retry/resume up to the Coordinator emergency threshold.
 Custom orchestration models are enabled by default and are validated against the
 configured gateway catalog. Set `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`
 only when you intentionally want the strict AMD Claude allowlist
-(`claude-opus-5` / `claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6`).
+(`claude-opus-5-5` / `claude-opus-5` / `claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6`).
 
 | Symptom | Fix |
 |---|---|

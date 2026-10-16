@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 from kernelforge.llm.workspace_policy import (
+    FORGE_LOOP_OUTPUT_DIRNAME,
     is_protected_path,
     protected_path_inventory,
     tracked_editable_paths,
@@ -84,6 +85,26 @@ def test_recursive_inventory_uses_the_same_nested_rules(tmp_path: Path):
         workspace=tmp_path,
         extra_globs=["*/references/*.data"],
     )
+
+
+def test_recursive_inventory_skips_the_loops_own_output_tree(tmp_path: Path):
+    """The loop's output tree is skipped at any depth, while a harness beside the kernel is still protected."""
+    staged = tmp_path / FORGE_LOOP_OUTPUT_DIRNAME / "analysis" / "work" / "abc" / "tools" / "venv"
+    staged.mkdir(parents=True)
+    (staged / "conftest.py").write_text("")
+    (staged / "test_oracle.py").write_text("")
+    nested = tmp_path / "src" / FORGE_LOOP_OUTPUT_DIRNAME / "conftest.py"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("")
+    kernel_harness = tmp_path / "src" / "conftest.py"
+    kernel_harness.write_text("")
+
+    inventory = set(protected_path_inventory(tmp_path))
+
+    assert staged / "conftest.py" not in inventory
+    assert staged / "test_oracle.py" not in inventory
+    assert nested not in inventory
+    assert kernel_harness in inventory
 
 
 def test_recursive_inventory_includes_missing_exact_paths(tmp_path: Path):

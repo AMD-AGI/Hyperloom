@@ -27,6 +27,7 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
     VERDICT_REVERT,
+    agentx_active,
     constraint_fields,
     graded_axes_of,
     perf_snapshot_from_mapping,
@@ -93,9 +94,10 @@ from hyperloom.inference_optimizer.grid_server_args import (
     server_args_env_name,
 )
 from ._ray_serving import maybe_serving_lease
+from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 
 from ._launch_restatement import config_envs, named_settings, restates_the_baseline
-from ._server_argv import config_server_argv
+from ._server_argv import ConfigUnreadable, config_server_argv
 from ._server_lifecycle import (
     resolve_lifecycle_params,
     teardown_lifecycle_server,
@@ -520,6 +522,54 @@ def _is_noop_filter_exempt(variant: GridVariant) -> bool:
     if _is_config_replay_variant(variant):
         return True
     return str(getattr(variant, "provenance", "") or "").strip() in _NOOP_FILTER_ALWAYS_RUNS
+
+
+def _materialized_launch(
+    base_yaml_path: Path, base_extra_args: str, gv: GridVariant, output_subdir: Path, **build: Any
+) -> tuple[str, dict[str, str]]:
+    """The server argv and benchmark envs ``run_grid`` would launch *gv* with."""
+    out_path = _build_variant_yaml(base_yaml_path, base_extra_args, gv, output_subdir=output_subdir, **build)
+    return config_server_argv(out_path).text, config_envs(out_path)
+
+
+def filter_context_copy_drafts(
+    grid: list[GridVariant], *, base_yaml_path: Path, base_extra_args: str, **build: Any
+) -> tuple[list[GridVariant], list[tuple[str, str]]]:
+    """Drop variants that introduce or change a context-copying speculative-decoding draft (synthetic sessions only).
+
+    Each variant and its base are materialized through ``_build_variant_yaml``, the way ``run_grid`` builds the round,
+    so a draft reached through args, replace mode, envs or a server-args env counts. A launch that cannot be
+    materialized is judged on the variant's own args and envs against an empty base.
+
+    Returns the variants still to run, plus ``(name, reason)`` for each drop.
+    """
+    if not grid:
+        return [], []
+    kept: list[GridVariant] = []
+    dropped: list[tuple[str, str]] = []
+    with tempfile.TemporaryDirectory(prefix="explore_spec_probe_") as tmp_dir:
+        tmp_root = Path(tmp_dir)
+        try:
+            base = _materialized_launch(
+                base_yaml_path, base_extra_args, GridVariant(_NOOP_PROBE_BASE_NAME), tmp_root / "base", **build
+            )
+        except (OSError, ValueError, yaml.YAMLError, ConfigUnreadable) as exc:
+            log.warning("explore: could not materialize the base to read its speculative decoding (%s)", exc)
+            base = ("", {})
+        for idx, gv in enumerate(grid):
+            against = base
+            try:
+                launch = _materialized_launch(base_yaml_path, base_extra_args, gv, tmp_root / f"v{idx}", **build)
+            except (OSError, ValueError, yaml.YAMLError, ConfigUnreadable) as exc:
+                log.warning("explore: could not materialize %s to read its speculative decoding (%s)", gv.name, exc)
+                launch = (str(gv.extra_server_args or ""), {str(k): str(v) for k, v in (gv.extra_envs or {}).items()})
+                against = ("", {})
+            reason = context_copy_refusal(against[0], against[1], launch[0], launch[1])
+            if reason:
+                dropped.append((gv.name, reason))
+            else:
+                kept.append(gv)
+    return kept, dropped
 
 
 def filter_baseline_noop_variants(
@@ -1035,6 +1085,10 @@ class ExploreExecutor:
         stack_remove_args = list(dict.fromkeys(base_remove_args))
         stack_unset_envs = list(dict.fromkeys(base_unset_envs))
         stack_base_args_mode = base_args_mode
+        # A context-copying draft is refused on the synthetic benchmark, whose repetition loops it would copy.
+        refuse_context_copy = not agentx_active(benchmark_mode=getattr(ss, "benchmark_mode", "")) and not (
+            is_stack_revalidation(params)
+        )
         running_base_tput = base_tput
 
         def _measured_against() -> dict[str, Any]:
@@ -1141,6 +1195,26 @@ class ExploreExecutor:
                         len(runnable),
                     )
                     break
+                if refuse_context_copy:
+                    # Judged against the stack as it stands now: a KEEP earlier in this round may have changed it.
+                    _, _copy_refused = filter_context_copy_drafts(
+                        [gv],
+                        base_yaml_path=config_path,
+                        base_extra_args=stack_extra_args,
+                        model_path=resolved_model,
+                        gpu_type=resolved_gpu,
+                        benchmark_script=override_script,
+                        base_args_mode=stack_base_args_mode,
+                        base_extra_envs=dict(stack_extra_envs),
+                        base_remove_args=list(stack_remove_args),
+                        base_unset_envs=list(stack_unset_envs),
+                    )
+                    if _copy_refused:
+                        log.warning("explore: refusing variant %s (%s)", gv.name, _copy_refused[0][1])
+                        skipped_dup.append(
+                            {"name": gv.name, "reason": CONTEXT_COPY_REFUSAL, "detail": _copy_refused[0][1]}
+                        )
+                        continue
                 fp = getattr(gv, "canonical_fp", "")
                 provenance = getattr(gv, "provenance", "llm_direct")
                 scope = str(getattr(gv, "scope", "") or "")

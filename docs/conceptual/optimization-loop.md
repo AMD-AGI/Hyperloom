@@ -514,8 +514,10 @@ turn never depends on what an earlier turn happened to remember.
 
 Critic is likewise reactive and stateless per tick. Runtime RCA and automatic
 supervision are not roles in this loop. Stopped sessions require an explicit
-operator `--resume-from` decision; `recover` only reconstructs artifacts
-offline.
+operator `--resume-from` decision; `recover` reconstructs artifacts offline
+or, with `--confirm-scope-gone` / `--confirm-stopped`, records the cleanup
+confirmation a refused resume asks for (see
+[Scenario A](../reference/operations.md#scenario-a-pod-was-oom-killed-mid-session)).
 
 ## Feedback loops
 
