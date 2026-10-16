@@ -216,9 +216,9 @@ skipped because every Experience records `e2e_throughput@v1`.
 ## Packaged mapping: `kernelforge-v1`
 
 Maps the document `kernelforge export-runs` writes from KernelForge's run logs
-to the packaged `kernelforge-run-v1` declaration: one Experience per forge-loop
-iteration, the one candidate kernel it measured and KernelForge's decision on
-it. Collecting a run takes two steps:
+to the packaged `kernelforge-run-v1` declaration: one Experience per
+forge-rewrite PORT step and per forge-loop iteration, the one candidate kernel
+it measured and KernelForge's decision on it. Collecting a run takes two steps:
 
 ```bash
 kernelforge export-runs <run directory>... -o runs.json
@@ -227,10 +227,12 @@ hyperloom-kb-collect --mapping kernelforge-v1 --document runs.json --dry-run
 
 It reads:
 
-- identity from the run's `campaign_config.json`;
-- `baseline.source_ms` from the pristine baseline the run's `run_state.json`
-  records, which for a run given `--baseline-json` is that file's time rather
-  than that of the kernel its search started from;
+- identity from the run's `campaign_config.json`, or from an AgentKernelArena
+  task's own files;
+- `baseline.source_ms` from forge-rewrite's source baseline line or, for a
+  forge-loop run, from the pristine baseline its `run_state.json` records,
+  which for a run given `--baseline-json` is that file's time rather than that
+  of the kernel its search started from;
 - `rationale.plan` from the `Summary:` line the candidate's plan opens with,
   and `rationale.reasoning` from the `Summary:` line of the reasoning log the
   Implementer kept beside that plan (see the
@@ -247,11 +249,11 @@ It reads:
 - `provenance.extra` from the logs: where the candidate came from, the commit
   KernelForge kept, the record its own experience KB filed a kept candidate
   under, and the Implementer's backend and model;
-- the iteration's archive, the run's `forge-loop.log`, and the Implementer's
-  transcript, linked by the reasoning log its first prompt names, into the
-  top-level `raw_logs`. A log or transcript first goes to the run whose
-  workspace path ends most like the path it names; one that fits two runs
-  equally well stops the export.
+- the iteration's archive, the run's `forge-loop.log` or arena log, and the
+  Implementer's transcript, which a plain forge-loop run links by the reasoning
+  log its first prompt names, into the top-level `raw_logs`. A plain run's log
+  or transcript first goes to the run whose workspace path ends most like the
+  path it names; one that fits two runs equally well stops the export.
 
 A unit is skipped when its logs could not be read as a run, when its iteration
 recorded no decision, or when it has no reasoning, which is always the case for

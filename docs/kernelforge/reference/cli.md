@@ -512,22 +512,23 @@ printed to stdout wrapped in `__FORGE_ROOFLINE_CEILING_RESULT__` sentinels.
 
 Writes the runs found under one or more directories as one JSON document,
 `{"runs": [...]}`, for `hyperloom-kb-collect --mapping kernelforge-v1` (see
-{doc}`Experience collection </reference/experience-kb-collect>`). A run is a
-plain `forge-loop` run's `forge_experiments/` directory, which holds
-`campaign_config.json` and `run_state.json`. Each forge-loop iteration found is
-one entry; a run whose `campaign_config.json` or `run_state.json` is not the
-JSON KernelForge writes, or a candidate whose `meta.json` is missing or
-malformed, is one entry saying why, which collection skips with that reason.
-Claude Code transcripts under a directory, such as a copy of
-`~/.claude/projects`, are linked to the candidates their sessions made through
-the reasoning log each session's first prompt names, so sessions run before
-KernelForge asked for that log stay unlinked. A log or transcript belongs to the
-run whose workspace path ends most like the path it names, which may differ in
-its leading directories, as for a run made in a container. The export stops with
-an error and writes nothing when it cannot list a directory under the log roots
-or read a file it needs, such as a JSON record, a plan, a reasoning log, a log
-or a transcript, naming that path, or when a log or transcript fits two runs
-equally well.
+{doc}`Experience collection </reference/experience-kb-collect>`). A run is an
+AgentKernelArena session, or a plain `forge-loop` run's `forge_experiments/`
+directory, which holds `campaign_config.json` and `run_state.json`. Each
+forge-rewrite PORT step and forge-loop iteration found is one entry; a session
+whose logs cannot be read as KernelForge wrote them, a plain run whose
+`campaign_config.json` or `run_state.json` is not the JSON KernelForge writes,
+or a candidate whose `meta.json` is missing or malformed, is one entry saying
+why, which collection skips with that reason. Claude Code transcripts under a
+directory, such as a copy of `~/.claude/projects`, are linked to the candidates
+their sessions made through the reasoning log each session's first prompt
+names, so sessions run before KernelForge asked for that log stay unlinked. A
+plain run's log or transcript belongs to the run whose workspace path ends most
+like the path it names, which may differ in its leading directories, as for a
+run made in a container. The export stops with an error and writes nothing when
+it cannot list a directory under the log roots or read a file a plain run needs,
+such as a JSON record, a plan, a reasoning log, a log or a transcript, naming
+that path, or when a log or transcript fits two plain runs equally well.
 
 | Argument / option | Default | Meaning |
 |:--|:--|:--|

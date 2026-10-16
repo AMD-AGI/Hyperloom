@@ -41,7 +41,8 @@ def _unreadable(error: OSError) -> str:
 def export_runs(log_roots: tuple[Path, ...], output: Path) -> None:
     """Write every run found under the LOG_ROOT directories as one JSON document.
 
-    A run is a plain forge-loop run's forge_experiments directory. Collect the document with
+    A run is an AgentKernelArena session of KernelForge, or a plain forge-loop run's
+    forge_experiments directory. Collect the document with
     `hyperloom-kb-collect --mapping kernelforge-v1 --document <output>`.
     """
 
