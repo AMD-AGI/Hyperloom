@@ -67,6 +67,18 @@ def _provider(
     return LocalSandboxProvider([template], gpus=cards, base_dir=session / _SANDBOXES, hostname=hostname)
 
 
+def _started(provider: LocalSandboxProvider, config: HostedConfig) -> HostedMeasurementBackend:
+    backend = HostedMeasurementBackend(provider, config)
+    backend.start()
+    return backend
+
+
+def _capped(policy: QueuePolicy | None, parallel: int) -> QueuePolicy:
+    """``policy`` with its global concurrency lowered to what the cards can run in parallel."""
+    base = policy or QueuePolicy()
+    return replace(base, global_concurrency=min(base.global_concurrency, parallel))
+
+
 def build_local_toolbox(
     *,
     session_dir: Path,
@@ -128,19 +140,19 @@ def build_local_toolbox(
         poll_interval_sec=poll_interval_sec,
     )
     provider = _provider(session, cards, tp, python, runner_envs, hostname)
-    backend = HostedMeasurementBackend(provider, config)
-    backend.start()
-    base = policy or QueuePolicy()
+    backend = _started(provider, config)
     toolbox = LocalHostedToolbox(
         log=SubmissionLog(session / _SUBMISSIONS, run_id),
         repo=repo,
         sink=notebook,  # type: ignore[arg-type]
         health=notebook,  # type: ignore[arg-type]
-        executor=HostedExecutor(backend, session, timeout_sec=timeout_sec, magpie_python=python),
+        executor=HostedExecutor(
+            backend, session, timeout_sec=timeout_sec, magpie_python=python, workload_kind=workload_kind
+        ),
         planner=planner,
         active_image_digest=active_image_digest,
         workload_kind=workload_kind,
-        policy=replace(base, global_concurrency=min(base.global_concurrency, parallel)),
+        policy=_capped(policy, parallel),
         claims=notebook,  # type: ignore[arg-type]
         records=notebook,  # type: ignore[arg-type]
         max_infra_retries=max_infra_retries,

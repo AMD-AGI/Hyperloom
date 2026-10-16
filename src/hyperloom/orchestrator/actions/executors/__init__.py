@@ -29,6 +29,8 @@ from ._subprocess_kill import (
     SESSION_TIME_EXHAUSTED_RETURNCODE,
 )
 from .benchmark_result import harvest_leaked_artifacts
+from ._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS, refuse_cacheless_agentx_baseline
+from ._launch_evidence import build_launch_evidence
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 from ._spec_decode_pin import (
     SPECULATIVE_DECODING_PINNED,
@@ -37,6 +39,7 @@ from ._spec_decode_pin import (
 )
 
 __all__ = [
+    "PREFIX_CACHE_OFF_ERROR_CLASS",
     "CONTEXT_COPY_REFUSAL",
     "AGENTX_PREFLIGHT_RETURNCODE",
     "BaselineExecutor",
@@ -54,6 +57,7 @@ __all__ = [
     "TargetAnalysisExecutor",
     "VariantResult",
     "baseline_executor",
+    "build_launch_evidence",
     "conc_sweep_executor",
     "context_copy_refusal",
     "default_baseline_config",
@@ -61,6 +65,7 @@ __all__ = [
     "harvest_leaked_artifacts",
     "materialize_config_with_envs",
     "num_gpus_for_config",
+    "refuse_cacheless_agentx_baseline",
     "refuse_unpinned_speculative_change",
     "report_executor",
     "resolve_lifecycle_params",

@@ -36,11 +36,13 @@ from hyperloom.contracts.measurement import (
     FailureClass,
     RoundValue,
     SandboxFacts,
+    Purpose,
     TestKind,
     TestRequest,
     TestResult,
     Validity,
 )
+from hyperloom.measure.fake_gain import PREFIX_CACHE_OFF_ERROR_CLASS, baseline_prefix_cache_refusal
 from hyperloom.measure.failures import Disposition, classify_test_failure
 from hyperloom.measure.hosted import HostedMeasurementBackend
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED, Record
@@ -48,6 +50,7 @@ from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestMeta, TestOutcome
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
+from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 
 __all__ = ["DEFAULT_TEST_TIMEOUT_SEC", "HostedExecutor", "OUTPUTS_DIR"]
@@ -60,6 +63,7 @@ _MANIFEST = "manifest.json"
 _UNFINISHED = (STATE_SUBMITTED, STATE_SENT)
 _SWEEP = "conc_sweep"
 _ACCURACY = "accuracy"
+_MEASURE = "measure"
 _REASON_DETAIL_CHARS = 300
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
 
@@ -73,7 +77,8 @@ class HostedExecutor:
             ``output_dir`` is relative to it.
         timeout_sec: The timeout of one attempt.
         magpie_python: The interpreter the measurement runs with (``TestCall.magpie_python``).
-        clock: Wall-clock seconds, for the attempt's start and end.
+        workload_kind: The campaign's workload; an AgentX baseline served with the prefix cache off does not end
+            ``succeeded``.
     """
 
     def __init__(
@@ -83,13 +88,14 @@ class HostedExecutor:
         *,
         timeout_sec: int = DEFAULT_TEST_TIMEOUT_SEC,
         magpie_python: str = sys.executable,
-        clock: Callable[[], float] = time.time,
+        workload_kind: WorkloadKind = WorkloadKind.INFERENCEX,
     ) -> None:
         self._backend = backend
         self._session = Path(session_dir)
         self._timeout = timeout_sec
         self._python = magpie_python
-        self._clock = clock
+        self._clock: Callable[[], float] = time.time
+        self._workload = workload_kind
 
     async def run(self, job: TestJob) -> TestResult:
         request = job.request
@@ -155,11 +161,14 @@ class HostedExecutor:
         audit = self._audit(request_id, record, call) if record is not None else {}
         if failure is None and not audit:
             raise MeasurementRefused("the result is not recorded as a verified bundle of this sandbox")
+        refusal = self._cacheless_baseline(request, accepted, outcome) if failure is None else ""
+        if refusal:
+            failure = FailureClass.CANDIDATE
         finished = self._clock()
         accuracy: tuple[AccuracyValue, ...] = ()
         if failure is None:
             rounds = _round_values(outcome.rounds, accepted.points)
-            if not any(r.phase == "measure" for r in rounds):
+            if not any(r.phase == _MEASURE for r in rounds):
                 raise MeasurementRefused("the verified result holds no readable measured round")
             accuracy = _accuracy_values(outcome.rounds, wanted=request.accuracy)
         else:
@@ -169,7 +178,7 @@ class HostedExecutor:
             request_id=request_id,
             validity=_validity_of(failure),
             failure_class=failure,
-            failure_reason=_failure_reason(outcome, failure),
+            failure_reason=refusal or _failure_reason(outcome, failure),
             rounds=rounds,
             accuracy=accuracy,
             sandbox=facts,
@@ -179,6 +188,21 @@ class HostedExecutor:
             gpu_seconds=gpu_seconds,
             **audit,
         )
+
+    def _cacheless_baseline(self, request: TestRequest, accepted: AcceptedMeasurement, outcome: TestOutcome) -> str:
+        """Why an AgentX baseline measured with the prefix cache off is refused, or ``""`` (main's #1884).
+
+        Every candidate is graded against the baseline, so a cold-cache one would credit the cache itself as a gain.
+        """
+        if self._workload is not WorkloadKind.AGENTX or request.purpose is not Purpose.BASELINE:
+            return ""
+        for item in outcome.rounds:
+            if item.phase != _MEASURE or item.point >= len(accepted.points):
+                continue
+            reason = baseline_prefix_cache_refusal(accepted.points[item.point], Path(item.output_dir))
+            if reason:
+                return f"{PREFIX_CACHE_OFF_ERROR_CLASS}: {reason}"
+        return ""
 
     def _timed_out(self, request_id: str, started: float) -> TestResult:
         """A timeout is an unclear failure (4.5): the sandbox is read from the journal, the node is not known."""
@@ -331,7 +355,7 @@ def _round_values(rounds: tuple[RoundOutcome, ...], points: tuple[Path, ...]) ->
     """One value per warmup or measured round whose report is readable and valid; the metric names are the report's."""
     values = []
     for item in rounds:
-        if item.phase not in ("warmup", "measure"):
+        if item.phase not in ("warmup", _MEASURE):
             continue
         report = _report_of(item.output_dir)
         if report is None:
