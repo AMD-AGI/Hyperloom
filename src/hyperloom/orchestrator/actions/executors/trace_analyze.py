@@ -367,6 +367,20 @@ _TRACELENS_ANALYSIS_MODULE = "hyperloom.orchestrator.trace_analysis.tracelens_an
 _BYPASS_TRACE_ANALYSIS_MODULE = "hyperloom.orchestrator.trace_analysis.bypass_trace_analysis"
 
 
+def _bypass_flags(state: Any, analysis_mode: str) -> list[str]:
+    """Flags only the bypass route reads; the analysis-mode hint retires with the bypass route."""
+    flags = ["--analysis-mode", analysis_mode] if analysis_mode else []
+    if str(getattr(state, "benchmark_mode", "") or "").strip().lower() == "agentx":
+        flags += ["--require-single-rank"]
+        try:
+            state_tp = int(getattr(state, "tp", 0) or 0)
+        except (TypeError, ValueError):
+            state_tp = 0
+        if state_tp > 0:
+            flags += ["--tensor-parallel-size", str(state_tp)]
+    return flags
+
+
 def _build_trace_analyze_cmd(
     payload: dict,
     *,
@@ -403,19 +417,12 @@ def _build_trace_analyze_cmd(
         # The tool's SDK run books its model requests onto this session's trajectory ledger.
         for key, value in inherited_scope_fields().items():
             cmd += [f"--trajectory-{key.replace('_', '-')}", str(value)]
-    elif str(getattr(state, "benchmark_mode", "") or "").strip().lower() == "agentx":
-        cmd += ["--require-single-rank"]
-        try:
-            state_tp = int(getattr(state, "tp", 0) or 0)
-        except (TypeError, ValueError):
-            state_tp = 0
-        if state_tp > 0:
-            cmd += ["--tensor-parallel-size", str(state_tp)]
+    else:
+        cmd += _bypass_flags(state, analysis_mode)
     for flag, val in (
         ("--model-name", model_name),
         ("--framework", framework),
         ("--target-platform", target_platform),
-        ("--analysis-mode", analysis_mode),
     ):
         if val:
             cmd += [flag, str(val)]
