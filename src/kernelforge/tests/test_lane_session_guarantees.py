@@ -178,6 +178,35 @@ def test_every_lane_round_releases_the_backend_it_built(tmp_path, monkeypatch, f
     assert all(backend.closed for backend in backends)
 
 
+def test_a_lane_may_write_its_reasoning_log_outside_its_copy(tmp_path, monkeypatch):
+    """The copy is deleted after the round, so the log lives beside the plans in the canonical workspace.
+
+    Reaching it takes an explicit extra directory, and the lane's protected-path hooks must not refuse it.
+    """
+    specs = _record_backend_specs(monkeypatch)
+    lane_dir = _tree(tmp_path / "lanes" / "1")
+    log = tmp_path / "workspace" / "forge_experiments" / "orchestration" / "iter_002" / "lane_002.reasoning.md"
+    session = _lane_factory(tmp_path)(str(lane_dir), None)
+
+    asyncio.run(session(str(lane_dir / "src" / "kernel.py"), "plan 2", reasoning_log=str(log)))
+
+    spec = specs[0]
+    assert spec.additional_directories == [str(log.parent)]
+    assert f"`{log}`" in spec.user_prompt
+    assert lane_dir.resolve() not in log.resolve().parents
+    deny_edit = next(
+        hook.callback for hook in spec.hooks.pre_tool_use if hook.matcher == gate_module._EDIT_TOOL_MATCHER
+    )
+    assert asyncio.run(deny_edit({"tool_name": "Write", "tool_input": {"file_path": str(log)}}, None, None)) == {}
+
+
+def test_a_lane_without_a_reasoning_log_is_given_no_extra_directory(tmp_path, monkeypatch):
+    spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch)
+
+    assert spec.additional_directories == []
+    assert "## Reasoning log" not in spec.user_prompt
+
+
 def test_a_hookless_provider_is_given_no_hooks_to_drop(tmp_path, monkeypatch):
     """The gate's callbacks are built for the provider that runs them, or not at all.
 

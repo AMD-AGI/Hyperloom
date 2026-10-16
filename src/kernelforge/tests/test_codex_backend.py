@@ -48,6 +48,7 @@ from kernelforge.agent_backends.codex import (
 from kernelforge.config import Config
 from kernelforge.cli.options import AgentRuntimeOptions, _agent_runtime_overrides
 from kernelforge.orchestrator import agent as agent_module
+from kernelforge.orchestrator.summary_line import REASONING_LOG_RULE, reasoning_log_section
 from kernelforge.tracker.usage import UsageAccumulator
 
 
@@ -1039,6 +1040,59 @@ def test_implementer_turn_inherits_the_worktree_the_loop_dirtied(
     assert captured["spec"].allow_dirty_baseline is True
     assert captured["spec"].commit_new_paths == ["kernels/*.s"]
     assert captured["spec"].allow_untracked is False
+
+
+@pytest.mark.parametrize("insession_gate", [False, True])
+def test_implementer_is_handed_its_reasoning_log_only_when_one_is_named(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    insession_gate: bool,
+) -> None:
+    """A named log adds one prompt section and its directory; without one the session is as it was."""
+    specs: list[AgentRunSpec] = []
+
+    class FakeBackend:
+        name = "codex"
+        capabilities = AgentCapabilities(stop_hooks=True)
+
+        async def run(self, spec: AgentRunSpec, usage: object = None) -> AgentRunResult:
+            specs.append(spec)
+            return AgentRunResult(text="PLAN: vectorize loads")
+
+    def fake_factory(runtime, **_kwargs: object) -> FakeBackend:
+        backend = FakeBackend()
+        backend.runtime = runtime
+        return backend
+
+    monkeypatch.setattr(agent_module, "create_registered_backend", fake_factory)
+    kernel = tmp_path / "kernel.py"
+    kernel.write_text("VALUE = 1\n")
+    driver = tmp_path / "forge_driver.py"
+    driver.write_text("print('allclose: True')\n")
+    agent_fn = agent_module.make_agent_fn(
+        Config(workspace=str(tmp_path), agent_backend="codex", agent_model="m", agent_precheck=False),
+        agent_module.ImplementerSetup(
+            agent_module.ImplementerTask(program_md="Optimize VALUE."),
+            measurement=agent_module.GateMeasurement(driver_script=str(driver)),
+            session=agent_module.SessionOptions(agent_backend="codex", insession_gate=insession_gate),
+        ),
+    )
+    log = tmp_path / "forge_experiments" / "orchestration" / "iter_001" / "optimization_plan.reasoning.md"
+
+    asyncio.run(agent_fn(str(kernel), "history"))
+    asyncio.run(agent_fn(str(kernel), "history", reasoning_log=str(log)))
+
+    without, named = specs
+    assert without.additional_directories == []
+    assert "## Reasoning log" not in without.user_prompt
+    assert "land in time.\n\n## Prior experience" in without.user_prompt
+    assert named.additional_directories == [str(log.parent)]
+    assert log.parent.is_dir()
+    assert f"`{log}`" in named.user_prompt
+    assert named.user_prompt.replace(reasoning_log_section(str(log)), "", 1) == without.user_prompt
+    assert named.system_prompt == without.system_prompt
+    assert REASONING_LOG_RULE in named.system_prompt
+    assert named.system_prompt.index(REASONING_LOG_RULE) < named.system_prompt.index("starting with `PLAN:`")
 
 
 def test_outer_gate_counts_only_incremental_resume_target_edits(

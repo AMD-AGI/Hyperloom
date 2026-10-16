@@ -5,12 +5,12 @@
 
 from __future__ import annotations
 
-import inspect
 import logging
 import subprocess
 from pathlib import Path
 
 from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON
+from kernelforge.loop.agent_extras import declared_extras
 from kernelforge.loop.iteration.iteration_types import (
     IterationResult,
     LoopAgents,
@@ -24,6 +24,7 @@ from kernelforge.loop.iteration.iteration_types import (
 from kernelforge.loop.merge_candidates import merge_plan
 from kernelforge.loop.run_state import complete_orchestration_probe, make_event
 from kernelforge.orchestrator.orchestration import OrchestrationInfrastructureError
+from kernelforge.orchestrator.summary_line import reasoning_log_path
 from kernelforge.tools.process_reaping import processes_under
 
 log = logging.getLogger(__name__)
@@ -213,18 +214,15 @@ class IterationPhasesMixin:
             )
             # Pass extras only to agent_fns that declare them: the in-session gate uses the current best mean case
             # speedup and immutable pristine per-case timings; session_sink hands back findings and the
-            # resumed-session factual-record callback.
-            extra_kwargs = {}
-            try:
-                params = inspect.signature(agent_fn).parameters
-                if "baseline_case_times" in params:
-                    extra_kwargs["baseline_case_times"] = dict(self._baseline_case_times)
-                if "best_mean_case_speedup" in params:
-                    extra_kwargs["best_mean_case_speedup"] = self.best_mean_case_speedup
-                if "session_sink" in params:
-                    extra_kwargs["session_sink"] = session_sink
-            except (ValueError, TypeError):
-                log.debug("could not introspect agent_fn signature", exc_info=True)
+            # resumed-session factual-record callback; the reasoning log is kept beside the plan being executed.
+            extras = {
+                "baseline_case_times": dict(self._baseline_case_times),
+                "best_mean_case_speedup": self.best_mean_case_speedup,
+                "session_sink": session_sink,
+            }
+            if optimization_plan_path:
+                extras["reasoning_log"] = str(reasoning_log_path(optimization_plan_path))
+            extra_kwargs = declared_extras(agent_fn, extras)
             agent_error = None
             try:
                 rationale = await agent_fn(

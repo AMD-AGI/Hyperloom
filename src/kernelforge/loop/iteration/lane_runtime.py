@@ -14,6 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from kernelforge.loop.fanout import LanePlan, LaneResult, run_lanes
+from kernelforge.orchestrator.summary_line import reasoning_log_path
 from kernelforge.loop.iteration.iteration_types import HeldRound, IterationResult, _StagedMerge, _append_finding
 from kernelforge.loop.merge_candidates import (
     MERGE_ATTEMPT_STALL_THRESHOLD,
@@ -147,6 +148,7 @@ class LaneRuntimeMixin:
             await agent_factory(str(lane_dir), str(serialized_driver))(
                 str(lane_dir / kernel_relative),
                 _lane_prompt(lane.plan, serialized_driver=serialized_driver),
+                reasoning_log=str(reasoning_log_path(self._lane_plan_path(iteration, int(lane.lane_id)))),
             )
 
         results = await run_lanes(
@@ -471,7 +473,7 @@ class LaneRuntimeMixin:
         manifest = self._lane_plan_manifest_path(iteration)
         manifest.unlink(missing_ok=True)
         keep = {self._lane_plan_path(iteration, lane) for lane in range(2, len(published) + 1)}
-        for stale in self._orchestration_root(iteration).glob("lane_*.md"):
+        for stale in self._orchestration_root(iteration).glob("lane_[0-9][0-9][0-9].md"):
             if stale not in keep:
                 stale.unlink()
         for lane, plan in enumerate(published, start=1):

@@ -628,7 +628,7 @@ def _lane_agent_factory(edits):
     """An agent that writes the edit its lane was assigned, in that lane's copy."""
 
     def factory(lane_dir, _serialized_driver):
-        async def agent(_kernel_file, prompt):
+        async def agent(_kernel_file, prompt, *, reasoning_log=None):
             path = Path(lane_dir) / "kernel.py"
             for plan, (old, new) in edits.items():
                 if plan in prompt:
@@ -644,13 +644,14 @@ def _recording_lane_factory(seen):
     """A lane agent that records everything the round handed it."""
 
     def factory(lane_dir, serialized_driver):
-        async def agent(kernel_file, prompt):
+        async def agent(kernel_file, prompt, *, reasoning_log=None):
             seen.append(
                 {
                     "lane_dir": lane_dir,
                     "serialized_driver": serialized_driver,
                     "kernel_file": kernel_file,
                     "prompt": prompt,
+                    "reasoning_log": reasoning_log,
                 }
             )
             path = Path(lane_dir) / "kernel.py"
@@ -685,6 +686,24 @@ async def test_a_lane_is_told_to_run_the_serialized_driver(tmp_path, monkeypatch
     assert "not a hang" in seen[0]["prompt"]
     assert "tune the prefill epilogue" in seen[0]["prompt"]
     assert [item.plan for item in loop._lane_queue] == ["tune the prefill epilogue"]
+
+
+async def test_each_lane_keeps_its_reasoning_log_beside_its_own_plan(tmp_path, monkeypatch):
+    """The lane copy is deleted after the round, so the log goes where the round's plans already live."""
+    loop, workspace = _reduction_loop(tmp_path, monkeypatch)
+    seen: list[dict] = []
+
+    await loop._fill_lane_queue(
+        iteration=3,
+        agent_factory=_recording_lane_factory(seen),
+        lane_plans=["tune the prefill epilogue", "tune the decode epilogue"],
+    )
+
+    round_dir = workspace.resolve() / "forge_experiments" / "orchestration" / "iter_003"
+    assert {Path(item["lane_dir"]).name: item["reasoning_log"] for item in seen} == {
+        "1": str(round_dir / "optimization_plan.reasoning.md"),
+        "2": str(round_dir / "lane_002.reasoning.md"),
+    }
 
 
 async def test_a_fan_out_round_queues_one_candidate_per_lane(tmp_path, monkeypatch):
@@ -783,6 +802,49 @@ def test_more_than_one_lane_fans_the_round_out(tmp_path, monkeypatch):
     )
 
     assert fanned_out == [1]
+
+
+def _reasoning_log_agent(seen):
+    """An agent that declares the reasoning log and records what it was handed."""
+
+    async def agent(_kernel_path, _history, session_sink, reasoning_log="not passed"):
+        seen.append(reasoning_log)
+        session_sink["plan"] = "inspect only"
+        return "No source change was needed."
+
+    return agent
+
+
+def test_an_orchestrated_session_keeps_its_reasoning_log_beside_the_plan(tmp_path, monkeypatch):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+    monkeypatch.setattr(loop, "_run_orchestration", _published_plan(workspace))
+    seen: list[str] = []
+
+    asyncio.run(
+        loop.run(
+            runner_module.LoopAgents(
+                agent_fn=_reasoning_log_agent(seen),
+                supervisor_fn=_unused_supervisor,
+                orchestration_service=object(),
+            )
+        )
+    )
+
+    assert seen == [
+        str(workspace / "forge_experiments" / "orchestration" / "iter_001" / "optimization_plan.reasoning.md")
+    ]
+
+
+def test_a_session_without_a_plan_is_given_no_reasoning_log(tmp_path, monkeypatch):
+    """No plan, nothing to sit beside: the argument is left out rather than pointed somewhere."""
+    loop, _workspace = _make_loop(tmp_path, monkeypatch)
+    seen: list[str] = []
+
+    asyncio.run(
+        loop.run(runner_module.LoopAgents(agent_fn=_reasoning_log_agent(seen), supervisor_fn=_unused_supervisor))
+    )
+
+    assert seen == ["not passed"]
 
 
 def _counting_plan(loop, workspace, rounds, *, plans=("a", "b"), unavailable=False):
@@ -1269,7 +1331,7 @@ async def test_a_lane_that_wrote_nothing_is_never_queued(tmp_path, monkeypatch):
     loop, workspace = _reduction_loop(tmp_path, monkeypatch)
 
     def factory(_lane_dir, _serialized_driver):
-        async def agent(_kernel_file, _prompt):
+        async def agent(_kernel_file, _prompt, *, reasoning_log=None):
             return None
 
         return agent

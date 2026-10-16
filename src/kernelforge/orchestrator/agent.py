@@ -31,6 +31,7 @@ from kernelforge.evaluation.scoring import (
     KEEP_MIN_MARGIN_FRACTION,
     keep_t_critical,
 )
+from kernelforge.orchestrator.summary_line import REASONING_LOG_RULE, reasoning_log_section
 from kernelforge.tracker.usage import UsageAccumulator
 
 log = logging.getLogger(__name__)
@@ -64,10 +65,54 @@ _PR_KB_CHILD_ENV_VARS = (
     "PR_KB_FALLBACK_MIN_WORTH",
 )
 
+_WORKSPACE_HYGIENE_RULE = (
+    "Do NOT create or leave new non-ignored files outside the campaign's "
+    "explicit --commit-new-path allowlist. Run "
+    "one-off checks inline; if a temporary file is unavoidable, place it "
+    "under forge_experiments/ and remove it before ending the turn."
+)
+
+# The counterpart to the rule above: that one keeps the workspace clean, this one keeps the artifact clean. Both
+# are stated here rather than in a knowledge card because a card is read on demand and this holds every iteration.
+_DELIVERABLE_HYGIENE_RULE = (
+    "What you submit is a finished operator, not a scratchpad: when you end "
+    "the turn it carries no `print` and reads no `os.environ` of its own. A "
+    "sweep knob or a probe print may live in the kernel while you search; "
+    "before ending the turn, replace each knob with the constant it selected, "
+    "delete each probe, and re-run the driver on the file you submit. A knob "
+    "left behind is indistinguishable, to everyone downstream, from live "
+    "configuration. The one exception is an option a library you call "
+    "exposes no other way: set that, and say in a comment why there is no "
+    "API for it."
+)
+
 
 def _pr_kb_child_env() -> dict[str, str]:
     """Collect the PR KB settings that must reach the position-C server."""
     return {name: os.environ[name] for name in _PR_KB_CHILD_ENV_VARS if os.environ.get(name, "").strip()}
+
+
+def _deadline_section(deadline_sec: int) -> str:
+    """Tell the session its own wall-clock bound."""
+    deadline_min = max(1, round(deadline_sec / 60))
+    return (
+        "## Session deadline\n"
+        f"You have about {deadline_min} minutes of wall-clock for "
+        "THIS session before it is cut off; a session cut off mid-turn hands "
+        "off nothing. Well before then, stop improving and submit the best "
+        "candidate you actually have through the clean handoff "
+        "(candidate_submitted) — do not reach for a larger gain you cannot "
+        "land in time.\n"
+    )
+
+
+def _ensure_reasoning_log_directory(reasoning_log: str | None) -> list[str]:
+    """Create the directory a session's reasoning log goes in and return it as the session's extra directories."""
+    if not reasoning_log:
+        return []
+    directory = Path(reasoning_log).resolve().parent
+    directory.mkdir(parents=True, exist_ok=True)
+    return [str(directory)]
 
 
 def _gate_scoring_context(baseline_case_times: dict | None, best_mean_case_speedup: float | None) -> str:
@@ -460,27 +505,6 @@ def make_agent_fn(
 
     prior_knowledge_section = f"{chr(10)}## Prior Knowledge{chr(10)}{pre_task_context}" if pre_task_context else ""
 
-    workspace_hygiene_rule = (
-        "Do NOT create or leave new non-ignored files outside the campaign's "
-        "explicit --commit-new-path allowlist. Run "
-        "one-off checks inline; if a temporary file is unavoidable, place it "
-        "under forge_experiments/ and remove it before ending the turn."
-    )
-
-    # The counterpart to the rule above: that one keeps the workspace clean, this one keeps the artifact clean. Both
-    # are stated here rather than in a knowledge card because a card is read on demand and this holds every iteration.
-    deliverable_hygiene_rule = (
-        "What you submit is a finished operator, not a scratchpad: when you end "
-        "the turn it carries no `print` and reads no `os.environ` of its own. A "
-        "sweep knob or a probe print may live in the kernel while you search; "
-        "before ending the turn, replace each knob with the constant it selected, "
-        "delete each probe, and re-run the driver on the file you submit. A knob "
-        "left behind is indistinguishable, to everyone downstream, from live "
-        "configuration. The one exception is an option a library you call "
-        "exposes no other way: set that, and say in a comment why there is no "
-        "API for it."
-    )
-
     # Stable across every iteration of a loop — placed in system_prompt so the underlying CLI's prompt cache reuses it
     # instead of re-billing each call.
     driver_base = Path(driver_script).name if driver_script else "forge_driver.py"
@@ -570,9 +594,10 @@ explain your rationale in one sentence.
    refusing a mechanism because it would compromise the benchmark, read the
    harness — it is in the workspace — and cite the lines that say so. An
    assumption about what the harness does is not a reason.
-5. {workspace_hygiene_rule}
-6. {deliverable_hygiene_rule}
-7. As your last output, output one line starting with `PLAN:` — a SHORT headline
+5. {_WORKSPACE_HYGIENE_RULE}
+6. {_DELIVERABLE_HYGIENE_RULE}
+7. {REASONING_LOG_RULE}
+8. As your last output, output one line starting with `PLAN:` — a SHORT headline
    (≤ ~12 words, one clause, plain prose, NO code/syntax) naming the optimization
    now in the file that will be committed and benchmarked, e.g. "vectorize global
    loads to 128-bit". Name only what you KEPT, not abandoned attempts or bug-fix
@@ -677,8 +702,9 @@ judge your kernel. It is yours to READ and to RUN; it is NOT yours to change.
   supplies. Before refusing a mechanism because it would compromise the
   benchmark, read the harness — it is in the workspace — and cite the lines that
   say so. An assumption about what the harness does is not a reason.
-- {workspace_hygiene_rule}
-- {deliverable_hygiene_rule}
+- {_WORKSPACE_HYGIENE_RULE}
+- {_DELIVERABLE_HYGIENE_RULE}
+- {REASONING_LOG_RULE}
 - As your VERY LAST output, after all edits/fixes are done and the kernel is in
   its final state, output one line starting with `PLAN:` — a SHORT headline
   (≤ ~12 words, one clause, plain prose, NO code/syntax) naming the optimization
@@ -705,18 +731,6 @@ Never `cat` a whole file — use the Read tool.
         if session.session_timeout_sec is not None
         else max(backend.runtime.timeout_sec, _DEFAULT_SESSION_TIMEOUT_SEC)
     )
-    session_deadline_min = max(1, round(session_deadline_sec / 60))
-
-    # Tell the session its own wall-clock bound.
-    deadline_section = (
-        "## Session deadline\n"
-        f"You have about {session_deadline_min} minutes of wall-clock for "
-        "THIS session before it is cut off; a session cut off mid-turn hands "
-        "off nothing. Well before then, stop improving and submit the best "
-        "candidate you actually have through the clean handoff "
-        "(candidate_submitted) — do not reach for a larger gain you cannot "
-        "land in time.\n"
-    )
 
     async def agent_fn(
         kernel_path: str,
@@ -724,6 +738,7 @@ Never `cat` a whole file — use the Read tool.
         session_sink: dict | None = None,
         baseline_case_times: dict | None = None,
         best_mean_case_speedup: float | None = None,
+        reasoning_log: str | None = None,
     ) -> str:
         # A caller that reads nothing back still gets a sink, so the session records into one place unconditionally.
         if session_sink is None:
@@ -745,7 +760,7 @@ Never `cat` a whole file — use the Read tool.
 
         prompt = f"""\
 {target_section}
-{deadline_section}
+{_deadline_section(session_deadline_sec)}{reasoning_log_section(reasoning_log)}
 ## Prior experience (distilled constraints + recent iterations)
 {experiment_history if experiment_history else "(none — this is iteration 1)"}
 
@@ -795,6 +810,7 @@ Make your change(s) now.
             cwd=run_cwd,
             writable=True,
             timeout_sec=session_deadline_sec,
+            additional_directories=_ensure_reasoning_log_directory(reasoning_log),
             tool_policy=AgentToolPolicy(
                 read=True,
                 search=True,
