@@ -125,6 +125,21 @@ def specialist_admission_minutes(shared_state: SharedState, params: dict[str, An
     return floor_min
 
 
+def explore_admission_minutes(per_round_minutes: float, params: dict[str, Any] | None) -> float:
+    """What an explore round costs: one measured round for each variant its grid carries.
+
+    The catalogue prices an action, and an explore is priced as one round --
+    but the task is a whole grid and every variant in it is a server launch and
+    a benchmark on the same serving lane. A measured FRAMEWORK_AGENT explore
+    carrying four variants ran 39.9 minutes against the ~12 it was admitted
+    at, so a queue charged per task reads as a third of what it will take: that
+    phase queued 23 rounds in 52 minutes and still had every one of them
+    waiting 95 minutes later, when the exit cancelled them unmeasured.
+    """
+    variants = len(((params or {}).get("grid") or ()))
+    return per_round_minutes * variants if variants > 1 else per_round_minutes
+
+
 def time_budget_denial(action: str, expected_cost_minutes: float, shared_state: SharedState) -> PolicyDenied | None:
     """Refuse an action that the session's usable time, or the gated phase's remaining time, cannot fit.
 

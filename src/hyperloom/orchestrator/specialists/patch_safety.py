@@ -313,7 +313,16 @@ def _git_apply_check(root: Path, patch_text: str, timeout_sec: float = 30.0) -> 
         )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         return None, repr(exc)
-    return proc.returncode == 0, (proc.stderr or "").strip()
+    detail = (proc.stderr or "").strip()
+    if proc.returncode == _GIT_FATAL_RC:
+        # git exits 1 when it read the patch and the patch does not apply, and
+        # 128 when it never got that far because the repository itself was
+        # unusable -- a worktree whose parent checkout is gone, a tree another
+        # uid owns. Only the first is a verdict about the patch; reported as
+        # one, the second labels every patch in the set stale on evidence
+        # about the machine.
+        return None, detail
+    return proc.returncode == 0, detail
 
 
 def resolve_patch_apply_root(
@@ -654,6 +663,8 @@ GROUND_PATH_ESCAPE = "path_escape"  # patch path escapes the tree
 GROUND_MISSING_TARGET = "missing_target"  # modify/delete target absent from base
 GROUND_AMBIGUOUS_ROOT = "ambiguous_root"  # patch targets match more than one disjoint tree
 GROUND_UNCHECKED = "unchecked"  # no base available / git unavailable
+#: git's exit code for a fatal error about the repository rather than the input.
+_GIT_FATAL_RC = 128
 
 
 @dataclass(frozen=True)
@@ -734,7 +745,10 @@ def ground_patch_text(
         return PatchGroundingResult(GROUND_MISSING_TARGET, detail)
     applies, detail = _git_apply_check(resolution.root, patch_text, git_timeout_sec)
     if applies is None:
-        return PatchGroundingResult(GROUND_UNCHECKED, f"git unavailable: {detail}")
+        # The verdict already says unchecked; the detail is git's own words for
+        # why, which is "git is not installed" for one cause and "this is not a
+        # repository" for another.
+        return PatchGroundingResult(GROUND_UNCHECKED, detail)
     if applies:
         return PatchGroundingResult(GROUND_APPLIES)
     return PatchGroundingResult(GROUND_STALE, detail[:240])

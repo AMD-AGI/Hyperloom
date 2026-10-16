@@ -16,9 +16,13 @@ LANE_GEMM = "gemm"
 #: tuner. This is only the fallback for a tuner that reports none.
 GEMM_DEFAULT_TARGET_SEC = 20 * 60
 
-#: fusion: no admission floor and no per-recipe estimate, so its ceiling is a
-#: count rather than a division. Travels to forge-fuse as ``--max-recipes``.
+#: fusion: the most recipes one lane may attempt. Travels to forge-fuse as ``--max-recipes``.
 FUSION_MAX_TARGETS = 3
+
+#: fusion: what one recipe is priced at, so a share too small to pay for even one leaves the lane unfundable
+#: instead of taking whatever seconds remain. Held at the sibling lane's per-target price rather than invented:
+#: both buy one forge target out of the same phase share, and nothing here has measured them apart.
+FUSION_DEFAULT_TARGET_SEC = GEMM_DEFAULT_TARGET_SEC
 
 #: Held back from the phase share so the lanes cannot consume the time the phase
 #: itself needs to close out.
@@ -106,7 +110,7 @@ def max_targets(
     if lane == LANE_GEMM:
         return _greedy_fit(budget_sec, target_costs_sec)
     if lane == LANE_FUSION:
-        return FUSION_MAX_TARGETS if budget_sec > 0 else 0
+        return min(FUSION_MAX_TARGETS, budget_sec // FUSION_DEFAULT_TARGET_SEC)
     raise LaneBudgetError(f"unknown lane {lane!r}")
 
 

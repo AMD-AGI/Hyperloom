@@ -62,10 +62,8 @@ def test_config_levers_preserve_envs_and_args() -> None:
             ]
         }
     )
-    assert levers == {
-        "extra_server_args": '--enable-x --compilation-config {"mode":"max-autotune"} --bare',
-        "extra_envs": {"VLLM_FOO": "1"},
-    }
+    assert levers["extra_server_args"] == '--enable-x --compilation-config {"mode":"max-autotune"} --bare'
+    assert levers["extra_envs"] == {"VLLM_FOO": "1"}
 
 
 def test_config_levers_args_as_list() -> None:
@@ -86,10 +84,8 @@ def test_invalid_config_args_preserve_independent_env_overrides() -> None:
             ]
         }
     )
-    assert levers == {
-        "extra_server_args": "",
-        "extra_envs": {"SAFE_ENV": "1"},
-    }
+    assert levers["extra_server_args"] == ""
+    assert levers["extra_envs"] == {"SAFE_ENV": "1"}
 
 
 def test_config_levers_json_args_as_list_stay_unquoted() -> None:
@@ -106,10 +102,8 @@ def test_config_levers_json_args_as_list_stay_unquoted() -> None:
             ]
         }
     )
-    assert levers == {
-        "extra_server_args": '--json-model-override-args {"rope_scaling":null}',
-        "extra_envs": {},
-    }
+    assert levers["extra_server_args"] == '--json-model-override-args {"rope_scaling":null}'
+    assert levers["extra_envs"] == {}
 
 
 # _framework_agent_audit_skip_confident

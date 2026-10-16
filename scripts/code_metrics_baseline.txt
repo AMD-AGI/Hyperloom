@@ -454,7 +454,7 @@ duplicated-lines src/hyperloom/orchestrator/enablement/runtime/tests/test_target
 duplicated-lines src/hyperloom/orchestrator/kernel/tests/test_forge_server_log_evidence.py 48
 duplicated-lines src/hyperloom/orchestrator/knowledge/kb_writeback.py 40
 duplicated-lines src/hyperloom/orchestrator/measurement/tests/test_apply_verification.py 12
-duplicated-lines src/hyperloom/orchestrator/phases/framework.py 58
+duplicated-lines src/hyperloom/orchestrator/phases/framework.py 34
 duplicated-lines src/hyperloom/orchestrator/tests/_helpers.py 53
 duplicated-lines src/hyperloom/orchestrator/trace_analysis/tests/test_tracelens_csv.py 55
 duplicated-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py 11
@@ -699,7 +699,7 @@ function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborat
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.build_env_spec 107
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.geak_rebench_params 120
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.handle_unpromotable_result 233
-function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.lift_to_current_best 342
+function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.lift_to_current_best 327
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.validate_geak_via_geak_harness 185
 function-lines src/hyperloom/orchestrator/measurement/apply_verification.py::verify_applied 81
 function-lines src/hyperloom/orchestrator/phases/close.py::ClosePhase.on_enter_close 115
@@ -971,7 +971,7 @@ module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py 543
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py 1505
 module-lines src/kernelforge/fusion/author.py 1370
 module-lines src/kernelforge/fusion/command.py 1584
-module-lines src/kernelforge/fusion/discover.py 1552
+module-lines src/kernelforge/fusion/discover.py 1539
 module-lines src/kernelforge/fusion/validate.py 1525
 module-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py 1399
 module-lines src/kernelforge/loop/insession_gate.py 1218

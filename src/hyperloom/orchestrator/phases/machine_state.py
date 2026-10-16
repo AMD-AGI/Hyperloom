@@ -1517,19 +1517,24 @@ def _kernel_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
     plateau = dict(inputs.get("plateau") or {})
     agent_in_flight = bool(pending.get("kernel_agent_in_flight"))
     work_pending = bool(pending.get("kernel_work_pending"))
+    controller_terminal = (
+        pending.get("optimizer") == "forge"
+        and int(pending.get("controller_cycle", -1)) == int(inputs.get("macro_cycle") or 0)
+        and str(pending.get("controller_status") or "") in CONTROLLER_TERMINAL_STATUSES
+    )
+    # The one exit that does not wait for an idle queue. ``kernel_agent`` holds every serving lane until the phase
+    # budget ends it, so a controller that has already reported terminal with nothing pending would otherwise spend
+    # the rest of the phase on work that cannot produce a KEEP. The transition barrier stops the in-flight task, so
+    # the next phase still starts on quiet GPUs.
+    if controller_terminal and not work_pending:
+        return "kernel_controller_done", {
+            "controller_status": pending.get("controller_status"),
+            "patch_count": int(pending.get("controller_patch_count") or 0),
+            "task_count": int(pending.get("controller_task_count") or 0),
+            "reason": str(pending.get("controller_reason") or ""),
+            "agent_in_flight": agent_in_flight,
+        }
     if not agent_in_flight:
-        controller_terminal = (
-            pending.get("optimizer") == "forge"
-            and int(pending.get("controller_cycle", -1)) == int(inputs.get("macro_cycle") or 0)
-            and str(pending.get("controller_status") or "") in CONTROLLER_TERMINAL_STATUSES
-        )
-        if controller_terminal and not work_pending:
-            return "kernel_controller_done", {
-                "controller_status": pending.get("controller_status"),
-                "patch_count": int(pending.get("controller_patch_count") or 0),
-                "task_count": int(pending.get("controller_task_count") or 0),
-                "reason": str(pending.get("controller_reason") or ""),
-            }
         if not work_pending:
             return "kernel_no_more_leverage", {"evidence": "kernel_settled"}
         idle_ticks = int(plateau.get("idle_ticks") or 0)

@@ -96,13 +96,22 @@ def test_gemm_treats_an_unusable_estimate_as_the_default(cost: Any) -> None:
     assert lb.max_targets(lb.LANE_GEMM, lb.GEMM_DEFAULT_TARGET_SEC, target_costs_sec=(cost,)) == 1
 
 
-def test_fusion_is_capped_by_count_not_by_division() -> None:
-    """It has neither an admission floor nor a per-recipe estimate."""
-    assert lb.max_targets(lb.LANE_FUSION, 10) == lb.FUSION_MAX_TARGETS
-    assert lb.max_targets(lb.LANE_FUSION, 10_000) == lb.FUSION_MAX_TARGETS
+def test_fusion_is_capped_by_count_once_the_share_pays_for_them() -> None:
+    assert lb.max_targets(lb.LANE_FUSION, lb.FUSION_MAX_TARGETS * lb.FUSION_DEFAULT_TARGET_SEC) == (
+        lb.FUSION_MAX_TARGETS
+    )
+    assert lb.max_targets(lb.LANE_FUSION, 10_000_000) == lb.FUSION_MAX_TARGETS
 
 
-def test_fusion_with_no_budget_funds_nothing() -> None:
+def test_fusion_funds_only_the_recipes_its_share_pays_for() -> None:
+    assert lb.max_targets(lb.LANE_FUSION, 2 * lb.FUSION_DEFAULT_TARGET_SEC) == 2
+    assert lb.max_targets(lb.LANE_FUSION, lb.FUSION_DEFAULT_TARGET_SEC) == 1
+
+
+def test_a_fusion_share_too_small_for_one_recipe_funds_nothing() -> None:
+    # The share one GLM-5.3 session dispatched forge-fuse with, three minutes before it closed.
+    assert lb.max_targets(lb.LANE_FUSION, 223) == 0
+    assert lb.max_targets(lb.LANE_FUSION, lb.FUSION_DEFAULT_TARGET_SEC - 1) == 0
     assert lb.max_targets(lb.LANE_FUSION, 0) == 0
 
 
