@@ -24,10 +24,7 @@ from typing import Protocol
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.notebook.interfaces import ClaimService, NotebookError
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus
-from hyperloom_multibranch.contracts.toolbox import Toolbox
-from hyperloom_multibranch.rulegate.gate import RuleGate
-from hyperloom_multibranch.rulegate.rules import Rule
-from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, JudgeNotebook
+from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, JudgeNotebook, Judging
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +61,16 @@ class SessionStart:
 SessionFactory = Callable[[SessionStart], Session]
 
 
+@dataclass(frozen=True)
+class RuntimePacing:
+    """How often the runtime looks: a judge polls its inbox every ``poll_seconds``, a claim the specialist holds is
+    renewed for ``claim_ttl_seconds`` a third of that apart, and ``clock`` times the restart window."""
+
+    poll_seconds: float = 5.0
+    claim_ttl_seconds: float = 600.0
+    clock: Callable[[], float] = time.monotonic
+
+
 @dataclass
 class _Branch:
     name: str
@@ -81,23 +88,15 @@ class SpecialistRuntime:
     def __init__(
         self,
         notebook_for: Callable[[str], RuntimeNotebook],
-        gate: RuleGate,
-        toolbox: Toolbox,
-        rule: Rule,
+        judging: Judging,
         sessions: SessionFactory,
         *,
-        poll_seconds: float = 5.0,
-        claim_ttl_seconds: float = 600.0,
-        clock: Callable[[], float] = time.monotonic,
+        pacing: RuntimePacing = RuntimePacing(),
     ) -> None:
         self._notebook_for = notebook_for
-        self._gate = gate
-        self._toolbox = toolbox
-        self._rule = rule
+        self._judging = judging
         self._sessions = sessions
-        self._poll_seconds = poll_seconds
-        self._claim_ttl_seconds = claim_ttl_seconds
-        self._clock = clock
+        self._pacing = pacing
         self._branches: dict[str, _Branch] = {}
 
     async def start(self, branch: str, start_commit: str, brief: str = "") -> None:
@@ -105,7 +104,7 @@ class SpecialistRuntime:
             raise ValueError(f"branch {branch!r} already has a specialist")
         state = _Branch(branch, start_commit, brief, self._notebook_for(branch))
         self._branches[branch] = state
-        judge = BranchJudge(branch, state.notebook, self._gate, self._toolbox, self._rule)
+        judge = BranchJudge(branch, state.notebook, self._judging)
         state.tasks = [
             asyncio.create_task(self._supervise(state), name=f"specialist of {branch}"),
             asyncio.create_task(self._judge(state, judge), name=f"judge of {branch}"),
@@ -146,7 +145,7 @@ class SpecialistRuntime:
             except Exception as error:
                 logger.exception("the specialist of %s crashed", state.name)
                 await state.session.stop()
-                now = self._clock()
+                now = self._pacing.clock()
                 crashes.append(now)
                 while now - crashes[0] > RESTART_WINDOW_S:
                     crashes.popleft()
@@ -159,7 +158,7 @@ class SpecialistRuntime:
 
     async def _judge(self, state: _Branch, judge: BranchJudge) -> None:
         try:
-            await judge.run(self._poll_seconds)
+            await judge.run(self._pacing.poll_seconds)
         except Exception as error:
             logger.exception("judging %s failed", state.name)
             supervisor, _, renewal = state.tasks
@@ -171,14 +170,15 @@ class SpecialistRuntime:
             await _notice(state, f"judging this branch failed ({error!r}); its specialist is stopped")
 
     async def _renew(self, state: _Branch) -> None:
+        ttl = self._pacing.claim_ttl_seconds
         while True:
-            await asyncio.sleep(self._claim_ttl_seconds / 3)
+            await asyncio.sleep(ttl / 3)
             snapshot = await state.notebook.snapshot()
             for claim in snapshot.claims:
                 if claim.holder != state.name or claim.status is not ClaimStatus.HELD or claim.request_id is not None:
                     continue
                 try:
-                    await state.notebook.renew(claim.key, ttl_seconds=self._claim_ttl_seconds)
+                    await state.notebook.renew(claim.key, ttl_seconds=ttl)
                 except NotebookError:
                     logger.warning("the claim %s of %s ended before its renewal", claim.key, state.name, exc_info=True)
 
@@ -193,4 +193,12 @@ def _log_failure(task: asyncio.Task[None]) -> None:
         logger.error("the %s ended", task.get_name(), exc_info=task.exception())
 
 
-__all__ = ["MAX_RESTARTS", "RESTART_WINDOW_S", "Session", "SessionFactory", "SessionStart", "SpecialistRuntime"]
+__all__ = [
+    "MAX_RESTARTS",
+    "RESTART_WINDOW_S",
+    "RuntimePacing",
+    "Session",
+    "SessionFactory",
+    "SessionStart",
+    "SpecialistRuntime",
+]

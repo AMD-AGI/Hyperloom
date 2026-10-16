@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Protocol
 
 from hyperloom.contracts.measurement import Purpose, Validity
@@ -40,15 +41,23 @@ class JudgeNotebook(Inbox, SnapshotQuery, BranchLogStore, CommitQuery, Protocol)
     """What judging a branch reads, and the branch log it writes as the branch's runtime."""
 
 
+@dataclass(frozen=True)
+class Judging:
+    """What every branch's judge settles candidates with: the workload's rule, the gate that lands what clears it, and
+    the toolbox a retest goes to."""
+
+    gate: RuleGate
+    toolbox: Toolbox
+    rule: Rule
+
+
 class BranchJudge:
     """Judges one branch's measured candidates; one task per branch, so its steps never race each other."""
 
-    def __init__(self, branch: str, notebook: JudgeNotebook, gate: RuleGate, toolbox: Toolbox, rule: Rule) -> None:
+    def __init__(self, branch: str, notebook: JudgeNotebook, judging: Judging) -> None:
         self._branch = branch
         self._notebook = notebook
-        self._gate = gate
-        self._toolbox = toolbox
-        self._rule = rule
+        self._gate, self._toolbox, self._rule = judging.gate, judging.toolbox, judging.rule
 
     async def run(self, poll_seconds: float) -> None:
         """Judge what waits, then again whenever the inbox brings a result, until cancelled."""
@@ -130,4 +139,4 @@ def _ended(record: TestRecord) -> str:
     return f"ended {record.result.validity.value} ({record.result.failure_reason or 'no reason given'})"
 
 
-__all__ = ["NOTICE", "BranchJudge", "JudgeNotebook"]
+__all__ = ["NOTICE", "BranchJudge", "JudgeNotebook", "Judging"]

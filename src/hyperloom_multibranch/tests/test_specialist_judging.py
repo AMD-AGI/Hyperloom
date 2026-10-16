@@ -21,7 +21,7 @@ from hyperloom_multibranch.rulegate.baseline import write_inferencex_baseline
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.inferencex import GAIN_NOT_CONFIRMED
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
-from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge
+from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, Judging
 from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
 from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig, NoiseModel
@@ -77,7 +77,7 @@ class _Session:
         self.judge = self.new_judge()
 
     def new_judge(self) -> BranchJudge:
-        return BranchJudge(BRANCH, self.runtime, self.gate, self.toolbox, InferenceXRule(self.runtime, CONC))
+        return BranchJudge(BRANCH, self.runtime, Judging(self.gate, self.toolbox, InferenceXRule(self.runtime, CONC)))
 
     async def prelude(self) -> None:
         root_event = LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=ROOT, recipe_digest=RECIPE.digest())

@@ -15,8 +15,14 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import delta, intent
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
-from hyperloom_multibranch.specialist.judging import NOTICE
-from hyperloom_multibranch.specialist.runtime import MAX_RESTARTS, RESTART_WINDOW_S, SessionStart, SpecialistRuntime
+from hyperloom_multibranch.specialist.judging import NOTICE, Judging
+from hyperloom_multibranch.specialist.runtime import (
+    MAX_RESTARTS,
+    RESTART_WINDOW_S,
+    RuntimePacing,
+    SessionStart,
+    SpecialistRuntime,
+)
 from hyperloom_multibranch.specialist.scripted import ScriptedSession, ScriptedSetup
 from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
@@ -90,17 +96,9 @@ class _Session:
         def notebook_for(branch: str) -> LocalNotebook:
             return notebook(self.root, Writer(Role.SPECIALIST_RUNTIME, branch, branch))
 
-        rule = InferenceXRule(self.reader, 64)
-        return SpecialistRuntime(
-            notebook_for,
-            self.gate,
-            self.toolbox,
-            rule,
-            runs,
-            poll_seconds=0.01,
-            claim_ttl_seconds=claim_ttl,
-            clock=clock,
-        )
+        judging = Judging(self.gate, self.toolbox, InferenceXRule(self.reader, 64))
+        pacing = RuntimePacing(poll_seconds=0.01, claim_ttl_seconds=claim_ttl, clock=clock)
+        return SpecialistRuntime(notebook_for, judging, runs, pacing=pacing)
 
     async def claim(self, key) -> ClaimStatus:
         (found,) = [claim for claim in (await self.reader.snapshot()).claims if claim.key == key]
