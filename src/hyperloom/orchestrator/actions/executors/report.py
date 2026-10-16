@@ -590,7 +590,7 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append(f"- **Budget**: {summary['max_minutes']} minutes")
     lines.append(f"- **Generated**: {summary['report_generated_at']}")
     lines.append("")
-    # Per-framework primary metric: serving reports throughput (tok/s/GPU), scriptable xDiT reports per-image latency
+    # Per-framework primary metric: serving reports throughput (tok/s), scriptable xDiT reports per-image latency
     # (e2el_mean_ms).
     from hyperloom.inference_optimizer import framework_registry
 
