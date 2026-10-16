@@ -250,10 +250,11 @@ It reads:
   KernelForge kept, the record its own experience KB filed a kept candidate
   under, and the Implementer's backend and model;
 - the iteration's archive, the run's `forge-loop.log` or arena log, and the
-  Implementer's transcript, which a plain forge-loop run links by the reasoning
-  log its first prompt names, into the top-level `raw_logs`. A plain run's log
-  or transcript first goes to the run whose workspace path ends most like the
-  path it names; one that fits two runs equally well stops the export.
+  linked transcripts into the top-level `raw_logs`: the Implementer's, which a
+  plain forge-loop run links by the reasoning log its first prompt names, and
+  for an AgentKernelArena campaign also those of the round's planners. A plain
+  run's log or transcript first goes to the run whose workspace path ends most
+  like the path it names; one that fits two runs equally well stops the export.
 
 A unit is skipped when its logs could not be read as a run, when its iteration
 recorded no decision, or when it has no reasoning, which is always the case for
