@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON
+from kernelforge.evaluation.scoring import GateScoring
 from kernelforge.loop.agent_extras import declared_extras
 from kernelforge.loop.iteration.iteration_types import (
     IterationResult,

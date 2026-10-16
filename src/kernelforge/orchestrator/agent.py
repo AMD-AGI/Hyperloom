@@ -29,6 +29,7 @@ from kernelforge.loop.lessons import SessionEnd
 from kernelforge.evaluation.scoring import (
     KEEP_MEASUREMENT_COUNT,
     KEEP_MIN_MARGIN_FRACTION,
+    GateScoring,
     keep_t_critical,
 )
 from kernelforge.orchestrator.summary_line import REASONING_LOG_RULE, reasoning_log_section
@@ -115,7 +116,7 @@ def _ensure_reasoning_log_directory(reasoning_log: str | None) -> list[str]:
     return [str(directory)]
 
 
-def _gate_scoring_context(baseline_case_times: dict | None, best_mean_case_speedup: float | None) -> str:
+def _gate_scoring_context(scoring: GateScoring) -> str:
     """Tell the session the exact rule its candidate will be judged by."""
     return (
         "\n\n## Authoritative mean case scoring state\n"
@@ -129,8 +130,8 @@ def _gate_scoring_context(baseline_case_times: dict | None, best_mean_case_speed
         f"{KEEP_MIN_MARGIN_FRACTION:.2%} of the current best. A "
         "quiet measurement therefore earns a small gain and a noisy "
         "one does not; repeatability is worth as much as speed.\n"
-        f"Fixed pristine per-case ms: {dict(baseline_case_times or {})}\n"
-        f"Current best pristine-relative score: {best_mean_case_speedup}.\n"
+        f"Fixed pristine per-case ms: {dict(scoring.baseline_case_times)}\n"
+        f"Current best pristine-relative score: {scoring.best_mean_case_speedup}.\n"
         "Raw `mean_ms` is diagnostic and never decides KEEP/REVERT."
     )
 
@@ -736,8 +737,7 @@ Never `cat` a whole file — use the Read tool.
         kernel_path: str,
         experiment_history: str,
         session_sink: dict | None = None,
-        baseline_case_times: dict | None = None,
-        best_mean_case_speedup: float | None = None,
+        gate_scoring: GateScoring = GateScoring(),
         reasoning_log: str | None = None,
     ) -> str:
         # A caller that reads nothing back still gets a sink, so the session records into one place unconditionally.
@@ -788,11 +788,11 @@ Make your change(s) now.
                 # The declared tree, not one guessed from the driver's location: forge-fuse keeps its driver in the
                 # run's output dir, which is outside the workspace and is not a repository.
                 replace(gate_scope, kernel_file=kernel_path, workspace=configured_workspace),
-                baseline_case_times=baseline_case_times,
-                best_mean_case_speedup=best_mean_case_speedup,
+                baseline_case_times=gate_scoring.baseline_case_times,
+                best_mean_case_speedup=gate_scoring.best_mean_case_speedup,
             )
             if gate_stop_check:
-                system_prompt = gate_system_prompt + _gate_scoring_context(baseline_case_times, best_mean_case_speedup)
+                system_prompt = gate_system_prompt + _gate_scoring_context(gate_scoring)
             # Built only for a provider that runs them. A backend which ignores
             # ``AgentRunSpec.hooks`` drops the whole group without a word, so
             # attaching one anyway makes this call site read as protection the
