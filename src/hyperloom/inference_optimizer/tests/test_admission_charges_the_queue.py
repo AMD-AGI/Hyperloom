@@ -30,7 +30,8 @@ def _dispatcher(*, queued_kinds: tuple[str, ...], phase_minutes_left: float) -> 
     dispatcher._phase_denial_for_action = lambda _a: None
     dispatcher._sequence_denial_for_action = lambda _a: None
     dispatcher.time_budget_denial_for_action = time_gate
-    dispatcher.expected_cost_minutes_for = lambda _kind: 12.0
+    # An explore is charged per variant, so the queue charge passes the task's params through.
+    dispatcher.expected_cost_minutes_for = lambda _kind, _params=None: 12.0
     # No lanes on record: every queued task is treated as contending.
     dispatcher._coord.action_registry = {}
     dispatcher._seen = seen

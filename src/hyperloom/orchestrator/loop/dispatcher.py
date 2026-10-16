@@ -58,6 +58,7 @@ from .time_budget import (
     lease_ttl_sec,
     measured_baseline_runtime_sec,
     phase_deadline,
+    explore_admission_minutes,
     specialist_admission_minutes,
     time_budget_denial,
 )
@@ -1412,20 +1413,29 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             )
         if action == "specialist":
             expected_min = max(expected_min, specialist_admission_minutes(self.shared_state, params))
+        elif action == "explore":
+            expected_min = explore_admission_minutes(expected_min, params)
         # Work already queued has spoken for its minutes even though none have
         # been spent: pricing against the raw clock calls a phase affordable
         # while its queue is oversubscribed. Zero at dispatch, where the queue
         # is what is being drained rather than added to.
         return time_budget_denial(action, expected_min + already_committed_minutes, self.shared_state)
 
-    def expected_cost_minutes_for(self, action_name: str) -> float:
-        """What one round of ``action_name`` is expected to cost, in minutes."""
-        meta = self.action_registry.get(str(action_name or "").strip())
+    def expected_cost_minutes_for(self, action_name: str, params: dict[str, Any] | None = None) -> float:
+        """What one round of ``action_name`` is expected to cost, in minutes.
+
+        ``params`` are what make a grid's size visible; without them an explore
+        prices as the single round the catalogue names rather than the one it
+        runs per variant.
+        """
+        action = str(action_name or "").strip()
+        meta = self.action_registry.get(action)
         if meta is None:
             return 0.0
-        return expected_action_cost_minutes(
+        minutes = expected_action_cost_minutes(
             meta, measured_baseline_sec=measured_baseline_runtime_sec(self.shared_state)
         )
+        return explore_admission_minutes(minutes, params) if action == "explore" else minutes
 
     async def queued_cost_minutes(self, action_name: str = "") -> float:
         """Minutes the queue has committed on the lanes ``action_name`` needs.
@@ -1441,7 +1451,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             kind = str(getattr(task, "kind", "") or "")
             if wanted and not wanted.intersection(self._lanes_for_action(kind)):
                 continue
-            total += self.expected_cost_minutes_for(kind)
+            total += self.expected_cost_minutes_for(kind, getattr(task, "params", None))
         return total
 
     async def queued_grid_variants(self) -> set[str]:
