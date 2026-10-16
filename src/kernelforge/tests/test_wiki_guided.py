@@ -95,10 +95,46 @@ def test_a_build_keeps_only_items_a_knowledge_base_page_supports():
 
     build, notes = parse_playbook("Here it is:\n" + json.dumps(payload))
 
-    assert build.item_ids() == ("P1", "P2")
+    # A malformed id is the answer's numbering, not its content: the item is kept under the next free id.
+    assert build.item_ids() == ("P1", "P2", "P5")
+    assert "renumbered item X5 as P5" in notes
     assert any("P3" in note and "no knowledge base page" in note for note in notes)
     assert any("P4" in note and "G9" in note for note in notes)
     assert len(notes) == 3
+
+
+def test_an_answer_numbered_its_own_way_is_renumbered_not_refused():
+    # The shape of a real answer that numbered its items N1..N6 and lost the whole round to PLAYBOOK_UNAVAILABLE.
+    answer = {
+        "summary": "split-K and the merge",
+        "groups": [
+            {"id": "G1", "title": "split-K loads"},
+            {"id": "merge", "title": "in-kernel merge"},
+        ],
+        "items": [
+            {"id": "N1", "group": "G1", "title": "alignment hint", "wiki_pages": ["a"], "conflicts_with": ["N2"]},
+            {"id": "N2", "group": "G1", "title": "retune the buckets", "wiki_pages": ["b"]},
+            {"id": "N3", "group": "MERGE", "title": "last-workgroup merge", "wiki_pages": ["c"]},
+        ],
+    }
+
+    build, notes = parse_playbook(json.dumps(answer))
+
+    assert [(item.item_id, item.group, item.conflicts_with) for item in build.items] == [
+        ("P1", "G1", ("P2",)),
+        ("P2", "G1", ()),
+        ("P3", "G2", ()),
+    ]
+    assert [group.group_id for group in build.groups] == ["G1", "G2"]
+    assert notes == [
+        "renumbered group MERGE as G2",
+        "renumbered item N1 as P1",
+        "renumbered item N2 as P2",
+        "renumbered item N3 as P3",
+    ]
+    # The campaign playbook, whose ids key the ledger, is read as stored and never renumbered.
+    with pytest.raises(ValueError, match="N1"):
+        guidance.Playbook.from_dict(answer)
 
 
 def test_an_answer_with_nothing_more_is_told_from_an_unusable_one():
@@ -175,6 +211,41 @@ def test_a_session_report_cites_the_ids_that_open_each_entry_and_a_claim_wins():
         "P6": "reverted, slower on perf5 (0.160 vs 0.146 ms)",
         "P15": "needs 96 KB of LDS after P14",
     }
+
+
+def test_an_id_after_a_comma_opens_an_entry_only_when_its_reason_follows_it():
+    known = [f"P{index}" for index in range(1, 30)]
+
+    mention = guidance.read_citations("[playbook-skip:P6 slower than the split path, P21 would be needed first]", known)
+    assert (mention.skipped, mention.reasons) == (
+        ("P6",),
+        {"P6": "slower than the split path, P21 would be needed first"},
+    )
+
+    entries = guidance.read_citations("[playbook-skip:P6 slower, P7: spilled 14 VGPRs, P8 (no gain), P9]", known)
+    assert entries.skipped == ("P6", "P7", "P8", "P9")
+    assert entries.reasons == {"P6": "slower", "P7": "spilled 14 VGPRs", "P8": "(no gain)"}
+
+
+def test_a_skip_of_an_item_whose_precondition_failed_settles_it():
+    state = _state_with(THREE_GROUPS)
+    report = "[playbook-skip:P2 not implemented: the grid is already XCD-ordered; P3 not attempted, out of time]"
+
+    record_outcome(state, iteration=1, plan_text=report, decision="KEEP")
+
+    assert [state.ledger[item].status for item in ("P2", "P3")] == ["SKIPPED", "PENDING"]
+
+
+def test_only_a_sessions_latest_report_counts():
+    first = "[playbook:P1] kept\n[playbook-skip:P2 spilled]\nSUBMIT_CANDIDATE"
+    second = "Reverted P1.\n[playbook-skip:P1 reverted after the stop hook: slower on case 3]\n[playbook:P2]\nSUBMIT_CANDIDATE"
+    text = f"{first}\nThe kernel is not faster yet.\n{second}"
+
+    assert guidance.latest_report(text) == "\nThe kernel is not faster yet.\n" + second
+    # A session cut off after it reported again, without submitting, is described by what it wrote last.
+    assert guidance.latest_report(f"{first}\n[playbook-skip:P1 slower]").strip() == "[playbook-skip:P1 slower]"
+    assert guidance.latest_report(f"{first}\nno new report\nSUBMIT_CANDIDATE").startswith("[playbook:P1]")
+    assert guidance.latest_report("no item lines\nSUBMIT_CANDIDATE") == ""
 
 
 def test_an_item_the_session_did_not_get_to_stays_open_with_its_reason():
@@ -529,6 +600,42 @@ def test_each_guided_round_builds_its_batch_and_implements_it_in_one_session(tmp
     assert service.contexts[2].wiki_guidance["phase"] == "FREE"
     assert "Phase: FREE (NO_USEFUL_DIRECTION)" in histories[2]
     assert (workspace / "forge_experiments" / "wiki_guidance" / "playbook_response_002.md").is_file()
+
+
+def test_a_session_the_stop_hook_sent_back_is_credited_from_its_latest_report(tmp_path, monkeypatch):
+    loop, workspace = _guided_loop(tmp_path, monkeypatch, rounds=1)
+    service = _GuidedService([["body [playbook:P1]", "grid [playbook:P2]"]], builds=[PLAYBOOK])
+    monkeypatch.setattr(loop, "run_one_iteration", _measured(["KEEP"]))
+    # The first submission kept P1; the kernel was not faster, so the session reverted P1 and landed P2.
+    closing = (
+        "[playbook:P1] kept\n[playbook-skip:P2 spilled 14 VGPRs]\nSUBMIT_CANDIDATE\n"
+        "Reverted P1 and fixed P2's spill.\n[playbook-skip:P1 slower on case 3]\n[playbook:P2] kept\nSUBMIT_CANDIDATE"
+    )
+
+    _run(loop, service, _editing_agent([], reports=[closing]))
+
+    [report] = _events(workspace, "wiki_batch_report")
+    assert (report["source"], report["landed"], report["dropped"]) == ("session", ["P2"], ["P1"])
+    ledger = WikiGuidanceStore(workspace).load().ledger
+    assert [ledger[item].status for item in ("P1", "P2")] == ["SKIPPED", "APPLIED"]
+    assert ledger["P1"].note == "skipped in iteration 1: slower on case 3"
+
+
+def test_an_answer_numbered_its_own_way_still_gives_the_round_its_batch(tmp_path, monkeypatch):
+    loop, workspace = _guided_loop(tmp_path, monkeypatch, rounds=1)
+    answer = json.loads(json.dumps(PLAYBOOK))
+    for index, item in enumerate(answer["items"], start=1):
+        item["id"] = f"N{index}"
+    service = _GuidedService([["body [playbook:P1]", "grid [playbook:P2]"]], builds=[answer])
+    monkeypatch.setattr(loop, "run_one_iteration", _measured(["KEEP"]))
+
+    _run(loop, service, _editing_agent([]))
+
+    assert _events(workspace, "wiki_playbook_unavailable") == []
+    [built] = _events(workspace, "wiki_playbook_built")
+    assert (built["items"], built["groups"]) == (["P1", "P2"], ["G1", "G2"])
+    assert service.contexts[0].wiki_guidance["batch"] == ["G1", "G2"]
+    assert [event["guidance_phase"] for event in _events(workspace, "iteration_result")] == ["GUIDED"]
 
 
 def test_a_batch_without_a_gain_ends_guided(tmp_path, monkeypatch):

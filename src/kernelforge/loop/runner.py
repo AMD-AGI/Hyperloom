@@ -80,6 +80,7 @@ from kernelforge.loop.wiki_guidance import (
     batch_plan,
     cited_items,
     declined,
+    latest_report,
     parse_playbook,
     read_citations,
     record_outcome,
@@ -2027,7 +2028,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         state = self.wiki_guidance
         if not self._iteration_batch or state is None or state.playbook is None:
             return
-        report = str(session_sink.get("final_text") or "")
+        report = latest_report(str(session_sink.get("final_text") or ""))
         cites = read_citations(report, state.ledger)
         reported = bool(cites.claimed or cites.skipped or cites.untried)
         if reported:

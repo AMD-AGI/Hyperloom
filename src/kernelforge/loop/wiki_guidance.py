@@ -21,7 +21,8 @@ planners see what the playbook settled and plan freely.
 A plan claims playbook items by citing them as ``[playbook:P1,P3]`` and declines one as ``[playbook-skip:P4]``. A
 batch session ends by citing the items that are in its final kernel, the ones it tried and dropped, and the ones it did
 not get to (``[playbook-untried:P5]``, which stay open), and the ledger is credited from that report when there is one,
-else from the plan; either way a claim counts only once a measurement decided it.
+else from the plan; either way a claim counts only once a measurement decided it. A session the stop hook sends back
+reports again when it submits again, and only its latest report says what is in the kernel that was measured.
 """
 
 from __future__ import annotations
@@ -89,17 +90,24 @@ FAILED_DECISIONS = frozenset(
 # The builder numbers its own answer from 1; the campaign playbook renumbers each build after the ones before it.
 _ITEM_ID = re.compile(r"^P\d{1,3}$")
 _GROUP_ID = re.compile(r"^G\d{1,3}$")
+_ID_NUMBER = re.compile(r"\d+$")
 _CITATION = re.compile(r"\[playbook:([^\]]*)\]", re.IGNORECASE)
 _SKIP_CITATION = re.compile(r"\[playbook-skip:([^\]]*)\]", re.IGNORECASE)
 _UNTRIED_CITATION = re.compile(r"\[playbook-untried:([^\]]*)\]", re.IGNORECASE)
 _CITED_ID = re.compile(r"\bP\d{1,3}\b", re.IGNORECASE)
 # Inside one citation, an entry is a run of item ids at the start of the block or after a `;`, `,` or line break,
-# followed by its reason; an id that only appears inside another entry's reason is not cited.
+# followed by its reason; an id that only appears inside another entry's reason is not cited. After a comma the run
+# opens an entry only when its reason starts right after it ("P6 slower, P7: spilled"): in "slower than the split
+# path, P21 would be needed first" P21 is part of P6's reason.
 _ENTRY_START = re.compile(r"(?:^|[;,\n])\s*(?=P\d)", re.IGNORECASE)
 _ID_RUN = re.compile(r"P\d{1,3}\b(?:\s*(?:,|/|&|\band\b)\s*P\d{1,3}\b)*", re.IGNORECASE)
-# A skip whose reason says the item was never tried or not finished leaves it open rather than settling it.
+_REASON_OPENER = re.compile(r"[ \t]*(?:$|[\n:;(=\-\u2013\u2014])")
+# The line that closes each submission a session makes; the text after the one before the last is its latest report.
+_SUBMIT_LINE = re.compile(r"^[ \t]*SUBMIT_CANDIDATE[ \t]*$", re.IGNORECASE | re.MULTILINE)
+# A skip whose reason says the item was never tried or not finished leaves it open rather than settling it. "Not
+# implemented" is not among them: a session also writes it of an item whose precondition proved false.
 _UNTRIED_REASON = re.compile(
-    r"not (?:attempted|tried|started|reached|finished|implemented)|untried|"
+    r"not (?:attempted|tried|started|reached|finished)|untried|"
     r"(?:lack|out|short) of (?:session )?time|ran out of time|deadline|time budget|no time",
     re.IGNORECASE,
 )
@@ -484,13 +492,54 @@ def _playbook_from_payload(
     return Playbook(items=tuple(items), groups=tuple(groups), summary=_text(payload.get("summary"))), notes
 
 
+def _renumbered(payload: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """``payload`` with every titled group and item whose id is missing or not shaped like G1 / P1 given the next free
+    one, and the references to it rewritten: an answer that numbered its items N1, N2 is still a usable build."""
+    result = dict(payload)
+    notes: list[str] = []
+    maps: dict[str, dict[str, str]] = {}
+    for key, pattern, prefix in (("groups", _GROUP_ID, "G"), ("items", _ITEM_ID, "P")):
+        entries = list(payload.get(key) or [])
+        ids = [_text(entry.get("id")).upper() if isinstance(entry, Mapping) else "" for entry in entries]
+        number = max((int(_ID_NUMBER.search(value).group()) for value in ids if pattern.match(value)), default=0)
+        mapping: dict[str, str] = {}
+        fixed: list[Any] = []
+        for entry, old in zip(entries, ids):
+            if isinstance(entry, Mapping) and _text(entry.get("title")) and not pattern.match(old):
+                number += 1
+                new = f"{prefix}{number}"
+                if old:
+                    mapping.setdefault(old, new)
+                notes.append(f"renumbered {key[:-1]} {old or '(no id)'} as {new}")
+                entry = {**entry, "id": new}
+            fixed.append(entry)
+        result[key] = fixed
+        maps[key] = mapping
+    if maps["groups"] or maps["items"]:
+        result["items"] = [
+            {
+                **entry,
+                "group": maps["groups"].get(_text(entry.get("group")).upper(), entry.get("group")),
+                "conflicts_with": [
+                    maps["items"].get(other.upper(), other) for other in _strings(entry.get("conflicts_with"))
+                ],
+            }
+            if isinstance(entry, Mapping)
+            else entry
+            for entry in result["items"]
+        ]
+    return result, notes
+
+
 def parse_playbook(text: str) -> tuple[Playbook | None, list[str]]:
     """Read one builder answer; the round's build, or ``None`` and why."""
     try:
         payload = extract_json_object(text or "", "wiki playbook")
     except ValueError as error:
         return None, [str(error)]
-    return _playbook_from_payload(payload)
+    payload, renumbered = _renumbered(payload)
+    build, notes = _playbook_from_payload(payload)
+    return build, [*renumbered, *notes]
 
 
 def declined(text: str) -> bool:
@@ -514,20 +563,36 @@ class Citations:
 
 def _entries(block: str) -> list[tuple[list[str], str]]:
     """Each entry of one citation block: the item ids it opens with, and the reason that follows them."""
-    starts = list(_ENTRY_START.finditer(block))
-    entries: list[tuple[list[str], str]] = []
+    opened: list[tuple[re.Match[str], re.Match[str]]] = []
     cursor = 0
-    for start in starts:
+    for start in _ENTRY_START.finditer(block):
         if start.end() < cursor:
             continue
         run = _ID_RUN.match(block, start.end())
         if run is None:
             continue
+        if block[start.start()] == "," and not _REASON_OPENER.match(block, run.end()):
+            continue
+        opened.append((start, run))
         cursor = run.end()
-        following = next((other.start() for other in starts if other.end() >= cursor), len(block))
-        reason = _text(block[cursor:following]).strip(" -\u2013\u2014:;,.")
+    entries: list[tuple[list[str], str]] = []
+    for index, (_, run) in enumerate(opened):
+        following = opened[index + 1][0].start() if index + 1 < len(opened) else len(block)
+        reason = _text(block[run.end() : following]).strip(" -\u2013\u2014:;,.")
         entries.append(([match.upper() for match in _CITED_ID.findall(run.group(0))], reason[:_NOTE_CHARS]))
     return entries
+
+
+def latest_report(text: str) -> str:
+    """The part of a session's text that holds its latest report, or ``""`` when it wrote none: the stop hook can send
+    a session back after it submitted, and an earlier submission's lines describe a kernel that was not measured."""
+    text = text or ""
+    bounds = [0, *(match.end() for match in _SUBMIT_LINE.finditer(text))]
+    segments = [text[start:end] for start, end in zip(bounds, [*bounds[1:], len(text)])]
+    for segment in reversed(segments):
+        if any(pattern.search(segment) for pattern in (_CITATION, _SKIP_CITATION, _UNTRIED_CITATION)):
+            return segment
+    return ""
 
 
 def _cited(pattern: re.Pattern[str], text: str, known: set[str]) -> tuple[list[str], dict[str, str]]:
@@ -544,7 +609,9 @@ def _cited(pattern: re.Pattern[str], text: str, known: set[str]) -> tuple[list[s
 
 
 def read_citations(text: str, known: Iterable[str]) -> Citations:
-    """The items ``text`` claims, skips and did not try, among ``known``; a claim wins over any other mention."""
+    """The items ``text`` claims, skips and did not try, among ``known``; a claim wins over any other mention, since a
+    report names an item it kept only in part both as kept and as dropped. ``text`` is one plan, or one session's
+    latest report (``latest_report``)."""
     known_ids = set(known)
     text = text or ""
     claimed, _ = _cited(_CITATION, text, known_ids)
@@ -695,7 +762,7 @@ def render_for_implementer(state: GuidanceState) -> str:
             "every cited item; when an item's detail matters, read its knowledge base pages with the knowledge tools "
             "(an item supported by profiling alone has none, and the plan states its evidence). "
             "A plan headed as a GUIDED batch is implemented whole in this session and measured once at its end: "
-            "follow its instructions for keeping or dropping each part and for the two lines that end the session."
+            "follow its instructions for keeping or dropping each part and for the lines that end the session."
         )
     return (
         "## Wiki guidance\n"
