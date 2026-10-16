@@ -61,6 +61,18 @@ PROTECTED_DIRS = frozenset(
 )
 
 
+def hide_forge_loop_output(workspace: str | Path) -> Path:
+    """Create forge-loop's output directory under ``workspace``, hide it from Git, and return it.
+
+    A ``.gitignore`` holding ``*`` ignores everything beside it, itself included, so Git never lists the directory:
+    nothing the loop or a session writes there is committed or reported as a new file, whatever the workspace ignores.
+    """
+    output_root = Path(workspace) / FORGE_LOOP_OUTPUT_DIRNAME
+    output_root.mkdir(parents=True, exist_ok=True)
+    (output_root / ".gitignore").write_text("*\n", encoding="utf-8")
+    return output_root
+
+
 def is_protected_path(
     path: str | Path,
     *,

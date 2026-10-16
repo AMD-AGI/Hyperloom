@@ -28,7 +28,7 @@ from hyperloom.common.unified_diff import touched_paths
 
 from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON
 from kernelforge.llm.process_reaping import processes_under
-from kernelforge.llm.workspace_policy import is_protected_path
+from kernelforge.llm.workspace_policy import hide_forge_loop_output, is_protected_path
 from kernelforge.llm.git import git, git_bytes
 from kernelforge.config import Config
 from kernelforge.loop.agent_extras import declared_extras
@@ -4676,6 +4676,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         workspace_lock_held: bool = False,
     ) -> list[IterationResult]:
         """Run while exclusively owning this campaign workspace."""
+        hide_forge_loop_output(self.ic.workspace_dir)
         if workspace_lock_held:
             return await self._run_locked(agents, callbacks=callbacks, usage=usage)
         store = LoopStateStore(self.ic.workspace_dir)
