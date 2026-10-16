@@ -46,6 +46,7 @@ from kernelforge.orchestrator.specialists import (
     build_specialist_prompts,
 )
 from kernelforge.orchestrator.plan_critic import PlanCriticAgent
+from kernelforge.orchestrator.summary_line import PLAN_SUMMARY_RULE
 
 
 def _context() -> OrchestrationContext:
@@ -2551,6 +2552,71 @@ async def test_a_fresh_revision_carries_the_whole_bundle() -> None:
         "critic_review",
     ):
         assert present in payload
+
+
+@pytest.mark.asyncio
+async def test_a_single_plan_is_asked_to_open_with_its_summary_line() -> None:
+    """The export reads a plan's problem and goal from its first line, so synthesis must write one."""
+    backend = _PerCallBackend(["Summary: The scale stream is re-read. Stage it once.\n# Plan"])
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+
+    await agent.synthesize_lane_plan_results(
+        _context(),
+        SpecialistRound(dispatch, (await _outcome("memory", "The scale stream is re-read."),), _coverage(["memory"])),
+        lanes=2,
+    )
+
+    assert PLAN_SUMMARY_RULE in backend.specs[0].system_prompt
+
+
+@pytest.mark.asyncio
+async def test_every_lane_plan_opens_with_a_summary_line_and_the_partition_does_not() -> None:
+    """Only a step that writes a Markdown plan is asked for the line; the partition answers in JSON."""
+    backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A\nRetime the MFMA.", "# Lane B\nStage."])
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+
+    await agent.synthesize_lane_plan_results(_context(), await _compute_and_memory_round(), lanes=2)
+
+    partition, *lanes = backend.specs
+    assert PLAN_SUMMARY_RULE not in partition.system_prompt
+    assert len(lanes) == 2
+    assert all(PLAN_SUMMARY_RULE in lane.system_prompt for lane in lanes)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_is_not_asked_for_a_summary_line() -> None:
+    backend = _StaticBackend(_dispatch_payload())
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2, min_assignments=1)
+
+    await agent.plan_dispatch(_context(), _definitions())
+
+    assert PLAN_SUMMARY_RULE not in backend.specs[0].system_prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resumable", [True, False])
+async def test_a_revised_plan_writes_its_own_summary_line(resumable) -> None:
+    """A REPLACE changes the plan's goal, so the revision restates the line rather than keeping the draft's."""
+    backend = (_ResumableQueuedBackend if resumable else _QueuedBackend)(["# Revised plan"])
+    agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
+    dispatch = DispatchPlan(analysis_commit="abc123", assignments=(_assignment(),))
+
+    await agent.revise_optimization_plan(
+        _context(),
+        SpecialistRound(dispatch, (await _outcome("memory", "The scale stream is re-read."),), _coverage(["memory"])),
+        draft=SynthesizedPlan(
+            text="Summary: The draft's goal.\n# Draft plan",
+            session_id="synthesis-session" if resumable else "",
+        ),
+        critic=PlanCriticOutcome(verdict="REPLACE", review="Compare the existing GEMM path."),
+    )
+
+    spec = backend.resumes[0][0] if resumable else backend.specs[0]
+    assert PLAN_SUMMARY_RULE in spec.system_prompt
+    assert "for the plan as revised, not for the draft" in spec.system_prompt
+    if not resumable:
+        assert PLAN_SUMMARY_RULE.strip() in json.loads(spec.user_prompt)["revision_instructions"]
 
 
 @pytest.mark.asyncio

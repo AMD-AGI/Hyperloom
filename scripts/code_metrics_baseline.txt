@@ -928,8 +928,8 @@ function-lines src/kernelforge/mcp_server/probe_stdio_server.py::probe_variant 2
 function-lines src/kernelforge/mcp_server/tools/bench.py::aggregate_benchmark_measurements 97
 function-lines src/kernelforge/mcp_server/tools/bench.py::bench_wallclock 110
 function-lines src/kernelforge/mcp_server/tools/bench.py::sweep_case 178
-function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 319
-function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn.agent_fn 194
+function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 300
+function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn.agent_fn 184
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._prompts 227
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._run_analysis_session 101
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._write_artifact_catalog 93
@@ -1000,7 +1000,7 @@ module-lines src/kernelforge/loop/knowledge_integration.py 1457
 module-lines src/kernelforge/loop/runner.py 6051
 module-lines src/kernelforge/loop/task_preparer.py 1299
 module-lines src/kernelforge/orchestrator/analysis.py 2080
-module-lines src/kernelforge/orchestrator/orchestration.py 1828
+module-lines src/kernelforge/orchestrator/orchestration.py 1771
 nested-blocks src/hyperloom/inference_optimizer/framework_paths.py::_discover_installed_framework_roots 6
 nested-blocks src/hyperloom/inference_optimizer/trace/tool_events.py::stream_json_tool_events 6
 nested-blocks src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::_read_aiperf_aggregate_json 6
