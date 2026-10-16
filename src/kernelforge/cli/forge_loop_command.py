@@ -378,11 +378,12 @@ def _load_external_baseline(path: str) -> tuple[float, dict[str, float]]:
     "--wiki-guided/--no-wiki-guided",
     default=False,
     help="Plan from a knowledge base playbook first. The first planning round builds a playbook of techniques "
-    "for this kernel from the knowledge base and the measured evidence, every GUIDED round ranks its open groups "
-    "against that round's evidence, and every planner follows it (GUIDED) until it is spent, the search policy "
-    "reports a stall, or --guided-budget-fraction is used; planning is free (FREE) from then on. A lane "
-    "candidate a sibling's KEEP stopped applying is ported onto the current kernel rather than dropped. Needs a "
-    "knowledge base (FORGE_KNOWLEDGE_WIKI_ROOT). Off by default.",
+    "for this kernel from the knowledge base and the measured evidence. Every GUIDED round then chooses a batch "
+    "of the open groups the round's evidence supports and runs it as steps, one session and one measurement per "
+    "group on the same tree, analyzing and planning again only after the last step. GUIDED lasts until the "
+    "playbook is spent, the search policy reports a stall, or --guided-budget-fraction is used; planning is free "
+    "(FREE) from then on, where a lane candidate a sibling's KEEP stopped applying is ported onto the current "
+    "kernel rather than dropped. Needs a knowledge base (FORGE_KNOWLEDGE_WIKI_ROOT). Off by default.",
 )
 @click.option(
     "--guided-budget-fraction",
@@ -1406,8 +1407,9 @@ def forge_loop(
         print(f"  Knowledge base: {knowledge_wiki.root} (calls logged to {knowledge_wiki.log_path})")
     if iter_config.wiki_guided:
         print(
-            "  Wiki-guided planning: on (GUIDED until the playbook is spent, the search stalls or "
-            f"{iter_config.guided_budget_fraction:.0%} of the budget is used; then FREE)"
+            "  Wiki-guided planning: on (GUIDED batches until the playbook is spent, the search stalls or, after "
+            f"two batches, {iter_config.guided_budget_fraction:.0%} of the budget left when GUIDED began is used; "
+            "then FREE)"
         )
 
     from kernelforge.orchestrator.orchestration import (

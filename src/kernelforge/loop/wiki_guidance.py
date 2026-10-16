@@ -6,12 +6,14 @@
 Off unless the campaign runs with ``--wiki-guided``. When on, the first planning round first asks a read-only builder
 to turn the knowledge base into a playbook: techniques for this kernel, grouped so that one group is one
 implementation step, each item citing the knowledge base pages behind it. The playbook says what the knowledge base
-supports; which group comes first is the measured evidence's call, so every GUIDED round has a ranker order the open
-groups by what the round's profile says each is worth before anything is planned. While the campaign is GUIDED every
-planning role sees the playbook, in that order, and its ledger, and plans from it. The campaign leaves GUIDED for FREE
-once the playbook is spent, the search policy reports a stall, or -- after at least ``MIN_GUIDED_ROUNDS`` GUIDED
-rounds -- the guided share of the budget left when GUIDED began is used; from then on the planners see what the
-playbook settled and are told to look beyond it.
+supports; what to do now is the measured evidence's call, so every GUIDED round first has a ranker choose the round's
+batch: every open group whose premise the round's profile supports, in implementation order. The round plans one
+step per batch group, and the loop runs the steps one after another on the canonical tree, each an Implementer
+session followed by its own measurement, with no new analysis or planning until the last step has been measured.
+While the campaign is GUIDED every planning role sees the playbook, the batch and the ledger, and plans from them. The
+campaign leaves GUIDED for FREE once the playbook is spent, the search policy reports a stall, or -- after at least
+``MIN_GUIDED_ROUNDS`` GUIDED rounds -- the guided share of the budget left when GUIDED began is used; from then on the
+planners see what the playbook settled and are told to look beyond it.
 
 A plan claims playbook items by citing them as ``[playbook:P1,P3]`` and declines one as ``[playbook-skip:P4]``. The
 ledger is credited from the plan the iteration actually measured, so a claim counts only once a measurement decided
@@ -46,9 +48,11 @@ REASON_GUIDED_STALL = "GUIDED_STALL"
 STALL_REASONS = frozenset({"NO_IMPROVEMENT_STALL", "DIMINISHING_RETURNS", "REPEATED_NO_CHANGES"})
 
 DEFAULT_GUIDED_BUDGET_FRACTION = 0.35
-# The guided budget share cannot end GUIDED before this many GUIDED planning rounds: one round measures only the
-# groups its lanes took, and the second is the first that plans from what the first one measured.
+# The guided budget share cannot end GUIDED before this many GUIDED planning rounds: the second is the first that
+# plans from a profile taken after the first round's steps.
 MIN_GUIDED_ROUNDS = 2
+# The most steps one batch runs before the profile is refreshed.
+MAX_BATCH_STEPS = 6
 
 STATUS_PENDING = "PENDING"
 STATUS_APPLIED = "APPLIED"
@@ -87,24 +91,26 @@ _CITED_ID = re.compile(r"\bP\d{1,2}\b", re.IGNORECASE)
 
 GUIDED_INSTRUCTIONS = (
     "GUIDED phase. `playbook` lists techniques the knowledge base supports for this kernel, in groups whose items "
-    "edit the same code and belong in one step. The groups are listed in the order this round's measured evidence "
-    "ranks them; a group's `rank_evidence`, when present, says what in the profile and the case timings put it "
-    "there. Plan from it:\n"
-    "1. Take the first group in that order that still has PENDING or FAILED items and implement all of its "
-    "applicable items together in one plan: one Implementer session and one measurement. A group is one step, not "
-    "a sequence of rounds.\n"
-    "2. When the round has more than one lane, give another group whose items edit different code its own lane. "
-    "Never split one group across lanes.\n"
+    "edit the same code and belong in one step. `batch`, when present, is the groups this round implements, in "
+    "order, chosen from this round's measured evidence: a group's `rank_evidence` says what put it there, and "
+    "`batch_excluded` says why an open group was left out. Plan from it:\n"
+    "1. Each group in `batch` is one step: one Implementer session and then one measurement, run one after another "
+    "on the same kernel in the batch's order. A step starts from the kernel as the earlier steps left it -- with "
+    "their changes when their measurement kept them, without them when it did not -- and the profile is not "
+    "refreshed until the batch has ended. Implement all of a group's applicable items together in its step; a group "
+    "is one step, not a sequence of rounds, and one step never spans two groups.\n"
+    "2. Plan each step to stand on its own measurement: it must not depend on a later step, and it must stay correct "
+    "and say how it adapts when an earlier step was not kept.\n"
     "3. On its own line, cite every item a plan implements as [playbook:P1,P3], and every item the evidence shows "
     "does not apply as [playbook-skip:P4] together with that evidence. Work a plan does not cite is not credited "
     "to the playbook.\n"
     "4. Adapt each item to this kernel's evidence (profile, cases, code). Its knowledge base pages are available "
     "through the knowledge tools; read them before planning the item.\n"
     "5. Do not re-plan REFUTED or SKIPPED items. A FAILED item may be retried once, with the failure fixed.\n"
-    "6. This round's analyses are one per open playbook group (role `playbook_group`, the group named in each "
-    "assignment), each covering its group whole across compute, memory and algorithm. Build each lane from one "
-    "group's analysis; an analyst of another role, when there is one, analyzes how this round's playbook items "
-    "apply to this kernel rather than surveying it broadly.\n"
+    "6. This round's analyses are one per batch group (role `playbook_group`, the group named in each assignment), "
+    "each covering its group whole across compute, memory and algorithm. Build each step from its group's analysis; "
+    "an analyst of another role, when there is one, analyzes how this round's playbook items apply to this kernel "
+    "rather than surveying it broadly.\n"
     "Add work outside the playbook only when the evidence shows a cited item cannot pay off without it."
 )
 
@@ -235,6 +241,10 @@ class GuidanceState:
     group_order: list[str] = field(default_factory=list)
     rank_evidence: dict[str, str] = field(default_factory=dict)
     ranked_at_iteration: int = 0
+    # The latest GUIDED round's batch: the groups it implements, in step order, and why each open group it left out
+    # was left out.
+    batch: list[str] = field(default_factory=list)
+    batch_excluded: dict[str, str] = field(default_factory=dict)
     # Seconds of the campaign budget already used when the first GUIDED round began planning; the guided share is
     # taken of what was left then, so setup before the first round is not charged to GUIDED.
     guided_started_used_sec: float | None = None
@@ -256,6 +266,8 @@ class GuidanceState:
             "group_order": list(self.group_order),
             "rank_evidence": dict(self.rank_evidence),
             "ranked_at_iteration": self.ranked_at_iteration,
+            "batch": list(self.batch),
+            "batch_excluded": dict(self.batch_excluded),
             "guided_started_used_sec": self.guided_started_used_sec,
             "guided_rounds": self.guided_rounds,
         }
@@ -288,6 +300,8 @@ class GuidanceState:
             group_order=[str(group_id) for group_id in payload.get("group_order") or []],
             rank_evidence={str(key): str(value) for key, value in (payload.get("rank_evidence") or {}).items()},
             ranked_at_iteration=int(payload.get("ranked_at_iteration") or 0),
+            batch=[str(group_id) for group_id in payload.get("batch") or []],
+            batch_excluded={str(key): str(value) for key, value in (payload.get("batch_excluded") or {}).items()},
             guided_started_used_sec=(
                 None if payload.get("guided_started_used_sec") is None else float(payload["guided_started_used_sec"])
             ),
@@ -303,6 +317,8 @@ class GuidanceState:
         self.group_order = []
         self.rank_evidence = {}
         self.ranked_at_iteration = 0
+        self.batch = []
+        self.batch_excluded = {}
 
     def open_group_ids(self) -> list[str]:
         """The groups that still have a PENDING or FAILED item, in the builder's order."""
@@ -324,6 +340,11 @@ class GuidanceState:
         by_id = {group.group_id: group for group in self.playbook.groups}
         ranked = [by_id[group_id] for group_id in self.group_order if group_id in by_id]
         return ranked + [group for group in self.playbook.groups if group.group_id not in self.group_order]
+
+    def open_batch(self) -> list[str]:
+        """Every open group in the current order, at most one batch's worth: the batch when no ranking chose one."""
+        open_ids = set(self.open_group_ids())
+        return [group.group_id for group in self.ordered_groups() if group.group_id in open_ids][:MAX_BATCH_STEPS]
 
     def status_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
@@ -423,28 +444,42 @@ def parse_playbook(text: str) -> tuple[Playbook | None, list[str]]:
     return _playbook_from_payload(payload)
 
 
-def parse_ranking(text: str, open_groups: Sequence[str]) -> tuple[list[str], dict[str, str], list[str]]:
-    """Read the ranker's answer: the open groups it ranks, first to plan first, what put each there, and notes.
+@dataclass(frozen=True)
+class Ranking:
+    """The ranker's batch: open groups in step order, what put each there, and why the others were left out."""
 
-    Raises ``ValueError`` when the answer ranks no open group.
+    batch: tuple[str, ...]
+    evidence: Mapping[str, str]
+    excluded: Mapping[str, str]
+    notes: tuple[str, ...] = ()
+
+
+def parse_ranking(text: str, open_groups: Sequence[str]) -> Ranking:
+    """Read the ranker's answer against the round's open groups.
+
+    Raises ``ValueError`` when the answer puts no open group in the batch.
     """
     payload = extract_json_object(text or "", "wiki playbook ranking")
     known = set(open_groups)
-    order: list[str] = []
+    batch: list[str] = []
     evidence: dict[str, str] = {}
+    excluded: dict[str, str] = {}
     notes: list[str] = []
-    for entry in payload.get("ranking") or []:
+    for entry in payload.get("batch") or []:
         if not isinstance(entry, Mapping):
-            notes.append("dropped a ranking entry that was not an object")
+            notes.append("dropped a batch entry that was not an object")
             continue
         group_id = _text(entry.get("group")).upper()
         if group_id not in known:
             notes.append(f"dropped {group_id or '?'}: it is not an open group")
             continue
-        if group_id in order:
+        if group_id in batch:
             notes.append(f"dropped a second {group_id}")
             continue
-        order.append(group_id)
+        if len(batch) == MAX_BATCH_STEPS:
+            notes.append(f"dropped {group_id}: a batch runs at most {MAX_BATCH_STEPS} steps")
+            continue
+        batch.append(group_id)
         parts = (
             ("cases", _text(entry.get("cases"))),
             ("expected gain", _text(entry.get("expected_gain"))),
@@ -453,9 +488,15 @@ def parse_ranking(text: str, open_groups: Sequence[str]) -> tuple[list[str], dic
         reason = "; ".join(f"{label}: {value}" for label, value in parts if value)
         if reason:
             evidence[group_id] = reason
-    if not order:
-        raise ValueError("the ranking names no open group")
-    return order, evidence, notes
+    for entry in payload.get("excluded") or []:
+        if not isinstance(entry, Mapping):
+            continue
+        group_id = _text(entry.get("group")).upper()
+        if group_id in known and group_id not in batch:
+            excluded[group_id] = _text(entry.get("reason")) or "no reason given"
+    if not batch:
+        raise ValueError("the ranking puts no open group in the batch")
+    return Ranking(batch=tuple(batch), evidence=evidence, excluded=excluded, notes=tuple(notes))
 
 
 def _ids(blocks: Iterable[str], known: set[str]) -> list[str]:
@@ -583,6 +624,10 @@ def render_for_planning(state: GuidanceState) -> dict[str, Any] | None:
     }
     if state.ranked_at_iteration:
         rendered["ranked_at_iteration"] = state.ranked_at_iteration
+    if state.phase == PHASE_GUIDED and state.batch:
+        rendered["batch"] = list(state.batch)
+        if state.batch_excluded:
+            rendered["batch_excluded"] = dict(state.batch_excluded)
     return rendered
 
 
@@ -594,7 +639,9 @@ def render_for_implementer(state: GuidanceState) -> str:
         return (
             "## Wiki guidance\n"
             "Phase: GUIDED. The plan implements knowledge base playbook items it cites as [playbook:...]. Implement "
-            "every cited item; when an item's detail matters, read its knowledge base pages with the knowledge tools."
+            "every cited item; when an item's detail matters, read its knowledge base pages with the knowledge tools. "
+            "A plan headed as a batch step is one of several run one after another on this kernel: the tree already "
+            "carries the earlier steps that were kept, and this step is measured on its own when it ends."
         )
     return (
         "## Wiki guidance\n"

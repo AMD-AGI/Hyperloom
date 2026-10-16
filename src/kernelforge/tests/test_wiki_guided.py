@@ -157,31 +157,57 @@ def test_the_phase_leaves_guided_on_exhaustion_budget_or_stall(setup, reasons, u
     assert decide_phase(state, search_reasons=reasons, budget_used_fraction=used, budget_fraction=0.35) == expected
 
 
-def test_a_ranking_keeps_only_open_groups_and_leaves_the_rest_in_the_builders_order():
+def test_a_batch_keeps_only_open_groups_and_says_why_the_others_were_left_out():
     state = _state_with_playbook()
     state.ledger["P1"].status = guidance.STATUS_APPLIED
     answer = {
-        "ranking": [
+        "batch": [
             {"group": "g2", "cases": "decode", "expected_gain": "about half of decode", "evidence": "grid-starved"},
             {"group": "G1", "evidence": "already applied"},
             {"group": "G2"},
             {"group": "G7"},
-        ]
+        ],
+        "excluded": [{"group": "G1", "reason": "applied"}, {"group": "G2", "reason": "chosen"}],
     }
 
-    order, evidence, notes = guidance.parse_ranking("ranked:\n" + json.dumps(answer), state.open_group_ids())
+    ranking = guidance.parse_ranking("chosen:\n" + json.dumps(answer), state.open_group_ids())
 
     assert state.open_group_ids() == ["G2"]
-    assert order == ["G2"]
-    assert evidence == {"G2": "cases: decode; expected gain: about half of decode; evidence: grid-starved"}
-    assert len(notes) == 3
-    state.group_order, state.rank_evidence = order, evidence
-    rendered = guidance.render_for_planning(state)["playbook"]["groups"]
-    assert [group["id"] for group in rendered] == ["G2", "G1"]
-    assert rendered[0]["rank_evidence"].startswith("cases: decode")
-    assert "rank_evidence" not in rendered[1]
-    with pytest.raises(ValueError, match="names no open group"):
-        guidance.parse_ranking(json.dumps({"ranking": [{"group": "G1"}]}), ["G2"])
+    assert ranking.batch == ("G2",)
+    assert ranking.evidence == {"G2": "cases: decode; expected gain: about half of decode; evidence: grid-starved"}
+    # Neither a closed group nor a chosen one can be excluded.
+    assert ranking.excluded == {}
+    assert len(ranking.notes) == 3
+    state.group_order, state.rank_evidence, state.batch = list(ranking.batch), dict(ranking.evidence), ["G2"]
+    rendered = guidance.render_for_planning(state)
+    assert [group["id"] for group in rendered["playbook"]["groups"]] == ["G2", "G1"]
+    assert rendered["playbook"]["groups"][0]["rank_evidence"].startswith("cases: decode")
+    assert "rank_evidence" not in rendered["playbook"]["groups"][1]
+    assert rendered["batch"] == ["G2"]
+    assert "batch_excluded" not in rendered
+    with pytest.raises(ValueError, match="no open group in the batch"):
+        guidance.parse_ranking(json.dumps({"batch": [{"group": "G1"}]}), ["G2"])
+
+
+def test_a_batch_runs_at_most_the_step_limit_and_is_shown_only_while_guided():
+    payload = json.loads(json.dumps(PLAYBOOK))
+    payload["groups"] = [{"id": f"G{index}", "title": f"group {index}"} for index in range(1, 9)]
+    payload["items"] = [
+        {"id": f"P{index}", "group": f"G{index}", "title": f"item {index}", "wiki_pages": ["page"]}
+        for index in range(1, 9)
+    ]
+    state = GuidanceState()
+    state.adopt(parse_playbook(json.dumps(payload))[0])
+    answer = {"batch": [{"group": f"G{index}"} for index in range(1, 9)]}
+
+    ranking = guidance.parse_ranking(json.dumps(answer), state.open_group_ids())
+
+    assert len(ranking.batch) == guidance.MAX_BATCH_STEPS
+    assert state.open_batch() == [f"G{index}" for index in range(1, guidance.MAX_BATCH_STEPS + 1)]
+    state.batch, state.batch_excluded = list(ranking.batch), {"G8": "superseded"}
+    assert guidance.render_for_planning(state)["batch_excluded"] == {"G8": "superseded"}
+    state.phase = guidance.PHASE_FREE
+    assert "batch" not in guidance.render_for_planning(state)
 
 
 def test_free_is_final():
@@ -220,6 +246,7 @@ class _GuidedService:
         self.outages = outages
         self.builds = 0
         self.contexts = []
+        self.lanes = []
 
     async def build_wiki_playbook(self, context, *, usage=None):
         self.builds += 1
@@ -230,6 +257,7 @@ class _GuidedService:
 
     async def run(self, context, *, usage=None, lanes=1):
         self.contexts.append(context)
+        self.lanes.append(lanes)
         plans = self.plans.pop(0)
         return OrchestrationRunResult(dispatch_plan=None, optimization_plans=tuple(plans))
 
@@ -250,8 +278,13 @@ class _RankingService(_GuidedService):
         return answer
 
 
-def _ranking(*groups):
-    return json.dumps({"ranking": [{"group": group, "evidence": f"profile says {group}"} for group in groups]})
+def _ranking(*groups, excluded=None):
+    return json.dumps(
+        {
+            "batch": [{"group": group, "evidence": f"profile says {group}"} for group in groups],
+            "excluded": [{"group": group, "reason": reason} for group, reason in (excluded or {}).items()],
+        }
+    )
 
 
 def _guided_loop(
@@ -483,60 +516,173 @@ def test_a_stall_the_search_policy_reports_ends_guided(tmp_path, monkeypatch):
     assert WikiGuidanceStore(workspace).load().ledger["P2"].status == "PENDING"
 
 
-def test_each_lane_credits_the_items_its_own_plan_cites(tmp_path, monkeypatch):
-    # Two regions far enough apart that lane two's diff still applies once lane one's KEEP is committed.
-    spacer = "".join(f"# line {index}\n" for index in range(12))
-    loop, workspace = _guided_loop(
-        tmp_path,
-        monkeypatch,
-        rounds=2,
-        lanes=2,
-        kernel_text=f"def kernel():\n    return 1\n{spacer}GRID = 1\n",
-    )
-    service = _GuidedService([["lane one: body\n[playbook:P1]", "lane two: grid\n[playbook:P2]"]])
-    monkeypatch.setattr(loop, "run_one_iteration", _measured(["KEEP", "REVERT"]))
+def _plan_file(workspace, iteration):
+    return (
+        workspace / "forge_experiments" / "orchestration" / f"iter_{iteration:03d}" / "optimization_plan.md"
+    ).read_text()
 
-    _run(
-        loop,
-        service,
-        _editing_agent([]),
-        agent_factory=_lane_agent_factory(
-            {"lane one": ("return 1", "return 11"), "lane two": ("GRID = 1", "GRID = 2")}
-        ),
-    )
 
+def _lane_recorder(seen):
+    """A lane-session factory that only records that a lane session was asked for."""
+
+    def factory(_lane_dir, _serialized_driver):
+        async def agent(_kernel_file, prompt):
+            seen.append(prompt)
+
+        return agent
+
+    return factory
+
+
+def test_a_guided_round_runs_its_batch_one_step_per_iteration_before_planning_again(tmp_path, monkeypatch):
+    loop, workspace = _guided_loop(tmp_path, monkeypatch, rounds=3, lanes=2)
+    service = _RankingService(
+        [["grid step\n[playbook:P2]", "body step\n[playbook:P1]"], ["beyond the playbook"]],
+        [_ranking("G2", "G1")],
+    )
+    histories: list[str] = []
+    lane_sessions: list[str] = []
+    monkeypatch.setattr(loop, "run_one_iteration", _measured(["KEEP", "REVERT", "REVERT"]))
+
+    _run(loop, service, _editing_agent(histories), agent_factory=_lane_recorder(lane_sessions))
+
+    # One planning round buys both steps; the next is planned only once both were measured, and no lane copy is made.
+    assert len(service.contexts) == 2
+    assert service.lanes[0] == 2
+    assert service.contexts[0].wiki_guidance["batch"] == ["G2", "G1"]
+    assert lane_sessions == []
+    assert len(histories) == 3
+    assert _plan_file(workspace, 1).startswith("# Batch step 1 of 2: playbook group G2")
+    second = _plan_file(workspace, 2)
+    assert second.startswith("# Batch step 2 of 2: playbook group G1")
+    assert "body step\n[playbook:P1]" in second
+    [planned] = _events(workspace, "wiki_batch_planned")
+    assert (planned["iter"], planned["steps"], planned["groups"]) == (1, 2, ["G2", "G1"])
+    steps = [(event["iter"], event["position"], event["group"]) for event in _events(workspace, "wiki_batch_step")]
+    assert steps == [(1, 1, "G2"), (2, 2, "G1")]
+    assert [event.get("wiki_batch_step") for event in _events(workspace, "iteration_result")] == ["1/2", "2/2", None]
     ledger = [(event["iter"], event["items"]) for event in _events(workspace, "wiki_playbook_ledger")]
-    assert ledger == [(1, {"P1": "APPLIED"}), (2, {"P2": "REFUTED"})]
+    assert ledger == [(1, {"P2": "APPLIED"}), (2, {"P1": "REFUTED"})]
+    # The batch settled both items, so the round after it plans FREE.
+    assert service.contexts[1].wiki_guidance["phase"] == "FREE"
+    assert not (workspace / "forge_experiments" / "orchestration" / "batch_steps.json").exists()
 
 
-def test_every_guided_round_plans_in_the_order_its_own_evidence_ranks(tmp_path, monkeypatch):
+def test_a_batch_cut_short_by_the_process_resumes_its_remaining_steps_without_planning(tmp_path, monkeypatch):
+    loop, workspace = _guided_loop(tmp_path, monkeypatch, rounds=1)
+    service = _RankingService([["grid step\n[playbook:P2]", "body step\n[playbook:P1]"]], [_ranking("G2", "G1")])
+    monkeypatch.setattr(loop, "run_one_iteration", _measured(["KEEP"]))
+    _run(loop, service, _editing_agent([]))
+    assert (workspace / "forge_experiments" / "orchestration" / "batch_steps.json").exists()
+
+    resumed, _ = _guided_loop(tmp_path, monkeypatch, rounds=1, resume=True)
+    # Any planning call would fail on the empty script.
+    later = _GuidedService([])
+    monkeypatch.setattr(resumed, "run_one_iteration", _measured(["KEEP"]))
+    _run(resumed, later, _editing_agent(["first process"]))
+
+    assert later.contexts == []
+    [step] = [event for event in _events(workspace, "wiki_batch_step") if event["position"] == 2]
+    assert (step["group"], step["planned_iteration"]) == ("G1", 1)
+    assert WikiGuidanceStore(workspace).load().ledger["P1"].status == "APPLIED"
+    assert not (workspace / "forge_experiments" / "orchestration" / "batch_steps.json").exists()
+
+
+def test_a_fresh_campaign_does_not_run_an_earlier_campaigns_batch(tmp_path, monkeypatch):
+    loop, workspace = _guided_loop(tmp_path, monkeypatch, rounds=1)
+    service = _RankingService([["grid step\n[playbook:P2]", "body step\n[playbook:P1]"]], [_ranking("G2", "G1")])
+    monkeypatch.setattr(loop, "run_one_iteration", _measured(["KEEP"]))
+    _run(loop, service, _editing_agent([]))
+    queue = workspace / "forge_experiments" / "orchestration" / "batch_steps.json"
+    assert queue.exists()
+
+    IterationLoop(
+        replace(loop.ic),
+        ExperimentTracker(tmp_path / "experiments"),
+        config=SimpleNamespace(experiments_dir=workspace / "forge_experiments", gpu_target="gfx942"),
+        resume=False,
+    )
+
+    assert not queue.exists()
+
+
+def test_the_profile_is_not_refreshed_until_the_batch_ends(tmp_path, monkeypatch):
+    from kernelforge.loop.run_state import RunState
+    from kernelforge.loop.runner import BatchStep
+
+    loop, _workspace = _guided_loop(tmp_path, monkeypatch)
+    loop.run_state = RunState()
+    # A commit no evidence was collected for, so the ordinary policy refreshes.
+    context = SimpleNamespace(analysis_commit="abc123")
+    fresh = loop._analysis_refresh_decision(context)
+    assert fresh.refresh
+
+    loop._batch_steps = [BatchStep(plan="step", group="G1", position=2, of=2, planned_iteration=1)]
+    deferred = loop._analysis_refresh_decision(context)
+
+    assert not deferred.refresh
+    assert deferred.reasons == (*fresh.reasons, "DEFERRED_UNTIL_BATCH_ENDS")
+
+
+THREE_GROUPS = {
+    "summary": "three steps",
+    "groups": [*PLAYBOOK["groups"], {"id": "G3", "title": "epilogue"}],
+    "items": [*PLAYBOOK["items"], {"id": "P3", "group": "G3", "title": "nontemporal stores", "wiki_pages": ["page"]}],
+}
+
+
+def test_the_batch_is_every_open_group_but_the_ones_excluded_with_a_reason(tmp_path, monkeypatch):
+    loop, workspace = _guided_loop(tmp_path, monkeypatch, rounds=1)
+    service = _RankingService(
+        [["one step"]],
+        # G2 is neither chosen nor excluded, so its premise still holds and it runs after the chosen group.
+        [_ranking("G3", excluded={"G1": "the kept tile already removed its bottleneck"})],
+        playbook=json.dumps(THREE_GROUPS),
+    )
+    monkeypatch.setattr(loop, "run_one_iteration", _measured(["REVERT"]))
+
+    _run(loop, service, _editing_agent([]))
+
+    guided = service.contexts[0].wiki_guidance
+    assert guided["batch"] == ["G3", "G2"]
+    assert guided["batch_excluded"] == {"G1": "the kept tile already removed its bottleneck"}
+    assert service.lanes == [2]
+    [ranked] = _events(workspace, "wiki_playbook_ranked")
+    assert (ranked["order"], ranked["appended"]) == (["G3", "G2"], ["G2"])
+    assert ranked["excluded"] == {"G1": "the kept tile already removed its bottleneck"}
+
+
+def test_every_guided_round_chooses_its_batch_from_its_own_evidence(tmp_path, monkeypatch):
     loop, workspace = _guided_loop(tmp_path, monkeypatch, rounds=3)
     service = _RankingService(
         [["grid [playbook:P2]"], ["body [playbook:P1]"], ["beyond the playbook"]],
-        # The second ranking still names G2, which the first round applied.
+        # The second answer still names G2, which the first round applied.
         [_ranking("G2", "G1"), _ranking("G1", "G2")],
     )
     monkeypatch.setattr(loop, "run_one_iteration", _measured(["KEEP", "REVERT", "REVERT"]))
 
     _run(loop, service, _editing_agent([]))
 
-    # The ranker reads the round's guidance as it stood, and the planners get it back in the ranked order.
+    # The ranker reads the round's guidance as it stood, and the planners get it back with the batch it chose.
     assert [group["id"] for group in service.ranked_contexts[0].wiki_guidance["playbook"]["groups"]] == ["G1", "G2"]
     first, second, third = (context.wiki_guidance for context in service.contexts)
     assert [group["id"] for group in first["playbook"]["groups"]] == ["G2", "G1"]
+    assert first["batch"] == ["G2", "G1"]
     assert first["playbook"]["groups"][0]["rank_evidence"] == "evidence: profile says G2"
     assert first["ranked_at_iteration"] == 1
     assert [group["id"] for group in second["playbook"]["groups"]] == ["G1", "G2"]
-    assert second["ranked_at_iteration"] == 2
+    assert (second["batch"], second["ranked_at_iteration"]) == (["G1"], 2)
+    assert service.lanes[:2] == [2, 1]
     # Both items are settled by the third round, which plans FREE and is not ranked.
     assert third["phase"] == "FREE"
+    assert "batch" not in third
     assert len(service.ranked_contexts) == 2
     assert [event["order"] for event in _events(workspace, "wiki_playbook_ranked")] == [["G2", "G1"], ["G1"]]
     persisted = WikiGuidanceStore(workspace).load()
     assert (persisted.group_order, persisted.ranked_at_iteration) == (["G1"], 2)
 
 
-def test_a_ranker_that_fails_leaves_the_previous_order_and_the_round_plans_on(tmp_path, monkeypatch):
+def test_a_ranker_that_fails_leaves_the_previous_order_and_batches_every_open_group(tmp_path, monkeypatch):
     loop, workspace = _guided_loop(tmp_path, monkeypatch, rounds=3)
     service = _RankingService(
         [["one"], ["two"], ["three"]],
@@ -549,16 +695,17 @@ def test_a_ranker_that_fails_leaves_the_previous_order_and_the_round_plans_on(tm
     assert [[group["id"] for group in context.wiki_guidance["playbook"]["groups"]] for context in service.contexts] == [
         ["G2", "G1"]
     ] * 3
+    assert [context.wiki_guidance["batch"] for context in service.contexts] == [["G2", "G1"]] * 3
     errors = [event["error"] for event in _events(workspace, "wiki_playbook_rank_unavailable")]
     assert [error.split(":")[0] for error in errors] == ["OrchestrationInfrastructureError", "ValueError"]
 
 
 def _conflicting_lanes(tmp_path, monkeypatch, *, wiki_guided, plans, decisions):
-    """A two-lane round whose lanes both rewrite the kernel's one line, so lane two stops applying once lane one is
-    kept."""
+    """A two-lane FREE round whose lanes both rewrite the kernel's one line, so lane two stops applying once lane one
+    is kept. A --wiki-guided campaign plans FREE from the start when its playbook is unusable."""
     loop, workspace = _guided_loop(tmp_path, monkeypatch, wiki_guided=wiki_guided, rounds=2, lanes=2)
     assert (workspace / "kernel.py").read_text() == "def kernel():\n    return 1\n"
-    service = _GuidedService(plans)
+    service = _GuidedService(plans, playbook="no JSON here")
     histories: list[str] = []
     monkeypatch.setattr(loop, "run_one_iteration", _measured(decisions))
     _run(
@@ -577,7 +724,7 @@ def test_a_guided_campaign_ports_a_lane_its_siblings_keep_stopped_applying(tmp_p
         tmp_path,
         monkeypatch,
         wiki_guided=True,
-        plans=[["lane one: body\n[playbook:P1]", "lane two: grid\n[playbook:P2]"]],
+        plans=[["lane one: body", "lane two: grid"]],
         decisions=["KEEP", "KEEP"],
     )
 
@@ -592,13 +739,10 @@ def test_a_guided_campaign_ports_a_lane_its_siblings_keep_stopped_applying(tmp_p
     assert f"Read {plan_path}" in port
     plan = plan_path.read_text()
     assert plan.startswith("# Port lane 2 onto the current kernel")
-    assert "lane two: grid\n[playbook:P2]" in plan
+    assert "lane two: grid" in plan
     lane_diff, since = plan.split("## The lane's diff")[1].split("## What the kept changes did")
     assert "+    return 12" in lane_diff
     assert "+    return 11" in since
-    ledger = [(event["iter"], event["items"]) for event in _events(workspace, "wiki_playbook_ledger")]
-    assert ledger == [(1, {"P1": "APPLIED"}), (2, {"P2": "APPLIED"})]
-    assert WikiGuidanceStore(workspace).load().ledger["P2"].iterations == [2]
 
 
 def test_an_unguided_campaign_still_drops_a_lane_that_stopped_applying(tmp_path, monkeypatch):
@@ -699,7 +843,7 @@ def test_the_ranker_reads_the_evidence_and_the_playbook_read_only(tmp_path):
         ).rank_wiki_playbook(context)
     )
 
-    assert guidance.parse_ranking(text, ["G1", "G3"])[0] == ["G1"]
+    assert guidance.parse_ranking(text, ["G1", "G3"]).batch == ("G1",)
     [spec] = backend.specs
     assert spec.role == "playbook_rank"
     assert (spec.writable, spec.tool_policy.read, spec.tool_policy.shell) == (False, True, False)
@@ -745,6 +889,58 @@ def test_planning_tasks_point_at_the_guidance_only_when_there_is_some():
     assert guided.to_prompt_dict()["wiki_guidance"]["phase"] == "GUIDED"
     with pytest.raises(ValueError, match="wiki_guidance"):
         replace(plain, wiki_guidance=["not", "a", "mapping"])
+
+
+def _batch_context(batch):
+    state = GuidanceState()
+    state.adopt(parse_playbook(json.dumps(THREE_GROUPS))[0])
+    state.batch = list(batch)
+    return replace(_context(), wiki_guidance=guidance.render_for_planning(state))
+
+
+def test_a_batch_round_plans_one_step_per_group_without_dividing_the_round_by_code():
+    backend = _McpBackend("the step's plan")
+    agent = OrchestrationAgent(backend=backend, timeout_sec=60, max_turns=8)
+    context = _batch_context(["G2", "G1"])
+    dispatch = orchestration_module.playbook_group_dispatch(context, lanes=2)
+    # Analyses come back in completion order, not step order.
+    outcomes = [
+        SpecialistOutcome(
+            assignment_id=assignment.assignment_id,
+            role_id=assignment.role_id,
+            duration_sec=0.1,
+            content=f"analysis: {assignment.reason}",
+        )
+        for assignment in reversed(dispatch.assignments)
+    ]
+
+    plans = asyncio.run(agent.synthesize_lane_plan_results(context, outcomes, dispatch, {}, lanes=2))
+
+    assert [plan.ground for plan in plans] == [
+        "batch step 1 of 2: playbook group G2",
+        "batch step 2 of 2: playbook group G1",
+    ]
+    # No partition turn: every call is a step plan.
+    assert {spec.system_prompt for spec in backend.specs} == {orchestration_module._BATCH_STEP_SYSTEM_PROMPT}
+    steps = sorted(
+        (json.loads(spec.user_prompt)["batch_step"] for spec in backend.specs), key=lambda step: step["position"]
+    )
+    assert [(step["position"], step["of"], step["group"]) for step in steps] == [(1, 2, "G2"), (2, 2, "G1")]
+    assert steps[1]["earlier_steps"] == ["G2 grid order"] and steps[0]["later_steps"] == ["G1 loop body"]
+    analyses = json.loads(backend.specs[0].user_prompt)["specialist_analyses"]
+    assert [entry["analysis"].split(" (")[0] for entry in analyses] == [
+        "analysis: Playbook group G2",
+        "analysis: Playbook group G1",
+    ]
+    assert agent.structured_output_diagnostics["batch"] == {"steps": ["G2", "G1"], "planned": 2}
+
+
+def test_a_guided_round_analyzes_its_batch_groups_and_no_others():
+    service, _agent, pool = _service({"compute", "memory", "algorithm", orchestration_module.PLAYBOOK_GROUP_ROLE})
+
+    asyncio.run(service.run(_batch_context(["G3"]), lanes=3))
+
+    assert [assignment.reason.split(" (")[0] for assignment in pool.assignments] == ["Playbook group G3"]
 
 
 # --- GUIDED rounds analyze each playbook group whole ----------------------------------------------------------------

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from collections.abc import Iterator, Mapping, MutableMapping, Sequence
 from contextlib import contextmanager
@@ -171,22 +172,35 @@ says which techniques the knowledge base supports for this kernel. It does not
 say which one matters now: the measured evidence does, and the evidence changes
 every time a candidate is kept.
 
-Rank the playbook's open groups -- those with a PENDING or FAILED item -- by the
-gain this round's evidence lets you estimate for the campaign's objective, the
-largest first. Read the evidence the context names before you rank: the
-analysis bundle and summary, each case's timing, bottleneck and profile
-summary, and the roofline standing when there is one. For each group name the
-cases it would speed up, what in the evidence limits those cases now, and how
-much of their time the group can remove. Rank a group low when the evidence
-shows its premise no longer holds, for example because a kept change already
-removed the bottleneck it targets. A group's dependence on another lowers its
-rank only when it cannot be built or cannot pay off without the other; a
-separate code path for some cases does not depend on the groups that tune the
-path those cases leave.
+Choose this round's batch from the playbook's open groups -- those with a PENDING
+or FAILED item. The batch runs as steps, one group per step, one after another on
+the same kernel; each step is measured and kept only if it helps, and the profile
+is refreshed only after the last step. So put in the batch every open group
+whose premise this round's evidence supports. Leave a group out only when the
+evidence shows its premise does not hold now -- for example because a kept change
+already removed the bottleneck it targets -- or when another group in the batch
+makes it pointless, because it tunes code that group replaces; list each group
+you leave out under `excluded` with that reason.
 
-Rank only: do not plan, edit files, or run shell commands. Return one JSON
+Read the evidence the context names before you choose: the analysis bundle and
+summary, each case's timing, bottleneck and profile summary, and the roofline
+standing when there is one. For each group in the batch name the cases it would
+speed up, what in the evidence limits those cases now, and how much of their
+time it can remove on top of the steps before it.
+
+Order the batch by that gain, the largest first, against the campaign's
+objective and its target when it has one. A measured gain does not go ahead of a
+larger estimated one because it was measured: both are estimates of what the
+step adds, and a step whose best case stays far from the target gains less than
+one that removes what holds the cases far from it. A group goes behind another
+only when it cannot be built or cannot pay off without it; a group that replaces
+a code path for some cases goes before the groups that tune what remains of
+that path, and does not depend on them.
+
+Choose only: do not plan, edit files, or run shell commands. Return one JSON
 object and nothing else, in this shape:
-{"ranking": [{"group": "G2", "cases": "...", "expected_gain": "...", "evidence": "..."}]}
+{"batch": [{"group": "G2", "cases": "...", "expected_gain": "...", "evidence": "..."}],
+ "excluded": [{"group": "G4", "reason": "..."}]}
 """
 
 _PARTITION_SYSTEM_PROMPT = """\
@@ -314,6 +328,31 @@ measurement inputs, or present an inference as a profiler fact. Return ordinary
 Markdown with no fixed schema.
 """
 
+_BATCH_STEP_SYSTEM_PROMPT = """\
+You are the read-only lead planner for one step of a batch in an autonomous
+GPU-kernel optimization search. The batch's steps run one after another on the
+same kernel, in the order given. Each step is one Implementer session followed
+by one measurement that keeps the step only if it helps, and the profile is not
+refreshed until the last step has been measured.
+
+Plan only your step: the playbook group named in `batch_step`. The earlier and
+later steps are listed so you can see what your step starts from and what it
+leaves room for. Your step starts from the kernel as the earlier steps left it,
+which carries their changes only when their measurement kept them. Say what your
+plan assumes the earlier steps changed, and how the Implementer adapts when such
+a change is not in the tree. Do not plan another step's group, and do not make
+your step depend on a later one.
+
+You are given the whole round's analyses, not a slice of it; use whatever bears
+on your group. Judge the recommendations rather than copying them: compare
+expected value, evidence, feasibility, correctness risk, cost and dependencies,
+and choose a clear implementation sequence.
+
+Use only supplied evidence. Do not edit files, run shell commands, alter
+measurement inputs, or present an inference as a profiler fact. Return ordinary
+Markdown with no fixed schema.
+"""
+
 _REVISION_SYSTEM_PROMPT = """\
 You are the read-only lead planner revising one GPU-kernel optimization plan
 after an independent critic review.
@@ -417,6 +456,32 @@ PLAYBOOK_GROUP_ROLE = "playbook_group"
 _OPEN_PLAYBOOK_STATUSES = frozenset({"PENDING", "FAILED"})
 
 
+_PLAYBOOK_GROUP_REASON = re.compile(r"^Playbook group (G\d{1,2}) \((.*)\), one step:", re.DOTALL)
+
+
+def batch_steps(
+    context: OrchestrationContext,
+    dispatch_plan: DispatchPlan,
+    analyses: Sequence[SpecialistOutcome],
+) -> list[tuple[str, str, SpecialistOutcome]]:
+    """A GUIDED batch round's steps -- (group id, title, its analysis) in step order -- or [] for any other round."""
+    guidance = context.wiki_guidance
+    if not guidance or guidance.get("phase") != "GUIDED" or not guidance.get("batch"):
+        return []
+    by_assignment = {outcome.assignment_id: outcome for outcome in analyses}
+    steps = []
+    for assignment in dispatch_plan.assignments:
+        if assignment.role_id != PLAYBOOK_GROUP_ROLE:
+            return []
+        match = _PLAYBOOK_GROUP_REASON.match(assignment.reason)
+        outcome = by_assignment.get(assignment.assignment_id)
+        if match is None:
+            return []
+        if outcome is not None:
+            steps.append((match.group(1), match.group(2), outcome))
+    return steps
+
+
 def playbook_group_definition() -> SpecialistDefinition:
     return SpecialistDefinition(
         role_id=PLAYBOOK_GROUP_ROLE,
@@ -435,17 +500,20 @@ def playbook_group_definition() -> SpecialistDefinition:
 
 
 def playbook_group_dispatch(context: OrchestrationContext, *, lanes: int) -> DispatchPlan | None:
-    """A GUIDED round's assignments, one per open playbook group in the guidance's (ranked) order; None outside
-    GUIDED."""
+    """A GUIDED round's assignments, one per open group of its batch in step order (or of the playbook in its
+    ranked order when there is no batch); None outside GUIDED."""
     guidance = context.wiki_guidance
     if not guidance or guidance.get("phase") != "GUIDED":
         return None
     playbook = guidance.get("playbook") or {}
     items = {str(item.get("id")): item for item in playbook.get("items") or [] if isinstance(item, Mapping)}
+    groups = [group for group in playbook.get("groups") or [] if isinstance(group, Mapping)]
+    batch = [str(group_id) for group_id in guidance.get("batch") or []]
+    if batch:
+        by_id = {str(group.get("id")): group for group in groups}
+        groups = [by_id[group_id] for group_id in batch if group_id in by_id]
     entries = []
-    for group in playbook.get("groups") or []:
-        if not isinstance(group, Mapping):
-            continue
+    for group in groups:
         open_items = [
             items[item_id]
             for item_id in group.get("items") or []
@@ -523,8 +591,8 @@ class OrchestrationAgent:
             raise ValueError("a ranking needs a playbook")
         payload = {
             "task": (
-                "Rank every open group of `context.wiki_guidance.playbook` by what this round's measured evidence "
-                "says it is worth."
+                "Choose this round's batch from the open groups of `context.wiki_guidance.playbook`, in step order, "
+                "by what this round's measured evidence says each is worth."
             ),
             "context": context.to_prompt_dict(),
         }
@@ -859,6 +927,19 @@ class OrchestrationAgent:
                     )
                 ]
 
+        steps = batch_steps(context, dispatch_plan, analyses)
+        if len(steps) > 1:
+            # A batch's steps run one after another on one tree, so the round is not divided by code: each group
+            # analysis becomes one step.
+            return await self._synthesize_batch_steps(
+                context,
+                analyses,
+                dispatch_plan,
+                coverage,
+                steps=steps,
+                usage=usage,
+            )
+
         grounds = await self._partition_round(
             context,
             analyses,
@@ -957,6 +1038,86 @@ class OrchestrationAgent:
             plans.append(answer)
         if not plans:
             raise OrchestrationOutputError("orchestration synthesis returned no lane plan")
+        return plans
+
+    async def _synthesize_batch_steps(
+        self,
+        context: OrchestrationContext,
+        analyses: Sequence[SpecialistOutcome],
+        dispatch_plan: DispatchPlan,
+        coverage: Mapping[str, object],
+        *,
+        steps: Sequence[tuple[str, str, SpecialistOutcome]],
+        usage=None,
+    ) -> list[SynthesizedPlan]:
+        """One plan per batch step, in step order."""
+        titles = [f"{group_id} {title}" for group_id, title, _ in steps]
+        ordered = [outcome for _, _, outcome in steps]
+
+        async def _step(index: int) -> SynthesizedPlan | None:
+            group_id, title, _ = steps[index]
+            role = f"orchestration batch step {index + 1} synthesis"
+            payload = {
+                "task": (
+                    "Produce the plan this batch step's Implementer should execute: the playbook group named in "
+                    "`batch_step`, on the kernel as the earlier steps leave it." + wiki_guidance_task(context)
+                ),
+                "context": context.to_prompt_dict(),
+                "dispatch_plan": dispatch_plan.to_dict(),
+                "specialist_coverage": dict(coverage),
+                "batch_step": {
+                    "position": index + 1,
+                    "of": len(steps),
+                    "group": group_id,
+                    "title": title,
+                    "earlier_steps": titles[:index],
+                    "later_steps": titles[index + 1 :],
+                },
+                "specialist_analyses": [
+                    {
+                        "assignment_id": outcome.assignment_id,
+                        "role_id": outcome.role_id,
+                        "analysis": outcome.content,
+                    }
+                    for outcome in ordered
+                ],
+            }
+            result = await self._run_result(
+                context,
+                system_prompt=_BATCH_STEP_SYSTEM_PROMPT,
+                user_prompt=json.dumps(payload, indent=2, sort_keys=True),
+                usage=usage,
+                role=role,
+            )
+            text = self._validated_text(result, role=role, allow_empty=True)
+            if not text:
+                return None
+            return SynthesizedPlan(
+                text=text,
+                session_id=str(result.session_id or "").strip(),
+                ground=f"batch step {index + 1} of {len(steps)}: playbook group {group_id}",
+            )
+
+        # Each step is an independent call, so one that fails is one step lost and not the round.
+        with _phase_timer(self.phase_durations_sec, "synthesis"):
+            answers = await asyncio.gather(*(_step(index) for index in range(len(steps))), return_exceptions=True)
+        plans: list[SynthesizedPlan] = []
+        for index, answer in enumerate(answers):
+            if isinstance(answer, BaseException):
+                log.warning(
+                    "batch step %d of %d lost its plan: %s: %s", index + 1, len(steps), type(answer).__name__, answer
+                )
+                continue
+            if answer is None:
+                log.warning("batch step %d of %d returned an empty plan", index + 1, len(steps))
+                continue
+            plans.append(answer)
+        self.structured_output_diagnostics["batch"] = {
+            "steps": [group_id for group_id, _, _ in steps],
+            "planned": len(plans),
+        }
+        if not plans:
+            raise OrchestrationOutputError("orchestration synthesis returned no batch step plan")
         return plans
 
     @staticmethod
