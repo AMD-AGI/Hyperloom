@@ -52,6 +52,10 @@ class CandidateRecord:
     # Why the agent session ended + turns spent (for end-reason analysis).
     session_end_reason: str = ""
     turns: int | None = None
+    agent_profile_id: str = ""
+    agent_provider: str = ""
+    agent_model: str = ""
+    blockage_epoch: int = 0
 
     # Context
     kernel_file: str = ""
@@ -200,6 +204,10 @@ class CandidateArchive:
             "plan": meta.get("plan", ""),
             "session_end_reason": meta.get("session_end_reason", ""),
             "turns": meta.get("turns"),
+            "agent_profile_id": meta.get("agent_profile_id", ""),
+            "agent_provider": meta.get("agent_provider", ""),
+            "agent_model": meta.get("agent_model", ""),
+            "blockage_epoch": meta.get("blockage_epoch", 0),
             "dir": directory.name,
         }
 
@@ -388,6 +396,10 @@ class CandidateArchive:
                 "rationale": rec.rationale,
                 "session_end_reason": rec.session_end_reason,
                 "turns": rec.turns,
+                "agent_profile_id": rec.agent_profile_id,
+                "agent_provider": rec.agent_provider,
+                "agent_model": rec.agent_model,
+                "blockage_epoch": rec.blockage_epoch,
                 "kernel_file": self.kernel_basename,
                 "shape": rec.shape or {},
                 "files": {

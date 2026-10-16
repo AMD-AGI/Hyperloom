@@ -17,6 +17,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TextIO
 
+from kernelforge.loop.agent_relay import (
+    AgentAvailabilitySnapshot,
+    AgentRelayState,
+    migrate_run_state_relay_fields,
+)
 from kernelforge.loop.search_policy import (
     OBJECTIVE_IMMEDIATE_CANONICAL_GAIN,
     SEARCH_MODE_EXPLOIT,
@@ -191,6 +196,8 @@ class RunState:
     orchestration_error_streak: int = 0
     orchestration_circuit_state: str = ORCHESTRATION_CIRCUIT_CLOSED
     intervention_count: int = 0
+    agent_relay: AgentRelayState = field(default_factory=AgentRelayState)
+    agent_availability_snapshot: AgentAvailabilitySnapshot = field(default_factory=AgentAvailabilitySnapshot)
     phase: str = PHASE_EXPLORE
     search_mode: str = SEARCH_MODE_EXPLOIT
     search_reason_codes: list[str] = field(default_factory=list)
@@ -286,6 +293,15 @@ class RunState:
             nested(entry, RoundCost, f"round_costs.recent[{index}]") for index, entry in enumerate(round_costs.recent)
         ]
         payload["round_costs"] = round_costs
+        payload["agent_relay"] = nested(
+            payload["agent_relay"],
+            AgentRelayState,
+            "agent_relay",
+        )
+        payload["agent_relay"].validate()
+        payload["agent_availability_snapshot"] = AgentAvailabilitySnapshot.from_dict(
+            payload["agent_availability_snapshot"]
+        )
         state = cls(**payload)
         _validate_round_costs(state.round_costs)
         if state.search_mode not in SEARCH_MODES:
@@ -684,7 +700,7 @@ class LoopStateStore:
             payload = json.loads(self.state_path.read_text())
         except (OSError, json.JSONDecodeError) as error:
             raise ValueError(f"invalid run state checkpoint: {self.state_path}") from error
-        return RunState.from_dict(payload)
+        return RunState.from_dict(migrate_run_state_relay_fields(payload))
 
     def save(self, state: RunState) -> None:
         """Atomically overwrite ``run_state.json``."""

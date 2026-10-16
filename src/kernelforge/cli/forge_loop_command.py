@@ -18,7 +18,6 @@ from typing import Sequence
 
 import click
 
-from kernelforge.cli.lanes import _make_lane_agent_factory, _require_lane_provider_capabilities
 from kernelforge.cli.options import (
     CEILING_ON,
     _agent_runtime_options,
@@ -1594,6 +1593,7 @@ def forge_loop(
     click.get_current_context().call_on_close(workspace_lock.release)
 
     from kernelforge.loop.campaign_setup import resolve_campaign
+    from kernelforge.cli.relay import resolve_default_relay_config
 
     campaign_store = CampaignConfigStore(str(workspace))
     campaign_root = campaign_store.root
@@ -1608,6 +1608,26 @@ def forge_loop(
         state_path=state_path,
         campaign_store=campaign_store,
         has_run_artifacts=has_run_artifacts,
+    )
+    agent_runtime_overrides = _agent_runtime_overrides(
+        model=model,
+        agent_backend=agent_backend,
+        agent_cli=agent_cli,
+        agent_timeout_sec=agent_timeout_sec,
+        agent_reasoning_effort=agent_reasoning_effort,
+        agent_sandbox_mode=agent_sandbox_mode,
+        agent_fallback_provider=agent_fallback_provider,
+        agent_precheck=agent_precheck,
+        agent_options_json=agent_options_json,
+    )
+    bootstrap_agent_config = Config.from_env(
+        workspace=str(workspace),
+        knowledge_config=knowledge_config,
+        **agent_runtime_overrides,
+    )
+    requested_relay_config = resolve_default_relay_config(
+        bootstrap_agent_config,
+        blockage_threshold=3,
     )
 
     try:
@@ -1632,6 +1652,7 @@ def forge_loop(
             nproc_per_node=nproc_per_node,
             bench_repeat=bench_repeat,
             commit_new_paths=list(commit_new_paths),
+            agent_relay=requested_relay_config,
         )
     except (OSError, ValueError) as error:
         raise click.ClickException(str(error)) from error
@@ -1679,19 +1700,7 @@ def forge_loop(
     ):
         if _value is not None:
             overrides[_name] = _value
-    overrides.update(
-        _agent_runtime_overrides(
-            model=model,
-            agent_backend=agent_backend,
-            agent_cli=agent_cli,
-            agent_timeout_sec=agent_timeout_sec,
-            agent_reasoning_effort=agent_reasoning_effort,
-            agent_sandbox_mode=agent_sandbox_mode,
-            agent_fallback_provider=agent_fallback_provider,
-            agent_precheck=agent_precheck,
-            agent_options_json=agent_options_json,
-        )
-    )
+    overrides.update(agent_runtime_overrides)
     if gpu_target:
         os.environ["GPU_TARGET"] = gpu_target
     config = Config.from_env(
@@ -1699,6 +1708,18 @@ def forge_loop(
         knowledge_config=knowledge_config,
         **overrides,
     )
+    startup_availability = None
+    if campaign.agent_relay is not None:
+        from kernelforge.cli.relay import probe_agent_profiles
+
+        try:
+            startup_availability = probe_agent_profiles(
+                campaign.agent_relay,
+                config=config,
+                workspace=str(workspace),
+            )
+        except (OSError, RuntimeError, ValueError) as error:
+            raise click.ClickException(f"Agent startup availability check failed: {error}") from error
     # Two roots by design: resume artifacts (run_state/candidates/best) always live under
     # <workspace>/forge_experiments (campaign_root); diagnostics and the external-recovery checkpoint go to
     # --experiments-dir when the caller supplies a distinct one (e.g. Hyperloom's output dir), else campaign_root.
@@ -1735,7 +1756,6 @@ def forge_loop(
     from kernelforge.loop.runner import IterationConfig
     from kernelforge.loop.scoring import warm_start_improvement_flags
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
-    from kernelforge.orchestrator.agent import make_agent_fn
 
     iter_config = IterationConfig(
         kernel_file=kernel,
@@ -1949,8 +1969,6 @@ def forge_loop(
     # Analysis Agent.
     iter_config.program_md = program_md
 
-    # Hook-capable providers gate before stop; resumable providers apply the same canonical gate between turns.
-    gate_on = True
     # No hard edit budget: a session making steady progress must not be cut off for editing a lot.
     max_blocks = 10
     # A turn cap never bounded time: it fired on 2.2% of sessions, so a session that neither converged nor capped ran
@@ -1974,15 +1992,36 @@ def forge_loop(
         remaining=deadline.remaining,
     )
 
+    from kernelforge.cli.relay import (
+        SearchActorBuildContext,
+        build_search_actor_pool,
+        config_for_profile,
+    )
+    from kernelforge.loop.agent_relay import AgentProfile, AgentRelayConfig
+    from kernelforge.orchestrator.orchestration import default_specialist_definitions
+
+    specialist_definitions = default_specialist_definitions()
     selected_runtime = config.agent_runtime()
-    agent_fn = make_agent_fn(
+    relay_config = campaign.agent_relay
+    if relay_config is None:
+        primary_profile = AgentProfile(
+            selected_runtime.provider,
+            selected_runtime.provider,
+            selected_runtime.model,
+            selected_runtime.reasoning_effort,
+        )
+        relay_config = AgentRelayConfig(
+            primary_profile_id=primary_profile.profile_id,
+            profiles=(primary_profile,),
+        )
+
+    actor_builder = SearchActorBuildContext(
         config=config,
         program_md=program_md,
-        pre_task_context=pr_task_context,
+        pr_task_context=pr_task_context,
         pr_kb_repo=pr_kb_repo,
-        kernel_backend_name=kernel_backend,
-        insession_gate=gate_on,
-        driver_script=driver,
+        kernel_backend=kernel_backend,
+        driver=driver,
         snr_threshold=snr_threshold,
         max_blocks=max_blocks,
         session_timeout_sec=session_timeout_sec,
@@ -1994,103 +2033,50 @@ def forge_loop(
         source_files=source_files_list,
         target_functions=target_functions_list,
         profiling_enabled=profiling_enabled,
-        agent_backend=selected_runtime.provider,
         commit_new_paths=iter_config.commit_new_paths,
         usage=usage,
-    )
-    effective_implementer = getattr(
-        agent_fn,
-        "backend_name",
-        selected_runtime.provider,
-    )
-    effective_implementer_model = getattr(
-        agent_fn,
-        "backend_model",
-        selected_runtime.model,
-    )
-    print(f"  Implementer: {effective_implementer} / {effective_implementer_model}")
-
-    # Checked against the backend a lane actually resolves to, not the one that was asked for: a lane repeats the
-    # canonical session's resolution from the same runtime, so a fallback that moved the canonical session moved the
-    # lanes with it.
-    _require_lane_provider_capabilities(effective_implementer, lanes)
-
-    _lane_agent_factory = _make_lane_agent_factory(
-        make_agent=make_agent_fn,
-        config=config,
+        lanes=lanes,
         workspace_dir=iter_config.workspace_dir,
-        driver=driver,
-        source_files=source_files_list,
-        session_kwargs={
-            "program_md": program_md,
-            "pre_task_context": pr_task_context,
-            "pr_kb_repo": pr_kb_repo,
-            "kernel_backend_name": kernel_backend,
-            "snr_threshold": snr_threshold,
-            "max_blocks": max_blocks,
-            "session_timeout_sec": session_timeout_sec,
-            "validation_timeout_sec": iter_config.validate_stage_timeout_sec,
-            "bench_timeout_sec": iter_config.bench_timeout_sec,
-            "bench_repeat": bench_repeat,
-            "permission_mode": permission_mode,
-            "task_type": task_type,
-            "commit_new_paths": iter_config.commit_new_paths,
-            # Function names, not paths: nothing to rebind onto a lane.
-            "target_functions": target_functions_list,
-            "agent_backend": selected_runtime.provider,
-            "usage": usage,
-        },
+        specialist_definitions=specialist_definitions,
+        critic_enabled=critic_enabled,
+        relay_enabled=campaign.agent_relay is not None,
+        supervisor_backend=supervisor_backend,
     )
+    try:
+        search_actors = build_search_actor_pool(
+            relay_config,
+            bundle_factory=actor_builder.build,
+            availability=startup_availability,
+        )
+    except (OSError, RuntimeError, ValueError) as error:
+        raise click.ClickException(f"Agent startup availability check failed: {error}") from error
+    primary_bundle = search_actors.bundle(relay_config.primary_profile_id)
+    agent_fn = primary_bundle.agent_fn
+    _lane_agent_factory = primary_bundle.agent_factory
+    orchestration_service = primary_bundle.orchestration_service
+    supervisor_fn = primary_bundle.supervisor_fn
+    effective_implementer = primary_bundle.profile.provider
+    effective_implementer_model = primary_bundle.profile.model
+    for profile_id, status in search_actors.availability.profiles.items():
+        state = "available" if status.available else f"unavailable ({status.reason})"
+        print(f"  Agent profile: {profile_id} / {status.model}: {state}")
 
     from kernelforge.orchestrator.analysis import make_analysis_agent_service
 
+    analysis_config = config_for_profile(config, primary_bundle.profile)
     analysis_service = make_analysis_agent_service(
-        config=config,
+        config=analysis_config,
         usage=usage,
         timeout_sec=profile_timeout_sec,
         profiling_enabled=profiling_enabled,
     )
     analysis_mode = "profiled" if profiling_enabled else "static-only"
     print("  Analysis Agent: " + analysis_mode)
-
-    from kernelforge.orchestrator.orchestration import (
-        default_specialist_definitions,
-        make_orchestration_service,
-    )
-
-    specialist_definitions = default_specialist_definitions()
-    orchestration_service = make_orchestration_service(
-        config=config,
-        usage=usage,
-        definitions=specialist_definitions,
-        enable_plan_critic=critic_enabled,
-    )
     print(f"  Orchestration: enabled with parallel specialists ({', '.join(sorted(specialist_definitions))})")
     print(
         "  Plan Critic: "
         + ("enabled (long-horizon, same backend/model)" if critic_enabled else "disabled (requires --max-hours > 2)")
     )
-
-    # AVO supervisor (always on): reviews the trajectory on a stall and injects fresh directions.
-    from kernelforge.orchestrator.supervisor import make_supervisor_fn
-
-    sup_backend = supervisor_backend or effective_implementer
-    supervisor_fn = make_supervisor_fn(
-        program_md=program_md,
-        gpu_target=config.gpu_target,
-        backend=sup_backend,
-        usage=usage,
-        config=config,
-    )
-    # Report the backend/model resolved by the shared backend preflight.
-    eff_backend = getattr(supervisor_fn, "backend_name", sup_backend)
-    eff_model = getattr(
-        supervisor_fn,
-        "backend_model",
-        config.agent_runtime().model,
-    )
-    fell_back = f" (requested {sup_backend}, fell back)" if eff_backend != sup_backend else ""
-    print(f"  Supervisor: {eff_backend} / {eff_model}{fell_back}")
 
     remote_publication = _initial_remote_publication_state(warm)
 
@@ -2135,6 +2121,7 @@ def forge_loop(
             on_best_ready=_publish_remote_best,
             usage=usage,
             workspace_lock_held=True,
+            search_actors=(search_actors if campaign.agent_relay is not None else None),
         )
     )
 

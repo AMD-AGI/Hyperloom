@@ -21,6 +21,7 @@ from kernelforge.loop.campaign_config import (
     resolve_kernel_backend_override,
     validate_pending_campaign_head,
 )
+from kernelforge.loop.agent_relay import AgentProfile, AgentRelayConfig
 from kernelforge.llm.git import GitError
 
 
@@ -98,6 +99,31 @@ def test_create_save_load_normalizes_and_persists_campaign(tmp_path, monkeypatch
     assert loaded.program_md_sha256 == hashlib.sha256(program.read_bytes()).hexdigest()
     assert (workspace / loaded.program_md_path).read_text() == program.read_text()
     assert store.read_program_md(loaded) == program.read_text()
+
+
+def test_campaign_persists_immutable_agent_relay_profiles(tmp_path, monkeypatch):
+    workspace, kernel, _helper, driver = _git_workspace(tmp_path)
+    monkeypatch.setenv("GPU_TARGET", "gfx950")
+    relay = AgentRelayConfig(
+        primary_profile_id="claude",
+        profiles=(
+            AgentProfile("claude", "claude", "claude-opus-5.5"),
+            AgentProfile("codex", "codex", "gpt-6"),
+        ),
+    )
+
+    config = create_campaign_config(
+        workspace_dir=str(workspace),
+        kernel=str(kernel),
+        driver=str(driver),
+        source_files=[str(kernel)],
+        program_md_file=None,
+        agent_relay=relay,
+    )
+    store = CampaignConfigStore(str(workspace))
+    store.save(config)
+
+    assert store.load().agent_relay == relay
 
 
 def test_the_operator_is_settled_before_the_loop_can_rename_it(tmp_path, monkeypatch):

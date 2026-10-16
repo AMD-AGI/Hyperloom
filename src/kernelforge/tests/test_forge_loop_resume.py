@@ -13,6 +13,7 @@ import pytest
 from click.testing import CliRunner
 
 import kernelforge.cli.forge_loop_command as forge_loop_command
+import kernelforge.cli.relay as relay_module
 import kernelforge.loop.recovery as recovery_module
 import kernelforge.orchestrator.agent as agent_module
 import kernelforge.orchestrator.analysis as analysis_module
@@ -26,6 +27,11 @@ from kernelforge.loop.campaign_config import (
     create_campaign_config,
 )
 from kernelforge.loop.experience import ExperienceLedger
+from kernelforge.loop.agent_relay import (
+    AgentAvailabilitySnapshot,
+    ProfileAvailability,
+    ProviderAvailability,
+)
 from kernelforge.loop.run_state import (
     SESSION_PAUSED,
     LoopStateStore,
@@ -201,6 +207,26 @@ def _install_cli_fakes(monkeypatch, tmp_path):
         return {"written": False, "reason": "test"}
 
     monkeypatch.setattr(forge_loop_command.Config, "from_env", staticmethod(fake_from_env))
+
+    def fake_probe_agent_profiles(relay_config, **_kwargs):
+        providers = {profile.provider: ProviderAvailability(available=True) for profile in relay_config.profiles}
+        profiles = {
+            profile.profile_id: ProfileAvailability(
+                provider=profile.provider,
+                model=profile.model,
+                provider_available=True,
+                model_available=True,
+                available=True,
+            )
+            for profile in relay_config.profiles
+        }
+        return AgentAvailabilitySnapshot(
+            checked_at="2026-10-16T08:00:00Z",
+            providers=providers,
+            profiles=profiles,
+        )
+
+    monkeypatch.setattr(relay_module, "probe_agent_profiles", fake_probe_agent_profiles)
     monkeypatch.setattr(forge_loop_command, "kb_warmstart", fake_warmstart)
     monkeypatch.setattr(
         forge_loop_command,
