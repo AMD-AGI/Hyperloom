@@ -29,8 +29,10 @@ from ._subprocess_kill import (
     SESSION_TIME_EXHAUSTED_RETURNCODE,
 )
 from .benchmark_result import harvest_leaked_artifacts
+from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 
 __all__ = [
+    "CONTEXT_COPY_REFUSAL",
     "AGENTX_PREFLIGHT_RETURNCODE",
     "BaselineExecutor",
     "ConcSweepExecutor",
@@ -46,6 +48,7 @@ __all__ = [
     "VariantResult",
     "baseline_executor",
     "conc_sweep_executor",
+    "context_copy_refusal",
     "default_baseline_config",
     "explore_executor",
     "harvest_leaked_artifacts",
