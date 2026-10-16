@@ -984,7 +984,7 @@ function-args src/kernelforge/loop/task_preparer_prompts.py::_build_prompt 7
 function-args src/kernelforge/mcp_server/tools/bench.py::bench_wallclock 7
 function-args src/kernelforge/mcp_server/tools/bench.py::measure_wallclock 7
 function-args src/kernelforge/mcp_server/tools/bench.py::sweep_case 7
-function-args src/kernelforge/orchestrator/agent.py::_build_insession_gate 16
+function-args src/kernelforge/orchestrator/agent.py::_build_insession_gate 15
 function-args src/kernelforge/orchestrator/agent.py::_fill_session_sink 7
 function-args src/kernelforge/orchestrator/agent.py::_target_section 6
 function-args src/kernelforge/orchestrator/agent.py::make_agent_fn 26
@@ -1466,7 +1466,7 @@ function-lines src/kernelforge/mcp_server/tools/bench.py::aggregate_benchmark_me
 function-lines src/kernelforge/mcp_server/tools/bench.py::bench_wallclock 120
 function-lines src/kernelforge/mcp_server/tools/bench.py::sweep_case 178
 function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 313
-function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn.agent_fn 199
+function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn.agent_fn 197
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._finalize_framework_artifacts 83
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._prompts 236
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._run_analysis_session 119

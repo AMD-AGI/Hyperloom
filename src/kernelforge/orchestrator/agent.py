@@ -27,6 +27,7 @@ from kernelforge.loop.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
     KEEP_MEASUREMENT_COUNT,
     KEEP_MIN_MARGIN_FRACTION,
+    GateScoring,
     keep_t_critical,
 )
 from kernelforge.orchestrator.summary_line import REASONING_LOG_RULE, reasoning_log_section
@@ -111,7 +112,7 @@ def _ensure_reasoning_log_directory(reasoning_log: str | None) -> list[str]:
     return [str(directory)]
 
 
-def _gate_scoring_context(baseline_case_times: dict | None, best_mean_case_speedup: float | None) -> str:
+def _gate_scoring_context(scoring: GateScoring) -> str:
     """Tell the session the exact rule its candidate will be judged by."""
     return (
         "\n\n## Authoritative mean case scoring state\n"
@@ -125,8 +126,8 @@ def _gate_scoring_context(baseline_case_times: dict | None, best_mean_case_speed
         f"{KEEP_MIN_MARGIN_FRACTION:.2%} of the current best. A "
         "quiet measurement therefore earns a small gain and a noisy "
         "one does not; repeatability is worth as much as speed.\n"
-        f"Fixed pristine per-case ms: {dict(baseline_case_times or {})}\n"
-        f"Current best pristine-relative score: {best_mean_case_speedup}.\n"
+        f"Fixed pristine per-case ms: {dict(scoring.baseline_case_times)}\n"
+        f"Current best pristine-relative score: {scoring.best_mean_case_speedup}.\n"
         "Raw `mean_ms` is diagnostic and never decides KEEP/REVERT."
     )
 
@@ -136,8 +137,7 @@ def _build_insession_gate(
     *,
     driver_script: str | None,
     snr_threshold: float,
-    baseline_case_times: dict | None,
-    best_mean_case_speedup: float | None,
+    scoring: GateScoring,
     max_blocks: int,
     validation_timeout_sec: int,
     bench_timeout_sec: int,
@@ -156,8 +156,8 @@ def _build_insession_gate(
     return InSessionGate(
         driver_script=driver_script,
         snr_threshold=snr_threshold,
-        baseline_case_times=baseline_case_times,
-        best_mean_case_speedup=best_mean_case_speedup,
+        baseline_case_times=scoring.baseline_case_times,
+        best_mean_case_speedup=scoring.best_mean_case_speedup,
         kernel_file=kernel_path,
         max_blocks=max_blocks,
         stage_timeout_sec=validation_timeout_sec,
@@ -746,8 +746,7 @@ Never `cat` a whole file — use the Read tool.
         kernel_path: str,
         experiment_history: str,
         session_sink: dict | None = None,
-        baseline_case_times: dict | None = None,
-        best_mean_case_speedup: float | None = None,
+        gate_scoring: GateScoring = GateScoring(),
         reasoning_log: str | None = None,
     ) -> str:
         # Mark the session before entering the provider.
@@ -801,8 +800,7 @@ Make your change(s) now.
                 kernel_path,
                 driver_script=driver_script,
                 snr_threshold=snr_threshold,
-                baseline_case_times=baseline_case_times,
-                best_mean_case_speedup=best_mean_case_speedup,
+                scoring=gate_scoring,
                 max_blocks=max_blocks,
                 validation_timeout_sec=validation_timeout_sec,
                 bench_timeout_sec=bench_timeout_sec,
@@ -819,7 +817,7 @@ Make your change(s) now.
             else None
         )
         system_prompt = (
-            gate_system_prompt + _gate_scoring_context(baseline_case_times, best_mean_case_speedup)
+            gate_system_prompt + _gate_scoring_context(gate_scoring)
             if gate is not None and gate_stop_check
             else base_system_prompt
         )
