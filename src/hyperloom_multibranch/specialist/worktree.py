@@ -107,6 +107,11 @@ class BranchWorktree:
         self.path = path
         self._layouts = layouts
 
+    def holds(self, component: str) -> bool:
+        """Whether the source base laid out ``component``; a recipe's patches to any other component are not here."""
+        layout = self._layouts.get(component)
+        return layout is not None and (self.path / layout.upstream_prefix).is_dir()
+
     def head(self) -> str | None:
         """The experiment commit HEAD holds, or ``None`` while it holds the installed packages alone."""
         subject = _git(self.path, "log", "-1", "--format=%s").strip()
