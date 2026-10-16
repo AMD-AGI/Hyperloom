@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from hyperloom.common.llm_config import (
+    DEFAULT_CLAUDE_MODEL,
     LLMConfigError,
     apply_reasoning_effort,
     astream_chat_completion_text,
@@ -30,7 +31,7 @@ log = logging.getLogger(__name__)
 
 
 DEFAULT_SCORER_MODELS: tuple[str, ...] = (
-    "claude-opus-5",
+    DEFAULT_CLAUDE_MODEL,
     "gpt-5.6-sol",
     # Gemini MUST carry the ``gemini/`` prefix (bare slug routes to a broken Vertex ADC path).
     "dvue-aoai-005-Kimi-K2.6",

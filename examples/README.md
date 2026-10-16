@@ -77,7 +77,7 @@ It asks for these values with a fixed option order:
    - If `.env` already exists, setup preserves unrelated keys but updates the
      Hyperloom setup keys selected in this run.
 3. Model, asked alongside the non-secret values:
-   - `Use default (claude-opus-5)`
+   - `Use default (claude-opus-5-5)`
    - `Custom`
 4. `USER_DATA_PATH`:
    - Default: `<workspace>/session`
