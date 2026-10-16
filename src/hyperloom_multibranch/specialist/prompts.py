@@ -72,6 +72,7 @@ def role_prompt(workload: str) -> str:
 def launch_prompt(
     *,
     branch: str,
+    start_commit: str,
     head: str,
     k: int,
     worktree: str,
@@ -82,7 +83,7 @@ def launch_prompt(
     """The first message of one session of ``branch``'s specialist; ``last_end`` says how the previous one ended."""
     sections = [f"Startup brief:\n{brief.strip()}"] if brief.strip() else []
     sections.append(
-        f"Your branch: {branch}. Its head: {head}. Tests you may have running at once: {k}.\n"
+        f"Your branch: {branch}, started at {start_commit}. Its head: {head}. Tests you may have running at once: {k}.\n"
         f"Your worktree: {worktree} (call worktree_sync before each source change)."
     )
     if recent:

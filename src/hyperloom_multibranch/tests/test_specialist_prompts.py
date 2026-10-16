@@ -28,7 +28,15 @@ def _record(n: int, content: str = "", request_ids: tuple[str, ...] = ()) -> Bra
 
 
 def _launch(**overrides) -> str:
-    fields = {"branch": "s1", "head": "c7", "k": 3, "worktree": "/nfs/s1/worktree", "brief": "", "recent": ()}
+    fields = {
+        "branch": "s1",
+        "start_commit": "c0",
+        "head": "c7",
+        "k": 3,
+        "worktree": "/nfs/s1/worktree",
+        "brief": "",
+        "recent": (),
+    }
     return launch_prompt(**{**fields, **overrides})
 
 
@@ -47,7 +55,8 @@ def test_a_launch_opens_with_the_brief_then_says_where_the_branch_stands():
     prompt = _launch(brief="leads: fp8 KV cache measured +4% on this model")
 
     assert prompt.startswith("Startup brief:\nleads: fp8 KV cache")
-    assert prompt.index("Your branch: s1. Its head: c7. Tests you may have running at once: 3.") > prompt.index("leads")
+    facts = "Your branch: s1, started at c0. Its head: c7. Tests you may have running at once: 3."
+    assert prompt.index(facts) > prompt.index("leads")
     assert "first session on your branch" in prompt
 
 
@@ -56,7 +65,7 @@ def test_a_launch_shows_the_latest_entries_cut_to_size_and_how_the_last_session_
 
     prompt = _launch(recent=entries, last_end="the agent CLI exited 1")
 
-    assert prompt.startswith("Your branch: s1.")
+    assert prompt.startswith("Your branch: s1,")
     assert "[e4] result: entry 4" not in prompt and "[e5] result: entry 5" in prompt
     assert f"[e99] result (s1-17): {'x' * (ENTRY_CHARS - 3)}...\n" in prompt
     assert "Your previous session ended: the agent CLI exited 1." in prompt
