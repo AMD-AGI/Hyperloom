@@ -24,7 +24,7 @@ def _dispatcher(*, frozen: bool) -> DispatcherCollaborator:
     dispatcher._phase_denial_for_action = lambda _a: None
     dispatcher._sequence_denial_for_action = lambda _a: None
     dispatcher.time_budget_denial_for_action = lambda _a, **_kw: None
-    dispatcher.expected_cost_minutes_for = lambda _kind: 12.0
+    dispatcher.expected_cost_minutes_for = lambda _kind, _params=None: 12.0
     return dispatcher
 
 
