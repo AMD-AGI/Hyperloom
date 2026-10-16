@@ -33,7 +33,7 @@ from hyperloom_multibranch.notebook.knowledge.tests.fakes import (
 )
 from hyperloom_multibranch.notebook.knowledge.warm_start import WarmLead
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
-from hyperloom_multibranch.notebook.rsi.briefing import CrossSessionBriefing
+from hyperloom_multibranch.notebook.rsi.briefing import CrossSessionBriefing, SessionBriefs
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, judgement, profile, request, result
 from hyperloom_multibranch.notebook.tests.sessions import METRIC, SPLIT_KV, scripted_session
 
@@ -214,3 +214,50 @@ async def test_without_a_kb_or_a_profile_or_a_completed_read_nothing_is_recalled
     no_kb = await CrossSessionBriefing(notebook).startup_brief("c1")
 
     assert unavailable.lessons == unavailable.leads == no_profile.leads == no_kb.leads == ()
+
+
+class _Changing(_WithExtraFailure):
+    """The notebook, which gets the extra failure once ``extra`` is set."""
+
+    extra = False
+
+    async def snapshot(self) -> NotebookSnapshot:
+        return await super().snapshot() if self.extra else await self.notebook.snapshot()
+
+
+async def test_a_brief_built_again_shows_the_notebook_then_and_reads_the_kb_once(tmp_path: Path) -> None:
+    changing = _Changing(await scripted_session(tmp_path / "notebook", FakeClock()))
+    reader = _reader(_recalled("exp-faster", "keep", 1100.0))
+    briefs = SessionBriefs(changing, experiences=reader, metric=METRIC)
+    repeated = "this session: attention / split kv failed 2 times on the states this one builds on"
+
+    first = await briefs.text("s3", "c1", focus="attention")
+    changing.extra = True
+    later = await briefs.text("s3", "c1")
+
+    assert repeated not in first and repeated in later
+    assert "prior: --block-size 16: keep +10.00% [exp-faster]" in later
+    ((_, context, _),) = reader.calls
+    assert (context["observations"]["bottleneck"], context["observations"]["branch"]) == ("attention", "s3")
+
+
+async def test_a_read_that_did_not_complete_is_read_again_at_the_next_brief(tmp_path: Path) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    failed = FakeExperienceReader(RemoteReadResult("", "unavailable", "", (), ("planner_timeout",)))
+    briefs = SessionBriefs(notebook, experiences=failed)
+
+    await briefs.text("s3", "c1")
+    await briefs.text("s3", "c1")
+
+    assert len(failed.calls) == 2
+
+
+async def test_each_branch_keeps_its_focus_and_every_branch_shares_one_index_and_cache(tmp_path: Path) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    briefs = SessionBriefs(notebook, experiences=_reader())
+
+    briefs.for_branch("s3", "attention")
+    s3, s4 = briefs.for_branch("s3"), briefs.for_branch("s4")
+
+    assert (s3.focus, s4.focus) == ("attention", "")
+    assert s3.recalls is s4.recalls and s3.identities is s4.identities

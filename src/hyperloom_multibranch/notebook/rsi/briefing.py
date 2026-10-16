@@ -16,13 +16,18 @@ Its brief has three parts:
 At the root before anything was tried, the brief is the first batch's: cross-session content only. Lessons and leads
 together stay under ``max_chars``, the most specific first. Where the brief sits in the prompt and how long it may be
 is xiaofei's call, so the cap is a parameter.
+
+:class:`SessionBriefs` is the session's one source of briefs, so a branch's brief can be rebuilt at every launch of its
+specialist, on its head then: the Experience KB is read once per focus and branch, and only the notebook's part is read
+again. It keeps the focus each branch was given.
 """
 
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from hyperloom_multibranch.contracts.notebook.interfaces import Notebook, StartupBriefProvider
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, StartupBrief
@@ -44,6 +49,7 @@ from hyperloom_multibranch.notebook.learning_search import (
     session_matches,
 )
 from hyperloom_multibranch.notebook.rsi.analysis import FailureTier, failures_at, repeated_failures
+from hyperloom_multibranch.notebook.tools import render_brief
 
 DEFAULT_MAX_CHARS = 4000
 KEPT = "keep"
@@ -92,6 +98,24 @@ def _fit(items: Iterable[_Item], max_chars: int) -> tuple[tuple[str, ...], tuple
     return tuple(item.text for item in kept if item.lesson), tuple(item.text for item in kept if not item.lesson)
 
 
+class RecallCache:
+    """The completed Experience KB reads of one session, by focus, branch and baseline; a read that did not complete
+    is not kept, so the next brief tries again."""
+
+    def __init__(self) -> None:
+        self._reads: dict[tuple[str, str, float | None], Recall] = {}
+        self._lock = threading.Lock()
+
+    def get(self, key: tuple[str, str, float | None]) -> Recall | None:
+        with self._lock:
+            return self._reads.get(key)
+
+    def keep(self, key: tuple[str, str, float | None], recall: Recall) -> None:
+        if recall.available:
+            with self._lock:
+                self._reads[key] = recall
+
+
 @dataclass(frozen=True)
 class CrossSessionBriefing(StartupBriefProvider):
     """A startup brief with this session's lessons and what other sessions left.
@@ -100,7 +124,8 @@ class CrossSessionBriefing(StartupBriefProvider):
     specialist attacks) on ``branch``; ``metric`` the throughput metric whose baseline the read carries.
     ``identities`` looks up the conditions a read's summaries leave out; by default one is built on ``experiences``,
     and passing one index to every briefing of a session reads the export once. ``learnings`` is the session's one
-    recall of the specialists' learnings; without it the brief holds this session's only.
+    recall of the specialists' learnings; without it the brief holds this session's only. ``recalls`` keeps the
+    completed reads, so a brief built again reads the Experience KB no more.
     """
 
     notebook: Notebook
@@ -112,6 +137,7 @@ class CrossSessionBriefing(StartupBriefProvider):
     max_chars: int = DEFAULT_MAX_CHARS
     identities: IdentityIndex | None = None
     learnings: LearningRecall | None = None
+    recalls: RecallCache | None = None
 
     def __post_init__(self) -> None:
         if self.identities is None and self.experiences is not None:
@@ -121,7 +147,10 @@ class CrossSessionBriefing(StartupBriefProvider):
         if self.experiences is None or snapshot.profile is None:
             return None
         baseline = snapshot.baseline.values.get(self.metric) if snapshot.baseline is not None else None
-        return await asyncio.to_thread(
+        key = (self.focus, self.branch, baseline)
+        if self.recalls is not None and (kept := self.recalls.get(key)) is not None:
+            return kept
+        recall = await asyncio.to_thread(
             recall_experiences,
             self.experiences,
             snapshot.profile,
@@ -129,6 +158,9 @@ class CrossSessionBriefing(StartupBriefProvider):
             RecallQuery(self.focus, self.branch),
             identities=self.identities,
         )
+        if self.recalls is not None:
+            self.recalls.keep(key, recall)
+        return recall
 
     async def _learnt(self, snapshot: NotebookSnapshot) -> tuple[list[str], list[str]]:
         """This session's learnings about ``focus`` and past sessions', as lessons; the recall logs what it showed."""
@@ -167,4 +199,50 @@ class CrossSessionBriefing(StartupBriefProvider):
         return replace(tried, lessons=lessons, leads=leads)
 
 
-__all__ = ["DEFAULT_MAX_CHARS", "CrossSessionBriefing"]
+@dataclass
+class SessionBriefs:
+    """The session's briefs for every branch, each built on demand from the notebook as it stands then.
+
+    The fields are :class:`CrossSessionBriefing`'s for the whole session. One identity index and one cache of the
+    Experience KB reads serve every branch. A branch keeps the ``focus`` it was last given, so a later call without
+    one, at a restart of its specialist, briefs it on the same bottleneck.
+    """
+
+    notebook: Notebook
+    warm: tuple[WarmLead, ...] = ()
+    experiences: ExperienceReader | None = None
+    metric: str = ""
+    learnings: LearningRecall | None = None
+    max_chars: int = DEFAULT_MAX_CHARS
+    _identities: IdentityIndex | None = field(init=False, default=None)
+    _recalls: RecallCache = field(init=False, default_factory=RecallCache)
+    _focus: dict[str, str] = field(init=False, default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self._identities = IdentityIndex.of(self.experiences) if self.experiences is not None else None
+
+    def for_branch(self, branch: str, focus: str | None = None) -> CrossSessionBriefing:
+        """The briefing of ``branch``, on ``focus`` when given and else on the focus it was last given."""
+
+        if focus is not None:
+            self._focus[branch] = focus
+        return CrossSessionBriefing(
+            self.notebook,
+            warm=self.warm,
+            experiences=self.experiences,
+            metric=self.metric,
+            focus=self._focus.get(branch, ""),
+            branch=branch,
+            max_chars=self.max_chars,
+            identities=self._identities,
+            learnings=self.learnings,
+            recalls=self._recalls,
+        )
+
+    async def text(self, branch: str, commit: str, focus: str | None = None) -> str:
+        """The brief of ``branch`` starting from ``commit``, rendered as the prompt shows it."""
+
+        return render_brief(await self.for_branch(branch, focus).startup_brief(commit))
+
+
+__all__ = ["DEFAULT_MAX_CHARS", "CrossSessionBriefing", "RecallCache", "SessionBriefs"]
