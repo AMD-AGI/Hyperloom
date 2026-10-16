@@ -153,13 +153,26 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     return " ".join(out)
 
 
-# Serving-ineligible harness flags.
+# Serving-ineligible harness flags: legal to benchmark with, wrong to hand back as a serving recipe. Stripped where a
+# recipe is persisted, never on the launch path: the baseline keeps the operator's flags, so a variant must too.
 _BENCHMARK_HARNESS_FLAG_DENYLIST: tuple[str, ...] = ("--no-enable-prefix-caching",)
 
 
 def strip_benchmark_harness_flags(server_args: str | None) -> str:
     """Drop every :data:`_BENCHMARK_HARNESS_FLAG_DENYLIST` entry from ``server_args``."""
     return remove_server_args(server_args, _BENCHMARK_HARNESS_FLAG_DENYLIST)
+
+
+def normalize_server_args(server_args: str | None) -> str:
+    """Compact JSON values and drop one layer of shell wrappers, removing nothing.
+
+    Magpie expands ``EXTRA_*_ARGS`` unquoted, so a ``--quantization 'fp8'`` wrapper would reach argv literally.
+    """
+    args = _reserialize_json_blobs(str(server_args or "").strip())
+    if not args:
+        return ""
+    tokens = _split_args_preserving_json(args)
+    return args if tokens is None else " ".join(tokens)
 
 
 def compose_server_args(
@@ -186,7 +199,7 @@ def compose_server_args(
         raw = merge_server_args(combined_base, variant_extra_args)
         pruned = remove_server_args(combined_base, remove_args)
         composed = merge_server_args(pruned, variant_extra_args)
-    result = strip_benchmark_harness_flags(composed)
+    result = normalize_server_args(composed)
     # Compare against the RAW inputs, not against ``composed``.
     _warn_on_damaged_json_values(raw, result)
     return result
@@ -233,8 +246,9 @@ def _parses_as_json(value: str) -> bool:
 
 
 # A JSON "bareword": an identifier-like token that appears where a double-quoted JSON key or string value should be
-# (letters/digits/underscore plus the ``.``, ``/``, ``-`` common in model ids and paths).
-_JSON_BAREWORD = r"[+-]?[A-Za-z_][A-Za-z0-9_./-]*"
+# (letters/digits/underscore plus the ``.``, ``/``, ``-`` common in model ids and paths). It may start with ``/`` so an
+# absolute path value (a spec-decode draft ``model``) is quoted too; a bare number never matches and stays numeric.
+_JSON_BAREWORD = r"[+-]?[A-Za-z_/][A-Za-z0-9_./-]*"
 _UNQUOTED_KEY_RE = re.compile(r"([{,]\s*)(" + _JSON_BAREWORD + r")(\s*:)")
 _UNQUOTED_VALUE_RE = re.compile(r"([:\[,]\s*)(" + _JSON_BAREWORD + r")")
 
@@ -863,3 +877,102 @@ def merge_cumulative_extra_server_args(
     else:
         merged = candidate or full or base
     return dedupe_extra_server_args(merged)
+
+
+def _json_with_field_set(blob: str, field: str, value: str) -> str | None:
+    """``blob`` with ``field`` set to ``value``, compact; ``None`` when it is not a JSON object."""
+    try:
+        config = json.loads(blob)
+    except json.JSONDecodeError:
+        repaired = _repair_unquoted_json(blob)
+        config = json.loads(repaired) if repaired is not None else None
+    if not isinstance(config, dict):
+        return None
+    if config.get(field) == value:
+        return blob
+    config[field] = value
+    return json.dumps(config, separators=(",", ":"))
+
+
+def _with_dotted_config_merged(args: str, flag: str) -> str:
+    """``args`` with vLLM's cudagraph mode forced off, keeping every other configured field.
+
+    vLLM collects every dotted ``--compilation-config.<field>`` into one dict and appends that
+    dict to argv LAST, so a dotted arg replaces a JSON-form ``--compilation-config`` outright --
+    every field, in either order, with no warning. Appending is therefore only correct when
+    there is no JSON form to lose; otherwise the field is merged into the existing object here.
+    """
+    option, off_value = flag.split()
+    config_option, field = option.split(".", 1)
+    tokens = _split_args_preserving_json(args)
+    if tokens is None:
+        # Unsplittable args hold no object we could identify to merge into.
+        return f"{args} {flag}".strip()
+    if "--enforce-eager" in tokens:
+        return args
+
+    def _value_of(idx: int) -> tuple[str, int | None]:
+        """The option's value and the index holding it (``None`` for the ``--flag=value`` form)."""
+        token = tokens[idx]
+        if "=" in token:
+            return token.split("=", 1)[1], None
+        return (tokens[idx + 1], idx + 1) if idx + 1 < len(tokens) else ("", None)
+
+    dotted_mode_idx: int | None = None
+    json_idx: int | None = None
+    has_other_dotted = False
+    for idx, token in enumerate(tokens):
+        name = token.split("=", 1)[0]
+        if name == option:
+            dotted_mode_idx = idx
+        elif name.startswith(f"{config_option}."):
+            has_other_dotted = True
+        elif name == config_option:
+            json_idx = idx
+
+    if dotted_mode_idx is not None:
+        value, value_idx = _value_of(dotted_mode_idx)
+        if value == off_value:
+            return args
+        if value_idx is None:
+            tokens[dotted_mode_idx] = f"{option}={off_value}"
+        else:
+            tokens[value_idx] = off_value
+        return " ".join(tokens)
+    if json_idx is None or has_other_dotted:
+        # Dotted fields merge with each other, and the operator's own dotted arg is already
+        # costing them any JSON form, so appending loses nothing that was not lost already.
+        return f"{args} {flag}".strip()
+
+    value, value_idx = _value_of(json_idx)
+    merged = _json_with_field_set(value, field, off_value)
+    if merged is None:
+        log.warning(
+            "%s does not hold a JSON object, so capture is disabled by appending %s; "
+            "vLLM resolves the pair by discarding the existing value",
+            config_option,
+            flag,
+        )
+        return f"{args} {flag}".strip()
+    if merged == value:
+        return args
+    if value_idx is None:
+        tokens[json_idx] = f"{config_option}={merged}"
+    else:
+        tokens[value_idx] = merged
+    return " ".join(tokens)
+
+
+def with_capture_disabled(args: str, flag: str) -> str:
+    """``args`` with ``flag`` applied once (idempotent).
+
+    A dotted option (``--config.field value``) is merged into any existing ``--config`` rather
+    than appended, because the server resolves the pair by discarding that one; see
+    :func:`_with_dotted_config_merged`. A plain flag is appended unless already present, by
+    whole token so ``--disable-cuda-graph-extra`` is not mistaken for ``--disable-cuda-graph``.
+    """
+    if "." in flag.split()[0]:
+        return _with_dotted_config_merged(args or "", flag)
+    if flag in (args or "").split():
+        return args or ""
+    return f"{args} {flag}".strip()

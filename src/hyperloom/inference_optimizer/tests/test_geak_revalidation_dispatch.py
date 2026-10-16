@@ -15,6 +15,7 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant
 from hyperloom.orchestrator.actions.executors._proposal_identity import effective_fingerprint
+from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_SKIP_TO_SWEEP
 
@@ -857,11 +858,17 @@ def _stub_geak_runner_call(monkeypatch, outcome) -> list[str]:
     """Replace only the GEAK runner's own thread call; every other one runs.
 
     ``asyncio.to_thread`` is shared, so the phase's bus and file work travels
-    through it too — dispatching on the runner closure keeps those real.
+    through it too — dispatching on the runner closure keeps those real. The
+    hand-off's GPU check reports the cards free, so the outcome does not hang
+    on what the test host's GPUs hold.
 
     Returns the list the interceptions are recorded in, so a test can prove the
     phase reached the runner rather than returning at an earlier gate.
     """
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._server_lifecycle.free_gpus_for_handoff",
+        lambda *_args, **_kwargs: GpuHandoff(reaped=[], busy=[], holders=[], unverified=""),
+    )
     original_to_thread = asyncio.to_thread
     calls: list[str] = []
 

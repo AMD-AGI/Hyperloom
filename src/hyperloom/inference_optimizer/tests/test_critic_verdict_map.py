@@ -238,6 +238,7 @@ class _BareSharedState:
     baseline_warm_runtime_sec: float = 0.0
     explore_search: dict = field(default_factory=dict)
     macro_cycle: int = 0
+    specialist_rounds: list = field(default_factory=list)
 
     def save(self, _session_dir: Path | None) -> None:
         self.save_count += 1

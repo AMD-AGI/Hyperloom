@@ -32,6 +32,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     run_with_session_kill,
 )
 from hyperloom.orchestrator.bus.gpu_pool import GPU_LEASE_TTL_GRACE
+from hyperloom.orchestrator.loop import time_budget
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import (
     _CANCEL_NOTICE_SEC,
@@ -43,6 +44,7 @@ from hyperloom.orchestrator.loop.time_budget import (
     expected_action_cost_minutes,
     measured_baseline_runtime_sec,
 )
+from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.policy.gate import PolicyDenied
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState, effective_closing_grace_sec
@@ -55,6 +57,9 @@ _EXPENSIVE_ACTION = "conc_sweep"
 _EXPENSIVE_COST_MIN = 30.0
 # Cheap enough to fit anything but a nearly-spent budget.
 _CHEAP_ACTION = "profile"
+# What the orchestrator may propose in FRAMEWORK_AGENT, priced above a five-minute budget.
+_PROPOSABLE_ACTION = "explore"
+_PROPOSABLE_PHASE = "FRAMEWORK_AGENT"
 # An action the catalogue prices at five minutes, and what one of the two sessions that motivated the wall-clock work
 # actually measured for it.
 _BASELINE_ACTION = "baseline"
@@ -257,7 +262,9 @@ class TestTimeBudgetGate:
         assert isinstance(denied, PolicyDenied)
         assert denied.rule == "time_budget"
         assert f"{_EXPENSIVE_COST_MIN:.0f} min" in str(denied)
-        assert "report" in str(getattr(denied, "hint", ""))
+        # Outside CLOSE a `report` is refused at admission, so the hint must not send the orchestrator there.
+        hint = str(getattr(denied, "hint", ""))
+        assert "report" not in hint and "Coordinator closes the session" in hint
 
     def test_an_action_that_fits_is_admitted(self, coord: Coordinator):
         _set_budget(coord, minutes=20)
@@ -346,23 +353,78 @@ class TestTheLeaseCoversTheExpectedCost:
         assert coord.dispatcher.registry_lanes_ttl(kind)[1] == ACTION_CATALOGUE[kind].lease_ttl_sec
 
 
+@pytest.fixture
+def proposing_coord(coord: Coordinator) -> Coordinator:
+    """A coordinator in the phase where the orchestrator may propose :data:`_PROPOSABLE_ACTION`."""
+    coord.shared_state.phase = _PROPOSABLE_PHASE
+    return coord
+
+
 class TestAdmissionGateOrder:
     """``admission_denial_for_action`` chains the gates; the first one wins."""
 
-    def test_the_baseline_prerequisite_is_reported_before_the_budget(self, coord: Coordinator):
-        coord.shared_state.baseline_tput = 0.0
-        _set_budget(coord, minutes=1)
-        denied = coord.dispatcher.admission_denial_for_action("explore")
+    def test_the_baseline_prerequisite_is_reported_before_the_budget(self, proposing_coord: Coordinator):
+        proposing_coord.shared_state.baseline_tput = 0.0
+        _set_budget(proposing_coord, minutes=1)
+        denied = proposing_coord.dispatcher.admission_denial_for_action(_PROPOSABLE_ACTION)
         assert denied is not None and denied.rule == "execution_order"
 
-    def test_the_budget_gate_runs_once_the_sequence_gate_passes(self, coord: Coordinator):
-        _set_budget(coord, minutes=20)
-        denied = coord.dispatcher.admission_denial_for_action(_EXPENSIVE_ACTION)
+    def test_the_budget_gate_runs_once_the_sequence_gate_passes(self, proposing_coord: Coordinator):
+        _set_budget(proposing_coord, minutes=5)
+        denied = proposing_coord.dispatcher.admission_denial_for_action(_PROPOSABLE_ACTION)
         assert denied is not None and denied.rule == "time_budget"
 
-    def test_an_action_clearing_both_gates_is_admitted(self, coord: Coordinator):
+    def test_an_action_clearing_both_gates_is_admitted(self, proposing_coord: Coordinator):
+        _set_budget(proposing_coord, minutes=600)
+        assert proposing_coord.dispatcher.admission_denial_for_action(_PROPOSABLE_ACTION) is None
+
+
+def _catalogue_cost_min(action: str) -> float:
+    return expected_action_cost_minutes(ACTION_CATALOGUE[action])
+
+
+def _set_phase_budget(coord: Coordinator, monkeypatch, *, phase: str, minutes_left: float) -> None:
+    """Put the session in ``phase`` with ``minutes_left`` of that phase's own budget remaining."""
+    coord.shared_state.phase = phase
+    monkeypatch.setattr(machine_state, "phase_budget_remaining_seconds", lambda _state, **_kw: minutes_left * 60.0)
+
+
+class TestThePhaseBudgetGate:
+    """FRAMEWORK and KERNEL refuse work their own remaining budget cannot fit, however much the session has left."""
+
+    @pytest.mark.parametrize("phase", sorted(time_budget.PHASE_BUDGET_GATED_PHASES))
+    def test_an_action_too_big_for_the_phase_is_denied(self, coord: Coordinator, monkeypatch, phase: str):
+        # The costliest action the phase lets the orchestrator propose; every gated phase prices it above 5 minutes.
+        action = max(machine_state.allowed_actions_for(phase), key=_catalogue_cost_min)
         _set_budget(coord, minutes=600)
-        assert coord.dispatcher.admission_denial_for_action(_EXPENSIVE_ACTION) is None
+        _set_phase_budget(coord, monkeypatch, phase=phase, minutes_left=5)
+
+        denied = coord.dispatcher.admission_denial_for_action(action)
+
+        assert isinstance(denied, PolicyDenied)
+        assert denied.rule == "phase_time_budget"
+        assert f"{_catalogue_cost_min(action):.0f} min" in str(denied)
+
+    def test_a_phase_without_a_search_budget_answers_only_to_the_session(self, coord: Coordinator, monkeypatch):
+        _set_budget(coord, minutes=600)
+        _set_phase_budget(coord, monkeypatch, phase="PRELUDE", minutes_left=1)
+        assert coord.dispatcher.admission_denial_for_action(_BASELINE_ACTION) is None
+
+    @pytest.mark.asyncio
+    async def test_a_queued_task_the_phase_outlived_is_dropped_before_dispatch(self, coord: Coordinator, monkeypatch):
+        _set_budget(coord, minutes=600)
+        task, _ = await coord.tasks.create_or_return_existing(
+            kind=_EXPENSIVE_ACTION,
+            params={},
+            idempotency_key="q-phase-drained",
+        )
+        _set_phase_budget(coord, monkeypatch, phase="FRAMEWORK_AGENT", minutes_left=20)
+
+        await coord.dispatcher._spawn_fitting_queued()
+
+        dropped = await coord.tasks.get(task.task_id)
+        assert dropped.state == "cancelled"
+        assert dropped.history[-1]["evidence"]["reason"] == "phase_time_budget"
 
 
 def _delegate(action_name: str, key: str) -> Intent:
@@ -378,51 +440,51 @@ class TestIntentPathsAreGated:
     @pytest.mark.asyncio
     async def test_delegating_an_over_budget_action_queues_nothing(
         self,
-        coord: Coordinator,
+        proposing_coord: Coordinator,
         monkeypatch,
     ):
-        _set_budget(coord, minutes=20)
+        _set_budget(proposing_coord, minutes=5)
         recorded: list[PolicyDenied] = []
 
         async def _rec(source, intent, denied, action_name=None):
             recorded.append(denied)
 
-        monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
-        await coord.router.handle_delegate("orchestration", _delegate(_EXPENSIVE_ACTION, "d-budget"))
+        monkeypatch.setattr(proposing_coord.router, "record_policy_denied", _rec)
+        await proposing_coord.router.handle_delegate("orchestration", _delegate(_PROPOSABLE_ACTION, "d-budget"))
         assert [d.rule for d in recorded] == ["time_budget"]
-        assert [t for t in await coord.tasks.queued() if t.kind == _EXPENSIVE_ACTION] == []
+        assert [t for t in await proposing_coord.tasks.queued() if t.kind == _PROPOSABLE_ACTION] == []
 
     @pytest.mark.asyncio
     async def test_delegating_an_affordable_action_still_queues(
         self,
-        coord: Coordinator,
+        proposing_coord: Coordinator,
         monkeypatch,
     ):
-        _set_budget(coord, minutes=600)
-        monkeypatch.setattr(coord.shared_state, "is_pruned", lambda a: False)
-        await coord.router.handle_delegate("orchestration", _delegate(_EXPENSIVE_ACTION, "d-ok"))
-        assert [t for t in await coord.tasks.queued() if t.kind == _EXPENSIVE_ACTION]
+        _set_budget(proposing_coord, minutes=600)
+        monkeypatch.setattr(proposing_coord.shared_state, "is_pruned", lambda a: False)
+        await proposing_coord.router.handle_delegate("orchestration", _delegate(_PROPOSABLE_ACTION, "d-ok"))
+        assert [t for t in await proposing_coord.tasks.queued() if t.kind == _PROPOSABLE_ACTION]
 
     @pytest.mark.asyncio
     async def test_proposing_an_over_budget_action_never_reaches_the_critic(
         self,
-        coord: Coordinator,
+        proposing_coord: Coordinator,
         monkeypatch,
     ):
-        _set_budget(coord, minutes=20)
+        _set_budget(proposing_coord, minutes=5)
         recorded: list[PolicyDenied] = []
 
         async def _rec(source, intent, denied, action_name=None):
             recorded.append(denied)
 
-        monkeypatch.setattr(coord.router, "record_policy_denied", _rec)
+        monkeypatch.setattr(proposing_coord.router, "record_policy_denied", _rec)
         intent = Intent(
             type=IntentType.PROPOSE_ACTION,
-            payload={"action_name": _EXPENSIVE_ACTION, "predicted_gain_pct": 5.0},
+            payload={"action_name": _PROPOSABLE_ACTION, "predicted_gain_pct": 5.0},
         )
-        await coord.router._handle_propose_action("orchestration", intent)
+        await proposing_coord.router._handle_propose_action("orchestration", intent)
         assert [d.rule for d in recorded] == ["time_budget"]
-        assert not coord.state.pending_proposals
+        assert not proposing_coord.state.pending_proposals
 
 
 class TestPreDispatchBackstop:

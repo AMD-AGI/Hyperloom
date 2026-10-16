@@ -1132,6 +1132,50 @@ def _run_registered_author(
     return rc
 
 
+def _record_author_log(log_path: str, progress: list[str], **fields: Any) -> None:
+    """Write the author log, best-effort.
+
+    A log this run could not write is not a reason to lose the verdict it was
+    recording, so the failure is reported and the caller carries on.
+    """
+    try:
+        _write_registered_author_log(log_path, progress, **fields)
+    except OSError:
+        log.warning("could not write registered author log %s", log_path)
+
+
+def _safety_detail(exc: AuthorSafetyError) -> str:
+    """The guard's complaint, with the paths it named."""
+    detail = str(exc)
+    return f"{detail}; paths={', '.join(exc.paths[:20])}" if exc.paths else detail
+
+
+def _author_run_error_verdict(run_error: Exception, *, backend: Any, timeout_s: int) -> tuple[int, bool]:
+    """The exit code for an agent run that raised, and whether another attempt is worth spending."""
+    # Checked ahead of the timeout markers: a provider safety stop is final even if its message happens to mention
+    # a clock, and retrying one is exactly the anti-pattern the session-resume allowlist already refuses.
+    if is_agent_safety_error(run_error):
+        log.error(
+            "%s author was stopped by a provider safety guard: %s: %s",
+            backend.name,
+            type(run_error).__name__,
+            run_error,
+        )
+        return AUTHOR_RC_SAFETY, False
+    if is_agent_timeout_error(run_error):
+        log.warning(
+            "%s author timed out after %ss: %s: %s",
+            backend.name,
+            timeout_s,
+            type(run_error).__name__,
+            run_error,
+        )
+        # The attempt just spent the whole per-attempt budget; another would spend it again.
+        return AUTHOR_RC_TIMEOUT, False
+    log.error("%s author failed: %s: %s", backend.name, type(run_error).__name__, run_error)
+    return AUTHOR_RC_FAILED, classify_llm_error(run_error) in RETRYABLE_KINDS
+
+
 def _run_registered_author_once(
     backend: Any,
     prompt: str,
@@ -1152,18 +1196,13 @@ def _run_registered_author_once(
     try:
         guard = _AuthorWorkspaceGuard(workdir, requested_targets, requested_module_dirs)
     except AuthorSafetyError as exc:
-        detail = str(exc)
-        if exc.paths:
-            detail = f"{detail}; paths={', '.join(exc.paths[:20])}"
+        detail = _safety_detail(exc)
         heading = (
             "author workspace could not be inspected before run"
             if exc.transient
             else "author workspace safety rejected before run"
         )
-        try:
-            _write_registered_author_log(log_path, progress, error=f"{heading}: {detail}")
-        except OSError:
-            log.warning("could not write registered author log %s", log_path)
+        _record_author_log(log_path, progress, error=f"{heading}: {detail}")
         log.error("%s: %s", heading, detail)
         # A workspace the guard could not read is the box's problem, not the transport's.
         return (AUTHOR_RC_FAILED if exc.transient else AUTHOR_RC_SAFETY), False
@@ -1225,37 +1264,23 @@ def _run_registered_author_once(
     try:
         enforcement = guard.enforce()
     except AuthorSafetyError as exc:
-        detail = str(exc)
-        if exc.paths:
-            detail = f"{detail}; paths={', '.join(exc.paths[:20])}"
         heading = (
             "author workspace restoration could not complete"
             if exc.transient
             else "author workspace safety restoration failed"
         )
-        reason = _with_run_error(f"{heading}: {detail}")
-        try:
-            _write_registered_author_log(
-                log_path,
-                progress,
-                text=str(getattr(result, "text", "") or ""),
-                error=reason,
-            )
-        except OSError:
-            log.warning("could not write registered author log %s", log_path)
+        reason = _with_run_error(f"{heading}: {_safety_detail(exc)}")
+        _record_author_log(log_path, progress, text=str(getattr(result, "text", "") or ""), error=reason)
         log.error("%s", reason)
         return (AUTHOR_RC_FAILED if exc.transient else AUTHOR_RC_SAFETY), False
     except Exception as exc:
         detail = f"{type(exc).__name__}: internal workspace guard failure"
-        try:
-            _write_registered_author_log(
-                log_path,
-                progress,
-                text=str(getattr(result, "text", "") or ""),
-                error=_with_run_error(f"author workspace safety rejection: {detail}"),
-            )
-        except OSError:
-            log.warning("could not write registered author log %s", log_path)
+        _record_author_log(
+            log_path,
+            progress,
+            text=str(getattr(result, "text", "") or ""),
+            error=_with_run_error(f"author workspace safety rejection: {detail}"),
+        )
         # The agent-facing log stays content-free (a guard defect is not something the author can act on), but the
         # operator needs the traceback to fix it.
         log.exception("author workspace safety restoration failed: %s", _with_run_error(detail))
@@ -1267,15 +1292,7 @@ def _run_registered_author_once(
         if len(violations) > 20:
             detail += f", ... ({len(violations)} paths)"
         reason = _with_run_error(f"author workspace rejected and restored non-target paths: {detail}")
-        try:
-            _write_registered_author_log(
-                log_path,
-                progress,
-                text=str(getattr(result, "text", "") or ""),
-                error=reason,
-            )
-        except OSError:
-            log.warning("could not write registered author log %s", log_path)
+        _record_author_log(log_path, progress, text=str(getattr(result, "text", "") or ""), error=reason)
         log.error("%s", reason)
         # Deterministic: the same guard, worktree and prompt reject the next attempt the same way, and the loop is
         # told so rather than spending one on it.
@@ -1290,54 +1307,17 @@ def _run_registered_author_once(
     if run_error is not None:
         if not isinstance(run_error, Exception):
             raise run_error
-        try:
-            _write_registered_author_log(
-                log_path,
-                progress,
-                error=f"{type(run_error).__name__}: {run_error}",
-                created=enforcement.created,
-            )
-        except OSError:
-            log.warning("could not write registered author log %s", log_path)
-        # Checked ahead of the timeout markers: a provider safety stop is final even if its message happens to mention
-        # a clock, and retrying one is exactly the anti-pattern the session-resume allowlist already refuses.
-        if is_agent_safety_error(run_error):
-            log.error(
-                "%s author was stopped by a provider safety guard: %s: %s",
-                backend.name,
-                type(run_error).__name__,
-                run_error,
-            )
-            return AUTHOR_RC_SAFETY, False
-        if is_agent_timeout_error(run_error):
-            log.warning(
-                "%s author timed out after %ss: %s: %s",
-                backend.name,
-                timeout_s,
-                type(run_error).__name__,
-                run_error,
-            )
-            # The attempt just spent the whole per-attempt budget; another would spend it again.
-            return AUTHOR_RC_TIMEOUT, False
-        log.error(
-            "%s author failed: %s: %s",
-            backend.name,
-            type(run_error).__name__,
-            run_error,
+        _record_author_log(
+            log_path,
+            progress,
+            error=f"{type(run_error).__name__}: {run_error}",
+            created=enforcement.created,
         )
-        return AUTHOR_RC_FAILED, classify_llm_error(run_error) in RETRYABLE_KINDS
+        return _author_run_error_verdict(run_error, backend=backend, timeout_s=timeout_s)
 
     assert result is not None
     final_text = str(getattr(result, "text", "") or "")
-    try:
-        _write_registered_author_log(
-            log_path,
-            progress,
-            text=final_text,
-            created=enforcement.created,
-        )
-    except OSError:
-        log.warning("could not write registered author log %s", log_path)
+    _record_author_log(log_path, progress, text=final_text, created=enforcement.created)
     end_reason = result.end_reason
     if end_reason == "agent_stopped":
         return AUTHOR_RC_OK, False

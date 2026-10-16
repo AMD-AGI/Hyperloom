@@ -52,6 +52,8 @@ def test_normalize_quant_aliases():
     assert _normalize_quant_type("w8a8") == "per_token"
     assert _normalize_quant_type("per_1x128") == "blockscale"
     assert _normalize_quant_type("a4w4") == "fp4"
+    assert _normalize_quant_type("per_1x32") == "fp4"
+    assert _normalize_quant_type("No") == "none"
     assert _normalize_quant_type("custom") == "custom"
 
 

@@ -13,13 +13,10 @@ from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.orchestrator.phases.machine_state import (
     DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
     DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
-    ESCALATE_HINT_BUDGET_BUMP_CAP,
-    ESCALATE_HINT_BUDGET_BUMP_DELTA,
     PHASE_CLOSE,
     PHASE_KERNEL_AGENT,
     PHASE_SWEEP,
     _config_lever_dry,
-    apply_escalate_budget_bump,
     compute_next_phase,
     kernel_work_pending,
 )
@@ -40,8 +37,6 @@ def test_escalate_hint_vocab_closed():
             "skip_to_kernel",
             "skip_to_sweep",
             "skip_to_close",
-            "extend_explore_budget",
-            "extend_kernel_budget",
         }
     )
 
@@ -462,31 +457,6 @@ def test_a_whitespace_padded_target_file_still_matches():
     }
 
     assert kernel_work_pending(state) is False
-
-
-def test_apply_escalate_budget_bump_lifts_phase_within_cap():
-    out = apply_escalate_budget_bump(
-        {"FRAMEWORK_AGENT": 0.60},
-        phase="FRAMEWORK_AGENT",
-    )
-    assert out["FRAMEWORK_AGENT"] == pytest.approx(
-        0.60 + ESCALATE_HINT_BUDGET_BUMP_DELTA,
-    )
-
-
-def test_apply_escalate_budget_bump_clamps_to_cap():
-    out = apply_escalate_budget_bump(
-        {"FRAMEWORK_AGENT": 0.95},
-        phase="FRAMEWORK_AGENT",
-    )
-    assert out["FRAMEWORK_AGENT"] == ESCALATE_HINT_BUDGET_BUMP_CAP
-
-
-def test_apply_escalate_budget_bump_ignores_unknown_phase():
-    inp = {"FRAMEWORK_AGENT": 0.60}
-    out = apply_escalate_budget_bump(inp, phase="NOT_A_PHASE")
-    # No bump; returns a normalised copy with all known phases populated.
-    assert out["FRAMEWORK_AGENT"] == 0.60
 
 
 def test_set_pending_escalate_hint_accepts_vocab():

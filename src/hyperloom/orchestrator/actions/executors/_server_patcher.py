@@ -51,7 +51,9 @@ _VLLM_GRAPH_CAPTURE_MARKERS: tuple[str, ...] = ("graph_capture_profiler", "captu
 # known image SHAs.
 _XDIT_PATCH_RE = re.compile(r"^config_xdit_v(\d+(?:\.\d+)*)\.patch$")
 _XDIT_PATCHES_LEAF = "xdit_patches"
-_XDIT_DEFAULT_SOURCE_ROOT = Path("/app/xDiT")
+def _xdit_default_source_root() -> Path:
+    from hyperloom.inference_optimizer import framework_registry
+    return Path(framework_registry.source_root("xdit") or "/app/xDiT")
 _XDIT_SENTINEL_REL: tuple[str, ...] = ("xfuser", "config", "args.py")
 _XDIT_SENTINEL_MARKERS: tuple[str, ...] = ("profile_capture_phase",)
 # Known image tag → head commit SHA (full 40-char).
@@ -442,7 +444,7 @@ def _discover_xdit_plan(arg: Path | str | None) -> _PatchPlan | None:
     Only attempts patching when the HEAD SHA matches a known image.
     Unknown SHAs are skipped — no patch is attempted.
     """
-    source_root = Path(os.environ.get("XDIT_PATH", "").strip() or str(_XDIT_DEFAULT_SOURCE_ROOT))
+    source_root = Path(os.environ.get("XDIT_PATH", "").strip() or str(_xdit_default_source_root()))
     if not source_root.is_dir():
         log.info("_server_patcher: xDiT source root %s not found; skip patch", source_root)
         return None

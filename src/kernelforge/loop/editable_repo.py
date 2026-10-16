@@ -19,6 +19,7 @@ serialize nothing at all.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 import fcntl
 import functools
 import os
@@ -53,51 +54,9 @@ def _scan_editable_roots() -> tuple[str, ...]:
     and extracts the absolute paths they map into. Such packages are imported via
     a sys.meta_path finder that points at the *live* repo and CANNOT be overridden
     by PYTHONPATH, so a git worktree copy is never imported.
-
-    Handles two finder layouts:
-      1. Path-string .pth files that contain absolute paths in quotes.
-      2. Setuptools-style .pth files that ``import __editable___<pkg>_finder``;
-         the finder .py has a ``MAPPING`` dict mapping package names to paths.
     """
     roots: set[str] = set()
-    seen_dirs: set[str] = set()
-    scan_dirs = list(sys.path)
-    try:
-        scan_dirs.extend(site.getsitepackages())
-    except AttributeError:
-        # Absent under a virtualenv built without the site module's framework
-        # support, and raising rather than returning empty on some builds. The
-        # prefix probing below reaches the same directories, so this is one of
-        # several ways to find them rather than the only one.
-        pass
-    if hasattr(site, "getusersitepackages"):
-        try:
-            scan_dirs.append(site.getusersitepackages())
-        except AttributeError:
-            # Same: a user site directory is optional, and its absence says
-            # nothing about the roots the rest of the scan will find.
-            pass
-    # Venv / conda site-packages may not appear in sys.path; probe conventional
-    # locations for sys.prefix, VIRTUAL_ENV, CONDA_PREFIX, and the interpreter.
-    _pyver = f"python{sys.version_info[0]}.{sys.version_info[1]}"
-    _prefixes = {sys.prefix, sys.exec_prefix, sys.base_prefix}
-    for var in ("VIRTUAL_ENV", "CONDA_PREFIX"):
-        v = os.environ.get(var)
-        if v:
-            _prefixes.add(v)
-    # Derive the venv from the interpreter path.
-    _interp = os.path.realpath(sys.executable)
-    if os.sep + "bin" + os.sep in _interp:
-        _prefixes.add(_interp.rsplit(os.sep + "bin" + os.sep, 1)[0])
-    for prefix in _prefixes:
-        for sub in (f"lib/{_pyver}/site-packages", f"lib/{_pyver}/dist-packages"):
-            cand = os.path.join(prefix, sub)
-            if os.path.isdir(cand):
-                scan_dirs.append(cand)
-    for scan_dir in scan_dirs:
-        if not scan_dir or scan_dir in seen_dirs or not os.path.isdir(scan_dir):
-            continue
-        seen_dirs.add(scan_dir)
+    for scan_dir in _site_dirs_to_scan():
         try:
             entries = os.listdir(scan_dir)
         except OSError:
@@ -107,38 +66,116 @@ def _scan_editable_roots() -> tuple[str, ...]:
                 continue
             if not (entry.endswith((".pth", "_finder.py"))):
                 continue
-            try:
-                with open(os.path.join(scan_dir, entry), errors="replace") as handle:
-                    text = handle.read()
-            except OSError:
-                # This one file, not the scan: a root named by a later finder is
-                # still a root, and a swallowed scan would hand a campaign a
-                # private checkout of a repository that must be edited in place.
-                continue
-            # Layout 0: bare absolute path on a line (no quotes, no import).
-            for line in text.splitlines():
-                line = line.strip()
-                if line.startswith("/") and not line.startswith("#") and "import" not in line and os.path.isdir(line):
-                    roots.add(os.path.realpath(line))
-            # Layout 1: quoted absolute paths directly in the file.
-            for quoted in re.findall(r"['\"](/[^'\"]+)['\"]", text):
-                if os.path.isdir(quoted):
-                    roots.add(os.path.realpath(quoted))
-            # Layout 2: .pth imports a _finder.py; read its MAPPING dict for
-            # paths. The finder file lives next to the .pth in site-packages.
-            if entry.endswith(".pth"):
-                imported = re.search(r"import\s+(__editable___\w+_finder)", text)
-                if imported:
-                    finder_file = os.path.join(scan_dir, imported.group(1) + ".py")
-                    try:
-                        with open(finder_file, errors="replace") as finder_handle:
-                            finder_text = finder_handle.read()
-                    except OSError:
-                        continue
-                    for quoted in re.findall(r"['\"](/[^'\"]+)['\"]", finder_text):
-                        if os.path.isdir(quoted):
-                            roots.add(os.path.realpath(quoted))
+            roots |= _roots_declared_by(scan_dir, entry)
     return tuple(sorted(roots))
+
+
+def _site_dirs_to_scan() -> Iterator[str]:
+    """Yield each distinct existing directory an editable marker file could sit in."""
+    seen: set[str] = set()
+    for scan_dir in (*sys.path, *_site_module_dirs(), *_prefix_site_dirs()):
+        if not scan_dir or scan_dir in seen or not os.path.isdir(scan_dir):
+            continue
+        seen.add(scan_dir)
+        yield scan_dir
+
+
+def _site_module_dirs() -> list[str]:
+    """The site directories the ``site`` module itself reports, where it can answer."""
+    dirs: list[str] = []
+    try:
+        dirs.extend(site.getsitepackages())
+    except AttributeError:
+        # Absent under a virtualenv built without the site module's framework
+        # support, and raising rather than returning empty on some builds. The
+        # prefix probing below reaches the same directories, so this is one of
+        # several ways to find them rather than the only one.
+        pass
+    if hasattr(site, "getusersitepackages"):
+        try:
+            dirs.append(site.getusersitepackages())
+        except AttributeError:
+            # Same: a user site directory is optional, and its absence says
+            # nothing about the roots the rest of the scan will find.
+            pass
+    return dirs
+
+
+def _prefix_site_dirs() -> list[str]:
+    """Conventional site-packages under every prefix in play.
+
+    Venv / conda site-packages may not appear in ``sys.path``, so the prefixes
+    ``sys`` reports, the ones the environment names, and the one the interpreter
+    path implies are each probed.
+    """
+    version = f"python{sys.version_info[0]}.{sys.version_info[1]}"
+    prefixes = {sys.prefix, sys.exec_prefix, sys.base_prefix}
+    for var in ("VIRTUAL_ENV", "CONDA_PREFIX"):
+        value = os.environ.get(var)
+        if value:
+            prefixes.add(value)
+    interpreter = os.path.realpath(sys.executable)
+    if os.sep + "bin" + os.sep in interpreter:
+        prefixes.add(interpreter.rsplit(os.sep + "bin" + os.sep, 1)[0])
+    dirs: list[str] = []
+    for prefix in prefixes:
+        for sub in (f"lib/{version}/site-packages", f"lib/{version}/dist-packages"):
+            candidate = os.path.join(prefix, sub)
+            if os.path.isdir(candidate):
+                dirs.append(candidate)
+    return dirs
+
+
+def _roots_declared_by(scan_dir: str, entry: str) -> set[str]:
+    """Absolute repository roots one editable marker file maps into.
+
+    Three layouts reach the same answer: a bare absolute path on its own line,
+    quoted absolute paths in the file itself, and a ``.pth`` that imports a
+    ``_finder.py`` whose ``MAPPING`` dict holds them.
+    """
+    text = _read_marker(os.path.join(scan_dir, entry))
+    if text is None:
+        # This one file, not the scan: a root named by a later finder is still a
+        # root, and a swallowed scan would hand a campaign a private checkout of
+        # a repository that must be edited in place.
+        return set()
+    roots = _bare_path_lines(text) | _quoted_dirs(text)
+    if entry.endswith(".pth"):
+        roots |= _roots_behind_finder_import(scan_dir, text)
+    return roots
+
+
+def _roots_behind_finder_import(scan_dir: str, pth_text: str) -> set[str]:
+    """Roots named by the ``_finder.py`` a ``.pth`` imports, which lives beside it."""
+    imported = re.search(r"import\s+(__editable___\w+_finder)", pth_text)
+    if imported is None:
+        return set()
+    finder_text = _read_marker(os.path.join(scan_dir, imported.group(1) + ".py"))
+    return set() if finder_text is None else _quoted_dirs(finder_text)
+
+
+def _read_marker(path: str) -> str | None:
+    """Read a marker file, or None when it cannot be read."""
+    try:
+        with open(path, errors="replace") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+def _bare_path_lines(text: str) -> set[str]:
+    """Existing directories named by a bare absolute path on a line of its own."""
+    roots: set[str] = set()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("/") and "import" not in line and os.path.isdir(line):
+            roots.add(os.path.realpath(line))
+    return roots
+
+
+def _quoted_dirs(text: str) -> set[str]:
+    """Existing directories named by a quoted absolute path anywhere in the text."""
+    return {os.path.realpath(quoted) for quoted in re.findall(r"['\"](/[^'\"]+)['\"]", text) if os.path.isdir(quoted)}
 
 
 def needs_inplace(kernel_repo: str) -> bool:

@@ -411,19 +411,15 @@ def _build_trace_analyze_cmd(
             state_tp = 0
         if state_tp > 0:
             cmd += ["--tensor-parallel-size", str(state_tp)]
-    if model_name:
-        cmd += ["--model-name", str(model_name)]
-    if framework:
-        cmd += ["--framework", str(framework)]
-    if target_platform:
-        cmd += ["--target-platform", str(target_platform)]
-    if analysis_mode:
-        cmd += ["--analysis-mode", str(analysis_mode)]
+    for flag, val in (
+        ("--model-name", model_name),
+        ("--framework", framework),
+        ("--target-platform", target_platform),
+        ("--analysis-mode", analysis_mode),
+    ):
+        if val:
+            cmd += [flag, str(val)]
 
-    # Model identity informs source resolution for every framework, not only the
-    # diffusion roofline. Keep the standard payload > state > environment
-    # precedence so ordinary sglang/vLLM production requests carry config.json
-    # selectors into the bounded model context.
     model_path = str(
         payload.get("model_path") or getattr(state, "model_path", "") or os.environ.get("MODEL_PATH") or ""
     ).strip()
@@ -436,11 +432,6 @@ def _build_trace_analyze_cmd(
         cmd += ["--precision", precision]
 
     if scriptable:
-        # --skip-split is TraceLens-only; the bypass backend has its own windowing.
-        if not is_bypass:
-            cmd += ["--skip-split"]
-        # Forward the denoise-step count for per-step roofline timings.
-        # Priority: payload override > baseline workload metadata.
         num_denoise = payload.get("num_denoise_steps") or workload.get("num_inference_steps")
         if num_denoise not in (None, ""):
             try:
@@ -448,9 +439,9 @@ def _build_trace_analyze_cmd(
                     cmd += ["--num-denoise-steps", str(int(num_denoise))]
             except (TypeError, ValueError):
                 pass
-    else:
-        # Splitter workload hints. Priority: payload override > baseline metadata
-        # > drop the flag.
+
+    if not scriptable and not is_bypass:
+        cmd += ["--split-llm-inference"]
         split_conc = payload.get("split_conc") or workload.get("conc")
         if split_conc not in (None, ""):
             cmd += ["--split-conc", str(split_conc).strip()]
@@ -466,13 +457,14 @@ def _build_trace_analyze_cmd(
     )
     if capture_folder:
         cmd += ["--capture-folder", str(capture_folder)]
-    # Forward TraceLens splitter steady-state mode via payload or env.
-    steady_state_mode = payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
-    steady_state_mode = str(steady_state_mode).strip()
+    if scriptable and not is_bypass:
+        steady_state_mode = "generic"
+    else:
+        steady_state_mode = str(
+            payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
+        ).strip()
     if steady_state_mode:
         cmd += ["--steady-state-mode", steady_state_mode]
-    # Post-kernel-opt roofline writes a separate report so it never overwrites
-    # the baseline kernel_roofline.json.
     roofline_output_name = str(payload.get("roofline_output_name") or "").strip()
     if roofline_output_name:
         cmd += ["--roofline-output-name", roofline_output_name]

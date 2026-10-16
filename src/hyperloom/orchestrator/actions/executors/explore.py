@@ -8,9 +8,7 @@ from __future__ import annotations
 import functools
 import logging
 import os
-import shlex
 import tempfile
-import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -20,7 +18,7 @@ import yaml
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
-from hyperloom.common.launch_log_evidence import launch_flag_setting_name, settings_the_engine_rewrote
+from hyperloom.common.launch_log_evidence import settings_the_engine_rewrote
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import (
     GRADED_DURATION,
@@ -29,6 +27,7 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
     VERDICT_REVERT,
+    constraint_fields,
     graded_axes_of,
     perf_snapshot_from_mapping,
     resolve_grading_anchor_perf,
@@ -52,10 +51,9 @@ from ...state.shared_state import (
     stack_base_params,
 )
 from ..stop_attribution import (
-    SESSION_TIME_EXHAUSTED_CLASS,
-    STOPPED_BY_THE_RUN,
     StoppedByTheRun,
     stopped_by_the_run_class,
+    variant_budget_stop,
 )
 from ._accuracy_gate import (
     accuracy_passed,
@@ -96,6 +94,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
 )
 from ._ray_serving import maybe_serving_lease
 
+from ._launch_restatement import config_envs, named_settings, restates_the_baseline
 from ._server_argv import config_server_argv
 from ._server_lifecycle import (
     resolve_lifecycle_params,
@@ -435,40 +434,6 @@ def observed_launch_from_state(state: Any) -> tuple[dict[str, Any], dict[str, st
     return config, env
 
 
-def _config_envs(config_path: Path) -> dict[str, str]:
-    """Read ``benchmark.envs`` out of a built config file as a ``str -> str`` dict.
-
-    Drops the framework's server-args key (``EXTRA_SGLANG_ARGS`` and friends),
-    which holds the launch argv rather than an env value. Returns an empty dict
-    when the file carries no ``benchmark.envs`` mapping.
-    """
-    cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    bench = cfg.get("benchmark") if isinstance(cfg, Mapping) else None
-    envs = bench.get("envs") if isinstance(bench, Mapping) else None
-    if not isinstance(envs, Mapping):
-        return {}
-    args_env = server_args_env_name(str(bench.get("framework") or ""))
-    return {str(k): str(v) for k, v in envs.items() if str(k) != args_env}
-
-
-def _named_settings(argv_text: str, framework: str) -> dict[str, list[str]]:
-    """Map each setting ``argv_text`` names to its value tokens, last occurrence winning like the engine."""
-    try:
-        tokens = shlex.split(argv_text)
-    except ValueError:
-        return {}
-    settings: dict[str, list[str]] = {}
-    current = ""
-    for token in tokens:
-        if token.startswith("-"):
-            name, separator, attached = token.partition("=")
-            current = launch_flag_setting_name(name, framework)
-            settings[current] = [attached] if separator else []
-        elif current:
-            settings[current].append(token)
-    return settings
-
-
 def _setting_already_holds(proposed: list[str], observed: Any) -> bool:
     """Whether ``observed`` is already the value ``proposed`` asks for."""
     if not proposed:
@@ -506,10 +471,10 @@ def _launch_delta(
     resolves to ``3600.0`` -- so weighing it would reject every variant. Those
     rewrites hit base and variant alike, so the delta cancels them.
     """
-    base_settings = _named_settings(base_argv, framework)
+    base_settings = named_settings(base_argv, framework)
     settings = {
         name: values
-        for name, values in _named_settings(variant_argv, framework).items()
+        for name, values in named_settings(variant_argv, framework).items()
         if base_settings.get(name) != values
     }
     envs = {name: value for name, value in variant_envs.items() if base_envs.get(name) != value}
@@ -577,10 +542,21 @@ def filter_baseline_noop_variants(
     """Drop variants that would launch the server the stack is already running.
 
     The baseline and each variant are materialized through ``_build_variant_yaml``
-    into throwaway configs, and only what the variant *changes* about the baseline
-    is judged: those settings against ``observed_server_config`` -- the engine's
-    own resolved settings -- and those envs against ``observed_server_env``. A
-    variant is dropped only when both halves are already in effect.
+    into throwaway configs, and which rule applies depends on whether the computed
+    settings and env delta of the variant against the baseline (``_launch_delta``)
+    is empty. That delta lists only what the variant sets differently, so a
+    ``"replace"`` variant that drops a baseline flag can still have an empty one:
+
+    1. Empty delta: the variant is dropped only when its ``args_mode`` is
+       ``"append"`` and its own request names only settings and envs the baseline
+       launch already holds (``restates_the_baseline``). This rule reads the
+       baseline config, not the observed launch. Every other empty-delta variant
+       -- a ``"replace"`` request, an empty request, or a change the merged config
+       hides -- is kept without consulting the observed launch.
+    2. Non-empty delta: only what the variant *changes* about the baseline is
+       judged, those settings against ``observed_server_config`` -- the engine's
+       own resolved settings -- and those envs against ``observed_server_env``.
+       The variant is dropped when both halves are already in effect.
 
     A variant that removes something, or names a list-valued flag, is exempt:
     neither is visible here, so both would read as a restatement of the stack.
@@ -611,7 +587,7 @@ def filter_baseline_noop_variants(
                 base_unset_envs=base_unset_envs,
             )
             base_argv = config_server_argv(base_path).text
-            base_envs = _config_envs(base_path)
+            base_envs = config_envs(base_path)
         except (OSError, ValueError, yaml.YAMLError) as exc:
             log.warning(
                 "explore: baseline-noop probe could not materialize the baseline (%s); keeping every variant", exc
@@ -639,17 +615,19 @@ def filter_baseline_noop_variants(
                     base_unset_envs=base_unset_envs,
                 )
                 variant_argv = config_server_argv(out_path).text
-                variant_envs = _config_envs(out_path)
+                variant_envs = config_envs(out_path)
             except (OSError, ValueError, yaml.YAMLError) as exc:
                 log.warning("explore: baseline-noop probe failed for variant %s (%s); keeping it", gv.name, exc)
                 kept.append(gv)
                 continue
             delta_settings, delta_envs = _launch_delta(variant_argv, variant_envs, base_argv, base_envs, framework)
             if not delta_settings and not delta_envs:
-                # A change the merged config does not express leaves no delta, and
-                # so does a variant that only restates the baseline. The two are
-                # indistinguishable here, so the variant runs rather than risk
-                # dropping a real experiment for a missed drop.
+                # A change the merged config hides leaves no delta either: only a request
+                # that itself restates the baseline marks the variant as a noop.
+                restated = restates_the_baseline(gv.extra_server_args, gv.extra_envs, base_argv, base_envs, framework)
+                if restated and gv.args_mode == "append":
+                    dropped.append((gv.name, "names only settings the baseline launch already holds (baseline noop)"))
+                    continue
                 kept.append(gv)
                 continue
             if _settings_already_hold(delta_settings, observed_config) and _envs_already_hold(delta_envs, observed_env):
@@ -1152,13 +1130,13 @@ class ExploreExecutor:
                     from ._subprocess_kill import resolve_benchmark_timeouts
 
                     fit_required_sec = resolve_benchmark_timeouts()[1]
-                if session_deadline_sec is not None and (session_deadline_sec - time.monotonic()) < fit_required_sec:
-                    run_stop = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS]
+                run_stop = variant_budget_stop(session_deadline_sec, extra.get("phase_deadline"), fit_required_sec)
+                if run_stop is not None:
                     run_stop_detail = run_stop.never_started
                     session_budget_untested = len(runnable) - idx
                     log.warning(
-                        "explore: session budget cannot fit another variant "
-                        "(needs %.0fs); stopping after %d/%d variant(s)",
+                        "explore: cannot fit another variant (%s, needs %.0fs); stopping after %d/%d variant(s)",
+                        run_stop.error_class,
                         fit_required_sec,
                         idx,
                         len(runnable),
@@ -1351,8 +1329,7 @@ class ExploreExecutor:
                         GRADED_INTVTY_P50: r.intvty_p50,
                         GRADED_DURATION: r.duration_seconds,
                         GRADED_ERROR_RATE: r.request_error_rate,
-                        # Graded against the session latency budget when one is set.
-                        "e2el_mean_ms": r.e2el_mean_ms,
+                        **constraint_fields(r),
                     }
                     stamp_output_per_gpu(variant_meas, getattr(ss, "tp", None))
                     graded = resolve_graded_comparison(
@@ -1418,7 +1395,7 @@ class ExploreExecutor:
                         decision_gates.append(
                             {
                                 "gate": (
-                                    "latency_budget"
+                                    graded.vetoed_by
                                     if graded.veto_reason
                                     else (
                                         "graded_axes"
@@ -1611,8 +1588,8 @@ class ExploreExecutor:
                             # The axes this KEEP was graded on travel with it: current_best becomes the next round's
                             # anchor, and an anchor without them degrades the session.
                             **graded_axes_of(variant_meas),
-                            # Promotion re-checks the latency budget against this row, not the round's measurement.
-                            "e2el_mean_ms": r.e2el_mean_ms,
+                            # Promotion re-checks the budgets against this row, not the round's measurement.
+                            **constraint_fields(r),
                             "single_workspace": r.workspace,
                             "launch_evidence": dict(r.launch_evidence or {}),
                             "launch_evidence_path": r.launch_evidence_path,

@@ -30,6 +30,7 @@ from hyperloom.common.llm_config import (
     DEFAULT_CODEX_MODEL,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
+from kernelforge.gemm_tune.evidence import MOE_KEY_FIELDS
 
 
 _FUSION_PROVIDER_ENV_KEYS = (
@@ -217,6 +218,33 @@ class TestForgeGemmHelperCoverage:
         state = SharedState(precision="bf16", model_path="/models/does-not-exist")
         state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
         assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "auto")
+
+    _QUARK_MXFP4 = {
+        "quant_method": "quark",
+        "global_quant_config": {"weight": {"dtype": "fp4", "group_size": 32}},
+        "layer_quant_config": {"*self_attn*": {"weight": {"dtype": "fp8_e4m3", "group_size": 128}}},
+    }
+    _COMPRESSED_TENSORS_FP8 = {
+        "quant_method": "compressed-tensors",
+        "config_groups": {"group_0": {"targets": ["Linear"], "weights": {"num_bits": 8, "type": "float"}}},
+    }
+
+    @pytest.mark.parametrize(
+        ("quant_cfg", "session_precision"),
+        [(_QUARK_MXFP4, "fp4"), (_COMPRESSED_TENSORS_FP8, "fp8")],
+    )
+    def test_resolve_forge_precision_leaves_a_nested_format_to_forge(self, tmp_path, quant_cfg, session_precision):
+        # Handed on, the label would hold for every lane, and an fp8 one would also be pinned to per_token.
+        model = self._write_cfg(tmp_path / "m", {"hidden_size": 6144, "quantization_config": quant_cfg})
+        state = SharedState(precision=session_precision, model_path=model)
+        state.current_best = {"extra_server_args": "", "extra_envs": {}}
+        assert krh._resolve_forge_precision_and_quant(state, {}) == ("auto", "auto")
+
+    def test_resolve_forge_precision_keeps_an_operator_precision_the_checkpoint_does_not_nest(self, tmp_path):
+        model = self._write_cfg(tmp_path / "m", {"hidden_size": 6144, "quantization_config": self._QUARK_MXFP4})
+        state = SharedState(precision="bf16", model_path=model)
+        state.current_best = {"extra_server_args": "", "extra_envs": {}}
+        assert krh._resolve_forge_precision_and_quant(state, {}) == ("bf16", "auto")
 
     def test_resolve_aiter_root_from_editable_source_layout(self, tmp_path, monkeypatch):
         monkeypatch.delenv("AITER_ROOT_DIR", raising=False)
@@ -1880,7 +1908,7 @@ class TestForgeGemmHelperCoverage:
         log = tmp_path / "server.log"
         log.write_text(self._REAL_MOE_DISPATCH + "\n", encoding="utf-8")
         supplied = tmp_path / "operator_moe.csv"
-        supplied.write_text(krh._FMOE_UNTUNED_CSV_HEADER + "\n", encoding="utf-8")
+        supplied.write_text(",".join(MOE_KEY_FIELDS) + "\n", encoding="utf-8")
 
         async def _fake_subprocess(cmd, *, timeout_sec, **_kwargs):
             return 0, self._sentinel(), ""
@@ -3776,6 +3804,41 @@ class TestRunGemmTuningHandler:
 
         assert result["status"] == "ok"
 
+    @pytest.mark.parametrize(
+        ("benchmark_mode", "grading"),
+        [("agentx", {"objective": "e2e_norm_intvty_p50"}), ("", {})],
+        ids=["agentx_intvty", "fixed_isl_osl"],
+    )
+    def test_tunes_on_output_whatever_the_session_is_graded_on(self, tmp_path, monkeypatch, benchmark_mode, grading):
+        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
+        SharedState(
+            precision="fp8",
+            framework="sglang",
+            model_path="/models/qwen-fp8",
+            gpu_type="mi355x",
+            tp=1,
+            conc=64,
+            isl=1024,
+            osl=1024,
+            baseline_tput=4479.0,
+            benchmark_mode=benchmark_mode,
+            grading=grading,
+        ).save(tmp_path)
+        captured: dict[str, object] = {}
+
+        async def fake_run(cmd: list[str], *, timeout_sec: int, **_kwargs):
+            captured["cmd"] = cmd
+            captured["input"] = json.loads(Path(cmd[cmd.index("--input-json") + 1]).read_text())
+            return 0, json.dumps({"status": "ok", "decision": "KEEP", "best_speedup": 1.1}), ""
+
+        monkeypatch.setattr(krh, "_run_subprocess", fake_run)
+
+        asyncio.run(krh._run_geak_gemm_tuning({"dry_run": True, "task_id": "t1"}, session_dir=tmp_path))
+
+        assert "E2E_METRIC=output" in captured["cmd"]  # type: ignore[operator]
+        assert captured["input"]["env"] == {"E2E_METRIC": "output"}  # type: ignore[index]
+        assert captured["input"]["baseline_tput"] == 4479.0  # type: ignore[index]
+
     def test_geak_without_config_does_not_fall_back_to_forge(self, tmp_path, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         monkeypatch.delenv("GEAK_CONFIG", raising=False)
@@ -4546,7 +4609,8 @@ class TestBuildTraceAnalyzeCmd:
             "MI300X",
             "--analysis-mode",
             "inference",
-            # splitter hints: payload override wins over workload metadata.
+            # LLM inference flag + splitter hints: payload override wins over workload metadata.
+            "--split-llm-inference",
             "--split-conc",
             "64",
             "--split-osl",
@@ -4793,3 +4857,75 @@ class TestTheGemmLaneBudgetReachesTheInputJson:
         )
         written = await self._written(tmp_path, {"task_id": "cap-explicit", "tuner": "a8w8"})
         assert written["tuner"] == "a8w8"
+
+
+@pytest.mark.asyncio
+async def test_a_bounded_phase_that_cannot_fund_a_lane_skips_it_without_launching(tmp_path, monkeypatch):
+    """Under the 5 min phase reserve no lane funds a target; an explicit timeout sizes a run, it does not start one."""
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    trace = tmp_path / "decode.trace.json.gz"
+    trace.write_text("{}", encoding="utf-8")
+    SharedState(
+        precision="bf16",
+        framework="sglang",
+        model_path=str(model_dir),
+        gpu_type="mi355x",
+        tp=1,
+        conc=64,
+        last_profile_trace=str(trace),
+    ).save(tmp_path)
+    monkeypatch.setattr(SharedState, "remaining_minutes", lambda _self, **_kw: 4.0)
+    _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
+    monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+    monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
+    monkeypatch.setattr(krh, "_gemm_router_targets", lambda **_kwargs: (("fmoe_ck", 600),))
+    launched: list[object] = []
+
+    async def _launch(*args, **_kwargs):
+        launched.append(args)
+        return {}
+
+    monkeypatch.setattr(krh, "_run_subprocess", _launch)
+    monkeypatch.setattr(krh.forge_fusion, "run_forge_fusion", _launch)
+
+    gemm = await krh._run_forge_gemm_tuning({"task_id": "gemm", "timeout_sec": 7200}, session_dir=tmp_path)
+    fusion = await krh._run_forge_fusion({"task_id": "fusion", "timeout": 7200}, session_dir=tmp_path)
+
+    for result in (gemm, fusion):
+        assert (result["status"], result["error_class"]) == ("skipped", lane_budget.INSUFFICIENT_BUDGET)
+        assert "decision" not in result
+    assert launched == []
+    assert _FORGE_GEMM_PAYLOADS == []
+
+
+@pytest.mark.asyncio
+async def test_a_shape_capture_for_a_lane_the_phase_cannot_fund_never_starts(tmp_path, monkeypatch):
+    """The capture is priced on the input it would record, and a lane that input cannot fund boots no capture server."""
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(
+        json.dumps({"architectures": ["Qwen3ForCausalLM"], "hidden_size": 5120, "intermediate_size": 17408})
+    )
+    SharedState(precision="fp8", framework="vllm", model_path=str(model), gpu_type="mi300x", tp=1, conc=64).save(
+        tmp_path
+    )
+    monkeypatch.setattr(SharedState, "remaining_minutes", lambda _self, **_kw: 4.0)
+    monkeypatch.setattr(krh, "_forge_gemm_tune_available", lambda: True)
+    router_calls: list[dict] = []
+
+    def _router(**kwargs):
+        router_calls.append(kwargs)
+        return (("vllm_dense_tunableop", 600),)
+
+    async def _must_not_capture(**_kwargs):
+        raise AssertionError("a capture whose lane cannot be funded must not start")
+
+    monkeypatch.setattr(krh, "_gemm_router_targets", _router)
+    monkeypatch.setattr(krh, "_capture_vllm_tunableop_shapes", _must_not_capture)
+
+    result = await krh._run_forge_gemm_tuning({"task_id": "capture"}, session_dir=tmp_path)
+
+    assert (result["status"], result["error_class"]) == ("skipped", lane_budget.INSUFFICIENT_BUDGET)
+    assert [call["has_tunableop_input"] for call in router_calls] == [True]
+    assert _FORGE_GEMM_PAYLOADS == []

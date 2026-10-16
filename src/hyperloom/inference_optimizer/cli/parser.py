@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import argparse
 import os
-from math import isfinite
 from pathlib import Path
 from typing import NoReturn
 
 from .. import framework_registry
+from .constraint_args import add_constraint_arguments, positive_watts_arg
 from .backends import CRITIC_PROTOCOL_CHOICES
 from .recover import add_cleanup_confirmation_arguments
+from hyperloom.common import predictor_config
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.llm_config import is_anthropic_only, is_openai_only, provider_model_defaults
 
@@ -108,33 +109,6 @@ def _positive_int_arg(value: str) -> int:
     return parsed
 
 
-def _positive_ms_arg(value: str) -> float:
-    """argparse type for a millisecond ceiling.
-
-    The gate this feeds fails closed, so its switch must not fail open: an
-    unusable value has to stop the launch rather than resolve to "no budget" and
-    leave the operator believing an SLA is enforced.
-    """
-    try:
-        parsed = float(str(value).strip())
-    except (TypeError, ValueError) as exc:
-        raise argparse.ArgumentTypeError(f"expected a positive number of milliseconds, got {value!r}") from exc
-    if not isfinite(parsed) or parsed <= 0:
-        raise argparse.ArgumentTypeError(f"expected a positive number of milliseconds, got {value!r}")
-    return parsed
-
-
-def _positive_watts_arg(value: str) -> float:
-    """argparse type for a power in watts; an unusable value stops the launch rather than skipping the check."""
-    try:
-        parsed = float(str(value).strip())
-    except (TypeError, ValueError) as exc:
-        raise argparse.ArgumentTypeError(f"expected a positive number of watts, got {value!r}") from exc
-    if not isfinite(parsed) or parsed <= 0:
-        raise argparse.ArgumentTypeError(f"expected a positive number of watts, got {value!r}")
-    return parsed
-
-
 def _default_claude_model_env() -> str:
     """Resolve the default Claude model from env."""
     explicit = (os.environ.get("CLAUDE_MODEL") or "").strip()
@@ -173,6 +147,30 @@ def _default_gpu_specialist_capacity() -> int:
     from hyperloom.common.visible_devices import detect_gpu_count
 
     return detect_gpu_count()
+
+
+def _add_custom_specialist_args(opt: argparse.ArgumentParser) -> None:
+    """The ``--custom-specialist-*`` flags of ``optimize``."""
+    opt.add_argument(
+        "--custom-specialist-prompt-file",
+        dest="custom_specialist_prompt_file",
+        type=str,
+        default=None,
+        help="Register an operator-defined specialist type (custom_specialist) whose domain focus is this file's "
+        "text (max 16 KiB). Requires --custom-specialist-description. The Coordinator alone dispatches it, once "
+        "per macro cycle in FRAMEWORK_AGENT, ahead of other queued work, and benches its proposals first; "
+        "Orchestration cannot. Persisted for --resume-from; passing it on a "
+        "resume replaces the stored definition. The text is written in clear to state.json and every task's "
+        "prompt.md: do not put credentials in it. HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1 runs FRAMEWORK_AGENT on it alone.",
+    )
+    opt.add_argument(
+        "--custom-specialist-description",
+        dest="custom_specialist_description",
+        type=str,
+        default=None,
+        help="One line (max 200 chars) describing custom_specialist in its own prompt. Requires "
+        "--custom-specialist-prompt-file.",
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -596,23 +594,10 @@ def _build_parser() -> argparse.ArgumentParser:
             "independently of --target-gain / --target-tput / --target-baseline-dir."
         ),
     )
-    # Outside the group as well, and for a stronger reason than --target-roofline: this is a constraint rather than
-    # an objective. It does not say when to stop, it says which winners are admissible, so it composes with whichever
-    # target is in use instead of competing with one.
-    opt.add_argument(
-        "--max-latency-ms",
-        type=_positive_ms_arg,
-        default=None,
-        help=(
-            "Scriptable frameworks (xdit, custom) only. Refuse any KEEP whose mean "
-            "end-to-end latency exceeds N ms. Off by default. A candidate that "
-            "reported no end-to-end latency is refused too, since an unmeasured "
-            "constraint is not a satisfied one."
-        ),
-    )
+    add_constraint_arguments(opt)
     opt.add_argument(
         "--gpu-power-cap-w",
-        type=_positive_watts_arg,
+        type=positive_watts_arg,
         default=None,
         help=(
             "Declare the power cap (W) the GPUs are already set to. An assertion, not a request: the optimizer "
@@ -821,25 +806,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--orch-prompt", type=str, default=None, help="Override Orchestration system prompt (file path or inline)"
     )
     opt.add_argument("--critic-prompt", type=str, default=None, help="Override Critic system prompt")
-    opt.add_argument(
-        "--custom-specialist-prompt-file",
-        dest="custom_specialist_prompt_file",
-        type=str,
-        default=None,
-        help="Register an operator-defined specialist type (custom_specialist) whose domain focus is this file's "
-        "text (max 16 KiB). Requires --custom-specialist-description. Orchestration may select it, and the "
-        "Coordinator dispatches it at least once in FRAMEWORK_AGENT. Persisted for --resume-from; passing it on a "
-        "resume replaces the stored definition. The text is written in clear to state.json and every task's "
-        "prompt.md: do not put credentials in it.",
-    )
-    opt.add_argument(
-        "--custom-specialist-description",
-        dest="custom_specialist_description",
-        type=str,
-        default=None,
-        help="One line (max 200 chars) telling Orchestration when to pick custom_specialist. Requires "
-        "--custom-specialist-prompt-file.",
-    )
+    _add_custom_specialist_args(opt)
     opt.add_argument(
         "--local-kb-root",
         dest="local_kb_root",
@@ -890,6 +857,27 @@ def _build_parser() -> argparse.ArgumentParser:
         "match (conf 0.7) both fire, while a ``miss`` (conf 0.0) "
         "does not. Raise it above 0.7 to require an exact hit "
         "before spending a verify on the warm config.",
+    )
+    # PrimaTune predictor: off unless an endpoint is given, so a session that passes none behaves as before.
+    opt.add_argument(
+        "--primatune-endpoint",
+        dest="primatune_endpoint",
+        type=str,
+        default=None,
+        help="Base URL of a PrimaTune predictor service, asked once per FRAMEWORK_AGENT decision point. "
+        "Its proposals join the untested-proposal queue beside the specialists' and are graded by the "
+        "same KEEP threshold. Exported as $HYPERLOOM_PREDICTOR_ENDPOINT. "
+        "See docs/reference/primatune-predictor.md.",
+    )
+    opt.add_argument(
+        "--primatune-mode",
+        dest="primatune_mode",
+        type=str,
+        choices=predictor_config.MODES,
+        default=None,
+        help="'shadow' (the default once an endpoint is set) asks and logs, queueing nothing; "
+        "'active' queues the answer for benchmarking; 'off' disables. "
+        "Exported as $HYPERLOOM_PREDICTOR_MODE.",
     )
     # PR Monitor REST + MCP are co-hosted by KB Store and derived from $KB_STORE_URL.
     opt.add_argument(
@@ -1036,7 +1024,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="static_recon",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Auto-dispatch a read-only static-recon specialist at PRELUDE "
+        help="Auto-dispatch a read-only static-recon specialist at PRELUDE, and "
+        "again once per macro-cycle when the configuration arm plateaus, "
         "that greps the framework source for un-bridged capability "
         "switches (predicates that silently disable a faster path for "
         "this model/GPU/precision, e.g. a CUDA-only ``*_supported()`` "

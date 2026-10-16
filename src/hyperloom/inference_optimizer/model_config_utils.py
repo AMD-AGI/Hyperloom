@@ -12,7 +12,7 @@ import struct
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.checkpoint_quant import QUARK_LAYER_CONFIG_KEYS
+from hyperloom.common.checkpoint_quant import QUARK_LAYER_CONFIG_KEYS, checkpoint_format
 from hyperloom.common.coerce import to_int
 
 # Single source of truth for --model (path OR HF repo id) -> local dir.
@@ -392,75 +392,160 @@ def _derive_attention_type(cfg: dict) -> str:
 
 
 def _derive_quantization(cfg: dict) -> str:
-    """Return the weight quant method (e.g. ``fp8``) or '' when unquantized."""
+    """Return the checkpoint's weight format (e.g. ``fp8``, ``fp4``) or '' when unquantized.
+
+    Quark and compressed-tensors put their own name in ``quant_method`` and the format one level down, so a nested
+    format answers before the method does.
+    """
     qc = cfg.get("quantization_config")
     if isinstance(qc, dict):
-        return str(qc.get("quant_method") or "").strip()
+        return checkpoint_format(qc) or str(qc.get("quant_method") or "").strip()
     return ""
+
+
+def _deepseek_family(mt: str, name: str) -> str:
+    """DeepSeek keeps its major version; v3 is checked before v2 because deepseek_v32 carries both."""
+    if "v4" in mt:
+        return "deepseek_v4"
+    if "v3" in mt or mt == "deepseek":
+        return "deepseek_v3"
+    if "v2" in mt:
+        return "deepseek_v2"
+    return "deepseek"
+
+
+def _qwen_family(mt: str, name: str) -> str:
+    """Qwen collapses each generation's variants onto the generation."""
+    if mt.startswith("qwen3"):
+        return "qwen3"
+    if mt.startswith("qwen2"):
+        return "qwen2"
+    if mt.startswith("qwen1") or "qwen1.5" in name:
+        return "qwen1.5"
+    return "qwen"
+
+
+def _gemma_family(mt: str, name: str) -> str:
+    """Gemma generations are already in the model_type; a generation with no rule here declines."""
+    for generation in ("gemma4", "gemma3", "gemma2"):
+        if mt.startswith(generation):
+            return generation
+    return "gemma" if mt == "gemma" else ""
+
+
+def _llama_family(mt: str, name: str) -> str:
+    """Llama's model_type is the bare family, so the generation comes from the directory name."""
+    if mt == "llama4" or "llama-4" in name or "llama4" in name:
+        return "llama4"
+    if "llama-3" in name or "llama3" in name or "llama_3" in name:
+        return "llama3"
+    if "llama-2" in name or "llama2" in name or "llama_2" in name:
+        return "llama2"
+    return "llama"
+
+
+def _glm_family(mt: str, name: str) -> str:
+    """GLM4 is the only generation this tree distinguishes."""
+    return "glm4" if "4" in mt else "glm"
+
+
+def _phi_family(mt: str, name: str) -> str:
+    """Phi3 is the only generation this tree distinguishes."""
+    return "phi3" if mt.startswith("phi3") else "phi"
+
+
+# Families whose generation has to be derived, keyed on the model_type prefix that selects the rule.
+# A resolver returns "" to decline, leaving the generic fallbacks below to answer.
+_FAMILY_RESOLVERS = (
+    ("deepseek", _deepseek_family),
+    ("qwen", _qwen_family),
+    ("gemma", _gemma_family),
+    ("llama", _llama_family),
+    ("glm", _glm_family),
+    ("phi", _phi_family),
+)
+
+# Families that collapse every sub-variant onto one name. Mistral and Mixtral are kept distinct.
+_COLLAPSED_FAMILY_PREFIXES = ("mixtral", "mistral", "minimax", "nemotron", "internvl")
 
 
 def _derive_model_family(model_type: str, model_path: str) -> str:
     """Infer the base model family with generation (e.g. qwen3, deepseek_v3)."""
     mt = str(model_type or "").strip().lower()
     name = Path(model_path or "").name.lower()
-
-    # DeepSeek: keep major version. Check v3 before v2 (deepseek_v32 has both).
-    if mt.startswith("deepseek"):
-        if "v4" in mt:
-            return "deepseek_v4"
-        if "v3" in mt or mt == "deepseek":
-            return "deepseek_v3"
-        if "v2" in mt:
-            return "deepseek_v2"
-        return "deepseek"
-    # Qwen: collapse the generation's variants.
-    if mt.startswith("qwen"):
-        if mt.startswith("qwen3"):
-            return "qwen3"
-        if mt.startswith("qwen2"):
-            return "qwen2"
-        if mt.startswith("qwen1") or "qwen1.5" in name:
-            return "qwen1.5"
-        return "qwen"
-    # Gemma generations.
-    for gen in ("gemma4", "gemma3", "gemma2"):
-        if mt.startswith(gen):
-            return gen
-    if mt == "gemma":
-        return "gemma"
-    # Mistral vs Mixtral kept distinct.
-    if mt.startswith("mixtral"):
-        return "mixtral"
-    if mt.startswith("mistral"):
-        return "mistral"
-    # Llama: model_type is bare 'llama'; derive generation from name.
-    if mt == "llama" or mt.startswith("llama"):
-        if mt == "llama4" or "llama-4" in name or "llama4" in name:
-            return "llama4"
-        if "llama-3" in name or "llama3" in name or "llama_3" in name:
-            return "llama3"
-        if "llama-2" in name or "llama2" in name or "llama_2" in name:
-            return "llama2"
-        return "llama"
-    # MiniMax / Nemotron / InternVL families collapse sub-variants.
-    if mt.startswith("minimax"):
-        return "minimax"
-    if mt.startswith("nemotron"):
-        return "nemotron"
-    if mt.startswith("internvl"):
-        return "internvl"
-    if mt.startswith("glm"):
-        return "glm4" if "4" in mt else "glm"
-    if mt.startswith("phi"):
-        return "phi3" if mt.startswith("phi3") else "phi"
+    for prefix, resolve in _FAMILY_RESOLVERS:
+        if mt.startswith(prefix):
+            family = resolve(mt, name)
+            if family:
+                return family
+    for prefix in _COLLAPSED_FAMILY_PREFIXES:
+        if mt.startswith(prefix):
+            return prefix
     if not mt:
         return ""
     # Derived/hybrid types: map to the base family token in the model_type.
-    for tok in _FAMILY_TOKENS:
-        if tok in mt:
-            return tok
+    for token in _FAMILY_TOKENS:
+        if token in mt:
+            return token
     # Generic fallback: family prefix before the first separator.
     return mt.split("_")[0]
+
+
+def _attention_shape(cfg: dict) -> dict:
+    """The attention head counts and head dimension this config states or implies."""
+    heads = to_int(cfg.get("num_attention_heads")) or 0
+    kv_raw = cfg.get("num_key_value_heads")
+    kv = (to_int(kv_raw) if kv_raw is not None else heads) or 0
+    head_dim = to_int(cfg.get("head_dim"))
+    hidden = to_int(cfg.get("hidden_size"))
+    if not head_dim and hidden and heads:
+        head_dim = hidden // heads
+    shape: dict = {}
+    attn = _derive_attention_type(cfg)
+    if attn:
+        shape["attention_type"] = attn
+    if heads:
+        shape["num_attention_heads"] = heads
+    if kv:
+        shape["num_key_value_heads"] = kv
+    if head_dim:
+        shape["head_dim"] = head_dim
+    return shape
+
+
+def _first_int_under(cfg: dict, keys) -> int:
+    """The first non-zero integer any of these keys carries, or 0."""
+    for key in keys:
+        value = to_int(cfg.get(key))
+        if value:
+            return value
+    return 0
+
+
+def _moe_shape(cfg: dict) -> dict:
+    """Whether this config describes an MoE model, and the expert counts if it does.
+
+    Shared-expert detection is reported only alongside ``is_moe``, so a dense
+    model carrying a shared-looking key is not read as having one.
+    """
+    num_experts = _first_int_under(cfg, _MOE_EXPERT_KEYS)
+    experts_per_tok = to_int(cfg.get("num_experts_per_tok")) or 0
+    shape: dict = {"is_moe": num_experts > 0}
+    if num_experts > 0:
+        shape["num_experts"] = num_experts
+    if experts_per_tok > 0:
+        shape["num_experts_per_tok"] = experts_per_tok
+    if not shape["is_moe"]:
+        return shape
+    num_shared = _first_int_under(cfg, _SHARED_EXPERT_KEYS)
+    shared_evidence = (
+        num_shared > 0 or bool(cfg.get("shared_expert_intermediate_size")) or bool(cfg.get("shared_experts"))
+    )
+    if shared_evidence:
+        shape["has_shared_expert"] = True
+        if num_shared > 0:
+            shape["num_shared_experts"] = num_shared
+    return shape
 
 
 def summarize_model_config(model_path: str) -> dict:
@@ -484,66 +569,22 @@ def summarize_model_config(model_path: str) -> dict:
     if family:
         out["model_family"] = family
 
-    heads = to_int(cfg.get("num_attention_heads")) or 0
-    kv_raw = cfg.get("num_key_value_heads")
-    kv = (to_int(kv_raw) if kv_raw is not None else heads) or 0
-    head_dim = to_int(cfg.get("head_dim"))
-    hidden = to_int(cfg.get("hidden_size"))
-    if not head_dim and hidden and heads:
-        head_dim = hidden // heads
-
-    attn = _derive_attention_type(cfg)
-    if attn:
-        out["attention_type"] = attn
-    if heads:
-        out["num_attention_heads"] = heads
-    if kv:
-        out["num_key_value_heads"] = kv
-    if head_dim:
-        out["head_dim"] = head_dim
+    out.update(_attention_shape(cfg))
 
     for key in ("hidden_size", "intermediate_size", "num_hidden_layers", "vocab_size", "max_position_embeddings"):
-        val = to_int(cfg.get(key))
-        if val is not None:
-            out[key] = val
+        value = to_int(cfg.get(key))
+        if value is not None:
+            out[key] = value
 
-    num_experts = 0
-    for k in _MOE_EXPERT_KEYS:
-        ne = to_int(cfg.get(k))
-        if ne:
-            num_experts = ne
-            break
-    experts_per_tok = to_int(cfg.get("num_experts_per_tok")) or 0
-    out["is_moe"] = num_experts > 0
-    if num_experts > 0:
-        out["num_experts"] = num_experts
-    if experts_per_tok > 0:
-        out["num_experts_per_tok"] = experts_per_tok
-
-    # Shared-expert detection: only emit when is_moe is also true to avoid false positives on non-MoE models that
-    # happen to carry shared-looking keys.
-    if out["is_moe"]:
-        num_shared = 0
-        for k in _SHARED_EXPERT_KEYS:
-            ns = to_int(cfg.get(k))
-            if ns:
-                num_shared = ns
-                break
-        shared_evidence = (
-            num_shared > 0 or bool(cfg.get("shared_expert_intermediate_size")) or bool(cfg.get("shared_experts"))
-        )
-        if shared_evidence:
-            out["has_shared_expert"] = True
-            if num_shared > 0:
-                out["num_shared_experts"] = num_shared
+    out.update(_moe_shape(cfg))
 
     quant = _derive_quantization(cfg)
     if quant:
         out["quantization"] = quant
     for key in ("torch_dtype", "kv_cache_dtype"):
-        val = str(cfg.get(key) or "").strip()
-        if val:
-            out[key] = val
+        value = str(cfg.get(key) or "").strip()
+        if value:
+            out[key] = value
     return out
 
 

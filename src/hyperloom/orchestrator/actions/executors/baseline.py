@@ -46,6 +46,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     make_baseline_recorder,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
+from hyperloom.inference_optimizer.grid_server_args import with_capture_disabled
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
 from ...measurement.integrate_performance import assess_integrate_performance
@@ -486,10 +487,11 @@ def _is_cuda_graph_capture_failure(*texts: str) -> bool:
     return bool(_classify_cuda_graph_capture_failure(*texts)[0])
 
 
-# Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph, vllm and atom use --enforce-eager.
+# Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph, vllm uses the dotted
+# --compilation-config.cudagraph_mode NONE (which keeps inductor), atom still uses --enforce-eager.
 _DISABLE_CUDA_GRAPH_FLAGS = {
     "sglang": "--disable-cuda-graph",
-    "vllm": "--enforce-eager",
+    "vllm": "--compilation-config.cudagraph_mode NONE",
     "atom": "--enforce-eager",
 }
 
@@ -685,11 +687,8 @@ def _disable_cuda_graph_flag(framework: str) -> str:
 
 
 def _with_cuda_graph_disabled(extra_server_args: str, framework: str) -> str:
-    """Append the framework-correct disable-cuda-graph flag once (idempotent)."""
-    flag = _disable_cuda_graph_flag(framework)
-    if flag in (extra_server_args or "").split():
-        return extra_server_args or ""
-    return f"{extra_server_args} {flag}".strip()
+    """Apply the framework-correct disable-cuda-graph flag once (idempotent)."""
+    return with_capture_disabled(extra_server_args or "", _disable_cuda_graph_flag(framework))
 
 
 def _classify_subprocess_error(
@@ -2737,6 +2736,7 @@ class BenchmarkRunExecutor:
                 # reverting here handed prelude a clean tree and silently lost the replay.
                 if applied_patches and not isinstance(patch_application, dict):
                     _revert_legacy_warm_patch_trees(params)
+                _lifecycle.stop_agentx_servers(output_dir)
                 if bench_lease is not None:
                     bench_lease.close()
 

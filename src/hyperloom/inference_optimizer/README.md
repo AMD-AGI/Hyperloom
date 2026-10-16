@@ -68,6 +68,7 @@ src/hyperloom/inference_optimizer/
 ├── cli/                        # `python -m hyperloom optimize` entry point
 │   ├── __init__.py             # main()/_run_optimize()
 │   ├── parser.py               # _build_parser()
+│   ├── constraint_args.py      # --max-latency-ms / --max-power-w / --max-per-gpu-power-w
 │   ├── backends/bootstrap/executors/kb/model_gate/preflight.py
 │   └── credentials/multi_node/quantization/recover.py
 ├── model_config_utils.py       # stdlib-only model-config leaf shared by cli/ and the orchestrator

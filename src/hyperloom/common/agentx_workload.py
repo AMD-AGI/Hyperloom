@@ -18,6 +18,10 @@ AIPERF_CLIENT_SCRIPT = "aiperf_client.sh"
 MLPERF_CLIENT_SCRIPT = "mlperf_agentic_client.sh"
 AGENTX_CLIENT_SCRIPTS = frozenset({AIPERF_CLIENT_SCRIPT, MLPERF_CLIENT_SCRIPT})
 
+# Both client scripts write the pid of the server they boot here, under their RESULT_DIR. The server is setsid'd and
+# re-parented away from the client, so reaping the round's process tree never reaches it.
+AGENTX_SERVER_PIDFILE = "agentx_server.pid"
+
 BACKEND_ENV = "HYPERLOOM_AGENTIC_BACKEND"
 
 # The MLPerf agentic v6 corpus and the two flows ``run_agentic.sh`` accepts.
