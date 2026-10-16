@@ -1113,6 +1113,31 @@ def _tracelens_patch_enabled() -> bool:
     return os.environ.get("HYPERLOOM_ENABLE_PATCH", "1").strip() != "0"
 
 
+def _record_tracelens_patch_status(
+    envs: dict[str, Any],
+    *,
+    attempted: bool,
+    patched: bool,
+    framework: str,
+    degraded_detail: str = "annotation-only flags",
+) -> None:
+    """Set ``HYPERLOOM_TRACELENS_PATCH_STATUS`` and warn on attempted-but-failed."""
+    if patched:
+        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "ok"
+    elif attempted:
+        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "unavailable"
+        envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
+        log.warning(
+            "TraceLens runtime patch unavailable for framework=%s; "
+            "profile will omit %s and roofline "
+            "analysis may be degraded.",
+            framework or "<unset>",
+            degraded_detail,
+        )
+    else:
+        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "not_attempted"
+
+
 def _coerce_workload_int_env(env_key: str, raw: str) -> int:
     """Coerce workload env values, accepting ``CONC`` comma ladders."""
     text = str(raw or "").strip()
@@ -1584,6 +1609,29 @@ def materialize_config_with_envs(
     from hyperloom.inference_optimizer import framework_registry as _fw_reg
 
     _is_scriptable_profile = _fw_reg.is_scriptable(bench.get("framework"))
+    if is_profile and str(bench.get("framework") or "").lower() == "xdit":
+        from ._server_patcher import ensure_xdit_patched_for_tracelens
+
+        xdit_patch_attempted = _tracelens_patch_enabled()
+        xdit_patched = xdit_patch_attempted and ensure_xdit_patched_for_tracelens()
+        # Append to the config-declared runner args (``--model``, frame/step
+        # counts) rather than replacing them, so the profile captures the same
+        # workload the baseline measured. ``--profile_wait`` is the sentinel for
+        # an already-appended set, keeping re-materialization of a prior profile
+        # YAML idempotent -- the vLLM path below guards the same way.
+        existing_xdit_args = str(envs.get("EXTRA_XDIT_ARGS", "")).strip()
+        if "--profile_wait" not in existing_xdit_args:
+            profiler_args = (
+                "--profile_wait 1 --profile_capture_phase --profile_with_stack" if xdit_patched else "--profile_wait 1"
+            )
+            envs["EXTRA_XDIT_ARGS"] = f"{existing_xdit_args} {profiler_args}".strip()
+        _record_tracelens_patch_status(
+            envs,
+            attempted=xdit_patch_attempted,
+            patched=xdit_patched,
+            framework="xdit",
+            degraded_detail="capture-phase flags",
+        )
     profile_num_prompts: int | None = None
     atom_caps: _AtomTracelensCaps | None = None
     # ``(sentinel, flag)`` pairs remembered so the re-assertion at the very end of
@@ -1684,23 +1732,11 @@ def materialize_config_with_envs(
         is_sglang = "sglang" in fw
         sglang_sitecustomize = is_sglang and resolve_sglang_shape_mode() == "sitecustomize"
         patch_attempted = _tracelens_patch_enabled() and not is_atom and not sglang_sitecustomize
-        # Written in every branch, not only the failing one: "patched fine" and "never tried because the image
-        # already carries it" call for different reactions when a trace later turns up without annotations.
-        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "not_attempted"
         if patch_attempted:
             if "vllm" in fw:
                 tracelens_patch_ok = ensure_vllm_patched_for_tracelens()
             else:
                 tracelens_patch_ok = ensure_sglang_patched_for_tracelens()
-            envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "ok" if tracelens_patch_ok else "unavailable"
-            if not tracelens_patch_ok:
-                envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
-                log.warning(
-                    "TraceLens runtime patch unavailable for framework=%s; "
-                    "profile will omit annotation-only flags and roofline "
-                    "analysis may be degraded.",
-                    fw or "<unset>",
-                )
         elif sglang_sitecustomize and _tracelens_patch_enabled():
             # Shapes come from kernel_shape_tool, but the per-batch-size capture trace still needs
             # sglang_gc_patch or it IndexErrors. Only profiling captures traces, so patch only here.
@@ -1712,6 +1748,7 @@ def materialize_config_with_envs(
                     "It needs TRACELENS_ROOT with an exact "
                     "examples/custom_workflows/inference_analysis/sglang_gc_patch/sglang_<X_Y_Z> dir."
                 )
+        _record_tracelens_patch_status(envs, attempted=patch_attempted, patched=tracelens_patch_ok, framework=fw)
         if is_atom:
             # ATOM has no delay/max-iteration window; extra prompts only grow
             # the HTTP-bracketed trace. Force NUM_PROMPTS=CONC.
@@ -2012,17 +2049,14 @@ def materialize_config_with_envs(
         for _name in _QUALITY_REF_WRITE_ENVS:
             envs[_name] = _ref_write
     # ── xDiT-only wiring ───────────────────────────────────────────────────
-    # These three are read by the xDiT runner and by nothing else, so they are
+    # These are read by the xDiT runner and by nothing else, so they are
     # keyed on the framework rather than on scriptability: an operator-supplied
     # ``custom`` workload must not have its baseline altered by settings it
     # never declared, least of all an attention backend.
     if str(bench.get("framework") or "").strip().lower() == "xdit":
-        # The xDiT runner resolves models via MODEL_REGISTRY keys, not
-        # filesystem paths. XDIT_MODEL_ARG selects the basename ("name",
-        # registry-correct) vs the full path ("path", which fails lookup). Force
-        # it onto benchmark.envs here so per-task overrides can't break model
-        # resolution. Default "name".
-        envs["XDIT_MODEL_ARG"] = os.environ.get("XDIT_MODEL_ARG", "").strip() or "name"
+        _xdit_model_name = os.environ.get("XDIT_MODEL_NAME", "").strip()
+        if _xdit_model_name:
+            envs["XDIT_MODEL_NAME"] = _xdit_model_name
         # If set, the baked hyperloom_local_aliases map each registered name to
         # a local snapshot dir rooted at $XDIT_MODEL_ROOT/<slug>. Leave unset in
         # public/default deployments so the operator chooses the model cache

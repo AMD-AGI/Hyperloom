@@ -4158,6 +4158,13 @@ def test_infer_analysis_mode_atom_returns_inference():
     assert tlr.infer_analysis_mode("  atom  ", "default") == "inference"
 
 
+def test_infer_analysis_mode_xdit_returns_inference():
+    """xDiT uses inference-mode reporting for capture-folder support."""
+    assert tlr.infer_analysis_mode("xdit", "") == "inference"
+    assert tlr.infer_analysis_mode("xDiT", "default") == "inference"
+    assert tlr.infer_analysis_mode("  xdit  ", "default") == "inference"
+
+
 def test_infer_analysis_mode_sglang_vllm_unchanged():
     """Regression guard: sglang / vllm remain ``inference``."""
     assert tlr.infer_analysis_mode("sglang", "") == "inference"
