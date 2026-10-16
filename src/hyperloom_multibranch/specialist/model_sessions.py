@@ -20,7 +20,13 @@ from hyperloom.orchestrator.specialists.agent_runner import AgentRunner
 from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SpecialistTokens
-from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSession, Processes
+from hyperloom_multibranch.specialist.agent_session import (
+    AgentCommand,
+    AgentSession,
+    AgentSetup,
+    BranchPlace,
+    Processes,
+)
 from hyperloom_multibranch.specialist.prompts import role_prompt
 from hyperloom_multibranch.specialist.runtime import SessionFactory, SessionStart
 from hyperloom_multibranch.specialist.tools import WorktreeFor
@@ -55,28 +61,15 @@ def model_sessions(
     base = SourceBase(source, locator=locator)
     if not source.exists():
         base.build(components)
-    role = role_prompt(workload)
+    setup = AgentSetup(command, role_prompt(workload), env, runner, tokens, processes, repo)
 
     def worktrees(branch: str) -> BranchWorktree:
         return base.worktree(branch, branch_dir(branch) / WORKTREE_DIR)
 
     def factory(start: SessionStart) -> AgentSession:
-        return AgentSession(
-            start.branch,
-            start.start_commit,
-            start.k,
-            start.brief,
-            command=command,
-            role=role,
-            env=env,
-            runner=runner,
-            tokens=tokens,
-            processes=processes,
-            repo=repo,
-            worktree=worktrees(start.branch),
-            notebook=notebook_for(start.branch),
-            workspace=branch_dir(start.branch) / SESSION_DIR,
-        )
+        branch = start.branch
+        place = BranchPlace(worktrees(branch), notebook_for(branch), branch_dir(branch) / SESSION_DIR)
+        return AgentSession(start, setup, place)
 
     return ModelSessions(factory, worktrees)
 

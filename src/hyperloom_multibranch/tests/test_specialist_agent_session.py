@@ -19,7 +19,14 @@ from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, L
 from hyperloom_multibranch.contracts.toolbox import SpecialistGrant
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
-from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSession, SessionCrashed
+from hyperloom_multibranch.specialist.agent_session import (
+    AgentCommand,
+    AgentSession,
+    AgentSetup,
+    BranchPlace,
+    SessionCrashed,
+)
+from hyperloom_multibranch.specialist.runtime import SessionStart
 from hyperloom_multibranch.specialist.worktree import SourceBase
 
 BRANCH, TOKEN_ENV, FIRST_PID = "s1", "HYPERLOOM_SPECIALIST_MCP_TOKEN", 4000
@@ -116,21 +123,20 @@ async def rig(tmp_path):
     )
 
     def session(command=AgentCommand("claude", "claude"), runner=None, **overrides) -> AgentSession:
-        fields = {
-            "command": command,
-            "role": "You are a long-running optimization specialist.",
-            "env": {"PATH": os.environ.get("PATH", "")},
-            "runner": runner or rig.runner,
-            "tokens": rig.tokens,
-            "processes": rig.processes,
-            "repo": repo,
-            "worktree": rig.worktree,
-            "notebook": notebook,
-            "workspace": rig.workspace,
-            "poll_seconds": 0.01,
-            "clock": lambda: clock.now,
-        }
-        return AgentSession(BRANCH, root, 2, "leads: fp8 KV cache", **{**fields, **overrides})
+        setup = AgentSetup(
+            command=command,
+            role="You are a long-running optimization specialist.",
+            env={"PATH": os.environ.get("PATH", "")},
+            runner=runner or rig.runner,
+            tokens=rig.tokens,
+            processes=rig.processes,
+            repo=repo,
+            poll_seconds=0.01,
+            clock=lambda: clock.now,
+            **overrides,
+        )
+        place = BranchPlace(rig.worktree, notebook, rig.workspace)
+        return AgentSession(SessionStart(BRANCH, root, "leads: fp8 KV cache", 2), setup, place)
 
     rig.session = session
     return rig

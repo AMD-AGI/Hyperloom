@@ -15,6 +15,7 @@ from collections.abc import Sequence
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_SAFETY_PREAMBLE
 from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord
 from hyperloom_multibranch.specialist.judging import NOTICE
+from hyperloom_multibranch.specialist.runtime import SessionStart
 
 #: Branch-log entries a launch prompt shows; the specialist reads further back with notebook_branch_log.
 RECENT_ENTRIES = 20
@@ -71,20 +72,14 @@ def role_prompt(workload: str) -> str:
 
 
 def launch_prompt(
-    *,
-    branch: str,
-    start_commit: str,
-    head: str,
-    k: int,
-    worktree: str,
-    brief: str,
-    recent: Sequence[BranchLogRecord],
-    last_end: str = "",
+    start: SessionStart, *, head: str, worktree: str, recent: Sequence[BranchLogRecord], last_end: str = ""
 ) -> str:
-    """The first message of one session of ``branch``'s specialist; ``last_end`` says how the previous one ended."""
-    sections = [f"Startup brief:\n{brief.strip()}"] if brief.strip() else []
+    """The first message of one session of the specialist ``start`` runs; ``last_end`` says how the previous one ended."""
+    brief = start.brief.strip()
+    sections = [f"Startup brief:\n{brief}"] if brief else []
     sections.append(
-        f"Your branch: {branch}, started at {start_commit}. Its head: {head}. Tests you may have running at once: {k}.\n"
+        f"Your branch: {start.branch}, started at {start.start_commit}. Its head: {head}. "
+        f"Tests you may have running at once: {start.k}.\n"
         f"Your worktree: {worktree} (call worktree_sync before each source change)."
     )
     if recent:

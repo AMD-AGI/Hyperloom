@@ -7,6 +7,7 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_S
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord
 from hyperloom_multibranch.specialist.prompts import ENTRY_CHARS, RECENT_ENTRIES, launch_prompt, role_prompt
+from hyperloom_multibranch.specialist.runtime import SessionStart
 
 WORKLOAD = "qwen3-8b on vllm, TP 1, ISL 1024, OSL 1024, concurrency 64, InferenceX"
 TOOLS = (
@@ -28,17 +29,9 @@ def _record(n: int, content: str = "", request_ids: tuple[str, ...] = ()) -> Bra
     return BranchLogRecord(f"e{n}", float(n), entry)
 
 
-def _launch(**overrides) -> str:
-    fields = {
-        "branch": "s1",
-        "start_commit": "c0",
-        "head": "c7",
-        "k": 3,
-        "worktree": "/nfs/s1/worktree",
-        "brief": "",
-        "recent": (),
-    }
-    return launch_prompt(**{**fields, **overrides})
+def _launch(*, brief: str = "", **overrides) -> str:
+    fields = {"head": "c7", "worktree": "/nfs/s1/worktree", "recent": ()}
+    return launch_prompt(SessionStart("s1", "c0", brief, 3), **{**fields, **overrides})
 
 
 def test_the_role_names_the_workload_every_step_s_tool_and_the_rules():

@@ -18,7 +18,7 @@ import contextlib
 import logging
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -36,6 +36,7 @@ from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, SpecialistTokens
 from hyperloom_multibranch.specialist.prompts import launch_prompt
+from hyperloom_multibranch.specialist.runtime import SessionStart
 from hyperloom_multibranch.specialist.tools import sync_to_head
 from hyperloom_multibranch.specialist.worktree import BranchWorktree
 
@@ -114,51 +115,51 @@ class AgentCommand:
         return f"{role}\n\n{prompt}" if self.backend == AGENT_BACKEND_CODEX else prompt
 
 
-class AgentSession:
-    """One run of a model-backed specialist on ``branch``: CLI sessions until it is stopped or one crashes.
+@dataclass(frozen=True)
+class AgentSetup:
+    """What every model-backed session of a session shares: the CLI and its role, and what a session reaches.
 
     ``env`` is the environment the CLI runs with, the branch's MCP token added; the session decides nothing about it.
     """
 
-    def __init__(
-        self,
-        branch: str,
-        start_commit: str,
-        k: int,
-        brief: str,
-        *,
-        command: AgentCommand,
-        role: str,
-        env: Mapping[str, str],
-        runner: AgentRunner,
-        tokens: SpecialistTokens,
-        processes: Processes,
-        repo: ExperimentRepo,
-        worktree: BranchWorktree,
-        notebook: BranchLogStore,
-        workspace: Path,
-        session_seconds: float = LONG_RUNNING_SESSION_SEC,
-        min_session_seconds: float = MIN_SESSION_S,
-        poll_seconds: float = 5.0,
-        clock: Callable[[], float] = time.time,
-    ) -> None:
-        self._branch, self._start_commit, self._k, self._brief = branch, start_commit, k, brief
-        self._command, self._role, self._env, self._runner = command, role, env, runner
-        self._tokens, self._processes, self._repo = tokens, processes, repo
-        self._worktree, self._notebook, self._workspace = worktree, notebook, workspace
-        self._session_seconds, self._min_session_seconds = session_seconds, min_session_seconds
-        self._poll_seconds, self._clock = poll_seconds, clock
+    command: AgentCommand
+    role: str
+    env: Mapping[str, str]
+    runner: AgentRunner
+    tokens: SpecialistTokens
+    processes: Processes
+    repo: ExperimentRepo
+    session_seconds: float = LONG_RUNNING_SESSION_SEC
+    min_session_seconds: float = MIN_SESSION_S
+    poll_seconds: float = 5.0
+    clock: Callable[[], float] = time.time
+
+
+@dataclass(frozen=True)
+class BranchPlace:
+    """Where one branch's sessions work: its worktree, its log, and the directory a session's files go in."""
+
+    worktree: BranchWorktree
+    notebook: BranchLogStore
+    workspace: Path
+
+
+class AgentSession:
+    """One run of a model-backed specialist: CLI sessions on its branch until it is stopped or one crashes."""
+
+    def __init__(self, start: SessionStart, setup: AgentSetup, place: BranchPlace) -> None:
+        self._start, self._setup, self._place = start, setup, place
         self._stopped = asyncio.Event()
         self._handle: AgentHandle | None = None
 
     async def run(self) -> None:
-        grant = self._tokens.issue(self._branch, frozenset({SCOPE_SPECIALIST}))
+        grant = self._setup.tokens.issue(self._start.branch, frozenset({SCOPE_SPECIALIST}))
         last_end = ""
         while not self._stopped.is_set():
             last_end = await self._session(grant, last_end)
 
     async def set_k(self, k: int) -> None:
-        self._k = k
+        self._start = replace(self._start, k=k)
 
     async def stop(self) -> None:
         self._stopped.set()
@@ -166,84 +167,76 @@ class AgentSession:
         handle, self._handle = self._handle, None
         if handle is not None:
             await self._finish(handle, cancel=True)
-        self._tokens.revoke(self._branch)
+        self._setup.tokens.revoke(self._start.branch)
 
     async def _session(self, grant: SpecialistGrant, last_end: str) -> str:
         """Run one CLI session to its end and say how it ended; raises :class:`SessionCrashed` when it did not work."""
-        head = await sync_to_head(self._repo, self._branch, self._worktree)
-        recent = await self._notebook.branch_log(self._branch)
-        prompt = launch_prompt(
-            branch=self._branch,
-            start_commit=self._start_commit,
-            head=head,
-            k=self._k,
-            worktree=str(self._worktree.path),
-            brief=self._brief,
-            recent=recent,
-            last_end=last_end,
-        )
+        branch, worktree, clock = self._start.branch, self._place.worktree, self._setup.clock
+        head = await sync_to_head(self._setup.repo, branch, worktree)
+        recent = await self._place.notebook.branch_log(branch)
+        prompt = launch_prompt(self._start, head=head, worktree=str(worktree.path), recent=recent, last_end=last_end)
         spec = await asyncio.to_thread(self._spec, grant, prompt)
-        started = self._clock()
-        handle = self._handle = await self._runner.launch(spec)
+        started = clock()
+        handle = self._handle = await self._setup.runner.launch(spec)
         self._adopt(handle, spec.argv)
         status = await self._wait(handle)
         if self._handle is not handle:
             return last_end
         self._handle = None
         await self._finish(handle, cancel=status.state != "exited")
-        seconds = self._clock() - started
+        seconds = clock() - started
         if self._stopped.is_set():
             return last_end
         if (
             status.state == STATE_LOST
             or (status.returncode and not status.timed_out)
-            or seconds < self._min_session_seconds
+            or seconds < self._setup.min_session_seconds
         ):
             raise SessionCrashed(_describe(status, seconds))
         return "it reached its deadline" if status.timed_out else "its model finished its turn"
 
     def _spec(self, grant: SpecialistGrant, prompt: str) -> AgentLaunchSpec:
-        self._workspace.mkdir(parents=True, exist_ok=True)
-        done = self._workspace / DONE_FILE
+        setup, workspace, worktree = self._setup, self._place.workspace, self._place.worktree.path
+        workspace.mkdir(parents=True, exist_ok=True)
+        done = workspace / DONE_FILE
         done.unlink(missing_ok=True)
-        role_file = self._workspace / ROLE_FILE
-        role_file.write_bytes(self._role.encode())
-        (self._workspace / PROMPT_FILE).write_bytes(self._command.stdin(self._role, prompt).encode())
+        role_file = workspace / ROLE_FILE
+        role_file.write_bytes(setup.role.encode())
+        (workspace / PROMPT_FILE).write_bytes(setup.command.stdin(setup.role, prompt).encode())
         return AgentLaunchSpec(
-            task_id=self._branch,
-            workspace=self._workspace,
-            argv=self._command.argv(role_file, self._worktree.path),
-            env={**self._env, grant.token_env: grant.token},
-            cwd=self._worktree.path,
+            task_id=self._start.branch,
+            workspace=workspace,
+            argv=setup.command.argv(role_file, worktree),
+            env={**setup.env, grant.token_env: grant.token},
+            cwd=worktree,
             gpus=0,
-            deadline_unix=self._clock() + self._session_seconds,
+            deadline_unix=setup.clock() + setup.session_seconds,
             done_paths=(done,),
-            heartbeat_path=self._workspace / HEARTBEAT_FILE,
+            heartbeat_path=workspace / HEARTBEAT_FILE,
             mcp_servers=(McpEndpoint(MCP_SERVER, grant.url, grant.token_env),),
-            backend=self._command.backend,
+            backend=setup.command.backend,
             heartbeat_sink=grant.heartbeat_sink,
         )
 
     def _adopt(self, handle: AgentHandle, argv: Sequence[str]) -> None:
+        branch = self._start.branch
         try:
-            self._processes.adopt(handle.pid, branch=self._branch, argv=argv)
+            self._setup.processes.adopt(handle.pid, branch=branch, argv=argv)
         except ValueError:
-            logger.warning(
-                "the agent CLI of %s ended before the process registry took it over", self._branch, exc_info=True
-            )
+            logger.warning("the agent CLI of %s ended before the process registry took it over", branch, exc_info=True)
 
     async def _wait(self, handle: AgentHandle) -> AgentStatus:
         while True:
-            status = await self._runner.poll(handle)
+            status = await self._setup.runner.poll(handle)
             if status.state != _RUNNING or self._stopped.is_set():
                 return status
             with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(self._stopped.wait(), self._poll_seconds)
+                await asyncio.wait_for(self._stopped.wait(), self._setup.poll_seconds)
 
     async def _finish(self, handle: AgentHandle, *, cancel: bool) -> None:
         if cancel:
-            await self._runner.cancel(handle)
-        await self._runner.collect(handle)
+            await self._setup.runner.cancel(handle)
+        await self._setup.runner.collect(handle)
 
 
 def _describe(status: AgentStatus, seconds: float) -> str:
@@ -254,4 +247,13 @@ def _describe(status: AgentStatus, seconds: float) -> str:
     return f"the session ended after {seconds:.0f}s, too soon to have worked"
 
 
-__all__ = ["MCP_SERVER", "MIN_SESSION_S", "AgentCommand", "AgentSession", "Processes", "SessionCrashed"]
+__all__ = [
+    "MCP_SERVER",
+    "MIN_SESSION_S",
+    "AgentCommand",
+    "AgentSession",
+    "AgentSetup",
+    "BranchPlace",
+    "Processes",
+    "SessionCrashed",
+]
