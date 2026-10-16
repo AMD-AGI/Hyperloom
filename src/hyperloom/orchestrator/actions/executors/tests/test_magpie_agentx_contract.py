@@ -255,7 +255,6 @@ def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path,
 
 def test_native_baseline_runs_through_the_real_executor(source, tmp_path, monkeypatch, report):
     import asyncio
-    import json
     import subprocess
 
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
@@ -323,7 +322,6 @@ async def test_applied_source_is_measured_and_transactionally_kept_or_reverted(
     source, report, tmp_path, monkeypatch, throughput, interactivity, expected
 ):
     import hashlib
-    import json
     import subprocess
 
     from hyperloom.orchestrator.actions.executors import _grid_runner, _ray_serving
@@ -411,7 +409,6 @@ async def test_applied_source_is_measured_and_transactionally_kept_or_reverted(
 @pytest.mark.parametrize("capture_status", ["complete", "failed", "missing"])
 async def test_profile_executor_keeps_capture_windows_separate(source, report, tmp_path, monkeypatch, capture_status):
     import gzip
-    import json
 
     from hyperloom.orchestrator.actions.executors.baseline import BenchmarkRunExecutor
     from hyperloom.orchestrator.actions.executors.profile import ProfileExecutor
