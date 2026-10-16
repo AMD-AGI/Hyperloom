@@ -79,6 +79,7 @@ REJECTION_CODES = (
     "unknown_retest",  # ``retest_of`` names no accepted request
     "branch_stopped",  # the queue policy lists the branches that may submit and this one is not among them
     "speculative_context_copy_on_synthetic",  # an InferenceX candidate introduces or changes a context-copy draft
+    "speculative_decoding_pinned",  # an AgentX candidate changes the draft or simulated acceptance its parent pins
 )
 
 

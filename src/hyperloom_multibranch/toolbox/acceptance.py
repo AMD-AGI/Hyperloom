@@ -18,7 +18,12 @@ from typing import Protocol
 from hyperloom.contracts.measurement import Purpose, TestRequest
 from hyperloom.contracts.recipe import Recipe, RecipeError, apply
 from hyperloom.measure.compile import BaseImageMismatchError
-from hyperloom.measure.fake_gain import CONTEXT_COPY_REFUSAL, launch_context_copy_refusal
+from hyperloom.measure.fake_gain import (
+    CONTEXT_COPY_REFUSAL,
+    SPECULATIVE_DECODING_PINNED,
+    launch_context_copy_refusal,
+    pinned_speculative_refusal,
+)
 from hyperloom.measure.surface import SurfaceViolation
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
@@ -115,12 +120,17 @@ class Acceptance:
             ) from error
 
     def _check_fake_gain(self, parent: Recipe, candidate: Recipe) -> None:
-        """Refuse a candidate whose gain main refuses as fake (#1904): the launch is compared with its parent's."""
-        if self._workload is not WorkloadKind.INFERENCEX:
-            return
-        reason = launch_context_copy_refusal(parent.launch, candidate.launch)
+        """Refuse a candidate whose gain main refuses as fake: its launch is compared with its parent's.
+
+        InferenceX runs a synthetic benchmark, where a context-copy draft is refused (#1904); AgentX runs real
+        datasets, where a draft whose acceptance length the parent simulates stays pinned (#1885).
+        """
+        if self._workload is WorkloadKind.INFERENCEX:
+            reason, code = launch_context_copy_refusal(parent.launch, candidate.launch), CONTEXT_COPY_REFUSAL
+        else:
+            reason, code = pinned_speculative_refusal(parent.launch, candidate.launch), SPECULATIVE_DECODING_PINNED
         if reason:
-            raise RequestRejected(reason, CONTEXT_COPY_REFUSAL)
+            raise RequestRejected(reason, code)
 
     def _plan(self, recipe: Recipe, request: TestRequest) -> object:
         try:

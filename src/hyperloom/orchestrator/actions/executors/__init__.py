@@ -30,6 +30,11 @@ from ._subprocess_kill import (
 )
 from .benchmark_result import harvest_leaked_artifacts
 from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
+from ._spec_decode_pin import (
+    SPECULATIVE_DECODING_PINNED,
+    SpeculativeDecodingPinnedError,
+    refuse_unpinned_speculative_change,
+)
 
 __all__ = [
     "CONTEXT_COPY_REFUSAL",
@@ -43,7 +48,9 @@ __all__ = [
     "ORCHESTRATOR_CANCELLED_RETURNCODE",
     "ReportExecutor",
     "SESSION_TIME_EXHAUSTED_RETURNCODE",
+    "SPECULATIVE_DECODING_PINNED",
     "SessionBreakdownExecutor",
+    "SpeculativeDecodingPinnedError",
     "TargetAnalysisExecutor",
     "VariantResult",
     "baseline_executor",
@@ -54,6 +61,7 @@ __all__ = [
     "harvest_leaked_artifacts",
     "materialize_config_with_envs",
     "num_gpus_for_config",
+    "refuse_unpinned_speculative_change",
     "report_executor",
     "resolve_lifecycle_params",
     "run_grid",

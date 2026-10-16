@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.recipe import LaunchConfig, Recipe
+from hyperloom.contracts.recipe import ConfigDelta, LaunchConfig, Recipe, RecipeDelta
 from hyperloom_multibranch.contracts.toolbox import REJECTION_CODES, RequestRejected, WorkloadKind
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, build, req
 
@@ -77,3 +77,44 @@ async def test_an_inferencex_candidate_that_leaves_the_base_copy_draft_alone_is_
 
 async def test_an_agentx_campaign_does_not_refuse_a_context_copy_draft(tmp_path: Path) -> None:
     assert await _refused_with(tmp_path, _repo(), WorkloadKind.AGENTX, NGRAM) is None
+
+
+# --- AgentX: a draft whose acceptance the parent simulates stays pinned ---
+
+PINNED_CODE = "speculative_decoding_pinned"
+SIMULATING = "--speculative-algorithm EAGLE --speculative-num-steps 3"
+SIM_ENV = {"SGLANG_SIMULATE_ACC_LEN": "3.6"}
+
+
+def test_the_pinned_code_is_a_documented_rejection_code() -> None:
+    assert PINNED_CODE in REJECTION_CODES
+
+
+@pytest.mark.parametrize("server_args", ["--speculative-num-steps 5", "--speculative-algorithm NEXTN"])
+async def test_an_agentx_candidate_that_changes_the_pinned_draft_is_refused(tmp_path: Path, server_args: str) -> None:
+    code = await _refused_with(tmp_path, _repo(SIMULATING, SIM_ENV), WorkloadKind.AGENTX, server_args)
+    assert code == PINNED_CODE
+
+
+async def test_an_agentx_candidate_that_leaves_the_pinned_draft_alone_is_accepted(tmp_path: Path) -> None:
+    code = await _refused_with(tmp_path, _repo(SIMULATING, SIM_ENV), WorkloadKind.AGENTX, "--max-running-requests 8")
+    assert code is None
+
+
+async def test_an_agentx_candidate_that_starts_simulating_over_a_real_draft_is_refused(tmp_path: Path) -> None:
+    rig = build(tmp_path, repo=_repo(SIMULATING), workload_kind=WorkloadKind.AGENTX)
+    change = RecipeDelta(config=ConfigDelta(envs=SIM_ENV))
+    with pytest.raises(RequestRejected) as refused:
+        await rig.toolbox.submit_test(req(change=change))
+    assert refused.value.code == PINNED_CODE
+
+
+async def test_an_agentx_candidate_may_enable_a_draft_the_parent_does_not_run(tmp_path: Path) -> None:
+    assert await _refused_with(tmp_path, _repo(), WorkloadKind.AGENTX, SIMULATING) is None
+
+
+async def test_an_inferencex_campaign_does_not_pin_a_simulated_draft(tmp_path: Path) -> None:
+    code = await _refused_with(
+        tmp_path, _repo(SIMULATING, SIM_ENV), WorkloadKind.INFERENCEX, "--speculative-num-steps 5"
+    )
+    assert code is None
