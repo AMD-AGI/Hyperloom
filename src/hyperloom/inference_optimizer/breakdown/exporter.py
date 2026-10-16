@@ -471,7 +471,7 @@ def write_minimal_final_report(
     current_best = state.get("current_best") or {}
     cb_action = current_best.get("action") or "-"
     cb_tput = current_best.get("tput")
-    # Framework-aware primary metric: serving shows tok/s/GPU, scriptable xDiT shows per-image latency e2el_mean_ms
+    # Framework-aware primary metric: serving shows tok/s, scriptable xDiT shows per-image latency e2el_mean_ms
     # (ms).
     baseline_metric_s = framework_registry.format_primary_metric(framework, baseline_tput, precision=2)
     cb_metric_s = (
