@@ -47,6 +47,8 @@ _TORCH_API_TRANSLATIONS: Mapping[str, tuple[str, Callable[[object], bool | int]]
     "PYTORCH_TUNABLEOP_MAX_TUNING_ITERATIONS": ("torch.cuda.tunable.set_max_tuning_iterations", int),
 }
 
+_PRELUDE_MODULE_ERROR = "Settings prelude did not produce a valid module"
+
 
 @dataclass(frozen=True)
 class SettingsPlan:
@@ -108,7 +110,7 @@ def render_prelude(plan: SettingsPlan) -> str:
     emitted_env_loop = False
     emitted_unset_loop = False
     if plan.applied_env:
-        entries = [_tuple_literal((_py_string(name), _py_string(value))) for name, value in sorted(plan.applied_env.items())]
+        entries = [_tuple_literal((json.dumps(name), json.dumps(value))) for name, value in sorted(plan.applied_env.items())]
         lines.extend(
             [
                 f"for _hl_k, _hl_v in {_tuple_literal(entries)}:",
@@ -117,7 +119,7 @@ def render_prelude(plan: SettingsPlan) -> str:
         )
         emitted_env_loop = True
     if plan.unset_env:
-        entries = [_py_string(name) for name in sorted(set(plan.unset_env))]
+        entries = [json.dumps(name) for name in sorted(set(plan.unset_env))]
         lines.extend(
             [
                 f"for _hl_k in {_tuple_literal(entries)}:",
@@ -166,7 +168,7 @@ def apply_settings_prelude(source: bytes, plan: SettingsPlan) -> bytes:
     try:
         tree = ast.parse(source)
     except SyntaxError as exc:
-        raise ValueError("Settings prelude did not produce a valid module") from exc
+        raise ValueError(_PRELUDE_MODULE_ERROR) from exc
 
     insertion_line = _insertion_line(tree)
     text = source.decode()
@@ -180,19 +182,15 @@ def apply_settings_prelude(source: bytes, plan: SettingsPlan) -> bytes:
     try:
         new_tree = ast.parse(out)
     except SyntaxError as exc:
-        raise ValueError("Settings prelude did not produce a valid module") from exc
+        raise ValueError(_PRELUDE_MODULE_ERROR) from exc
     if not any(isinstance(node, ast.FunctionDef) and node.name == "hyperloom_optimize" for node in new_tree.body):
-        raise ValueError("Settings prelude did not produce a valid module")
+        raise ValueError(_PRELUDE_MODULE_ERROR)
     return out
 
 
 def _render_torch_api_call(name: str, value: object) -> str:
     function_name, coerce = _TORCH_API_TRANSLATIONS[name]
     return f"{function_name}({coerce(value)!r})"
-
-
-def _py_string(value: str) -> str:
-    return json.dumps(value)
 
 
 def _tuple_literal(entries: Sequence[str]) -> str:
