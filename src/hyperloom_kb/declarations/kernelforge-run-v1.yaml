@@ -4,10 +4,11 @@
 # listed here. rationale.reasoning holds the Summary line the implementer's reasoning log (rationale.reasoning_log)
 # opens with, at most three sentences stating the problem it solved and its approach. When the session kept no such
 # log, or its log has no Summary line, as in every run made before KernelForge asked for the log, it holds the first
-# three sentences of the implementer's own messages from its Claude Code transcript or, without a transcript, of the
-# rationale KernelForge recorded: the Rationale line it logs, which it cuts at 200 characters
-# (kernelforge/loop/runner.py:5417 at 1c14e79e1), or for a plain forge-loop run the candidate's meta.json. Reasoning
-# is required: a run whose logs hold none becomes no Experience, and the review asks for logs that record it.
+# three sentences of the implementer's own messages from the Claude Code transcript linked to the session
+# (rationale.reasoning_file) or, with none linked, of the rationale KernelForge recorded: the Rationale line it logs,
+# which it cuts at 200 characters (kernelforge/loop/runner.py:5417 at 1c14e79e1), or for a plain forge-loop run the
+# candidate's meta.json. Reasoning is required: a run whose logs hold none becomes no Experience, and the review asks
+# for logs that record it.
 # The objective and every identity field always form the repeat group, with the schema: Hyperloom groups Experiences
 # that way by itself (hyperloom_kb/query_view.py repeat_group_key) and accepts group: true only on baseline and change
 # fields, so none is declared here.
@@ -80,7 +81,8 @@ rationale:
       were collected from: every message the agent wrote, and the record of the iteration it gave KernelForge
       afterwards. The transcript is also one of the Experience's raw_logs, named by the path's last part. A path, not
       a file link: Hyperloom's credential screen for linked files flags the transcript's token-usage counters, such
-      as input_tokens. Absent when the logs hold no transcript of that session.
+      as input_tokens. Absent when the export links no transcript in the logs to that session, as for every plain
+      forge-loop run made before KernelForge named the reasoning log in the session's first prompt.
     kind: text
   - name: reasoning_log
     description: >-

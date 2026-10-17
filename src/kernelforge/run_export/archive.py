@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from kernelforge.orchestrator.summary_line import read_reasoning_log_section, read_summary, reasoning_log_path
-from kernelforge.run_export.files import read_json, read_text
+from kernelforge.run_export.files import inventory, read_json, read_text
 from kernelforge.run_export.units import CandidateOrigin
 
 #: How many sentences of a plan, of the agent's reasoning, or of a lesson an Experience keeps.
@@ -124,7 +124,7 @@ def campaign_identity(config: dict[str, Any], **more: str | None) -> dict[str, A
 
 
 def _files_in(directory: Path) -> list[Path]:
-    return sorted(path for path in directory.rglob("*") if path.is_file()) if directory.is_dir() else []
+    return [record.path for record in inventory(directory)] if directory.is_dir() else []
 
 
 def _lane_plan_file(experiments: Path, seq: int, plan: str) -> Path | None:

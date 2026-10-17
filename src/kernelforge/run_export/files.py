@@ -27,11 +27,16 @@ class FileRecord:
     size: int
 
 
+def _raise(error: OSError) -> None:
+    raise error
+
+
 def inventory(root: Path) -> list[FileRecord]:
-    """Every regular file under ``root``, in path order. Symlinked directories are not entered."""
+    """Every regular file under ``root``, in path order. Symlinked directories are not entered, and a directory that
+    cannot be listed raises its ``OSError`` rather than hiding the files in it."""
 
     records: list[FileRecord] = []
-    for directory, _subdirectories, names in os.walk(root):
+    for directory, _subdirectories, names in os.walk(root, onerror=_raise):
         for name in names:
             path = Path(directory) / name
             if path.is_file():
