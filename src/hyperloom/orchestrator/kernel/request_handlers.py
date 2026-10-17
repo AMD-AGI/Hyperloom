@@ -26,7 +26,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Awaitable, Callable, Mapping, NamedTuple
 
 from hyperloom.orchestrator.trace_analysis._capture_shapes import (
     is_capture_fragment as _shared_is_capture_fragment,
@@ -2987,6 +2987,74 @@ async def _invoke_forge_gemm_tune(input_payload: dict[str, Any], timeout: int) -
     return result if result is not None else _shape_tool_result(rc, stdout, stderr)
 
 
+def _log_failed_tuners(result: dict[str, Any]) -> None:
+    """Name each tuner that failed, so a partial run is legible from the log."""
+    failed = result.get("failed_tuners")
+    if not isinstance(failed, list):
+        return
+    for _f in failed:
+        if not isinstance(_f, dict):
+            continue
+        log.warning(
+            "forge gemm tuner %s failed (%s): %s",
+            _f.get("tuner") or "?",
+            _f.get("error_class") or "?",
+            _f.get("error") or "",
+        )
+
+
+def _bridge_forge_decision(
+    result: dict[str, Any],
+    *,
+    raw_model_path: str,
+    session_dir: Path,
+) -> None:
+    """Read forge's micro_decision as a coordinator decision, in place.
+
+    A "candidate" with a recommended env becomes a KEEP whose tuned CSV is made
+    durable and recipe-portable, so it survives with the recipe instead of
+    referencing the ephemeral tuner workspace; every other micro_decision is a
+    REVERT, named by what forge found.
+    """
+    micro = str(result.get("micro_decision") or "").strip().lower()
+    if micro == "candidate" and result.get("recommended_env"):
+        result.setdefault("decision", "KEEP")
+        # Make the tuned CSV durable + recipe-portable (mirrors integrate_patch's
+        # source-layer snapshot): copy it into the serving aiter config dir,
+        # repoint the env there, and snapshot it so the KEEP survives with the
+        # recipe instead of referencing the ephemeral tuner-workspace path.
+        # Keep the logical ID here: a resolved HF snapshot basename is a commit
+        # hash, which would make durable artifact names unstable across revisions.
+        _durable_envs, _snap_dir = _persist_forge_gemm_csv_durably(
+            dict(result["recommended_env"]),
+            model_path=raw_model_path,
+            session_dir=session_dir,
+        )
+        result.setdefault("extra_envs", _durable_envs)
+        if _snap_dir:
+            result.setdefault("source_snapshot", _snap_dir)
+        # Derive best_speedup from tuners_run when absent.
+        if "best_speedup" not in result:
+            best = 1.0
+            for t in result.get("tuners_run") or []:
+                if isinstance(t, dict):
+                    sp = float(t.get("best_micro_speedup") or 1.0)
+                    if sp > best:
+                        best = sp
+            if best > 1.0:
+                result["best_speedup"] = best
+        # Micro-only result: E2E validation still needed.
+        result.setdefault("requires_e2e_validation", True)
+    elif micro in ("no_improvement", "skipped"):
+        # Left unadorned on purpose: the wordings below are only legible against it.
+        result.setdefault("decision", "REVERT")
+    elif micro in _FORGE_BARREN_MICRO_DECISIONS:
+        result.setdefault("decision", "REVERT")
+        if micro == "failed":
+            result.setdefault("status", "failed")
+        result.setdefault("error_class", f"forge_{micro}")
+
+
 async def _run_forge_gemm_tuning(
     payload: dict,
     *,
@@ -3383,17 +3451,7 @@ async def _run_forge_gemm_tuning(
         disk_failed = _read_forge_result_json(workspace).get("failed_tuners")
         if disk_failed:
             result["failed_tuners"] = disk_failed
-    _failed_tuners = result.get("failed_tuners")
-    if isinstance(_failed_tuners, list) and _failed_tuners:
-        for _f in _failed_tuners:
-            if not isinstance(_f, dict):
-                continue
-            log.warning(
-                "forge gemm tuner %s failed (%s): %s",
-                _f.get("tuner") or "?",
-                _f.get("error_class") or "?",
-                _f.get("error") or "",
-            )
+    _log_failed_tuners(result)
 
     # The breakdown and the stack read the envelope, not the jsonl audit row, so
     # a tuner's own error class has to surface here too. Lifted before the bridge
@@ -3413,45 +3471,7 @@ async def _run_forge_gemm_tuning(
                 result["error"] = str(_t["error"])
                 break
 
-    # Bridge forge schema → coordinator schema: a "candidate" micro_decision with
-    # recommended_env becomes decision="KEEP" + extra_envs.
-    micro = str(result.get("micro_decision") or "").strip().lower()
-    if micro == "candidate" and result.get("recommended_env"):
-        result.setdefault("decision", "KEEP")
-        # Make the tuned CSV durable + recipe-portable (mirrors integrate_patch's
-        # source-layer snapshot): copy it into the serving aiter config dir,
-        # repoint the env there, and snapshot it so the KEEP survives with the
-        # recipe instead of referencing the ephemeral tuner-workspace path.
-        # Keep the logical ID here: a resolved HF snapshot basename is a commit
-        # hash, which would make durable artifact names unstable across revisions.
-        _durable_envs, _snap_dir = _persist_forge_gemm_csv_durably(
-            dict(result["recommended_env"]),
-            model_path=raw_model_path,
-            session_dir=session_dir,
-        )
-        result.setdefault("extra_envs", _durable_envs)
-        if _snap_dir:
-            result.setdefault("source_snapshot", _snap_dir)
-        # Derive best_speedup from tuners_run when absent.
-        if "best_speedup" not in result:
-            best = 1.0
-            for t in result.get("tuners_run") or []:
-                if isinstance(t, dict):
-                    sp = float(t.get("best_micro_speedup") or 1.0)
-                    if sp > best:
-                        best = sp
-            if best > 1.0:
-                result["best_speedup"] = best
-        # Micro-only result: E2E validation still needed.
-        result.setdefault("requires_e2e_validation", True)
-    elif micro in ("no_improvement", "skipped"):
-        # Left unadorned on purpose: the wordings below are only legible against it.
-        result.setdefault("decision", "REVERT")
-    elif micro in _FORGE_BARREN_MICRO_DECISIONS:
-        result.setdefault("decision", "REVERT")
-        if micro == "failed":
-            result.setdefault("status", "failed")
-        result.setdefault("error_class", f"forge_{micro}")
+    _bridge_forge_decision(result, raw_model_path=raw_model_path, session_dir=session_dir)
 
     return result
 
@@ -4531,6 +4551,151 @@ def _grade_integrate_accuracy(
     }
 
 
+class _SourceImport(NamedTuple):
+    """Whether the served process imported the patched source, and what it cost."""
+
+    confirmed: bool | None
+    evidence: dict[str, bool | None]
+    decision: str
+    downgraded: bool
+
+
+def _applied_patch_result(
+    payload: dict[str, Any],
+    *,
+    session_dir: str,
+    preapplied_git_patch: bool,
+) -> dict[str, Any]:
+    """Apply the kernel patch, or adopt a pre-applied result the session can vouch for.
+
+    A pre-applied manifest is trusted only from under the session's own
+    ``patches`` directory. An agent's integrate params land in ``payload``
+    verbatim, so the payload can never vouch for itself.
+    """
+    kernel_id = payload.get("kernel_id")
+    preapplied = payload.get("preapplied_apply_result")
+    if isinstance(preapplied, dict) and preapplied.get("status") == "ok":
+        manifest_path = Path(str(preapplied.get("manifest_path") or ""))
+        patches_root = (Path(session_dir) / "patches").resolve()
+        try:
+            trusted_preapplied = manifest_path.is_file() and manifest_path.resolve().is_relative_to(patches_root)
+        except OSError:
+            trusted_preapplied = False
+        return (
+            dict(preapplied)
+            if trusted_preapplied
+            else {
+                "status": "failed",
+                "error_class": "untrusted_preapplied_manifest",
+                "error": f"invalid pre-applied manifest: {manifest_path}",
+            }
+        )
+    if preapplied_git_patch:
+        # A controller publication is git-applied to the worktree before the
+        # validator runs, so its final bytes are already on disk; apply reads them
+        # as a snapshot instead of mistaking the diff for replacement source.
+        # Skipping the apply outright would also skip the cache invalidation,
+        # multi-node fan-out and rebuild the measurement depends on.
+        # Only an in-process caller can set this: an agent's integrate params
+        # land in ``payload`` verbatim, so the payload cannot carry the trust.
+        return _maybe_apply_kernel_patch(
+            _preapplied_snapshot_payload(payload),
+            session_dir=session_dir,
+            kernel_id=kernel_id,
+        )
+    return _maybe_apply_kernel_patch(
+        payload,
+        session_dir=session_dir,
+        kernel_id=kernel_id,
+    )
+
+
+def _unmeasured_integration_failure(
+    payload: dict[str, Any],
+    *,
+    apply_result: dict[str, Any],
+    bench_result: Any,
+) -> dict[str, Any]:
+    """Report a re-baseline that produced no usable measurement, and revert the patch.
+
+    The patch was never fairly scored, so the fault is surfaced at the top level
+    -- the re-baseline's own error class when it has one -- and routed through the
+    fault retry budget rather than discarded as a genuine REVERT.
+    """
+    kernel_id = payload.get("kernel_id")
+    patch_path = payload.get("patch_path")
+    revert_result = _maybe_revert_kernel_patch(apply_result)
+    # The re-baseline produced no usable measurement, so the patch was never
+    # fairly scored. Surface a top-level fault error_class (the re-baseline's
+    # own when present, else bench_exception) so this routes through the fault
+    # retry budget rather than being discarded as a genuine REVERT.
+    rebaseline_error_class = (
+        str((bench_result or {}).get("error_class") or "").strip() if isinstance(bench_result, dict) else ""
+    ) or "bench_exception"
+    stopped = stopped_by_the_run_class(rebaseline_error_class)
+    if stopped is not None:
+        # Nothing was measured, so the patch has no verdict to answer for.
+        return {
+            "status": "failed",
+            "error_class": stopped.error_class,
+            "error": stopped.interrupted,
+            "decision": "NEEDS_REVIEW",
+            "rebaseline_detail": bench_result,
+            "kernel_id": kernel_id,
+            "patch_path": patch_path,
+            "target_file": payload.get("target_file") or payload.get("source_file"),
+            "apply_result": apply_result,
+            "revert_result": revert_result,
+        }
+    return {
+        "status": "failed",
+        "error_class": rebaseline_error_class,
+        "error": "re-baseline did not succeed",
+        "decision": "REVERT",
+        "rebaseline_detail": bench_result,
+        "kernel_id": kernel_id,
+        "patch_path": patch_path,
+        "target_file": payload.get("target_file") or payload.get("source_file"),
+        "apply_result": apply_result,
+        "revert_result": revert_result,
+    }
+
+
+def _confirm_source_import(
+    payload: dict[str, Any],
+    *,
+    workspace: Any,
+    decision: str,
+) -> _SourceImport:
+    """Grade whether the served process imported and compiled the patched source.
+
+    Only the strict sub-flag enforces it, and only on positive non-import
+    evidence: an unknown never penalizes a decision. The whole write set is
+    graded, with the single target as the fallback for a bundle that declared
+    none.
+    """
+    if not _honest_flag("HL_CONFIRM_SOURCE_IMPORTED"):
+        return _SourceImport(confirmed=None, evidence={}, decision=decision, downgraded=False)
+    source_import_confirmed: bool | None = None
+    source_import_evidence: dict[str, bool | None] = {}
+    source_not_imported_downgrade = False
+    # Grade the whole write set; the single target is the fallback for a
+    # patch whose bundle declared none.
+    _written = [str(path) for path in (payload.get("patch_write_paths") or []) if str(path or "").strip()]
+    if not _written:
+        _written = [str(payload.get("target_file") or payload.get("source_file") or "")]
+    source_import_confirmed, source_import_evidence = _confirm_sources_imported(_written, workspace)
+    if decision == "KEEP" and source_import_confirmed is False and _honest_flag("HL_CONFIRM_SOURCE_IMPORTED_STRICT"):
+        decision = "NEEDS_REVIEW"
+        source_not_imported_downgrade = True
+    return _SourceImport(
+        confirmed=source_import_confirmed,
+        evidence=source_import_evidence,
+        decision=decision,
+        downgraded=source_not_imported_downgrade,
+    )
+
+
 async def integrate_handler(
     payload: dict,
     *,
@@ -4646,42 +4811,7 @@ async def integrate_handler(
     state = SharedState.load_or_init(session_dir)
     patch_path = payload.get("patch_path")
     kernel_id = payload.get("kernel_id")
-    preapplied = payload.get("preapplied_apply_result")
-    if isinstance(preapplied, dict) and preapplied.get("status") == "ok":
-        manifest_path = Path(str(preapplied.get("manifest_path") or ""))
-        patches_root = (Path(session_dir) / "patches").resolve()
-        try:
-            trusted_preapplied = manifest_path.is_file() and manifest_path.resolve().is_relative_to(patches_root)
-        except OSError:
-            trusted_preapplied = False
-        apply_result = (
-            dict(preapplied)
-            if trusted_preapplied
-            else {
-                "status": "failed",
-                "error_class": "untrusted_preapplied_manifest",
-                "error": f"invalid pre-applied manifest: {manifest_path}",
-            }
-        )
-    elif preapplied_git_patch:
-        # A controller publication is git-applied to the worktree before the
-        # validator runs, so its final bytes are already on disk; apply reads them
-        # as a snapshot instead of mistaking the diff for replacement source.
-        # Skipping the apply outright would also skip the cache invalidation,
-        # multi-node fan-out and rebuild the measurement depends on.
-        # Only an in-process caller can set this: an agent's integrate params
-        # land in ``payload`` verbatim, so the payload cannot carry the trust.
-        apply_result = _maybe_apply_kernel_patch(
-            _preapplied_snapshot_payload(payload),
-            session_dir=session_dir,
-            kernel_id=kernel_id,
-        )
-    else:
-        apply_result = _maybe_apply_kernel_patch(
-            payload,
-            session_dir=session_dir,
-            kernel_id=kernel_id,
-        )
+    apply_result = _applied_patch_result(payload, session_dir=session_dir, preapplied_git_patch=preapplied_git_patch)
     if mode == "env_only" and apply_result.get("status") == "skipped":
         apply_result = {
             "status": "ok",
@@ -4853,41 +4983,7 @@ async def integrate_handler(
         _restore_aiter_rebuild_env()
 
     if not is_valid_measurement(bench_result):
-        revert_result = _maybe_revert_kernel_patch(apply_result)
-        # The re-baseline produced no usable measurement, so the patch was never
-        # fairly scored. Surface a top-level fault error_class (the re-baseline's
-        # own when present, else bench_exception) so this routes through the fault
-        # retry budget rather than being discarded as a genuine REVERT.
-        rebaseline_error_class = (
-            str((bench_result or {}).get("error_class") or "").strip() if isinstance(bench_result, dict) else ""
-        ) or "bench_exception"
-        stopped = stopped_by_the_run_class(rebaseline_error_class)
-        if stopped is not None:
-            # Nothing was measured, so the patch has no verdict to answer for.
-            return {
-                "status": "failed",
-                "error_class": stopped.error_class,
-                "error": stopped.interrupted,
-                "decision": "NEEDS_REVIEW",
-                "rebaseline_detail": bench_result,
-                "kernel_id": kernel_id,
-                "patch_path": patch_path,
-                "target_file": payload.get("target_file") or payload.get("source_file"),
-                "apply_result": apply_result,
-                "revert_result": revert_result,
-            }
-        return {
-            "status": "failed",
-            "error_class": rebaseline_error_class,
-            "error": "re-baseline did not succeed",
-            "decision": "REVERT",
-            "rebaseline_detail": bench_result,
-            "kernel_id": kernel_id,
-            "patch_path": patch_path,
-            "target_file": payload.get("target_file") or payload.get("source_file"),
-            "apply_result": apply_result,
-            "revert_result": revert_result,
-        }
+        return _unmeasured_integration_failure(payload, apply_result=apply_result, bench_result=bench_result)
 
     # Don't score a stale binary: for cpp_itfs targets the served kernel is
     # runtime-compiled, so a reused params-hashed lib.so would measure the
@@ -4985,31 +5081,12 @@ async def integrate_handler(
             # missing verdict is only an evidence gap -> NEEDS_REVIEW.
             decision = "REVERT" if accuracy_gate["accuracy_pass"] is False else "NEEDS_REVIEW"
 
-    # import-grep source confirmation (HL_HONEST_E2E umbrella, default ON; opt
-    # out with HL_HONEST_E2E=0 or HL_CONFIRM_SOURCE_IMPORTED=0). Advisory:
-    # annotate whether the served process imported/compiled the patched source.
-    # Only the strict sub-flag enforces it, and only on positive non-import
-    # evidence (confirmed is False); an "unknown" (None) never penalizes.
-    source_import_confirmed: bool | None = None
-    source_import_evidence: dict[str, bool | None] = {}
-    source_not_imported_downgrade = False
-    if _honest_flag("HL_CONFIRM_SOURCE_IMPORTED"):
-        # Grade the whole write set; the single target is the fallback for a
-        # patch whose bundle declared none.
-        _written = [str(path) for path in (payload.get("patch_write_paths") or []) if str(path or "").strip()]
-        if not _written:
-            _written = [str(payload.get("target_file") or payload.get("source_file") or "")]
-        source_import_confirmed, source_import_evidence = _confirm_sources_imported(
-            _written,
-            bench_result.get("workspace"),
-        )
-        if (
-            decision == "KEEP"
-            and source_import_confirmed is False
-            and _honest_flag("HL_CONFIRM_SOURCE_IMPORTED_STRICT")
-        ):
-            decision = "NEEDS_REVIEW"
-            source_not_imported_downgrade = True
+    # Only the strict sub-flag enforces the confirmation; an unknown never penalizes.
+    confirmation = _confirm_source_import(payload, workspace=bench_result.get("workspace"), decision=decision)
+    source_import_confirmed = confirmation.confirmed
+    source_import_evidence = confirmation.evidence
+    decision = confirmation.decision
+    source_not_imported_downgrade = confirmation.downgraded
 
     revert_result = (
         {"status": "skipped", "reason": "KEEP decision"}
