@@ -179,7 +179,15 @@ async def test_the_real_peers_live_inside_the_session_directory(
         reply = await asyncio.to_thread(_call_tool, grant, "queue_state")
         assert reply["result"]["isError"] is False
         tools = await asyncio.to_thread(_list_tools, grant)
-        assert {"worktree_sync", "worktree_check", "worktree_patch", "notebook_brief"} <= tools
+        served = {
+            "worktree_sync",
+            "worktree_check",
+            "worktree_patch",
+            "notebook_brief",
+            "request_repair",
+            "decline_repair",
+        }
+        assert served <= tools
     finally:
         peers.mcp.stop()
         await peers.toolbox.close()

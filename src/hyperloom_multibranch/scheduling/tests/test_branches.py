@@ -13,6 +13,9 @@ import pytest
 
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
+from hyperloom_multibranch.contracts.fork import RepairRequest
+from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
+from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
@@ -35,6 +38,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     RecordingToolbox,
     RefusingRuntime,
     specialist_runtime,
+    tagged,
 )
 
 NOW = 1_700_000_000.0
@@ -46,10 +50,10 @@ BASELINE = Recipe(MB_FAKE_BASE_IMAGE_DIGEST)
 class BrokenRuntime(RefusingRuntime):
     """A runtime that cannot start ``b01`` and cannot re-size any specialist; a failure double, not a placeholder."""
 
-    async def start(self, branch: str, start_commit: str) -> None:
+    async def start(self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None) -> None:
         if branch == "b01":
             raise RuntimeError(f"no GPU left for {branch}")
-        await super().start(branch, start_commit)
+        await super().start(branch, start_commit, brief, repair)
 
     async def set_k(self, branch: str, k: int) -> None:
         raise RuntimeError(f"{branch} did not take K {k}")
@@ -58,18 +62,18 @@ class BrokenRuntime(RefusingRuntime):
 class HangingStartRuntime(RefusingRuntime):
     """A runtime whose start of ``b01`` never returns; a failure double, not a placeholder."""
 
-    async def start(self, branch: str, start_commit: str) -> None:
+    async def start(self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None) -> None:
         if branch == "b01":
             await asyncio.Event().wait()
-        await super().start(branch, start_commit)
+        await super().start(branch, start_commit, brief, repair)
 
 
 class StartedThenHangingRuntime(RefusingRuntime):
     """A runtime whose start of ``b01`` brings the specialist up and then never returns; a failure double, not a
     placeholder."""
 
-    async def start(self, branch: str, start_commit: str) -> None:
-        await super().start(branch, start_commit)
+    async def start(self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None) -> None:
+        await super().start(branch, start_commit, brief, repair)
         if branch == "b01":
             await asyncio.Event().wait()
 
@@ -87,18 +91,20 @@ class Bench:
         tmp_path: Path,
         refusing: frozenset[str] = frozenset(),
         runtime: type[RefusingRuntime] = RefusingRuntime,
+        clock: Clock = CLOCK,
     ) -> None:
-        self.notebook = LocalNotebook(tmp_path / "nb", Writer(Role.SCHEDULER, "scheduler"), clock=CLOCK.now)
-        self.gate_notebook = LocalNotebook(tmp_path / "nb", Writer(Role.GATE, "rule-gate"), clock=CLOCK.now)
-        self.roster = Roster(RosterCaps(3, 2, 8), tmp_path / "MB-roster.json", CLOCK)
+        self.clock = clock
+        self.notebook = LocalNotebook(tmp_path / "nb", Writer(Role.SCHEDULER, "scheduler"), clock=clock.now)
+        self.gate_notebook = LocalNotebook(tmp_path / "nb", Writer(Role.GATE, "rule-gate"), clock=clock.now)
+        self.roster = Roster(RosterCaps(3, 2, 8), tmp_path / "MB-roster.json", clock)
         self.toolbox = RecordingToolbox(
-            LocalNotebook(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=CLOCK.now)
+            LocalNotebook(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=clock.now)
         )
         self.repo_path = tmp_path / "repo"
         self.repo = GitExperimentRepo(self.repo_path, LocalBlobStore(tmp_path / "blobs"))
         self.sessions = RecordedSessions(self.toolbox, self.repo, self.notebook)
         self.runtime = specialist_runtime(
-            tmp_path / "nb", self.toolbox, self.repo, self.sessions, now=CLOCK.now, runtime=runtime
+            tmp_path / "nb", self.toolbox, self.repo, self.sessions, now=clock.now, runtime=runtime
         )
         self.runtime.refusing = refusing
         self.root = ""
@@ -109,9 +115,9 @@ class Bench:
             SessionLayout(tmp_path),
             self.roster,
             self.notebook,
-            DecisionLog(tmp_path / "MB-decisions.jsonl", CLOCK),
-            ProcessRegistry(tmp_path / "MB-pids.jsonl", CLOCK),
-            CLOCK,
+            DecisionLog(tmp_path / "MB-decisions.jsonl", self.clock),
+            ProcessRegistry(tmp_path / "MB-pids.jsonl", self.clock),
+            self.clock,
         )
         return BranchControl(context, self.runtime, toolbox, self.repo)
 
@@ -144,22 +150,63 @@ async def test_the_opening_batch_is_recorded_started_and_given_quota(tmp_path: P
     assert bench.sessions.quota_at_start == {"b01": 2, "b02": 2}
 
 
-async def test_an_admitted_repair_is_cut_and_opens_at_its_commit_with_its_k_and_its_quota(tmp_path: Path) -> None:
-    bench = await Bench(tmp_path).rooted()
+def _repair_of(parent_commit: str) -> RepairRequest:
+    intent = Intent("b01", parent_commit, "attention", "fp8 kv cache", IntentLayer.CONFIG)
+    blocked = Judgement(Verdict.BLOCKED, 6.0, 2.0, ("r1", "r2"), {"output_throughput": 1060.0}, accuracy_ok=False)
+    return RepairRequest(intent, tagged("fp8-kv"), blocked, "per-tensor KV scales; scale per head")
+
+
+async def _admit_repair(bench: Bench) -> RepairRequest:
+    """Open ``b01``, then admit and start ``b02`` as a repair of a candidate of ``b01`` measured on a fix of it."""
+
     await bench.control.open_branches(1, bench.root, 1, BranchOrigin.FIRST_BATCH, OPEN_BY)
     fix = await bench.repo.commit("b01", bench.root, BASELINE, "a fix")
     bench.roster.open("b02", origin=BranchOrigin.REPAIR, start_commit="", k=2, from_branch="b01")
-
-    assert await bench.control.start_admitted(AdmittedBranch("b02", fix), OPEN_BY)
+    repair = _repair_of(fix)
+    assert await bench.control.start_admitted(AdmittedBranch("b02", fix, repair), OPEN_BY)
     await _runs_started()
+    return repair
 
+
+async def test_an_admitted_repair_is_cut_and_opens_at_its_commit_with_its_k_its_quota_and_its_request(
+    tmp_path: Path,
+) -> None:
+    bench = await Bench(tmp_path).rooted()
+
+    repair = await _admit_repair(bench)
+
+    fix = repair.intent.parent_commit
     assert await bench.repo.head("b02") == fix
     assert (bench.sessions.started["b02"], bench.sessions.k["b02"]) == (fix, 2)
+    assert bench.sessions.repairs == {"b02": repair}
     assert bench.sessions.quota_at_start["b02"] == 2
     view = {branch.branch: branch for branch in (await bench.notebook.lineage()).branches}
     assert (view["b02"].start_commit, view["b02"].origin) == (fix, LineageKind.OPEN)
     logged = json.loads((tmp_path / "MB-decisions.jsonl").read_text().splitlines()[-1])
     assert (logged["kind"], logged["branch"]) == ("repair", "b02")
+
+
+async def test_a_repair_branch_is_stopped_for_its_time_limit_two_hours_after_its_admission(tmp_path: Path) -> None:
+    now = [NOW]
+    bench = await Bench(tmp_path, clock=Clock(now=lambda: now[0])).rooted()
+    await _admit_repair(bench)
+
+    now[0] = NOW + branches.REPAIR_BRANCH_SECONDS - 1
+    await bench.control.stop_overrun_repairs()
+    assert bench.roster.entry("b02").stop is None
+
+    now[0] = NOW + branches.REPAIR_BRANCH_SECONDS
+    await bench.control.stop_overrun_repairs()
+    await bench.control.stop_overrun_repairs()
+
+    expected = BranchStop(StopCause.REPAIR_TIME_LIMIT, "a repair branch runs at most 2 hours", now[0])
+    assert bench.roster.entry("b02").stop == expected
+    assert bench.roster.entry("b01").stop is None
+    assert bench.sessions.stopped == ["b02"] and bench.toolbox.cancelled == ["b02"]
+    stops = {branch.branch: branch.stop_reason for branch in (await bench.notebook.lineage()).branches}
+    assert stops["b02"] == "repair_time_limit: a repair branch runs at most 2 hours"
+    logged = json.loads((tmp_path / "MB-decisions.jsonl").read_text().splitlines()[-1])
+    assert (logged["kind"], logged["branch"], logged["reason"]) == ("stop", "b02", expected.summary)
 
 
 async def test_a_fork_waits_for_the_gate_to_land_its_fix_and_opens_at_it(tmp_path: Path) -> None:

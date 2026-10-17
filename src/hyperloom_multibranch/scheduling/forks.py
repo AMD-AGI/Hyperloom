@@ -12,8 +12,8 @@ starts it: a repair at the commit the blocked candidate was measured against, a 
 landed the fix on it. The desk needs no peer, so it is built before them and handed to the specialist runtime, which
 builds its rule gates on it.
 
-The specialist runtime reads a new branch's brief from the notebook, so neither the fix a fork lands nor a repair's
-diagnosis reaches the new specialist from here; the diagnosis is kept in the ``REPAIR`` decision.
+An admitted repair carries its request, which the branch control hands the new specialist as its branch's task; the
+diagnosis is also kept in the ``REPAIR`` decision. The fix a fork lands reaches its specialist through the notebook.
 """
 
 from __future__ import annotations
@@ -30,10 +30,12 @@ DECISION_KINDS = {BranchOrigin.FORK: DecisionKind.FORK, BranchOrigin.REPAIR: Dec
 
 @dataclass(frozen=True)
 class AdmittedBranch:
-    """A fork or repair the desk admitted, cut from ``parent_commit``."""
+    """A fork or repair the desk admitted, cut from ``parent_commit``; ``repair`` is the request a repair was admitted
+    for, ``None`` for a fork."""
 
     branch: str
     parent_commit: str
+    repair: RepairRequest | None = None
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,7 @@ class _Ask:
     from_branch: str
     reason: str
     detail: dict[str, object]
+    repair: RepairRequest | None = None
 
 
 def _parent_refusal(roster: Roster, from_branch: str) -> str:
@@ -72,7 +75,8 @@ class ForkDesk:
         if not refusal and key in self._repairs:
             refusal = f"a repair of this intent on {intent.parent_commit} is already open"
         reason = f"repair of {intent.mechanism} on {intent.target}"
-        ask = _Ask(BranchOrigin.REPAIR, intent.parent_commit, intent.branch, reason, {"diagnosis": request.diagnosis})
+        detail: dict[str, object] = {"diagnosis": request.diagnosis}
+        ask = _Ask(BranchOrigin.REPAIR, intent.parent_commit, intent.branch, reason, detail, request)
         answer = self._admit(ask, refusal)
         if answer.status is AdmissionStatus.ACCEPTED:
             self._repairs.add(key)
@@ -88,7 +92,7 @@ class ForkDesk:
             branch = self._roster.next_branch_id()
             k = self._roster.entry(ask.from_branch).k
             self._roster.open(branch, origin=ask.origin, start_commit="", k=k, from_branch=ask.from_branch)
-            self._waiting[branch] = AdmittedBranch(branch, ask.parent_commit)
+            self._waiting[branch] = AdmittedBranch(branch, ask.parent_commit, ask.repair)
             answer = ForkAdmission(AdmissionStatus.ACCEPTED, ask.reason, branch)
         detail = {
             "status": answer.status.value,

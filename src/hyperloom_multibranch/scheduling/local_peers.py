@@ -10,7 +10,8 @@ kernel files its environment compiler reads, like the repository, from the sessi
 MCP service listens on loopback for the whole session and hands every toolbox call to the loop the peers were built
 on; its learnings tool recalls past sessions' from the Experience KB the environment names. The gate's session
 service and the specialist runtime judge on one InferenceX rule at the workload's conc; the runtime settles through a
-rule gate that asks the scheduler's fork desk for branches. The runtime's specialist sessions come from
+rule gate that asks the scheduler's fork desk for branches, and the MCP service's ``request_repair`` and
+``decline_repair`` conclude a blocked candidate through the same gate. The runtime's specialist sessions come from
 a :data:`SpecialistSessions`: :func:`model_backed_sessions` runs each branch's specialist as an agent CLI in a
 worktree of its own, briefed by the session's :class:`SessionBriefs`, whose warm-start leads the session binds once
 PRELUDE has read them. :func:`load_peers` resolves that CLI first and refuses when this machine has none, so the
@@ -160,6 +161,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
         SpecialistToolOptions,
         register_specialist_tools,
     )
+    from hyperloom_multibranch.specialist.blocked import BlockedCandidates, register_blocked_tools
     from hyperloom_multibranch.specialist.tools import register_worktree_tools
     from hyperloom_multibranch.toolbox.planner import HostedPlanner
     from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
@@ -206,7 +208,10 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     register_specialist_tools(mcp, toolbox=toolbox, notebooks=runtime_notebook, options=tool_options)
     built = sessions(SessionWiring(setup, repo, McpSpecialistTokens(mcp), runtime_notebook, briefs))
     register_worktree_tools(mcp, repo=repo, worktrees=built.worktrees)
-    judging = Judging(RuleGate(gate_notebook, repo, setup.desk, toolbox), toolbox, rule)
+    gate = RuleGate(gate_notebook, repo, setup.desk, toolbox)
+    blocked = BlockedCandidates(gate_notebook, gate)
+    register_blocked_tools(mcp, blocked=blocked, home=tool_options.toolbox_loop)
+    judging = Judging(gate, toolbox, rule)
     runtime = SpecialistRuntime(
         runtime_notebook, judging, built.factory, pacing=RuntimePacing(claim_ttl_seconds=CLAIM_TTL_SECONDS)
     )

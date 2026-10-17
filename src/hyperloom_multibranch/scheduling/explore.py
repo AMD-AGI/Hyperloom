@@ -3,11 +3,11 @@
 
 """EXPLORE: open the opening batch, then let the judge steer the branches until the EXPLORE deadline or a soft stop.
 
-The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it starts the forks and repairs the fork desk admitted, consults
-the MB2 placeholders, and every judge interval asks the judge, applies what it decided and rebuilds the dashboard. The judge reads the
-frontier-scored progress and how similar archived sessions went; a judge call that has not answered by the EXPLORE
-deadline counts as failed, and a branch that has not opened by then is withdrawn, so neither eats into FINAL. The
-integrator merges in a background task of its own, in rounds as wide as the integration branch's K. When EXPLORE ends
+The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it stops the repair branches that used up their time, starts the
+forks and repairs the fork desk admitted, consults the MB2 placeholders, and every judge interval asks the judge,
+applies what it decided and rebuilds the dashboard. The judge reads the frontier-scored progress and how similar
+archived sessions went; a judge call that has not answered by the EXPLORE deadline counts as failed, and a branch that
+has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background task of its own, in rounds as wide as the integration branch's K. When EXPLORE ends
 that task is cancelled and the integrator abandons its round, so the integration head the FINAL candidates are read
 from no longer moves and no merge test competes with FINAL's measurements.
 """
@@ -123,6 +123,7 @@ class Explorer:
         while (now := self._clock.now()) < window.explore_end:
             if merging.done():
                 merging.result()
+            await self._branches.stop_overrun_repairs()
             await self._start_admitted(window.explore_end)
             await self._consult_placeholders(window)
             if now >= next_judge:

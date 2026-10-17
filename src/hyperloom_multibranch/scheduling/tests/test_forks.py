@@ -68,15 +68,16 @@ async def test_an_accepted_fork_names_its_branch_and_waits_on_the_desk_until_rel
     assert (logged["kind"], logged["branch"], logged["detail"]["status"]) == ("fork", "b02", "accepted")
 
 
-async def test_an_accepted_repair_inherits_its_branch_k_and_keeps_its_diagnosis(tmp_path: Path) -> None:
+async def test_an_accepted_repair_inherits_its_branch_k_and_carries_its_request(tmp_path: Path) -> None:
     roster, desk = _desk(tmp_path, max_branches=3)
+    request = _repair()
 
-    answer = await desk.admit_repair(_repair())
+    answer = await desk.admit_repair(request)
 
     assert (answer.status, answer.branch) == (AdmissionStatus.ACCEPTED, "b02")
     entry = roster.entry("b02")
     assert (entry.origin, entry.from_branch, entry.k) == (BranchOrigin.REPAIR, "b01", 2)
-    assert desk.waiting() == (AdmittedBranch("b02", "c1"),)
+    assert desk.waiting() == (AdmittedBranch("b02", "c1", request),)
     logged = _logged(tmp_path)[-1]
     assert (logged["kind"], logged["detail"]["diagnosis"]) == ("repair", "per-tensor KV scales; scale per head")
 
