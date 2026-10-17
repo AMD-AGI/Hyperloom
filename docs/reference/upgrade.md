@@ -82,6 +82,37 @@ These flags are rejected with `unrecognized arguments`:
 * On the rayjob backend, `--pd-prefill-ep`, `--pd-decode-ep` and
   `--pd-*-extra-args` now fail the server restart instead of being ignored;
   they are supported on infera only.
+* `--pr-feed-window-days` and `--local-kb-root` (no reader left): drop them;
+  select the knowledge root with `KNOWLEDGE_LOCAL_ROOT`.
+* `kernelforge forge-loop --return-after-read-kb`, and the TraceLens kernel tool's
+  `--skip-split` / `--source-root` (with `TRACELENS_SOURCE_ROOT`): drop them.
+* `hyperloom multi-node kernel-bench` is removed; nothing in the optimizer calls it.
+
+### Required: sessions created before this release do not resume
+
+Every session's `storage/coordinator.db` now records schema version 7, and
+there are no in-place migrations. Opening a database recorded at an older
+version, including every session started by 1.1.4 or earlier, fails before
+anything is written:
+
+```text
+RuntimeError: coordinator.db is at schema version 6, older than this build's 7: sessions
+created before this release cannot be resumed. Finish the session under the build that
+started it, or start a new session.
+```
+
+This covers `optimize --resume-from` and every command that opens the
+session's database. The legacy shapes the old migrations handled
+(`events.priority`, a `leases` table without `owner_scope`, `state.json`
+without `elapsed_charged_sec` or `phase_elapsed_totals`, manifests without
+`workflow_contract_version`) are no longer read. Finish in-flight sessions
+before upgrading.
+
+### Required: `session_breakdown.json` drops `robustness`
+
+The top-level `robustness` key, `close.robustness` and the
+`robustness_escalated` stop reason are gone; they were always empty since the
+robustness agent was retired. Consumers that read them should stop.
 
 ### Required: quantization failure exits 4
 
@@ -291,8 +322,11 @@ For any minor or patch upgrade:
    ```bash
    . "${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}"
    ```
-4. If you have ongoing sessions you want to resume across the upgrade,
-   verify `manifest.json` and `state.json` are intact, then run
+4. To resume an ongoing session across the upgrade, first check the target
+   release's upgrade section: a release that raises the `coordinator.db`
+   schema version (1.1.x → this release does) refuses sessions started before
+   it, so finish those under the build that started them. Otherwise verify
+   `manifest.json`, `state.json` and `storage/coordinator.db` are intact, then run
    `python -m hyperloom optimize --resume-from "$SESSION_DIR"`.
 
 Upgrades do not move storage or rewrite historical sessions.
