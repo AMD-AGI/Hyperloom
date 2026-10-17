@@ -109,9 +109,14 @@ class TestRecord:
 
     @property
     def measured(self) -> bool:
-        """Its result measured the candidate, a failure of the candidate included; a failed measurement did not."""
+        """Its result measured the candidate, a failure of the candidate included; a failed measurement did not, nor
+        a result the rule gate could not re-verify."""
 
-        return self.result is not None and self.result.validity is not Validity.MEASUREMENT_FAILED
+        return (
+            self.result is not None
+            and self.result.validity is not Validity.MEASUREMENT_FAILED
+            and self.conclusion is not Conclusion.UNVERIFIED
+        )
 
 
 @dataclass(frozen=True)

@@ -46,7 +46,7 @@ MAPPING_PATH = Path(__file__).with_name("mappings") / "multibranch-notebook-v1.y
 EXPORT_FORMAT = "multibranch.notebook.export.v1"
 THROUGHPUT_OBJECTIVE = "output_throughput"
 SUMMARY_CHARS = 160
-_PENDING = frozenset({Conclusion.SPLIT_REQUESTED, Conclusion.SPLIT_PENDING})
+_PENDING = frozenset({Conclusion.SPLIT_REQUESTED, Conclusion.SPLIT_PENDING, Conclusion.DIAGNOSIS_PENDING})
 _REASONS = frozenset({BranchLogType.HYPOTHESIS, BranchLogType.ATTEMPT})
 _SETTLED = frozenset({HypothesisStatus.CONFIRMED, HypothesisStatus.FALSIFIED})
 

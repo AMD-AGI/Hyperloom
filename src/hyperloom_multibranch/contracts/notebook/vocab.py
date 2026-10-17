@@ -45,7 +45,7 @@ class Conclusion(str, Enum):
 
     ``DIAGNOSIS_PENDING`` is a blocked gain waiting for its specialist to send it for repair or decline it.
     ``UNVERIFIED``: a result the decision rested on did not re-verify against its signed bundle, so nothing was landed
-    or requested.
+    or requested; the notebook counts the test as not measured.
     """
 
     COMMITTED = "committed"

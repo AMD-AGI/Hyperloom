@@ -87,6 +87,8 @@ def lesson_of(record: TestRecord, snapshot: NotebookSnapshot) -> Lesson | None:
     def lesson(kind: LessonKind, outcome: str, gain_pct: float | None = None) -> Lesson:
         return Lesson(kind, record.request_id, what, record.request.parent_commit, outcome, gain_pct)
 
+    if not record.measured:
+        return None
     if record.result is not None and record.result.validity is Validity.CANDIDATE_FAILED:
         return lesson(LessonKind.PITFALL, f"the candidate failed ({record.result.failure_reason or 'no reason'})")
     judged = record.judgement

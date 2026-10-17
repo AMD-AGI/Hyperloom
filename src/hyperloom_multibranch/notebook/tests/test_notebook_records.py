@@ -45,6 +45,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     Withdrawal,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import (
+    ClaimStatus,
     Conclusion,
     DedupStatus,
     InboxKind,
@@ -294,6 +295,28 @@ async def test_a_failed_measurement_costs_its_branch_but_is_no_direction_tried(o
 
     assert (row.tests, row.gpu_seconds) == (2, 690.0)
     assert [item.request_id for item in brief.tried] == ["r1"]
+
+
+async def test_a_result_the_gate_could_not_re_verify_is_no_test_of_its_change_and_no_direction_tried(
+    open_as: Open,
+) -> None:
+    scheduler, runtime, toolbox = open_as(Role.SCHEDULER), open_as(Role.SPECIALIST_RUNTIME, "s1"), open_as(Role.TOOLBOX)
+    await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s1", from_commit="c0"))
+    wanted = intent("s1", "c0")
+    claim = await runtime.acquire(wanted, delta().fingerprint(), ttl_seconds=TTL)
+    await toolbox.write_request(request("r1", wanted))
+    await toolbox.attach_request(claim.key, "r1", ttl_seconds=TTL)
+    await toolbox.write_result(result("r1", gpu_seconds=90.0))
+
+    record = await open_as(Role.GATE).write_judgement("r1", judgement(4.0, ("r1",)), Conclusion.UNVERIFIED)
+    (row,) = [row for row in await scheduler.progress() if row.branch == "s1"]
+
+    assert (record.measured, record.conclusion) == (False, Conclusion.UNVERIFIED)
+    assert (await runtime.lookup(claim.key, delta().fingerprint())).status is DedupStatus.FREE
+    assert (await runtime.acquire(wanted, delta().fingerprint(), ttl_seconds=TTL)).status is ClaimStatus.HELD
+    assert (await scheduler.startup_brief("c0")).tried == ()
+    assert (row.tests, row.gpu_seconds) == (1, 90.0)
 
 
 async def test_a_request_without_an_intent_carries_no_claim_and_matches_no_lookup(open_as: Open) -> None:

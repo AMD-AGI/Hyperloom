@@ -63,13 +63,18 @@ def test_the_session_lists_put_the_best_and_the_worst_first(snapshot: NotebookSn
     assert session_lessons(snapshot).gaps == ()
 
 
-def test_a_test_in_flight_unmeasured_or_improved_without_a_commit_teaches_nothing(snapshot: NotebookSnapshot) -> None:
+def test_a_test_in_flight_unmeasured_unverified_or_improved_without_a_commit_teaches_nothing(
+    snapshot: NotebookSnapshot,
+) -> None:
     in_flight = TestRecord(request("r9", GEMM))
     unmeasured = TestRecord(request("r9", GEMM), result("r9", validity=Validity.MEASUREMENT_FAILED))
+    regressed = judgement(-2.0, ("r9",), verdict=Verdict.REGRESSED)
+    unverified = TestRecord(request("r9", GEMM), result("r9"), regressed, Conclusion.UNVERIFIED)
     kept_aside = TestRecord(request("r9", GEMM), result("r9"), judgement(1.0, ("r9",)), Conclusion.RECORDED_ONLY)
 
     assert lesson_of(in_flight, snapshot) is None
     assert lesson_of(unmeasured, snapshot) is None
+    assert lesson_of(unverified, snapshot) is None
     assert lesson_of(kept_aside, snapshot) is None
 
 

@@ -212,20 +212,25 @@ def test_a_delta_is_a_config_change_a_source_patch_or_a_kernel() -> None:
     assert change_document(config)["summary"] == "--a 1 X=1 drop --b unset Y"
 
 
-def test_a_judgement_waiting_on_its_split_waits_to_be_published(snapshot: NotebookSnapshot) -> None:
+def test_a_judgement_waiting_on_its_split_or_its_diagnosis_waits_to_be_published(snapshot: NotebookSnapshot) -> None:
     (record,) = [record for record in snapshot.records if record.request_id == "r1"]
-    pending = dataclasses.replace(record, conclusion=Conclusion.SPLIT_REQUESTED, commit_id=None)
+    pending = [
+        dataclasses.replace(record, conclusion=waiting, commit_id=None)
+        for waiting in (Conclusion.SPLIT_REQUESTED, Conclusion.DIAGNOSIS_PENDING)
+    ]
 
     assert snapshot.profile is not None
-    assert candidate_row(pending, snapshot, snapshot.profile, METRIC) is None
+    assert [candidate_row(item, snapshot, snapshot.profile, METRIC) for item in pending] == [None, None]
 
 
-def test_a_test_whose_measurement_failed_is_never_published(snapshot: NotebookSnapshot) -> None:
+def test_a_test_whose_measurement_failed_or_did_not_re_verify_is_never_published(snapshot: NotebookSnapshot) -> None:
     (record,) = [record for record in snapshot.records if record.request_id == "r1"]
     unmeasured = dataclasses.replace(record, result=result("r1", validity=Validity.MEASUREMENT_FAILED))
+    unverified = dataclasses.replace(record, conclusion=Conclusion.UNVERIFIED, commit_id=None)
 
     assert snapshot.profile is not None
     assert candidate_row(unmeasured, snapshot, snapshot.profile, METRIC) is None
+    assert candidate_row(unverified, snapshot, snapshot.profile, METRIC) is None
 
 
 def test_without_a_profile_there_is_nothing_to_export_and_agentx_publishes_nothing(snapshot: NotebookSnapshot) -> None:
