@@ -216,9 +216,9 @@ skipped because every Experience records `e2e_throughput@v1`.
 ## Packaged mapping: `kernelforge-v1`
 
 Maps the document `kernelforge export-runs` writes from KernelForge's run logs
-to the packaged `kernelforge-run-v1` declaration: one Experience per
-forge-rewrite PORT step and per forge-loop iteration, the one candidate kernel
-it measured and KernelForge's decision on it. Collecting a run takes two steps:
+to the packaged `kernelforge-run-v1` declaration: one Experience per forge-loop
+iteration, the one candidate kernel it measured and KernelForge's decision on
+it. Collecting a run takes two steps:
 
 ```bash
 kernelforge export-runs <run directory>... -o runs.json
@@ -257,7 +257,9 @@ It reads:
 
 A unit is skipped when its logs could not be read as a run, when its iteration
 recorded no decision, or when it has no reasoning, which is always the case for
-a merge of two archived candidates because no agent made it, and for a lane of a
-plain run made before KernelForge asked for the reasoning log. KernelForge writes
-naive local times, which collection reads as UTC; that is right for a run made
-in a container, which normally runs in UTC.
+a merge of two archived candidates because no agent made it, for a lane of a
+plain run made before KernelForge asked for the reasoning log, and for a
+forge-rewrite PORT step, whose logs record no reasoning from the agent that
+ported the kernel: `export-runs` writes its entry, and collection skips it.
+KernelForge writes naive local times, which collection reads as UTC; that is
+right for a run made in a container, which normally runs in UTC.
