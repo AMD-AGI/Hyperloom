@@ -126,6 +126,8 @@ async def test_a_gain_is_retested_on_another_node_and_lands_on_its_branch(sessio
     assert set(record.judgement.recorded_value) == {GRADED_OUTPUT, ACCURACY_SCORE}
     assert (record.conclusion, record.commit_id) == (Conclusion.COMMITTED, await session.repo.head(BRANCH))
     assert (await session.runtime.record(retest.request_id)).result.sandbox.node_name != first_node
+    (notice,) = await session.notices()
+    assert notice.startswith(f"{NOTICE} {first} landed on your branch at +") and f"% over {ROOT};" in notice
 
 
 async def test_the_retest_carries_the_files_the_candidate_was_measured_with(session):
@@ -205,9 +207,11 @@ async def test_of_two_gains_on_one_parent_the_second_does_not_land(session):
         None,
     )
     assert await session.repo.head(BRANCH) == landed.commit_id
-    (notice,) = await session.notices()
+    first_landed, second_moved = await session.notices()
+    assert f"{first} landed on your branch" in first_landed
     assert (
-        f"{second} improved on {ROOT}, but the branch has moved on; submit it again on the head as a new test" in notice
+        f"{second} improved on {ROOT}, but the branch has moved on; submit it again on the head as a new test"
+        in second_moved
     )
 
 

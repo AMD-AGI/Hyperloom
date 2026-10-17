@@ -4,7 +4,7 @@
 """Judging a branch's measured candidates: the half of the specialist runtime that is not a model.
 
 The specialist proposes and the toolbox measures; this code compares each measurement through the rule gate, retests a
-gain on another node, and tells the specialist in its branch log what the gate could not land. Every step is read back
+gain on another node, and tells the specialist in its branch log what landed and what the gate could not land. Every step is read back
 from the notebook, so a restarted runtime takes each step once.
 """
 
@@ -105,7 +105,10 @@ class BranchJudge:
 
     async def _settle(self, first: TestRecord, judgement: Judgement, logged: set[BranchLogEntry]) -> None:
         action = await self._gate.settle(first.request, judgement)
-        if action is Action.RETEST:
+        if action is Action.COMMIT:
+            landed = f"{first.request_id} landed on your branch at {judgement.gain_pct:+.2f}% over {first.request.parent_commit}"
+            await self._notice(logged, f"{landed}; your next candidates go on the new head", *judgement.request_ids)
+        elif action is Action.RETEST:
             await self._toolbox.submit_test(retest_request(first, self._rule))
         elif action is Action.DIAGNOSE:
             held_back_by = ", ".join(judgement.refused_by) or "the accuracy gate"
