@@ -40,7 +40,6 @@ class Transition:
     to_phase: str
     reason: str
     evidence: dict
-    loopback: bool = False
 
 
 class MachinePhase(CoordinatorCollaborator):
