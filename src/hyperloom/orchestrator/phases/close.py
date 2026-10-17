@@ -36,8 +36,6 @@ _TASK_STATE_RUNNING: str = "running"
 # Appended to a close step's idempotency key when its first row is dead, so ``create_or_return_existing`` mints a new
 # task instead of returning the corpse.
 _RETRY_KEY_SUFFIX: str = "retry"
-# Fallback registry poll interval, for a caller with no dispatcher poll set.
-_DEFAULT_TASK_POLL_SEC: float = 10.0
 
 # Floor on how long CLOSE waits for a step it found already running, for a step the catalogue prices at almost nothing
 # or does not carry at all.

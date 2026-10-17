@@ -2293,12 +2293,6 @@ class KernelPhase(CoordinatorCollaborator):
             return {}
         return data if isinstance(data, dict) else {}
 
-    @classmethod
-    def _geak_journey_kernels(cls, result: dict[str, Any]) -> list[dict[str, Any]]:
-        """Return the journey's kernel records, or ``[]`` when unreadable."""
-        journey = cls._load_geak_journey(result)
-        return [kernel for kernel in journey.get("kernels") or [] if isinstance(kernel, dict)]
-
     def record_geak_adopted_kernels(
         self,
         result: dict[str, Any],
