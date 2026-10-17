@@ -520,24 +520,14 @@ def _crash_safe_platform(gpu_type: str | None) -> dict[str, Any]:
     return platform_fingerprint(gpu_type)
 
 
-#: Who wrote a crash-safe ``final.json``. A producer may replace a fallback
-#: written by itself or by a lower-ranked producer, never the full
-#: ``ReportExecutor`` output. The supervisor outranks the coordinator: it
-#: writes only after observing the coordinator's process end.
+#: Value of ``producer`` in a crash-safe ``final.json``.
 FINAL_PRODUCER_COORDINATOR = "coordinator"
-FINAL_PRODUCER_SUPERVISOR = "supervisor"
-_FINAL_PRODUCER_RANK: dict[str, int] = {
-    FINAL_PRODUCER_COORDINATOR: 1,
-    FINAL_PRODUCER_SUPERVISOR: 2,
-}
 
 
 def write_minimal_final_json(
     session_dir: Path | str,
     *,
     output_path: Path | str | None = None,
-    producer: str = FINAL_PRODUCER_COORDINATOR,
-    extra: dict[str, Any] | None = None,
 ) -> Path:
     """Crash-safe ``reports/final.json`` fallback for any non-graceful exit."""
     from datetime import datetime, timezone
@@ -547,17 +537,12 @@ def write_minimal_final_json(
     sd = Path(session_dir).resolve()
     target = Path(output_path).resolve() if output_path else reports_dir(sd) / "final.json"
     target.parent.mkdir(parents=True, exist_ok=True)
-    # Keep a full report (``safety_net`` absent/false) and a fallback from a
-    # higher-ranked producer; refresh a fallback from an equal or lower-ranked
-    # one; preserve a corrupt file as ``final.json.corrupt`` and overwrite it.
-    rank = _FINAL_PRODUCER_RANK.get(producer, 1)
+    # Keep a full report (``safety_net`` absent/false); refresh an earlier fallback;
+    # preserve a corrupt file as ``final.json.corrupt`` and overwrite it.
     if target.exists() and target.stat().st_size > 0:
         try:
             existing = json.loads(target.read_text(encoding="utf-8"))
             overwrite = isinstance(existing, dict) and existing.get("safety_net") is True
-            if overwrite:
-                held = _FINAL_PRODUCER_RANK.get(existing.get("producer"), 1)
-                overwrite = rank >= held
         except (OSError, json.JSONDecodeError):
             try:
                 target.replace(target.with_name(target.name + ".corrupt"))
@@ -574,7 +559,7 @@ def write_minimal_final_json(
         # not finish gracefully.
         "safety_net": True,
         "report_complete": False,
-        "producer": producer,
+        "producer": FINAL_PRODUCER_COORDINATOR,
         "session_id": state.get("session_id") or "",
         "model_name": state.get("model_name") or "",
         "model_path": state.get("model_path") or "",
@@ -594,9 +579,6 @@ def write_minimal_final_json(
         # A run that died unattended is exactly when the host record is most useful, since nobody was watching.
         "platform": _crash_safe_platform(gpu_type),
     }
-    if extra:
-        summary.update(extra)
-
     atomic_write_json(target, summary)
     log.info("crash-safe final.json: wrote %s", target)
     return target
@@ -606,7 +588,6 @@ __all__ = [
     "BREAKDOWN_FILENAME",
     "EXPORTER_VERSION",
     "FINAL_PRODUCER_COORDINATOR",
-    "FINAL_PRODUCER_SUPERVISOR",
     "build",
     "write_breakdown_json",
     "write_minimal_final_json",
