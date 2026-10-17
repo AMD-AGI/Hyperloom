@@ -332,7 +332,7 @@ def _request_handlers_importable() -> bool:
     reason="hyperloom orchestrator not importable",
 )
 class TestBuildTraceAnalyzeCmd:
-    """Verify request_handlers._build_trace_analyze_cmd sets flags correctly."""
+    """Verify trace_analyze._build_trace_analyze_cmd sets flags correctly."""
 
     def _mock_state(self):
         state = MagicMock()
@@ -340,9 +340,6 @@ class TestBuildTraceAnalyzeCmd:
         return state
 
     def _run(self, *, scriptable: bool, framework: str, **payload_kw):
-        import os
-
-        os.environ.setdefault("HYPERLOOM_KERNEL_AGENT_ROOT", str(Path(__file__).resolve().parent.parent))
         from hyperloom.orchestrator.actions.executors.trace_analyze import (
             _build_trace_analyze_cmd,
         )
