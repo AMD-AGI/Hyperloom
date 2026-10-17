@@ -12,7 +12,6 @@ The sequencer's last act now records the verdict, so an un-settled section says
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -50,28 +49,6 @@ def _close(session_dir: Path, *, warnings: list[str] | None = None) -> dict[str,
         warnings if warnings is not None else [],
         recorded=assembled.get("close"),
     )
-
-
-def _write_findings(session_dir: Path, rows: list[dict[str, Any]], *, name: str = "s1") -> None:
-    """Write findings the way the robustness ladder's sink does."""
-    directory = session_dir / "agents" / "robustness" / "findings"
-    directory.mkdir(parents=True, exist_ok=True)
-    (directory / f"{name}.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
-
-
-def _finding(**overrides: Any) -> dict[str, Any]:
-    row = {
-        "tick_index": 4,
-        "timestamp_unix": 1000.0,
-        "symptom_name": "server_crash_loop",
-        "severity": "high",
-        "summary": "three boots failed in a row",
-        "intents": [{"intent_type": "alert", "payload": {"detail": "noisy"}}],
-        "evidence": {"crashes": 3},
-        "rca_text": "the flag is unsupported on this build",
-    }
-    row.update(overrides)
-    return row
 
 
 def _run_sequence(session_dir: Path, *, fail: str = "") -> None:
@@ -166,47 +143,6 @@ def test_artifacts_are_recorded_not_probed(sd: Path) -> None:
     # Never recorded, so it stays absent rather than being invented.
     assert artifacts["final_md_path"] is None
     assert artifacts["session_breakdown_path"] == "session_breakdown.json"
-
-
-def test_escalation_comes_from_the_recorded_stop_reason(sd: Path) -> None:
-    _run_sequence(sd)
-    record_close_settled(sd, stop_reason="robustness_escalated")
-
-    robustness = _close(sd)["robustness"]
-    assert robustness["escalated"] is True
-    # Recorded alongside the verdict, so the escalation can be checked against its reason.
-    assert robustness["stop_reason"] == "robustness_escalated"
-
-
-def test_ordinary_stop_reason_is_not_an_escalation(sd: Path) -> None:
-    _run_sequence(sd)
-    record_close_settled(sd, stop_reason="target_reached")
-    assert _close(sd)["robustness"]["escalated"] is False
-
-
-def test_close_does_not_fetch_retired_findings(sd: Path) -> None:
-    _write_findings(sd, [_finding()])
-    _run_sequence(sd)
-    record_close_settled(sd, stop_reason="target_reached")
-
-    robustness = _close(sd)["robustness"]
-    assert robustness == {"escalated": False, "stop_reason": "target_reached"}
-
-
-def test_historical_close_findings_remain_readable() -> None:
-    finding = _finding()
-    recorded = {
-        "status": "succeeded",
-        "stop_reason": "robustness_escalated",
-        "robustness": {"escalated": True, "findings": [finding], "findings_total": 60},
-    }
-    robustness = collect_v6_close([], recorded=recorded)["robustness"]
-    assert robustness == {
-        "escalated": True,
-        "stop_reason": "robustness_escalated",
-        "findings": [finding],
-        "findings_total": 60,
-    }
 
 
 def test_step_row_carries_task_id_and_detail(sd: Path) -> None:

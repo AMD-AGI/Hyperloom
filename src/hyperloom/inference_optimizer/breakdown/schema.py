@@ -1505,32 +1505,6 @@ class V6Critic(TypedDict, total=False):
     iterations: list[CriticIteration]
 
 
-class V6RobustnessFinding(TypedDict, total=False):
-    """One firing of the robustness ladder, as the ladder itself persisted it.
-
-    Read from the ladder's own JSONL log at close time rather than mirrored
-    through a recorder: the log is already durable and complete, so a second
-    copy taken as each finding was raised could only be the same rows or fewer."""
-
-    tick_index: int
-    timestamp_unix: float
-    symptom_name: str
-    severity: str
-    summary: str
-    rca_text: str
-    intents: list[str]
-    evidence: dict[str, Any]
-
-
-class V6CloseRobustness(TypedDict, total=False):
-    """The close sequencer's final robustness verdict."""
-
-    escalated: bool
-    stop_reason: str
-    findings: list[V6RobustnessFinding]
-    findings_total: int
-
-
 class V6FinalRecipe(TypedDict, total=False):
     """The configuration the session ended on, as the close-out settled it."""
 
@@ -1557,15 +1531,6 @@ class V6Close(TypedDict, total=False):
     end_time: str
     close_sequence_done: bool
     steps: list[dict[str, Any]]
-    # The whole robustness account: the close-out's verdict (``escalated`` and
-    # the ``stop_reason`` it was drawn from), the agent's own ``turns``, and
-    # the ``findings`` the ladder persisted. Together because they are one
-    # account of one thing -- the verdict on its own says a session was
-    # escalated without saying what for, and the findings of an un-escalated
-    # session, the ones judged survivable, had nowhere to be read at all.
-    # ``findings`` and ``findings_total`` are absent when the ladder never
-    # wrote anything, because an empty list would claim it ran and found none.
-    robustness: V6CloseRobustness
     artifacts: dict[str, Any]
     # Absent when the session never attempted to publish its Recipe.
     kb_write_back: V6KBWriteBackExt
@@ -2591,7 +2556,6 @@ __all__ = [
     "V6BaselineExt",
     "V6BaselineProgress",
     "V6Close",
-    "V6CloseRobustness",
     "V6ConcSweepArm",
     "V6ConcSweepArtifacts",
     "V6ConcSweepBoot",
@@ -2696,7 +2660,6 @@ __all__ = [
     "V6PhaseProposalOutcome",
     "V6PhaseProposalReview",
     "V6PhaseSegment",
-    "V6RobustnessFinding",
     "V6RooflineEventSnapshot",
     "V6RooflineExt",
     "V6RooflineKernel",
