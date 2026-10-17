@@ -167,19 +167,18 @@ async def test_resumed_entry_reuses_a_live_task_and_replaces_a_settled_one(coord
             to_phase=ps.PHASE_KERNEL_AGENT,
             reason="test",
             evidence={},
-            loopback=False,
         )
     )
     first = [t for t in await c.tasks.queued() if t.kind == "kernel_agent"]
     await c.phase_kernel.on_enter_kernel(
-        Transition(from_phase="resume", to_phase=ps.PHASE_KERNEL_AGENT, reason="test", evidence={}, loopback=False)
+        Transition(from_phase="resume", to_phase=ps.PHASE_KERNEL_AGENT, reason="test", evidence={})
     )
     assert [t.task_id for t in await c.tasks.queued() if t.kind == "kernel_agent"] == [first[0].task_id]
 
     await c.tasks.transition(first[0].task_id, "running")
     await c.tasks.transition(first[0].task_id, "failed", evidence={"reason": "dead_holder"})
     await c.phase_kernel.on_enter_kernel(
-        Transition(from_phase="resume", to_phase=ps.PHASE_KERNEL_AGENT, reason="test", evidence={}, loopback=False)
+        Transition(from_phase="resume", to_phase=ps.PHASE_KERNEL_AGENT, reason="test", evidence={})
     )
 
     requeued = [t for t in await c.tasks.queued() if t.kind == "kernel_agent"]
@@ -228,7 +227,6 @@ async def test_kernel_agent_dispatch_keeps_authoring_phase_and_validates_contrac
             to_phase=ps.PHASE_KERNEL_AGENT,
             reason="test",
             evidence={},
-            loopback=False,
         )
     )
     task = next(task for task in await c.tasks.queued() if task.kind == "kernel_agent")
