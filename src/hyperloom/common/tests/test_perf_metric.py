@@ -11,7 +11,6 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY,
     GRADED_TOTAL,
     INTVTY_V1,
-    agentx_enabled,
     holds_within_band,
     intvty_grading_enabled,
     intvty_of,
@@ -190,7 +189,7 @@ def test_an_agentx_run_grades_on_total_without_being_asked(monkeypatch):
     """The corpus this grading exists for must not need an opt-in to get it."""
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    assert intvty_grading_enabled() is True
+    assert intvty_grading_enabled(benchmark_mode="agentx") is True
 
 
 def test_a_synthetic_run_still_grades_on_output(monkeypatch):
@@ -217,31 +216,6 @@ def test_agentx_off_tokens_do_not_enable_grading(monkeypatch, raw):
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     monkeypatch.setenv("HYPERLOOM_AGENTX", raw)
     assert intvty_grading_enabled() is False
-
-
-def test_an_unreadable_agentx_value_is_not_silently_off(monkeypatch):
-    """Grading the wrong metric for a whole run is worse than refusing to start."""
-    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "nonsense")
-    with pytest.raises(EnvValueError, match="HYPERLOOM_AGENTX"):
-        intvty_grading_enabled()
-
-
-def test_the_wrapper_reader_answers_by_the_same_rule_as_the_grader(monkeypatch):
-    """One variable, one vocabulary: this is the reader the workload and server-args paths ask."""
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "off")
-    assert agentx_enabled() is False
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "nonsense")
-    with pytest.raises(EnvValueError, match="HYPERLOOM_AGENTX"):
-        agentx_enabled()
-
-
-def test_a_grid_variant_env_is_read_by_the_same_rule(monkeypatch):
-    """A variant's environment is built before it exists as a process, so it arrives as a mapping."""
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
-    assert agentx_enabled({"HYPERLOOM_AGENTX": "1"}) is True
-    with pytest.raises(EnvValueError, match="HYPERLOOM_AGENTX"):
-        agentx_enabled({"HYPERLOOM_AGENTX": "ture"})
 
 
 # --- the persisted marker ---

@@ -831,8 +831,10 @@ class IntentRouter(CoordinatorCollaborator):
         sid_candidate: str,
     ) -> None:
         """Materialise, deny, or send back a proposal according to its collapsed verdict."""
-        # Both `approve` and `advise` mean "dispatch may proceed"; treat them
-        # identically for materialization.
+        from ..phases.geak_native_revalidation import record_review
+
+        if record_review(self, pending, verdict=verdict, reasoning=reasoning):
+            return
         if verdict in ("approve", "advise"):
             await self._coord.proposals.materialize_approved_proposal(
                 pending,
@@ -841,8 +843,6 @@ class IntentRouter(CoordinatorCollaborator):
         elif verdict == "reject" and is_upstream_pr_prescreen(pending.action_name, pending.payload):
             await self._coord.phase_framework.record_critic_denial(pending, reasoning)
         elif verdict == "reject" and pending.action_name == "integrate_patch" and bool(pa_params.get("enablement")):
-            # A Critic-rejected ENABLEMENT integrate_patch never reaches the executor, so the normal integrate-result
-            # rearm never fires.
             try:
                 await self._coord.enablement_lane.maybe_rearm_enablement(
                     {"enablement": True, "status": "reverted", "reason": "critic_rejected"}

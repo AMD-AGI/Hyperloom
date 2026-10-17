@@ -33,9 +33,8 @@ def test_preflight_gates_magpie_on_backend():
     magpie_src = inspect.getsource(preflight_mod._ensure_magpie)
     assert "import Magpie" in magpie_src
     assert "if magpie_active and" in magpie_src
-    # InferenceX must NOT be gated away: bypass still needs it, so preflight resolves it unconditionally rather
-    # than inside the Magpie-only branch.
-    assert "_ensure_inferencex(install_event)" in src
+    # The synthetic bypass backend still needs InferenceX; its preparation is separate from the Magpie install.
+    assert "_prepare_inferencex(install_event, magpie_active=_magpie_backend_active)" in src
     assert "_ensure_inferencex" not in magpie_src
 
 

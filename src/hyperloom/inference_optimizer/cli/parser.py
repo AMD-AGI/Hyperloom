@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from .benchmark_config import add_benchmark_argument
+
 import argparse
 import os
 from pathlib import Path
@@ -186,7 +188,6 @@ def _build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--verbose", "-v", action="count", default=0, help="Verbose logging (-v INFO, -vv DEBUG)")
     sub = p.add_subparsers(dest="command", required=True)
-
     opt = sub.add_parser("optimize", parents=[common], help="Drive a multi-agent optimization run on a model")
     opt.add_argument(
         "--model",
@@ -300,6 +301,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--framework custom; for the built-in frameworks it overrides the "
         "checkout they would otherwise clone.",
     )
+    add_benchmark_argument(opt)
     opt.add_argument(
         "--benchmark-scripts-dir",
         default=None,
@@ -1059,8 +1061,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run a post-optimization concurrency sweep (baseline vs "
         "current_best across CONC) and write "
         "reports/conc_sweep_summary.json + conc_sweep_raw.csv. "
-        "On by default, off under AgentX (each rung is a 3600s window); "
-        "force either way with --enable-conc-sweep / --no-enable-conc-sweep.",
+        "On by default for synthetic workloads, off by default for MLPerf. "
+        "Unavailable for native Magpie AgentX: start a separate session for each CONC.",
     )
     opt.add_argument(
         "--conc-sweep-concs",
@@ -1070,9 +1072,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Comma-separated CONC ladder for --enable-conc-sweep. Ordered "
         "high-to-low internally for single-server arm reuse, so the order given "
         "does not matter. Defaults to the ladder for the workload: "
-        "256,128,64,32,16,8,4,2 synthetic, 1,4,8,10,14,20,28 under "
-        "HYPERLOOM_AGENTX (an agentic request carries orders of magnitude more "
-        "prompt, so the same card saturates far lower).",
+        "256,128,64,32,16,8,4,2 for synthetic, 1,4,8,10,14,20,28 for MLPerf. "
+        "Unavailable for native Magpie AgentX.",
     )
     opt.add_argument(
         "--conc-sweep-total-budget-sec",

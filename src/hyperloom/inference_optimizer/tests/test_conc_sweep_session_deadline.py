@@ -49,7 +49,9 @@ def sweep_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_backend):
     monkeypatch.setattr(_server_lifecycle, "teardown_lifecycle_server", MagicMock())
     monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: sys.executable)
     monkeypatch.setattr(gr, "build_benchmark_command", lambda **kwargs: [sys.executable, "scripted-benchmark"])
-    monkeypatch.setattr(gr, "ensure_eval_probe_patched", lambda *args: True)
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors._inferencex_patcher.ensure_eval_probe_patched", lambda *args: True
+    )
     monkeypatch.setattr(conc_sweep, "_build_roofline_ceiling", lambda *args, **kwargs: None)
     base = tmp_path / "baseline.yaml"
     base.write_text(
@@ -65,7 +67,7 @@ def sweep_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_backend):
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(conc_sweep, "materialize_config_with_envs", lambda *args, **kwargs: base)
+    monkeypatch.setattr(conc_sweep, "prepare_grid_benchmark_config", lambda *args, **kwargs: base)
     state = shared_state.SharedState()
     state.baseline_tput = 100.0
     state.baseline_runtime_sec = 5.0

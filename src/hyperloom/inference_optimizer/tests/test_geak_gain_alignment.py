@@ -277,9 +277,15 @@ def _agentx_rebench_coord(tmp_path: Path) -> Coordinator:
 @pytest.mark.parametrize("persisted_mode,ambient", [("agentx", ""), ("agentx", "0"), ("", "1")])
 @pytest.mark.parametrize("bench_client", ["auto", "native", "inferencex"])
 async def test_agentx_2a_refuses_before_launch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, persisted_mode: str, ambient: str, bench_client: str
+    native_benchmark,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    persisted_mode: str,
+    ambient: str,
+    bench_client: str,
 ) -> None:
-    monkeypatch.setenv("HYPERLOOM_AGENTX", ambient)
+    if ambient == "1":
+        monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output")
     coord = _agentx_rebench_coord(tmp_path)
     state = coord.shared_state
@@ -309,9 +315,9 @@ async def test_agentx_2a_refuses_before_launch(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bench_client", ["auto", "native", "inferencex"])
 async def test_persisted_legacy_mode_allows_existing_geak_replay(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bench_client: str
+    native_benchmark, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bench_client: str
 ) -> None:
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output")
     coord = _coord(tmp_path, baseline=100.0, best_tput=150.0)
     coord.shared_state.benchmark_mode = "synthetic"
@@ -351,7 +357,7 @@ async def test_persisted_legacy_mode_allows_existing_geak_replay(
 async def test_agentx_2b_uses_current_canonical_measurement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case: str, measurement_location: str
 ) -> None:
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
     coord = _agentx_rebench_coord(tmp_path)
     state = coord.shared_state
