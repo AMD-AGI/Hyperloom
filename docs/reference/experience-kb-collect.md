@@ -228,6 +228,9 @@ hyperloom-kb-collect --mapping kernelforge-v1 --document runs.json --dry-run
 It reads:
 
 - identity from the run's `campaign_config.json`;
+- `baseline.source_ms` from the pristine baseline the run's `run_state.json`
+  records, which for a run given `--baseline-json` is that file's time rather
+  than that of the kernel its search started from;
 - `rationale.plan` from the `Summary:` line the candidate's plan opens with,
   and `rationale.reasoning` from the `Summary:` line of the reasoning log the
   Implementer kept beside that plan (see the
@@ -244,7 +247,9 @@ It reads:
   under, and the Implementer's backend and model;
 - the iteration's archive, the run's `forge-loop.log`, and the Implementer's
   transcript, linked by the reasoning log its first prompt names, into the
-  top-level `raw_logs`.
+  top-level `raw_logs`. A log or transcript first goes to the run whose
+  workspace path ends most like the path it names; one that fits two runs
+  equally well stops the export.
 
 A unit is skipped when its logs could not be read as a run, when its iteration
 recorded no decision, or when it has no reasoning, which is always the case for

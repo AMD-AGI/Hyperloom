@@ -514,10 +514,16 @@ Writes the runs found under one or more directories as one JSON document,
 `{"runs": [...]}`, for `hyperloom-kb-collect --mapping kernelforge-v1` (see
 {doc}`Experience collection </reference/experience-kb-collect>`). A run is a
 plain `forge-loop` run's `forge_experiments/` directory. Each forge-loop
-iteration found is one entry; a run whose logs cannot be read is one entry
-saying why, which collection skips with that reason. Claude Code transcripts
-under a directory, such as a copy of `~/.claude/projects`, are linked to the
-candidates their sessions made.
+iteration found is one entry; a run or candidate whose JSON records cannot be
+read as KernelForge wrote them is one entry saying why, which collection skips
+with that reason. Claude Code transcripts under a directory, such as a copy of
+`~/.claude/projects`, are linked to the candidates their sessions made. A log or
+transcript belongs to the run whose workspace path ends most like the path it
+names, which may differ in its leading directories, as for a run made in a
+container. The export stops with an error and writes nothing when it cannot
+read any other file it needs, such as a plan, a reasoning log, a log or a
+transcript, naming that file, or when a log or transcript fits two runs equally
+well.
 
 | Argument / option | Default | Meaning |
 |:--|:--|:--|

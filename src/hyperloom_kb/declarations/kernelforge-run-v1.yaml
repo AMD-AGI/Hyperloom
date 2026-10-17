@@ -48,10 +48,12 @@ baseline:
     role: measurement
   - name: source_ms
     description: >-
-      How long the original kernel took before any change, in milliseconds: its average time per benchmark case,
-      measured once when the session started. It comes from forge-rewrite's source baseline line, or from the baseline
-      wall time KernelForge archived for the iteration. Every score compares a kernel's time on each case with the
-      original kernel's time on that case.
+      How long the original kernel took before any change, in milliseconds: its average time per benchmark case. It
+      comes from forge-rewrite's source baseline line or, for a forge-loop run, from the pristine baseline the run's
+      run_state.json records, which for a run given --baseline-json is that file's time rather than the time of the
+      kernel the search started from. A run state that records none leaves the baseline wall time KernelForge
+      archived for the iteration. Every score compares a kernel's time on each case with the original kernel's time
+      on that case.
     kind: number
 
 rationale:
