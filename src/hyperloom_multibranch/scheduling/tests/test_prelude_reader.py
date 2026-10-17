@@ -68,10 +68,11 @@ def test_completed_child_session_is_read(tmp_path: Path) -> None:
     assert artifacts.launch.server_args == "--mem-fraction-static 0.8"
     assert dict(artifacts.launch.envs) == {"FOO": "1"}
     assert [kept.patch_file for kept in artifacts.kept_patches] == [session / "enablement" / "1.patch"]
+    assert artifacts.foreign_patches == ()
     assert artifacts.framework_root == tmp_path / "framework"
     assert artifacts.roofline_ceiling == {PRIMARY_METRIC: ROOFLINE_PEAK}
     assert artifacts.framework_version == "0.4.1"
-    assert artifacts.dropped == ("setup_commands",)
+    assert artifacts.unexpressed == ("setup_commands",)
     assert artifacts.setup_script == session / "reports" / "enablement" / "enablement_setting.sh"
 
 
@@ -197,18 +198,45 @@ def test_root_recipe_without_framework_checkout_has_no_component(tmp_path: Path)
     assert root_recipe(read_prelude(session), "sglang", None, (), IMAGE).components == ()
 
 
-def test_patch_on_a_tree_that_is_not_a_git_checkout_is_refused(tmp_path: Path) -> None:
+def _patched_elsewhere(session: Path, tree: Path) -> Path:
+    """``session`` with its one kept patch applying to ``tree`` instead of the framework checkout."""
+
+    state = json.loads((session / "state.json").read_text())
+    patch_file = state["enablement"]["kept_patches"][0]
+    state["enablement"]["patch_roots"] = {patch_file: str(tree)}
+    return write_child_session(session, state)
+
+
+@pytest.mark.parametrize("tree", ["site-packages", "other-checkout"])
+def test_a_patch_off_the_framework_checkout_marks_the_root_instead_of_failing(tmp_path: Path, tree: str) -> None:
+    root = tmp_path / tree
+    if tree == "other-checkout":
+        framework_checkout(root)
+        root = root / "framework"
+    else:
+        root.mkdir()
+    session = _patched_elsewhere(child_with_patch(tmp_path), root)
+
+    artifacts = read_prelude(session)
+    recipe = root_recipe(artifacts, "sglang", framework_pin(artifacts), (), IMAGE)
+
+    assert artifacts.kept_patches == () and [patch.root for patch in artifacts.foreign_patches] == [root]
+    assert recipe.unexpressed == (f"patch:{root}/1.patch", "setup_commands")
+    assert not recipe.complete
+    component = recipe.component("sglang")
+    assert component is not None and component.patches == ()
+
+
+def test_a_framework_root_that_is_no_git_checkout_pins_nothing_and_its_patches_mark_the_root(tmp_path: Path) -> None:
     session = child_with_patch(tmp_path)
     site_packages = tmp_path / "site-packages"
     site_packages.mkdir()
-    state = json.loads((session / "state.json").read_text())
-    patch_file = state["enablement"]["kept_patches"][0]
-    state["enablement"]["patch_roots"] = {patch_file: str(site_packages)}
-    write_child_session(session, state)
-    with pytest.raises(PreludeReadError, match="not a git checkout"):
-        root_recipe(
-            read_prelude(session), "sglang", UpstreamPin(REMOTE_URL, BASE_SHA), (PatchRef("patch/a", "c" * 64),), IMAGE
-        )
+    artifacts = _with_enablement(session, framework_root=str(site_packages), patch_roots={}, base_sha_by_root={})
+
+    assert artifacts.framework_root is None and framework_pin(artifacts) is None
+    recipe = root_recipe(artifacts, "sglang", None, (), IMAGE)
+    assert recipe.components == ()
+    assert recipe.unexpressed == (f"patch:{site_packages}/1.patch", "setup_commands")
 
 
 def test_harness_flags_are_stripped_and_unexpressed_launch_controls_are_named(tmp_path: Path) -> None:
@@ -231,8 +259,5 @@ def test_harness_flags_are_stripped_and_unexpressed_launch_controls_are_named(tm
     artifacts = read_prelude(session)
 
     assert artifacts.launch.server_args == "--mem-fraction-static 0.8"
-    assert artifacts.dropped == (
-        "accepted_config.remove_args",
-        "accepted_config.unset_envs",
-        "accepted_config.args_mode",
-    )
+    assert artifacts.unexpressed == ("remove_args", "unset_envs", "args_mode")
+    assert root_recipe(artifacts, "sglang", None, (), IMAGE).unexpressed == ("args_mode", "remove_args", "unset_envs")

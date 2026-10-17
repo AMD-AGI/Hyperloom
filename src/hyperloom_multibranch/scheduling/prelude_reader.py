@@ -6,7 +6,8 @@
 ``state.json`` is the main flow's internal persistence format, not an interface, so every key read from it is read
 here and nowhere else, and a schema version other than the pinned one is refused rather than guessed at. What the
 reader returns is folded into the root :class:`~hyperloom.contracts.recipe.Recipe` by :func:`root_recipe`; what a
-recipe cannot express yet is named in :attr:`PreludeArtifacts.dropped`. The launch is rebuilt from
+recipe cannot express yet, a kept patch outside the framework's git checkout among it, is named in
+:attr:`PreludeArtifacts.unexpressed`, which the root recipe carries as its ``unexpressed`` mark. The launch is rebuilt from
 ``enablement.accepted_config``, the source the main flow writes ``reports/enablement/enablement_setting.sh`` from;
 that script is not parsed, only located (:attr:`PreludeArtifacts.setup_script`), so the setup the root recipe leaves
 out can be traced to it.
@@ -21,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.jsonio import read_json
-from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, PatchRef, Recipe, RecipeError
+from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, PatchRef, Recipe, RecipeError, with_unexpressed
 from hyperloom.inference_optimizer.breakdown.stop_reasons import outcome_status
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC
@@ -44,16 +45,20 @@ MB_ROOFLINE_PEAK_KEY = "theoretical_peak_tok_per_sec"
 MB_OUTCOME_COMPLETED = "completed"
 #: src/hyperloom/orchestrator/enablement/lane.py: an accepted config without ``args_mode`` appends its server args.
 MB_DEFAULT_ARGS_MODE = "append"
-#: What enablement kept that a recipe cannot express yet, by its ``state.json`` name under ``enablement``.
+#: What enablement kept that a recipe cannot express yet, by its ``state.json`` name under ``enablement``, which is
+#: also its kind in :data:`~hyperloom.contracts.recipe.UNEXPRESSED_KINDS`.
 MB_UNEXPRESSED_ENABLEMENT = ("setup_commands", "kept_artifacts", "active_runtime", "environment_closure")
 #: Launch controls of ``enablement.accepted_config`` a recipe's launch config cannot express yet
-#: (src/hyperloom/orchestrator/enablement/revalidation.py carries them with the accepted launch).
+#: (src/hyperloom/orchestrator/enablement/revalidation.py carries them with the accepted launch); each is also its kind.
 MB_UNEXPRESSED_LAUNCH = ("remove_args", "unset_envs")
+#: The unexpressed kind of a non-default ``args_mode`` and of a kept patch outside the framework checkout.
+ARGS_MODE_KIND = "args_mode"
+PATCH_KIND = "patch"
 DEFAULT_REMOTE = "origin"
 
 
 class PreludeReadError(RuntimeError):
-    """The child session is missing, of another schema, or holds something the root recipe cannot express."""
+    """The child session is missing, of another schema, or holds something the root recipe cannot even mark."""
 
 
 @dataclass(frozen=True)
@@ -62,6 +67,11 @@ class KeptPatch:
 
     root: Path
     patch_file: Path
+
+    @property
+    def unexpressed(self) -> str:
+        """The root recipe's mark for this patch when no component of it can carry the patch."""
+        return f"{PATCH_KIND}:{self.root / self.patch_file.name}"
 
 
 @dataclass(frozen=True)
@@ -77,8 +87,11 @@ class PreludeArtifacts:
     """What the baseline prelude left behind, as the root recipe and the session profile need it.
 
     ``framework_root`` is the framework source tree enablement patched, or the checkout the operator named; it is
-    ``None`` when the child named neither. ``roofline_ceiling`` is keyed by the recorded-value metric.
-    ``setup_script`` is the child's ``enablement_setting.sh``, ``None`` when it wrote none.
+    ``None`` when the child named neither or it is not a git checkout (an installed package). ``kept_patches`` apply to
+    that checkout; ``foreign_patches`` apply to any other tree, so no component can carry them. ``unexpressed`` names,
+    as recipe ``unexpressed`` entries, the foreign patches and whatever else enablement kept that a recipe cannot
+    express yet. ``roofline_ceiling`` is keyed by the recorded-value metric. ``setup_script`` is the child's
+    ``enablement_setting.sh``, ``None`` when it wrote none.
     """
 
     session_dir: Path
@@ -86,11 +99,12 @@ class PreludeArtifacts:
     baseline_tput: float
     launch: LaunchConfig
     kept_patches: tuple[KeptPatch, ...]
+    foreign_patches: tuple[KeptPatch, ...]
     base_sha_by_root: Mapping[str, str]
     framework_root: Path | None
     framework_version: str
     roofline_ceiling: Mapping[str, float]
-    dropped: tuple[str, ...]
+    unexpressed: tuple[str, ...]
     setup_script: Path | None
 
     @property
@@ -111,7 +125,10 @@ def read_child_session(launch_info: Path) -> Path | None:
 
 
 def read_prelude(session_dir: Path) -> PreludeArtifacts:
-    """Read the child session in ``session_dir``; raises :class:`PreludeReadError` on anything it cannot trust."""
+    """Read the child session in ``session_dir``; raises :class:`PreludeReadError` on anything it cannot trust.
+
+    Blocks: telling the framework's patches from the others runs ``git``.
+    """
 
     state = _json_object(session_dir / MB_STATE_FILE)
     version = state.get("schema_version")
@@ -123,17 +140,22 @@ def read_prelude(session_dir: Path) -> PreludeArtifacts:
     enablement = _mapping(state.get("enablement"), "enablement")
     accepted = _mapping(enablement.get("accepted_config"), "enablement.accepted_config")
     framework_root = _framework_root(state, enablement)
+    checkout = None if framework_root is None else _checkout(framework_root)
+    patches = _kept_patches(session_dir, enablement, framework_root)
+    kept = tuple(patch for patch in patches if checkout is not None and _checkout(patch.root) == checkout)
+    foreign = tuple(patch for patch in patches if patch not in kept)
     return PreludeArtifacts(
         session_dir=session_dir,
         stop_reason=str(state.get("stop_reason") or ""),
         baseline_tput=_number(state.get("baseline_tput"), "baseline_tput"),
         launch=_launch_config(accepted),
-        kept_patches=_kept_patches(session_dir, enablement, framework_root),
+        kept_patches=kept,
+        foreign_patches=foreign,
         base_sha_by_root=_text_map(enablement.get("base_sha_by_root"), "enablement.base_sha_by_root"),
-        framework_root=framework_root,
+        framework_root=None if checkout is None else framework_root,
         framework_version=str(state.get("framework_version") or ""),
         roofline_ceiling=_roofline_ceiling(state.get("roofline_snapshots"), state.get("baseline_roofline_ceiling")),
-        dropped=_dropped(enablement, accepted),
+        unexpressed=(*_unexpressed(enablement, accepted), *(patch.unexpressed for patch in foreign)),
         setup_script=session_dir / MB_SETUP_SCRIPT if (session_dir / MB_SETUP_SCRIPT).is_file() else None,
     )
 
@@ -181,20 +203,17 @@ def root_recipe(
     base_image_digest: str,
 ) -> Recipe:
     """The baseline as a recipe on ``base_image_digest``: the accepted launch config and ``framework`` pinned with the
-    stored ``patches``.
+    stored ``patches``, marked with everything the prelude kept that it leaves out.
 
-    ``patches`` are the kept patches as the experiment repository stored them, in the same order. Every kept patch
-    must apply to the framework's own git checkout: a patch on another tree, or on one that is not a git checkout
-    (an installed package), has no component to belong to.
+    ``patches`` are the framework's kept patches as the experiment repository stored them, in the same order.
     """
 
-    for kept in artifacts.kept_patches:
-        _require_framework_tree(kept, artifacts.framework_root)
     if patches and pin is None:
         raise PreludeReadError(f"{len(patches)} kept patches but no framework checkout to pin them to")
     try:
         components = () if pin is None else (ComponentPatches(framework, pin.repo_url, pin.ref, patches),)
-        return Recipe(base_image_digest=base_image_digest, launch=artifacts.launch, components=components)
+        recipe = Recipe(base_image_digest=base_image_digest, launch=artifacts.launch, components=components)
+        return with_unexpressed(recipe, artifacts.unexpressed)
     except RecipeError as exc:
         raise PreludeReadError(f"the prelude's result is not a valid recipe: {exc}") from exc
 
@@ -292,21 +311,23 @@ def _snapshot_list(snapshots: object) -> list[object]:
     return snapshots
 
 
-def _dropped(enablement: Mapping[str, object], accepted: Mapping[str, object]) -> tuple[str, ...]:
-    """What enablement kept that a recipe cannot express yet, by its ``state.json`` name."""
+def _unexpressed(enablement: Mapping[str, object], accepted: Mapping[str, object]) -> tuple[str, ...]:
+    """What enablement kept that a recipe cannot express yet, as recipe ``unexpressed`` kinds."""
 
-    dropped = [name for name in MB_UNEXPRESSED_ENABLEMENT if enablement.get(name)]
-    dropped += [f"accepted_config.{name}" for name in MB_UNEXPRESSED_LAUNCH if accepted.get(name)]
+    kinds = [name for name in MB_UNEXPRESSED_ENABLEMENT if enablement.get(name)]
+    kinds += [name for name in MB_UNEXPRESSED_LAUNCH if accepted.get(name)]
     if str(accepted.get("args_mode") or MB_DEFAULT_ARGS_MODE) != MB_DEFAULT_ARGS_MODE:
-        dropped.append("accepted_config.args_mode")
-    return tuple(dropped)
+        kinds.append(ARGS_MODE_KIND)
+    return tuple(kinds)
 
 
-def _require_framework_tree(kept: KeptPatch, framework_root: Path | None) -> None:
-    if framework_root is None or _toplevel(kept.root) != _toplevel(framework_root):
-        raise PreludeReadError(
-            f"kept patch {kept.patch_file} applies to {kept.root}, not to the framework checkout {framework_root}"
-        )
+def _checkout(root: Path) -> Path | None:
+    """The git checkout ``root`` lies in; ``None`` when it lies in none."""
+
+    try:
+        return _toplevel(root)
+    except PreludeReadError:
+        return None
 
 
 def _toplevel(root: Path) -> Path:

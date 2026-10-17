@@ -62,6 +62,7 @@ from hyperloom_multibranch.scheduling.stops import (
     StopReport,
     StopSignals,
 )
+from hyperloom_multibranch.specialist.prompts import prompt_versions
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +238,12 @@ class Session:
             return SessionOutcome(SessionStopReason.PRELUDE_FAILED, None, None, str(exc))
         sockets = await asyncio.to_thread(socket_versions)
         await self._notebook.write_manifest_fingerprint(
-            ManifestFingerprint(activity=self._layout.session_id, sockets=sockets, policy_versions=POLICY_VERSIONS)
+            ManifestFingerprint(
+                activity=self._layout.session_id,
+                sockets=sockets,
+                prompt_versions=prompt_versions(),
+                policy_versions=POLICY_VERSIONS,
+            )
         )
         deadlines = budget.phases_after_prelude(self._clock.now())
         self._phase("explore", explore_end=deadlines.explore_end, final_end=deadlines.final_end)

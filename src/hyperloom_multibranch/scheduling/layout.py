@@ -46,6 +46,7 @@ PRELUDE_LAUNCH_FILE = "MB-prelude-launch.json"
 PRELUDE_CHILD_FILE = "MB-prelude-child.json"
 ROOT_RECIPE_FILE = "MB-root-recipe.json"
 PRELUDE_LOG_FILE = "MB-prelude.log"
+PRELUDE_PATCHES_DIR = "MB-unexpressed-patches"
 MERGES_FILE = "MB-merges.jsonl"
 REPORT_FILE = "MB-report.json"
 REPORT_MARKDOWN_FILE = "MB-report.md"
@@ -168,6 +169,11 @@ class SessionLayout:
     @property
     def prelude_log(self) -> Path:
         return self.prelude / PRELUDE_LOG_FILE
+
+    @property
+    def prelude_patches(self) -> Path:
+        """The kept patches the root recipe names as unexpressed, copied out of the child session."""
+        return self.prelude / PRELUDE_PATCHES_DIR
 
     @property
     def merges(self) -> Path:

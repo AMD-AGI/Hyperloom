@@ -213,6 +213,32 @@ async def test_finished_child_roots_the_session_before_any_baseline_test(tmp_pat
     assert peers.toolbox.requests == {}
 
 
+async def test_a_patch_off_the_framework_checkout_is_kept_in_the_prelude_dir_and_marks_the_root(
+    tmp_path: Path,
+) -> None:
+    layout = _layout(tmp_path)
+    child = child_with_patch(tmp_path)
+    site_packages = tmp_path / "site-packages"
+    site_packages.mkdir()
+    state = json.loads((child / "state.json").read_text())
+    state["enablement"]["patch_roots"] = {state["enablement"]["kept_patches"][0]: str(site_packages)}
+    write_child_session(child, state)
+    processes, peers = _registry(layout, child), _peers(layout)
+
+    budget = SessionBudget.from_hours(2.0, NOW)
+    result = await _prelude(layout, processes, peers).root(WORKLOAD, budget, HardStop(budget, _clock()), IMAGE)
+
+    recipe = await peers.repo.read_recipe(result.root_commit)
+    assert recipe.unexpressed == (f"patch:{site_packages}/1.patch", "setup_commands")
+    assert [component.patches for component in recipe.components] == [()]
+    copy = layout.prelude_patches / "0000-1.patch"
+    assert copy.read_text() == PATCH_TEXT
+    logged = [json.loads(line) for line in layout.decisions.read_text().splitlines()]
+    detail = next(entry["detail"] for entry in logged if entry["reason"] == "root committed")
+    assert detail["unexpressed"] == list(recipe.unexpressed)
+    assert detail["unexpressed_patches"] == {str(copy): str(site_packages)}
+
+
 async def test_the_recipe_kb_champions_for_the_profile_become_warm_start_leads(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     kb = OneChampionKB()

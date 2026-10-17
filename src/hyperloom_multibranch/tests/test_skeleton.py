@@ -74,6 +74,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     tagged,
 )
 from hyperloom_multibranch.scheduling.tests.child_sessions import child_with_patch
+from hyperloom_multibranch.specialist.prompts import prompt_versions
 
 START = 1_700_000_000.0
 CONC = 16
@@ -309,6 +310,7 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     [fingerprint] = await observer.manifest_fingerprints()
     assert fingerprint.policy_versions["judge_prompt"] == JUDGE_PROMPT_VERSION
     assert dict(fingerprint.sockets) == socket_versions()
+    assert dict(fingerprint.prompt_versions) == prompt_versions()
 
     fix = await stage.repo.head("b03")
     assert fix != c1 and stage.sessions.started == {"b01": root, "b02": root, "b03": fix}
