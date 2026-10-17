@@ -4,17 +4,19 @@
 """What the model behind a branch's specialist is told: its role once, and at every launch where its branch stands.
 
 The role says how a long-running specialist works through the session's tools and how its candidates are judged. The
-launch prompt opens with the startup brief, right after the role, then the branch, its head, K and the branch's latest
-memory, so a new session goes on where the last one stopped. :func:`prompt_versions` names the text of both for the
-session's manifest fingerprint.
+launch prompt opens with the repair a repair branch was opened for and the startup brief, right after the role, then
+the branch, its head, K and the branch's latest memory, so a new session goes on where the last one stopped.
+:func:`prompt_versions` names the text of both for the session's manifest fingerprint.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Sequence
 
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_SAFETY_PREAMBLE
+from hyperloom_multibranch.contracts.fork import RepairRequest
 from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionStart
@@ -27,6 +29,15 @@ ENTRY_CHARS = 400
 VERSION_HEX = 12
 
 _BRIEF = "Startup brief:\n{brief}"
+_REPAIR = """\
+Your branch repairs {candidate}, a blocked candidate of {from_branch}: on {parent_commit} it measured \
+{gain_pct:+.2f}% and was held back by {held_back_by}. Your branch starts at that commit. Its intent: {target} / \
+{mechanism} ({layer}). Its change, as a delta:
+{delta}
+What the specialist of {from_branch} found, the root cause and the repair:
+{diagnosis}
+Start from that change and add the repair. Claim the repair as an intent of its own, its mechanism naming the repair: \
+the candidate's intent was tested on this commit. A repaired candidate is judged as any other."""
 _STANDING = """\
 Your branch: {branch}, started at {start_commit}. Its head: {head}. Tests you may have running at once: {k}.
 Your worktree: {worktree} (call worktree_sync before each source change)."""
@@ -34,7 +45,7 @@ _LOG = "Your branch log, the latest {count} entries, oldest first:\n{entries}"
 _FIRST = "Your branch log is empty: this is the first session on your branch."
 _ENDED = "Your previous session ended: {last_end}. Go on from your branch log."
 _ENTRY = "- [{entry_id}] {kind}{tests}: {content}"
-_LAUNCH = (_BRIEF, _STANDING, _LOG, _FIRST, _ENDED, _ENTRY, str(RECENT_ENTRIES), str(ENTRY_CHARS))
+_LAUNCH = (_REPAIR, _BRIEF, _STANDING, _LOG, _FIRST, _ENDED, _ENTRY, str(RECENT_ENTRIES), str(ENTRY_CHARS))
 
 _ROLE = f"""\
 You are a long-running optimization specialist on one branch of a Hyperloom multi-branch session.
@@ -106,8 +117,10 @@ def launch_prompt(
     start: SessionStart, *, head: str, worktree: str, recent: Sequence[BranchLogRecord], last_end: str = ""
 ) -> str:
     """The first message of one session of the specialist ``start`` runs; ``last_end`` says how the previous one ended."""
+    sections = [_repair(start.repair)] if start.repair is not None else []
     brief = start.brief.strip()
-    sections = [_BRIEF.format(brief=brief)] if brief else []
+    if brief:
+        sections.append(_BRIEF.format(brief=brief))
     sections.append(
         _STANDING.format(branch=start.branch, start_commit=start.start_commit, head=head, k=start.k, worktree=worktree)
     )
@@ -125,6 +138,22 @@ def prompt_versions() -> dict[str, str]:
     """``{prompt name: the first hex digits of the sha256 of its text}``, for the session's manifest fingerprint."""
     texts = {"specialist_role": _ROLE, "specialist_launch": "\n".join(_LAUNCH)}
     return {name: hashlib.sha256(text.encode()).hexdigest()[:VERSION_HEX] for name, text in texts.items()}
+
+
+def _repair(request: RepairRequest) -> str:
+    intent, judgement = request.intent, request.judgement
+    return _REPAIR.format(
+        candidate=judgement.request_ids[0],
+        from_branch=intent.branch,
+        parent_commit=intent.parent_commit,
+        gain_pct=judgement.gain_pct,
+        held_back_by=", ".join(judgement.refused_by) or "the accuracy gate",
+        target=intent.target,
+        mechanism=intent.mechanism,
+        layer=intent.layer.value,
+        delta=json.dumps(request.candidate_delta.to_document(), sort_keys=True),
+        diagnosis=request.diagnosis.strip(),
+    )
 
 
 def _entry(record: BranchLogRecord) -> str:

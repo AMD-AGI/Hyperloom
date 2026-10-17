@@ -1,10 +1,16 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
+import json
+
 import pytest
 
+from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_SAFETY_PREAMBLE
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
+from hyperloom_multibranch.contracts.fork import RepairRequest
+from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
+from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord
 from hyperloom_multibranch.specialist import prompts
 from hyperloom_multibranch.specialist.prompts import (
@@ -66,6 +72,25 @@ def test_a_launch_opens_with_the_brief_then_says_where_the_branch_stands():
     facts = "Your branch: s1, started at c0. Its head: c7. Tests you may have running at once: 3."
     assert prompt.index(facts) > prompt.index("leads")
     assert "first session on your branch" in prompt
+
+
+def test_every_launch_of_a_repair_branch_opens_with_the_candidate_s_change_and_its_diagnosis():
+    blocked = Judgement(Verdict.BLOCKED, 3.25, 2.0, ("s0-4", "s0-5"), {"output_throughput": 1030.0}, False)
+    kv = Intent("s0", "c3", "kv cache", "fp8 kv cache", IntentLayer.CONFIG)
+    change = RecipeDelta(config=ConfigDelta(server_args="--kv-cache-dtype fp8"))
+    repair = RepairRequest(kv, change, blocked, "per-tensor KV scales; scale per head\n")
+    start = SessionStart("s1", "c3", "leads: fp8 KV cache measured +4% on this model", 3, repair)
+
+    prompt = launch_prompt(start, head="c3", worktree="/nfs/s1/worktree", recent=(_record(1),))
+
+    assert prompt.startswith(
+        "Your branch repairs s0-4, a blocked candidate of s0: on c3 it measured +3.25% and was held back by the "
+        "accuracy gate. Your branch starts at that commit. Its intent: kv cache / fp8 kv cache (config)."
+    )
+    assert json.dumps(change.to_document(), sort_keys=True) in prompt
+    assert "the root cause and the repair:\nper-tensor KV scales; scale per head\nStart from that change" in prompt
+    assert prompt.index("fp8 kv cache (config)") < prompt.index("Startup brief:") < prompt.index("Your branch: s1,")
+    assert "Your branch repairs" not in _launch(brief="leads: none")
 
 
 def test_each_prompt_is_versioned_by_its_own_text(monkeypatch):
