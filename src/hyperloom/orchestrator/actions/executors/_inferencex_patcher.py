@@ -912,6 +912,12 @@ def ensure_benchmark_lib_seed_patched(
     )
 
 
+def benchmark_lib_seed_patched_in(root: Path | str) -> bool:
+    """Return whether the one checkout at ``root`` forwards ``$INFERENCEX_BENCH_SEED``, whatever other roots do."""
+    lib = Path(root).joinpath("benchmarks", "benchmark_lib.sh")
+    return lib.is_file() and _is_bench_seed_patched(lib)
+
+
 def _resolve_eval_sitecustomize_paths(
     inferencex_path: Path | str | None,
 ) -> list[Path]:
@@ -1217,6 +1223,7 @@ __all__ = [
     "ensure_benchmark_lib_patched",
     "ensure_benchmark_lib_eval_dest_patched",
     "ensure_benchmark_lib_eval_start_patched",
+    "benchmark_lib_seed_patched_in",
     "ensure_benchmark_lib_seed_patched",
     "ensure_benchmark_serving_patched",
     "ensure_eval_probe_patched",

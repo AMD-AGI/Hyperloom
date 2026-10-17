@@ -889,10 +889,15 @@ _SERVING_LIB = (Path(__file__).parent / "fixtures" / "run_benchmark_serving.sh.t
 class TestWarmupRoundSeed:
     """The warmup round must draw different prompts than the measured round, so it cannot prime the server's prefix cache with the prompts the measured round will send."""
 
-    def _run_two_rounds(self, tmp_path, monkeypatch, *, lib_text: str):
+    def _run_two_rounds(self, tmp_path, monkeypatch, *, lib_text: str, other_root_lib_text: str | None = None):
         monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
-        monkeypatch.delenv("INFERENCEX_PATH", raising=False)
         monkeypatch.delenv("MAGPIE_PATH", raising=False)
+        monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+        if other_root_lib_text is not None:
+            other = tmp_path / "other_ix"
+            (other / "benchmarks").mkdir(parents=True)
+            (other / "benchmarks" / "benchmark_lib.sh").write_text(other_root_lib_text, encoding="utf-8")
+            monkeypatch.setenv("INFERENCEX_PATH", str(other))
         ix_root = tmp_path / "InferenceX"
         (ix_root / "benchmarks").mkdir(parents=True)
         lib = ix_root / "benchmarks" / "benchmark_lib.sh"
@@ -949,3 +954,14 @@ class TestWarmupRoundSeed:
         assert gr.WARMUP_SEED_UNPATCHED_WARNING in warnings
         assert not any(w.startswith("warmup_round_seed:") for w in warnings)
         assert "INFERENCEX_BENCH_SEED" not in lib.read_text(encoding="utf-8")
+
+    def test_another_checkout_being_patched_does_not_hide_the_configured_one_being_unpatchable(
+        self, tmp_path, monkeypatch
+    ):
+        rotted = _SERVING_LIB.replace('if [[ -n "$endpoint" ]]; then', 'if [ -n "$endpoint" ]; then')
+
+        results, _, _ = self._run_two_rounds(tmp_path, monkeypatch, lib_text=rotted, other_root_lib_text=_SERVING_LIB)
+
+        warnings = results[0].nonfatal_warnings
+        assert gr.WARMUP_SEED_UNPATCHED_WARNING in warnings
+        assert not any(w.startswith("warmup_round_seed:") for w in warnings)

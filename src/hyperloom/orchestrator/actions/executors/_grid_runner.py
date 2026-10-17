@@ -42,7 +42,7 @@ from ._benchmark_interpreter import (
     _resolve_magpie_python as _resolve_magpie_python,
     _resolve_probe_python as _resolve_probe_python,
 )
-from ._inferencex_patcher import BENCH_SEED_ENV, ensure_benchmark_lib_seed_patched
+from ._inferencex_patcher import BENCH_SEED_ENV, benchmark_lib_seed_patched_in, ensure_benchmark_lib_seed_patched
 from ._recipe_script import launcher_overwritten_envs
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
@@ -554,7 +554,9 @@ def _warmup_seed_warnings(warmup_cfg_path: Path) -> list[str]:
     bench = (yaml.safe_load(warmup_cfg_path.read_text(encoding="utf-8")) or {}).get("benchmark") or {}
     if is_magpie_agentx(bench):
         return []
-    if not ensure_benchmark_lib_seed_patched(str(bench.get("inferencex_path") or "").strip() or None):
+    root = str(bench.get("inferencex_path") or "").strip() or None
+    # ``ensure`` succeeds when any discovered checkout is patched; the round runs the configured one.
+    if not ensure_benchmark_lib_seed_patched(root) or (root and not benchmark_lib_seed_patched_in(root)):
         log.warning(
             "grid_runner: %s is not forwarded by benchmark_lib.sh; the warmup round replays the measured round's prompts",
             BENCH_SEED_ENV,
