@@ -122,7 +122,8 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         kb_anchor="static_recon",
         default_mode="research",
         description=(
-            "Read-only static-source reconnaissance dispatched at PRELUDE. "
+            "Read-only static-source reconnaissance dispatched at PRELUDE (and "
+            "again once per macro-cycle when the config arm plateaus). "
             "Greps the framework source tree (vLLM / SGLang) for un-bridged "
             "capability switches — fast paths that should be enabled for the "
             "current (model, GPU, precision) but are silently disabled by a "

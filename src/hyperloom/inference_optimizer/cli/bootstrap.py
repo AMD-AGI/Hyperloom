@@ -393,14 +393,6 @@ def resolve_gpu_power_settings(
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
     """Return the canonical corpus shape, until a measurement replaces it."""
     from hyperloom.common.agentx_workload import MLPERF_CORPUS, is_mlperf_backend, mlperf_trajectories
-    from hyperloom.inference_optimizer.agentx.mapping import (
-        CANONICAL_CORPUS_DURATION_S,
-        CANONICAL_CORPUS_ENTRIES,
-        CANONICAL_CORPUS_LOADER,
-        CANONICAL_ISL,
-        CANONICAL_OSL,
-        CANONICAL_PREFIX_CACHE_HIT,
-    )
 
     if is_mlperf_backend():
         # The MLPerf corpus has no published shape; the first measurement supplies it.
@@ -410,15 +402,7 @@ def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
             "source": "canonical_mlperf",
         }
 
-    return {
-        "corpus_loader": CANONICAL_CORPUS_LOADER,
-        "corpus_entries": CANONICAL_CORPUS_ENTRIES,
-        "duration_s": float(CANONICAL_CORPUS_DURATION_S),
-        "isl": dict(CANONICAL_ISL),
-        "osl": dict(CANONICAL_OSL),
-        "prefix_cache_hit": CANONICAL_PREFIX_CACHE_HIT,
-        "source": "canonical",
-    }
+    return {}
 
 
 def _custom_specialist_fields(args: argparse.Namespace) -> dict[str, Any]:

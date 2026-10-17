@@ -61,7 +61,7 @@ async def test_run_specialist_rebench_success(tmp_path, monkeypatch) -> None:
         return [fake]
 
     monkeypatch.setattr(sr, "default_baseline_config", lambda: str(tmp_path / "base.yaml"))
-    monkeypatch.setattr(sr, "materialize_config_with_envs", lambda *a, **k: tmp_path / "mat.yaml")
+    monkeypatch.setattr(sr, "prepare_grid_benchmark_config", lambda *a, **k: tmp_path / "mat.yaml")
     monkeypatch.setattr(sr, "run_grid", _fake_run_grid)
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
 
@@ -97,7 +97,7 @@ async def test_run_specialist_rebench_failed_status(tmp_path, monkeypatch) -> No
     async def _fake_run_grid(**kwargs):
         return [fake]
 
-    monkeypatch.setattr(sr, "materialize_config_with_envs", lambda *a, **k: tmp_path / "mat.yaml")
+    monkeypatch.setattr(sr, "prepare_grid_benchmark_config", lambda *a, **k: tmp_path / "mat.yaml")
     monkeypatch.setattr(sr, "run_grid", _fake_run_grid)
 
     res = await sr.run_specialist_rebench(
@@ -113,7 +113,7 @@ async def test_run_specialist_rebench_no_result(tmp_path, monkeypatch) -> None:
     async def _fake_run_grid(**kwargs):
         return []
 
-    monkeypatch.setattr(sr, "materialize_config_with_envs", lambda *a, **k: tmp_path / "m.yaml")
+    monkeypatch.setattr(sr, "prepare_grid_benchmark_config", lambda *a, **k: tmp_path / "m.yaml")
     monkeypatch.setattr(sr, "run_grid", _fake_run_grid)
 
     res = await sr.run_specialist_rebench(
@@ -129,7 +129,7 @@ async def test_run_specialist_rebench_exception_surfaced(tmp_path, monkeypatch) 
     async def _boom(**kwargs):
         raise RuntimeError("kaboom")
 
-    monkeypatch.setattr(sr, "materialize_config_with_envs", lambda *a, **k: tmp_path / "m.yaml")
+    monkeypatch.setattr(sr, "prepare_grid_benchmark_config", lambda *a, **k: tmp_path / "m.yaml")
     monkeypatch.setattr(sr, "run_grid", _boom)
 
     res = await sr.run_specialist_rebench(

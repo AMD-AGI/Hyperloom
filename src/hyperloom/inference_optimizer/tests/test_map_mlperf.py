@@ -84,13 +84,31 @@ def test_no_scores_file_leaves_accuracy_absent():
     assert "accuracy_score" not in _map()
 
 
-def test_an_incomplete_run_is_not_a_valid_measurement():
+@pytest.mark.parametrize(
+    "state,complete,reasons",
+    [
+        ("interrupted", True, ["interrupted"]),
+        ("completed", False, ["incomplete_run"]),
+        ("interrupted", False, ["interrupted", "incomplete_run"]),
+        ("completed", True, []),
+    ],
+)
+def test_submission_verdict_reaches_the_measurement_gate(tmp_path, state, complete, reasons):
+    from hyperloom.orchestrator.actions.executors.benchmark_result import (
+        extract_benchmark_measurement,
+        is_valid_measurement,
+    )
+
     report = _report()
-    report["complete"] = False
-    report["state"] = "interrupted"
+    report.update(complete=complete, state=state)
     mapped = _map(report)
-    assert mapped["submission_valid"] is False
-    assert mapped["submission_invalid_reasons"] == ["interrupted", "incomplete_run"]
+    assert mapped["submission_valid"] is (not reasons)
+    assert mapped["submission_invalid_reasons"] == reasons
+    (tmp_path / "inferencex_result.json").write_text(json.dumps(mapped))
+    measurement = extract_benchmark_measurement(None, workspace=tmp_path)
+    assert measurement["output_throughput"] > 0
+    assert measurement["completed_requests"] > 0
+    assert is_valid_measurement(measurement) is (not reasons)
 
 
 def test_failed_samples_are_an_error_rate_over_issued():

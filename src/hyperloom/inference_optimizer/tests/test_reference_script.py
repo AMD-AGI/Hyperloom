@@ -246,6 +246,29 @@ def test_parse_sglang_entrypoint(tmp_path):
     assert r.envs.get("SGLANG_USE_AITER") == "1"
 
 
+def test_parse_sglang_serve_entrypoint_as_the_cookbook_writes_it(tmp_path):
+    text = (
+        "export SGLANG_OPT_USE_TOPK_V2=1\n"
+        "sglang serve \\\n"
+        "  --trust-remote-code \\\n"
+        "  --model-path amd/GLM-5.2-MXFP4 \\\n"
+        "  --tp 4 \\\n"
+        "  --kv-cache-dtype fp8_e4m3 \\\n"
+        "  --host 0.0.0.0 \\\n"
+        "  --port 30000\n"
+    )
+    r = parse_reference_script(_write(tmp_path, text), framework="sglang")
+    assert r.server_args == "--trust-remote-code --tp 4 --kv-cache-dtype fp8_e4m3"
+    assert r.model == "GLM-5.2-MXFP4"
+    assert r.envs == {"SGLANG_OPT_USE_TOPK_V2": "1"}
+
+
+def test_parse_serve_entrypoint_does_not_take_the_cli_name_for_the_model(tmp_path):
+    r = parse_reference_script(_write(tmp_path, "sglang serve --model-path=$MODEL --tp 8\n"), framework="sglang")
+    assert r.server_args == "--tp 8"
+    assert r.model is None
+
+
 def test_render_round_trip(tmp_path):
     src = _write(tmp_path, _M3_RECIPE)
     r = parse_reference_script(src, framework="vllm")

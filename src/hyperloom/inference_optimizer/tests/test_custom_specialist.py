@@ -972,7 +972,7 @@ def _recorder(calls: list[str]):
     ("only", "expected"),
     [
         (True, ["custom", "bench", "finish"]),
-        (False, ["framework", "bench", "scout", "stalled", "custom", "predictor"]),
+        (False, ["framework", "bench", "scout", "recon", "stalled", "custom", "predictor"]),
     ],
 )
 async def test_only_mode_tick_runs_the_custom_work_alone(monkeypatch, only, expected):
@@ -988,7 +988,10 @@ async def test_only_mode_tick_runs_the_custom_work_alone(monkeypatch, only, expe
     state = SharedState(custom_specialist_prompt=_PROMPT, custom_specialist_only=only)
     coord = SimpleNamespace(
         shared_state=state,
-        phase_internal=SimpleNamespace(maybe_enqueue_explore_research_scout=_rec("scout")),
+        phase_internal=SimpleNamespace(
+            maybe_enqueue_explore_research_scout=_rec("scout"),
+            maybe_enqueue_config_plateau_static_recon=_rec("recon"),
+        ),
         specialist_dispatch=SimpleNamespace(
             maybe_force_stalled_domain_specialist=_rec("stalled"), ensure_custom_specialist=_rec("custom")
         ),

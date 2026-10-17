@@ -4,6 +4,7 @@
 """Concurrency sweep over the CONC ladder."""
 
 from __future__ import annotations
+from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
 
 import csv
 import json
@@ -50,7 +51,6 @@ from ..actions.stop_attribution import (
 from ..actions.executors._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
-    materialize_config_with_envs,
 )
 from ..actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
 from hyperloom.inference_optimizer.roofline_ceiling import (
@@ -1208,10 +1208,10 @@ async def run_conc_sweep(
     if optimized is None:
         return _declined(recorder, "no_optimization_to_compare")
     if optimized.overlay:
-        from ..actions.executors._grid_runner import _is_safe_path_entry
-        from ..kernel.geak_config import _geak_overlay_is_loadable
+        from hyperloom.inference_optimizer.runtime_environment import is_safe_path_entry
+        from ..kernel.geak_config import geak_overlay_is_loadable
 
-        if not _is_safe_path_entry(optimized.overlay) or not _geak_overlay_is_loadable(optimized.overlay):
+        if not is_safe_path_entry(optimized.overlay) or not geak_overlay_is_loadable(optimized.overlay):
             return _declined(recorder, "optimized_overlay_unavailable", final_overlay=optimized.overlay)
     if not concs:
         return _declined(recorder, "empty_conc_list")
@@ -1247,7 +1247,7 @@ async def run_conc_sweep(
     )
     benchmark_script = state.accepted_baseline_script()
     try:
-        base_yaml_path = materialize_config_with_envs(
+        base_yaml_path = prepare_grid_benchmark_config(
             base_yaml_path,
             workspace,
             model_path=resolved_model or None,
