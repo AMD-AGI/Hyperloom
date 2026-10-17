@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping, NamedTuple
 import yaml
 from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.common.env import env_int, is_truthy
@@ -271,6 +271,54 @@ def _is_patch_column_keep(task_params: Mapping[str, Any], result: Mapping[str, A
 
 class IntegrateRecoveryIncomplete(RuntimeError):
     """An integration cannot publish a result while its recovery is unconfirmed."""
+
+
+class _GeakRebench(NamedTuple):
+    """A GEAK 2b rebench: what it measured, and what it measured against.
+
+    ``current_best`` and ``candidate`` are read once, before the ruling can
+    promote and move them, so every arm of the ruling judges the same state the
+    rebench was measured against.
+    """
+
+    variant: Mapping[str, Any]
+    measurement: dict[str, Any]
+    measured: float
+    measured_ok: bool
+    got_hash: str
+    current_best: Mapping[str, Any]
+    current_best_tput: Any
+    candidate: Mapping[str, Any]
+
+
+class _OverlayReading(NamedTuple):
+    """Whether the overlay a 2b rebench expected was in the measurement."""
+
+    expected: str
+    loaded: bool
+    digest: str
+    decision: str
+
+
+class _RebenchDecision(NamedTuple):
+    """What a 2b rebench decided, and the native refusal behind it if any."""
+
+    decision: str
+    native_rejection: str
+
+
+class _ReplayRuling(NamedTuple):
+    """How a GEAK-harness replay ruled a revalidation it was handed."""
+
+    decision: str
+    promoted: bool
+
+
+class _MaterialVerdict(NamedTuple):
+    """Whether a validated GEAK rebench has material product behind it."""
+
+    decision: str
+    rejection: str | None = None
 
 
 @dataclass
@@ -2522,327 +2570,11 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         "geak_fallback": bool((task.params or {}).get("geak_fallback")),
                     },
                 )
-            # A GEAK revalidation (2b) must assert config identity + that the
-            # optimization engaged before stamping validated, else replay via
-            # the GEAK harness (2a). Native revalidations keep the
-            # unconditional watermark reconciliation below.
+            # A GEAK revalidation (2b) rules on its own rebench and publishes the
+            # verdict itself. Native revalidations keep the unconditional watermark
+            # reconciliation below.
             if bool((task.params or {}).get("geak_fallback")):
-                from hyperloom.common.perf_metric import output_tput_of
-
-                rebench_variant = (
-                    best_winner
-                    if isinstance(best_winner, Mapping)
-                    else next((winner for winner in winners if isinstance(winner, Mapping)), {})
-                )
-                rebench_measurement = rebench_variant.get("bench_result")
-                if not isinstance(rebench_measurement, Mapping):
-                    rebench_measurement = rebench_variant.get("measurement")
-                if not isinstance(rebench_measurement, Mapping):
-                    rebench_measurement = rebench_variant
-                rebench_measurement = dict(rebench_measurement)
-                if "output_throughput" not in rebench_measurement and "tput" not in rebench_measurement:
-                    rebench_measurement["output_throughput"] = measured
-                measured = output_tput_of(rebench_measurement)
-                got_hash = str(rebench_variant.get("fingerprint") or "")
-                cb_now = self.shared_state.current_best
-                cb_tput = cb_now.get("tput")
-                baseline_grade = resolve_graded_comparison(
-                    self.shared_state, rebench_measurement, against_baseline=True
-                )
-                current_grade = resolve_graded_comparison(self.shared_state, rebench_measurement)
-                expected_hash = str((task.params or {}).get("expected_cfg_hash") or "")
-                decision = _geak_revalidation_decision(
-                    measured=baseline_grade.candidate,
-                    baseline=baseline_grade.reference,
-                    got_hash=got_hash,
-                    expected_hash=expected_hash,
-                    min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
-                    current_best=current_grade.reference,
-                )
-                if (
-                    measured <= 0
-                    or not baseline_grade.comparable
-                    or not current_grade.comparable
-                    or baseline_grade.objective != current_grade.objective
-                    or str(result.get("status") or "succeeded") not in {"succeeded", "ok"}
-                ):
-                    decision = "fallback"
-                elif (not expected_hash or got_hash == expected_hash) and any(
-                    grade.graded_on_intvty and grade.verdict != "KEEP" for grade in (baseline_grade, current_grade)
-                ):
-                    decision = "no_promote"
-                native_rejection = next(
-                    (
-                        str(entry.get("reason") or "native_gate_rejected")
-                        for entry in result.get("per_variant_outcomes") or []
-                        if isinstance(entry, Mapping)
-                        and entry.get("outcome") == "REVERT"
-                        and (
-                            any(
-                                isinstance(gate, Mapping)
-                                and gate.get("gate") in {"graded_axes", "accuracy"}
-                                and gate.get("passed") is False
-                                for gate in entry.get("gates") or []
-                            )
-                            or (
-                                "gates" not in entry
-                                and entry.get("reason")
-                                in {"accuracy_drop", EVAL_KIND_ACCURACY_UNAVAILABLE, "intvty_regression"}
-                            )
-                        )
-                        and (not expected_hash or entry.get("fingerprint") == expected_hash)
-                    ),
-                    "",
-                )
-                if (
-                    measured > 0
-                    and got_hash == expected_hash
-                    and (not baseline_grade.comparable or not current_grade.comparable)
-                ):
-                    decision = "no_promote"
-                # ``expected_cfg_hash`` fingerprints (args, envs) only, so it
-                # cannot see the overlay drop out between dispatch and launch —
-                # ``run_grid`` skips an overlay whose dir has gone away and logs
-                # a warning, and the run then measures plain flags while the
-                # credit still reads as a kernel win. Re-check the overlay's own
-                # identity here; a miss is inconclusive, not validated.
-                expected_overlay = str((task.params or {}).get("expected_overlay") or "")
-                overlay_loaded = True
-                got_digest = ""
-                if expected_overlay:
-                    expected_digest = str((task.params or {}).get("expected_overlay_digest") or "")
-                    got_digest = _geak_overlay_digest(expected_overlay)
-                    overlay_loaded = geak_overlay_is_loadable(expected_overlay) and (got_digest == expected_digest)
-                    if not overlay_loaded and decision == "validated":
-                        log.warning(
-                            "geak 2b: overlay %r did not survive the run "
-                            "(loadable=%r digest expected=%r got=%r) -> 2a fallback",
-                            expected_overlay,
-                            geak_overlay_is_loadable(expected_overlay),
-                            expected_digest,
-                            got_digest,
-                        )
-                        decision = "fallback"
-                if native_rejection:
-                    decision = "no_promote"
-                ps = self.shared_state.geak_result if isinstance(self.shared_state.geak_result, dict) else {}
-                # A rebench that beats current_best is only a KERNEL gain when
-                # GEAK actually produced something. Without a material product
-                # (kernel/head/overlay/patch or a config delta vs the pre-KERNEL
-                # best) the win is same-config measurement noise; drop it.
-                # An empty geak_result cannot be judged by the helper, so
-                # disambiguate here: a pre-existing ``geak_e2e`` stack entry
-                # means this is a resume revalidation of an already-material win
-                # (let it through); otherwise there is no material to validate.
-                if decision == "validated":
-                    stack_now = self.shared_state.optimization_stack or []
-                    has_prior_geak_e2e = any(isinstance(e, dict) and e.get("action") == "geak_e2e" for e in stack_now)
-                    # Escape hatch first: a pre-existing geak_e2e stack entry is
-                    # an already-proven win, so this is a resume revalidation.
-                    # It must short-circuit the material check regardless of
-                    # geak_result (which is persisted and thus non-empty on
-                    # resume) — by now current_best already carries the GEAK
-                    # accepted_config, so the fingerprint would match and be
-                    # mis-judged no_material, reverting a real win. Only apply
-                    # the material gate on the FIRST validation (no prior entry),
-                    # where current_best is still the pre-KERNEL config.
-                    if not has_prior_geak_e2e:
-                        if not ps:
-                            decision = "no_material"
-                        else:
-                            try:
-                                _accepted_config_as_variant(ps.get("accepted_config"))
-                                has_material = _geak_result_has_material(
-                                    ps,
-                                    prev_best_flags=str(cb_now.get("extra_server_args") or ""),
-                                    prev_best_envs=cb_now.get("extra_envs") or {},
-                                    prev_best_controls={**cb_now, **self.current_best_launch_config()},
-                                )
-                            except ValueError as exc:
-                                decision = "no_promote"
-                                native_rejection = f"invalid_accepted_config: {exc}"
-                            else:
-                                if not has_material:
-                                    decision = "no_material"
-
-                pending = self.shared_state.geak_pending or {}
-                pending_status = str(pending.get("status") or "") if isinstance(pending, dict) else ""
-                if decision == "validated":
-                    # Write the headline from the measured orchestrator-harness
-                    # rebench: lift current_best + optimization_stack + the
-                    # validated gain and clear geak_pending.
-                    promotion_result = dict(ps)
-                    for key in (
-                        "output_throughput",
-                        "input_throughput",
-                        "total_throughput",
-                        "total_token_throughput",
-                        "e2e_norm_intvty_p90",
-                        "tpot_p90_ms",
-                        "submission_valid",
-                        "submission_invalid_reasons",
-                    ):
-                        promotion_result.pop(key, None)
-                        if key in rebench_measurement:
-                            promotion_result[key] = rebench_measurement[key]
-                    promoted = self._coord.phase_kernel.promote_geak_from_candidate(
-                        promotion_result,
-                        measured_tput=float(measured),
-                        provenance="geak_orch_harness_validated",
-                        # Only an overlay that was dispatched AND still matches
-                        # its manifest proves a kernel was in the measurement.
-                        overlay_loaded=bool(expected_overlay) and overlay_loaded,
-                        measurement_provenance={**rebench_variant, **rebench_measurement},
-                    )
-                    if not promoted:
-                        decision = "no_promote"
-                if decision == "no_material":
-                    # No material GEAK product; the rebench beating current_best
-                    # is same-config measurement noise. Do not touch the
-                    # headline / stack / gain; record + clear the candidate.
-                    log.info(
-                        "geak 2b rebench beat current_best but GEAK shipped no "
-                        "material product (measured=%r current_best=%r) -> "
-                        "no_material drop",
-                        measured,
-                        cb_tput,
-                    )
-                    await self.bus.record_observation(
-                        "coordinator",
-                        "observation",
-                        {
-                            "kind": "geak_no_material",
-                            "measured_tput": float(measured),
-                            "current_best_tput": (float(cb_tput) if isinstance(cb_tput, (int, float)) else None),
-                            "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
-                        },
-                    )
-                    # Stamp the drop on geak_result (always, so an empty {} is
-                    # distinguishable from never-populated on resume/debug and
-                    # acts as a tombstone against KERNEL crash-recovery
-                    # re-enqueue) and reject any provisional KEEP in
-                    # kernel_journey so a session audit does not read a dropped
-                    # candidate as an accepted kernel (no-op when the journey
-                    # has no KEEP / the file is absent).
-                    ps_stamped = dict(ps) if isinstance(ps, dict) else {}
-                    ps_stamped["revalidation_status"] = "no_material"
-                    self.shared_state.geak_result = ps_stamped
-                    self._record_geak_rebench_conclusion(final_status="no_material")
-                    self._coord.phase_kernel.reject_geak_kernel_journey(
-                        ps_stamped,
-                        measured_tput=float(measured),
-                        current_best_tput=(float(cb_tput) if isinstance(cb_tput, (int, float)) else 0.0),
-                        provenance="geak_no_material",
-                        rejection_reason="geak_no_material_product",
-                    )
-                    self.shared_state.geak_pending = {}
-                elif decision in {"no_promote", "accuracy_drop", EVAL_KIND_ACCURACY_UNAVAILABLE, "intvty_regression"}:
-                    # A native quality rejection or measured loss is conclusive;
-                    # replaying through another harness cannot overturn it.
-                    log.info(
-                        "geak 2b rebench rejected (decision=%s measured=%r current_best=%r)",
-                        decision,
-                        measured,
-                        cb_tput,
-                    )
-                    await self.bus.record_observation(
-                        "coordinator",
-                        "observation",
-                        {
-                            "kind": f"geak_{decision}",
-                            "measured_tput": float(measured) if measured_ok else None,
-                            "current_best_tput": (float(cb_tput) if isinstance(cb_tput, (int, float)) else None),
-                            "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
-                        },
-                    )
-                    # Persist the closed verdict so a later KERNEL entry does
-                    # not recover stale result.json and re-enqueue this already
-                    # adjudicated candidate (#1240).
-                    self._coord.phase_kernel.reject_geak_promotion(
-                        ps,
-                        measured_tput=float(measured) if measured_ok else 0.0,
-                        current_best_tput=float(cb_tput or 0.0),
-                        reason=native_rejection or "graded_comparison_rejected",
-                        attempt_id=str(task.idempotency_key or task.task_id),
-                    )
-                    result["status"] = "no_promote"
-                elif decision == "fallback":
-                    # 2b inconclusive -> GEAK harness replay (2a), which
-                    # clears the pending flag on success. Best-effort.
-                    log.warning(
-                        "geak 2b revalidation inconclusive "
-                        "(measured=%r got_hash=%r expected=%r) -> GEAK-harness 2a fallback",
-                        measured,
-                        got_hash,
-                        (task.params or {}).get("expected_cfg_hash"),
-                    )
-                    fallback_result: dict[str, Any]
-                    try:
-                        # Routed via ``_coord`` so a test / caller that overrides
-                        # ``coordinator._validate_geak_via_geak_harness`` still wins
-                        # (bare-name delegation resolves it back onto this class).
-                        fallback_result = await self.validate_geak_via_geak_harness(reason="2b_inconclusive")
-                    except Exception as exc:
-                        log.exception("geak 2a GEAK-harness fallback failed")
-                        fallback_result = {
-                            "validated": False,
-                            "reason": repr(exc),
-                        }
-                        geak_result = (
-                            self.shared_state.geak_result if isinstance(self.shared_state.geak_result, dict) else {}
-                        )
-                    if not bool(fallback_result.get("validated")):
-                        from ..phases.geak_rebench import INCOMPARABLE_REVALIDATION
-
-                        geak_result = (
-                            dict(self.shared_state.geak_result)
-                            if isinstance(self.shared_state.geak_result, dict)
-                            else {}
-                        )
-                        # 2a reports a refusal it will repeat for this workload
-                        # as a typed status. Persist it beside the verdict: the
-                        # reason text is for the report, and a later KERNEL entry
-                        # needs to know the replay is settled, not merely broken.
-                        refusal = str(fallback_result.get("status") or "")
-                        geak_result["revalidation_status"] = (
-                            "no_promote" if refusal == "no_promote" else "fallback_failed"
-                        )
-                        geak_result["revalidation_error_class"] = refusal
-                        geak_result["revalidation_error"] = str(
-                            fallback_result.get("reason") or refusal or "GEAK harness fallback did not validate"
-                        )[:500]
-                        self.shared_state.geak_result = geak_result
-                        self._record_geak_rebench_conclusion(
-                            final_status=geak_result["revalidation_status"],
-                            final_error=str(geak_result.get("revalidation_error") or ""),
-                        )
-                        self.shared_state.geak_pending = {}
-                        result["status"] = refusal if refusal in {INCOMPARABLE_REVALIDATION, "no_promote"} else "failed"
-                    else:
-                        promoted = True
-                        decision = "validated"
-                self._record_geak_rebench_timeline(
-                    task=task,
-                    decision=decision,
-                    pending_status=pending_status,
-                    measured=measured,
-                    config_matched=(got_hash == str((task.params or {}).get("expected_cfg_hash") or ""))
-                    if str((task.params or {}).get("expected_cfg_hash") or "")
-                    else None,
-                    overlay_loaded=overlay_loaded if expected_overlay else None,
-                    got_hash=got_hash,
-                    got_overlay_digest=got_digest,
-                )
-                self.shared_state.record_action_attempt(
-                    action="explore",
-                    task_id=task.task_id,
-                    status=str(result.get("status") or "succeeded"),
-                    decision="promoted" if promoted else "no_promote" if decision == "no_promote" else "discarded",
-                    result=result,
-                    extras={"revalidation_decision": decision, "output_throughput": measured},
-                )
-                outcome.verdict = Verdict.ADOPTED if promoted else Verdict.REFUSED
-                outcome.changed = True
+                await self._rule_on_geak_rebench(result, task=task, outcome=outcome)
                 return
             if measured_ok and self.shared_state.baseline_tput > 0 and not stale_measurement:
                 self.validate(measured, result, source=STACK_REVALIDATE_SOURCE)
@@ -2942,6 +2674,452 @@ class WritebackCollaborator(CoordinatorCollaborator):
         outcome.changed = changed
         outcome.audit_decision = audit_decision
         outcome.audit_extras = audit_extras
+
+    async def _rule_on_geak_rebench(
+        self,
+        result: dict,
+        *,
+        task: "Task",
+        outcome: _PromoteOutcome,
+    ) -> None:
+        """Rule on a GEAK (2b) revalidation rebench and publish what it decided.
+
+        A GEAK revalidation must assert config identity and that the optimization
+        engaged before it may stamp ``validated``, else the round replays through
+        the GEAK harness (2a). That ruling is the whole of such a round, so the
+        verdict is written onto ``outcome`` here rather than handed back to the
+        winner-accept path a revalidation never reaches.
+        """
+        # Set by the validated promotion and by the harness replay; a ruling that
+        # reaches neither leaves the round unpromoted.
+        promoted = False
+        rebench = self._read_geak_rebench(result)
+        ruling = self._geak_rebench_decision(result, task=task, rebench=rebench)
+        decision, native_rejection = ruling.decision, ruling.native_rejection
+        # ``expected_cfg_hash`` fingerprints (args, envs) only, so it
+        # cannot see the overlay drop out between dispatch and launch —
+        # ``run_grid`` skips an overlay whose dir has gone away and logs
+        # a warning, and the run then measures plain flags while the
+        # credit still reads as a kernel win. Re-check the overlay's own
+        # identity here; a miss is inconclusive, not validated.
+        overlay = self._overlay_reading(task, decision=decision)
+        expected_overlay, overlay_loaded = overlay.expected, overlay.loaded
+        got_digest, decision = overlay.digest, overlay.decision
+        if native_rejection:
+            decision = "no_promote"
+        if decision == "validated":
+            verdict = self._material_verdict(rebench)
+            decision = verdict.decision
+            if verdict.rejection is not None:
+                native_rejection = verdict.rejection
+
+        pending = self.shared_state.geak_pending or {}
+        pending_status = str(pending.get("status") or "") if isinstance(pending, dict) else ""
+        if decision == "validated":
+            # Only an overlay that was dispatched AND still matches its
+            # manifest proves a kernel was in the measurement.
+            promoted = self._promote_validated_rebench(
+                rebench, overlay_loaded=bool(expected_overlay) and overlay_loaded
+            )
+            if not promoted:
+                decision = "no_promote"
+        if decision == "no_material":
+            await self._drop_immaterial_rebench(rebench)
+        elif decision in {"no_promote", "accuracy_drop", EVAL_KIND_ACCURACY_UNAVAILABLE, "intvty_regression"}:
+            await self._refuse_rebench(
+                result, task=task, rebench=rebench, decision=decision, native_rejection=native_rejection
+            )
+        elif decision == "fallback":
+            replay = await self._replay_via_geak_harness(result, task=task, rebench=rebench)
+            decision, promoted = replay.decision, replay.promoted
+        expected_hash = str((task.params or {}).get("expected_cfg_hash") or "")
+        self._record_geak_rebench_timeline(
+            task=task,
+            decision=decision,
+            pending_status=pending_status,
+            measured=rebench.measured,
+            config_matched=(rebench.got_hash == expected_hash) if expected_hash else None,
+            overlay_loaded=overlay_loaded if expected_overlay else None,
+            got_hash=rebench.got_hash,
+            got_overlay_digest=got_digest,
+        )
+        self.shared_state.record_action_attempt(
+            action="explore",
+            task_id=task.task_id,
+            status=str(result.get("status") or "succeeded"),
+            decision="promoted" if promoted else "no_promote" if decision == "no_promote" else "discarded",
+            result=result,
+            extras={"revalidation_decision": decision, "output_throughput": rebench.measured},
+        )
+        outcome.verdict = Verdict.ADOPTED if promoted else Verdict.REFUSED
+        outcome.changed = True
+
+    def _read_geak_rebench(self, result: dict) -> _GeakRebench:
+        """Read a 2b rebench round: the variant measured, and what it measured against.
+
+        A variant carries its measurement under one of three keys depending on how
+        it was produced, and a measurement with no throughput of its own falls back
+        to the round's -- so a rebench is never graded against a missing number.
+        ``measured_ok`` judges the round's own throughput, not the rebench's: a
+        round that measured nothing says nothing, whatever the variant carries.
+        """
+        from hyperloom.common.perf_metric import output_tput_of
+
+        best_winner = result.get("best_variant")
+        winners = result.get("winners") or []
+        round_tput = result.get("output_throughput")
+        rebench_variant = (
+            best_winner
+            if isinstance(best_winner, Mapping)
+            else next((winner for winner in winners if isinstance(winner, Mapping)), {})
+        )
+        rebench_measurement = rebench_variant.get("bench_result")
+        if not isinstance(rebench_measurement, Mapping):
+            rebench_measurement = rebench_variant.get("measurement")
+        if not isinstance(rebench_measurement, Mapping):
+            rebench_measurement = rebench_variant
+        rebench_measurement = dict(rebench_measurement)
+        if "output_throughput" not in rebench_measurement and "tput" not in rebench_measurement:
+            rebench_measurement["output_throughput"] = round_tput
+        current_best = self.shared_state.current_best
+        return _GeakRebench(
+            variant=rebench_variant,
+            measurement=rebench_measurement,
+            measured=output_tput_of(rebench_measurement),
+            measured_ok=isinstance(round_tput, (int, float)) and round_tput > 0,
+            got_hash=str(rebench_variant.get("fingerprint") or ""),
+            current_best=current_best,
+            current_best_tput=current_best.get("tput"),
+            candidate=self.shared_state.geak_result if isinstance(self.shared_state.geak_result, dict) else {},
+        )
+
+    @staticmethod
+    def _overlay_reading(
+        task: "Task",
+        *,
+        decision: str,
+    ) -> _OverlayReading:
+        """Read whether the kernel overlay a 2b rebench expected survived the run.
+
+        An overlay that no longer loads, or whose digest moved, means the kernel
+        was not in the measurement -- which sends an otherwise validated round to
+        the harness replay rather than letting it stamp a kernel gain.
+        """
+        expected_overlay = str((task.params or {}).get("expected_overlay") or "")
+        overlay_loaded = True
+        got_digest = ""
+        if expected_overlay:
+            expected_digest = str((task.params or {}).get("expected_overlay_digest") or "")
+            got_digest = _geak_overlay_digest(expected_overlay)
+            overlay_loaded = geak_overlay_is_loadable(expected_overlay) and (got_digest == expected_digest)
+            if not overlay_loaded and decision == "validated":
+                log.warning(
+                    "geak 2b: overlay %r did not survive the run "
+                    "(loadable=%r digest expected=%r got=%r) -> 2a fallback",
+                    expected_overlay,
+                    geak_overlay_is_loadable(expected_overlay),
+                    expected_digest,
+                    got_digest,
+                )
+                decision = "fallback"
+        return _OverlayReading(expected=expected_overlay, loaded=overlay_loaded, digest=got_digest, decision=decision)
+
+    def _geak_rebench_decision(
+        self,
+        result: dict,
+        *,
+        task: "Task",
+        rebench: _GeakRebench,
+    ) -> _RebenchDecision:
+        """Read what a GEAK 2b rebench decided about the stack it re-measured.
+
+        Config identity and an engaged optimization are both required before a
+        rebench may read as ``validated``; an incomparable grade or a losing
+        objective sends the round to the harness replay instead.
+        """
+        measured, got_hash = rebench.measured, rebench.got_hash
+        expected_hash = str((task.params or {}).get("expected_cfg_hash") or "")
+        baseline_grade = resolve_graded_comparison(self.shared_state, rebench.measurement, against_baseline=True)
+        current_grade = resolve_graded_comparison(self.shared_state, rebench.measurement)
+        decision = _geak_revalidation_decision(
+            measured=baseline_grade.candidate,
+            baseline=baseline_grade.reference,
+            got_hash=got_hash,
+            expected_hash=expected_hash,
+            min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
+            current_best=current_grade.reference,
+        )
+        if (
+            measured <= 0
+            or not baseline_grade.comparable
+            or not current_grade.comparable
+            or baseline_grade.objective != current_grade.objective
+            or str(result.get("status") or "succeeded") not in {"succeeded", "ok"}
+        ):
+            decision = "fallback"
+        elif (not expected_hash or got_hash == expected_hash) and any(
+            grade.graded_on_intvty and grade.verdict != "KEEP" for grade in (baseline_grade, current_grade)
+        ):
+            decision = "no_promote"
+        native_rejection = next(
+            (
+                str(entry.get("reason") or "native_gate_rejected")
+                for entry in result.get("per_variant_outcomes") or []
+                if isinstance(entry, Mapping)
+                and entry.get("outcome") == "REVERT"
+                and (
+                    any(
+                        isinstance(gate, Mapping)
+                        and gate.get("gate") in {"graded_axes", "accuracy"}
+                        and gate.get("passed") is False
+                        for gate in entry.get("gates") or []
+                    )
+                    or (
+                        "gates" not in entry
+                        and entry.get("reason")
+                        in {"accuracy_drop", EVAL_KIND_ACCURACY_UNAVAILABLE, "intvty_regression"}
+                    )
+                )
+                and (not expected_hash or entry.get("fingerprint") == expected_hash)
+            ),
+            "",
+        )
+        if (
+            measured > 0
+            and got_hash == expected_hash
+            and (not baseline_grade.comparable or not current_grade.comparable)
+        ):
+            decision = "no_promote"
+        return _RebenchDecision(decision=decision, native_rejection=native_rejection)
+
+    async def _drop_immaterial_rebench(self, rebench: _GeakRebench) -> None:
+        """Record a rebench that beat current_best with no GEAK product behind it.
+
+        Same-config measurement noise: the headline, the stack and the gain are
+        left alone and the candidate is cleared.
+        """
+        candidate, measured = rebench.candidate, rebench.measured
+        current_best_tput = rebench.current_best_tput
+        log.info(
+            "geak 2b rebench beat current_best but GEAK shipped no "
+            "material product (measured=%r current_best=%r) -> "
+            "no_material drop",
+            measured,
+            current_best_tput,
+        )
+        await self.bus.record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": "geak_no_material",
+                "measured_tput": float(measured),
+                "current_best_tput": (
+                    float(current_best_tput) if isinstance(current_best_tput, (int, float)) else None
+                ),
+                "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
+            },
+        )
+        # Stamp the drop on geak_result (always, so an empty {} is
+        # distinguishable from never-populated on resume/debug and
+        # acts as a tombstone against KERNEL crash-recovery
+        # re-enqueue) and reject any provisional KEEP in
+        # kernel_journey so a session audit does not read a dropped
+        # candidate as an accepted kernel (no-op when the journey
+        # has no KEEP / the file is absent).
+        ps_stamped = dict(candidate) if isinstance(candidate, dict) else {}
+        ps_stamped["revalidation_status"] = "no_material"
+        self.shared_state.geak_result = ps_stamped
+        self._record_geak_rebench_conclusion(final_status="no_material")
+        self._coord.phase_kernel.reject_geak_kernel_journey(
+            ps_stamped,
+            measured_tput=float(measured),
+            current_best_tput=(float(current_best_tput) if isinstance(current_best_tput, (int, float)) else 0.0),
+            provenance="geak_no_material",
+            rejection_reason="geak_no_material_product",
+        )
+        self.shared_state.geak_pending = {}
+
+    async def _refuse_rebench(
+        self,
+        result: dict,
+        *,
+        task: "Task",
+        rebench: _GeakRebench,
+        decision: str,
+        native_rejection: str,
+    ) -> None:
+        """Record a revalidation the rebench refused, and why it was refused."""
+        measured, measured_ok = rebench.measured, rebench.measured_ok
+        candidate, current_best_tput = rebench.candidate, rebench.current_best_tput
+        log.info(
+            "geak 2b rebench rejected (decision=%s measured=%r current_best=%r)",
+            decision,
+            measured,
+            current_best_tput,
+        )
+        await self.bus.record_observation(
+            "coordinator",
+            "observation",
+            {
+                "kind": f"geak_{decision}",
+                "measured_tput": float(measured) if measured_ok else None,
+                "current_best_tput": (
+                    float(current_best_tput) if isinstance(current_best_tput, (int, float)) else None
+                ),
+                "baseline_tput": float(self.shared_state.baseline_tput or 0.0),
+            },
+        )
+        # Persist the closed verdict so a later KERNEL entry does
+        # not recover stale result.json and re-enqueue this already
+        # adjudicated candidate (#1240).
+        self._coord.phase_kernel.reject_geak_promotion(
+            candidate,
+            measured_tput=float(measured) if measured_ok else 0.0,
+            current_best_tput=float(current_best_tput or 0.0),
+            reason=native_rejection or "graded_comparison_rejected",
+            attempt_id=str(task.idempotency_key or task.task_id),
+        )
+        result["status"] = "no_promote"
+
+    async def _replay_via_geak_harness(
+        self,
+        result: dict,
+        *,
+        task: "Task",
+        rebench: _GeakRebench,
+    ) -> _ReplayRuling:
+        """Replay an inconclusive 2b revalidation through the GEAK harness (2a).
+
+        Best-effort: a successful replay clears the pending flag and rules the
+        round ``validated``; anything else leaves the round as the 2b rebench
+        found it.
+        """
+        measured, got_hash = rebench.measured, rebench.got_hash
+        promoted = False
+        decision = "fallback"
+        log.warning(
+            "geak 2b revalidation inconclusive (measured=%r got_hash=%r expected=%r) -> GEAK-harness 2a fallback",
+            measured,
+            got_hash,
+            (task.params or {}).get("expected_cfg_hash"),
+        )
+        fallback_result: dict[str, Any]
+        try:
+            # Routed via ``_coord`` so a test / caller that overrides
+            # ``coordinator._validate_geak_via_geak_harness`` still wins
+            # (bare-name delegation resolves it back onto this class).
+            fallback_result = await self.validate_geak_via_geak_harness(reason="2b_inconclusive")
+        except Exception as exc:
+            log.exception("geak 2a GEAK-harness fallback failed")
+            fallback_result = {
+                "validated": False,
+                "reason": repr(exc),
+            }
+            geak_result = self.shared_state.geak_result if isinstance(self.shared_state.geak_result, dict) else {}
+        if not bool(fallback_result.get("validated")):
+            from ..phases.geak_rebench import INCOMPARABLE_REVALIDATION
+
+            geak_result = dict(self.shared_state.geak_result) if isinstance(self.shared_state.geak_result, dict) else {}
+            # 2a reports a refusal it will repeat for this workload
+            # as a typed status. Persist it beside the verdict: the
+            # reason text is for the report, and a later KERNEL entry
+            # needs to know the replay is settled, not merely broken.
+            refusal = str(fallback_result.get("status") or "")
+            geak_result["revalidation_status"] = "no_promote" if refusal == "no_promote" else "fallback_failed"
+            geak_result["revalidation_error_class"] = refusal
+            geak_result["revalidation_error"] = str(
+                fallback_result.get("reason") or refusal or "GEAK harness fallback did not validate"
+            )[:500]
+            self.shared_state.geak_result = geak_result
+            self._record_geak_rebench_conclusion(
+                final_status=geak_result["revalidation_status"],
+                final_error=str(geak_result.get("revalidation_error") or ""),
+            )
+            self.shared_state.geak_pending = {}
+            result["status"] = refusal if refusal in {INCOMPARABLE_REVALIDATION, "no_promote"} else "failed"
+        else:
+            promoted = True
+            decision = "validated"
+        return _ReplayRuling(decision=decision, promoted=promoted)
+
+    def _promote_validated_rebench(self, rebench: _GeakRebench, *, overlay_loaded: bool) -> bool:
+        """Write the headline a validated orchestrator-harness rebench earns.
+
+        Lifts current_best + optimization_stack + the validated gain and clears
+        ``geak_pending``. The candidate's own throughput fields give way to the
+        rebench's, so the headline reports what was just measured rather than what
+        the candidate claimed when it was accepted.
+
+        Returns:
+            Whether the promotion landed.
+        """
+        measurement, variant = rebench.measurement, rebench.variant
+        promotion_result = dict(rebench.candidate)
+        for key in (
+            "output_throughput",
+            "input_throughput",
+            "total_throughput",
+            "total_token_throughput",
+            "e2e_norm_intvty_p90",
+            "tpot_p90_ms",
+            "submission_valid",
+            "submission_invalid_reasons",
+        ):
+            promotion_result.pop(key, None)
+            if key in measurement:
+                promotion_result[key] = measurement[key]
+        return self._coord.phase_kernel.promote_geak_from_candidate(
+            promotion_result,
+            measured_tput=float(rebench.measured),
+            provenance="geak_orch_harness_validated",
+            overlay_loaded=overlay_loaded,
+            measurement_provenance={**variant, **measurement},
+        )
+
+    def _material_verdict(self, rebench: _GeakRebench) -> _MaterialVerdict:
+        """Rule on whether a validated GEAK rebench has material product behind it.
+
+        A rebench that beats current_best is only a KERNEL gain when
+        GEAK actually produced something. Without a material product
+        (kernel/head/overlay/patch or a config delta vs the pre-KERNEL
+        best) the win is same-config measurement noise; drop it.
+        An empty geak_result cannot be judged by the helper, so
+        disambiguate here: a pre-existing ``geak_e2e`` stack entry
+        means this is a resume revalidation of an already-material win
+        (let it through); otherwise there is no material to validate.
+        """
+        pending_summary, current_best = rebench.candidate, rebench.current_best
+        stack_now = self.shared_state.optimization_stack or []
+        has_prior_geak_e2e = any(isinstance(e, dict) and e.get("action") == "geak_e2e" for e in stack_now)
+        # Escape hatch first: a pre-existing geak_e2e stack entry is
+        # an already-proven win, so this is a resume revalidation.
+        # It must short-circuit the material check regardless of
+        # geak_result (which is persisted and thus non-empty on
+        # resume) — by now current_best already carries the GEAK
+        # accepted_config, so the fingerprint would match and be
+        # mis-judged no_material, reverting a real win. Only apply
+        # the material gate on the FIRST validation (no prior entry),
+        # where current_best is still the pre-KERNEL config.
+        if not has_prior_geak_e2e:
+            if not pending_summary:
+                return _MaterialVerdict(decision="no_material")
+            try:
+                _accepted_config_as_variant(pending_summary.get("accepted_config"))
+                has_material = _geak_result_has_material(
+                    pending_summary,
+                    prev_best_flags=str(current_best.get("extra_server_args") or ""),
+                    prev_best_envs=current_best.get("extra_envs") or {},
+                    prev_best_controls={**current_best, **self.current_best_launch_config()},
+                )
+            except ValueError as exc:
+                return _MaterialVerdict(
+                    decision="no_promote",
+                    rejection=f"invalid_accepted_config: {exc}",
+                )
+            else:
+                if not has_material:
+                    return _MaterialVerdict(decision="no_material")
+        return _MaterialVerdict(decision="validated")
 
     def _confirmed_integrate_completion(
         self, result: dict, task: "Task | None", *, kept_flag: bool
