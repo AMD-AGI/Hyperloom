@@ -22,7 +22,7 @@ from hyperloom.common.provenance import detect_kineto_backend
 from hyperloom.common.timeutil import now_iso
 from ...phases.machine_state import record_lifecycle_event
 from ...loop.sub_agent_runner import RunnerContext
-from ...state.analysis_failures import remember_roofline_failure
+from ...state.analysis_failures import remember_roofline_failure, remember_trace_failure
 from hyperloom.inference_optimizer.trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
 from ..stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
@@ -806,10 +806,10 @@ def _flag_attribution_degraded(ta_result: dict[str, Any], profile_result: dict[s
             "trace_analyze returned 0 hot kernels: the profile trace "
             "has no execute_*/user_annotation events, so per-kernel "
             "device time is folded into hipGraphLaunch wrappers under "
-            "cuda-graph capture (#431). Re-profile in eager mode "
-            "(append --enforce-eager to EXTRA_SGLANG_ARGS / "
-            "EXTRA_VLLM_ARGS) so per-step annotations fire, or enable "
-            "a capture-fold fallback over capture_traces/."
+            "cuda-graph capture (#431). Re-profile without capture (append "
+            "--disable-cuda-graph to EXTRA_SGLANG_ARGS, or "
+            "--compilation-config.cudagraph_mode NONE to EXTRA_VLLM_ARGS) so "
+            "per-step annotations fire, or enable a capture-fold fallback over capture_traces/."
         ),
         "capture_traces_present": bool(trace_health.get("capture_traces_present")),
     }
@@ -916,6 +916,7 @@ class RooflineExecutor:
 
         analysis = await self._analyze(ctx, recorder, payload)
         if not isinstance(analysis, _AnalysisOutcome):
+            remember_trace_failure(self.shared_state, payload, analysis)
             return analysis
         attribution_degraded = _flag_attribution_degraded(analysis.result, profiled.result)
         analysed = _AnalysedProfile(profiled, analysis)

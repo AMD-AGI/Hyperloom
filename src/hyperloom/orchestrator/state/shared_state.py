@@ -479,8 +479,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Operator-defined specialist (``--custom-specialist-*``); empty prompt means not configured.
     custom_specialist_prompt: str = ""
     custom_specialist_description: str = ""
-    # Set once a custom_specialist task has started; drives the at-least-once dispatch.
-    custom_specialist_dispatched: bool = False
+    # ``HYPERLOOM_CUSTOM_SPECIALIST_ONLY``: FRAMEWORK_AGENT runs the custom specialist and its bench alone.
+    custom_specialist_only: bool = False
     # ``--extra-env NAME=VALUE`` pins.
     operator_extra_env: dict[str, str] = field(default_factory=dict)
     # Operator-supplied custom-workload paths.
@@ -2676,6 +2676,15 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if usable is None:
             return None
         return time.monotonic() + usable
+
+    @property
+    def has_validated_gain_stamp(self) -> bool:
+        """Whether a cumulative gain has been validated against the current anchor."""
+        return bool(
+            self.cumulative_gain_validated_ts
+            or self.cumulative_gain_validated_stack_len
+            or self.cumulative_gain_validated
+        )
 
     def optimization_stack_has_unvalidated_keeps(self) -> bool:
         """True iff ``current_best`` changed since the last validated measurement (stack grew or a lift landed)."""

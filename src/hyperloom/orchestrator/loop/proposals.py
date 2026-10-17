@@ -284,6 +284,12 @@ def _record_config_dropped(coll: Any, pending: Any, *, reason: str) -> None:
 class ProposalsCollaborator(CoordinatorCollaborator):
     """Turns approved proposals into queued tasks."""
 
+    def register_review_proposal(self, message: Message, payload: dict[str, Any]) -> None:
+        """Register a coordinator proposal before publishing it for Critic review."""
+        pending = PendingProposal(message.msg_id, "coordinator", payload["action_name"], 0.0, payload)
+        self.state.pending_proposals[message.msg_id] = pending
+        _record_phase_proposal(self._coord, pending)
+
     def _approved_idempotency_key(self, action_name: str, params: dict[str, Any]) -> str:
         """Content-addressed idempotency key for an approved proposal."""
         payload: Any = (

@@ -504,6 +504,7 @@ async def test_stack_validation_preserves_actual_measurement(
     c.shared_state.framework = "vllm"
     c.shared_state.benchmark_mode = "agentx" if agentx else "synthetic"
     c.shared_state.baseline_accuracy = 0.9
+    c.shared_state.current_best["workload_identity"] = "fixed-workload"
     c.shared_state.current_best.update(
         total_throughput=20000.0,
         e2e_norm_intvty_p90=400.0,
@@ -532,7 +533,10 @@ async def test_stack_validation_preserves_actual_measurement(
         "duration_seconds": 900.0,
         "request_error_rate": 0.0,
         "completed_requests": 64,
-        "submission_valid": submission_valid,
+        "benchmark_backend": "magpie_agentx" if agentx else "synthetic",
+        "benchmark_valid": submission_valid,
+        "diagnostic_only": False,
+        "workload_identity": "fixed-workload",
         "submission_invalid_reasons": ["scenario_constraint"] if submission_valid is False else [],
         "accuracy": 0.9,
         "ttft_mean_ms": 20.0,

@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 IO_INSTALL = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "assets" / "install.sh"
 PREFLIGHT = REPO_ROOT / "src" / "hyperloom" / "inference_optimizer" / "cli" / "preflight.py"
 
-MAGPIE_V020_COMMIT = "e6833b8183c6c41adf6038252337550876ca0433"
+MAGPIE_PIN = "6a1ee26f9053363d3750b43e3d5afb5d1c4ce84e"
 
 PIP_MARKER = "pip-install-called"
 
@@ -40,7 +40,7 @@ if [ "$1" = "-" ]; then
   echo "{installed_root}"
   exit 0
 fi
-if [ "$1" = "-c" ]; then
+if [ "$1" = "-c" ] || [[ "$1" == *check_magpie.py ]]; then
   {import_check}
 fi
 exit 0
@@ -78,6 +78,7 @@ MAGPIE_REPO="https://example.invalid/Magpie.git"
 MAGPIE_REF="deadbeef"
 MAGPIE_PACKAGE_SPEC="magpie-eval @ git+https://example.invalid/Magpie.git@deadbeef"
 {magpie_path_line}
+_script_dir="{IO_INSTALL.parent}"
 PYTHON="{fake_py}"
 PIP_EXTRA=()
 
@@ -103,7 +104,7 @@ ensure_magpie
 def test_skip_reinstall_when_already_installed_from_magpie_dir(tmp_path: Path) -> None:
     out, pip_called = _run_ensure_magpie(tmp_path, import_ok=True)
     assert not pip_called, f"reinstall should have been skipped:\n{out}"
-    assert "Magpie already importable; skipping pip install" in out
+    assert "Magpie revision already installed or explicitly supplied; skipping pip install" in out
     assert "MAGPIE_PATH resolved from installed package" in out
 
 
@@ -122,14 +123,14 @@ def test_preserves_explicit_magpie_path(tmp_path: Path) -> None:
 # Static guard: the idempotent skip must stay wired in.
 def test_io_install_magpie_reinstall_is_idempotent_guarded() -> None:
     body = _extract_ensure_magpie()
-    assert "Magpie already importable; skipping pip install" in body
+    assert "Magpie revision already installed or explicitly supplied; skipping pip install" in body
     assert "MAGPIE_PACKAGE_SPEC" in body
     assert "pip install" in body, "reinstall path must still exist for the miss case"
 
 
-def test_default_magpie_pin_is_v020_and_consistent() -> None:
+def test_default_magpie_pin_is_consistent() -> None:
     install_text = IO_INSTALL.read_text(encoding="utf-8")
     preflight_text = PREFLIGHT.read_text(encoding="utf-8")
 
-    assert f'MAGPIE_REF="${{MAGPIE_REF:-{MAGPIE_V020_COMMIT}}}"' in install_text
-    assert f'os.environ.get("MAGPIE_REF", "{MAGPIE_V020_COMMIT}")' in preflight_text
+    assert f'MAGPIE_REF="${{MAGPIE_REF:-{MAGPIE_PIN}}}"' in install_text
+    assert f'os.environ.get("MAGPIE_REF", "{MAGPIE_PIN}")' in preflight_text

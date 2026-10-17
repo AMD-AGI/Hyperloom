@@ -394,12 +394,19 @@ the code actually is; SESSION CONTEXT names the tree this session optimises
   fixed for the session, so look for levers that buy throughput per watt.
 * **Config vs source patch.** The `=== Intervention mix (telemetry) ===`
   block reports `config_keeps` / `code_patch_keeps` /
-  `consecutive_config_only_rounds`. Config tuning tends to plateau; when
-  the ledger shows many consecutive config-only rounds with no code_patch
-  keeps, a `serving_specialist`-authored framework SOURCE patch
-  (scheduler / kv_cache / chunked-prefill), promoted via
-  `integrate_patch`, is one route worth weighing against another config
-  round. A `code_patch` KEEP resets the consecutive counter.
+  `consecutive_config_only_rounds`. The arms differ in ceiling, not in
+  order: a flag is cheap to validate and bounded by whatever upstream
+  already wired up, while a source change moves the ceiling and keeps
+  paying in later rounds and cycles. A KEEP-less config round is
+  therefore not an argument for another config round. On consecutive
+  config-only rounds, dispatch a `mode='patch'` specialist at a
+  high-ceiling move: bridge a predicate that takes this model / GPU /
+  precision off a faster path (the `[static_recon/...]` rows in
+  `=== Current gaps ===`),
+  restore a path the runtime findings report disabled or falling back,
+  fix the framework bug behind the symptom, or re-sequence how
+  this architecture drives its components. Promote via
+  `integrate_patch`. A `code_patch` KEEP resets the counter.
 * **You CANNOT** delegate kernel_agent-owned actions; write a state field;
   read or write KB directly (Critic owns it). You **CAN** emit
   `escalate_strategy_change` with a `skip_to_kernel` / `skip_to_close` hint —

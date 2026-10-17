@@ -373,7 +373,7 @@ def test_llm_path_inserts_narratives_for_non_skipped_sections() -> None:
 def test_llm_broken_json_falls_back_to_deterministic_exec_summary() -> None:
     r = render_session_report(_fixture_breakdown(), llm_client=_BrokenLLM())
     assert "## Executive Summary" in r.markdown
-    assert "baseline 2205.00 tok/s/GPU → final" in r.markdown
+    assert "baseline 2205.00 tok/s → final" in r.markdown
 
 
 def test_llm_exception_does_not_crash_compose() -> None:

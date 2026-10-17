@@ -976,10 +976,11 @@ def test_conc_sweep_plot_helper_series_and_payload_loading(tmp_path: Path) -> No
     assert plot._load_payload(payload_file) == payload
 
     axes = plot._axes_for_metric("output_throughput", 2.0)
-    xs, ys = plot._arm_series(payload["baseline"]["points"], 2.0, axes)
-    assert xs == [200.0, 300.0]
-    assert ys == [400.0, 300.0]
-    assert plot._arm_series([{"conc": None, "output_throughput": -1}], 1.0, axes) == ([], [])
+    xs, ys, concs = plot._arm_series(payload["baseline"]["points"], 2.0, axes)
+    assert xs == [300.0, 200.0]
+    assert ys == [300.0, 400.0]
+    assert concs == [2.0, 4.0]
+    assert plot._arm_series([{"conc": None, "output_throughput": -1}], 1.0, axes) == ([], [], [])
 
     cx, cy = plot._ceiling_series(payload["roofline_ceiling"], tp_eff=4.0)
     assert cx == [200.0, 300.0]

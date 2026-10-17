@@ -683,8 +683,8 @@ def test_pitfall_description_uses_variant_name_not_bare_kind(
 # --- AgentX stays out of the cross-session KB ----------------------------------
 
 
-def test_kb_amend_recipe_is_noop_under_agentx(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+def test_kb_amend_recipe_is_noop_under_agentx(native_benchmark, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     coord = _make_coordinator(tmp_path)
 
     class _ForbiddenRecipeKB:
@@ -697,7 +697,7 @@ def test_kb_amend_recipe_is_noop_under_agentx(tmp_path: Path, monkeypatch) -> No
 
 def test_kb_amend_recipe_still_writes_without_agentx(tmp_path: Path, monkeypatch) -> None:
     """The gate must not cost the synthetic path its knowledge."""
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     coord = _make_coordinator(tmp_path)
     coord.recipe_journal.kb_amend_recipe(
         append_lesson={"statement": "synthetic still recorded", "measured_impact": "+1%"}
@@ -709,9 +709,9 @@ def test_kb_amend_recipe_still_writes_without_agentx(tmp_path: Path, monkeypatch
     assert "synthetic still recorded" in statements
 
 
-def test_finalize_recipe_is_skipped_under_agentx(tmp_path, monkeypatch) -> None:
+def test_finalize_recipe_is_skipped_under_agentx(native_benchmark, tmp_path, monkeypatch) -> None:
     """The sink the kb_amend_recipe gate cannot reach."""
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     coord = _make_coordinator(tmp_path)
 
     def _must_not_run(*_a, **_k):
@@ -726,11 +726,11 @@ def test_finalize_recipe_is_skipped_under_agentx(tmp_path, monkeypatch) -> None:
     assert out["reason"] == "agentx_local_store_unsupported"
 
 
-def test_finalize_recipe_reaches_agentx_remote_kb(tmp_path, monkeypatch) -> None:
+def test_finalize_recipe_reaches_agentx_remote_kb(native_benchmark, tmp_path, monkeypatch) -> None:
     """AgentX is isolated by its scheme and may now use the remote KB."""
     from types import SimpleNamespace
 
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     coord = _make_coordinator(tmp_path)
     coord.knowledge_plane = SimpleNamespace(
         config=KnowledgeConfig.from_env(
@@ -774,10 +774,12 @@ def test_finalize_recipe_reaches_agentx_remote_kb(tmp_path, monkeypatch) -> None
     assert "best_throughput" not in audit["result"]
 
 
-def test_agentx_remote_kb_never_receives_a_gain_measured_for_an_older_recipe(tmp_path, monkeypatch) -> None:
+def test_agentx_remote_kb_never_receives_a_gain_measured_for_an_older_recipe(
+    native_benchmark, tmp_path, monkeypatch
+) -> None:
     from types import SimpleNamespace
 
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     coord = _make_coordinator(tmp_path)
     coord.knowledge_plane = SimpleNamespace(
         config=KnowledgeConfig.from_env(
@@ -812,10 +814,10 @@ def test_agentx_remote_kb_never_receives_a_gain_measured_for_an_older_recipe(tmp
     assert out["result_type"] == "unvalidated_recipe"
 
 
-def test_agentx_remote_skip_audit_does_not_invent_throughput_metric(tmp_path, monkeypatch) -> None:
+def test_agentx_remote_skip_audit_does_not_invent_throughput_metric(native_benchmark, tmp_path, monkeypatch) -> None:
     from types import SimpleNamespace
 
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     coord = _make_coordinator(tmp_path)
     coord.knowledge_plane = SimpleNamespace(
         config=KnowledgeConfig.from_env(
@@ -858,7 +860,7 @@ def test_agentx_remote_skip_audit_does_not_invent_throughput_metric(tmp_path, mo
 
 def test_finalize_gate_honours_persisted_mode_without_the_env_var(tmp_path, monkeypatch) -> None:
     """benchmark_mode is stamped so the mode survives a restart; the gate should trust it rather than the shell that happens to be running."""
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     coord = _make_coordinator(tmp_path)
     coord.shared_state.benchmark_mode = "agentx"
     out = coord.recipe_journal.finalize_recipe_and_journal(source="close")
@@ -867,17 +869,17 @@ def test_finalize_gate_honours_persisted_mode_without_the_env_var(tmp_path, monk
 
 def test_finalize_recipe_still_runs_without_agentx(tmp_path, monkeypatch) -> None:
     """The gate must not cost the synthetic path its finalize."""
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     coord = _make_coordinator(tmp_path)
     out = coord.recipe_journal.finalize_recipe_and_journal(source="close")
     assert out.get("reason") != "agentx"
 
 
-def test_t0_anchor_does_not_write_under_agentx(tmp_path, monkeypatch) -> None:
+def test_t0_anchor_does_not_write_under_agentx(native_benchmark, tmp_path, monkeypatch) -> None:
     """The third Recipe sink, and the one the first two gates never saw."""
     from hyperloom.orchestrator.knowledge.recipe_kb_t0 import run_t0_anchor
 
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     coord = _make_coordinator(tmp_path)
 
     class _ForbiddenKB:

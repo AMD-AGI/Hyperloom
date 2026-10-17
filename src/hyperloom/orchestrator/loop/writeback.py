@@ -45,6 +45,7 @@ from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..actions.executors.explore import STACK_REVALIDATE_SOURCE, is_stack_revalidation
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 from hyperloom.inference_optimizer.framework_registry import server_args_env_name
+from ..actions.executors._agentx_prefix_cache import PREFIX_CACHE_OFF_ERROR_CLASS
 from ..actions.executors._subprocess_kill import AGENTX_PREFLIGHT_ERROR_CLASS
 from ..actions.executors._ray_serving import RAY_INFEASIBLE_MARKER
 from hyperloom.inference_optimizer.breakdown.stop_reasons import (
@@ -69,7 +70,7 @@ from ..kernel.geak_config import (
     _geak_accepted_kernel_specs,
     _geak_has_accepted_kernel,
     _geak_overlay_digest,
-    _geak_overlay_is_loadable,
+    geak_overlay_is_loadable,
     _geak_result_has_material,
     _geak_revalidation_decision,
     geak_spec_name,
@@ -110,6 +111,16 @@ _MIN_KERNEL_ENGAGED_GAIN_PCT: float = 2.0
 
 # Combined baseline-failure backstop: fast-fail after this many TOTAL baseline failures.
 _BASELINE_MAX_TOTAL_FAILURES: int = 3
+_BASELINE_FAILED_STOP_REASON = "baseline_failed"
+#: Baseline failures a retry cannot change, each mapped to the stop reason it ends the run with on its FIRST
+#: occurrence, with no streak.
+_STOPS_ON_FIRST_OCCURRENCE: dict[str, str] = {
+    # A retry recomposes the same argv the installed parser already refused.
+    ARGV_INVALID: ARGV_INVALID,
+    # The server booted and measured a cold cache. The next attempt launches the same server and no framework patch
+    # changes the operator's flag; ``_authorable_launch_log`` keeps it out of enablement.
+    PREFIX_CACHE_OFF_ERROR_CLASS: _BASELINE_FAILED_STOP_REASON,
+}
 # Default resume-drift floor (%): a re-measured current_best below this fraction of its recorded tput is flagged as
 # drift.
 _DEFAULT_RESUME_DRIFT_FLOOR_PCT: float = 95.0
@@ -128,7 +139,11 @@ def _authorable_launch_log(result_payload: dict[str, Any] | None, *, err_class: 
     """
     if not isinstance(result_payload, dict) or _is_ray_cluster_infeasible(result_payload):
         return ""
-    if err_class in ("fast_exit_arg_error", AGENTX_PREFLIGHT_ERROR_CLASS) or stopped_by_the_run_class(err_class):
+    if err_class in (
+        "fast_exit_arg_error",
+        AGENTX_PREFLIGHT_ERROR_CLASS,
+        PREFIX_CACHE_OFF_ERROR_CLASS,
+    ) or stopped_by_the_run_class(err_class):
         return ""
     parts: list[str] = []
     for key in ("error", "stderr", "log_tail", "log_excerpt", "traceback", "reason"):
@@ -911,13 +926,20 @@ class WritebackCollaborator(CoordinatorCollaborator):
         if task_kind == "baseline":
             # A baseline whose accuracy eval failed measured throughput but must
             # not anchor; route it to handle_unpromotable_result for enablement.
-            if bool(result.get("baseline_eval_failed")):
+            # One refused for a cold prefix cache measured too, but must not anchor
+            # either; handle_unpromotable_result stops the run on it.
+            if bool(result.get("baseline_eval_failed")) or result.get("error_class") == PREFIX_CACHE_OFF_ERROR_CLASS:
                 return False
             return is_valid_measurement(result)
         if task_kind == "profile":
             measurement_status = result.get("measurement_status")
             if measurement_status is not None and str(measurement_status) != "succeeded":
                 return False
+            # Magpie marks a profiled replay diagnostic_only, so a native AgentX profile
+            # is never a valid measurement. The trace is what a profile task produces, and
+            # ``ProfileExecutor`` already accepts the round on this field.
+            if result.get("round_succeeded") is True:
+                return True
             return is_valid_measurement(result)
         # replay_warm_recipe always routes through promote_warm_replay (owns its own failure bookkeeping).
         if task_kind == "replay_warm_recipe":
@@ -1190,6 +1212,15 @@ class WritebackCollaborator(CoordinatorCollaborator):
             return True
         return not retries_suppressed and (streak >= 3 or (streak >= 2 and repeated))
 
+    def _arms_baseline_failure_gates(self, err_class: str) -> bool:
+        """Whether a failed baseline goes through the streak and stop gates.
+
+        Only while no baseline has succeeded yet, except a cache-off refusal:
+        a re-baseline refused for it stops the run as the first baseline does,
+        since the next round would launch the same server.
+        """
+        return self.shared_state.baseline_tput <= 0 or err_class == PREFIX_CACHE_OFF_ERROR_CLASS
+
     async def handle_unpromotable_result(
         self,
         task: Task,
@@ -1258,8 +1289,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # slow-baseline retry budget on deterministic failures.
         baseline_event_payload: dict[str, Any] | None = None
         # Only arm/streak while no baseline has succeeded yet (tput <= 0).
-        if task.kind == "baseline" and self.shared_state.baseline_tput <= 0:
-            err_class = result_payload.get("error_class", "")
+        err_class = result_payload.get("error_class", "")
+        if task.kind == "baseline" and self._arms_baseline_failure_gates(err_class):
             # A round the run itself stopped -- the session budget reaped it, or
             # the orchestrator cancelled the action -- measured nothing, so it
             # says nothing about whether this baseline boots. Charging it to the
@@ -1305,31 +1336,17 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     err_class,
                     self.shared_state.baseline_failure_streak,
                 )
-            elif err_class == ARGV_INVALID:
-                # A retry recomposes the same argv the installed parser already
-                # refused: terminal on the first occurrence, with no streak.
-                self.shared_state.set_stop_reason(ARGV_INVALID)
+            elif err_class in _STOPS_ON_FIRST_OCCURRENCE:
+                self.shared_state.set_stop_reason(_STOPS_ON_FIRST_OCCURRENCE[err_class])
             elif err_class == "fast_exit_arg_error":
                 self.shared_state.baseline_arg_error_streak += 1
                 if self.shared_state.baseline_arg_error_streak >= 2:
                     self.shared_state.set_stop_reason("baseline_arg_error")
             elif err_class == AGENTX_PREFLIGHT_ERROR_CLASS:
-                # AgentX declares aiperf for itself, this repository owns its
-                # install, and the runtime already tried it (agentx.repair) --
-                # so reaching here means the environment cannot supply a
-                # dependency no amount of authoring can invent. Stop on the
-                # FIRST occurrence and name the fix.
-                #
-                # Measured: routed as an ordinary launch failure, this opened an
-                # enablement round instead. The specialist could not tell a
-                # supply gap from a framework bug, re-derived the install from
-                # scratch, had its commands rejected by the setup allowlist, and
-                # the PolicyGate's enablement_round_in_flight rule then blocked
-                # the baseline for the rest of the run -- 24h of budget spent
-                # retrying a problem one operator action fixes.
+                # The delegated client must pass its environment preflight before framework optimization.
                 log.error(
-                    "baseline %s failed the AgentX preflight and the automatic install did not "
-                    "resolve it; stopping the run. This is an environment gap, not something a "
+                    "baseline %s failed the agentic client preflight; setup must "
+                    "resolve it before resuming. This is an environment gap, not something a "
                     "framework patch can close: %s",
                     task.task_id,
                     result_payload.get("error") or err_class,
@@ -1345,7 +1362,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     result_payload,
                     retries_suppressed=bool(eval_pending_suppress or in_enablement),
                 ):
-                    self.shared_state.set_stop_reason("baseline_failed")
+                    self.shared_state.set_stop_reason(_BASELINE_FAILED_STOP_REASON)
             # Combined backstop: count ALL baseline failures so mixed
             # error_classes that split the per-class streaks still fast-fail.
             if not stopped_by_the_run:
@@ -1356,7 +1373,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 and not eval_pending_suppress
                 and not in_enablement
             ):
-                self.shared_state.set_stop_reason("baseline_failed")
+                self.shared_state.set_stop_reason(_BASELINE_FAILED_STOP_REASON)
             # One-shot eager fallback: a (non-OOM) cuda-graph capture failure is
             # often recoverable by disabling cuda-graph capture.
             if err_class == "cuda_graph_capture_failed" and not self.shared_state.baseline_eager_fallback:
@@ -1858,6 +1875,40 @@ class WritebackCollaborator(CoordinatorCollaborator):
         "conc_sweep": "_promote_conc_sweep",
     }
 
+    def _anchor_held_reason(self, result: dict, *, is_revalidation: bool) -> str:
+        """Why a baseline result does not replace the anchor, or ``""`` when it does.
+
+        The anchor is the best measurement of the unmodified stack. A later, lower re-baseline must not replace it, or
+        downstream gains end up measured against a different reference than the one they claim. A revalidation is
+        exempt: the enablement patch changed the stack, so the prior anchor no longer describes anything reproducible.
+        """
+        tput = result.get("output_throughput")
+        if not (isinstance(tput, (int, float)) and tput > 0):
+            return "no_measurement"
+        prior_anchor = float(self.shared_state.baseline_tput or 0.0)
+        if prior_anchor <= 0.0 or is_revalidation:
+            return ""
+        # A stamped cumulative gain is measured against this anchor; moving it afterwards leaves every stamp
+        # describing a reference that no longer exists, which the report then classifies as `inconsistent`.
+        if self.shared_state.has_validated_gain_stamp:
+            return "anchor_load_bearing"
+        # A hot pass measured against a recorded COLD anchor is a correction, not a regression, so it lands even when
+        # the number is lower. The two are not comparable -- that is what the cold marker says -- and a cold figure
+        # can read higher than the hot one that replaces it whenever the "cold" pass was not really cold: weights in
+        # page cache and a JIT cache a prior run populated leave it paying none of the startup its depressed
+        # reputation assumes. Without this the session cannot escape the marker. PRELUDE refuses to finish while it
+        # is set, the retry that would clear it is rejected for measuring lower, and the run re-measures whole
+        # baseline rounds until the clock kills it.
+        hot_pass_ran = result.get("measure_round_runtime_sec")
+        corrects_a_cold_anchor = (
+            bool(self.shared_state.baseline_measure_round_dropped)
+            and isinstance(hot_pass_ran, (int, float))
+            and hot_pass_ran > 0
+        )
+        if float(tput) > prior_anchor or corrects_a_cold_anchor:
+            return ""
+        return "below_anchor"
+
     async def _promote_baseline(
         self,
         result: dict,
@@ -1880,33 +1931,9 @@ class WritebackCollaborator(CoordinatorCollaborator):
             task_params.get("reason") == ENABLEMENT_REVALIDATION_REASON
             or (tracked_tid and tracked_tid == promoting_tid)
         )
-        # The anchor is the best measurement of the unmodified stack. A later,
-        # lower re-baseline must not replace it, or downstream gains end up
-        # measured against a different reference than the one they claim. A
-        # revalidation is exempt: the enablement patch changed the stack, so the
-        # prior anchor no longer describes anything reproducible.
         prior_anchor = float(self.shared_state.baseline_tput or 0.0)
-        # A hot pass measured against a recorded COLD anchor is a correction, not
-        # a regression, so it lands even when the number is lower. The two are not
-        # comparable -- that is what the cold marker says -- and a cold figure can
-        # read higher than the hot one that replaces it whenever the "cold" pass
-        # was not really cold: weights in page cache and a JIT cache a prior run
-        # populated leave it paying none of the startup its depressed reputation
-        # assumes. Without this the session cannot escape the marker. PRELUDE
-        # refuses to finish while it is set, the retry that would clear it is
-        # rejected for measuring lower, and the run re-measures whole baseline
-        # rounds until the clock kills it.
-        hot_pass_ran = result.get("measure_round_runtime_sec")
-        corrects_a_cold_anchor = (
-            bool(self.shared_state.baseline_measure_round_dropped)
-            and isinstance(hot_pass_ran, (int, float))
-            and hot_pass_ran > 0
-        )
-        anchor_accepted = bool(
-            isinstance(tput, (int, float))
-            and tput > 0
-            and (prior_anchor <= 0.0 or float(tput) > prior_anchor or is_revalidation or corrects_a_cold_anchor)
-        )
+        held_reason = self._anchor_held_reason(result, is_revalidation=is_revalidation)
+        anchor_accepted = not held_reason
         if isinstance(tput, (int, float)) and tput > 0:
             if anchor_accepted:
                 # The anchor is the hot measure round; the cold warmup round is
@@ -1914,10 +1941,11 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 self.shared_state.baseline_tput = float(tput)
             else:
                 log.info(
-                    "baseline anchor: keeping %.1f; re-baseline measured %.1f (task=%s)",
+                    "baseline anchor: keeping %.1f; re-baseline measured %.1f (task=%s reason=%s)",
                     prior_anchor,
                     float(tput),
                     promoting_tid,
+                    held_reason,
                 )
             self.shared_state.baseline_failure_streak = 0
             # A genuine baseline is what revalidates an enablement KEEP.
@@ -2120,6 +2148,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         }
         if not anchor_accepted and isinstance(tput, (int, float)) and tput > 0:
             audit_extras["anchor_kept_tput"] = prior_anchor
+            audit_extras["anchor_held"] = {"reason": held_reason, "prior": prior_anchor, "measured": float(tput)}
         # Present only when the probe cut a runaway eval short; explains a ~0 accuracy.
         if result.get("eval_probe"):
             audit_extras["eval_probe"] = result["eval_probe"]
@@ -2836,13 +2865,13 @@ class WritebackCollaborator(CoordinatorCollaborator):
         if expected_overlay:
             expected_digest = str((task.params or {}).get("expected_overlay_digest") or "")
             got_digest = _geak_overlay_digest(expected_overlay)
-            overlay_loaded = _geak_overlay_is_loadable(expected_overlay) and (got_digest == expected_digest)
+            overlay_loaded = geak_overlay_is_loadable(expected_overlay) and (got_digest == expected_digest)
             if not overlay_loaded and decision == "validated":
                 log.warning(
                     "geak 2b: overlay %r did not survive the run "
                     "(loadable=%r digest expected=%r got=%r) -> 2a fallback",
                     expected_overlay,
-                    _geak_overlay_is_loadable(expected_overlay),
+                    geak_overlay_is_loadable(expected_overlay),
                     expected_digest,
                     got_digest,
                 )
@@ -4546,24 +4575,16 @@ class WritebackCollaborator(CoordinatorCollaborator):
             log.exception("Coordinator: orphaned KEEP resume recovery failed")
 
     def geak_rebench_params(self, *, reason: str) -> dict[str, Any]:
-        """Build the explore params that re-measure ``geak_result`` on the orchestrator harness (GEAK 2b).
+        """Build canonical revalidation params, or explain why a product cannot be deployed.
 
-        Args:
-            reason: Human-readable reason stamped on the params.
-
-        Returns:
-            The single-variant explore params, tagged ``geak_fallback``, or a
-            ``{"skipped": True, "reason": ...}`` summary; the summary carries
-            ``"fallback": "geak_harness"`` when only GEAK's own harness can
-            deploy the candidate.
+        Native source products use reviewed integration; configuration and overlay
+        products use the existing explore executor. ``reason`` is recorded in the task.
         """
         benchmark_script = self.shared_state.accepted_baseline_script()
         recipe_generation = int(self.shared_state.working_recipe_generation or 0)
         ps = self.shared_state.geak_result if isinstance(self.shared_state.geak_result, dict) else {}
         ps_cfg = ps.get("accepted_config") or {}
         ps_overlay = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
-        # ``no_gain`` is a verdict on GEAK's headline basis, not on its kernels: an accepted, positive-delta kernel is
-        # revalidated too, so the kernel gets an orchestrator-measured number.
         ps_admissible = str(ps.get("status") or "") == "ok" or _geak_has_accepted_kernel(ps)
         try:
             ps_controls = _accepted_config_controls(
@@ -4592,10 +4613,20 @@ class WritebackCollaborator(CoordinatorCollaborator):
 
         from ..actions.executors._proposal_identity import effective_fingerprint
 
-        # An overlay that cannot load installs nothing, so the measured delta would belong to the flags alone; drop it
-        # before the run so the row cannot be read as a kernel win.
+        from ..phases.geak_native_revalidation import source_rebench_params
+
+        source_params = source_rebench_params(
+            self._coord,
+            reason=reason,
+            result=ps,
+            launch={"extra_server_args": ps_flags, "extra_envs": dict(ps_envs), **ps_controls},
+            overlay=ps_overlay,
+        )
+        if source_params is not None:
+            return source_params
+
         overlay_requested = bool(ps_overlay)
-        if ps_overlay and not _geak_overlay_is_loadable(ps_overlay):
+        if ps_overlay and not geak_overlay_is_loadable(ps_overlay):
             log.warning(
                 "geak 2b: overlay %r is not loadable (no sitecustomize.py); "
                 "revalidating the config WITHOUT the authored kernel",
@@ -4605,7 +4636,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
         if not (ps_flags or ps_envs or ps_controls or ps_overlay):
             if not ps_has_material:
                 return {"skipped": True, "reason": "geak_no_material"}
-            # A dead overlay or a source-patch-only result cannot be represented by this grid.
             return {
                 "skipped": True,
                 "reason": "geak_overlay_unloadable" if overlay_requested else "geak_material_requires_harness",
@@ -4630,8 +4660,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
             base_unset_envs=base_params.get("base_unset_envs"),
             base_args_mode=base_params.get("base_args_mode"),
         )
-        # ``expected_cfg_hash`` cannot see the overlay, so its digest travels beside it and both are re-checked after
-        # the run: a dropped or altered overlay then reads as inconclusive rather than as a validated kernel win.
         expected_overlay_digest = _geak_overlay_digest(ps_overlay)
         ps_kernels = [geak_spec_name(k) for k in _geak_accepted_kernel_specs(ps)]
         params_ps: dict[str, Any] = {
@@ -4650,12 +4678,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     **ps_controls,
                     "overlay_pythonpath": ps_overlay,
                     "provenance": "geak_revalidate",
-                    # Only an overlay actually being loaded carries kernels.
                     "accepted_kernels": ps_kernels if ps_overlay else [],
                     "note": "same-harness config-identity revalidation of the geak e2e win",
                 }
             ],
-            # The rebench reproduces the whole stack, so its gain is cumulative-vs-baseline.
             "base_tput": float(self.shared_state.baseline_tput or 0.0),
             **base_params,
         }
@@ -4791,7 +4817,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # one holding no ``sitecustomize.py``. Only 9 can install a kernel. A
         # non-empty string is therefore not evidence the kernel ran, and using
         # it as evidence would stamp 55 flag-only measurements as kernel wins.
-        # Same check 2b runs; see ``_geak_overlay_is_loadable``.
+        # Same check 2b runs; see ``geak_overlay_is_loadable``.
         ps_overlay_2a = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
         overlay_digest_before = _geak_overlay_digest(ps_overlay_2a) if ps_overlay_2a else ""
         am = ps.get("alignment_metrics") or {}
@@ -4883,7 +4909,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             # The replay proves the config engaged. It does not prove the
             # overlay did: the overlay has to still be loadable, and still be
             # the same overlay, at the moment the replay ran.
-            overlay_loaded_2a = bool(ps_overlay_2a) and _geak_overlay_is_loadable(ps_overlay_2a)
+            overlay_loaded_2a = bool(ps_overlay_2a) and geak_overlay_is_loadable(ps_overlay_2a)
             if overlay_loaded_2a and overlay_digest_before:
                 overlay_loaded_2a = _geak_overlay_digest(ps_overlay_2a) == overlay_digest_before
             if ps_overlay_2a and not overlay_loaded_2a:
@@ -4892,7 +4918,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     "(loadable=%r digest before=%r after=%r) -> gain credited "
                     "to config, not to a kernel",
                     ps_overlay_2a,
-                    _geak_overlay_is_loadable(ps_overlay_2a),
+                    geak_overlay_is_loadable(ps_overlay_2a),
                     overlay_digest_before,
                     _geak_overlay_digest(ps_overlay_2a),
                 )

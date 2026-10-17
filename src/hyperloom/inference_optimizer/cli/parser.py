@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from .benchmark_config import add_benchmark_argument
+
 import argparse
 import os
 from pathlib import Path
@@ -13,7 +15,7 @@ from typing import NoReturn
 from .. import framework_registry
 from .constraint_args import add_constraint_arguments, positive_watts_arg
 from .backends import CRITIC_PROTOCOL_CHOICES
-from .recover import add_cleanup_confirmation_arguments
+from .recover import RECOVER_DESCRIPTION, RECOVER_HELP, add_cleanup_confirmation_arguments
 from hyperloom.common import predictor_config
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.llm_config import is_anthropic_only, is_openai_only, provider_model_defaults
@@ -149,6 +151,30 @@ def _default_gpu_specialist_capacity() -> int:
     return detect_gpu_count()
 
 
+def _add_custom_specialist_args(opt: argparse.ArgumentParser) -> None:
+    """The ``--custom-specialist-*`` flags of ``optimize``."""
+    opt.add_argument(
+        "--custom-specialist-prompt-file",
+        dest="custom_specialist_prompt_file",
+        type=str,
+        default=None,
+        help="Register an operator-defined specialist type (custom_specialist) whose domain focus is this file's "
+        "text (max 16 KiB). Requires --custom-specialist-description. The Coordinator alone dispatches it, once "
+        "per macro cycle in FRAMEWORK_AGENT, ahead of other queued work, and benches its proposals first; "
+        "Orchestration cannot. Persisted for --resume-from; passing it on a "
+        "resume replaces the stored definition. The text is written in clear to state.json and every task's "
+        "prompt.md: do not put credentials in it. HYPERLOOM_CUSTOM_SPECIALIST_ONLY=1 runs FRAMEWORK_AGENT on it alone.",
+    )
+    opt.add_argument(
+        "--custom-specialist-description",
+        dest="custom_specialist_description",
+        type=str,
+        default=None,
+        help="One line (max 200 chars) describing custom_specialist in its own prompt. Requires "
+        "--custom-specialist-prompt-file.",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the top-level CLI argument parser and subcommands."""
     from hyperloom.orchestrator.specialists.domains import (
@@ -162,7 +188,6 @@ def _build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--verbose", "-v", action="count", default=0, help="Verbose logging (-v INFO, -vv DEBUG)")
     sub = p.add_subparsers(dest="command", required=True)
-
     opt = sub.add_parser("optimize", parents=[common], help="Drive a multi-agent optimization run on a model")
     opt.add_argument(
         "--model",
@@ -276,6 +301,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--framework custom; for the built-in frameworks it overrides the "
         "checkout they would otherwise clone.",
     )
+    add_benchmark_argument(opt)
     opt.add_argument(
         "--benchmark-scripts-dir",
         default=None,
@@ -776,25 +802,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--orch-prompt", type=str, default=None, help="Override Orchestration system prompt (file path or inline)"
     )
     opt.add_argument("--critic-prompt", type=str, default=None, help="Override Critic system prompt")
-    opt.add_argument(
-        "--custom-specialist-prompt-file",
-        dest="custom_specialist_prompt_file",
-        type=str,
-        default=None,
-        help="Register an operator-defined specialist type (custom_specialist) whose domain focus is this file's "
-        "text (max 16 KiB). Requires --custom-specialist-description. Orchestration may select it, and the "
-        "Coordinator dispatches it at least once in FRAMEWORK_AGENT. Persisted for --resume-from; passing it on a "
-        "resume replaces the stored definition. The text is written in clear to state.json and every task's "
-        "prompt.md: do not put credentials in it.",
-    )
-    opt.add_argument(
-        "--custom-specialist-description",
-        dest="custom_specialist_description",
-        type=str,
-        default=None,
-        help="One line (max 200 chars) telling Orchestration when to pick custom_specialist. Requires "
-        "--custom-specialist-prompt-file.",
-    )
+    _add_custom_specialist_args(opt)
     opt.add_argument(
         "--local-kb-root",
         dest="local_kb_root",
@@ -925,8 +933,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "gates; rater identities are anonymized in the orchestration "
         "prompt). Only takes effect when --proposal-scoring is also "
         "passed (scoring is OFF by default); this flag alone does not "
-        "enable scoring. Default 'claude-opus-5,gpt-5.6-sol,"
-        "dvue-aoai-005-Kimi-K2.6,gemini/gemini-3.1-pro-preview'. "
+        "enable scoring. Default '%(default)s'. "
         "Add a model by appending its slug. Empty list disables scoring "
         "even when enabled.",
     )
@@ -1012,7 +1019,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="static_recon",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Auto-dispatch a read-only static-recon specialist at PRELUDE "
+        help="Auto-dispatch a read-only static-recon specialist at PRELUDE, and "
+        "again once per macro-cycle when the configuration arm plateaus, "
         "that greps the framework source for un-bridged capability "
         "switches (predicates that silently disable a faster path for "
         "this model/GPU/precision, e.g. a CUDA-only ``*_supported()`` "
@@ -1053,8 +1061,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Run a post-optimization concurrency sweep (baseline vs "
         "current_best across CONC) and write "
         "reports/conc_sweep_summary.json + conc_sweep_raw.csv. "
-        "On by default, off under AgentX (each rung is a 3600s window); "
-        "force either way with --enable-conc-sweep / --no-enable-conc-sweep.",
+        "On by default for synthetic workloads, off by default for MLPerf. "
+        "Unavailable for native Magpie AgentX: start a separate session for each CONC.",
     )
     opt.add_argument(
         "--conc-sweep-concs",
@@ -1064,9 +1072,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Comma-separated CONC ladder for --enable-conc-sweep. Ordered "
         "high-to-low internally for single-server arm reuse, so the order given "
         "does not matter. Defaults to the ladder for the workload: "
-        "256,128,64,32,16,8,4,2 synthetic, 1,4,8,10,14,20,28 under "
-        "HYPERLOOM_AGENTX (an agentic request carries orders of magnitude more "
-        "prompt, so the same card saturates far lower).",
+        "256,128,64,32,16,8,4,2 for synthetic, 1,4,8,10,14,20,28 for MLPerf. "
+        "Unavailable for native Magpie AgentX.",
     )
     opt.add_argument(
         "--conc-sweep-total-budget-sec",
@@ -1166,8 +1173,8 @@ def _build_parser() -> argparse.ArgumentParser:
     rec = sub.add_parser(
         "recover",
         parents=[common],
-        help="Rebuild + push the session_breakdown for a session that exited "
-        "abnormally (crash / SIGKILL) so its breakdown lands on Langfuse.",
+        help=RECOVER_HELP,
+        description=RECOVER_DESCRIPTION,
     )
     rec.add_argument(
         "--session-dir",

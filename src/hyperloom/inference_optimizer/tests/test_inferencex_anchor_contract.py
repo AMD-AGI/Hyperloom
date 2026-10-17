@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.cli.preflight import _INFERENCEX_REF_DEFAULT
+from hyperloom.inference_optimizer.inferencex_checkout import DEFAULT_REF
 from hyperloom.orchestrator.actions.executors.inferencex_anchor_contract import (
     MAGPIE_LIB_PATH,
     PROBE_TARGET_PATH,
@@ -38,8 +38,8 @@ def test_recorded_ref_matches_the_pin_the_code_installs():
     """Bumping INFERENCEX_REF is exactly when an anchor silently rots, so the bump cannot be allowed to pass without someone re-verifying."""
     record = load_record()
 
-    assert record["ref"] == _INFERENCEX_REF_DEFAULT, (
-        f"INFERENCEX_REF moved to {_INFERENCEX_REF_DEFAULT} but the anchor contract was last "
+    assert record["ref"] == DEFAULT_REF, (
+        f"INFERENCEX_REF moved to {DEFAULT_REF} but the anchor contract was last "
         f"verified against {record['ref']}. Re-verify and refresh it: {REFRESH_CMD}"
     )
 
