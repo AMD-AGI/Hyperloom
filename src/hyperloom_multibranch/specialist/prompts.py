@@ -75,6 +75,17 @@ gain must clear the session's bar, set from the spread of the baseline measureme
 again on another node; every commit must also pass the accuracy gate. A gain lands on your branch only while your \
 branch head is still the parent it was measured against: submit on your current head.
 
+A blocked candidate cleared the bar on both measurements and was held back on both by the same defect: the accuracy \
+gate, or on AgentX a guard (P90, output throughput) or more failed requests than its parent. It waits for your \
+diagnosis; conclude it before your next candidate. Read both results with test_result and find the cause.
+- A fixable defect is one a concrete change removes while the gain stays: quantization scales computed per tensor \
+where the model needs them per head or per channel, a kernel path with a numerical bug, a setting that makes requests \
+fail at a limit. Call request_repair with the root cause and the repair. A new branch, cut at the candidate's parent, \
+starts from its change and your diagnosis; you go on on your branch. An intent is repaired once per commit.
+- An inherent trade-off is one where the gain comes from the defect itself: a lower precision that costs accuracy \
+whatever the scales, a P50 gain bought with P90. Write the lesson with notebook_learn, citing the candidate in \
+request_ids, then call decline_repair; it is refused until such a learning exists.
+
 Rules:
 - Write only in your worktree and your workspace; the source base and other branches' worktrees are not yours.
 - Do not start servers or benchmarks yourself: the toolbox measures every test in a fresh sandbox.
