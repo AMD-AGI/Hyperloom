@@ -21,6 +21,7 @@ import yaml
 
 from hyperloom.common.agentx_workload import AGENTX_SERVER_PIDFILE
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors import _inferencex_bench_seed as bench_seed
 from hyperloom.orchestrator.actions.executors import _multi_node_env as mne
 from hyperloom.orchestrator.actions.executors import (
     _multi_node_server_lifecycle as mnsl,
@@ -936,13 +937,13 @@ class TestWarmupRoundSeed:
         results, round_envs, lib = self._run_two_rounds(tmp_path, monkeypatch, lib_text=_SERVING_LIB)
 
         warmup_envs, measured_envs = round_envs
-        assert warmup_envs["INFERENCEX_BENCH_SEED"] == str(gr.WARMUP_ROUND_SEED)
+        assert warmup_envs["INFERENCEX_BENCH_SEED"] == str(bench_seed.WARMUP_ROUND_SEED)
         assert "INFERENCEX_BENCH_SEED" not in measured_envs
         assert "INFERENCEX_BENCH_SEED" in lib.read_text(encoding="utf-8")
         warnings = results[0].nonfatal_warnings
         assert "warmup_round_seed:1" in warnings
         assert "measured_round_seed:client_default" in warnings
-        assert gr.WARMUP_SEED_UNPATCHED_WARNING not in warnings
+        assert bench_seed.WARMUP_SEED_UNPATCHED_WARNING not in warnings
 
     def test_a_patch_that_cannot_apply_is_reported_on_the_result(self, tmp_path, monkeypatch):
         rotted = _SERVING_LIB.replace('if [[ -n "$endpoint" ]]; then', 'if [ -n "$endpoint" ]; then')
@@ -951,7 +952,7 @@ class TestWarmupRoundSeed:
 
         assert results[0].status == "succeeded"
         warnings = results[0].nonfatal_warnings
-        assert gr.WARMUP_SEED_UNPATCHED_WARNING in warnings
+        assert bench_seed.WARMUP_SEED_UNPATCHED_WARNING in warnings
         assert not any(w.startswith("warmup_round_seed:") for w in warnings)
         assert "INFERENCEX_BENCH_SEED" not in lib.read_text(encoding="utf-8")
 
@@ -963,5 +964,5 @@ class TestWarmupRoundSeed:
         results, _, _ = self._run_two_rounds(tmp_path, monkeypatch, lib_text=rotted, other_root_lib_text=_SERVING_LIB)
 
         warnings = results[0].nonfatal_warnings
-        assert gr.WARMUP_SEED_UNPATCHED_WARNING in warnings
+        assert bench_seed.WARMUP_SEED_UNPATCHED_WARNING in warnings
         assert not any(w.startswith("warmup_round_seed:") for w in warnings)

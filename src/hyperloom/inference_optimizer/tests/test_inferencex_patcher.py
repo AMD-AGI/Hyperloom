@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from hyperloom.orchestrator.actions.executors import _inferencex_patcher
+from hyperloom.orchestrator.actions.executors._inferencex_bench_seed import ensure_benchmark_lib_seed_patched
 from hyperloom.orchestrator.actions.executors._inferencex_patcher import (
     ensure_benchmark_lib_patched,
 )
@@ -1222,7 +1223,7 @@ def _client_argv(lib: Path, tmp_path: Path, env: dict[str, str]) -> list[str]:
 def test_bench_seed_patch_forwards_the_env_as_seed(tmp_path):
     lib = _write_serving_lib(tmp_path)
 
-    assert _inferencex_patcher.ensure_benchmark_lib_seed_patched(tmp_path) is True
+    assert ensure_benchmark_lib_seed_patched(tmp_path) is True
 
     argv = _client_argv(lib, tmp_path, {"INFERENCEX_BENCH_SEED": "7"})
     assert argv[argv.index("--seed") + 1] == "7"
@@ -1233,7 +1234,7 @@ def test_bench_seed_patch_leaves_the_client_command_alone_when_env_is_unset(tmp_
     lib = _write_serving_lib(tmp_path)
     before = _client_argv(lib, tmp_path, {})
 
-    _inferencex_patcher.ensure_benchmark_lib_seed_patched(tmp_path)
+    ensure_benchmark_lib_seed_patched(tmp_path)
 
     assert _client_argv(lib, tmp_path, {}) == before
     assert "--seed" not in before
@@ -1243,9 +1244,9 @@ def test_bench_seed_patch_leaves_the_client_command_alone_when_env_is_unset(tmp_
 def test_bench_seed_patch_is_idempotent(tmp_path):
     lib = _write_serving_lib(tmp_path)
 
-    _inferencex_patcher.ensure_benchmark_lib_seed_patched(tmp_path)
+    ensure_benchmark_lib_seed_patched(tmp_path)
     after_first = lib.read_text(encoding="utf-8")
-    assert _inferencex_patcher.ensure_benchmark_lib_seed_patched(tmp_path) is True
+    assert ensure_benchmark_lib_seed_patched(tmp_path) is True
 
     assert lib.read_text(encoding="utf-8") == after_first
     assert after_first.count("INFERENCEX_BENCH_SEED") == 2
@@ -1256,7 +1257,7 @@ def test_bench_seed_patch_reports_a_missing_anchor_and_writes_nothing(tmp_path):
     lib = _write_serving_lib(tmp_path, reworded)
     before = lib.read_text(encoding="utf-8")
 
-    assert _inferencex_patcher.ensure_benchmark_lib_seed_patched(tmp_path) is False
+    assert ensure_benchmark_lib_seed_patched(tmp_path) is False
 
     assert lib.read_text(encoding="utf-8") == before
     seed_status = next(s for s in _inferencex_patcher.verify_patch_anchors(tmp_path) if s.name == "bench_seed")
