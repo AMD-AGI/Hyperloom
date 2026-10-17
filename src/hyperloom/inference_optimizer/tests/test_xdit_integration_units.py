@@ -13,6 +13,7 @@ from hyperloom.inference_optimizer import framework_registry as fr
 from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
 from hyperloom.orchestrator.actions.executors import benchmark_result as br
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors import _grid_variant_filter as vf
 from hyperloom.orchestrator.actions.executors import explore as ex
 
 
@@ -89,20 +90,20 @@ class TestServerArgsEnvName:
 
 class TestXditBlacklist:
     def test_precision_lock_and_quantized_attn(self):
-        assert gr.xdit_blacklist_reason({"XDIT_USE_FP4_GEMMS": "1"}) is not None
-        assert gr.xdit_blacklist_reason({"XDIT_USE_FP8_GEMMS": "1"}) is not None
-        assert gr.xdit_blacklist_reason({"XDIT_ATTENTION_BACKEND": "aiter_fp8"}) is not None
-        assert gr.xdit_blacklist_reason({"RCCL_MSCCL_ENABLE": "1"}) is not None
+        assert vf.xdit_blacklist_reason({"XDIT_USE_FP4_GEMMS": "1"}) is not None
+        assert vf.xdit_blacklist_reason({"XDIT_USE_FP8_GEMMS": "1"}) is not None
+        assert vf.xdit_blacklist_reason({"XDIT_ATTENTION_BACKEND": "aiter_fp8"}) is not None
+        assert vf.xdit_blacklist_reason({"RCCL_MSCCL_ENABLE": "1"}) is not None
 
     def test_combo_crash(self):
-        reason = gr.xdit_blacklist_reason({"AMD_DIRECT_DISPATCH": "1", "AMDGCN_USE_BUFFER_OPS": "1"})
+        reason = vf.xdit_blacklist_reason({"AMD_DIRECT_DISPATCH": "1", "AMDGCN_USE_BUFFER_OPS": "1"})
         assert reason is not None
 
     def test_safe_envs_pass(self):
-        assert gr.xdit_blacklist_reason({"XDIT_ATTENTION_BACKEND": "aiter"}) is None
-        assert gr.xdit_blacklist_reason({"AMDGCN_USE_BUFFER_OPS": "1"}) is None
-        assert gr.xdit_blacklist_reason({"XDIT_USE_FP4_GEMMS": "0"}) is None
-        assert gr.xdit_blacklist_reason({}) is None
+        assert vf.xdit_blacklist_reason({"XDIT_ATTENTION_BACKEND": "aiter"}) is None
+        assert vf.xdit_blacklist_reason({"AMDGCN_USE_BUFFER_OPS": "1"}) is None
+        assert vf.xdit_blacklist_reason({"XDIT_USE_FP4_GEMMS": "0"}) is None
+        assert vf.xdit_blacklist_reason({}) is None
 
     def test_compatibility_filter_drops_blacklisted(self):
         good = gr.GridVariant(name="xdit_ok", extra_server_args="", extra_envs={"XDIT_ATTENTION_BACKEND": "aiter"})
@@ -281,7 +282,7 @@ class TestExploreGrid:
             assert v.note == v.provenance == "default_grid"
             assert v.remove_args == v.unset_envs == []
             assert v.args_mode == "append"
-            assert gr.xdit_blacklist_reason(v.extra_envs) is None
+            assert vf.xdit_blacklist_reason(v.extra_envs) is None
 
     @pytest.mark.parametrize("framework", ["sglang", "vllm", "custom", "unknown", ""])
     def test_other_frameworks_have_no_default_grid(self, framework):
