@@ -375,6 +375,12 @@ def test_put_recipe_rejects_empty_canonical_id(tmp_path: Path) -> None:
         store.put_recipe(canonical_id="")
 
 
+def test_get_recipe_rejects_empty_canonical_id(tmp_path: Path) -> None:
+    store = LocalRecipeStore(root=tmp_path)
+    with pytest.raises(ValueError):
+        store.get_recipe(canonical_id="")
+
+
 def test_put_recipe_rejects_malformed_canonical_id(tmp_path: Path) -> None:
     store = LocalRecipeStore(root=tmp_path)
     with pytest.raises(InvalidCanonicalIdError):

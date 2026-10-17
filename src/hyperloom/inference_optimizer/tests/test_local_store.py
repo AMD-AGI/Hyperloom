@@ -170,14 +170,6 @@ def test_get_recipe_missing(tmp_path):
     assert store.get_recipe(canonical_id=_cid()) is None
 
 
-def test_empty_cid_raises(tmp_path):
-    store = ls.LocalRecipeStore(root=tmp_path)
-    with pytest.raises(ValueError):
-        store.put_recipe(canonical_id="")
-    with pytest.raises(ValueError):
-        store.get_recipe(canonical_id="")
-
-
 # ---- attempts ----
 
 
@@ -218,12 +210,6 @@ def test_search_filters(tmp_path):
     # updated_since far future -> none
     assert store.search(updated_since="9999-01-01T00:00:00") == []
     assert len(store.search(limit=10)) == 2
-
-
-def test_search_bad_order_by(tmp_path):
-    store = ls.LocalRecipeStore(root=tmp_path)
-    with pytest.raises(ValueError):
-        store.search(order_by="bogus")
 
 
 # ---- low-level helpers ----
