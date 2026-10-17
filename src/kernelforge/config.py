@@ -227,10 +227,7 @@ class Config:
 
     def agent_runtime(self):
         """Resolve the selected provider into one complete runtime config."""
-        from kernelforge.agent_backends.registry import (
-            resolve_agent_runtime,
-            select_default_agent_provider,
-        )
+        from kernelforge.agent_backends.registry import select_default_agent_provider
 
         provider = self.agent_backend
         if provider == "auto":
@@ -239,10 +236,26 @@ class Config:
         # provider is settled -- reading it before ``auto`` resolves is how a
         # Claude model id reaches Codex.
         model = self.agent_model or resolve_agent_model(provider)
+        return self.agent_runtime_for(
+            provider,
+            model,
+            executable=self.agent_cli,
+        )
+
+    def agent_runtime_for(
+        self,
+        provider: str,
+        model: str = "",
+        *,
+        executable: str = "",
+    ):
+        """Resolve one explicit provider/model using this run's operator settings."""
+        from kernelforge.agent_backends.registry import resolve_agent_runtime
+
         return resolve_agent_runtime(
             provider,
             model=model,
-            executable=self.agent_cli,
+            executable=executable,
             timeout_sec=self.agent_timeout_sec,
             reasoning_effort=self.agent_reasoning_effort,
             sandbox_mode=self.agent_sandbox_mode,

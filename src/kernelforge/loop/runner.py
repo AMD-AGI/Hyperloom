@@ -21,7 +21,7 @@ import textwrap
 import time
 import traceback
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -61,10 +61,22 @@ from kernelforge.loop.search_policy import (
     MARGINAL_GAIN_SCAN_WINDOW,
     MARGINAL_GAIN_WINDOW,
     NO_CHANGES_STREAK_WINDOW,
+    OBJECTIVE_DISCOVER_NEW_MECHANISM,
+    SEARCH_MODE_DIVERSIFY,
     SEARCH_MODE_EXPLOIT,
     SearchPolicyDecision,
     SearchPolicyEngine,
 )
+from kernelforge.loop.agent_relay import (
+    INTERVENTION_SUPERVISOR,
+    apply_profile_switch,
+    apply_relay_iteration_outcome,
+    apply_supervisor_fallback,
+    invalidate_profile,
+    relay_blockage_reached,
+    select_relay_intervention,
+)
+from kernelforge.loop.search_actors import SearchActorPool
 from kernelforge.loop.round_budget import (
     admit_dispatch,
     admit_round,
@@ -197,6 +209,10 @@ PENDING_KEEP_FIELDS = frozenset(
         "best_mean_case_speedup_before",
         "session_end_reason",
         "turns",
+        "agent_profile_id",
+        "agent_provider",
+        "agent_model",
+        "blockage_epoch",
         "search_control",
         "commit_message",
         "commit_subject",
@@ -600,6 +616,11 @@ class IterationResult:
     integrity_violation: bool = False
     # Why the workspace could not be cleared of leftover processes.
     workspace_contention: str = ""
+    # Exact model-harness profile that produced this candidate.
+    agent_profile_id: str = ""
+    agent_provider: str = ""
+    agent_model: str = ""
+    blockage_epoch: int = 0
 
 
 @dataclass(frozen=True)
@@ -856,6 +877,14 @@ class IterationLoop(AnalysisRuntimeMixin):
             pending = json.loads(path.read_text())
         except Exception as error:
             raise ValueError(f"invalid pending KEEP metadata: {path}") from error
+        relay_fields = {
+            "agent_profile_id": "",
+            "agent_provider": "",
+            "agent_model": "",
+            "blockage_epoch": 0,
+        }
+        if isinstance(pending, dict) and not set(relay_fields) & set(pending):
+            pending.update(relay_fields)
         if not isinstance(pending, dict) or set(pending) != PENDING_KEEP_FIELDS:
             raise ValueError(f"invalid pending KEEP metadata: {path}")
         return pending
@@ -941,6 +970,10 @@ class IterationLoop(AnalysisRuntimeMixin):
             "best_mean_case_speedup_before": self.best_mean_case_speedup,
             "session_end_reason": result.session_end_reason,
             "turns": result.turns,
+            "agent_profile_id": result.agent_profile_id,
+            "agent_provider": result.agent_provider,
+            "agent_model": result.agent_model,
+            "blockage_epoch": result.blockage_epoch,
             "search_control": self._search_control_snapshot(),
             "commit_message": commit_message,
             "commit_subject": commit_message.splitlines()[0],
@@ -1619,6 +1652,10 @@ class IterationLoop(AnalysisRuntimeMixin):
                 rationale=str(pending.get("rationale") or ""),
                 session_end_reason=str(pending.get("session_end_reason") or ""),
                 turns=pending.get("turns"),
+                agent_profile_id=str(pending.get("agent_profile_id") or ""),
+                agent_provider=str(pending.get("agent_provider") or ""),
+                agent_model=str(pending.get("agent_model") or ""),
+                blockage_epoch=int(pending.get("blockage_epoch") or 0),
                 kernel_file=str(pending.get("kernel_file") or self.ic.kernel_file),
                 shape=pending.get("shape") or {},
                 kernel_source=str(pending.get("kernel_source") or ""),
@@ -1651,6 +1688,10 @@ class IterationLoop(AnalysisRuntimeMixin):
             bench_detail=dict(pending.get("benchmark") or {}),
             session_end_reason=str(pending.get("session_end_reason") or ""),
             turns=pending.get("turns"),
+            agent_profile_id=str(pending.get("agent_profile_id") or ""),
+            agent_provider=str(pending.get("agent_provider") or ""),
+            agent_model=str(pending.get("agent_model") or ""),
+            blockage_epoch=int(pending.get("blockage_epoch") or 0),
         )
 
     @staticmethod
@@ -1828,7 +1869,10 @@ class IterationLoop(AnalysisRuntimeMixin):
         for result in results:
             if result.error:
                 print(f"  [lane {result.lane_id}] session lost: {result.error}")
-        self._lane_queue = [item for item in results if item.produced_candidate]
+        active_profile_id = self.run_state.agent_relay.active_profile_id
+        self._lane_queue = [
+            replace(item, agent_profile_id=active_profile_id) for item in results if item.produced_candidate
+        ]
         print(f"  [lanes] {len(self._lane_queue)} of {len(results)} lanes produced a candidate")
         self._persist_lane_queue()
         # The device is not per-lane.
@@ -3539,6 +3583,59 @@ class IterationLoop(AnalysisRuntimeMixin):
         ):
             raise RuntimeError("failed to publish validated warm-start best artifact")
 
+    def _apply_relay_outcome(
+        self,
+        result: IterationResult,
+        decision_label: str,
+    ) -> None:
+        """Reduce attributed search progress and invalidate an exhausted API profile."""
+        apply_relay_iteration_outcome(
+            self.run_state.agent_relay,
+            decision=decision_label,
+            kept=result.kept,
+            producer_profile_id=result.agent_profile_id,
+        )
+        if decision_label != "API_ERROR" or not result.agent_profile_id:
+            return
+        reason = result.validation_summary or "Agent API retries exhausted"
+        invalidate_profile(
+            self.run_state.agent_availability_snapshot,
+            result.agent_profile_id,
+            reason,
+        )
+        self.state_store.append_event(
+            make_event(
+                "relay_profile_invalidated",
+                result.iteration,
+                agent_profile_id=result.agent_profile_id,
+                reason=reason,
+            )
+        )
+
+    def _apply_new_iteration_outcome(
+        self,
+        result: IterationResult,
+        decision_label: str,
+        plan: str,
+    ) -> None:
+        """Reduce one previously unseen outcome into campaign and relay state."""
+        apply_iteration(
+            self.run_state,
+            iteration=result.iteration,
+            decision=decision_label,
+            kept=result.kept,
+            wall_ms=result.wall_ms,
+            mean_case_speedup=result.mean_case_speedup,
+            commit_hash=result.commit_hash,
+            plan=plan,
+            baseline_wall_ms=self.ic.baseline_wall_ms,
+            best_wall_ms=self.best_wall_ms,
+            best_mean_case_speedup=self.best_mean_case_speedup,
+            stall_threshold=self.ic.supervise_after,
+            orchestration_error_threshold=self.ic.max_consecutive_orchestration_errors,
+        )
+        self._apply_relay_outcome(result, decision_label)
+
     def _record_iteration_outcome(
         self,
         result: IterationResult,
@@ -3577,21 +3674,7 @@ class IterationLoop(AnalysisRuntimeMixin):
 
             newly_applied = self.run_state.next_iteration <= result.iteration
             if newly_applied:
-                apply_iteration(
-                    self.run_state,
-                    iteration=result.iteration,
-                    decision=decision_label,
-                    kept=result.kept,
-                    wall_ms=result.wall_ms,
-                    mean_case_speedup=result.mean_case_speedup,
-                    commit_hash=result.commit_hash,
-                    plan=plan,
-                    baseline_wall_ms=self.ic.baseline_wall_ms,
-                    best_wall_ms=self.best_wall_ms,
-                    best_mean_case_speedup=self.best_mean_case_speedup,
-                    stall_threshold=self.ic.supervise_after,
-                    orchestration_error_threshold=(self.ic.max_consecutive_orchestration_errors),
-                )
+                self._apply_new_iteration_outcome(result, decision_label, plan)
             elif result.kept and (
                 self.run_state.best.iteration != result.iteration
                 or self.run_state.best.commit_hash != result.commit_hash
@@ -3681,6 +3764,10 @@ class IterationLoop(AnalysisRuntimeMixin):
             wall_ms=result.wall_ms,
             mean_case_speedup=result.mean_case_speedup,
             snr_db=result.snr_db,
+            agent_profile_id=result.agent_profile_id or None,
+            agent_provider=result.agent_provider or None,
+            agent_model=result.agent_model or None,
+            blockage_epoch=result.blockage_epoch,
             error_sig=error_sig or None,
             session_end_reason=result.session_end_reason or None,
             session_index=int(
@@ -3701,6 +3788,18 @@ class IterationLoop(AnalysisRuntimeMixin):
             is_new_best=result.kept,
             diversification_cycle_completed=(self.run_state.diversification_cycle_completed),
         )
+
+    def _handoff_agent_provenance(self, session_sink: dict) -> dict:
+        """Resolve producer identity once for the immutable handoff."""
+        profile_id = str(session_sink.get("agent_profile_id") or "")
+        profile = self.run_state.agent_availability_snapshot.profiles.get(profile_id)
+        return {
+            "agent_profile_id": profile_id,
+            "agent_provider": profile.provider if profile is not None else "",
+            "agent_model": profile.model if profile is not None else "",
+            "blockage_epoch": self.run_state.agent_relay.blockage_epoch,
+            "intervention_kind": self.run_state.agent_relay.intervention_kind,
+        }
 
     def _record_iteration_handoff(
         self,
@@ -3766,6 +3865,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     if archived_path is not None
                     else ""
                 ),
+                **self._handoff_agent_provenance(session_sink),
             )
             return self.handoff_store.write(handoff)
         except Exception as error:
@@ -4191,6 +4291,17 @@ class IterationLoop(AnalysisRuntimeMixin):
             ),
             window_gain_ratio=window_gain.ratio,
         )
+        relay = self.run_state.agent_relay
+        if relay.switch_iteration == iteration and relay.intervention_kind not in {
+            "",
+            INTERVENTION_SUPERVISOR,
+        }:
+            decision = SearchPolicyDecision(
+                mode=SEARCH_MODE_DIVERSIFY,
+                reason_codes=("AGENT_RELAY_BLOCKAGE",),
+                objective_kind=OBJECTIVE_DISCOVER_NEW_MECHANISM,
+                residence_iterations_remaining=0,
+            )
         previous_mode = self.run_state.search_mode
         previous_reasons = tuple(self.run_state.search_reason_codes)
         self.run_state.search_mode = decision.mode
@@ -4373,6 +4484,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                             "lane_id": lane.lane_id,
                             "plan": lane.plan,
                             "diff": lane.diff,
+                            "agent_profile_id": lane.agent_profile_id,
                         }
                         for lane in self._lane_queue
                     ]
@@ -4395,6 +4507,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     lane_id=str(entry["lane_id"]),
                     plan=str(entry["plan"]),
                     diff=str(entry["diff"]),
+                    agent_profile_id=str(entry.get("agent_profile_id") or ""),
                 )
                 for entry in record["candidates"]
             ]
@@ -4438,7 +4551,11 @@ class IterationLoop(AnalysisRuntimeMixin):
             atomic_write_text(self._lane_plan_path(iteration, lane), plan + "\n")
         atomic_write_json(
             manifest,
-            {"analysis_commit": analysis_commit, "lanes": len(published)},
+            {
+                "analysis_commit": analysis_commit,
+                "lanes": len(published),
+                "agent_profile_id": self.run_state.agent_relay.active_profile_id,
+            },
         )
         return self._lane_plan_path(iteration, 1)
 
@@ -4493,6 +4610,19 @@ class IterationLoop(AnalysisRuntimeMixin):
             return None
         published = self._load_lane_plans(planned_iteration)
         if published is None:
+            return None
+        try:
+            manifest = json.loads(self._lane_plan_manifest_path(planned_iteration).read_text(encoding="utf-8"))
+            planned_profile_id = str(manifest.get("agent_profile_id") or "")
+        except (OSError, ValueError, TypeError):
+            return None
+        active_profile_id = self.run_state.agent_relay.active_profile_id
+        if active_profile_id and planned_profile_id != active_profile_id:
+            print(
+                f"  [lanes] iteration {planned_iteration} belongs to "
+                f"{planned_profile_id or 'a legacy profile'}, not active "
+                f"profile {active_profile_id}; planning this round afresh"
+            )
             return None
         planned_commit, plans = published
         if len(plans) < 2:
@@ -4583,6 +4713,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         supervisor_fn=None,
         *,
         agent_factory=None,
+        search_actors: SearchActorPool | None = None,
         workspace_lock_held: bool = False,
     ) -> list[IterationResult]:
         """Run the loop and clean attempt-owned processes on every exit path."""
@@ -4597,6 +4728,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 on_best_ready=on_best_ready,
                 usage=usage,
                 supervisor_fn=supervisor_fn,
+                search_actors=search_actors,
                 workspace_lock_held=workspace_lock_held,
             )
         finally:
@@ -4621,6 +4753,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         supervisor_fn=None,
         *,
         agent_factory=None,
+        search_actors: SearchActorPool | None = None,
         workspace_lock_held: bool = False,
     ) -> list[IterationResult]:
         """Run while exclusively owning this campaign workspace."""
@@ -4635,6 +4768,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 on_best_ready=on_best_ready,
                 usage=usage,
                 supervisor_fn=supervisor_fn,
+                search_actors=search_actors,
             )
         store = LoopStateStore(self.ic.workspace_dir)
         with store.workspace_lock():
@@ -4648,6 +4782,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                 on_best_ready=on_best_ready,
                 usage=usage,
                 supervisor_fn=supervisor_fn,
+                search_actors=search_actors,
             )
 
     async def _run_supervisor_review(
@@ -4813,6 +4948,10 @@ class IterationLoop(AnalysisRuntimeMixin):
                         best_mean_case_speedup_before=best_mean_case_speedup_before,
                         plan=session_sink.get("plan", ""),
                         rationale=rationale,
+                        agent_profile_id=result.agent_profile_id,
+                        agent_provider=result.agent_provider,
+                        agent_model=result.agent_model,
+                        blockage_epoch=result.blockage_epoch,
                         kernel_file=self.ic.kernel_file,
                         shape={},
                         kernel_source=attempt_source,
@@ -5568,6 +5707,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             attempt_diff = self._working_tree_diff()
             reusable_benchmark = None
             session_sink["plan"] = queued_lane.plan
+            session_sink["agent_profile_id"] = queued_lane.agent_profile_id
             print(f"  [lane {queued_lane.lane_id}] measuring queued candidate")
         elif merge_diff and merge_pair is not None:
             unmeasured_result = None
@@ -5593,6 +5733,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             )
         elif agent_fn is not None:
             print("  [agent] Querying agent for kernel modification...")
+            session_sink["agent_profile_id"] = self.run_state.agent_relay.active_profile_id
             if orchestration_service is not None:
                 if fan_out_plan is not None:
                     plan_path, orchestration_error = fan_out_plan
@@ -5851,6 +5992,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     validation_summary=summary,
                     kept=False,
                 )
+                self._stamp_result_profile(result, session_sink)
                 result.agent_rationale = rationale
                 result.session_end_reason = session_sink.get("end_reason", "")
                 result.turns = session_sink.get("turns")
@@ -5884,6 +6026,15 @@ class IterationLoop(AnalysisRuntimeMixin):
             optimization_plan_path=optimization_plan_path,
             optimization_plan_executable=optimization_plan_executable,
         )
+
+    def _stamp_result_profile(self, result: IterationResult, session_sink: dict) -> None:
+        """Attach immutable producer provenance before the outcome is persisted."""
+        result.agent_profile_id = str(session_sink.get("agent_profile_id") or "")
+        result.blockage_epoch = self.run_state.agent_relay.blockage_epoch
+        profile = self.run_state.agent_availability_snapshot.profiles.get(result.agent_profile_id)
+        if profile is not None:
+            result.agent_provider = profile.provider
+            result.agent_model = profile.model
 
     async def _abandon_iteration(
         self,
@@ -6041,7 +6192,149 @@ class IterationLoop(AnalysisRuntimeMixin):
             )
         return history
 
-    async def _open_iteration(self, *, iteration, digest, supervisor_fn, analysis_service) -> None:
+    def _bootstrap_search_actor(
+        self,
+        search_actors: SearchActorPool | None,
+        agent_fn,
+        agent_factory,
+        orchestration_service,
+        supervisor_fn,
+    ) -> tuple:
+        """Use the persisted active profile while campaign recovery initializes."""
+        if search_actors is None:
+            return agent_fn, agent_factory, orchestration_service, supervisor_fn
+        active = self.run_state.agent_relay.active_profile_id or search_actors.primary_profile_id
+        profile_id = active if search_actors.has_bundle(active) else search_actors.primary_profile_id
+        bundle = search_actors.bundle(profile_id)
+        return bundle.agent_fn, bundle.agent_factory, bundle.orchestration_service, bundle.supervisor_fn
+
+    def _record_agent_availability(self, search_actors: SearchActorPool | None) -> None:
+        """Persist the process-start snapshot after the session index advances."""
+        if search_actors is None:
+            return
+        snapshot = copy.deepcopy(search_actors.availability)
+        snapshot.session_index = self.run_state.session_index
+        self.run_state.agent_availability_snapshot = snapshot
+        if not self.run_state.agent_relay.active_profile_id:
+            self.run_state.agent_relay.active_profile_id = search_actors.primary_profile_id
+        self.state_store.append_event(
+            make_event(
+                "agent_availability_snapshot",
+                self.run_state.iteration,
+                snapshot=asdict(snapshot),
+            )
+        )
+
+    def _activate_search_actor(self, iteration: int, search_actors: SearchActorPool) -> tuple:
+        bundle, force_supervisor = self._prepare_search_actor(iteration, search_actors)
+        return (
+            bundle.agent_fn,
+            bundle.agent_factory,
+            bundle.orchestration_service,
+            bundle.supervisor_fn,
+            force_supervisor,
+        )
+
+    def _initialize_campaign_runtime(self, usage) -> None:
+        """Initialize process-local stores and candidate queues for one session."""
+        self.start_time = time.time()
+        self.results = []
+        self._usage = usage
+        force_jit_rebuild(self._jit_source_files())
+        self.ledger = ExperienceLedger(self.ic.workspace_dir)
+        self.lessons = LessonStore(self.ic.workspace_dir)
+        self.handoff_store = HandoffStore(self.ic.workspace_dir)
+        self.archive = CandidateArchive(self.ic.workspace_dir, self.ic.kernel_file)
+        self.best_publisher = BestResultPublisher(self.ic.workspace_dir)
+        self._lane_queue = []
+        self._last_lane_plans = []
+        self._merge_precedence_streak = 0
+        self.device_hazard = DeviceHazardLog(self.ic.workspace_dir)
+
+    def _prepare_search_actor(
+        self,
+        iteration: int,
+        search_actors: SearchActorPool,
+    ) -> tuple[object, bool]:
+        """Select and durably switch the complete search actor at a clean boundary."""
+        relay = self.run_state.agent_relay
+        if not relay.active_profile_id:
+            relay.active_profile_id = search_actors.primary_profile_id
+            self.state_store.save(self.run_state)
+        active_status = self.run_state.agent_availability_snapshot.profiles.get(relay.active_profile_id)
+        active_unavailable = not search_actors.has_bundle(relay.active_profile_id) or not (
+            active_status and active_status.available
+        )
+        blocked = active_unavailable or relay_blockage_reached(
+            relay,
+            threshold=search_actors.blockage_threshold,
+        )
+        if not blocked:
+            return search_actors.bundle(relay.active_profile_id), False
+
+        intervention = select_relay_intervention(
+            relay,
+            profiles=search_actors.profiles,
+            availability=self.run_state.agent_availability_snapshot,
+        )
+        self.state_store.append_event(
+            make_event(
+                "relay_blockage_detected",
+                iteration,
+                active_profile_id=relay.active_profile_id,
+                streak=relay.active_no_improvement_streak,
+                selected_intervention=intervention.kind,
+                target_profile_id=intervention.target_profile_id or None,
+            )
+        )
+        if intervention.kind == INTERVENTION_SUPERVISOR:
+            apply_supervisor_fallback(
+                relay,
+                intervention=intervention,
+                iteration=iteration,
+            )
+            self.state_store.save(self.run_state)
+            return search_actors.bundle(relay.active_profile_id), True
+
+        if self._pending_keep_path.exists():
+            raise RuntimeError("cannot switch Agent profile while pending KEEP exists")
+        if self._working_tree_diff().strip():
+            raise RuntimeError("cannot switch Agent profile with a tracked candidate diff")
+        apply_profile_switch(
+            relay,
+            intervention=intervention,
+            iteration=iteration,
+        )
+        self.run_state.last_critic = CriticRuling()
+        self._lane_queue = []
+        self._persist_lane_queue()
+        self._last_lane_plans = []
+        self.state_store.save(self.run_state)
+        self.state_store.append_event(
+            make_event(
+                "relay_profile_switched",
+                iteration,
+                previous_profile_id=relay.previous_profile_id,
+                active_profile_id=relay.active_profile_id,
+                intervention_kind=relay.intervention_kind,
+                blockage_epoch=relay.blockage_epoch,
+                reason=relay.switch_reason,
+            )
+        )
+        if self.monitor is not None:
+            self.monitor.no_improve_streak = 0
+        return search_actors.bundle(relay.active_profile_id), False
+
+    async def _open_iteration(
+        self,
+        *,
+        iteration,
+        digest,
+        supervisor_fn,
+        analysis_service,
+        relay_managed: bool = False,
+        force_supervisor: bool = False,
+    ) -> None:
         """Resolve evidence, review the trajectory and re-scope what this iteration owns.
 
         Analysis resolves before any Supervisor or planning call, so both read
@@ -6053,7 +6346,11 @@ class IterationLoop(AnalysisRuntimeMixin):
         supervisor_due = False
         supervisor_reason = ""
         if self.monitor is not None and supervisor_fn is not None:
-            supervisor_due, supervisor_reason = self.monitor.should_intervene(iteration)
+            if force_supervisor:
+                supervisor_due = True
+                supervisor_reason = self.run_state.agent_relay.switch_reason
+            elif not relay_managed:
+                supervisor_due, supervisor_reason = self.monitor.should_intervene(iteration)
 
         # Resolve Analysis before any Supervisor or planning call.
         if analysis_service is not None:
@@ -6116,6 +6413,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         supervisor_fn=None,
         *,
         agent_factory=None,
+        search_actors: SearchActorPool | None = None,
     ) -> list[IterationResult]:
         """Run the autonomous iteration loop."""
         import functools
@@ -6123,40 +6421,19 @@ class IterationLoop(AnalysisRuntimeMixin):
         global print
         print = functools.partial(print, flush=True)  # noqa: A001 - deliberate flush-on-print rebind
 
-        self.start_time = time.time()
-        self.results = []
-        self._usage = usage
-
-        # Safety net: if the kernel is an aiter HIP kernel, force it to recompile from the current source
-        # (AITER_REBUILD) so the agent's edits are never silently ignored via aiter's prebuilt in-tree .so.
-        force_jit_rebuild(self._jit_source_files())
-
-        # Cross-iteration objective ledger: records each iteration's net diff, measured outcome, and real error
-        # signatures, then feeds concise toolchain observations and recent entries into the next prompt.
-        self.ledger = ExperienceLedger(self.ic.workspace_dir)
-
-        # Per-iteration lesson documents.
-        self.lessons = LessonStore(self.ic.workspace_dir)
-        self.handoff_store = HandoffStore(self.ic.workspace_dir)
-
-        # Full-fidelity candidate archive: persists each iteration's WHOLE solution (kernel snapshot + diff + full
-        # profile + measurements + decision) so a later iteration can read back any prior attempt's real code.
-        self.archive = CandidateArchive(self.ic.workspace_dir, self.ic.kernel_file)
-        self.best_publisher = BestResultPublisher(self.ic.workspace_dir)
-        # Candidates from one concurrent fan-out, spent one per iteration so each is measured and judged on its own by
-        # the ordinary decision path.
-        self._lane_queue: list[LaneResult] = []
-        self._last_lane_plans: list[str] = []
-        # Stacked iterations run back to back so far.
-        self._merge_precedence_streak = 0
-        # A device the campaign may not measure on, recorded by whichever iteration found it and re-checked by every
-        # iteration after it.
-        self.device_hazard = DeviceHazardLog(self.ic.workspace_dir)
+        self._initialize_campaign_runtime(usage)
 
         # Durable, file-backed run state + append-only event log.
         self.state_store = LoopStateStore(self.ic.workspace_dir)
         state_exists = self.state_store.state_path.exists()
         self.run_state = self.state_store.load()
+        agent_fn, agent_factory, orchestration_service, supervisor_fn = self._bootstrap_search_actor(
+            search_actors,
+            agent_fn,
+            agent_factory,
+            orchestration_service,
+            supervisor_fn,
+        )
         current_ruling_path = latest_supervisor_ruling_path(self.ic.workspace_dir)
         self._supervisor_ruling = load_latest_supervisor_ruling(self.ic.workspace_dir) if self.resume else ""
 
@@ -6189,6 +6466,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         self._set_state_identity(self.run_state)
         self._stage_validated_warm_start_state()
         start_session(self.run_state)
+        self._record_agent_availability(search_actors)
         self.experiment = self.tracker.create_segment(
             campaign_id=self.run_state.campaign_id,
             segment_index=next_segment_index,
@@ -6255,6 +6533,12 @@ class IterationLoop(AnalysisRuntimeMixin):
             if stop:
                 break
 
+            force_supervisor = False
+            if search_actors is not None:
+                agent_fn, agent_factory, orchestration_service, supervisor_fn, force_supervisor = (
+                    self._activate_search_actor(iteration, search_actors)
+                )
+
             # Price the round before anything is spent on it.
             self._close_round()
             round_lanes = self.ic.lanes
@@ -6270,6 +6554,8 @@ class IterationLoop(AnalysisRuntimeMixin):
                 digest=digest,
                 supervisor_fn=supervisor_fn,
                 analysis_service=analysis_service,
+                relay_managed=search_actors is not None,
+                force_supervisor=force_supervisor,
             )
 
             # Agent proposes modification
@@ -6364,6 +6650,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     )
             result.commit_hash = commit_hash
             result.agent_rationale = rationale
+            self._stamp_result_profile(result, session_sink)
             # Session end reason + turns spent (from the in-session gate / SDK via session_sink) — persisted so a
             # run's end-reason distribution (edit cap / turn cap / converged / …) is analyzable.
             result.session_end_reason = session_sink.get("end_reason", "")

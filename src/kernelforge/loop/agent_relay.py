@@ -1,0 +1,404 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Durable state and pure policy helpers for KernelForge Agent relay."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Mapping, Sequence
+
+
+INTERVENTION_CROSS_HARNESS = "cross_harness"
+INTERVENTION_SAME_HARNESS = "same_harness"
+INTERVENTION_SUPERVISOR = "supervisor"
+INTERVENTION_KINDS = frozenset(
+    {
+        "",
+        INTERVENTION_CROSS_HARNESS,
+        INTERVENTION_SAME_HARNESS,
+        INTERVENTION_SUPERVISOR,
+    }
+)
+
+_NON_SEARCH_DECISIONS = frozenset(
+    {
+        "AGENT_ERROR",
+        "API_ERROR",
+        "ORCHESTRATION_ERROR",
+        "REVERT_CONTENDED",
+        "REVERT_INTEGRITY",
+    }
+)
+
+
+@dataclass(frozen=True)
+class AgentProfile:
+    """One immutable model-harness combination available to a campaign."""
+
+    profile_id: str
+    provider: str
+    model: str
+    reasoning_effort: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.profile_id.strip():
+            raise ValueError("agent profile id is required")
+        if not self.provider.strip():
+            raise ValueError("agent profile provider is required")
+        if not self.model.strip():
+            raise ValueError("agent profile model is required")
+
+
+@dataclass(frozen=True)
+class AgentRelayConfig:
+    """Immutable Agent profiles and blockage policy for one campaign."""
+
+    primary_profile_id: str
+    profiles: tuple[AgentProfile, ...]
+    blockage_threshold: int = 3
+
+    def __post_init__(self) -> None:
+        by_id = _profile_mapping(self.profiles)
+        if self.primary_profile_id not in by_id:
+            raise ValueError("primary Agent profile is not configured")
+        if self.blockage_threshold < 1:
+            raise ValueError("relay blockage threshold must be positive")
+
+    @classmethod
+    def from_dict(cls, payload: object) -> AgentRelayConfig:
+        """Strictly rebuild immutable relay campaign configuration."""
+        data = _strict_mapping(payload, cls, "agent relay config")
+        raw_profiles = data["profiles"]
+        if not isinstance(raw_profiles, (list, tuple)):
+            raise ValueError("agent relay config profiles must be a list")
+        profiles = tuple(
+            AgentProfile(**_strict_mapping(item, AgentProfile, "agent relay profile")) for item in raw_profiles
+        )
+        return cls(
+            primary_profile_id=str(data["primary_profile_id"]),
+            profiles=profiles,
+            blockage_threshold=int(data["blockage_threshold"]),
+        )
+
+
+@dataclass
+class ProviderAvailability:
+    """Startup availability of one harness/provider."""
+
+    available: bool = False
+    reason: str = ""
+
+
+@dataclass
+class ProfileAvailability:
+    """Startup availability of one exact provider/model profile."""
+
+    provider: str = ""
+    model: str = ""
+    provider_available: bool = False
+    model_available: bool = False
+    available: bool = False
+    reason: str = ""
+
+
+@dataclass
+class AgentAvailabilitySnapshot:
+    """Availability facts established before the first optimization iteration."""
+
+    checked_at: str = ""
+    session_index: int = 0
+    providers: dict[str, ProviderAvailability] = field(default_factory=dict)
+    profiles: dict[str, ProfileAvailability] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, payload: object) -> AgentAvailabilitySnapshot:
+        """Strictly rebuild a persisted startup snapshot."""
+        data = _strict_mapping(payload, cls, "agent availability snapshot")
+        providers = _availability_entries(
+            data["providers"],
+            ProviderAvailability,
+            "agent availability providers",
+        )
+        profiles = _availability_entries(
+            data["profiles"],
+            ProfileAvailability,
+            "agent availability profiles",
+        )
+        snapshot = cls(
+            checked_at=str(data["checked_at"]),
+            session_index=int(data["session_index"]),
+            providers=providers,
+            profiles=profiles,
+        )
+        if snapshot.session_index < 0:
+            raise ValueError("agent availability session_index must be non-negative")
+        return snapshot
+
+
+@dataclass
+class AgentRelayState:
+    """Durable relay cursor and blockage state."""
+
+    active_profile_id: str = ""
+    active_no_improvement_streak: int = 0
+    blockage_epoch: int = 0
+    profiles_tried_since_keep: list[str] = field(default_factory=list)
+    intervention_kind: str = ""
+    previous_profile_id: str = ""
+    switch_iteration: int = 0
+    switch_reason: str = ""
+
+    def validate(self) -> None:
+        """Reject state that cannot drive a deterministic relay decision."""
+        if self.active_no_improvement_streak < 0:
+            raise ValueError("agent relay streak must be non-negative")
+        if self.blockage_epoch < 0:
+            raise ValueError("agent relay blockage_epoch must be non-negative")
+        if self.switch_iteration < 0:
+            raise ValueError("agent relay switch_iteration must be non-negative")
+        if self.intervention_kind not in INTERVENTION_KINDS:
+            raise ValueError(f"unsupported relay intervention kind: {self.intervention_kind!r}")
+        if len(set(self.profiles_tried_since_keep)) != len(self.profiles_tried_since_keep):
+            raise ValueError("agent relay tried profiles must be unique")
+
+
+@dataclass(frozen=True)
+class RelayIntervention:
+    """One policy decision at an iteration boundary."""
+
+    kind: str
+    target_profile_id: str = ""
+    reason: str = ""
+
+    def __post_init__(self) -> None:
+        if self.kind not in INTERVENTION_KINDS - {""}:
+            raise ValueError(f"unsupported relay intervention kind: {self.kind!r}")
+        if self.kind == INTERVENTION_SUPERVISOR and self.target_profile_id:
+            raise ValueError("supervisor intervention cannot target another profile")
+        if self.kind != INTERVENTION_SUPERVISOR and not self.target_profile_id:
+            raise ValueError("profile switch intervention requires a target profile")
+
+
+def decision_counts_toward_blockage(decision: str) -> bool:
+    """Whether an attributable optimization outcome advances the relay streak."""
+    normalized = str(decision or "").strip().upper()
+    if not normalized or normalized == "KEEP":
+        return False
+    return normalized not in _NON_SEARCH_DECISIONS
+
+
+def apply_relay_iteration_outcome(
+    state: AgentRelayState,
+    *,
+    decision: str,
+    kept: bool,
+    producer_profile_id: str,
+) -> AgentRelayState:
+    """Reduce one attributed iteration outcome into relay state."""
+    if kept:
+        state.active_no_improvement_streak = 0
+        state.profiles_tried_since_keep = []
+        state.intervention_kind = ""
+        state.previous_profile_id = ""
+        state.switch_iteration = 0
+        state.switch_reason = ""
+        return state
+    if producer_profile_id and producer_profile_id != state.active_profile_id:
+        return state
+    if decision_counts_toward_blockage(decision):
+        state.active_no_improvement_streak += 1
+    return state
+
+
+def relay_blockage_reached(state: AgentRelayState, *, threshold: int) -> bool:
+    """Whether the active profile has reached the configured blockage threshold."""
+    if threshold < 1:
+        raise ValueError("relay blockage threshold must be positive")
+    return state.active_no_improvement_streak >= threshold
+
+
+def select_relay_intervention(
+    state: AgentRelayState,
+    *,
+    profiles: Sequence[AgentProfile],
+    availability: AgentAvailabilitySnapshot,
+) -> RelayIntervention:
+    """Select the first viable untried profile, then fall back to Supervisor."""
+    by_id = _profile_mapping(profiles)
+    active = by_id.get(state.active_profile_id)
+    if active is None:
+        return RelayIntervention(
+            kind=INTERVENTION_SUPERVISOR,
+            reason="active profile is not present in campaign configuration",
+        )
+    excluded = set(state.profiles_tried_since_keep) | {active.profile_id}
+    candidates = [
+        profile
+        for profile in profiles
+        if profile.profile_id not in excluded and _profile_is_available(profile, availability)
+    ]
+    for profile in candidates:
+        if profile.provider != active.provider:
+            return RelayIntervention(
+                kind=INTERVENTION_CROSS_HARNESS,
+                target_profile_id=profile.profile_id,
+                reason="active profile reached the blockage threshold",
+            )
+    for profile in candidates:
+        if profile.model != active.model:
+            return RelayIntervention(
+                kind=INTERVENTION_SAME_HARNESS,
+                target_profile_id=profile.profile_id,
+                reason="no cross-harness profile is available",
+            )
+    return RelayIntervention(
+        kind=INTERVENTION_SUPERVISOR,
+        reason="no untried relay profile is available",
+    )
+
+
+def apply_profile_switch(
+    state: AgentRelayState,
+    *,
+    intervention: RelayIntervention,
+    iteration: int,
+) -> AgentRelayState:
+    """Persist a profile switch before the new profile starts an iteration."""
+    if intervention.kind == INTERVENTION_SUPERVISOR:
+        raise ValueError("supervisor intervention is not a profile switch")
+    if iteration < 1:
+        raise ValueError("relay switch iteration must be positive")
+    previous = state.active_profile_id
+    if previous and previous not in state.profiles_tried_since_keep:
+        state.profiles_tried_since_keep.append(previous)
+    state.previous_profile_id = previous
+    state.active_profile_id = intervention.target_profile_id
+    state.active_no_improvement_streak = 0
+    state.blockage_epoch += 1
+    state.intervention_kind = intervention.kind
+    state.switch_iteration = iteration
+    state.switch_reason = intervention.reason
+    return state
+
+
+def apply_supervisor_fallback(
+    state: AgentRelayState,
+    *,
+    intervention: RelayIntervention,
+    iteration: int,
+) -> AgentRelayState:
+    """Open a fresh supervised search window without changing profiles."""
+    if intervention.kind != INTERVENTION_SUPERVISOR:
+        raise ValueError("supervisor fallback requires a supervisor intervention")
+    if iteration < 1:
+        raise ValueError("supervisor iteration must be positive")
+    state.active_no_improvement_streak = 0
+    state.blockage_epoch += 1
+    state.intervention_kind = intervention.kind
+    state.previous_profile_id = ""
+    state.switch_iteration = iteration
+    state.switch_reason = intervention.reason
+    return state
+
+
+def invalidate_profile(
+    snapshot: AgentAvailabilitySnapshot,
+    profile_id: str,
+    reason: str,
+) -> AgentAvailabilitySnapshot:
+    """Mark runtime availability drift without running another probe."""
+    entry = snapshot.profiles.get(profile_id)
+    if entry is None:
+        raise ValueError(f"unknown Agent profile: {profile_id}")
+    entry.available = False
+    entry.reason = str(reason or "profile became unavailable")
+    return snapshot
+
+
+def migrate_run_state_relay_fields(payload: object) -> dict[str, Any]:
+    """Add relay defaults only to checkpoints written before relay existed."""
+    if not isinstance(payload, dict):
+        raise ValueError("run state must be a JSON object")
+    migrated = dict(payload)
+    keys = {"agent_relay", "agent_availability_snapshot"}
+    present = keys & set(migrated)
+    if not present:
+        migrated["agent_relay"] = {
+            "active_profile_id": "",
+            "active_no_improvement_streak": 0,
+            "blockage_epoch": 0,
+            "profiles_tried_since_keep": [],
+            "intervention_kind": "",
+            "previous_profile_id": "",
+            "switch_iteration": 0,
+            "switch_reason": "",
+        }
+        migrated["agent_availability_snapshot"] = {
+            "checked_at": "",
+            "session_index": 0,
+            "providers": {},
+            "profiles": {},
+        }
+    return migrated
+
+
+def _strict_mapping(payload: object, model: type, label: str) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} must be an object")
+    expected = set(model.__dataclass_fields__)
+    missing = expected - set(payload)
+    unknown = set(payload) - expected
+    if missing:
+        raise ValueError(f"{label} missing fields: " + ", ".join(sorted(missing)))
+    if unknown:
+        raise ValueError(f"{label} has unknown fields: " + ", ".join(sorted(unknown)))
+    return dict(payload)
+
+
+def _availability_entries(payload: object, model: type, label: str) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label} must be an object")
+    entries = {}
+    for key, value in payload.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError(f"{label} keys must be non-empty strings")
+        entries[key] = model(**_strict_mapping(value, model, f"{label}.{key}"))
+    return entries
+
+
+def _profile_mapping(profiles: Sequence[AgentProfile]) -> Mapping[str, AgentProfile]:
+    by_id = {profile.profile_id: profile for profile in profiles}
+    if len(by_id) != len(profiles):
+        raise ValueError("Agent profile ids must be unique")
+    return by_id
+
+
+def _profile_is_available(
+    profile: AgentProfile,
+    snapshot: AgentAvailabilitySnapshot,
+) -> bool:
+    entry = snapshot.profiles.get(profile.profile_id)
+    return bool(entry and entry.available and entry.provider == profile.provider and entry.model == profile.model)
+
+
+__all__ = [
+    "AgentAvailabilitySnapshot",
+    "AgentProfile",
+    "AgentRelayConfig",
+    "AgentRelayState",
+    "INTERVENTION_CROSS_HARNESS",
+    "INTERVENTION_SAME_HARNESS",
+    "INTERVENTION_SUPERVISOR",
+    "ProfileAvailability",
+    "ProviderAvailability",
+    "RelayIntervention",
+    "apply_profile_switch",
+    "apply_relay_iteration_outcome",
+    "apply_supervisor_fallback",
+    "decision_counts_toward_blockage",
+    "invalidate_profile",
+    "migrate_run_state_relay_fields",
+    "relay_blockage_reached",
+    "select_relay_intervention",
+]

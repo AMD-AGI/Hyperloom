@@ -10,6 +10,7 @@ from click.testing import CliRunner
 
 from hyperloom.common.env import EnvValueError
 from kernelforge.cli import forge_loop
+from kernelforge.cli.relay import SearchActorBuildContext
 from kernelforge.cli.pr_references import (
     _collect_pr_references,
     _git_remote_url,
@@ -74,20 +75,23 @@ def test_switch_is_independent_of_the_experience_kb_flag():
 
 def test_pr_context_is_wired_only_to_the_implementer():
     """Keep external PR text out of measured Analysis and planning evidence."""
-    source = inspect.getsource(forge_loop.callback)
-    implementer = source[source.index("agent_fn = make_agent_fn(") : source.index("effective_implementer =")]
-    analysis = source[source.index("analysis_service = make_analysis_agent_service(") : source.index("analysis_mode =")]
-    orchestration = source[
-        source.index("orchestration_service = make_orchestration_service(") : source.index(
-            "supervisor_fn = make_supervisor_fn("
+    actor_source = inspect.getsource(SearchActorBuildContext.build)
+    implementer = actor_source[
+        actor_source.index("actor_fn = make_agent_fn(") : actor_source.index("self._resolved_profile(")
+    ]
+    orchestration = actor_source[
+        actor_source.index("orchestration = make_orchestration_service(") : actor_source.index(
+            "supervisor = make_supervisor_fn("
         )
     ]
-    supervisor = source[
-        source.index("supervisor_fn = make_supervisor_fn(") : source.index("loop_runner = IterationLoop(")
+    supervisor = actor_source[actor_source.index("supervisor = make_supervisor_fn(") :]
+    cli_source = inspect.getsource(forge_loop.callback)
+    analysis = cli_source[
+        cli_source.index("analysis_service = make_analysis_agent_service(") : cli_source.index("analysis_mode =")
     ]
 
-    assert "pre_task_context=pr_task_context" in implementer
-    assert "pr_kb_repo=pr_kb_repo" in implementer
+    assert "pre_task_context=self.pr_task_context" in implementer
+    assert "pr_kb_repo=self.pr_kb_repo" in implementer
     assert "pr_task_context" not in analysis
     assert "pr_task_context" not in orchestration
     assert "pr_task_context" not in supervisor

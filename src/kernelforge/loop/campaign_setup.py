@@ -21,6 +21,7 @@ from kernelforge.loop.campaign_config import (
     resolve_kernel_backend_override,
     validate_pending_campaign_head,
 )
+from kernelforge.loop.agent_relay import AgentRelayConfig
 
 
 def parse_list(raw: str) -> list[str]:
@@ -61,6 +62,7 @@ def resolve_campaign(
     nproc_per_node: int = 1,
     bench_repeat: int = 1,
     commit_new_paths: list[str] | None = None,
+    agent_relay: AgentRelayConfig | None = None,
 ) -> CampaignResolution:
     """Resolve or create the immutable campaign configuration."""
     workspace = Path(workspace_dir).resolve()
@@ -143,6 +145,7 @@ def resolve_campaign(
         framework=framework,
         operator_name=operator_name,
         producer=(existing_campaign.producer if existing_campaign is not None else producer),
+        agent_relay=agent_relay,
     )
 
     if program_md_file:

@@ -28,6 +28,11 @@ class IterationHandoff:
     lesson_path: str = ""
     orchestration_artifacts: str = ""
     candidate_archive: str = ""
+    agent_profile_id: str = ""
+    agent_provider: str = ""
+    agent_model: str = ""
+    blockage_epoch: int = 0
+    intervention_kind: str = ""
 
     def __post_init__(self) -> None:
         if isinstance(self.iteration, bool) or not isinstance(self.iteration, int) or self.iteration <= 0:
@@ -60,6 +65,11 @@ class IterationHandoff:
             "lesson_path": self.lesson_path,
             "orchestration_artifacts": self.orchestration_artifacts,
             "candidate_archive": self.candidate_archive,
+            "agent_profile_id": self.agent_profile_id,
+            "agent_provider": self.agent_provider,
+            "agent_model": self.agent_model,
+            "blockage_epoch": self.blockage_epoch,
+            "intervention_kind": self.intervention_kind,
         }
 
 
@@ -111,6 +121,23 @@ class HandoffStore:
             raise ValueError(f"handoff must be an object: {path}")
         if payload.get("complete") is not True:
             raise ValueError(f"incomplete handoff: {path}")
+        relay_fields = {
+            "agent_profile_id",
+            "agent_provider",
+            "agent_model",
+            "blockage_epoch",
+            "intervention_kind",
+        }
+        if not relay_fields & set(payload):
+            payload.update(
+                {
+                    "agent_profile_id": "",
+                    "agent_provider": "",
+                    "agent_model": "",
+                    "blockage_epoch": 0,
+                    "intervention_kind": "",
+                }
+            )
         expected = {
             "complete",
             "iteration",
@@ -123,6 +150,11 @@ class HandoffStore:
             "lesson_path",
             "orchestration_artifacts",
             "candidate_archive",
+            "agent_profile_id",
+            "agent_provider",
+            "agent_model",
+            "blockage_epoch",
+            "intervention_kind",
             "created_at",
         }
         missing = expected - set(payload)

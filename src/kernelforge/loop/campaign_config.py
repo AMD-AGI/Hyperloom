@@ -28,6 +28,7 @@ from kernelforge.knowledge.kb_store.identity.implementation import (
 from kernelforge.loop.new_path_allowlist import normalize_commit_new_paths
 from kernelforge.mcp_server.tools.pmc import derive_kernel_names
 from kernelforge.durable_io import atomic_write_text
+from kernelforge.loop.agent_relay import AgentRelayConfig
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 
@@ -74,6 +75,7 @@ class CampaignConfig:
     # Paths the Implementer may CREATE and still have committed with a KEEP (see
     # ``IterationConfig.commit_new_paths``).
     commit_new_paths: list[str] = field(default_factory=list)
+    agent_relay: AgentRelayConfig | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -116,6 +118,9 @@ class CampaignConfig:
             # hand-edited pattern the loop would read differently than its author meant is refused here rather than
             # acted on later.
             commit_new_paths=normalize_commit_new_paths(payload["commit_new_paths"]),
+            agent_relay=(
+                AgentRelayConfig.from_dict(payload["agent_relay"]) if payload["agent_relay"] is not None else None
+            ),
         )
         if config.nproc_per_node < 1:
             raise ValueError("campaign nproc_per_node must be positive")
@@ -226,6 +231,8 @@ class CampaignConfigStore:
             raise ValueError(f"invalid campaign config: {error}") from error
         if not isinstance(payload, dict):
             raise ValueError("campaign config must be a JSON object")
+        if "agent_relay" not in payload:
+            payload["agent_relay"] = None
         return CampaignConfig.from_dict(payload)
 
     def save(
@@ -440,6 +447,7 @@ def create_campaign_config(
     nproc_per_node: int = 1,
     bench_repeat: int = 1,
     commit_new_paths: list[str] | None = None,
+    agent_relay: AgentRelayConfig | None = None,
 ) -> CampaignConfig:
     """Resolve and normalize all immutable inputs for a fresh campaign."""
     workspace = Path(workspace_dir).resolve()
@@ -552,4 +560,5 @@ def create_campaign_config(
         nproc_per_node=max(1, int(nproc_per_node or 1)),
         bench_repeat=max(1, int(bench_repeat or 1)),
         commit_new_paths=normalize_commit_new_paths(commit_new_paths or []),
+        agent_relay=agent_relay,
     )
