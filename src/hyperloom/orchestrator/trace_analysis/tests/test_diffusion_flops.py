@@ -103,17 +103,18 @@ def test_ceiling_scales_with_steps_and_precision(tmp_path):
         "patch_size": 2,
     }
     d = _write_denoiser(tmp_path / "m", cfg)
-    e10 = df.analytic_ceiling(d, gpu_type="mi355x", precision="bf16", num_steps=10, cfg_batch=1)
-    e20 = df.analytic_ceiling(d, gpu_type="mi355x", precision="bf16", num_steps=20, cfg_batch=1)
+    e10 = df.analytic_ceiling(d, gpu_type="mi355x", precision="bf16", num_steps=10)
+    e20 = df.analytic_ceiling(d, gpu_type="mi355x", precision="bf16", num_steps=20)
     # doubling steps doubles total flops + ideal_ms
     assert e20["total_flops"] == pytest.approx(2 * e10["total_flops"])
     assert e20["ideal_ms"] == pytest.approx(2 * e10["ideal_ms"])
     # fp8 peak is 2x -> ideal_ms halves
-    e_fp8 = df.analytic_ceiling(d, gpu_type="mi355x", precision="fp8", num_steps=10, cfg_batch=1)
+    e_fp8 = df.analytic_ceiling(d, gpu_type="mi355x", precision="fp8", num_steps=10)
     assert e_fp8["ideal_ms"] == pytest.approx(e10["ideal_ms"] / 2)
     # cfg batch 2 doubles vs 1
-    e_cfg2 = df.analytic_ceiling(d, gpu_type="mi355x", precision="bf16", num_steps=10, cfg_batch=2)
-    assert e_cfg2["total_flops"] == pytest.approx(2 * e10["total_flops"])
+    cfg1 = df.estimate_image_flops(d, num_steps=10, cfg_batch=1)
+    cfg2 = df.estimate_image_flops(d, num_steps=10, cfg_batch=2)
+    assert cfg2["total_flops"] == pytest.approx(2 * cfg1["total_flops"])
 
 
 def test_moe_uses_active_experts(tmp_path):
