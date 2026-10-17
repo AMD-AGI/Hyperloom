@@ -8,9 +8,11 @@ and repairs queued on the fork desk onto the free slots, lands each admitted for
 the admitted forks and repairs, and every judge interval asks the judge, applies what it decided and rebuilds the
 dashboard. A slot the judge's stops free goes to the queued requests first and only then to the branches the judge
 opens. The judge is asked at once, not at its next interval, when the scheduler itself frees a slot: a repair branch
-stopped at its time limit, a fork the gate did not land, or an admitted fork or repair that failed to start. A branch
-the judge opens after the opening batch starts from the integration head, briefed on a focus. The judge reads the
-frontier-scored progress, how similar archived sessions went and which running branches made much the same change, and
+stopped at its time limit, a fork the gate did not land, or an admitted fork or repair that failed to start; and when
+an event changes what the branches are worth: a merge that moved the integration head by a large gain, or a quarantined
+measurement node. A branch the judge opens after the opening batch starts from the integration head, briefed on a
+focus. The judge reads the frontier-scored progress, how similar archived sessions went, which running branches made
+much the same change, the events since its last call and how far each branch lies behind the integration head, and
 decides what to stop; a judge call that has not answered by the EXPLORE deadline counts as failed, and a branch that has
 not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background task of its own, in
 rounds as wide as the integration branch's K. When EXPLORE ends that task is cancelled and the integrator abandons its
@@ -34,6 +36,7 @@ from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS, 
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
+from hyperloom_multibranch.scheduling.events import SessionEvents, behind_integration_pct
 from hyperloom_multibranch.scheduling.integrator import Integrator
 from hyperloom_multibranch.scheduling.judge import Judge, JudgeDecision, JudgeView
 from hyperloom_multibranch.scheduling.mb_fakes import MbFakeSplitLanding
@@ -68,8 +71,8 @@ class ExploreWindow:
 class Steering:
     """How the judge steers EXPLORE: the judge, how often it is asked, the frontier-scored progress it reads, against
     the archived sessions that progress holds, the dashboard rebuilt once the opening batch is open and after every
-    later judge call, the signals of whether a branch opened now would still pay off, and which running branches made
-    much the same change."""
+    later judge call, the signals of whether a branch opened now would still pay off, which running branches made
+    much the same change, and the events that have the judge asked at once."""
 
     judge: Judge
     interval_seconds: float
@@ -77,6 +80,7 @@ class Steering:
     dashboard: SessionDashboard
     widening: Widening
     similarity: BranchSimilarity
+    events: SessionEvents
 
 
 def integration_row(progress: tuple[BranchProgress, ...]) -> BranchProgress | None:
@@ -109,6 +113,7 @@ class Explorer:
         self._clock = context.clock
         self._widening = steering.widening
         self._similarity = steering.similarity
+        self._events = steering.events
 
     async def run(self, window: ExploreWindow) -> SessionStopReason:
         """Explore until the deadline or the judge's soft stop; the integrator is stopped before this returns.
@@ -141,7 +146,8 @@ class Explorer:
                 merging.result()
             overrun = await self._branches.stop_overrun_repairs()
             self._desk.fill_free_slots()
-            if await self._start_admitted(window.explore_end) or overrun:
+            freed = await self._start_admitted(window.explore_end) or overrun
+            if await self._events.detect() or freed:
                 next_judge = now
             if now >= next_judge:
                 next_judge = now + self._interval
@@ -155,7 +161,9 @@ class Explorer:
     async def _merge_forever(self) -> None:
         while True:
             width = self._roster.entry(INTEGRATION_BRANCH).k
-            if not await self._integrator.integrate_next(width):
+            reports = await self._integrator.integrate_next(width)
+            self._events.note_merges(reports)
+            if not reports:
                 await self._clock.sleep(EXPLORE_TICK_SECONDS)
 
     async def _start_admitted(self, deadline: float) -> bool:
@@ -196,6 +204,8 @@ class Explorer:
         now = self._clock.now()
         progress = await self._progress.progress()
         integration = integration_row(progress)
+        integration_value = dict(integration.head_value) if integration is not None else {}
+        root = await self._notebook.recorded_value(window.root_commit)
         view = JudgeView(
             now=now,
             explore_remaining_seconds=max(window.explore_end - now, 0.0),
@@ -203,7 +213,7 @@ class Explorer:
             caps=self._roster.caps,
             roster=self._roster.entries(),
             progress=progress,
-            integration_value=dict(integration.head_value) if integration is not None else {},
+            integration_value=integration_value,
             roofline_ceiling=window.roofline_ceiling,
             metric=PRIMARY_METRIC,
             opening=opening,
@@ -217,6 +227,8 @@ class Explorer:
             ),
             widening=await self._widening.signals(),
             similar_to=await self._similarity.similar_to(),
+            events=self._events.hand_over(),
+            behind_integration_pct=behind_integration_pct(progress, integration_value, root.values, PRIMARY_METRIC),
         )
         try:
             decision = await self._clock.wait_for(self._judge.decide(view), window.explore_end - now)

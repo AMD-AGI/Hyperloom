@@ -58,7 +58,10 @@ RESOLVER_SYSTEM_PROMPT = (
 
 @dataclass(frozen=True)
 class MergeReport:
-    """What came of one candidate on integration head ``onto``; ``config_conflicts`` took the candidate's value."""
+    """What came of one candidate on integration head ``onto``; ``config_conflicts`` took the candidate's value.
+
+    A merged candidate carries the gain its merge test was judged to make and the bar it was judged against.
+    """
 
     candidate: str
     onto: str
@@ -67,6 +70,8 @@ class MergeReport:
     request_id: str | None = None
     merged_commit: str | None = None
     config_conflicts: tuple[ValueChange, ...] = ()
+    gain_pct: float | None = None
+    threshold_pct: float | None = None
 
 
 class LlmPatchResolver:
@@ -271,7 +276,14 @@ class Integrator:
         self._recording = asyncio.ensure_future(self._record_merge(report, tested.delta, judgement))
         merged = await asyncio.shield(self._recording)
         reason = f"improved {judgement.gain_pct:+.2f}% on the integration head"
-        return replace(report, outcome=MergeOutcome.MERGED, reason=reason, merged_commit=merged)
+        return replace(
+            report,
+            outcome=MergeOutcome.MERGED,
+            reason=reason,
+            merged_commit=merged,
+            gain_pct=judgement.gain_pct,
+            threshold_pct=judgement.threshold_pct,
+        )
 
     async def _record_merge(self, tested: MergeReport, delta: RecipeDelta, judgement: Judgement) -> str:
         """Commit the merge and record it; runs shielded, so a cancelled merge never moves only one of the two.

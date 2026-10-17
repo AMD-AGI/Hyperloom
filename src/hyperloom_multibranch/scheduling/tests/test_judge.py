@@ -16,6 +16,7 @@ from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, FrontierScore
 from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, EventKind, SessionEvent
 from hyperloom_multibranch.scheduling.judge import (
     JUDGE_PROMPT_VERSION,
     JUDGE_SYSTEM_PROMPT,
@@ -79,6 +80,8 @@ def _view(
     history: str = "",
     widening: WideningSignals = WIDENING,
     similar_to: dict[str, tuple[SimilarBranch, ...]] | None = None,
+    events: tuple[SessionEvent, ...] = (),
+    behind: dict[str, float] | None = None,
 ) -> JudgeView:
     return JudgeView(
         now=NOW,
@@ -108,6 +111,8 @@ def _view(
         history=history,
         widening=widening,
         similar_to=similar_to or {},
+        events=events,
+        behind_integration_pct=behind or {},
     )
 
 
@@ -120,6 +125,29 @@ def test_a_branch_row_lists_its_similar_branches_and_the_prompt_says_which_twin_
     assert rows[INTEGRATION_BRANCH]["similar_to"] == []
     assert "similar_to" in JUDGE_SYSTEM_PROMPT and "identical" in JUDGE_SYSTEM_PROMPT
     assert "stop the one of the pair with the lower expected_gain_pct" in " ".join(JUDGE_SYSTEM_PROMPT.split())
+
+
+def test_the_prompt_shows_and_explains_the_events_and_how_far_each_branch_lies_behind() -> None:
+    moved = SessionEvent(EventKind.INTEGRATION_MOVED, "moved", {"gain_pct": 4.0, "threshold_pct": 2.0})
+    quarantined = SessionEvent(EventKind.ENVIRONMENT_CHANGED, "node n1 quarantined", {"node": "n1", "gpu_ids": []})
+
+    state = _state(_view(events=(moved, quarantined), behind={"b01": 3.14159}))
+
+    assert state["events"] == [
+        {"event": "integration_moved", "reason": "moved", "gain_pct": 4.0, "threshold_pct": 2.0},
+        {"event": "environment_changed", "reason": "node n1 quarantined", "node": "n1", "gpu_ids": []},
+    ]
+    rows = {row["branch"]: row for row in state["branches"]}
+    assert rows["b01"]["behind_integration_pct"] == 3.14
+    assert "behind_integration_pct" not in rows["b02"] and "behind_integration_pct" not in rows[INTEGRATION_BRANCH]
+    prompt = " ".join(JUDGE_SYSTEM_PROMPT.split())
+    for field in ("events", "integration_moved", "environment_changed", "behind_integration_pct"):
+        assert field in prompt
+    assert f"at least {MB_BIG_GAIN_BARS} times the bar threshold_pct" in prompt
+
+
+def test_the_prompt_shows_no_event_when_none_happened() -> None:
+    assert _state(_view())["events"] == []
 
 
 def _reply(payload: object) -> str:

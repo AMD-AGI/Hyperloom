@@ -5,7 +5,8 @@
 
 The scheduler hands the judge a :class:`JudgeView` (the roster, each branch's frontier progress, the remaining budget,
 the integration branch's recorded value, how similar archived sessions went, whether a branch opened now would
-still pay off and which running branches made much the same change). The judge answers with one JSON object, which :func:`parse_decision`
+still pay off, which running branches made much the same change, the events since its last call and how far each
+branch lies behind the integration head). The judge answers with one JSON object, which :func:`parse_decision`
 reads and :func:`cap_decision` cuts to the caps and to the branches that are still live. A failed call or an
 unreadable reply gives ``None``, and the scheduler keeps the status quo. The judge never calls a peer; the scheduler
 applies its decision.
@@ -23,6 +24,7 @@ from hyperloom.common.io import append_jsonl
 from hyperloom.common.jsonio import extract_last_json_with_key
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, SessionEvent
 from hyperloom_multibranch.scheduling.forks import PendingBranch
 from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, RosterCaps
@@ -39,7 +41,7 @@ _KEY_STOP_SESSION = "stop_session"
 _KEY_BRANCH = "branch"
 _KEY_REASON = "reason"
 
-JUDGE_SYSTEM_PROMPT = """You are the scheduler's judge in a multi-branch LLM inference optimization session.
+JUDGE_SYSTEM_PROMPT = f"""You are the scheduler's judge in a multi-branch LLM inference optimization session.
 Specialist branches explore optimizations in parallel; the integration branch merges their kept commits.
 Each branch has K, the number of tests it may run at once. Within the hard caps you are given, decide:
 how many branches to open, each branch's K (the integration branch included), which specialist branches to stop and
@@ -62,6 +64,14 @@ A branch's similar_to lists the other running branches whose own change since th
 its own, with score the share of the two changes they have in common. identical is true when both heads hold the same
 recipe: two branches marked identical spend twice the budget on one result, so stop the one of the pair with the
 lower expected_gain_pct. A similar pair that is not identical is yours to weigh.
+events lists what happened since your last call that changes what the running branches are worth; you are asked at
+once when one happens. integration_moved: a merge moved the integration head by gain_pct, at least {MB_BIG_GAIN_BARS}
+times the bar threshold_pct it was judged against. A branch's behind_integration_pct is how far its head's recorded
+value lies below the integration head's, in percent of the root's value: a branch far behind gains little even once
+merged, so it is a candidate to stop, and a branch you open now starts from the new integration head.
+environment_changed: the toolbox quarantined a measurement node after an infrastructure failure (gpu_ids is empty for
+the whole node). Tests still run, on a single node even on the quarantined one, but results measured before and after
+it may compare less well; weigh whether opening more branches is still worth it.
 Before opening a branch, weigh whether it would still pay off. min_useful_seconds is the least EXPLORE time a branch
 opened now needs to show a trend: the frontier's trend window, or its specialist's start-up plus the sandbox cold
 starts its first tests wait through, when that is longer. cold_start is the recent sandbox cold start in seconds, or
@@ -96,7 +106,9 @@ class JudgeView:
     repairs the fork desk queued for a slot, oldest first; ``history`` is the notebook's
     digest of similar archived sessions, empty when the archive holds none. ``widening`` says whether a branch
     opened now would still pay off. ``similar_to`` maps a branch to the running branches whose own change is much the
-    same as its own; a branch similar to none is not in it.
+    same as its own; a branch similar to none is not in it. ``events`` are the events detected since the last call,
+    and ``behind_integration_pct`` maps a running specialist branch to how far its head lies behind the integration
+    head, in percent of the root's value.
     """
 
     now: float
@@ -114,6 +126,8 @@ class JudgeView:
     history: str
     widening: WideningSignals
     similar_to: Mapping[str, tuple[SimilarBranch, ...]]
+    events: tuple[SessionEvent, ...]
+    behind_integration_pct: Mapping[str, float]
 
 
 @dataclass(frozen=True)
@@ -176,9 +190,7 @@ def _progress_row(progress: BranchProgress | None) -> dict[str, object]:
     return row
 
 
-def _branch_row(
-    entry: BranchEntry, progress: BranchProgress | None, similar: tuple[SimilarBranch, ...]
-) -> dict[str, object]:
+def _branch_row(entry: BranchEntry, progress: BranchProgress | None, view: JudgeView) -> dict[str, object]:
     row: dict[str, object] = {
         _KEY_BRANCH: entry.branch,
         "kind": entry.kind.value,
@@ -187,8 +199,11 @@ def _branch_row(
         "from_branch": entry.from_branch,
         "start_commit": entry.start_commit,
         "k": entry.k,
-        "similar_to": [asdict(item) for item in similar],
+        "similar_to": [asdict(item) for item in view.similar_to.get(entry.branch, ())],
     }
+    behind = view.behind_integration_pct.get(entry.branch)
+    if behind is not None:
+        row["behind_integration_pct"] = round(behind, 2)
     if entry.stop is not None:
         row["stopped"] = entry.stop.summary
     row.update(_progress_row(progress))
@@ -229,10 +244,8 @@ def render_prompt(view: JudgeView) -> str:
             "roofline_ceiling": dict(view.roofline_ceiling),
             "headroom_pct": _headroom_pct(view),
         },
-        _KEY_BRANCHES: [
-            _branch_row(entry, progress.get(entry.branch), view.similar_to.get(entry.branch, ()))
-            for entry in view.roster
-        ],
+        "events": [{"event": event.kind.value, "reason": event.reason, **event.detail} for event in view.events],
+        _KEY_BRANCHES: [_branch_row(entry, progress.get(entry.branch), view) for entry in view.roster],
     }
     history = f"How similar past sessions went:\n{view.history}\n\n" if view.history else ""
     return f"Session state:\n{json.dumps(state, indent=2, sort_keys=True)}\n\n{history}{_REPLY_FORMAT}"

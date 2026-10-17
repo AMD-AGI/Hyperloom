@@ -36,8 +36,8 @@ from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission,
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import ToolResultPointer
-from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind
+from hyperloom_multibranch.contracts.notebook.records import QuarantineEvent, ToolResultPointer
+from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind, QuarantineAction
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
@@ -999,3 +999,26 @@ async def test_a_repair_admitted_while_a_refill_starts_cuts_the_refill_and_the_s
     }
     [cut] = [row for row in _decisions(stage) if row["kind"] == "open" and not row["branch"]]
     assert (cut["reason"], cut["detail"]) == (OPEN_CUT_REASON, {"requested": 2, "opened": 1, "open_cut": 1})
+
+
+async def test_a_whole_node_quarantine_is_shown_to_the_judge_at_once_and_explore_goes_on(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.judge = ScriptedCompletion([_reply({"open": 1, "branches": [], "stop": []})])
+
+    async def quarantine(branch: str) -> None:
+        event = QuarantineEvent("node-0", QuarantineAction.QUARANTINE, "the sandbox was lost")
+        await stage.handle(Role.TOOLBOX).record_quarantine(event)
+
+    stage.steps = {"b01": quarantine}
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, "", 0)
+    assert outcome.final is not None
+    [event] = [row for row in _decisions(stage) if row["kind"] == "event"]
+    assert (event["reason"], event["detail"]["event"]) == ("node node-0 quarantined", "environment_changed")
+    at = float(str(event["at"]))
+    _judged_within_a_tick_of(stage, at)
+    calls = [json.loads(line) for line in stage.layout.judge.read_text().splitlines()]
+    [shown] = [call for call in calls if '"event": "environment_changed"' in call["prompt"]]
+    assert at <= shown["at"] <= at + EXPLORE_TICK_SECONDS and '"node": "node-0"' in shown["prompt"]

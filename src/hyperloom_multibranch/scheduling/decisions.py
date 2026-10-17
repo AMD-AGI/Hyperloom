@@ -4,9 +4,9 @@
 """Decision logs: one JSON line per decision, with its reason, so a post-mortem can replay why the session went the
 way it did.
 
-The scheduler's log, ``MB-scheduling/MB-decisions.jsonl``, gets every phase change, branch opened, forked,
-repaired, re-sized or stopped, judge call, final choice and session stop. The integrator keeps its merges in a log of its own,
-``MB-integration/MB-merges.jsonl``.
+The scheduler's log, ``MB-scheduling/MB-decisions.jsonl``, gets every phase change, branch opened, forked, repaired,
+re-sized or stopped, judge call, event the judge is shown, final choice and session stop. The integrator keeps its
+merges in a log of its own, ``MB-integration/MB-merges.jsonl``.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ class DecisionKind(str, Enum):
     JUDGE = "judge"
     JUDGE_FAILED = "judge_failed"
     MERGE = "merge"
+    EVENT = "event"
     FINAL = "final"
     SESSION_STOP = "session_stop"
 

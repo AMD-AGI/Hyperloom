@@ -274,6 +274,7 @@ async def test_an_improving_merge_is_tested_and_confirmed_from_the_head_then_wri
     record = await bench.handle(Role.OBSERVER).record(str(report.request_id))
     assert (record.conclusion, record.commit_id) == (Conclusion.MERGED, head)
     assert record.judgement is not None and record.judgement.gain_pct == pytest.approx(3.0)
+    assert (report.gain_pct, report.threshold_pct) == (record.judgement.gain_pct, record.judgement.threshold_pct)
     lineage = await bench.handle(Role.OBSERVER).lineage()
     assert lineage.commit(head).recipe_digest == merged.digest()
     [logged] = bench.logged()
@@ -298,6 +299,7 @@ async def test_a_merge_that_does_not_improve_is_not_stackable(
 
     assert report is not None and report.outcome is MergeOutcome.NOT_STACKABLE
     assert report.reason.startswith(verdict)
+    assert (report.gain_pct, report.threshold_pct) == (None, None)
     assert await bench.repo.head(INTEGRATION_BRANCH) == bench.root
     record = await bench.handle(Role.OBSERVER).record(str(report.request_id))
     assert (record.conclusion, record.commit_id) == (Conclusion.NOT_STACKABLE, None)

@@ -41,6 +41,7 @@ from hyperloom_multibranch.scheduling.close import CloseReport, Closer
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
+from hyperloom_multibranch.scheduling.events import SessionEvents
 from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, Steering, integration_row
 from hyperloom_multibranch.scheduling.exports import ExportSources, SessionExports
 from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalChoice, FinalSelector, choose_candidates
@@ -166,7 +167,8 @@ class Session:
         judge = Judge(services.judge_completion, layout.judge, clock)
         widening = Widening(peers.toolbox, self._roster, progress.policy)
         similarity = BranchSimilarity(peers.repo, self._roster)
-        steering = Steering(judge, settings.judge_interval_seconds, progress, dashboard, widening, similarity)
+        events = SessionEvents(self._notebook, self._decisions)
+        steering = Steering(judge, settings.judge_interval_seconds, progress, dashboard, widening, similarity, events)
         self._explorer = Explorer(context, self._branches, integrator, steering, peers.split_landing)
         self._selector = FinalSelector(tests, peers.gate, settings.workload, PRIMARY_METRIC, clock)
         sources = ExportSources(self._notebook, peers.repo, blobs, dashboard)
