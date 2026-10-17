@@ -34,9 +34,9 @@ from itertools import zip_longest
 
 from hyperloom_multibranch.contracts.notebook.interfaces import Notebook, StartupBriefProvider
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
-from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, StartupBrief
-from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall
-from hyperloom_multibranch.notebook.knowledge.lessons import listed
+from hyperloom_multibranch.contracts.notebook.records import LearningRecord, NotebookSnapshot, StartupBrief
+from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall, PastLearnings
+from hyperloom_multibranch.notebook.knowledge.lessons import MAX_ITEMS, clipped, listed
 from hyperloom_multibranch.notebook.knowledge.recall import (
     ExperienceReader,
     IdentityIndex,
@@ -50,6 +50,7 @@ from hyperloom_multibranch.notebook.knowledge.warm_start import WarmLead
 from hyperloom_multibranch.notebook.learning_search import (
     Retrieval,
     RetrievalSource,
+    ShownLead,
     render_session_learning,
     session_matches,
 )
@@ -66,13 +67,14 @@ LEARNINGS = 5
 class _Item:
     lesson: bool
     text: str
+    lead: ShownLead | None = None
 
 
 @dataclass(frozen=True)
 class _Recalled:
     """Recalled priors with a positive gain (leads), and the other priors and those to re-verify (lessons)."""
 
-    leads: tuple[str, ...] = ()
+    leads: tuple[_Item, ...] = ()
     lessons: tuple[str, ...] = ()
 
 
@@ -85,9 +87,24 @@ def _by_layer(items: Sequence[RecalledExperience]) -> list[RecalledExperience]:
     return [item for turn in zip_longest(*layers.values()) for item in turn if item is not None]
 
 
-def _lead(item: RecalledExperience) -> str:
+def _lead(item: RecalledExperience) -> _Item:
     layer = f" ({item.layer.value})" if item.layer is not None else ""
-    return f"prior{layer}: {item.describe()}"
+    return _Item(False, f"prior{layer}: {item.describe()}", ShownLead(item.experience_id, item.change_summary))
+
+
+def _recipe(lead: WarmLead) -> _Item:
+    envs = (f"{name}={value}" for name, value in sorted(lead.envs.items()))
+    change = " ".join(part for part in (lead.server_args, *envs) if part)
+    return _Item(False, f"recipe: {lead.describe()}", ShownLead(lead.canonical_id, change))
+
+
+def _listed(items: Iterable[_Item]) -> list[_Item]:
+    """``items`` as :func:`listed` keeps texts: without repeats, each clipped, at most :data:`MAX_ITEMS` of them."""
+
+    kept: dict[str, _Item] = {}
+    for item in items:
+        kept.setdefault(clipped(item.text), replace(item, text=clipped(item.text)))
+    return list(kept.values())[:MAX_ITEMS]
 
 
 def _recalled(recall: Recall | None) -> _Recalled:
@@ -104,7 +121,7 @@ def _recalled(recall: Recall | None) -> _Recalled:
     )
 
 
-def _fit(items: Iterable[_Item], max_chars: int) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def _fit(items: Iterable[_Item], max_chars: int) -> list[_Item]:
     """Lessons and leads, in priority order, up to the first that would pass ``max_chars``."""
 
     kept: list[_Item] = []
@@ -114,7 +131,7 @@ def _fit(items: Iterable[_Item], max_chars: int) -> tuple[tuple[str, ...], tuple
             break
         kept.append(item)
         used += len(item.text)
-    return tuple(item.text for item in kept if item.lesson), tuple(item.text for item in kept if not item.lesson)
+    return kept
 
 
 class RecallCache:
@@ -181,20 +198,18 @@ class CrossSessionBriefing(StartupBriefProvider):
             self.recalls.keep(key, recall)
         return recall
 
-    async def _learnt(self, snapshot: NotebookSnapshot) -> tuple[list[str], list[str]]:
-        """This session's learnings about ``focus`` and past sessions', as lessons; the recall logs what it showed."""
+    async def _learnt(self, snapshot: NotebookSnapshot) -> tuple[tuple[LearningRecord, ...], PastLearnings | None]:
+        """This session's learnings about ``focus``, and the read of past sessions' when there is a recall."""
 
         here = session_matches(snapshot, self.focus, limit=LEARNINGS)
         past = None
         if self.learnings is not None and snapshot.profile is not None:
             past = await asyncio.to_thread(self.learnings.past, snapshot.profile, self.focus, limit=LEARNINGS)
-        if self.learnings is not None:
-            self.learnings.record(snapshot, Retrieval(self.branch, RetrievalSource.BRIEF, self.focus), here, past)
-        learnt_here = [f"learnt here: {render_session_learning(record, snapshot)[2:]}" for record in here]
-        learnt_before = [f"learnt before: {item.render()[2:]}" for item in (past.items if past is not None else ())]
-        return learnt_here, learnt_before
+        return tuple(here), past
 
     async def startup_brief(self, start_commit: str) -> StartupBrief:
+        """The brief from ``start_commit``; the recall logs the learnings and the leads it shows."""
+
         tried = await self.notebook.startup_brief(start_commit)
         snapshot = await self.notebook.snapshot()
         on_line = [item for item in failures_at(snapshot, start_commit) if item.tier is not FailureTier.ELSEWHERE]
@@ -203,19 +218,29 @@ class CrossSessionBriefing(StartupBriefProvider):
             for direction, count in repeated_failures(on_line)
         ]
         recalled = _recalled(await self._recall(snapshot))
-        learnt_here, learnt_before = await self._learnt(snapshot)
+        here, past = await self._learnt(snapshot)
+        learnt_before = [f"learnt before: {item.render()[2:]}" for item in (past.items if past is not None else ())]
         kb_lessons = [
             f"{lead.canonical_id}: {text}" for lead in self.warm for text in (*lead.pitfalls, *lead.what_failed)
         ]
         ordered = [
             *(_Item(True, text) for text in listed(repeated)),
-            *(_Item(True, text) for text in learnt_here),
-            *(_Item(False, f"recipe: {lead.describe()}") for lead in self.warm),
-            *(_Item(False, text) for text in listed(recalled.leads)),
+            *(_Item(True, f"learnt here: {render_session_learning(record, snapshot)[2:]}") for record in here),
+            *(_recipe(lead) for lead in self.warm),
+            *_listed(recalled.leads),
             *(_Item(True, text) for text in listed([*recalled.lessons, *learnt_before, *kb_lessons])),
         ]
-        lessons, leads = _fit(ordered, self.max_chars)
-        return replace(tried, lessons=lessons, leads=leads)
+        kept = _fit(ordered, self.max_chars)
+        if self.learnings is not None:
+            shown = tuple(item.lead for item in kept if item.lead is not None)
+            self.learnings.record(
+                snapshot, Retrieval(self.branch, RetrievalSource.BRIEF, self.focus, shown), here, past
+            )
+        return replace(
+            tried,
+            lessons=tuple(item.text for item in kept if item.lesson),
+            leads=tuple(item.text for item in kept if not item.lesson),
+        )
 
 
 @dataclass

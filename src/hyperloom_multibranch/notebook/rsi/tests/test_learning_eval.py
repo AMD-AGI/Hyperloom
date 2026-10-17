@@ -61,6 +61,75 @@ def test_each_learning_counts_once_at_its_first_showing_and_each_later_test_once
     assert "| pitfalls avoided | 100% (1/1) |" in found.render()
 
 
+def test_a_brief_lead_counts_once_and_is_taken_up_by_a_later_test_making_its_change(
+    snapshot: NotebookSnapshot,
+) -> None:
+    at = {record.request_id: record.requested_at for record in snapshot.records}
+    before_r1, after_r2 = at["r1"] - 0.001, _between(snapshot, "r2", "r3")
+    seqs = {"ref": "exp-seqs", "change": "--max-num-seqs 256"}
+    log = [
+        {"at": before_r1, "branch": "s1", "source": "brief", "here": [], "past": [], "leads": [seqs]},
+        {"at": after_r2, "branch": "s1", "source": "brief", "here": [], "past": [], "leads": [seqs]},
+        {
+            "at": after_r2,
+            "branch": "s2",
+            "source": "brief",
+            "here": [],
+            "past": [],
+            "leads": [
+                {"ref": "exp-fp8", "change": "--kv-cache-dtype fp8"},
+                {"ref": "inference:older", "change": "--enable-expert-parallel"},
+                {"ref": "exp-unnamed", "change": ""},
+            ],
+        },
+    ]
+
+    found = evaluate_learnings(snapshot, log)
+
+    # s1 committed --max-num-seqs 256 (r1); s2 made the fp8 change (r5), which failed the accuracy check.
+    assert (found.leads_shown, found.leads_taken_up, found.leads_committed) == (4, 2, 1)
+    assert "| brief leads taken up | 50% (2/4) |" in found.render()
+
+
+def test_a_lead_counts_once_and_is_taken_up_by_a_later_test_making_every_change_it_names(
+    snapshot: NotebookSnapshot,
+) -> None:
+    before_r1 = min(record.requested_at for record in snapshot.records) - 1.0
+    after_r2 = _between(snapshot, "r2", "r3")
+    fp8 = {"ref": "exp-fp8", "change": "--kv-cache-dtype fp8"}
+    log = [
+        {
+            "at": before_r1,
+            "branch": "s1",
+            "source": "brief",
+            "here": [],
+            "past": [],
+            "leads": [
+                {"ref": "exp-seqs", "change": "--max-num-seqs 256"},
+            ],
+        },
+        {
+            "at": after_r2,
+            "branch": "s2",
+            "source": "brief",
+            "here": [],
+            "past": [],
+            "leads": [
+                fp8,
+                {"ref": "exp-never", "change": "--speculative-config ngram"},
+                {"ref": "inference:older", "change": ""},
+            ],
+        },
+        {"at": after_r2 + 0.0001, "branch": "s2", "source": "brief", "here": [], "past": [], "leads": [fp8]},
+    ]
+
+    found = evaluate_learnings(snapshot, log)
+
+    # r1 made exp-seqs' change and committed; r5 made exp-fp8's and failed the accuracy check.
+    assert (found.leads_shown, found.leads_taken_up, found.leads_committed) == (4, 2, 1)
+    assert "| brief leads taken up | 50% (2/4) |" in found.render()
+
+
 def test_a_learning_names_a_direction_by_what_it_gives_of_it() -> None:
     target_only = dataclasses.replace(INSIGHT, mechanism="")
 

@@ -13,8 +13,12 @@ or a mechanism):
 Then every test a branch requested after its first retrieval counts once: *in a shown direction* when a learning shown
 to the branch before it named the test's direction, *elsewhere* otherwise; how many of each led to a commit sets the
 learnings' directions beside the rest. Past sessions' learnings are logged by Experience id only, so they are counted,
-not matched. Every share comes with its counts; what they mean for the retrieval, vector search included, is MB2's
-call to make with them.
+not matched.
+
+A lead a startup brief showed counts once too, at its first showing to a branch: *taken up* when a later test of the
+branch makes every change the lead names (each word of its change, as the Experience export summarizes a change), and
+*committed* when such a test committed. A lead that names no change is counted, not matched. Every share comes with its
+counts; what they mean for the retrieval and the briefs, vector search included, is MB2's call to make with them.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from hyperloom.common.jsonio import read_jsonl
 from hyperloom_multibranch.contracts.notebook.peers import Intent, TestKind
 from hyperloom_multibranch.contracts.notebook.records import Learning, NotebookSnapshot, Writer
 from hyperloom_multibranch.contracts.notebook.vocab import COMMITTING, LearningKind, Role
+from hyperloom_multibranch.notebook.knowledge.experience import change_document
 from hyperloom_multibranch.notebook.local.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.report import share, table
 
@@ -52,6 +57,9 @@ class LearningEvaluation:
     committed_elsewhere: int
     past_shown: int
     past_distinct: int
+    leads_shown: int = 0
+    leads_taken_up: int = 0
+    leads_committed: int = 0
 
     def render(self) -> str:
         """The evaluation as markdown: a table of the measures, each with its counts."""
@@ -65,6 +73,8 @@ class LearningEvaluation:
                 share(self.committed_in_shown_directions, self.tests_in_shown_directions),
             ),
             ("tests committed, elsewhere", share(self.committed_elsewhere, self.tests_elsewhere)),
+            ("brief leads taken up", share(self.leads_taken_up, self.leads_shown)),
+            ("brief leads taken up and committed", share(self.leads_committed, self.leads_shown)),
         ]
         return "\n".join(
             [
@@ -81,6 +91,7 @@ class _Test:
     at: float
     intent: Intent | None
     committed: bool
+    change: frozenset[str] = frozenset()
 
 
 def _words(text: str) -> str:
@@ -101,7 +112,9 @@ def _tests(snapshot: NotebookSnapshot) -> dict[str, list[_Test]]:
     for record in sorted(snapshot.records, key=lambda item: item.requested_at):
         if record.request.kind is TestKind.TEST:
             intent = snapshot.intents.get(record.request.intent_fingerprint)
-            found[record.request.branch].append(_Test(record.requested_at, intent, record.conclusion in COMMITTING))
+            change = frozenset(str(change_document(record.request.delta)["summary"]).split())
+            committed = record.conclusion in COMMITTING
+            found[record.request.branch].append(_Test(record.requested_at, intent, committed, change))
     return found
 
 
@@ -148,6 +161,21 @@ def _outcomes(
     return counts
 
 
+def _leads(log: Sequence[Mapping[str, Any]], tests: Mapping[str, list[_Test]]) -> Counter[str]:
+    first: dict[tuple[str, str], tuple[float, frozenset[str]]] = {}
+    for line in sorted(log, key=lambda item: float(item["at"])):
+        for lead in line.get("leads", ()):
+            change = frozenset(str(lead.get("change") or "").split())
+            first.setdefault((str(line["branch"]), str(lead["ref"])), (float(line["at"]), change))
+    counts: Counter[str] = Counter()
+    for (branch, _), (at, change) in first.items():
+        counts["shown"] += 1
+        taken = [test for test in tests.get(branch, ()) if change and test.at > at and change <= test.change]
+        counts["taken_up"] += bool(taken)
+        counts["committed"] += any(test.committed for test in taken)
+    return counts
+
+
 def evaluate_learnings(snapshot: NotebookSnapshot, log: Sequence[Mapping[str, Any]]) -> LearningEvaluation:
     """The retrieval of ``snapshot``'s session, read off its retrieval ``log`` (decoded lines)."""
 
@@ -155,6 +183,7 @@ def evaluate_learnings(snapshot: NotebookSnapshot, log: Sequence[Mapping[str, An
     tests = _tests(snapshot)
     shown = _first_shown(log)
     uptake, outcomes = _uptake(shown, learnings, tests), _outcomes(shown, learnings, tests)
+    leads = _leads(log, tests)
     past = [str(item) for line in log for item in line.get("past", ())]
     return LearningEvaluation(
         retrievals=len(log),
@@ -169,6 +198,9 @@ def evaluate_learnings(snapshot: NotebookSnapshot, log: Sequence[Mapping[str, An
         committed_elsewhere=outcomes["else_committed"],
         past_shown=len(past),
         past_distinct=len(set(past)),
+        leads_shown=leads["shown"],
+        leads_taken_up=leads["taken_up"],
+        leads_committed=leads["committed"],
     )
 
 

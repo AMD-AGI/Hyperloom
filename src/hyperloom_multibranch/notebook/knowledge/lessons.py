@@ -157,11 +157,16 @@ def session_lessons(snapshot: NotebookSnapshot, final_commit: str | None = None)
     )
 
 
+def clipped(text: str) -> str:
+    """``text`` cut to :data:`MAX_ITEM_CHARS`, an ellipsis marking the cut."""
+
+    return text if len(text) <= MAX_ITEM_CHARS else text[: MAX_ITEM_CHARS - 3] + "..."
+
+
 def listed(texts: Iterable[str]) -> tuple[str, ...]:
     """``texts`` without repeats, each clipped to :data:`MAX_ITEM_CHARS`, at most :data:`MAX_ITEMS` of them."""
 
-    clipped = (text if len(text) <= MAX_ITEM_CHARS else text[: MAX_ITEM_CHARS - 3] + "..." for text in texts)
-    return tuple(dict.fromkeys(clipped))[:MAX_ITEMS]
+    return tuple(dict.fromkeys(map(clipped, texts)))[:MAX_ITEMS]
 
 
 __all__ = [
@@ -170,6 +175,7 @@ __all__ = [
     "Lesson",
     "LessonKind",
     "SessionLessons",
+    "clipped",
     "direction",
     "hypotheses",
     "lesson_of",

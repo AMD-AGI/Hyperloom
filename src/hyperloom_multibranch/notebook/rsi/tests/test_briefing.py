@@ -225,6 +225,39 @@ async def test_the_lessons_hold_what_this_session_and_past_sessions_learnt_about
     assert any(lesson.startswith("learnt here") for lesson in alone.lessons)
 
 
+async def test_the_brief_logs_the_leads_it_kept_under_its_cap_with_the_change_each_suggests(tmp_path: Path) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    log = tmp_path / LEARNINGS_LOG
+    recall = LearningRecall(FakeExperienceReader(completed_read()), log=RetrievalLog(log))
+    full = CrossSessionBriefing(
+        notebook, warm=(LEAD,), experiences=_reader(_recalled("exp-faster", "keep", 1100.0)), learnings=recall
+    )
+
+    await full.startup_brief("c0")
+    await dataclasses.replace(full, max_chars=100).startup_brief("c0")
+    first, capped = [json.loads(line)["leads"] for line in log.read_text(encoding="utf-8").splitlines()]
+
+    recipe = {"ref": "inference:older", "change": "--enable-expert-parallel"}
+    assert first == [recipe, {"ref": "exp-faster", "change": "--block-size 16"}]
+    assert capped == [recipe]
+
+
+async def test_the_brief_logs_the_leads_it_shows_and_only_those(tmp_path: Path) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    log = tmp_path / LEARNINGS_LOG
+    recall = LearningRecall(FakeExperienceReader(completed_read()), log=RetrievalLog(log))
+    reader = _reader(_recalled("exp-faster", "keep", 1100.0))
+    full = CrossSessionBriefing(notebook, warm=(LEAD,), experiences=reader, branch="s3", learnings=recall)
+
+    await full.startup_brief("c0")
+    await dataclasses.replace(full, max_chars=100).startup_brief("c0")
+    first, capped = [json.loads(line)["leads"] for line in log.read_text(encoding="utf-8").splitlines()]
+
+    recipe = {"ref": "inference:older", "change": "--enable-expert-parallel"}
+    assert first == [recipe, {"ref": "exp-faster", "change": "--block-size 16"}]
+    assert capped == [recipe]
+
+
 async def test_without_a_kb_or_a_profile_or_a_completed_read_nothing_is_recalled(tmp_path: Path) -> None:
     notebook = await scripted_session(tmp_path / "notebook", FakeClock())
     failed = FakeExperienceReader(RemoteReadResult("", "unavailable", "", (), ("planner_timeout",)))

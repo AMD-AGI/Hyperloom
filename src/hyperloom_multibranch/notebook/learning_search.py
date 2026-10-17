@@ -48,12 +48,22 @@ class RetrievalSource(str, Enum):
 
 
 @dataclass(frozen=True)
+class ShownLead:
+    """A lead a startup brief showed: ``ref`` the Experience or the Recipe KB record it came from, and ``change`` the
+    change it suggests, summarized as the Experience export summarizes a change (empty when it names none)."""
+
+    ref: str
+    change: str = ""
+
+
+@dataclass(frozen=True)
 class Retrieval:
-    """One retrieval of learnings: for ``branch``, through ``source``, for ``query``."""
+    """One retrieval of learnings: for ``branch``, through ``source``, for ``query``; a brief also shows ``leads``."""
 
     branch: str
     source: RetrievalSource
     query: str
+    leads: tuple[ShownLead, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -61,7 +71,7 @@ class RetrievalLog:
     """The session's log of the learnings shown to its branches; a failed append is logged and holds up nobody.
 
     A line names this session's learnings by entry id, past sessions' by Experience id, and the past read's status
-    (empty when nothing read past sessions).
+    (empty when nothing read past sessions); a brief's line also lists the leads it showed, each with its change.
     """
 
     path: Path
@@ -74,7 +84,7 @@ class RetrievalLog:
         past: Sequence[str] = (),
         past_status: str = "",
     ) -> None:
-        line = {
+        line: dict[str, object] = {
             "format": LEARNINGS_LOG_FORMAT,
             "at": snapshot.taken_at,
             "branch": retrieval.branch,
@@ -84,6 +94,8 @@ class RetrievalLog:
             "past": list(past),
             "past_status": past_status,
         }
+        if retrieval.leads:
+            line["leads"] = [{"ref": lead.ref, "change": lead.change} for lead in retrieval.leads]
         try:
             append_jsonl(self.path, line, make_parents=True, sort_keys=True)
         except OSError as exc:
@@ -203,6 +215,7 @@ __all__ = [
     "RetrievalLog",
     "RetrievalSource",
     "SessionLearnings",
+    "ShownLead",
     "current_learnings",
     "fit_lines",
     "outcome_of",
