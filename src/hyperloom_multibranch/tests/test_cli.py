@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
+from hyperloom.measure import compile as compile_module
+from hyperloom.measure.compile import PackageBase
 from hyperloom_multibranch import cli
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS
@@ -125,14 +127,16 @@ def eight_cards(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.fixture
 def ready_environment(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
-    """No Experience KB, no Recipe KB, no image named, the shipped tool pins, and a writable RSI archive outside the
-    test's workspace."""
+    """No Experience KB, no Recipe KB, no image named, the shipped tool pins, a writable RSI archive outside the
+    test's workspace, and the framework's package installed in the image."""
 
     for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN", *IMAGE_VARS, "MAGPIE_REF", "INFERENCEX_REF"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("KB_STORE_URL", raising=False)
     monkeypatch.delenv("KB_STORE_TOKEN", raising=False)
     monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path_factory.mktemp("rsi-archive")))
+    installed = PackageBase("vllm", tmp_path_factory.mktemp("site-packages") / "vllm", "vllm", "0.0.0")
+    monkeypatch.setattr(compile_module, "locate_installed_package", lambda layout: installed)
 
 
 @pytest.fixture
@@ -193,6 +197,22 @@ def test_tool_pins_that_cannot_be_read_fail_loudly_before_creating_anything(
 
     captured = capsys.readouterr()
     assert "measurement pins" in captured.err and "MAGPIE_REF" in captured.err
+    assert captured.out == ""
+    assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
+def test_a_framework_whose_source_cannot_be_laid_out_fails_loudly_before_creating_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    framework_at = WORKLOAD_ARGS.index("--framework") + 1
+    argv = ["run", *WORKLOAD_ARGS[:framework_at], "tensorrt-llm", *WORKLOAD_ARGS[framework_at + 1 :]]
+
+    assert cli.main(argv) == cli.EXIT_FAILED
+
+    captured = capsys.readouterr()
+    assert "tensorrt-llm has no package layout" in captured.err
     assert captured.out == ""
     assert not any(tmp_path.iterdir())
 

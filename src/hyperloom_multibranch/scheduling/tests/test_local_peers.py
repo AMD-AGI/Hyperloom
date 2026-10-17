@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: MIT
 
 """The real peers of a session: built inside the session directory on model-backed specialist sessions and on this
-machine's measurement host, and refused when this machine has no agent CLI for them or its pins cannot be read."""
+machine's measurement host, and refused when this machine has no agent CLI for them, its pins cannot be read or the
+image lacks the framework's package."""
 
 from __future__ import annotations
 
@@ -17,7 +18,8 @@ import pytest
 
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
-from hyperloom.measure.compile import LocalBlobStore
+from hyperloom.measure import compile as compile_module
+from hyperloom.measure.compile import ComponentLayout, LocalBlobStore, PackageBase, UnsupportedComponentError
 from hyperloom.measure.pins import ActiveImage, ToolCommits, pinned_tool_commits
 from hyperloom.orchestrator.kernel.request_handlers import resolve_gemm_tuning_backend
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
@@ -36,6 +38,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
     machine_cards,
     machine_parallel_tests,
     measurement_host,
+    require_framework_package,
     specialist_command,
     workload_environment,
 )
@@ -153,6 +156,19 @@ def test_the_cards_are_the_ids_the_visible_device_mask_names(mask: str, monkeypa
     monkeypatch.setenv(mask, "6,2")
 
     assert machine_cards() == (6, 2)
+
+
+@pytest.mark.parametrize("framework", ["tensorrt-llm", "sglang"])
+def test_a_framework_whose_source_cannot_be_laid_out_refuses_the_peers(
+    framework: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def not_installed(layout: ComponentLayout) -> PackageBase:
+        raise UnsupportedComponentError(f"package {layout.import_name} is not installed in this image")
+
+    monkeypatch.setattr(compile_module, "locate_installed_package", not_installed)
+
+    with pytest.raises(PeersUnavailable, match=f"{framework} .*(no package layout|not installed in this image)"):
+        require_framework_package(framework)
 
 
 @pytest.mark.usefixtures("four_cards")

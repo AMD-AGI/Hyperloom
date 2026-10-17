@@ -10,7 +10,8 @@ needs are checked before anything is created, so a missing one fails the command
 behind: the Recipe KB that PRELUDE reads warm-start leads from and CLOSE writes the final recipe back to is
 configured by ``KB_STORE_URL`` and ``KB_STORE_TOKEN``, both or neither, and is not used without them; the RSI archive
 defaults to :data:`RSI_ARCHIVE_DEFAULT`, set in this process's environment for every reader of it, and must be a
-writable directory; the measurement pins must be readable; and the agent CLI the specialists run must be installed.
+writable directory; the measurement pins must be readable; the framework's package must be installed in the image;
+and the agent CLI the specialists run must be installed.
 A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
 :data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_EXPERIENCE_KB`).
 """
@@ -191,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         recipe_kb = recipe_kb_from_env()
         require_rsi_archive(os.environ)
-        peer_factory = load_peers()
+        peer_factory = load_peers(settings.workload)
     except (EnvironmentIncomplete, PeersUnavailable) as exc:
         print(f"{PROG}: cannot run a session, {exc}", file=sys.stderr)
         return EXIT_FAILED

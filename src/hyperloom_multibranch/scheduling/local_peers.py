@@ -15,8 +15,9 @@ rule gate that asks the scheduler's fork desk for branches, and the MCP service'
 ``decline_repair`` conclude a blocked candidate through the same gate. The runtime's specialist sessions come from
 a :data:`SpecialistSessions`: :func:`model_backed_sessions` runs each branch's specialist as an agent CLI in a
 worktree of its own, briefed by the session's :class:`SessionBriefs`, whose warm-start leads the session binds once
-PRELUDE has read them. :func:`load_peers` reads the measurement host and resolves that CLI first, and refuses when
-either cannot be had, so the command line fails before it creates anything.
+PRELUDE has read them. :func:`load_peers` reads the measurement host, checks the image holds the framework package
+those worktrees branch off and resolves that CLI first, and refuses when any cannot be had, so the command line fails
+before it creates anything.
 
 The toolbox, its measurement points and the agent sessions load the main flow's runtime, so they are imported inside
 the functions that use them: importing this module, the command line or the session loads none of it.
@@ -264,6 +265,21 @@ def specialist_command(env: Mapping[str, str]) -> AgentCommand:
     return AgentCommand(backend, executable, model)
 
 
+def require_framework_package(framework: str) -> None:
+    """Check that the image holds the installed package the specialists' worktrees of ``framework`` branch off;
+    raises :class:`PeersUnavailable` when ``framework`` has no package layout or its package cannot be a base."""
+
+    from hyperloom.measure.compile import COMPONENT_LAYOUTS, UnsupportedComponentError, locate_installed_package
+
+    layout = COMPONENT_LAYOUTS.get(framework)
+    if layout is None:
+        raise PeersUnavailable(f"the framework {framework} has no package layout the specialists' worktrees can use")
+    try:
+        locate_installed_package(layout)
+    except UnsupportedComponentError as exc:
+        raise PeersUnavailable(f"the {framework} source the specialists change cannot be laid out: {exc}") from exc
+
+
 def _specialist_role(workload: Workload) -> str:
     """The workload as the specialists' role prompt names it."""
 
@@ -310,13 +326,15 @@ def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
     return build
 
 
-def load_peers() -> PeerFactory:
-    """The factory of a session's real peers; raises :class:`PeersUnavailable` when this machine cannot run them.
+def load_peers(workload: Workload) -> PeerFactory:
+    """The factory of the real peers of a session of ``workload``; raises :class:`PeersUnavailable` when this machine
+    cannot run them.
 
     It creates nothing, so the command line calls it before the session directory exists.
     """
 
     host = measurement_host(os.environ)
+    require_framework_package(workload.framework)
     return partial(local_peers, host, model_backed_sessions(specialist_command(os.environ)))
 
 
@@ -334,6 +352,7 @@ __all__ = [
     "mb_fake_active_image",
     "measurement_host",
     "model_backed_sessions",
+    "require_framework_package",
     "specialist_command",
     "workload_environment",
 ]
