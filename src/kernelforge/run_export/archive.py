@@ -191,14 +191,20 @@ class IterationArchive:
     def fields(
         self, origin: CandidateOrigin | None, meta: dict[str, Any] | None, plan_file: Path | None
     ) -> dict[str, Any]:
-        """The unit fields the archive holds: the plan, the baseline time, the PLAN headline, the kernel, the lesson."""
+        """The unit fields the archive holds: the plan, the baseline time, the PLAN headline, the kernel, the lesson.
+
+        The baseline time is the pristine one the run's state records, which every score divides by. ``meta.json``
+        holds the time of the kernel the search started from, which is the same unless the run was given
+        ``--baseline-json``, so it stands in only for a run state that records none.
+        """
 
         fields: dict[str, Any] = {}
         if plan_file is not None:
             fields["plan_file"] = str(plan_file.resolve())
             fields["plan"] = plan_text(read_text(plan_file))
         if meta is not None:
-            fields["source_ms"] = meta.get("baseline_wall_ms")
+            pristine = (read_json(self.experiments / "run_state.json") or {}).get("pristine_baseline_wall_ms")
+            fields["source_ms"] = pristine if pristine is not None else meta.get("baseline_wall_ms")
             headline = str(meta.get("plan") or "").strip()
             if origin is CandidateOrigin.SESSION and headline and "\n" not in headline:
                 fields["approach"] = headline
@@ -220,10 +226,11 @@ class IterationArchive:
         return files + [path for path in (self.handoff, self.lesson) if path.is_file()]
 
     def sessions(self, plan_file: Path | None, transcripts: Iterable[Transcript]) -> list[Transcript]:
-        """The transcripts of the sessions told to keep ``plan_file``'s reasoning log.
+        """Of this run's ``transcripts``, those of the sessions told to keep ``plan_file``'s reasoning log.
 
         A prompt names the log by the absolute path it had where the session ran, which for a run made in a container
-        is not the path it has here, so the log is matched by its path from the workspace's own directory on.
+        is not the path it has here, so the log is matched by its path from the workspace's own directory on. Another
+        run's workspace of the same name would match too, so ``transcripts`` must hold only this run's.
         """
 
         if plan_file is None:

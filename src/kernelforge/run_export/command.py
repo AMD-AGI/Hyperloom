@@ -11,6 +11,18 @@ from pathlib import Path
 import click
 
 
+def _unreadable(error: OSError) -> str:
+    """What to tell the user about a file under the log roots the export could not read."""
+
+    message = f"cannot read {error.filename or 'a file under the log roots'}: {error.strerror or error}"
+    if isinstance(error, PermissionError):
+        message += (
+            ". Files written in a container may be owned by root: fix their ownership, for example with chown, "
+            "or move them out of the log root, then export again"
+        )
+    return message
+
+
 @click.command()
 @click.argument(
     "log_roots",
@@ -34,8 +46,14 @@ def export_runs(log_roots: tuple[Path, ...], output: Path) -> None:
     """
 
     from kernelforge.run_export.document import normalize
+    from kernelforge.run_export.forge_loop import AmbiguousOwnership
 
-    document = normalize(log_roots)
+    try:
+        document = normalize(log_roots)
+    except AmbiguousOwnership as error:
+        raise click.ClickException(str(error)) from error
+    except OSError as error:
+        raise click.ClickException(_unreadable(error)) from error
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     click.echo(f"wrote {len(document['runs'])} runs to {output}")

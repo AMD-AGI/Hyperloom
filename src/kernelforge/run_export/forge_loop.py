@@ -8,9 +8,14 @@ The run is a workspace's ``forge_experiments/`` directory, recognized by its ``c
 is a unit: seq N, the candidate iteration N measured and Kernel Forge's decision on it, under the run's
 ``campaign_id`` as ``run_id``. The forge-loop's stdout log has no timestamps, so a unit's times come from the run's
 ``events.jsonl``, and the log is read only for the Implementer it names and the record of Kernel Forge's own
-experience KB each kept candidate was written as. A log belongs to the run whose kernel it announces. A Claude Code
-transcript under the log root belongs to the unit whose plan's reasoning log its first prompt tells the session to
-keep; the transcript is how a lane's PLAN headline is known, since the lane's ``meta.json`` holds its whole plan.
+experience KB each kept candidate was written as.
+
+A log, and a Claude Code transcript under the log root, belong to the run whose workspace path shares the most trailing
+components with the path they name: the kernel the log announces, and the reasoning log the transcript's first prompt
+tells the session to keep. Those are the paths the run had where it was made, so a run made in a container is still
+found, and a path two runs fit equally stops the export rather than giving both runs the evidence. Within its run, a
+transcript belongs to the unit whose plan's reasoning log it names; the transcript is how a lane's PLAN headline is
+known, since the lane's ``meta.json`` holds its whole plan.
 
 Kernel Forge writes naive local times, and the units carry them as it wrote them; collection reads a naive time as
 UTC. That is right for a run made in a container, which normally runs in UTC, and shifts the times of a run made on a
@@ -22,7 +27,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from kernelforge.loop.merge_candidates import MERGE_PLAN_PREFIX
@@ -68,11 +73,65 @@ class _LoopLog:
     implementer: dict[str, str]
     kb_records: dict[int, str]
 
-    def announces(self, workspace: Path, kernel_path: str) -> bool:
-        """Whether a run of this log edited ``kernel_path`` in a workspace of this name, wherever it then was."""
 
-        suffix = f"/{workspace.name}/{kernel_path}"
-        return bool(kernel_path) and any(kernel.strip().endswith(suffix) for kernel in self.kernels)
+class AmbiguousOwnership(Exception):
+    """A log or a transcript names a path that fits more than one run's workspace equally well."""
+
+
+def _shared_tail(named: tuple[str, ...], workspace: Path) -> int:
+    """How many of ``workspace``'s trailing path components ``named`` ends with."""
+
+    shared = 0
+    for mine, theirs in zip(reversed(named), reversed(workspace.parts)):
+        if mine != theirs:
+            break
+        shared += 1
+    return shared
+
+
+def _owner(evidence: Path, named: str, candidates: dict[Path, tuple[str, ...]]) -> Path | None:
+    """The ``forge_experiments`` directory of the run that ``evidence``, which names the path ``named``, belongs to.
+
+    ``candidates`` maps each run it can belong to onto the workspace ``named`` would put that run in, and the run whose
+    workspace shares the most trailing components with it owns it.
+    """
+
+    scores = {experiments: _shared_tail(workspace, experiments.parent) for experiments, workspace in candidates.items()}
+    best = max(scores.values(), default=0)
+    owners = sorted(experiments for experiments, score in scores.items() if score == best) if best else []
+    if len(owners) > 1:
+        workspaces = " and ".join(str(owner.parent) for owner in owners)
+        raise AmbiguousOwnership(
+            f"{evidence} names {named}, which fits the runs in {workspaces} equally well; "
+            "export them from separate log roots"
+        )
+    return owners[0] if owners else None
+
+
+def _log_owners(log: _LoopLog, kernel_paths: dict[Path, str]) -> set[Path]:
+    """The runs whose kernel ``log`` announces; ``kernel_paths`` holds each run's kernel path in its workspace."""
+
+    inners = {experiments: PurePosixPath(path).parts for experiments, path in kernel_paths.items() if path}
+    owners: set[Path] = set()
+    for kernel in log.kernels:
+        named = PurePosixPath(kernel.strip()).parts
+        candidates = {
+            experiments: named[: -len(inner)] for experiments, inner in inners.items() if named[-len(inner) :] == inner
+        }
+        owner = _owner(log.path, kernel.strip(), candidates)
+        if owner is not None:
+            owners.add(owner)
+    return owners
+
+
+def _transcript_owner(transcript: Transcript, runs: list[Path]) -> Path | None:
+    """The run whose reasoning log the transcript's session was told to keep; None for a session told of none."""
+
+    named = PurePosixPath(transcript.reasoning_log or "").parts
+    if _EXPERIMENTS not in named:
+        return None
+    workspace = named[: len(named) - 1 - named[::-1].index(_EXPERIMENTS)]
+    return _owner(transcript.path, str(transcript.reasoning_log), dict.fromkeys(runs, workspace))
 
 
 def _kb_records(text: str) -> dict[int, str]:
@@ -97,10 +156,7 @@ def _loop_logs(records: list[FileRecord], claimed: set[Path]) -> list[_LoopLog]:
     for record in records:
         if record.path.suffix != ".log" or record.size == 0 or record.path in claimed:
             continue
-        try:
-            text = read_text(record.path)
-        except OSError:
-            continue
+        text = read_text(record.path)
         if _LOOP_BANNER not in text:
             continue
         implementer = _IMPLEMENTER_LINE.search(text)
@@ -217,12 +273,12 @@ class _PlainRun:
 def _run_units(
     experiments: Path, logs: list[_LoopLog], transcripts: list[Transcript], root: Path
 ) -> list[dict[str, Any]]:
+    """The units of one run, given the logs and transcripts that belong to it."""
+
     workspace = experiments.parent
     config = read_json(experiments / _CONFIG)
     state = read_json(experiments / _STATE)
-    kernel_path = str((config or {}).get("kernel_path") or "")
-    run_logs = [log for log in logs if log.announces(workspace, kernel_path)]
-    files = [log.path for log in run_logs] + [experiments / _CONFIG, experiments / _STATE]
+    files = [log.path for log in logs] + [experiments / _CONFIG, experiments / _STATE]
     campaign_id = str((state or {}).get("campaign_id") or "")
     if config is None or not campaign_id:
         problem = f"{_CONFIG} is not a readable JSON object" if config is None else f"{_STATE} names no campaign_id"
@@ -235,9 +291,9 @@ def _run_units(
         label=workspace.name,
         run_id=campaign_id,
         identity=campaign_identity(config),
-        provenance=next((log.implementer for log in run_logs if log.implementer), {}),
+        provenance=next((log.implementer for log in logs if log.implementer), {}),
     )
-    kb_records = {seq: record for log in run_logs for seq, record in log.kb_records.items()}
+    kb_records = {seq: record for log in logs for seq, record in log.kb_records.items()}
     plain = _PlainRun(run, experiments, files, times, kb_records, root, transcripts)
     candidates = experiments / "candidates"
     numbers = sorted(
@@ -248,19 +304,50 @@ def _run_units(
     return [plain.candidate_unit(seq) for seq in numbers]
 
 
+def _logs_by_run(logs: list[_LoopLog], runs: list[Path]) -> dict[Path, list[_LoopLog]]:
+    """Each run's forge-loop logs: those announcing its kernel."""
+
+    kernel_paths = {
+        experiments: str((read_json(experiments / _CONFIG) or {}).get("kernel_path") or "") for experiments in runs
+    }
+    owned: dict[Path, list[_LoopLog]] = {experiments: [] for experiments in runs}
+    for log in logs:
+        for owner in _log_owners(log, kernel_paths):
+            owned[owner].append(log)
+    return owned
+
+
+def _transcripts_by_run(transcripts: list[Transcript], runs: list[Path]) -> dict[Path, list[Transcript]]:
+    """Each run's transcripts: those of the sessions told to keep a reasoning log in its workspace."""
+
+    owned: dict[Path, list[Transcript]] = {experiments: [] for experiments in runs}
+    for transcript in transcripts:
+        owner = _transcript_owner(transcript, runs)
+        if owner is not None:
+            owned[owner].append(transcript)
+    return owned
+
+
 def forge_loop_runs(records: list[FileRecord], claimed: set[Path], root: Path) -> list[dict[str, Any]]:
     """The units of every plain forge-loop run under ``root`` whose files no arena layout claimed."""
 
     runs = _experiments_dirs(records, claimed, root)
     if not runs:
         return []
-    logs = _loop_logs(records, claimed)
-    transcripts = sorted(
-        (
-            read_transcript(record.path)
-            for record in records
-            if is_transcript(record.path) and record.path not in claimed
+    logs = _logs_by_run(_loop_logs(records, claimed), runs)
+    transcripts = _transcripts_by_run(
+        sorted(
+            (
+                read_transcript(record.path)
+                for record in records
+                if is_transcript(record.path) and record.path not in claimed
+            ),
+            key=lambda transcript: (transcript.started, str(transcript.path)),
         ),
-        key=lambda transcript: (transcript.started, str(transcript.path)),
+        runs,
     )
-    return [unit for experiments in runs for unit in _run_units(experiments, logs, transcripts, root)]
+    return [
+        unit
+        for experiments in runs
+        for unit in _run_units(experiments, logs[experiments], transcripts[experiments], root)
+    ]

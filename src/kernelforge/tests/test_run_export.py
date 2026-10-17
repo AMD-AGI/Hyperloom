@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from hyperloom_kb.collect import collect
 from kernelforge.cli import main
 from kernelforge.orchestrator.summary_line import reasoning_log_section
 from kernelforge.run_export.document import normalize
+from kernelforge.run_export.forge_loop import AmbiguousOwnership
 
 CAMPAIGN = "5f1c0a9e2b7d4c38a6e0f1b2c3d4e5f6"
 WORKSPACE = "forge_loop_triton_softmax_1760500000"
@@ -291,6 +293,27 @@ def test_a_merge_is_named_by_its_stacked_plans_and_dated_by_its_archive(tmp_path
     assert "reasoning" not in unit and "plan_file" not in unit
 
 
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [
+        pytest.param({"pristine_baseline_wall_ms": 0.104}, 0.104, id="pristine-recorded"),
+        pytest.param({}, 0.052, id="no-pristine"),
+    ],
+)
+def test_source_ms_is_the_pristine_baseline_every_score_divides_by(
+    tmp_path: Path, state: dict[str, Any], expected: float
+) -> None:
+    """A run given --baseline-json archives the time of the kernel its search started from in each meta.json; its
+    run state keeps the original kernel's time, which every score is relative to."""
+
+    experiments = _plain_run(tmp_path)
+    _write_json(experiments / "run_state.json", {"campaign_id": CAMPAIGN, "iteration": 3, **state})
+
+    units = _units(tmp_path)
+
+    assert {units[f"{WORKSPACE}/iteration-{seq}"]["source_ms"] for seq in (1, 2, 3)} == {expected}
+
+
 def test_each_log_attaches_to_the_run_whose_kernel_it_announces(tmp_path: Path) -> None:
     _plain_run(tmp_path / "a", name="softmax-a", campaign_id="campaign-a")
     _plain_run(tmp_path / "b", name="softmax-b", campaign_id="campaign-b")
@@ -303,6 +326,52 @@ def test_each_log_attaches_to_the_run_whose_kernel_it_announces(tmp_path: Path) 
     assert (first["run_id"], first["provenance"]["llm_model"]) == ("campaign-a", "Claude-Sonnet-5")
     assert (second["run_id"], second["provenance"]["llm_backend"]) == ("campaign-b", "codex")
     assert str(log_a.resolve()) in first["log_files"] and str(log_b.resolve()) not in first["log_files"]
+
+
+def test_runs_whose_workspaces_share_a_name_keep_their_own_logs_and_transcripts(tmp_path: Path) -> None:
+    """Both runs' workspaces are ``ws``, and their logs and transcripts name the paths the run directories had in a
+    container, so only the run directory tells their evidence apart."""
+
+    models = {"a": "Claude-Opus-5", "b": "Claude-Sonnet-5"}
+    for run, model in models.items():
+        _plain_run(tmp_path / run, name="ws", campaign_id=f"campaign-{run}")
+        _loop_log(tmp_path / run / "forge-loop.log", f"{run}/ws", implementer=f"claude / {model}")
+        _transcript(
+            tmp_path / run / PROJECTS / f"-home-someone-kernelforge-runs-softmax-2h-{run}-ws" / "session.jsonl",
+            _implementer_prompt(_container_log("optimization_plan", workspace=f"{run}/ws")),
+            f"PLAN: Fuse the passes in run {run}",
+        )
+
+    units = {(unit["run_id"], unit["seq"]): unit for unit in normalize([tmp_path])["runs"]}
+
+    for run, model in models.items():
+        unit = units[(f"campaign-{run}", 1)]
+        (other,) = set(models) - {run}
+        assert (unit["provenance"]["llm_model"], unit["approach"]) == (model, f"Fuse the passes in run {run}")
+        assert str((tmp_path / run / "forge-loop.log").resolve()) in unit["log_files"]
+        assert not [path for path in unit["log_files"] if path.startswith(str((tmp_path / other).resolve()))]
+
+
+@pytest.mark.parametrize("evidence", ["log", "transcript"])
+def test_evidence_two_runs_fit_equally_stops_the_export_naming_both(tmp_path: Path, evidence: str) -> None:
+    """The path names only the workspace ``ws``, which both runs have, so it cannot be given to either."""
+
+    for run in ("a", "b"):
+        _plain_run(tmp_path / run, name="ws", campaign_id=f"campaign-{run}")
+    if evidence == "log":
+        named = _loop_log(tmp_path / "forge-loop.log", "ws")
+    else:
+        named = _transcript(
+            tmp_path / PROJECTS / "-work-ws" / "session.jsonl",
+            _implementer_prompt("/work/ws/forge_experiments/orchestration/iter_001/optimization_plan.reasoning.md"),
+            "PLAN: Fuse the passes",
+        )
+
+    with pytest.raises(AmbiguousOwnership) as caught:
+        normalize([tmp_path])
+
+    assert str(named) in str(caught.value)
+    assert all(str(tmp_path / run / "ws") in str(caught.value) for run in ("a", "b"))
 
 
 def test_only_a_kept_candidate_carries_the_kb_record_its_iteration_wrote(tmp_path: Path) -> None:
@@ -518,6 +587,45 @@ def test_export_runs_names_runs_by_their_workspace_from_a_relative_root(
     assert result.exit_code == 0, result.output
     runs = json.loads((tmp_path / "runs.json").read_text(encoding="utf-8"))["runs"]
     assert [run["unit_id"] for run in runs] == [f"{WORKSPACE}/iteration-{seq}" for seq in (1, 2, 3)]
+
+
+@pytest.mark.parametrize("unreadable", ["transcript", "plan", "log"])
+def test_export_runs_stops_naming_a_file_it_cannot_read(tmp_path: Path, unreadable: str) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root reads every file whatever its mode")
+    logs = tmp_path / "logs"
+    experiments = _plain_run(logs)
+    files = {
+        "transcript": _transcript(logs / PROJECTS / "-work-session" / "session.jsonl", "Plan the round."),
+        "plan": experiments / "orchestration" / "iter_001" / "optimization_plan.md",
+        "log": _loop_log(logs / "forge-loop.log", WORKSPACE),
+    }
+    path = files[unreadable]
+    output = tmp_path / "runs.json"
+    path.chmod(0)
+    try:
+        result = CliRunner().invoke(main, ["export-runs", str(logs), "-o", str(output)])
+    finally:
+        path.chmod(0o644)
+
+    assert result.exit_code == 1
+    assert f"Error: cannot read {path}: Permission denied." in result.output
+    assert "chown" in result.output
+    assert not output.exists()
+
+
+def test_export_runs_stops_on_a_log_two_runs_fit_equally(tmp_path: Path) -> None:
+    logs = tmp_path / "logs"
+    for run in ("a", "b"):
+        _plain_run(logs / run, name="ws", campaign_id=f"campaign-{run}")
+    log = _loop_log(logs / "forge-loop.log", "ws")
+    output = tmp_path / "runs.json"
+
+    result = CliRunner().invoke(main, ["export-runs", str(logs), "-o", str(output)])
+
+    assert result.exit_code == 1
+    assert f"Error: {log} names" in result.output and "export them from separate log roots" in result.output
+    assert not output.exists()
 
 
 def test_export_runs_refuses_a_missing_root_or_output(tmp_path: Path) -> None:
