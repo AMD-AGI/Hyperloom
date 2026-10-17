@@ -273,23 +273,9 @@ Without the explicit mode, local/default ignores both credentials. Set
 
 The implicit local root changed from `$USER_DATA_PATH/kb` (or
 `/workspace/hyperloom/kb`) to `$USER_DATA_PATH/knowledge` (or
-`~/.cache/hyperloom/knowledge`). Upgrade local deployments in this order:
-
-1. Stop every old Hyperloom process that can write the legacy Recipe KB.
-2. Back up the legacy root, including `recipe.json`, `history/`, and
-   `attempts.ndjson`.
-3. Install the new revision while leaving `KNOWLEDGE_LOCAL_ROOT`,
-   `--local-kb-root`, and `HYPERLOOM_LOCAL_KB_ROOT` unset for the first start.
-4. Start one new local-mode process. It migrates the Recipe corpus once,
-   excludes live lock/temp files, preserves unrelated data already under the
-   new knowledge root, and writes a durable marker only after success.
-5. Verify warm-start data, then roll out the remaining new processes.
-
-If the destination already contains Recipes or the completion marker,
-migration is intentionally skipped. A migration error while legacy Recipes
-exist fails startup; restore from the backup or correct permissions and retry.
-Deployments that explicitly keep `--local-kb-root` or
-`HYPERLOOM_LOCAL_KB_ROOT` continue using that path and are not migrated.
+`~/.cache/hyperloom/knowledge`). Data under the old root is neither read nor
+migrated; `--local-kb-root` and `HYPERLOOM_LOCAL_KB_ROOT` are removed, so use
+`KNOWLEDGE_LOCAL_ROOT` to select a root.
 
 ---
 
@@ -309,9 +295,7 @@ For any minor or patch upgrade:
    verify `manifest.json` and `state.json` are intact, then run
    `python -m hyperloom optimize --resume-from "$SESSION_DIR"`.
 
-Upgrades do not rewrite explicit `HYPERLOOM_LOCAL_KB_ROOT` paths or historical
-sessions. The one-time implicit Recipe-root migration described above is the
-only automatic storage move.
+Upgrades do not move storage or rewrite historical sessions.
 
 ---
 
