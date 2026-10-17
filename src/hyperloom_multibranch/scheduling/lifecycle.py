@@ -63,6 +63,7 @@ from hyperloom_multibranch.scheduling.stops import (
     StopReport,
     StopSignals,
 )
+from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
 from hyperloom_multibranch.scheduling.widening import Widening
 from hyperloom_multibranch.specialist.prompts import prompt_versions
 
@@ -164,7 +165,8 @@ class Session:
         )
         judge = Judge(services.judge_completion, layout.judge, clock)
         widening = Widening(peers.toolbox, self._roster, progress.policy)
-        steering = Steering(judge, settings.judge_interval_seconds, progress, dashboard, widening)
+        similarity = BranchSimilarity(peers.repo, self._roster)
+        steering = Steering(judge, settings.judge_interval_seconds, progress, dashboard, widening, similarity)
         self._explorer = Explorer(context, self._branches, integrator, steering, peers.split_landing)
         self._selector = FinalSelector(tests, peers.gate, settings.workload, PRIMARY_METRIC, clock)
         sources = ExportSources(self._notebook, peers.repo, blobs, dashboard)

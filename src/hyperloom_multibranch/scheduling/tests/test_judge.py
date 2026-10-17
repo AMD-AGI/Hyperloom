@@ -38,6 +38,7 @@ from hyperloom_multibranch.scheduling.roster import (
     RosterCaps,
     StopCause,
 )
+from hyperloom_multibranch.scheduling.similarity import SimilarBranch
 from hyperloom_multibranch.scheduling.widening import WideningSignals
 
 METRIC = "output_throughput"
@@ -77,6 +78,7 @@ def _view(
     pending: tuple[PendingBranch, ...] = (),
     history: str = "",
     widening: WideningSignals = WIDENING,
+    similar_to: dict[str, tuple[SimilarBranch, ...]] | None = None,
 ) -> JudgeView:
     return JudgeView(
         now=NOW,
@@ -105,7 +107,19 @@ def _view(
         pending=pending,
         history=history,
         widening=widening,
+        similar_to=similar_to or {},
     )
+
+
+def test_a_branch_row_lists_its_similar_branches_and_the_prompt_says_which_twin_to_stop() -> None:
+    twins = {"b01": (SimilarBranch("b02", 1.0, identical=True),), "b02": (SimilarBranch("b01", 1.0, identical=True),)}
+
+    rows = {row["branch"]: row for row in _state(_view(similar_to=twins))["branches"]}
+
+    assert rows["b01"]["similar_to"] == [{"branch": "b02", "score": 1.0, "identical": True}]
+    assert rows[INTEGRATION_BRANCH]["similar_to"] == []
+    assert "similar_to" in JUDGE_SYSTEM_PROMPT and "identical" in JUDGE_SYSTEM_PROMPT
+    assert "stop the one of the pair with the lower expected_gain_pct" in " ".join(JUDGE_SYSTEM_PROMPT.split())
 
 
 def _reply(payload: object) -> str:

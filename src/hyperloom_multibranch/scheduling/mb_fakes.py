@@ -24,7 +24,6 @@ from hyperloom_multibranch.notebook.rsi.session import (
     KnowledgeClose,
     close_knowledge,
 )
-from hyperloom_multibranch.scheduling.roster import Roster
 
 #: Stands in for the image digest of the machine a session runs on while whoever launches the session does not name
 #: it (``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST``, board #8); replaced by
@@ -56,16 +55,6 @@ async def mb_fake_settle_voided(branch: str, reason: str) -> None:
     """
 
     del branch, reason
-
-
-def mb_fake_similar_branches(roster: Roster) -> tuple[str, ...]:
-    """Branches to stop because they duplicate another: always none.
-
-    Stands in for the MB2 similarity stop; replaced when MB2 compares branch trajectories.
-    """
-
-    del roster
-    return ()
 
 
 def mb_fake_regression_passes(commit: str) -> bool:
@@ -117,5 +106,4 @@ __all__ = [
     "mb_fake_learning_recall",
     "mb_fake_regression_passes",
     "mb_fake_settle_voided",
-    "mb_fake_similar_branches",
 ]

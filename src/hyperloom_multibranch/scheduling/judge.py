@@ -4,8 +4,8 @@
 """The judge: an LLM that, inside the scheduler's hard caps, decides the branches' K, what to open and the stops.
 
 The scheduler hands the judge a :class:`JudgeView` (the roster, each branch's frontier progress, the remaining budget,
-the integration branch's recorded value, how similar archived sessions went and whether a branch opened now would
-still pay off). The judge answers with one JSON object, which :func:`parse_decision`
+the integration branch's recorded value, how similar archived sessions went, whether a branch opened now would
+still pay off and which running branches made much the same change). The judge answers with one JSON object, which :func:`parse_decision`
 reads and :func:`cap_decision` cuts to the caps and to the branches that are still live. A failed call or an
 unreadable reply gives ``None``, and the scheduler keeps the status quo. The judge never calls a peer; the scheduler
 applies its decision.
@@ -26,6 +26,7 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.forks import PendingBranch
 from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, RosterCaps
+from hyperloom_multibranch.scheduling.similarity import SimilarBranch
 from hyperloom_multibranch.scheduling.widening import WideningSignals
 from hyperloom_multibranch.specialist.prompts import VERSION_HEX
 
@@ -57,6 +58,10 @@ observing a slow-paying direction is a candidate to stop or to lower K; keep K w
 A branch's basis says what its expected gain rests on: its own trend, a prior from similar past sessions, the floor
 of a direction still being observed, the floor of a branch too new to have a trend, or the roofline headroom that
 capped it; trust a measured trend over a floor.
+A branch's similar_to lists the other running branches whose own change since their start commit is much the same as
+its own, with score the share of the two changes they have in common. identical is true when both heads hold the same
+recipe: two branches marked identical spend twice the budget on one result, so stop the one of the pair with the
+lower expected_gain_pct. A similar pair that is not identical is yours to weigh.
 Before opening a branch, weigh whether it would still pay off. min_useful_seconds is the least EXPLORE time a branch
 opened now needs to show a trend: the frontier's trend window, or its specialist's start-up plus the sandbox cold
 starts its first tests wait through, when that is longer. cold_start is the recent sandbox cold start in seconds, or
@@ -90,7 +95,8 @@ class JudgeView:
     ``free_slots`` is the roster's own count of branches that may still be opened; ``pending`` are the forks and
     repairs the fork desk queued for a slot, oldest first; ``history`` is the notebook's
     digest of similar archived sessions, empty when the archive holds none. ``widening`` says whether a branch
-    opened now would still pay off.
+    opened now would still pay off. ``similar_to`` maps a branch to the running branches whose own change is much the
+    same as its own; a branch similar to none is not in it.
     """
 
     now: float
@@ -107,6 +113,7 @@ class JudgeView:
     pending: tuple[PendingBranch, ...]
     history: str
     widening: WideningSignals
+    similar_to: Mapping[str, tuple[SimilarBranch, ...]]
 
 
 @dataclass(frozen=True)
@@ -169,7 +176,9 @@ def _progress_row(progress: BranchProgress | None) -> dict[str, object]:
     return row
 
 
-def _branch_row(entry: BranchEntry, progress: BranchProgress | None) -> dict[str, object]:
+def _branch_row(
+    entry: BranchEntry, progress: BranchProgress | None, similar: tuple[SimilarBranch, ...]
+) -> dict[str, object]:
     row: dict[str, object] = {
         _KEY_BRANCH: entry.branch,
         "kind": entry.kind.value,
@@ -178,6 +187,7 @@ def _branch_row(entry: BranchEntry, progress: BranchProgress | None) -> dict[str
         "from_branch": entry.from_branch,
         "start_commit": entry.start_commit,
         "k": entry.k,
+        "similar_to": [asdict(item) for item in similar],
     }
     if entry.stop is not None:
         row["stopped"] = entry.stop.summary
@@ -219,7 +229,10 @@ def render_prompt(view: JudgeView) -> str:
             "roofline_ceiling": dict(view.roofline_ceiling),
             "headroom_pct": _headroom_pct(view),
         },
-        _KEY_BRANCHES: [_branch_row(entry, progress.get(entry.branch)) for entry in view.roster],
+        _KEY_BRANCHES: [
+            _branch_row(entry, progress.get(entry.branch), view.similar_to.get(entry.branch, ()))
+            for entry in view.roster
+        ],
     }
     history = f"How similar past sessions went:\n{view.history}\n\n" if view.history else ""
     return f"Session state:\n{json.dumps(state, indent=2, sort_keys=True)}\n\n{history}{_REPLY_FORMAT}"

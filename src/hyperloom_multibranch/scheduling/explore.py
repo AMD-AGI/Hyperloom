@@ -3,19 +3,19 @@
 
 """EXPLORE: open the opening batch, then let the judge steer the branches until the EXPLORE deadline or a soft stop.
 
-The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it stops the repair branches that used up their time, moves the
-forks and repairs queued on the fork desk onto the free slots, lands each admitted fork through the split landing and
-starts the admitted forks and repairs, consults the MB2 placeholders, and every judge interval asks the judge,
-applies what it decided and rebuilds the dashboard. A slot the judge's stops free goes to the queued requests first and
-only then to the branches the judge opens. The judge is asked at once, not at its next interval, when the scheduler
-itself frees a slot: a repair branch stopped at its time limit, a fork the gate did not land, or an admitted fork or
-repair that failed to start. A branch the judge opens after the opening batch starts from the integration head,
-briefed on a focus. The judge reads the frontier-scored progress and how similar archived sessions went; a judge call
-that has not answered by the EXPLORE deadline counts as failed, and a branch that has not opened by then is withdrawn,
-so neither eats into FINAL. The integrator merges in a background task of its own, in rounds as wide as the
-integration branch's K. When EXPLORE ends that task is cancelled and the integrator abandons its round, so the
-integration head the FINAL candidates are read from no longer moves and no merge test competes with FINAL's
-measurements.
+The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it stops the repair branches that used up their time, moves the forks
+and repairs queued on the fork desk onto the free slots, lands each admitted fork through the split landing and starts
+the admitted forks and repairs, and every judge interval asks the judge, applies what it decided and rebuilds the
+dashboard. A slot the judge's stops free goes to the queued requests first and only then to the branches the judge
+opens. The judge is asked at once, not at its next interval, when the scheduler itself frees a slot: a repair branch
+stopped at its time limit, a fork the gate did not land, or an admitted fork or repair that failed to start. A branch
+the judge opens after the opening batch starts from the integration head, briefed on a focus. The judge reads the
+frontier-scored progress, how similar archived sessions went and which running branches made much the same change, and
+decides what to stop; a judge call that has not answered by the EXPLORE deadline counts as failed, and a branch that has
+not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background task of its own, in
+rounds as wide as the integration branch's K. When EXPLORE ends that task is cancelled and the integrator abandons its
+round, so the integration head the FINAL candidates are read from no longer moves and no merge test competes with
+FINAL's measurements.
 """
 
 from __future__ import annotations
@@ -36,10 +36,11 @@ from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
 from hyperloom_multibranch.scheduling.integrator import Integrator
 from hyperloom_multibranch.scheduling.judge import Judge, JudgeDecision, JudgeView
-from hyperloom_multibranch.scheduling.mb_fakes import MbFakeSplitLanding, mb_fake_similar_branches
+from hyperloom_multibranch.scheduling.mb_fakes import MbFakeSplitLanding
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchOrigin, BranchStop, StopCause
 from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC
 from hyperloom_multibranch.scheduling.settle import failure_text, settled
+from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.scheduling.widening import Widening, refill_focus
 
@@ -47,7 +48,6 @@ logger = logging.getLogger(__name__)
 
 #: How often the loop starts admitted forks and repairs and checks the deadline; the judge runs on its own, longer interval.
 EXPLORE_TICK_SECONDS = 5.0
-SIMILAR_BRANCH_REASON = "duplicates another branch"
 OPEN_CUT_REASON = "branch slots taken"
 FORK_NOT_LANDED = "the rule gate did not land the fork"
 
@@ -68,13 +68,15 @@ class ExploreWindow:
 class Steering:
     """How the judge steers EXPLORE: the judge, how often it is asked, the frontier-scored progress it reads, against
     the archived sessions that progress holds, the dashboard rebuilt once the opening batch is open and after every
-    later judge call, and the signals of whether a branch opened now would still pay off."""
+    later judge call, the signals of whether a branch opened now would still pay off, and which running branches made
+    much the same change."""
 
     judge: Judge
     interval_seconds: float
     progress: FrontierScoring
     dashboard: SessionDashboard
     widening: Widening
+    similarity: BranchSimilarity
 
 
 def integration_row(progress: tuple[BranchProgress, ...]) -> BranchProgress | None:
@@ -106,6 +108,7 @@ class Explorer:
         self._interval = steering.interval_seconds
         self._clock = context.clock
         self._widening = steering.widening
+        self._similarity = steering.similarity
 
     async def run(self, window: ExploreWindow) -> SessionStopReason:
         """Explore until the deadline or the judge's soft stop; the integrator is stopped before this returns.
@@ -140,7 +143,6 @@ class Explorer:
             self._desk.fill_free_slots()
             if await self._start_admitted(window.explore_end) or overrun:
                 next_judge = now
-            await self._consult_placeholders()
             if now >= next_judge:
                 next_judge = now + self._interval
                 decision = await self._ask(window, opening=False)
@@ -185,10 +187,6 @@ class Explorer:
             return failure_text(landed)
         return "" if landed else FORK_NOT_LANDED
 
-    async def _consult_placeholders(self) -> None:
-        for branch in mb_fake_similar_branches(self._roster):
-            await self._stop(branch, SIMILAR_BRANCH_REASON)
-
     async def _refill(self, window: ExploreWindow) -> BatchStart:
         """Where the branches a steering judge call opens start: the integration head, which no judge stop moves."""
 
@@ -218,6 +216,7 @@ class Explorer:
                 budget_seconds=window.budget_seconds,
             ),
             widening=await self._widening.signals(),
+            similar_to=await self._similarity.similar_to(),
         )
         try:
             decision = await self._clock.wait_for(self._judge.decide(view), window.explore_end - now)
