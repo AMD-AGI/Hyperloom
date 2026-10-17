@@ -16,6 +16,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+# Re-exported: callers and tests import them from this module.
+from .aiter_script_map import resolve_aiter_csrc, resolve_aiter_root  # noqa: F401
+
 log = logging.getLogger(__name__)
 
 

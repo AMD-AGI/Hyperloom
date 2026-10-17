@@ -11,8 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .base import BaseTuner, TuneResult, micro_metrics
-from ..aiter_script_map import resolve_aiter_root
-from ..utils import find_tuner_script, run_subprocess, TUNER_ENV_VARS
+from ..utils import find_tuner_script, resolve_aiter_root, run_subprocess, TUNER_ENV_VARS
 from .. import tune_robustness as _tr
 
 log = logging.getLogger(__name__)
