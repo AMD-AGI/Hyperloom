@@ -305,9 +305,6 @@ When `--nodes >= 2`, the optimization sandbox has no GPU. Handlers adapt:
 - **Applying patches**: `apply_kernel_patch.py` detects multi-node and fans the
   patch to every pod using `python3 -m hyperloom multi-node apply-patch`.
   Revert uses `manifest.multinode.host_backup_map` to hit the same pods.
-- **Compiling/benchmarking**: Forge/GEAK backends use
-  `python3 -m hyperloom multi-node kernel-bench` instead of
-  local `hipcc`.
 - **Integration**: `integrate_handler` forces a full server restart after a
   successful apply so the re-baseline measures the patched modules.
 - **RayJob recreate**: `_replay_kernel_patches_for_multi_node` replays all
