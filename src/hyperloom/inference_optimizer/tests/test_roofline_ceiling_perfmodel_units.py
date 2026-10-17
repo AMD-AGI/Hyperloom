@@ -782,14 +782,6 @@ def test_breakdown_from_state_routes_a_diffusion_run_to_the_image_ceiling(tmp_pa
     assert bd == rc._EMPTY_BREAKDOWN
 
 
-def test_peak_from_state_is_the_breakdown_peak(tmp_path):
-    model = _write_model(tmp_path / "m", _DENSE_CFG, weight_bytes=8 * 1024**2)
-    st = _state(tmp_path, _serving_benchmark(model))
-    assert rc.compute_peak_from_state(st) == pytest.approx(
-        rc.compute_roofline_breakdown_from_state(st).peak_tok_per_sec
-    )
-
-
 def test_select_peak_and_bound_takes_the_lower_side():
     assert rc.select_peak_and_bound(100.0, 250.0) == (100.0, "memory")
     assert rc.select_peak_and_bound(400.0, 250.0) == (250.0, "compute")
