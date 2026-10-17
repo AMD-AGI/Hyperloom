@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import errno
 import fcntl
 import json
 import logging
@@ -24,7 +23,7 @@ from .canonical_id import (
     canonical_id_for_path,
     cid_to_path_components,
 )
-from .schema import Attempt, Recipe
+from .schema import Recipe
 
 
 log = logging.getLogger(__name__)
@@ -33,7 +32,6 @@ log = logging.getLogger(__name__)
 # Filenames + sub-paths within one recipe directory
 RECIPE_FILENAME: str = "recipe.json"
 HISTORY_DIRNAME: str = "history"
-ATTEMPTS_FILENAME: str = "attempts.ndjson"
 LOCK_FILENAME: str = ".lock"
 HISTORY_VERSION_PREFIX: str = "v"
 HISTORY_VERSION_SUFFIX: str = ".json"
@@ -80,30 +78,6 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         raise LocalRecipeStoreError(
             f"failed to read {path}: {exc}",
         ) from exc
-
-
-def _list_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Read every line of an NDJSON file as a JSON dict."""
-    if not path.is_file():
-        return []
-    rows: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError as exc:
-                log.warning(
-                    "skipping malformed NDJSON row in %s: %s",
-                    path,
-                    exc,
-                )
-                continue
-            if isinstance(obj, dict):
-                rows.append(obj)
-    return rows
 
 
 # Per-lock-file mutexes, shared across ``_CidLock`` instances.
@@ -194,10 +168,6 @@ class LocalRecipeStore:
     def _history_version_path(self, canonical_id: str, version: int) -> Path:
         """Return the archive path for a specific recipe version."""
         return self._history_dir(canonical_id) / f"{HISTORY_VERSION_PREFIX}{int(version)}{HISTORY_VERSION_SUFFIX}"
-
-    def _attempts_path(self, canonical_id: str) -> Path:
-        """Return the path to a cid's append-only attempts log."""
-        return self._recipe_dir(canonical_id) / ATTEMPTS_FILENAME
 
     def _lock_path(self, canonical_id: str) -> Path:
         """Return the path to a cid's advisory ``.lock`` file."""
@@ -446,86 +416,6 @@ class LocalRecipeStore:
         )
         return rows[:clamped_limit]
 
-    # Attempts, append-only
-    def append_attempt(
-        self,
-        *,
-        canonical_id: str,
-        session_id: str,
-        diff: dict[str, Any] | None = None,
-        predicted_delta: dict[str, Any] | None = None,
-        measured_metrics: dict[str, Any] | None = None,
-        fitness: float | None = None,
-        outcome: str = "",
-        rationale: str = "",
-        attempt_at: str | None = None,
-    ) -> dict[str, Any]:
-        """Append one attempt row."""
-        if not canonical_id:
-            raise ValueError(
-                "append_attempt requires a non-empty canonical_id",
-            )
-        if not session_id:
-            raise ValueError(
-                "append_attempt requires a non-empty session_id",
-            )
-        recipe_dir = self._recipe_dir(canonical_id)
-        recipe_dir.mkdir(parents=True, exist_ok=True)
-        attempts_path = self._attempts_path(canonical_id)
-        # ``id`` is monotonic per cid (existing rows + 1), assigned under the cid lock so concurrent appends don't
-        # collide.
-        lock = _CidLock(self._lock_path(canonical_id))
-        with lock:
-            existing = _list_jsonl(attempts_path)
-            next_id = len(existing) + 1
-            stamped_at = attempt_at or now_iso(timespec="microseconds")
-            attempt = Attempt(
-                id=next_id,
-                recipe_canonical_id=canonical_id,
-                session_id=session_id,
-                attempt_at=stamped_at,
-                diff=dict(diff or {}),
-                predicted_delta=dict(predicted_delta or {}),
-                measured_metrics=dict(measured_metrics or {}),
-                fitness=float(fitness) if fitness is not None else None,
-                outcome=str(outcome),
-                rationale=str(rationale),
-            )
-            row = attempt.to_dict()
-            line = json.dumps(row, sort_keys=True) + "\n"
-            with attempts_path.open("a", encoding="utf-8") as f:
-                f.write(line)
-                f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except OSError as exc:
-                    if exc.errno != errno.EINVAL:
-                        log.debug(
-                            "fsync skipped on %s: %s",
-                            attempts_path,
-                            exc,
-                        )
-        return {
-            "id": next_id,
-            "recipe_canonical_id": canonical_id,
-            "attempt_at": stamped_at,
-        }
-
-    def list_attempts(
-        self,
-        *,
-        canonical_id: str,
-        session_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Return append-only attempts for one Recipe identity."""
-
-        if not canonical_id:
-            raise ValueError("list_attempts requires a non-empty canonical_id")
-        rows = _list_jsonl(self._attempts_path(canonical_id))
-        if session_id is None:
-            return rows
-        return [row for row in rows if str(row.get("session_id") or "") == str(session_id)]
-
 
 # search filter helpers
 def _matches_labels(payload: dict[str, Any], label_match: dict[str, Any]) -> bool:
@@ -750,7 +640,6 @@ def _normalise_sessions(items: list[Any] | None) -> list[dict[str, Any]]:
 
 
 __all__ = [
-    "ATTEMPTS_FILENAME",
     "HISTORY_DIRNAME",
     "LOCK_FILENAME",
     "LocalRecipeStore",
