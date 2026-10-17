@@ -3919,6 +3919,29 @@ async def test_coordinator_auto_reject_answers_in_one_envelope(
 
 
 @pytest.mark.asyncio
+async def test_a_padded_target_agent_reaches_its_handler(session_dir):
+    """PolicyGate admits the stripped target, so the router has to route on the same name it admitted."""
+    c = Coordinator(session_dir, backends=_backends_silent())
+    try:
+        c.shared_state.kernel_enabled = True
+        await c.router.handle_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.REQUEST,
+                payload={"target_agent": "  kernel_agent  ", "kind": "invent_brand_new_kind"},
+            ),
+        )
+
+        responses = await c.bus.tail(topic="response", to_agent="orchestration")
+        assert responses, "the request must be answered"
+        # It reaches the kernel_agent arm, so it is refused for its kind rather than for its target.
+        assert responses[0].payload["result"]["error_class"] == "unknown_kernel_kind"
+        assert responses[0].from_agent == "kernel_agent"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_coordinator_request_handler_exception_recorded(session_dir):
     """Handler crashes → RESPONSE.status='failed' + error_class set."""
     c = Coordinator(session_dir, backends=_backends_silent())
