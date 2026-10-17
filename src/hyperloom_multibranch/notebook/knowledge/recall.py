@@ -11,7 +11,8 @@ refuses Experiences without evidence, so nothing recalled lacks one.
 
 Sorting reads each summary's ``identity``. The service's read summaries carry none yet, so an :class:`IdentityIndex`
 looks the identity up by id in the service's export. An Experience whose identity is found nowhere matches no
-condition, so it is one to re-verify, never a prior.
+condition, so it is one to re-verify, never a prior. The summaries carry no change family either; the index keeps
+it from the same export, so a recalled Experience names the layer it changed.
 """
 
 from __future__ import annotations
@@ -24,12 +25,15 @@ from enum import Enum
 from typing import Any, Protocol, cast
 
 from hyperloom_kb import ReadStatus, RemoteClientError
+from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import SessionProfile
 from hyperloom_multibranch.notebook.knowledge.experience import experience_identity
 
 log = logging.getLogger(__name__)
 
 CONDITION_KEYS = ("model", "gpu", "framework", "tp", "conc", "bottleneck", "isl", "osl")
+#: The layer each change family of ``inference-recipe-v1`` changes; the schema declares no kernel family.
+LAYER_OF_FAMILY = {"config_variant": IntentLayer.CONFIG, "source_patch": IntentLayer.SOURCE}
 EXPORT_PAGE = 100
 WORKLOAD_KEYS = frozenset({"tp", "ep", "conc", "isl", "osl", "max_model_len", "compute_partition_mode", "partitions"})
 DECISION = "Choose the next actions for one branch of a multi-branch inference optimization session."
@@ -57,11 +61,12 @@ class ExperienceExport(Protocol):
 
 
 class IdentityIndex:
-    """The conditions each Experience of one schema was measured under, by id, read from the service's export.
+    """The conditions each Experience of one schema was measured under, and its change family, by id, read from the
+    service's export.
 
     The export is paged from the start the first time an id is missing, and later only from where it stopped, so
     Experiences written since are found too. One index serves every recall of a session; a failed export is logged
-    and leaves the identity unknown.
+    and leaves the identity and the family unknown.
     """
 
     def __init__(self, export: ExperienceExport, schema_ref: str | None = None) -> None:
@@ -69,6 +74,7 @@ class IdentityIndex:
         self._schema_ref = schema_ref
         self._cursor = 0
         self._known: dict[str, dict[str, Any]] = {}
+        self._families: dict[str, str] = {}
         self._lock = threading.Lock()
 
     @classmethod
@@ -86,6 +92,14 @@ class IdentityIndex:
                 self._advance()
             return self._known.get(experience_id, {})
 
+    def change_family(self, experience_id: str) -> str:
+        """The family of the change the Experience recorded, such as ``config_variant``; empty when unknown."""
+
+        with self._lock:
+            if experience_id not in self._known:
+                self._advance()
+            return self._families.get(experience_id, "")
+
     def _advance(self) -> None:
         try:
             while True:
@@ -93,7 +107,12 @@ class IdentityIndex:
                 for item in page.items:
                     stored = item.get("experience")
                     if isinstance(stored, Mapping) and stored.get("id"):
-                        self._known[str(stored["id"])] = dict(stored.get("identity") or {})
+                        experience_id = str(stored["id"])
+                        self._known[experience_id] = dict(stored.get("identity") or {})
+                        change = stored.get("change")
+                        family = change.get("change_family") if isinstance(change, Mapping) else None
+                        if isinstance(family, str) and family:
+                            self._families[experience_id] = family
                 self._cursor = page.next_cursor
                 if not page.has_more:
                     return
@@ -111,6 +130,13 @@ class RecalledExperience:
     baseline_value: float | None
     outcome_value: float | None
     source_run_id: str
+    change_family: str = ""
+
+    @property
+    def layer(self) -> IntentLayer | None:
+        """The layer the recorded change acts on; ``None`` when its family is unknown."""
+
+        return LAYER_OF_FAMILY.get(self.change_family)
 
     @property
     def gain_pct(self) -> float | None:
@@ -200,12 +226,14 @@ def classify(
     item: Mapping[str, Any], query: Mapping[str, Any], identities: IdentityIndex | None = None
 ) -> RecalledExperience:
     """Sort one read summary by whether its identity, or the one ``identities`` holds for it, matches every queried
-    condition."""
+    condition; its change family comes from the summary, else from ``identities``."""
 
-    identity = item.get("identity") or (identities.identity(str(item["experience_id"])) if identities else {})
+    experience_id = str(item["experience_id"])
+    identity = item.get("identity") or (identities.identity(experience_id) if identities else {})
+    family = item.get("change_family") or (identities.change_family(experience_id) if identities else "")
     differing = tuple(key for key, value in query.items() if key not in identity or not _same(identity[key], value))
     return RecalledExperience(
-        experience_id=str(item["experience_id"]),
+        experience_id=experience_id,
         tier=RecallTier.REVERIFY if differing else RecallTier.PRIOR,
         differing=differing,
         change_summary=str(item.get("change_summary") or ""),
@@ -213,6 +241,7 @@ def classify(
         baseline_value=_number(item.get("baseline_value")),
         outcome_value=_number(item.get("outcome_value")),
         source_run_id=str(item.get("source_run_id") or ""),
+        change_family=str(family),
     )
 
 
@@ -259,6 +288,7 @@ def recall_experiences(
 __all__ = [
     "CONDITION_KEYS",
     "DECISION",
+    "LAYER_OF_FAMILY",
     "ExperienceExport",
     "ExperienceReader",
     "IdentityIndex",

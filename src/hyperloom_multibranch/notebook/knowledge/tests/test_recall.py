@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 from hyperloom_kb import RemoteReadResult
 
+from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.notebook.knowledge.recall import (
     CONDITION_KEYS,
     DECISION,
@@ -122,6 +123,34 @@ def test_a_summary_without_an_identity_is_sorted_by_the_identity_the_export_hold
     assert [item.tier for item in later.experiences] == [RecallTier.PRIOR, RecallTier.PRIOR]
     # The whole export once, two records a page; then only from where it stopped, for exp-d.
     assert export.afters == [0, 2, 3]
+
+
+def test_a_recalled_experience_names_the_layer_of_its_change_family_from_the_summary_or_the_export() -> None:
+    export = FakeExport(
+        [
+            {"id": "exp-config", "identity": SAME, "change": {"change_family": "config_variant"}},
+            {"id": "exp-patch", "identity": SAME, "change": {"change_family": "source_patch"}},
+            {"id": "exp-unknown", "identity": SAME},
+        ]
+    )
+    named = {**experience_summary("exp-named", SAME), "change_family": "source_patch"}
+    reader = FakeExperienceReader(
+        completed_read(
+            experience_summary("exp-config", SAME),
+            experience_summary("exp-patch", SAME),
+            experience_summary("exp-unknown", SAME),
+            named,
+        )
+    )
+
+    recall = recall_experiences(reader, profile(), 1000.0, ATTENTION, identities=IdentityIndex(export))
+
+    assert {item.experience_id: item.layer for item in recall.experiences} == {
+        "exp-config": IntentLayer.CONFIG,
+        "exp-patch": IntentLayer.SOURCE,
+        "exp-unknown": None,
+        "exp-named": IntentLayer.SOURCE,
+    }
 
 
 def test_an_export_that_fails_leaves_the_experience_one_to_reverify(caplog: pytest.LogCaptureFixture) -> None:

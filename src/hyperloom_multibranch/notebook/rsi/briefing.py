@@ -11,7 +11,9 @@ Its brief has three parts:
   this session's specialists learnt about ``focus``, then Experiences recalled from other sessions, labelled
   ``prior`` when measured under this session's conditions and ``to re-verify`` otherwise, then what specialists of
   past sessions learnt about it, then the pitfalls and failures the warm-start records list;
-* leads: the Recipe KB champions the warm start read, and recalled priors with a positive gain.
+* leads: the Recipe KB champions the warm start read, and recalled priors with a positive gain, taking turns by the
+  layer they change (configuration, source), so that one kind of change does not fill them all. The Experience KB's
+  schema has no kernel family, so no recalled lead is a kernel change.
 
 At the root before anything was tried, the brief is the first batch's: cross-session content only. Lessons and leads
 together stay under ``max_chars``, the most specific first. Where the brief sits in the prompt and how long it may be
@@ -26,10 +28,12 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
+from itertools import zip_longest
 
 from hyperloom_multibranch.contracts.notebook.interfaces import Notebook, StartupBriefProvider
+from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, StartupBrief
 from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall
 from hyperloom_multibranch.notebook.knowledge.lessons import listed
@@ -37,6 +41,7 @@ from hyperloom_multibranch.notebook.knowledge.recall import (
     ExperienceReader,
     IdentityIndex,
     Recall,
+    RecalledExperience,
     RecallQuery,
     RecallTier,
     recall_experiences,
@@ -71,13 +76,27 @@ class _Recalled:
     lessons: tuple[str, ...] = ()
 
 
+def _by_layer(items: Sequence[RecalledExperience]) -> list[RecalledExperience]:
+    """``items`` taking turns by the layer they change, each layer in its own order, the first layer seen first."""
+
+    layers: dict[IntentLayer | None, list[RecalledExperience]] = {}
+    for item in items:
+        layers.setdefault(item.layer, []).append(item)
+    return [item for turn in zip_longest(*layers.values()) for item in turn if item is not None]
+
+
+def _lead(item: RecalledExperience) -> str:
+    layer = f" ({item.layer.value})" if item.layer is not None else ""
+    return f"prior{layer}: {item.describe()}"
+
+
 def _recalled(recall: Recall | None) -> _Recalled:
     if recall is None or not recall.available:
         return _Recalled()
     priors = recall.of(RecallTier.PRIOR)
     positive = [item for item in priors if (item.gain_pct or 0.0) > 0 and item.decision == KEPT]
     return _Recalled(
-        leads=tuple(f"prior: {item.describe()}" for item in positive),
+        leads=tuple(_lead(item) for item in _by_layer(positive)),
         lessons=(
             *(f"prior: {item.describe()}" for item in priors if item not in positive),
             *(f"to re-verify: {item.describe()}" for item in recall.of(RecallTier.REVERIFY)),

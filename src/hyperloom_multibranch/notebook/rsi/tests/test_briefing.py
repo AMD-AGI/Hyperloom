@@ -162,6 +162,30 @@ async def test_a_recalled_summary_without_conditions_is_sorted_by_the_index_the_
     assert (await without.startup_brief("c0")).leads == ()
 
 
+async def test_recalled_leads_take_turns_by_the_layer_they_change(tmp_path: Path) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+
+    def kept(experience_id: str, outcome: float, family: str) -> dict[str, object]:
+        summary = experience_summary(experience_id, SAME, outcome=outcome, change=f"change {experience_id}")
+        return {**summary, "change_family": family}
+
+    reader = _reader(
+        kept("exp-c1", 1100.0, "config_variant"),
+        kept("exp-c2", 1080.0, "config_variant"),
+        kept("exp-c3", 1060.0, "config_variant"),
+        kept("exp-s1", 1050.0, "source_patch"),
+    )
+
+    brief = await CrossSessionBriefing(notebook, experiences=reader).startup_brief("c0")
+
+    assert brief.leads == (
+        "prior (config): change exp-c1: keep +10.00% [exp-c1]",
+        "prior (source): change exp-s1: keep +5.00% [exp-s1]",
+        "prior (config): change exp-c2: keep +8.00% [exp-c2]",
+        "prior (config): change exp-c3: keep +6.00% [exp-c3]",
+    )
+
+
 async def test_the_lessons_hold_what_this_session_and_past_sessions_learnt_about_the_focus(tmp_path: Path) -> None:
     clock = FakeClock()
     notebook = await scripted_session(tmp_path / "notebook", clock)
