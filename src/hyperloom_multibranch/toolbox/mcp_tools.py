@@ -9,6 +9,8 @@ from the arguments, so a specialist submits, cancels, claims, logs and reads its
 only; the notebook's search and record reads are shared across branches, as the notebook contract has them:
 
 * ``submit_test``, ``test_result``, ``cancel_test`` and ``queue_state`` go through the toolbox interface;
+* ``start_analysis`` starts ``tracelens`` or ``roofline`` on the branch's head commit (an
+  :class:`~.analysis.AnalysisStarter`, the real toolbox);
 * ``poll_inbox`` reads the branch's inbox;
 * the ``notebook_*`` tools are the notebook's own specialist tools (lookup, claim, release, search, record, branch log,
   brief), bound per call to the notebook handle of the caller's branch.
@@ -44,6 +46,7 @@ from hyperloom_multibranch.contracts.toolbox import (
     ToolboxError,
 )
 from hyperloom_multibranch.notebook.tools import ERROR, notebook_tools
+from hyperloom_multibranch.toolbox.analysis import ANALYSIS_TOOLS, CODE_NO_EXECUTOR, AnalysisStarter
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.notebook.learning_search import LearningFinder
@@ -81,6 +84,20 @@ _SUBMIT_TEST: dict[str, Any] = {
         "diff_ref": {"type": _STRING},
     },
     "required": ["kind", "purpose", "parent_commit"],
+    "additionalProperties": False,
+}
+# The commit is the branch head, read by the server; a request that names a commit or a branch is refused by the schema.
+_START_ANALYSIS: dict[str, Any] = {
+    "type": _OBJECT,
+    "properties": {
+        "tool": {"type": _STRING, "description": f"One of: {', '.join(ANALYSIS_TOOLS)}."},
+        "params": {"type": _OBJECT, "description": "The tool's own parameters, such as trace_input for tracelens."},
+        "profile_request_id": {
+            "type": _STRING,
+            "description": "The id of a profile test of this branch whose trace is analysed; checked by the server.",
+        },
+    },
+    "required": ["tool"],
     "additionalProperties": False,
 }
 _POLL_INBOX: dict[str, Any] = {
@@ -186,6 +203,26 @@ def _submit_test(
     return handle
 
 
+def _start_analysis(
+    analysis: AnalysisStarter | None, home: asyncio.AbstractEventLoop | None
+) -> Callable[[dict[str, Any], CallContext], Any]:
+    async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, str]:
+        if analysis is None:
+            raise ToolError(f"rejected ({CODE_NO_EXECUTOR}): this campaign runs no asynchronous tool executor")
+        call = analysis.submit_analysis(
+            ctx.principal.branch,
+            str(arguments["tool"]),
+            arguments.get("params") or {},
+            str(arguments.get("profile_request_id") or ""),
+        )
+        try:
+            return {"job_id": await _on(home, call)}
+        except RequestRejected as exc:
+            raise ToolError(f"rejected ({exc.code}): {exc.reason}") from exc
+
+    return handle
+
+
 def _test_result(notebooks: NotebookFor) -> Callable[[dict[str, Any], CallContext], Any]:
     async def handle(arguments: dict[str, Any], ctx: CallContext) -> dict[str, Any]:
         record = await _own_record(notebooks, ctx, arguments["request_id"])
@@ -267,12 +304,14 @@ class SpecialistToolOptions:
     adds past sessions' from the Experience KB); without it ``notebook_learnings`` finds this session's only.
     ``briefing_for`` gives the provider of the brief of a branch (the notebook's ``SessionBriefs.for_branch``), called
     with the caller's branch from the token at every ``notebook_brief``; without it the notebook's own brief is returned.
+    ``analysis`` starts ``start_analysis`` jobs (the real toolbox is one); without it that tool refuses by name.
     """
 
     claim_ttl_seconds: float = 600.0
     toolbox_loop: asyncio.AbstractEventLoop | None = None
     learnings: LearningFinder | None = None
     briefing_for: BriefingFor | None = None
+    analysis: AnalysisStarter | None = None
 
 
 def register_specialist_tools(
@@ -314,6 +353,17 @@ def register_specialist_tools(
         description="Queue lengths by priority, running tests by branch, and the sandbox cold start time.",
         schema=_NO_ARGUMENTS,
         handler=_queue_state(toolbox, toolbox_loop),
+        **own,
+    )
+    server.register(
+        "start_analysis",
+        description=(
+            "Start tracelens (analyse a trace) or roofline (profile, then analyse) for this branch; returns the job "
+            "id at once and the result arrives in poll_inbox. The commit analysed is this branch's head, set by the "
+            "server; with a profile_request_id of a profile test of this branch the pointer carries its op shares."
+        ),
+        schema=_START_ANALYSIS,
+        handler=_start_analysis(options.analysis, toolbox_loop),
         **own,
     )
     server.register(

@@ -67,6 +67,10 @@ def req(
 class FakeRepo:
     def __init__(self, recipe: Recipe | None = None) -> None:
         self.recipes = {PARENT: recipe or Recipe(base_image_digest=IMAGE)}
+        self.heads: dict[str, str] = {}
+
+    async def head(self, branch: str) -> str:
+        return self.heads.get(branch, PARENT)
 
     async def read_recipe(self, commit: str) -> Recipe:
         return self.recipes[commit]

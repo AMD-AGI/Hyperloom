@@ -14,8 +14,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from typing import Any
 
 from hyperloom.contracts.measurement import FailureClass, TestRequest, TestResult, Validity
 from hyperloom_multibranch.contracts.notebook.interfaces import (
@@ -37,6 +38,7 @@ from hyperloom_multibranch.contracts.toolbox import (
     UnknownTestRequest,
     WorkloadKind,
 )
+from hyperloom_multibranch.toolbox.analysis import CODE_NO_EXECUTOR, AnalysisAsk, analysis_request
 from hyperloom_multibranch.toolbox.acceptance import Acceptance, MeasurementPlanner
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, AttemptRunner, Executor, TestJob
 from hyperloom_multibranch.toolbox.quarantine import Quarantine
@@ -119,7 +121,7 @@ class RealToolbox:
             max_infra_retries=tuning.max_infra_retries,
         )
         self._ttl, self._clock = tuning.claim_ttl_seconds, tuning.clock
-        self._tools = tools
+        self._tools, self._repo = tools, acceptance.repo
         self._closed = False
         self._tool_jobs: dict[str, list[str]] = {}
         self._lock = asyncio.Lock()
@@ -254,10 +256,26 @@ class RealToolbox:
         """
 
         if self._tools is None:
-            raise RequestRejected("this toolbox serves no asynchronous tools")
+            raise RequestRejected("this toolbox serves no asynchronous tools", CODE_NO_EXECUTOR)
         job_id = self._tools.submit(request)
         self._tool_jobs.setdefault(request.branch, []).append(job_id)
         return job_id
+
+    async def submit_analysis(
+        self, branch: str, tool: str, params: Mapping[str, Any], profile_request_id: str = ""
+    ) -> str:
+        """Start ``tracelens`` or ``roofline`` for ``branch`` on its head commit; returns the job id at once.
+
+        The commit is the head of the branch in the experiment repository, read here at submission; it is never taken
+        from ``params``. ``profile_request_id`` is kept only for a PROFILE test of this branch on that commit.
+        """
+
+        if self._tools is None:
+            raise RequestRejected("this toolbox serves no asynchronous tools", CODE_NO_EXECUTOR)
+        request = await analysis_request(
+            self._repo, self._records, AnalysisAsk(branch, tool, params, profile_request_id)
+        )
+        return self.submit_tool(request)
 
     def tool_status(self, job_id: str) -> JobStatus:
         if self._tools is None:
