@@ -40,7 +40,6 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     # Keyed by content rather than by iteration number, which a resume reuses
     # after workdir pruning.
     "critic_iteration": "item",
-    "robustness_turn": "item",
     "kernel_event": "item",
     "kernel_lane_run": "item",
     "kernel_rebench_attempt": "item",
