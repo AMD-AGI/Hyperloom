@@ -1009,11 +1009,7 @@ def test_a_model_needing_a_named_tokenizer_refuses_an_unpatchable_checkout(tmp_p
         encoding="utf-8",
     )
 
-    ex = bl.BaselineExecutor(session_dir=tmp_path) if hasattr(bl, "BaselineExecutor") else None
-    if ex is None:
-        import pytest as _pytest
-
-        _pytest.skip("BaselineExecutor not exposed under this name")
+    ex = bl.BaselineExecutor(session_dir=tmp_path)
     monkeypatch.setattr(bl, "materialized_run_eval_disabled", lambda _p: False)
     # The subject is the refusal, not the mode detection that precedes it.
     # ``_client_tokenizer_mode`` answers "" when ``transformers`` cannot be
