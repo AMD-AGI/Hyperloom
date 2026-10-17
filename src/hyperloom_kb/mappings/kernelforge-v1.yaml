@@ -1,9 +1,10 @@
 format: hyperloom-kb.collect.v2
 description: >-
-  KernelForge runs, one Experience per PORT step and forge-loop iteration, each holding what it started from, the
-  agent's reasoning and plan, the optimization it tried, and what KernelForge measured and decided; from driver.log
-  sessions, from campaign logs with KernelForge's artifacts and the agents' Claude Code transcripts, or from a plain
-  forge-loop run's forge_experiments directory with its forge-loop.log and any Claude Code transcripts beside it
+  KernelForge runs, one Experience per forge-loop iteration, each holding what it started from, the agent's
+  reasoning and plan, the optimization it tried, and what KernelForge measured and decided; from driver.log sessions,
+  from campaign logs with KernelForge's artifacts and the agents' Claude Code transcripts, or from a plain forge-loop
+  run's forge_experiments directory with its forge-loop.log and any Claude Code transcripts beside it. A forge-rewrite
+  PORT step is skipped: its logs record no reasoning from the agent that ported the kernel
 declaration: kernelforge-run-v1
 producer:
   name: kernelforge
@@ -49,8 +50,9 @@ require:
       No reasoning, which every Experience requires: the logs hold no reasoning log with a Summary line for this run's
       candidate, no Claude Code transcript linked to the agent that made it, and no rationale KernelForge recorded for
       it (a "[agent] Rationale:" line, or a single session's meta.json). A merge never has one, since no agent made it,
-      and neither does a lane of a plain forge-loop run made before KernelForge asked for the reasoning log. For any
-      other unit, provide logs that record the agent's reasoning.
+      and neither does a lane of a plain forge-loop run made before KernelForge asked for the reasoning log, or a
+      forge-rewrite PORT step, whose logs record no reasoning from the agent that ported the kernel. For any other
+      unit, provide logs that record the agent's reasoning.
     check: {present: $run.reasoning}
   - reason: No log files were found for this run.
     check: {present: $run.log_files}
