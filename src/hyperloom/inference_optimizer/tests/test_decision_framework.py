@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
@@ -220,18 +219,3 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
         assert c.phase_kernel._gemm_tuning_required_before_kernel_opt() is False
     finally:
         await c.stop()
-
-
-# D — native-only guard for kernel optimization handler
-def _partial_kernel_opt_result(kernel_id: str, decision: str = "PARTIAL") -> dict[str, Any]:
-    return {
-        "status": "ok",
-        "kernel_id": kernel_id,
-        "proposal": {"decision": decision, "reasons": ["no measurable speedup found"]},
-        "verification": {
-            "compile_passed": True,
-            "correctness_passed": False,
-            "micro_speedup": 1.0,
-            "best_artifact_path": f"/tmp/{kernel_id}.hip",
-        },
-    }

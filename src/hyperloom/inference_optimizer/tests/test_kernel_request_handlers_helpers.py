@@ -274,28 +274,6 @@ def test_shape_tool_result_synthesizes_on_empty_stdout() -> None:
     assert out == {"status": "failed", "returncode": 2, "error": "the stderr"}
 
 
-# -- _in_flight_kernel_ids ------------------------------------------------- -- unattempted_skip_reason /
-# gate-rejected dispatch ----------------------
-def _state_owing_one_attempt():
-    """SharedState whose trace still owes ``k001`` a kernel_opt attempt."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    state = SharedState(session_id="skip-accounting")
-    state.last_trace_analyze = {
-        "hot_kernels": [
-            {
-                "kernel_id": "k001",
-                "name": "gqa_decode_kernel",
-                "gpu_pct": 8.5,
-                "reusable_native_kernel": True,
-                "source_file": "/pkg/aiter/gqa.py",
-            }
-        ],
-        "task_groups": [],
-    }
-    return state
-
-
 _OP_FANOUT_ROWS = [
     {
         "kernel_id": "k001",
