@@ -27,7 +27,7 @@ async def check_registers(build_dir: str | None = None) -> dict:
     binary_path = so_files[0]
 
     # Disassemble
-    cmd = ["llvm-objdump", "-d", binary_path]
+    cmd = ["llvm-objdump", "-d", "--mcpu=gfx950", binary_path]
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
