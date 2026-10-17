@@ -738,7 +738,6 @@ async def _refilled_on_a_full_roster(stage: Stage, open_count: int) -> str:
     start = stage.sessions.started[refill]
     assert recipe_tags(await stage.repo.read_recipe(start)) == {"c1"}
     [opened] = [row for row in _decisions(stage) if row["kind"] == "open" and row["branch"] == refill]
-    assert stage.sessions.briefs[refill].startswith(f"Startup brief from {start}")
     assert stage.briefs.for_branch(refill).focus == "attention" and opened["detail"]["focus"] == "attention"
     return refill
 

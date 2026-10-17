@@ -5,8 +5,8 @@
 notebook in step.
 
 Opening a branch records its ``OPEN`` lineage, cuts it in the experiment repository at its start commit, starts its
-specialist there and gives it its K; a branch the scheduler opens in a batch starts on the session's brief of it, on
-the focus it was opened with. A repair the fork desk admitted is opened the same way at the commit its blocked
+specialist there and gives it its K; the session's briefs keep the focus a branch the scheduler opens in a batch was
+opened with. A repair the fork desk admitted is opened the same way at the commit its blocked
 candidate was measured against; a fork is cut by the rule gate, which lands the fix on it first and records its
 ``SPLIT`` lineage, so it gets no ``OPEN``: it is opened at its head once that head has moved past the commit it was cut
 at, and stopped as not started when that has not happened within :data:`SPECIALIST_START_SECONDS` of its admission.
@@ -82,7 +82,7 @@ class BatchStart:
 
 
 class BranchControl:
-    """Every change to a branch goes through here; ``briefs`` brief each specialist it starts."""
+    """Every change to a branch goes through here; ``briefs`` keep the focus of each branch it opens in a batch."""
 
     def __init__(
         self,
@@ -169,7 +169,7 @@ class BranchControl:
         focus: str | None = None,
     ) -> BranchEntry:
         """Record ``OPEN`` and cut a branch the scheduler cuts, give the toolbox its K and start its specialist, on
-        ``repair`` for a repair branch, and on the session's brief on ``focus`` unless that is ``None``; a branch any of
+        ``repair`` for a repair branch, the session's briefs keeping ``focus`` unless that is ``None``; a branch any of
         that fails for, or that is not done within :data:`SPECIALIST_START_SECONDS` or by ``deadline``, is stopped
         with the failure as the reason."""
 
@@ -281,9 +281,11 @@ class BranchControl:
     async def _launch(
         self, entry: BranchEntry, start_commit: str, repair: RepairRequest | None, focus: str | None
     ) -> None:
-        """Start the specialist; without a ``focus`` it starts unbriefed, and the runtime briefs each launch itself."""
+        """Start the specialist unbriefed, as the runtime briefs each launch itself; a ``focus`` is the one the
+        session's briefs keep for the branch."""
 
-        brief = "" if focus is None else await self._briefs.text(entry.branch, start_commit, focus=focus)
+        if focus is not None:
+            self._briefs.for_branch(entry.branch, focus)
         if entry.origin.cut_by_scheduler:
             reason = f"{entry.origin.value} branch" + (f" of {entry.from_branch}" if entry.from_branch else "")
             await self._notebook.record_lineage(
@@ -292,7 +294,7 @@ class BranchControl:
             await self._repo.create_branch(entry.branch, start_commit)
         await self.push_quota()
         self._specialists.add(entry.branch)
-        started = await settled(self._lifecycle.start(entry.branch, start_commit, brief=brief, repair=repair))
+        started = await settled(self._lifecycle.start(entry.branch, start_commit, repair=repair))
         if isinstance(started, BaseException):
             self._specialists.discard(entry.branch)
             raise started

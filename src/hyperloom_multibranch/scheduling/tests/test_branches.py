@@ -187,7 +187,7 @@ async def test_a_batch_stops_at_the_first_slot_an_admission_took_and_spends_no_b
     assert json.loads((tmp_path / "MB-roster.json").read_text())["issued_branch_ids"] == 4
 
 
-async def test_a_batch_briefs_each_branch_on_its_focus_and_names_it_in_its_open_decision(tmp_path: Path) -> None:
+async def test_a_batch_keeps_each_branch_focus_unrendered_and_names_it_in_its_open_decision(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).rooted()
     briefs = SessionBriefs(bench.notebook)
     bench.control = BranchControl(bench.context(tmp_path), bench.runtime, bench.toolbox, bench.repo, briefs)
@@ -198,10 +198,7 @@ async def test_a_batch_briefs_each_branch_on_its_focus_and_names_it_in_its_open_
 
     assert start.start_commit == bench.root
     assert {branch: briefs.for_branch(branch).focus for branch in ("b01", "b02")} == {"b01": "attention", "b02": ""}
-    assert bench.sessions.briefs == {
-        "b01": f"Startup brief from {bench.root}",
-        "b02": f"Startup brief from {bench.root}",
-    }
+    assert bench.sessions.briefs == {"b01": "", "b02": ""}
     opened = [json.loads(line) for line in (tmp_path / "MB-decisions.jsonl").read_text().splitlines()]
     assert [(row["branch"], row["detail"]["focus"]) for row in opened if row["kind"] == "open"] == [
         ("b01", "attention"),
