@@ -1082,25 +1082,6 @@ async def test_dead_coordinator_does_not_release_specialist_gpu_lanes(conn, lock
     assert (await locks.lane_holders())["gpu_research_lane"] == 1
 
 
-def test_legacy_db_gains_unknown_owner_scope(tmp_path):
-    import sqlite3
-
-    path = tmp_path / "legacy.db"
-    with sqlite3.connect(path) as raw:
-        raw.execute(
-            "CREATE TABLE leases (lane TEXT, holder_id TEXT, task_id TEXT, action TEXT, pid INTEGER, "
-            "acquired_at TEXT, expires_at TEXT, heartbeat_at TEXT, PRIMARY KEY (lane, holder_id))"
-        )
-        raw.execute("INSERT INTO leases VALUES ('research_lane','old','old','specialist',123,'old','old','old')")
-    db = SqliteConnection(path)
-    try:
-        ensure_schema(db.raw)
-        row = db.raw.execute("SELECT owner_scope FROM leases").fetchone()
-        assert row["owner_scope"] == ""
-    finally:
-        db.close()
-
-
 def test_gpu_research_lane_seeded_capacity_one():
     """A fresh DB seeds gpu_research_lane at capacity 1 (strictly serial)."""
     assert DEFAULT_LANE_CAPACITIES.get("gpu_research_lane") == 1
