@@ -119,11 +119,6 @@ class PassState:
         """Missed AND actually flippable by editing the ``PassConfig`` default."""
         return self.missed and self.source == "default"
 
-    @property
-    def undecidable(self) -> bool:
-        """Present in the target but its state could not be established."""
-        return self.present and self.enabled is None
-
 
 @dataclass(frozen=True)
 class TargetRuntime:
