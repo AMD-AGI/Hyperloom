@@ -520,6 +520,10 @@ one entry; a session or campaign whose logs cannot be read as KernelForge wrote
 them, a plain run whose `campaign_config.json` or `run_state.json` is not the
 JSON KernelForge writes, or a candidate whose `meta.json` is missing or
 malformed, is one entry saying why, which collection skips with that reason.
+A campaign log that names more than one KernelForge artifacts directory, as the
+launcher writes for a run of several tasks or a resumed run that launched
+KernelForge again, is such an entry, and each directory it names is read as a
+plain run.
 Claude Code transcripts under a directory, such as a copy of
 `~/.claude/projects`, are linked to the candidates their sessions made; a plain
 run links them through the reasoning log each session's first prompt names, so

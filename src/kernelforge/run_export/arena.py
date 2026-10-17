@@ -6,7 +6,7 @@ template.
 
 * A session directory holding ``driver.log`` and ``arena_logs/`` (KernelForge's forge-rewrite-by-flydsl pipeline),
   with the task's directory. The task's conditions come from the task's own files.
-* A campaign log (the launcher's log of one run, under ``logs/``) next to the run's KernelForge artifacts directory
+* A campaign log (the launcher's log of one launch, under ``logs/``) next to the run's KernelForge artifacts directory
   (``<workspace>/<run>/<task>-forge-<id>/engine/forge_experiments``) and the Claude Code transcripts of its agents
   (``.claude/projects/<cwd>/<session>.jsonl``). An iteration's fields also come from KernelForge's archive of it,
   from the implementer's messages in the transcript of the session that produced its candidate, which is linked by
@@ -460,8 +460,21 @@ def _campaign_provenance(text: str, lines: list[LogLine], setup: Setup) -> dict[
     return extra
 
 
+def _logged_artifacts(lines: list[LogLine]) -> list[str]:
+    """The KernelForge artifacts directories the launcher logged, one per launch, by their in-container paths."""
+
+    return list(
+        dict.fromkeys(
+            match.group(1).rstrip("/")
+            for line in lines
+            if not line.forge and (match := _FORGE_ARTIFACTS.match(line.body.strip()))
+        )
+    )
+
+
 def campaign_runs(log: Path, records: list[FileRecord], root: Path) -> ArenaRuns:
-    """The PORT step, when the campaign ran forge-rewrite, and each forge-loop iteration of one campaign log."""
+    """The PORT step, when the campaign ran forge-rewrite, and each forge-loop iteration of the log of one launch; a
+    log that names the artifacts directories of several launches is one unit saying so."""
 
     try:
         text = read_text(log)
@@ -471,15 +484,15 @@ def campaign_runs(log: Path, records: list[FileRecord], root: Path) -> ArenaRuns
     lines = timeline([text])
     setup = Setup.read(lines)
     run_name = setup.run_name
-    artifacts = next(
-        (
-            match.group(1).rstrip("/")
-            for line in lines
-            if not line.forge and (match := _FORGE_ARTIFACTS.match(line.body.strip()))
-        ),
-        None,
-    )
     label = _RUN_STAMP.sub("", run_name) if run_name else f"{log.parent.name}/{log.stem}"
+    named = _logged_artifacts(lines)
+    if len(named) > 1:
+        message = (
+            f"names {len(named)} KernelForge artifacts directories, one per launch: {', '.join(named)}; "
+            "only the log of a single launch is read as a campaign"
+        )
+        return ArenaRuns([read_error(f"{label}/session", message, [log])], frozenset({log}))
+    artifacts = named[0] if named else None
     forge_dir = _artifacts_dir(records, run_name, artifacts) if run_name and artifacts else None
     if forge_dir is None or run_name is None or artifacts is None:
         message = (

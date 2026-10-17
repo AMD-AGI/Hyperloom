@@ -628,6 +628,33 @@ def test_a_campaign_keeps_its_transcripts_from_the_plain_runs_beside_it(tmp_path
     assert not any(str(implementer.resolve()) in run["log_files"] for run in plain)
 
 
+def test_a_campaign_log_of_several_tasks_is_one_unreadable_unit(tmp_path: Path) -> None:
+    gemm = "/workspace/run_20261001_120000_softmax-forge/gemm-forge-9b2c"
+    loop = CAMPAIGN.index(SETUP[-1])
+    gemm_task = [
+        f"Forge artifacts: {gemm}",
+        "[FORGE] [forge-rewrite] source baseline: 9.0 ms (full suite, cases=[g1])",
+        "[FORGE] [forge-rewrite] PORT FAILED after 3 attempts",
+    ]
+    _campaign(tmp_path, [*CAMPAIGN[:loop], *SETUP[1:-1], *CAMPAIGN[loop:], *gemm_task])
+
+    runs = normalize([tmp_path])["runs"]
+
+    assert runs[0] == {
+        "unit_id": "softmax-forge/session",
+        "kind": "session",
+        "read_error": (
+            f"names 2 KernelForge artifacts directories, one per launch: {ARTIFACTS}, {gemm}; "
+            "only the log of a single launch is read as a campaign"
+        ),
+        "log_files": [str((tmp_path / "logs" / "softmax.log").resolve())],
+    }
+    assert [(run["unit_id"], run["run_id"], run["source_ms"]) for run in runs[1:]] == [
+        ("engine/iteration-1", "ignored-by-the-arena-layouts", 0.05),
+        ("engine/iteration-2", "ignored-by-the-arena-layouts", 0.05),
+    ]
+
+
 def test_a_campaign_whose_artifacts_are_missing_is_one_unreadable_unit(tmp_path: Path) -> None:
     log = _write(tmp_path / "logs" / "softmax.log", _log(CAMPAIGN))
     assert normalize([tmp_path])["runs"] == [
