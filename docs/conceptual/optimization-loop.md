@@ -298,10 +298,18 @@ It needs `amd-smi set` privileges and refuses, with nothing left changed:
   too), or whose VRAM use cannot be read;
 - when a set fails.
 
-Only the settings that were declared are changed, and only those are put back.
-An sclk cap also puts the card in `manual`, so its perf level is recorded and put
-back too: the level first, then the limit, and from a level other than `manual`
-the level alone, since it resets the limit itself.
+Only the declared settings are set, and only the settings they change are put back.
+The perf level and the sclk limit change each other (a clock limit puts the
+card in `manual`, and setting a level resets the limit), so applying either
+records and puts back both: the level first, then the limit, and from `auto`
+the level alone, since it resets the limit itself. A starting level a restore could not bring
+back is refused before anything is set: `determinism` whenever the perf level
+or sclk cap is applied (its clock soft-max is set with `amd-smi set -d`, which
+a perf-level restore does not carry), and any level other than `auto` or
+`manual` when an sclk cap is applied (setting it again would leave the card in
+`manual`). After every restore the cards are read back; a card not back at its
+recorded values is reported and its record kept, so the next launch warns or
+recovers it.
 The originals are written to a per-card record under
 `/var/tmp/hyperloom/gpu_power_settings/` before anything is set. That path is
 host-local and fixed, whatever `HYPERLOOM_RUNTIME_DIR` or `USER_DATA_PATH` say,

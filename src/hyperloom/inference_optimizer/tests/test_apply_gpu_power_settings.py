@@ -53,9 +53,9 @@ class _AmdSmi:
 
 def _hooks(*, observed=None, vram=None, mask=_MASK, smi=None) -> tuple[_Hooks, _AmdSmi]:
     smi = smi or _AmdSmi()
-    reads = iter(observed or [_cards(), _cards()])
+    reads = list(observed or [_cards(), _cards()])
     hooks = _Hooks(
-        read=lambda: next(reads),
+        read=lambda: reads.pop(0) if len(reads) > 1 else reads[0],
         resident_vram=lambda: dict.fromkeys(range(8), 284.0) if vram is None else vram,
         apply=lambda gpus, **a: apply_gpu_power_settings(gpus, run=smi, **a),
         restore=lambda originals: restore_gpu_power_settings(originals, run=smi),
@@ -255,7 +255,7 @@ class TestApplyDeclared:
 
     def test_both_declared_are_both_restored(self, tmp_path):
         applied, smi = _apply(tmp_path, perf_level="determinism")
-        assert applied.record["originals"]["4"] == {"power_cap_w": 1400.0, "perf_level": "auto"}
+        assert applied.record["originals"]["4"] == {"power_cap_w": 1400.0, "perf_level": "auto", "sclk_max_mhz": 2400.0}
         assert ["amd-smi", "set", "-g", "4", "5", "6", "7", "-l", "DETERMINISM"] in smi.calls
         applied.restore()
         assert smi.calls[-1] == ["amd-smi", "set", "-g", "4", "5", "6", "7", "-l", "AUTO"]
@@ -294,6 +294,51 @@ class TestApplyDeclared:
         split = {**_cards(), 5: {"power_cap_w": 1400.0, "perf_level": "auto", "sclk_max_mhz": None}}
         with pytest.raises(GpuPowerSettingsError, match=r"sclk max .*GPU\(s\) 5"):
             _apply(tmp_path, power_cap_w=None, sclk_max_mhz=2000.0, observed=[split, split])
+
+    @pytest.mark.parametrize(
+        ("level", "kw", "needle"),
+        [
+            ("determinism", {"power_cap_w": None, "sclk_max_mhz": 2000.0}, "determinism perf level"),
+            ("determinism", {"power_cap_w": None, "perf_level": "manual"}, "determinism perf level"),
+            ("high", {"power_cap_w": None, "sclk_max_mhz": 2000.0}, "are at the high perf level"),
+        ],
+    )
+    def test_a_starting_level_a_restore_could_not_bring_back_is_refused_untouched(self, tmp_path, level, kw, needle):
+        cards = _cards(level=level, sclk=1300.0)
+        smi = _AmdSmi()
+        with pytest.raises(GpuPowerSettingsError, match=needle):
+            _apply(tmp_path, observed=[cards, cards], smi=smi, **kw)
+        assert smi.calls == []
+        assert orphaned_power_records(tmp_path) == {}
+
+    def test_a_cap_alone_on_a_determinism_card_is_allowed(self, tmp_path):
+        """The perf level is not touched, so the determinism soft-max is never at risk."""
+        cards = _cards(level="determinism", sclk=1300.0)
+        applied, smi = _apply(tmp_path, observed=[cards, cards])
+        assert smi.calls == [["amd-smi", "set", "-g", "4", "5", "6", "7", "-o", "ppt0", "1000"]]
+        assert applied.restore() == []
+
+    def test_a_perf_level_apply_from_manual_puts_back_the_operators_sclk_limit(self, tmp_path):
+        """Setting a level resets the clock limit, so a level-only apply must record and restore the limit too."""
+        manual = _cards(level="manual", sclk=2100.0)
+        applied, smi = _apply(tmp_path, power_cap_w=None, perf_level="auto", observed=[manual, manual])
+        assert applied.record["originals"]["4"] == {"perf_level": "manual", "sclk_max_mhz": 2100.0}
+        assert smi.calls == [["amd-smi", "set", "-g", "4", "5", "6", "7", "-l", "AUTO"]]
+        applied.restore()
+        assert smi.calls[1:] == [
+            ["amd-smi", "set", "-g", "4", "5", "6", "7", "-l", "MANUAL"],
+            ["amd-smi", "set", "-g", "4", "5", "6", "7", "-L", "sclk", "max", "2100"],
+        ]
+
+    def test_a_restore_the_card_did_not_take_is_reported_and_its_record_kept(self, tmp_path):
+        """amd-smi can exit 0 without the card taking the value; the record must survive for the next launch."""
+        stuck_manual = _cards(level="manual", sclk=2000.0)
+        applied, _ = _apply(
+            tmp_path, power_cap_w=None, sclk_max_mhz=2000.0, observed=[_cards(), _cards(), stuck_manual]
+        )
+        problems = applied.restore()
+        assert any("perf level reads 'manual' after the restore, recorded 'auto'" in p for p in problems)
+        assert orphaned_power_records(tmp_path)[4]["original"]["perf_level"] == "auto"
 
     @pytest.mark.parametrize(
         ("observed", "perf_level", "unreadable_gpu"),

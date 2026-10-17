@@ -75,7 +75,8 @@ def add_gpu_power_arguments(opt: argparse._ActionsContainer) -> None:
             "host-local storage before anything is set and restored when the session ends, including on SIGTERM "
             "or SIGHUP; after a SIGKILL the cards stay at the applied settings until the next launch that passes "
             "this flag restores them. Refuses without an integer mask, on multi-node, and on a card that holds "
-            "someone else's resident model or whose VRAM cannot be read, since a cap is card-wide. Must be passed "
+            "someone else's resident model or whose VRAM cannot be read, since a cap is card-wide, and on a "
+            "starting perf level a restore could not bring back (determinism). Must be passed "
             "again on resume."
         ),
     )

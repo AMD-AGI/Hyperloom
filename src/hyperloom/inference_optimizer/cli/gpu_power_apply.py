@@ -32,6 +32,7 @@ from hyperloom.common.gpu_power_control import (
     restore_gpu_power_settings,
 )
 from hyperloom.common.gpu_power_settings import (
+    PERF_LEVEL_MANUAL,
     GpuPowerSettingsError,
     declared_combination_error,
     normalize_perf_level,
@@ -53,6 +54,8 @@ _FOREIGN_RESIDENT_VRAM_MB = 2048.0
 _POWER_CAP_W = "power_cap_w"
 _PERF_LEVEL = "perf_level"
 _SCLK_MAX_MHZ = "sclk_max_mhz"
+_DETERMINISM = "determinism"
+_LEVELS_AFTER_SCLK = frozenset({"auto", PERF_LEVEL_MANUAL})
 _LABELS = {_POWER_CAP_W: "power cap", _PERF_LEVEL: "perf level", _SCLK_MAX_MHZ: "sclk max"}
 _RESTORE_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 
@@ -132,12 +135,63 @@ def _originals(observed: Mapping[int, Mapping[str, Any]], gpus: set[int], touche
     return originals
 
 
+def _refuse_unrestorable_levels(originals: Mapping[int, Mapping[str, Any]], *, sclk_applied: bool) -> None:
+    """Refuse cards whose starting perf level a restore could not bring back; checked before anything is set.
+
+    A determinism card's clock soft-max is set with ``amd-smi set -d``, which a perf-level restore does not carry. And
+    once a clock limit has put a card in manual, setting a level other than auto does not take it out of manual.
+    """
+    levels = {gpu: normalize_perf_level(row.get(_PERF_LEVEL)) for gpu, row in originals.items() if _PERF_LEVEL in row}
+    determinism = sorted(gpu for gpu, level in levels.items() if level == _DETERMINISM)
+    if determinism:
+        raise GpuPowerSettingsError(
+            f"GPU(s) {', '.join(map(str, determinism))} are at the determinism perf level, whose clock soft-max a "
+            "restore could not put back; nothing was applied. Leave --gpu-perf-level / --gpu-sclk-max-mhz unset for "
+            "these cards, or move them to auto first"
+        )
+    stuck = sorted(gpu for gpu, level in levels.items() if sclk_applied and level not in _LEVELS_AFTER_SCLK)
+    if stuck:
+        named = ", ".join(sorted({levels[gpu] for gpu in stuck}))
+        raise GpuPowerSettingsError(
+            f"GPU(s) {', '.join(map(str, stuck))} are at the {named} perf level; a clock limit puts a card in manual, "
+            "and setting that level again would leave it there, so the sclk cap could not be undone. Nothing was "
+            "applied; move the cards to auto or manual first"
+        )
+
+
+def _restore_mismatches(observed: Mapping[int, Mapping[str, Any]], originals: Mapping[int, Mapping[str, Any]]) -> list:
+    """Each recorded setting a card is not back at after a restore; empty when every one is."""
+    problems = []
+    for gpu, row in sorted(originals.items()):
+        now = observed.get(gpu) or {}
+        for key, want in row.items():
+            got = now.get(key)
+            if key == _PERF_LEVEL:
+                matches = normalize_perf_level(got) == normalize_perf_level(want)
+            else:
+                matches = isinstance(got, (int, float)) and not isinstance(got, bool) and abs(got - want) <= 0.5
+            if not matches:
+                problems.append(f"GPU {gpu} {_LABELS[key]} reads {got!r} after the restore, recorded {want!r}")
+    return problems
+
+
+def _restore_and_verify(hooks: _Hooks, originals: Mapping[int, Mapping[str, Any]]) -> list[str]:
+    """Put the originals back and read them back: an amd-smi set can exit 0 without the card taking the value."""
+    problems = hooks.restore(originals)
+    if problems:
+        return problems
+    try:
+        return _restore_mismatches(hooks.read(), originals)
+    except GpuPowerSettingsError as exc:
+        return [f"the restored settings could not be read back: {exc}"]
+
+
 def _recover_orphans(lease: Any, hooks: _Hooks) -> list[int]:
     """Restore what a dead session left on these cards; the cards it recovered."""
     orphans = lease.orphaned()
     if not orphans:
         return []
-    problems = hooks.restore({gpu: dict(rec.get("original") or {}) for gpu, rec in orphans.items()})
+    problems = _restore_and_verify(hooks, {gpu: dict(rec.get("original") or {}) for gpu, rec in orphans.items()})
     if problems:
         raise GpuPowerSettingsError(
             "a previous session left these cards at settings it applied and they could not be restored: "
@@ -177,16 +231,20 @@ def apply_declared_gpu_power_settings(
         raise GpuPowerSettingsError("--apply-gpu-power-settings cannot set the cards of a multi-node session")
     gpus = _session_gpus(hooks.read(), hooks.mask())
     lease = hooks.lease(ledger_dir, gpus)
-    # Only what this session changes is recorded, so only that is put back: restoring a perf level nobody declared
-    # would reset a card left in MANUAL clocks for reasons this session knows nothing about.
+    # Only what this session changes is recorded, so only that is put back: restoring a perf level that neither a
+    # declared level nor a declared sclk cap touched would reset a card left in MANUAL clocks for reasons this session
+    # knows nothing about.
     declared = {_POWER_CAP_W: power_cap_w, _PERF_LEVEL: level, _SCLK_MAX_MHZ: sclk_max_mhz}
     applied_keys = [key for key, value in declared.items() if value]
-    # A clock limit puts the card in the manual perf level, so the level is changed too and has to be put back.
-    touched = applied_keys + ([_PERF_LEVEL] if sclk_max_mhz is not None and _PERF_LEVEL not in applied_keys else [])
+    # The perf level and the sclk limit change each other: a clock limit puts the card in manual, and setting a level
+    # resets the limit. Applying either records and restores both.
+    coupled = [key for key in (_PERF_LEVEL, _SCLK_MAX_MHZ) if key not in applied_keys]
+    touched = applied_keys + (coupled if any(key in applied_keys for key in (_PERF_LEVEL, _SCLK_MAX_MHZ)) else [])
     try:
         recovered = _recover_orphans(lease, hooks)
         _refuse_busy_cards(gpus, hooks.resident_vram())
         originals = _originals(hooks.read(), gpus, touched)
+        _refuse_unrestorable_levels(originals, sclk_applied=sclk_max_mhz is not None)
         lease.record(originals, applied={key: declared[key] for key in applied_keys}, owner=owner)
     except GpuPowerSettingsError:
         lease.release()
@@ -199,7 +257,7 @@ def apply_declared_gpu_power_settings(
         if done:
             return []
         done = True
-        problems = hooks.restore(originals)
+        problems = _restore_and_verify(hooks, originals)
         if not problems:
             lease.clear()
         lease.release()
