@@ -39,8 +39,12 @@ def test_progress_records_phase_and_last_output_and_refreshes_in_the_background(
         before = json.loads((tmp_path / "progress.json").read_text())
         assert before["phase"] == "running" and before["last_output_unix"] is None
         progress.touch()
-        time.sleep(0.15)
-        after = json.loads((tmp_path / "progress.json").read_text())
+        # Wait for the background refresh rather than a fixed sleep, which a loaded CI runner can outlast.
+        deadline = time.monotonic() + 10
+        after = before
+        while after["last_output_unix"] is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+            after = json.loads((tmp_path / "progress.json").read_text())
 
     assert after["last_output_unix"] is not None
     assert after["updated_unix"] > before["updated_unix"]
