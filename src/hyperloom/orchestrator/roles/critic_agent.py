@@ -1108,6 +1108,7 @@ class CriticAgentBackend:
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
                 max_tokens=max_tokens,
+                cache_control=True,
                 timeout=build_http_timeout(connect=connect_timeout_s, read=rw_timeout_s),
                 timeout_s=rw_timeout_s,
             )

@@ -1513,6 +1513,48 @@ def test_anthropic_completion_posts_to_the_messages_api_when_a_key_is_configured
     assert client.closed, "the HTTP client must be closed once the completion returns"
 
 
+@pytest.mark.parametrize("system", ["sys", None])
+def test_anthropic_completion_system_cache_breakpoint(monkeypatch, system):
+    client = _ClosingAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
+    monkeypatch.setattr(llm_config, "get_anthropic_client", lambda **_kw: client)
+
+    llm_config.anthropic_completion(
+        model="claude-opus-5",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=8,
+        system=system,
+        cache_control=True,
+        env={_ANTHROPIC_KEY: "sk-ant-key"},
+    )
+
+    body = client.calls[0]["json"]
+    if system is None:
+        assert "system" not in body
+    else:
+        assert body["system"] == [
+            {"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}},
+        ]
+
+
+@pytest.mark.asyncio
+async def test_aanthropic_completion_system_cache_breakpoint(monkeypatch):
+    client = _ClosingAsyncAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
+    monkeypatch.setattr(llm_config, "get_async_anthropic_client", lambda **_kw: client)
+
+    await llm_config.aanthropic_completion(
+        model="claude-opus-5",
+        messages=[{"role": "user", "content": "hi"}],
+        max_tokens=8,
+        system="sys",
+        cache_control=True,
+        env={_ANTHROPIC_KEY: "sk-ant-key"},
+    )
+
+    assert client.calls[0]["json"]["system"] == [
+        {"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}},
+    ]
+
+
 def test_anthropic_completion_sends_temperature_on_the_http_path(monkeypatch):
     """The Messages API accepts it, and callers that ask for a low temperature to pin an output shape must keep getting one."""
     client = _ClosingAnthropicTransport(_FakeAnthropicResponse(body=_MESSAGE_BODY))
@@ -1571,7 +1613,8 @@ def test_anthropic_completion_omits_an_absent_system_prompt(monkeypatch):
     assert "system" not in client.calls[0]["json"]
 
 
-def test_anthropic_completion_drives_the_claude_cli_for_a_subscription_token(monkeypatch, fake_one_shot):
+@pytest.mark.parametrize("cache_control", [False, True])
+def test_anthropic_completion_drives_the_claude_cli_for_a_subscription_token(monkeypatch, fake_one_shot, cache_control):
     def _refuse(**_kw: Any) -> Any:
         raise AssertionError("a subscription token must not reach the Messages API")
 
@@ -1584,6 +1627,7 @@ def test_anthropic_completion_drives_the_claude_cli_for_a_subscription_token(mon
         system="sys",
         env={_OAUTH_ENV: _OAUTH_VALUE},
         timeout_s=12.0,
+        cache_control=cache_control,
     )
 
     assert result.text == "cli reply"
@@ -1667,7 +1711,10 @@ async def test_aanthropic_completion_posts_to_the_messages_api_and_closes(monkey
 
 
 @pytest.mark.asyncio
-async def test_aanthropic_completion_drives_the_claude_cli_for_a_subscription_token(monkeypatch, fake_one_shot):
+@pytest.mark.parametrize("cache_control", [False, True])
+async def test_aanthropic_completion_drives_the_claude_cli_for_a_subscription_token(
+    monkeypatch, fake_one_shot, cache_control
+):
     def _refuse(**_kw: Any) -> Any:
         raise AssertionError("a subscription token must not reach the Messages API")
 
@@ -1678,10 +1725,12 @@ async def test_aanthropic_completion_drives_the_claude_cli_for_a_subscription_to
         messages=[{"role": "user", "content": "hi"}],
         max_tokens=64,
         env={_OAUTH_ENV: _OAUTH_VALUE},
+        cache_control=cache_control,
     )
 
     assert result.text == "cli reply"
     assert fake_one_shot.instances[0].calls[0]["max_tokens"] == 64
+    assert "cache_control" not in fake_one_shot.instances[0].calls[0]
 
 
 @pytest.mark.asyncio
