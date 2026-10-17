@@ -17,6 +17,7 @@ from typing import Protocol
 
 from hyperloom.contracts.measurement import Purpose, Validity
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
+from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook.interfaces import (
     BranchLogStore,
@@ -104,7 +105,13 @@ class BranchJudge:
         await self._settle(first, judgement, logged)
 
     async def _settle(self, first: TestRecord, judgement: Judgement, logged: set[BranchLogEntry]) -> None:
-        action = await self._gate.settle(first.request, judgement)
+        try:
+            action = await self._gate.settle(first.request, judgement)
+        except ResultUnverified as error:
+            unverified = "a result behind it did not re-verify against its signed bundle"
+            content = f"{first.request_id} was not committed: {unverified} ({error.request_id}: {error.reason})"
+            await self._notice(logged, content, *judgement.request_ids)
+            return
         if action is Action.COMMIT:
             landed = f"{first.request_id} landed on your branch at {judgement.gain_pct:+.2f}% over {first.request.parent_commit}"
             await self._notice(logged, f"{landed}; your next candidates go on the new head", *judgement.request_ids)

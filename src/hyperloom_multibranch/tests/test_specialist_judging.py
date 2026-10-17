@@ -140,6 +140,20 @@ async def test_the_retest_carries_the_files_the_candidate_was_measured_with(sess
     assert retest.attachments == attached
 
 
+async def test_a_gain_whose_result_does_not_re_verify_is_not_committed_and_the_specialist_is_told(session):
+    first = await session.explore(FAST)
+    session.verifier.rejects = frozenset({first})
+    await session.step()
+    await session.step()
+    await session.judge.reconcile()
+
+    record = await session.runtime.record(first)
+    assert (record.conclusion, record.commit_id) == (Conclusion.UNVERIFIED, None)
+    assert await session.repo.head(BRANCH) == ROOT
+    (notice,) = await session.notices()
+    assert f"{first} was not committed: a result behind it did not re-verify against its signed bundle" in notice
+
+
 async def test_a_flat_candidate_is_recorded_without_a_retest(session):
     first = await session.explore(FLAT)
     await session.step()
