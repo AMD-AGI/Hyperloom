@@ -22,8 +22,9 @@ from hyperloom.contracts.recipe import (
     PatchRef,
     RecipeDelta,
 )
+from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom_multibranch.contracts.notebook import NotRecorded
-from hyperloom_multibranch.contracts.notebook.peers import BranchLogEntry, BranchLogType, Validity
+from hyperloom_multibranch.contracts.notebook.peers import BranchLogEntry, BranchLogType, TestKind, Validity
 from hyperloom_multibranch.contracts.notebook.records import (
     BranchLogRecord,
     Learning,
@@ -231,6 +232,26 @@ def test_a_test_whose_measurement_failed_or_did_not_re_verify_is_never_published
     assert snapshot.profile is not None
     assert candidate_row(unmeasured, snapshot, snapshot.profile, METRIC) is None
     assert candidate_row(unverified, snapshot, snapshot.profile, METRIC) is None
+
+
+@pytest.mark.parametrize(
+    "examined",
+    [
+        {"kind": TestKind.PROFILE},
+        {"kind": TestKind.SWEEP},
+        {"kind": TestKind.ACCURACY, "accuracy": True},
+        {"kind": TestKind.REPRO, "attachments": (AttachmentRef("repro.sh", "file", "c" * 64),)},
+    ],
+)
+def test_only_a_test_of_kind_test_is_published_as_the_other_kinds_examine_a_state(
+    snapshot: NotebookSnapshot, examined: dict[str, object]
+) -> None:
+    (record,) = [record for record in snapshot.records if record.request_id == "r3"]
+    other = dataclasses.replace(record, request=dataclasses.replace(record.request, **examined))
+
+    assert snapshot.profile is not None
+    assert candidate_row(record, snapshot, snapshot.profile, METRIC) is not None
+    assert candidate_row(other, snapshot, snapshot.profile, METRIC) is None
 
 
 def test_without_a_profile_there_is_nothing_to_export_and_agentx_publishes_nothing(snapshot: NotebookSnapshot) -> None:

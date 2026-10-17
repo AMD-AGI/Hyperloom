@@ -3,8 +3,9 @@
 
 """Publish a session's tested candidates to the Experience KB, so what they taught reaches later sessions.
 
-Every specialist test the rule gate judged, or that failed by the candidate's own fault, becomes one Experience through
-the packaged ``multibranch-notebook-v1`` mapping:
+Every specialist test of kind ``test`` that the rule gate judged, or that failed by the candidate's own fault, becomes
+one Experience through the packaged ``multibranch-notebook-v1`` mapping; the other kinds (profile, accuracy, repro,
+sweep) examine a state rather than try a change, so they are not published:
 
 * conditions: the session profile under the names the ``inference-recipe-v1`` declaration gives them, plus the
   intent's target (as ``bottleneck``), mechanism and layer;
@@ -31,7 +32,7 @@ from pathlib import Path
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_kb.collect import CollectionTarget, CollectReport, collect
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, NotRecorded
-from hyperloom_multibranch.contracts.notebook.peers import BranchLogType, HypothesisStatus, Intent, Validity
+from hyperloom_multibranch.contracts.notebook.peers import BranchLogType, HypothesisStatus, Intent, TestKind, Validity
 from hyperloom_multibranch.contracts.notebook.records import (
     BranchLogRecord,
     LearningRecord,
@@ -180,10 +181,16 @@ def _state(snapshot: NotebookSnapshot, commit_id: str) -> str:
 def candidate_row(
     record: TestRecord, snapshot: NotebookSnapshot, profile: SessionProfile, metric: str
 ) -> dict[str, object] | None:
-    """One export row; ``None`` for a merge, a test in flight or not measured, or a judgement waiting on its split."""
+    """One export row; ``None`` for a merge, another kind than ``test``, a test in flight or not measured, or a
+    judgement waiting on its split."""
 
     result = record.result
-    if record.request.branch == INTEGRATION_BRANCH or result is None or not record.measured:
+    if (
+        record.request.branch == INTEGRATION_BRANCH
+        or record.request.kind is not TestKind.TEST
+        or result is None
+        or not record.measured
+    ):
         return None
     failed = result.validity is Validity.CANDIDATE_FAILED
     if not failed and (record.judgement is None or record.conclusion is None or record.conclusion in _PENDING):
