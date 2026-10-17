@@ -7,10 +7,15 @@ Main refuses three gains that a measurement can show without the candidate being
 speculative draft on a synthetic benchmark, a change of a draft whose acceptance length is simulated, and an AgentX
 baseline served with the prefix cache off. Its flow does that in the explore and baseline executors; a test launched
 through ``hyperloom.measure`` never reaches them. This module re-exports the checks without copying their logic.
+
+``FAKE_GAINS`` is the catalog of the known fake gains. The rule: each newly found fake gain lands as a check, a row
+here and a test together; the test sends a minimal example through the real enforcement point named in the row.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +34,8 @@ from hyperloom.orchestrator.actions.executors import (
 __all__ = [
     "CONTEXT_COPY_REFUSAL",
     "PREFIX_CACHE_OFF_ERROR_CLASS",
+    "FAKE_GAINS",
+    "FakeGain",
     "SPECULATIVE_DECODING_PINNED",
     "baseline_prefix_cache_refusal",
     "launch_context_copy_refusal",
@@ -75,3 +82,39 @@ def baseline_prefix_cache_refusal(point: Path, round_dir: Path) -> str:
     measured: dict[str, Any] = {"status": "succeeded", "launch_evidence": evidence}
     refuse_cacheless_agentx_baseline(measured)
     return str(measured.get("error") or "") if measured["status"] != "succeeded" else ""
+
+
+@dataclass(frozen=True)
+class FakeGain:
+    """One known fake gain: how it shows, what refuses it, and where."""
+
+    name: str
+    shows_as: str
+    refusal_code: str  # the ``RequestRejected`` code, or the prefix of the failure reason the executor writes
+    check: Callable[..., str]
+    where: str  # "acceptance" (before anything launches) or "executor" (the round that ran)
+
+
+FAKE_GAINS = (
+    FakeGain(
+        name="context_copy_draft_on_synthetic",
+        shows_as="A speculative draft that copies the context accepts nearly every token of a synthetic benchmark.",
+        refusal_code=CONTEXT_COPY_REFUSAL,
+        check=launch_context_copy_refusal,
+        where="acceptance",
+    ),
+    FakeGain(
+        name="speculative_decoding_pinned",
+        shows_as="Changing a draft whose acceptance length the parent simulates moves the number without a real draft.",
+        refusal_code=SPECULATIVE_DECODING_PINNED,
+        check=pinned_speculative_refusal,
+        where="acceptance",
+    ),
+    FakeGain(
+        name="agentx_baseline_prefix_cache_off",
+        shows_as="An AgentX baseline served with the prefix cache off makes every later candidate look faster.",
+        refusal_code=PREFIX_CACHE_OFF_ERROR_CLASS,
+        check=baseline_prefix_cache_refusal,
+        where="executor",
+    ),
+)
