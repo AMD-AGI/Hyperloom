@@ -25,7 +25,7 @@ from contextlib import ExitStack, suppress
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, BinaryIO, Iterable, Iterator, Mapping, Sequence
+from typing import Any, BinaryIO, Iterable, Iterator, Mapping, NamedTuple, Sequence
 
 import yaml
 
@@ -1663,6 +1663,28 @@ def _iter_log_tails(root: Path, *, max_bytes: int, limit: int = 64) -> Iterator[
         return
 
 
+class _BenchProcess(NamedTuple):
+    """What the benchmark subprocess left behind, and what the server did under it."""
+
+    returncode: Any
+    stdout: str
+    stderr: str
+    runtime_sec: float
+    server_init_dead: Any
+    server_init_dead_error: Any
+    registry_mismatch: Any
+    cuda_graph_capture_failed: Any
+    capture_meta: Any
+
+
+class _PatchSettlement(NamedTuple):
+    """What applying a recipe's warm patches left behind, or the failure that ends the run."""
+
+    applied: Any = ()
+    pre_patch_sha: str = ""
+    failure: dict[str, Any] | None = None
+
+
 class BenchmarkRunExecutor:
     """One benchmark action: materialize the config, launch the backend, retry, parse the report."""
 
@@ -2569,108 +2591,17 @@ class BenchmarkRunExecutor:
                 return False
             return True
 
-        # An overlay recording its own root needs no resolved target, so this only refuses when nothing names a tree
-        # at all.
-        if params.get("patches") and not any(
-            str((entry or {}).get("framework_root") or "").strip()
-            for entry in params["patches"]
-            if isinstance(entry, dict)
-        ):
-            patch_application = {
-                "status": "failed",
-                "failure": "missing_target_repo",
-                "patches": [],
-                "applied": [],
-            }
-        else:
-            patch_application = _apply_warm_patches(
-                params,
-                "",
-                output_dir,
-                before_mutation=_persist_recipe_snapshot,
-            )
-        if isinstance(patch_application, dict):
-            applied_patches = list(patch_application.get("applied") or [])
-            _pre_patch_sha = str(patch_application.get("pre_sha") or "")
-            if patch_application.get("status") == "failed":
-                kernel_rollback = _rollback_warm_kernel_apply_results(
-                    params.get("warm_kernel_apply_results"),
-                    params.get("warm_kernel_snapshots"),
-                )
-                recipe_rollback = patch_application.get("rollback") or {
-                    "ok": not patch_application.get("snapshot_manifest"),
-                    "errors": [],
-                }
-                rollback_errors = [
-                    *list(recipe_rollback.get("errors") or []),
-                    *list(kernel_rollback.get("errors") or []),
-                ]
-                rollback_result = {
-                    "ok": bool(recipe_rollback.get("ok") and kernel_rollback.get("ok")),
-                    "recipe": recipe_rollback,
-                    "kernel": kernel_rollback,
-                    "errors": rollback_errors,
-                }
-                if live_shared_state is not None:
-                    if rollback_result["ok"]:
-                        live_shared_state.warm_replay_pending = {}
-                    else:
-                        live_shared_state.warm_replay_pending = {
-                            **dict(
-                                getattr(
-                                    live_shared_state,
-                                    "warm_replay_pending",
-                                    {},
-                                )
-                                or {}
-                            ),
-                            "status": "rollback_failed",
-                            "rollback_errors": rollback_errors,
-                        }
-                        if hasattr(live_shared_state, "set_stop_reason"):
-                            live_shared_state.set_stop_reason("warm_replay_rollback_failed")
-                    try:
-                        live_shared_state.save(self.session_dir)
-                    except Exception:
-                        log.warning(
-                            "combined warm replay cleanup persist failed",
-                            exc_info=True,
-                        )
-                return {
-                    "status": ("required_patch_failed" if rollback_result["ok"] else "required_patch_rollback_failed"),
-                    "error_class": (
-                        "required_patch_failed" if rollback_result["ok"] else "warm_replay_rollback_failed"
-                    ),
-                    "error": str(patch_application.get("failure") or "required recipe timeline patch failed"),
-                    "required_patch_failure": patch_application,
-                    "failed_patch_ref": patch_application.get("failed_ref"),
-                    "warm_kernel_rolled_back": bool(kernel_rollback.get("ok")),
-                    "warm_replay_rollback": rollback_result,
-                    "workspace": str(output_dir),
-                }
-            if live_shared_state is not None:
-                pending = dict(getattr(live_shared_state, "warm_replay_pending", {}) or {})
-                pending.update(
-                    {
-                        "status": "benchmarking",
-                        "recipe_patch_trees": list(patch_application.get("trees") or []),
-                        "recipe_patch_target": str(patch_application.get("target_repo") or ""),
-                        "recipe_patch_pre_sha": _pre_patch_sha,
-                        "recipe_patch_snapshot_manifest": patch_application.get("snapshot_manifest"),
-                        "recipe_patch_statuses": list(patch_application.get("patches") or []),
-                    }
-                )
-                live_shared_state.warm_replay_pending = pending
-                try:
-                    live_shared_state.save(self.session_dir)
-                except Exception:
-                    log.debug(
-                        "combined warm replay pending persist failed",
-                        exc_info=True,
-                    )
-        else:
-            applied_patches = patch_application
-            _pre_patch_sha = before_apply_sha
+        patch_application = self._apply_recipe_patches(params, output_dir, before_mutation=_persist_recipe_snapshot)
+        settlement = self._settle_patch_application(
+            patch_application,
+            params=params,
+            output_dir=output_dir,
+            before_apply_sha=before_apply_sha,
+            live_shared_state=live_shared_state,
+        )
+        if settlement.failure is not None:
+            return settlement.failure
+        applied_patches, _pre_patch_sha = settlement.applied, settlement.pre_patch_sha
         if applied_patches:
             log.info(
                 "baseline_executor: prepared %d warm-replay code patches: %s",
@@ -3008,6 +2939,88 @@ class BenchmarkRunExecutor:
                 _revert_legacy_warm_patch_trees(params)
             if bench_lease is not None:
                 bench_lease.close()
+
+    def _settle_patch_application(
+        self,
+        patch_application: Any,
+        *,
+        params: Mapping[str, Any],
+        output_dir: Any,
+        before_apply_sha: str,
+        live_shared_state: Any,
+    ) -> _PatchSettlement:
+        """Read what applying the recipe's warm patches left behind.
+
+        A required timeline patch that failed is rolled back -- the kernel half
+        first, then the recipe half -- and reported as the failure that ends the
+        run, because a baseline measured over a half-applied tree scores nothing.
+        """
+        applied: Any = []
+        pre_patch_sha = ""
+        if isinstance(patch_application, dict):
+            applied = list(patch_application.get("applied") or [])
+            pre_patch_sha = str(patch_application.get("pre_sha") or "")
+            if patch_application.get("status") == "failed":
+                return self._roll_back_failed_patches(
+                    patch_application,
+                    params=params,
+                    output_dir=output_dir,
+                    live_shared_state=live_shared_state,
+                )
+            if live_shared_state is not None:
+                pending = dict(getattr(live_shared_state, "warm_replay_pending", {}) or {})
+                pending.update(
+                    {
+                        "status": "benchmarking",
+                        "recipe_patch_trees": list(patch_application.get("trees") or []),
+                        "recipe_patch_target": str(patch_application.get("target_repo") or ""),
+                        "recipe_patch_pre_sha": pre_patch_sha,
+                        "recipe_patch_snapshot_manifest": patch_application.get("snapshot_manifest"),
+                        "recipe_patch_statuses": list(patch_application.get("patches") or []),
+                    }
+                )
+                live_shared_state.warm_replay_pending = pending
+                try:
+                    live_shared_state.save(self.session_dir)
+                except Exception:
+                    log.debug(
+                        "combined warm replay pending persist failed",
+                        exc_info=True,
+                    )
+        else:
+            applied = patch_application
+            pre_patch_sha = before_apply_sha
+        return _PatchSettlement(applied=applied, pre_patch_sha=pre_patch_sha)
+
+    @staticmethod
+    def _apply_recipe_patches(
+        params: Mapping[str, Any],
+        output_dir: Any,
+        *,
+        before_mutation: Any,
+    ) -> Any:
+        """Apply the recipe's warm patches over the tree they name.
+
+        An overlay recording its own root needs no resolved target, so this only refuses when nothing names a tree
+        at all.
+        """
+        if params.get("patches") and not any(
+            str((entry or {}).get("framework_root") or "").strip()
+            for entry in params["patches"]
+            if isinstance(entry, dict)
+        ):
+            return {
+                "status": "failed",
+                "failure": "missing_target_repo",
+                "patches": [],
+                "applied": [],
+            }
+        return _apply_warm_patches(
+            params,
+            "",
+            output_dir,
+            before_mutation=before_mutation,
+        )
 
     def _round_affordable_before_ignition(
         self,
@@ -3714,80 +3727,21 @@ class BenchmarkRunExecutor:
                 ", ".join(str(src.name) for src, _ in harvested),
             )
         if workspace is None:
-            failure_extras = {
-                "output_dir": str(output_dir),
-                "harvested_artifacts": [str(dst) for _, dst in harvested],
-                **capture_meta,
-            }
-            # Magpie never created a benchmark_* workspace, so the wrapper never wrote server.log.
-            captured = redact_secret_values((proc_stderr or "") + (proc_stdout or ""))
-            stderr_log_path: str | None = None
-            if captured.strip():
-                try:
-                    log_file = output_dir / "baseline_stderr.log"
-                    log_file.write_text(captured, encoding="utf-8")
-                    stderr_log_path = str(log_file)
-                except OSError as exc:
-                    log.warning(
-                        "baseline_executor: failed to persist stderr log: %s",
-                        exc,
-                    )
-            if stderr_log_path:
-                failure_extras["stderr_log_path"] = stderr_log_path
-            # Registry mismatch is wrapped in "Capture cuda graph failed" and must win so we do not arm the
-            # disable-cuda-graph retry.
-            if registry_mismatch:
-                return {
-                    "status": "failed",
-                    "error_class": "aiter_jit_registry_mismatch",
-                    "returncode": proc_returncode,
-                    "error": redact_secret_values(
-                        server_init_dead_error if server_init_dead else (proc_stderr or proc_stdout or "")[-2000:]
-                    ),
-                    **failure_extras,
-                }
-            # cuda-graph capture failures take priority over server_init_dead: only this class arms the one-shot
-            # disable-cuda-graph retry.
-            if cuda_graph_capture_failed:
-                return {
-                    "status": "failed",
-                    "error_class": "cuda_graph_capture_failed",
-                    "returncode": proc_returncode,
-                    "error": redact_secret_values(
-                        server_init_dead_error if server_init_dead else (proc_stderr or proc_stdout or "")[-2000:]
-                    ),
-                    **failure_extras,
-                }
-            if server_init_dead:
-                return {
-                    "status": "failed",
-                    "error_class": "server_init_dead",
-                    "returncode": proc_returncode,
-                    "error": redact_secret_values(server_init_dead_error),
-                    **failure_extras,
-                }
-            if proc_returncode != 0:
-                tail = redact_secret_values((proc_stderr or proc_stdout or "")[-2000:])
-                err_class = _classify_subprocess_error(
-                    subprocess_runtime_sec,
-                    tail,
-                    proc_returncode,
-                )
-                return {
-                    "status": "failed",
-                    "error_class": err_class,
-                    "returncode": proc_returncode,
-                    "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
-                    "error": tail,
-                    "output_signature": nonzero_output_signature(err_class, proc_stdout, proc_stderr),
-                    **failure_extras,
-                }
-            return {
-                "status": "failed",
-                "error_class": "no_workspace",
-                "error": "Magpie completed but produced no benchmark_* workspace",
-                **failure_extras,
-            }
+            return self._no_workspace_failure(
+                _BenchProcess(
+                    returncode=proc_returncode,
+                    stdout=proc_stdout,
+                    stderr=proc_stderr,
+                    runtime_sec=subprocess_runtime_sec,
+                    server_init_dead=server_init_dead,
+                    server_init_dead_error=server_init_dead_error,
+                    registry_mismatch=registry_mismatch,
+                    cuda_graph_capture_failed=cuda_graph_capture_failed,
+                    capture_meta=capture_meta,
+                ),
+                output_dir=output_dir,
+                harvested=harvested,
+            )
         report_path = workspace / "benchmark_report.json"
         report: dict[str, Any] | None = None
         if report_path.exists():
@@ -3958,6 +3912,172 @@ class BenchmarkRunExecutor:
             result["e2el_mean_ms"] or 0.0,
         )
         return result
+
+    def _no_workspace_failure(
+        self,
+        process: _BenchProcess,
+        *,
+        output_dir: Any,
+        harvested: Any,
+    ) -> dict[str, Any]:
+        """Report a run that finished without ever creating a benchmark workspace.
+
+        Magpie never created a ``benchmark_*`` directory, so the wrapper never
+        wrote a server log: whatever the subprocess printed is the only evidence
+        there is, and the error class names which of the known causes it was.
+        """
+        failure_extras = {
+            "output_dir": str(output_dir),
+            "harvested_artifacts": [str(dst) for _, dst in harvested],
+            **process.capture_meta,
+        }
+        # Magpie never created a benchmark_* workspace, so the wrapper never wrote server.log.
+        captured = redact_secret_values((process.stderr or "") + (process.stdout or ""))
+        stderr_log_path: str | None = None
+        if captured.strip():
+            try:
+                log_file = output_dir / "baseline_stderr.log"
+                log_file.write_text(captured, encoding="utf-8")
+                stderr_log_path = str(log_file)
+            except OSError as exc:
+                log.warning(
+                    "baseline_executor: failed to persist stderr log: %s",
+                    exc,
+                )
+        if stderr_log_path:
+            failure_extras["stderr_log_path"] = stderr_log_path
+        # Registry mismatch is wrapped in "Capture cuda graph failed" and must win so we do not arm the
+        # disable-cuda-graph retry.
+        if process.registry_mismatch:
+            return {
+                "status": "failed",
+                "error_class": "aiter_jit_registry_mismatch",
+                "returncode": process.returncode,
+                "error": redact_secret_values(
+                    process.server_init_dead_error
+                    if process.server_init_dead
+                    else (process.stderr or process.stdout or "")[-2000:]
+                ),
+                **failure_extras,
+            }
+        # cuda-graph capture failures take priority over server_init_dead: only this class arms the one-shot
+        # disable-cuda-graph retry.
+        if process.cuda_graph_capture_failed:
+            return {
+                "status": "failed",
+                "error_class": "cuda_graph_capture_failed",
+                "returncode": process.returncode,
+                "error": redact_secret_values(
+                    process.server_init_dead_error
+                    if process.server_init_dead
+                    else (process.stderr or process.stdout or "")[-2000:]
+                ),
+                **failure_extras,
+            }
+        if process.server_init_dead:
+            return {
+                "status": "failed",
+                "error_class": "server_init_dead",
+                "returncode": process.returncode,
+                "error": redact_secret_values(process.server_init_dead_error),
+                **failure_extras,
+            }
+        if process.returncode != 0:
+            return self._nonzero_exit_failure(process, failure_extras)
+        return {
+            "status": "failed",
+            "error_class": "no_workspace",
+            "error": "Magpie completed but produced no benchmark_* workspace",
+            **failure_extras,
+        }
+
+    @staticmethod
+    def _nonzero_exit_failure(process: _BenchProcess, failure_extras: dict[str, Any]) -> dict[str, Any]:
+        """Report a benchmark subprocess that exited nonzero, classified by its tail."""
+        tail = redact_secret_values((process.stderr or process.stdout or "")[-2000:])
+        err_class = _classify_subprocess_error(
+            process.runtime_sec,
+            tail,
+            process.returncode,
+        )
+        return {
+            "status": "failed",
+            "error_class": err_class,
+            "returncode": process.returncode,
+            "subprocess_runtime_sec": round(process.runtime_sec, 2),
+            "error": tail,
+            "output_signature": nonzero_output_signature(err_class, process.stdout, process.stderr),
+            **failure_extras,
+        }
+
+    def _roll_back_failed_patches(
+        self,
+        patch_application: Mapping[str, Any],
+        *,
+        params: Mapping[str, Any],
+        output_dir: Any,
+        live_shared_state: Any,
+    ) -> _PatchSettlement:
+        """Unwind an apply that failed, and report it when the timeline required it.
+
+        The kernel half is rolled back first, then the recipe half, so the tree is
+        whole again before anything is reported.
+        """
+        kernel_rollback = _rollback_warm_kernel_apply_results(
+            params.get("warm_kernel_apply_results"),
+            params.get("warm_kernel_snapshots"),
+        )
+        recipe_rollback = patch_application.get("rollback") or {
+            "ok": not patch_application.get("snapshot_manifest"),
+            "errors": [],
+        }
+        rollback_errors = [
+            *list(recipe_rollback.get("errors") or []),
+            *list(kernel_rollback.get("errors") or []),
+        ]
+        rollback_result = {
+            "ok": bool(recipe_rollback.get("ok") and kernel_rollback.get("ok")),
+            "recipe": recipe_rollback,
+            "kernel": kernel_rollback,
+            "errors": rollback_errors,
+        }
+        if live_shared_state is not None:
+            if rollback_result["ok"]:
+                live_shared_state.warm_replay_pending = {}
+            else:
+                live_shared_state.warm_replay_pending = {
+                    **dict(
+                        getattr(
+                            live_shared_state,
+                            "warm_replay_pending",
+                            {},
+                        )
+                        or {}
+                    ),
+                    "status": "rollback_failed",
+                    "rollback_errors": rollback_errors,
+                }
+                if hasattr(live_shared_state, "set_stop_reason"):
+                    live_shared_state.set_stop_reason("warm_replay_rollback_failed")
+            try:
+                live_shared_state.save(self.session_dir)
+            except Exception:
+                log.warning(
+                    "combined warm replay cleanup persist failed",
+                    exc_info=True,
+                )
+        return _PatchSettlement(
+            failure={
+                "status": ("required_patch_failed" if rollback_result["ok"] else "required_patch_rollback_failed"),
+                "error_class": ("required_patch_failed" if rollback_result["ok"] else "warm_replay_rollback_failed"),
+                "error": str(patch_application.get("failure") or "required recipe timeline patch failed"),
+                "required_patch_failure": patch_application,
+                "failed_patch_ref": patch_application.get("failed_ref"),
+                "warm_kernel_rolled_back": bool(kernel_rollback.get("ok")),
+                "warm_replay_rollback": rollback_result,
+                "workspace": str(output_dir),
+            }
+        )
 
 
 class BaselineExecutor(BenchmarkRunExecutor):
