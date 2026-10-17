@@ -886,13 +886,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "Short-circuits the IR-3 PR Monitor probe; IR-3 sets this "
         "automatically when PR Monitor is unreachable (soft degrade).",
     )
-    opt.add_argument(
-        "--pr-feed-window-days",
-        dest="pr_feed_window_days",
-        type=int,
-        default=30,
-        help="Look-back window for the PR feed warmup (days). Default: 30.",
-    )
     # specialist research_lane capacity (locked at session start).
     opt.add_argument(
         "--research-lane-capacity",

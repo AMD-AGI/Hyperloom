@@ -120,8 +120,6 @@ def test_cli_pr_monitor_controls_have_expected_defaults():
     assert args.degraded_pr is False
     assert not hasattr(args, "pr_monitor_url")
     assert not hasattr(args, "pr_monitor_mcp_url")
-    assert isinstance(args.pr_feed_window_days, int)
-    assert args.pr_feed_window_days > 0
 
 
 def test_cli_degraded_pr_sets_flag_true():
@@ -133,11 +131,6 @@ def test_cli_degraded_pr_sets_flag_true():
 def test_removed_independent_pr_endpoint_flags_are_rejected(flag: str):
     with pytest.raises(SystemExit):
         _parse_optimize_args([flag, "https://legacy.example/pr-monitor"])
-
-
-def test_cli_pr_feed_window_days_override_reaches_namespace():
-    args = _parse_optimize_args(["--pr-feed-window-days", "7"])
-    assert args.pr_feed_window_days == 7
 
 
 def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
@@ -168,7 +161,7 @@ def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
     )
     monkeypatch.setenv("KB_STORE_URL", "https://kb.example/knowledge-base")
 
-    args = _parse_optimize_args(["--pr-feed-window-days", "14"])
+    args = _parse_optimize_args([])
     plane = _bootstrap_knowledge_plane(
         args,
         recipe_kb_client=None,
