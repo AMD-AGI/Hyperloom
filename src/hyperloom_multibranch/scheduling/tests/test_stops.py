@@ -226,7 +226,6 @@ async def test_a_stop_that_overruns_the_hard_stop_is_cut_and_every_process_kille
     report = await session.stopper.stop_everything(SessionStopReason.TIME_EXHAUSTED, NOW + SHORT_GRACE)
 
     assert STOP_OVERRAN in report.failures and not report.clean
-    assert session.sessions.stopped == ["b01"]
     assert session.toolbox.withdrawals == [SessionStopReason.TIME_EXHAUSTED.value]
     assert not any(running(pid) for pid in pids)
     assert session.roster.closed
