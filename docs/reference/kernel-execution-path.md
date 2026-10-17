@@ -44,7 +44,6 @@ No PolicyGate path runs for the RESPONSE because it's written directly through
 | Request kind | Handler | Entry point |
 |---|---|---|
 | `trace_analyze` | `trace_analyze_handler` | TraceLens `tracelens_analysis.py` |
-| `run_optimization` | `run_optimization_handler` | GEAK or Forge per-kernel |
 | `integrate` | `integrate_handler` | patch → re-baseline → KEEP/REVERT |
 | `apply_patch` | `integrate_handler` (alias) | same as `integrate` |
 
@@ -176,13 +175,11 @@ decides kernel strategy internally:
   `--backends` CLI flags and payload `backends` hints do not override this
   choice.
 
-`run_gemm_tuning_handler` also defaults to GEAK unless the effective
-`KERNEL_OPT_BACKEND_ORDER` is `forge`, whether selected explicitly or by the
-ATOM CLI default. That default applies to an LLM-issued `run_gemm_tuning`
-REQUEST, which is dispatched inline whatever the backend. The KERNEL-**entry**
-GEMM tuning is a different matter: under `geak` it never fires at all, because
-`run_agent` hands the phase to `_run_geak_kernel_phase` and returns
-before reaching it.
+`run_gemm_tuning_handler` runs the Forge GEMM tuner only, and only `KernelPhase`
+calls it. Under `geak` the KERNEL-entry GEMM tuning never fires, because
+`run_agent` hands the phase to `_run_geak_kernel_phase` and returns before
+reaching it. An orchestration-issued `run_gemm_tuning` REQUEST is rejected, as
+described above.
 
 FlyDSL kernels (`source_type=flydsl`) are handled by Forge when it is enabled.
 
