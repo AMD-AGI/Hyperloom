@@ -10,7 +10,7 @@ toolbox, which releases the sandboxes it holds, and kills every process the sche
 still alive. The toolbox close gets
 :data:`TOOLBOX_CLOSE_SECONDS`, or half the time left before the hard stop when that is less, the branch stops the rest,
 and the release runs whether or not they finished. Both close the roster first, so no fork is admitted and no branch
-opened afterwards.
+opened afterwards, and void the forks and repairs still queued for a slot.
 The main flow's signal drain lives in its loop package, which this package does not import.
 """
 
@@ -135,15 +135,20 @@ class SessionStopper:
         self._processes = context.processes
         self._decisions = context.decisions
         self._clock = context.clock
+        self._desk = context.desk
 
     async def end_exploration(self, reason: SessionStopReason) -> None:
-        """Close the roster and stop every specialist branch; the integration branch keeps its quota for FINAL.
+        """Close the roster, void the queued forks and repairs and stop every specialist branch; the integration branch
+        keeps its quota for FINAL.
 
         A branch stop that fails is logged and does not hold FINAL up: the branch's own ``STOP`` decision names the
         failure, and CLOSE kills whatever it left behind and reports what outlived that.
         """
 
         self._roster.close()
+        voided = await settled(self._desk.void_all(reason.value))
+        if isinstance(voided, BaseException):
+            logger.error("the queued forks and repairs were not voided cleanly", exc_info=voided)
         for failure in await self._stop_open(reason, frozenset({BranchKind.SPECIALIST})):
             logger.error("a specialist branch did not stop cleanly at the end of EXPLORE", exc_info=failure)
 
@@ -205,8 +210,9 @@ class SessionStopper:
         failure of the session stop.
         """
 
+        voided = await settled(self._desk.void_all(reason.value))
         withdrawn = await settled(self._toolbox.withdraw_all(reason.value))
-        failures = [withdrawn] if isinstance(withdrawn, BaseException) else []
+        failures = [step for step in (voided, withdrawn) if isinstance(step, BaseException)]
         failures += await self._stop_open(reason, frozenset(BranchKind))
         unconfirmed = await self._branches.stop_unconfirmed_specialists()
         status = await settled(self._toolbox.queue_state())

@@ -23,6 +23,7 @@ from hyperloom.common.io import append_jsonl
 from hyperloom.common.jsonio import extract_last_json_with_key
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.forks import PendingBranch
 from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, RosterCaps
 from hyperloom_multibranch.scheduling.widening import WideningSignals
@@ -48,7 +49,9 @@ its focus: the op it should speed up. Name the focus of each, or leave it out an
 largest op of the integration head's latest profile, or on none when that head was never profiled. The opening batch
 is given no focus. free_branch_slots counts the branches that may still be opened before your stops take effect: a
 branch you stop frees its slot for a branch you open in the same answer, and branches beyond the slots left are not
-opened.
+opened. pending lists the forks and repairs the rule gate asked for that wait for a slot, oldest first, with how long
+each has waited: a slot your stops free goes to them first and only the slots left open your branches. You do not
+admit them; stop a branch that is worth less than a pending one to let it start.
 Spend the budget where the expected gain is highest: a branch whose frontier expected_gain_pct is low and that is not
 observing a slow-paying direction is a candidate to stop or to lower K; keep K where the gain is high.
 A branch's basis says what its expected gain rests on: its own trend, a prior from similar past sessions, the floor
@@ -84,7 +87,8 @@ class JudgeView:
     """What the judge sees; ``opening`` is true only for the call that sizes the opening batch, which opens at least
     one branch.
 
-    ``free_slots`` is the roster's own count of branches that may still be opened; ``history`` is the notebook's
+    ``free_slots`` is the roster's own count of branches that may still be opened; ``pending`` are the forks and
+    repairs the fork desk queued for a slot, oldest first; ``history`` is the notebook's
     digest of similar archived sessions, empty when the archive holds none. ``widening`` says whether a branch
     opened now would still pay off.
     """
@@ -100,6 +104,7 @@ class JudgeView:
     metric: str
     opening: bool
     free_slots: int
+    pending: tuple[PendingBranch, ...]
     history: str
     widening: WideningSignals
 
@@ -180,6 +185,15 @@ def _branch_row(entry: BranchEntry, progress: BranchProgress | None) -> dict[str
     return row
 
 
+def _pending_row(pending: PendingBranch, now: float) -> dict[str, object]:
+    return {
+        "kind": pending.origin.value,
+        _KEY_BRANCH: pending.branch,
+        "from_branch": pending.from_branch,
+        "waiting_seconds": round(now - pending.queued_at),
+    }
+
+
 def _cold_start(widening: WideningSignals) -> int | str:
     seconds = widening.cold_start_seconds
     return "unknown" if seconds is None else round(seconds)
@@ -198,6 +212,7 @@ def render_prompt(view: JudgeView) -> str:
         "min_useful_seconds": round(view.widening.min_useful_seconds),
         "cold_start": _cold_start(view.widening),
         "toolbox_headroom": view.widening.toolbox_headroom,
+        "pending": [_pending_row(pending, view.now) for pending in view.pending],
         "session_remaining_seconds": round(view.session_remaining_seconds),
         "integration": {
             "recorded_value": dict(view.integration_value),

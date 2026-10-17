@@ -11,17 +11,17 @@ from pathlib import Path
 import pytest
 
 from hyperloom_kb import ReadStatus
-from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.notebook.learning_search import RetrievalLog
 from hyperloom_multibranch.notebook.tests.factories import profile
 from hyperloom_multibranch.scheduling.mb_fakes import (
     MB_FAKE_BASE_IMAGE_DIGEST,
     mb_fake_learning_recall,
-    mb_fake_refused_fork,
     mb_fake_regression_passes,
+    mb_fake_settle_voided,
     mb_fake_similar_branches,
 )
+from hyperloom_multibranch.scheduling.local_peers import MbFakeNoSplitLanding
 from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
 
 
@@ -30,10 +30,9 @@ def _roster(tmp_path: Path) -> Roster:
     return Roster(caps, tmp_path / "MB-roster.json", Clock(now=lambda: 0.0))
 
 
-def test_a_fork_the_roster_cannot_take_is_rejected_never_pending() -> None:
-    assert mb_fake_refused_fork("the session is stopping") == ForkAdmission(
-        AdmissionStatus.REJECTED, "the session is stopping"
-    )
+async def test_no_fork_is_landed_and_a_void_tells_the_gate_nothing() -> None:
+    assert not await MbFakeNoSplitLanding().land_split("b03")
+    assert await mb_fake_settle_voided("b03", "parent b01 stopped: flat") is None
 
 
 def test_mb2_policies_are_inert(tmp_path: Path) -> None:

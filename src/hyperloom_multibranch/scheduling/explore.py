@@ -3,16 +3,19 @@
 
 """EXPLORE: open the opening batch, then let the judge steer the branches until the EXPLORE deadline or a soft stop.
 
-The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it stops the repair branches that used up their time, starts the
-forks and repairs the fork desk admitted, consults the MB2 placeholders, and every judge interval asks the judge,
-applies what it decided and rebuilds the dashboard. The judge is asked at once, not at its next interval, when the
-scheduler itself frees a slot: a repair branch stopped at its time limit, or an admitted fork or repair that failed to
-start. A branch the judge opens after the opening batch starts from the integration head, briefed on a focus. The
-judge reads the frontier-scored progress and how similar archived sessions went; a judge call that has not answered by
-the EXPLORE deadline counts as failed, and a branch that has not opened by then is withdrawn, so neither eats into
-FINAL. The integrator merges in a background task of its own, in rounds as wide as the integration branch's K. When
-EXPLORE ends that task is cancelled and the integrator abandons its round, so the integration head the FINAL
-candidates are read from no longer moves and no merge test competes with FINAL's measurements.
+The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it stops the repair branches that used up their time, moves the
+forks and repairs queued on the fork desk onto the free slots, lands each admitted fork through the split landing and
+starts the admitted forks and repairs, consults the MB2 placeholders, and every judge interval asks the judge,
+applies what it decided and rebuilds the dashboard. A slot the judge's stops free goes to the queued requests first and
+only then to the branches the judge opens. The judge is asked at once, not at its next interval, when the scheduler
+itself frees a slot: a repair branch stopped at its time limit, a fork the gate did not land, or an admitted fork or
+repair that failed to start. A branch the judge opens after the opening batch starts from the integration head,
+briefed on a focus. The judge reads the frontier-scored progress and how similar archived sessions went; a judge call
+that has not answered by the EXPLORE deadline counts as failed, and a branch that has not opened by then is withdrawn,
+so neither eats into FINAL. The integrator merges in a background task of its own, in rounds as wide as the
+integration branch's K. When EXPLORE ends that task is cancelled and the integrator abandons its round, so the
+integration head the FINAL candidates are read from no longer moves and no merge test competes with FINAL's
+measurements.
 """
 
 from __future__ import annotations
@@ -27,16 +30,16 @@ from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierScoring
 from hyperloom_multibranch.notebook.rsi.session import judge_history
-from hyperloom_multibranch.scheduling.branches import BatchStart, BranchControl
+from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS, BatchStart, BranchControl
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
-from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import Integrator
 from hyperloom_multibranch.scheduling.judge import Judge, JudgeDecision, JudgeView
-from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_similar_branches
+from hyperloom_multibranch.scheduling.mb_fakes import MbFakeSplitLanding, mb_fake_similar_branches
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchOrigin, BranchStop, StopCause
 from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC
+from hyperloom_multibranch.scheduling.settle import failure_text, settled
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.scheduling.widening import Widening, refill_focus
 
@@ -46,6 +49,7 @@ logger = logging.getLogger(__name__)
 EXPLORE_TICK_SECONDS = 5.0
 SIMILAR_BRANCH_REASON = "duplicates another branch"
 OPEN_CUT_REASON = "branch slots taken"
+FORK_NOT_LANDED = "the rule gate did not land the fork"
 
 
 @dataclass(frozen=True)
@@ -79,19 +83,20 @@ def integration_row(progress: tuple[BranchProgress, ...]) -> BranchProgress | No
 
 class Explorer:
     """Runs EXPLORE once; the scheduler's notebook handle gives the snapshot the judge's digest of the archived
-    sessions compares with them."""
+    sessions compares with them, and ``landing`` lands each fork the fork desk admits."""
 
     def __init__(
         self,
         context: SchedulerContext,
         branches: BranchControl,
-        desk: ForkDesk,
         integrator: Integrator,
         steering: Steering,
+        landing: MbFakeSplitLanding,
     ) -> None:
         self._roster = context.roster
         self._branches = branches
-        self._desk = desk
+        self._desk = context.desk
+        self._landing = landing
         self._judge = steering.judge
         self._integrator = integrator
         self._progress = steering.progress
@@ -132,6 +137,7 @@ class Explorer:
             if merging.done():
                 merging.result()
             overrun = await self._branches.stop_overrun_repairs()
+            self._desk.fill_free_slots()
             if await self._start_admitted(window.explore_end) or overrun:
                 next_judge = now
             await self._consult_placeholders()
@@ -151,15 +157,33 @@ class Explorer:
                 await self._clock.sleep(EXPLORE_TICK_SECONDS)
 
     async def _start_admitted(self, deadline: float) -> bool:
-        """Start the forks and repairs the fork desk admitted; true when one failed to start, freeing its slot."""
+        """Land the admitted forks and start the forks and repairs the fork desk admitted; true when a fork did not land
+        or a branch failed to start, freeing its slot."""
 
         freed = False
         for admitted in self._desk.waiting():
-            if await self._branches.start_admitted(admitted, deadline):
-                self._desk.release(admitted.branch)
-                stop = self._roster.entry(admitted.branch).stop
-                freed = freed or (stop is not None and stop.cause is StopCause.START_FAILED)
+            self._desk.release(admitted.branch)
+            failure = await self._land(admitted.branch, deadline)
+            if failure:
+                await self._branches.void_admitted(admitted.branch, failure)
+            else:
+                await self._branches.start_admitted(admitted, deadline)
+            stop = self._roster.entry(admitted.branch).stop
+            freed = freed or (stop is not None and stop.cause is StopCause.START_FAILED)
         return freed
+
+    async def _land(self, branch: str, deadline: float) -> str:
+        """Have the split landing land ``branch`` when it is a live fork; why it did not, or ``""``."""
+
+        entry = self._roster.entry(branch)
+        if entry.origin is not BranchOrigin.FORK or entry.stop is not None:
+            return ""
+        seconds = min(SPECIALIST_START_SECONDS, deadline - self._clock.now())
+        landed = await settled(self._clock.wait_for(self._landing.land_split(branch), seconds))
+        if isinstance(landed, BaseException):
+            logger.error("the fork %s was not landed", branch, exc_info=landed)
+            return failure_text(landed)
+        return "" if landed else FORK_NOT_LANDED
 
     async def _consult_placeholders(self) -> None:
         for branch in mb_fake_similar_branches(self._roster):
@@ -186,6 +210,7 @@ class Explorer:
             metric=PRIMARY_METRIC,
             opening=opening,
             free_slots=self._roster.free_slots(),
+            pending=self._desk.pending(),
             history=judge_history(
                 await self._notebook.snapshot(),
                 self._progress.history,
@@ -204,8 +229,9 @@ class Explorer:
         return decision
 
     async def _apply(self, decision: JudgeDecision, start: BatchStart) -> bool:
-        """Apply the stop and K orders, then open the branches the judge asked for as ``start`` says, into the slots the
-        stops freed; True, and nothing opened, when the judge asked to stop the session."""
+        """Apply the stop and K orders, move the queued forks and repairs onto the slots the stops freed, then open the
+        branches the judge asked for as ``start`` says into the slots left; True, and nothing moved or opened, when the
+        judge asked to stop the session."""
 
         self._decisions.record(
             Decision(
@@ -225,6 +251,7 @@ class Explorer:
             await self._branches.apply_k({order.branch: order.k for order in decision.k})
         if decision.session_stop:
             return True
+        self._desk.fill_free_slots()
         focus = await self._focus(decision, start) if start.origin is BranchOrigin.REFILL else ()
         await self._open_batch(decision.open_count, decision.open_k, start, focus)
         return False
@@ -256,4 +283,12 @@ class Explorer:
             logger.error("the judge's stop of %s did not finish cleanly", branch, exc_info=failure)
 
 
-__all__ = ["EXPLORE_TICK_SECONDS", "OPEN_CUT_REASON", "ExploreWindow", "Explorer", "Steering", "integration_row"]
+__all__ = [
+    "EXPLORE_TICK_SECONDS",
+    "FORK_NOT_LANDED",
+    "OPEN_CUT_REASON",
+    "ExploreWindow",
+    "Explorer",
+    "Steering",
+    "integration_row",
+]

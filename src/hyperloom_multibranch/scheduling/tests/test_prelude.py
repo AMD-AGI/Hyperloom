@@ -31,6 +31,7 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
+from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
 from hyperloom_multibranch.scheduling.prelude import Prelude, PreludeFailed, PreludeResult, prelude_argv
@@ -127,8 +128,9 @@ def _prelude(
 ) -> Prelude:
     clock = clock or _clock()
     roster = Roster(RosterCaps(1, 1, 1), layout.roster, clock)
+    decisions = DecisionLog(layout.decisions, clock)
     context = SchedulerContext(
-        layout, roster, _notebook(layout), DecisionLog(layout.decisions, clock), processes, clock
+        layout, roster, _notebook(layout), decisions, processes, clock, ForkDesk(roster, decisions, clock)
     )
     return Prelude(context, peers.repo, peers.gate, peers.tests, recipe_kb=recipe_kb)
 

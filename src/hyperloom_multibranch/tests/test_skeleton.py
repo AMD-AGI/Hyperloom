@@ -4,13 +4,14 @@
 """The end-to-end skeleton: one session driven in-process on the specialist runtime, peer stand-ins and a virtual
 clock.
 
-PRELUDE roots the session on a scripted child session in a git repository; the judge opens two branches, whose
-scripted specialists the runtime runs and judges; on ``b01`` the runtime confirms and commits ``c1``, and a fix of it is
-asked for as a fork, which the stand-in gate splits off as ``b03`` and the scheduler starts at the fix (a second fork
-is refused at the cap); on ``b02`` it commits ``c2``, the best single-branch value, whose specialist holds a claim and a process the AI work socket started, and the judge
-stops ``b02``; the integrator merges ``c1`` and refuses ``c2``; FINAL weighs the judge-stopped ``b02`` against the
-integration head and passes over it, because its head does not reproduce its recorded value; CLOSE leaves nothing
-running.
+PRELUDE roots the session on a scripted child session in a git repository; the judge opens two branches, whose scripted
+specialists the runtime runs and judges; on ``b01`` the runtime confirms and commits ``c1``, and two fixes of it are
+asked for as forks: the first takes the last slot as ``b03``, the second waits in the fork desk's queue as ``b04`` and
+takes the slot the judge's stop of ``b02`` frees; the stand-in gate lands each fix on its fork and the scheduler starts
+each at its fix; on ``b02`` it commits ``c2``, the best single-branch value, whose specialist holds a claim and a
+process the AI work socket started, and the judge stops ``b02``; the integrator merges ``c1`` and refuses ``c2``; FINAL
+weighs the judge-stopped ``b02`` against the integration head and passes over it, because its head does not reproduce
+its recorded value; CLOSE leaves nothing running.
 """
 
 from __future__ import annotations
@@ -28,14 +29,14 @@ import pytest
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.proctree import running
 from hyperloom.contracts.measurement import Purpose, TestRequest
-from hyperloom.contracts.recipe import Recipe, RecipeDelta, apply
+from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
 from hyperloom.measure.versions import socket_versions
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent, ToolResultPointer
+from hyperloom_multibranch.contracts.notebook.records import ToolResultPointer
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
@@ -43,8 +44,9 @@ from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.notebook.tests.factories import delta, intent
 from hyperloom_multibranch.scheduling.budget import SessionBudget
 from hyperloom_multibranch.scheduling import branches
-from hyperloom_multibranch.scheduling.explore import EXPLORE_TICK_SECONDS, OPEN_CUT_REASON
+from hyperloom_multibranch.scheduling.explore import EXPLORE_TICK_SECONDS, FORK_NOT_LANDED, OPEN_CUT_REASON
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL
+from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.lifecycle import CUT_SHORT, Session, SessionHost, SessionOutcome, SessionServices
@@ -70,6 +72,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     RefusingRuntime,
     ScriptedCompletion,
     SessionStep,
+    SplittingDesk,
     StuckToolbox,
     VirtualClock,
     recipe_effect,
@@ -101,6 +104,9 @@ CURVES = {
 EXPLORED = {**CURVES, frozenset({"c2"}): {MAIN_POINT: 1060.0}}
 SCRIPTS = {"b01": (tagged("c1"),), "b02": (tagged("c2"),)}
 FIX_REASON = "fix f1 regresses"
+#: The fork each fix asks for lands on, by the order the forks are asked for.
+FIXES = {"b03": tagged("f1"), "b04": tagged("f2")}
+FIX_REASONS = (FIX_REASON, "fix f2 regresses")
 #: An agent CLI as the AI work socket starts one: leading a session of its own.
 AGENT_ARGV = ("sleep", "600")
 #: Real seconds a scripted specialist's change gets to be judged and committed while virtual time stands still.
@@ -184,6 +190,7 @@ class Stage:
     refusing: frozenset[str] = frozenset()
     hanging: frozenset[str] = frozenset()
     runtime_type: type[RefusingRuntime] = RefusingRuntime
+    fixes: Mapping[str, RecipeDelta] = field(default_factory=dict)
     recipe_kb: OneChampionKB | None = None
     stuck: frozenset[str] = frozenset()
     toolbox_type: type[RecordingToolbox] = RecordingToolbox
@@ -192,6 +199,7 @@ class Stage:
     sessions: RecordedSessions = field(init=False)
     repo: HeldGitRepo = field(init=False)
     setup: PeerSetup = field(init=False)
+    splits: SplittingDesk = field(init=False)
     briefs: SessionBriefs = field(init=False)
     forks: list[ForkAdmission] = field(default_factory=list)
     watchers: list[asyncio.Future[None]] = field(default_factory=list)
@@ -208,13 +216,15 @@ class Stage:
         self.sessions = RecordedSessions(
             toolbox, repo, self.handle(Role.OBSERVER), scripts=self.scripts, steps=self.steps, hanging=self.hanging
         )
+        assert isinstance(setup.desk, ForkDesk)
+        self.splits = SplittingDesk(setup.desk, repo, self.handle(Role.GATE), self.fixes)
         runtime = specialist_runtime(
             setup.layout.notebook,
             toolbox,
             repo,
             self.sessions,
             now=self.time.now,
-            desk=setup.desk,
+            desk=self.splits,
             runtime=self.runtime_type,
         )
         runtime.refusing = self.refusing
@@ -222,7 +232,7 @@ class Stage:
         self.briefs = SessionBriefs(self.handle(Role.OBSERVER))
         mcp = McpServer(McpServerConfig(host_token="t" * MIN_TOKEN_LENGTH), campaign=setup.layout.session_id)
         gate = session_gate(self.handle(Role.GATE), toolbox)
-        return Peers(runtime, toolbox, repo, gate, mcp, self.briefs, toolbox.config.image_digest)
+        return Peers(runtime, toolbox, repo, gate, mcp, self.briefs, toolbox.config.image_digest, self.splits)
 
     async def root(self) -> str:
         return (await self.handle(Role.OBSERVER).baseline()).root_commit
@@ -276,19 +286,13 @@ def _stage(tmp_path: Path, *, child: Path | None, exit_code: int = 0) -> Stage:
     return Stage(layout, time, processes, judge, [])
 
 
-def _script(stage: Stage) -> None:
-    """``b01`` commits ``c1`` and asks for two forks of a fix of it; ``b02`` commits ``c2``, then holds a claim on it
-    and a process."""
+def _script(stage: Stage, forks: int = len(FIX_REASONS)) -> None:
+    """``b01`` commits ``c1`` and asks for ``forks`` forks of a fix of it; ``b02`` commits ``c2``, then holds a claim
+    on it and a process."""
 
-    async def forks(branch: str, c1: str) -> None:
-        accepted = await stage.setup.desk.admit(ForkRequest(branch, c1, FIX_REASON))
-        stage.forks.append(accepted)
-        await stage.repo.create_branch(accepted.branch, c1)
-        fixed = apply(await stage.repo.read_recipe(c1), tagged("f1"))
-        fix = await stage.repo.commit(accepted.branch, c1, fixed, FIX_REASON)
-        split = LineageEvent(LineageKind.SPLIT, accepted.branch, commit_id=fix, from_commit=c1, from_branch=branch)
-        await stage.handle(Role.GATE).record_lineage(split)
-        stage.forks.append(await stage.setup.desk.admit(ForkRequest(branch, c1, "fix f2 regresses")))
+    async def ask_forks(branch: str, c1: str) -> None:
+        for reason in FIX_REASONS[:forks]:
+            stage.forks.append(await stage.splits.admit(ForkRequest(branch, c1, reason)))
 
     async def holds(branch: str, c2: str) -> None:
         runtime = stage.handle(Role.SPECIALIST_RUNTIME, branch)
@@ -296,7 +300,8 @@ def _script(stage: Stage) -> None:
         await stage.start_agent(branch)
 
     stage.scripts = SCRIPTS
-    stage.steps = {"b01": stage.once_committed(forks), "b02": stage.once_committed(holds)}
+    stage.fixes = FIXES
+    stage.steps = {"b01": stage.once_committed(ask_forks), "b02": stage.once_committed(holds)}
 
 
 async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Path) -> None:
@@ -321,15 +326,27 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert dict(fingerprint.sockets) == socket_versions()
     assert dict(fingerprint.prompt_versions) == prompt_versions()
 
-    fix = await stage.repo.head("b03")
-    assert fix != c1 and stage.sessions.started == {"b01": root, "b02": root, "b03": fix}
+    fix, queued_fix = await stage.repo.head("b03"), await stage.repo.head("b04")
+    assert stage.sessions.started == {"b01": root, "b02": root, "b03": fix, "b04": queued_fix}
     assert recipe_tags(await stage.repo.read_recipe(c1)) == {"c1"}
     assert recipe_tags(await stage.repo.read_recipe(c2)) == {"c2"}
+    assert recipe_tags(await stage.repo.read_recipe(fix)) == {"c1", "f1"}
+    assert recipe_tags(await stage.repo.read_recipe(queued_fix)) == {"c1", "f2"}
     assert [(admission.status, admission.branch) for admission in stage.forks] == [
         (AdmissionStatus.ACCEPTED, "b03"),
-        (AdmissionStatus.REJECTED, ""),
+        (AdmissionStatus.PENDING, ""),
     ]
-    assert (branches["b03"].origin, branches["b03"].start_commit) == (LineageKind.SPLIT, c1)
+    for fork in ("b03", "b04"):
+        assert (branches[fork].origin, branches[fork].start_commit, branches[fork].from_branch) == (
+            LineageKind.SPLIT,
+            c1,
+            "b01",
+        )
+    [dequeued] = [
+        row for row in _decisions(stage) if row["kind"] == "fork" and row["detail"].get("status") == "dequeued"
+    ]
+    [stopped] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b02"]
+    assert dequeued["branch"] == "b04" and stopped["at"] <= dequeued["at"] < stopped["at"] + EXPLORE_TICK_SECONDS
 
     assert stage.sessions.k["b01"] == 2 and stage.sessions.running == set()
     specialist_ks = [
@@ -348,6 +365,7 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
         "b01": BranchOrigin.FIRST_BATCH.value,
         "b02": BranchOrigin.FIRST_BATCH.value,
         "b03": BranchOrigin.FORK.value,
+        "b04": BranchOrigin.FORK.value,
     }
     assert not [row for row in _decisions(stage) if row["kind"] == "open" and not row["branch"]]
     b02 = next(entry for entry in roster["entries"] if entry["branch"] == "b02")
@@ -728,7 +746,7 @@ async def _refilled_on_a_full_roster(stage: Stage, open_count: int) -> str:
     """Run the session in which the judge, on a roster ``b01``, ``b02`` and the fork ``b03`` fill, stops ``b02`` and
     asks for ``open_count`` branches; the one branch opened, which must have started at the integration head."""
 
-    _script(stage)
+    _script(stage, forks=1)
     stage.judge = ScriptedCompletion([OPENING, _refill_steer(open_count)])
 
     outcome = await stage.run()
@@ -805,8 +823,8 @@ def _admit_on_start(stage: Stage, admit: Callable[[str, str], Awaitable[ForkAdmi
     return AskingRuntime
 
 
-def _repair(branch: str, parent_commit: str) -> RepairRequest:
-    intent = Intent(branch, parent_commit, "attention", "fp8 kv cache", IntentLayer.CONFIG)
+def _repair(branch: str, parent_commit: str, mechanism: str = "fp8 kv cache") -> RepairRequest:
+    intent = Intent(branch, parent_commit, "attention", mechanism, IntentLayer.CONFIG)
     blocked = Judgement(Verdict.BLOCKED, 6.0, 2.0, ("r1", "r2"), {GRADED_OUTPUT: 1060.0}, accuracy_ok=False)
     return RepairRequest(intent, tagged("fp8-kv"), blocked, "per-tensor KV scales; scale per head")
 
@@ -835,17 +853,97 @@ async def test_a_repair_stopped_at_its_time_limit_has_the_judge_asked_at_the_nex
     _judged_within_a_tick_of(stage, float(str(stop["at"])))
 
 
-async def test_an_admitted_fork_that_fails_to_start_has_the_judge_asked_at_the_next_tick(tmp_path: Path) -> None:
+async def test_a_fork_the_gate_does_not_land_is_voided_and_has_the_judge_asked_at_the_next_tick(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
-    stage.runtime_type = _admit_on_start(stage, lambda b, c: stage.setup.desk.admit(ForkRequest(b, c, FIX_REASON)))
+    stage.runtime_type = _admit_on_start(stage, lambda b, c: stage.splits.admit(ForkRequest(b, c, FIX_REASON)))
 
     await stage.run()
 
     [(status, fork)] = [(admission.status, admission.branch) for admission in stage.forks]
-    assert status is AdmissionStatus.ACCEPTED
+    assert status is AdmissionStatus.ACCEPTED and fork not in stage.sessions.started
     [stop] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == fork]
-    assert str(stop["reason"]).startswith(StopCause.START_FAILED.value)
+    assert stop["reason"] == f"{StopCause.START_FAILED.value}: {FORK_NOT_LANDED}"
     _judged_within_a_tick_of(stage, float(str(stop["at"])))
+
+
+def _queueing(stage: Stage, failing: str = "") -> type[RefusingRuntime]:
+    """A runtime that, once ``b02`` has started, has two repairs of it asked for: the first takes the last slot as
+    ``b03``, the second is queued as ``b04``; it cannot start ``failing``. A test double for a specialist's repair
+    requests, not a placeholder."""
+
+    class QueueingRuntime(RefusingRuntime):
+        async def start(
+            self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None
+        ) -> None:
+            if branch == failing:
+                raise RuntimeError(f"no specialist CLI for {branch}")
+            await super().start(branch, start_commit, brief, repair)
+            if branch == "b02":
+                for mechanism in ("fp8 kv cache", "bf16 kv cache"):
+                    stage.forks.append(await stage.setup.desk.admit_repair(_repair(branch, start_commit, mechanism)))
+
+    return QueueingRuntime
+
+
+async def _queued_repair_session(stage: Stage, stops: str, failing: str = "") -> None:
+    """Run the session in which ``b02`` queues the repair ``b04`` on a full roster and the judge then stops ``stops``
+    and asks for one branch."""
+
+    steer = _reply({"open": 1, "branches": [], "stop": [{"branch": stops, "reason": STOP_REASON}]})
+    stage.judge = ScriptedCompletion([OPENING, steer])
+    stage.runtime_type = _queueing(stage, failing)
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    assert [(admission.status, admission.branch) for admission in stage.forks] == [
+        (AdmissionStatus.ACCEPTED, "b03"),
+        (AdmissionStatus.PENDING, ""),
+    ]
+
+
+async def test_a_queued_repair_takes_the_slot_a_judge_stop_frees_before_the_judge_opens_a_branch(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+
+    await _queued_repair_session(stage, stops="b01")
+
+    root = await stage.root()
+    assert stage.sessions.started == {"b01": root, "b02": root, "b03": root, "b04": root}
+    assert stage.sessions.repairs["b04"].intent.mechanism == "bf16 kv cache"
+    assert _origins(stage) == {
+        "b01": BranchOrigin.FIRST_BATCH.value,
+        "b02": BranchOrigin.FIRST_BATCH.value,
+        "b03": BranchOrigin.REPAIR.value,
+        "b04": BranchOrigin.REPAIR.value,
+    }
+    [cut] = [row for row in _decisions(stage) if row["kind"] == "open" and not row["branch"]]
+    assert (cut["reason"], cut["detail"]) == (OPEN_CUT_REASON, {"requested": 1, "opened": 0, "open_cut": 1})
+
+
+async def test_a_queued_repair_is_voided_when_the_branch_that_asked_for_it_stops(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+
+    await _queued_repair_session(stage, stops="b02")
+
+    assert "b04" not in _origins(stage) and "b04" not in stage.sessions.started
+    assert _origins(stage)["b05"] == BranchOrigin.REFILL.value
+    [voided] = [row for row in _decisions(stage) if row["kind"] == "repair" and row["detail"].get("status") == "voided"]
+    assert (voided["branch"], voided["reason"]) == ("b04", f"voided: parent b02 stopped: {STOP_REASON}")
+
+
+async def test_a_dequeued_repair_that_fails_to_start_has_the_judge_asked_at_the_next_tick(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+
+    await _queued_repair_session(stage, stops="b01", failing="b04")
+
+    [stop] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b04"]
+    assert str(stop["reason"]).startswith(StopCause.START_FAILED.value)
+    freed_at = float(str(stop["at"]))
+    steered_at = _judge_times(stage)[1]
+    assert any(freed_at <= at <= freed_at + EXPLORE_TICK_SECONDS for at in _judge_times(stage))
+    assert freed_at + EXPLORE_TICK_SECONDS < steered_at + SETTINGS.judge_interval_seconds
 
 
 class NoRefillRuntime(RefusingRuntime):

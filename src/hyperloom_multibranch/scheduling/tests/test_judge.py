@@ -28,6 +28,7 @@ from hyperloom_multibranch.scheduling.judge import (
     parse_decision,
     render_prompt,
 )
+from hyperloom_multibranch.scheduling.forks import PendingBranch
 from hyperloom_multibranch.scheduling.llm import CompletionFailed
 from hyperloom_multibranch.scheduling.roster import (
     BranchEntry,
@@ -73,6 +74,7 @@ def _view(
     opening: bool = False,
     roster: tuple[BranchEntry, ...] = ROSTER,
     free_slots: int = 2,
+    pending: tuple[PendingBranch, ...] = (),
     history: str = "",
     widening: WideningSignals = WIDENING,
 ) -> JudgeView:
@@ -100,6 +102,7 @@ def _view(
         metric=METRIC,
         opening=opening,
         free_slots=free_slots,
+        pending=pending,
         history=history,
         widening=widening,
     )
@@ -311,6 +314,16 @@ def test_the_prompt_explains_opening_at_any_call_its_focus_and_the_free_slots() 
     for text in ("at any call", "focus", "free_branch_slots", "integration head"):
         assert text in JUDGE_SYSTEM_PROMPT
     assert '"focus"' in render_prompt(_view())
+
+
+def test_the_prompt_shows_and_explains_the_forks_and_repairs_waiting_for_a_slot() -> None:
+    waiting = PendingBranch("b05", BranchOrigin.REPAIR, "b01", "c-b01", NOW - 90.0)
+
+    state = _state(_view(pending=(waiting,)))
+
+    assert state["pending"] == [{"kind": "repair", "branch": "b05", "from_branch": "b01", "waiting_seconds": 90}]
+    assert _state(_view())["pending"] == []
+    assert "pending" in JUDGE_SYSTEM_PROMPT and "goes to them first" in JUDGE_SYSTEM_PROMPT
 
 
 async def test_decide_returns_the_capped_decision_and_logs_the_exchange(tmp_path: Path) -> None:

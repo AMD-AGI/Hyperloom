@@ -207,7 +207,7 @@ async def test_the_real_peers_live_inside_the_session_directory(
     monkeypatch.delenv("HYPERLOOM_KB_URL", raising=False)
     clock = Clock()
     layout = create_session(tmp_path, WORKLOAD.model_basename, clock)
-    desk = ForkDesk(Roster(RosterCaps(1, 1, 1), layout.roster, clock), DecisionLog(layout.decisions, clock))
+    desk = ForkDesk(Roster(RosterCaps(1, 1, 1), layout.roster, clock), DecisionLog(layout.decisions, clock), clock)
     setup = PeerSetup(layout, WORKLOAD, desk, ProcessRegistry(layout.pids, clock), LocalBlobStore(layout.blobs))
     wired: list[SessionWiring] = []
 

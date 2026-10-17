@@ -18,6 +18,7 @@ from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
 from hyperloom.measure.compile import LocalBlobStore
+from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkRequest
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
@@ -31,6 +32,7 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
+from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import (
@@ -98,8 +100,9 @@ class Stage:
         self.sessions = RecordedSessions(self.toolbox, self.repo, self.notebook, hanging=hanging)
         self.runtime = specialist_runtime(tmp_path / "notebook", self.toolbox, self.repo, self.sessions, now=clock.now)
         self.runtime.refusing = refusing
+        self.desk = ForkDesk(self.roster, decisions, clock)
         context = SchedulerContext(
-            SessionLayout(tmp_path), self.roster, self.notebook, decisions, self.processes, clock
+            SessionLayout(tmp_path), self.roster, self.notebook, decisions, self.processes, clock, self.desk
         )
         self.branches = BranchControl(context, self.runtime, self.toolbox, self.repo, SessionBriefs(self.notebook))
         self.mcp = McpServer(McpServerConfig(host_token="t" * MIN_TOKEN_LENGTH), campaign="stops")
@@ -155,6 +158,25 @@ async def test_end_exploration_stops_open_specialists_and_keeps_integration(tmp_
     assert session.roster.free_slots() == 0
     with pytest.raises(RosterFull):
         session.roster.open("b04", origin=BranchOrigin.FORK, start_commit="", k=1)
+
+
+@pytest.mark.parametrize("reason", [SessionStopReason.TIME_EXHAUSTED, SessionStopReason.SIGNAL])
+async def test_a_session_stop_voids_every_fork_queued_for_a_slot(tmp_path: Path, reason: SessionStopReason) -> None:
+    session = await Stage(tmp_path).opened()
+    for branch in ("b04", "b05"):
+        session.roster.open(branch, origin=BranchOrigin.FIRST_BATCH, start_commit=session.root, k=1)
+    queued = await session.desk.admit(ForkRequest("b01", session.root, "fix f1 regresses"))
+
+    if reason is SessionStopReason.TIME_EXHAUSTED:
+        await session.stopper.end_exploration(reason)
+    else:
+        await session.stopper.stop_everything(reason, HARD_STOP)
+
+    assert queued.status is AdmissionStatus.PENDING and session.desk.pending() == ()
+    logged = [json.loads(line) for line in session.decisions_file.read_text(encoding="utf-8").splitlines()]
+    assert [row["reason"] for row in logged if row["kind"] == "fork" and row["detail"].get("status") == "voided"] == [
+        f"voided: {reason.value}"
+    ]
 
 
 async def test_a_failed_branch_stop_does_not_hold_up_the_end_of_exploration(tmp_path: Path) -> None:

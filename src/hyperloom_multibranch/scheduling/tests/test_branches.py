@@ -13,7 +13,7 @@ import pytest
 
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
-from hyperloom_multibranch.contracts.fork import RepairRequest
+from hyperloom_multibranch.contracts.fork import AdmissionStatus, RepairRequest
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
@@ -28,7 +28,7 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
-from hyperloom_multibranch.scheduling.forks import AdmittedBranch
+from hyperloom_multibranch.scheduling.forks import AdmittedBranch, ForkDesk
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStop, Roster, RosterCaps, StopCause
@@ -113,6 +113,7 @@ class Bench:
         self.notebook = LocalNotebook(tmp_path / "nb", Writer(Role.SCHEDULER, "scheduler"), clock=clock.now)
         self.gate_notebook = LocalNotebook(tmp_path / "nb", Writer(Role.GATE, "rule-gate"), clock=clock.now)
         self.roster = Roster(RosterCaps(3, 2, 8), tmp_path / "MB-roster.json", clock)
+        self.desk = ForkDesk(self.roster, DecisionLog(tmp_path / "MB-decisions.jsonl", clock), clock)
         self.toolbox = RecordingToolbox(
             LocalNotebook(tmp_path / "nb", Writer(Role.TOOLBOX, "toolbox"), clock=clock.now)
         )
@@ -127,13 +128,15 @@ class Bench:
         self.control = self.controlling(self.toolbox, tmp_path)
 
     def context(self, tmp_path: Path) -> SchedulerContext:
+        decisions = DecisionLog(tmp_path / "MB-decisions.jsonl", self.clock)
         return SchedulerContext(
             SessionLayout(tmp_path),
             self.roster,
             self.notebook,
-            DecisionLog(tmp_path / "MB-decisions.jsonl", self.clock),
+            decisions,
             ProcessRegistry(tmp_path / "MB-pids.jsonl", self.clock),
             self.clock,
+            self.desk,
         )
 
     def controlling(self, toolbox: RecordingToolbox, tmp_path: Path) -> BranchControl:
@@ -219,7 +222,7 @@ async def _admit_repair(bench: Bench) -> RepairRequest:
     fix = await bench.repo.commit("b01", bench.root, BASELINE, "a fix")
     bench.roster.open("b02", origin=BranchOrigin.REPAIR, start_commit="", k=2, from_branch="b01")
     repair = _repair_of(fix)
-    assert await bench.control.start_admitted(AdmittedBranch("b02", fix, repair), OPEN_BY)
+    await bench.control.start_admitted(AdmittedBranch("b02", fix, repair), OPEN_BY)
     await _runs_started()
     return repair
 
@@ -265,19 +268,16 @@ async def test_a_repair_branch_is_stopped_for_its_time_limit_two_hours_after_its
     assert (logged["kind"], logged["branch"], logged["reason"]) == ("stop", "b02", expected.summary)
 
 
-async def test_a_fork_waits_for_the_gate_to_land_its_fix_and_opens_at_it(tmp_path: Path) -> None:
+async def test_a_fork_the_gate_landed_opens_at_its_fix(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).rooted()
     await bench.control.open_branches(1, 1, BatchStart(BranchOrigin.FIRST_BATCH, bench.root, OPEN_BY))
     bench.roster.open("b02", origin=BranchOrigin.FORK, start_commit="", k=2, from_branch="b01")
-    admitted = AdmittedBranch("b02", bench.root)
-
-    assert not await bench.control.start_admitted(admitted, OPEN_BY)
     await bench.repo.create_branch("b02", bench.root)
-    assert not await bench.control.start_admitted(admitted, OPEN_BY)
     fix = await bench.repo.commit("b02", bench.root, BASELINE, "the fix")
     split = LineageEvent(LineageKind.SPLIT, "b02", commit_id=fix, from_commit=bench.root, from_branch="b01")
     await bench.gate_notebook.record_lineage(split)
-    assert await bench.control.start_admitted(admitted, OPEN_BY)
+
+    await bench.control.start_admitted(AdmittedBranch("b02", bench.root), OPEN_BY)
     await _runs_started()
 
     assert (bench.sessions.started["b02"], bench.sessions.k["b02"]) == (fix, 2)
@@ -287,20 +287,34 @@ async def test_a_fork_waits_for_the_gate_to_land_its_fix_and_opens_at_it(tmp_pat
     assert (logged["kind"], logged["branch"], logged["detail"]["from_branch"]) == ("fork", "b02", "b01")
 
 
-async def test_a_fork_whose_fix_does_not_land_in_time_is_withdrawn_as_not_started(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(branches, "SPECIALIST_START_SECONDS", 0.0)
+async def test_a_fork_the_gate_did_not_land_is_voided_as_not_started_and_frees_its_slot(tmp_path: Path) -> None:
     bench = await Bench(tmp_path).rooted()
     bench.roster.open("b01", origin=BranchOrigin.FIRST_BATCH, start_commit=bench.root, k=1)
     bench.roster.open("b02", origin=BranchOrigin.FORK, start_commit="", k=1, from_branch="b01")
 
-    assert await bench.control.start_admitted(AdmittedBranch("b02", bench.root), OPEN_BY)
+    await bench.control.void_admitted("b02", "the rule gate did not land the fork")
 
-    stop = bench.roster.entry("b02").stop
-    assert stop is not None and stop.cause is StopCause.START_FAILED
+    assert bench.roster.entry("b02").stop == BranchStop(
+        StopCause.START_FAILED, "the rule gate did not land the fork", NOW
+    )
+    assert bench.roster.free_slots() == 2
     await _runs_started()
     assert "b02" not in bench.sessions.started and bench.toolbox.cancelled == ["b02"]
+
+
+async def test_stopping_a_branch_voids_the_forks_and_repairs_it_queued(tmp_path: Path) -> None:
+    bench = await Bench(tmp_path).rooted()
+    await bench.control.open_branches(3, 1, BatchStart(BranchOrigin.FIRST_BATCH, bench.root, OPEN_BY))
+    queued = await bench.desk.admit_repair(_repair_of(bench.root))
+
+    await bench.control.stop_branch("b01", BranchStop(StopCause.JUDGE, "flat", NOW))
+    bench.desk.fill_free_slots()
+
+    assert queued.status is AdmissionStatus.PENDING
+    assert bench.desk.pending() == () and bench.desk.waiting() == ()
+    logged = [json.loads(line) for line in (tmp_path / "MB-decisions.jsonl").read_text().splitlines()]
+    [voided] = [row for row in logged if row["kind"] == "repair" and row["detail"].get("status") == "voided"]
+    assert (voided["branch"], voided["reason"]) == ("b04", "voided: parent b01 stopped: flat")
 
 
 async def test_a_failing_specialist_stop_is_returned_and_still_withdraws_and_records_the_branch(tmp_path: Path) -> None:
@@ -332,7 +346,7 @@ async def test_stopping_a_branch_withdraws_it_once_and_its_admitted_fork_never_s
     assert bench.toolbox.cancelled == ["b02", "b01"]
     assert bench.roster.entry("b01").stop == stop
     assert bench.roster.entry("b02").stop == BranchStop(StopCause.JUDGE, "parent b01 stopped: flat", NOW)
-    assert await bench.control.start_admitted(AdmittedBranch("b02", bench.root), OPEN_BY)
+    await bench.control.start_admitted(AdmittedBranch("b02", bench.root), OPEN_BY)
     await _runs_started()
     assert "b02" not in bench.sessions.started
     assert "b02" not in {branch.branch for branch in (await bench.notebook.lineage()).branches}

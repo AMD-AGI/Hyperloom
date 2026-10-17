@@ -70,6 +70,19 @@ CLAIM_TTL_SECONDS = 1800.0
 MB_FAKE_IMAGE_REF = "local"
 
 
+class MbFakeNoSplitLanding:
+    """The session's :class:`~hyperloom_multibranch.scheduling.mb_fakes.MbFakeSplitLanding`: lands no fork, so the
+    scheduler voids every fork it admits and frees its slot at once.
+
+    Stands in for the rule gate's landing method (board #34, request A); replaced by it once it lands. No specialist
+    asks for a fork in production yet, so nothing is lost meanwhile.
+    """
+
+    async def land_split(self, branch: str) -> bool:
+        del branch
+        return False
+
+
 @dataclass(frozen=True)
 class SessionWiring:
     """What a session's specialist sessions are built on: the peer setup, the repository the branches use, the
@@ -193,7 +206,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     )
     mcp.start()
     gate_service = GateService(gate_notebook, toolbox, rule, toolbox)
-    return Peers(runtime, toolbox, repo, gate_service, mcp, briefs, image.digest)
+    return Peers(runtime, toolbox, repo, gate_service, mcp, briefs, image.digest, MbFakeNoSplitLanding())
 
 
 def machine_cards() -> tuple[int, ...]:
@@ -343,6 +356,7 @@ __all__ = [
     "GATE_WRITER",
     "MB_FAKE_IMAGE_REF",
     "MeasurementHost",
+    "MbFakeNoSplitLanding",
     "SessionWiring",
     "SpecialistSessions",
     "load_peers",

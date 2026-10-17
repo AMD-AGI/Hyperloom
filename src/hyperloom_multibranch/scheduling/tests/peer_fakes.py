@@ -39,10 +39,18 @@ from hyperloom.orchestrator.knowledge.remote_recipe.values import (
     CURRENT_KNOWLEDGE_SCHEMA_VERSION,
     RECORD_KIND_HYPERLOOM_RECIPE,
 )
-from hyperloom_multibranch.contracts.fork import ForkAdmission, ForkAdmissionService, ForkRequest, RepairRequest
+from hyperloom_multibranch.contracts.fork import (
+    AdmissionStatus,
+    ForkAdmission,
+    ForkAdmissionService,
+    ForkRequest,
+    RepairRequest,
+)
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.interfaces import SnapshotQuery
+from hyperloom_multibranch.contracts.notebook.records import LineageEvent
+from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
 from hyperloom_multibranch.contracts.repo import ExperimentRepo, RepoMerge
 from hyperloom_multibranch.contracts.toolbox import CancelOutcome, QueueState
 from hyperloom_multibranch.repo.git_repo import RECIPE_FILE, GitExperimentRepo
@@ -55,6 +63,7 @@ from hyperloom_multibranch.rulegate.rules import InferenceXRule
 from hyperloom_multibranch.rulegate.service import GateNotebook, GateService
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.local_peers import GATE_WRITER
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
 from hyperloom_multibranch.specialist.judging import Judging
@@ -417,6 +426,50 @@ class NoForks:
         raise AssertionError("no repair is asked for here")
 
 
+class SplittingDesk:
+    """The fork desk as the rule gate asks it, keeping the fork each answer reserves a branch for, and the gate's split
+    landing: it cuts that branch at the fork's parent commit, commits the fix ``fixes`` names for the branch and
+    records its ``SPLIT``; a fork it holds no fix for is not landed. A test double for the gate's landing method
+    (board #34), not a placeholder."""
+
+    def __init__(
+        self, desk: ForkDesk, repo: ExperimentRepo, notebook: LocalNotebook, fixes: Mapping[str, RecipeDelta]
+    ) -> None:
+        self._desk = desk
+        self._repo = repo
+        self._notebook = notebook
+        self._fixes = dict(fixes)
+        self._forks: dict[str, ForkRequest] = {}
+
+    async def admit(self, request: ForkRequest) -> ForkAdmission:
+        answer = await self._desk.admit(request)
+        if answer.status is AdmissionStatus.ACCEPTED:
+            self._forks[answer.branch] = request
+        elif answer.status is AdmissionStatus.PENDING:
+            self._forks[self._desk.pending()[-1].branch] = request
+        return answer
+
+    async def admit_repair(self, request: RepairRequest) -> ForkAdmission:
+        return await self._desk.admit_repair(request)
+
+    async def land_split(self, branch: str) -> bool:
+        request, fix = self._forks.get(branch), self._fixes.get(branch)
+        if request is None or fix is None:
+            return False
+        await self._repo.create_branch(branch, request.parent_commit)
+        fixed = apply(await self._repo.read_recipe(request.parent_commit), fix)
+        head = await self._repo.commit(branch, request.parent_commit, fixed, request.reason)
+        split = LineageEvent(
+            LineageKind.SPLIT,
+            branch,
+            commit_id=head,
+            from_commit=request.parent_commit,
+            from_branch=request.from_branch,
+        )
+        await self._notebook.record_lineage(split)
+        return True
+
+
 def specialist_runtime(
     notebook: Path,
     toolbox: RecordingToolbox,
@@ -671,6 +724,7 @@ __all__ = [
     "SPECIALIST_POLL_SECONDS",
     "ScriptedCompletion",
     "SessionStep",
+    "SplittingDesk",
     "StuckToolbox",
     "VirtualClock",
     "session_gate",
