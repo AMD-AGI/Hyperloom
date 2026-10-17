@@ -3472,3 +3472,33 @@ async def test_explore_grades_the_rounds_own_gpu_power_against_the_budget(
     coord.shared_state = state
     await coord.writeback._promote_explore(out, None, wb._PromoteOutcome(verdict=wb.Verdict.RECORDED))
     assert state.current_best["variant_name"] == "v_power"
+
+
+def test_lever_variants_are_measured_before_the_rest_of_the_grid():
+    """A round that runs out of budget should still have measured what the rewrite was for."""
+    from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
+
+    seeded = ExploreExecutor._seed_lever_variants(
+        [{"name": "grid_a"}, {"name": "grid_b"}],
+        [{"name": "lever_x"}],
+    )
+
+    assert [v["name"] for v in seeded] == ["lever_x", "grid_a", "grid_b"]
+
+
+def test_a_lever_the_grid_already_names_is_not_seeded_twice():
+    from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
+
+    grid = [{"name": "lever_x"}, {"name": "grid_a"}]
+    seeded = ExploreExecutor._seed_lever_variants(grid, [{"name": "lever_x"}])
+
+    assert [v["name"] for v in seeded] == ["lever_x", "grid_a"]
+
+
+def test_a_round_with_no_levers_keeps_its_grid_as_it_stands():
+    from hyperloom.orchestrator.actions.executors.explore import ExploreExecutor
+
+    grid = [{"name": "grid_a"}]
+
+    assert ExploreExecutor._seed_lever_variants(grid, []) is grid
+    assert ExploreExecutor._seed_lever_variants(grid, None) is grid
