@@ -35,6 +35,7 @@ kernelforge gemm-tune run --model-path <M> --framework sglang \
 kernelforge kernel-rewrite-controller --handoff-dir <H> \
     --budget-minutes <m> --output-dir <D>
 kernelforge roofline-ceiling --workspace <W> [options]
+kernelforge export-runs <LOG_ROOT>... --output <file>
 ```
 
 See {doc}`Experience store </kernelforge/reference/experience-store>` for the exact
@@ -509,3 +510,29 @@ profiler or a shell cannot outlive its budget and hold the device.
 
 The result dict (`ideal_ms` per case, `mean_ideal_ms`, `report_path`) is
 printed to stdout wrapped in `__FORGE_ROOFLINE_CEILING_RESULT__` sentinels.
+
+## export-runs
+
+Writes the runs found under one or more directories as one JSON document,
+`{"runs": [...]}`, for `hyperloom-kb-collect --mapping kernelforge-v1` (see
+{doc}`Experience collection </reference/experience-kb-collect>`). A run is a
+plain `forge-loop` run's `forge_experiments/` directory, which holds
+`campaign_config.json` and `run_state.json`. Each forge-loop iteration found is
+one entry; a run whose `campaign_config.json` or `run_state.json` is not the
+JSON KernelForge writes, or a candidate whose `meta.json` is missing or
+malformed, is one entry saying why, which collection skips with that reason.
+Claude Code transcripts under a directory, such as a copy of
+`~/.claude/projects`, are linked to the candidates their sessions made through
+the reasoning log each session's first prompt names, so sessions run before
+KernelForge asked for that log stay unlinked. A log or transcript belongs to the
+run whose workspace path ends most like the path it names, which may differ in
+its leading directories, as for a run made in a container. The export stops with
+an error and writes nothing when it cannot list a directory under the log roots
+or read a file it needs, such as a JSON record, a plan, a reasoning log, a log
+or a transcript, naming that path, or when a log or transcript fits two runs
+equally well.
+
+| Argument / option | Default | Meaning |
+|:--|:--|:--|
+| `LOG_ROOT...` | required | One or more directories to read runs from, in the order given. |
+| `--output <file>` / `-o` | required | Where to write the JSON document. |
