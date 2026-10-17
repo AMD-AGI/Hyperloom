@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 from ._file_lock import best_effort_file_lock
+from ._bench_seed_anchor import BENCH_SEED_LEGACY, BENCH_SEED_SENTINEL
 from ._magpie_patcher import atomic_write_text
 from ._patch_sentinel import file_contains_sentinel
 
@@ -1041,6 +1042,7 @@ _ANCHOR_CONTRACT: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
     ("num_prompts", ("benchmarks", "benchmark_lib.sh"), _PATCH_SENTINEL, _LEGACY_LINE),
     ("eval_dest", ("benchmarks", "benchmark_lib.sh"), _EVAL_DEST_SENTINEL, _EVAL_DEST_LEGACY),
     ("eval_start", ("benchmarks", "benchmark_lib.sh"), _EVAL_START_SENTINEL, _EVAL_START_LEGACY),
+    ("bench_seed", ("benchmarks", "benchmark_lib.sh"), BENCH_SEED_SENTINEL, BENCH_SEED_LEGACY),
     (
         _BENCH_SERVING_ANCHOR_NAME,
         # The pinned revision's layout; newer checkouts are resolved by name, not by this path.

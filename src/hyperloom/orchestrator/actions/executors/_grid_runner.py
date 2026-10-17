@@ -42,6 +42,7 @@ from ._benchmark_interpreter import (
     _resolve_magpie_python as _resolve_magpie_python,
     _resolve_probe_python as _resolve_probe_python,
 )
+from ._inferencex_bench_seed import BENCH_SEED_ENV, WARMUP_ROUND_SEED, warmup_seed_warnings
 from ._recipe_script import launcher_overwritten_envs
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
@@ -1104,6 +1105,7 @@ async def run_grid(
                     auto_warmup = False
 
             warmup_tput: float | None = None
+            warmup_seed_notes: list[str] = []
             if auto_warmup:
                 warmup_slot = slot / "warmup_round"
                 warmup_server_log = warmup_slot / "server.log"
@@ -1124,7 +1126,7 @@ async def run_grid(
                         benchmark_script=benchmark_script,
                         server_lifecycle=warmup_lifecycle,
                         base_args_mode=base_args_mode,
-                        base_extra_envs=base_extra_envs,
+                        base_extra_envs={**(base_extra_envs or {}), BENCH_SEED_ENV: str(WARMUP_ROUND_SEED)},
                         base_remove_args=base_remove_args,
                         base_unset_envs=base_unset_envs,
                     )
@@ -1155,6 +1157,7 @@ async def run_grid(
                         )
                     )
 
+                warmup_seed_notes = await asyncio.to_thread(warmup_seed_warnings, warmup_cfg_path)
                 warmup_workspaces_before = snapshot_workspaces(warmup_slot)
                 warmup_started_unix = time.time()
                 # Held in a local because the abort line below has to name the cap the round was actually granted: the
@@ -1734,6 +1737,7 @@ async def run_grid(
                 warnings.append(f"harvested_leaked_artifact:{leak_src}")
             if warmup_tput is not None:
                 warnings.append("run_grid_warmup_discarded_first")
+                warnings.extend(warmup_seed_notes)
                 warnings.append(f"warmup_round_tput:{float(warmup_tput):.1f}")
 
             if not measurement.get("valid_measurement"):
