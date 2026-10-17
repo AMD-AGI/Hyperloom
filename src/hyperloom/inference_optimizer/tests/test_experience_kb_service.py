@@ -239,6 +239,17 @@ def test_auto_push_is_off_until_the_workspace_opts_in(monkeypatch, caplog) -> No
     with caplog.at_level(logging.INFO):
         experience_kb_service.auto_push()
     assert "push with https://global.example: 2 created, 0 unchanged, 0 skipped, 1 held_back, 0 rejected" in caplog.text
+    # A service started before Distills reports no Distill counts, so the line names none.
+    assert "Distills" not in caplog.text
+
+
+def test_a_sync_line_counts_the_distills_it_moved() -> None:
+    distills = {"created": 1, "unchanged": 2, "skipped": 3, "held_back": 4}
+    pushed = experience_kb_service._summary("push", _push_report(distills=distills))
+    pulled = experience_kb_service._summary("pull", _push_report(distills=distills))
+
+    assert pushed.endswith("0 rejected; Distills: 1 created, 2 unchanged, 4 held_back")
+    assert pulled.endswith("0 rejected; Distills: 1 created, 2 unchanged, 3 skipped")
 
 
 @pytest.mark.parametrize(
@@ -348,6 +359,8 @@ def test_workspace_labels_restores_and_exclusions_act_on_the_schema_its_runs_wri
         refused = capsys.readouterr().err
         assert experience_kb_service.main(["export"]) == 0
         exported = json.loads(capsys.readouterr().out)
+        assert experience_kb_service.main(["distill", "sync"]) == 0
+        synced = json.loads(capsys.readouterr().out)
         assert service.process.poll() is None
     finally:
         service.process.terminate()
@@ -361,6 +374,10 @@ def test_workspace_labels_restores_and_exclusions_act_on_the_schema_its_runs_wri
     assert [entry["label_id"] for entry in labels["labels"]] == [label["label_id"]]
     assert (restored["restored"]["label_id"], restored["saved"]) == (label["label_id"], None)
     assert "Experience KB exclude failed" in refused and "404" in refused
+    # A workspace's sync writes its schema's Distill pages beside the service's data unless it names a directory.
+    pages = synced["schemas"][experience_kb_service.mapping_schema_ref()]
+    assert synced["directory"] == str(experience_kb_service.distill_dir())
+    assert Path(pages["directory"]).parent == experience_kb_service.distill_dir() and pages["created"] == 0
 
 
 def test_skills_describe_the_service_by_the_commands_and_variables_it_reads() -> None:
@@ -389,6 +406,8 @@ def test_skills_describe_the_service_by_the_commands_and_variables_it_reads() ->
     assert "experience_kb_service restore <label_id>" in optimizer
     for text in (setup, optimizer):
         assert "`hyperloom-kb` skill" in " ".join(text.split())
+        assert "`hyperloom-kb-distill` skill" in " ".join(text.split())
+    assert "experience_kb_service distill list" in optimizer
     for text in (setup, optimizer):
         assert "HYPERLOOM_FLEET_KB" not in text
         assert "HYPERLOOM_KB_ENABLE" not in text

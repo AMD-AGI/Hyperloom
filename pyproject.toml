@@ -219,6 +219,10 @@ exclude = [
 ".agents/skills/hyperloom-kb" = ["src/hyperloom_kb/skills/hyperloom-kb/SKILL.md"]
 ".claude/skills/hyperloom-kb" = ["src/hyperloom_kb/skills/hyperloom-kb/SKILL.md"]
 ".cursor/skills/hyperloom-kb" = ["src/hyperloom_kb/skills/hyperloom-kb/SKILL.md"]
+# Draws Distills from Experiences, keeps them current, and syncs them into a directory a Curated Wiki searches.
+".agents/skills/hyperloom-kb-distill" = ["src/hyperloom_kb/skills/hyperloom-kb-distill/SKILL.md"]
+".claude/skills/hyperloom-kb-distill" = ["src/hyperloom_kb/skills/hyperloom-kb-distill/SKILL.md"]
+".cursor/skills/hyperloom-kb-distill" = ["src/hyperloom_kb/skills/hyperloom-kb-distill/SKILL.md"]
 # Demo run skills chained from /hyperloom-setup.
 ".agents/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]
 ".claude/skills/hyperloom-qwen3-8b-3h" = ["examples/hyperloom-qwen3-8b-3h/SKILL.md"]

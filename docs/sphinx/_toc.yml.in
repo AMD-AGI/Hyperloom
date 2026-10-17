@@ -71,6 +71,8 @@ subtrees:
     title: Experience collection
   - file: reference/experience-kb-schema.md
     title: Experience schema
+  - file: reference/experience-kb-distill.md
+    title: Distills
   - file: reference/operator-scripts.md
     title: Operator scripts
   - file: reference/multi-node.md

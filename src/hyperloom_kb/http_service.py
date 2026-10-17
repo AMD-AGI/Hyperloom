@@ -11,6 +11,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import threading
@@ -25,10 +26,12 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, BinaryIO, TextIO, cast
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from hyperloom_kb.config import PACKAGED_DECLARATION, load_declaration
-from hyperloom_kb.database import Connection, Database, DatabaseError, WriteSource, open_database
+from hyperloom_kb.database import Connection, Database, DatabaseError, WriteSource, open_database, record_write
+from hyperloom_kb.distill import DistillConflict, DistillEntry, DistillStore, FormDeclaration, Scope
+from hyperloom_kb.distill.service import EVIDENCE_PAGE, REPRESENTATIVES, DistillService
 from hyperloom_kb.files import FileStore, file_sha256
 from hyperloom_kb.observability import (
     PROBE_ROUTES,
@@ -115,6 +118,9 @@ _READ_FIELDS = frozenset({"decision", "context", "outcome", "limit", "schema_ref
 _WRITE_FIELDS = frozenset({"experience", "declaration"})
 _FILES_PREFIX = "/v1/files/"
 _FILES_MISSING = "/v1/files/missing"
+_EXPERIENCES_PREFIX = "/v1/experiences/"
+_SCHEMAS_PREFIX = "/v1/schemas/"
+_DISTILL_VERSION_PATH = re.compile(r"/v1/distill/entries/([^/]+)/versions/([1-9][0-9]{0,17})")
 _GET, _POST, _PUT, _DELETE = "GET", "POST", "PUT", "DELETE"
 
 
@@ -325,33 +331,39 @@ class ExperienceHTTPService:
         self._records = RecordFiles(config.home, self.kb_id)
         self._files = FileStore(config.home, self.kb_id)
         self._state = LocalState(self.kb_id)
+        self._distill = DistillStore(config.home, self.kb_id, self._state)
         self._ledger = SyncLedger(database, self.kb_id)
         self._planner = planner
         self._declarations: dict[str, ExperienceDeclaration] = {}
         self._views: dict[str, _ReadView] = {}
         self.metrics = Metrics()
+        self.distill = DistillService(self, database, self._state, self._distill)
         self.register(declaration)
         self._missing_records = self._verify_records()
         self._missing_files = self._verify_files()
         self._sync = GlobalSync(self, self._ledger, global_kb)
 
     def _verify_records(self) -> int:
-        """How many records the database holds whose file is missing or of another size; reported as unready."""
+        """How many records the database holds, Experiences and Distill versions, whose file is missing or of another
+        size; reported as unready."""
 
         with self._database.transaction() as connection:
             rows = connection.execute(
                 "SELECT experience_id, bytes FROM experiences WHERE kb_id = %s", (self.kb_id,)
             ).fetchall()
+            distill_versions, distill_missing = self._distill.check_records(connection)
         missing = sum(1 for row in rows if not self._records.holds(str(row["experience_id"]), int(row["bytes"])))
         event(
             log,
             "records_verified",
-            level=logging.WARNING if missing else logging.INFO,
+            level=logging.WARNING if missing or distill_missing else logging.INFO,
             kb_id=self.kb_id,
             records=len(rows),
             missing=missing,
+            distill_versions=distill_versions,
+            distill_missing=distill_missing,
         )
-        return missing
+        return missing + distill_missing
 
     def _verify_files(self) -> int:
         """How many files the database holds that are missing from the home or of another size; reported as
@@ -381,13 +393,45 @@ class ExperienceHTTPService:
         if not locked:
             raise HTTPServiceError(f"schema_ref {schema_ref} is not registered; write it with its declaration")
 
-    def _schema_of(self, connection: Connection, experience_id: str) -> str:
+    def _schema_of(self, connection: Connection, record_id: str) -> str:
+        """The schema of the Experience or Distill ``record_id``."""
+
         row = connection.execute(
-            "SELECT schema_ref FROM experiences WHERE kb_id = %s AND experience_id = %s", (self.kb_id, experience_id)
+            "SELECT schema_ref FROM experiences WHERE kb_id = %s AND experience_id = %s", (self.kb_id, record_id)
         ).fetchone()
-        if row is None:
-            raise UnknownStateItem(f"Experience {experience_id} is not held here")
-        return str(row["schema_ref"])
+        if row is not None:
+            return str(row["schema_ref"])
+        try:
+            return self._distill.schema_of(connection, record_id)
+        except UnknownStateItem:
+            raise UnknownStateItem(f"{record_id} is no Experience or Distill held here") from None
+
+    @property
+    def code_digest(self) -> str:
+        return self._code_digest
+
+    def lock_schema(self, connection: Connection, schema_ref: str) -> None:
+        self._schema_row(connection, schema_ref, changes_reads=False)
+
+    def kb_state(self, schema_ref: str) -> str:
+        """Which of ``schema_ref``'s Experiences there are: its last write, and the digest of those reads skip."""
+
+        with self._database.transaction() as connection:
+            return f"{self._head(connection, schema_ref)}:{self._state.hidden_digest(connection, schema_ref)}"
+
+    def visible_experiences(self, schema_ref: str) -> tuple[Experience, ...]:
+        view = self._read_view(self.declaration_for(schema_ref))
+        return tuple(stored.experience for stored in view.store.list_experiences(schema_ref))
+
+    def experience(self, experience_id: str) -> dict[str, JsonValue]:
+        """One held Experience in full, whether reads see it, and where this host holds the files it names."""
+
+        experience = self.held(experience_id)
+        return {
+            "experience": experience.to_dict(),
+            "visible": self.is_visible(experience),
+            "files": {ref.sha256: str(self.file_path(ref)) for ref in experience.files()},
+        }
 
     def is_visible(self, experience: Experience) -> bool:
         with self._database.transaction() as connection:
@@ -593,22 +637,13 @@ class ExperienceHTTPService:
                 )
                 self._schema_row(connection, experience.schema_ref, changes_reads=True)
                 status = InsertStatus.CREATED.value
-            connection.execute(
-                """
-                INSERT INTO writes(kb_id, experience_id, schema_ref, result, source_kb_id, source_name, request_id,
-                    received_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                """,
-                (
-                    self.kb_id,
-                    experience.id,
-                    experience.schema_ref,
-                    status,
-                    source.kb_id,
-                    source.name,
-                    source.request_id,
-                    _utc_now(),
-                ),
+            record_write(
+                connection,
+                self.kb_id,
+                record_id=experience.id,
+                schema_ref=experience.schema_ref,
+                result=status,
+                source=source,
             )
         self.metrics.count("hyperloom_kb_writes_total", schema_ref=experience.schema_ref, result=status)
         if status == _CONFLICT:
@@ -1001,7 +1036,18 @@ class ExperienceHTTPService:
                 """,
                 (self.kb_id,),
             ).fetchall()
+            distill_states = self._distill_states(connection)
         counts = {str(row["schema_ref"]): int(row["visible"]) for row in rows}
+        checks = self.distill.checks()
+        distills: dict[str, JsonValue] = {}
+        for schema_ref, states in distill_states.items():
+            check = checks.get(schema_ref)
+            distills[schema_ref] = {
+                "visible": states["visible"],
+                "deleted": states["deleted"],
+                "needs_attention": None if check is None else check.needs_attention,
+                "checked_at": None if check is None else check.at.isoformat(),
+            }
         return {
             "status": "ok",
             "kb_id": self.kb_id,
@@ -1009,6 +1055,7 @@ class ExperienceHTTPService:
             "schema_ref": self.declaration.schema_ref,
             "experience_count": sum(counts.values()),
             "schemas": counts,
+            "distills": distills,
             "pid": os.getpid(),
             "config_digest": self._config_digest,
             "code_digest": self._code_digest,
@@ -1047,8 +1094,45 @@ class ExperienceHTTPService:
             for stat, value in sorted(self._database.connection_stats().items())
             if stat in ("pool_size", "pool_available", "requests_waiting")
         ]
+        gauges += self._distill_check_gauges()
         if readiness["database"]:
             gauges += self._database_gauges()
+        return gauges
+
+    def _distill_states(self, connection: Connection) -> dict[str, dict[str, int]]:
+        """How many Distills of each schema that has any are visible, deleted, and outside its state."""
+
+        rows = connection.execute(
+            """
+            SELECT distill_entries.schema_ref,
+                SUM(CASE WHEN outside.experience_id IS NULL AND exclusions.experience_id IS NULL THEN 1 ELSE 0 END)
+                    AS visible,
+                COUNT(exclusions.experience_id) AS deleted,
+                COUNT(outside.experience_id) AS outside
+            FROM distill_entries
+            LEFT JOIN outside ON outside.kb_id = distill_entries.kb_id
+                AND outside.schema_ref = distill_entries.schema_ref AND outside.experience_id = distill_entries.entry_id
+            LEFT JOIN exclusions ON exclusions.kb_id = distill_entries.kb_id
+                AND exclusions.schema_ref = distill_entries.schema_ref
+                AND exclusions.experience_id = distill_entries.entry_id
+            WHERE distill_entries.kb_id = %s GROUP BY distill_entries.schema_ref ORDER BY distill_entries.schema_ref
+            """,
+            (self.kb_id,),
+        )
+        return {
+            str(row["schema_ref"]): {state: int(row[state]) for state in ("visible", "deleted", "outside")}
+            for row in rows
+        }
+
+    def _distill_check_gauges(self) -> list[tuple[str, dict[str, str], float]]:
+        gauges: list[tuple[str, dict[str, str], float]] = []
+        for schema_ref, check in sorted(self.distill.checks().items()):
+            labels = {"schema_ref": schema_ref}
+            gauges += [
+                ("hyperloom_kb_distill_changes", {**labels, "status": status.value}, count)
+                for status, count in check.counts.items()
+            ]
+            gauges.append(("hyperloom_kb_distill_checked_timestamp_seconds", labels, check.at.timestamp()))
         return gauges
 
     def _database_gauges(self) -> list[tuple[str, dict[str, str], float]]:
@@ -1072,6 +1156,9 @@ class ExperienceHTTPService:
                     gauges.append(
                         ("hyperloom_kb_experiences", {"schema_ref": row["schema_ref"], "state": state}, row[state])
                     )
+            for schema_ref, states in self._distill_states(connection).items():
+                for state, count in states.items():
+                    gauges.append(("hyperloom_kb_distill_entries", {"schema_ref": schema_ref, "state": state}, count))
             sizes = connection.execute(
                 "SELECT COALESCE(SUM(bytes), 0) AS records, MAX(stored_at) AS last_write FROM experiences WHERE kb_id = %s",
                 (self.kb_id,),
@@ -1227,18 +1314,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         if self._dispatch_state(app, parsed.path, query) or self._dispatch_files(app, parsed.path):
             return
-        if self.command == _POST and parsed.path == "/v1/push":
-            _reject_unknown(self._body(), frozenset())
-            self._write(HTTPStatus.OK, app.push())
-            return
-        if self.command == _POST and parsed.path == "/v1/pull":
-            body = self._body()
-            _reject_unknown(body, frozenset({"schema_ref"}))
-            self._write(HTTPStatus.OK, app.pull(_required_text(body.get("schema_ref"), "schema_ref")))
-            return
-        if self.command == _POST and parsed.path == "/v1/rebind":
-            _reject_unknown(self._body(), frozenset())
-            self._write(HTTPStatus.OK, app.rebind())
+        if self._dispatch_distill(app, parsed.path, query) or self._dispatch_sync(app, parsed.path):
             return
         if self.command == _POST and parsed.path == "/v1/read":
             body = self._body()
@@ -1262,25 +1338,40 @@ class RequestHandler(BaseHTTPRequestHandler):
                 ),
             )
             return
-        prefix = "/v1/experiences/"
-        if self.command == _PUT and parsed.path.startswith(prefix):
+        if self.command == _PUT and parsed.path.startswith(_EXPERIENCES_PREFIX):
             body = self._body()
             _reject_unknown(body, _WRITE_FIELDS)
             experience = Experience.from_dict(body.get("experience"))
-            if experience.id != parsed.path.removeprefix(prefix):
+            if experience.id != parsed.path.removeprefix(_EXPERIENCES_PREFIX):
                 raise HTTPServiceError("Experience path id differs from payload")
             declaration = body.get("declaration")
-            context = current_request.get() or RequestContext("")
             self._write(
                 HTTPStatus.OK,
                 app.write(
                     experience,
                     None if declaration is None else ExperienceDeclaration.from_dict(declaration),
-                    source=WriteSource(context.client_kb_id, context.client_name, context.request_id),
+                    source=self._source(),
                 ),
             )
             return
         self._write(HTTPStatus.NOT_FOUND, {"error": "not_found"})
+
+    def _dispatch_sync(self, app: ExperienceHTTPService, path: str) -> bool:
+        """Serve the push, pull, and rebind routes; ``False`` when ``path`` is none of them."""
+
+        if self.command == _POST and path == "/v1/push":
+            _reject_unknown(self._body(), frozenset())
+            self._write(HTTPStatus.OK, app.push())
+        elif self.command == _POST and path == "/v1/pull":
+            body = self._body()
+            _reject_unknown(body, frozenset({"schema_ref"}))
+            self._write(HTTPStatus.OK, app.pull(_required_text(body.get("schema_ref"), "schema_ref")))
+        elif self.command == _POST and path == "/v1/rebind":
+            _reject_unknown(self._body(), frozenset())
+            self._write(HTTPStatus.OK, app.rebind())
+        else:
+            return False
+        return True
 
     def _dispatch_state(self, app: ExperienceHTTPService, path: str, query: Mapping[str, list[str]]) -> bool:
         """Serve the label and exclusion routes; ``False`` when ``path`` is none of them."""
@@ -1325,6 +1416,105 @@ class RequestHandler(BaseHTTPRequestHandler):
             return False
         return True
 
+    def _dispatch_distill(self, app: ExperienceHTTPService, path: str, query: Mapping[str, list[str]]) -> bool:
+        """Serve the schema, Experience, and Distill reading and authoring routes; ``False`` for any other path."""
+
+        distill = app.distill
+        entries = "/v1/distill/entries"
+        if self.command == _GET and path.startswith(_SCHEMAS_PREFIX):
+            self._write(HTTPStatus.OK, distill.describe_schema(unquote(path.removeprefix(_SCHEMAS_PREFIX))))
+        elif self.command == _GET and path.startswith(_EXPERIENCES_PREFIX):
+            self._write(HTTPStatus.OK, app.experience(unquote(path.removeprefix(_EXPERIENCES_PREFIX))))
+        elif self.command == _POST and path == "/v1/distill/explore":
+            body = self._body()
+            _reject_unknown(body, frozenset({"schema_ref", "scope", "group_by", "member_limit"}))
+            group_by = body.get("group_by", [])
+            if not isinstance(group_by, list) or not all(isinstance(item, str) for item in group_by):
+                raise HTTPServiceError("group_by must be a list of paths")
+            self._write(
+                HTTPStatus.OK,
+                distill.explore(
+                    _required_text(body.get("schema_ref"), "schema_ref"),
+                    Scope.from_dict(body.get("scope", {})),
+                    tuple(cast(list[str], group_by)),
+                    cast(int | None, body.get("member_limit")),
+                ),
+            )
+        elif self.command == _GET and path == "/v1/distill/forms":
+            self._write(HTTPStatus.OK, distill.forms(_required_text(_query_text(query, "schema_ref"), "schema_ref")))
+        elif self.command == _PUT and path == "/v1/distill/forms":
+            body = self._body()
+            _reject_unknown(body, frozenset({"schema_ref", "form"}))
+            self._write(
+                HTTPStatus.OK,
+                distill.register_form(
+                    _required_text(body.get("schema_ref"), "schema_ref"), FormDeclaration.from_dict(body.get("form"))
+                ),
+            )
+        elif self.command == _POST and path == "/v1/distill/preview":
+            body = self._body()
+            _reject_unknown(body, frozenset({"draft", "entry_id"}))
+            entry_id = body.get("entry_id")
+            self._write(
+                HTTPStatus.OK,
+                distill.preview(
+                    body.get("draft"), entry_id=None if entry_id is None else _required_text(entry_id, "entry_id")
+                ),
+            )
+        elif self.command == _POST and path == entries:
+            self._write(HTTPStatus.OK, distill.create(self._draft(), source=self._source()))
+        elif self.command == _PUT and (version_path := _DISTILL_VERSION_PATH.fullmatch(path)):
+            self._write(HTTPStatus.OK, self._receive_distill(app, unquote(version_path[1]), int(version_path[2])))
+        elif self.command == _PUT and path.startswith(f"{entries}/"):
+            entry_id = unquote(path.removeprefix(f"{entries}/"))
+            self._write(HTTPStatus.OK, distill.update(entry_id, self._draft(), source=self._source()))
+        elif self.command == _GET and path.startswith(f"{entries}/"):
+            self._write(
+                HTTPStatus.OK,
+                distill.get(
+                    unquote(path.removeprefix(f"{entries}/")),
+                    version=_query_int(query, "version", 0) or None,
+                    follow_evidence=_query_flag(query, "follow_evidence"),
+                    after=_query_int(query, "after", 0),
+                    limit=_query_int(query, "limit", EVIDENCE_PAGE),
+                    representative_limit=_query_int(query, "representatives", REPRESENTATIVES),
+                ),
+            )
+        elif self.command == _GET and path == entries:
+            self._write(
+                HTTPStatus.OK,
+                distill.list(
+                    _required_text(_query_text(query, "schema_ref"), "schema_ref"),
+                    include_deleted=_query_flag(query, "include_deleted"),
+                ),
+            )
+        elif self.command == _GET and path == "/v1/distill/changes":
+            self._write(HTTPStatus.OK, distill.changes(_query_text(query, "schema_ref")))
+        else:
+            return False
+        return True
+
+    def _receive_distill(self, app: ExperienceHTTPService, entry_id: str, version: int) -> dict[str, JsonValue]:
+        body = self._body()
+        _reject_unknown(body, frozenset({"entry", "form", "declaration"}))
+        entry = DistillEntry.from_dict(body.get("entry"))
+        if (entry.id, entry.version) != (entry_id, version):
+            raise HTTPServiceError("Distill path id or version differs from payload")
+        declaration = body.get("declaration")
+        if declaration is not None:
+            app.register(ExperienceDeclaration.from_dict(declaration))
+        return app.distill.receive(entry, FormDeclaration.from_dict(body.get("form")), source=self._source())
+
+    def _draft(self) -> JsonValue:
+        body = self._body()
+        _reject_unknown(body, frozenset({"draft"}))
+        return body.get("draft")
+
+    @staticmethod
+    def _source() -> WriteSource:
+        context = current_request.get() or RequestContext("")
+        return WriteSource(context.client_kb_id, context.client_name, context.request_id)
+
     def _handle(self) -> None:
         """Answer one request, counted and timed, with its context on every line logged while answering it."""
 
@@ -1362,7 +1552,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._dispatch()
         except UnknownStateItem as exc:
             self._write(HTTPStatus.NOT_FOUND, {"error": "not_found", "detail": str(exc)})
-        except ImmutableExperienceConflict as exc:
+        except (ImmutableExperienceConflict, DistillConflict) as exc:
             self._write(HTTPStatus.CONFLICT, {"error": "conflict", "detail": str(exc)})
         except MissingFiles as exc:
             self._write(

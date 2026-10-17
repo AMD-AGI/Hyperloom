@@ -1,26 +1,32 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Push this service's own Experiences to a global Experience KB and pull one schema of the global KB's into it."""
+"""Push this service's own Experiences and its Distills' latest versions to a global Experience KB, and pull one
+schema of the global KB's, Experiences and Distills, into it."""
 
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Collection, Iterator, Mapping
+from collections.abc import Collection, Iterable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any, BinaryIO, Protocol
 
 from hyperloom_kb.database import Database, WriteSource
-
-from hyperloom_kb.remote import RemoteClient, RemoteClientError, RemoteConfig
+from hyperloom_kb.distill.model import DistillEntry, FormDeclaration
+from hyperloom_kb.local_state import UnknownStateItem
+from hyperloom_kb.remote import ExportPage, RemoteClient, RemoteClientError, RemoteConfig
 from hyperloom_kb.schema import Experience, ExperienceDeclaration, FileRef, JsonValue
 from hyperloom_kb.storage import StorageContractError
 
 GLOBAL_URL_ENV = "HYPERLOOM_GLOBAL_KB_URL"
 GLOBAL_TOKEN_ENV = "HYPERLOOM_GLOBAL_KB_TOKEN"
 SYNC_BATCH = 100
+#: What a sync report counts of the Distill versions it handled: a pull ``skipped`` the ones older than the version
+#: here, and a push ``held_back`` the ones a global KB older than Distills cannot take yet.
+DISTILL_COUNTS = ("created", "unchanged", "skipped", "held_back")
 _PUSH = "push"
 _PULL = "pull"
 _PER_GLOBAL_TABLES = (
@@ -30,6 +36,7 @@ _PER_GLOBAL_TABLES = (
     "sync_on_global",
     "sync_pulls_in_progress",
     "sync_pulled_states",
+    "sync_distills_on_global",
 )
 
 
@@ -167,6 +174,32 @@ class SyncLedger:
         )
         return frozenset(str(row["experience_id"]) for row in rows)
 
+    def note_distill(self, global_url: str, schema_ref: str, entry_id: str, version: int) -> None:
+        """Remember that the global KB holds ``version`` of ``entry_id``, or refused it from here, so a push stops
+        sending it."""
+
+        self._execute(
+            """
+            INSERT INTO sync_distills_on_global(kb_id, global_url, schema_ref, entry_id, version)
+            VALUES (%s, %s, %s, %s, %s) ON CONFLICT DO NOTHING
+            """,
+            global_url,
+            schema_ref,
+            entry_id,
+            version,
+        )
+
+    def distills_on_global(self, global_url: str, schema_ref: str) -> frozenset[tuple[str, int]]:
+        rows = self._rows(
+            """
+            SELECT entry_id, version FROM sync_distills_on_global
+            WHERE kb_id = %s AND global_url = %s AND schema_ref = %s
+            """,
+            global_url,
+            schema_ref,
+        )
+        return frozenset((str(row["entry_id"]), int(row["version"])) for row in rows)
+
     def pulled_state(self, global_url: str, schema_ref: str) -> str:
         """The state of ``schema_ref`` on the global KB as the last pull batch saw it; empty before the first."""
 
@@ -221,10 +254,12 @@ def _report(
     counts: Counter[str] | None = None,
     rejected: list[JsonValue] | None = None,
     *,
+    distills: Counter[str] | None = None,
     has_more: bool = False,
     error: str = "",
 ) -> dict[str, JsonValue]:
     counts = counts or Counter()
+    distills = distills or Counter()
     report: dict[str, JsonValue] = {
         "status": status,
         "global_url": global_url,
@@ -232,6 +267,7 @@ def _report(
         "unchanged": counts["unchanged"],
         "skipped": counts["skipped"],
         "held_back": counts["held_back"],
+        "distills": {key: distills[key] for key in DISTILL_COUNTS},
         "rejected": rejected or [],
         "has_more": has_more,
     }
@@ -245,11 +281,35 @@ def _record_id(item: Mapping[str, Any]) -> str:
     return str(experience.get("id") or "") if isinstance(experience, Mapping) else ""
 
 
+class SyncedDistills(Protocol):
+    """What sync needs of the Distills of the service it pushes from and pulls into."""
+
+    def pushable(self, schema_ref: str) -> list[tuple[str, int]]:
+        """Each visible Distill of ``schema_ref`` that shows its latest version, with that version."""
+
+    def version(self, entry_id: str, version: int) -> tuple[DistillEntry, FormDeclaration]:
+        """A stored version and the form it is written in."""
+
+    def latest_version(self, entry_id: str) -> int:
+        """The highest version stored of ``entry_id``; 0 for one not held."""
+
+    def receive(self, entry: DistillEntry, form: FormDeclaration, *, source: WriteSource) -> dict[str, JsonValue]:
+        """Store a version as another KB wrote it; the result carries its ``status``."""
+
+    def show_at_least(self, schema_ref: str, entry_id: str, version: int) -> None:
+        """Make ``entry_id`` show ``version`` when it shows an older one."""
+
+
 class SyncedService(Protocol):
     """What sync needs of the Experience service it pushes from and pulls into."""
 
     kb_id: str
     name: str
+    distill: SyncedDistills
+
+    @property
+    def schema_refs(self) -> tuple[str, ...]:
+        """Every schema the service holds."""
 
     def register(self, declaration: ExperienceDeclaration) -> None:
         """Hold ``declaration``'s schema."""
@@ -285,6 +345,25 @@ class SyncedService(Protocol):
         """Store ``size`` bytes of ``stream`` as the file ``sha256``."""
 
 
+@dataclass(frozen=True)
+class _Global:
+    """The global KB a sync talks to, its identity, and whether it holds Distills: one older than them reports none
+    in its health and answers none of their routes."""
+
+    client: RemoteClient
+    kb_id: str
+    holds_distills: bool
+
+
+@dataclass(frozen=True)
+class _PullPage:
+    """A page of the schema a pull batch brings, and the position and Experience on the global KB it follows."""
+
+    page: ExportPage
+    position: int
+    anchor: str
+
+
 class GlobalSync:
     """One service's sync with its global KB; one push or pull batch runs at a time."""
 
@@ -295,15 +374,16 @@ class GlobalSync:
         if target is not None:
             target.identify(service.kb_id, service.name)
 
-    def _connected(self) -> tuple[RemoteClient, str]:
-        """The global KB and its identity, once it is the one this service synced with before, or the first one."""
+    def _connected(self) -> _Global:
+        """The global KB, once it is the one this service synced with before, or the first one."""
 
         if self._target is None:
             raise SyncUnavailable(
                 f"this service was started without a global Experience KB ({GLOBAL_URL_ENV}, {GLOBAL_TOKEN_ENV})"
             )
         url = self._target.config.base_url
-        kb_id = str(self._target.health().get("kb_id") or "")
+        health = self._target.health()
+        kb_id = str(health.get("kb_id") or "")
         if not kb_id:
             raise SyncRefused(f"the Experience KB at {url} reports no identity; upgrade it before syncing with it")
         bound = self._ledger.identity(url)
@@ -314,7 +394,7 @@ class GlobalSync:
                 "the start"
             )
         self._ledger.bind(url, kb_id)
-        return self._target, kb_id
+        return _Global(self._target, kb_id, "distills" in health)
 
     def rebind(self) -> dict[str, JsonValue]:
         """Forget the global KB this service synced with at its URL, so the next push and pull sync from the start
@@ -347,17 +427,56 @@ class GlobalSync:
         self._ledger.note_on_global(target.config.base_url, experience.schema_ref, (experience.id,))
         return ""
 
+    def _unsent_distills(self, url: str) -> Iterator[tuple[str, str, int]]:
+        """Each latest Distill version, with its schema, that the global KB at ``url`` does not hold yet."""
+
+        for schema_ref in self._service.schema_refs:
+            on_global = self._ledger.distills_on_global(url, schema_ref)
+            for entry_id, version in self._service.distill.pushable(schema_ref):
+                if (entry_id, version) not in on_global:
+                    yield schema_ref, entry_id, version
+
+    def _push_distills(
+        self, target: RemoteClient, distills: Counter[str], rejected: list[JsonValue]
+    ) -> tuple[str, bool]:
+        """Send up to a batch of the latest Distill versions the global KB does not hold yet; the error that should
+        stop this push, if any, and whether more remain. A version the global KB refuses is reported once, and a later
+        version of the entry is sent again."""
+
+        url = target.config.base_url
+        for sent, (schema_ref, entry_id, version) in enumerate(self._unsent_distills(url)):
+            if sent == SYNC_BATCH:
+                return "", True
+            entry, form = self._service.distill.version(entry_id, version)
+            try:
+                result = target.put_distill_version(
+                    entry,
+                    form,
+                    declaration=self._service.declaration_for(schema_ref),
+                    files={ref.sha256: self._service.file_path(ref) for ref in entry.files()},
+                )
+            except RemoteClientError as exc:
+                if exc.retryable:
+                    return str(exc), False
+                rejected.append({"entry_id": entry_id, "version": version, "detail": str(exc)})
+            else:
+                distills[str(result["status"])] += 1
+            self._ledger.note_distill(url, schema_ref, entry_id, version)
+        return "", False
+
     def push(self) -> dict[str, JsonValue]:
-        """Send the Experiences written here that reads here see; one they do not see waits until they do."""
+        """Send the Experiences written here that reads here see, then the latest version of each visible Distill;
+        an Experience reads do not see waits until they do."""
 
         with self._ledger.exclusive():
             url = self._target.config.base_url if self._target is not None else ""
             try:
-                target, _ = self._connected()
+                connected = self._connected()
             except RemoteClientError as exc:
                 return _report("incomplete", url, error=str(exc))
             except SyncRefused as exc:
                 return _report("refused", url, error=str(exc))
+            target = connected.client
             counts: Counter[str] = Counter()
             rejected: list[JsonValue] = []
             for experience_id in self._ledger.held_back(url):
@@ -383,7 +502,36 @@ class GlobalSync:
                         return _report("incomplete", url, counts, rejected, error=error)
                 position = sequence
             self._ledger.advance(url, _PUSH, position)
-            return _report("completed", url, counts, rejected, has_more=has_more)
+            distills: Counter[str] = Counter()
+            if not has_more and not connected.holds_distills:
+                # A global KB older than Distills takes them once it is upgraded; until then each waits here.
+                distills["held_back"] = sum(1 for _ in self._unsent_distills(url))
+            elif not has_more:
+                # Distills go once every Experience has, so the evidence they name is on the global KB first.
+                error, has_more = self._push_distills(target, distills, rejected)
+                if error:
+                    return _report("incomplete", url, counts, rejected, distills=distills, error=error)
+            return _report("completed", url, counts, rejected, distills=distills, has_more=has_more)
+
+    def _next_page(self, target: RemoteClient, schema_ref: str) -> _PullPage:
+        """The page of ``schema_ref`` a pull batch brings, after the cursor, or from the start again when the global KB
+        no longer holds what the cursor names or shows the schema differently."""
+
+        url = target.config.base_url
+        position, anchor = self._ledger.cursor(url, f"{_PULL} {schema_ref}")
+        page = target.export_page(after=position, limit=SYNC_BATCH, schema_ref=schema_ref)
+        lost = bool(position) and page.after_id != anchor
+        if lost or (position and page.state != self._ledger.pulled_state(url, schema_ref)):
+            # Either the global KB no longer holds at the cursor what this service pulled there, as after a
+            # restore from an older backup, so what it holds now may sit before the cursor; or its exclusions
+            # or restores changed, so Experiences the cursor passed while they were hidden may show now.
+            # The ones already here come back unchanged.
+            page = target.export_page(after=0, limit=SYNC_BATCH, schema_ref=schema_ref)
+            position, anchor = 0, ""
+        if lost:
+            # What it lost may include what this service pushed, so the next push sends everything again.
+            self._ledger.advance(url, _PUSH, 0)
+        return _PullPage(page, position, anchor)
 
     def pull(self, schema_ref: str) -> dict[str, JsonValue]:
         """Bring ``schema_ref``'s state to everything the global KB holds of it, one batch per call.
@@ -397,28 +545,18 @@ class GlobalSync:
         with self._ledger.exclusive():
             url = self._target.config.base_url if self._target is not None else ""
             try:
-                target, global_kb_id = self._connected()
+                connected = self._connected()
             except RemoteClientError as exc:
                 return _report("incomplete", url, error=str(exc))
             except SyncRefused as exc:
                 return _report("refused", url, error=str(exc))
+            target, global_kb_id = connected.client, connected.kb_id
             direction = f"{_PULL} {schema_ref}"
-            position, anchor = self._ledger.cursor(url, direction)
             try:
-                page = target.export_page(after=position, limit=SYNC_BATCH, schema_ref=schema_ref)
-                lost = bool(position) and page.after_id != anchor
-                if lost or (position and page.state != self._ledger.pulled_state(url, schema_ref)):
-                    # Either the global KB no longer holds at the cursor what this service pulled there, as after a
-                    # restore from an older backup, so what it holds now may sit before the cursor; or its exclusions
-                    # or restores changed, so Experiences the cursor passed while they were hidden may show now.
-                    # The ones already here come back unchanged.
-                    page = target.export_page(after=0, limit=SYNC_BATCH, schema_ref=schema_ref)
-                    position, anchor = 0, ""
+                batch = self._next_page(target, schema_ref)
             except RemoteClientError as exc:
                 return _report("incomplete", url, error=str(exc))
-            if lost:
-                # What it lost may include what this service pushed, so the next push sends everything again.
-                self._ledger.advance(url, _PUSH, 0)
+            page, position, anchor = batch.page, batch.position, batch.anchor
             if page.declaration is not None:
                 self._service.register(page.declaration)
             saved: dict[str, JsonValue] | None = None
@@ -437,7 +575,7 @@ class GlobalSync:
                     experience = Experience.from_dict(item.get("experience"))
                     if experience.schema_ref != schema_ref:
                         raise ValueError(f"exported under {schema_ref} but belongs to {experience.schema_ref}")
-                    self._fetch_files(target, experience)
+                    self._fetch_files(target, experience.files())
                     status = str(self._service.write(experience, source=WriteSource(global_kb_id))["status"])
                 except RemoteClientError as exc:
                     if exc.retryable:
@@ -458,6 +596,11 @@ class GlobalSync:
             self._service.bring_in(schema_ref, fetched)
             self._ledger.advance(url, direction, resume, resume_id)
             self._ledger.note_pulled_state(url, schema_ref, page.state)
+            distills: Counter[str] = Counter()
+            if not error and not page.has_more and connected.holds_distills:
+                # Distills come once every Experience has, so the evidence they name is here first; a global KB
+                # older than Distills holds none.
+                error = self._pull_distills(target, schema_ref, WriteSource(global_kb_id), distills, rejected)
             self._ledger.mark_pull_in_progress(url, schema_ref, bool(error) or page.has_more)
             return {
                 **_report(
@@ -465,6 +608,7 @@ class GlobalSync:
                     url,
                     counts,
                     rejected,
+                    distills=distills,
                     has_more=bool(error) or page.has_more,
                     error=error,
                 ),
@@ -472,14 +616,68 @@ class GlobalSync:
                 "saved": saved,
             }
 
-    def _fetch_files(self, target: RemoteClient, experience: Experience) -> None:
-        """Bring each file ``experience`` names that is not held here from the global KB, before the record."""
+    def _pull_distills(
+        self,
+        target: RemoteClient,
+        schema_ref: str,
+        source: WriteSource,
+        distills: Counter[str],
+        rejected: list[JsonValue],
+    ) -> str:
+        """Bring the version each Distill of ``schema_ref`` the global KB shows, and make it shown here unless a later
+        version is; the error that should stop this pull, if any.
 
-        for sha256 in self._service.missing_files(experience.files()):
+        A version held here with other content than the global KB's is a conflict, reported and left as it is.
+        """
+
+        url = target.config.base_url
+        try:
+            listed = target.list_distills(schema_ref)["items"]
+            forms = {
+                str(item["form_ref"]): FormDeclaration.from_dict(item["form"])
+                for item in target.distill_forms(schema_ref)["forms"]
+            }
+        except RemoteClientError as exc:
+            return str(exc)
+        for item in listed:
+            entry_id, version = str(item["entry_id"]), int(item["version"])
+            latest = self._service.distill.latest_version(entry_id)
+            try:
+                if latest > version:
+                    distills["skipped"] += 1
+                    continue
+                if latest == version:
+                    held, _ = self._service.distill.version(entry_id, version)
+                    if held.content_hash() != item["content_hash"]:
+                        raise ValueError(f"version {version} of {entry_id} here differs from the global KB's")
+                    distills["unchanged"] += 1
+                else:
+                    entry = DistillEntry.from_dict(target.distill(entry_id, version=version)["entry"])
+                    self._fetch_files(target, entry.files())
+                    received = self._service.distill.receive(entry, forms[entry.form_ref], source=source)
+                    distills[str(received["status"])] += 1
+            except RemoteClientError as exc:
+                if exc.retryable:
+                    return str(exc)
+                rejected.append({"entry_id": entry_id, "version": version, "detail": str(exc)})
+                continue
+            except (KeyError, TypeError, ValueError, StorageContractError, UnknownStateItem) as exc:
+                rejected.append({"entry_id": entry_id, "version": version, "detail": str(exc)})
+                continue
+            self._service.distill.show_at_least(schema_ref, entry_id, version)
+            self._service.bring_in(schema_ref, (entry_id,))
+            self._ledger.note_distill(url, schema_ref, entry_id, version)
+        return ""
+
+    def _fetch_files(self, target: RemoteClient, refs: Iterable[FileRef]) -> None:
+        """Bring each file of ``refs`` that is not held here from the global KB, before the record naming it."""
+
+        for sha256 in self._service.missing_files(tuple(refs)):
             target.fetch_file(sha256, partial(self._service.put_file, sha256))
 
 
 __all__ = [
+    "DISTILL_COUNTS",
     "GLOBAL_TOKEN_ENV",
     "GLOBAL_URL_ENV",
     "SYNC_BATCH",
@@ -487,6 +685,7 @@ __all__ = [
     "SyncLedger",
     "SyncRefused",
     "SyncUnavailable",
+    "SyncedDistills",
     "SyncedService",
     "global_config_from_env",
 ]

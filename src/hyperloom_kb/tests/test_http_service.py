@@ -293,6 +293,7 @@ def test_write_is_immediately_readable_immutable_and_rendered_losslessly(
         "schema_ref": schema.schema_ref,
         "experience_count": 1,
         "schemas": {schema.schema_ref: 1},
+        "distills": {},
         "pid": os.getpid(),
         "config_digest": "",
         "code_digest": code_digest(),

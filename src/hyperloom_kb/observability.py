@@ -48,10 +48,18 @@ _FIXED_ROUTES = frozenset(
         "/v1/restore",
         "/v1/exclusions",
         "/v1/files/missing",
+        "/v1/distill/explore",
+        "/v1/distill/forms",
+        "/v1/distill/preview",
+        "/v1/distill/entries",
+        "/v1/distill/changes",
     }
 )
 _ROUTE_PATTERNS = (
     (re.compile(r"^/v1/experiences/[^/]+$"), "/v1/experiences/{experience_id}"),
+    (re.compile(r"^/v1/schemas/[^/]+$"), "/v1/schemas/{schema_ref}"),
+    (re.compile(r"^/v1/distill/entries/[^/]+$"), "/v1/distill/entries/{entry_id}"),
+    (re.compile(r"^/v1/distill/entries/[^/]+/versions/[^/]+$"), "/v1/distill/entries/{entry_id}/versions/{version}"),
     (re.compile(r"^/v1/files/[^/]+$"), "/v1/files/{sha256}"),
     (re.compile(r"^/v1/labels/[^/]+$"), "/v1/labels/{label_id}"),
     (re.compile(r"^/v1/exclusions/[^/]+$"), "/v1/exclusions/{experience_id}"),
@@ -76,6 +84,20 @@ _HELP = {
     "hyperloom_kb_file_writes_total": (_COUNTER, "File writes by result: created, unchanged."),
     "hyperloom_kb_sync_batches_total": (_COUNTER, "Push and pull batches by direction and status."),
     "hyperloom_kb_experiences": (_GAUGE, "Stored Experiences by schema and state: visible, excluded, outside."),
+    "hyperloom_kb_distill_entries": (_GAUGE, "Distill entries by schema and state: visible, deleted, outside."),
+    "hyperloom_kb_distill_writes_total": (_COUNTER, "Distill version writes by operation and result."),
+    "hyperloom_kb_distill_evidence_seconds": (
+        _HISTOGRAM,
+        "Time to select and classify a Distill's group of Experiences, or to check how Distills' evidence moved.",
+    ),
+    "hyperloom_kb_distill_changes": (
+        _GAUGE,
+        "Visible Distills by evidence status, as the last listing or changes pass over the schema found them.",
+    ),
+    "hyperloom_kb_distill_checked_timestamp_seconds": (
+        _GAUGE,
+        "When the last listing or changes pass checked the schema's Distills' evidence.",
+    ),
     "hyperloom_kb_record_bytes": (_GAUGE, "Bytes of the KB's record files."),
     "hyperloom_kb_database_bytes": (_GAUGE, "Size of the KB's database."),
     "hyperloom_kb_disk_free_bytes": (_GAUGE, "Free bytes on the file system of the service's home."),
@@ -176,14 +198,14 @@ def _number(value: float) -> str:
 
 
 class Metrics:
-    """The counters and request histogram of one service process, rendered with gauges sampled at scrape time."""
+    """The counters and histograms of one service process, rendered with gauges sampled at scrape time."""
 
     def __init__(self) -> None:
         self.started_at = time.time()
         self._lock = threading.Lock()
         self._counters: dict[tuple[str, Labels], float] = {}
-        self._buckets: dict[Labels, list[int]] = {}
-        self._sums: dict[Labels, float] = {}
+        self._buckets: dict[tuple[str, Labels], list[int]] = {}
+        self._sums: dict[tuple[str, Labels], float] = {}
         self._in_flight = 0
 
     def count(self, name: str, amount: float = 1.0, **labels: str) -> None:
@@ -191,20 +213,33 @@ class Metrics:
         with self._lock:
             self._counters[key] = self._counters.get(key, 0.0) + amount
 
+    def observe(self, name: str, seconds: float, **labels: str) -> None:
+        """Add one duration to the histogram ``name``, bucketed by ``LATENCY_BUCKETS``."""
+
+        key = (name, tuple(sorted(labels.items())))
+        with self._lock:
+            buckets = self._buckets.setdefault(key, [0] * (len(LATENCY_BUCKETS) + 1))
+            for index, bound in enumerate(LATENCY_BUCKETS):
+                if seconds <= bound:
+                    buckets[index] += 1
+            buckets[-1] += 1
+            self._sums[key] = self._sums.get(key, 0.0) + seconds
+
+    @contextmanager
+    def timed(self, name: str, **labels: str) -> Iterator[None]:
+        started = time.monotonic()
+        try:
+            yield
+        finally:
+            self.observe(name, time.monotonic() - started, **labels)
+
     def observe_request(
         self, *, method: str, route: str, status: int, seconds: float, bytes_in: int, bytes_out: int
     ) -> None:
         self.count("hyperloom_kb_http_requests_total", method=method, route=route, status=str(status))
         self.count("hyperloom_kb_http_request_bytes_total", bytes_in, route=route)
         self.count("hyperloom_kb_http_response_bytes_total", bytes_out, route=route)
-        labels: Labels = (("method", method), ("route", route))
-        with self._lock:
-            buckets = self._buckets.setdefault(labels, [0] * (len(LATENCY_BUCKETS) + 1))
-            for index, bound in enumerate(LATENCY_BUCKETS):
-                if seconds <= bound:
-                    buckets[index] += 1
-            buckets[-1] += 1
-            self._sums[labels] = self._sums.get(labels, 0.0) + seconds
+        self.observe("hyperloom_kb_http_request_duration_seconds", seconds, method=method, route=route)
 
     @contextmanager
     def in_flight(self) -> Iterator[None]:
@@ -227,13 +262,12 @@ class Metrics:
         with self._lock:
             for (name, labels), value in sorted(self._counters.items()):
                 series.setdefault(name, []).append(f"{_series(name, labels)} {_number(value)}")
-            histogram = "hyperloom_kb_http_request_duration_seconds"
-            for labels, buckets in sorted(self._buckets.items()):
+            for (histogram, labels), buckets in sorted(self._buckets.items()):
                 lines = series.setdefault(histogram, [])
                 for bound, count in zip((*LATENCY_BUCKETS, float("inf")), buckets):
                     le = "+Inf" if bound == float("inf") else repr(bound)
                     lines.append(f"{_series(histogram + '_bucket', (*labels, ('le', le)))} {count}")
-                lines.append(f"{_series(histogram + '_sum', labels)} {_number(self._sums[labels])}")
+                lines.append(f"{_series(histogram + '_sum', labels)} {_number(self._sums[(histogram, labels)])}")
                 lines.append(f"{_series(histogram + '_count', labels)} {buckets[-1]}")
             in_flight = self._in_flight
         series.setdefault("hyperloom_kb_http_requests_in_flight", []).append(

@@ -591,6 +591,12 @@ optimizer's environment with `.env` loaded, such as
 workspace's schema, and they use the service as it runs, never restarting it
 under a running session.
 
+When the user asks to distill a pattern from the workspace's Experiences, or
+to check, read, or sync its Distills, follow the `hyperloom-kb-distill` skill
+and run its commands through the same entry point, such as
+`experience_kb_service distill list`. There `distill sync` writes the pages
+into `distilled/` under the service's data home unless it names `--dir`.
+
 A global Experience KB is optional, set by `HYPERLOOM_GLOBAL_KB_URL` and
 `HYPERLOOM_GLOBAL_KB_TOKEN` in `.env`; unset, runs use only the local KB. With
 them set, `python -m hyperloom.inference_optimizer.experience_kb_service push`
