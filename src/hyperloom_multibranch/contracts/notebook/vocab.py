@@ -43,6 +43,7 @@ class DedupStatus(str, Enum):
 class Conclusion(str, Enum):
     """What came of a tested candidate: the rule gate's action on a specialist branch, or the integrator's merge.
 
+    ``DIAGNOSIS_PENDING`` is a blocked gain waiting for its specialist to send it for repair or decline it.
     ``UNVERIFIED``: a result the decision rested on did not re-verify against its signed bundle, so nothing was landed
     or requested.
     """
@@ -52,6 +53,7 @@ class Conclusion(str, Enum):
     SPLIT_REQUESTED = "split_requested"
     SPLIT_PENDING = "split_pending"
     SPLIT_COMMITTED = "split_committed"
+    DIAGNOSIS_PENDING = "diagnosis_pending"
     REPAIR_REQUESTED = "repair_requested"
     RECORDED_ONLY = "recorded_only"
     ACCURACY_FAILED = "accuracy_failed"
