@@ -9,8 +9,10 @@ closes after the client exits, so model load, graph capture and idle tail all av
 reading ignores three of the four serving cards, and a candidate that only boots slower reads as drawing less power.
 
 This recorder hangs off the same watchdog loop that drives the KV-metrics phase machine and samples every card the
-round could use with read-only ``amd-smi metric --power --mem-usage``, keeping only samples taken in the ``measured``
-phase. The serving cards are the ones holding a serving-sized share of VRAM during that phase, so a TP4 round on an
+round could use with read-only ``amd-smi metric --power --mem-usage --clock``, keeping only samples taken in the
+``measured`` phase. It also reads the cards' throttle accumulators (``amd-smi metric --violation``) as each measured
+window opens and closes, so a round under a power cap reports how much of it the cards spent held back by that cap,
+and at what graphics clock they actually ran. The serving cards are the ones holding a serving-sized share of VRAM during that phase, so a TP4 round on an
 unpinned eight-card host is averaged over the four cards it runs on.
 
 Nothing here raises: telemetry that fails must cost the round nothing, and a round with no reading reports ``None``
@@ -37,7 +39,9 @@ __all__ = [
     "GpuPowerRecorder",
     "ServerLogPhaseDriver",
     "build_gpu_power_recorder",
+    "parse_clock_sample",
     "parse_power_sample",
+    "parse_throttle_sample",
     "read_measured_gpu_power",
     "read_measured_gpu_power_by_gpu",
 ]
@@ -54,6 +58,12 @@ _QUERY_TIMEOUT_SEC = 10.0
 #: reserve most of HBM up front (vLLM's default ``--gpu-memory-utilization`` is 0.9), while an idle card holds a few
 #: hundred MB of driver state, so the split is wide and the threshold does not need to be exact.
 _SERVING_VRAM_FRACTION = 0.10
+
+#: A serving card held back by its power limit for at least this share of the measured phase is reported as power
+#: throttled: the clock was repeatedly pulled down and released, which a fixed sclk cap near the sustained clock avoids.
+_POWER_THROTTLE_REPORT_FRACTION = 0.10
+#: A suggested sclk cap is rounded down to this step, so it sits at or below the clock the card sustained.
+_SCLK_SUGGESTION_STEP_MHZ = 50
 
 #: How far a recorder's start may precede the subprocess it is paired with and still be that round's.
 _START_SLACK_SEC = 5.0
@@ -87,9 +97,55 @@ def parse_power_sample(payload: Any) -> dict[int, tuple[float | None, float | No
     return out
 
 
-def _query_amd_smi(run: Callable[..., subprocess.CompletedProcess]) -> Any:
+def parse_clock_sample(payload: Any) -> dict[int, tuple[float | None, float | None]]:
+    """``{gpu: (mean current sclk over the busy XCDs, sclk max limit)}`` from ``amd-smi metric --clock --json``.
+
+    An XCD in deep sleep reports a clock below its own ``min_clk`` (tens of MHz on MI355X); that is idle time, not the
+    clock the card runs at under load, so it is left out, and a card with every XCD asleep has no current clock. The
+    limit is ``None`` when the XCDs disagree on it.
+    """
+    rows = payload.get("gpu_data") if isinstance(payload, dict) else payload
+    out: dict[int, tuple[float | None, float | None]] = {}
+    for row in rows or []:
+        if not isinstance(row, dict) or not isinstance(row.get("gpu"), int) or not isinstance(row.get("clock"), dict):
+            continue
+        blocks = [
+            block for name, block in row["clock"].items() if str(name).startswith("gfx_") and isinstance(block, dict)
+        ]
+        current = [
+            clk
+            for block in blocks
+            if (clk := _value(block.get("clk"))) is not None and clk >= (_value(block.get("min_clk")) or 0.0)
+        ]
+        limits = {_value(block.get("max_clk")) for block in blocks}
+        out[row["gpu"]] = (
+            sum(current) / len(current) if current else None,
+            limits.pop() if len(limits) == 1 else None,
+        )
+    return out
+
+
+def parse_throttle_sample(payload: Any) -> dict[int, tuple[float, float]]:
+    """``{gpu: (accumulation_counter, ppt_accumulated)}`` from ``amd-smi metric --violation --json``.
+
+    Both count the same firmware ticks, so the share of ticks in a window spent power (PPT) limited is the ratio of
+    their deltas. A card without both counters is left out.
+    """
+    rows = payload.get("gpu_data") if isinstance(payload, dict) else payload
+    out: dict[int, tuple[float, float]] = {}
+    for row in rows or []:
+        if not isinstance(row, dict) or not isinstance(row.get("gpu"), int):
+            continue
+        block = row.get("throttle") if isinstance(row.get("throttle"), dict) else {}
+        ticks, ppt = _value(block.get("accumulation_counter")), _value(block.get("ppt_accumulated"))
+        if ticks is not None and ppt is not None:
+            out[row["gpu"]] = (ticks, ppt)
+    return out
+
+
+def _query_amd_smi(run: Callable[..., subprocess.CompletedProcess], *metrics: str) -> Any:
     done = run(
-        ["amd-smi", "metric", "--power", "--mem-usage", "--json"],  # nosec B603 B607
+        ["amd-smi", "metric", *metrics, "--json"],  # nosec B603 B607
         capture_output=True,
         text=True,
         timeout=_QUERY_TIMEOUT_SEC,
@@ -98,6 +154,45 @@ def _query_amd_smi(run: Callable[..., subprocess.CompletedProcess]) -> Any:
     if done.returncode != 0:
         raise RuntimeError(f"amd-smi exited {done.returncode}: {(done.stderr or '').strip()[:200]}")
     return json.loads(done.stdout)
+
+
+def _clock_fields(
+    clocks: list[float] | None, limits: set[float | None] | None, delta: tuple[float, float] | None
+) -> dict[str, Any]:
+    """A card's measured-phase sclk and power-throttle share; ``None`` for whatever was not read."""
+    limit = next(iter(limits)) if limits and len(limits) == 1 else None
+    return {
+        "sclk_mean_mhz": round(sum(clocks) / len(clocks), 1) if clocks else None,
+        "sclk_max_mhz": limit,
+        "power_throttle_fraction": round(delta[1] / delta[0], 4) if delta and delta[0] > 0 else None,
+    }
+
+
+def _power_fields(watts: list[float], peak_vram: float) -> dict[str, Any]:
+    """A card's measured-phase power."""
+    return {
+        "avg_power_w": round(sum(watts) / len(watts), 2),
+        "max_power_w": round(max(watts), 2),
+        "samples": len(watts),
+        "peak_vram_fraction": round(peak_vram, 4),
+    }
+
+
+def _power_throttled(per_gpu: dict[str, dict[str, Any]], serving: list[int]) -> list[int]:
+    """The serving cards held back by their power limit for at least the reporting share of the measured phase."""
+    return sorted(
+        gpu
+        for gpu in serving
+        if (per_gpu[str(gpu)].get("power_throttle_fraction") or 0.0) >= _POWER_THROTTLE_REPORT_FRACTION
+    )
+
+
+def _suggested_sclk_cap(per_gpu: dict[str, dict[str, Any]], throttled: list[int]) -> float | None:
+    """The lowest sustained sclk among the throttled cards, rounded down to a step; ``None`` with none throttled."""
+    sustained = [per_gpu[str(gpu)]["sclk_mean_mhz"] for gpu in throttled if per_gpu[str(gpu)]["sclk_mean_mhz"]]
+    if not sustained:
+        return None
+    return float(int(min(sustained) // _SCLK_SUGGESTION_STEP_MHZ) * _SCLK_SUGGESTION_STEP_MHZ)
 
 
 class GpuPowerRecorder:
@@ -115,12 +210,21 @@ class GpuPowerRecorder:
         gpus: set[int] | None = None,
         interval_sec: float = _DEFAULT_INTERVAL_SEC,
         query: Callable[[], Any] | None = None,
+        throttle_query: Callable[[], Any] | None = None,
     ) -> None:
         """Prepare a recorder without running anything."""
         self._output_path = output_path
         self._gpus = None if gpus is None else set(gpus)
         self._interval = max(_MIN_INTERVAL_SEC, float(interval_sec))
-        self._query = query or (lambda: _query_amd_smi(subprocess.run))
+        self._query = query or (lambda: _query_amd_smi(subprocess.run, "--power", "--mem-usage", "--clock"))
+        # A recorder handed its own sample source reads no throttle counters unless handed a source for those too.
+        default_throttle = (lambda: _query_amd_smi(subprocess.run, "--violation")) if query is None else dict
+        self._throttle_query = throttle_query or default_throttle
+        self._clocks: dict[int, list[float]] = {}
+        self._clock_limits: dict[int, set[float | None]] = {}
+        # Throttle counters at the open of the current measured window, and the deltas summed over closed windows.
+        self._window_open: dict[int, tuple[float, float]] | None = None
+        self._throttle_deltas: dict[int, list[float]] = {}
         self._phase = _BOOT
         self._samples: list[dict[int, tuple[float | None, float | None]]] = []
         self._errors = 0
@@ -151,12 +255,40 @@ class GpuPowerRecorder:
     def _loop(self) -> None:
         while not self._stop.is_set():
             if self._phase == "measured":
+                # Sampled first: the counter read takes about a second and must not delay the first power sample.
                 self._sample_once()
+                if self._window_open is None:
+                    self._window_open = self._read_throttle()
+            elif self._window_open is not None:
+                self._close_window()
             self._stop.wait(self._interval)
+
+    def _read_throttle(self) -> dict[int, tuple[float, float]]:
+        try:
+            counters = parse_throttle_sample(self._throttle_query())
+        except Exception as exc:  # noqa: BLE001 - telemetry must not fail the round
+            with self._lock:
+                self._errors += 1
+                self._last_error = str(exc)[:200]
+            return {}
+        return {gpu: row for gpu, row in counters.items() if self._gpus is None or gpu in self._gpus}
+
+    def _close_window(self) -> None:
+        """Add the throttle counters' movement over the measured window that just ended."""
+        opened, self._window_open = self._window_open or {}, None
+        closed = self._read_throttle()
+        with self._lock:
+            for gpu, (ticks, ppt) in closed.items():
+                if gpu in opened and ticks > opened[gpu][0]:
+                    total = self._throttle_deltas.setdefault(gpu, [0.0, 0.0])
+                    total[0] += ticks - opened[gpu][0]
+                    total[1] += max(0.0, ppt - opened[gpu][1])
 
     def _sample_once(self) -> None:
         try:
-            reading = parse_power_sample(self._query())
+            payload = self._query()
+            reading = parse_power_sample(payload)
+            clocks = parse_clock_sample(payload)
         except Exception as exc:  # noqa: BLE001 - telemetry must not fail the round
             with self._lock:
                 self._errors += 1
@@ -167,12 +299,21 @@ class GpuPowerRecorder:
         if reading and self._phase == "measured":
             with self._lock:
                 self._samples.append(reading)
+                for gpu, (current, limit) in clocks.items():
+                    if gpu not in reading:
+                        continue
+                    if current is not None:
+                        self._clocks.setdefault(gpu, []).append(current)
+                    self._clock_limits.setdefault(gpu, set()).add(limit)
 
     def summary(self, *, aborted: bool = False) -> dict[str, Any]:
         """The round's measured-phase power, averaged over the cards that served it."""
         with self._lock:
             samples = list(self._samples)
             errors, last_error = self._errors, self._last_error
+            clocks = {gpu: list(values) for gpu, values in self._clocks.items()}
+            limits = {gpu: set(values) for gpu, values in self._clock_limits.items()}
+            deltas = {gpu: tuple(values) for gpu, values in self._throttle_deltas.items()}
         peak_vram: dict[int, float] = {}
         watts: dict[int, list[float]] = {}
         for reading in samples:
@@ -197,13 +338,12 @@ class GpuPowerRecorder:
         )
         per_gpu = {
             str(gpu): {
-                "avg_power_w": round(sum(watts[gpu]) / len(watts[gpu]), 2),
-                "max_power_w": round(max(watts[gpu]), 2),
-                "samples": len(watts[gpu]),
-                "peak_vram_fraction": round(peak_vram.get(gpu, 0.0), 4),
+                **_power_fields(watts[gpu], peak_vram.get(gpu, 0.0)),
+                **_clock_fields(clocks.get(gpu), limits.get(gpu), deltas.get(gpu)),
             }
             for gpu in sorted(watts)
         }
+        throttled = _power_throttled(per_gpu, serving)
         avg = (
             round(sum(per_gpu[str(g)]["avg_power_w"] for g in serving) / len(serving), 2)
             if serving and not unread
@@ -222,6 +362,8 @@ class GpuPowerRecorder:
             "avg_power_w": avg,
             "max_power_w": peak,
             "per_gpu": per_gpu,
+            "power_throttled_gpus": throttled,
+            "suggested_sclk_max_mhz": _suggested_sclk_cap(per_gpu, throttled),
             "query_errors": errors,
             "last_error": last_error,
             "aborted": bool(aborted),
@@ -232,7 +374,21 @@ class GpuPowerRecorder:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=_QUERY_TIMEOUT_SEC + self._interval)
+        if self._window_open is not None and not self._closed:
+            self._close_window()
         payload = self.summary(aborted=aborted)
+        if payload["power_throttled_gpus"] and not self._closed:
+            log.warning(
+                "gpu_power: GPU(s) %s were power throttled for %s of the measured phase, their clock repeatedly "
+                "pulled down by the power cap; a fixed sclk cap near %s MHz (the sustained clock, amd-smi set "
+                "--clk-limit sclk max) would hold the clock steady instead",
+                ", ".join(map(str, payload["power_throttled_gpus"])),
+                ", ".join(
+                    f"{payload['per_gpu'][str(gpu)]['power_throttle_fraction']:.0%}"
+                    for gpu in payload["power_throttled_gpus"]
+                ),
+                payload["suggested_sclk_max_mhz"],
+            )
         if self._closed or not self._output_path:
             self._closed = True
             return payload

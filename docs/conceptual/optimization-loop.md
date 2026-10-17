@@ -252,7 +252,7 @@ unset.
 ### GPU power: measured and asserted
 
 Each round's GPU power is sampled by Hyperloom itself, with read-only
-`amd-smi metric --power --mem-usage` every 2 s, only while the round is in its
+`amd-smi metric --power --mem-usage --clock` every 2 s, only while the round is in its
 measured phase (from server ready, and from AIPerf's measured-phase line under
 AgentX, until the client exits or the eval starts). It is averaged over the
 serving cards: those in the visible-device mask that held at least 10% of VRAM
@@ -263,6 +263,20 @@ serving card or no power reading stays unmeasured. The benchmark report's
 `gpu_monitor` block (`gpu_metrics.json`) is only the fallback for rounds no
 sampler ran on: on one node it reads a single card over the whole process
 lifetime, boot and idle tail included.
+
+The sampler also reports how the cards ran under their power cap. Each card in
+`gpu_power.json` carries its mean graphics clock over the measured phase while
+busy (`sclk_mean_mhz`; an XCD in deep sleep, below its `min_clk`, is idle time
+and left out), its clock limit (`sclk_max_mhz`), and the share of the measured
+phase it spent held back by its power limit (`power_throttle_fraction`, from the
+`amd-smi metric --violation` accumulators read as each measured window opens
+and closes; idle stretches in the phase count toward that share's whole). A serving card power throttled for at least 10% of the
+phase is listed in `power_throttled_gpus`. Its clock was repeatedly pulled down
+by the cap and released, which makes rounds noisier. The round logs a warning
+with `suggested_sclk_max_mhz`, the lowest sustained clock among those cards
+rounded down to 50 MHz. Pinning the clock there (`amd-smi set --clk-limit sclk
+max N`) holds it steady instead. The suggestion is only reported; nothing changes
+the cards.
 
 The optimizer never changes power settings. The power cap and DPM performance
 level decide how much of the card's throughput is available at what power, so

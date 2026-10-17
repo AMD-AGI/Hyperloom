@@ -177,7 +177,7 @@ def test_native_power_uses_client_boundaries_and_waits_for_responses(tmp_path, m
     client.parent.mkdir(parents=True)
     query = _Replay(_tp4_on_eight(800.0))
     monkeypatch.setattr(_gpu_power, "gpu_power_sampling_unavailable", lambda: "")
-    monkeypatch.setattr(_gpu_power, "_query_amd_smi", lambda run: query())
+    monkeypatch.setattr(_gpu_power, "_query_amd_smi", lambda run, *metrics: {} if "--violation" in metrics else query())
     monkeypatch.setattr(_gpu_power, "_MIN_INTERVAL_SEC", 0.01)
     monkeypatch.setenv("HYPERLOOM_GPU_POWER_INTERVAL_S", "0.01")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_KV_METRICS", "0")
@@ -472,3 +472,123 @@ def test_the_replay_recorder_is_closed_even_when_the_driver_fails(tmp_path, monk
     with pytest.raises(KeyError):
         _geak_sweep._run_sampled(lambda: None, tmp_path, {})
     assert closed == [True]
+
+
+# --- clock and power-throttle share over the measured phase -----------------------------------------------------------
+
+
+def _clocked(gpu: int, watts: float, used_mb: float, sclk: list[float], limit: float = 2400.0) -> dict:
+    """A power/mem row with the ``metric --clock`` block MI355X reports: one ``gfx_<n>`` per XCD."""
+    row = _row(gpu, watts, used_mb)
+    row["clock"] = {
+        **{
+            f"gfx_{n}": {"clk": {"value": mhz}, "min_clk": {"value": 500}, "max_clk": {"value": limit}}
+            for n, mhz in enumerate(sclk)
+        },
+        "mem_0": {"clk": {"value": 2000}, "max_clk": {"value": 2000}},
+    }
+    return row
+
+
+def _throttle(ticks: float, ppt: float, gpus=(4, 5)) -> dict:
+    return {"gpu_data": [{"gpu": g, "throttle": {"accumulation_counter": ticks, "ppt_accumulated": ppt}} for g in gpus]}
+
+
+def test_parse_clock_sample_averages_the_xcds_and_reads_the_limit():
+    from hyperloom.orchestrator.actions.executors._gpu_power import parse_clock_sample
+
+    parsed = parse_clock_sample({"gpu_data": [_clocked(4, 700.0, 250_000, [1700, 1800], limit=2000)]})
+    assert parsed[4] == (1750.0, 2000.0)
+    split = _clocked(5, 700.0, 250_000, [1700, 1800])
+    split["clock"]["gfx_1"]["max_clk"]["value"] = 2100
+    assert parse_clock_sample({"gpu_data": [split]})[5] == (1750.0, None), "XCDs that disagree leave the limit unread"
+
+
+def test_parse_throttle_sample_needs_both_counters():
+    from hyperloom.orchestrator.actions.executors._gpu_power import parse_throttle_sample
+
+    assert parse_throttle_sample(_throttle(1000, 40, gpus=(4,))) == {4: (1000.0, 40.0)}
+    assert parse_throttle_sample({"gpu_data": [{"gpu": 4, "throttle": {"accumulation_counter": "N/A"}}]}) == {}
+
+
+def _throttled_round(tmp_path, *, end_ppt: float, caplog=None) -> dict:
+    rows = [_clocked(g, 700.0, 250_000, [1730.0] * 8) for g in (4, 5)] + [_clocked(6, 225.0, 284, [38.0] * 8)]
+    query = _Replay(rows)
+    counters = _Replay(_throttle(10_000, 1_000), _throttle(20_000, end_ppt))
+    recorder = GpuPowerRecorder(
+        output_path=str(tmp_path / GPU_POWER_ARTIFACT_NAME), query=query, throttle_query=counters, interval_sec=0.5
+    )
+    recorder._interval = 0.01
+    _run_measured(recorder, query, samples=3)
+    return recorder.close()
+
+
+def test_a_power_throttled_round_names_the_cards_and_suggests_a_sustained_clock(tmp_path, caplog):
+    """30% of the measured ticks power limited: the cap pulled the clock down, so suggest the clock it sustained."""
+    with caplog.at_level("WARNING", logger="hyperloom.orchestrator.actions.executors._gpu_power"):
+        out = _throttled_round(tmp_path, end_ppt=4_000)
+    assert out["per_gpu"]["4"]["power_throttle_fraction"] == pytest.approx(0.3)
+    assert out["per_gpu"]["4"]["sclk_mean_mhz"] == pytest.approx(1730.0)
+    assert out["per_gpu"]["4"]["sclk_max_mhz"] == 2400.0
+    assert out["power_throttled_gpus"] == [4, 5]
+    assert out["suggested_sclk_max_mhz"] == 1700.0, "rounded down to a 50 MHz step, at or below the sustained clock"
+    assert "a fixed sclk cap near 1700.0 MHz" in caplog.text
+    written = json.loads((tmp_path / GPU_POWER_ARTIFACT_NAME).read_text())
+    assert written["power_throttled_gpus"] == [4, 5]
+
+
+def test_an_unthrottled_round_reports_no_throttling(tmp_path, caplog):
+    with caplog.at_level("WARNING", logger="hyperloom.orchestrator.actions.executors._gpu_power"):
+        out = _throttled_round(tmp_path, end_ppt=1_100)
+    assert out["per_gpu"]["4"]["power_throttle_fraction"] == pytest.approx(0.01)
+    assert out["power_throttled_gpus"] == []
+    assert out["suggested_sclk_max_mhz"] is None
+    assert "power throttled" not in caplog.text
+
+
+def test_throttle_counters_sum_over_every_measured_window(tmp_path):
+    """A GEAK replay re-enters boot per replica; the windows between are not the measured load and must not count."""
+    reads = iter([_throttle(1_000, 0), _throttle(2_000, 500), _throttle(10_000, 500), _throttle(11_000, 1_000)])
+    recorder = GpuPowerRecorder(output_path=None, query=dict, throttle_query=lambda: next(reads))
+    for _ in range(2):
+        recorder._window_open = recorder._read_throttle()
+        recorder._close_window()
+    assert recorder._throttle_deltas[4] == [2_000.0, 1_000.0], "8,000 ticks of boot between the windows are excluded"
+
+
+def test_deep_sleep_clocks_do_not_pull_the_sustained_clock_down():
+    """Idle stretches inside the measured phase read ~38 MHz; averaging them in would suggest a cap far too low."""
+    from hyperloom.orchestrator.actions.executors._gpu_power import parse_clock_sample
+
+    asleep = parse_clock_sample({"gpu_data": [_clocked(4, 230.0, 250_000, [38.0] * 8)]})
+    assert asleep[4] == (None, 2400.0)
+    mixed = parse_clock_sample({"gpu_data": [_clocked(4, 900.0, 250_000, [1700.0] * 6 + [38.0] * 2)]})
+    assert mixed[4][0] == pytest.approx(1700.0)
+
+
+def test_a_round_with_idle_gaps_suggests_the_loaded_clock(tmp_path):
+    busy = [_clocked(g, 1390.0, 250_000, [1700.0] * 8) for g in (4, 5)]
+    idle = [_clocked(g, 230.0, 250_000, [38.0] * 8) for g in (4, 5)]
+    query = _Replay(busy, idle, busy, idle, busy)
+    counters = _Replay(_throttle(10_000, 1_000), _throttle(20_000, 4_000))
+    recorder = GpuPowerRecorder(output_path=None, query=query, throttle_query=counters, interval_sec=0.5)
+    recorder._interval = 0.01
+    _run_measured(recorder, query, samples=5)
+    out = recorder.close()
+    assert out["per_gpu"]["4"]["sclk_mean_mhz"] == pytest.approx(1700.0)
+    assert out["suggested_sclk_max_mhz"] == 1700.0
+
+
+def test_the_sampler_closes_a_window_when_the_round_leaves_the_measured_phase(tmp_path):
+    """The window is closed by the sampler thread at the phase change, not only by close()."""
+    query = _Replay([_clocked(g, 700.0, 250_000, [1730.0] * 8) for g in (4, 5)])
+    counters = _Replay(_throttle(10_000, 1_000), _throttle(20_000, 4_000))
+    recorder = GpuPowerRecorder(output_path=None, query=query, throttle_query=counters, interval_sec=0.5)
+    recorder._interval = 0.01
+    _run_measured(recorder, query, samples=2)
+    recorder.note_phase("eval", time.monotonic())
+    deadline = time.monotonic() + 5.0
+    while counters.calls < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert recorder._window_open is None and recorder._throttle_deltas[4] == [10_000.0, 3_000.0]
+    recorder.close()
