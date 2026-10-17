@@ -31,10 +31,6 @@ def _expanded(value: str) -> str:
 
 
 def _default_local_root(env: Mapping[str, str]) -> str:
-    compatibility_root = str(env.get("HYPERLOOM_LOCAL_KB_ROOT") or "").strip()
-    if compatibility_root:
-        return _expanded(compatibility_root)
-
     user_data_path = str(env.get("USER_DATA_PATH") or "")
     if user_data_path:
         return str(Path(user_data_path).expanduser() / "knowledge")

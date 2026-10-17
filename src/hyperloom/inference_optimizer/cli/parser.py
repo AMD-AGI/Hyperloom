@@ -804,23 +804,6 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument("--critic-prompt", type=str, default=None, help="Override Critic system prompt")
     _add_custom_specialist_args(opt)
     opt.add_argument(
-        "--local-kb-root",
-        dest="local_kb_root",
-        type=str,
-        default=None,
-        help="Filesystem root for the local recipe-snapshot KB store. "
-        "All writes (put_recipe / append_attempt / delete_recipe) go "
-        "here. Defaults to "
-        "$HYPERLOOM_LOCAL_KB_ROOT, then $USER_DATA_PATH/kb, "
-        "then /workspace/hyperloom/kb. Layout is a 5-level "
-        "directory tree keyed by canonical_id components "
-        "(model -> hardware -> framework -> framework_version -> "
-        "precision); each leaf holds recipe.json + history/ + "
-        "attempts.ndjson + .lock. See "
-        "src/hyperloom/orchestrator/knowledge/recipe_kb/local_store.py for the "
-        "on-disk contract.",
-    )
-    opt.add_argument(
         "--degraded-kb",
         dest="degraded_kb",
         action="store_true",

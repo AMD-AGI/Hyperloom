@@ -333,7 +333,7 @@ def recipe_kb_dir(session_dir: Path) -> Path:
     """Compute ``<sd>/runtime/recipe_kb/``, the Recipe KB per-session bookkeeping root.
 
     This directory holds only *derived* bookkeeping — the authoritative recipe
-    store is the local KB root (``$HYPERLOOM_LOCAL_KB_ROOT`` / ``workspace_root()/kb``,
+    store is the local KB root (``$KNOWLEDGE_LOCAL_ROOT``,
     mirrored to gbrain), which lives outside the session tree. The snapshots
     here (``.kb_pitfalls.json`` / ``.kb_lessons.json``) are rewritten by every
     T0 anchor, so a session that predates the ``runtime/cortex`` ->
