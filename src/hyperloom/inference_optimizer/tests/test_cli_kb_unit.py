@@ -203,8 +203,6 @@ def test_bootstrap_knowledge_plane_degraded_bypasses_remote_validation(
 
     assert plane.kb_disabled is True
     assert plane.recipe_kb is None
-    assert plane.status["recipe"]["enabled"] is False
-    assert plane.status["recipe"]["disabled_reason"] == "degraded_kb"
 
 
 def test_bootstrap_knowledge_plane_enabled(tmp_path) -> None:

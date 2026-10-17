@@ -83,24 +83,8 @@ history, or attempt data is created. A KB Store transport failure is logged and
 remains non-fatal; invalid or missing startup configuration fails before the
 optimization run starts.
 
-## KernelForge bridge
-
-Hyperloom's `KernelExperienceBridge` only:
-
-1. validates and forwards the shared mode/root;
-2. forwards validated KB Store credentials in Recipe remote mode and strips
-   the bearer token in local mode;
-3. forwards the KB Service URL for PR Monitor in either mode, using the global
-   default when local mode has no explicit URL and IR-3 can reach it;
-4. never forwards GBrain credentials to KernelForge children; and
-5. collects bounded capability/result provenance returned by KernelForge.
-
-KernelForge continues to own local knowledge. Hyperloom does not implement
-kernel-experience CRUD or ranking.
-
 ## Audit and secrets
 
 Recipe read/write audit events include `mode`, `backend`, resolution, compact
-result metadata, and failure class. Kernel experience passthrough records the
-same mode/backend fields and bounded provenance. Tokens, credentials, complete
-patches, and full KernelForge payloads are excluded.
+result metadata, and failure class. Tokens, credentials, and complete patches
+are excluded.
