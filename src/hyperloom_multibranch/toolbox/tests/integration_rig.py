@@ -57,6 +57,13 @@ class NoScheduler:
         raise AssertionError(f"unexpected repair request {request}")
 
 
+class AcceptingVerifier:
+    """The rule gate's verifier until the toolbox re-verifies results itself: every result passes."""
+
+    async def reverify(self, request_id: str) -> None:
+        return None
+
+
 @dataclass(frozen=True)
 class Variant:
     """What differs between the CPU and the GPU variant.
@@ -166,7 +173,7 @@ async def build_stack(root: Path, variant: Variant, baseline: Recipe, *, k: int 
         repo,
         server,
         McpSpecialistTokens(server),
-        RuleGate(gate_notebook, repo, NoScheduler()),
+        RuleGate(gate_notebook, repo, NoScheduler(), AcceptingVerifier()),
         gate_notebook,
         variant.spec.blobs,  # type: ignore[arg-type]
         await repo.head(INTEGRATION_BRANCH),

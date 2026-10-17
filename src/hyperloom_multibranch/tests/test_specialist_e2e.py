@@ -35,7 +35,7 @@ from hyperloom_multibranch.specialist.prompts import role_prompt
 from hyperloom_multibranch.specialist.runtime import RuntimePacing, SpecialistRuntime
 from hyperloom_multibranch.specialist.tools import register_worktree_tools
 from hyperloom_multibranch.specialist.worktree import SourceBase
-from hyperloom_multibranch.tests.fakes import RecordingScheduler
+from hyperloom_multibranch.tests.fakes import RecordingScheduler, RecordingVerifier
 from hyperloom_multibranch.toolbox.fake import FakeExecutor
 from hyperloom_multibranch.toolbox.fake_model import FakeToolboxConfig, NoiseModel
 from hyperloom_multibranch.toolbox.mcp_tools import McpSpecialistTokens, register_specialist_tools
@@ -205,7 +205,7 @@ async def test_a_model_backed_specialist_lands_a_source_change_through_the_sessi
     )
     register_specialist_tools(server, toolbox=toolbox, notebooks=notebook_for)
     register_worktree_tools(server, repo=repo, worktrees=sessions.worktrees, locator=lambda _layout: installed)
-    gate = RuleGate(gate_notebook, repo, RecordingScheduler(AdmissionStatus.ACCEPTED))
+    gate = RuleGate(gate_notebook, repo, RecordingScheduler(AdmissionStatus.ACCEPTED), RecordingVerifier())
     judging = Judging(gate, toolbox, InferenceXRule(reader, CONC))
     runtime = SpecialistRuntime(notebook_for, judging, sessions.factory, pacing=RuntimePacing(poll_seconds=0.05))
     workspace = tmp_path / "MB-branches" / BRANCH / SESSION_DIR

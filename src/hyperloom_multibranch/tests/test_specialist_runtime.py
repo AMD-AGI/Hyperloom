@@ -24,7 +24,7 @@ from hyperloom_multibranch.specialist.runtime import (
     SpecialistRuntime,
 )
 from hyperloom_multibranch.specialist.scripted import ScriptedSession, ScriptedSetup
-from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler
+from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler, RecordingVerifier
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
 from hyperloom_multibranch.toolbox.fake_model import FakeToolboxConfig
 
@@ -79,7 +79,10 @@ class _Session:
         self.repo = InMemoryRepo(RECIPE)
         self.reader = LocalNotebook(root, Writer(Role.OBSERVER, "observer"))
         self.gate = RuleGate(
-            LocalNotebook(root, Writer(Role.GATE, "gate")), self.repo, RecordingScheduler(AdmissionStatus.ACCEPTED)
+            LocalNotebook(root, Writer(Role.GATE, "gate")),
+            self.repo,
+            RecordingScheduler(AdmissionStatus.ACCEPTED),
+            RecordingVerifier(),
         )
 
     async def open(self) -> str:

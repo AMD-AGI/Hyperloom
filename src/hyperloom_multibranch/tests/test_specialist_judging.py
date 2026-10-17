@@ -22,7 +22,7 @@ from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.inferencex import GAIN_NOT_CONFIRMED
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
 from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, Judging
-from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler
+from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler, RecordingVerifier
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
 from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig, NoiseModel
 
@@ -73,7 +73,8 @@ class _Session:
         self.gate_notebook = LocalNotebook(root, Writer(Role.GATE, "gate"))
         self.runtime = LocalNotebook(root, Writer(Role.SPECIALIST_RUNTIME, BRANCH, BRANCH))
         self.repo = InMemoryRepo(RECIPE)
-        self.gate = RuleGate(self.gate_notebook, self.repo, RecordingScheduler(AdmissionStatus.ACCEPTED))
+        self.verifier = RecordingVerifier()
+        self.gate = RuleGate(self.gate_notebook, self.repo, RecordingScheduler(AdmissionStatus.ACCEPTED), self.verifier)
         self.judge = self.new_judge()
 
     def new_judge(self) -> BranchJudge:
