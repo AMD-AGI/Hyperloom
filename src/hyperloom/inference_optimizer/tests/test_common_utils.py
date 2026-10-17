@@ -1442,13 +1442,7 @@ def test_gpu_type_autodetect_rocm_and_torch_fallback(monkeypatch: pytest.MonkeyP
     assert gpu_types._autodetect_gpu_type() is None
 
 
-# Tests for breakdown.recorder.section_shape / breakdown.reporters
-
-
-def test_section_shape_unknown_is_none() -> None:
-    from hyperloom.inference_optimizer.breakdown.recorder import section_shape
-
-    assert section_shape("not_registered") is None
+# Tests for breakdown.reporters
 
 
 def test_roofline_and_workload_render_minimal_inputs() -> None:

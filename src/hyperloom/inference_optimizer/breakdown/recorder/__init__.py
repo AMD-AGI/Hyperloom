@@ -110,7 +110,6 @@ from .recorder import (
     SectionShape,
     get_recorder,
     recorder_for,
-    section_shape,
 )
 from .session_metadata import (
     record_metadata_identity,
@@ -184,7 +183,6 @@ __all__ = [
     "rows_for_event",
     "snapshot_metadata",
     "snapshot_state_sections",
-    "section_shape",
     "sort_rows",
     "trace_enabled",
     "wire_row",

@@ -127,11 +127,6 @@ SECTION_SHAPES: dict[str, SectionShape] = {
 }
 
 
-def section_shape(section: str) -> SectionShape | None:
-    """Return the declared shape for ``section``, or ``None`` if unregistered."""
-    return SECTION_SHAPES.get(section)
-
-
 log = logging.getLogger(__name__)
 
 _ENTITY_ID_FIELDS = (
@@ -529,5 +524,4 @@ __all__ = [
     "SectionShape",
     "get_recorder",
     "recorder_for",
-    "section_shape",
 ]
