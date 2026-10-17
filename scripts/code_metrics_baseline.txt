@@ -140,7 +140,7 @@ cognitive-complexity src/hyperloom/orchestrator/loop/sub_agent_runner.py::SubAge
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._drain_agent_keep_outbox 34
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._keep_patch_sources 42
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_baseline 97
-cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_explore 79
+cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_explore 76
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_integrate_patch 63
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._replay_keep_from_result 40
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._resume_recover_orphaned_keeps 36
@@ -1230,7 +1230,7 @@ function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter.ha
 function-lines src/hyperloom/orchestrator/loop/proposals.py::ProposalsCollaborator.materialize_approved_proposal 124
 function-lines src/hyperloom/orchestrator/loop/sub_agent_runner.py::SubAgentRunner.run_task 177
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_baseline 279
-function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_explore 177
+function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_explore 176
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_integrate_patch 152
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_profile 98
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_roofline 89
@@ -1495,7 +1495,7 @@ module-lines src/hyperloom/orchestrator/knowledge/remote_recipe/values.py 1284
 module-lines src/hyperloom/orchestrator/loop/coordinator.py 1429
 module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1503
 module-lines src/hyperloom/orchestrator/loop/intent_router.py 1548
-module-lines src/hyperloom/orchestrator/loop/writeback.py 4998
+module-lines src/hyperloom/orchestrator/loop/writeback.py 4963
 module-lines src/hyperloom/orchestrator/phases/framework.py 3139
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4227
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 2232
