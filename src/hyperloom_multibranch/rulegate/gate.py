@@ -41,7 +41,8 @@ def _require(judgement: Judgement, *actions: Action) -> None:
 
 
 class RuleGate:
-    """``settle`` lands a commit or a record; a retest, a diagnosis and a fork are its caller's next step.
+    """``settle`` lands a commit or a record, or holds a blocked gain as ``DIAGNOSIS_PENDING`` until its specialist
+    sends it for repair or declines it; a retest, a diagnosis and a fork are its caller's next step.
 
     A commit, a fork and a repair first re-verify every result behind the judgement with ``verifier``; one that does
     not re-verify is recorded ``UNVERIFIED`` and its :class:`ResultUnverified` raised, with nothing landed or asked.
@@ -69,6 +70,8 @@ class RuleGate:
                 return Action.RECORD_ONLY
         elif action is Action.RECORD_ONLY:
             await self._record(request, judgement)
+        elif action is Action.DIAGNOSE:
+            await self._notebook.write_judgement(request.request_id, judgement, Conclusion.DIAGNOSIS_PENDING)
         return action
 
     async def decline(self, request: TestRequest, judgement: Judgement) -> TestRecord:

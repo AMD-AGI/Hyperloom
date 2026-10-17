@@ -82,16 +82,25 @@ async def test_a_candidate_only_recorded_leaves_its_branch_alone(setup, judgemen
     assert verifier.asked == []
 
 
-@pytest.mark.parametrize(
-    ("verdict", "action"), [(Verdict.NEEDS_CONFIRM, Action.RETEST), (Verdict.BLOCKED, Action.DIAGNOSE)]
-)
-async def test_a_retest_or_a_diagnosis_is_the_callers_next_step(setup, verdict, action):
+async def test_a_retest_is_the_callers_next_step(setup):
     notebook, repo, measured = setup
     gate = RuleGate(notebook, repo, RecordingScheduler(AdmissionStatus.ACCEPTED), RecordingVerifier())
 
-    assert await gate.settle(measured, _judged(verdict, accuracy_ok=False)) is action
+    assert await gate.settle(measured, _judged(Verdict.NEEDS_CONFIRM, accuracy_ok=False)) is Action.RETEST
 
     assert (await notebook.record("r1")).judgement is None
+
+
+async def test_a_blocked_gain_is_held_for_its_specialist_s_diagnosis(setup):
+    notebook, repo, measured = setup
+    gate = RuleGate(notebook, repo, RecordingScheduler(AdmissionStatus.ACCEPTED), RecordingVerifier())
+    blocked = _judged(Verdict.BLOCKED, accuracy_ok=False)
+
+    assert await gate.settle(measured, blocked) is Action.DIAGNOSE
+
+    record = await notebook.record("r1")
+    assert (record.judgement, record.conclusion) == (blocked, Conclusion.DIAGNOSIS_PENDING)
+    assert await repo.head("s1") == "c0"
 
 
 @pytest.mark.parametrize(

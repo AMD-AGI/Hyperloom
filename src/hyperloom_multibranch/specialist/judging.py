@@ -105,6 +105,14 @@ class BranchJudge:
         await self._settle(first, judgement, logged)
 
     async def _settle(self, first: TestRecord, judgement: Judgement, logged: set[BranchLogEntry]) -> None:
+        if decide(judgement) is Action.DIAGNOSE:
+            # Before the gate holds the candidate: once held, it is never judged again, so a notice lost after that
+            # would never be written.
+            held_back_by = ", ".join(judgement.refused_by) or "the accuracy gate"
+            content = f"{first.request_id} cleared the bar twice and is held back by {held_back_by}"
+            await self._notice(
+                logged, f"{content}; diagnose it, then request_repair or decline_repair", *judgement.request_ids
+            )
         try:
             action = await self._gate.settle(first.request, judgement)
         except ResultUnverified as error:
@@ -117,10 +125,6 @@ class BranchJudge:
             await self._notice(logged, f"{landed}; your next candidates go on the new head", *judgement.request_ids)
         elif action is Action.RETEST:
             await self._toolbox.submit_test(retest_request(first, self._rule))
-        elif action is Action.DIAGNOSE:
-            held_back_by = ", ".join(judgement.refused_by) or "the accuracy gate"
-            content = f"{first.request_id} cleared the bar twice and is held back by {held_back_by}; diagnose it"
-            await self._notice(logged, content, *judgement.request_ids)
         elif action is Action.REQUEST_FORK:
             raise RuntimeError(f"{first.request_id} calls for a fork, which the runtime does not request yet")
         elif action is Action.RECORD_ONLY and decide(judgement) is Action.COMMIT:

@@ -176,15 +176,20 @@ async def test_a_gain_the_retest_does_not_repeat_is_recorded_only(tmp_path):
     assert record.conclusion is Conclusion.RECORDED_ONLY
 
 
-async def test_a_gain_the_accuracy_gate_holds_back_twice_goes_to_the_specialist_once(session):
+async def test_a_gain_the_accuracy_gate_holds_back_twice_is_held_for_the_specialist_once(session):
     first = await session.explore(WRONG)
     await session.step()
     await session.step()
-    await session.judge.reconcile()
+    await session.new_judge().reconcile()
 
-    assert (await session.runtime.record(first)).judgement is None
+    record = await session.runtime.record(first)
+    assert (record.judgement.verdict, record.conclusion) == (Verdict.BLOCKED, Conclusion.DIAGNOSIS_PENDING)
+    assert len(session.retests()) == 1
     (notice,) = await session.notices()
-    assert f"{first} cleared the bar twice and is held back by the accuracy gate" in notice
+    assert notice == (
+        f"{NOTICE} {first} cleared the bar twice and is held back by the accuracy gate; "
+        "diagnose it, then request_repair or decline_repair"
+    )
 
 
 async def test_a_failed_measurement_takes_no_judgement(session):
