@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 from ._file_lock import best_effort_file_lock
-from ._inferencex_bench_seed import BENCH_SEED_LEGACY, BENCH_SEED_SENTINEL
+from ._bench_seed_anchor import BENCH_SEED_LEGACY, BENCH_SEED_SENTINEL
 from ._magpie_patcher import atomic_write_text
 from ._patch_sentinel import file_contains_sentinel
 

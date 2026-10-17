@@ -20,21 +20,15 @@ import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
 
+from ._bench_seed_anchor import BENCH_SEED_ENV, BENCH_SEED_LEGACY, BENCH_SEED_PATCHED, BENCH_SEED_SENTINEL
+from ._inferencex_patcher import _apply_line_replacement_atomic, _ensure_patched, _resolve_benchmark_lib_paths
 from ._patch_sentinel import file_contains_sentinel
 
 log = logging.getLogger(__name__)
 
-BENCH_SEED_ENV = "INFERENCEX_BENCH_SEED"
 WARMUP_ROUND_SEED = 1
 WARMUP_SEED_UNPATCHED_WARNING = "run_grid_warmup_seed_unpatched"
 
-BENCH_SEED_LEGACY = '    if [[ -n "$endpoint" ]]; then'
-_BENCH_SEED_PATCHED = (
-    f'    if [[ -n "${{{BENCH_SEED_ENV}:-}}" ]]; then\n'
-    f'        benchmark_cmd+=(--seed "${BENCH_SEED_ENV}")\n'
-    "    fi\n\n" + BENCH_SEED_LEGACY
-)
-BENCH_SEED_SENTINEL = BENCH_SEED_ENV
 _LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_lib_seed_patcher.lock")
 
 
@@ -47,15 +41,13 @@ def ensure_benchmark_lib_seed_patched(
     inferencex_path: Path | str | None = None,
 ) -> bool:
     """Ensure ``run_benchmark_serving`` passes ``--seed "$INFERENCEX_BENCH_SEED"`` to the client when that env is set."""
-    from ._inferencex_patcher import _apply_line_replacement_atomic, _ensure_patched, _resolve_benchmark_lib_paths
-
     return _ensure_patched(
         _resolve_benchmark_lib_paths(inferencex_path),
         _is_bench_seed_patched,
         partial(
             _apply_line_replacement_atomic,
             legacy=BENCH_SEED_LEGACY,
-            patched_line=_BENCH_SEED_PATCHED,
+            patched_line=BENCH_SEED_PATCHED,
             missing_msg=(
                 "_inferencex_bench_seed: expected endpoint branch of run_benchmark_serving not "
                 "found in %s; upstream layout may have changed. A warmup round will replay "
