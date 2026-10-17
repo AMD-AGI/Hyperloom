@@ -900,59 +900,9 @@ class ExploreExecutor:
             grid_payload = []
         # Framework-rewrite levers first.
         lever_payload = framework_lever_grid(extra.get("shared_state") or extra.get("state"))
-        if lever_payload:
-            existing_names = {str(v.get("name") or "") for v in grid_payload if isinstance(v, dict)}
-            fresh = [v for v in lever_payload if str(v.get("name") or "") not in existing_names]
-            if fresh:
-                log.info(
-                    "explore: seeding %d framework-rewrite lever variant(s) for attribution",
-                    len(fresh),
-                )
-                grid_payload = fresh + list(grid_payload)
+        grid_payload = self._seed_lever_variants(grid_payload, lever_payload)
         if not grid_payload:
-            # No LLM variants: fall through to the framework's programmatic seed grid instead of failing the task.
-            seed_model_class = str(params.get("model_class") or "").strip() or os.environ.get("MODEL_CLASS", "").strip()
-            seed_conc = 0
-            try:
-                _conc_raw = params.get("conc") or _yaml_envs.get("CONC") or os.environ.get("CONC") or 0
-                seed_conc = int(_conc_raw)
-            except (TypeError, ValueError):
-                seed_conc = 0
-            seed_isl = 0
-            seed_osl = 0
-            try:
-                seed_isl = int(params.get("isl") or _yaml_envs.get("ISL") or os.environ.get("ISL") or 0)
-                seed_osl = int(params.get("osl") or _yaml_envs.get("OSL") or os.environ.get("OSL") or 0)
-            except (TypeError, ValueError):
-                # Non-integer seed hint; fall back to the default grid below.
-                pass
-            seed = _default_grid_for_framework(
-                framework,
-                model_class=seed_model_class,
-                conc=seed_conc,
-                isl=seed_isl,
-                osl=seed_osl,
-            )
-            if seed:
-                log.info(
-                    "explore: empty grid for framework=%s; falling through "
-                    "to %d default_grid seed variants "
-                    "(model_class=%r conc=%d)",
-                    framework or "?",
-                    len(seed),
-                    seed_model_class or "?",
-                    seed_conc,
-                )
-                grid_payload = [
-                    {
-                        "name": v.name,
-                        "extra_server_args": v.extra_server_args,
-                        "extra_envs": dict(v.extra_envs or {}),
-                        "note": v.note or "default_grid",
-                        "provenance": getattr(v, "provenance", "default_grid"),
-                    }
-                    for v in seed
-                ]
+            grid_payload = self._seed_grid_payload(params, framework=framework, yaml_envs=_yaml_envs)
         if not isinstance(grid_payload, list) or not grid_payload:
             return {
                 "status": "failed",
@@ -1754,108 +1704,9 @@ class ExploreExecutor:
                 continue
             rejected_dedup[fp] = entry
 
-        # Flat per-variant outcomes for the Coordinator's per-variant fact-write hook.
-        reasons_by_fp: dict[str, str] = {
-            str(r.get("fingerprint") or ""): str(r.get("reason") or "") for r in rejected_update
-        }
-        per_variant_outcomes: list[dict[str, Any]] = []
-        for fp_key, te in tested_update.items():
-            outcome = str(te.get("outcome") or "")
-            if outcome not in (
-                "KEEP",
-                "REVERT",
-                TS_FAILED,
-                TS_KILLED_OVERTIME,
-            ):
-                continue
-            metrics: dict[str, Any] = {}
-            if te.get("tput") is not None:
-                metrics["tput"] = te.get("tput")
-            if te.get("gain_pct") is not None:
-                metrics["gain_pct"] = te.get("gain_pct")
-            # The anchor this variant's gain was measured against. Carried
-            # verbatim rather than left to be back-solved from the gain: each
-            # KEEP advances ``running_base_tput``, so a consumer dividing the
-            # gain out of the final throughput reconstructs whichever anchor
-            # happens to be current, not the one this variant was judged on --
-            # and for a FAILED or killed variant there is no gain to divide.
-            if te.get("base_tput") is not None:
-                metrics["base_tput"] = te.get("base_tput")
-            # Rough decode tput salvaged from a killed-overtime variant's
-            # partial server.log. Informational only (no ``tput``/gain).
-            if te.get("estimated_output_throughput") is not None:
-                metrics["estimated_output_throughput"] = te.get(
-                    "estimated_output_throughput",
-                )
-            # Surface wall-clock + kill ratio so the LLM/KB sees "ran too slow → early kill" instead of an opaque
-            # FAILED row.
-            if te.get("runtime_sec") is not None:
-                metrics["runtime_sec"] = te.get("runtime_sec")
-            if te.get("wall_clock_ratio_vs_baseline") is not None:
-                metrics["wall_clock_ratio_vs_baseline"] = te.get(
-                    "wall_clock_ratio_vs_baseline",
-                )
-            failure_attribution = ""
-            if outcome in UNMEASURED_OUTCOMES:
-                failure_attribution = classify_failure_attribution(
-                    error_class=te.get("error_class"),
-                    error_excerpt=te.get("error_excerpt"),
-                    reason=reasons_by_fp.get(fp_key, ""),
-                    explicit=te.get("failure_attribution"),
-                )
-            per_variant_outcomes.append(
-                {
-                    "variant_name": str(te.get("name") or ""),
-                    "outcome": outcome,
-                    "fingerprint": fp_key,
-                    "failure_id": make_failure_id(
-                        task_id=str(ctx.task.task_id),
-                        fingerprint=fp_key,
-                        variant_name=str(te.get("name") or ""),
-                    ),
-                    "stage": str(te.get("stage") or FAILURE_STAGE_DECISION),
-                    "error_excerpt": te.get("error_excerpt"),
-                    "provenance": str(te.get("provenance") or ""),
-                    "scope": str(te.get("scope") or ""),
-                    "metrics": metrics,
-                    "reason": reasons_by_fp.get(fp_key, ""),
-                    "error_class": str(te.get("error_class") or ""),
-                    "failure_attribution": failure_attribution,
-                    "server_log_path": te.get("server_log_path"),
-                    "workspace": te.get("workspace"),
-                    "raw_result_path": te.get("raw_result_path"),
-                    # Carry the variant knobs so the journal's ``classify_change_kind`` can classify the change kind.
-                    "variant": {
-                        "name": str(te.get("name") or ""),
-                        "extra_server_args": str(te.get("extra_server_args") or ""),
-                        "extra_envs": dict(te.get("extra_envs") or {}),
-                        "remove_args": list(te.get("remove_args") or []),
-                        "unset_envs": list(te.get("unset_envs") or []),
-                        "args_mode": str(te.get("args_mode") or "append"),
-                        "note": str(te.get("note") or ""),
-                        "reasoning_origin": str(te.get("reasoning_origin") or ""),
-                        "experience_citations": list(te.get("experience_citations") or []),
-                    },
-                    # The verdicts and the stack behind them, as the round
-                    # ruled. Absent keys mean the variant never got that far:
-                    # no gate ruled on a warmup failure, and nothing validated
-                    # one that was killed before it was graded.
-                    "measured_against": te.get("measured_against") or {},
-                    "gates": [gate for gate in (te.get("gates") or []) if isinstance(gate, dict)],
-                    "validation_basis": str(te.get("validation_basis") or ""),
-                }
-            )
-        for sd in skipped_dup:
-            per_variant_outcomes.append(
-                {
-                    "variant_name": str(sd.get("name") or ""),
-                    "outcome": TS_SKIPPED_DEDUP,
-                    "fingerprint": str(sd.get("fingerprint") or ""),
-                    "provenance": "",
-                    "metrics": {},
-                    "reason": str(sd.get("reason") or ""),
-                }
-            )
+        per_variant_outcomes = self._per_variant_outcomes(
+            tested_update, rejected_update, skipped_dup, task_id=str(ctx.task.task_id)
+        )
 
         lever_attributions = _framework_lever_attributions(
             per_variant_outcomes,
@@ -1945,6 +1796,214 @@ class ExploreExecutor:
             # gain_pct for the audit trail (best gain of the batch).
             "gain_pct": best_gain_pct,
             "explore_grid_exhausted": not runnable,
+        }
+
+    @staticmethod
+    def _seed_lever_variants(grid_payload: Any, lever_payload: Any) -> Any:
+        """Put this round's framework-rewrite lever variants in front of the grid.
+
+        A lever already named by the grid is not seeded twice; the fresh ones go
+        first so a round that runs out of budget still measures what the rewrite
+        was for.
+        """
+        if not lever_payload:
+            return grid_payload
+        existing_names = {str(v.get("name") or "") for v in grid_payload if isinstance(v, dict)}
+        fresh = [v for v in lever_payload if str(v.get("name") or "") not in existing_names]
+        if fresh:
+            log.info(
+                "explore: seeding %d framework-rewrite lever variant(s) for attribution",
+                len(fresh),
+            )
+            return fresh + list(grid_payload)
+        return grid_payload
+
+    @staticmethod
+    def _seed_grid_payload(
+        params: Mapping[str, Any],
+        *,
+        framework: str,
+        yaml_envs: Mapping[str, str],
+    ) -> list[dict[str, Any]]:
+        """Build the framework's programmatic seed grid for a round the LLM left empty.
+
+        A round with no variants of its own falls through to this rather than
+        failing the task; the concurrency and model class come from the params,
+        the launch yaml and the environment, in that order.
+        """
+        # No LLM variants: fall through to the framework's programmatic seed grid instead of failing the task.
+        seed_model_class = str(params.get("model_class") or "").strip() or os.environ.get("MODEL_CLASS", "").strip()
+        seed_conc = 0
+        try:
+            _conc_raw = params.get("conc") or yaml_envs.get("CONC") or os.environ.get("CONC") or 0
+            seed_conc = int(_conc_raw)
+        except (TypeError, ValueError):
+            seed_conc = 0
+        seed_isl = 0
+        seed_osl = 0
+        try:
+            seed_isl = int(params.get("isl") or yaml_envs.get("ISL") or os.environ.get("ISL") or 0)
+            seed_osl = int(params.get("osl") or yaml_envs.get("OSL") or os.environ.get("OSL") or 0)
+        except (TypeError, ValueError):
+            # Non-integer seed hint; fall back to the default grid below.
+            pass
+        seed = _default_grid_for_framework(
+            framework,
+            model_class=seed_model_class,
+            conc=seed_conc,
+            isl=seed_isl,
+            osl=seed_osl,
+        )
+        if seed:
+            log.info(
+                "explore: empty grid for framework=%s; falling through "
+                "to %d default_grid seed variants "
+                "(model_class=%r conc=%d)",
+                framework or "?",
+                len(seed),
+                seed_model_class or "?",
+                seed_conc,
+            )
+            return [
+                {
+                    "name": v.name,
+                    "extra_server_args": v.extra_server_args,
+                    "extra_envs": dict(v.extra_envs or {}),
+                    "note": v.note or "default_grid",
+                    "provenance": getattr(v, "provenance", "default_grid"),
+                }
+                for v in seed
+            ]
+        return []
+
+    def _per_variant_outcomes(
+        self,
+        tested_update: Mapping[str, Any],
+        rejected_update: Any,
+        skipped_dup: Any,
+        *,
+        task_id: str,
+    ) -> list[dict[str, Any]]:
+        """Describe what each variant of this round did, flat, for the fact-write hook.
+
+        One row per variant whatever became of it: measured and ruled on, rejected
+        before it ran, or skipped as a duplicate of one already tested. The
+        rejection ledger is deduplicated by fingerprint first, so a variant that
+        was refused more than once is still one row.
+        """
+        reasons_by_fp: dict[str, str] = {
+            str(r.get("fingerprint") or ""): str(r.get("reason") or "") for r in rejected_update
+        }
+        per_variant_outcomes: list[dict[str, Any]] = []
+        for fp_key, te in tested_update.items():
+            outcome = str(te.get("outcome") or "")
+            if outcome not in (
+                "KEEP",
+                "REVERT",
+                TS_FAILED,
+                TS_KILLED_OVERTIME,
+            ):
+                continue
+            per_variant_outcomes.append(
+                self._tested_variant_row(fp_key, te, outcome=outcome, task_id=task_id, reasons_by_fp=reasons_by_fp)
+            )
+        for sd in skipped_dup:
+            per_variant_outcomes.append(
+                {
+                    "variant_name": str(sd.get("name") or ""),
+                    "outcome": TS_SKIPPED_DEDUP,
+                    "fingerprint": str(sd.get("fingerprint") or ""),
+                    "provenance": "",
+                    "metrics": {},
+                    "reason": str(sd.get("reason") or ""),
+                }
+            )
+        return per_variant_outcomes
+
+    def _tested_variant_row(
+        self,
+        fp_key: str,
+        te: Mapping[str, Any],
+        *,
+        outcome: str,
+        task_id: str,
+        reasons_by_fp: Mapping[str, str],
+    ) -> dict[str, Any]:
+        """Describe one variant this round actually measured."""
+        metrics: dict[str, Any] = {}
+        if te.get("tput") is not None:
+            metrics["tput"] = te.get("tput")
+        if te.get("gain_pct") is not None:
+            metrics["gain_pct"] = te.get("gain_pct")
+        # The anchor this variant's gain was measured against. Carried
+        # verbatim rather than left to be back-solved from the gain: each
+        # KEEP advances ``running_base_tput``, so a consumer dividing the
+        # gain out of the final throughput reconstructs whichever anchor
+        # happens to be current, not the one this variant was judged on --
+        # and for a FAILED or killed variant there is no gain to divide.
+        if te.get("base_tput") is not None:
+            metrics["base_tput"] = te.get("base_tput")
+        # Rough decode tput salvaged from a killed-overtime variant's
+        # partial server.log. Informational only (no ``tput``/gain).
+        if te.get("estimated_output_throughput") is not None:
+            metrics["estimated_output_throughput"] = te.get(
+                "estimated_output_throughput",
+            )
+        # Surface wall-clock + kill ratio so the LLM/KB sees "ran too slow → early kill" instead of an opaque
+        # FAILED row.
+        if te.get("runtime_sec") is not None:
+            metrics["runtime_sec"] = te.get("runtime_sec")
+        if te.get("wall_clock_ratio_vs_baseline") is not None:
+            metrics["wall_clock_ratio_vs_baseline"] = te.get(
+                "wall_clock_ratio_vs_baseline",
+            )
+        failure_attribution = ""
+        if outcome in UNMEASURED_OUTCOMES:
+            failure_attribution = classify_failure_attribution(
+                error_class=te.get("error_class"),
+                error_excerpt=te.get("error_excerpt"),
+                reason=reasons_by_fp.get(fp_key, ""),
+                explicit=te.get("failure_attribution"),
+            )
+        return {
+            "variant_name": str(te.get("name") or ""),
+            "outcome": outcome,
+            "fingerprint": fp_key,
+            "failure_id": make_failure_id(
+                task_id=task_id,
+                fingerprint=fp_key,
+                variant_name=str(te.get("name") or ""),
+            ),
+            "stage": str(te.get("stage") or FAILURE_STAGE_DECISION),
+            "error_excerpt": te.get("error_excerpt"),
+            "provenance": str(te.get("provenance") or ""),
+            "scope": str(te.get("scope") or ""),
+            "metrics": metrics,
+            "reason": reasons_by_fp.get(fp_key, ""),
+            "error_class": str(te.get("error_class") or ""),
+            "failure_attribution": failure_attribution,
+            "server_log_path": te.get("server_log_path"),
+            "workspace": te.get("workspace"),
+            "raw_result_path": te.get("raw_result_path"),
+            # Carry the variant knobs so the journal's ``classify_change_kind`` can classify the change kind.
+            "variant": {
+                "name": str(te.get("name") or ""),
+                "extra_server_args": str(te.get("extra_server_args") or ""),
+                "extra_envs": dict(te.get("extra_envs") or {}),
+                "remove_args": list(te.get("remove_args") or []),
+                "unset_envs": list(te.get("unset_envs") or []),
+                "args_mode": str(te.get("args_mode") or "append"),
+                "note": str(te.get("note") or ""),
+                "reasoning_origin": str(te.get("reasoning_origin") or ""),
+                "experience_citations": list(te.get("experience_citations") or []),
+            },
+            # The verdicts and the stack behind them, as the round
+            # ruled. Absent keys mean the variant never got that far:
+            # no gate ruled on a warmup failure, and nothing validated
+            # one that was killed before it was graded.
+            "measured_against": te.get("measured_against") or {},
+            "gates": [gate for gate in (te.get("gates") or []) if isinstance(gate, dict)],
+            "validation_basis": str(te.get("validation_basis") or ""),
         }
 
 
