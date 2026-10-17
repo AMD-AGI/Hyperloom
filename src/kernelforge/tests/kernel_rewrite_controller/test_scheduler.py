@@ -103,8 +103,8 @@ def test_tasks_run_sequentially_by_priority_and_continue_after_failure(
     assert [name for name, _ in calls] == ["first", "second", "third"]
     assert all(deadline == 10_000 + 90 * 60 for _, deadline in calls)
     assert result.task_count == 3
-    assert result.succeeded_count == 2
-    assert result.failed_count == 1
+    assert [r.status for r in result.results].count("succeeded") == 2
+    assert [r.status for r in result.results].count("failed") == 1
     assert result.stopped_for_budget is False
 
 
@@ -166,7 +166,7 @@ def test_a_failing_progress_report_does_not_end_the_campaign(
         on_progress=_explode,
     )
 
-    assert result.succeeded_count == 2
+    assert [r.status for r in result.results].count("succeeded") == 2
     assert result.task_count == 2
 
 
@@ -312,7 +312,7 @@ def test_tasks_from_separate_repositories_each_get_their_own_base(
     )
 
     assert calls == ["moe_stage1", "rmsnorm"]
-    assert result.succeeded_count == 2
+    assert [r.status for r in result.results].count("succeeded") == 2
     assert result.skipped_count == 0
     assert result.repository_pins == {str(aiter): "a" * 40, str(sglang): "c" * 40}
 
@@ -349,6 +349,6 @@ def test_a_different_shared_base_is_skipped_without_blocking_siblings(
     )
 
     assert calls == ["first"]
-    assert result.succeeded_count == 1
+    assert [r.status for r in result.results].count("succeeded") == 1
     assert result.skipped_count == 1
     assert TaskStateStore(mismatched).load().status == "skipped"  # type: ignore[union-attr]
