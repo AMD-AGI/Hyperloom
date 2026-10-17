@@ -6,11 +6,10 @@
 from __future__ import annotations
 
 import logging as _logging
-import os
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Collection, Mapping
 
-from hyperloom.common.coerce import optional_positive_int, to_float, to_int
+from hyperloom.common.coerce import to_float, to_int
 from hyperloom.common.io import append_jsonl
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
@@ -25,6 +24,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
     summarize_change,
 )
 from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
+from hyperloom.orchestrator.knowledge.workload_tags import workload_shape_tags
 from hyperloom.orchestrator.lever import lever_kind_for_task
 
 from ..collaborator import CoordinatorCollaborator
@@ -848,41 +848,27 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             text = str(getattr(ss, attr, "") or "").strip()
             if text:
                 out[attr] = text
-        for src_attr, dst_key in (
-            ("precision", "precision"),
-            ("tp", "tp"),
-            ("ep", "ep"),
-            ("conc", "conc"),
-            ("isl", "isl"),
-            ("osl", "osl"),
-            ("max_model_len", "max_model_len"),
-        ):
-            v = getattr(ss, src_attr, None)
-            if v not in (None, "", 0):
-                out[dst_key] = v
-        # The env answers for parallelism SharedState does not carry: ``ep`` on legacy SDK callers, ``pp`` always
-        # (it has no CLI surface and so no field).
-        for env_key, dst_key in (("EP", "ep"), ("PP", "pp")):
-            parallelism = optional_positive_int(os.environ.get(env_key))
-            if parallelism:
-                out.setdefault(dst_key, parallelism)
+        precision = getattr(ss, "precision", None)
+        if precision not in (None, "", 0):
+            out["precision"] = precision
+        out.update(workload_shape_tags(ss))
         # runtime version tags from stack_fingerprint_meta (cli writes at boot, resume reads verbatim).
         fp_meta = ss.stack_fingerprint_meta or {}
         if isinstance(fp_meta, dict):
             # framework_version is whichever of sglang/vllm is active.
             fw_lc = out.get("framework", "").lower()
             if fw_lc in ("sglang", "vllm"):
-                v = str(fp_meta.get(fw_lc) or "").strip()
-                if v and v != "unknown":
-                    out["framework_version"] = v
+                version = str(fp_meta.get(fw_lc) or "").strip()
+                if version and version != "unknown":
+                    out["framework_version"] = version
             for src_key, dst_key in (
                 ("rocm", "rocm_version"),
                 ("aiter", "aiter_version"),
                 ("image_digest", "image_digest"),
             ):
-                v = str(fp_meta.get(src_key) or "").strip()
-                if v and v != "unknown":
-                    out[dst_key] = v
+                version = str(fp_meta.get(src_key) or "").strip()
+                if version and version != "unknown":
+                    out[dst_key] = version
         # per-baseline workload extras from materialized YAML; keep bool False (don't drop an "explicitly disabled" signal).
         wl_extra = ss.baseline_workload_extra or {}
         if isinstance(wl_extra, dict):

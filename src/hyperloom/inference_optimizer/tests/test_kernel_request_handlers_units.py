@@ -4620,6 +4620,26 @@ class TestBuildTraceAnalyzeCmd:
         ]
         assert steady == ""
 
+    def test_splitter_forwards_zero_workload_hints(self, monkeypatch, tmp_path):
+        """A zero conc/osl/ratio is a real workload value, not an unset one."""
+        state, session_dir = self._common(monkeypatch, tmp_path)
+        cmd, _steady = ta._build_trace_analyze_cmd(
+            {"trace_input": "/t/trace"},
+            session_dir=session_dir,
+            state=state,
+            workspace_path="/ws",
+            trace_input="/t/trace",
+            tracelens_root=Path("/tl"),
+            is_bypass=False,
+            scriptable=False,
+            workload={"conc": 0, "osl": 0, "random_range_ratio": 0.0},
+            model_name="",
+            framework="",
+            target_platform="",
+            analysis_mode="",
+        )
+        assert cmd[cmd.index("--split-conc") :] == ["--split-conc", "0", "--split-osl", "0", "--split-r", "0.0"]
+
     def test_sglang_cmd_forwards_model_context(self, monkeypatch, tmp_path):
         """Non-scriptable analysis receives model config and precision context."""
         state, session_dir = self._common(monkeypatch, tmp_path)

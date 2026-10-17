@@ -25,9 +25,11 @@ from hyperloom.orchestrator.actions.executors import trace_analyze as ta
 from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
     BenchmarkRunExecutor,
-    _default_baseline_config,
 )
-from hyperloom.orchestrator.actions.executors._workload_envs import materialize_benchmark_config
+from hyperloom.orchestrator.actions.executors._workload_envs import (
+    default_baseline_config,
+    materialize_benchmark_config,
+)
 from hyperloom.orchestrator.actions.executors.profile import (
     ProfileExecutor,
     _preferred_main_trace_path,
@@ -1749,7 +1751,7 @@ def test_materialize_config_atom_profile_skips_tracelens_flags(
 
     monkeypatch.setenv("FRAMEWORK", "atom")
     monkeypatch.setenv("PROFILE", "1")
-    src = _default_baseline_config()  # baseline_atom.yaml
+    src = default_baseline_config()  # baseline_atom.yaml
     out = materialize_benchmark_config(src, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     envs = rendered["benchmark"]["envs"]
