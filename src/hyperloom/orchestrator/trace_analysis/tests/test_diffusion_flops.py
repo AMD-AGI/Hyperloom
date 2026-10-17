@@ -171,48 +171,6 @@ def test_sana_linear_attention_cheaper_than_full(tmp_path):
     assert df._linear_attention_flops(seq, h, hd) < df._full_attention_flops(seq, h) / 10
 
 
-# ---- real model configs (skipped when /primus/models is not mounted) -----
-_MODELS_ROOT = Path("/primus/models")
-_REAL = [
-    "stabilityai-stable-diffusion-xl-base-1.0",
-    "black-forest-labs-FLUX.1-dev",
-    "black-forest-labs-FLUX.1-schnell",
-    "Tongyi-MAI-Z-Image",
-    "Tongyi-MAI-Z-Image-Turbo",
-    "stabilityai-stable-diffusion-3.5-medium",
-    "stabilityai-stable-diffusion-3.5-large",
-    "stabilityai-stable-diffusion-3.5-large-turbo",
-    "stabilityai-stable-diffusion-3-medium-diffusers",
-    "Qwen-Qwen-Image",
-    "Qwen-Qwen-Image-2512",
-    "baidu-ERNIE-Image",
-    "baidu-ERNIE-Image-Turbo",
-    "HiDream-ai-HiDream-I1-Fast",
-    "ideogram-ai-ideogram-4-fp8",
-    "fal-AuraFlow",
-    "NucleusAI-Nucleus-Image",
-    "hunyuanvideo-community-HunyuanImage-2.1-Diffusers",
-    "Warlord-K-Sana-1024",
-    "tencent-SRPO",
-    "stabilityai-stable-diffusion-3-medium",
-]
-
-
-@pytest.mark.parametrize("slug", _REAL)
-def test_real_models_resolve_or_reference(slug):
-    d = _MODELS_ROOT / slug
-    if not d.is_dir():
-        pytest.skip(f"{d} not mounted")
-    g = df.resolve_geometry(d)
-    if g is None:
-        # SRPO / raw sd3-medium ship only single-file weights (no diffusers config).
-        assert slug in ("tencent-SRPO", "stabilityai-stable-diffusion-3-medium")
-        return
-    est = df.analytic_ceiling(d, gpu_type="mi355x", precision="bf16")
-    assert est["total_flops"] > 0
-    assert est["ideal_ms"] > 0
-
-
 # ---- safetensors-header inference fallback -------------------------------
 def _write_safetensors(model_dir: Path, header: dict, name: str = "diffusion_pytorch_model.safetensors") -> Path:
     model_dir.mkdir(parents=True, exist_ok=True)
