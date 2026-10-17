@@ -105,12 +105,21 @@ class MergeOutcome(str, Enum):
 
 
 class InboxKind(str, Enum):
-    """What an inbox item points at."""
+    """What an inbox item points at; a ``brief`` item points at the branch's head and asks for its brief again."""
 
     RESULT = "result"
     JUDGEMENT = "judgement"
     TOOL_RESULT = "tool_result"
     LINEAGE = "lineage"
+    BRIEF = "brief"
+
+
+class UsageSource(str, Enum):
+    """Whose LLM spent the money: a branch's specialist, or the scheduler's judge or resolver."""
+
+    SPECIALIST = "specialist"
+    JUDGE = "judge"
+    RESOLVER = "resolver"
 
 
 class QuarantineAction(str, Enum):
@@ -162,4 +171,5 @@ __all__ = [
     "MergeOutcome",
     "QuarantineAction",
     "Role",
+    "UsageSource",
 ]

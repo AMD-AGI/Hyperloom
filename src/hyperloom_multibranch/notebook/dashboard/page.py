@@ -60,7 +60,7 @@ def _branches(rows: Sequence[Mapping[str, Any]]) -> str:
 
     return _table(
         "Branches",
-        (_BRANCH, "state", "start", "head", "tests", "commits", "GPU hours", "gain", "expected gain"),
+        (_BRANCH, "state", "start", "head", "tests", "commits", "GPU hours", "LLM $", "gain", "expected gain"),
         [
             (
                 row["branch"],
@@ -70,6 +70,7 @@ def _branches(rows: Sequence[Mapping[str, Any]]) -> str:
                 row["tests"],
                 row["commits"],
                 row["gpu_hours"],
+                row["llm_usd"],
                 _pct(row["gain_pct"]),
                 frontier(row),
             )
@@ -159,10 +160,12 @@ def render_html(dashboard: Mapping[str, Any]) -> str:
         for key in ("model", "hardware", "framework", "tp", "conc", "isl", "osl")
         if session.get(key)
     )
+    spend = dashboard["spend"]
+    spent = f"spent {_text(spend['gpu_hours'])} GPU hours and ${_text(spend['llm_usd'])} of LLM calls"
     body = "".join(
         (
             f"<h1>{escape(title)}</h1>",
-            f'<p class="meta">{escape(task)}; generated {escape(str(dashboard["generated_at_utc"]))}</p>',
+            f'<p class="meta">{escape(task)}; {spent}; generated {escape(str(dashboard["generated_at_utc"]))}</p>',
             _branches(dashboard["branches"]),
             _in_flight(dashboard["in_flight"]),
             _lineage(dashboard),

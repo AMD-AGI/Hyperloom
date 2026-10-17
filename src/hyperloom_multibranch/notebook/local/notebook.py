@@ -44,6 +44,7 @@ from hyperloom_multibranch.contracts.notebook.interfaces import (
     SnapshotQuery,
     StartupBriefProvider,
     TestRecordSink,
+    UsageSink,
     WriterNotAllowed,
 )
 from hyperloom_multibranch.contracts.notebook.peers import (
@@ -68,6 +69,8 @@ from hyperloom_multibranch.contracts.notebook.records import (
     LearningRecord,
     LineageEvent,
     LineageView,
+    LlmUsage,
+    LlmUsageRecord,
     ManifestFingerprint,
     MergeAttempt,
     NotebookSnapshot,
@@ -94,9 +97,11 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
     DedupStatus,
     LineageKind,
     Role,
+    UsageSource,
 )
 from hyperloom_multibranch.notebook import codec
 from hyperloom_multibranch.notebook.local import feeds, views
+from hyperloom_multibranch.notebook.local.feeds import BriefTriggers
 from hyperloom_multibranch.notebook.local.claims import LeaseStore, LeaseTaken, effective, is_live
 from hyperloom_multibranch.notebook.local.segments import (
     Entry,
@@ -225,6 +230,7 @@ class LocalNotebook(
     ClaimService,
     BranchLogStore,
     LearningStore,
+    UsageSink,
     Inbox,
     ProgressQuery,
     CommitQuery,
@@ -236,9 +242,18 @@ class LocalNotebook(
     """A handle on the notebook in ``root``, writing as ``writer``; ``clock`` gives Unix seconds.
 
     It is a :class:`~hyperloom_multibranch.contracts.notebook.interfaces.Notebook`: it implements each interface it lists.
+    With ``briefs``, the inbox it polls also holds ``brief`` items (:class:`~feeds.BriefTriggers`); the handles the
+    specialists poll through want them, the others need nothing.
     """
 
-    def __init__(self, root: Path, writer: Writer, *, clock: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self,
+        root: Path,
+        writer: Writer,
+        *,
+        clock: Callable[[], float] = time.time,
+        briefs: BriefTriggers | None = None,
+    ) -> None:
         require_token(writer.name, "writer name")
         if writer.branch:
             require_token(writer.branch, "branch")
@@ -247,6 +262,7 @@ class LocalNotebook(
         self.root = Path(root)
         self.writer = writer
         self._clock = clock
+        self._briefs = briefs
         self._segment = SegmentWriter(self.root / SEGMENTS_DIR, make_writer_id(writer.role, writer.name))
         self._reader = SegmentReader(self.root / SEGMENTS_DIR)
         self._leases = LeaseStore(self.root / CLAIMS_DIR)
@@ -620,7 +636,25 @@ class LocalNotebook(
         return tuple(record for record in self._state().learnings if not branch or record.learning.branch == branch)
 
     async def poll(self, branch: str, cursor: str = "") -> InboxPage:
-        return feeds.poll(self._state(), branch, cursor)
+        if self._briefs is None:
+            return feeds.poll(self._state(), branch, cursor)
+        now = self._clock()
+        held = [claim for claim in self._leases.all_current() if claim.holder == branch and is_live(claim, now)]
+        return feeds.poll(self._state(), branch, cursor, self._briefs, held)
+
+    async def record_llm_usage(self, usage: LlmUsage) -> LlmUsageRecord:
+        self._require(Role.SPECIALIST_RUNTIME, Role.SCHEDULER)
+        if self.writer.role is Role.SPECIALIST_RUNTIME:
+            self._own_branch(usage.branch)
+            if usage.source is not UsageSource.SPECIALIST:
+                raise WriterNotAllowed(f"a specialist runtime records its specialist's spend, not the {usage.source}'s")
+        elif usage.branch or usage.source is UsageSource.SPECIALIST:
+            raise WriterNotAllowed("the scheduler records its own judge's and resolver's spend, with no branch")
+        summary = (
+            f"llm usage/{usage.source.value}: ${usage.cost_usd:.4f}, {usage.input_tokens}+{usage.output_tokens} tokens"
+        )
+        written = self._append(EntryKind.LLM_USAGE, usage, branch=usage.branch, parent="", summary=summary)
+        return LlmUsageRecord(written.entry_id, written.at, usage)
 
     # --- queries --------------------------------------------------------------------------------------------------
 

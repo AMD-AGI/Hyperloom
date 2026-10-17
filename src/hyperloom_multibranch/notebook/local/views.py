@@ -10,7 +10,8 @@ and stop from lineage events.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import math
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from hyperloom_multibranch.contracts.notebook.interfaces import NotRecorded
@@ -199,7 +200,32 @@ def regression_cases_for(state: NotebookState, view: LineageView, commit_id: str
     return tuple(case for case in state.regressions if case.fix_commit in ancestry)
 
 
+def judged_since_commit(records: Sequence[TestRecord], view: LineageView, branch: str, until: float = math.inf) -> int:
+    """The tests of ``branch`` judged by ``until`` and after its last commit by then, or since it opened before any.
+
+    A test counts once it was measured and judged; a withdrawn or failed measurement, or a result that did not
+    re-verify, never does.
+    """
+
+    commits = [
+        node.at
+        for node in view.commits
+        if node.branch == branch and node.origin is not CommitOrigin.ROOT and node.at <= until
+    ]
+    since = max(commits, default=-math.inf)
+    return sum(
+        1
+        for record in records
+        if record.request.branch == branch
+        and record.request.kind is TestKind.TEST
+        and record.measured
+        and record.judged_at is not None
+        and since < record.judged_at <= until
+    )
+
+
 def progress(state: NotebookState, view: LineageView) -> tuple[BranchProgress, ...]:
+    records = state.records()
     found = []
     for branch in view.branches:
         requests = [
@@ -221,6 +247,8 @@ def progress(state: NotebookState, view: LineageView) -> tuple[BranchProgress, .
                 commits=len(commits),
                 gpu_seconds=sum(result.gpu_seconds for result in results),
                 head_value=_value_or_empty(state, view, branch.head_commit),
+                judged_since_commit=judged_since_commit(records, view, branch.branch),
+                llm_usd=sum(item.usage.cost_usd for item in state.llm_usage if item.usage.branch == branch.branch),
             )
         )
     return tuple(found)
@@ -301,11 +329,13 @@ def snapshot(state: NotebookState, claims: tuple[Claim, ...], taken_at: float) -
         branch_logs={branch: tuple(records) for branch, records in state.branch_logs.items()},
         learnings=tuple(state.learnings),
         op_shares=dict(state.op_shares),
+        llm_usage=tuple(state.llm_usage),
     )
 
 
 __all__ = [
     "committed",
+    "judged_since_commit",
     "lineage_view",
     "merge_state",
     "progress",

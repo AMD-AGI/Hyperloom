@@ -39,6 +39,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     BaselineRecord,
     Learning,
     LineageEvent,
+    LlmUsage,
     MergeAttempt,
     QuarantineEvent,
     ToolResultPointer,
@@ -53,6 +54,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
     LineageKind,
     MergeOutcome,
     QuarantineAction,
+    UsageSource,
 )
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import TTL, delta, intent, judgement, request, result
@@ -71,7 +73,7 @@ async def _tested(open_as: Open, request_id: str, branch: str = "s1", parent: st
 def test_the_local_notebook_implements_every_interface_method() -> None:
     names = [name for name, member in inspect.getmembers(interfaces.Notebook) if inspect.iscoroutinefunction(member)]
 
-    assert len(names) == 39
+    assert len(names) == 40
     assert all(getattr(LocalNotebook, name) is not getattr(interfaces.Notebook, name) for name in names)
 
 
@@ -461,6 +463,55 @@ async def test_lifting_a_node_returns_all_its_gpus_to_service(open_as: Open) -> 
     assert [(event.node, event.request_ids) for event in await toolbox.quarantined()] == [("node-3", ("r9",))]
     with pytest.raises(WriterNotAllowed):
         await open_as(Role.GATE).record_quarantine(QuarantineEvent("node-1", QuarantineAction.QUARANTINE, "x"))
+
+
+async def test_a_specialist_records_its_own_llm_spend_and_the_scheduler_its_judges_and_resolvers(open_as: Open) -> None:
+    scheduler, runtime = open_as(Role.SCHEDULER), open_as(Role.SPECIALIST_RUNTIME, "s1")
+    await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s1", from_commit="c0"))
+    await _tested(open_as, "r1")
+
+    spent = await runtime.record_llm_usage(LlmUsage("s1", UsageSource.SPECIALIST, 1.25, 90_000, 4_000, "launch-1"))
+    await runtime.record_llm_usage(LlmUsage("s1", UsageSource.SPECIALIST, 0.5))
+    await scheduler.record_llm_usage(LlmUsage("", UsageSource.JUDGE, 0.125))
+    await scheduler.record_llm_usage(LlmUsage("", UsageSource.RESOLVER, 0.125))
+    snapshot = await scheduler.snapshot()
+    rows = {row.branch: row for row in snapshot.progress}
+
+    assert (spent.usage.launch, snapshot.llm_usage[0]) == ("launch-1", spent)
+    assert [record.usage.source for record in snapshot.llm_usage] == [
+        UsageSource.SPECIALIST,
+        UsageSource.SPECIALIST,
+        UsageSource.JUDGE,
+        UsageSource.RESOLVER,
+    ]
+    assert (rows["s1"].llm_usd, rows[INTEGRATION_BRANCH].llm_usd, snapshot.llm_usd) == (1.75, 0.0, 2.0)
+    assert snapshot.gpu_hours == pytest.approx(600.0 / 3600.0)
+
+
+@pytest.mark.parametrize(
+    ("role", "branch", "usage"),
+    [
+        (Role.SPECIALIST_RUNTIME, "s1", LlmUsage("s2", UsageSource.SPECIALIST, 1.0)),
+        (Role.SPECIALIST_RUNTIME, "s1", LlmUsage("s1", UsageSource.JUDGE, 1.0)),
+        (Role.SCHEDULER, "", LlmUsage("s1", UsageSource.JUDGE, 1.0)),
+        (Role.SCHEDULER, "", LlmUsage("", UsageSource.SPECIALIST, 1.0)),
+        (Role.TOOLBOX, "", LlmUsage("", UsageSource.JUDGE, 1.0)),
+    ],
+)
+async def test_llm_spend_is_recorded_only_by_whoever_spent_it(
+    open_as: Open, role: Role, branch: str, usage: LlmUsage
+) -> None:
+    with pytest.raises(WriterNotAllowed):
+        await open_as(role, branch).record_llm_usage(usage)
+
+
+@pytest.mark.parametrize(
+    "fields", [{"cost_usd": -0.01}, {"cost_usd": float("nan")}, {"cost_usd": float("inf")}, {"input_tokens": -1}]
+)
+def test_an_llm_cost_is_a_finite_amount_and_token_counts_are_not_negative(fields: dict[str, float]) -> None:
+    with pytest.raises(ValueError):
+        LlmUsage(**{"branch": "s1", "source": UsageSource.SPECIALIST, "cost_usd": 1.0, **fields})
 
 
 async def test_the_latest_baseline_is_in_force(open_as: Open) -> None:

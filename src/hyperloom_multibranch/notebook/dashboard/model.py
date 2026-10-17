@@ -5,6 +5,7 @@
 
 * ``branches``: each branch's progress, its head's gain over the baseline, and its frontier score when the progress
   rows carry one (pass :class:`FrontierScoring`'s rows to show them);
+* ``spend``: the session's GPU hours and LLM dollars so far, its specialists', judge's and resolver's together;
 * ``in_flight``: tests requested and neither measured nor withdrawn yet, and the claims held now;
 * ``queue``: the toolbox's queue lengths and latest cold start, when the caller passes ``Toolbox.queue_state()``;
 * ``lineage`` and ``splits``: every commit, every branch, and the branches split off for a correctness fix;
@@ -55,7 +56,9 @@ def _branches(snapshot: NotebookSnapshot, rows: Sequence[BranchProgress], metric
             "head_commit": row.head_commit,
             "tests": row.tests,
             "commits": row.commits,
+            "judged_since_commit": row.judged_since_commit,
             "gpu_hours": row.gpu_seconds / 3600.0,
+            "llm_usd": row.llm_usd,
             "head_value": dict(row.head_value),
             "gain_pct": _gain(row.head_value, baseline, metric),
             "frontier": encode(row.frontier),
@@ -124,6 +127,7 @@ def build_dashboard(
         "session": encode(profile),
         "baseline": encode(baseline),
         "branches": _branches(snapshot, rows, metric),
+        "spend": {"gpu_hours": snapshot.gpu_hours, "llm_usd": snapshot.llm_usd},
         "in_flight": _in_flight(snapshot),
         "queue": _queue(queue) if queue is not None else None,
         "lineage": encode(snapshot.lineage),

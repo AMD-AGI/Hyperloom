@@ -64,6 +64,11 @@ def test_the_dashboard_holds_branches_in_flight_work_lineage_and_infrastructure(
     assert branches["s1"]["frontier"]["expected_gain_pct"] == pytest.approx(4.0)
     assert branches[INTEGRATION_BRANCH]["gain_pct"] == pytest.approx(4.1)
     assert branches["s2"]["running"] is False and branches["s2"]["frontier"] is None
+    assert [(branches[name]["llm_usd"], branches[name]["judged_since_commit"]) for name in ("s1", "s2")] == [
+        (1.25, 1),
+        (0.5, 2),
+    ]
+    assert dashboard["spend"] == {"gpu_hours": 1.0, "llm_usd": 2.0}
     (waiting,) = dashboard["in_flight"]["tests"]
     assert (waiting["request_id"], waiting["waiting_s"]) == ("r9", pytest.approx(30.0))
     assert [(claim["branch"], claim["expires_in_s"]) for claim in dashboard["in_flight"]["claims"]] == [("s1", 45.0)]
@@ -88,6 +93,7 @@ def test_the_page_is_self_contained_and_escapes_every_value(busy: NotebookSnapsh
     assert HOSTILE not in page and "&lt;script&gt;" in page
     assert not any(marker in page for marker in ("http://", "https://", "<link", "<script", " src="))
     assert "<td>+4.00%</td>" in page and "Toolbox queue" not in page
+    assert "spent 1.00 GPU hours and $2.00 of LLM calls" in page
     assert "<td>stopped</td>" in page and "<td>node-3</td>" in page
 
 

@@ -10,6 +10,7 @@
   fails the accuracy check. The scheduler stops ``s2``.
 * The integrator merges ``c1`` onto ``c0`` as ``i1`` (``m1``).
 * ``s1`` confirms a hypothesis, ``s2`` falsifies one.
+* LLM calls cost $1.25 for ``s1``'s specialist, $0.50 for ``s2``'s, and $0.125 each for the judge and the resolver.
 """
 
 from __future__ import annotations
@@ -34,11 +35,12 @@ from hyperloom_multibranch.contracts.notebook.peers import (
 from hyperloom_multibranch.contracts.notebook.records import (
     BaselineRecord,
     LineageEvent,
+    LlmUsage,
     ManifestFingerprint,
     MergeAttempt,
     NotebookSnapshot,
 )
-from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind
+from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind, UsageSource
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import (
     TTL,
@@ -129,6 +131,12 @@ async def scripted_session(root: Path, clock: FakeClock) -> LocalNotebook:
     )
     await w.as_role(Role.SPECIALIST_RUNTIME, "s1").append_branch_log(confirmed)
     await w.as_role(Role.SPECIALIST_RUNTIME, "s2").append_branch_log(falsified)
+    for branch, cost in (("s1", 1.25), ("s2", 0.5)):
+        await w.as_role(Role.SPECIALIST_RUNTIME, branch).record_llm_usage(
+            LlmUsage(branch, UsageSource.SPECIALIST, cost)
+        )
+    for source in (UsageSource.JUDGE, UsageSource.RESOLVER):
+        await scheduler.record_llm_usage(LlmUsage("", source, 0.125))
     await scheduler.record_lineage(LineageEvent(LineageKind.STOP, "s2", reason="no progress"))
     await scheduler.release_branch("s2")
     return w.as_role(Role.OBSERVER)

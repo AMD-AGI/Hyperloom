@@ -36,6 +36,8 @@ from hyperloom_multibranch.contracts.notebook.records import (
     LearningRecord,
     LineageEvent,
     LineageView,
+    LlmUsage,
+    LlmUsageRecord,
     ManifestFingerprint,
     MergeAttempt,
     NotebookSnapshot,
@@ -224,6 +226,14 @@ class LearningStore(Protocol):
         """The learnings of ``branch``, every branch's when empty, oldest first, the superseded ones included."""
 
 
+class UsageSink(Protocol):
+    """What the LLMs cost: a branch's specialist runtime records each launch's spend, the scheduler its own."""
+
+    async def record_llm_usage(self, usage: LlmUsage) -> LlmUsageRecord:
+        """Keep one launch's or call's cost; a specialist runtime records only its own branch's, the scheduler only its
+        own, with no branch."""
+
+
 class Inbox(Protocol):
     """Pointers pushed to one branch; the tool layer turns polling into pushes."""
 
@@ -299,6 +309,7 @@ class Notebook(
     ClaimService,
     BranchLogStore,
     LearningStore,
+    UsageSink,
     Inbox,
     ProgressQuery,
     CommitQuery,
@@ -336,5 +347,6 @@ __all__ = [
     "StartupBriefProvider",
     "TestRecordSink",
     "UnknownRequest",
+    "UsageSink",
     "WriterNotAllowed",
 ]

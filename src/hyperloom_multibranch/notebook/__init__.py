@@ -10,6 +10,7 @@ sits under it: ``knowledge`` (Recipe KB write-back and warm start, the session b
 and ``tools``, the notebook as tools for a specialist's model.
 """
 
+from hyperloom_multibranch.notebook.local.feeds import STALL_TESTS, BriefTriggers
 from hyperloom_multibranch.notebook.local.notebook import LocalNotebook
 
-__all__ = ["LocalNotebook"]
+__all__ = ["STALL_TESTS", "BriefTriggers", "LocalNotebook"]

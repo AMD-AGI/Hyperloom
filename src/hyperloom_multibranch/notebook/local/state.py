@@ -23,6 +23,8 @@ from hyperloom_multibranch.contracts.notebook.records import (
     Learning,
     LearningRecord,
     LineageEvent,
+    LlmUsage,
+    LlmUsageRecord,
     ManifestFingerprint,
     MergeAttempt,
     OpShares,
@@ -86,6 +88,7 @@ PAYLOADS: dict[EntryKind, type] = {
     EntryKind.CLAIM: ClaimDecision,
     EntryKind.SESSION_PROFILE: SessionProfile,
     EntryKind.MANIFEST: ManifestFingerprint,
+    EntryKind.LLM_USAGE: LlmUsage,
 }
 
 
@@ -107,6 +110,7 @@ class NotebookState:
         self.quarantine: list[QuarantineEvent] = []
         self.branch_logs: dict[str, list[BranchLogRecord]] = {}
         self.learnings: list[LearningRecord] = []
+        self.llm_usage: list[LlmUsageRecord] = []
         self.intents: dict[str, Intent] = {}
         self.op_shares: dict[str, OpShares] = {}
         self.profiles: list[SessionProfile] = []
@@ -131,6 +135,9 @@ class NotebookState:
             EntryKind.LEARNING: self._learning,
             EntryKind.TOOL_RESULT: self._tool_result,
             EntryKind.CLAIM: self._claim,
+            EntryKind.LLM_USAGE: lambda entry, value: self.llm_usage.append(
+                LlmUsageRecord(entry.entry_id, entry.at, value)
+            ),
         }
         for entry in entries:
             try:

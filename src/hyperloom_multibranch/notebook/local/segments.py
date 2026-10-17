@@ -52,6 +52,7 @@ class EntryKind(str, Enum):
     CLAIM = "claim"
     SESSION_PROFILE = "session_profile"
     MANIFEST = "manifest"
+    LLM_USAGE = "llm_usage"
 
 
 def require_token(value: str, name: str) -> str:

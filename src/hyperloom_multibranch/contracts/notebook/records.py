@@ -32,11 +32,13 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
     MergeOutcome,
     QuarantineAction,
     Role,
+    UsageSource,
 )
 
 CLAIM_TOKEN_LENGTH = 24
 MAX_OP_SHARES = 50
 WHOLE_PCT = 100.0
+SECONDS_PER_HOUR = 3600.0
 
 
 @dataclass(frozen=True)
@@ -297,6 +299,32 @@ class LearningRecord:
 
 
 @dataclass(frozen=True)
+class LlmUsage:
+    """What one LLM launch or call cost: ``branch`` is the branch whose specialist spent it, empty for the scheduler's
+    own judge or resolver; ``launch`` names the CLI session it came from, to trace it back."""
+
+    branch: str
+    source: UsageSource
+    cost_usd: float
+    input_tokens: int = 0
+    output_tokens: int = 0
+    launch: str = ""
+
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.cost_usd) or self.cost_usd < 0:
+            raise ValueError(f"an LLM cost is a finite amount of dollars, at least 0, not {self.cost_usd!r}")
+        if self.input_tokens < 0 or self.output_tokens < 0:
+            raise ValueError("token counts are at least 0")
+
+
+@dataclass(frozen=True)
+class LlmUsageRecord:
+    entry_id: str
+    at: float
+    usage: LlmUsage
+
+
+@dataclass(frozen=True)
 class FrontierScore:
     """Expected gain over the PRELUDE baseline from one more unit of budget, its parts, and what it rests on."""
 
@@ -307,7 +335,11 @@ class FrontierScore:
 
 @dataclass(frozen=True)
 class BranchProgress:
-    """One branch at a glance; ``frontier`` is filled by a scoring progress query, such as the RSI's frontier scoring."""
+    """One branch at a glance; ``frontier`` is filled by a scoring progress query, such as the RSI's frontier scoring.
+
+    ``judged_since_commit`` counts the branch's tests judged since its last commit (since it opened, before any), and
+    ``llm_usd`` what its specialist's LLM cost.
+    """
 
     branch: str
     running: bool
@@ -318,6 +350,8 @@ class BranchProgress:
     gpu_seconds: float
     head_value: Mapping[str, float]
     frontier: FrontierScore | None = None
+    judged_since_commit: int = 0
+    llm_usd: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -500,10 +534,23 @@ class NotebookSnapshot:
     branch_logs: Mapping[str, tuple[BranchLogRecord, ...]]
     learnings: tuple[LearningRecord, ...] = ()
     op_shares: Mapping[str, OpShares] = field(default_factory=dict)
+    llm_usage: tuple[LlmUsageRecord, ...] = ()
 
     @property
     def baseline(self) -> BaselineRecord | None:
         return self.baselines[-1] if self.baselines else None
+
+    @property
+    def gpu_hours(self) -> float:
+        """The GPU time every test took, whatever its branch or purpose; time outside the notebook's tests is not in it."""
+
+        return sum(record.result.gpu_seconds for record in self.records if record.result is not None) / SECONDS_PER_HOUR
+
+    @property
+    def llm_usd(self) -> float:
+        """What every LLM launch and call recorded cost, the scheduler's own included."""
+
+        return sum(record.usage.cost_usd for record in self.llm_usage)
 
     def value_of(self, commit_id: str) -> Mapping[str, float]:
         """The recorded value of a commit: the baseline for the root, else the judgement that made the commit."""
@@ -535,6 +582,8 @@ __all__ = [
     "LearningRecord",
     "LineageEvent",
     "LineageView",
+    "LlmUsage",
+    "LlmUsageRecord",
     "ManifestFingerprint",
     "MergeAttempt",
     "MergeState",

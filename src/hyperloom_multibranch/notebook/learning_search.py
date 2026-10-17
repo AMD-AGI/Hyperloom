@@ -24,8 +24,8 @@ from pathlib import Path
 from typing import Protocol
 
 from hyperloom.common.io import append_jsonl
-from hyperloom_multibranch.contracts.notebook.peers import Validity
-from hyperloom_multibranch.contracts.notebook.records import LearningRecord, NotebookSnapshot, TestRecord
+from hyperloom_multibranch.contracts.notebook.peers import Intent, Validity
+from hyperloom_multibranch.contracts.notebook.records import Learning, LearningRecord, NotebookSnapshot, TestRecord
 
 log = logging.getLogger(__name__)
 
@@ -110,6 +110,19 @@ class LearningFinder(Protocol):
 
     async def lines(self, snapshot: NotebookSnapshot, query: str, *, limit: int, branch: str = "") -> list[str]:
         """The learnings that bear on ``query`` for ``branch``, as headed lines; empty when none does."""
+
+
+def _same_words(left: str, right: str) -> bool:
+    return " ".join(left.lower().split()) == " ".join(right.lower().split())
+
+
+def names(learning: Learning, intent: Intent | None) -> bool:
+    """Whether ``learning`` names ``intent``'s direction: its target and mechanism, those it gives, the same."""
+
+    if intent is None or not (learning.target or learning.mechanism):
+        return False
+    same_target = not learning.target or _same_words(learning.target, intent.target)
+    return same_target and (not learning.mechanism or _same_words(learning.mechanism, intent.mechanism))
 
 
 def current_learnings(snapshot: NotebookSnapshot) -> tuple[LearningRecord, ...]:
@@ -218,6 +231,7 @@ __all__ = [
     "ShownLead",
     "current_learnings",
     "fit_lines",
+    "names",
     "outcome_of",
     "render_session_learning",
     "session_matches",

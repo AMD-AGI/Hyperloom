@@ -34,6 +34,7 @@ from hyperloom_multibranch.contracts.notebook.peers import Intent, TestKind
 from hyperloom_multibranch.contracts.notebook.records import Learning, NotebookSnapshot, Writer
 from hyperloom_multibranch.contracts.notebook.vocab import COMMITTING, LearningKind, Role
 from hyperloom_multibranch.notebook.knowledge.experience import change_document
+from hyperloom_multibranch.notebook.learning_search import names
 from hyperloom_multibranch.notebook.local.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.report import share, table
 
@@ -92,19 +93,6 @@ class _Test:
     intent: Intent | None
     committed: bool
     change: frozenset[str] = frozenset()
-
-
-def _words(text: str) -> str:
-    return " ".join(text.lower().split())
-
-
-def names(learning: Learning, intent: Intent | None) -> bool:
-    """Whether ``learning`` names ``intent``'s direction: its target and mechanism, those it gives, the same."""
-
-    if intent is None or not (learning.target or learning.mechanism):
-        return False
-    same_target = not learning.target or _words(learning.target) == _words(intent.target)
-    return same_target and (not learning.mechanism or _words(learning.mechanism) == _words(intent.mechanism))
 
 
 def _tests(snapshot: NotebookSnapshot) -> dict[str, list[_Test]]:

@@ -113,6 +113,7 @@ def build_breakdown(
         "baseline": encode(snapshot.baseline),
         "lineage": encode(snapshot.lineage),
         "branches": encode(snapshot.progress),
+        "spend": {"gpu_hours": snapshot.gpu_hours, "llm_usd": snapshot.llm_usd},
         "committed": encode(snapshot.committed),
         "tests": encode(snapshot.records),
         "measurement_sandboxes": encode(measurement_usage(snapshot.records)),
