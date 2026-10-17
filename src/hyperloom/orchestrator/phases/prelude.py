@@ -175,6 +175,13 @@ def _overlay_provenance_summary(sdk_replay: Mapping[str, Any]) -> dict[str, Any]
     }
 
 
+class _KernelOverlay(NamedTuple):
+    """The launch overlay a replay's prepared kernels ask for."""
+
+    args: str
+    envs: dict[str, Any]
+
+
 class _ReplayMeasurement(NamedTuple):
     """What a warm-replay round measured, and what it was measured against."""
 
@@ -1061,58 +1068,10 @@ class PreludePhase(CoordinatorCollaborator):
         current_remote = self._is_current_remote_recipe(warm)
         sdk_replay: dict[str, Any] = {}
         if current_remote:
-            recipe_metadata = warm.get("recipe") or {}
-            if isinstance(recipe_metadata, Mapping) and recipe_metadata.get("replayable") is False:
-                self._skip_warm_replay(
-                    code=SKIP_RECIPE_NOT_REPLAYABLE,
-                    outcome={
-                        "status": "skipped",
-                        "reason": str(
-                            recipe_metadata.get("replay_disabled_reason") or "remote_recipe_view_not_replayable"
-                        ),
-                        "view_source": str(recipe_metadata.get("view_source") or ""),
-                    },
-                    details={"view_source": str(recipe_metadata.get("view_source") or "")},
-                )
+            resolved = self._current_remote_replay(warm)
+            if resolved is None:
                 return None
-            try:
-                sdk_replay = self._read_current_recipe_replay()
-            except Exception as exc:  # noqa: BLE001 — current replay fails closed
-                self._skip_warm_replay(
-                    code=SKIP_RECIPE_READ_FAILED,
-                    outcome={
-                        "status": "skipped",
-                        "reason": (f"current_recipe_sdk_read_failed:{type(exc).__name__}:{exc}")[:500],
-                    },
-                    details={"error_class": type(exc).__name__},
-                )
-                return None
-            if patch_entries := list(sdk_replay.get("patches") or []):
-                # Every overlay names the checkout it was measured on.
-                recorded = [str((entry or {}).get("framework_root") or "").strip() for entry in patch_entries]
-                if not all(recorded):
-                    known = [root for root in recorded if root]
-                    self._skip_warm_replay(
-                        code=SKIP_FRAMEWORK_ROOT_MISSING,
-                        outcome=self._warm_replay_root_skip_outcome(
-                            reason="framework_apply_root_missing",
-                            root_kind="framework",
-                            roots=known,
-                        ),
-                        details={"root_kind": "framework", "recorded_roots": known},
-                    )
-                    return None
-                if absent := [root for root in dict.fromkeys(recorded) if not Path(root).is_dir()]:
-                    self._skip_warm_replay(
-                        code=SKIP_FRAMEWORK_ROOT_MISSING,
-                        outcome=self._warm_replay_root_skip_outcome(
-                            reason="framework_apply_root_absent",
-                            root_kind="framework",
-                            roots=absent,
-                        ),
-                        details={"root_kind": "framework", "recorded_roots": list(absent)},
-                    )
-                    return None
+            sdk_replay = resolved
         try:
             kernel = (
                 await self._prepare_warm_kernel_kb(sdk_replay.get("kernel_kb"))
@@ -1132,31 +1091,7 @@ class PreludePhase(CoordinatorCollaborator):
             or preparation_pending.get("kernel_snapshots")
             or preparation_pending.get("kernel_apply_results")
         )
-        if str(kernel.get("status") or "") in {"error", "rollback_failed"} and preparation_dirty:
-            rollback = dict(kernel.get("rollback") or {}) if isinstance(kernel.get("rollback"), dict) else {}
-            if not rollback:
-                rollback = revert_warm_kernel_patches(
-                    list(preparation_pending.get("kernel_apply_results") or []),
-                    list(preparation_pending.get("kernel_snapshots") or []),
-                )
-            if rollback.get("ok"):
-                state.warm_replay_pending = {}
-            else:
-                state.warm_replay_pending = {
-                    **preparation_pending,
-                    "status": "rollback_failed",
-                    "rollback_errors": list(rollback.get("errors") or []),
-                }
-                state.set_stop_reason("warm_replay_rollback_failed")
-            self._skip_warm_replay(
-                code=SKIP_KERNEL_PREPARATION_FAILED,
-                outcome={
-                    "status": ("kernel_preparation_failed" if rollback.get("ok") else "rollback_failed"),
-                    "reason": str(kernel.get("reason") or "kernel preparation left mutable state"),
-                    "rollback": rollback,
-                },
-                details={"kernel_status": str(kernel.get("status") or "")},
-            )
+        if self._refuse_dirty_kernel_preparation(kernel, preparation_pending, preparation_dirty=preparation_dirty):
             return None
         kernel_root_block = self._warm_replay_kernel_root_block_reason(state)
         if kernel_root_block is not None:
@@ -1172,13 +1107,10 @@ class PreludePhase(CoordinatorCollaborator):
         kernel_pending = list(kernel.get("pending") or []) if kernel.get("status") == "prepared" else []
         kernel_applied = list(kernel.get("applied") or []) if kernel_pending else []
         kernel_snapshots = list(kernel.get("snapshots") or []) if kernel_pending else []
-        if current_remote and kernel_pending:
-            kernel_config = sdk_replay.get("kernel_config") or {}
-            kernel_envs = dict(kernel_config.get("extra_envs") or {})
-            kernel_args = str(kernel_config.get("extra_server_args") or "")
-        else:
-            kernel_envs = dict(kernel.get("extra_envs") or {}) if kernel_pending else {}
-            kernel_args = str(kernel.get("extra_server_args") or "") if kernel_pending else ""
+        overlay = self._warm_kernel_overlay(
+            kernel, sdk_replay=sdk_replay, current_remote=current_remote, kernel_pending=kernel_pending
+        )
+        kernel_args, kernel_envs = overlay.args, overlay.envs
 
         if not warm and not kernel_pending:
             if str(kernel.get("status") or "") in {"empty", "loaded"}:
@@ -1286,41 +1218,10 @@ class PreludePhase(CoordinatorCollaborator):
         if recipe_suppressed:
             wsc_patches = []
             required_patch_timeline = False
-        if wsc_patches:
-            # Re-checked here because a persisted plan may be resumed under a different image, and because the kernel
-            # half is already applied by now: a root that has since gone means unwinding that too.
-            recorded_roots = [str((entry or {}).get("framework_root") or "").strip() for entry in wsc_patches]
-            unusable = [root for root in dict.fromkeys(recorded_roots) if root and not Path(root).is_dir()]
-            if not all(recorded_roots) or unusable:
-                rollback = (
-                    revert_warm_kernel_patches(
-                        kernel_applied,
-                        kernel_snapshots,
-                    )
-                    if kernel_applied or kernel_snapshots
-                    else {"ok": True, "errors": []}
-                )
-                if rollback.get("ok"):
-                    state.warm_replay_pending = {}
-                else:
-                    state.warm_replay_pending = {
-                        **dict(state.warm_replay_pending or {}),
-                        "status": "rollback_failed",
-                        "rollback_errors": list(rollback.get("errors") or []),
-                    }
-                    state.set_stop_reason("warm_replay_rollback_failed")
-                blocking_roots = unusable or [root for root in recorded_roots if root]
-                self._skip_warm_replay(
-                    code=SKIP_FRAMEWORK_ROOT_MISSING,
-                    outcome=self._warm_replay_root_skip_outcome(
-                        reason=("framework_apply_root_absent" if unusable else "framework_apply_root_missing"),
-                        root_kind="framework",
-                        roots=blocking_roots,
-                        rollback=rollback,
-                    ),
-                    details={"root_kind": "framework", "recorded_roots": list(blocking_roots)},
-                )
-                return None
+        if self._refuse_absent_framework_roots(
+            wsc_patches, kernel_applied=kernel_applied, kernel_snapshots=kernel_snapshots
+        ):
+            return None
         if not bc_args and not bc_envs and not wsc_patches and not kernel_pending:
             self._skip_warm_replay(
                 code=SKIP_BEST_CONFIG_EMPTY,
@@ -1337,18 +1238,8 @@ class PreludePhase(CoordinatorCollaborator):
         # gain_pct.
         expected_gain = donor_expected_gain
         sessions_field = recipe_attrs.get("sessions")
-        if expected_gain <= 0 and isinstance(sessions_field, list):
-            session_gains: list[float] = []
-            for s in sessions_field:
-                if not isinstance(s, dict):
-                    continue
-                try:
-                    g = float(s.get("gain_pct") or 0.0)
-                except (TypeError, ValueError):
-                    continue
-                session_gains.append(g)
-            if session_gains:
-                expected_gain = max(session_gains)
+        if expected_gain <= 0:
+            expected_gain = self._best_session_gain(sessions_field) or expected_gain
         # Last-chance fallback for offline-ingested seed rows.
         if expected_gain <= 0:
             try:
@@ -1379,56 +1270,12 @@ class PreludePhase(CoordinatorCollaborator):
             {"warm_recipe_tier": tier, "warm_recipe_conf": conf, **donor_metadata},
         ):
             return None
-        try:
-            from hyperloom.inference_optimizer.grid_server_args import (
-                validate_warm_replay_context_length,
-            )
-
-            validated_args, workload_compatibility = validate_warm_replay_context_length(
-                combined_args,
-                state.framework,
-                int(state.isl or 0),
-                int(state.osl or 0),
-                state.max_model_len or None,
-            )
-            if validated_args != combined_args:
-                raise RuntimeError("warm replay context preflight must not mutate config")
-        except (ValueError, RuntimeError) as exc:
-            rollback = (
-                revert_warm_kernel_patches(
-                    kernel_applied,
-                    kernel_snapshots,
-                )
-                if kernel_applied or kernel_snapshots
-                else {"ok": True, "errors": []}
-            )
-            if rollback.get("ok"):
-                state.warm_replay_pending = {}
-            else:
-                state.warm_replay_pending = {
-                    **dict(state.warm_replay_pending or {}),
-                    "status": "rollback_failed",
-                    "rollback_errors": list(rollback.get("errors") or []),
-                }
-                state.set_stop_reason("warm_replay_rollback_failed")
-            target_workload_shape = {
-                "conc": int(state.conc or 0),
-                "isl": int(state.isl or 0),
-                "osl": int(state.osl or 0),
-            }
-            self._skip_warm_replay(
-                code=SKIP_WORKLOAD_CONFIG_INCOMPATIBLE,
-                outcome={
-                    "status": ("skipped" if rollback.get("ok") else "rollback_failed"),
-                    "reason": (f"workload_config_incompatible:{type(exc).__name__}:{exc}")[:500],
-                    "target_workload_shape": target_workload_shape,
-                    "rollback": rollback,
-                },
-                details={
-                    "error_class": type(exc).__name__,
-                    "target_workload_shape": dict(target_workload_shape),
-                },
-            )
+        workload_compatibility = self._validated_replay_context(
+            combined_args,
+            kernel_applied=kernel_applied,
+            kernel_snapshots=kernel_snapshots,
+        )
+        if workload_compatibility is None:
             return None
         params: dict[str, Any] = {
             "source": "coordinator_internal",
@@ -1533,6 +1380,267 @@ class PreludePhase(CoordinatorCollaborator):
         # the two is recovered as an in-flight replay of a named recipe.
         self._open_warm_replay_timeline(task=task, session_baseline_tput=state.baseline_tput)
         return task
+
+    @staticmethod
+    def _best_session_gain(sessions_field: Any) -> float:
+        """The best gain any recorded session of this recipe reported.
+
+        A prior with no headline gain of its own is still worth replaying when one
+        of its sessions measured one; 0.0 says none did.
+        """
+        if not isinstance(sessions_field, list):
+            return 0.0
+        session_gains: list[float] = []
+        for s in sessions_field:
+            if not isinstance(s, dict):
+                continue
+            try:
+                g = float(s.get("gain_pct") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            session_gains.append(g)
+        if session_gains:
+            return max(session_gains)
+        return 0.0
+
+    def _current_remote_replay(self, warm: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Read the replay payload a current remote recipe yields.
+
+        Returns ``None`` once the recipe has refused the replay and the skip is
+        on record; the caller then has nothing left to enqueue.
+        """
+        sdk_replay: dict[str, Any] = {}
+        recipe_metadata = warm.get("recipe") or {}
+        if isinstance(recipe_metadata, Mapping) and recipe_metadata.get("replayable") is False:
+            self._skip_warm_replay(
+                code=SKIP_RECIPE_NOT_REPLAYABLE,
+                outcome={
+                    "status": "skipped",
+                    "reason": str(recipe_metadata.get("replay_disabled_reason") or "remote_recipe_view_not_replayable"),
+                    "view_source": str(recipe_metadata.get("view_source") or ""),
+                },
+                details={"view_source": str(recipe_metadata.get("view_source") or "")},
+            )
+            return None
+        try:
+            sdk_replay = self._read_current_recipe_replay()
+        except Exception as exc:  # noqa: BLE001 — current replay fails closed
+            self._skip_warm_replay(
+                code=SKIP_RECIPE_READ_FAILED,
+                outcome={
+                    "status": "skipped",
+                    "reason": (f"current_recipe_sdk_read_failed:{type(exc).__name__}:{exc}")[:500],
+                },
+                details={"error_class": type(exc).__name__},
+            )
+            return None
+        if patch_entries := list(sdk_replay.get("patches") or []):
+            # Every overlay names the checkout it was measured on.
+            recorded = [str((entry or {}).get("framework_root") or "").strip() for entry in patch_entries]
+            if not all(recorded):
+                known = [root for root in recorded if root]
+                self._skip_warm_replay(
+                    code=SKIP_FRAMEWORK_ROOT_MISSING,
+                    outcome=self._warm_replay_root_skip_outcome(
+                        reason="framework_apply_root_missing",
+                        root_kind="framework",
+                        roots=known,
+                    ),
+                    details={"root_kind": "framework", "recorded_roots": known},
+                )
+                return None
+            if absent := [root for root in dict.fromkeys(recorded) if not Path(root).is_dir()]:
+                self._skip_warm_replay(
+                    code=SKIP_FRAMEWORK_ROOT_MISSING,
+                    outcome=self._warm_replay_root_skip_outcome(
+                        reason="framework_apply_root_absent",
+                        root_kind="framework",
+                        roots=absent,
+                    ),
+                    details={"root_kind": "framework", "recorded_roots": list(absent)},
+                )
+                return None
+        return sdk_replay
+
+    def _refuse_dirty_kernel_preparation(
+        self,
+        kernel: Mapping[str, Any],
+        preparation_pending: Mapping[str, Any],
+        *,
+        preparation_dirty: bool,
+    ) -> bool:
+        """Unwind a kernel preparation that failed with mutable state still applied.
+
+        Returns whether the replay was refused. A rollback that itself fails stops
+        the run, because the tree is then neither the recipe's nor the baseline's.
+        """
+        if str(kernel.get("status") or "") not in {"error", "rollback_failed"} or not preparation_dirty:
+            return False
+        rollback = dict(kernel.get("rollback") or {}) if isinstance(kernel.get("rollback"), dict) else {}
+        if not rollback:
+            rollback = revert_warm_kernel_patches(
+                list(preparation_pending.get("kernel_apply_results") or []),
+                list(preparation_pending.get("kernel_snapshots") or []),
+            )
+        if rollback.get("ok"):
+            self.shared_state.warm_replay_pending = {}
+        else:
+            self.shared_state.warm_replay_pending = {
+                **preparation_pending,
+                "status": "rollback_failed",
+                "rollback_errors": list(rollback.get("errors") or []),
+            }
+            self.shared_state.set_stop_reason("warm_replay_rollback_failed")
+        self._skip_warm_replay(
+            code=SKIP_KERNEL_PREPARATION_FAILED,
+            outcome={
+                "status": ("kernel_preparation_failed" if rollback.get("ok") else "rollback_failed"),
+                "reason": str(kernel.get("reason") or "kernel preparation left mutable state"),
+                "rollback": rollback,
+            },
+            details={"kernel_status": str(kernel.get("status") or "")},
+        )
+        return True
+
+    @staticmethod
+    def _warm_kernel_overlay(
+        kernel: Mapping[str, Any],
+        *,
+        sdk_replay: Mapping[str, Any],
+        current_remote: bool,
+        kernel_pending: Any,
+    ) -> _KernelOverlay:
+        """Read the launch overlay the prepared kernels ask for.
+
+        A current remote recipe carries it in the replay payload; anything else
+        carries it on the preparation result, and a preparation with nothing
+        pending carries none at all.
+        """
+        if current_remote and kernel_pending:
+            kernel_config = sdk_replay.get("kernel_config") or {}
+            envs = dict(kernel_config.get("extra_envs") or {})
+            args = str(kernel_config.get("extra_server_args") or "")
+        else:
+            envs = dict(kernel.get("extra_envs") or {}) if kernel_pending else {}
+            args = str(kernel.get("extra_server_args") or "") if kernel_pending else ""
+        return _KernelOverlay(args=args, envs=envs)
+
+    def _refuse_absent_framework_roots(
+        self,
+        wsc_patches: Any,
+        *,
+        kernel_applied: Any,
+        kernel_snapshots: Any,
+    ) -> bool:
+        """Refuse a replay whose recorded framework roots are no longer there.
+
+        Re-checked here because a persisted plan may be resumed under a different
+        image, and because the kernel half is already applied by now: a root that
+        has since gone means unwinding that too. Returns whether it was refused.
+        """
+        if not wsc_patches:
+            return False
+        # Re-checked here because a persisted plan may be resumed under a different image, and because the kernel
+        # half is already applied by now: a root that has since gone means unwinding that too.
+        recorded_roots = [str((entry or {}).get("framework_root") or "").strip() for entry in wsc_patches]
+        unusable = [root for root in dict.fromkeys(recorded_roots) if root and not Path(root).is_dir()]
+        if not all(recorded_roots) or unusable:
+            rollback = (
+                revert_warm_kernel_patches(
+                    kernel_applied,
+                    kernel_snapshots,
+                )
+                if kernel_applied or kernel_snapshots
+                else {"ok": True, "errors": []}
+            )
+            if rollback.get("ok"):
+                self.shared_state.warm_replay_pending = {}
+            else:
+                self.shared_state.warm_replay_pending = {
+                    **dict(self.shared_state.warm_replay_pending or {}),
+                    "status": "rollback_failed",
+                    "rollback_errors": list(rollback.get("errors") or []),
+                }
+                self.shared_state.set_stop_reason("warm_replay_rollback_failed")
+            blocking_roots = unusable or [root for root in recorded_roots if root]
+            self._skip_warm_replay(
+                code=SKIP_FRAMEWORK_ROOT_MISSING,
+                outcome=self._warm_replay_root_skip_outcome(
+                    reason=("framework_apply_root_absent" if unusable else "framework_apply_root_missing"),
+                    root_kind="framework",
+                    roots=blocking_roots,
+                    rollback=rollback,
+                ),
+                details={"root_kind": "framework", "recorded_roots": list(blocking_roots)},
+            )
+            return True
+        return False
+
+    def _validated_replay_context(
+        self,
+        combined_args: str,
+        *,
+        kernel_applied: Any,
+        kernel_snapshots: Any,
+    ) -> Any:
+        """Check the replay config against the workload it will be measured on.
+
+        The preflight may only report, never rewrite: a config it changed would be
+        measured as the recipe's while being something else. Returns ``None`` once
+        the replay has been refused and the skip is on record.
+        """
+        try:
+            from hyperloom.inference_optimizer.grid_server_args import (
+                validate_warm_replay_context_length,
+            )
+
+            validated_args, workload_compatibility = validate_warm_replay_context_length(
+                combined_args,
+                self.shared_state.framework,
+                int(self.shared_state.isl or 0),
+                int(self.shared_state.osl or 0),
+                self.shared_state.max_model_len or None,
+            )
+            if validated_args != combined_args:
+                raise RuntimeError("warm replay context preflight must not mutate config")
+        except (ValueError, RuntimeError) as exc:
+            rollback = (
+                revert_warm_kernel_patches(
+                    kernel_applied,
+                    kernel_snapshots,
+                )
+                if kernel_applied or kernel_snapshots
+                else {"ok": True, "errors": []}
+            )
+            if rollback.get("ok"):
+                self.shared_state.warm_replay_pending = {}
+            else:
+                self.shared_state.warm_replay_pending = {
+                    **dict(self.shared_state.warm_replay_pending or {}),
+                    "status": "rollback_failed",
+                    "rollback_errors": list(rollback.get("errors") or []),
+                }
+                self.shared_state.set_stop_reason("warm_replay_rollback_failed")
+            target_workload_shape = {
+                "conc": int(self.shared_state.conc or 0),
+                "isl": int(self.shared_state.isl or 0),
+                "osl": int(self.shared_state.osl or 0),
+            }
+            self._skip_warm_replay(
+                code=SKIP_WORKLOAD_CONFIG_INCOMPATIBLE,
+                outcome={
+                    "status": ("skipped" if rollback.get("ok") else "rollback_failed"),
+                    "reason": (f"workload_config_incompatible:{type(exc).__name__}:{exc}")[:500],
+                    "target_workload_shape": target_workload_shape,
+                    "rollback": rollback,
+                },
+                details={
+                    "error_class": type(exc).__name__,
+                    "target_workload_shape": dict(target_workload_shape),
+                },
+            )
+            return None
+        return workload_compatibility
 
     def _resolve_promoted_recipe_checkout(
         self,

@@ -176,7 +176,7 @@ cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase.
 cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._settle_warm_replay 43
 cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._warm_kernel_extra_envs 42
 cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase.inject_warm_recipe_history_into_ledger 31
-cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase.maybe_enqueue_warm_replay 190
+cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase.maybe_enqueue_warm_replay 101
 cognitive-complexity src/hyperloom/orchestrator/phases/prelude.py::_merge_named_current_recipe_configs 39
 cognitive-complexity src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_payload_paths 39
 cognitive-complexity src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_warm_replay_targets 39
@@ -341,7 +341,7 @@ cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._
 cyclomatic-complexity src/hyperloom/orchestrator/phases/machine_state.py::replay_next_phase 30
 cyclomatic-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._prepare_warm_kernel_kb 33
 cyclomatic-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._settle_warm_replay 25
-cyclomatic-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase.maybe_enqueue_warm_replay 48
+cyclomatic-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase.maybe_enqueue_warm_replay 34
 cyclomatic-complexity src/hyperloom/orchestrator/roles/claude.py::ClaudeBackend._invoke_and_collect 26
 cyclomatic-complexity src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.warm_specialist_params 41
 cyclomatic-complexity src/hyperloom/orchestrator/specialists/patch_safety.py::resolve_patch_apply_root 21
@@ -1282,7 +1282,7 @@ function-lines src/hyperloom/orchestrator/phases/machine_state.py::replay_next_p
 function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._judge_warm_replay_accuracy 123
 function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._prepare_warm_kernel_kb 269
 function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._settle_warm_replay 197
-function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase.maybe_enqueue_warm_replay 490
+function-lines src/hyperloom/orchestrator/phases/prelude.py::PreludePhase.maybe_enqueue_warm_replay 337
 function-lines src/hyperloom/orchestrator/phases/sweep.py::SweepPhase._start_conc_sweep 81
 function-lines src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_specialist_dispatch 91
 function-lines src/hyperloom/orchestrator/policy/gate.py::PolicyGate._validate_specialist_gpu_request 82
