@@ -17,7 +17,8 @@ from ..dense_shapes import compute_dense_nk_shapes, compute_dense_m_values
 from ..evidence import demand_for_tuner, demand_shapes, load_demand
 from ..script_discovery import discover_tuner_script
 from ..script_probe import filter_args, probe_script
-from ..utils import resolve_aiter_root, run_subprocess, TUNER_ENV_VARS
+from ..aiter_script_map import resolve_aiter_root
+from ..utils import run_subprocess, TUNER_ENV_VARS
 
 log = logging.getLogger(__name__)
 

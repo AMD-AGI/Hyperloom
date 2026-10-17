@@ -20,7 +20,8 @@ from typing import Any
 
 from .base import TuneContext, TuneResult, micro_metrics
 from ..script_probe import filter_args, probe_script
-from ..utils import find_tuner_script, resolve_aiter_root, run_subprocess
+from ..aiter_script_map import resolve_aiter_root
+from ..utils import find_tuner_script, run_subprocess
 from .. import tune_robustness as _tr
 
 log = logging.getLogger(__name__)
