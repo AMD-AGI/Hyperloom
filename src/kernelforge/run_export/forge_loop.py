@@ -283,10 +283,7 @@ def _run_units(
     if config is None or not campaign_id:
         problem = f"{_CONFIG} is not a readable JSON object" if config is None else f"{_STATE} names no campaign_id"
         return [read_error(f"{workspace.name}/session", problem, files)]
-    try:
-        times = _event_times(experiments / "events.jsonl")
-    except OSError as error:
-        return [read_error(f"{workspace.name}/session", f"{type(error).__name__}: {error}", files)]
+    times = _event_times(experiments / "events.jsonl")
     run = Run(
         label=workspace.name,
         run_id=campaign_id,

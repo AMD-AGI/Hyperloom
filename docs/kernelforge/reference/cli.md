@@ -513,10 +513,12 @@ printed to stdout wrapped in `__FORGE_ROOFLINE_CEILING_RESULT__` sentinels.
 Writes the runs found under one or more directories as one JSON document,
 `{"runs": [...]}`, for `hyperloom-kb-collect --mapping kernelforge-v1` (see
 {doc}`Experience collection </reference/experience-kb-collect>`). A run is a
-plain `forge-loop` run's `forge_experiments/` directory. Each forge-loop
-iteration found is one entry; a run or candidate whose JSON records are missing
-or are not the JSON KernelForge writes is one entry saying why, which collection
-skips with that reason. Claude Code transcripts under a directory, such as a copy of
+plain `forge-loop` run's `forge_experiments/` directory, which holds
+`campaign_config.json` and `run_state.json`. Each forge-loop iteration found is
+one entry; a run whose `campaign_config.json` or `run_state.json` is not the
+JSON KernelForge writes, or a candidate whose `meta.json` is missing or
+malformed, is one entry saying why, which collection skips with that reason.
+Claude Code transcripts under a directory, such as a copy of
 `~/.claude/projects`, are linked to the candidates their sessions made through
 the reasoning log each session's first prompt names, so sessions run before
 KernelForge asked for that log stay unlinked. A log or transcript belongs to the
