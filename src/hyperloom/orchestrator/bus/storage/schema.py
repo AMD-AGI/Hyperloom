@@ -151,19 +151,6 @@ _DDL = [
 ]
 
 
-_MANAGED_TABLES = (
-    "leases",
-    "lane_capacity",
-    "gpu_leases",
-    "events",
-    "cursors",
-    "tasks",
-    "bringup_rounds",
-    "round_events",
-    "schema_version",
-)
-
-
 #: SQLite gained ``ALTER TABLE ... DROP COLUMN`` here.
 _DROP_COLUMN_MIN_SQLITE = (3, 35, 0)
 
@@ -214,22 +201,6 @@ def set_lane_capacity(
         cur.close()
 
 
-def get_lane_capacity(conn: sqlite3.Connection, lane: str) -> int:
-    """Return capacity for ``lane``, falling back to defaults."""
-    cur = conn.cursor()
-    try:
-        cur.execute(
-            "SELECT capacity FROM lane_capacity WHERE lane = ?",
-            (str(lane),),
-        )
-        row = cur.fetchone()
-        if row is not None:
-            return int(row[0])
-    finally:
-        cur.close()
-    return int(DEFAULT_LANE_CAPACITIES.get(lane, 1))
-
-
 def ensure_schema(conn: sqlite3.Connection) -> int:
     """Idempotently create all tables, seed lane_capacity defaults, and record the schema version."""
     cur = conn.cursor()
@@ -255,16 +226,3 @@ def ensure_schema(conn: sqlite3.Connection) -> int:
         raise
     finally:
         cur.close()
-
-
-def reset_schema(conn: sqlite3.Connection) -> None:
-    """Drop and recreate every managed table. Test-only convenience."""
-    cur = conn.cursor()
-    try:
-        cur.execute("BEGIN IMMEDIATE")
-        for table in _MANAGED_TABLES:
-            cur.execute(f"DROP TABLE IF EXISTS {table}")
-        conn.commit()
-    finally:
-        cur.close()
-    ensure_schema(conn)
