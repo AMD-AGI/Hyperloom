@@ -41,7 +41,11 @@ class DedupStatus(str, Enum):
 
 
 class Conclusion(str, Enum):
-    """What came of a tested candidate: the rule gate's action on a specialist branch, or the integrator's merge."""
+    """What came of a tested candidate: the rule gate's action on a specialist branch, or the integrator's merge.
+
+    ``UNVERIFIED``: a result the decision rested on did not re-verify against its signed bundle, so nothing was landed
+    or requested.
+    """
 
     COMMITTED = "committed"
     COMMITTED_WITH_REPRO = "committed_with_repro"
@@ -51,6 +55,7 @@ class Conclusion(str, Enum):
     REPAIR_REQUESTED = "repair_requested"
     RECORDED_ONLY = "recorded_only"
     ACCURACY_FAILED = "accuracy_failed"
+    UNVERIFIED = "unverified"
     MERGED = "merged"
     NOT_STACKABLE = "not_stackable"
 
