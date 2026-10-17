@@ -6,7 +6,15 @@ import pytest
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_SAFETY_PREAMBLE
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord
-from hyperloom_multibranch.specialist.prompts import ENTRY_CHARS, RECENT_ENTRIES, launch_prompt, role_prompt
+from hyperloom_multibranch.specialist import prompts
+from hyperloom_multibranch.specialist.prompts import (
+    ENTRY_CHARS,
+    RECENT_ENTRIES,
+    VERSION_HEX,
+    launch_prompt,
+    prompt_versions,
+    role_prompt,
+)
 from hyperloom_multibranch.specialist.runtime import SessionStart
 
 WORKLOAD = "qwen3-8b on vllm, TP 1, ISL 1024, OSL 1024, concurrency 64, InferenceX"
@@ -52,6 +60,17 @@ def test_a_launch_opens_with_the_brief_then_says_where_the_branch_stands():
     facts = "Your branch: s1, started at c0. Its head: c7. Tests you may have running at once: 3."
     assert prompt.index(facts) > prompt.index("leads")
     assert "first session on your branch" in prompt
+
+
+def test_each_prompt_is_versioned_by_its_own_text(monkeypatch):
+    versions = prompt_versions()
+
+    assert set(versions) == {"specialist_role", "specialist_launch"}
+    assert all(len(version) == VERSION_HEX and int(version, 16) >= 0 for version in versions.values())
+    monkeypatch.setattr(prompts, "_ROLE", prompts._ROLE + "- One more rule.\n")
+    edited = prompt_versions()
+    assert edited["specialist_role"] != versions["specialist_role"]
+    assert edited["specialist_launch"] == versions["specialist_launch"]
 
 
 def test_a_launch_shows_the_latest_entries_cut_to_size_and_how_the_last_session_ended():
