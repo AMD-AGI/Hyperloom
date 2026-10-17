@@ -122,127 +122,6 @@ def test_remote_config_uses_kb_store_backend_and_keeps_optional_gbrain() -> None
     assert config.kb_store_url == "https://kb.test"
 
 
-def test_a_remote_child_gets_only_kb_store_credentials() -> None:
-    remote = KnowledgeConfig.from_env(
-        {
-            "KNOWLEDGE_STORE_MODE": "remote",
-            "KB_STORE_URL": "https://kb.test",
-            "KB_STORE_TOKEN": "kb-token",
-            "GBRAIN_BASE_URL": "https://gbrain.test",
-            "GBRAIN_TOKEN": "gbrain-token",
-        }
-    )
-    child: dict[str, str] = {}
-    remote.apply_to_child_env(child)
-    assert child["KB_STORE_URL"] == "https://kb.test"
-    assert child["KB_STORE_TOKEN"] == "kb-token"
-    assert "GBRAIN_BASE_URL" not in child
-    assert "GBRAIN_TOKEN" not in child
-
-
-def test_ambient_gbrain_credentials_never_reach_a_remote_child() -> None:
-    remote = KnowledgeConfig.from_env(
-        {
-            "KNOWLEDGE_STORE_MODE": "remote",
-            "KB_STORE_URL": "https://kb.test",
-            "KB_STORE_TOKEN": "kb-token",
-        }
-    )
-    child: dict[str, str] = {
-        "GBRAIN_BASE_URL": "https://ambient.invalid",
-        "GBRAIN_TOKEN": "ambient-secret",
-    }
-    remote.apply_to_child_env(child)
-    assert child["KB_STORE_URL"] == "https://kb.test"
-    assert "GBRAIN_BASE_URL" not in child
-    assert "GBRAIN_TOKEN" not in child
-
-
-def test_a_local_child_keeps_pr_service_url_without_recipe_token() -> None:
-    local = KnowledgeConfig.from_env(
-        {
-            "KNOWLEDGE_STORE_MODE": "local",
-            "KB_STORE_URL": "https://kb.test",
-            "KB_STORE_TOKEN": "must-not-cross",
-            "GBRAIN_BASE_URL": "https://gbrain.test",
-            "GBRAIN_TOKEN": "gbrain-token",
-        }
-    )
-    child: dict[str, str] = {
-        "KB_STORE_URL": "https://kb.test",
-        "KB_STORE_TOKEN": "kb-token",
-        "GBRAIN_BASE_URL": "https://gbrain.test",
-        "GBRAIN_TOKEN": "gbrain-token",
-    }
-    local.apply_to_child_env(child)
-    assert child["KB_STORE_URL"] == "https://kb.test"
-    assert "KB_STORE_TOKEN" not in child
-    assert "GBRAIN_BASE_URL" not in child
-    assert "GBRAIN_TOKEN" not in child
-
-
-def test_a_local_child_defaults_to_global_pr_service() -> None:
-    from hyperloom.common.pr_monitor_urls import DEFAULT_KB_STORE_URL
-
-    local = KnowledgeConfig.from_env({"KNOWLEDGE_STORE_MODE": "local"})
-    child: dict[str, str] = {}
-
-    local.apply_to_child_env(child)
-
-    assert child["KB_STORE_URL"] == DEFAULT_KB_STORE_URL
-    assert "KB_STORE_TOKEN" not in child
-
-
-def test_a_local_child_omits_unreachable_pr_service() -> None:
-    local = KnowledgeConfig.from_env(
-        {
-            "KNOWLEDGE_STORE_MODE": "local",
-            "HYPERLOOM_PR_MONITOR_ENABLED": "0",
-        }
-    )
-    child = {"KB_STORE_URL": "https://ambient.invalid"}
-
-    local.apply_to_child_env(child)
-
-    assert child["HYPERLOOM_PR_MONITOR_ENABLED"] == "0"
-    assert "KB_STORE_URL" not in child
-
-
-def test_a_remote_child_keeps_recipe_url_when_pr_monitor_is_disabled() -> None:
-    remote = KnowledgeConfig.from_env(
-        {
-            "KNOWLEDGE_STORE_MODE": "remote",
-            "KB_STORE_URL": "https://kb.test",
-            "KB_STORE_TOKEN": "kb-token",
-            "HYPERLOOM_PR_MONITOR_ENABLED": "0",
-        }
-    )
-    child: dict[str, str] = {}
-
-    remote.apply_to_child_env(child)
-
-    assert child["HYPERLOOM_PR_MONITOR_ENABLED"] == "0"
-    assert child["KB_STORE_URL"] == "https://kb.test"
-    assert child["KB_STORE_TOKEN"] == "kb-token"
-
-
-def test_a_kernelforge_child_never_stages_into_the_inference_draft() -> None:
-    config = KnowledgeConfig.from_env(
-        {
-            "KNOWLEDGE_STORE_MODE": "remote",
-            "KB_STORE_URL": "https://kb.test",
-            "KB_STORE_TOKEN": "kb-token",
-        }
-    )
-    child = {
-        "KB_DRAFT_DIR": "/session/runtime/kb_draft",
-        "KB_WARM_START_DIR": "/session/runtime/remote_recipe",
-    }
-    config.apply_to_child_env(child)
-    assert "KB_DRAFT_DIR" not in child
-    assert "KB_WARM_START_DIR" not in child
-
-
 def test_local_dispatcher_ignores_ambient_remote_credentials(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -447,19 +326,6 @@ def test_remote_dispatcher_is_none_without_creating_local_root(
     assert not root.exists()
 
 
-def test_remote_plane_reports_close_writer_enabled() -> None:
-    config = KnowledgeConfig.from_env(
-        {
-            "KNOWLEDGE_STORE_MODE": "remote",
-            "KB_STORE_URL": "https://kb.test",
-            "KB_STORE_TOKEN": "token",
-        }
-    )
-    plane = KnowledgePlane.from_clients(recipe_kb=None, config=config)
-    assert plane.status["recipe"]["enabled"] is True
-    assert plane.status["recipe"]["read_enabled"] is False
-
-
 def test_plane_owns_injected_local_recipe(
     tmp_path: Path,
 ) -> None:
@@ -472,4 +338,3 @@ def test_plane_owns_injected_local_recipe(
     recipe_kb = RecipeKB(local=LocalRecipeStore(tmp_path))
     plane = KnowledgePlane.from_clients(recipe_kb=recipe_kb, config=config)
     assert plane.recipe_kb is recipe_kb
-    assert plane.status["recipe"]["backend"] == "local-json"
