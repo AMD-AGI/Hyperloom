@@ -58,6 +58,9 @@ _IMAGE_BANNER = re.compile(r"^Docker runtime: .*?\bimage=(\S+)", re.M)
 _CONFIG_BANNER = re.compile(r"^config_ok=(\S+)\s*$", re.M)
 _IMPLEMENTER = re.compile(r"^Implementer: (\S+) / (\S+)$")
 _MODEL_CLASS = re.compile(r"'--model-class', '([^']+)'")
+#: The line KernelForge ends every implementer's prompt with (``kernelforge/orchestrator/agent.py``), and no planner's.
+_IMPLEMENTER_PROMPT_END = "Make your change(s) now."
+_ROUND_DIR = re.compile(r"^iter_(\d+)$")
 _PIPELINE = "forge-rewrite-by-flydsl"
 
 
@@ -275,7 +278,7 @@ def campaign_logs(records: list[FileRecord], claimed: set[Path]) -> list[Path]:
 
 
 class _Role(Enum):
-    """What one of the run's agents did, as its working directory tells."""
+    """What one of the run's agents did, as its working directory tells, or in the workspace itself its prompt."""
 
     LANE = "lane"
     PLANNING = "planning"
@@ -293,10 +296,15 @@ class _AgentSession:
 
     @property
     def role(self) -> _Role:
+        """The planners run in the workspace itself, as does the implementer of a kernel at its root, whose prompt
+        names a reasoning log or ends as every implementer's does."""
+
         if self.where.startswith("forge-lanes-"):
             return _Role.LANE
         if self.where == "engine":
-            return _Role.PLANNING
+            prompt = self.transcript.prompt
+            implements = self.transcript.reasoning_log is not None or _IMPLEMENTER_PROMPT_END in prompt
+            return _Role.IMPLEMENTER if implements else _Role.PLANNING
         if self.where.startswith("engine/forge_experiments/analysis"):
             return _Role.ANALYSIS
         if self.where.startswith("engine/"):
@@ -314,13 +322,13 @@ def _within(stamp: str, iteration: dict[str, Any]) -> bool:
     return bool(stamp and end) and str(iteration.get("started_at") or "") <= stamp <= str(end)
 
 
-def _implementer_sessions(
-    iteration: dict[str, Any], meta: dict[str, Any] | None, sessions: list[_AgentSession]
-) -> list[_AgentSession]:
-    """The session that produced the iteration's candidate.
+def _implementer_sessions(iteration: dict[str, Any], plan: str, sessions: list[_AgentSession]) -> list[_AgentSession]:
+    """The session that produced the iteration's candidate, when none was told to keep the reasoning log beside its
+    plan, as in runs made before KernelForge named one.
 
     A single session is told its round's plan by path, so its prompt names ``orchestration/iter_NNN``. A lane session
-    is given its lane's plan inline, so its prompt holds the plan KernelForge archived for the candidate it measured.
+    is given its lane's plan inline, so its prompt holds ``plan``, the plan KernelForge archived for the candidate it
+    measured; the plan's first heading stands for it, or the whole plan when it has none.
     """
 
     origin = iteration.get("change_kind")
@@ -330,16 +338,15 @@ def _implementer_sessions(
         return [session for session in implementers if marker in session.transcript.prompt] or [
             session for session in implementers if _within(session.transcript.started, iteration)
         ]
-    if origin is CandidateOrigin.LANE:
-        title = plan_title(str((meta or {}).get("plan") or ""))
+    if origin is CandidateOrigin.LANE and plan:
+        key = plan_title(plan) or plan
         end = str(iteration.get("completed_at") or "~")
         found = [
             session
             for session in sessions
             if session.role is _Role.LANE
             and session.lane == iteration.get("lane_number")
-            and title
-            and title in session.transcript.prompt
+            and key in session.transcript.prompt
             and session.transcript.started <= end
         ]
         return found[-1:]
@@ -348,32 +355,53 @@ def _implementer_sessions(
 
 @dataclass(frozen=True)
 class _Campaign:
-    """One campaign's KernelForge artifacts, the transcripts of its agents, and the files all its units name."""
+    """One campaign's KernelForge artifacts, the transcripts of its agents, the iterations its log shows by seq, and
+    the files all its units name."""
 
     root: Path
     experiments: Path
     sessions: list[_AgentSession]
+    rounds: dict[int, dict[str, Any]]
     files: list[Path]
 
     def iteration_unit(self, run: Run, iteration: dict[str, Any]) -> dict[str, Any]:
-        """An iteration's unit from its log lines, KernelForge's archive of it, and its implementer's transcript."""
+        """An iteration's unit from its log lines, KernelForge's archive of it, and its implementer's transcript.
+
+        forge-rewrite's logged source baseline is the original kernel's time, so it wins over the archive's, which is
+        the time of the port the forge-loop started from when the run state records no pristine baseline.
+        """
 
         archive = IterationArchive(self.experiments, iteration["seq"])
         meta = archive.meta()
         origin = iteration.get("change_kind")
-        plan_file = archive.plan_file(origin, str((meta or {}).get("plan") or "").strip())
+        plan = str((meta or {}).get("plan") or "").strip()
+        plan_file = archive.plan_file(origin, plan)
         unit = iteration_unit(run, iteration, [])
-        unit.update(archive.fields(origin, meta, plan_file))
-        transcripts = [session.transcript for session in _implementer_sessions(iteration, meta, self.sessions)]
+        archived = archive.fields(origin, meta, plan_file)
+        if run.source_ms is not None:
+            archived.pop("source_ms", None)
+        unit.update(archived)
+        transcripts = archive.sessions(plan_file, [session.transcript for session in self.sessions]) or [
+            session.transcript for session in _implementer_sessions(iteration, plan, self.sessions)
+        ]
         unit.update(implementer_fields(transcripts, plan_file, self.root))
         files = archive.files(plan_file) + [transcript.path for transcript in transcripts]
-        files += [
+        unit["log_files"] = log_files(self.files + files + self._planners(plan_file, iteration))
+        return unit
+
+    def _planners(self, plan_file: Path | None, iteration: dict[str, Any]) -> list[Path]:
+        """The transcripts of the planners of the round that planned ``plan_file``, or of ``iteration``'s own.
+
+        A fan-out round plans all its lanes at once, and its later lanes are measured in later iterations.
+        """
+
+        named = _ROUND_DIR.match(plan_file.parent.name) if plan_file is not None else None
+        planned = self.rounds.get(int(named.group(1)), iteration) if named else iteration
+        return [
             session.transcript.path
             for session in self.sessions
-            if session.role is _Role.PLANNING and _within(session.transcript.started, iteration)
+            if session.role is _Role.PLANNING and _within(session.transcript.started, planned)
         ]
-        unit["log_files"] = log_files(self.files + files)
-        return unit
 
 
 def _agent_sessions(records: list[FileRecord], artifacts: str) -> list[_AgentSession]:
@@ -471,13 +499,15 @@ def campaign_runs(log: Path, records: list[FileRecord], root: Path) -> ArenaRuns
         provenance=_campaign_provenance(text, lines, setup),
         source_ms=setup.source_ms,
     )
+    logged = iterations(setup)
     campaign = _Campaign(
         root=root,
         experiments=experiments,
         sessions=_agent_sessions(records, artifacts),
+        rounds={iteration["seq"]: iteration for iteration in logged},
         files=[log] + [path for path in (config_path, state_path) if path.is_file()],
     )
     units = [port_unit(run, setup, log_files(campaign.files))] if setup.port_start is not None else []
-    units += [campaign.iteration_unit(run, iteration) for iteration in iterations(setup)]
+    units += [campaign.iteration_unit(run, iteration) for iteration in logged]
     claimed = {log} | {record.path for record in records if is_under(record.path, forge_dir)}
     return ArenaRuns(units, frozenset(claimed))
