@@ -264,7 +264,7 @@ the barrier out of the conditional, do not try to make the condition uniform.
 
 ### Recovery
 ```bash
-rocm-smi                # 100% busy with no progress confirms the hang
+amd-smi metric --usage  # 100% busy with no progress confirms the hang
 sudo amdgpu-reset       # or reboot
 ```
 

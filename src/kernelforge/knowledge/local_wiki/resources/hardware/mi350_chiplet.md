@@ -126,7 +126,7 @@ hosting up to **8 instances of a 70B model** on one MI355X. A single large model
 - **Sizing the grid for 304 CUs** — query `hipGetDeviceProperties → multiProcessorCount`.
 
 ## Verify
-- `amd-smi static` / `rocm-smi --showcomputepartition --showmemorypartition` for the current mode.
+- `amd-smi partition` for the current mode.
 - `rocprof-compute`: XCD load balance, **L2 hit rate**, and **HBM read volume**. The real pass
   condition for a locality change is **lower HBM reads at the same FLOP count** — wall time alone can
   move for unrelated reasons.

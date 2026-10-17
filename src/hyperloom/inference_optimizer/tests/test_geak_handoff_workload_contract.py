@@ -306,7 +306,7 @@ async def test_gpus_that_cannot_be_checked_are_still_handed_to_geak(
     coord = _coord(tmp_path)
     launches = _launch_mock_runner(coord, monkeypatch, tmp_path)
     _gpus_at_handoff(
-        monkeypatch, GpuHandoff(reaped=[], busy=[], holders=[], unverified="rocm-smi could not report VRAM")
+        monkeypatch, GpuHandoff(reaped=[], busy=[], holders=[], unverified="amd-smi could not report VRAM")
     )
 
     with caplog.at_level("WARNING", logger="hyperloom.orchestrator.phases.kernel"):

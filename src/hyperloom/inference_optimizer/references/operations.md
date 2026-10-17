@@ -49,7 +49,7 @@ python3 -m hyperloom optimize \
 
 - `--model`: required model path.
 - `--framework`: `sglang` (default), `vllm`, or `atom`; atom is single-node only.
-- `--gpu-type`: optional; omitted means rocm-smi auto-detect.
+- `--gpu-type`: optional; omitted means amd-smi static --asic auto-detect.
 - `--model-class`: optional; when unset, Coordinator boot infers it from
   model metadata or model-path family keywords. Examples: `dense`, `moe_mla`,
   `moe_swa`, `moe_mla_nsa`.

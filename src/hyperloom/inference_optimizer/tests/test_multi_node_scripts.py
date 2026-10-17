@@ -421,7 +421,7 @@ def test_kill_remote_sigterms_then_process_exits(tmp_path, monkeypatch):
     monkeypatch.setattr("os.getpgid", _getpgid)
     monkeypatch.setattr("os.killpg", _killpg)
     monkeypatch.setattr("time.sleep", lambda _s: None)
-    # Neutralize the post-kill GPU-VRAM reclaim path so the test never shells out to rocm-smi (primary footprint +
+    # Neutralize the post-kill GPU-VRAM reclaim path so the test never shells out to amd-smi (primary footprint +
     # fallback per-card both stubbed).
     monkeypatch.setattr(km, "_gpu_total_used_mb", lambda: None)
     monkeypatch.setattr(km, "_gpu_used_mb_for_pgids", lambda _pgids: None)
@@ -441,26 +441,62 @@ class _FakeProc:
         self.stdout = stdout
 
 
-def test_gpu_vram_used_mb_parses_bytes_to_mib(monkeypatch):
-    """rocm-smi byte values are converted to MiB (per-card used VRAM only)."""
+#: ``amd-smi metric --mem-usage`` for two cards, with the visible-VRAM and GTT aliases a loose key match would catch.
+_AMD_SMI_MEM_USAGE = {
+    "gpu_data": [
+        {
+            "gpu": 0,
+            "mem_usage": {
+                "total_vram": {"value": 65536, "unit": "MB"},
+                "used_vram": {"value": 100, "unit": "MB"},
+                "used_visible_vram": {"value": 100, "unit": "MB"},
+                "used_gtt": {"value": 49152, "unit": "MB"},
+            },
+        },
+        {
+            "gpu": 1,
+            "mem_usage": {
+                "total_vram": {"value": 65536, "unit": "MB"},
+                "used_vram": {"value": 250, "unit": "MB"},
+            },
+        },
+    ]
+}
+
+
+def test_gpu_vram_used_mb_reads_vram_not_gtt(monkeypatch):
+    """Per-card used VRAM in MiB; the GTT and visible-VRAM neighbours are not VRAM and must not be summed in."""
     km = _load_script_module("km_gpu_parse", "kill_multinode.py")
-    payload = {
-        "card0": {"VRAM Total Memory (B)": "68702699520", "VRAM Total Used Memory (B)": str(1024 * 1024 * 100)},
-        "card1": {"VRAM Total Used Memory (B)": str(1024 * 1024 * 250)},
-        "system": {"Driver version": "6.1.4"},  # non-card dict must be ignored
-    }
+    monkeypatch.setattr(km.subprocess, "run", lambda *a, **k: _FakeProc(0, json.dumps(_AMD_SMI_MEM_USAGE)))
+    assert km._gpu_vram_used_mb() == [100.0, 250.0]
+
+
+def test_gpu_vram_used_mb_matches_the_shared_reader(monkeypatch):
+    """The pod-side copy and ``hyperloom.common.amd_smi`` must agree: this script cannot import the shared one."""
+    from hyperloom.common import amd_smi
+
+    km = _load_script_module("km_gpu_parity", "kill_multinode.py")
+    text = json.dumps(_AMD_SMI_MEM_USAGE)
+    monkeypatch.setattr(km.subprocess, "run", lambda *a, **k: _FakeProc(0, text))
+    monkeypatch.setattr(amd_smi.shutil, "which", lambda _n: "/opt/rocm/bin/amd-smi")
+    monkeypatch.setattr(amd_smi.subprocess, "run", lambda *a, **k: _FakeProc(0, text))
+    assert km._gpu_vram_used_mb() == [gpu.used_mib for gpu in amd_smi.gpu_vram_usage()]
+
+
+def test_gpu_vram_used_mb_handles_a_bare_scalar(monkeypatch):
+    """Older amd-smi prints some metrics unwrapped, so a bare number must read as MiB, not be dropped."""
+    km = _load_script_module("km_gpu_bare", "kill_multinode.py")
+    payload = {"gpu_data": [{"gpu": 0, "mem_usage": {"used_vram": 512}}]}
     monkeypatch.setattr(km.subprocess, "run", lambda *a, **k: _FakeProc(0, json.dumps(payload)))
-    used = km._gpu_vram_used_mb()
-    # Only the "used" keys are picked (not "Total Memory"); bytes -> MiB.
-    assert used == [100.0, 250.0]
+    assert km._gpu_vram_used_mb() == [512.0]
 
 
-def test_gpu_vram_used_mb_none_when_rocm_smi_missing(monkeypatch):
-    """A missing rocm-smi binary degrades to None (skip the GPU wait)."""
+def test_gpu_vram_used_mb_none_when_amd_smi_missing(monkeypatch):
+    """A missing amd-smi binary degrades to None (skip the GPU wait)."""
     km = _load_script_module("km_gpu_missing", "kill_multinode.py")
 
     def _boom(*a, **k):
-        raise FileNotFoundError("rocm-smi")
+        raise FileNotFoundError("amd-smi")
 
     monkeypatch.setattr(km.subprocess, "run", _boom)
     assert km._gpu_vram_used_mb() is None
@@ -493,8 +529,8 @@ def test_wait_gpu_free_reports_busy_gpus_at_timeout(monkeypatch):
     assert busy == [5000.0]
 
 
-def test_wait_gpu_free_skips_when_rocm_smi_unavailable(monkeypatch):
-    """None from rocm-smi -> skip the wait entirely (empty)."""
+def test_wait_gpu_free_skips_when_amd_smi_unavailable(monkeypatch):
+    """None from amd-smi -> skip the wait entirely (empty)."""
     km = _load_script_module("km_gpu_skip", "kill_multinode.py")
     monkeypatch.setattr(km, "_gpu_vram_used_mb", lambda: None)
     assert km._wait_gpu_free(threshold_mb=2048.0, timeout_s=999.0) == []
@@ -544,17 +580,50 @@ def test_gpu_total_used_mb_sums_cards(monkeypatch):
     assert km._gpu_total_used_mb() is None
 
 
+#: ``amd-smi process --json`` for two cards; mirrors the schema confirmed by reading the amd-smi CLI's own
+#: ``process.py`` (``process_info`` is a dict with an unwrapped ``pid`` and a unit-wrapped ``memory_usage.vram_mem``
+#: in bytes, or the literal string ``"No running processes detected"``/``"N/A"`` when nothing is running or matched).
+_AMD_SMI_PROCESS_LIST = {
+    "gpu_data": [
+        {
+            "gpu": 0,
+            "process_list": [
+                {
+                    "process_info": {
+                        "name": "launcher",
+                        "pid": 100,
+                        "memory_usage": {"vram_mem": {"value": 0, "unit": "B"}},
+                    }
+                },  # our pg leader, no VRAM
+                {
+                    "process_info": {
+                        "name": "engine",
+                        "pid": 101,
+                        "memory_usage": {"vram_mem": {"value": 104857600, "unit": "B"}},
+                    }
+                },  # child in our pg -> 100 MiB
+            ],
+        },
+        {
+            "gpu": 1,
+            "process_list": [
+                {
+                    "process_info": {
+                        "name": "other",
+                        "pid": 900,
+                        "memory_usage": {"vram_mem": {"value": 209715200, "unit": "B"}},
+                    }
+                }  # co-tenant, different pg
+            ],
+        },
+    ]
+}
+
+
 def test_gpu_used_mb_for_pgids_attributes_by_process_group(monkeypatch):
     """VRAM is summed only for pids whose process group is ours (child included)."""
     km = _load_script_module("km_gpu_pgids", "kill_multinode.py")
-    payload = {
-        "system": {
-            "PID100": "launcher, 0, 0, 0, unknown",  # our pg leader, no VRAM
-            "PID101": "engine, 1, 104857600, 0, unknown",  # child in our pg -> 100 MiB
-            "PID900": "other, 1, 209715200, 0, unknown",  # co-tenant, different pg
-        }
-    }
-    monkeypatch.setattr(km.subprocess, "run", lambda *a, **k: _FakeProc(0, json.dumps(payload)))
+    monkeypatch.setattr(km.subprocess, "run", lambda *a, **k: _FakeProc(0, json.dumps(_AMD_SMI_PROCESS_LIST)))
     pgmap = {100: 50, 101: 50, 900: 90}  # pids 100+101 share pgid 50 (ours)
     monkeypatch.setattr("os.getpgid", lambda pid: pgmap[pid])
     assert km._gpu_used_mb_for_pgids({50}) == 100.0
@@ -564,12 +633,38 @@ def test_gpu_used_mb_for_pgids_attributes_by_process_group(monkeypatch):
     assert km._gpu_used_mb_for_pgids(set()) == 0.0
 
 
-def test_gpu_used_mb_for_pgids_none_when_rocm_smi_unavailable(monkeypatch):
-    """rocm-smi missing/bad -> None so the caller uses the fallback path."""
+def test_gpu_used_mb_for_pgids_treats_no_running_processes_as_zero(monkeypatch):
+    """ "No running processes detected" is a string, not a process dict -- must not be summed or crash."""
+    km = _load_script_module("km_gpu_pgids_empty", "kill_multinode.py")
+    payload = {"gpu_data": [{"gpu": 0, "process_list": [{"process_info": "No running processes detected"}]}]}
+    monkeypatch.setattr(km.subprocess, "run", lambda *a, **k: _FakeProc(0, json.dumps(payload)))
+    assert km._gpu_used_mb_for_pgids({1}) == 0.0
+
+
+def test_gpu_used_mb_for_pgids_handles_a_bare_scalar(monkeypatch):
+    """Older amd-smi may print vram_mem unwrapped; a bare number must read as bytes, not be dropped."""
+    km = _load_script_module("km_gpu_pgids_bare", "kill_multinode.py")
+    payload = {
+        "gpu_data": [
+            {
+                "gpu": 0,
+                "process_list": [
+                    {"process_info": {"name": "engine", "pid": 101, "memory_usage": {"vram_mem": 104857600}}}
+                ],
+            }
+        ]
+    }
+    monkeypatch.setattr(km.subprocess, "run", lambda *a, **k: _FakeProc(0, json.dumps(payload)))
+    monkeypatch.setattr("os.getpgid", lambda _pid: 50)
+    assert km._gpu_used_mb_for_pgids({50}) == 100.0
+
+
+def test_gpu_used_mb_for_pgids_none_when_amd_smi_unavailable(monkeypatch):
+    """amd-smi missing/bad -> None so the caller uses the fallback path."""
     km = _load_script_module("km_gpu_pgids_none", "kill_multinode.py")
 
     def _boom(*a, **k):
-        raise FileNotFoundError("rocm-smi")
+        raise FileNotFoundError("amd-smi")
 
     monkeypatch.setattr(km.subprocess, "run", _boom)
     assert km._gpu_used_mb_for_pgids({1}) is None
@@ -592,8 +687,8 @@ def test_wait_gpu_reclaimed_reports_residual_at_timeout(monkeypatch):
     assert residual == 260000.0
 
 
-def test_wait_gpu_reclaimed_none_when_rocm_smi_unavailable(monkeypatch):
-    """rocm-smi unavailable -> skip the wait (None)."""
+def test_wait_gpu_reclaimed_none_when_amd_smi_unavailable(monkeypatch):
+    """amd-smi unavailable -> skip the wait (None)."""
     km = _load_script_module("km_reclaim_skip", "kill_multinode.py")
     monkeypatch.setattr(km, "_gpu_total_used_mb", lambda: None)
     assert km._wait_gpu_reclaimed(2000.0, 2048.0, 999.0) is None
@@ -647,7 +742,7 @@ def test_kill_remote_fallback_45s_when_footprint_unknown(monkeypatch, tmp_path):
     """When footprint can't be attributed, fall back to the 45s per-card wait."""
     km = _load_script_module("km_fallback", "kill_multinode.py")
     d = _prep_killable_pid_dir(km, monkeypatch, tmp_path)
-    monkeypatch.setattr(km, "_gpu_total_used_mb", lambda: None)  # rocm-smi unavailable
+    monkeypatch.setattr(km, "_gpu_total_used_mb", lambda: None)  # amd-smi unavailable
     monkeypatch.setattr(km, "_gpu_used_mb_for_pgids", lambda _pgids: None)
     seen = {}
 
@@ -757,9 +852,101 @@ def test_build_vllm_cmd_kv_transfer_config_defaults_and_roles():
     assert dcfg["kv_role"] == "kv_consumer"
 
 
+#: ``amd-smi firmware --json`` captured live from a Strix Halo host; ``fw_version`` is reported as a string, and
+#: identically shaped on both a ROCm 7.15 and a ROCm 10.2 amd-smi install on that host.
+_AMD_SMI_FIRMWARE = {
+    "gpu_data": [
+        {
+            "gpu": 0,
+            "fw_list": [
+                {"fw_id": "CP_PFP", "fw_version": "46"},
+                {"fw_id": "CP_ME", "fw_version": "32"},
+                {"fw_id": "CP_MEC1", "fw_version": "32"},
+            ],
+        }
+    ]
+}
+
+
+def test_probe_mec_firmware_lt_177_true_below_threshold(monkeypatch):
+    lm = _load_script_module("lm_mec_old", "launch_multinode.py")
+    monkeypatch.setattr(lm.subprocess, "run", lambda *a, **k: _FakeProc(0, json.dumps(_AMD_SMI_FIRMWARE)))
+    assert lm._probe_mec_firmware_lt_177() is True
+
+
+def test_probe_mec_firmware_lt_177_false_at_or_above_threshold(monkeypatch):
+    lm = _load_script_module("lm_mec_new", "launch_multinode.py")
+    payload = {"gpu_data": [{"gpu": 0, "fw_list": [{"fw_id": "CP_MEC1", "fw_version": "177"}]}]}
+    monkeypatch.setattr(lm.subprocess, "run", lambda *a, **k: _FakeProc(0, json.dumps(payload)))
+    assert lm._probe_mec_firmware_lt_177() is False
+
+
+def test_probe_mec_firmware_lt_177_false_when_no_mec_entry(monkeypatch):
+    """A card whose firmware listing carries no MEC entry must not be treated as the old-firmware case."""
+    lm = _load_script_module("lm_mec_missing", "launch_multinode.py")
+    payload = {"gpu_data": [{"gpu": 0, "fw_list": [{"fw_id": "CP_PFP", "fw_version": "46"}]}]}
+    monkeypatch.setattr(lm.subprocess, "run", lambda *a, **k: _FakeProc(0, json.dumps(payload)))
+    assert lm._probe_mec_firmware_lt_177() is False
+
+
+def test_probe_mec_firmware_lt_177_false_when_amd_smi_unavailable(monkeypatch):
+    lm = _load_script_module("lm_mec_missing_binary", "launch_multinode.py")
+
+    def _boom(*a, **k):
+        raise FileNotFoundError("amd-smi")
+
+    monkeypatch.setattr(lm.subprocess, "run", _boom)
+    assert lm._probe_mec_firmware_lt_177() is False
+
+
+def test_probe_mec_firmware_lt_177_false_on_bad_json_or_nonzero(monkeypatch):
+    """Non-zero exit, empty stdout, or unparseable JSON all degrade to False, never raise."""
+    lm = _load_script_module("lm_mec_badjson", "launch_multinode.py")
+    monkeypatch.setattr(lm.subprocess, "run", lambda *a, **k: _FakeProc(1, "boom"))
+    assert lm._probe_mec_firmware_lt_177() is False
+    monkeypatch.setattr(lm.subprocess, "run", lambda *a, **k: _FakeProc(0, "   "))
+    assert lm._probe_mec_firmware_lt_177() is False
+    monkeypatch.setattr(lm.subprocess, "run", lambda *a, **k: _FakeProc(0, "{not json"))
+    assert lm._probe_mec_firmware_lt_177() is False
+
+
+def test_probe_mec_firmware_lt_177_prefers_mec1_over_an_earlier_mec2(monkeypatch):
+    """``CP_MEC1`` decides the gate even when ``amd-smi`` lists ``CP_MEC2`` first.
+
+    A part can report both MEC queues at different firmware versions, so a bare ``"MEC" in fw_id`` match -- what the
+    old rocm-smi line scrape did, and what the first port kept -- let amd-smi's list order decide
+    ``HSA_NO_SCRATCH_RECLAIM``. ``CP_MEC1`` is the id this host reports under both amd-smi majors (26.5.0 and
+    27.1.0); no dual-MEC part was available, so which queue the workaround truly depends on is **unverified** -- but
+    deferring to a named id is deterministic where list order was not.
+    """
+    lm = _load_script_module("lm_mec_dual", "launch_multinode.py")
+    payload = {
+        "gpu_data": [
+            {
+                "gpu": 0,
+                "fw_list": [
+                    {"fw_id": "CP_MEC2", "fw_version": "32"},  # old, and listed first
+                    {"fw_id": "CP_MEC1", "fw_version": "177"},  # the one that decides
+                ],
+            }
+        ]
+    }
+    monkeypatch.setattr(lm.subprocess, "run", lambda *a, **k: _FakeProc(0, json.dumps(payload)))
+    assert lm._probe_mec_firmware_lt_177() is False  # MEC1's 177 decides, not MEC2's 32
+
+
+def test_probe_mec_firmware_lt_177_falls_back_when_no_mec1_is_reported(monkeypatch):
+    """A part that names its MEC queue something else still probes rather than silently skipping the workaround."""
+    lm = _load_script_module("lm_mec_fallback", "launch_multinode.py")
+    payload = {"gpu_data": [{"gpu": 0, "fw_list": [{"fw_id": "CP_MEC2", "fw_version": "32"}]}]}
+    monkeypatch.setattr(lm.subprocess, "run", lambda *a, **k: _FakeProc(0, json.dumps(payload)))
+    assert lm._probe_mec_firmware_lt_177() is True
+
+
 def test_subprocess_env_prepends_venv_bin(monkeypatch):
     lm = _load_script_module("lm_test_env", "launch_multinode.py")
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setattr(lm, "_probe_mec_firmware_lt_177", lambda: False)
     env = lm._subprocess_env()
     assert env["PATH"].startswith("/opt/venv/bin:")
 
@@ -767,9 +954,27 @@ def test_subprocess_env_prepends_venv_bin(monkeypatch):
 def test_subprocess_env_idempotent_if_already_first(monkeypatch):
     lm = _load_script_module("lm_test_env2", "launch_multinode.py")
     monkeypatch.setenv("PATH", "/opt/venv/bin:/usr/bin")
+    monkeypatch.setattr(lm, "_probe_mec_firmware_lt_177", lambda: False)
     env = lm._subprocess_env()
     assert env["PATH"].startswith("/opt/venv/bin")
     assert env["PATH"].count("/opt/venv/bin") == 1
+
+
+def test_subprocess_env_gates_hsa_no_scratch_reclaim_on_old_mec(monkeypatch):
+    lm = _load_script_module("lm_env_old_mec", "launch_multinode.py")
+    monkeypatch.delenv("HSA_NO_SCRATCH_RECLAIM", raising=False)
+    monkeypatch.setattr(lm, "_probe_mec_firmware_lt_177", lambda: True)
+    env = lm._subprocess_env()
+    assert env["HSA_NO_SCRATCH_RECLAIM"] == "1"
+
+
+def test_subprocess_env_leaves_an_explicit_override_alone(monkeypatch):
+    """An operator-set value is a deliberate choice and must not be overwritten by the probe."""
+    lm = _load_script_module("lm_env_override", "launch_multinode.py")
+    monkeypatch.setenv("HSA_NO_SCRATCH_RECLAIM", "0")
+    monkeypatch.setattr(lm, "_probe_mec_firmware_lt_177", lambda: True)
+    env = lm._subprocess_env()
+    assert env["HSA_NO_SCRATCH_RECLAIM"] == "0"
 
 
 def test_detach_framework_launch_starts_sleep(tmp_path):

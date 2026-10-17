@@ -7,11 +7,12 @@ lane ceilings, path allowlists, and the free-form task-description guard.
 
 from __future__ import annotations
 
-import subprocess
+import json
 from pathlib import Path
 
 import pytest
 
+from hyperloom.common import amd_smi
 from hyperloom.common.visible_devices import detect_gpu_count
 from hyperloom.orchestrator.policy import gate as pol
 from hyperloom.orchestrator.policy.gate import (
@@ -44,29 +45,29 @@ def test_detect_gpu_count_empty_mask_returns_zero(monkeypatch) -> None:
     assert detect_gpu_count() == 0
 
 
-def test_detect_gpu_count_rocm_smi_fallback(monkeypatch) -> None:
+def test_detect_gpu_count_amd_smi_fallback(monkeypatch) -> None:
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
 
     class _CP:
         returncode = 0
-        stdout = "GPU[0]\t: foo\nGPU[1]\t: bar\nother line\n"
+        stdout = json.dumps([{"gpu": 0, "bdf": "0000:c5:00.0"}, {"gpu": 1, "bdf": "0000:c6:00.0"}])
         stderr = ""
 
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _CP())
+    monkeypatch.setattr(amd_smi.subprocess, "run", lambda *a, **k: _CP())
     assert detect_gpu_count() == 2
 
 
-def test_detect_gpu_count_rocm_smi_missing(monkeypatch) -> None:
+def test_detect_gpu_count_amd_smi_missing(monkeypatch) -> None:
     monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
     monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
 
     def _boom(*a, **k):
-        raise FileNotFoundError("rocm-smi")
+        raise FileNotFoundError("amd-smi")
 
-    monkeypatch.setattr(subprocess, "run", _boom)
+    monkeypatch.setattr(amd_smi.subprocess, "run", _boom)
     assert detect_gpu_count() == 0
 
 

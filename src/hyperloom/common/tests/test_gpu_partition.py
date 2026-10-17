@@ -34,6 +34,10 @@ def _partition_payload(mode: str, gpu_id: int = 0) -> dict:
     return {"current_partition": [{"gpu_id": gpu_id, "accelerator_type": mode}]}
 
 
+def _memory_partition_payload(mode: str, gpu_id: int = 0) -> dict:
+    return {"memory_partition": [{"gpu_id": gpu_id, "current_memory_partition": mode}]}
+
+
 def _vram_payload(value: float, unit: str = "MB") -> dict:
     return {"gpu_data": [{"vram": {"size": {"value": value, "unit": unit}}}]}
 
@@ -88,6 +92,41 @@ class TestReadPartitionMode:
             ]
         }
         assert gp.read_partition_modes() == {1: "DPX"}
+
+
+class TestReadMemoryPartitionMode:
+    def test_reads_the_mode_of_the_named_card(self, smi):
+        smi.payloads["partition"] = {
+            "memory_partition": [
+                {"gpu_id": 0, "current_memory_partition": "NPS1"},
+                {"gpu_id": 3, "current_memory_partition": "NPS4"},
+            ]
+        }
+        assert gp.read_memory_partition_mode(3) == "NPS4"
+
+    def test_a_card_absent_from_the_report_raises(self, smi):
+        smi.payloads["partition"] = _memory_partition_payload("NPS1", gpu_id=0)
+        with pytest.raises(gp.PartitionError, match="no memory-partition state for GPU 7"):
+            gp.read_memory_partition_mode(7)
+
+    def test_an_empty_report_raises_rather_than_returning_nothing(self, smi):
+        smi.payloads["partition"] = {"memory_partition": []}
+        with pytest.raises(gp.PartitionError, match="reported no memory-partition state"):
+            gp.read_memory_partition_modes()
+
+    def test_rows_without_a_usable_gpu_id_are_skipped(self, smi):
+        smi.payloads["partition"] = {
+            "memory_partition": [
+                {"gpu_id": "n/a", "current_memory_partition": "NPS1"},
+                {"gpu_id": 1, "current_memory_partition": "NPS2"},
+            ]
+        }
+        assert gp.read_memory_partition_modes() == {1: "NPS2"}
+
+    def test_an_na_reading_is_returned_verbatim_not_filtered(self, smi):
+        """An APU reports the literal string "N/A"; distinguishing that from a mode is the caller's call, not ours."""
+        smi.payloads["partition"] = _memory_partition_payload("N/A", gpu_id=0)
+        assert gp.read_memory_partition_mode(0) == "N/A"
 
 
 class TestReadDeviceCu:
@@ -289,7 +328,14 @@ class TestPublicSurface:
 
     @pytest.mark.parametrize(
         "name",
-        ["read_partition_mode", "read_partition_modes", "read_device_cu", "read_device_gib"],
+        [
+            "read_partition_mode",
+            "read_partition_modes",
+            "read_memory_partition_mode",
+            "read_memory_partition_modes",
+            "read_device_cu",
+            "read_device_gib",
+        ],
     )
     def test_the_probe_helpers_behind_observe_partition_are_not_advertised(self, name):
         """``observe_partition`` calls itself the single entry point a caller needs."""

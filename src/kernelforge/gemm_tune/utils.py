@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.amd_smi import gpu_status
+
 from .aiter_script_map import TUNER_SCRIPT_HINTS as _TUNER_SCRIPT_HINTS
 
 # Re-exported: callers and tests import them from this module.
@@ -63,7 +65,7 @@ TUNER_ENV_VARS = {
 
 @dataclass
 class GpuInfo:
-    """GPU status from rocm-smi."""
+    """GPU status from amd-smi. Readings stay strings so an unsupported field reports as ``""`` rather than a zero."""
 
     gpu_id: int
     temperature: str
@@ -81,43 +83,38 @@ def find_tuner_script(tuner_name: str) -> Path | None:
     return discover_tuner_script(tuner_name)
 
 
+def _reading(value: float | None) -> str:
+    """Render one amd-smi reading, with ``""`` for a field the part does not expose."""
+    if value is None:
+        return ""
+    return str(int(value)) if float(value).is_integer() else str(value)
+
+
 def check_gpu_status(skip: bool = False) -> list[GpuInfo]:
-    """Run rocm-smi and return GPU status list. Returns empty if skip=True or rocm-smi unavailable."""
+    """Return per-GPU status from amd-smi; empty when ``skip`` is set or amd-smi cannot be read.
+
+    Memory is reported in MiB, not the bytes rocm-smi used to print, because that is amd-smi's unit for it.
+
+    Args:
+        skip: Do not probe at all.
+
+    Returns:
+        list[GpuInfo]: One entry per card, or ``[]`` when skipped or unreadable.
+    """
     if skip:
         return []
-    try:
-        proc = subprocess.run(
-            ["rocm-smi", "--showuse", "--showmemuse", "--showtemp", "--showpower", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=15,
+    return [
+        GpuInfo(
+            gpu_id=status.gpu_id,
+            temperature=_reading(status.temperature_c),
+            power=_reading(status.power_w),
+            utilization=_reading(status.utilization_pct),
+            memory_used=_reading(status.memory_used_mib),
+            memory_total=_reading(status.memory_total_mib),
+            busy=status.busy,
         )
-        if proc.returncode != 0:
-            log.warning("rocm-smi returned %d", proc.returncode)
-            return []
-        data = json.loads(proc.stdout)
-        gpus = []
-        for key, info in data.items():
-            if not key.startswith("card"):
-                continue
-            gpu_id = int(key.replace("card", ""))
-            util_str = str(info.get("GPU use (%)", info.get("GPU Utilization (%)", "0")))
-            util_val = float(util_str.replace("%", "").strip() or "0")
-            gpus.append(
-                GpuInfo(
-                    gpu_id=gpu_id,
-                    temperature=str(info.get("Temperature (Sensor edge) (C)", "")),
-                    power=str(info.get("Average Graphics Package Power (W)", "")),
-                    utilization=util_str,
-                    memory_used=str(info.get("VRAM Total Used Memory (B)", "")),
-                    memory_total=str(info.get("VRAM Total Memory (B)", "")),
-                    busy=util_val > 50.0,
-                )
-            )
-        return gpus
-    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as exc:
-        log.warning("GPU check failed: %s", exc)
-        return []
+        for status in gpu_status()
+    ]
 
 
 #: MI355X/ROCm 7.2 measured 1.64 GiB peak per hipcc job; round up to cover

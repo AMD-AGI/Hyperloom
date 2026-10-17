@@ -360,7 +360,7 @@ def _focus_comm_specialist(inp: SpecialistPromptInputs) -> list[str]:
         "",
         "**Pitfalls**",
         "- INT4 QuickReduce at TP=2 — overhead dominates the bandwidth savings.",
-        "- Tuning NCCL env vars without confirming `rocm-smi --showtopo` shows",
+        "- Tuning NCCL env vars without confirming `amd-smi topology` shows",
         "  the expected XGMI / PCIe topology.",
     ]
 
@@ -415,7 +415,7 @@ def _focus_system_specialist(inp: SpecialistPromptInputs) -> list[str]:
         "",
         "**What to read first**",
         "- `/sys/class/kfd/kfd/` (read-only probes via Bash).",
-        "- `rocm-smi --showmeminfo VRAM` / `rocm-smi --showtopo`.",
+        "- `amd-smi metric --mem-usage` / `amd-smi topology`.",
         "- KB anchor `systems.*` (KFD / dispatch / memory).",
         "",
         "**Winning techniques to consider**",

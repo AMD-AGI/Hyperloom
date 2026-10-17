@@ -271,14 +271,43 @@ def harvest_leaked_artifacts(
     return harvested
 
 
-# Multi-node GPU metrics: the GPU pods run a rocm-smi sampler (see launch_infera_node.py) streaming per-card samples
+# Multi-node GPU metrics: the GPU pods run an amd-smi sampler (see launch_infera_node.py) streaming per-card samples
 # to ``$HYPERLOOM_MN_SERVER_LOG_DIR/gpu_metrics_<host>.csv`` on shared storage.
 _MN_GPU_SAMPLE_CAP: int = 5000
 _MN_GPU_WINDOW_SLACK_SEC: float = 2.0
 
+# amd-smi ``metric --csv`` column names, most-preferred first. These are exact, not substrings, because the column
+# set they sit in is hostile to substring matching: ``total_gtt`` is 48 GiB next to a 2 GiB ``total_vram`` on an APU,
+# ``mem_voltage`` sits beside ``socket_power``, and ``apu_average_dram_reads`` is a list cell. A column amd-smi does
+# not support reads as the literal string ``N/A``, which ``_num_from_cell`` resolves to ``None`` and ``_pick`` skips,
+# so a preference list falls through to the next spelling rather than recording a non-value.
+_AMD_SMI_TEMPERATURE_COLS: tuple[str, ...] = ("junction", "hotspot", "edge")
+_AMD_SMI_POWER_COLS: tuple[str, ...] = ("socket_power", "average_socket_power", "apu_average_socket_power")
+#: ``usage`` is last and is the 26.2.2 (ROCm 7.2.3) spelling: where a part reports no utilization, amd-smi renders
+#: ``usage`` as the bare string ``"N/A"`` and ``--csv`` emits it as ONE column, rather than expanding it into
+#: ``gfx_activity`` and friends. Whether a part that does report utilization still collapses to a single ``usage``
+#: column on 26.2.2 could not be checked here -- it needs an Instinct part on ROCm 7.2.3 -- so the name is accepted
+#: defensively. A cell holding ``"N/A"`` yields no number and is skipped, so this costs nothing where it does not apply.
+_AMD_SMI_UTIL_COLS: tuple[str, ...] = (
+    "gfx_activity",
+    "graphics_activity",
+    "apu_average_gfx_activity",
+    "usage",
+)
+_AMD_SMI_CLOCK_COLS: tuple[str, ...] = ("gfx_0_clk", "apu_average_gfxclk_frequency")
+_AMD_SMI_VRAM_USED_COL = "used_vram"
+_AMD_SMI_VRAM_TOTAL_COL = "total_vram"
+
 
 def _num_from_cell(cell: Any) -> float | None:
-    """Parse the first numeric token from a rocm-smi CSV cell (unit-tolerant)."""
+    """Parse the first numeric token from a sampler CSV cell (unit-tolerant).
+
+    Args:
+        cell: One CSV cell.
+
+    Returns:
+        float | None: The first number in the cell, or ``None`` for an empty cell or amd-smi's ``N/A``.
+    """
     if cell is None:
         return None
     m = re.search(r"-?\d+\.?\d*", str(cell))
@@ -286,7 +315,20 @@ def _num_from_cell(cell: Any) -> float | None:
 
 
 def _row_to_gpu_sample(header: list[str], row: list[str]) -> dict[str, Any]:
-    """Map one rocm-smi ``--csv`` data row to a flat gpu_monitor sample."""
+    """Map one sampler ``--csv`` data row to a flat gpu_monitor sample.
+
+    Reads the amd-smi ``metric`` header by exact column name. There is deliberately no rocm-smi header path: the
+    sampler is read from this checkout and shipped to the pod at launch, so producer and consumer are always the
+    same build, and a pre-existing CSV whose header disagrees is rotated out of this consumer's glob by the sampler
+    before any new row is written.
+
+    Args:
+        header: The CSV header row, as written by the pod sampler.
+        row: One data row from the same file.
+
+    Returns:
+        dict[str, Any]: The fields that could be resolved; empty when the header matched nothing.
+    """
     n = min(len(header), len(row))
     cols = [(header[i] or "").strip().lower() for i in range(n)]
     vals = [_num_from_cell(row[i]) for i in range(n)]
@@ -299,31 +341,31 @@ def _row_to_gpu_sample(header: list[str], row: list[str]) -> dict[str, Any]:
                     return vals[i]
         return None
 
+    def _exact(*names: str) -> tuple[Any, ...]:
+        """Build one equality predicate per name, so name order beats column order."""
+        return tuple((lambda c, name=name: c == name) for name in names)
+
     sample: dict[str, Any] = {}
-    temp = _pick(
-        lambda c: "temp" in c and "junction" in c,
-        lambda c: "temp" in c and "edge" in c,
-        lambda c: "temp" in c and "mem" not in c,
-        lambda c: "temp" in c,
-    )
+    temp = _pick(*_exact(*_AMD_SMI_TEMPERATURE_COLS))
     if temp is not None:
         sample["temperature_c"] = temp
-    power = _pick(
-        lambda c: "average" in c and "power" in c,
-        lambda c: "socket" in c and "power" in c,
-        lambda c: "power" in c,
-    )
+    power = _pick(*_exact(*_AMD_SMI_POWER_COLS))
     if power is not None:
         sample["power_w"] = power
-    clock = _pick(lambda c: "sclk" in c)
+    clock = _pick(*_exact(*_AMD_SMI_CLOCK_COLS))
     if clock is not None:
         sample["clock_mhz"] = clock
-    util = _pick(lambda c: "gpu use" in c or "gpu_use" in c or c == "gpu%")
+    util = _pick(*_exact(*_AMD_SMI_UTIL_COLS))
     if util is not None:
         sample["gpu_util_pct"] = util
-    vram = _pick(lambda c: "vram" in c or ("memory" in c and "use" in c))
-    if vram is not None:
-        sample["vram_pct"] = vram
+    # amd-smi has no VRAM-percent field at all -- rocm-smi's ``GPU Memory Allocated (VRAM%)`` was already a
+    # percentage -- so it is computed from the two capacity columns, by exact name. Reading a capacity column AS a
+    # percentage is the specific silent failure this migration had to avoid: ``used_vram`` on an MI300 is a
+    # four-digit MiB count that looks entirely plausible in a field named ``_pct``.
+    used = _pick(*_exact(_AMD_SMI_VRAM_USED_COL))
+    total = _pick(*_exact(_AMD_SMI_VRAM_TOTAL_COL))
+    if used is not None and total is not None and total > 0:
+        sample["vram_pct"] = round(used / total * 100.0, 2)
     return sample
 
 
@@ -428,6 +470,10 @@ def harvest_mn_gpu_metrics(
             ts = _num_from_cell(row[0])
             if ts is None:
                 continue
+            # A timestamp and nothing else: amd-smi --csv terminates each invocation with a blank line, and a pod
+            # running a sampler that does not strip it stamps that line like any other.
+            if sum(1 for cell in row if str(cell).strip()) < 2:
+                continue
             if lo is not None and (ts < lo or ts > hi):
                 continue
             merged.append(([host, role] if role_of else [host]) + row)
@@ -437,6 +483,13 @@ def harvest_mn_gpu_metrics(
                     s["role"] = role
                 samples.append(s)
 
+    if merged and not samples:
+        # Rows parsed but no field resolved: the sampler wrote a header vocabulary this consumer does not know.
+        # Silence here is the failure mode the migration was most at risk of, so say so rather than inject nothing.
+        log.error(
+            "benchmark_result: GPU sampler header matched no gpu_monitor field, metrics dropped; header=%s",
+            header,
+        )
     if header and merged:
         try:
             destination.mkdir(parents=True, exist_ok=True)

@@ -198,27 +198,49 @@ def _build_vllm_cmd(
 
 
 def _probe_mec_firmware_lt_177() -> bool:
-    """Return True iff rocm-smi reports MEC firmware < 177 (gates the HSA_NO_SCRATCH_RECLAIM workaround); False on any failure."""
+    """Return True iff amd-smi reports MEC firmware < 177 (gates the HSA_NO_SCRATCH_RECLAIM workaround); False on any failure.
+
+    Deliberately a stdlib-only, vendored parser rather than a call into ``hyperloom.common.amd_smi``: this script is
+    cloudpickled onto the RayJob head pod (see ``multi_node/cli.py``'s ``_LAUNCHER_DEPS`` bundling), and a
+    ``hyperloom`` import here would make the launch require the package on pods that only carry the serving image.
+    """
     try:
         proc = subprocess.run(
-            ["rocm-smi", "--showfw"],
+            ["amd-smi", "firmware", "--json"],
             capture_output=True,
             text=True,
             timeout=10,
         )
     except (FileNotFoundError, subprocess.SubprocessError, OSError):
         return False
-    if proc.returncode != 0:
+    if proc.returncode != 0 or not proc.stdout.strip():
         return False
-    for line in (proc.stdout or "").splitlines():
-        if "MEC" not in line:
+    try:
+        data = json.loads(proc.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    rows = data.get("gpu_data") if isinstance(data, dict) else data
+    # amd-smi reports a structured fw_id, so prefer CP_MEC1 exactly rather than taking whichever MEC queue it happens
+    # to list first: a part that reports CP_MEC2 as well (the Instinct parts do) would otherwise let list order decide
+    # the gate. The substring pass is kept as a fallback so a part spelling the id differently still probes rather
+    # than silently skipping the workaround, which is what the old rocm-smi line scrape did for every part.
+    versions: dict[str, object] = {}
+    for row in rows or []:
+        if not isinstance(row, dict):
             continue
-        token = line.split()[-1].strip() if line.split() else ""
-        try:
-            return int(token) < 177
-        except ValueError:
-            return False
-    return False
+        for entry in row.get("fw_list") or []:
+            if not isinstance(entry, dict):
+                continue
+            fw_id = str(entry.get("fw_id") or "").upper()
+            if "MEC" in fw_id:
+                versions.setdefault(fw_id, entry.get("fw_version"))
+    raw = versions.get("CP_MEC1")
+    if raw is None:
+        raw = next(iter(versions.values()), None)
+    try:
+        return int(raw) < 177
+    except (TypeError, ValueError):
+        return False
 
 
 def _subprocess_env() -> dict[str, str]:
