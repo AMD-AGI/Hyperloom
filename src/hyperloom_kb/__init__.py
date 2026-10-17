@@ -134,23 +134,16 @@ from hyperloom_kb.schema import (
 )
 from hyperloom_kb.service import (
     CompleteExperienceRequired,
-    ExperienceService,
-    UnknownSchemaRef,
 )
 from hyperloom_kb.storage import (
     ExperienceStore,
     ImmutableExperienceConflict,
     InMemoryExperienceStore,
-    InMemorySchemaRegistry,
     InsertResult,
     InsertStatus,
-    LocalExperienceStore,
-    LocalSchemaRegistry,
-    SchemaRegistry,
     StorageContractError,
     StoredExperience,
     canonical_experience_bytes,
-    canonical_schema_bytes,
     experience_content_hash,
 )
 from hyperloom_kb.sync import (
@@ -161,9 +154,6 @@ from hyperloom_kb.sync import (
 )
 from hyperloom_kb.transitions import (
     ExperienceConflictError,
-    TransitionKind,
-    classify_transition,
-    validate_supersession,
 )
 
 __all__ = [
@@ -189,7 +179,6 @@ __all__ = [
     "ExperienceDeclaration",
     "ExperienceHTTPService",
     "ExperienceRenderer",
-    "ExperienceService",
     "ExperienceStatus",
     "ExperienceStore",
     "ExportPage",
@@ -209,7 +198,6 @@ __all__ = [
     "ImmutableExperienceConflict",
     "InMemoryExperienceStore",
     "InMemoryQueryViewStore",
-    "InMemorySchemaRegistry",
     "InsertResult",
     "InsertStatus",
     "KnowledgeReadError",
@@ -219,10 +207,8 @@ __all__ = [
     "LeaseExpired",
     "LexicalFuzzyProvider",
     "ListPage",
-    "LocalExperienceStore",
     "LocalFiles",
     "LocalRetrievalService",
-    "LocalSchemaRegistry",
     "LocalService",
     "LocalServiceError",
     "MatchContribution",
@@ -273,23 +259,18 @@ __all__ = [
     "RetrievalError",
     "RetrievalPolicyError",
     "RetrievalResult",
-    "SchemaRegistry",
     "SchemaValidationError",
     "ServiceSettings",
     "SessionValue",
     "StorageContractError",
     "StoredExperience",
     "SyncUnavailable",
-    "TransitionKind",
-    "UnknownSchemaRef",
     "UnsupportedSchemaVersion",
     "ViewUnavailable",
     "WeightedGroupResult",
     "WeightedQueryExecution",
     "WeightedQueryPlan",
     "canonical_experience_bytes",
-    "canonical_schema_bytes",
-    "classify_transition",
     "create_http_server",
     "default_search_weight",
     "derive_experience_id",
@@ -303,5 +284,4 @@ __all__ = [
     "load_declaration",
     "render_complete_experience",
     "repeat_group_key",
-    "validate_supersession",
 ]
