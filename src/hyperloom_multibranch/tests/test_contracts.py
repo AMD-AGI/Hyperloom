@@ -5,6 +5,7 @@ import pytest
 
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, RepairRequest
+from hyperloom_multibranch.contracts.gate import NotMeasured, ResultUnverified, ResultVerifier
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 
@@ -74,3 +75,14 @@ def test_an_admission_names_the_new_branch_exactly_when_it_accepts(status, branc
     assert ForkAdmission(AdmissionStatus.ACCEPTED, branch="s9").branch == "s9"
     with pytest.raises(ValueError, match="names its new branch"):
         ForkAdmission(status, branch=branch)
+
+
+def test_an_unverified_result_is_one_the_gate_cannot_judge_by():
+    error = ResultUnverified("r1", "record_mismatch")
+    assert isinstance(error, NotMeasured)
+    assert (error.request_id, error.reason) == ("r1", "record_mismatch")
+    assert str(error) == "r1 did not re-verify: record_mismatch"
+
+
+def test_the_verifier_protocol_is_the_one_call_of_l26():
+    assert {name for name in vars(ResultVerifier) if not name.startswith("_")} == {"reverify"}

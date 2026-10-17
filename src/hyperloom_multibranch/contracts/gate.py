@@ -6,6 +6,8 @@
 PRELUDE establishes the baseline from its root tests, the integrator compares a merge test, FINAL checks a candidate.
 The gate judges them as it judges a specialist's candidate, the confirming retest included, and settles nothing: what
 a judgement leads to is the caller's.
+
+:class:`ResultVerifier` is the other direction: what the gate asks of the toolbox before a decision rests on a result.
 """
 
 from __future__ import annotations
@@ -19,7 +21,26 @@ from hyperloom_multibranch.contracts.notebook.records import BaselineRecord
 
 class NotMeasured(Exception):
     """The tests gave the gate nothing to judge by: withdrawn, not measured, measured without a value the rule reads,
-    or, for the baseline, root tests whose eval score is below the floor."""
+    a result that does not re-verify (:class:`ResultUnverified`), or, for the baseline, root tests whose eval score is
+    below the floor."""
+
+
+class ResultUnverified(NotMeasured):
+    """The notebook's result of ``request_id`` is not backed by its archived signed bundle, or the bundle cannot be
+    read; ``reason`` says which. Final: the gate does not ask again."""
+
+    def __init__(self, request_id: str, reason: str) -> None:
+        super().__init__(f"{request_id} did not re-verify: {reason}")
+        self.request_id = request_id
+        self.reason = reason
+
+
+class ResultVerifier(Protocol):
+    """What the gate asks before a decision rests on a result (hosting design L26); the toolbox implements it."""
+
+    async def reverify(self, request_id: str) -> None:
+        """Check the notebook's result of ``request_id`` against its archived signed bundle, its values included;
+        raises :class:`ResultUnverified` when it does not match or cannot be checked."""
 
 
 class SessionGate(Protocol):
@@ -39,4 +60,4 @@ class SessionGate(Protocol):
         """Whether the test clears the accuracy gate every commit clears."""
 
 
-__all__ = ["NotMeasured", "SessionGate"]
+__all__ = ["NotMeasured", "ResultUnverified", "ResultVerifier", "SessionGate"]
