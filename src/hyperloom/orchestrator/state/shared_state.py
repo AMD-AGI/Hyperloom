@@ -1078,14 +1078,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         # Filter to known fields; unknown keys dropped, missing keys default.
         known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in raw.items() if k in known}
-        # A state written before per-phase totals existed still records every transition in phase_history, so the
-        # completed segments are reconstructible.
-        if not isinstance(filtered.get("phase_elapsed_totals"), dict):
-            from ..phases.machine_state import phase_elapsed_totals_from_history
-
-            filtered["phase_elapsed_totals"] = phase_elapsed_totals_from_history(
-                filtered.get("phase_history"),
-            )
         # The charge anchor belongs to a live leg, not to the file: only
         # ``begin_leg`` arms it, so ``elapsed_charged_sec`` alone survives a load.
         filtered["leg_anchor_unix"] = 0.0
@@ -1101,13 +1093,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         filtered["explore_search"] = cls._build_explore_search(
             existing=filtered.get("explore_search"),
         )
-
-        # A state written before the budget was charged forward records spend
-        # only as ``start_ts``; carry ``now - start_ts`` across so a resume does
-        # not hand the session its whole budget again.
-        if "elapsed_charged_sec" not in raw:
-            started = to_unix(raw.get("start_ts"))
-            filtered["elapsed_charged_sec"] = max(0.0, time.time() - started) if started else 0.0
 
         if isinstance(filtered.get("enablement"), dict):
             filtered["enablement"] = EnablementRound.from_dict(filtered["enablement"])
