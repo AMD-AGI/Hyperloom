@@ -129,15 +129,6 @@ def _toml_string(value: str) -> str:
     return json.dumps(value)
 
 
-def api_key_env_name(
-    *,
-    api_key_env: str = "OPENAI_API_KEY",
-    env: dict[str, str] | None = None,
-) -> str:
-    """Return the NAME of the env var holding the OpenAI-side API key."""
-    return _api_key_env_name(api_key_env=api_key_env, source=_effective_env(env))
-
-
 def _api_key_env_name(*, api_key_env: str, source: Mapping[str, str]) -> str:
     """Resolve the API key variable name from an already-effective mapping."""
     candidates = list(dict.fromkeys([api_key_env, "OPENAI_API_KEY"]))
@@ -261,20 +252,6 @@ def _resolve_codex_provider_config(
             env_additions[header_env_name] = value
         overrides.append(f"model_providers.{provider}.env_http_headers.{header}={_toml_string(header_env_name)}")
     return CodexProviderConfig(overrides=tuple(overrides), env_additions=tuple(env_additions.items()))
-
-
-def codex_provider_overrides(
-    *,
-    api_key_env: str = "OPENAI_API_KEY",
-    base_url_env: str = "OPENAI_BASE_URL",
-    env: dict[str, str] | None = None,
-) -> tuple[str, ...]:
-    """Return provider overrides for compatibility with existing callers."""
-    return resolve_codex_provider_config(
-        api_key_env=api_key_env,
-        base_url_env=base_url_env,
-        env=env,
-    ).overrides
 
 
 def _writable_root_overrides(writable_roots: Sequence[Path]) -> tuple[str, ...]:
@@ -914,8 +891,6 @@ __all__ = [
     "CodexSessionUnavailableError",
     "DEFAULT_CODEX_SANDBOX_MODE",
     "HYPERLOOM_RUNTIME_DIR_ENV",
-    "api_key_env_name",
-    "codex_provider_overrides",
     "codex_sandbox",
     "load_codex_sdk",
     "normalize_codex_result",

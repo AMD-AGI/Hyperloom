@@ -294,7 +294,7 @@ def _install_transient_codex_home_cleanup_race(
 
 def test_provider_overrides_pass_the_key_env_name_not_its_value():
     """The API key must reach Codex by variable NAME only."""
-    overrides = cs.codex_provider_overrides(env=_gateway_env())
+    overrides = cs.resolve_codex_provider_config(env=_gateway_env()).overrides
 
     assert _override_value(overrides, "model_providers.hyperloom.env_key") == '"OPENAI_API_KEY"'
     assert not any(_SECRET in override for override in overrides)
@@ -302,7 +302,7 @@ def test_provider_overrides_pass_the_key_env_name_not_its_value():
 
 def test_provider_overrides_select_the_responses_wire_api():
     """Codex talks to the gateway over the OpenAI Responses protocol."""
-    overrides = cs.codex_provider_overrides(env=_gateway_env())
+    overrides = cs.resolve_codex_provider_config(env=_gateway_env()).overrides
 
     assert _override_value(overrides, "model_provider") == '"hyperloom"'
     assert _override_value(overrides, "model_providers.hyperloom.wire_api") == '"responses"'
@@ -375,7 +375,7 @@ def test_provider_overrides_reject_a_header_codex_cannot_express():
 def test_provider_overrides_require_an_explicit_base_url():
     """Codex needs the gateway endpoint; guessing one would misroute traffic."""
     with pytest.raises(cs.CodexSessionUnavailableError, match="OPENAI_BASE_URL"):
-        cs.codex_provider_overrides(env={"OPENAI_API_KEY": _SECRET})
+        cs.resolve_codex_provider_config(env={"OPENAI_API_KEY": _SECRET})
 
 
 def test_provider_overrides_require_a_credential():
@@ -385,7 +385,7 @@ def test_provider_overrides_require_a_credential():
     uncredentialed rather than as a gateway deployment.
     """
     with pytest.raises(cs.CodexSessionUnavailableError, match="credential is missing"):
-        cs.codex_provider_overrides(
+        cs.resolve_codex_provider_config(
             env={
                 "OPENAI_BASE_URL": "https://gateway.example/Unified/v1",
                 "LLM_GATEWAY_KEY": _SECRET,
@@ -393,22 +393,17 @@ def test_provider_overrides_require_a_credential():
         )
 
 
-def test_api_key_env_name_follows_llm_config_precedence():
+def test_env_key_follows_llm_config_precedence():
     """The caller's preferred variable wins, then OPENAI_API_KEY."""
-    both = {"OPENAI_API_KEY": "a", "LLM_GATEWAY_KEY": "b"}
+    both = _gateway_env(LLM_GATEWAY_KEY="b")
 
-    assert cs.api_key_env_name(env=both) == "OPENAI_API_KEY"
-    assert cs.api_key_env_name(api_key_env="SAFE_API_KEY", env={"SAFE_API_KEY": "c", **both}) == "SAFE_API_KEY"
+    default = cs.resolve_codex_provider_config(env=both).overrides
+    preferred = cs.resolve_codex_provider_config(
+        api_key_env="SAFE_API_KEY", env={"SAFE_API_KEY": "c", **both}
+    ).overrides
 
-
-def test_api_key_env_name_lists_every_candidate_when_none_is_set():
-    """The error must tell the operator which variables were checked."""
-    with pytest.raises(cs.CodexSessionUnavailableError) as excinfo:
-        cs.api_key_env_name(api_key_env="SAFE_API_KEY", env={})
-
-    message = str(excinfo.value)
-    assert "SAFE_API_KEY" in message
-    assert "OPENAI_API_KEY" in message
+    assert _override_value(default, "model_providers.hyperloom.env_key") == '"OPENAI_API_KEY"'
+    assert _override_value(preferred, "model_providers.hyperloom.env_key") == '"SAFE_API_KEY"'
 
 
 # --------------------------------------------------------------------------- # Sandbox and approval selection
