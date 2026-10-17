@@ -46,6 +46,7 @@ from hyperloom_multibranch.scheduling.layout import SessionLayout, create_sessio
 from hyperloom_multibranch.scheduling.lifecycle import CUT_SHORT, Session, SessionHost, SessionOutcome, SessionServices
 from hyperloom_multibranch.scheduling.llm import CompletionFailed
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
+from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
 from hyperloom_multibranch.scheduling.roster import BranchStatus, RosterCaps, StopCause
 from hyperloom_multibranch.scheduling.settings import KernelOptimizer, RunSettings, Workload
 from hyperloom_multibranch.scheduling.stops import (
@@ -310,6 +311,9 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert (await observer.session_profile()).session_id == stage.layout.session_id
     [fingerprint] = await observer.manifest_fingerprints()
     assert fingerprint.policy_versions["judge_prompt"] == JUDGE_PROMPT_VERSION
+    assert fingerprint.policy_versions["scheduling"] == policy_version(SCHEDULING_POLICY)
+    [policy] = [row for row in _decisions(stage) if row["kind"] == "prelude" and row["reason"] == "scheduling policy"]
+    assert policy["detail"] == {"values": dict(SCHEDULING_POLICY)}
     assert dict(fingerprint.sockets) == socket_versions()
     assert dict(fingerprint.prompt_versions) == prompt_versions()
 

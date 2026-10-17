@@ -50,6 +50,7 @@ from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, Judge
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.llm import Completion
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeerSetup
+from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
 from hyperloom_multibranch.scheduling.prelude import Prelude, PreludeFailed, PreludeResult
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.requests import SessionTests
@@ -69,7 +70,11 @@ logger = logging.getLogger(__name__)
 
 SCHEDULER_WRITER = "scheduler"
 INTEGRATOR_WRITER = "integrator"
-POLICY_VERSIONS = {"quota": QUOTA_POLICY_VERSION, "judge_prompt": JUDGE_PROMPT_VERSION}
+POLICY_VERSIONS = {
+    "quota": QUOTA_POLICY_VERSION,
+    "judge_prompt": JUDGE_PROMPT_VERSION,
+    "scheduling": policy_version(SCHEDULING_POLICY),
+}
 #: Stop reasons a session ends with when it ran its course; any other one, or an error, is a failed session.
 COMPLETED_REASONS = frozenset({SessionStopReason.TIME_EXHAUSTED, SessionStopReason.GLOBAL_CONVERGED})
 #: The distribution this package ships in (pyproject.toml ``[project] name``).
@@ -234,6 +239,9 @@ class Session:
         await self._toolbox.start()
         await self._branches.push_quota()
         self._phase("prelude")
+        self._decisions.record(
+            Decision(DecisionKind.PRELUDE, "scheduling policy", detail={"values": dict(SCHEDULING_POLICY)})
+        )
         try:
             prelude = await self._root_session(budget, hard_stop)
         except PreludeFailed as exc:
