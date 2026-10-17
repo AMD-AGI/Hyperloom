@@ -140,6 +140,7 @@ class Session:
         blobs = LocalBlobStore(layout.blobs)
         peers = peer_factory(PeerSetup(layout, settings.workload, desk, processes, blobs))
         self._toolbox = peers.toolbox
+        self._briefs = peers.briefs
         tests = SessionTests(peers.toolbox, clock)
         budget = budget_seconds(settings.max_hours)
         self._branches = BranchControl(context, peers.lifecycle, peers.toolbox, peers.repo)
@@ -255,9 +256,11 @@ class Session:
         return SessionOutcome(reason, final, None, "")
 
     async def _root_session(self, budget: SessionBudget, hard_stop: HardStop) -> PreludeResult:
-        """PRELUDE: the root commit, the integration branch with its K, then the baseline measured on it."""
+        """PRELUDE: the root commit and the warm-start leads every specialist is briefed on, the integration branch
+        with its K, then the baseline measured on the root."""
 
         prelude = await self._prelude.root(self._settings.workload, budget, hard_stop)
+        self._briefs.warm = prelude.warm_leads
         self._roster.add_integration(prelude.root_commit, k=1)
         await self._branches.push_quota()
         await self._prelude.measure_baseline(prelude.root_commit)

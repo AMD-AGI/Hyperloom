@@ -11,7 +11,7 @@ import re
 import sys
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -21,12 +21,6 @@ import hyperloom
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
-from hyperloom.orchestrator.knowledge.remote_recipe.client import KBStoreError
-from hyperloom.orchestrator.knowledge.remote_recipe.models import RecipeScope
-from hyperloom.orchestrator.knowledge.remote_recipe.values import (
-    CURRENT_KNOWLEDGE_SCHEMA_VERSION,
-    RECORD_KIND_HYPERLOOM_RECIPE,
-)
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
@@ -44,6 +38,7 @@ from hyperloom_multibranch.scheduling.processes import ProcessRegistry, Register
 from hyperloom_multibranch.scheduling.requests import SessionTests
 from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC, KernelOptimizer, Workload
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
+    OneChampionKB,
     LAUNCH_FLAG,
     MbFakeChildRegistry,
     RecordingToolbox,
@@ -119,37 +114,6 @@ def _layout(tmp_path: Path) -> SessionLayout:
 
 def _notebook(layout: SessionLayout) -> LocalNotebook:
     return LocalNotebook(layout.notebook, Writer(Role.SCHEDULER, "scheduler"), clock=_clock().now)
-
-
-@dataclass
-class OneChampionKB:
-    """A Recipe KB holding one champion in whatever scope it is asked for, or one that cannot be reached."""
-
-    unreachable: bool = False
-    searched: list[dict[str, Any]] = field(default_factory=list)
-
-    def search_identities(
-        self,
-        *,
-        scheme: str,
-        match: dict[str, str],
-        hardware_in: list[str] | None = None,
-        offset: int = 0,
-        limit: int = 50,
-    ) -> dict[str, Any]:
-        if self.unreachable:
-            raise KBStoreError("connection refused")
-        self.searched.append({"scheme": scheme, "match": match})
-        return {"items": [{"canonical_id": f"{scheme}:champion"}], "next_offset": None}
-
-    def get_view(self, canonical_id: str, scope: RecipeScope) -> dict[str, Any] | None:
-        knowledge = {
-            "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
-            "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
-            "validated_e2e_gain": 12.0,
-            "value": {"config": {"extra_server_args": "--enable-expert-parallel"}, "patch": {}, "kernel": {}},
-        }
-        return {"canonical_id": canonical_id, "session_id": "earlier", "knowledge": knowledge}
 
 
 def _prelude(

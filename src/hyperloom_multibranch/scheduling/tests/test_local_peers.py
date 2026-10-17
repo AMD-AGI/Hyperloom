@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The real peers of a session: built inside the session directory, and refused while the specialist runtime has no
-model-backed session factory."""
+"""The real peers of a session: built inside the session directory on model-backed specialist sessions, and refused
+when this machine has no agent CLI for them."""
 
 from __future__ import annotations
 
@@ -18,10 +18,8 @@ import pytest
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.orchestrator.kernel.request_handlers import resolve_gemm_tuning_backend
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.repo import ExperimentRepo
-from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, SpecialistTokens
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -29,11 +27,11 @@ from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.layout import SESSION_PREFIX, create_session
 from hyperloom_multibranch.scheduling.local_peers import (
-    MB_FAKE_MISSING_SESSION_FACTORY,
     MeasurementHost,
-    load_peers,
+    SessionWiring,
     local_peers,
     mb_fake_measurement_host,
+    specialist_command,
     workload_environment,
 )
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
@@ -41,12 +39,12 @@ from hyperloom_multibranch.scheduling.peers import PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
 from hyperloom_multibranch.scheduling.settings import KernelOptimizer, Workload
-from hyperloom_multibranch.scheduling.tests.peer_fakes import RecordedSessions
-from hyperloom_multibranch.specialist.runtime import SpecialistRuntime
+from hyperloom_multibranch.specialist.model_sessions import ModelSessions
+from hyperloom_multibranch.specialist.runtime import SessionStart, SpecialistRuntime
+from hyperloom_multibranch.specialist.worktree import BranchWorktree
 from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
 from hyperloom_multibranch.toolbox.mcp_tools import McpSpecialistTokens
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
-from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
 WORKLOAD = Workload("/models/Llama-3-8B", "sglang", 2, 1024, 512, 16, "bf16", "mi355x", KernelOptimizer.FORGE)
 HOST = MeasurementHost((0, 1, 2, 3), "local", MB_FAKE_BASE_IMAGE_DIGEST, "a" * 40, "b" * 40)
@@ -61,6 +59,17 @@ def _call_tool(grant: SpecialistGrant, name: str) -> dict[str, object]:
     )
     with urllib.request.urlopen(request, timeout=10) as reply:
         return json.loads(reply.read())
+
+
+def _list_tools(grant: SpecialistGrant) -> set[str]:
+    message = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+    request = urllib.request.Request(
+        grant.url,
+        data=json.dumps(message).encode(),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {grant.token}"},
+    )
+    with urllib.request.urlopen(request, timeout=10) as reply:
+        return {tool["name"] for tool in json.loads(reply.read())["result"]["tools"]}
 
 
 def test_the_workload_reaches_the_renderer_as_hyperloom_optimize_exports_it(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -96,11 +105,19 @@ def test_the_model_is_exported_as_the_directory_a_server_loads_it_from(
     assert workload_environment(hub_id)["MODEL_PATH"] == str(tmp_path / "Llama-3-8B")
 
 
-def test_loading_the_peers_names_the_missing_session_factory() -> None:
-    with pytest.raises(PeersUnavailable) as refused:
-        load_peers()
-    assert refused.value.missing == MB_FAKE_MISSING_SESSION_FACTORY
-    assert "SpecialistRuntime" in str(refused.value)
+def test_the_specialists_run_the_agent_cli_found_on_path(tmp_path: Path) -> None:
+    cli = tmp_path / "claude"
+    cli.write_text("#!/bin/sh\nexit 0\n")
+    cli.chmod(0o755)
+
+    command = specialist_command({"PATH": str(tmp_path), "ANTHROPIC_API_KEY": "dummy", "CLAUDE_MODEL": "m-1"})
+
+    assert (command.backend, command.executable, command.model) == ("claude", str(cli), "m-1")
+
+
+def test_without_the_agent_cli_the_peers_are_refused(tmp_path: Path) -> None:
+    with pytest.raises(PeersUnavailable, match="claude CLI the specialists run is not on PATH"):
+        specialist_command({"PATH": str(tmp_path), "ANTHROPIC_API_KEY": "dummy"})
 
 
 def test_the_placeholder_host_is_one_machine_on_the_root_recipes_image() -> None:
@@ -120,19 +137,24 @@ async def test_the_real_peers_live_inside_the_session_directory(
     layout = create_session(tmp_path, WORKLOAD.model_basename, clock)
     desk = ForkDesk(Roster(RosterCaps(1, 1, 1), layout.roster, clock), DecisionLog(layout.decisions, clock))
     setup = PeerSetup(layout, WORKLOAD, desk, ProcessRegistry(layout.pids, clock), LocalBlobStore(layout.blobs))
-    built: list[tuple[PeerSetup, ExperimentRepo, RealToolbox]] = []
-    granted: list[SpecialistTokens] = []
+    wired: list[SessionWiring] = []
 
-    def sessions(
-        given: PeerSetup, repo: ExperimentRepo, toolbox: RealToolbox, tokens: SpecialistTokens
-    ) -> RecordedSessions:
-        built.append((given, repo, toolbox))
-        granted.append(tokens)
-        return RecordedSessions(toolbox, repo, LocalNotebook(layout.notebook, Writer(Role.OBSERVER, "observer")))
+    def sessions(wiring: SessionWiring) -> ModelSessions:
+        wired.append(wiring)
+
+        def factory(start: SessionStart) -> object:
+            raise AssertionError("no specialist runs here")
+
+        def worktrees(branch: str) -> BranchWorktree:
+            raise AssertionError("no worktree is used here")
+
+        return ModelSessions(factory, worktrees)
 
     peers = local_peers(HOST, sessions, setup)
     try:
-        assert built == [(setup, peers.repo, peers.toolbox)] and isinstance(peers.lifecycle, SpecialistRuntime)
+        [wiring] = wired
+        assert (wiring.setup, wiring.repo, wiring.briefs) == (setup, peers.repo, peers.briefs)
+        assert isinstance(peers.lifecycle, SpecialistRuntime) and peers.briefs.warm == ()
         assert isinstance(peers.toolbox, LocalHostedToolbox) and isinstance(peers.repo, GitExperimentRepo)
         assert (layout.toolbox / "canonical" / "canonical.yaml").is_file()
         config = json.loads(layout.measurement_config.read_text(encoding="utf-8"))
@@ -151,12 +173,13 @@ async def test_the_real_peers_live_inside_the_session_directory(
         await peers.toolbox.set_policy(QueuePolicy(per_branch_k=1, global_concurrency=2))
         state = await peers.toolbox.queue_state()
         assert (state.queued, state.running) == (0, 0)
-        [tokens] = granted
-        assert isinstance(tokens, McpSpecialistTokens)
-        grant = tokens.issue("b01", frozenset({SCOPE_SPECIALIST}))
+        assert isinstance(wiring.tokens, McpSpecialistTokens)
+        grant = wiring.tokens.issue("b01", frozenset({SCOPE_SPECIALIST}))
         assert grant.url == peers.mcp.url
         reply = await asyncio.to_thread(_call_tool, grant, "queue_state")
         assert reply["result"]["isError"] is False
+        tools = await asyncio.to_thread(_list_tools, grant)
+        assert {"worktree_sync", "worktree_check", "worktree_patch", "notebook_brief"} <= tools
     finally:
         peers.mcp.stop()
         await peers.toolbox.close()

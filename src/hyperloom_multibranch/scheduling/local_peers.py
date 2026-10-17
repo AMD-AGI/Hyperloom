@@ -11,11 +11,13 @@ MCP service listens on loopback for the whole session and hands every toolbox ca
 on; its learnings tool recalls past sessions' from the Experience KB the environment names. The gate's session
 service and the specialist runtime judge on one InferenceX rule at the workload's conc; the runtime settles through a
 rule gate that asks the scheduler's fork desk for branches. The runtime's specialist sessions come from
-a :data:`SpecialistSessions`, given the MCP service's specialist tokens to issue each branch's grant with; no session
-backed by a model exists yet, so :func:`load_peers` refuses and the command line fails before it creates anything.
+a :data:`SpecialistSessions`: :func:`model_backed_sessions` runs each branch's specialist as an agent CLI in a
+worktree of its own, briefed by the session's :class:`SessionBriefs`, whose warm-start leads the session binds once
+PRELUDE has read them. :func:`load_peers` resolves that CLI first and refuses when this machine has none, so the
+command line fails before it creates anything.
 
-The toolbox and its measurement points load the main flow's renderer, so they are imported inside the functions that
-use them: importing this module, the command line or the session loads none of the main-flow runtime.
+The toolbox, its measurement points and the agent sessions load the main flow's runtime, so they are imported inside
+the functions that use them: importing this module, the command line or the session loads none of it.
 """
 
 from __future__ import annotations
@@ -23,54 +25,68 @@ from __future__ import annotations
 import asyncio
 import os
 import secrets
+import shutil
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING
 
 from hyperloom.common.io import atomic_write_json
+from hyperloom.common.llm_config import preferred_agent_backend, provider_model_defaults, resolve_forge_llm_model
 from hyperloom.common.model_paths import resolve_serving_model_path
 from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SpecialistTokens
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.codec import encode
+from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
 from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup, PeersUnavailable
-from hyperloom_multibranch.scheduling.settings import Workload
+from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC, Workload
 from hyperloom_multibranch.specialist.judging import Judging
-from hyperloom_multibranch.specialist.runtime import RuntimePacing, SessionFactory, SpecialistRuntime
+from hyperloom_multibranch.specialist.runtime import RuntimePacing, SpecialistRuntime
 
 if TYPE_CHECKING:
     from hyperloom.measure.points import CanonicalMeasurement
-    from hyperloom_multibranch.toolbox.toolbox import RealToolbox
+    from hyperloom_multibranch.specialist.agent_session import AgentCommand
+    from hyperloom_multibranch.specialist.model_sessions import ModelSessions
 
 TOOLBOX_WRITER = "toolbox"
 GATE_WRITER = "rule-gate"
+BRIEFS_READER = "briefs"
 CANONICAL_DIR = "canonical"
 POINTS_DIR = "points"
 #: A claim's lease on the specialist tools: the runtime renews it every 10 minutes (board #26).
 CLAIM_TTL_SECONDS = 1800.0
 
-#: What a real session needs and has no implementation of yet: the specialist runtime has only the scripted session.
-#: Deleted with :func:`mb_fake_specialist_sessions` once the model-backed session factory lands.
-MB_FAKE_MISSING_SESSION_FACTORY = (
-    "the model-backed specialist session factory for hyperloom_multibranch.specialist.runtime.SpecialistRuntime"
-)
 #: Stands in for the image the local sandboxes run in: they run on this machine, in no image.
 MB_FAKE_IMAGE_REF = "local"
 #: Stands in for the Magpie and InferenceX commits the runner checks out; the instruction sheet refuses no commit
 #: of this shape, but a runner cannot fetch it. Replaced when enablement or the command line name the real commits.
 MB_FAKE_TOOL_COMMIT = "0" * 40
 
-#: Builds the specialist runtime's session factory on the peer setup, the repository and the toolbox the branches use,
-#: and the tokens that grant a branch's specialist the MCP service's tools; a grant names the service's URL, so it is
-#: issued once the service runs, when a specialist starts.
-SpecialistSessions = Callable[[PeerSetup, ExperimentRepo, "RealToolbox", SpecialistTokens], SessionFactory]
+
+@dataclass(frozen=True)
+class SessionWiring:
+    """What a session's specialist sessions are built on: the peer setup, the repository the branches use, the
+    tokens that grant a branch's specialist the MCP service's tools (a grant names the service's URL, so it is issued
+    when a specialist starts), each branch's log and the session's briefs."""
+
+    setup: PeerSetup
+    repo: ExperimentRepo
+    tokens: SpecialistTokens
+    notebooks: Callable[[str], BranchLogStore]
+    briefs: SessionBriefs
+
+
+#: Builds the specialist runtime's session factory, and the worktree of each branch the worktree tools serve, on a
+#: session's wiring.
+SpecialistSessions = Callable[[SessionWiring], "ModelSessions"]
 
 
 @dataclass(frozen=True)
@@ -144,6 +160,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
         SpecialistToolOptions,
         register_specialist_tools,
     )
+    from hyperloom_multibranch.specialist.tools import register_worktree_tools
     from hyperloom_multibranch.toolbox.planner import HostedPlanner
     from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 
@@ -175,20 +192,26 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
         return LocalNotebook(layout.notebook, Writer(Role.SPECIALIST_RUNTIME, branch, branch))
 
     mcp = McpServer(McpServerConfig(host_token=secrets.token_hex(32)), campaign=layout.session_id)
+    learnings = LearningRecall.from_env(log=RetrievalLog(layout.reports / LEARNINGS_LOG))
+    briefs = SessionBriefs(
+        LocalNotebook(layout.notebook, Writer(Role.OBSERVER, BRIEFS_READER)), metric=PRIMARY_METRIC, learnings=learnings
+    )
     tool_options = SpecialistToolOptions(
         claim_ttl_seconds=CLAIM_TTL_SECONDS,
         toolbox_loop=asyncio.get_running_loop(),
-        learnings=LearningRecall.from_env(log=RetrievalLog(layout.reports / LEARNINGS_LOG)),
+        learnings=learnings,
+        briefing_for=briefs.for_branch,
         analysis=toolbox,
     )
     register_specialist_tools(mcp, toolbox=toolbox, notebooks=runtime_notebook, options=tool_options)
-    factory = sessions(setup, repo, toolbox, McpSpecialistTokens(mcp))
+    built = sessions(SessionWiring(setup, repo, McpSpecialistTokens(mcp), runtime_notebook, briefs))
+    register_worktree_tools(mcp, repo=repo, worktrees=built.worktrees)
     judging = Judging(RuleGate(gate_notebook, repo, setup.desk, toolbox), toolbox, rule)
     runtime = SpecialistRuntime(
-        runtime_notebook, judging, factory, pacing=RuntimePacing(claim_ttl_seconds=CLAIM_TTL_SECONDS)
+        runtime_notebook, judging, built.factory, pacing=RuntimePacing(claim_ttl_seconds=CLAIM_TTL_SECONDS)
     )
     mcp.start()
-    return Peers(runtime, toolbox, repo, GateService(gate_notebook, toolbox, rule, toolbox), mcp)
+    return Peers(runtime, toolbox, repo, GateService(gate_notebook, toolbox, rule, toolbox), mcp, briefs)
 
 
 def mb_fake_measurement_host() -> MeasurementHost:
@@ -215,36 +238,87 @@ def machine_parallel_tests(tp: int) -> int:
     return max_parallel_tests(len(mb_fake_measurement_host().cards), tp)
 
 
-def mb_fake_specialist_sessions() -> SpecialistSessions:
-    """Always raises :class:`PeersUnavailable` naming :data:`MB_FAKE_MISSING_SESSION_FACTORY`.
+def specialist_command(env: Mapping[str, str]) -> AgentCommand:
+    """The agent CLI every specialist of a session runs: the backend ``env`` is credentialed for, found on its
+    ``PATH``, on the model ``env`` names for it; raises :class:`PeersUnavailable` when that CLI is not installed."""
 
-    Stands in for the model-backed session factory of the specialist runtime; replaced by it once
-    ``hyperloom_multibranch.specialist`` ships one.
+    from hyperloom_multibranch.specialist.agent_session import AgentCommand
+
+    backend = preferred_agent_backend(env)
+    executable = shutil.which(backend, path=env.get("PATH"))
+    if executable is None:
+        raise PeersUnavailable(f"the {backend} CLI the specialists run is not on PATH")
+    model = resolve_forge_llm_model(backend, env={**env, **provider_model_defaults(env)})
+    return AgentCommand(backend, executable, model)
+
+
+def _specialist_role(workload: Workload) -> str:
+    """The workload as the specialists' role prompt names it."""
+
+    return (
+        f"{workload.model_basename} on {workload.framework}, {workload.precision}, TP {workload.tp}, "
+        f"ISL {workload.isl}, OSL {workload.osl}, concurrency {workload.conc}, {workload.gpu_type}"
+    )
+
+
+def model_backed_sessions(command: AgentCommand) -> SpecialistSessions:
+    """Sessions that run ``command`` for every branch's specialist, in a worktree of the workload's framework.
+
+    The CLI runs on the main flow's allowlisted specialist environment, through a local AI work socket whose resource
+    log is under ``MB-logs``; its worktrees branch off one source base at ``MB-source``, and each launch rebuilds the
+    branch's brief at the head it starts from.
     """
 
-    raise PeersUnavailable(MB_FAKE_MISSING_SESSION_FACTORY)
+    def build(wiring: SessionWiring) -> ModelSessions:
+        from hyperloom.orchestrator.specialists.agent_runner import LocalAgentRunner, build_specialist_env
+        from hyperloom_multibranch.specialist.agent_session import AgentSetup
+        from hyperloom_multibranch.specialist.model_sessions import model_sessions
+        from hyperloom_multibranch.specialist.prompts import role_prompt
+        from hyperloom_multibranch.specialist.worktree import SourceBase
+
+        layout, workload = wiring.setup.layout, wiring.setup.workload
+        agent = AgentSetup(
+            command=command,
+            role=role_prompt(_specialist_role(workload)),
+            env=build_specialist_env(),
+            runner=LocalAgentRunner(session_dir=layout.logs),
+            tokens=wiring.tokens,
+            processes=wiring.setup.processes,
+            repo=wiring.repo,
+            briefs=wiring.briefs.text,
+        )
+        return model_sessions(
+            agent,
+            base=SourceBase(layout.source),
+            components=(workload.framework,),
+            branch_dir=layout.branch_dir,
+            notebook_for=wiring.notebooks,
+        )
+
+    return build
 
 
 def load_peers() -> PeerFactory:
-    """The factory of a session's real peers; raises :class:`PeersUnavailable` while one has no implementation.
+    """The factory of a session's real peers; raises :class:`PeersUnavailable` when this machine cannot run them.
 
-    It takes no argument and creates nothing, so the command line calls it before the session directory exists.
+    It creates nothing, so the command line calls it before the session directory exists.
     """
 
-    return partial(local_peers, mb_fake_measurement_host(), mb_fake_specialist_sessions())
+    return partial(local_peers, mb_fake_measurement_host(), model_backed_sessions(specialist_command(os.environ)))
 
 
 __all__ = [
     "CLAIM_TTL_SECONDS",
     "GATE_WRITER",
-    "MB_FAKE_MISSING_SESSION_FACTORY",
     "MeasurementHost",
+    "SessionWiring",
     "SpecialistSessions",
     "load_peers",
     "local_peers",
     "machine_parallel_tests",
     "mb_fake_measurement_host",
     "measurement_config",
-    "mb_fake_specialist_sessions",
+    "model_backed_sessions",
+    "specialist_command",
     "workload_environment",
 ]

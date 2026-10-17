@@ -4,7 +4,7 @@
 """The peers a session runs on and what they are built on.
 
 A :data:`PeerFactory` builds the specialist lifecycle, the toolbox, the experiment repository, the rule gate's
-session service and the session's MCP service on a :class:`PeerSetup`: the session directory, the workload the session optimizes, the scheduler's
+session service, the session's MCP service and its briefs on a :class:`PeerSetup`: the session directory, the workload the session optimizes, the scheduler's
 answer to the rule gate's branch requests, the session's process registry and its blob store. The specialist runtime
 builds its own rule gates on the branch requests; the session gate judges the tests the scheduler submits itself.
 """
@@ -20,6 +20,7 @@ from hyperloom_multibranch.contracts.fork import ForkAdmissionService
 from hyperloom_multibranch.contracts.gate import SessionGate
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
+from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.settings import Workload
@@ -33,7 +34,8 @@ if TYPE_CHECKING:
 class Peers:
     """``repo`` holds nothing until PRELUDE roots it with ``init_root``; ``gate`` writes the baseline PRELUDE measures.
 
-    ``mcp`` serves the specialist tools; the session stop stops it.
+    ``mcp`` serves the specialist tools; the session stop stops it. ``briefs`` brief every specialist; they are built
+    before PRELUDE has read the warm-start leads, which the session binds to them once it has.
     """
 
     lifecycle: SpecialistLifecycle
@@ -41,6 +43,7 @@ class Peers:
     repo: ExperimentRepo
     gate: SessionGate
     mcp: McpServer
+    briefs: SessionBriefs
 
 
 @dataclass(frozen=True)
@@ -67,11 +70,7 @@ PeerFactory = Callable[[PeerSetup], Peers]
 
 
 class PeersUnavailable(RuntimeError):
-    """A peer a session needs has no implementation yet; ``missing`` names it."""
-
-    def __init__(self, missing: str) -> None:
-        super().__init__(f"no implementation yet of {missing}")
-        self.missing = missing
+    """A peer a session needs cannot be built on this machine; the message says what is missing."""
 
 
 __all__ = [

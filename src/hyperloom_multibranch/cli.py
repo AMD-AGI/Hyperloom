@@ -11,7 +11,7 @@ behind: the Experience KB the session's CLOSE publishes to must be configured (`
 ``HYPERLOOM_KB_TOKEN``); the Recipe KB that PRELUDE reads warm-start leads from and CLOSE writes the final recipe back
 to is configured by ``KB_STORE_URL`` and ``KB_STORE_TOKEN``, both or neither, and is not used without them; the RSI
 archive defaults to :data:`RSI_ARCHIVE_DEFAULT`, set in this process's environment for every reader of it, and must be
-a writable directory.
+a writable directory; and the agent CLI the specialists run must be installed.
 """
 
 from __future__ import annotations

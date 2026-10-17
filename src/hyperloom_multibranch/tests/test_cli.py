@@ -12,10 +12,11 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
 from hyperloom_multibranch import cli
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS
-from hyperloom_multibranch.scheduling.local_peers import MB_FAKE_MISSING_SESSION_FACTORY
+from hyperloom_multibranch.scheduling.peers import PeerFactory
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import KernelOptimizer, RunSettings, Workload
 
@@ -124,16 +125,49 @@ def experience_kb(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.Temp
     monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path_factory.mktemp("rsi-archive")))
 
 
+@pytest.fixture
+def agent_cli(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> list[RunSettings]:
+    """Stand-ins for both agent CLIs first on ``PATH``; returns the settings of every session the command would run,
+    which runs none."""
+
+    bin_dir = tmp_path_factory.mktemp("bin")
+    for backend in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX):
+        stand_in = bin_dir / backend
+        stand_in.write_text("#!/bin/sh\nexit 0\n")
+        stand_in.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    runs: list[RunSettings] = []
+
+    def run_session(settings: RunSettings, peer_factory: PeerFactory, recipe_kb: object) -> int:
+        runs.append(settings)
+        return 0
+
+    monkeypatch.setattr(cli, "run_session", run_session)
+    return runs
+
+
 @pytest.mark.usefixtures("experience_kb")
-def test_run_without_peers_fails_loudly_before_creating_anything(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_a_ready_environment_runs_the_session_on_the_model_backed_specialists(
+    agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+
+    assert cli.main(["run", *WORKLOAD_ARGS]) == 0
+
+    assert agent_cli == [_settings()]
+
+
+@pytest.mark.usefixtures("experience_kb", "agent_cli")
+def test_run_without_the_agent_cli_fails_loudly_before_creating_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-bin"))
 
     assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
 
     captured = capsys.readouterr()
-    assert MB_FAKE_MISSING_SESSION_FACTORY in captured.err
+    assert "CLI the specialists run is not on PATH" in captured.err
     assert captured.out == ""
     assert not any(tmp_path.iterdir())
 
@@ -146,7 +180,7 @@ def test_run_without_peers_fails_loudly_before_creating_anything(
         (("HYPERLOOM_KB_TOKEN",), "HYPERLOOM_KB_TOKEN"),
     ],
 )
-@pytest.mark.usefixtures("experience_kb")
+@pytest.mark.usefixtures("experience_kb", "agent_cli")
 def test_run_without_the_experience_kb_fails_loudly_before_creating_anything(
     unset: tuple[str, ...],
     named: str,
@@ -163,13 +197,12 @@ def test_run_without_the_experience_kb_fails_loudly_before_creating_anything(
     captured = capsys.readouterr()
     assert "Experience KB" in captured.err and named in captured.err
     assert "KB_STORE_URL and KB_STORE_TOKEN configure the Recipe KB only" in captured.err
-    assert MB_FAKE_MISSING_SESSION_FACTORY not in captured.err
     assert captured.out == ""
     assert not any(tmp_path.iterdir())
 
 
 @pytest.mark.parametrize("unset", ["KB_STORE_URL", "KB_STORE_TOKEN"])
-@pytest.mark.usefixtures("experience_kb")
+@pytest.mark.usefixtures("experience_kb", "agent_cli")
 def test_a_half_configured_recipe_kb_fails_loudly_before_creating_anything(
     unset: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -186,7 +219,7 @@ def test_a_half_configured_recipe_kb_fails_loudly_before_creating_anything(
     assert not any(tmp_path.iterdir())
 
 
-@pytest.mark.usefixtures("experience_kb")
+@pytest.mark.usefixtures("experience_kb", "agent_cli")
 def test_the_rsi_archive_defaults_to_the_shared_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.delenv(ARCHIVE_ENV)
@@ -196,7 +229,7 @@ def test_the_rsi_archive_defaults_to_the_shared_one(tmp_path: Path, monkeypatch:
     assert os.environ[ARCHIVE_ENV] == cli.RSI_ARCHIVE_DEFAULT == "/shared_nfs/hyperloom/rsi-archive/"
 
 
-@pytest.mark.usefixtures("experience_kb")
+@pytest.mark.usefixtures("experience_kb", "agent_cli")
 def test_a_named_rsi_archive_is_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     archive = tmp_path / "archive"
     archive.mkdir()
@@ -208,7 +241,7 @@ def test_a_named_rsi_archive_is_kept(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert os.environ[ARCHIVE_ENV] == str(archive)
 
 
-@pytest.mark.usefixtures("experience_kb")
+@pytest.mark.usefixtures("experience_kb", "agent_cli")
 def test_an_rsi_archive_that_is_not_a_writable_directory_fails_loudly_before_creating_anything(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -219,7 +252,6 @@ def test_an_rsi_archive_that_is_not_a_writable_directory_fails_loudly_before_cre
 
     captured = capsys.readouterr()
     assert ARCHIVE_ENV in captured.err and "no-such-archive" in captured.err
-    assert MB_FAKE_MISSING_SESSION_FACTORY not in captured.err
     assert not any(tmp_path.iterdir())
 
 

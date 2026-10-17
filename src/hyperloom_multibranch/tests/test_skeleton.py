@@ -37,6 +37,7 @@ from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
+from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.notebook.tests.factories import delta, intent
 from hyperloom_multibranch.scheduling.budget import SessionBudget
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL
@@ -58,6 +59,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     SPECIALIST_POLL_SECONDS,
     HeldGitRepo,
     MbFakeHeldRegistry,
+    OneChampionKB,
     RecordedSessions,
     RecordingToolbox,
     RefusingRuntime,
@@ -178,6 +180,7 @@ class Stage:
     refusing: frozenset[str] = frozenset()
     hanging: frozenset[str] = frozenset()
     runtime_type: type[RefusingRuntime] = RefusingRuntime
+    recipe_kb: OneChampionKB | None = None
     stuck: frozenset[str] = frozenset()
     toolbox_type: type[RecordingToolbox] = RecordingToolbox
     repo_type: type[HeldGitRepo] = HeldGitRepo
@@ -185,6 +188,7 @@ class Stage:
     sessions: RecordedSessions = field(init=False)
     repo: HeldGitRepo = field(init=False)
     setup: PeerSetup = field(init=False)
+    briefs: SessionBriefs = field(init=False)
     forks: list[ForkAdmission] = field(default_factory=list)
     watchers: list[asyncio.Future[None]] = field(default_factory=list)
     signalled_at: float = 0.0
@@ -211,8 +215,9 @@ class Stage:
         )
         runtime.refusing = self.refusing
         self.toolbox, self.repo, self.setup = toolbox, repo, setup
+        self.briefs = SessionBriefs(self.handle(Role.OBSERVER))
         mcp = McpServer(McpServerConfig(host_token="t" * MIN_TOKEN_LENGTH), campaign=setup.layout.session_id)
-        return Peers(runtime, toolbox, repo, session_gate(self.handle(Role.GATE), toolbox), mcp)
+        return Peers(runtime, toolbox, repo, session_gate(self.handle(Role.GATE), toolbox), mcp, self.briefs)
 
     async def root(self) -> str:
         return (await self.handle(Role.OBSERVER).baseline()).root_commit
@@ -250,7 +255,9 @@ class Stage:
     async def run(self) -> SessionOutcome:
         self.time.hold_threads()
         host = SessionHost(self.layout, self.processes, self.time.clock)
-        session = Session(SETTINGS, self.factory, host, SessionServices(self.judge, ScriptedCompletion(), None))
+        session = Session(
+            SETTINGS, self.factory, host, SessionServices(self.judge, ScriptedCompletion(), self.recipe_kb)
+        )
         return await session.run()
 
 
@@ -372,6 +379,17 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     ):
         assert path.is_file(), path
     assert all(entry.name.startswith("MB-") for entry in stage.layout.root.iterdir())
+
+
+async def test_the_specialists_are_briefed_on_the_warm_start_leads_prelude_read(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.recipe_kb = OneChampionKB()
+
+    await stage.run()
+
+    [lead] = stage.briefs.warm
+    assert (lead.canonical_id, lead.server_args) == ("inference:champion", "--enable-expert-parallel")
+    assert stage.recipe_kb.searched
 
 
 async def test_a_failed_prelude_skips_to_close(tmp_path: Path) -> None:
