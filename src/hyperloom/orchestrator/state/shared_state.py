@@ -1719,30 +1719,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         _m.record_gemm_tuning(self, result)
 
     # Multi-KEEP integrate queue helpers.
-    def _kernel_ids_with_integrate_attempts(self) -> set[str]:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m._kernel_ids_with_integrate_attempts(self)
-
-    def integrate_attempt_count_for_kernel(self, kernel_id: str) -> int:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.integrate_attempt_count_for_kernel(self, kernel_id)
-
-    def integrate_attempt_count_for_integration(
-        self,
-        integration_id: str,
-    ) -> int:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.integrate_attempt_count_for_integration(
-            self,
-            integration_id,
-        )
-
     def next_pending_keep_kernel_id(self) -> str:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m

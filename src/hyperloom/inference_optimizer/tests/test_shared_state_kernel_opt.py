@@ -625,7 +625,6 @@ def test_pending_keep_includes_kernel_with_unexhausted_fault(state: SharedState)
             patch_path="/tmp/k001_opt.py",
         ),
     )
-    assert "k001" not in state._kernel_ids_with_integrate_attempts()
     assert state.pending_keep_kernel_ids() == ["k001"]
 
 
@@ -658,5 +657,4 @@ def test_pending_keep_drops_kernel_on_genuine_revert(state: SharedState):
             patch_path="/tmp/k001_opt.py",
         ),
     )
-    assert "k001" in state._kernel_ids_with_integrate_attempts()
     assert state.pending_keep_kernel_ids() == []
