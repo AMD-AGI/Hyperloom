@@ -526,10 +526,7 @@ class ClosePhase(CoordinatorCollaborator):
         # The verdict, recorded last because reaching this line is the evidence
         # for it. A reader looking at the steps alone cannot tell the ones that
         # had not happened yet from the ones that never will.
-        _close_out.record_close_settled(
-            self.session_dir,
-            stop_reason=str(self.shared_state.stop_reason or ""),
-        )
+        _close_out.record_close_settled(self.session_dir)
         from hyperloom.inference_optimizer.breakdown.recorder import record_stage_reached
 
         record_stage_reached(self.session_dir, "close")

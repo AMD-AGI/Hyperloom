@@ -367,7 +367,6 @@ def _trajectory(baseline: float, baseline_ts: str, stack: Any) -> list[dict[str,
 def record_close_settled(
     session_dir: Path | str | None,
     *,
-    stop_reason: str = "",
     ts: str = "",
 ) -> None:
     """Record the sequencer's verdict as its last act.
@@ -377,12 +376,10 @@ def record_close_settled(
     ran to the end, so an un-settled step does not count against the verdict.
     An unreadable spool is also ``degraded``: the sequence finished, but the
     step rows cannot be used to prove it was clean.
-    ``stop_reason`` is recorded alongside the verdict.
     """
     if not session_dir:
         trace_skip(reason="no session_dir", section=SECTION)
         return
-    reason = str(stop_reason or "").strip()
     step_failed = _any_step_failed(session_dir)
     _write(
         session_dir,
@@ -390,7 +387,6 @@ def record_close_settled(
             "status": "succeeded" if step_failed is False else "degraded",
             "end_time": _stamp(ts),
             "close_sequence_done": True,
-            "stop_reason": reason,
         },
     )
 

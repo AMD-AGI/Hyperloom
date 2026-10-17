@@ -654,7 +654,6 @@ async def test_close_sequencer_records_its_own_verdict_and_artifacts(
     recorded = assemble_parts(tmp_path, warnings=[])["close"]
     assert recorded["status"] == "succeeded"
     assert recorded["close_sequence_done"] is True
-    assert recorded["stop_reason"] == "sweep_done"
     assert [row["step"] for row in recorded["steps"]] == [
         "sequencer_started",
         "stack_revalidation",
