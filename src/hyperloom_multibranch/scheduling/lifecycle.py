@@ -62,6 +62,7 @@ from hyperloom_multibranch.scheduling.stops import (
     StopReport,
     StopSignals,
 )
+from hyperloom_multibranch.scheduling.widening import Widening
 from hyperloom_multibranch.specialist.prompts import prompt_versions
 
 logger = logging.getLogger(__name__)
@@ -157,7 +158,8 @@ class Session:
             MergeRecords(merger, DecisionLog(layout.merges, clock)), peers.repo, tests, peers.gate, resolver
         )
         judge = Judge(services.judge_completion, layout.judge, clock)
-        steering = Steering(judge, settings.judge_interval_seconds, progress, dashboard)
+        widening = Widening(peers.toolbox, self._roster, progress.policy)
+        steering = Steering(judge, settings.judge_interval_seconds, progress, dashboard, widening)
         self._explorer = Explorer(context, self._branches, desk, integrator, steering)
         self._selector = FinalSelector(tests, peers.gate, settings.workload, PRIMARY_METRIC, clock)
         sources = ExportSources(self._notebook, peers.repo, blobs, dashboard)

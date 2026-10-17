@@ -365,8 +365,8 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     manifest = json.loads(stage.layout.manifest.read_text())
     assert set(manifest["code_version"]) == {"package", "git_sha"} and manifest["metric"] == GRADED_OUTPUT
     judge_calls = len(stage.layout.judge.read_text().splitlines())
-    # One dashboard rebuild after each judge call during EXPLORE, and the stop's own read of the queue.
-    assert judge_calls >= 2 and stage.toolbox.queue_reads == judge_calls + 1
+    # Each judge call's view and the dashboard rebuild after it read the queue, and so does the stop.
+    assert judge_calls >= 2 and stage.toolbox.queue_reads == 2 * judge_calls + 1
     assert await stage.processes.leftovers() == ()
     for path in (
         stage.layout.manifest,

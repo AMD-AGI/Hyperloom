@@ -35,6 +35,7 @@ from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_branches_to_add, m
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStop, StopCause
 from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
+from hyperloom_multibranch.scheduling.widening import Widening
 
 logger = logging.getLogger(__name__)
 
@@ -58,13 +59,14 @@ class ExploreWindow:
 @dataclass(frozen=True)
 class Steering:
     """How the judge steers EXPLORE: the judge, how often it is asked, the frontier-scored progress it reads, against
-    the archived sessions that progress holds, and the dashboard rebuilt once the opening batch is open and after every
-    later judge call."""
+    the archived sessions that progress holds, the dashboard rebuilt once the opening batch is open and after every
+    later judge call, and the signals of whether a branch opened now would still pay off."""
 
     judge: Judge
     interval_seconds: float
     progress: FrontierScoring
     dashboard: SessionDashboard
+    widening: Widening
 
 
 def integration_row(progress: tuple[BranchProgress, ...]) -> BranchProgress | None:
@@ -94,6 +96,7 @@ class Explorer:
         self._decisions = context.decisions
         self._interval = steering.interval_seconds
         self._clock = context.clock
+        self._widening = steering.widening
 
     async def run(self, window: ExploreWindow) -> SessionStopReason:
         """Explore until the deadline or the judge's soft stop; the integrator is stopped before this returns.
@@ -175,6 +178,7 @@ class Explorer:
                 PRIMARY_METRIC,
                 budget_seconds=window.budget_seconds,
             ),
+            widening=await self._widening.signals(),
         )
         try:
             decision = await self._clock.wait_for(self._judge.decide(view), window.explore_end - now)

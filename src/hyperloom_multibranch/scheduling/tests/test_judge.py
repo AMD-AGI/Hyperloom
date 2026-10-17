@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -16,6 +17,7 @@ from hyperloom_multibranch.contracts.notebook.records import BranchProgress, Fro
 from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.judge import (
+    JUDGE_PROMPT_VERSION,
     JUDGE_SYSTEM_PROMPT,
     Judge,
     JudgeDecision,
@@ -35,6 +37,7 @@ from hyperloom_multibranch.scheduling.roster import (
     RosterCaps,
     StopCause,
 )
+from hyperloom_multibranch.scheduling.widening import WideningSignals
 
 METRIC = "output_throughput"
 NOW = 1000.0
@@ -62,10 +65,16 @@ ROSTER = (
 
 
 OPENING_ROSTER = (_entry(INTEGRATION_BRANCH, kind=BranchKind.INTEGRATION),)
+WIDENING = WideningSignals(min_useful_seconds=1350.0, cold_start_seconds=90.0, toolbox_headroom=3)
 
 
 def _view(
-    *, opening: bool = False, roster: tuple[BranchEntry, ...] = ROSTER, free_slots: int = 2, history: str = ""
+    *,
+    opening: bool = False,
+    roster: tuple[BranchEntry, ...] = ROSTER,
+    free_slots: int = 2,
+    history: str = "",
+    widening: WideningSignals = WIDENING,
 ) -> JudgeView:
     return JudgeView(
         now=NOW,
@@ -92,6 +101,7 @@ def _view(
         opening=opening,
         free_slots=free_slots,
         history=history,
+        widening=widening,
     )
 
 
@@ -114,6 +124,33 @@ def test_prompt_shows_frontier_roster_caps_budget_and_headroom() -> None:
     assert state["session_remaining_seconds"] == 4000
     assert state["integration"]["headroom_pct"] == 75.0
     assert '"stop_session"' in prompt and "ONE JSON object" in JUDGE_SYSTEM_PROMPT
+
+
+def _state(view: JudgeView) -> dict[str, object]:
+    prompt = render_prompt(view)
+    return json.loads(prompt[prompt.index("{") : prompt.index("\n\nReply with")])
+
+
+def test_prompt_shows_and_explains_whether_a_branch_opened_now_would_pay_off() -> None:
+    state = _state(_view())
+
+    assert (state["min_useful_seconds"], state["cold_start"], state["toolbox_headroom"]) == (1350, 90, 3)
+    for field in ("min_useful_seconds", "cold_start", "toolbox_headroom"):
+        assert field in JUDGE_SYSTEM_PROMPT
+
+
+def test_prompt_says_the_cold_start_is_unknown_before_the_first_one() -> None:
+    state = _state(_view(widening=replace(WIDENING, cold_start_seconds=None)))
+
+    assert state["cold_start"] == "unknown"
+    assert '"unknown"' in JUDGE_SYSTEM_PROMPT
+
+
+def test_the_prompt_version_is_derived_from_the_prompt_text() -> None:
+    prompt = render_prompt(_view())
+    texts = f"{JUDGE_SYSTEM_PROMPT}\n{prompt[prompt.index('Reply with') :]}"
+
+    assert JUDGE_PROMPT_VERSION == hashlib.sha256(texts.encode()).hexdigest()[:12]
 
 
 def test_a_branch_row_names_what_its_expected_gain_rests_on() -> None:

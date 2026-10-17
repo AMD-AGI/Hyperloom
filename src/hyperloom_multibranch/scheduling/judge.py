@@ -4,7 +4,8 @@
 """The judge: an LLM that, inside the scheduler's hard caps, decides the branches' K, the opening count and the stops.
 
 The scheduler hands the judge a :class:`JudgeView` (the roster, each branch's frontier progress, the remaining budget,
-the integration branch's recorded value and how similar archived sessions went). The judge answers with one JSON object, which :func:`parse_decision`
+the integration branch's recorded value, how similar archived sessions went and whether a branch opened now would
+still pay off). The judge answers with one JSON object, which :func:`parse_decision`
 reads and :func:`cap_decision` cuts to the caps and to the branches that are still live. A failed call or an
 unreadable reply gives ``None``, and the scheduler keeps the status quo. The judge never calls a peer; the scheduler
 applies its decision.
@@ -12,6 +13,7 @@ applies its decision.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
@@ -23,8 +25,8 @@ from hyperloom_multibranch.contracts.notebook.records import BranchProgress
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, RosterCaps
-
-JUDGE_PROMPT_VERSION = "mb1-judge-3"
+from hyperloom_multibranch.scheduling.widening import WideningSignals
+from hyperloom_multibranch.specialist.prompts import VERSION_HEX
 
 _KEY_OPEN = "open"
 _KEY_OPEN_K = "open_k"
@@ -44,6 +46,14 @@ observing a slow-paying direction is a candidate to stop or to lower K; keep K w
 A branch's basis says what its expected gain rests on: its own trend, a prior from similar past sessions, the floor
 of a direction still being observed, the floor of a branch too new to have a trend, or the roofline headroom that
 capped it; trust a measured trend over a floor.
+Before opening a branch, weigh whether it would still pay off. min_useful_seconds is the least EXPLORE time a branch
+opened now needs to show a trend: the frontier's trend window, or its specialist's start-up plus the sandbox cold
+starts its first tests wait through, when that is longer. cold_start is the recent sandbox cold start in seconds, or
+"unknown" before the first one, and min_useful_seconds then leaves the cold starts out and reads low. When
+explore_remaining_seconds is below min_useful_seconds, a branch opened now is unlikely to show anything.
+toolbox_headroom is how many more tests the toolbox would start at once: the max_parallel_tests cap less the tests
+running and queued. A branch opened now makes progress only while it is above 0, and runs at its full K only while it
+is at least that K.
 Stop the session only when no branch is expected to gain anything worth the remaining time.
 Answer with exactly ONE JSON object and nothing after it."""
 
@@ -55,13 +65,17 @@ _REPLY_FORMAT = """Reply with one JSON object of this shape:
  "stop_session": null or {"reason": "<why the session should stop now>"}}
 List only the branches whose K should change. Branches not named keep their K and keep running."""
 
+#: The judge prompt's version in the session's manifest fingerprint, derived from its text as the specialist prompts'.
+JUDGE_PROMPT_VERSION = hashlib.sha256(f"{JUDGE_SYSTEM_PROMPT}\n{_REPLY_FORMAT}".encode()).hexdigest()[:VERSION_HEX]
+
 
 @dataclass(frozen=True)
 class JudgeView:
     """What the judge sees; ``opening`` is true only for the call that sizes the opening batch.
 
     ``free_slots`` is the roster's own count of branches that may still be opened; ``history`` is the notebook's
-    digest of similar archived sessions, empty when the archive holds none.
+    digest of similar archived sessions, empty when the archive holds none. ``widening`` says whether a branch
+    opened now would still pay off.
     """
 
     now: float
@@ -76,6 +90,7 @@ class JudgeView:
     opening: bool
     free_slots: int
     history: str
+    widening: WideningSignals
 
 
 @dataclass(frozen=True)
@@ -151,6 +166,11 @@ def _branch_row(entry: BranchEntry, progress: BranchProgress | None) -> dict[str
     return row
 
 
+def _cold_start(widening: WideningSignals) -> int | str:
+    seconds = widening.cold_start_seconds
+    return "unknown" if seconds is None else round(seconds)
+
+
 def render_prompt(view: JudgeView) -> str:
     """The user prompt for ``view``; the system prompt is :data:`JUDGE_SYSTEM_PROMPT`."""
 
@@ -161,6 +181,9 @@ def render_prompt(view: JudgeView) -> str:
         "caps": asdict(view.caps),
         "free_branch_slots": view.free_slots,
         "explore_remaining_seconds": round(view.explore_remaining_seconds),
+        "min_useful_seconds": round(view.widening.min_useful_seconds),
+        "cold_start": _cold_start(view.widening),
+        "toolbox_headroom": view.widening.toolbox_headroom,
         "session_remaining_seconds": round(view.session_remaining_seconds),
         "integration": {
             "recorded_value": dict(view.integration_value),
