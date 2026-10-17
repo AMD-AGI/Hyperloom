@@ -273,12 +273,22 @@ class IntegrateRecoveryIncomplete(RuntimeError):
     """An integration cannot publish a result while its recovery is unconfirmed."""
 
 
-class _RebenchReading(NamedTuple):
-    """The variant a 2b rebench measured, and the measurement behind it."""
+class _GeakRebench(NamedTuple):
+    """A GEAK 2b rebench: what it measured, and what it measured against.
+
+    ``current_best`` and ``candidate`` are read once, before the ruling can
+    promote and move them, so every arm of the ruling judges the same state the
+    rebench was measured against.
+    """
 
     variant: Mapping[str, Any]
     measurement: dict[str, Any]
     measured: float
+    measured_ok: bool
+    got_hash: str
+    current_best: Mapping[str, Any]
+    current_best_tput: Any
+    candidate: Mapping[str, Any]
 
 
 class _OverlayReading(NamedTuple):
@@ -2595,15 +2605,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             # verdict itself. Native revalidations keep the unconditional watermark
             # reconciliation below.
             if bool((task.params or {}).get("geak_fallback")):
-                await self._rule_on_geak_rebench(
-                    result,
-                    task=task,
-                    outcome=outcome,
-                    best_winner=best_winner,
-                    winners=winners,
-                    measured=measured,
-                    measured_ok=measured_ok,
-                )
+                await self._rule_on_geak_rebench(result, task=task, outcome=outcome)
                 return
             if measured_ok and self.shared_state.baseline_tput > 0 and not stale_measurement:
                 self.validate(measured, result, source=STACK_REVALIDATE_SOURCE)
@@ -2711,10 +2713,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
         *,
         task: "Task",
         outcome: _PromoteOutcome,
-        best_winner: Any,
-        winners: Any,
-        measured: Any,
-        measured_ok: bool,
     ) -> None:
         """Rule on a GEAK (2b) revalidation rebench and publish what it decided.
 
@@ -2727,23 +2725,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # Set by the validated promotion and by the harness replay; a ruling that
         # reaches neither leaves the round unpromoted.
         promoted = False
-        reading = self._rebench_reading(best_winner, winners, fallback_tput=measured)
-        rebench_variant, rebench_measurement = reading.variant, reading.measurement
-        measured = reading.measured
-        got_hash = str(rebench_variant.get("fingerprint") or "")
-        cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
-        cb_tput = cb_now.get("tput")
-        baseline_grade = resolve_graded_comparison(self.shared_state, rebench_measurement, against_baseline=True)
-        current_grade = resolve_graded_comparison(self.shared_state, rebench_measurement)
-        expected_hash = str((task.params or {}).get("expected_cfg_hash") or "")
-        ruling = self._geak_rebench_decision(
-            result,
-            measured=measured,
-            got_hash=got_hash,
-            expected_hash=expected_hash,
-            baseline_grade=baseline_grade,
-            current_grade=current_grade,
-        )
+        rebench = self._read_geak_rebench(result)
+        ruling = self._geak_rebench_decision(result, task=task, rebench=rebench)
         decision, native_rejection = ruling.decision, ruling.native_rejection
         # ``expected_cfg_hash`` fingerprints (args, envs) only, so it
         # cannot see the overlay drop out between dispatch and launch —
@@ -2756,9 +2739,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
         got_digest, decision = overlay.digest, overlay.decision
         if native_rejection:
             decision = "no_promote"
-        geak_candidate = self.shared_state.geak_result if isinstance(self.shared_state.geak_result, dict) else {}
         if decision == "validated":
-            verdict = self._material_verdict(geak_candidate, current_best=cb_now)
+            verdict = self._material_verdict(rebench)
             decision = verdict.decision
             if verdict.rejection is not None:
                 native_rejection = verdict.rejection
@@ -2766,43 +2748,31 @@ class WritebackCollaborator(CoordinatorCollaborator):
         pending = self.shared_state.geak_pending or {}
         pending_status = str(pending.get("status") or "") if isinstance(pending, dict) else ""
         if decision == "validated":
+            # Only an overlay that was dispatched AND still matches its
+            # manifest proves a kernel was in the measurement.
             promoted = self._promote_validated_rebench(
-                geak_candidate,
-                measurement=rebench_measurement,
-                variant=rebench_variant,
-                measured=float(measured),
-                # Only an overlay that was dispatched AND still matches its
-                # manifest proves a kernel was in the measurement.
-                overlay_loaded=bool(expected_overlay) and overlay_loaded,
+                rebench, overlay_loaded=bool(expected_overlay) and overlay_loaded
             )
             if not promoted:
                 decision = "no_promote"
         if decision == "no_material":
-            await self._drop_immaterial_rebench(geak_candidate, measured=measured, current_best_tput=cb_tput)
+            await self._drop_immaterial_rebench(rebench)
         elif decision in {"no_promote", "accuracy_drop", EVAL_KIND_ACCURACY_UNAVAILABLE, "intvty_regression"}:
             await self._refuse_rebench(
-                result,
-                task=task,
-                decision=decision,
-                measured=measured,
-                measured_ok=measured_ok,
-                current_best_tput=cb_tput,
-                candidate=geak_candidate,
-                native_rejection=native_rejection,
+                result, task=task, rebench=rebench, decision=decision, native_rejection=native_rejection
             )
         elif decision == "fallback":
-            ruling = await self._replay_via_geak_harness(result, task=task, measured=measured, got_hash=got_hash)
-            decision, promoted = ruling.decision, ruling.promoted
+            replay = await self._replay_via_geak_harness(result, task=task, rebench=rebench)
+            decision, promoted = replay.decision, replay.promoted
+        expected_hash = str((task.params or {}).get("expected_cfg_hash") or "")
         self._record_geak_rebench_timeline(
             task=task,
             decision=decision,
             pending_status=pending_status,
-            measured=measured,
-            config_matched=(got_hash == str((task.params or {}).get("expected_cfg_hash") or ""))
-            if str((task.params or {}).get("expected_cfg_hash") or "")
-            else None,
+            measured=rebench.measured,
+            config_matched=(rebench.got_hash == expected_hash) if expected_hash else None,
             overlay_loaded=overlay_loaded if expected_overlay else None,
-            got_hash=got_hash,
+            got_hash=rebench.got_hash,
             got_overlay_digest=got_digest,
         )
         self.shared_state.record_action_attempt(
@@ -2811,26 +2781,25 @@ class WritebackCollaborator(CoordinatorCollaborator):
             status=str(result.get("status") or "succeeded"),
             decision="promoted" if promoted else "no_promote" if decision == "no_promote" else "discarded",
             result=result,
-            extras={"revalidation_decision": decision, "output_throughput": measured},
+            extras={"revalidation_decision": decision, "output_throughput": rebench.measured},
         )
         outcome.verdict = Verdict.ADOPTED if promoted else Verdict.REFUSED
         outcome.changed = True
 
-    @staticmethod
-    def _rebench_reading(
-        best_winner: Any,
-        winners: Any,
-        *,
-        fallback_tput: Any,
-    ) -> _RebenchReading:
-        """Find the variant a 2b rebench measured, and the measurement behind it.
+    def _read_geak_rebench(self, result: dict) -> _GeakRebench:
+        """Read a 2b rebench round: the variant measured, and what it measured against.
 
         A variant carries its measurement under one of three keys depending on how
         it was produced, and a measurement with no throughput of its own falls back
         to the round's -- so a rebench is never graded against a missing number.
+        ``measured_ok`` judges the round's own throughput, not the rebench's: a
+        round that measured nothing says nothing, whatever the variant carries.
         """
         from hyperloom.common.perf_metric import output_tput_of
 
+        best_winner = result.get("best_variant")
+        winners = result.get("winners") or []
+        round_tput = result.get("output_throughput")
         rebench_variant = (
             best_winner
             if isinstance(best_winner, Mapping)
@@ -2843,9 +2812,18 @@ class WritebackCollaborator(CoordinatorCollaborator):
             rebench_measurement = rebench_variant
         rebench_measurement = dict(rebench_measurement)
         if "output_throughput" not in rebench_measurement and "tput" not in rebench_measurement:
-            rebench_measurement["output_throughput"] = fallback_tput
-        measured = output_tput_of(rebench_measurement)
-        return _RebenchReading(variant=rebench_variant, measurement=rebench_measurement, measured=measured)
+            rebench_measurement["output_throughput"] = round_tput
+        current_best = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+        return _GeakRebench(
+            variant=rebench_variant,
+            measurement=rebench_measurement,
+            measured=output_tput_of(rebench_measurement),
+            measured_ok=isinstance(round_tput, (int, float)) and round_tput > 0,
+            got_hash=str(rebench_variant.get("fingerprint") or ""),
+            current_best=current_best,
+            current_best_tput=current_best.get("tput"),
+            candidate=self.shared_state.geak_result if isinstance(self.shared_state.geak_result, dict) else {},
+        )
 
     @staticmethod
     def _overlay_reading(
@@ -2878,15 +2856,12 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 decision = "fallback"
         return _OverlayReading(expected=expected_overlay, loaded=overlay_loaded, digest=got_digest, decision=decision)
 
-    @staticmethod
     def _geak_rebench_decision(
+        self,
         result: dict,
         *,
-        measured: float,
-        got_hash: str,
-        expected_hash: str,
-        baseline_grade: Any,
-        current_grade: Any,
+        task: "Task",
+        rebench: _GeakRebench,
     ) -> _RebenchDecision:
         """Read what a GEAK 2b rebench decided about the stack it re-measured.
 
@@ -2894,6 +2869,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
         rebench may read as ``validated``; an incomparable grade or a losing
         objective sends the round to the harness replay instead.
         """
+        measured, got_hash = rebench.measured, rebench.got_hash
+        expected_hash = str((task.params or {}).get("expected_cfg_hash") or "")
+        baseline_grade = resolve_graded_comparison(self.shared_state, rebench.measurement, against_baseline=True)
+        current_grade = resolve_graded_comparison(self.shared_state, rebench.measurement)
         decision = _geak_revalidation_decision(
             measured=baseline_grade.candidate,
             baseline=baseline_grade.reference,
@@ -2945,18 +2924,14 @@ class WritebackCollaborator(CoordinatorCollaborator):
             decision = "no_promote"
         return _RebenchDecision(decision=decision, native_rejection=native_rejection)
 
-    async def _drop_immaterial_rebench(
-        self,
-        candidate: Mapping[str, Any],
-        *,
-        measured: float,
-        current_best_tput: Any,
-    ) -> None:
+    async def _drop_immaterial_rebench(self, rebench: _GeakRebench) -> None:
         """Record a rebench that beat current_best with no GEAK product behind it.
 
         Same-config measurement noise: the headline, the stack and the gain are
         left alone and the candidate is cleared.
         """
+        candidate, measured = rebench.candidate, rebench.measured
+        current_best_tput = rebench.current_best_tput
         log.info(
             "geak 2b rebench beat current_best but GEAK shipped no "
             "material product (measured=%r current_best=%r) -> "
@@ -3001,14 +2976,13 @@ class WritebackCollaborator(CoordinatorCollaborator):
         result: dict,
         *,
         task: "Task",
+        rebench: _GeakRebench,
         decision: str,
-        measured: float,
-        measured_ok: bool,
-        current_best_tput: Any,
-        candidate: Mapping[str, Any],
         native_rejection: str,
     ) -> None:
         """Record a revalidation the rebench refused, and why it was refused."""
+        measured, measured_ok = rebench.measured, rebench.measured_ok
+        candidate, current_best_tput = rebench.candidate, rebench.current_best_tput
         log.info(
             "geak 2b rebench rejected (decision=%s measured=%r current_best=%r)",
             decision,
@@ -3044,8 +3018,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         result: dict,
         *,
         task: "Task",
-        measured: float,
-        got_hash: str,
+        rebench: _GeakRebench,
     ) -> _ReplayRuling:
         """Replay an inconclusive 2b revalidation through the GEAK harness (2a).
 
@@ -3053,6 +3026,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         round ``validated``; anything else leaves the round as the 2b rebench
         found it.
         """
+        measured, got_hash = rebench.measured, rebench.got_hash
         promoted = False
         decision = "fallback"
         log.warning(
@@ -3100,15 +3074,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             decision = "validated"
         return _ReplayRuling(decision=decision, promoted=promoted)
 
-    def _promote_validated_rebench(
-        self,
-        candidate: Mapping[str, Any],
-        *,
-        measurement: Mapping[str, Any],
-        variant: Mapping[str, Any],
-        measured: float,
-        overlay_loaded: bool,
-    ) -> bool:
+    def _promote_validated_rebench(self, rebench: _GeakRebench, *, overlay_loaded: bool) -> bool:
         """Write the headline a validated orchestrator-harness rebench earns.
 
         Lifts current_best + optimization_stack + the validated gain and clears
@@ -3119,7 +3085,8 @@ class WritebackCollaborator(CoordinatorCollaborator):
         Returns:
             Whether the promotion landed.
         """
-        promotion_result = dict(candidate)
+        measurement, variant = rebench.measurement, rebench.variant
+        promotion_result = dict(rebench.candidate)
         for key in (
             "output_throughput",
             "input_throughput",
@@ -3135,18 +3102,13 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 promotion_result[key] = measurement[key]
         return self._coord.phase_kernel.promote_geak_from_candidate(
             promotion_result,
-            measured_tput=float(measured),
+            measured_tput=float(rebench.measured),
             provenance="geak_orch_harness_validated",
             overlay_loaded=overlay_loaded,
             measurement_provenance={**variant, **measurement},
         )
 
-    def _material_verdict(
-        self,
-        pending_summary: Mapping[str, Any] | None,
-        *,
-        current_best: Mapping[str, Any],
-    ) -> _MaterialVerdict:
+    def _material_verdict(self, rebench: _GeakRebench) -> _MaterialVerdict:
         """Rule on whether a validated GEAK rebench has material product behind it.
 
         A rebench that beats current_best is only a KERNEL gain when
@@ -3158,6 +3120,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         means this is a resume revalidation of an already-material win
         (let it through); otherwise there is no material to validate.
         """
+        pending_summary, current_best = rebench.candidate, rebench.current_best
         stack_now = self.shared_state.optimization_stack or []
         has_prior_geak_e2e = any(isinstance(e, dict) and e.get("action") == "geak_e2e" for e in stack_now)
         # Escape hatch first: a pre-existing geak_e2e stack entry is
