@@ -464,8 +464,6 @@ pytest_ci_args = [
 xdist_workers = 2
 # GitHub matrix shards the suite is split across (pytest-split).
 total_shards = 6
-# Repository variable name: when truthy, CI skips fail_under enforcement.
-relax_fail_under_repo_var = "COVERAGE_RELAX_FAIL_UNDER"
 
 # White-box code-metrics gate: ``scripts/code_metrics.py``, run by
 # ``.github/workflows/code-metrics.yml``. Each number below carries its reason.
