@@ -11,6 +11,7 @@ that sandbox. At most ``8 / TP`` tests run at once on one node.
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -22,6 +23,7 @@ from hyperloom.measure.hosted_spec import SpecContext
 from hyperloom.measure.local import SUPPORTED_KINDS
 from hyperloom.measure.local_templates import local_runner_template
 from hyperloom.sandbox.local import LocalSandboxProvider
+from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
@@ -37,6 +39,8 @@ MAX_CARDS_PER_NODE = 8
 _SANDBOXES, _ARCHIVE, _SUBMISSIONS = "sandboxes", "archive", "toolbox/submissions.jsonl"
 _TOOL_RESULTS = "tool-results"
 _POLL_INTERVAL_SEC = 2.0
+LEAKED_CARDS_REASON = "sandbox processes not provably gone"
+logger = logging.getLogger(__name__)
 
 
 class LocalHostedToolbox(RealToolbox):
@@ -44,11 +48,65 @@ class LocalHostedToolbox(RealToolbox):
 
     backend: HostedMeasurementBackend
     provider: LocalSandboxProvider
+    _reported_cards: frozenset[int] = frozenset()
+
+    async def measurement_capacity(self) -> MeasurementCapacity:
+        """The provider's card pool, less the cards it lost for good (``provider.quarantined``); node quarantine does
+        not reduce it."""
+
+        total = self.provider.pool.total
+        return MeasurementCapacity(total, total - len(self._leaked()))
+
+    async def start(self) -> None:
+        """Start, after taking back the leaks an earlier run of this host recorded in the notebook."""
+
+        await self._restore_leaked_cards()
+        await super().start()
+
+    async def _restore_leaked_cards(self) -> None:
+        """A card an earlier process lost for good stays lost: its old holder may still run.
+
+        The notebook holds those cards as events of this node with ``gpu_ids``. The provider is fresh and owns every
+        card, so they are leased once here (the pool has no call to take out one card) and never released, exactly as
+        a leak in this process; the others go straight back.
+        """
+
+        node = self.provider.hostname
+        recorded = {gpu for event in await self._quarantine.cards() if event.node == node for gpu in event.gpu_ids}
+        pool = self.provider.pool
+        lost = frozenset(recorded & set(pool.free_cards()))
+        if not lost:
+            return
+        leased = pool.acquire(len(pool.free_cards()), 0.0)
+        pool.release([card for card in leased if card not in lost])
+        self.provider.quarantined.update(lost)
+        self._reported_cards |= lost
+
+    def _leaked(self) -> frozenset[int]:
+        return frozenset(self.provider.quarantined)
+
+    async def _housekeeping(self) -> None:
+        """Tell the notebook about cards the provider lost since last time: one event for all the new ones.
+
+        The provider only grows a plain set; this polls it after each settled test and on every tick, so the sandbox
+        layer knows nothing of the notebook. A refused write is retried at the next poll.
+        """
+
+        new = self._leaked() - self._reported_cards
+        if not new:
+            return
+        try:
+            await self._quarantine.add_cards(self.provider.hostname, new, LEAKED_CARDS_REASON)
+        except Exception:
+            logger.warning("could not record leaked cards in the notebook", exc_info=True)
+            return
+        self._reported_cards |= new
 
     async def close(self) -> None:
         await super().close()
         await asyncio.to_thread(self.backend.close)
         await asyncio.to_thread(self.provider.close)
+        await self._housekeeping()  # a sandbox that could not be reaped at shutdown has leaked its cards too
 
 
 def max_parallel_tests(cards: int, tp: int) -> int:

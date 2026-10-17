@@ -25,7 +25,12 @@ class Quarantine:
     async def load(self) -> None:
         """Read the list the notebook holds; called once when the toolbox starts."""
 
-        self._nodes = {event.node for event in await self._health.quarantined()}
+        self._nodes = {event.node for event in await self._health.quarantined() if not event.gpu_ids}
+
+    async def cards(self) -> tuple[QuarantineEvent, ...]:
+        """The card-level events the notebook holds (cards lost for good), not the whole-node ones."""
+
+        return tuple(event for event in await self._health.quarantined() if event.gpu_ids)
 
     @property
     def nodes(self) -> frozenset[str]:
@@ -44,9 +49,22 @@ class Quarantine:
         self._nodes.add(node)
         return True
 
+    async def add_cards(self, node: str, gpu_ids: Iterable[int], reason: str) -> None:
+        """Record cards of ``node`` that are lost for good; the node itself stays in service (one event, not a node
+        quarantine: :meth:`load` and :attr:`nodes` ignore it)."""
+
+        await self._health.record_quarantine(
+            QuarantineEvent(
+                node=node, action=QuarantineAction.QUARANTINE, reason=reason, gpu_ids=tuple(sorted(gpu_ids))
+            )
+        )
+
     async def lift(self, node: str, reason: str) -> bool:
         if node not in self._nodes:
             return False
+        lost = [event for event in await self.cards() if event.node == node]
         await self._health.record_quarantine(QuarantineEvent(node=node, action=QuarantineAction.LIFT, reason=reason))
+        for event in lost:  # lifting a node returns its card sets in the notebook; cards lost for good are not returned
+            await self._health.record_quarantine(event)
         self._nodes.discard(node)
         return True

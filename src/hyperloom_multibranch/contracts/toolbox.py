@@ -122,6 +122,30 @@ class QueueState:
 _PRIORITIES = range(PRIORITY_HIGHEST, PRIORITY_LOWEST + 1)
 
 
+@dataclass(frozen=True)
+class MeasurementCapacity:
+    """How many cards the toolbox can still measure on: what the scheduler checks ``usable_cards < workload.tp`` against.
+
+    ``total_cards`` is the card pool the toolbox owns; ``usable_cards`` is the total minus the cards that are lost for
+    good (a card whose holder processes were not provably gone is never leased again). Quarantining a node does not
+    reduce ``usable_cards``: quarantine only widens ``avoid_nodes`` and never blocks a test. ``known`` is ``False`` for
+    a toolbox that has no card pool of its own to read (both counts are then 0 and mean nothing): the caller does not
+    compare against them.
+    """
+
+    total_cards: int
+    usable_cards: int
+    known: bool = True
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.usable_cards <= self.total_cards:
+            raise ValueError(f"usable_cards {self.usable_cards} must be between 0 and total_cards {self.total_cards}")
+
+    @classmethod
+    def unknown(cls) -> MeasurementCapacity:
+        return cls(0, 0, known=False)
+
+
 #: The scope names of MCP tokens and tools: the host (Claw's front end) and a specialist.
 SCOPE_HOST = "host"
 SCOPE_SPECIALIST = "specialist"
@@ -172,6 +196,9 @@ class Toolbox(Protocol):
 
     async def queue_state(self) -> QueueState: ...
 
+    async def measurement_capacity(self) -> MeasurementCapacity:
+        """The cards this toolbox can still measure on; read-only, see :class:`MeasurementCapacity`."""
+
 
 __all__ = [
     "SCOPE_HOST",
@@ -179,6 +206,7 @@ __all__ = [
     "REJECTION_CODES",
     "Backpressure",
     "CancelOutcome",
+    "MeasurementCapacity",
     "NodeHealth",
     "QueueState",
     "RequestRejected",

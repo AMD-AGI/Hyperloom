@@ -31,6 +31,7 @@ from hyperloom_multibranch.contracts.notebook.records import ClaimKey, Withdrawa
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import (
     CancelOutcome,
+    MeasurementCapacity,
     NodeHealth,
     QueueState,
     RequestRejected,
@@ -210,6 +211,11 @@ class RealToolbox:
     async def queue_state(self) -> QueueState:
         return self._queue.state()
 
+    async def measurement_capacity(self) -> MeasurementCapacity:
+        """The cards this toolbox can measure on; a toolbox with no card pool of its own reports it as unknown."""
+
+        return MeasurementCapacity.unknown()
+
     # --- beyond the interface ------------------------------------------------------------------------------------
 
     async def set_policy(self, policy: QueuePolicy) -> None:
@@ -348,9 +354,13 @@ class RealToolbox:
         """One round of housekeeping: renew the claims of live tests and retry outcomes the notebook refused."""
 
         await self.renew_claims()
+        await self._housekeeping()
         for entry in self._log.entries():
             if entry.unwritten:
                 await self._write_outcome(entry)
+
+    async def _housekeeping(self) -> None:
+        """What a backend reports on its own once a test has settled and on every tick; nothing here by default."""
 
     async def renew_claims(self) -> None:
         if self._claims is None:
@@ -424,6 +434,7 @@ class RealToolbox:
             entry = self._log.get(item.request_id)
             if entry is not None:
                 await self._record_and_write(entry, {"result": result.to_document()})
+            await self._housekeeping()
         finally:
             self._queue.remove(item.request_id)
             self._tasks.pop(item.request_id, None)

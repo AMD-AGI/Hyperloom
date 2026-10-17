@@ -52,7 +52,7 @@ def test_queue_state_totals() -> None:
 
 def test_the_toolbox_protocol_is_the_three_calls_of_the_design() -> None:
     names = {name for name in vars(toolbox.Toolbox) if not name.startswith("_")}
-    assert names == {"submit_test", "cancel", "queue_state"}
+    assert names == {"submit_test", "cancel", "queue_state", "measurement_capacity"}
     assert {o.value for o in CancelOutcome} == {"withdrawn", "finished"}
 
 
@@ -73,6 +73,9 @@ def test_a_minimal_implementation_satisfies_the_protocol_shape() -> None:
 
         async def queue_state(self) -> QueueState:
             return QueueState()
+
+        async def measurement_capacity(self) -> toolbox.MeasurementCapacity:
+            return toolbox.MeasurementCapacity(8, 8)
 
     impl: toolbox.Toolbox = Minimal()
     request = TestRequest(TestKind.TEST, Purpose.EXPLORE, "b1", "c0")

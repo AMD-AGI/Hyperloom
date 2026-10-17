@@ -28,7 +28,13 @@ from hyperloom.contracts.measurement import TestKind, TestRequest, TestResult, V
 from hyperloom.contracts.recipe import Recipe
 from hyperloom_multibranch.contracts.notebook.interfaces import ClaimService, RecordSearch
 from hyperloom_multibranch.contracts.notebook.records import QuarantineEvent, Withdrawal
-from hyperloom_multibranch.contracts.toolbox import CancelOutcome, QueueState, RequestRejected, WorkloadKind
+from hyperloom_multibranch.contracts.toolbox import (
+    CancelOutcome,
+    MeasurementCapacity,
+    QueueState,
+    RequestRejected,
+    WorkloadKind,
+)
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.fake_model import (
@@ -313,6 +319,14 @@ class FakeToolbox(RealToolbox):
         if self.results:
             self.record_cold_start(self.config.attempt_seconds)
         return await super().queue_state()
+
+    async def measurement_capacity(self) -> MeasurementCapacity:
+        """Cards of the fake fleet: ``gpu_count`` per node. The fake refuses every test once all nodes are
+        quarantined, so the cards of a quarantined node are not usable here (the real toolbox keeps them usable)."""
+
+        per_node = self.config.gpu_count
+        usable = len(set(self.config.nodes) - self.quarantined)
+        return MeasurementCapacity(len(self.config.nodes) * per_node, usable * per_node)
 
     async def drain(self) -> None:
         """Release held attempts, run everything queued and wait for every running test."""
