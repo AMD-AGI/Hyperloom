@@ -53,7 +53,7 @@ def locks(conn):
 
 
 def test_schema_version_records_owner_provenance():
-    assert SCHEMA_VERSION == 6
+    assert SCHEMA_VERSION == 7
 
 
 def test_fresh_db_has_composite_pk(conn):
