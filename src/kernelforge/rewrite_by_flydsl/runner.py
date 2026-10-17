@@ -40,7 +40,7 @@ from kernelforge.rewrite_by_flydsl.kb import (
 from kernelforge.rewrite_by_flydsl.optimize import run_optimize
 from kernelforge.rewrite_by_flydsl.port_loop import PortResult, run_port_loop
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET, RewriteBudgetPolicy
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 from kernelforge.tracker import UsageAccumulator, UsageLedgerFile, combine_usage_totals
 
 log = logging.getLogger(__name__)

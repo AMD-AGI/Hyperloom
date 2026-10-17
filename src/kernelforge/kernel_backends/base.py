@@ -14,7 +14,7 @@ from kernelforge.kernel_backends.constants import (
     KERNEL_BACKEND_PROMPT_MODULES,
     resolve_language_dirs,
 )
-from kernelforge.loop.scoring import canonical_gate_prompt
+from kernelforge.evaluation.scoring import canonical_gate_prompt
 
 log = logging.getLogger(__name__)
 

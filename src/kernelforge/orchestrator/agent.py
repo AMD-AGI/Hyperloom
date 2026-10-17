@@ -23,7 +23,7 @@ from kernelforge.agent_backends.session_resume import run_session_with_api_resum
 from kernelforge.config import Config, resolve_agent_model
 from kernelforge.llm.workspace_policy import TOOL_OWNED_UNTRACKED_GLOBS
 from kernelforge.mcp_server.pr_stdio_server import TOOL_NAMES as PR_TOOL_NAMES
-from kernelforge.loop.scoring import (
+from kernelforge.evaluation.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
     KEEP_MEASUREMENT_COUNT,
     KEEP_MIN_MARGIN_FRACTION,

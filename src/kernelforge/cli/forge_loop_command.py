@@ -61,7 +61,7 @@ from kernelforge.loop.recovery import (
     publish_warm_start_recovery,
     rollback_unpublished_warm_start,
 )
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB, aggregate_regression_detail
+from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB, aggregate_regression_detail
 
 
 # A high runaway backstop, not a time bound.
@@ -1733,7 +1733,7 @@ def forge_loop(
 
     from kernelforge.loop.runner import IterationLoop
     from kernelforge.loop.runner import IterationConfig
-    from kernelforge.loop.scoring import warm_start_improvement_flags
+    from kernelforge.evaluation.scoring import warm_start_improvement_flags
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
     from kernelforge.orchestrator.agent import make_agent_fn
 
