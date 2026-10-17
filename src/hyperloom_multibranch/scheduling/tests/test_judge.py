@@ -38,6 +38,7 @@ from hyperloom_multibranch.scheduling.roster import (
 
 METRIC = "output_throughput"
 NOW = 1000.0
+STOP_REASON = "no gain left"
 
 
 def _entry(branch: str, *, kind: BranchKind = BranchKind.SPECIALIST, stopped: bool = False) -> BranchEntry:
@@ -158,6 +159,26 @@ def test_parse_reads_the_last_decision_object() -> None:
 
 
 @pytest.mark.parametrize(
+    ("reply", "decision"),
+    [
+        (
+            {
+                "open": 1,
+                "open_k": 2,
+                "branches": [{"branch": "b01", "k": 2}],
+                "stop": [{"branch": "b02", "reason": STOP_REASON}],
+                "stop_session": None,
+            },
+            JudgeDecision(open_count=1, open_k=2, k=(KOrder("b01", 2),), stop=(StopOrder("b02", STOP_REASON),)),
+        ),
+        ({"open": 0}, JudgeDecision()),
+    ],
+)
+def test_a_reply_in_the_mb1_format_still_parses(reply: dict[str, object], decision: JudgeDecision) -> None:
+    assert parse_decision(_reply(reply)) == decision
+
+
+@pytest.mark.parametrize(
     "reply",
     [
         "no json at all",
@@ -238,15 +259,19 @@ async def test_decide_keeps_the_status_quo_when_the_call_fails(tmp_path: Path) -
     assert row["reply"] == "" and "status=529" in row["error"]
 
 
-async def test_decide_keeps_the_status_quo_on_an_unreadable_reply(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "reply",
+    ["I would open two branches.", _reply({"open": 0, "stop": [{"branch": "b02"}], "stop_session": None})],
+)
+async def test_decide_keeps_the_status_quo_on_an_unreadable_reply(tmp_path: Path, reply: str) -> None:
     async def completion(system: str, user: str) -> str:
-        return "I would open two branches."
+        return reply
 
     transcript = tmp_path / "MB-judge.jsonl"
 
     assert await Judge(completion, transcript, Clock(now=lambda: NOW)).decide(_view()) is None
     (row,) = [json.loads(line) for line in transcript.read_text().splitlines()]
-    assert row["reply"] == "I would open two branches." and row["error"]
+    assert row["reply"] == reply and row["error"]
 
 
 async def test_an_unexpected_error_is_not_swallowed(tmp_path: Path) -> None:

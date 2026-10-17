@@ -616,6 +616,23 @@ async def test_a_failed_opening_judge_call_opens_one_branch_at_k_one(tmp_path: P
     assert failed and set(failed) == {"kept the status quo"}
 
 
+async def test_an_unreadable_steering_reply_keeps_every_branch_and_k_as_they_were(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.judge = ScriptedCompletion([OPENING], fallback="Stop b02 and give b01 one test.")
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    assert len(stage.judge.calls) > 2
+    decisions = _decisions(stage)
+    assert [row["kind"] for row in decisions if row["kind"] in ("judge", "judge_failed")] == ["judge"] + [
+        "judge_failed"
+    ] * (len(stage.judge.calls) - 1)
+    assert {row["reason"] for row in decisions if row["kind"] == "judge_failed"} == {"kept the status quo"}
+    assert not [row for row in decisions if row["kind"] == "stop" and str(row["reason"]).startswith("judge:")]
+    assert stage.sessions.k == {"b01": 2, "b02": 2}
+
+
 async def test_a_judge_stop_the_runtime_refuses_does_not_end_the_session(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
     _script(stage)
