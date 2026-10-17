@@ -226,7 +226,8 @@ class Stage:
         """An agent CLI of ``branch``'s specialist, started the way the AI work socket starts one and adopted by the
         session's process registry, as the runtime adopts every process it has started."""
 
-        agent = await asyncio.create_subprocess_exec(*AGENT_ARGV, start_new_session=True)
+        async with self.time.held():
+            agent = await asyncio.create_subprocess_exec(*AGENT_ARGV, start_new_session=True)
         self.setup.processes.adopt(agent.pid, branch=branch, argv=AGENT_ARGV)
         self.pids.append(agent.pid)
 

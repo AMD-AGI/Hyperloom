@@ -187,7 +187,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         settings = settings_from(args)
     except ValueError as exc:
-        parser.error(str(exc))
+        parser.print_usage(sys.stderr)
+        print(f"{parser.prog}: error: {exc}", file=sys.stderr)
+        raise SystemExit(EXIT_USAGE) from exc
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format=LOG_FORMAT)
     try:
         recipe_kb = recipe_kb_from_env()
