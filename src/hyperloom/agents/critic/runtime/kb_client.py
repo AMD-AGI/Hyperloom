@@ -20,11 +20,6 @@ from .errors import (
     KBTransportError,
     KBValidationError,
 )
-from .metrics import (
-    CRITIC_KB_WRITE_DURATION_SECONDS,
-    CRITIC_KB_WRITE_TOTAL,
-    get_registry,
-)
 from hyperloom.common.url_safety import require_http_url as _require_http_url
 
 
@@ -133,7 +128,7 @@ class HTTPKBClient:
 
     # Internal — request / retry
     def _request(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
-        """POST ``body`` to ``path`` with retry, backoff, and metrics."""
+        """POST ``body`` to ``path`` with retry and backoff."""
         url = f"{self.base_url}{path}"
         data = json.dumps(body).encode("utf-8")
         headers = {
@@ -143,11 +138,8 @@ class HTTPKBClient:
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
 
-        registry = get_registry()
-        endpoint_label = path.split("/")[-1]
         last_error: Exception | None = None
         attempt = 0
-        start = time.time()
         while attempt <= self.retry_max:
             attempt += 1
             _require_http_url(url)
@@ -155,27 +147,11 @@ class HTTPKBClient:
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:  # nosec B310 - URL scheme checked above.
                     payload = resp.read().decode("utf-8") or "{}"
-                    body_obj = json.loads(payload)
-                    registry.counter(CRITIC_KB_WRITE_TOTAL).inc(
-                        {
-                            "endpoint": endpoint_label,
-                            "status": str(resp.status),
-                        }
-                    )
-                    registry.histogram(CRITIC_KB_WRITE_DURATION_SECONDS).observe(
-                        time.time() - start, {"endpoint": endpoint_label}
-                    )
-                    return body_obj
+                    return json.loads(payload)
             except urllib.error.HTTPError as exc:
                 # 4xx → don't retry.
                 status = getattr(exc, "code", 0)
                 err_body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
-                registry.counter(CRITIC_KB_WRITE_TOTAL).inc(
-                    {
-                        "endpoint": endpoint_label,
-                        "status": str(status),
-                    }
-                )
                 if status == 404:
                     raise KBNotFoundError(f"{path} 404: {err_body}") from exc
                 if status == 409:

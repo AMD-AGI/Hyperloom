@@ -44,7 +44,6 @@ from .v6 import (
 )
 from .v6_close import collect_v6_close as collect_v6_close
 from .v6_critic import collect_v6_critic as collect_v6_critic
-from .v6_robustness import collect_v6_robustness as collect_v6_robustness
 
 __all__ = [
     "collect_langfuse",
@@ -54,7 +53,6 @@ __all__ = [
     "collect_v6_critic",
     "collect_v6_metadata",
     "collect_v6_outcome",
-    "collect_v6_robustness",
     "collect_v6_timeline",
     "collect_workload",
     "langfuse_block",

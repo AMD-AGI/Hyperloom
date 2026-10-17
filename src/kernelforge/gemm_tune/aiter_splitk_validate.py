@@ -64,11 +64,6 @@ _TRIAL_OPS = {
 }
 
 
-def supported_ops() -> frozenset[str]:
-    """Op keys :func:`make_support_fn` can build a real trial for."""
-    return frozenset(_TRIAL_OPS)
-
-
 def max_supported_splitk(
     m: int,
     n: int,

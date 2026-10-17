@@ -595,11 +595,7 @@ class TestAtomPathPresentInAllThreeLocations:
         assert any("/app/atom/atom" in r.lower() for r in fp._DEFAULT_SOURCE_ROOTS)
 
     def test_atom_present_in_reusable_source_roots(self):
-        from hyperloom.orchestrator.kernel import (
-            request_handlers as krh,
-        )
-
-        assert any("/app/atom/atom" in r.lower() for r in krh._reusable_source_roots())
+        assert any("/app/atom/atom" in r.lower() for r in fp.resolve_known_source_prefixes())
 
     def test_atom_present_in_tracelens_reusable_roots(self):
         """The kernel-agent's tracelens_analysis ``_REUSABLE_SOURCE_ROOTS`` must track the orchestrator-side list."""
@@ -615,12 +611,9 @@ class TestAtomPathPresentInAllThreeLocations:
 
     def test_kernel_request_handlers_and_tracelens_analysis_atom_paths_in_sync(self):
         """The orchestrator gate and kernel-agent classifier derive reusable roots from the same source, so their atom subsets must match."""
-        from hyperloom.orchestrator.kernel import (
-            request_handlers as krh,
-        )
         from hyperloom.orchestrator.trace_analysis import tracelens_analysis
 
-        orch_atom = frozenset(r.lower() for r in krh._reusable_source_roots() if "/atom/" in r.lower())
+        orch_atom = frozenset(r.lower() for r in fp.resolve_known_source_prefixes() if "/atom/" in r.lower())
         tracelens_analysis._framework_source_roots.cache_clear()
         ka_atom = frozenset(r.lower() for r in tracelens_analysis._reusable_roots() if "/atom/" in r.lower())
         assert orch_atom, "orchestrator reusable roots carry no atom entry"

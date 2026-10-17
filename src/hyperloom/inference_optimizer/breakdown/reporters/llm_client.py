@@ -20,20 +20,10 @@ REPORT_HTTP_TIMEOUT_SEC = 60.0
 
 __all__ = [
     "REPORT_HTTP_TIMEOUT_SEC",
-    "NullClient",
     "OpenAIHttpClient",
     "AnthropicClient",
     "build_client_from_env",
 ]
-
-
-@dataclass
-class NullClient:
-    """No-op client; compose treats this exactly like ``llm_client=None``."""
-
-    def complete(self, *, system: str, user: str) -> str:
-        """Return an empty string, disabling the narrative pass."""
-        return ""
 
 
 @dataclass

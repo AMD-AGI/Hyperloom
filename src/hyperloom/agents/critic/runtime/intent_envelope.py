@@ -20,9 +20,6 @@ from hyperloom.inference_optimizer.protocol.intent import (
 from .errors import IntentEnvelopeValidationError
 
 
-ENVELOPE_SCHEMA_VERSION = "v0.6"
-
-
 # Intent types the Critic role is allowed to emit.
 ALLOWED_CRITIC_INTENTS: frozenset[str] = frozenset(
     {
@@ -141,16 +138,9 @@ def build_review_verdict_intent(
     return Intent(intent_type="review_verdict", payload=payload)
 
 
-def build_idle_intent(body_md: str = DEFAULT_IDLE_BODY) -> Intent:
-    """Build the ``observation`` ``send_message`` intent for an idle turn.
-
-    Args:
-        body_md (str): Message body; defaults to :data:`DEFAULT_IDLE_BODY`.
-
-    Returns:
-        Intent: A ``send_message`` intent on the ``observation`` topic.
-    """
-    return Intent(intent_type="send_message", payload={"topic": "observation", "body_md": body_md})
+def build_idle_intent() -> Intent:
+    """Build the ``observation`` ``send_message`` intent carrying :data:`DEFAULT_IDLE_BODY` for an idle turn."""
+    return Intent(intent_type="send_message", payload={"topic": "observation", "body_md": DEFAULT_IDLE_BODY})
 
 
 def build_advice_intent(body_md: str, *, target_proposal_msg_id: str | None = None) -> Intent:
@@ -181,7 +171,6 @@ __all__ = [
     "ALLOWED_VERDICT_SOURCES",
     "DEFAULT_ADVICE_TOPIC",
     "DEFAULT_IDLE_BODY",
-    "ENVELOPE_SCHEMA_VERSION",
     "Intent",
     "IntentEnvelope",
     "build_advice_intent",

@@ -574,10 +574,9 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             if task.task_id in self._inflight_actions:
                 continue
             self_settling = task.kind in _SELF_SETTLING_KINDS
-            retired = task.kind == "recover" and task.kind not in self.sub.executor_registry
-            if not retired and await self._cancel_queued_task_over_budget(task):
+            if await self._cancel_queued_task_over_budget(task):
                 continue
-            lanes_needed = [] if retired else list(task.requires_lanes or [])
+            lanes_needed = list(task.requires_lanes or [])
             if lanes_needed:
                 # SQLite lane gate. Under single-node Ray execution the
                 # authoritative GPU mutex is Ray's custom
@@ -834,8 +833,7 @@ class DispatcherCollaborator(CoordinatorCollaborator):
             which case the row is untouched and still queued.
         """
         lease = prebound_lease
-        retired = task.kind == "recover" and task.kind not in self.sub.executor_registry and task.state == "queued"
-        if lease is None and task.requires_lanes and not retired:
+        if lease is None and task.requires_lanes:
             lease = await self.locks.try_acquire_many(
                 list(task.requires_lanes),
                 holder_id=task.task_id,

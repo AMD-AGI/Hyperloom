@@ -13,7 +13,6 @@ import pytest
 from hyperloom.inference_optimizer.breakdown.reporters.llm_client import (
     REPORT_HTTP_TIMEOUT_SEC,
     AnthropicClient,
-    NullClient,
     OpenAIHttpClient,
     build_client_from_env,
 )
@@ -75,10 +74,6 @@ def _install_factories(
     monkeypatch.setattr(f"{_CLAUDE_ONESHOT}.ensure_available", _ensure_available)
     monkeypatch.setattr(f"{_LLM_CONFIG}.build_http_timeout", lambda **kwargs: kwargs)
     return built
-
-
-def test_null_client_disables_the_narrative_pass() -> None:
-    assert NullClient().complete(system="s", user="u") == ""
 
 
 def test_openai_client_delegates_to_the_shared_chat_helper(monkeypatch: pytest.MonkeyPatch) -> None:

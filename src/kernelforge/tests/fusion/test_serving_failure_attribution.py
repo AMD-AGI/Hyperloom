@@ -14,7 +14,6 @@ from kernelforge.fusion.validate import (
     _explicit_fatal_error,
     _is_hard_gpu_fault,
     _serving_crash_reason,
-    serving_failure_blames_kernel,
 )
 
 # The failure that prompted this: an install that needs an env var it was not given.
@@ -38,17 +37,6 @@ def test_engine_start_failure_is_reported_not_guessed_at() -> None:
     assert "no explicit GPU-fault line" not in reason
 
 
-def test_engine_start_failure_does_not_accuse_the_kernel() -> None:
-    assert serving_failure_blames_kernel(_serving_crash_reason(AITER_LOG)) is False
-
-
-def test_a_gpu_fault_still_accuses_the_kernel() -> None:
-    reason = _serving_crash_reason(FAULT_LOG)
-
-    assert "Memory access fault" in reason
-    assert serving_failure_blames_kernel(reason) is True
-
-
 def test_a_fault_marker_outranks_a_later_exception_line() -> None:
     mixed = FAULT_LOG + "\nRuntimeError: some later noise\n"
 
@@ -59,7 +47,6 @@ def test_silence_stays_silence() -> None:
     reason = _serving_crash_reason("nothing interesting here\n")
 
     assert reason == "server exited unexpectedly (no explicit GPU-fault line)"
-    assert serving_failure_blames_kernel(reason) is False
 
 
 def test_prefixes_are_stripped_from_the_reported_line() -> None:

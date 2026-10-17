@@ -14,11 +14,11 @@ from types import SimpleNamespace
 
 from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_metadata
 from hyperloom.inference_optimizer.breakdown.recorder import (
+    SECTION_SHAPES,
     assemble_parts,
     record_metadata_identity,
     record_metadata_langfuse,
     recorder_for,
-    section_shape,
     snapshot_metadata,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.session_metadata import SECTION
@@ -86,7 +86,7 @@ def _state(**overrides):
 
 
 def test_metadata_is_a_registered_singleton():
-    assert section_shape(SECTION) == "singleton"
+    assert SECTION_SHAPES[SECTION] == "singleton"
 
 
 def test_the_manifest_stamp_records_identity_and_image(tmp_path):

@@ -178,11 +178,6 @@ def primary_metric_unit(framework: str | None) -> str:
     return "ms" if is_scriptable(framework) else throughput_unit(framework)
 
 
-def primary_metric_name(framework: str | None) -> str:
-    """Return the state field name holding a session's primary result metric."""
-    return "e2el_mean_ms" if is_scriptable(framework) else "throughput_tok_s_per_gpu"
-
-
 def primary_metric_value(framework: str | None, tput: float | int | None) -> float | None:
     """Convert a session's stored throughput (the server aggregate, not per GPU) into the value shown."""
     tput = float(tput or 0.0)

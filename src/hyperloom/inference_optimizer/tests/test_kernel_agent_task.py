@@ -167,19 +167,18 @@ async def test_resumed_entry_reuses_a_live_task_and_replaces_a_settled_one(coord
             to_phase=ps.PHASE_KERNEL_AGENT,
             reason="test",
             evidence={},
-            loopback=False,
         )
     )
     first = [t for t in await c.tasks.queued() if t.kind == "kernel_agent"]
     await c.phase_kernel.on_enter_kernel(
-        Transition(from_phase="resume", to_phase=ps.PHASE_KERNEL_AGENT, reason="test", evidence={}, loopback=False)
+        Transition(from_phase="resume", to_phase=ps.PHASE_KERNEL_AGENT, reason="test", evidence={})
     )
     assert [t.task_id for t in await c.tasks.queued() if t.kind == "kernel_agent"] == [first[0].task_id]
 
     await c.tasks.transition(first[0].task_id, "running")
     await c.tasks.transition(first[0].task_id, "failed", evidence={"reason": "dead_holder"})
     await c.phase_kernel.on_enter_kernel(
-        Transition(from_phase="resume", to_phase=ps.PHASE_KERNEL_AGENT, reason="test", evidence={}, loopback=False)
+        Transition(from_phase="resume", to_phase=ps.PHASE_KERNEL_AGENT, reason="test", evidence={})
     )
 
     requeued = [t for t in await c.tasks.queued() if t.kind == "kernel_agent"]
@@ -228,7 +227,6 @@ async def test_kernel_agent_dispatch_keeps_authoring_phase_and_validates_contrac
             to_phase=ps.PHASE_KERNEL_AGENT,
             reason="test",
             evidence={},
-            loopback=False,
         )
     )
     task = next(task for task in await c.tasks.queued() if task.kind == "kernel_agent")
@@ -274,8 +272,8 @@ async def test_kernel_agent_dispatch_keeps_authoring_phase_and_validates_contrac
         (
             "idle streak",
             lambda st: (
-                setattr(st, "kernel_idle_ticks", ps.KERNEL_IDLE_MAX_TICKS),
-                setattr(st, "kernel_idle_since_unix", time.time() - ps.KERNEL_IDLE_MIN_SECONDS - 1.0),
+                setattr(st, "kernel_idle_ticks", ps._kernel_idle_max_ticks()),
+                setattr(st, "kernel_idle_since_unix", time.time() - ps._kernel_idle_min_seconds() - 1.0),
             ),
             "kernel_no_more_leverage",
         ),
@@ -318,9 +316,9 @@ async def test_kernel_holds_while_its_task_is_in_flight_and_leaves_once_it_settl
     task = await _create_kernel_agent(c)
     await c.tasks.transition(task.task_id, "running")
 
-    for _ in range(ps.KERNEL_IDLE_MAX_TICKS * 5):
+    for _ in range(ps._kernel_idle_max_ticks() * 5):
         await c.phase_machine.advance_phase_if_needed()
-        st.kernel_idle_since_unix = datetime.now(timezone.utc).timestamp() - ps.KERNEL_IDLE_MIN_SECONDS * 10
+        st.kernel_idle_since_unix = datetime.now(timezone.utc).timestamp() - ps._kernel_idle_min_seconds() * 10
 
     assert st.phase == ps.PHASE_KERNEL_AGENT
     assert st.kernel_idle_ticks == 0

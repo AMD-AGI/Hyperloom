@@ -1046,9 +1046,9 @@ def test_an_unfinished_visit_states_no_verdict(tmp_path):
 
 def test_the_trace_analyze_run_records_the_only_legal_kernel_id_source(tmp_path):
     recorder = _forge_recorder()
-    recorder.record_trace_analyze_run(
+    record_trace_analyze_request(
+        macro_cycle=3,
         run_id="ta-1",
-        trigger="pre_run_optimization",
         status="ok",
         requested_by="orchestration",
         trace_input="/s/traces",
@@ -1418,9 +1418,9 @@ def test_discovered_kernels_carry_profiling_fields(tmp_path):
 
 def test_trace_analyze_run_also_records_discovered_kernels(tmp_path):
     recorder = _forge_recorder()
-    recorder.record_trace_analyze_run(
+    record_trace_analyze_request(
+        macro_cycle=3,
         run_id="ta-2",
-        trigger="pre_run_optimization",
         status="ok",
         result={"analysis_meta": {"route": "agent", "tool": "tracelens"}},
         snapshot={

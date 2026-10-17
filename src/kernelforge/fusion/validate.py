@@ -159,17 +159,6 @@ def _explicit_fatal_error(server_log_text: str) -> str:
     return ""
 
 
-def serving_failure_blames_kernel(reason: str) -> bool:
-    """Whether a serving failure is evidence against the KERNEL.
-
-    Only a GPU fault is. Everything else -- an engine that will not initialize, a
-    missing dependency, a config the install rejects -- is a soft fail that the
-    author cannot fix by re-authoring, and telling it otherwise spends the whole
-    attempt budget rewriting a kernel that was never at fault.
-    """
-    return _contains_marker(reason or "", _SERVING_CRASH_MARKERS)
-
-
 def _is_vllm_framework(framework: str) -> bool:
     return (framework or "").strip().lower() in ("vllm", "vllm-aiter")
 
@@ -244,21 +233,6 @@ def _is_hard_gpu_fault(text: str) -> bool:
     if _looks_resource_exhausted(text):
         return False
     return _contains_marker(text or "", _HARD_GPU_FAULT_MARKERS)
-
-
-def classify_serving_smoke_failure(reason: str) -> str:
-    """Reason-only fallback for callers that kept no verdict.
-
-    Prefer :class:`SmokeVerdict` from :func:`serving_smoke_verdict`: this can only
-    see the message, so it recognizes explicit GPU-fault evidence and treats
-    everything else -- boot failures, OOM, probe/transport errors -- as the
-    environment, which Hyperloom's formal e2e serving is the KEEP/REVERT gate for.
-    """
-    if _is_hard_gpu_fault(reason or ""):
-        return "kernel_fault"
-    if "decode bench timed out" in (reason or "").casefold():
-        return "kernel_fault"
-    return "env_or_boot"
 
 
 def _hip_visible_devices(gpu: str, tp: int) -> str:
@@ -518,7 +492,7 @@ def _free_vram_fraction(gpu: str, *, _run=None) -> Optional[float]:
     return 1.0 - int(used[idx]) / 100.0
 
 
-def gpu_is_free_enough(gpu: str, *, need: float = 0.5, _probe=None) -> tuple[bool, str]:
+def gpu_is_free_enough(gpu: str, *, _probe=None) -> tuple[bool, str]:
     """Whether the card has room for a server, before one is launched.
 
     A card still held by a previous stage fails the launch with an allocator
@@ -535,7 +509,7 @@ def gpu_is_free_enough(gpu: str, *, need: float = 0.5, _probe=None) -> tuple[boo
     free = probe(gpu)
     if free is None:
         return True, ""
-    if free >= need:
+    if free >= 0.5:
         return True, ""
     return False, (
         f"GPU {gpu} has only {free * 100:.0f}% of its memory free before the server "

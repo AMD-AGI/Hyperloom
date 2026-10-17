@@ -19,7 +19,6 @@ from hyperloom.orchestrator.kernel.patch_conflict_merge import (
     STRATEGY_UNION,
     _resolver_backend,
     apply_patch_resolving_conflicts,
-    llm_resolution_available,
 )
 from hyperloom.common.llm_config import DEFAULT_CODEX_MODEL
 
@@ -315,7 +314,7 @@ def test_a_dual_configured_box_keeps_the_claude_resolver(monkeypatch: pytest.Mon
 
 
 def test_a_box_credentialed_for_neither_side_has_no_resolver() -> None:
-    assert not llm_resolution_available()
+    assert _resolver_backend() == ""
 
 
 async def test_a_rejected_patch_leaves_nothing_of_the_file_it_created(repo: Path, patches: Path) -> None:

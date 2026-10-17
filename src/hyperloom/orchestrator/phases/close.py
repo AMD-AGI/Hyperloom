@@ -36,8 +36,6 @@ _TASK_STATE_RUNNING: str = "running"
 # Appended to a close step's idempotency key when its first row is dead, so ``create_or_return_existing`` mints a new
 # task instead of returning the corpse.
 _RETRY_KEY_SUFFIX: str = "retry"
-# Fallback registry poll interval, for a caller with no dispatcher poll set.
-_DEFAULT_TASK_POLL_SEC: float = 10.0
 
 # Floor on how long CLOSE waits for a step it found already running, for a step the catalogue prices at almost nothing
 # or does not carry at all.
@@ -528,10 +526,7 @@ class ClosePhase(CoordinatorCollaborator):
         # The verdict, recorded last because reaching this line is the evidence
         # for it. A reader looking at the steps alone cannot tell the ones that
         # had not happened yet from the ones that never will.
-        _close_out.record_close_settled(
-            self.session_dir,
-            stop_reason=str(self.shared_state.stop_reason or ""),
-        )
+        _close_out.record_close_settled(self.session_dir)
         from hyperloom.inference_optimizer.breakdown.recorder import record_stage_reached
 
         record_stage_reached(self.session_dir, "close")
@@ -866,9 +861,7 @@ class ClosePhase(CoordinatorCollaborator):
         elif state.pending_escalate_hint:
             state.discard_pending_escalate_hint()
         _phase_state.record_phase_transition(state, to_phase=target, reason=reason, evidence=evidence, ts_unix=now)
-        machine.fire_phase_exit(
-            Transition(from_phase=prior, to_phase=target, reason=reason, evidence=evidence, loopback=False)
-        )
+        machine.fire_phase_exit(Transition(from_phase=prior, to_phase=target, reason=reason, evidence=evidence))
         _phase_state.record_lifecycle_event(
             state, step=target, status=_phase_state.LIFECYCLE_STATUS_ENTER, phase=target, detail=f"reason={reason}"
         )
@@ -968,7 +961,6 @@ class ClosePhase(CoordinatorCollaborator):
                 to_phase=_phase_state.PHASE_CLOSE,
                 reason=reason,
                 evidence={},
-                loopback=False,
             )
         )
         return True

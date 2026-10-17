@@ -55,21 +55,6 @@ def normalize_operation_key(operation: str) -> str:
     return _strip_template_arguments(_strip_dispatch_decoration(operation))
 
 
-def logical_operator_name(candidate: dict[str, Any] | None) -> str:
-    """Return the stable logical operation for Forge, launch API stripped."""
-    candidate = candidate or {}
-    task_group = candidate.get("task_group")
-    identity = task_group.get("operator_identity") if isinstance(task_group, dict) else None
-    raw = (
-        (identity.get("operation") if isinstance(identity, dict) else "")
-        or candidate.get("operation")
-        or candidate.get("name")
-        or ""
-    )
-    normalized = native_operation_key(str(raw).strip())
-    return re.sub(r"\s*::\s*", "::", normalized)
-
-
 def native_operation_key(operation: str) -> str:
     """Return a stable native operator identity across template instances."""
     normalized = normalize_operation_key(operation)
@@ -451,36 +436,3 @@ def build_task_group_shape_cases(group: dict[str, Any]) -> list[dict[str, Any]]:
         case["case_id"] = case_id
         case["selector"] = {CASE_SELECTOR_KEY: case_id, **dimensions}
     return cases
-
-
-def task_group_shape_cases(candidate: dict[str, Any]) -> list[dict[str, Any]]:
-    """Return normalized cases from a candidate's task group."""
-    group = candidate.get("task_group")
-    if not isinstance(group, dict):
-        return []
-    existing = group.get("shape_cases")
-    if isinstance(existing, list) and all(
-        isinstance(case, dict) and isinstance(case.get("selector"), dict) for case in existing
-    ):
-        return existing
-    return build_task_group_shape_cases(group)
-
-
-def forge_shapes_from_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
-    """Build Forge primary/minimal/validation selectors for a candidate."""
-    cases = task_group_shape_cases(candidate)
-    if cases:
-        selectors = [dict(case["selector"]) for case in cases]
-        primary = selectors[0]
-        return {
-            "primary": primary,
-            "minimal": primary,
-            "validation": selectors,
-        }
-
-    primary = named_dimensions(candidate)
-    return {
-        "primary": primary,
-        "minimal": primary,
-        "validation": [primary] if primary else [],
-    }

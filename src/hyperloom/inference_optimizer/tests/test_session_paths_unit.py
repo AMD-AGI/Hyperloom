@@ -56,12 +56,6 @@ def test_runs_dir_accepts_uuid_hex_task_id():
     assert sp.runs_dir(SD, "baseline", tid) == SD / "runs" / "baseline" / tid
 
 
-def test_kernel_agent_runs_dir_rejects_bad_id():
-    for bad in ("", "   ", "../x", ".", "a/b", "/abs"):
-        with pytest.raises(ValueError):
-            sp.kernel_agent_runs_dir(SD, bad)
-
-
 def test_patches_dir_rejects_bad_id():
     for bad in ("", "   ", "../x", ".", "a/b", "/abs"):
         with pytest.raises(ValueError):
@@ -73,7 +67,6 @@ def test_validate_action_strips():
 
 
 def test_kernel_and_patch_paths():
-    assert sp.kernel_agent_runs_dir(SD, "s1") == SD / "kernel-agent" / "runs" / "s1"
     assert sp.patches_dir(SD, "k1") == SD / "patches" / "k1"
 
 
@@ -125,9 +118,6 @@ def test_recipe_kb_paths():
     assert sp.recipe_kb_pending_ndjson(SD).name == ".kb_pending.ndjson"
     assert sp.recipe_kb_flushed_ndjson(SD).name == ".kb_flushed.ndjson"
     assert sp.recipe_kb_dead_letter_ndjson(SD).name == ".kb_dead_letter.ndjson"
-    assert sp.recipe_kb_audit_jsonl(SD).name == ".kb_audit.jsonl"
-    assert sp.recipe_kb_flusher_pid(SD).name == ".kb_flusher.pid"
-    assert sp.recipe_kb_flusher_status_json(SD).name == ".kb_flusher_status.json"
     assert sp.pr_monitor_status_json(SD).name == ".pr_monitor_status.json"
 
 

@@ -2255,7 +2255,7 @@ async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypat
     monkeypatch.setattr(
         ps,
         "compute_next_phase",
-        lambda *a, **k: ("FRAMEWORK_AGENT", "robustness_escalated", {"evidence": "llm_escalation"}),
+        lambda *a, **k: ("FRAMEWORK_AGENT", "optimize_no_more_leverage", {"evidence": "llm_escalation"}),
     )
 
     async def _entered(*, from_phase, to_phase, reason="", evidence=None):
@@ -2722,7 +2722,7 @@ async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch
 
     coord.shared_state.set_stop_reason("target_reached")
     await coord.phase_close.on_enter_close(
-        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="SWEEP", evidence={}, loopback=False)
+        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="SWEEP", evidence={})
     )
     assert coord.shared_state.close_sequence_done is True
     assert coord.shared_state.stop_reason

@@ -169,21 +169,6 @@ def write_timeline_event_at(session_dir: Path | str, event: dict[str, Any]) -> P
     return path
 
 
-def read_timeline_event(
-    session_dir: Path | str,
-    event_type: str,
-) -> dict[str, Any] | None:
-    """Read the latest persisted event of one type."""
-    _validate_event_type(event_type)
-    for _, stored_type, path in reversed(_history_files(session_dir)):
-        if stored_type != event_type:
-            continue
-        event = _read_event_file(path, event_type)
-        if event is not None:
-            return event
-    return None
-
-
 def read_timeline_event_for_update(
     session_dir: Path | str,
     event_type: str,
@@ -298,7 +283,6 @@ __all__ = [
     "pending_install_event",
     "persist_pending_install_event",
     "read_write_warnings",
-    "read_timeline_event",
     "read_timeline_event_for_update",
     "read_timeline_events",
     "record_write_warning",

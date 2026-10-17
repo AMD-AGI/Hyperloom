@@ -200,16 +200,6 @@ def test_classify_attempted_reads_task_terminal_integration():
     )
 
 
-def _eligible(gpu_pct: float) -> dict:
-    """A top-list entry that clears every gate except the GPU-share threshold."""
-    return {
-        "source_file": "f.py",
-        "reusable_native_kernel": True,
-        "recommended_backends": ["forge"],
-        "gpu_pct": gpu_pct,
-    }
-
-
 def test_hot_kernel_floor_falls_back_on_an_unparseable_override(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "not-a-number")
     assert kds.resolve_hot_kernel_min_gpu_pct() == kds._DEFAULT_HOT_KERNEL_MIN_GPU_PCT

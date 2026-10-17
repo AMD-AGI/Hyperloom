@@ -724,7 +724,6 @@ class _WarmStart:
 
     warm: dict
     program_md: str
-    warm_start_result: dict | None
     kb_pristine_baseline_ms: float | None
     kb_reused_speedup: float | None
 
@@ -765,7 +764,6 @@ def _read_kb_warm_start(
         "read_reason": "resume" if resume else "deadline",
         "read_error": "",
     }
-    warm_start_result = None
     if experience_kb and kb_warmstart_enabled and not resume and remaining(reserve=finalize_reserve_sec) >= 600:
         try:
             warm = kb_warmstart(
@@ -812,7 +810,6 @@ def _read_kb_warm_start(
                     result_json=result_json,
                 )
                 if published:
-                    warm_start_result = dict(published)
                     iter_config.warm_start_publication = dict(published)
                 if published and published.get("persistence_degraded"):
                     print(
@@ -879,7 +876,6 @@ def _read_kb_warm_start(
     return _WarmStart(
         warm=warm,
         program_md=program_md,
-        warm_start_result=warm_start_result,
         kb_pristine_baseline_ms=kb_pristine_baseline_ms,
         kb_reused_speedup=kb_reused_speedup,
     )
@@ -972,63 +968,6 @@ def _prepare_assembly_task(
     )
 
 
-def _warm_start_only_result(
-    warm: dict,
-    warm_start_result,
-    *,
-    usage,
-    result_json,
-    warm_start_improvement_flags,
-) -> None:
-    """Report a validated warm start and stop, for a caller that asked for nothing more."""
-    if not isinstance(warm_start_result, dict):
-        raise click.ClickException("validated KB warm-start has no recoverable result")
-    pristine_ms = float(warm["pristine_ms"])
-    best_ms = float(warm["keep_baseline_ms"])
-    mean_case_speedup = float(warm["mean_case_speedup"])
-    best_commit = str(warm.get("applied_commit") or "")
-    publication_state = _initial_remote_publication_state(warm)
-    publication = _remote_publication_view(
-        publication_state,
-        best_commit,
-    )
-    kb_experience = {
-        "read": kb_read_status(warm),
-        "write": publication_state["last_result"],
-        "publication": publication,
-    }
-    result = {
-        **warm_start_result,
-        "pristine_baseline_ms": pristine_ms,
-        "search_start_ms": best_ms,
-        "mean_case_speedup": mean_case_speedup,
-        "search_start_mean_case_speedup": mean_case_speedup,
-        # Like the published manifest's badge, ``improved`` is withheld when the wall times contradict the score.
-        **warm_start_improvement_flags(
-            pristine_ms=pristine_ms,
-            best_ms=best_ms,
-            mean_case_speedup=mean_case_speedup,
-        ),
-        "incremental_improved": False,
-        "improved_during_search": False,
-        "total_speedup": mean_case_speedup,
-        "incremental_speedup": 1.0,
-        "remote_publication": publication,
-        "kb_experience": kb_experience,
-        "llm_usage": usage.totals(),
-        "returned_after_read_kb": True,
-    }
-    payload = json.dumps(result)
-    if result_json:
-        atomic_write_json(result_json, result)
-    print(
-        "  [kb] validated warm-start accepted; returning before iteration 1",
-        flush=True,
-    )
-    click.echo(f"__FORGE_RESULT__{payload}__FORGE_RESULT__")
-    return
-
-
 class _ForgeDeadline:
     """The run's absolute deadline, and the reserve finalization needs out of it.
 
@@ -1051,21 +990,8 @@ class _ForgeDeadline:
             raise click.ClickException(f"absolute Forge deadline exhausted before {phase}")
 
 
-def _reject_incompatible_loop_options(
-    *,
-    return_after_read_kb: bool,
-    kernel_backend: str,
-    experience_kb: bool,
-    kb_warmstart_enabled: bool,
-    producer: str,
-) -> None:
+def _reject_incompatible_loop_options(*, producer: str) -> None:
     """Refuse an option combination the loop cannot honour, before anything is set up."""
-    if return_after_read_kb and kernel_backend == "assembly":
-        raise click.UsageError("--return-after-read-kb is incompatible with assembly preparation")
-    if return_after_read_kb and not experience_kb:
-        raise click.UsageError("--return-after-read-kb cannot be used with --no-experience-kb")
-    if return_after_read_kb and not kb_warmstart_enabled:
-        raise click.UsageError("--return-after-read-kb cannot be used with --no-kb-warmstart")
     if producer:
         from kernelforge.knowledge.kb_store.identity.kernel_recipe import KERNEL_RECIPE_PRODUCERS
 
@@ -1425,15 +1351,6 @@ def _program_context(
     "can keep its records out of the kernel campaigns' ranking.",
 )
 @click.option(
-    "--return-after-read-kb",
-    "--return-after-read-KB",
-    "return_after_read_kb",
-    is_flag=True,
-    default=False,
-    help="Return before Iteration 1 when a KB solution applies cleanly, passes "
-    "current correctness, and improves current performance.",
-)
-@click.option(
     "--pr-kb/--no-pr-kb",
     default=None,
     help="Inject upstream pull-request references from the PR Monitor "
@@ -1533,7 +1450,6 @@ def forge_loop(
     experience_kb,
     kb_warmstart_enabled,
     producer,
-    return_after_read_kb,
     pr_kb,
     resume,
     nproc_per_node,
@@ -1558,13 +1474,7 @@ def forge_loop(
     import dataclasses as _dataclasses
     import hashlib as _hashlib
 
-    _reject_incompatible_loop_options(
-        return_after_read_kb=return_after_read_kb,
-        kernel_backend=kernel_backend,
-        experience_kb=experience_kb,
-        kb_warmstart_enabled=kb_warmstart_enabled,
-        producer=producer,
-    )
+    _reject_incompatible_loop_options(producer=producer)
 
     from kernelforge.loop.campaign_config import (
         CampaignConfigStore,
@@ -1733,7 +1643,6 @@ def forge_loop(
 
     from kernelforge.loop.runner import IterationLoop
     from kernelforge.loop.runner import IterationConfig
-    from kernelforge.loop.scoring import warm_start_improvement_flags
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
     from kernelforge.orchestrator.agent import make_agent_fn
 
@@ -1931,19 +1840,8 @@ def forge_loop(
     )
     warm = warm_start.warm
     program_md = warm_start.program_md
-    warm_start_result = warm_start.warm_start_result
     kb_pristine_baseline_ms = warm_start.kb_pristine_baseline_ms
     kb_reused_speedup = warm_start.kb_reused_speedup
-
-    if return_after_read_kb and warm.get("applied"):
-        _warm_start_only_result(
-            warm,
-            warm_start_result,
-            usage=usage,
-            result_json=result_json,
-            warm_start_improvement_flags=warm_start_improvement_flags,
-        )
-        return
 
     # Source mapping, profiling, profile analysis, and potential analysis are produced together by the commit-bound
     # Analysis Agent.

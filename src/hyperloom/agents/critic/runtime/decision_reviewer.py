@@ -30,7 +30,6 @@ from .intent_envelope import (
 )
 from .kb_client import KBClient
 from .kb_writer import KBWriter, WriteContext
-from .metrics import CRITIC_REVIEW_VERDICT_TOTAL, get_registry
 from .request_models import (
     COORDINATOR_INBOX,
     CRITICAL_CONTEXT_KEYS,
@@ -530,7 +529,6 @@ class DecisionReviewer:
                     "kb_evidence": item.get("kb_evidence") or [],
                 },
             )
-            get_registry().counter(CRITIC_REVIEW_VERDICT_TOTAL).inc({"verdict": verdict})
             self._maybe_write_kb_for_verdict(item, req, session_ctx, outcome)
 
         # Every advisory also goes out as a standalone advice message, whatever the target's verdict (or if

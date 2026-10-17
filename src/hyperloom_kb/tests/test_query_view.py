@@ -2,29 +2,25 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
-from pathlib import Path
 
 from hyperloom_kb import (
     Experience,
     ExperienceDeclaration,
-    ExperienceService,
     ExperienceStatus,
     FieldDeclaration,
     FieldKind,
     FieldRole,
     InMemoryExperienceStore,
     InMemoryQueryViewStore,
-    InMemorySchemaRegistry,
-    LocalQueryViewStore,
     ObjectiveDeclaration,
     Provenance,
     QueryViewBuilder,
-    QueryViewMaintainer,
     derive_experience_id,
     experience_content_hash,
     repeat_group_key,
 )
 from hyperloom_kb.storage import StoredExperience
+from hyperloom_kb.tests.view_fixtures import publish_view
 
 NOW = datetime(2026, 9, 17, tzinfo=timezone.utc)
 
@@ -170,35 +166,12 @@ def test_notes_neither_split_a_repeat_group_nor_enter_exact_lookup() -> None:
     assert not [field for field in view.field_lookup if field.startswith("notes")]
 
 
-def test_local_view_store_keeps_old_generation_and_moves_current(tmp_path: Path) -> None:
-    schema = declaration()
-    schemas = InMemorySchemaRegistry()
-    experiences = InMemoryExperienceStore()
-    service = ExperienceService(schemas, experiences)
-    service.register_schema(schema)
-    first = experience(schema, run_id="run-1", seq=0)
-    service.submit_complete(first)
-    views = LocalQueryViewStore(tmp_path)
-    maintainer = QueryViewMaintainer(schemas, experiences, views)
-
-    old_ref = maintainer.rebuild(schema.schema_ref)
-    second = experience(schema, run_id="run-2", seq=0)
-    service.submit_complete(second)
-    current_ref = maintainer.rebuild(schema.schema_ref)
-
-    assert old_ref != current_ref
-    assert views.get_view(old_ref.view_id).visible_experience_ids == (first.id,)
-    assert views.current_view(schema.schema_ref).ref == current_ref
-
-
 def test_empty_query_view_is_a_valid_current_snapshot() -> None:
     schema = declaration()
-    schemas = InMemorySchemaRegistry()
     experiences = InMemoryExperienceStore()
     views = InMemoryQueryViewStore()
-    schemas.register_schema(schema)
 
-    ref = QueryViewMaintainer(schemas, experiences, views).rebuild(schema.schema_ref)
+    ref = publish_view(schema, experiences, views)
 
     assert ref.local_page_sequence == 0
     assert views.current_view(schema.schema_ref).visible_experience_ids == ()

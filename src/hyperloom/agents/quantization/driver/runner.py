@@ -6,7 +6,7 @@ import atexit
 import os
 import shutil
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
@@ -38,7 +38,6 @@ class AttemptResult:
     workspace: Path
     sdk_error: str = ""
     raw_text: str = ""
-    chunks: list[str] = field(default_factory=list)
 
 
 def _import_sdk() -> tuple[Any, Any]:
@@ -262,7 +261,6 @@ async def run_one_attempt(
         workspace=workspace,
         sdk_error=sdk_error,
         raw_text="\n".join(chunks),
-        chunks=chunks,
     )
 
 

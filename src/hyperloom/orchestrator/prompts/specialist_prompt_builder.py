@@ -915,9 +915,6 @@ class SpecialistPromptInputs:
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     pr_monitor_available: bool = True
 
-    # Generic sub_kind passthrough so ``_focus_*`` helpers can specialise.
-    sub_kind: str = ""
-
     # Extra knowledge-domain tags; each contributes a focus block to Section 1.
     extra_focus_tags: tuple[str, ...] = ()
 

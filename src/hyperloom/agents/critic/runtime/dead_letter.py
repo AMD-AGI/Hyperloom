@@ -15,7 +15,6 @@ from hyperloom.common.io import append_jsonl
 from hyperloom.common.timeutil import now_iso
 
 from .errors import RuntimeAdapterError
-from .metrics import CRITIC_KB_DEAD_LETTER_COUNT, get_registry
 
 
 DEFAULT_DEAD_LETTER_DIR = "/var/lib/critic-kb-dlq"
@@ -76,7 +75,6 @@ class DeadLetter:
             "context": context or {},
         }
         append_jsonl(path, record, ensure_ascii=False)
-        get_registry().counter(CRITIC_KB_DEAD_LETTER_COUNT).inc({"endpoint": endpoint})
         return path
 
     def files(self) -> list[Path]:
