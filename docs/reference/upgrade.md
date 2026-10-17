@@ -91,18 +91,19 @@ These flags are rejected with `unrecognized arguments`:
 ### Required: sessions created before this release do not resume
 
 Every session's `storage/coordinator.db` now records schema version 7, and
-there are no in-place migrations. Opening a database recorded at an older
-version, including every session started by 1.1.4 or earlier, fails before
-anything is written:
+there are no in-place migrations. `optimize --resume-from` on a session whose
+database records an older version, which is every session started by 1.1.4 or
+earlier, exits 2 at resume admission, before `state.json` or the database is
+touched:
 
 ```text
-RuntimeError: coordinator.db is at schema version 6, older than this build's 7: sessions
-created before this release cannot be resumed. Finish the session under the build that
-started it, or start a new session.
+ERROR: --resume-from coordinator.db is at schema version 6, older than this build's 7:
+sessions created before this release cannot be resumed. Finish the session under the
+build that started it, or start a new session.
 ```
 
-This covers `optimize --resume-from` and every command that opens the
-session's database. The legacy shapes the old migrations handled
+Opening such a database through the coordinator storage raises the same
+message without writing to it. The legacy shapes the old migrations handled
 (`events.priority`, a `leases` table without `owner_scope`, `state.json`
 without `elapsed_charged_sec` or `phase_elapsed_totals`, manifests without
 `workflow_contract_version`) are no longer read. Finish in-flight sessions
