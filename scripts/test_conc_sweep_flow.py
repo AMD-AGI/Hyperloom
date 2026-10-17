@@ -2,23 +2,22 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""End-to-end validation of the single-server-per-arm concurrency sweep.
+"""End-to-end validation of the interleaved concurrency sweep.
 
 Reuses a real optimization session's baseline + accepted ``current_best`` and
 runs the *current* ``run_conc_sweep`` over a descending CONC ladder against the
-real model on GPU. It then answers one question:
+real model on GPU. The sweep runs both arms at each CONC before the next lower
+one, each rung on a server of its own. It then answers one question:
 
-    "As CONC descends from high to low on a single reused server, does the
-     server get killed between points?"
+    "Did every rung of both arms measure, each on the server it booted?"
 
 The verdict is derived from two independent signals:
 
   1. Result signal  — every CONC point in each arm reports a measured
-     ``output_throughput``. If the server had been killed after the boot round,
-     the lower-CONC reuse rounds would fail with connection errors.
-  2. Boot signal    — the number of distinct server *launches* per arm, counted
-     from Magpie's ``server.log`` / ``reuse_server_spawn.pid`` artifacts. In the
-     single-server path this must be exactly one launch per arm.
+     ``output_throughput``.
+  2. Boot signal    — the number of server *launches* per arm, counted from
+     Magpie's ``server.log`` artifacts. Every rung boots its own server, so this
+     must equal the arm's measured points.
 
 Finally it renders the InferenceX-style throughput-vs-interactivity plot from
 the produced ``conc_sweep_summary.json`` artifact, completing the full flow.
@@ -64,10 +63,9 @@ def _prepare_test_session(source_session: Path, out_dir: Path) -> None:
     shutil.copy2(src_state, out_dir / "state.json")
 
 
-def _count_server_launches(sweep_workspace: Path, arm: str) -> tuple[int, list[str]]:
-    """Count distinct server launches for one arm under the sweep workspace."""
+def _count_server_launches(sweep_workspace: Path, arm: str) -> int:
+    """Count server launches for one arm under the sweep workspace."""
     launches = 0
-    pids: list[str] = []
     for slot in sorted(sweep_workspace.glob(f"variant_*_{arm}_conc*")):
         for server_log in slot.rglob("server.log"):
             try:
@@ -75,20 +73,13 @@ def _count_server_launches(sweep_workspace: Path, arm: str) -> tuple[int, list[s
                     launches += 1
             except OSError:
                 pass
-        for pid_file in slot.rglob("reuse_server_spawn.pid"):
-            try:
-                txt = pid_file.read_text(encoding="utf-8").split()
-                if txt:
-                    pids.append(txt[0])
-            except OSError:
-                pass
-    return launches, sorted(set(pids))
+    return launches
 
 
 def _analyze(payload: dict, sweep_workspace: Path) -> bool:
-    """Print the kill/survival verdict from the sweep payload + server logs."""
+    """Print the per-rung verdict from the sweep payload + server logs."""
     print("\n" + "=" * 78)
-    print("VERDICT: will CONC high->low kill the reused server?")
+    print("VERDICT: did every rung of both arms measure on a server of its own?")
     print("=" * 78)
     overall_ok = True
     for arm in ("optimized", "baseline"):
@@ -97,7 +88,7 @@ def _analyze(payload: dict, sweep_workspace: Path) -> bool:
         if not points:
             print(f"\n[{arm}] no points recorded — arm skipped.")
             continue
-        launches, pids = _count_server_launches(sweep_workspace, arm)
+        launches = _count_server_launches(sweep_workspace, arm)
         print(f"\n[{arm}] {len(points)} CONC points (high -> low):")
         arm_ok = True
         for p in points:
@@ -109,21 +100,18 @@ def _analyze(payload: dict, sweep_workspace: Path) -> bool:
                 arm_ok = False
             print(f"    conc={conc:<4} status={status:<10} output_throughput={tput}")
         print(f"  server launches counted (server.log): {launches}")
-        print(f"  distinct spawn PIDs: {pids or '(none captured)'}")
-        if arm_ok and launches <= 1:
-            print(f"  => [{arm}] SERVER SURVIVED: booted once, reused down the ladder, NOT killed.")
-        elif arm_ok and launches > 1:
-            print(f"  => [{arm}] all points ok but {launches} launches — server was restarted (check lifecycle).")
+        if arm_ok and launches == len(points):
+            print(f"  => [{arm}] every rung measured on the server it booted.")
+        elif arm_ok:
+            print(f"  => [{arm}] all points ok but {launches} launches for {len(points)} rungs.")
             overall_ok = False
         else:
-            print(f"  => [{arm}] some points failed — server may have been killed mid-ladder.")
+            print(f"  => [{arm}] some points failed.")
             overall_ok = False
     print("\n" + "=" * 78)
     print(
         "ANSWER:",
-        "NO — the server is booted once per arm and reused (not killed)."
-        if overall_ok
-        else "SEE ABOVE — anomalies detected.",
+        "YES — every rung of both arms measured, one server per rung." if overall_ok else "SEE ABOVE — anomalies.",
     )
     print("=" * 78 + "\n")
     return overall_ok
@@ -136,7 +124,7 @@ async def _run(
     isl: int = 0,
     osl: int = 0,
 ) -> dict:
-    """Load the copied state and run the sweep with single-server mode on."""
+    """Load the copied state and run the sweep."""
     state = SharedState.load_or_init(session_dir)
     # The source session already COMPLETED, so its persisted lifecycle flags (closing_phase / stop_reason) and
     # exhausted wall-clock would make the new sweep's deadline/event detection skip everything.
@@ -189,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"[flowtest] source session : {source}")
     print(f"[flowtest] test session   : {out_dir}")
-    print(f"[flowtest] CONC ladder     : {concs}  (descending single-server reuse)")
+    print(f"[flowtest] CONC ladder     : {concs}  (descending, both arms per level)")
     if args.isl or args.osl:
         print(f"[flowtest] ISL/OSL override: {args.isl or '(keep)'} / {args.osl or '(keep)'}")
 
@@ -204,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     sweep_workspaces = sorted(cs_root.glob("conc_sweep_*"), key=lambda p: p.stat().st_mtime)
     sweep_ws = sweep_workspaces[-1] if sweep_workspaces else cs_root
 
-    survived = _analyze(payload, sweep_ws)
+    all_measured = _analyze(payload, sweep_ws)
 
     # Complete the designed flow: render the plot from the produced artifact.
     summary_json = reports_dir(out_dir) / "conc_sweep_summary.json"
@@ -226,7 +214,7 @@ def main(argv: list[str] | None = None) -> int:
             print("[flowtest] plot skipped (no valid data / matplotlib unavailable)")
     print(f"[flowtest] artifact json  : {summary_json}")
 
-    return 0 if survived else 1
+    return 0 if all_measured else 1
 
 
 if __name__ == "__main__":

@@ -538,6 +538,14 @@ def _run_grid_warmup_enabled() -> bool:
     return env_flag("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", default=not os.environ.get("PYTEST_CURRENT_TEST"))
 
 
+def variant_rounds(*, warmup_before_measure: bool | None = None, server_lifecycle: Any = None) -> int:
+    """Full benchmark passes one :func:`run_grid` variant runs, which its budget gate admits it against."""
+    from ._multi_node_env import is_multi_node, mn_bench_warmup_enabled
+
+    warmup = _run_grid_warmup_enabled() if warmup_before_measure is None else warmup_before_measure
+    return 1 + int(bool(warmup) and server_lifecycle is None) + int(is_multi_node() and mn_bench_warmup_enabled())
+
+
 def _prepend_magpie_pythonpath(magpie_dir: str, current_pythonpath: str) -> str:
     """Prepend Magpie's import root to PYTHONPATH, skipping package-root dirs."""
     if not magpie_dir or is_python_package_root(magpie_dir):
@@ -940,18 +948,9 @@ async def run_grid(
             return True
         return not keep_going_on_failure
 
-    # How many full benchmark passes one variant costs.
-    _mn_warmup_rounds = 0
-    if variant_expected_sec is not None:
-        from ._multi_node_env import (
-            is_multi_node as _mn_is_multi_node,
-            mn_bench_warmup_enabled as _mn_bench_warmup_enabled,
-        )
+    rounds_per_variant = variant_rounds(warmup_before_measure=warmup_before_measure, server_lifecycle=server_lifecycle)
 
-        _mn_warmup_rounds = 1 if (_mn_is_multi_node() and _mn_bench_warmup_enabled()) else 0
-    variant_rounds = 1 + (1 if auto_warmup_requested else 0) + _mn_warmup_rounds
-
-    def _skip_rest_for_budget(idx: int, *, spent_on: str, rounds_left: int = variant_rounds) -> bool:
+    def _skip_rest_for_budget(idx: int, *, spent_on: str, rounds_left: int = rounds_per_variant) -> bool:
         """Skip variant ``idx`` and every one after it, or say the budget still fits."""
         if session_deadline_sec is None:
             return False
@@ -1369,7 +1368,7 @@ async def run_grid(
             if _skip_rest_for_budget(
                 i,
                 spent_on="this variant's server restart",
-                rounds_left=1 + _mn_warmup_rounds,
+                rounds_left=rounds_per_variant - int(auto_warmup_requested),
             ):
                 if auto_warmup:
                     _teardown_variant_server(slot, lifecycle)
@@ -2121,6 +2120,7 @@ __all__ = [
     "server_args_env_name",
     "session_grid_bounds",
     "stopped_by_the_run",
+    "variant_rounds",
     # Re-exported from the sibling modules to keep the namespace intact.
     "_resolve_magpie_python",
     "_resolve_probe_python",

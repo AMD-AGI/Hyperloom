@@ -70,20 +70,18 @@ ROW_PAIR = "pair"
 ARM_BASELINE = "baseline"
 ARM_OPTIMIZED = "optimized"
 
-# How a rung came to run. The sweep prefers to boot one server at the top of
-# the ladder and reuse it down; a framework with no server lifecycle, or a
-# ladder whose every boot failed, restarts per rung instead. ``boot_attempt``
-# is a rung the retry-descend loop could not bring up, kept whether or not it
-# was later committed, because that concurrency is itself the finding.
+# How a rung came to run. The arms alternate level by level on the same GPUs,
+# so every rung boots its own server (``server_restart``). ``boot``,
+# ``boot_attempt`` and ``reuse`` are the stages of the earlier ladder that kept
+# one server per arm, kept so the events it wrote still read.
 STAGE_BOOT_ATTEMPT = "boot_attempt"
 STAGE_BOOT = "boot"
 STAGE_REUSE = "reuse"
 STAGE_SERVER_RESTART = "server_restart"
 STAGE_BUDGET_SKIP = "budget_skip"
 
-# How an arm ran its ladder. The restart path is both the fallback for a
-# lifecycle-ineligible framework and the retry after every boot failed, which
-# is why the arm also records the reason.
+# How an arm ran its ladder. Every arm now restarts per rung;
+# ``single_server_reuse`` is kept for events written by the earlier ladder.
 STRATEGY_SINGLE_SERVER = "single_server_reuse"
 STRATEGY_SERVER_RESTART = "server_restart"
 
@@ -338,11 +336,10 @@ class ConcSweepEventRecorder:
     ) -> None:
         """Record the ladder the sweep resolved and the order it will run it in.
 
-        The arm order matters to a reader of the budget: the optimized arm runs
-        first as the more informative of the two, so a budget that runs out
-        takes the baseline arm with it. ``concs_ordered`` is deduplicated and
-        descending, because a single-server arm boots at the most demanding
-        rung so the lower ones need no restart. ``grid_source`` is a ``GRID_*``
+        The sweep runs ``concs_ordered`` (deduplicated, descending) one level
+        at a time, and ``arms_order`` is the order the arms run within each
+        level; a budget that runs out ends the ladder between levels, so every
+        level it finished is a pair. ``grid_source`` is a ``GRID_*``
         value, and ``num_prompts_factor`` turns a rung's CONC into its
         NUM_PROMPTS.
         """

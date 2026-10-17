@@ -451,8 +451,15 @@ be attempted or explicitly rejected before report can close the run.
 ## SWEEP
 
 SWEEP measures the optimized stack against the baseline across a
-concurrency ladder, one arm each, and produces the throughput-vs-
-interactivity curve. The ladder is sized for the workload: powers of two
+concurrency ladder and produces the throughput-vs-interactivity curve. It
+runs the ladder one CONC level at a time, highest first, and at each level
+runs the optimized arm and then the baseline arm before moving down, so a
+budget that runs out keeps every pair it finished. The two arms take turns
+on the same GPUs, so every rung boots its own server. A level starts only
+when the time left admits a rung of both arms by the rung cost estimate, so
+a level the estimate says cannot finish is not started, and once its first
+arm has run its partner is admitted even if that rung overran the estimate,
+so a budget cut never leaves a level with one arm measured. The ladder is sized for the workload: powers of two
 down from 256 for a synthetic run, `1,4,8,10,14,20,28` for an agentic one,
 where a request carries orders of magnitude more prompt and the same card
 saturates far lower. Override either with `--conc-sweep-concs`. Under
@@ -461,6 +468,16 @@ native Magpie AgentX, concurrency is fixed for the session and
 CONC. The independent MLPerf backend keeps its optional sweep, disabled by
 default. See the [AgentX workflow](../how-to/optimize.md#optimize-an-agentx-workload)
 for supported workload controls.
+
+Size `--conc-sweep-total-budget-sec` from the rung cost the sweep records
+(`rung_cost_sec`, the session's measured server start plus benchmark). A
+rung is admitted against that cost times its benchmark passes (two with the
+default warm-up pass, one without, and one more on a multi-node run with its
+benchmark warm-up on), so a level is admitted against twice that. To pair `L` levels, give the sweep at least `(L - 1) × 2 × W` for the
+levels before the last, where `W` is a rung's wall time including its server
+start, plus the last level's admission. With a 4,700 s rung cost, about
+5,000 s per rung and the warm-up pass on, 30,000 s pairs two levels:
+`1 × 2 × 5,000 + 4 × 4,700 = 28,800`.
 
 Results update `last_conc_sweep` and feed the final report and breakdown.
 The phase exits on `sweep_done` (or `sweep_failed`). While the sweep it
