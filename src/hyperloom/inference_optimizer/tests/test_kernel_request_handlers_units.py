@@ -2186,12 +2186,12 @@ class TestBackendOrder:
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
         monkeypatch.delenv("CURSOR_API_KEY", raising=False)
 
-        assert krh._raw_kernel_backend_order({}) == ["geak"]
+        assert krh._raw_kernel_backend_order() == ["geak"]
 
     def test_kernel_opt_backends_alias_with_mixed_values_stays_geak_only(self, monkeypatch):
         monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
 
-        assert krh._raw_kernel_backend_order({}) == ["geak"]
+        assert krh._raw_kernel_backend_order() == ["geak"]
 
 
 class TestCandidateEnvAllowed:

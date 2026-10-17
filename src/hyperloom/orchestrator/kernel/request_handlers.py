@@ -3900,20 +3900,19 @@ def _summarize_dropped_patches(dropped: Any) -> dict[str, int]:
     return counts
 
 
-def _raw_kernel_backend_order(payload: dict | None = None) -> list[str]:
+def _raw_kernel_backend_order() -> list[str]:
     """Return the effective kernel backend order.
 
     Forge is deliberately not request-selectable.  The only supported forge
     opt-in is exactly ``KERNEL_OPT_BACKEND_ORDER=forge``; every other value,
-    missing value, legacy alias, or payload override stays on the GEAK
-    whole-phase backend.
+    missing value or legacy alias stays on the GEAK whole-phase backend.
     """
     if forge_explicitly_enabled():
         return ["forge"]
     return list(_DEFAULT_KERNEL_PHASE_BACKEND_ORDER)
 
 
-def geak_selected(payload: dict | None = None) -> bool:
+def geak_selected() -> bool:
     """Whether ``geak`` (the whole-pipeline e2e delegate) is in the kernel backend order.
 
     ``geak`` is not a per-kernel backend: when it appears in the order it
@@ -3922,13 +3921,10 @@ def geak_selected(payload: dict | None = None) -> bool:
     order are ignored for the kernel phase), so an order of just ``geak``
     runs only the GEAK e2e optimizer. ``forge`` is the per-kernel backend.
 
-    Args:
-        payload: Optional request payload that may carry ``backend_order``.
-
     Returns:
         bool: ``True`` when ``geak`` is in the resolved order.
     """
-    return "geak" in _raw_kernel_backend_order(payload)
+    return "geak" in _raw_kernel_backend_order()
 
 
 def _sweep_integrate_aiter_locks(*, reason: str) -> dict[str, Any]:
