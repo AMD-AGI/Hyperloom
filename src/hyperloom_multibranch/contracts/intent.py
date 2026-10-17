@@ -34,17 +34,24 @@ def intent_fingerprint(target: str, mechanism: str, layer: IntentLayer) -> str:
 
 @dataclass(frozen=True)
 class Intent:
-    """The structured description a specialist writes, and claims on ``parent_commit``, before it changes anything."""
+    """The structured description a specialist writes, and claims on ``parent_commit``, before it changes anything.
+
+    ``target_share_pct`` is the target's share of GPU time on ``parent_commit``, read from that commit's own profile,
+    when the specialist gives one. It bounds what the intent can gain, and takes no part in the fingerprint.
+    """
 
     branch: str
     parent_commit: str
     target: str
     mechanism: str
     layer: IntentLayer
+    target_share_pct: float | None = None
 
     def __post_init__(self) -> None:
         if not _normalized(self.target) or not _normalized(self.mechanism):
             raise ValueError("an intent needs a target and a mechanism")
+        if self.target_share_pct is not None and not 0.0 <= self.target_share_pct <= 100.0:
+            raise ValueError(f"a target's share of GPU time is a percentage, not {self.target_share_pct}")
 
     @property
     def fingerprint(self) -> str:

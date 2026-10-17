@@ -44,6 +44,16 @@ def test_an_intent_without_a_target_or_mechanism_is_refused(target, mechanism):
         _intent(target=target, mechanism=mechanism)
 
 
+def test_the_target_s_share_takes_no_part_in_the_fingerprint():
+    assert _intent(target_share_pct=12.5).fingerprint == _intent().fingerprint
+
+
+@pytest.mark.parametrize("share", [-0.1, 100.1, float("nan"), float("inf")])
+def test_a_target_share_that_is_not_a_percentage_is_refused(share):
+    with pytest.raises(ValueError, match="share of GPU time"):
+        _intent(target_share_pct=share)
+
+
 def _judgement(verdict: Verdict) -> Judgement:
     return Judgement(verdict, 8.0, 2.0, ("r1", "r2"), {"output_throughput": 1080.0}, accuracy_ok=False)
 
