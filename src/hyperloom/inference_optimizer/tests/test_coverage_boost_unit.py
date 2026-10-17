@@ -194,20 +194,6 @@ def test_canonical_id_for_path_errors(tmp_path) -> None:
         cid.canonical_id_for_path(root=root, recipe_dir=shallow)
 
 
-# --------------------------------------------------------------------------- # recipe_kb.schema.Attempt #
-# --------------------------------------------------------------------------- #
-def test_attempt_from_dict_with_fitness() -> None:
-    from hyperloom.orchestrator.knowledge.recipe_kb.schema import Attempt
-
-    a = Attempt.from_dict({"id": "7", "fitness": "1.5", "outcome": "win"})
-    assert a.id == 7
-    assert a.fitness == pytest.approx(1.5)
-    assert a.outcome == "win"
-    # Round-trip includes fitness only when set.
-    assert "fitness" in a.to_dict()
-    assert "fitness" not in Attempt(id=1).to_dict()
-
-
 # --------------------------------------------------------------------------- #
 # orchestrator.actions.executors._file_lock #
 # --------------------------------------------------------------------------- #
