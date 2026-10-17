@@ -22,7 +22,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Validity
-from hyperloom_multibranch.contracts.gate import SessionGate
+from hyperloom_multibranch.contracts.gate import NotMeasured, SessionGate
 from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress
@@ -30,7 +30,6 @@ from hyperloom_multibranch.contracts.toolbox import RequestRejected, TestWithdra
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_regression_passes
 from hyperloom_multibranch.scheduling.requests import (
-    GATE_UNJUDGEABLE,
     SessionTests,
     integration_test_request,
     together,
@@ -227,7 +226,7 @@ class FinalSelector:
             return CandidateCheck(candidate, error=f"a validation test was withdrawn: {exc}")
         except RequestRejected as exc:
             return CandidateCheck(candidate, error=f"the toolbox refused a validation test: {exc}")
-        except GATE_UNJUDGEABLE as exc:
+        except NotMeasured as exc:
             return CandidateCheck(candidate, error=f"the gate had nothing to judge: {exc}")
 
     async def _check(self, candidate: FinalCandidate) -> CandidateCheck:

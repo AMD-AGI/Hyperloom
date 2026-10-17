@@ -362,7 +362,7 @@ async def test_a_baseline_measuring_no_throughput_fails_prelude(
     layout = _layout(tmp_path)
     peers = _peers(layout)
     prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), peers)
-    with pytest.raises(PreludeFailed, match="the baseline anchors nothing: a throughput must be positive"):
+    with pytest.raises(PreludeFailed, match="the baseline anchors nothing: .*: a throughput must be positive"):
         await _run(prelude, SessionBudget.from_hours(2.0, NOW))
 
 

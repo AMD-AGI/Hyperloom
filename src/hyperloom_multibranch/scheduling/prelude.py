@@ -28,7 +28,7 @@ from hyperloom.contracts.recipe import PatchRef, Recipe
 from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
 from hyperloom.measure.compile import BlobError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import KBStoreError
-from hyperloom_multibranch.contracts.gate import SessionGate
+from hyperloom_multibranch.contracts.gate import NotMeasured, SessionGate
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Notebook
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent, SessionProfile
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
@@ -48,7 +48,7 @@ from hyperloom_multibranch.scheduling.prelude_reader import (
     root_recipe,
 )
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
-from hyperloom_multibranch.scheduling.requests import GATE_UNJUDGEABLE, SessionTests, integration_test_request
+from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
 from hyperloom_multibranch.scheduling.settings import Workload
 
 #: The ``hyperloom`` console script, run as a module so the child runs on the same install as the scheduler.
@@ -233,7 +233,7 @@ class Prelude:
             raise PreludeFailed(f"the toolbox refused the baseline test: {exc}") from exc
         try:
             baseline = await self._gate.establish_baseline(root, request_ids)
-        except GATE_UNJUDGEABLE as exc:
+        except NotMeasured as exc:
             raise PreludeFailed(f"the baseline anchors nothing: {exc}") from exc
         self._decisions.record(
             Decision(
