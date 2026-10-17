@@ -7,6 +7,7 @@ from __future__ import annotations
 
 #: gpu_type -> (dispatch gfx arch, compute-unit count).
 AMD_GPU_DISPATCH_IDENTITIES: dict[str, tuple[str, int]] = {
+    "mi300a": ("gfx942", 228),
     "mi300x": ("gfx942", 304),
     "mi308x": ("gfx942", 304),
     "mi325x": ("gfx942", 304),

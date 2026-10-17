@@ -142,6 +142,7 @@ def test_hardware_topology_parser(
 def test_hardware_fallback_preserves_topology_and_isa() -> None:
     values = _hardware_fallback_values(TARGET["hardware"])
     assert values == [
+        "mi300a_ws16_pd1p1d_tp8_ep2_rayjob",
         "mi300x_ws16_pd1p1d_tp8_ep2_rayjob",
         "mi308x_ws16_pd1p1d_tp8_ep2_rayjob",
         "mi325x_ws16_pd1p1d_tp8_ep2_rayjob",

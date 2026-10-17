@@ -469,19 +469,17 @@ check_rocm_toolchain_alignment() {
   return 0
 }
 
-# Human GPU label from arch, refined by rocm-smi product name when available.
+# A shared gfx architecture does not identify a board's product name.
 detect_gpu_label() {
-  local gfx="$1" product=""
+  local gfx="$1" product="" py=""
   if command -v rocm-smi >/dev/null 2>&1; then
-    product="$(rocm-smi --showproductname 2>/dev/null | grep -oiE 'MI[0-9]{3}[A-Z]?' | head -1)"
+    product="$(rocm-smi --showproductname 2>/dev/null | grep -oiE 'MI[0-9]{3}[A-Z]?' | head -1 || true)"
   fi
   if [ -n "$product" ]; then echo "$product"; return 0; fi
-  case "$gfx" in
-    gfx942) echo "MI300X" ;;
-    gfx950) echo "MI355X" ;;
-    "") echo "unknown" ;;
-    *) echo "$gfx" ;;
-  esac
+  if py="$(resolve_python)"; then
+    product="$("$py" -c 'import torch; print(torch.cuda.get_device_properties(0).name)' 2>/dev/null || true)"
+  fi
+  echo "${product:-${gfx:-unknown}}"
 }
 
 DETECTED_GPU="unknown"

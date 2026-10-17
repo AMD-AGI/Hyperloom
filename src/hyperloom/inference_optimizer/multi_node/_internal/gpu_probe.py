@@ -12,18 +12,17 @@ import time
 from pathlib import Path
 from typing import Any
 
-from ...gpu_types import _AMD_GPU_TYPES, _GFX_TO_RUNNER, _PRODUCT_TAGS
+from ...gpu_types import _GFX_TO_RUNNER, _PRODUCT_TAGS, _gpu_type_from_product_name
 from . import ray_dashboard, ssh_client, ssh_known_hosts
 from .external_state import build_external_state_from_env, external_service_url
 
 log = logging.getLogger(__name__)
 
-# One command that prints the product name, falling back to torch's gcnArchName (gfx942 / gfx950) when rocm-smi is
-# unavailable on PATH.
+# SMI may exit successfully with N/A product fields inside a container.
 _PROBE_CMD = (
-    "rocm-smi --showproductname 2>/dev/null || "
+    f"rocm-smi --showproductname 2>/dev/null | grep -iE '({'|'.join(_PRODUCT_TAGS)})' || "
     'python3 -c "import torch;'
-    'print(torch.cuda.get_device_properties(0).gcnArchName)" 2>/dev/null'
+    'p=torch.cuda.get_device_properties(0);print(p.name, p.gcnArchName)" 2>/dev/null'
 )
 
 # Ray Dashboard job terminal states (mirror multi_node.cli).
@@ -32,12 +31,8 @@ _TERMINAL_STATUSES = {"SUCCEEDED", "FAILED", "STOPPED"}
 
 def _parse_gpu_type(text: str) -> str | None:
     """Map rocm-smi / gcnArchName output to a known AMD runner type."""
-    upper = (text or "").upper()
-    for tag in _PRODUCT_TAGS:
-        if tag in upper:
-            candidate = tag.lower()
-            if candidate in _AMD_GPU_TYPES:
-                return candidate
+    if product := _gpu_type_from_product_name(text or ""):
+        return product
     lower = (text or "").lower()
     for gfx, runner in _GFX_TO_RUNNER.items():
         if gfx in lower:
