@@ -897,6 +897,11 @@ class WritebackCollaborator(CoordinatorCollaborator):
             measurement_status = result.get("measurement_status")
             if measurement_status is not None and str(measurement_status) != "succeeded":
                 return False
+            # Magpie marks a profiled replay diagnostic_only, so a native AgentX profile
+            # is never a valid measurement. The trace is what a profile task produces, and
+            # ``ProfileExecutor`` already accepts the round on this field.
+            if result.get("round_succeeded") is True:
+                return True
             return is_valid_measurement(result)
         # replay_warm_recipe always routes through promote_warm_replay (owns its own failure bookkeeping).
         if task_kind == "replay_warm_recipe":

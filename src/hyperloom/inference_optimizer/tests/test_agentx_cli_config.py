@@ -103,6 +103,13 @@ def test_standard_cli_generates_native_yaml_and_candidate_controls(tmp_path, mon
     assert load_benchmark(source)["profiler"]["torch_profiler"]["enabled"] is False
 
 
+@pytest.mark.parametrize(("board", "runner"), [("mi308x", "mi300x"), ("mi325x", "mi300x"), ("mi355x", "mi355x")])
+def test_generated_yaml_pins_the_magpie_runner_label_not_the_board(tmp_path, monkeypatch, board, runner):
+    """Magpie ships no mi308x/mi325x launch script, so those boards must resolve to mi300x."""
+    _, source = _launch(tmp_path, monkeypatch, "--gpu-type", board)
+    assert load_benchmark(source)["runner_type"] == runner
+
+
 def test_cli_defaults_and_operator_workload_pins_use_existing_resolver(tmp_path, monkeypatch):
     monkeypatch.setenv("CONC", "32")
     _, source = _launch(tmp_path, monkeypatch, "--extra-env", "TP=2", "--extra-env", "EP=2")

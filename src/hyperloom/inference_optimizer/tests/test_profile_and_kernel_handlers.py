@@ -2030,6 +2030,68 @@ async def test_baseline_executor_fails_on_nonzero_rc_despite_valid_measurement(t
     db.close()
 
 
+def _native_profile_result(trace: Path) -> dict:
+    """What ``ProfileExecutor`` returns for a Magpie-owned profiling round."""
+    from hyperloom.inference_optimizer.agentx.report import agentx_measurement
+
+    measurement = agentx_measurement(
+        {
+            "scenario": "agentx",
+            "success": True,
+            "benchmark_valid": True,
+            "publishable": True,
+            "framework": "sglang",
+            "model": "Qwen/Qwen3-8B",
+            "agentx_metrics": {
+                "execution_owner": "magpie",
+                "server_launch": {"effective_argv": ["python", "-m", "sglang.launch_server"], "effective_env": {}},
+                "diagnostic_only": True,
+                "recipe": {"tp": 8},
+                "throughput": {"output_tokens_per_second": 1234.0},
+                "requests": {},
+                "latency_seconds": {},
+            },
+        }
+    )
+    return {
+        **measurement,
+        "status": "succeeded",
+        "main_trace_path": str(trace),
+        "trace_input_ready": True,
+        "launch_evidence_path": "/tmp/profile/launch_evidence.json",
+    }
+
+
+@pytest.mark.asyncio
+async def test_native_agentx_profile_promotes_its_trace(session_dir, tmp_path):
+    """Magpie stamps a profiled replay diagnostic_only, so the profile lane cannot gate on measurement validity."""
+    trace = tmp_path / "rank0.pt.trace.json.gz"
+    trace.write_bytes(b"")
+    result = _native_profile_result(trace)
+    # The premise: this round is deliberately not a valid measurement.
+    assert result["diagnostic_only"] is True
+    assert result["valid_measurement"] is False
+
+    c = Coordinator(session_dir, backends=_backends_silent())
+    assert c.writeback.is_promotable_result("profile", result)
+
+    await c.writeback.promote_to_shared_state("profile", result)
+
+    assert c.shared_state.last_profile_trace == str(trace)
+    assert c.shared_state.last_profile_status == "succeeded"
+
+
+def test_native_agentx_profile_measurement_still_cannot_anchor_a_baseline(session_dir, tmp_path):
+    """Accepting the trace must not make the diagnostic number usable as the session anchor."""
+    trace = tmp_path / "rank0.pt.trace.json.gz"
+    trace.write_bytes(b"")
+    result = _native_profile_result(trace)
+
+    c = Coordinator(session_dir, backends=_backends_silent())
+    assert not c.writeback.is_promotable_result("baseline", result)
+    assert not c.writeback.is_promotable_result("profile", {**result, "measurement_status": "failed"})
+
+
 @pytest.mark.asyncio
 async def test_coordinator_promotes_valid_baseline_even_with_failed_status(session_dir):
     c = Coordinator(session_dir, backends=_backends_silent())
