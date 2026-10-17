@@ -59,8 +59,8 @@ cognitive-complexity src/hyperloom/orchestrator/actions/executors/_patch_snapsho
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_ray_serving.py::ServingLease._await_or_cancel 37
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py::_communicate_with_watchdog 62
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_workload_envs.py::materialize_config_with_envs 286
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_once 173
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 119
+cognitive-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_once 129
+cognitive-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 96
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::_apply_warm_patches 175
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/benchmark_result.py::_rescue_candidate_paths 39
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/benchmark_result.py::extract_benchmark_measurement 35
@@ -288,8 +288,8 @@ cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_nogit_patch.
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_ray_serving.py::_serving_actor_body 21
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py::_communicate_with_watchdog 23
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_workload_envs.py::materialize_config_with_envs 110
-cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_once 54
-cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 38
+cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_once 46
+cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 31
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::_apply_warm_patches 52
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/benchmark_result.py::harvest_mn_gpu_metrics 30
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/explore.py::ExploreExecutor.__call__ 76
@@ -1112,9 +1112,9 @@ function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::Baselin
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._maybe_stop_on_missing_baseline_accuracy 128
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._mn_warmup_pass 92
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._preflight_server_argv 103
-function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_once 659
+function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_once 568
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_retrying 97
-function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 567
+function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 508
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::_apply_warm_patches 416
 function-lines src/hyperloom/orchestrator/actions/executors/benchmark_result.py::extract_benchmark_measurement 133
 function-lines src/hyperloom/orchestrator/actions/executors/benchmark_result.py::harvest_leaked_artifacts 85
