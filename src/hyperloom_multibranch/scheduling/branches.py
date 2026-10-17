@@ -86,11 +86,16 @@ class BranchControl:
     async def open_branches(
         self, count: int, start_commit: str, k: int, origin: BranchOrigin, deadline: float
     ) -> tuple[BranchEntry, ...]:
-        """Open ``count`` specialist branches of ``origin`` from ``start_commit``, record ``OPEN``, start them, each
-        by ``deadline`` (clock seconds)."""
+        """Open up to ``count`` specialist branches of ``origin`` from ``start_commit``, record ``OPEN``, start them,
+        each by ``deadline`` (clock seconds); the branches opened before the roster first refuses one.
+
+        Forks and repairs are admitted while a branch starts, so the roster is asked again before each branch, right
+        before its branch id is issued: a refused branch takes no id."""
 
         opened = []
         for _ in range(count):
+            if self._roster.open_refusal():
+                break
             entry = self._roster.open(self._roster.next_branch_id(), origin=origin, start_commit=start_commit, k=k)
             opened.append(await self._open(entry, start_commit, deadline, repair=None))
         return tuple(opened)

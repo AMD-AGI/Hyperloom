@@ -78,6 +78,21 @@ class StartedThenHangingRuntime(RefusingRuntime):
             await asyncio.Event().wait()
 
 
+class CrowdingRuntime(RefusingRuntime):
+    """A runtime during whose start of ``b01`` the fork desk admits two forks of it onto ``roster``, taking the last
+    free slots; a test double for the admissions that race an opening batch, not a placeholder."""
+
+    roster: Roster
+
+    async def start(self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None) -> None:
+        await super().start(branch, start_commit, brief, repair)
+        if branch == "b01":
+            for _ in range(2):
+                self.roster.open(
+                    self.roster.next_branch_id(), origin=BranchOrigin.FORK, start_commit="", k=1, from_branch=branch
+                )
+
+
 class HangingSetKRuntime(RefusingRuntime):
     """A runtime that never returns from a new K; a failure double, not a placeholder."""
 
@@ -148,6 +163,24 @@ async def test_the_opening_batch_is_recorded_started_and_given_quota(tmp_path: P
     assert {branch.branch: branch.start_commit for branch in view.branches}["b02"] == bench.root
     assert dict(bench.toolbox.policies[-1].branch_k) == {INTEGRATION_BRANCH: 1, "b01": 2, "b02": 2}
     assert bench.sessions.quota_at_start == {"b01": 2, "b02": 2}
+
+
+async def test_a_batch_stops_at_the_first_slot_an_admission_took_and_spends_no_branch_id_on_it(
+    tmp_path: Path,
+) -> None:
+    bench = await Bench(tmp_path, runtime=CrowdingRuntime).rooted()
+    assert isinstance(bench.runtime, CrowdingRuntime)
+    bench.runtime.roster = bench.roster
+
+    opened = await bench.control.open_branches(3, bench.root, 1, BranchOrigin.FIRST_BATCH, OPEN_BY)
+
+    assert [entry.branch for entry in opened] == ["b01"]
+    assert [entry.branch for entry in bench.roster.entries() if entry.origin is BranchOrigin.FORK] == ["b02", "b03"]
+    await bench.control.stop_branch("b02", BranchStop(StopCause.JUDGE, "flat", NOW))
+    assert [
+        entry.branch for entry in await bench.control.open_branches(1, bench.root, 1, BranchOrigin.REFILL, OPEN_BY)
+    ] == ["b04"]
+    assert json.loads((tmp_path / "MB-roster.json").read_text())["issued_branch_ids"] == 4
 
 
 def _repair_of(parent_commit: str) -> RepairRequest:

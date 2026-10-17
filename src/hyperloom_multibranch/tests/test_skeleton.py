@@ -31,7 +31,7 @@ from hyperloom.contracts.measurement import Purpose, TestRequest
 from hyperloom.contracts.recipe import Recipe, RecipeDelta, apply
 from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
 from hyperloom.measure.versions import socket_versions
-from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest
+from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind
@@ -40,6 +40,7 @@ from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.notebook.tests.factories import delta, intent
 from hyperloom_multibranch.scheduling.budget import SessionBudget
+from hyperloom_multibranch.scheduling.explore import OPEN_CUT_REASON
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL
 from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
@@ -47,7 +48,7 @@ from hyperloom_multibranch.scheduling.lifecycle import CUT_SHORT, Session, Sessi
 from hyperloom_multibranch.scheduling.llm import CompletionFailed
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
-from hyperloom_multibranch.scheduling.roster import BranchStatus, RosterCaps, StopCause
+from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStatus, RosterCaps, StopCause
 from hyperloom_multibranch.scheduling.settings import KernelOptimizer, RunSettings, Workload
 from hyperloom_multibranch.scheduling.stops import (
     STOP_OVERRAN,
@@ -338,6 +339,14 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert stage.toolbox.policies[-1].branch_k == {}
 
     roster = json.loads(stage.layout.roster.read_text())
+    assert {
+        entry["branch"]: entry["origin"] for entry in roster["entries"] if entry["branch"] != INTEGRATION_BRANCH
+    } == {
+        "b01": BranchOrigin.FIRST_BATCH.value,
+        "b02": BranchOrigin.FIRST_BATCH.value,
+        "b03": BranchOrigin.FORK.value,
+    }
+    assert not [row for row in _decisions(stage) if row["kind"] == "open" and not row["branch"]]
     b02 = next(entry for entry in roster["entries"] if entry["branch"] == "b02")
     assert b02["stop"] == {"cause": StopCause.JUDGE.value, "reason": STOP_REASON, "at": b02["stop"]["at"]}
     assert branches["b02"].stop_reason == f"judge: {STOP_REASON}"
@@ -618,6 +627,51 @@ async def test_a_failed_opening_judge_call_opens_one_branch_at_k_one(tmp_path: P
     assert stage.sessions.k == {"b01": 1}
     failed = [row["reason"] for row in _decisions(stage) if row["kind"] == "judge_failed"]
     assert failed and set(failed) == {"kept the status quo"}
+    assert not [
+        row for row in _decisions(stage) if row["kind"] == "judge" or (row["kind"] == "open" and not row["branch"])
+    ]
+
+
+def _crowding(stage: Stage) -> type[RefusingRuntime]:
+    """A runtime during whose start of ``b01`` two forks of it are asked for, which the fork desk admits
+    onto the last free slots; a test double for the admissions that race the opening batch, not a placeholder."""
+
+    class CrowdingRuntime(RefusingRuntime):
+        async def start(
+            self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None
+        ) -> None:
+            await super().start(branch, start_commit, brief, repair)
+            if branch == "b01":
+                for reason in (FIX_REASON, "fix f2 regresses"):
+                    stage.forks.append(await stage.setup.desk.admit(ForkRequest(branch, start_commit, reason)))
+
+    return CrowdingRuntime
+
+
+async def test_forks_admitted_while_the_opening_batch_starts_cut_the_batch_and_the_session_goes_on(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.judge = ScriptedCompletion([_reply({"open": 3, "branches": [], "stop": []})])
+    stage.runtime_type = _crowding(stage)
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    assert [(admission.status, admission.branch) for admission in stage.forks] == [
+        (AdmissionStatus.ACCEPTED, "b02"),
+        (AdmissionStatus.ACCEPTED, "b03"),
+    ]
+    root = await stage.root()
+    assert stage.sessions.started == {"b01": root}
+    roster = json.loads(stage.layout.roster.read_text())
+    assert roster["issued_branch_ids"] == 3
+    decisions = _decisions(stage)
+    sessionwide = [row for row in decisions if row["kind"] in ("judge", "open") and not row["branch"]]
+    assert [row["kind"] for row in sessionwide][:2] == ["judge", "open"]
+    [cut] = [row for row in sessionwide if row["kind"] == "open"]
+    assert cut["reason"] == OPEN_CUT_REASON
+    assert cut["detail"] == {"requested": 3, "opened": 1, "open_cut": 2}
 
 
 async def test_an_unreadable_steering_reply_keeps_every_branch_and_k_as_they_were(tmp_path: Path) -> None:

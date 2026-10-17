@@ -32,7 +32,7 @@ from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import Integrator
 from hyperloom_multibranch.scheduling.judge import Judge, JudgeDecision, JudgeView
 from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_branches_to_add, mb_fake_similar_branches
-from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStop, StopCause
+from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchOrigin, BranchStop, StopCause
 from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 from hyperloom_multibranch.scheduling.widening import Widening
@@ -42,6 +42,7 @@ logger = logging.getLogger(__name__)
 #: How often the loop starts admitted forks and repairs and checks the deadline; the judge runs on its own, longer interval.
 EXPLORE_TICK_SECONDS = 5.0
 SIMILAR_BRANCH_REASON = "duplicates another branch"
+OPEN_CUT_REASON = "branch slots taken"
 
 
 @dataclass(frozen=True)
@@ -105,12 +106,12 @@ class Explorer:
         """
 
         opening = await self._ask(window, opening=True)
-        if opening is not None and await self._apply(opening):
+        if opening is None:
+            await self._open_batch(1, 1, window.root_commit, BranchOrigin.FIRST_BATCH, window.explore_end)
+        elif await self._apply(opening, window.root_commit, BranchOrigin.FIRST_BATCH, window.explore_end):
             return SessionStopReason.GLOBAL_CONVERGED
         if self._clock.now() >= window.explore_end:
             return SessionStopReason.TIME_EXHAUSTED
-        count, k = (opening.open_count, opening.open_k) if opening is not None else (1, 1)
-        await self._branches.open_branches(count, window.root_commit, k, BranchOrigin.FIRST_BATCH, window.explore_end)
         await self._dashboard.refresh()
         merging = asyncio.ensure_future(self._merge_forever())
         try:
@@ -132,7 +133,9 @@ class Explorer:
             if now >= next_judge:
                 next_judge = now + self._interval
                 decision = await self._ask(window, opening=False)
-                if decision is not None and await self._apply(decision):
+                if decision is not None and await self._apply(
+                    decision, window.root_commit, BranchOrigin.REFILL, window.explore_end
+                ):
                     return SessionStopReason.GLOBAL_CONVERGED
                 await self._dashboard.refresh()
             await self._clock.sleep(min(EXPLORE_TICK_SECONDS, window.explore_end - now))
@@ -189,8 +192,9 @@ class Explorer:
             self._decisions.record(Decision(DecisionKind.JUDGE_FAILED, "kept the status quo"))
         return decision
 
-    async def _apply(self, decision: JudgeDecision) -> bool:
-        """Apply the stop and K orders; True when the judge asked to stop the session."""
+    async def _apply(self, decision: JudgeDecision, start_commit: str, origin: BranchOrigin, deadline: float) -> bool:
+        """Apply the stop and K orders, then open the branches the judge asked for, of ``origin`` from
+        ``start_commit``; True, and nothing opened, when the judge asked to stop the session."""
 
         self._decisions.record(
             Decision(
@@ -208,7 +212,25 @@ class Explorer:
             await self._stop(order.branch, order.reason)
         if decision.k:
             await self._branches.apply_k({order.branch: order.k for order in decision.k})
-        return bool(decision.session_stop)
+        if decision.session_stop:
+            return True
+        await self._open_batch(decision.open_count, decision.open_k, start_commit, origin, deadline)
+        return False
+
+    async def _open_batch(
+        self, count: int, k: int, start_commit: str, origin: BranchOrigin, deadline: float
+    ) -> tuple[BranchEntry, ...]:
+        """Open up to ``count`` branches of ``origin`` at K ``k`` from ``start_commit``, each by ``deadline``; none
+        once the deadline has passed. The only place a batch is cut to the free slots: a fork or repair admitted while
+        the batch starts can take the last ones, and the branches that found no slot are recorded as ``open_cut``."""
+
+        if self._clock.now() >= deadline:
+            return ()
+        opened = await self._branches.open_branches(count, start_commit, k, origin, deadline)
+        if len(opened) < count:
+            detail = {"requested": count, "opened": len(opened), "open_cut": count - len(opened)}
+            self._decisions.record(Decision(DecisionKind.OPEN, OPEN_CUT_REASON, detail=detail))
+        return opened
 
     async def _stop(self, branch: str, reason: str) -> None:
         """A judge stop; a step that fails is logged and exploring goes on, as CLOSE kills what the stop left."""
@@ -218,4 +240,4 @@ class Explorer:
             logger.error("the judge's stop of %s did not finish cleanly", branch, exc_info=failure)
 
 
-__all__ = ["EXPLORE_TICK_SECONDS", "ExploreWindow", "Explorer", "Steering", "integration_row"]
+__all__ = ["EXPLORE_TICK_SECONDS", "OPEN_CUT_REASON", "ExploreWindow", "Explorer", "Steering", "integration_row"]
