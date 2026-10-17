@@ -1258,55 +1258,6 @@ class KernelEventRecorder:
             },
         )
 
-    def record_trace_analyze_run(
-        self,
-        *,
-        run_id: str,
-        trigger: str,
-        status: str,
-        result: Any,
-        requested_by: str = "",
-        request_msg_id: str = "",
-        trace_input: str = "",
-        top_k: Any = None,
-        snapshot: dict[str, Any] | None = None,
-        cache_hit: bool = False,
-    ) -> None:
-        """Record an analysis the phase requested for itself.
-
-        This section is normally empty. The entry re-profile dispatches a
-        ``roofline`` task by default, which analyses the trace it just captured,
-        so the phase's own request is skipped as cached. A non-empty section
-        therefore marks the case where the analysis behind a rewrite has no
-        roofline event of its own; it is what explains that request's snapshot
-        counter bump and cache replacement on the timeline.
-
-        ``reusable_native_kernel_ids`` is recorded because it is the only legal
-        source of a ``kernel_id``: the hot-kernel ranking includes vendor
-        binaries that dispatch rejects as ``non_reusable_kernel``, so without
-        the admitted set there is no way to check afterwards whether the kernel
-        the phase went on to rewrite was ever a legitimate target.
-
-        Args:
-            run_id: Entry-stable identifier for this analysis.
-            trigger: ``pre_run_optimization`` or ``llm_explicit``.
-            status: ``ok`` or ``failed``.
-            snapshot: The ``last_trace_analyze`` cache the run produced.
-        """
-        _write_trace_analyze_run(
-            self._sink,
-            run_id=run_id,
-            trigger=trigger,
-            status=status,
-            result=result,
-            requested_by=requested_by,
-            request_msg_id=request_msg_id,
-            trace_input=trace_input,
-            top_k=top_k,
-            snapshot=snapshot,
-            cache_hit=cache_hit,
-        )
-
     def _record_lane_run(self, row: Mapping[str, Any]) -> None:
         """Write one lane row, keyed by the run it describes."""
         self._sink.record(
