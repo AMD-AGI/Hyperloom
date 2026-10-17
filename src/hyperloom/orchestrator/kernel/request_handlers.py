@@ -192,13 +192,6 @@ def _confirm_sources_imported(
     return None, per_file
 
 
-# Backends whose stdout log we mine for token usage.
-_TOKEN_TRACED_KERNEL_BACKENDS: frozenset[str] = frozenset({"forge"})
-
-
-# Kernel-agent shell tools root; read lazily so late env injection wins.
-
-
 HandlerFn = Callable[..., Awaitable[HandlerResult]]
 
 _RUNTIME_GENERATED_SOURCE_MARKERS = (  # nosec B108 - marker strings, not filesystem writes.
@@ -215,30 +208,6 @@ _COMPILE_GENERATED_NAME_MARKERS = (
     "torchinductor",
     "inductor",
 )
-
-
-def _reusable_source_roots() -> tuple[str, ...]:
-    """Framework install roots for the runtime-generated kernel classifier.
-
-    Emits a lower-case variant per root because that classifier matches against
-    a lower-cased source path. Path containment uses
-    :func:`~hyperloom.inference_optimizer.framework_paths.resolved_within` instead.
-
-    Returns:
-        The de-duplicated framework install roots (each with a lower-case
-        variant), including FlyDSL checkout roots.
-    """
-    from hyperloom.inference_optimizer.framework_paths import resolve_known_source_prefixes
-
-    roots = resolve_known_source_prefixes()
-    out: list[str] = []
-    seen: set[str] = set()
-    for root in roots:
-        for variant in (root, root.lower()):
-            if variant and variant not in seen:
-                seen.add(variant)
-                out.append(variant)
-    return tuple(out)
 
 
 # forge is the only per-kernel backend. The default phase-level backend is the
@@ -3910,12 +3879,6 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
 # one file; the TraceLens-free reader picks a window in memory and never writes
 # chunks. Both answer "is the window this analysis rests on trustworthy", so the
 # event normalizes them onto one shape and keeps the raw form under ``selected``.
-
-
-#: Rewrite targets forge can actually execute in one ``--auto`` call. Running
-#: several needs a per-target base commit and scratch path, so its CLI refuses
-#: more than one; asking for what the budget funds would fail the whole lane.
-_REWRITE_EXECUTABLE_TARGETS = 1
 
 
 def _summarize_dropped_patches(dropped: Any) -> dict[str, int]:

@@ -23,6 +23,7 @@ from hyperloom.common.codex_session import (
 from hyperloom.common.env import is_truthy
 from hyperloom.orchestrator.actions.executors import _kernel_agent_tool as tool
 from hyperloom.orchestrator.actions.executors import trace_analyze as ta
+from hyperloom.inference_optimizer.framework_paths import resolve_known_source_prefixes
 from hyperloom.orchestrator.kernel import request_handlers as krh
 from hyperloom.orchestrator.kernel import lane_budget
 from hyperloom.common.llm_config import (
@@ -2343,13 +2344,13 @@ class TestReusableSourceRootsAtom:
 
     def test_includes_atom_editable_path(self):
         # The matcher lowercases its source-file input, so the stored prefix is lowercase ``/app/atom/atom/``.
-        assert any("/app/atom/atom/" in r.lower() for r in krh._reusable_source_roots())
+        assert any("/app/atom/atom/" in r.lower() for r in resolve_known_source_prefixes())
 
     def test_includes_atom_site_packages_python_3_10(self):
-        assert any("/opt/venv/lib/python3.10/site-packages/atom/" in r for r in krh._reusable_source_roots())
+        assert any("/opt/venv/lib/python3.10/site-packages/atom/" in r for r in resolve_known_source_prefixes())
 
     def test_includes_atom_site_packages_python_3_12(self):
-        assert any("/opt/venv/lib/python3.12/site-packages/atom/" in r for r in krh._reusable_source_roots())
+        assert any("/opt/venv/lib/python3.12/site-packages/atom/" in r for r in resolve_known_source_prefixes())
 
 
 class TestRunGemmTuningHandler:
