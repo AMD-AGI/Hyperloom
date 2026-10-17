@@ -16,6 +16,7 @@ from hyperloom_multibranch.contracts.fork import (
     ForkRequest,
     RepairRequest,
 )
+from hyperloom_multibranch.contracts.gate import ResultUnverified, ResultVerifier
 from hyperloom_multibranch.contracts.intent import Intent
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook.interfaces import JudgementSink
@@ -40,12 +41,19 @@ def _require(judgement: Judgement, *actions: Action) -> None:
 
 
 class RuleGate:
-    """``settle`` lands a commit or a record; a retest, a diagnosis and a fork are its caller's next step."""
+    """``settle`` lands a commit or a record; a retest, a diagnosis and a fork are its caller's next step.
 
-    def __init__(self, notebook: JudgementSink, repo: ExperimentRepo, scheduler: ForkAdmissionService) -> None:
+    A commit, a fork and a repair first re-verify every result behind the judgement with ``verifier``; one that does
+    not re-verify is recorded ``UNVERIFIED`` and its :class:`ResultUnverified` raised, with nothing landed or asked.
+    """
+
+    def __init__(
+        self, notebook: JudgementSink, repo: ExperimentRepo, scheduler: ForkAdmissionService, verifier: ResultVerifier
+    ) -> None:
         self._notebook = notebook
         self._repo = repo
         self._scheduler = scheduler
+        self._verifier = verifier
 
     async def settle(self, request: TestRequest, judgement: Judgement) -> Action:
         """The judgement is written against ``request``, the first measurement of the candidate.
@@ -55,6 +63,7 @@ class RuleGate:
         """
         action = decide(judgement)
         if action is Action.COMMIT:
+            await self._reverify(request, judgement)
             # The scheduler may stop a specialist at any moment; a stop must not split a commit from its judgement.
             if not await asyncio.shield(self._commit(request, judgement)):
                 return Action.RECORD_ONLY
@@ -70,6 +79,7 @@ class RuleGate:
     async def fork(self, request: TestRequest, judgement: Judgement, reason: str) -> ForkAdmission:
         """Asks for the fork and records where the candidate stands; cutting the branch is not part of this call."""
         _require(judgement, Action.REQUEST_FORK)
+        await self._reverify(request, judgement)
         admission = await self._scheduler.admit(ForkRequest(request.branch, request.parent_commit, reason))
         if admission.status is AdmissionStatus.REJECTED:
             conclusion = _recorded_as(judgement)
@@ -81,6 +91,7 @@ class RuleGate:
         return admission
 
     async def repair(self, request: TestRequest, judgement: Judgement, intent: Intent, diagnosis: str) -> ForkAdmission:
+        await self._reverify(request, judgement)
         admission = await self._scheduler.admit_repair(RepairRequest(intent, request.delta, judgement, diagnosis))
         rejected = admission.status is AdmissionStatus.REJECTED
         conclusion = _recorded_as(judgement) if rejected else Conclusion.REPAIR_REQUESTED
@@ -104,6 +115,14 @@ class RuleGate:
             await self._repo.rewind(request.branch, commit, request.parent_commit)
             raise
         return True
+
+    async def _reverify(self, request: TestRequest, judgement: Judgement) -> None:
+        try:
+            for request_id in judgement.request_ids:
+                await self._verifier.reverify(request_id)
+        except ResultUnverified:
+            await self._notebook.write_judgement(request.request_id, judgement, Conclusion.UNVERIFIED)
+            raise
 
     async def _record(self, request: TestRequest, judgement: Judgement) -> TestRecord:
         return await self._notebook.write_judgement(request.request_id, judgement, _recorded_as(judgement))

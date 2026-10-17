@@ -6,8 +6,11 @@ git or processes."""
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from hyperloom.contracts.recipe import Recipe
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
+from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import BranchMoved
 
@@ -73,6 +76,19 @@ class RecordingScheduler:
         if self.status is not AdmissionStatus.ACCEPTED:
             return ForkAdmission(self.status)
         return ForkAdmission(self.status, branch=f"fork-{len(self.forks) + len(self.repairs)}")
+
+
+class RecordingVerifier:
+    """Re-verifies every result but those of ``rejects``, and keeps the request ids it was asked about."""
+
+    def __init__(self, rejects: Iterable[str] = ()) -> None:
+        self.rejects = frozenset(rejects)
+        self.asked: list[str] = []
+
+    async def reverify(self, request_id: str) -> None:
+        self.asked.append(request_id)
+        if request_id in self.rejects:
+            raise ResultUnverified(request_id, "the manifest hash is not the recorded one")
 
 
 class RecordingLifecycle:
