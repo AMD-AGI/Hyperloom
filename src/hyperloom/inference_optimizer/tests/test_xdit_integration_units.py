@@ -515,12 +515,10 @@ class TestScriptableLatencyRooflineSidecar:
 
         return SharedState.load_or_init(tmp_path)
 
-    def _write_sidecar(self, session_dir, *, sigma_ideal_us=611192.0, analytic_us=None):
+    def _write_sidecar(self, session_dir, *, sigma_ideal_us=611192.0):
         run_dir = session_dir / "kernel-agent" / "runs" / "20260705T193725Z" / "20260705T200313Z_tl-abc"
         run_dir.mkdir(parents=True, exist_ok=True)
         payload = {"totals": {"sigma_ideal_roofline_us": sigma_ideal_us}}
-        if analytic_us is not None:
-            payload["analytic_dit_ceiling"] = {"ideal_compute_us": analytic_us}
         sidecar = run_dir / "diffusion_roofline.json"
         sidecar.write_text(json.dumps(payload), encoding="utf-8")
         return sidecar
@@ -532,12 +530,6 @@ class TestScriptableLatencyRooflineSidecar:
         e2e_ms, ideal_ms = state._scriptable_latency_roofline("xdit", 0.740741, "")
         assert e2e_ms == pytest.approx(1350.0, abs=1.0)
         assert ideal_ms == pytest.approx(611.192, abs=0.01)
-
-    def test_analytic_ceiling_preferred_over_totals(self, tmp_path):
-        state = self._make_state(tmp_path)
-        self._write_sidecar(tmp_path, sigma_ideal_us=611192.0, analytic_us=644000.0)
-        _e2e, ideal_ms = state._scriptable_latency_roofline("xdit", 0.740741, "")
-        assert ideal_ms == pytest.approx(644.0, abs=0.01)
 
     def test_missing_sidecar_yields_zero_ideal(self, tmp_path):
         state = self._make_state(tmp_path)
