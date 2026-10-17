@@ -187,9 +187,15 @@ def _tried(item: TriedDirection) -> str:
     return f"{where}: {outcome}{change}"
 
 
+def _ceilings(shares: OpShares | None) -> list[str]:
+    largest = shares.largest(CEILING_OPS) if shares is not None else ()
+    return [f"- {op}: {share:.1f}% of GPU time, at most +{amdahl_ceiling_pct(share):.1f}%" for op, share in largest]
+
+
 def render_brief(brief: StartupBrief) -> str:
     sections = [f"Startup brief from {brief.start_commit}"]
     for title, items in (
+        ("Ceilings (largest ops; claim with target_share_pct):", _ceilings(brief.op_shares)),
         ("Tried:", [_tried(item) for item in brief.tried]),
         ("Lessons:", [f"- {text}" for text in brief.lessons]),
         ("Leads:", [f"- {text}" for text in brief.leads]),
@@ -460,6 +466,7 @@ def notebook_tools(
 
 
 __all__ = [
+    "CEILING_OPS",
     "ERROR",
     "LINE_CHARS",
     "MAX_LINES",

@@ -18,6 +18,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     LineageEvent,
     MergeAttempt,
     RegressionCase,
+    ToolResultPointer,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import (
     ClaimStatus,
@@ -160,6 +161,22 @@ async def test_a_fill_specialist_is_briefed_on_everything_tried_on_the_states_it
         "r2": "add args --block-size 32",
     }
     assert (brief.leads, brief.lessons) == ((), ())
+    assert brief.op_shares is None
+
+
+async def test_the_brief_carries_the_latest_op_shares_reported_on_its_start_commit(session: Session) -> None:
+    for job, share in (("job-1", 30.0), ("job-2", 41.5)):
+        await session.toolbox.notify_tool_result(
+            ToolResultPointer("s1", job, "/a", "trace analysed", "c1", "", {"gemm": share})
+        )
+
+    brief = await session.scheduler.startup_brief("c1")
+
+    assert brief.op_shares is not None and (brief.op_shares.job_id, dict(brief.op_shares.shares)) == (
+        "job-2",
+        {"gemm": 41.5},
+    )
+    assert (await session.scheduler.startup_brief("i1")).op_shares is None
 
 
 async def test_a_branch_inbox_gets_its_results_judgements_and_lineage_once(session: Session) -> None:

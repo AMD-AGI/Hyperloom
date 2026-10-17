@@ -21,12 +21,14 @@ from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, Retrie
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, intent, request, result
 from hyperloom_multibranch.notebook.tests.sessions import scripted_session
 from hyperloom_multibranch.notebook.tools import (
+    CEILING_OPS,
     ERROR,
     MAX_LINES,
     NotebookTool,
     lines,
     notebook_tools,
     outcome,
+    render_brief,
     render_ceiling,
 )
 
@@ -274,6 +276,19 @@ async def test_the_brief_comes_from_the_briefing_the_tools_are_given(tools_of: T
     ]
     assert "- scheduler / chunked prefill on c0: not judged" in local
     assert "Lessons:\n- lesson 0" in briefed and "... 5 more\nLeads:\n- recipe: try expert parallel" in briefed
+
+
+def test_the_brief_lists_the_start_commits_largest_ops_with_their_ceilings_before_what_was_tried() -> None:
+    shares = OpShares("c1", "job-1", "", {f"op{index}": float(index) for index in range(1, 8)} | {"gemm": 50.0})
+    profiled = render_brief(StartupBrief("c1", (), op_shares=shares)).splitlines()
+
+    assert profiled[1:4] == [
+        "Ceilings (largest ops; claim with target_share_pct):",
+        "- gemm: 50.0% of GPU time, at most +100.0%",
+        "- op7: 7.0% of GPU time, at most +7.5%",
+    ]
+    assert len(profiled) == 2 + CEILING_OPS
+    assert "Ceilings" not in render_brief(StartupBrief("c1", ()))
 
 
 async def test_bad_arguments_come_back_as_marked_errors(tools_of: Tools) -> None:

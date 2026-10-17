@@ -270,6 +270,7 @@ async def test_op_shares_are_the_latest_a_tool_reported_on_the_commit(open_as: O
 
     assert latest is not None and (latest.job_id, dict(latest.shares)) == ("job-2", {"gemm": 41.5})
     assert await toolbox.op_shares("c0") is None
+    assert (await toolbox.snapshot()).op_shares == {"c1": latest}
 
 
 async def test_a_late_result_does_not_complete_the_claim_another_branch_took_over(

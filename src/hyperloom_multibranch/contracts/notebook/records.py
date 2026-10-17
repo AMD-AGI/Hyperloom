@@ -420,12 +420,17 @@ class TriedDirection:
 
 @dataclass(frozen=True)
 class StartupBrief:
-    """What a fill specialist reads at start; ``leads`` and ``lessons`` come from cross-session recall (MB2)."""
+    """What a fill specialist reads at start; ``leads`` and ``lessons`` come from cross-session recall (MB2).
+
+    ``op_shares`` are the latest op shares a tool reported on the start commit, which bound what speeding each op up
+    can gain; ``None`` while the commit was not profiled.
+    """
 
     start_commit: str
     tried: tuple[TriedDirection, ...]
     leads: tuple[str, ...] = ()
     lessons: tuple[str, ...] = ()
+    op_shares: OpShares | None = None
 
 
 @dataclass(frozen=True)

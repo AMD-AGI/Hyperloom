@@ -247,7 +247,7 @@ def startup_brief(state: NotebookState, view: LineageView, start_commit: str) ->
         and record.request.parent_commit in ancestry
         and (record.in_flight or record.measured)
     )
-    return StartupBrief(start_commit=start_commit, tried=tried)
+    return StartupBrief(start_commit=start_commit, tried=tried, op_shares=state.op_shares.get(start_commit))
 
 
 def _tried(state: NotebookState, record: TestRecord) -> TriedDirection:
