@@ -138,11 +138,13 @@ def _text(reply: dict[str, Any]) -> str:
     return str(reply["result"]["content"][0]["text"])
 
 
-async def _profile_test(stack: Stack, branch: str = "b1") -> str:
-    """A measured PROFILE test of ``branch`` on its head commit, as the notebook holds it."""
+async def _profile_test(stack: Stack, branch: str = "b1", commit: str = PARENT) -> str:
+    """A measured PROFILE test of ``branch`` on ``commit``, as the notebook holds it."""
     rig = stack.rig
     rig.executor.script = [lambda job: ok(job, profile_location="traces/p1")]
-    request = req(branch, purpose=Purpose.PROFILE, kind=TestKind.PROFILE, server_args="--p")
+    request = replace(
+        req(branch, purpose=Purpose.PROFILE, kind=TestKind.PROFILE, server_args="--p"), parent_commit=commit
+    )
     request_id = await rig.toolbox.submit_test(request)
     await rig.toolbox.drain()
     return request_id
@@ -150,28 +152,30 @@ async def _profile_test(stack: Stack, branch: str = "b1") -> str:
 
 @pytest.mark.parametrize("tool", ["tracelens", "roofline"])
 async def test_a_specialist_starts_each_analysis_tool_for_its_own_branch(stack: Stack, tool: str) -> None:
-    job = json.loads(_text(await stack.start(tool=tool, params={"trace_input": "t"})))["job_id"]
+    profile = await _profile_test(stack, commit=HEAD)
+    job = json.loads(_text(await stack.start(tool=tool, profile_request_id=profile)))["job_id"]
     assert await stack.jobs.wait(job) is not None
     (request,) = stack.tools[tool].requests
     assert (request.tool, request.branch) == (tool, "b1")
-    assert request.params["trace_input"] == "t"
+    assert request.params["trace_input"] == "traces/p1"
     (pointer,) = stack.capture.pointers
     assert (pointer.branch, pointer.job_id) == ("b1", job)
 
 
 async def test_the_pointer_carries_the_server_side_head_commit_not_the_callers(stack: Stack) -> None:
-    job = json.loads(_text(await stack.start(tool="tracelens", params={"trace_input": "t"})))["job_id"]
+    profile = await _profile_test(stack, commit=HEAD)
+    job = json.loads(_text(await stack.start(tool="tracelens", profile_request_id=profile)))["job_id"]
     await stack.jobs.wait(job)
     (pointer,) = stack.capture.pointers
     assert pointer.commit_id == HEAD != PARENT
     assert dict(pointer.op_shares) == SHARES
-    assert pointer.profile_request_id == ""
+    assert pointer.profile_request_id == profile
 
 
 async def test_a_caller_supplied_commit_id_reaches_neither_the_schema_nor_the_params(stack: Stack) -> None:
     top = await stack.refused(tool="tracelens", commit_id=FORGED)
     assert "additional properties" in top.lower()
-    inner = await stack.refused(tool="tracelens", params={"trace_input": "t", "commit_id": FORGED})
+    inner = await stack.refused(tool="tracelens", params={"commit_id": FORGED})
     assert "server_owned_param" in inner and "commit_id" in inner
     nested = await stack.refused(tool="roofline", params={"profile_request_id": "r1"})
     assert "server_owned_param" in nested
@@ -179,9 +183,10 @@ async def test_a_caller_supplied_commit_id_reaches_neither_the_schema_nor_the_pa
 
 
 async def test_a_caller_cannot_profile_another_branch(stack: Stack) -> None:
-    reply = await stack.start(tool="tracelens", branch="b2", params={"trace_input": "t"})
+    reply = await stack.start(tool="tracelens", branch="b2", profile_request_id="r1")
     assert "additional properties" in reply["error"]["message"].lower()
-    job = json.loads(_text(await stack.start("b2", tool="tracelens", params={"trace_input": "t"})))["job_id"]
+    profile = await _profile_test(stack, "b2")
+    job = json.loads(_text(await stack.start("b2", tool="tracelens", profile_request_id=profile)))["job_id"]
     await stack.jobs.wait(job)
     (request,) = stack.tools["tracelens"].requests
     assert request.branch == "b2" and request.params["commit_id"] == PARENT  # b2's own head, never b1's
@@ -223,13 +228,13 @@ async def test_a_branch_whose_head_cannot_be_read_is_refused(stack: Stack) -> No
         raise KeyError(branch)
 
     stack.rig.repo.head = broken  # type: ignore[method-assign]
-    text = await stack.refused(tool="tracelens", params={"trace_input": "t"})
+    text = await stack.refused(tool="tracelens", profile_request_id="r1")
     assert "commit_unknown" in text and "b1" in text
     assert stack.tools["tracelens"].requests == []
 
 
 async def test_a_toolbox_without_a_tool_executor_refuses_by_name(stack_without_tools: Stack) -> None:
-    text = await stack_without_tools.refused(tool="tracelens", params={"trace_input": "t"})
+    text = await stack_without_tools.refused(tool="tracelens", profile_request_id="r1")
     assert "no_tool_executor" in text
 
 
@@ -250,11 +255,21 @@ async def test_without_an_analysis_starter_the_route_refuses_by_name(tmp_path: P
         server.stop()
 
 
-async def test_a_trace_input_of_the_callers_next_to_a_profile_request_id_is_refused(stack: Stack) -> None:
+@pytest.mark.parametrize("with_profile", [True, False])
+async def test_a_trace_input_of_the_callers_is_refused_with_or_without_a_profile_request_id(
+    stack: Stack, with_profile: bool
+) -> None:
     stack.rig.repo.heads["b1"] = PARENT
-    mine = await _profile_test(stack)
-    text = await stack.refused(tool="tracelens", params={"trace_input": "/etc"}, profile_request_id=mine)
-    assert "server_owned_param" in text and "trace_input" in text
+    mine = await _profile_test(stack) if with_profile else ""
+    for tool in ("tracelens", "roofline"):
+        text = await stack.refused(tool=tool, params={"trace_input": "/etc"}, profile_request_id=mine)
+        assert "server_owned_param" in text and "trace_input" in text
+    assert stack.tools["tracelens"].requests == [] and stack.tools["roofline"].requests == []
+
+
+async def test_tracelens_without_a_profile_request_id_is_refused_by_name(stack: Stack) -> None:
+    text = await stack.refused(tool="tracelens")
+    assert "profile_required" in text and "name the profile test with profile_request_id" in text
     assert stack.tools["tracelens"].requests == []
 
 

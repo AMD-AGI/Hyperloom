@@ -115,16 +115,39 @@ async def test_a_specialist_analyses_the_trace_of_its_profile_test_on_the_real_l
 
 
 async def test_roofline_is_refused_by_name_on_the_local_backend(local: Local) -> None:
-    text = await local.stack.refused(tool="roofline", params={"trace_input": "t"})
+    text = await local.stack.refused(tool="roofline")
     assert "tool_unavailable_on_backend" in text and "no_tool_executor" not in text
     assert local.toolbox._tools.tool_names == ("tracelens",)  # type: ignore[union-attr]
 
 
-async def test_a_trace_input_of_the_callers_next_to_a_profile_request_id_is_refused(local: Local) -> None:
-    profile = await local.profile_test()
+@pytest.mark.parametrize("with_profile", [True, False])
+async def test_a_trace_input_of_the_callers_is_refused_with_or_without_a_profile_request_id(
+    local: Local, with_profile: bool
+) -> None:
+    profile = await local.profile_test() if with_profile else ""
     text = await local.stack.refused(tool="tracelens", params={"trace_input": "/etc"}, profile_request_id=profile)
     assert "server_owned_param" in text
     assert local.tracelens.requests == []
+
+
+async def test_tracelens_without_a_profile_request_id_is_refused_by_name(local: Local) -> None:
+    text = await local.stack.refused(tool="tracelens")
+    assert "profile_required" in text and local.tracelens.requests == []
+
+
+async def test_an_absolute_trace_location_outside_the_session_is_refused(local: Local, tmp_path: Path) -> None:
+    profile = await local.profile_test(str(tmp_path))  # a real directory, but not the session's
+    text = await local.stack.refused(tool="tracelens", profile_request_id=profile)
+    assert "profile_without_trace" in text and local.tracelens.requests == []
+
+
+async def test_an_absolute_trace_location_inside_the_session_is_accepted_resolved(local: Local) -> None:
+    inside = local.session / LOCATION
+    profile = await local.profile_test(str(inside))
+    reply = await local.stack.start(tool="tracelens", profile_request_id=profile)
+    await local.toolbox._tools.wait(json.loads(reply["result"]["content"][0]["text"])["job_id"])  # type: ignore[union-attr]
+    (request,) = local.tracelens.requests
+    assert request.params["trace_input"] == str(inside.resolve())
 
 
 async def test_a_trace_location_that_leaves_the_session_is_refused(local: Local) -> None:

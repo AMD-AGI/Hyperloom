@@ -28,6 +28,7 @@ CODE_TOOL_NOT_ALLOWED = "tool_not_allowed"
 CODE_SERVER_OWNED_PARAM = "server_owned_param"
 CODE_COMMIT_UNKNOWN = "commit_unknown"
 CODE_PROFILE_UNVERIFIED = "profile_request_unverified"
+CODE_PROFILE_REQUIRED = "profile_required"
 CODE_NO_EXECUTOR = "no_tool_executor"
 CODE_TOOL_UNAVAILABLE = "tool_unavailable_on_backend"
 CODE_PROFILE_WITHOUT_TRACE = "profile_without_trace"
@@ -75,17 +76,17 @@ def _trace_input(record: TestRecord, root: Path | None) -> str:
     """Where the host reads the trace of a verified PROFILE record: its ``profile_location``.
 
     The location is relative to the toolbox session directory (``root``), where landed test output lives
-    (``tests/<request_id>/...``); an absolute location is used as it is. A relative location that leaves ``root``
-    is refused. Without a ``root`` the location is passed on unchanged.
+    (``tests/<request_id>/...``). A relative or absolute location that does not resolve (symlinks followed) to
+    inside ``root`` is refused. Without a ``root`` the location is passed on unchanged.
     """
     location = record.result.profile_location if record.result is not None else ""
     if not location:
         raise RequestRejected(
             f"profile test {record.request_id!r} left no trace location to analyse", CODE_PROFILE_WITHOUT_TRACE
         )
-    if root is None or Path(location).is_absolute():
+    if root is None:
         return location
-    resolved = (root / location).resolve()
+    resolved = (root / location).resolve()  # an absolute location replaces ``root`` in the join, then is checked
     if not resolved.is_relative_to(root.resolve()):
         raise RequestRejected(
             f"the trace location of profile test {record.request_id!r} leaves the session", CODE_PROFILE_WITHOUT_TRACE
@@ -109,22 +110,23 @@ async def analysis_request(
     """The tool request for ``ask.branch``, its ``commit_id`` read from the repository; raises RequestRejected.
 
     With a verified ``profile_request_id`` the ``trace_input`` is the record's own trace (see :func:`_trace_input`,
-    resolved against ``trace_root``); the caller may not name one then, because the trace must be that profile's.
+    resolved against ``trace_root``); the caller never names one, because the trace must be that profile's.
     """
     if ask.tool not in ANALYSIS_TOOLS:
         raise RequestRejected(
             f"a specialist starts only {' and '.join(ANALYSIS_TOOLS)} here, not {ask.tool!r}", CODE_TOOL_NOT_ALLOWED
         )
-    owned = sorted({COMMIT_PARAM, PROFILE_REQUEST_PARAM} & set(ask.params))
+    owned = sorted({COMMIT_PARAM, PROFILE_REQUEST_PARAM, TRACE_INPUT_PARAM} & set(ask.params))
     if owned:
         raise RequestRejected(
-            f"{', '.join(owned)} in params is set by the server from the branch's own commit, not by the caller",
+            f"{', '.join(owned)} in params is set by the server (from the branch's own commit or its profile test), "
+            "not by the caller",
             CODE_SERVER_OWNED_PARAM,
         )
-    if ask.profile_request_id and TRACE_INPUT_PARAM in ask.params:
+    if ask.tool == TRACELENS_TOOL and not ask.profile_request_id:
         raise RequestRejected(
-            f"{TRACE_INPUT_PARAM} in params is set by the server from the profile test, not by the caller",
-            CODE_SERVER_OWNED_PARAM,
+            f"{TRACELENS_TOOL} reads the trace of a profile test: name the profile test with profile_request_id",
+            CODE_PROFILE_REQUIRED,
         )
     commit = await _head(repo, ask.branch)
     record = await _verified_profile(records, ask.branch, commit, ask.profile_request_id)
