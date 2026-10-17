@@ -40,13 +40,20 @@ _COMPOSERS = (
     (_grid_runner, "_build_variant_yaml"),
 )
 
-#: The functions allowed to write the argument env: the two composers, the two
-#: helpers they delegate a step to -- the per-flag merge every injection goes
-#: through and the final guards -- all of which run above the seal, plus the
-#: seal itself and the re-seal a repair is written back through.
+#: The functions allowed to write the argument env: the two composers, the phases
+#: the first one delegates to, the two helpers they delegate a step to -- the
+#: per-flag merge every injection goes through and the final guards -- all of
+#: which run above the seal, plus the seal itself and the re-seal a repair is
+#: written back through.
 _WRITERS = frozenset(
     {
         "materialize_config_with_envs",
+        "_apply_profile_config",
+        "_shape_profile_trace",
+        "_apply_framework_envs",
+        "_apply_eval_envs",
+        "_tokenized_requests_env",
+        "_resolve_tensor_parallel",
         "add_server_arg_unless_pinned",
         "_finalize_framework_server_args",
         "_build_variant_yaml",
