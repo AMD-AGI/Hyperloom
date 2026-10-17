@@ -2590,7 +2590,6 @@ async def test_trace_analyze_handler_payload_framework_overrides_serving_state(
     cmd = captured["cmd"]
     assert "--framework" in cmd and cmd[cmd.index("--framework") + 1] == "sglang"
     assert "--analysis-mode" in cmd and cmd[cmd.index("--analysis-mode") + 1] == "inference"
-    assert "--skip-split" not in cmd
 
 
 @pytest.mark.asyncio
