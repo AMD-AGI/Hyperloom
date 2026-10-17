@@ -21,7 +21,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, NamedTuple
 from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from .kernel_round_budget import controller_round_stop, integrate_within_phase, measurement_round_sec
@@ -249,6 +249,13 @@ class KernelExitFacts:
     """What the phase machine's KERNEL exit reads from the task queue."""
 
     agent_in_flight: bool
+
+
+class _LaunchSpec(NamedTuple):
+    """The env spec a GEAK run launches under, and the config it resolves to."""
+
+    env_spec: dict[str, Any]
+    config: Mapping[str, Any]
 
 
 class KernelPhase(CoordinatorCollaborator):
@@ -1276,17 +1283,7 @@ class KernelPhase(CoordinatorCollaborator):
             if isinstance(state_measurement, Mapping) and state_measurement
             else (cb.get("measurement") if isinstance(cb.get("measurement"), Mapping) else {})
         )
-        if agentx and not str(spec_config.get("server_launch_flags") or "").strip():
-            evidence = measurement.get("launch_evidence")
-            server_log = str(evidence.get("actual_server_log_path") or "") if isinstance(evidence, Mapping) else ""
-            recipe_launch = recipe_server_launch(server_log)
-            if recipe_launch.flags or recipe_launch.env:
-                env_spec = self._coord.writeback.build_env_spec(
-                    measurement=measurement,
-                    server_launch_flags=recipe_launch.flags,
-                    server_launch_envs=recipe_launch.env,
-                )
-                spec_config = env_spec["config"]
+        env_spec, spec_config = self._recipe_launch_spec(env_spec, spec_config, agentx=agentx, measurement=measurement)
         expected_identity = str(env_spec.get("launch_identity") or "")
         measured_identity = str(measurement.get("declared_launch_identity") or measurement.get("launch_identity") or "")
         identity_matches = bool(expected_identity and expected_identity == measured_identity)
@@ -1303,16 +1300,12 @@ class KernelPhase(CoordinatorCollaborator):
             if isinstance(observed_server_identity, Mapping)
             else {}
         )
-        if identity_matches and (observed_flags or observed_server_identity):
-            reference_verification_status = "verified_observed"
-        elif identity_matches and (
-            str(launch_evidence.get("requested_server_args") or "").strip()
-            or bool(launch_evidence.get("requested_server_env"))
-            or str(launch_evidence.get("recipe_digest") or "").strip()
-        ):
-            reference_verification_status = "verified_declared_only"
-        else:
-            reference_verification_status = "unverified"
+        reference_verification_status = self._reference_verification_status(
+            launch_evidence,
+            identity_matches=identity_matches,
+            observed_flags=observed_flags,
+            observed_server_identity=observed_server_identity,
+        )
         if agentx:
             reference_verification_status = "unverified_workload"
         reference_verified = reference_verification_status == "verified_observed"
@@ -1822,6 +1815,58 @@ class KernelPhase(CoordinatorCollaborator):
             )
         )
         state.save(self.session_dir)
+
+    @staticmethod
+    def _reference_verification_status(
+        launch_evidence: Mapping[str, Any],
+        *,
+        identity_matches: bool,
+        observed_flags: Any,
+        observed_server_identity: Any,
+    ) -> str:
+        """Say how far the reference launch was verified against what was asked for.
+
+        Observed flags or an observed server identity verify it outright; a
+        matching identity with only the request on record verifies the
+        declaration alone, and anything less is unverified.
+        """
+        if identity_matches and (observed_flags or observed_server_identity):
+            return "verified_observed"
+        if identity_matches and (
+            str(launch_evidence.get("requested_server_args") or "").strip()
+            or bool(launch_evidence.get("requested_server_env"))
+            or str(launch_evidence.get("recipe_digest") or "").strip()
+        ):
+            return "verified_declared_only"
+        return "unverified"
+
+    def _recipe_launch_spec(
+        self,
+        env_spec: dict[str, Any],
+        config: Mapping[str, Any],
+        *,
+        agentx: bool,
+        measurement: Mapping[str, Any],
+    ) -> _LaunchSpec:
+        """Rebuild the launch spec from the recipe's own server log, where it has one.
+
+        An AgentX workload whose spec carries no launch flags has them only in
+        the log of the server that was actually started; reading them back is
+        what makes the identity check below comparable.
+        """
+        if not agentx or str(config.get("server_launch_flags") or "").strip():
+            return _LaunchSpec(env_spec, config)
+        evidence = measurement.get("launch_evidence")
+        server_log = str(evidence.get("actual_server_log_path") or "") if isinstance(evidence, Mapping) else ""
+        recipe_launch = recipe_server_launch(server_log)
+        if recipe_launch.flags or recipe_launch.env:
+            env_spec = self._coord.writeback.build_env_spec(
+                measurement=measurement,
+                server_launch_flags=recipe_launch.flags,
+                server_launch_envs=recipe_launch.env,
+            )
+            return _LaunchSpec(env_spec, env_spec["config"])
+        return _LaunchSpec(env_spec, config)
 
     async def _revalidate_geak_candidate(self, *, reason: str) -> None:
         """Measure the GEAK candidate on the orchestrator harness and settle its verdict.

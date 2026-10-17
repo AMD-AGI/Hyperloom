@@ -158,7 +158,7 @@ cognitive-complexity src/hyperloom/orchestrator/phases/framework.py::_framework_
 cognitive-complexity src/hyperloom/orchestrator/phases/internal.py::InternalTasksPhase._enqueue_internal_research_scout_task 46
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._gemm_e2e_candidates 34
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._merge_gemm_candidate_with_runtime 83
-cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_geak_kernel_phase 122
+cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_geak_kernel_phase 115
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 106
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase.promote_geak_from_candidate 56
 cognitive-complexity src/hyperloom/orchestrator/phases/kernel_stack.py::KernelStackPhase._run_kernel_stack_validation_e2e 62
@@ -329,7 +329,7 @@ cyclomatic-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCol
 cyclomatic-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.handle_unpromotable_result 24
 cyclomatic-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.lift_to_current_best 43
 cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._merge_gemm_candidate_with_runtime 42
-cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_geak_kernel_phase 49
+cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._run_geak_kernel_phase 48
 cyclomatic-complexity src/hyperloom/orchestrator/phases/kernel.py::KernelPhase._validate_gemm_tuning_e2e 36
 cyclomatic-complexity src/hyperloom/orchestrator/phases/machine_state.py::replay_next_phase 30
 cyclomatic-complexity src/hyperloom/orchestrator/phases/prelude.py::PreludePhase._prepare_warm_kernel_kb 33
