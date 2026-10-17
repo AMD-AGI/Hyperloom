@@ -1086,7 +1086,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "set to 0 to disable. Also bounded above by the main session wall-clock deadline since conc_sweep runs as "
         "a SWEEP-phase action. A CONC level starts only when the time left admits a rung of both arms, so pairing "
         "L levels takes (L-1) x 2 x one rung's wall time plus the last level's admission of "
-        "2 x rung_cost_sec x benchmark passes.",
+        "2 x rung_cost_sec x benchmark passes. A level's second arm may run past the budget (never past the main "
+        "session deadline) so the level is not left with one arm measured.",
     )
     # Per-variant explore overtime kill ratio (mirrored to SharedState.explore_overtime_kill_ratio). 0 disables.
     # Explore variant hard timeout — operator override for the auto-derived cap. 0 (default) keeps auto-derive;

@@ -538,3 +538,26 @@ def test_a_first_arm_that_overruns_its_estimate_does_not_cost_its_partner_the_ad
     assert payload["budget_exhausted"] is True
     below = [p for arm in ("optimized", "baseline") for p in payload[arm]["points"] if p["conc"] == 4]
     assert {p["status"] for p in below} == {"skipped"}
+
+
+@pytest.mark.parametrize(
+    ("usable", "extended"), [(40.0, True), (12.0, False)], ids=["session-has-room", "session-binds"]
+)
+def test_the_partner_is_never_extended_past_the_session_deadline(sweep_run, usable, extended):
+    """On a bounded session the partner of an overrunning first arm may outlast the 10 s sweep budget, but only up to
+    the session's own deadline; when that deadline is the nearer limit there is nothing to extend."""
+    payload, backend, calls, bounds, clock = sweep_run(
+        attempts=[_measured(9.0), _measured()], bounded=True, usable=usable, total_budget_sec=10, concs=(8, 4)
+    )
+    session_deadline = 10000.0 + usable
+    assert [call["session_deadline_sec"] for call in calls][0] == 10010.0
+    partner_deadlines = [call["session_deadline_sec"] for call in calls[1:]]
+    assert all(deadline <= session_deadline for deadline in partner_deadlines)
+    assert all(call.session_deadline_sec <= session_deadline for call in backend.calls)
+    assert clock.elapsed <= usable
+    if extended:
+        assert _launched(calls) == ["optimized_conc8", "baseline_conc8"]
+        assert partner_deadlines[0] > 10010.0
+    else:
+        assert partner_deadlines == [session_deadline]
+        assert len(backend.calls) == 1

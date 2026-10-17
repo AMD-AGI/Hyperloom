@@ -441,7 +441,9 @@ class _SweepRun:
 
     ``results`` and ``budget`` are shared across arms on purpose: every incremental flush reports the whole sweep so
     far, and a budget stop in either arm has to stop every rung after it. ``session_deadline_sec`` is the earlier monotonic
-    sweep/session boundary, named by ``deadline_stop`` and distinct from the fixed per-spawn ``benchmark_timeout_sec``.
+    sweep/session boundary, named by ``deadline_stop`` and distinct from the fixed per-spawn ``benchmark_timeout_sec``;
+    ``grid_deadline_sec`` is the session's own deadline alone (``None`` when the session has none), the line no rung may
+    be extended past.
     """
 
     state: SharedState
@@ -461,6 +463,7 @@ class _SweepRun:
     session_deadline_sec: float | None
     variant_expected_sec: float | None
     deadline_stop: StoppedByTheRun
+    grid_deadline_sec: float | None
     started_at: float
     total_budget_sec: int | None
     json_path: Path
@@ -519,7 +522,6 @@ class _SweepRun:
         result: VariantResult,
         *,
         stage: str,
-        committed: bool = True,
         start_time: str = "",
         wall_duration_sec: float | None = None,
         budget_remaining_sec: float | None = None,
@@ -528,9 +530,8 @@ class _SweepRun:
 
         The result is flattened into the same point the report writes, so the
         recorded curve and the written one cannot differ. ``stage`` is a
-        ``STAGE_*`` value naming how the rung came to run, ``committed`` says
-        whether it is part of the published curve, and the seconds fields are
-        wall clock.
+        ``STAGE_*`` value naming how the rung came to run and the seconds fields
+        are wall clock.
         """
         if self.recorder is None:
             return
@@ -540,7 +541,6 @@ class _SweepRun:
             stage=stage,
             conc=point.get("conc"),
             point=point,
-            committed=committed,
             num_prompts=(result.extra_envs or {}).get("NUM_PROMPTS"),
             start_time=start_time,
             wall_duration_sec=wall_duration_sec,
@@ -634,16 +634,29 @@ class _SweepRun:
         """Bounds for the second arm of a level whose first arm has run, so the pair is never left half measured.
 
         The level was admitted on the estimate for both rungs; a first rung that overran it must not cost its partner
-        the admission it was promised. The partner gets a deadline of twice the time one rung is estimated to take (never
-        earlier than the sweep's own), which clears ``run_grid``'s gate and still lets it be stopped if it hangs. A session
-        that is closing or cancelled still stops it before it starts.
+        the admission it was promised. The sweep's own budget deadline is extended to twice the time one rung is
+        estimated to take, which clears ``run_grid``'s gate and still lets the partner be stopped if it hangs. The
+        extension never passes the session's grid deadline, so the partner cannot run into the reserve the session keeps
+        for closing; when the session clock is already the binding limit there is nothing to extend, and a partner the
+        gate refuses is recorded as an unpaired level. A session that is closing or cancelled still stops it before it
+        starts.
         """
         if self.session_deadline_sec is None or self.variant_expected_sec is None:
             return _RungBounds(self.session_deadline_sec, self.variant_expected_sec)
         rung_sec = float(self.variant_expected_sec) * variant_rounds()
-        return _RungBounds(
-            max(float(self.session_deadline_sec), time.monotonic() + 2 * rung_sec), self.variant_expected_sec
-        )
+        deadline = max(float(self.session_deadline_sec), time.monotonic() + 2 * rung_sec)
+        if self.grid_deadline_sec is not None:
+            deadline = min(deadline, float(self.grid_deadline_sec))
+        if deadline > float(self.session_deadline_sec):
+            log.info(
+                "conc_sweep: extending the partner rung's deadline by %.0fs (sweep budget %.0fs left, session %s)",
+                deadline - float(self.session_deadline_sec),
+                max(0.0, float(self.session_deadline_sec) - time.monotonic()),
+                "uncapped"
+                if self.grid_deadline_sec is None
+                else f"{self.grid_deadline_sec - time.monotonic():.0f}s left",
+            )
+        return _RungBounds(deadline, self.variant_expected_sec)
 
     def session_closing(self) -> bool:
         return bool(self.state.closing_phase or self.state.stop_reason)
@@ -1060,6 +1073,7 @@ async def run_conc_sweep(
 
     started_at = time.time()
     deadline_stop = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS]
+    grid_deadline_sec = session_deadline_sec
     if total_budget_sec is not None:
         sweep_deadline_sec = time.monotonic() + total_budget_sec
         if session_deadline_sec is None or sweep_deadline_sec < session_deadline_sec:
@@ -1100,6 +1114,7 @@ async def run_conc_sweep(
         session_deadline_sec=session_deadline_sec,
         variant_expected_sec=variant_expected_sec,
         deadline_stop=deadline_stop,
+        grid_deadline_sec=grid_deadline_sec,
         started_at=started_at,
         total_budget_sec=total_budget_sec,
         json_path=json_path,
