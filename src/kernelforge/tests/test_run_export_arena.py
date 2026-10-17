@@ -509,6 +509,18 @@ NAMED_LOG_PROMPT = "## Target\nkernel.py\n" + reasoning_log_section(
 )
 
 
+def _implementer_told_its_log(root: Path) -> Path:
+    """Round 1's implementer transcript, told the reasoning log beside the round's plan, in place of ``_campaign``'s."""
+
+    return _transcript(
+        root / f"{PROJECTS}-engine-kernels" / "implementer.jsonl",
+        f"{ARTIFACTS}/engine/kernels",
+        5,
+        NAMED_LOG_PROMPT,
+        "The max pass dominates. I fused it into the sum pass.\nPLAN: Fuse max into the sum pass",
+    )
+
+
 @pytest.mark.parametrize(
     "prompt",
     [
@@ -541,13 +553,7 @@ def test_a_campaign_implementer_of_a_kernel_at_the_workspace_root_is_not_a_plann
 
 def test_a_campaign_implementer_told_its_reasoning_log_is_linked_by_it_whenever_it_started(tmp_path: Path) -> None:
     _campaign(tmp_path)
-    _transcript(
-        tmp_path / f"{PROJECTS}-engine-kernels" / "implementer.jsonl",
-        f"{ARTIFACTS}/engine/kernels",
-        5,
-        NAMED_LOG_PROMPT,
-        "The max pass dominates. I fused it into the sum pass.\nPLAN: Fuse max into the sum pass",
-    )
+    _implementer_told_its_log(tmp_path)
 
     session = _units(tmp_path)["softmax-forge/iteration-1"]
 
@@ -588,6 +594,38 @@ def test_a_campaign_lane_measured_after_its_round_carries_that_rounds_planners(t
     lane_transcript = str((tmp_path / f"{PROJECTS}-forge-lanes-ab12-2" / "lane.jsonl").resolve())
     assert session["log_files"][-1] == planner
     assert lane["log_files"][-2:] == [lane_transcript, planner]
+
+
+def _logless_campaign(root: Path, number: int) -> None:
+    """Another campaign's artifacts without its campaign log, which the export reads as a plain forge-loop run."""
+
+    workspace = root / "workspace" / f"run_20261001_13000{number}_gemm-forge" / f"gemm-forge-{number}" / "engine"
+    experiments = workspace / "forge_experiments"
+    plan_path = "forge_experiments/orchestration/iter_001/optimization_plan.md"
+    _write(experiments / "campaign_config.json", json.dumps({"operator_name": "gemm"}))
+    _write(experiments / "run_state.json", json.dumps({"campaign_id": f"gemm-{number}"}))
+    _write(workspace / plan_path, "# Tile K\n\nTile the K loop by 128.\n")
+    _write(experiments / "handoffs" / "iter_001.json", json.dumps({"optimization_plan_path": plan_path}))
+    meta = {"plan": "Tile K", "rationale": "Tiled the K loop."}
+    _write(experiments / "candidates" / "iter_001" / "meta.json", json.dumps(meta))
+
+
+@pytest.mark.parametrize("beside", [1, 2])
+def test_a_campaign_keeps_its_transcripts_from_the_plain_runs_beside_it(tmp_path: Path, beside: int) -> None:
+    _campaign(tmp_path)
+    implementer = _implementer_told_its_log(tmp_path)
+    for number in range(beside):
+        _logless_campaign(tmp_path, number)
+
+    runs = normalize([tmp_path])["runs"]
+
+    own = {run["unit_id"]: run for run in runs if run["run_id"] == CAMPAIGN_RUN}
+    plain = [run for run in runs if run["run_id"] != CAMPAIGN_RUN]
+    assert own["softmax-forge/iteration-1"]["reasoning_file"] == f"{PROJECTS}-engine-kernels/implementer.jsonl"
+    assert [(run["run_id"], run["approach"], run.get("reasoning_file")) for run in plain] == [
+        (f"gemm-{number}", "Tile K", None) for number in range(beside)
+    ]
+    assert not any(str(implementer.resolve()) in run["log_files"] for run in plain)
 
 
 def test_a_campaign_whose_artifacts_are_missing_is_one_unreadable_unit(tmp_path: Path) -> None:
