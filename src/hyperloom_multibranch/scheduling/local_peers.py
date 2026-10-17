@@ -196,11 +196,20 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
 
 
 def machine_cards() -> tuple[int, ...]:
-    """The cards of this machine the session may use, as many as its visible-device mask or ``rocm-smi`` show;
-    none when neither shows any."""
+    """The cards of this machine the session may use: the absolute ids the first visible-device mask set names, or,
+    when none is set, as many as ``rocm-smi`` shows from card 0; none when neither shows any.
 
-    from hyperloom.common.visible_devices import detect_gpu_count
+    The ids are absolute because every sandbox's ``ROCR_VISIBLE_DEVICES`` is set to its leased cards in place of the
+    mask this process runs under; a mask of device UUIDs names no id, so it leaves no card. The main flow resolves its
+    whole-machine pool by the same rule (``hyperloom.orchestrator.bus.gpu_pool``), which the scheduler does not load.
+    """
 
+    from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS, detect_gpu_count, parse_device_list
+
+    for name in COUNTING_VISIBLE_DEVICE_VARS:
+        mask = os.environ.get(name)
+        if mask is not None:
+            return tuple(parse_device_list(mask))
     return tuple(range(detect_gpu_count()))
 
 

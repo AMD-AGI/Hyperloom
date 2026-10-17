@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.recipe import Recipe
+from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom.measure.pins import ActiveImage, ToolCommits, pinned_tool_commits
 from hyperloom.orchestrator.kernel.request_handlers import resolve_gemm_tuning_backend
@@ -32,6 +33,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
     MeasurementHost,
     SessionWiring,
     local_peers,
+    machine_cards,
     machine_parallel_tests,
     measurement_host,
     specialist_command,
@@ -127,9 +129,11 @@ def test_without_the_agent_cli_the_peers_are_refused(tmp_path: Path) -> None:
 
 @pytest.fixture
 def four_cards(monkeypatch: pytest.MonkeyPatch) -> None:
-    """This machine shows four cards."""
+    """This machine shows four cards, the upper half of an eight-card node."""
 
-    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
+    for name in COUNTING_VISIBLE_DEVICE_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
 
 
 @pytest.mark.usefixtures("four_cards")
@@ -138,8 +142,17 @@ def test_the_host_is_this_machines_cards_on_the_launchers_image_and_the_pinned_t
 
     host = measurement_host(env)
 
-    assert host == MeasurementHost((0, 1, 2, 3), IMAGE, pinned_tool_commits({}))
+    assert host == MeasurementHost((4, 5, 6, 7), IMAGE, pinned_tool_commits({}))
     assert machine_parallel_tests(2) == 2
+
+
+@pytest.mark.parametrize("mask", ["ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"])
+def test_the_cards_are_the_ids_the_visible_device_mask_names(mask: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in COUNTING_VISIBLE_DEVICE_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(mask, "6,2")
+
+    assert machine_cards() == (6, 2)
 
 
 @pytest.mark.usefixtures("four_cards")
