@@ -1259,8 +1259,7 @@ def test_quantization_join_and_prompt() -> None:
     assert qs._join_clauses(["a", "b", "c"]) == "a, b and c"
 
     cfg = qs.QuantizationConfig(global_scheme="fp8")
-    prompt = qs.build_quantization_prompt(cfg, model_path="/m", gpu_type="mi300x")
-    assert "Quantize /m on an MI300X target." in prompt
+    prompt = qs.build_quantization_prompt(cfg)
     assert "Quantization strategy" in prompt
 
 

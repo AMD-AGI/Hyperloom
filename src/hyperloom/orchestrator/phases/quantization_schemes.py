@@ -109,24 +109,9 @@ def _evaluation_paragraph(cfg: QuantizationConfig) -> str | None:
     return f"Evaluation:\nKeep the quantized model's accuracy within {pct}% of the bf16 baseline."
 
 
-def build_quantization_prompt(
-    cfg: QuantizationConfig,
-    *,
-    model_path: str | None = None,
-    gpu_type: str | None = None,
-    skill_path: str | None = None,
-) -> str:
+def build_quantization_prompt(cfg: QuantizationConfig) -> str:
     """Render ``cfg`` into the natural-language quantization prompt."""
-    paragraphs: list[str] = []
-
-    if model_path:
-        target = f" on an {gpu_type.upper()} target" if gpu_type else ""
-        if skill_path:
-            paragraphs.append(f"Use the skill at {skill_path} to quantize {model_path}{target}.")
-        else:
-            paragraphs.append(f"Quantize {model_path}{target}.")
-
-    paragraphs.append(_strategy_paragraph(cfg))
+    paragraphs: list[str] = [_strategy_paragraph(cfg)]
     for para in (_calibration_paragraph(cfg), _evaluation_paragraph(cfg)):
         if para:
             paragraphs.append(para)
