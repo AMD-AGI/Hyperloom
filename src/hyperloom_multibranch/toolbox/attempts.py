@@ -58,6 +58,10 @@ class Executor(Protocol):
 
     async def run(self, job: TestJob) -> TestResult: ...
 
+    async def reverify(self, result: TestResult) -> None:
+        """Check a recorded ``result`` against the evidence of the attempt that made it; raises
+        :class:`~hyperloom_multibranch.contracts.gate.ResultUnverified` when it does not match or cannot be checked."""
+
 
 NodeFailure = Callable[[str, str], Awaitable[None]]
 

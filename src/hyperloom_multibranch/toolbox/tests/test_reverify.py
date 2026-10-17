@@ -11,11 +11,12 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.measurement import TestResult
+from hyperloom.contracts.measurement import TestResult, Validity
 from hyperloom.measure.archive import ArchiveError
 from hyperloom.measure.bundle import RecordedBundle, RejectReason, ResultRejected
 from hyperloom.measure.hosted_log import STATE_FINISHED, Record
 from hyperloom.measure.tests.hosted_fixtures import Rig, make_rig, point_yaml
+from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.toolbox.hosted_executor import HostedExecutor
 from hyperloom_multibranch.toolbox.tests.helpers import build
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import POLICY, PointPlanner, _run
@@ -168,3 +169,74 @@ async def test_backend_reverify_lands_the_files_it_verified(tmp_path: Path, rig)
         out
     )
     assert next(out.rglob("benchmark_report.json")).is_file()
+
+
+# -- Executor.reverify: what the rule gate sees --------------------------------------------------------------------
+
+
+async def _reason(executor: HostedExecutor, result: TestResult) -> str:
+    with pytest.raises(ResultUnverified) as raised:
+        await executor.reverify(result)
+    assert raised.value.request_id == result.request_id
+    return raised.value.reason
+
+
+async def test_an_untouched_result_passes_executor_reverify(tmp_path: Path, rig) -> None:
+    executor, result = await _accepted(tmp_path, rig)
+    assert await executor.reverify(result) is None
+
+
+async def test_a_difference_is_the_reason(tmp_path: Path, rig) -> None:
+    executor, result = await _accepted(tmp_path, rig)
+    edited = replace(result, accuracy=(replace(result.accuracy[0], score=0.99),))
+    assert await _reason(executor, edited) == "accuracy[0].score: recorded 0.99, the bundle has 0.64"
+
+
+async def test_a_rejected_bundle_names_the_reject_reason(tmp_path: Path, rig) -> None:
+    executor, result = await _accepted(tmp_path, rig)
+    reason = await _reason(executor, replace(result, manifest_sha256="0" * 64))
+    assert reason.startswith(f"the bundle was rejected ({RejectReason.RECORD_MISMATCH.value}): ")
+
+
+async def test_an_unreachable_archive_names_the_archive(tmp_path: Path, rig) -> None:
+    executor, result = await _accepted(tmp_path, rig)
+
+    def unreachable(request_id: str, manifest_sha256: str) -> Path:
+        raise ArchiveError("unreachable")
+
+    rig.archive.bundle_path = unreachable  # type: ignore[method-assign]
+    assert await _reason(executor, result) == "the archive cannot be read: unreachable"
+
+
+async def test_an_unreadable_file_names_the_os_error(tmp_path: Path, rig) -> None:
+    executor, result = await _accepted(tmp_path, rig)
+
+    def broken(request_id: str, manifest_sha256: str) -> Path:
+        raise PermissionError("secret path")
+
+    rig.archive.bundle_path = broken  # type: ignore[method-assign]
+    assert await _reason(executor, result) == "the archive cannot be read: PermissionError"
+
+
+async def test_a_record_without_a_bundle_is_unverified_by_executor_reverify(tmp_path: Path, rig) -> None:
+    executor, result = await _accepted(tmp_path, rig)
+    assert await _reason(executor, replace(result, manifest_sha256=None)) == (
+        "manifest_sha256: the record names no bundle"
+    )
+
+
+# -- a result that did not succeed: the signature path still runs, no values are re-derived ------------------------
+
+
+async def test_a_failed_result_still_has_its_bundle_signature_checked(tmp_path: Path, rig) -> None:
+    executor, result = await _accepted(tmp_path, rig)
+    failed = replace(result, validity=Validity.CANDIDATE_FAILED, rounds=(), accuracy=())
+    assert await executor.reverify(failed) is None
+    reason = await _reason(executor, replace(failed, manifest_sha256="0" * 64))
+    assert reason.startswith(f"the bundle was rejected ({RejectReason.RECORD_MISMATCH.value}): ")
+
+
+async def test_a_failed_result_that_records_measured_rounds_is_named(tmp_path: Path, rig) -> None:
+    executor, result = await _accepted(tmp_path, rig)
+    failed = replace(result, validity=Validity.CANDIDATE_FAILED, accuracy=())
+    assert await _reason(executor, failed) == "rounds: a result that did not succeed records measured rounds"

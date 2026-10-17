@@ -472,3 +472,22 @@ async def test_the_fake_writes_requests_results_withdrawals_and_quarantine_into_
     assert failed is not None and failed.validity.value == "candidate_failed"
     assert (await notebook.record(dropped)).withdrawn_at is not None
     assert {event.node for event in await notebook.quarantined()} == box.quarantined != set()
+
+
+# --- re-verifying a result the fake produced ---------------------------------------------------------------------
+
+
+async def test_the_fake_reverifies_the_result_it_produced_and_names_a_mismatch_or_a_stranger() -> None:
+    from dataclasses import replace
+
+    from hyperloom_multibranch.contracts.gate import ResultUnverified
+
+    box = _toolbox(autorun=True)
+    result = await _run_one(box)
+    assert await box.executor.reverify(result) is None
+    with pytest.raises(ResultUnverified) as edited:
+        await box.executor.reverify(replace(result, rounds=()))
+    assert edited.value.reason == "rounds: differs from what the fake executor produced"
+    with pytest.raises(ResultUnverified) as stranger:
+        await box.executor.reverify(replace(result, request_id="other"))
+    assert stranger.value.reason == "the fake executor produced no result for this request"

@@ -29,6 +29,7 @@ from hyperloom.contracts.recipe import Recipe
 from hyperloom_multibranch.contracts.notebook.interfaces import ClaimService, RecordSearch
 from hyperloom_multibranch.contracts.notebook.records import QuarantineEvent, Withdrawal
 from hyperloom_multibranch.contracts.toolbox import CancelOutcome, QueueState, RequestRejected, WorkloadKind
+from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.fake_model import (
     AttemptOutcome,
@@ -97,6 +98,17 @@ class _NoPlanner:
         return None
 
 
+_MEASURED_FIELDS = (
+    "validity",
+    "rounds",
+    "accuracy",
+    "manifest_sha256",
+    "signing_key_fingerprint",
+    "spec_fingerprint",
+    "surface_sha256",
+)
+
+
 class FakeExecutor:
     """One attempt, faked: draws the fate, picks the node (away from ``avoid_nodes``, best effort) and measures.
 
@@ -113,6 +125,7 @@ class FakeExecutor:
         self._measurer = FakeMeasurer(config)
         self._scripts: list[tuple[Callable[[TestRequest], bool], list[Fate]]] = []
         self._gpu_seconds: dict[str, float] = {}
+        self._produced: dict[str, TestResult] = {}
 
     def script(self, match: Callable[[TestRequest], bool], fates: Sequence[Fate]) -> None:
         self._scripts.append((match, list(fates)))
@@ -135,7 +148,18 @@ class FakeExecutor:
         spent = self._gpu_seconds[request_id] = self._gpu_seconds.get(request_id, 0.0) + (self.now - started) * gpus
         if outcome.fate is Fate.MEASUREMENT:
             raise MeasurementRefused(outcome.failure_reason)
-        return self._result(request, outcome, started, spent)
+        result = self._produced[request_id] = self._result(request, outcome, started, spent)
+        return result
+
+    async def reverify(self, result: TestResult) -> None:
+        """What the result says of the measurement must be what this executor produced for its request; the runner's
+        own bookkeeping (queue time, sandbox marks) is not part of it."""
+        produced = self._produced.get(result.request_id)
+        if produced is None:
+            raise ResultUnverified(result.request_id, "the fake executor produced no result for this request")
+        for name in _MEASURED_FIELDS:
+            if getattr(produced, name) != getattr(result, name):
+                raise ResultUnverified(result.request_id, f"{name}: differs from what the fake executor produced")
 
     def _result(self, request: TestRequest, outcome: AttemptOutcome, started: float, gpu_seconds: float) -> TestResult:
         """The attempt as a result; the runner decides the request's final validity from the failure class."""

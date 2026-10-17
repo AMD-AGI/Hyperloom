@@ -38,6 +38,7 @@ from hyperloom_multibranch.contracts.toolbox import (
     UnknownTestRequest,
     WorkloadKind,
 )
+from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.toolbox.analysis import CODE_NO_EXECUTOR, AnalysisAsk, analysis_request
 from hyperloom_multibranch.toolbox.acceptance import Acceptance, MeasurementPlanner
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, AttemptRunner, Executor, TestJob
@@ -105,6 +106,7 @@ class RealToolbox:
         tuning: ToolboxTuning = ToolboxTuning(),
     ) -> None:
         self._log, self._sink, self._claims, self._records = stores.log, stores.sink, stores.claims, stores.records
+        self._executor = executor
         self._queue = WorkQueue(tuning.policy or QueuePolicy())
         self._quarantine = Quarantine(stores.health)
         self._acceptance = Acceptance(
@@ -215,6 +217,26 @@ class RealToolbox:
         if "result" in entry.outcome:
             return TestResult.from_document(entry.outcome["result"])
         raise TestWithdrawn(request_id, str(entry.outcome["withdrawal"]))
+
+    async def reverify(self, request_id: str) -> None:
+        """Check the notebook's result of ``request_id`` against the evidence of the attempt that made it (L26).
+
+        Fails closed: raises :class:`ResultUnverified` when there is no record, no result or no manifest hash to check
+        it by; otherwise what the executor raises.
+        """
+
+        if self._records is None:
+            raise ResultUnverified(request_id, "the toolbox reads no notebook records")
+        try:
+            record = await self._records.record(request_id)
+        except UnknownRequest:
+            raise ResultUnverified(request_id, "the notebook holds no record of this request") from None
+        result = record.result
+        if result is None:
+            raise ResultUnverified(request_id, "the record holds no result")
+        if not result.manifest_sha256:
+            raise ResultUnverified(request_id, "the result names no manifest hash")
+        await self._executor.reverify(result)
 
     async def cancel_branch(self, branch_id: str, reason: str = "branch stopped") -> int:
         """Withdraw every queued and running test of a stopped branch; returns how many."""

@@ -23,6 +23,7 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.measure.surface import SurfaceViolation
 from hyperloom.contracts.recipe import ConfigDelta, Recipe, RecipeDelta, RecipeError
+from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
@@ -131,6 +132,13 @@ class ScriptedExecutor:
     started: list[str] = field(default_factory=list)
     gate: asyncio.Event | None = None
     refuse: str | None = None
+    unverified: str | None = None
+    verified: list[TestResult] = field(default_factory=list)
+
+    async def reverify(self, result: TestResult) -> None:
+        self.verified.append(result)
+        if self.unverified:
+            raise ResultUnverified(result.request_id, self.unverified)
 
     async def run(self, job: TestJob) -> TestResult:
         self.jobs.append(job)

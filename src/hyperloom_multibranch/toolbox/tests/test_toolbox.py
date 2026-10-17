@@ -9,11 +9,13 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.measurement import FailureClass, Purpose, Validity
+from hyperloom_multibranch.contracts.gate import ResultUnverified, ResultVerifier
 from hyperloom_multibranch.contracts.notebook import Role
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, DedupStatus
 from hyperloom_multibranch.contracts.toolbox import Backpressure, CancelOutcome, RequestRejected, UnknownTestRequest
 from hyperloom_multibranch.notebook.tests.factories import TTL, intent
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
+from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 from hyperloom_multibranch.toolbox.tests.helpers import (
     PARENT,
     ScriptedExecutor,
@@ -350,3 +352,79 @@ async def test_a_stopped_branch_has_every_queued_and_running_test_withdrawn(tmp_
     for request_id in stopped:
         assert (await _record(rig, request_id)).withdrawn_at is not None
     assert (await _record(rig, other)).result is not None
+
+
+# --- re-verifying a recorded result (L26) -----------------------------------------------------------------------
+
+BUNDLE = "a" * 64
+
+
+def _unverified(raised: pytest.ExceptionInfo[ResultUnverified]) -> str:
+    return raised.value.reason
+
+
+def test_the_toolbox_is_a_result_verifier(tmp_path: Path) -> None:
+    verifier: ResultVerifier = build(tmp_path).toolbox  # the annotation is the static check
+    assert isinstance(verifier, RealToolbox)
+
+
+async def test_a_recorded_result_with_a_bundle_hash_goes_to_the_executor(tmp_path: Path) -> None:
+    executor = ScriptedExecutor([lambda j: ok(j, manifest_sha256=BUNDLE)])
+    rig = build(tmp_path, executor=executor)
+    request_id = await rig.toolbox.submit_test(req())
+    await rig.toolbox.drain()
+    await rig.toolbox.reverify(request_id)
+    assert [r.request_id for r in executor.verified] == [request_id]
+    assert executor.verified[0].manifest_sha256 == BUNDLE
+
+
+async def test_what_the_executor_names_comes_back_as_the_reason(tmp_path: Path) -> None:
+    executor = ScriptedExecutor([lambda j: ok(j, manifest_sha256=BUNDLE)])
+    executor.unverified = "rounds[0].metrics.output_tps: recorded 1, the bundle has 2"
+    rig = build(tmp_path, executor=executor)
+    request_id = await rig.toolbox.submit_test(req())
+    await rig.toolbox.drain()
+    with pytest.raises(ResultUnverified) as raised:
+        await rig.toolbox.reverify(request_id)
+    assert raised.value.request_id == request_id
+    assert _unverified(raised) == "rounds[0].metrics.output_tps: recorded 1, the bundle has 2"
+
+
+async def test_a_request_the_notebook_never_heard_of_is_unverified(tmp_path: Path) -> None:
+    executor = ScriptedExecutor()
+    rig = build(tmp_path, executor=executor)
+    with pytest.raises(ResultUnverified) as raised:
+        await rig.toolbox.reverify("nope")
+    assert _unverified(raised) == "the notebook holds no record of this request"
+    assert executor.verified == []
+
+
+async def test_a_record_without_a_result_is_unverified(tmp_path: Path) -> None:
+    executor = _gated()
+    rig = build(tmp_path, executor=executor)
+    request_id = await rig.toolbox.submit_test(req())
+    with pytest.raises(ResultUnverified) as raised:
+        await rig.toolbox.reverify(request_id)
+    assert _unverified(raised) == "the record holds no result"
+    assert executor.verified == []
+    executor.gate.set()
+    await rig.toolbox.drain()
+
+
+async def test_a_result_without_a_manifest_hash_is_unverified(tmp_path: Path) -> None:
+    executor = ScriptedExecutor()  # ok() carries no hash
+    rig = build(tmp_path, executor=executor)
+    request_id = await rig.toolbox.submit_test(req())
+    await rig.toolbox.drain()
+    with pytest.raises(ResultUnverified) as raised:
+        await rig.toolbox.reverify(request_id)
+    assert _unverified(raised) == "the result names no manifest hash"
+    assert executor.verified == []
+
+
+async def test_a_toolbox_without_a_notebook_to_read_is_unverified(tmp_path: Path) -> None:
+    rig = build(tmp_path)
+    rig.toolbox._records = None
+    with pytest.raises(ResultUnverified) as raised:
+        await rig.toolbox.reverify("any")
+    assert _unverified(raised) == "the toolbox reads no notebook records"

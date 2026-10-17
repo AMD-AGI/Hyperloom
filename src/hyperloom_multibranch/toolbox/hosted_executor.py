@@ -45,13 +45,15 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.measure.fake_gain import PREFIX_CACHE_OFF_ERROR_CLASS, baseline_prefix_cache_refusal
 from hyperloom.measure.failures import Disposition, classify_test_failure
-from hyperloom.measure.bundle import RecordedBundle
+from hyperloom.measure.archive import ArchiveError
+from hyperloom.measure.bundle import RecordedBundle, ResultRejected
 from hyperloom.measure.hosted import HostedMeasurementBackend, Reverified
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED, Record
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestMeta, TestOutcome
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
+from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.reverify import first_hash_difference, first_value_difference
@@ -130,6 +132,23 @@ class HostedExecutor:
         with tempfile.TemporaryDirectory(prefix="reverify-") as scratch:
             derived = self._backend.reverify(result.request_id, recorded, Path(scratch) / "bundle")
             return _unlike_bundle(result, derived)
+
+    async def reverify(self, result: TestResult) -> None:
+        """Raise :class:`ResultUnverified` naming why ``result`` does not follow from its archived bundle, or why the
+        bundle cannot be checked (a rejected bundle, an archive that cannot be read)."""
+        request_id = result.request_id
+        try:
+            difference = await asyncio.to_thread(self.difference, result)
+        except ResultRejected as exc:
+            raise ResultUnverified(
+                request_id, f"the bundle was rejected ({exc.reason.value}): {_one_line(exc.detail)}"
+            ) from None
+        except ArchiveError as exc:
+            raise ResultUnverified(request_id, f"the archive cannot be read: {_one_line(str(exc))}") from None
+        except OSError as exc:
+            raise ResultUnverified(request_id, f"the archive cannot be read: {type(exc).__name__}") from None
+        if difference:
+            raise ResultUnverified(request_id, difference)
 
     # -- the call --------------------------------------------------------------------------------------------------
 
@@ -257,6 +276,10 @@ class HostedExecutor:
         if manifest is not None:
             fields.update(spec_fingerprint=manifest.spec_fingerprint, surface_sha256=manifest.surface_sha256)
         return fields
+
+
+def _one_line(text: str) -> str:
+    return _CONTROL_CHARS.sub(" ", text.strip())[:_REASON_DETAIL_CHARS]
 
 
 def _unlike_bundle(result: TestResult, derived: Reverified) -> str | None:
