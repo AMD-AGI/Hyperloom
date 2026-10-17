@@ -855,6 +855,21 @@ class IntentRouter(CoordinatorCollaborator):
         elif verdict == "needs_review":
             await self._coord.phase_framework.maybe_reauthor_from_critic_feedback(pending, advisory)
 
+    async def _admit_explore(self, action_name: str, source: str, intent: Intent, params: dict[str, Any]) -> bool:
+        """Seed an explore delegate's runtime knobs and refuse its grid when it adds nothing new; other actions pass."""
+        if action_name != "explore":
+            return True
+        self._coord.proposals.inject_explore_runtime_params(params)
+        from ..actions.executors._measured_variants import explore_grid_already_covered
+
+        active = (*await self.tasks.queued(), *await self.tasks.running())
+        covered = explore_grid_already_covered(params, active, self.shared_state.explore_search)
+        if covered is not None:
+            await self.record_policy_denied(source, intent, covered, action_name=action_name)
+            return False
+        self._coord.proposals.credit_predictor_proposals(params)
+        return True
+
     async def handle_delegate(self, source: str, intent: Intent) -> None:
         """Validate and enqueue a delegated action as a TaskRegistry task."""
         action_name = intent.payload["action_name"]
@@ -911,9 +926,8 @@ class IntentRouter(CoordinatorCollaborator):
         # Delegates skip materialize_approved_proposal, so seed the same params here.
         if action_name in ("sweep", "explore"):
             inject_stack_base_params(params, self.shared_state, anchor=True)
-        if action_name == "explore":
-            self._coord.proposals.inject_explore_runtime_params(params)
-            self._coord.proposals.credit_predictor_proposals(params)
+        if not await self._admit_explore(action_name, source, intent, params):
+            return
         # Wave sugar: a specialist delegate carrying params.tasks=[...] fans out into N standard freeform specialist
         # tasks, each dispatched through the normal SpecialistRunner + TaskRegistry + lease + reap path.
         if (
