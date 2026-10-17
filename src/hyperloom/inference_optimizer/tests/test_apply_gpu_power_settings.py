@@ -21,7 +21,7 @@ from hyperloom.common.gpu_power_control import (
     orphaned_power_records,
     restore_gpu_power_settings,
 )
-from hyperloom.common.gpu_power_settings import GpuPowerSettingsError
+from hyperloom.common.gpu_power_settings import DeclaredPowerSettings, GpuPowerSettingsError
 from hyperloom.inference_optimizer.cli import bootstrap, gpu_power_apply
 from hyperloom.inference_optimizer.cli.gpu_power_apply import (
     _Hooks,
@@ -57,7 +57,7 @@ def _hooks(*, observed=None, vram=None, mask=_MASK, smi=None) -> tuple[_Hooks, _
     hooks = _Hooks(
         read=lambda: reads.pop(0) if len(reads) > 1 else reads[0],
         resident_vram=lambda: dict.fromkeys(range(8), 284.0) if vram is None else vram,
-        apply=lambda gpus, **a: apply_gpu_power_settings(gpus, run=smi, **a),
+        apply=lambda gpus, declared: apply_gpu_power_settings(gpus, declared, run=smi),
         restore=lambda originals: restore_gpu_power_settings(originals, run=smi),
         mask=lambda: mask,
         arm=lambda restore: None,
@@ -69,9 +69,7 @@ def _hooks(*, observed=None, vram=None, mask=_MASK, smi=None) -> tuple[_Hooks, _
 def _apply(tmp_path, *, nodes=1, power_cap_w=1000.0, perf_level=None, sclk_max_mhz=None, **hook_kw):
     hooks, smi = _hooks(**hook_kw)
     applied = apply_declared_gpu_power_settings(
-        power_cap_w=power_cap_w,
-        perf_level=perf_level,
-        sclk_max_mhz=sclk_max_mhz,
+        DeclaredPowerSettings(power_cap_w=power_cap_w, perf_level=perf_level or "", sclk_max_mhz=sclk_max_mhz),
         nodes=nodes,
         owner="sess",
         ledger_dir=tmp_path,
@@ -88,7 +86,7 @@ class TestSetCommands:
 
     def test_apply_raises_on_a_failed_set(self):
         with pytest.raises(GpuPowerSettingsError, match="permission denied"):
-            apply_gpu_power_settings({4}, power_cap_w=1000, perf_level=None, run=_AmdSmi(fail_on="ppt0"))
+            apply_gpu_power_settings({4}, DeclaredPowerSettings(power_cap_w=1000), run=_AmdSmi(fail_on="ppt0"))
 
     def test_restore_attempts_every_card_even_after_one_fails(self):
         smi = _AmdSmi(fail_on="1400")
@@ -191,14 +189,14 @@ class TestApplyDeclared:
         seen: list = []
         hooks, _ = _hooks(mask={4})
 
-        def _apply_and_look(gpus, **_):
+        def _apply_and_look(gpus, _declared):
             seen.append(orphaned_power_records(tmp_path))
             raise GpuPowerSettingsError("boom")
 
         hooks.apply = _apply_and_look
         with pytest.raises(GpuPowerSettingsError, match="boom"):
             apply_declared_gpu_power_settings(
-                power_cap_w=1000.0, perf_level=None, nodes=1, owner="s", ledger_dir=tmp_path, hooks=hooks
+                DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, owner="s", ledger_dir=tmp_path, hooks=hooks
             )
         assert seen == [{}], "held, so not visible as an orphan, but the file exists"
         assert (tmp_path / "gpu4.json").exists()
@@ -423,8 +421,8 @@ class TestRestoreGuard:
         hooks, smi = _hooks(mask={4})
         hooks.arm, hooks.disarm = guard.arm, guard.disarm
 
-        def _set_then_interrupt(gpus, **kw):
-            apply_gpu_power_settings(gpus, run=smi, **kw)
+        def _set_then_interrupt(gpus, declared):
+            apply_gpu_power_settings(gpus, declared, run=smi)
             if interrupt == "sigterm":
                 os.kill(os.getpid(), signal.SIGTERM)
             raise KeyboardInterrupt
@@ -433,7 +431,7 @@ class TestRestoreGuard:
         with pytest.raises((SystemExit, KeyboardInterrupt)):
             with gpu_power_apply.gpu_power_restore_guard():
                 apply_declared_gpu_power_settings(
-                    power_cap_w=1000.0, perf_level=None, nodes=1, owner="s", ledger_dir=tmp_path, hooks=hooks
+                    DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, owner="s", ledger_dir=tmp_path, hooks=hooks
                 )
         assert smi.calls[-1] == ["amd-smi", "set", "-g", "4", "-o", "ppt0", "1400"], "the original is put back"
         assert orphaned_power_records(tmp_path) == {}
@@ -444,7 +442,7 @@ class TestRestoreGuard:
         hooks.arm, hooks.disarm = guard.arm, guard.disarm
         with pytest.raises(GpuPowerSettingsError):
             apply_declared_gpu_power_settings(
-                power_cap_w=1000.0, perf_level=None, nodes=1, owner="s", ledger_dir=tmp_path, hooks=hooks
+                DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, owner="s", ledger_dir=tmp_path, hooks=hooks
             )
         guard.run()
         assert [call[-1] for call in smi.calls] == ["1000", "1400"], "restored once, by the failed apply"
@@ -484,7 +482,7 @@ class TestSessionWiring:
         monkeypatch.setattr(
             gpu_power_apply,
             "apply_for_session",
-            lambda **kw: pytest.fail("must not apply without --apply-gpu-power-settings"),
+            lambda *a, **kw: pytest.fail("must not apply without --apply-gpu-power-settings"),
         )
         monkeypatch.setattr(gpu_power_apply, "orphaned_power_settings_warning", lambda: "GPU 4 left")
         monkeypatch.setattr(bootstrap, "resolve_gpu_power_settings", lambda **kw: ({"declared": {}}, ""))
@@ -496,7 +494,9 @@ class TestSessionWiring:
     def test_a_launch_refused_on_its_budget_sets_nothing(self, monkeypatch):
         monkeypatch.setattr(bootstrap, "power_budget_unmeasurable_error", lambda **kw: "multi-node")
         monkeypatch.setattr(
-            gpu_power_apply, "apply_for_session", lambda **kw: pytest.fail("must not apply when the budget is refused")
+            gpu_power_apply,
+            "apply_for_session",
+            lambda *a, **kw: pytest.fail("must not apply when the budget is refused"),
         )
         args = SimpleNamespace(max_power_w=2000.0, apply_gpu_power_settings=True, gpu_power_cap_w=1000.0)
         with pytest.raises(SystemExit) as exc:
@@ -508,7 +508,9 @@ class TestSessionWiring:
         monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
         monkeypatch.setattr(bootstrap, "power_budget_unmeasurable_error", lambda **kw: "")
         monkeypatch.setattr(
-            gpu_power_apply, "apply_for_session", lambda **kw: pytest.fail("must not apply when the budget is refused")
+            gpu_power_apply,
+            "apply_for_session",
+            lambda *a, **kw: pytest.fail("must not apply when the budget is refused"),
         )
         args = SimpleNamespace(max_per_gpu_power_w={"7": 700.0}, apply_gpu_power_settings=True, gpu_power_cap_w=1000.0)
         with pytest.raises(SystemExit):
@@ -516,7 +518,7 @@ class TestSessionWiring:
         assert "names GPU(s) 7" in capsys.readouterr().err
 
     def test_a_launch_records_what_it_applied(self, monkeypatch):
-        monkeypatch.setattr(gpu_power_apply, "apply_for_session", lambda **kw: {"by": "hyperloom", "gpus": [4]})
+        monkeypatch.setattr(gpu_power_apply, "apply_for_session", lambda *a, **kw: {"by": "hyperloom", "gpus": [4]})
         monkeypatch.setattr(
             bootstrap, "resolve_gpu_power_settings", lambda **kw: ({"declared": {"power_cap_w": 1000.0}}, "")
         )
@@ -525,7 +527,7 @@ class TestSessionWiring:
         assert record["applied"] == {"by": "hyperloom", "gpus": [4]}
 
     def test_a_resume_of_an_applied_session_says_to_pass_the_flag_again(self, monkeypatch):
-        monkeypatch.setattr(gpu_power_apply, "apply_for_session", lambda **kw: {})
+        monkeypatch.setattr(gpu_power_apply, "apply_for_session", lambda *a, **kw: {})
         monkeypatch.setattr(
             bootstrap, "resolve_gpu_power_settings", lambda **kw: ({}, "GPU 4 power cap is 1400 W, declared 1000 W")
         )
@@ -538,7 +540,7 @@ class TestSessionWiring:
         assert "pass --apply-gpu-power-settings to apply them again" in error
 
     def test_an_apply_refusal_reaches_the_launch_error(self, monkeypatch, capsys):
-        def _refuse(**kw):
+        def _refuse(*a, **kw):
             raise GpuPowerSettingsError("needs an integer ROCR_VISIBLE_DEVICES mask")
 
         monkeypatch.setattr(gpu_power_apply, "apply_for_session", _refuse)

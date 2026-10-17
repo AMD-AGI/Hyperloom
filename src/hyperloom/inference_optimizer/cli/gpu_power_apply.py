@@ -33,6 +33,7 @@ from hyperloom.common.gpu_power_control import (
 )
 from hyperloom.common.gpu_power_settings import (
     PERF_LEVEL_MANUAL,
+    DeclaredPowerSettings,
     GpuPowerSettingsError,
     declared_combination_error,
     normalize_perf_level,
@@ -74,7 +75,7 @@ class _Hooks:
 
     read: Callable[[], Mapping[int, Mapping[str, Any]]] = read_gpu_power_settings
     resident_vram: Callable[[], Mapping[int, float]] = read_resident_vram_mb
-    apply: Callable[..., None] = apply_gpu_power_settings
+    apply: Callable[[set[int], DeclaredPowerSettings], None] = apply_gpu_power_settings
     restore: Callable[[Mapping[int, Mapping[str, Any]]], list[str]] = restore_gpu_power_settings
     lease: Callable[[Path, set[int]], Any] = PowerSettingsLease
     mask: Callable[[], set[int] | None] = visible_gpu_indices
@@ -202,12 +203,10 @@ def _recover_orphans(lease: Any, hooks: _Hooks) -> list[int]:
 
 
 def apply_declared_gpu_power_settings(
+    declared: DeclaredPowerSettings,
     *,
-    power_cap_w: float | None,
-    perf_level: str | None,
     nodes: int,
     owner: str,
-    sclk_max_mhz: float | None = None,
     ledger_dir: Path = GPU_POWER_LEDGER_DIR,
     hooks: _Hooks | None = None,
 ) -> AppliedPowerSettings:
@@ -220,12 +219,11 @@ def apply_declared_gpu_power_settings(
         GpuPowerSettingsError: nothing was left changed and the launch must stop.
     """
     hooks = hooks or _Hooks()
-    level = normalize_perf_level(perf_level) if perf_level else ""
-    if power_cap_w is None and not level and sclk_max_mhz is None:
+    if not any(value for value in declared.as_row().values()):
         raise GpuPowerSettingsError(
             "--apply-gpu-power-settings needs at least one of --gpu-power-cap-w, --gpu-perf-level, --gpu-sclk-max-mhz"
         )
-    if conflict := declared_combination_error(perf_level=level, sclk_max_mhz=sclk_max_mhz):
+    if conflict := declared_combination_error(perf_level=declared.perf_level, sclk_max_mhz=declared.sclk_max_mhz):
         raise GpuPowerSettingsError(conflict)
     if nodes >= 2:
         raise GpuPowerSettingsError("--apply-gpu-power-settings cannot set the cards of a multi-node session")
@@ -234,8 +232,8 @@ def apply_declared_gpu_power_settings(
     # Only what this session changes is recorded, so only that is put back: restoring a perf level that neither a
     # declared level nor a declared sclk cap touched would reset a card left in MANUAL clocks for reasons this session
     # knows nothing about.
-    declared = {_POWER_CAP_W: power_cap_w, _PERF_LEVEL: level, _SCLK_MAX_MHZ: sclk_max_mhz}
-    applied_keys = [key for key, value in declared.items() if value]
+    wanted = declared.as_row()
+    applied_keys = [key for key, value in wanted.items() if value]
     # The perf level and the sclk limit change each other: a clock limit puts the card in manual, and setting a level
     # resets the limit. Applying either records and restores both.
     coupled = [key for key in (_PERF_LEVEL, _SCLK_MAX_MHZ) if key not in applied_keys]
@@ -244,8 +242,8 @@ def apply_declared_gpu_power_settings(
         recovered = _recover_orphans(lease, hooks)
         _refuse_busy_cards(gpus, hooks.resident_vram())
         originals = _originals(hooks.read(), gpus, touched)
-        _refuse_unrestorable_levels(originals, sclk_applied=sclk_max_mhz is not None)
-        lease.record(originals, applied={key: declared[key] for key in applied_keys}, owner=owner)
+        _refuse_unrestorable_levels(originals, sclk_applied=declared.sclk_max_mhz is not None)
+        lease.record(originals, applied={key: wanted[key] for key in applied_keys}, owner=owner)
     except GpuPowerSettingsError:
         lease.release()
         raise
@@ -267,7 +265,7 @@ def apply_declared_gpu_power_settings(
     # interrupt from then on has to unwind through the session's restore.
     hooks.arm(_restore)
     try:
-        hooks.apply(gpus, power_cap_w=power_cap_w, perf_level=level, sclk_max_mhz=sclk_max_mhz)
+        hooks.apply(gpus, declared)
     except GpuPowerSettingsError as exc:
         leftover = _restore()
         hooks.disarm()
@@ -373,16 +371,12 @@ def warn_about_orphaned_cards() -> None:
         print(f"WARNING: {warning}.", file=sys.stderr)
 
 
-def apply_for_session(
-    *, power_cap_w: float | None, perf_level: str | None, sclk_max_mhz: float | None, nodes: int, owner: str
-) -> dict[str, Any]:
+def apply_for_session(declared: DeclaredPowerSettings, *, nodes: int, owner: str) -> dict[str, Any]:
     """Apply the declared settings, their restore held by the session's guard; the ``applied`` record to archive.
 
     Raises:
         GpuPowerSettingsError: the settings could not be applied; nothing was left changed.
     """
-    applied = apply_declared_gpu_power_settings(
-        power_cap_w=power_cap_w, perf_level=perf_level, sclk_max_mhz=sclk_max_mhz, nodes=nodes, owner=owner
-    )
+    applied = apply_declared_gpu_power_settings(declared, nodes=nodes, owner=owner)
     print(f"GPU power settings applied to GPU(s) {', '.join(map(str, applied.record['gpus']))}; restored at exit.")
     return applied.record

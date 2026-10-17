@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import subprocess  # nosec B404 - fixed read-only amd-smi invocations.
+from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 
 from hyperloom.common.env import env_flag
@@ -24,6 +25,7 @@ from hyperloom.common.env import env_flag
 __all__ = [
     "GPU_POWER_SAMPLING_ENV",
     "GpuPowerSettingsError",
+    "DeclaredPowerSettings",
     "PERF_LEVEL_MANUAL",
     "declared_combination_error",
     "declared_setting_problems",
@@ -100,6 +102,22 @@ def _power_cap_w(limit: Any) -> float | None:
         if (cap := _watts(limit.get(key))) is not None:
             return cap
     return None
+
+
+@dataclass(frozen=True)
+class DeclaredPowerSettings:
+    """The GPU power settings a launch declares; ``None`` (or ``""`` for the level) for one it leaves alone."""
+
+    power_cap_w: float | None = None
+    perf_level: str = ""
+    sclk_max_mhz: float | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "perf_level", normalize_perf_level(self.perf_level) if self.perf_level else "")
+
+    def as_row(self) -> dict[str, Any]:
+        """The settings keyed as a card's reading is."""
+        return {"power_cap_w": self.power_cap_w, "perf_level": self.perf_level, "sclk_max_mhz": self.sclk_max_mhz}
 
 
 def _sclk_max_mhz(clock: Any) -> float | None:

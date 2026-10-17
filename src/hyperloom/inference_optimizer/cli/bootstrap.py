@@ -305,13 +305,7 @@ def constraint_budget_resume_conflict(args: Any, state: Any) -> str:
 
 
 def _established_gpu_power_settings(
-    *,
-    power_cap_w: float | None,
-    perf_level: str | None,
-    sclk_max_mhz: float | None,
-    nodes: int,
-    apply: bool,
-    owner: str,
+    declared: Any, *, nodes: int, apply: bool, owner: str
 ) -> tuple[dict[str, Any], str]:
     """Apply the declared settings when permitted, then check and record them; ``(record, error)``.
 
@@ -324,15 +318,16 @@ def _established_gpu_power_settings(
     applied: dict[str, Any] = {}
     try:
         if apply:
-            applied = gpu_power_apply.apply_for_session(
-                power_cap_w=power_cap_w, perf_level=perf_level, sclk_max_mhz=sclk_max_mhz, nodes=nodes, owner=owner
-            )
+            applied = gpu_power_apply.apply_for_session(declared, nodes=nodes, owner=owner)
         else:
             gpu_power_apply.warn_about_orphaned_cards()
     except GpuPowerSettingsError as exc:
         return {}, f"cannot apply the declared GPU power settings: {exc}"
     record, error = resolve_gpu_power_settings(
-        power_cap_w=power_cap_w, perf_level=perf_level, sclk_max_mhz=sclk_max_mhz, nodes=nodes
+        power_cap_w=declared.power_cap_w,
+        perf_level=declared.perf_level or None,
+        sclk_max_mhz=declared.sclk_max_mhz,
+        nodes=nodes,
     )
     if applied:
         record["applied"] = applied
@@ -350,7 +345,7 @@ def _per_gpu_launch_error(args: Any, available_gpus: set[int] | None) -> str:
 def resolve_launch_gpu_power(args: Any, *, nodes: int, owner: str) -> dict[str, Any]:
     """The launch's GPU power settings record; exits 2 before anything runs when the declared settings cannot be
     applied or a requested power budget cannot be measured or checked. Nothing is applied when a budget is refused."""
-    from hyperloom.common.gpu_power_settings import visible_gpu_indices
+    from hyperloom.common.gpu_power_settings import DeclaredPowerSettings, visible_gpu_indices
 
     mask = visible_gpu_indices()
     gpu_power: dict[str, Any] = {}
@@ -362,9 +357,11 @@ def resolve_launch_gpu_power(args: Any, *, nodes: int, owner: str) -> dict[str, 
     ) or (_per_gpu_launch_error(args, mask) if mask is not None else "")
     if not error:
         gpu_power, error = _established_gpu_power_settings(
-            power_cap_w=getattr(args, _GPU_POWER_CAP_W, None),
-            perf_level=getattr(args, _GPU_PERF_LEVEL, None),
-            sclk_max_mhz=getattr(args, _GPU_SCLK_MAX_MHZ, None),
+            DeclaredPowerSettings(
+                power_cap_w=getattr(args, _GPU_POWER_CAP_W, None),
+                perf_level=getattr(args, _GPU_PERF_LEVEL, None) or "",
+                sclk_max_mhz=getattr(args, _GPU_SCLK_MAX_MHZ, None),
+            ),
             nodes=nodes,
             apply=bool(getattr(args, "apply_gpu_power_settings", False)),
             owner=owner,
@@ -383,13 +380,17 @@ def resume_gpu_power_settings(args: Any, state: Any) -> tuple[dict[str, Any], st
 
     A session that applied its settings restored them when it exited, so its resume must apply them again.
     """
+    from hyperloom.common.gpu_power_settings import DeclaredPowerSettings
+
     archived = dict(getattr(state, "gpu_power_settings", None) or {})
     declared = dict(archived.get(_DECLARED) or {})
     apply = bool(getattr(args, "apply_gpu_power_settings", False))
     record, error = _established_gpu_power_settings(
-        power_cap_w=getattr(args, _GPU_POWER_CAP_W, None) or declared.get("power_cap_w"),
-        perf_level=getattr(args, _GPU_PERF_LEVEL, None) or declared.get("perf_level"),
-        sclk_max_mhz=getattr(args, _GPU_SCLK_MAX_MHZ, None) or declared.get("sclk_max_mhz"),
+        DeclaredPowerSettings(
+            power_cap_w=getattr(args, _GPU_POWER_CAP_W, None) or declared.get("power_cap_w"),
+            perf_level=getattr(args, _GPU_PERF_LEVEL, None) or declared.get("perf_level") or "",
+            sclk_max_mhz=getattr(args, _GPU_SCLK_MAX_MHZ, None) or declared.get("sclk_max_mhz"),
+        ),
         nodes=max(int(getattr(args, _NODES, 1) or 1), int(getattr(state, _NODES, 1) or 1)),
         apply=apply,
         owner=str(getattr(state, "session_id", "") or ""),

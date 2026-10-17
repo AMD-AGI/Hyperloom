@@ -26,6 +26,7 @@ from typing import Any, Callable, Mapping
 
 from hyperloom.common.gpu_power_settings import (
     PERF_LEVEL_MANUAL,
+    DeclaredPowerSettings,
     GpuPowerSettingsError,
     _gpu_rows,
     _watts,
@@ -145,10 +146,8 @@ def restore_gpu_power_settings(
 
 def apply_gpu_power_settings(
     gpus: set[int],
+    declared: DeclaredPowerSettings,
     *,
-    power_cap_w: float | None,
-    perf_level: str | None,
-    sclk_max_mhz: float | None = None,
     run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
     timeout: float = 60.0,
 ) -> None:
@@ -157,9 +156,7 @@ def apply_gpu_power_settings(
     Raises:
         GpuPowerSettingsError: a set failed (typically not privileged). The caller restores from its record.
     """
-    wanted = {
-        gpu: {_POWER_CAP_W: power_cap_w, _PERF_LEVEL: perf_level or "", _SCLK_MAX_MHZ: sclk_max_mhz} for gpu in gpus
-    }
+    wanted = {gpu: declared.as_row() for gpu in gpus}
     for args in _set_commands(wanted):
         _run_amd_smi(run, args, timeout)
 
