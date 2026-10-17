@@ -20,9 +20,6 @@ from hyperloom.inference_optimizer.protocol.intent import (
 from .errors import IntentEnvelopeValidationError
 
 
-ENVELOPE_SCHEMA_VERSION = "v0.6"
-
-
 # Intent types the Critic role is allowed to emit.
 ALLOWED_CRITIC_INTENTS: frozenset[str] = frozenset(
     {
@@ -181,7 +178,6 @@ __all__ = [
     "ALLOWED_VERDICT_SOURCES",
     "DEFAULT_ADVICE_TOPIC",
     "DEFAULT_IDLE_BODY",
-    "ENVELOPE_SCHEMA_VERSION",
     "Intent",
     "IntentEnvelope",
     "build_advice_intent",
