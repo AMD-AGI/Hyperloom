@@ -14,8 +14,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 from hyperloom.contracts.measurement import FailureClass, TestRequest, TestResult, Validity
@@ -39,8 +40,14 @@ from hyperloom_multibranch.contracts.toolbox import (
     WorkloadKind,
 )
 from hyperloom_multibranch.contracts.gate import ResultUnverified
-from hyperloom_multibranch.toolbox.analysis import CODE_NO_EXECUTOR, AnalysisAsk, analysis_request
-from hyperloom_multibranch.toolbox.acceptance import Acceptance, MeasurementPlanner
+from hyperloom_multibranch.toolbox.analysis import (
+    ANALYSIS_TOOLS,
+    CODE_NO_EXECUTOR,
+    CODE_TOOL_UNAVAILABLE,
+    AnalysisAsk,
+    analysis_request,
+)
+from hyperloom_multibranch.toolbox.acceptance import Acceptance, MeasurementPlanner, check_kind
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, AttemptRunner, Executor, TestJob
 from hyperloom_multibranch.toolbox.quarantine import Quarantine
 from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, WorkQueue, sandbox_priority
@@ -75,12 +82,15 @@ class AcceptanceSetup:
     ``workload_kind`` is the campaign's workload (default InferenceX, the MB1 scenario, design 7.3): in an InferenceX
     campaign every ``explore`` and ``confirm`` request is accepted with ``accuracy=True``; AgentX leaves requests as
     submitted. A recipe on an image other than ``active_image_digest`` is refused; ``None`` skips the check.
+    ``supported_kinds`` are the kinds the backend runs (a sweep counts as ``test``); any other kind is refused at
+    acceptance as ``unsupported_kind``, and ``None`` accepts every kind.
     """
 
     repo: ExperimentRepo
     planner: MeasurementPlanner
     active_image_digest: str | None
     workload_kind: WorkloadKind = WorkloadKind.INFERENCEX
+    supported_kinds: Collection[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -94,7 +104,13 @@ class ToolboxTuning:
 
 
 class RealToolbox:
-    """Implements :class:`~hyperloom_multibranch.contracts.toolbox.Toolbox`; call :meth:`start` before use."""
+    """Implements :class:`~hyperloom_multibranch.contracts.toolbox.Toolbox`; call :meth:`start` before use.
+
+    ``trace_root`` is the directory a PROFILE record's relative ``profile_location`` is read from (the session
+    directory of a builder that lands test output there); ``None`` passes the location on as recorded.
+    """
+
+    trace_root: Path | None = None
 
     def __init__(
         self,
@@ -123,7 +139,7 @@ class RealToolbox:
             max_infra_retries=tuning.max_infra_retries,
         )
         self._ttl, self._clock = tuning.claim_ttl_seconds, tuning.clock
-        self._tools, self._repo = tools, acceptance.repo
+        self._tools, self._repo, self._kinds = tools, acceptance.repo, acceptance.supported_kinds
         self._closed = False
         self._tool_jobs: dict[str, list[str]] = {}
         self._lock = asyncio.Lock()
@@ -164,6 +180,7 @@ class RealToolbox:
     # --- the Toolbox interface -----------------------------------------------------------------------------------
 
     async def submit_test(self, request: TestRequest) -> str:
+        check_kind(request, self._kinds)
         async with self._lock:
             request = self._acceptance.with_required_accuracy(request)
             prepared = await self._acceptance.prepare(request)
@@ -294,8 +311,10 @@ class RealToolbox:
 
         if self._tools is None:
             raise RequestRejected("this toolbox serves no asynchronous tools", CODE_NO_EXECUTOR)
+        if tool in ANALYSIS_TOOLS and tool not in self._tools.tool_names:
+            raise RequestRejected(f"{tool!r} is not run by this toolbox's backend", CODE_TOOL_UNAVAILABLE)
         request = await analysis_request(
-            self._repo, self._records, AnalysisAsk(branch, tool, params, profile_request_id)
+            self._repo, self._records, AnalysisAsk(branch, tool, params, profile_request_id), self.trace_root
         )
         return self.submit_tool(request)
 

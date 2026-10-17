@@ -12,9 +12,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
 from hyperloom_multibranch.contracts.notebook.interfaces import RecordSearch
+from hyperloom_multibranch.contracts.notebook.records import TestRecord
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.toolbox.tools.base import ToolRequest
@@ -27,6 +29,9 @@ CODE_SERVER_OWNED_PARAM = "server_owned_param"
 CODE_COMMIT_UNKNOWN = "commit_unknown"
 CODE_PROFILE_UNVERIFIED = "profile_request_unverified"
 CODE_NO_EXECUTOR = "no_tool_executor"
+CODE_TOOL_UNAVAILABLE = "tool_unavailable_on_backend"
+CODE_PROFILE_WITHOUT_TRACE = "profile_without_trace"
+TRACE_INPUT_PARAM = "trace_input"
 
 
 class AnalysisStarter(Protocol):
@@ -50,16 +55,42 @@ async def _head(repo: ExperimentRepo, branch: str) -> str:
     return head
 
 
-async def _verified_profile(records: RecordSearch | None, branch: str, commit: str, request_id: str) -> str:
+async def _verified_profile(
+    records: RecordSearch | None, branch: str, commit: str, request_id: str
+) -> TestRecord | None:
+    """The PROFILE record ``request_id`` (branch and head commit checked), or ``None`` when no id was given."""
     if not request_id:
-        return ""
+        return None
     found = await records.profiles(commit) if records is not None else ()
-    if any(r.request_id == request_id and r.request.branch_id == branch for r in found):
-        return request_id
+    for record in found:
+        if record.request_id == request_id and record.request.branch_id == branch:
+            return record
     raise RequestRejected(
         f"{request_id!r} is not a profile test of branch {branch!r} on its head commit {commit}",
         CODE_PROFILE_UNVERIFIED,
     )
+
+
+def _trace_input(record: TestRecord, root: Path | None) -> str:
+    """Where the host reads the trace of a verified PROFILE record: its ``profile_location``.
+
+    The location is relative to the toolbox session directory (``root``), where landed test output lives
+    (``tests/<request_id>/...``); an absolute location is used as it is. A relative location that leaves ``root``
+    is refused. Without a ``root`` the location is passed on unchanged.
+    """
+    location = record.result.profile_location if record.result is not None else ""
+    if not location:
+        raise RequestRejected(
+            f"profile test {record.request_id!r} left no trace location to analyse", CODE_PROFILE_WITHOUT_TRACE
+        )
+    if root is None or Path(location).is_absolute():
+        return location
+    resolved = (root / location).resolve()
+    if not resolved.is_relative_to(root.resolve()):
+        raise RequestRejected(
+            f"the trace location of profile test {record.request_id!r} leaves the session", CODE_PROFILE_WITHOUT_TRACE
+        )
+    return str(resolved)
 
 
 @dataclass(frozen=True)
@@ -72,8 +103,14 @@ class AnalysisAsk:
     profile_request_id: str = ""
 
 
-async def analysis_request(repo: ExperimentRepo, records: RecordSearch | None, ask: AnalysisAsk) -> ToolRequest:
-    """The tool request for ``ask.branch``, its ``commit_id`` read from the repository; raises RequestRejected."""
+async def analysis_request(
+    repo: ExperimentRepo, records: RecordSearch | None, ask: AnalysisAsk, trace_root: Path | None = None
+) -> ToolRequest:
+    """The tool request for ``ask.branch``, its ``commit_id`` read from the repository; raises RequestRejected.
+
+    With a verified ``profile_request_id`` the ``trace_input`` is the record's own trace (see :func:`_trace_input`,
+    resolved against ``trace_root``); the caller may not name one then, because the trace must be that profile's.
+    """
     if ask.tool not in ANALYSIS_TOOLS:
         raise RequestRejected(
             f"a specialist starts only {' and '.join(ANALYSIS_TOOLS)} here, not {ask.tool!r}", CODE_TOOL_NOT_ALLOWED
@@ -84,9 +121,17 @@ async def analysis_request(repo: ExperimentRepo, records: RecordSearch | None, a
             f"{', '.join(owned)} in params is set by the server from the branch's own commit, not by the caller",
             CODE_SERVER_OWNED_PARAM,
         )
+    if ask.profile_request_id and TRACE_INPUT_PARAM in ask.params:
+        raise RequestRejected(
+            f"{TRACE_INPUT_PARAM} in params is set by the server from the profile test, not by the caller",
+            CODE_SERVER_OWNED_PARAM,
+        )
     commit = await _head(repo, ask.branch)
-    profile = await _verified_profile(records, ask.branch, commit, ask.profile_request_id)
-    return ToolRequest(ask.tool, ask.branch, {**ask.params, COMMIT_PARAM: commit, PROFILE_REQUEST_PARAM: profile})
+    record = await _verified_profile(records, ask.branch, commit, ask.profile_request_id)
+    params = {**ask.params, COMMIT_PARAM: commit, PROFILE_REQUEST_PARAM: ask.profile_request_id}
+    if record is not None:
+        params[TRACE_INPUT_PARAM] = _trace_input(record, trace_root)
+    return ToolRequest(ask.tool, ask.branch, params)
 
 
 __all__ = ["ANALYSIS_TOOLS", "AnalysisAsk", "AnalysisStarter", "analysis_request"]

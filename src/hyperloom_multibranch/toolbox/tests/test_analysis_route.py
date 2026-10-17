@@ -10,7 +10,7 @@ import json
 import secrets
 import urllib.request
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -197,10 +197,12 @@ async def test_any_other_tool_is_refused_with_its_reason(stack: Stack, tool: str
 async def test_a_profile_request_id_is_kept_only_for_a_profile_test_of_this_branch_and_commit(stack: Stack) -> None:
     stack.rig.repo.heads["b1"] = PARENT  # the commit the profile test ran on
     mine = await _profile_test(stack)
-    job = json.loads(_text(await stack.start(tool="tracelens", params={"trace_input": "t"}, profile_request_id=mine)))
+    job = json.loads(_text(await stack.start(tool="tracelens", profile_request_id=mine)))
     await stack.jobs.wait(job["job_id"])
     (pointer,) = stack.capture.pointers
     assert (pointer.commit_id, pointer.profile_request_id) == (PARENT, mine)
+    (request,) = stack.tools["tracelens"].requests
+    assert request.params["trace_input"] == "traces/p1"  # the profile record's own location; the rig has no root
 
 
 async def test_a_profile_request_id_of_another_branch_or_commit_or_unknown_is_refused(stack: Stack) -> None:
@@ -209,12 +211,10 @@ async def test_a_profile_request_id_of_another_branch_or_commit_or_unknown_is_re
     theirs = await _profile_test(stack, "b2")
     stack.rig.repo.heads["b1"] = HEAD  # b1 has moved on: a profile of PARENT is not of its head
     for wrong in (theirs, "no-such-request"):
-        text = await stack.refused(tool="tracelens", params={"trace_input": "t"}, profile_request_id=wrong)
+        text = await stack.refused(tool="tracelens", profile_request_id=wrong)
         assert "profile_request_unverified" in text
     stack.rig.repo.heads["b1"] = PARENT
-    assert "profile_request_unverified" in await stack.refused(
-        tool="tracelens", params={"trace_input": "t"}, profile_request_id=theirs
-    )
+    assert "profile_request_unverified" in await stack.refused(tool="tracelens", profile_request_id=theirs)
     assert stack.tools["tracelens"].requests == []
 
 
@@ -248,3 +248,27 @@ async def test_without_an_analysis_starter_the_route_refuses_by_name(tmp_path: P
         assert "no_tool_executor" in await bare.refused(tool="tracelens")
     finally:
         server.stop()
+
+
+async def test_a_trace_input_of_the_callers_next_to_a_profile_request_id_is_refused(stack: Stack) -> None:
+    stack.rig.repo.heads["b1"] = PARENT
+    mine = await _profile_test(stack)
+    text = await stack.refused(tool="tracelens", params={"trace_input": "/etc"}, profile_request_id=mine)
+    assert "server_owned_param" in text and "trace_input" in text
+    assert stack.tools["tracelens"].requests == []
+
+
+async def test_a_profile_test_without_a_trace_location_is_refused_by_name(stack: Stack) -> None:
+    stack.rig.repo.heads["b1"] = PARENT
+    mine = await _profile_test(stack)
+    records = stack.rig.toolbox._records
+    found = await records.profiles(PARENT)
+    bare = tuple(replace(r, result=replace(r.result, profile_location="")) for r in found)
+
+    async def profiles(commit: str) -> Any:
+        return bare
+
+    records.profiles = profiles  # type: ignore[method-assign]
+    text = await stack.refused(tool="tracelens", profile_request_id=mine)
+    assert "profile_without_trace" in text
+    assert stack.tools["tracelens"].requests == []

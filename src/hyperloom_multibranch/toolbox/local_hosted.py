@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from hyperloom.measure.archive import DirResultArchive, ResultArchive
 from hyperloom.measure.hosted import HostedConfig, HostedMeasurementBackend
 from hyperloom.measure.hosted_spec import SpecContext
+from hyperloom.measure.local import SUPPORTED_KINDS
 from hyperloom.measure.local_templates import local_runner_template
 from hyperloom.sandbox.local import LocalSandboxProvider
 from hyperloom_multibranch.notebook import LocalNotebook
@@ -26,6 +27,7 @@ from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
 from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
+from hyperloom_multibranch.toolbox.tools import AsyncTool, ToolJobs, tracelens_tool
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, RealToolbox, ToolboxStores, ToolboxTuning
 
 __all__ = ["LocalHostedToolbox", "LocalOptions", "LocalSession", "MAX_CARDS_PER_NODE", "build_local_toolbox"]
@@ -33,6 +35,7 @@ __all__ = ["LocalHostedToolbox", "LocalOptions", "LocalSession", "MAX_CARDS_PER_
 #: One node serves at most eight cards, so at most ``8 / TP`` tests run at once (handover 5, item 7).
 MAX_CARDS_PER_NODE = 8
 _SANDBOXES, _ARCHIVE, _SUBMISSIONS = "sandboxes", "archive", "toolbox/submissions.jsonl"
+_TOOL_RESULTS = "tool-results"
 _POLL_INTERVAL_SEC = 2.0
 
 
@@ -86,7 +89,9 @@ class LocalOptions:
     the result archive, a directory archive below ``session_dir`` when omitted. ``python`` is the interpreter the
     runner and the measurement run with. ``timeout_sec`` is the timeout of one attempt, ``max_infra_retries`` the
     infrastructure retries per test before it ends as ``measurement_failed`` and ``poll_interval_sec`` how often the
-    backend polls a runner for its result.
+    backend polls a runner for its result. ``tools`` are the asynchronous tools ``start_analysis`` may reach; ``None``
+    is the local set, TraceLens only: roofline profiles in the host process on host cards outside the card leases, so
+    it is not offered here.
     """
 
     policy: QueuePolicy | None = None
@@ -96,6 +101,7 @@ class LocalOptions:
     timeout_sec: int = DEFAULT_TEST_TIMEOUT_SEC
     max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES
     poll_interval_sec: float = _POLL_INTERVAL_SEC
+    tools: Sequence[AsyncTool] | None = None
 
 
 def _provider(session: LocalSession, cards: tuple[int, ...], options: LocalOptions) -> LocalSandboxProvider:
@@ -117,6 +123,16 @@ def _capped(policy: QueuePolicy | None, parallel: int) -> QueuePolicy:
     """``policy`` with its global concurrency lowered to what the cards can run in parallel."""
     base = policy or QueuePolicy()
     return replace(base, global_concurrency=min(base.global_concurrency, parallel))
+
+
+def _tool_jobs(options: LocalOptions, notebook: LocalNotebook, directory: Path) -> ToolJobs:
+    tools = (tracelens_tool(),) if options.tools is None else options.tools
+    return ToolJobs(tools, notebook, directory / _TOOL_RESULTS)  # type: ignore[arg-type]
+
+
+def _accepting_local_kinds(acceptance: AcceptanceSetup) -> AcceptanceSetup:
+    """``acceptance`` that refuses, before queueing, the kinds the local backend does not run."""
+    return replace(acceptance, supported_kinds=SUPPORTED_KINDS)
 
 
 def build_local_toolbox(
@@ -169,8 +185,9 @@ def build_local_toolbox(
             records=notebook,  # type: ignore[arg-type]
         ),
         executor,
-        acceptance,
+        _accepting_local_kinds(acceptance),
+        tools=_tool_jobs(options, notebook, directory),
         tuning=ToolboxTuning(policy=_capped(options.policy, parallel), max_infra_retries=options.max_infra_retries),
     )
-    toolbox.backend, toolbox.provider = backend, provider
+    toolbox.backend, toolbox.provider, toolbox.trace_root = backend, provider, directory
     return toolbox

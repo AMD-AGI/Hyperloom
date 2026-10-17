@@ -11,11 +11,11 @@ hosted measurement (``hyperloom.measure``) through the one :class:`MeasurementPl
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, replace
 from typing import Protocol
 
-from hyperloom.contracts.measurement import Purpose, TestRequest
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import Recipe, RecipeError, apply
 from hyperloom.measure.compile import BaseImageMismatchError
 from hyperloom.measure.fake_gain import (
@@ -32,6 +32,19 @@ from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKin
 # Every purpose whose result the InferenceX rule gate reads an eval score from: explore and confirm are compared,
 # integration and final are checked (accuracy_passes), baseline sets the accuracy bar (write_inferencex_baseline).
 _ACCURACY_PURPOSES = (Purpose.BASELINE, Purpose.EXPLORE, Purpose.CONFIRM, Purpose.INTEGRATION, Purpose.FINAL)
+
+
+def backend_kind(kind: TestKind) -> str:
+    """The kind a measurement backend is called with: a sweep is a test over several points."""
+    return TestKind.TEST.value if kind is TestKind.SWEEP else kind.value
+
+
+def check_kind(request: TestRequest, supported: Collection[str] | None) -> None:
+    """Refuse a request whose kind the backend does not run, before anything is queued; ``None`` accepts every kind."""
+    if supported is not None and backend_kind(request.kind) not in supported:
+        raise RequestRejected(
+            f"this toolbox's backend runs kinds {sorted(supported)}, not {request.kind.value!r}", "unsupported_kind"
+        )
 
 
 class MeasurementPlanner(Protocol):

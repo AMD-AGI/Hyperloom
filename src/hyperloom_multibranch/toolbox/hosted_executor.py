@@ -55,6 +55,7 @@ from hyperloom.measure.socket import RoundOutcome, TestCall, TestMeta, TestOutco
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
+from hyperloom_multibranch.toolbox.acceptance import backend_kind
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
 from hyperloom_multibranch.toolbox.reverify import first_hash_difference, first_value_difference
 
@@ -162,7 +163,6 @@ class HostedExecutor:
 
     def _call(self, job: TestJob, accepted: AcceptedMeasurement, output_dir: Path) -> TestCall:
         request = job.request
-        kind = request.kind.value
         return TestCall(
             points=accepted.points,
             environment=accepted.environment,  # type: ignore[arg-type]  # the sheet reads its overlay
@@ -171,7 +171,7 @@ class HostedExecutor:
             cwd=str(self._session),
             magpie_python=self._python,
             task_id=request.request_id or "",
-            kind="test" if request.kind is TestKind.SWEEP else kind,  # type: ignore[arg-type]
+            kind=backend_kind(request.kind),  # type: ignore[arg-type]
             prep=_SWEEP if request.kind is TestKind.SWEEP or len(accepted.points) > 1 else "grid",
             accuracy=request.accuracy,
             meta=TestMeta(

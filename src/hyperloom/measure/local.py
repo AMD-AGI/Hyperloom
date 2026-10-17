@@ -58,7 +58,7 @@ from hyperloom.orchestrator.actions.stop_attribution import (
 
 log = logging.getLogger(__name__)
 
-__all__ = ["LocalMeasurementBackend", "TestCallRefused"]
+__all__ = ["LocalMeasurementBackend", "SUPPORTED_KINDS", "TestCallRefused"]
 
 #: ``VariantResult.error_class`` of a round the per-round cap reaped.
 _TIMEOUT_CLASSES = frozenset({"magpie_timeout", "warmup_magpie_timeout"})
@@ -73,6 +73,8 @@ _LOG_TAIL_CHARS = 64 * 1024
 _ACCURACY = "accuracy"
 _UTF8 = "utf-8"
 _SUPPORTED_KINDS = ("test", _ACCURACY)
+#: The kinds of ``TestCall`` this backend runs; a toolbox refuses any other at acceptance.
+SUPPORTED_KINDS = _SUPPORTED_KINDS
 
 #: The old flow reads the process environment, so two tests in one process would see each other's settings.
 _PROCESS_LOCK = threading.Lock()

@@ -39,7 +39,11 @@ from hyperloom_multibranch.toolbox.local_hosted import (
     LocalSession,
     build_local_toolbox,
 )
-from hyperloom_multibranch.toolbox.mcp_tools import McpSpecialistTokens, register_specialist_tools
+from hyperloom_multibranch.toolbox.mcp_tools import (
+    McpSpecialistTokens,
+    SpecialistToolOptions,
+    register_specialist_tools,
+)
 from hyperloom_multibranch.toolbox.planner import HostedPlanner
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
@@ -158,6 +162,7 @@ async def build_stack(root: Path, variant: Variant, baseline: Recipe, *, k: int 
         server,
         toolbox=toolbox,
         notebooks=lambda branch: LocalNotebook(root / "notebook", Writer(Role.SPECIALIST_RUNTIME, branch, branch)),
+        options=SpecialistToolOptions(analysis=toolbox),
     )
     gate_notebook = LocalNotebook(root / "notebook", Writer(Role.GATE, "gate"))
     stack = Stack(
