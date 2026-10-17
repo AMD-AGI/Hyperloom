@@ -36,6 +36,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
 
 CLAIM_TOKEN_LENGTH = 24
 MAX_OP_SHARES = 50
+WHOLE_PCT = 100.0
 
 
 @dataclass(frozen=True)
@@ -222,7 +223,7 @@ class ToolResultPointer:
 def amdahl_ceiling_pct(share_pct: float) -> float:
     """The most, in percent, that speeding up a region worth ``share_pct`` of the time can gain: the region made free."""
 
-    return math.inf if share_pct >= 100.0 else 100.0 * share_pct / (100.0 - share_pct)
+    return math.inf if share_pct >= WHOLE_PCT else WHOLE_PCT * share_pct / (WHOLE_PCT - share_pct)
 
 
 @dataclass(frozen=True)
