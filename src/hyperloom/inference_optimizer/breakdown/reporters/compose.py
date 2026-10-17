@@ -27,7 +27,6 @@ from ._renderers import (
     attribution as _r_attribution,
     optimizations as _r_optimizations,
     critic as _r_critic,
-    robustness as _r_robustness,
 )
 
 
@@ -41,7 +40,7 @@ SECTION_GROUPS: list[tuple[str, list[str]]] = [
     ),
     ("Capability Search", ["capability_summary", "param_search"]),
     ("Kernel Optimization", ["kernel_lifecycle"]),
-    ("Review", ["critic", "robustness"]),
+    ("Review", ["critic"]),
     ("Run Trace", ["phase_timeline"]),
 ]
 
@@ -63,7 +62,6 @@ __all__ = [
     "_r_attribution",
     "_r_optimizations",
     "_r_critic",
-    "_r_robustness",
 ]
 
 
