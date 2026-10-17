@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from kernelforge.orchestrator.summary_line import reasoning_log_section
 from kernelforge.run_export.document import normalize
 
 #: One printed message; a tuple is a message the arena logged as several lines at one instant.
@@ -338,5 +339,329 @@ def test_a_session_without_one_arena_log_is_one_unreadable_unit(tmp_path: Path) 
             "kind": "session",
             "read_error": ("expected one arena log, one arena run directory, and one task directory; found 0, 0, 0"),
             "log_files": [str((tmp_path / "broken" / "driver.log").resolve())],
+        }
+    ]
+
+
+ARTIFACTS = "/workspace/run_20261001_120000_softmax-forge/softmax-forge-7f3a"
+PROJECTS = ".claude/projects/" + ARTIFACTS.replace("/", "-").replace("_", "-")
+LANE_PLAN = "# Lane two: vectorize loads\n\nUse 128-bit loads for the input rows. Keep the reduction as it is.\n"
+FALLBACK_PLAN = """The Orchestration revision was unavailable. Treat the review below as binding.
+
+## Critic review
+Too broad.
+
+## Original draft
+I read the profile before planning.
+# Fuse the passes
+Sentence one. Sentence two. Sentence three. Sentence four.
+"""
+CAMPAIGN_RUN = "run_20261001_120000_softmax-forge"
+CAMPAIGN: list[Message] = [
+    "AgentKernelArena Framework Started",
+    f"NEW RUN: {CAMPAIGN_RUN}",
+    f"Forge artifacts: {ARTIFACTS}",
+    "Evaluator command: ['python', 'eval.py', '--model-class', 'SoftmaxModule']",
+    "[FORGE]   Implementer: claude / claude-opus-4",
+    "[FORGE] Starting autonomous iteration loop",
+    "[FORGE] --- Iteration 1 (best mean case speedup: 1.000000x, remaining: 100 min) ---",
+    QUERY,
+    "[FORGE]   [agent] Rationale: Short rationale from the log.",
+    "[FORGE]   [REVERT] mean case speedup=0.98x not better than best=1.0x",
+    "[FORGE] --- Iteration 2 (best mean case speedup: 1.000000x, remaining: 90 min) ---",
+    "[FORGE]   [lane 2] measuring queued candidate",
+    "[FORGE]   [KEEP] mean case speedup=1.1x — NEW BEST (+10.0%); raw mean=0.0500ms",
+    "[FORGE] Autonomous loop complete",
+]
+
+
+def _transcript(path: Path, cwd: str, started: int, prompt: str, *texts: str) -> Path:
+    """A Claude Code transcript; a text equal to ``SUMMARY`` is KernelForge resuming it for its record."""
+
+    stamp = f"2026-10-01T12:{started // 60:02d}:{started % 60:02d}.000Z"
+    records: list[dict[str, Any]] = [{"type": "user", "cwd": cwd, "timestamp": stamp, "message": {"content": prompt}}]
+    for number, text in enumerate(texts):
+        if text == SUMMARY:
+            records.append({"type": "queue-operation", "content": text, "timestamp": stamp})
+            continue
+        message = {"id": f"msg-{number}", "content": [{"type": "text", "text": text}, {"type": "tool_use", "id": "t"}]}
+        records += [{"type": "assistant", "cwd": cwd, "timestamp": stamp, "message": message}] * 2
+    return _write(path, "\n".join(json.dumps(record) for record in records) + "\nnot json\n")
+
+
+SUMMARY = "Stop working on the kernel. Iteration 1 is over and your edits have been measured."
+
+
+def _campaign(root: Path, messages: list[Message] = CAMPAIGN, lane_plan: str = LANE_PLAN) -> Path:
+    """A campaign log of ``messages``, its run's artifacts directory, and three of its agents' transcripts, the lane
+    measured in iteration 2 having run ``lane_plan``; returns the experiments."""
+
+    raw = (
+        "forge_engine=main 1c14e79e1d\nDocker runtime: gpus=0 image=rocm/arena:latest\nconfig_ok=configs/softmax.yaml\n"
+    )
+    _write(root / "logs" / "softmax.log", raw + _log(messages))
+    experiments = root / "workspace" / ARTIFACTS.split("/workspace/", 1)[1] / "engine" / "forge_experiments"
+    config = {"operator_name": "softmax", "framework": "unknown", "kernel_backend": "triton", "gpu_type": "mi300x"}
+    _write(experiments / "campaign_config.json", json.dumps(config))
+    _write(experiments / "run_state.json", json.dumps({"campaign_id": "ignored-by-the-arena-layouts"}))
+    for iteration, plan in ((1, "Fuse the passes"), (2, lane_plan.strip())):
+        candidate = experiments / "candidates" / f"iter_{iteration:03d}"
+        _write(candidate / "kernel.py", f"# candidate {iteration}\n")
+        meta = {"plan": plan, "baseline_wall_ms": 0.05, "files": {"kernel": "kernel.py"}}
+        _write(candidate / "meta.json", json.dumps(meta))
+    _write(experiments / "orchestration" / "iter_001" / "optimization_plan.md", FALLBACK_PLAN)
+    _write(experiments / "orchestration" / "iter_001" / "lane_002.md", lane_plan)
+    plan_path = "forge_experiments/orchestration/iter_001/optimization_plan.md"
+    _write(experiments / "handoffs" / "iter_001.json", json.dumps({"optimization_plan_path": plan_path}))
+    _write(experiments / "lessons" / "iter_001.md", "(no agent summary) The candidate lost on every case.\n")
+    implementer_prompt = f"Read {plan_path} and execute the integrated plan."
+    _transcript(
+        root / f"{PROJECTS}-engine-kernels" / "implementer.jsonl",
+        f"{ARTIFACTS}/engine/kernels",
+        5,
+        implementer_prompt,
+        "I'll read the plan.",
+        "The max pass dominates. I fused it into the sum pass.\nPLAN: Fuse max into the sum pass",
+        SUMMARY,
+        "For the record: nothing else.",
+    )
+    _transcript(root / f"{PROJECTS}-engine" / "planner.jsonl", f"{ARTIFACTS}/engine", 24, "Plan the round.", "Plan.")
+    _transcript(
+        root / f"{PROJECTS}-forge-lanes-ab12-2" / "lane.jsonl",
+        f"{ARTIFACTS}/forge-lanes-ab12/2",
+        30,
+        f"Execute this plan:\n{lane_plan}",
+        "Loads were 32-bit. I widened them.\nPLAN: Vectorize the row loads",
+    )
+    return experiments
+
+
+def test_a_campaign_reads_its_archive_and_its_agents_transcripts(tmp_path: Path) -> None:
+    experiments = _campaign(tmp_path)
+    units = _units(tmp_path)
+
+    assert list(units) == ["softmax-forge/iteration-1", "softmax-forge/iteration-2"]
+    session, lane = units.values()
+    assert session["identity"] == {
+        "kernel": "softmax",
+        "backend": "triton",
+        "gpu": "mi300x",
+        "operator": "SoftmaxModule",
+    }
+    assert session["provenance"] == {
+        "kernelforge_commit": "1c14e79e1d",
+        "image": "rocm/arena:latest",
+        "arena_config": "configs/softmax.yaml",
+        "llm_backend": "claude",
+        "llm_model": "claude-opus-4",
+        "candidate_origin": "session",
+    }
+    orchestration = experiments / "orchestration" / "iter_001"
+    assert session["plan_file"] == str((orchestration / "optimization_plan.md").resolve())
+    assert session["plan"] == "Sentence one. Sentence two. Sentence three."
+    assert session["reasoning"] == "I'll read the plan. The max pass dominates. I fused it into the sum pass."
+    assert session["approach"] == "Fuse max into the sum pass"
+    assert session["reasoning_file"] == f"{PROJECTS}-engine-kernels/implementer.jsonl"
+    assert session["source_ms"] == 0.05
+    assert session["source_code"] == str((experiments / "candidates" / "iter_001" / "kernel.py").resolve())
+    assert session["lesson"] == "(no agent summary) The candidate lost on every case."
+    assert session["log_files"][-2:] == [
+        str((tmp_path / f"{PROJECTS}-engine-kernels" / "implementer.jsonl").resolve()),
+        str((tmp_path / f"{PROJECTS}-engine" / "planner.jsonl").resolve()),
+    ]
+
+    assert lane["provenance"]["candidate_origin"] == "lane"
+    assert lane["plan_file"] == str((orchestration / "lane_002.md").resolve())
+    assert lane["plan"] == "Use 128-bit loads for the input rows. Keep the reduction as it is."
+    assert lane["reasoning"] == "Loads were 32-bit. I widened them. PLAN: Vectorize the row loads"
+    assert lane["approach"] == "Vectorize the row loads"
+    assert lane["reasoning_file"] == f"{PROJECTS}-forge-lanes-ab12-2/lane.jsonl"
+    assert "lesson" not in lane
+
+
+def test_a_campaign_session_that_kept_a_reasoning_log_is_summarized_by_it(tmp_path: Path) -> None:
+    experiments = _campaign(tmp_path)
+    orchestration = experiments / "orchestration" / "iter_001"
+    summarized = FALLBACK_PLAN.replace(
+        "# Fuse the passes", "Summary: The max pass dominates. Fuse it.\n# Fuse the passes"
+    )
+    _write(orchestration / "optimization_plan.md", summarized)
+    log = _write(
+        orchestration / "optimization_plan.reasoning.md",
+        "Summary: The max pass read every row again. I fused it into the sum pass.\n\n## Evidence\nThe profile.\n",
+    )
+
+    session, lane = _units(tmp_path).values()
+
+    assert session["plan"] == "The max pass dominates. Fuse it."
+    assert session["reasoning"] == "The max pass read every row again. I fused it into the sum pass."
+    assert session["reasoning_log"] == str(log.resolve())
+    assert str(log.resolve()) in session["log_files"]
+    assert session["approach"] == "Fuse max into the sum pass"
+    assert session["reasoning_file"] == f"{PROJECTS}-engine-kernels/implementer.jsonl"
+    assert lane["reasoning"] == "Loads were 32-bit. I widened them. PLAN: Vectorize the row loads"
+    assert "reasoning_log" not in lane
+
+
+#: An implementer's prompt that names the reasoning log beside round 1's plan, by its path in the container.
+NAMED_LOG_PROMPT = "## Target\nkernel.py\n" + reasoning_log_section(
+    f"{ARTIFACTS}/engine/forge_experiments/orchestration/iter_001/optimization_plan.reasoning.md"
+)
+
+
+def _implementer_told_its_log(root: Path) -> Path:
+    """Round 1's implementer transcript, told the reasoning log beside the round's plan, in place of ``_campaign``'s."""
+
+    return _transcript(
+        root / f"{PROJECTS}-engine-kernels" / "implementer.jsonl",
+        f"{ARTIFACTS}/engine/kernels",
+        5,
+        NAMED_LOG_PROMPT,
+        "The max pass dominates. I fused it into the sum pass.\nPLAN: Fuse max into the sum pass",
+    )
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        pytest.param(
+            "Read forge_experiments/orchestration/iter_001/optimization_plan.md and execute the integrated plan.\n\n"
+            "Make your change(s) now.\n",
+            id="told-its-plan",
+        ),
+        pytest.param(NAMED_LOG_PROMPT, id="told-its-reasoning-log"),
+    ],
+)
+def test_a_campaign_implementer_of_a_kernel_at_the_workspace_root_is_not_a_planner(tmp_path: Path, prompt: str) -> None:
+    _campaign(tmp_path)
+    (tmp_path / f"{PROJECTS}-engine-kernels" / "implementer.jsonl").unlink()
+    implementer = _transcript(
+        tmp_path / f"{PROJECTS}-engine" / "implementer.jsonl",
+        f"{ARTIFACTS}/engine",
+        25,
+        prompt,
+        "The max pass dominates. I fused it into the sum pass.\nPLAN: Fuse max into the sum pass",
+    )
+
+    session, lane = _units(tmp_path).values()
+
+    assert session["approach"] == "Fuse max into the sum pass"
+    assert session["reasoning_file"] == f"{PROJECTS}-engine/implementer.jsonl"
+    assert str((tmp_path / f"{PROJECTS}-engine" / "planner.jsonl").resolve()) in lane["log_files"]
+    assert str(implementer.resolve()) not in lane["log_files"]
+
+
+def test_a_campaign_implementer_told_its_reasoning_log_is_linked_by_it_whenever_it_started(tmp_path: Path) -> None:
+    _campaign(tmp_path)
+    _implementer_told_its_log(tmp_path)
+
+    session = _units(tmp_path)["softmax-forge/iteration-1"]
+
+    assert session["approach"] == "Fuse max into the sum pass"
+    assert session["reasoning_file"] == f"{PROJECTS}-engine-kernels/implementer.jsonl"
+
+
+def test_a_campaign_lane_whose_plan_has_no_heading_is_linked_by_the_whole_plan(tmp_path: Path) -> None:
+    experiments = _campaign(tmp_path, lane_plan=LANE_PLAN.removeprefix("# Lane two: vectorize loads\n\n"))
+
+    lane = _units(tmp_path)["softmax-forge/iteration-2"]
+
+    assert lane["plan_file"] == str((experiments / "orchestration" / "iter_001" / "lane_002.md").resolve())
+    assert lane["approach"] == "Vectorize the row loads"
+    assert lane["reasoning_file"] == f"{PROJECTS}-forge-lanes-ab12-2/lane.jsonl"
+
+
+def test_a_forge_rewrite_campaign_keeps_the_source_baseline_it_logged(tmp_path: Path) -> None:
+    loop = CAMPAIGN.index(SETUP[-1])
+    experiments = _campaign(tmp_path, [*CAMPAIGN[:loop], *SETUP[1:-1], *CAMPAIGN[loop:]])
+    _write(experiments / "run_state.json", json.dumps({"pristine_baseline_wall_ms": 1.2}))
+
+    units = _units(tmp_path)
+
+    assert {unit_id: unit["source_ms"] for unit_id, unit in units.items()} == {
+        "softmax-forge/port": 1.5,
+        "softmax-forge/iteration-1": 1.5,
+        "softmax-forge/iteration-2": 1.5,
+    }
+
+
+def test_a_campaign_lane_measured_after_its_round_carries_that_rounds_planners(tmp_path: Path) -> None:
+    _campaign(tmp_path)
+
+    session, lane = _units(tmp_path).values()
+
+    planner = str((tmp_path / f"{PROJECTS}-engine" / "planner.jsonl").resolve())
+    lane_transcript = str((tmp_path / f"{PROJECTS}-forge-lanes-ab12-2" / "lane.jsonl").resolve())
+    assert session["log_files"][-1] == planner
+    assert lane["log_files"][-2:] == [lane_transcript, planner]
+
+
+def _logless_campaign(root: Path, number: int) -> None:
+    """Another campaign's artifacts without its campaign log, which the export reads as a plain forge-loop run."""
+
+    workspace = root / "workspace" / f"run_20261001_13000{number}_gemm-forge" / f"gemm-forge-{number}" / "engine"
+    experiments = workspace / "forge_experiments"
+    plan_path = "forge_experiments/orchestration/iter_001/optimization_plan.md"
+    _write(experiments / "campaign_config.json", json.dumps({"operator_name": "gemm"}))
+    _write(experiments / "run_state.json", json.dumps({"campaign_id": f"gemm-{number}"}))
+    _write(workspace / plan_path, "# Tile K\n\nTile the K loop by 128.\n")
+    _write(experiments / "handoffs" / "iter_001.json", json.dumps({"optimization_plan_path": plan_path}))
+    meta = {"plan": "Tile K", "rationale": "Tiled the K loop."}
+    _write(experiments / "candidates" / "iter_001" / "meta.json", json.dumps(meta))
+
+
+@pytest.mark.parametrize("beside", [1, 2])
+def test_a_campaign_keeps_its_transcripts_from_the_plain_runs_beside_it(tmp_path: Path, beside: int) -> None:
+    _campaign(tmp_path)
+    implementer = _implementer_told_its_log(tmp_path)
+    for number in range(beside):
+        _logless_campaign(tmp_path, number)
+
+    runs = normalize([tmp_path])["runs"]
+
+    own = {run["unit_id"]: run for run in runs if run["run_id"] == CAMPAIGN_RUN}
+    plain = [run for run in runs if run["run_id"] != CAMPAIGN_RUN]
+    assert own["softmax-forge/iteration-1"]["reasoning_file"] == f"{PROJECTS}-engine-kernels/implementer.jsonl"
+    assert [(run["run_id"], run["approach"], run.get("reasoning_file")) for run in plain] == [
+        (f"gemm-{number}", "Tile K", None) for number in range(beside)
+    ]
+    assert not any(str(implementer.resolve()) in run["log_files"] for run in plain)
+
+
+def test_a_campaign_log_of_several_tasks_is_one_unreadable_unit(tmp_path: Path) -> None:
+    gemm = "/workspace/run_20261001_120000_softmax-forge/gemm-forge-9b2c"
+    loop = CAMPAIGN.index(SETUP[-1])
+    gemm_task = [
+        f"Forge artifacts: {gemm}",
+        "[FORGE] [forge-rewrite] source baseline: 9.0 ms (full suite, cases=[g1])",
+        "[FORGE] [forge-rewrite] PORT FAILED after 3 attempts",
+    ]
+    _campaign(tmp_path, [*CAMPAIGN[:loop], *SETUP[1:-1], *CAMPAIGN[loop:], *gemm_task])
+
+    runs = normalize([tmp_path])["runs"]
+
+    assert runs[0] == {
+        "unit_id": "softmax-forge/session",
+        "kind": "session",
+        "read_error": (
+            f"names 2 KernelForge artifacts directories, one per launch: {ARTIFACTS}, {gemm}; "
+            "only the log of a single launch is read as a campaign"
+        ),
+        "log_files": [str((tmp_path / "logs" / "softmax.log").resolve())],
+    }
+    assert [(run["unit_id"], run["run_id"], run["source_ms"]) for run in runs[1:]] == [
+        ("engine/iteration-1", "ignored-by-the-arena-layouts", 0.05),
+        ("engine/iteration-2", "ignored-by-the-arena-layouts", 0.05),
+    ]
+
+
+def test_a_campaign_whose_artifacts_are_missing_is_one_unreadable_unit(tmp_path: Path) -> None:
+    log = _write(tmp_path / "logs" / "softmax.log", _log(CAMPAIGN))
+    assert normalize([tmp_path])["runs"] == [
+        {
+            "unit_id": "softmax-forge/session",
+            "kind": "session",
+            "read_error": f"no KernelForge artifacts directory {ARTIFACTS} for run {CAMPAIGN_RUN} under this log root",
+            "log_files": [str(log.resolve())],
         }
     ]
