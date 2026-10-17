@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import ast
-import importlib.util
 import logging
 import os
 import re
@@ -1079,124 +1078,6 @@ def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]
     if fragment.isdigit():
         return path.strip(), int(fragment), None
     return text, None, None
-
-
-# Launcher path → absolute source file resolver. Strategy (most-specific first):
-# $HYPERLOOM_FRAMEWORK_SOURCE_ROOTS override, importlib find_spec, then this fallback table.
-_FRAMEWORK_PKG_FALLBACK_ROOTS: dict[str, tuple[str, ...]] = {
-    "aiter": ("/sgl-workspace/aiter",),
-    "sglang": ("/sgl-workspace/sglang/python", "/sgl-workspace/sglang"),
-    "vllm": (
-        "/usr/local/lib/python3.12/dist-packages",
-        "/usr/local/lib/python3.10/dist-packages",
-        "/opt/venv/lib/python3.10/site-packages",
-        "/sgl-workspace/vllm",
-    ),
-    # atom fallback roots for CSV-only / static-analysis parses. Kept in sync
-    # with the reusable-source roots elsewhere, pinned by test_framework_paths_units.py.
-    "atom": (
-        "/app/ATOM",
-        "/usr/local/lib/python3.12/dist-packages",
-        "/usr/local/lib/python3.10/dist-packages",
-        "/opt/venv/lib/python3.10/site-packages",
-        "/opt/venv/lib/python3.12/site-packages",
-    ),
-}
-_FRAMEWORK_SOURCE_ROOTS_ENV = "HYPERLOOM_FRAMEWORK_SOURCE_ROOTS"
-
-
-def _env_framework_source_roots() -> dict[str, tuple[str, ...]]:
-    """Parse ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` into a package-root map.
-
-    The variable is a comma-separated list of ``pkg=/abs/parent`` entries.
-
-    Returns:
-        A ``{pkg: (root, ...)}`` mapping; unparseable entries are skipped.
-    """
-    raw = os.environ.get(_FRAMEWORK_SOURCE_ROOTS_ENV, "").strip()
-    if not raw:
-        return {}
-    out: dict[str, list[str]] = {}
-    for chunk in raw.split(","):
-        if "=" not in chunk:
-            continue
-        key, sep, value = chunk.partition("=")
-        key = key.strip().lower()
-        value = value.strip()
-        if not key or not value:
-            continue
-        out.setdefault(key, []).append(value)
-    return {k: tuple(v) for k, v in out.items()}
-
-
-def _package_root_parent(pkg: str) -> str | None:
-    """Find the directory containing a package on the live ``sys.path``.
-
-    Args:
-        pkg: The importable package name.
-
-    Returns:
-        The directory containing ``pkg/``, or ``None`` when not importable.
-    """
-    try:
-        spec = importlib.util.find_spec(pkg)
-    except (ImportError, ValueError):
-        return None
-    if spec is None:
-        return None
-    if spec.submodule_search_locations:
-        loc = list(spec.submodule_search_locations)[0]
-        return os.path.dirname(loc)
-    if spec.origin and spec.origin.endswith(".py"):
-        return os.path.dirname(os.path.dirname(spec.origin))
-    return None
-
-
-def _resolve_launcher_to_abs_source(
-    kernel_path: str,
-) -> tuple[str, int | None, str | None] | None:
-    """Resolve a TraceLens launcher-path to an absolute source file.
-
-    Args:
-        kernel_path: The TraceLens launcher-path to resolve.
-
-    Returns:
-        An ``(abs_file, line, function_name)`` tuple for an absolute path or a
-        resolvable framework-relative file, else ``None``.
-    """
-    raw_path, line, func = _parse_launcher_path(kernel_path)
-    if not raw_path:
-        return None
-    if os.path.isabs(raw_path):
-        # Keep container-resident paths even when this analysis host cannot stat
-        # them; the caller still needs the annotation split into separate fields.
-        return raw_path, line, func
-    head = raw_path.split("/", 1)[0]
-    if not head or head.startswith("."):
-        return None
-
-    candidate_roots: list[str] = []
-    env_roots = _env_framework_source_roots()
-    candidate_roots.extend(env_roots.get(head, ()))
-    pkg_parent = _package_root_parent(head)
-    if pkg_parent:
-        candidate_roots.append(pkg_parent)
-    candidate_roots.extend(_FRAMEWORK_PKG_FALLBACK_ROOTS.get(head, ()))
-
-    seen: set[str] = set()
-    for root in candidate_roots:
-        if not root or root in seen:
-            continue
-        seen.add(root)
-        abs_path = os.path.join(root, raw_path)
-        if not os.path.isfile(abs_path):
-            continue
-        # Validate the file actually hosts the launcher's function (guards sys.path shadowing).
-        if func and abs_path.endswith(".py"):
-            if _function_line_from_ast(Path(abs_path), func) is None:
-                continue
-        return abs_path, line, func
-    return None
 
 
 def _function_line_from_ast(path: Path, function_name: str) -> int | None:

@@ -41,7 +41,6 @@ from hyperloom.inference_optimizer.framework_paths import (
 from hyperloom.inference_optimizer.session.paths import workspace_root
 
 from ._task_group_contract import _strip_dispatch_decoration
-from ._task_group_contract import native_operation_key as _native_operation_key
 
 try:
     import aiter.jit.core as _aiter_jit_core  # type: ignore[import-untyped]
@@ -1412,30 +1411,6 @@ def refresh_kernel_search_roots() -> tuple[str, ...]:
     kernel_search_roots.cache_clear()
     _harness_search_bases.cache_clear()
     return kernel_search_roots()
-
-
-# Extensions a grep hit may be admitted under. Deliberately narrow, and kept in
-# lockstep with source_type_for(): a suffix admitted here but unclassified there
-# lands as source_type="unknown", which classify_patchability rejects. Worse, it
-# still competes in _rank_paths, where kind_score outweighs ext_score -- so a
-# /csrc/ file with an unclassified suffix outranks the sibling .py and turns a
-# routable candidate non-routable. Widen this only together with source_type_for.
-SOURCE_EXTENSIONS = (".cuh", ".cu", ".hip", ".cpp", ".h", ".hpp", ".py")
-
-# Extensions that make a string *look like* a path, used only to tell a real
-# source_file from a producer placeholder ("Not found", "AITER (vendor)"). This
-# one is permissive on purpose: rejecting an unusual-but-real path would zero a
-# field the resolution tiers already filled, whereas admitting one merely leaves
-# it to the classifier. Never use it as a grep admission filter.
-PATH_SHAPED_EXTENSIONS = SOURCE_EXTENSIONS + (
-    ".pyx",
-    ".cxx",
-    ".cc",
-    ".hh",
-    ".s",
-    ".asm",
-    ".jinja",
-)
 
 
 def _strip_template_args(symbol: str) -> str:
@@ -3931,35 +3906,6 @@ def build_audit_summary(
         # Trace-quality findings (empty = healthy; non-empty explains an empty ``tasks``).
         "trace_health_warnings": list(trace_health_warnings or []),
     }
-
-
-def _with_demangled_symbol(candidate: dict[str, Any]) -> dict[str, Any]:
-    """Copy ``candidate`` with the demangled device symbol added when it differs.
-
-    ``native_operation_key`` already owns this normalization for the task-group
-    identity: it strips the CPU-side launch call, a return type and template
-    parameters, then demangles an Itanium symbol. Only added when it actually
-    changes the string, so a row whose symbol was never mangled does not grow a
-    field restating it.
-
-    Args:
-        candidate (dict[str, Any]): One finalized candidate row.
-
-    Returns:
-        dict[str, Any]: A shallow copy, possibly carrying
-            ``device_kernel_name_demangled``.
-    """
-    row = dict(candidate)
-    raw = str(row.get("device_kernel_name") or row.get("name") or "").strip()
-    if not raw:
-        return row
-    try:
-        demangled = _native_operation_key(raw)
-    except Exception:  # noqa: BLE001 - a reading aid must not fail the stage
-        return row
-    if demangled and demangled != raw:
-        row["device_kernel_name_demangled"] = demangled
-    return row
 
 
 def write_reports(
