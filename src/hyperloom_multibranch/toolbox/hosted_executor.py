@@ -23,6 +23,7 @@ import math
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import replace
@@ -44,7 +45,8 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.measure.fake_gain import PREFIX_CACHE_OFF_ERROR_CLASS, baseline_prefix_cache_refusal
 from hyperloom.measure.failures import Disposition, classify_test_failure
-from hyperloom.measure.hosted import HostedMeasurementBackend
+from hyperloom.measure.bundle import RecordedBundle
+from hyperloom.measure.hosted import HostedMeasurementBackend, Reverified
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED, Record
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.points import AcceptedMeasurement
@@ -52,6 +54,7 @@ from hyperloom.measure.socket import RoundOutcome, TestCall, TestMeta, TestOutco
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
+from hyperloom_multibranch.toolbox.reverify import first_hash_difference, first_value_difference
 
 __all__ = ["DEFAULT_TEST_TIMEOUT_SEC", "HostedExecutor", "OUTPUTS_DIR"]
 
@@ -112,6 +115,21 @@ class HostedExecutor:
         except subprocess.TimeoutExpired:
             return self._timed_out(request_id, started)
         return self._result(request, accepted, call, outcome, started)
+
+    # -- verifying a recorded result again -------------------------------------------------------------------------
+
+    def difference(self, result: TestResult) -> str | None:
+        """Why ``result`` does not follow from its archived bundle, or ``None`` when it does (blocking).
+
+        The bundle is verified again from what acceptance journalled, its rounds and accuracy are derived again, and
+        every recorded field is compared. Raises what the backend raises for a bundle that does not verify.
+        """
+        if not result.manifest_sha256 or not result.signing_key_fingerprint:
+            return "manifest_sha256: the record names no bundle"
+        recorded = RecordedBundle(result.manifest_sha256, result.signing_key_fingerprint)
+        with tempfile.TemporaryDirectory(prefix="reverify-") as scratch:
+            derived = self._backend.reverify(result.request_id, recorded, Path(scratch) / "bundle")
+            return _unlike_bundle(result, derived)
 
     # -- the call --------------------------------------------------------------------------------------------------
 
@@ -241,6 +259,26 @@ class HostedExecutor:
         return fields
 
 
+def _unlike_bundle(result: TestResult, derived: Reverified) -> str | None:
+    """The first field of ``result`` that the verified bundle does not support."""
+    difference = first_hash_difference(result, derived.manifest)
+    if difference or result.validity is not Validity.SUCCEEDED:
+        return difference or _unmeasured_difference(result)
+    if derived.manifest.outcome.returncode != 0:
+        return (
+            f"validity: recorded succeeded, the bundle's outcome has return code {derived.manifest.outcome.returncode}"
+        )
+    values = _round_values_at(derived.rounds, tuple(_concurrency_in(text) for text in derived.point_yaml))
+    return first_value_difference(result, values, _scores_of(derived.rounds))
+
+
+def _unmeasured_difference(result: TestResult) -> str | None:
+    """A result that is not a success holds no measured value; one that does was not made by the runner."""
+    if result.rounds:
+        return "rounds: a result that did not succeed records measured rounds"
+    return "accuracy: a result that did not succeed records scores" if result.accuracy else None
+
+
 # -- mapping helpers -----------------------------------------------------------------------------------------------
 
 
@@ -309,9 +347,16 @@ def _archived_manifest(location: str, manifest_sha256: str) -> ResultManifest | 
 
 def _concurrency_of(point: Path) -> int | None:
     try:
-        document = yaml.safe_load(Path(point).read_text(encoding="utf-8")) or {}
+        return _concurrency_in(Path(point).read_text(encoding="utf-8"))
+    except OSError:
+        return None
+
+
+def _concurrency_in(text: str) -> int | None:
+    try:
+        document = yaml.safe_load(text) or {}
         value = int(str(document["benchmark"]["envs"]["CONC"]))
-    except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError):
+    except (ValueError, KeyError, TypeError, yaml.YAMLError):
         return None
     return value if value >= 1 else None
 
@@ -335,6 +380,10 @@ def _metrics_of(measurement: Mapping[str, Any]) -> dict[str, float]:
     }
 
 
+def _scores_of(rounds: tuple[RoundOutcome, ...]) -> tuple[AccuracyValue, ...]:
+    return tuple(value for r in rounds if r.phase == _ACCURACY for value in r.accuracy)
+
+
 def _accuracy_values(rounds: tuple[RoundOutcome, ...], *, wanted: bool) -> tuple[AccuracyValue, ...]:
     """The scores of the accuracy rounds, in round order.
 
@@ -353,6 +402,11 @@ def _accuracy_values(rounds: tuple[RoundOutcome, ...], *, wanted: bool) -> tuple
 
 def _round_values(rounds: tuple[RoundOutcome, ...], points: tuple[Path, ...]) -> tuple[RoundValue, ...]:
     """One value per warmup or measured round whose report is readable and valid; the metric names are the report's."""
+    return _round_values_at(rounds, tuple(_concurrency_of(point) for point in points))
+
+
+def _round_values_at(rounds: tuple[RoundOutcome, ...], concurrencies: tuple[int | None, ...]) -> tuple[RoundValue, ...]:
+    """:func:`_round_values` for a sheet whose points' concurrencies are already known, in order."""
     values = []
     for item in rounds:
         if item.phase not in ("warmup", _MEASURE):
@@ -369,7 +423,7 @@ def _round_values(rounds: tuple[RoundOutcome, ...], points: tuple[Path, ...]) ->
         values.append(
             RoundValue(
                 item.phase,
-                _concurrency_of(points[item.point]) if item.point < len(points) else None,
+                concurrencies[item.point] if item.point < len(concurrencies) else None,
                 _metrics_of(measurement),
                 completed_requests=completed if isinstance(completed, int) else None,
                 failed_requests=max(0, failed) if failed is not None else None,

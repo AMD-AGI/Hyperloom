@@ -135,3 +135,14 @@ def test_concurrent_writers_of_the_same_bundle_all_succeed_and_one_copy_exists(s
     assert [p.name for p in archive.bundle_dir(REQUEST_ID, verified.manifest_sha256).parent.iterdir()] == [
         verified.manifest_sha256
     ]
+
+
+def test_bundle_path_names_the_stored_bundle_and_refuses_a_key_nothing_is_stored_under(staged, archive) -> None:
+    bundle, verified = staged
+    with pytest.raises(ArchiveError, match="no bundle is archived"):
+        archive.bundle_path(REQUEST_ID, verified.manifest_sha256)
+    archive.put_bundle(REQUEST_ID, verified.manifest_sha256, bundle.staging)
+    path = archive.bundle_path(REQUEST_ID, verified.manifest_sha256)
+    assert verify_bundle(path, verify_args(bundle)).manifest_sha256 == verified.manifest_sha256
+    with pytest.raises(ArchiveError, match="not a sha256"):
+        archive.bundle_path(REQUEST_ID, "not-a-hash")

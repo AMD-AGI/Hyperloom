@@ -32,7 +32,14 @@ from hyperloom.common.env import env_bool
 from hyperloom.contracts.measurement import AccuracyValue, FailureClass, SandboxFacts
 from hyperloom.measure import bundle as bundle_mod
 from hyperloom.measure.archive import ArchiveError, ResultArchive
-from hyperloom.measure.bundle import MaterializeError, RejectReason, ResultRejected, VerifiedBundle
+from hyperloom.measure.bundle import (
+    BundleExpectation,
+    MaterializeError,
+    RecordedBundle,
+    RejectReason,
+    ResultRejected,
+    VerifiedBundle,
+)
 from hyperloom.measure.failures import Disposition, FailureClassification, classify_test_failure
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED, MeasurementJournal, Record
 from hyperloom.measure.hosted_spec import SpecContext, SpecRefused, build_spec, split_result_dir
@@ -74,6 +81,7 @@ __all__ = [
     "HOSTED_DIR_NAME",
     "HostedMeasurementBackend",
     "HostedStartError",
+    "Reverified",
     "STOPPED_RETURNCODE",
 ]
 
@@ -94,6 +102,19 @@ EventEmitter = Callable[[str, Mapping[str, Any]], None]
 
 class HostedStartError(RuntimeError):
     """The hosted backend cannot start in this environment (4.4.4 start checks)."""
+
+
+@dataclass(frozen=True)
+class Reverified:
+    """What an archived bundle says once it verified again: its signed manifest, its rounds and the sheet's points.
+
+    The rounds' directories lie below the directory the bundle was landed in; ``point_yaml`` is the YAML of every point
+    of the sheet that was sent, in order, so a round's ``point`` indexes it.
+    """
+
+    manifest: ResultManifest
+    rounds: tuple[RoundOutcome, ...]
+    point_yaml: tuple[str, ...]
 
 
 class _Events(Protocol):
@@ -562,6 +583,10 @@ class HostedMeasurementBackend:
                 "verified": True,
                 "manifest_sha256": verified.manifest_sha256,
                 "signing_key_fingerprint": verified.signing_key_fingerprint,
+                # What reverify needs later: the key the platform reported for this sandbox, as the verification
+                # above used it, and the fingerprint the sheet had to carry. Neither is read from a live runner again.
+                "public_key_pem": str(attempt.runner.public_key_pem),
+                "spec_fingerprint": verified.result.spec_fingerprint,
                 "archive": location,
             },
         )
@@ -569,6 +594,54 @@ class HostedMeasurementBackend:
         if out.timed_out:
             raise subprocess.TimeoutExpired(cmd=f"hosted test {call.task_id}", timeout=call.timeout_sec)
         return outcome
+
+    # -- verifying an accepted result again -----------------------------------------------------------------------
+
+    def reverify(self, request_id: str, recorded: RecordedBundle, output_dir: Path) -> Reverified:
+        """Verify the archived bundle of an accepted result again, from what was journalled at acceptance (L26).
+
+        The key, the sandbox and the sheet come from the journal and the saved sheet, never from a live runner, so
+        this works after the sandbox is gone. The bundle must verify for the same request, sheet and sandbox and be
+        the one ``recorded`` names; its files are then landed in ``output_dir`` (a directory the caller owns and
+        removes) so the rounds can be read the way acceptance read them.
+
+        Raises :class:`ResultRejected` for any bundle or journal that does not support the result,
+        :class:`~hyperloom.measure.archive.ArchiveError` or ``OSError`` when the archive cannot be read.
+        """
+        record = self._accepted_record(request_id, recorded.manifest_sha256)
+        expected = self._expectation(record)
+        bundle_dir = self._config.archive.bundle_path(request_id, recorded.manifest_sha256)
+        verified = bundle_mod.reverify_record(bundle_dir, expected, recorded)
+        try:
+            bundle_mod.materialize(verified, Path(output_dir))
+            spec = MeasurementSpec.from_bytes(self.journal.load_spec(request_id, record.attempt))
+            rounds = _rounds_of(verified, Path(output_dir))
+        except (MaterializeError, ValueError, KeyError) as exc:
+            raise ResultRejected(RejectReason.NOT_VERIFIED, f"the archived bundle cannot be read: {exc}") from None
+        return Reverified(verified.result, rounds, tuple(point.yaml for point in spec.config))
+
+    def _accepted_record(self, request_id: str, manifest_sha256: str) -> Record:
+        """The journal line that accepted this bundle; nothing else supports a result."""
+        found = [
+            record
+            for record in self.journal.records()
+            if record.request_id == request_id
+            and record.state == STATE_FINISHED
+            and record.extra.get("verified") is True
+            and record.extra.get("manifest_sha256") == manifest_sha256
+        ]
+        if not found:
+            raise ResultRejected(RejectReason.RECORD_MISMATCH, "the journal holds no acceptance of this bundle")
+        return found[-1]
+
+    def _expectation(self, record: Record) -> BundleExpectation:
+        key, fingerprint = record.extra.get("public_key_pem"), record.extra.get("spec_fingerprint")
+        if not isinstance(key, str) or not key:
+            raise ResultRejected(RejectReason.PUBLIC_KEY_UNUSABLE, "no signing key was kept at acceptance")
+        if not isinstance(fingerprint, str) or not fingerprint or not record.sandbox_id:
+            raise ResultRejected(RejectReason.RECORD_MISMATCH, "the acceptance kept no sheet fingerprint or sandbox")
+        sheet = self.journal.load_spec(record.request_id, record.attempt)
+        return BundleExpectation(key, record.request_id, fingerprint, spec_sha256(sheet), record.sandbox_id)
 
     # -- journal and events -------------------------------------------------------------------------------------
 

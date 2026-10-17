@@ -44,6 +44,13 @@ class ResultArchive(Protocol):
         """Store the bundle in ``staging_dir`` and return where it is stored; storing it again is a success."""
         ...
 
+    def bundle_path(self, request_id: str, manifest_sha256: str) -> Path:
+        """A readable directory holding the stored bundle, laid out as it was staged.
+
+        Raises :class:`ArchiveError` when nothing is stored under the key or the archive cannot be reached.
+        """
+        ...
+
 
 class DirResultArchive:
     """Archive into a local directory tree."""
@@ -55,6 +62,12 @@ class DirResultArchive:
         """Where a bundle is (or would be) stored."""
         _check_key(request_id, manifest_sha256)
         return self._root / request_id / manifest_sha256
+
+    def bundle_path(self, request_id: str, manifest_sha256: str) -> Path:
+        path = self.bundle_dir(request_id, manifest_sha256)
+        if not path.is_dir():
+            raise ArchiveError("no bundle is archived under this request and manifest hash")
+        return path
 
     def put_bundle(self, request_id: str, manifest_sha256: str, staging_dir: Path) -> str:
         final = self.bundle_dir(request_id, manifest_sha256)
