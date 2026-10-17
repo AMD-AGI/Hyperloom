@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging as _logging
 from pathlib import Path
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, NamedTuple
 from hyperloom.common.perf_metric import VERDICT_KEEP, constraint_fields, graded_axes_of
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
@@ -173,6 +173,16 @@ def _overlay_provenance_summary(sdk_replay: Mapping[str, Any]) -> dict[str, Any]
         "incomplete": sum(1 for row in rows if row.get("complete") is False),
         "artifacts_outside_root": sum(_count(row.get("artifacts_outside_root")) for row in rows),
     }
+
+
+class _ReplayMeasurement(NamedTuple):
+    """What a warm-replay round measured, and what it was measured against."""
+
+    tput: float
+    cold_round_tput: float
+    baseline_tput: float
+    measured_gain: float
+    expected_gain: float
 
 
 class PreludePhase(CoordinatorCollaborator):
@@ -2288,213 +2298,20 @@ class PreludePhase(CoordinatorCollaborator):
                 observed=measured_gain,
                 threshold=keep_threshold,
             )
-        promoted_checkout = ""
         if reproduced:
-            params = (task.params if task is not None else {}) or {}
-            promoted, promotion = self._resolve_promoted_recipe_checkout(
+            return self._settle_reproduced_replay(
                 result,
-                task,
+                task=task,
+                outcome=outcome,
+                recorder=recorder,
+                measurement=_ReplayMeasurement(
+                    tput=tput,
+                    cold_round_tput=cold_round_tput,
+                    baseline_tput=baseline_tput,
+                    measured_gain=measured_gain,
+                    expected_gain=expected_gain,
+                ),
             )
-            if not promoted:
-                if recorder is not None:
-                    recorder.record_gate(
-                        GATE_PROMOTION,
-                        passed=False,
-                        reason=str(promotion.get("failure") or "validated Recipe checkout promotion failed"),
-                    )
-                if not self._require_combined_warm_rollback(
-                    result,
-                    task,
-                    outcome,
-                    recorder,
-                ):
-                    return Verdict.FAILED
-                outcome["status"] = "promotion_failed"
-                outcome["reason"] = str(promotion.get("failure") or "validated Recipe checkout promotion failed")
-                outcome["recipe_checkout_promotion"] = promotion
-                kernel_outcome = {
-                    "status": "reverted",
-                    "reason": "recipe_checkout_promotion_failed",
-                    "validation": "combined_recipe_kernel",
-                }
-                outcome["kernel"] = kernel_outcome
-                return self._conclude_warm_replay(outcome, Verdict.FAILED)
-            promoted_checkout = (
-                str(promotion.get("target_repo") or "").strip() if promotion.get("status") == "promoted" else ""
-            )
-            warm_args = str(params.get("extra_server_args") or "").strip()
-            warm_envs = dict(params.get("extra_envs") or {})
-            replayed_patch_refs = [
-                str(item.get("patch_file") or "")
-                for item in (result.get("warm_patches_applied") or [])
-                if (
-                    isinstance(item, dict)
-                    and (
-                        not params.get("required_patch_timeline")
-                        or item.get("status")
-                        in {
-                            "applied",
-                            "applied_3way",
-                            # What a nogit apply reports when it writes; on a pip-installed
-                            # framework it is the only status an overlay can land under.
-                            "applied_nogit",
-                            "present_in_dirty_worktree",
-                        }
-                    )
-                    and str(item.get("patch_file") or "")
-                )
-            ]
-            if recorder is not None:
-                recorder.record_gate(
-                    GATE_PROMOTION,
-                    passed=True,
-                    reason="every patched checkout the replay measured on was promoted",
-                )
-            has_kernel = bool(params.get("warm_kernel_plan"))
-            if not warm_args and not warm_envs and not replayed_patch_refs and not has_kernel:
-                if recorder is not None:
-                    recorder.record_gate(
-                        GATE_PARAMS_PRESENT,
-                        passed=False,
-                        reason="task params carry no args, no envs, no patch and no kernel plan to replay",
-                    )
-                outcome["status"] = "reproduced_but_no_params"
-                outcome["reason"] = "task.params missing extra_server_args/extra_envs and no warm patch was applied"
-                log.warning(
-                    "warm-replay measured +%.2f%% but cannot push stack (task=%r has no warm args/envs)",
-                    measured_gain,
-                    task,
-                )
-                return self._conclude_warm_replay(outcome, Verdict.REFUSED)
-            if recorder is not None:
-                recorder.record_gate(
-                    GATE_PARAMS_PRESENT,
-                    passed=True,
-                    reason="the replay carries params that can be pushed onto the stack",
-                )
-            # Stack-entry-only metadata; the lift keeps current_best pure config.
-            entry_extra: dict[str, Any] = {
-                "gain_pct": round(measured_gain, 3),
-                "hot_tput": float(hot_tput),
-                "cold_tput": float(cold_round_tput) if cold_round_tput > 0 else None,
-                # The score this promotion was judged on, recorded alongside the throughput it was judged with.
-                "accuracy": outcome.get("replay_accuracy"),
-                # source_tier records the warm-recipe tier for breakdown attribution.
-                "source_tier": outcome.get("warm_recipe_tier", ""),
-                "source_confidence": outcome.get("warm_recipe_conf", 0.0),
-            }
-            if promoted_checkout:
-                entry_extra["framework_source_root"] = promoted_checkout
-            kernel_plan = [entry for entry in (params.get("warm_kernel_plan") or []) if isinstance(entry, dict)]
-            if kernel_plan:
-                entry_extra["kernel_replay"] = {
-                    "validation": "combined_recipe_kernel",
-                    "count": len(kernel_plan),
-                    "columns": sorted({str(entry.get("column") or "") for entry in kernel_plan}),
-                }
-            patch_result = result.get("warm_patch_result")
-            if isinstance(patch_result, dict):
-                entry_extra["recipe_patch_statuses"] = list(patch_result.get("patches") or [])
-            if replayed_patch_refs:
-                entry_extra["replayed_patch_refs"] = replayed_patch_refs
-            # Resume safety: do not clobber existing stack entries.
-            state.optimization_stack = list(state.optimization_stack or [])
-            # A prior promote owns the outcome; re-running would re-journal it.
-            already_pushed = any(
-                isinstance(e, dict) and e.get("action") == "replay_warm_recipe" for e in state.optimization_stack
-            )
-            recipe_args = str(
-                params["recipe_extra_server_args"] if "recipe_extra_server_args" in params else warm_args
-            ).strip()
-            recipe_envs = dict(params["recipe_extra_envs"] if "recipe_extra_envs" in params else warm_envs)
-            if not already_pushed and not self._coord.writeback.lift_to_current_best(
-                "replay_warm_recipe",
-                float(single_round_tput),
-                {
-                    "name": "warm_replay",
-                    **graded_axes_of(result),
-                    # The latency and power budgets grade on these and fail closed without them.
-                    **constraint_fields(result),
-                    "candidate_extra_server_args": warm_args,
-                    "candidate_extra_envs": warm_envs,
-                    "recipe_delta": {
-                        "extra_server_args": recipe_args,
-                        "extra_envs": recipe_envs,
-                        "remove_args": [],
-                        "unset_envs": [],
-                        "args_mode": "replace",
-                    },
-                    "extra_envs": warm_envs,
-                    "source_phase": "PRELUDE",
-                    "task_id": str(getattr(task, "task_id", "") or ""),
-                    "workspace": str(result.get("workspace") or ""),
-                },
-                entry_extra=entry_extra,
-            ):
-                # Cleared the keep threshold against the baseline yet did not
-                # beat the adopted configuration on its graded objective.
-                return self._reject_warm_replay_as_drift(
-                    result,
-                    task,
-                    outcome,
-                    recorder,
-                    reason=f"measured {measured_gain:+.2f}% over baseline but current_best refused the lift",
-                )
-            if promoted_checkout:
-                outcome["active_framework_root"] = promoted_checkout
-                # Resume re-points $INFERENCEX_PATH at this checkout, and stops the run when it has since vanished.
-                state.active_inferencex_path = promoted_checkout
-            outcome["status"] = "reproduced"
-            outcome.pop("replayed_patch_refs", None)
-            if replayed_patch_refs:
-                outcome["replayed_patch_refs"] = replayed_patch_refs
-            kernel_outcome = self._book_combined_kernel_keep(result, task)
-            outcome["kernel"] = dict(kernel_outcome)
-            if recorder is not None:
-                recorder.record_applied(kernel=kernel_outcome)
-            if already_pushed:
-                log.info(
-                    "warm-replay promote: stack already carries the entry; "
-                    "skipping duplicate push (likely resume mid-promote)",
-                )
-                return self._conclude_warm_replay(outcome, Verdict.ADOPTED, clear_pending=True)
-            if recorder is not None:
-                recorder.record_promotion(
-                    promoted_checkout=promoted_checkout,
-                    replayed_patch_refs=replayed_patch_refs,
-                    stack_entry=entry_extra,
-                )
-            # Publish the reproduced verdict now that the stack entry exists but
-            # before the cumulative update (the one step below that can raise and
-            # is swallowed by the caller). Placed after the lift on purpose --
-            # if the lift raises, the outcome stays in_flight and both the stack
-            # and the post-ruling mirror agree there is nothing adopted.
-            state.warm_replay_outcome = outcome
-            self._coord.writeback.validate(single_round_tput, result, source="warm_replay")
-            log.info(
-                "warm-replay REPRODUCED: measured=+%.2f%% (expected=+%.2f%%); pushed warm_replay onto stack",
-                measured_gain,
-                expected_gain,
-            )
-            # Journal warm-replay as a synthetic KEEP; no KB lesson.
-            try:
-                journal = self._coord.recipe_journal.ensure_journal()
-                journal.append_entry(
-                    JournalEntry(
-                        phase=(state.phase or "PRELUDE").upper() or "PRELUDE",
-                        iter=int(state.tick or 0),
-                        kind=KIND_OTHER,
-                        change=f"warm_replay({outcome.get('warm_recipe_tier', '?')}): {warm_args}",
-                        outcome=derive_journal_outcome(Verdict.ADOPTED, result),
-                        gain_pct=round(measured_gain, 3),
-                        throughput_after=tput,
-                        task_id=str(task.task_id if task is not None else ""),
-                        tick=int(state.tick or 0),
-                    )
-                )
-            except Exception:
-                log.exception("warm-replay journal append failed")
-            return self._conclude_warm_replay(outcome, Verdict.ADOPTED, clear_pending=True)
         return self._reject_warm_replay_as_drift(
             result,
             task,
@@ -2504,6 +2321,300 @@ class PreludePhase(CoordinatorCollaborator):
             or graded.refused_by
             or f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%",
         )
+
+    def _settle_reproduced_replay(
+        self,
+        result: dict,
+        *,
+        task: "Task | None",
+        outcome: dict[str, Any],
+        recorder: Any,
+        measurement: _ReplayMeasurement,
+    ) -> Verdict:
+        """Settle a warm replay that reproduced its prior, and say what it earned.
+
+        Every path here ends the settlement: the replay either promotes the
+        recipe it reproduced or is concluded against one of the gates, so the
+        drift rejection below this call is reached only by a replay that did not
+        reproduce at all.
+        """
+        promoted_checkout = ""
+        params = (task.params if task is not None else {}) or {}
+        promoted, promotion = self._resolve_promoted_recipe_checkout(
+            result,
+            task,
+        )
+        if not promoted:
+            return self._refuse_unpromoted_checkout(
+                result, task=task, outcome=outcome, recorder=recorder, promotion=promotion
+            )
+        promoted_checkout = (
+            str(promotion.get("target_repo") or "").strip() if promotion.get("status") == "promoted" else ""
+        )
+        warm_args = str(params.get("extra_server_args") or "").strip()
+        warm_envs = dict(params.get("extra_envs") or {})
+        replayed_patch_refs = self._replayed_patch_refs(result, params)
+        if recorder is not None:
+            recorder.record_gate(
+                GATE_PROMOTION,
+                passed=True,
+                reason="every patched checkout the replay measured on was promoted",
+            )
+        has_kernel = bool(params.get("warm_kernel_plan"))
+        if not warm_args and not warm_envs and not replayed_patch_refs and not has_kernel:
+            if recorder is not None:
+                recorder.record_gate(
+                    GATE_PARAMS_PRESENT,
+                    passed=False,
+                    reason="task params carry no args, no envs, no patch and no kernel plan to replay",
+                )
+            outcome["status"] = "reproduced_but_no_params"
+            outcome["reason"] = "task.params missing extra_server_args/extra_envs and no warm patch was applied"
+            log.warning(
+                "warm-replay measured +%.2f%% but cannot push stack (task=%r has no warm args/envs)",
+                measurement.measured_gain,
+                task,
+            )
+            return self._conclude_warm_replay(outcome, Verdict.REFUSED)
+        if recorder is not None:
+            recorder.record_gate(
+                GATE_PARAMS_PRESENT,
+                passed=True,
+                reason="the replay carries params that can be pushed onto the stack",
+            )
+        # Stack-entry-only metadata; the lift keeps current_best pure config.
+        entry_extra: dict[str, Any] = {
+            "gain_pct": round(measurement.measured_gain, 3),
+            "hot_tput": float(measurement.tput),
+            "cold_tput": float(measurement.cold_round_tput) if measurement.cold_round_tput > 0 else None,
+            # The score this promotion was judged on, recorded alongside the throughput it was judged with.
+            "accuracy": outcome.get("replay_accuracy"),
+            # source_tier records the warm-recipe tier for breakdown attribution.
+            "source_tier": outcome.get("warm_recipe_tier", ""),
+            "source_confidence": outcome.get("warm_recipe_conf", 0.0),
+        }
+        entry_extra.update(
+            self._stack_entry_annotations(
+                params,
+                result,
+                promoted_checkout=promoted_checkout,
+                replayed_patch_refs=replayed_patch_refs,
+            )
+        )
+        # Resume safety: do not clobber existing stack entries.
+        self.shared_state.optimization_stack = list(self.shared_state.optimization_stack or [])
+        # A prior promote owns the outcome; re-running would re-journal it.
+        already_pushed = any(
+            isinstance(e, dict) and e.get("action") == "replay_warm_recipe"
+            for e in self.shared_state.optimization_stack
+        )
+        recipe_args = str(
+            params["recipe_extra_server_args"] if "recipe_extra_server_args" in params else warm_args
+        ).strip()
+        recipe_envs = dict(params["recipe_extra_envs"] if "recipe_extra_envs" in params else warm_envs)
+        if not already_pushed and not self._coord.writeback.lift_to_current_best(
+            "replay_warm_recipe",
+            float(measurement.tput),
+            {
+                "name": "warm_replay",
+                **graded_axes_of(result),
+                # The latency and power budgets grade on these and fail closed without them.
+                **constraint_fields(result),
+                "candidate_extra_server_args": warm_args,
+                "candidate_extra_envs": warm_envs,
+                "recipe_delta": {
+                    "extra_server_args": recipe_args,
+                    "extra_envs": recipe_envs,
+                    "remove_args": [],
+                    "unset_envs": [],
+                    "args_mode": "replace",
+                },
+                "extra_envs": warm_envs,
+                "source_phase": "PRELUDE",
+                "task_id": str(getattr(task, "task_id", "") or ""),
+                "workspace": str(result.get("workspace") or ""),
+            },
+            entry_extra=entry_extra,
+        ):
+            # Cleared the keep threshold against the baseline yet did not
+            # beat the adopted configuration on its graded objective.
+            return self._reject_warm_replay_as_drift(
+                result,
+                task,
+                outcome,
+                recorder,
+                reason=f"measured {measurement.measured_gain:+.2f}% over baseline but current_best refused the lift",
+            )
+        if promoted_checkout:
+            outcome["active_framework_root"] = promoted_checkout
+            # Resume re-points $INFERENCEX_PATH at this checkout, and stops the run when it has since vanished.
+            self.shared_state.active_inferencex_path = promoted_checkout
+        outcome["status"] = "reproduced"
+        outcome.pop("replayed_patch_refs", None)
+        if replayed_patch_refs:
+            outcome["replayed_patch_refs"] = replayed_patch_refs
+        kernel_outcome = self._book_combined_kernel_keep(result, task)
+        outcome["kernel"] = dict(kernel_outcome)
+        if recorder is not None:
+            recorder.record_applied(kernel=kernel_outcome)
+        if already_pushed:
+            log.info(
+                "warm-replay promote: stack already carries the entry; "
+                "skipping duplicate push (likely resume mid-promote)",
+            )
+            return self._conclude_warm_replay(outcome, Verdict.ADOPTED, clear_pending=True)
+        if recorder is not None:
+            recorder.record_promotion(
+                promoted_checkout=promoted_checkout,
+                replayed_patch_refs=replayed_patch_refs,
+                stack_entry=entry_extra,
+            )
+        # Publish the reproduced verdict now that the stack entry exists but
+        # before the cumulative update (the one step below that can raise and
+        # is swallowed by the caller). Placed after the lift on purpose --
+        # if the lift raises, the outcome stays in_flight and both the stack
+        # and the post-ruling mirror agree there is nothing adopted.
+        self.shared_state.warm_replay_outcome = outcome
+        self._coord.writeback.validate(measurement.tput, result, source="warm_replay")
+        log.info(
+            "warm-replay REPRODUCED: measured=+%.2f%% (expected=+%.2f%%); pushed warm_replay onto stack",
+            measurement.measured_gain,
+            measurement.expected_gain,
+        )
+        self._journal_warm_replay(result, task=task, outcome=outcome, warm_args=warm_args, measurement=measurement)
+        return self._conclude_warm_replay(outcome, Verdict.ADOPTED, clear_pending=True)
+
+    @staticmethod
+    def _stack_entry_annotations(
+        params: Mapping[str, Any],
+        result: dict,
+        *,
+        promoted_checkout: str,
+        replayed_patch_refs: list[str],
+    ) -> dict[str, Any]:
+        """Describe what a replayed stack entry reproduced, for the audit trail.
+
+        None of this is configuration: it is what the replay touched -- the
+        framework checkout it ran against, the kernel columns it replayed, and
+        the patches that landed -- recorded so a later reader can tell a
+        reproduced stack entry from an originally measured one.
+        """
+        annotations: dict[str, Any] = {}
+        if promoted_checkout:
+            annotations["framework_source_root"] = promoted_checkout
+        kernel_plan = [entry for entry in (params.get("warm_kernel_plan") or []) if isinstance(entry, dict)]
+        if kernel_plan:
+            annotations["kernel_replay"] = {
+                "validation": "combined_recipe_kernel",
+                "count": len(kernel_plan),
+                "columns": sorted({str(entry.get("column") or "") for entry in kernel_plan}),
+            }
+        patch_result = result.get("warm_patch_result")
+        if isinstance(patch_result, dict):
+            annotations["recipe_patch_statuses"] = list(patch_result.get("patches") or [])
+        if replayed_patch_refs:
+            annotations["replayed_patch_refs"] = replayed_patch_refs
+        return annotations
+
+    def _refuse_unpromoted_checkout(
+        self,
+        result: dict,
+        *,
+        task: "Task | None",
+        outcome: dict[str, Any],
+        recorder: Any,
+        promotion: Mapping[str, Any],
+    ) -> Verdict:
+        """Conclude a reproduced replay whose Recipe checkout would not promote.
+
+        The replay measured what it claimed, but the checkout it measured cannot
+        be published, so nothing downstream may read it as adopted: the kernel
+        half is reported reverted alongside the recipe half that refused.
+        """
+        if recorder is not None:
+            recorder.record_gate(
+                GATE_PROMOTION,
+                passed=False,
+                reason=str(promotion.get("failure") or "validated Recipe checkout promotion failed"),
+            )
+        if not self._require_combined_warm_rollback(
+            result,
+            task,
+            outcome,
+            recorder,
+        ):
+            return Verdict.FAILED
+        outcome["status"] = "promotion_failed"
+        outcome["reason"] = str(promotion.get("failure") or "validated Recipe checkout promotion failed")
+        outcome["recipe_checkout_promotion"] = promotion
+        kernel_outcome = {
+            "status": "reverted",
+            "reason": "recipe_checkout_promotion_failed",
+            "validation": "combined_recipe_kernel",
+        }
+        outcome["kernel"] = kernel_outcome
+        return self._conclude_warm_replay(outcome, Verdict.FAILED)
+
+    @staticmethod
+    def _replayed_patch_refs(result: dict, params: Mapping[str, Any]) -> list[str]:
+        """Name the warm patches this replay actually landed.
+
+        A plan that required its patch timeline counts only the statuses that
+        mean the overlay is on disk; without that requirement every reported
+        patch file counts, since the apply had nothing to prove.
+        """
+        return [
+            str(item.get("patch_file") or "")
+            for item in (result.get("warm_patches_applied") or [])
+            if (
+                isinstance(item, dict)
+                and (
+                    not params.get("required_patch_timeline")
+                    or item.get("status")
+                    in {
+                        "applied",
+                        "applied_3way",
+                        # What a nogit apply reports when it writes; on a pip-installed
+                        # framework it is the only status an overlay can land under.
+                        "applied_nogit",
+                        "present_in_dirty_worktree",
+                    }
+                )
+                and str(item.get("patch_file") or "")
+            )
+        ]
+
+    def _journal_warm_replay(
+        self,
+        result: dict,
+        *,
+        task: "Task | None",
+        outcome: dict[str, Any],
+        warm_args: str,
+        measurement: _ReplayMeasurement,
+    ) -> None:
+        """Journal a warm replay as a synthetic KEEP; it carries no KB lesson.
+
+        Best-effort: the replay has already earned its verdict, so a journal
+        that cannot be written must not take the verdict down with it.
+        """
+        try:
+            journal = self._coord.recipe_journal.ensure_journal()
+            journal.append_entry(
+                JournalEntry(
+                    phase=(self.shared_state.phase or "PRELUDE").upper() or "PRELUDE",
+                    iter=int(self.shared_state.tick or 0),
+                    kind=KIND_OTHER,
+                    change=f"warm_replay({outcome.get('warm_recipe_tier', '?')}): {warm_args}",
+                    outcome=derive_journal_outcome(Verdict.ADOPTED, result),
+                    gain_pct=round(measurement.measured_gain, 3),
+                    throughput_after=measurement.tput,
+                    task_id=str(task.task_id if task is not None else ""),
+                    tick=int(self.shared_state.tick or 0),
+                )
+            )
+        except Exception:
+            log.exception("warm-replay journal append failed")
 
     def _reject_warm_replay_as_drift(
         self,
