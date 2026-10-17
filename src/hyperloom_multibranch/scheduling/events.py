@@ -4,34 +4,63 @@
 """Events that change what the running branches are worth, detected on each EXPLORE tick for the judge to weigh.
 
 The integration head moving by a large gain (``integration_moved``) leaves the branches started before it behind it,
-and a measurement node quarantined (``environment_changed``) may make results on either side of it compare less well.
-The scheduler records each event as a decision, shows it at the judge's next call and asks the judge at once; what to
-stop and what to open is the judge's decision. A quarantine never stops the session: it only widens the nodes the
-toolbox avoids, and on a single node the toolbox still measures there.
+its bottleneck moving (``bottleneck_moved``) leaves the branches attacking the old one with less to gain, and a
+measurement node quarantined (``environment_changed``) may make results on either side of it compare less well. The
+scheduler records each event as a decision, shows it at the judge's next call and asks the judge at once; what to stop
+and what to open is the judge's decision. A quarantine never stops the session: it only widens the nodes the toolbox
+avoids, and on a single node the toolbox still measures there.
 
 A large gain is read off the merge reports alone, against the bar each merge was judged by, so it follows the bar of
 whatever metric the gate judges. Nothing here scores the frontier, which logs a round every time it is read.
+
+After the integration head moved, :class:`IntegrationProfiler` profiles it, one profile at a time, in a task of its own:
+a PROFILE test of the head, then a TraceLens analysis of that test's trace, whose op shares the bottleneck is read from.
+Both wait for the measurement to end, so the tick only starts the task and looks whether it is done. The PROFILE takes
+one of the integration branch's K slots. A backend that cannot profile, by refusing the PROFILE, failing it or running
+no analysis, is not asked again in this session: on a backend that refuses after its sandbox is built, every try costs
+a cold start and holds the integration branch's slot. The toolbox's own names are imported where the profile uses
+them: the toolbox loads the main flow's runtime, which importing the session must not.
 """
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
 
+from hyperloom.contracts.measurement import Purpose, TestKind, Validity
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.interfaces import NodeHealth
-from hyperloom_multibranch.contracts.notebook.records import BranchProgress, QuarantineEvent
+from hyperloom_multibranch.contracts.notebook.interfaces import NodeHealth, RecordSearch
+from hyperloom_multibranch.contracts.notebook.records import BranchProgress, OpShares, QuarantineEvent
 from hyperloom_multibranch.contracts.notebook.vocab import MergeOutcome
+from hyperloom_multibranch.contracts.toolbox import RequestRejected
+from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.integrator import MergeReport
+from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
+
+if TYPE_CHECKING:
+    from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
 #: A merge moves the integration head when its gain is at least this many times the bar it was judged against.
 MB_BIG_GAIN_BARS = 2
+#: The bottleneck moves when the largest op changes, or its share falls by more than this many percentage points.
+MB_BOTTLENECK_SHIFT_PP = 10
+#: Clock seconds between two looks at the analysis of a profile.
+ANALYSIS_POLL_SECONDS = 5.0
+PROFILE_UNAVAILABLE = "profile not available on this backend"
+HEAD_MOVED_DURING_PROFILE = "integration head moved during profiling"
+PROFILED = "integration head profiled"
+#: The toolbox's refusal of a test kind its backend does not run, a PROFILE on a backend that cannot profile.
+UNSUPPORTED_KIND = "unsupported_kind"
 
 
 class EventKind(str, Enum):
     INTEGRATION_MOVED = "integration_moved"
+    BOTTLENECK_MOVED = "bottleneck_moved"
     ENVIRONMENT_CHANGED = "environment_changed"
 
 
@@ -61,6 +90,27 @@ def integration_moved(report: MergeReport) -> SessionEvent | None:
     return SessionEvent(EventKind.INTEGRATION_MOVED, reason, detail)
 
 
+def bottleneck_moved(before: OpShares | None, after: OpShares | None) -> SessionEvent | None:
+    """The event of the integration head's op shares going from ``before`` to ``after``: its largest op changed, or
+    that op's share fell by more than :data:`MB_BOTTLENECK_SHIFT_PP` points; ``None`` without both to compare."""
+
+    if before is None or after is None or not before.shares or not after.shares:
+        return None
+    [(old_op, old_share)], [(new_op, new_share)] = before.largest(1), after.largest(1)
+    if new_op == old_op and old_share - after.shares.get(old_op, 0.0) <= MB_BOTTLENECK_SHIFT_PP:
+        return None
+    reason = f"the bottleneck moved from {old_op} at {old_share:.1f}% to {new_op} at {new_share:.1f}%"
+    detail = {
+        "commit": after.commit_id,
+        "largest_op": new_op,
+        "share_pct": new_share,
+        "previous_commit": before.commit_id,
+        "previous_largest_op": old_op,
+        "previous_share_pct": old_share,
+    }
+    return SessionEvent(EventKind.BOTTLENECK_MOVED, reason, detail)
+
+
 def environment_changed(quarantine: QuarantineEvent) -> SessionEvent:
     """The event of ``quarantine``; no ``gpu_ids`` is the whole node."""
 
@@ -88,6 +138,115 @@ def behind_integration_pct(
     }
 
 
+@dataclass(frozen=True)
+class ProfileOutcome:
+    """How one profile of the integration head ended: the reason and facts of its decision, the event it found, and
+    whether the backend can profile at all."""
+
+    reason: str
+    detail: Mapping[str, object]
+    event: SessionEvent | None = None
+    available: bool = True
+
+
+class IntegrationProfiler:
+    """Profiles the integration head after it moved, at most one profile at a time, in a task of its own.
+
+    The profile is a PROFILE test of the head through ``tests``, at the default priority of its purpose, then a
+    TraceLens analysis of that test, whose op shares the ``records`` hold once the analysis has ended. Its bottleneck is
+    compared with the shares of the previous profile, or else with those of the head the move started from. Once a
+    profile shows the backend cannot profile, no profile starts again.
+    """
+
+    def __init__(self, toolbox: RealToolbox, tests: SessionTests, records: RecordSearch, clock: Clock) -> None:
+        self._toolbox = toolbox
+        self._tests = tests
+        self._records = records
+        self._clock = clock
+        self._task: asyncio.Future[ProfileOutcome] | None = None
+        self._shares: OpShares | None = None
+        self._available = True
+
+    @property
+    def running(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    def start(self, head: str, moved_from: str) -> None:
+        """Start profiling ``head``, which the integration head moved to from ``moved_from``, unless a profile runs or
+        the backend cannot profile."""
+
+        if self._available and not self.running:
+            self._task = asyncio.ensure_future(self._profile(head, moved_from))
+
+    def finished(self) -> ProfileOutcome | None:
+        """The outcome of the profile that ended since the last look; ``None`` while it runs or when none ran."""
+
+        if self._task is None or not self._task.done():
+            return None
+        task, self._task = self._task, None
+        outcome = task.result()
+        self._available = self._available and outcome.available
+        return outcome
+
+    async def stop(self) -> None:
+        """Cancel the running profile, which takes its PROFILE test back; its analysis goes with the integration
+        branch's withdrawal."""
+
+        if self._task is None:
+            return
+        task, self._task = self._task, None
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    async def _profile(self, head: str, moved_from: str) -> ProfileOutcome:
+        from hyperloom_multibranch.toolbox.analysis import (
+            CODE_NO_EXECUTOR,
+            CODE_PROFILE_UNVERIFIED,
+            CODE_PROFILE_WITHOUT_TRACE,
+            CODE_TOOL_UNAVAILABLE,
+        )
+
+        before = self._shares or await self._records.op_shares(moved_from)
+        request = integration_test_request(TestKind.PROFILE, Purpose.PROFILE, head)
+        try:
+            return await self._tests.judged(request, lambda request_id: self._analysed(head, request_id, before))
+        except RequestRejected as rejected:
+            detail = {"commit": head, "code": rejected.code, "rejection": rejected.reason}
+            if rejected.code == CODE_PROFILE_UNVERIFIED:
+                return ProfileOutcome(HEAD_MOVED_DURING_PROFILE, detail)
+            unable = (UNSUPPORTED_KIND, CODE_PROFILE_WITHOUT_TRACE, CODE_NO_EXECUTOR, CODE_TOOL_UNAVAILABLE)
+            if rejected.code in unable:
+                return ProfileOutcome(PROFILE_UNAVAILABLE, detail, available=False)
+            raise
+
+    async def _analysed(self, head: str, request_id: str, before: OpShares | None) -> ProfileOutcome:
+        """Analyse the trace of the PROFILE ``request_id`` once it ended; the toolbox reads the trace off that test's
+        own record."""
+
+        from hyperloom_multibranch.toolbox.tools.base import JobStatus
+        from hyperloom_multibranch.toolbox.tools.roofline import TRACELENS_TOOL
+
+        result = await self._toolbox.outcome(request_id)
+        detail: dict[str, object] = {"commit": head, "request_id": request_id}
+        if result.validity is not Validity.SUCCEEDED:
+            failed = {**detail, "validity": result.validity.value, "failure_reason": result.failure_reason}
+            return ProfileOutcome(PROFILE_UNAVAILABLE, failed, available=False)
+        job = await self._toolbox.submit_analysis(INTEGRATION_BRANCH, TRACELENS_TOOL, {}, request_id)
+        while self._toolbox.tool_status(job) is JobStatus.RUNNING:
+            await self._clock.sleep(ANALYSIS_POLL_SECONDS)
+        # A job's status turns final just before its result is pushed to the notebook, so the shares are read a poll
+        # later, and only when they are this job's.
+        await self._clock.sleep(ANALYSIS_POLL_SECONDS)
+        found = await self._records.op_shares(head)
+        shares = found if found is not None and found.job_id == job else None
+        if shares is not None:
+            self._shares = shares
+        largest = shares.largest(1) if shares is not None else ()
+        detail.update(job_id=job, analysis=self._toolbox.tool_status(job).value, largest_op=dict(largest))
+        return ProfileOutcome(PROFILED, detail, bottleneck_moved(before, shares))
+
+
 def _slot(quarantine: QuarantineEvent) -> tuple[str, tuple[int, ...]]:
     return quarantine.node, quarantine.gpu_ids
 
@@ -96,13 +255,14 @@ class SessionEvents:
     """Detects the events of one EXPLORE and holds them until the judge's next call.
 
     The integrator's task hands over each round's merge reports with :meth:`note_merges`; :meth:`detect` turns them,
-    and the quarantines put in force since the last tick, into events. A quarantine lifted and put in force again is a
-    new event.
+    the quarantines put in force since the last tick and the profile ``profiler`` finished, into events, and has the
+    head a large merge moved to profiled. A quarantine lifted and put in force again is a new event.
     """
 
-    def __init__(self, health: NodeHealth, decisions: DecisionLog) -> None:
+    def __init__(self, health: NodeHealth, decisions: DecisionLog, profiler: IntegrationProfiler) -> None:
         self._health = health
         self._decisions = decisions
+        self._profiler = profiler
         self._merges: list[MergeReport] = []
         self._quarantined: frozenset[tuple[str, tuple[int, ...]]] = frozenset()
         self._unshown: list[SessionEvent] = []
@@ -110,12 +270,24 @@ class SessionEvents:
     def note_merges(self, reports: Iterable[MergeReport]) -> None:
         self._merges.extend(reports)
 
-    async def detect(self) -> bool:
-        """Record the events since the last tick as decisions and hold them for the judge; true when there was one."""
+    @property
+    def profiling(self) -> bool:
+        """Whether a profile of the integration head runs, holding one of the integration branch's K slots."""
 
+        return self._profiler.running
+
+    async def detect(self) -> bool:
+        """Record the events since the last tick as decisions and hold them for the judge; true when there was one.
+
+        A large merge has the head the last merge of the tick moved to profiled, when no profile runs."""
+
+        found = self._profiled()
         moved = [event for event in map(integration_moved, self._merges) if event is not None]
+        merged = [report for report in self._merges if report.merged_commit]
+        if moved:
+            self._profiler.start(str(merged[-1].merged_commit), merged[0].onto)
         self._merges.clear()
-        found = [*moved, *await self._newly_quarantined()]
+        found = [*moved, *await self._newly_quarantined(), *found]
         for event in found:
             detail = {"event": event.kind.value, **event.detail}
             self._decisions.record(Decision(DecisionKind.EVENT, event.reason, detail=detail))
@@ -128,6 +300,16 @@ class SessionEvents:
         events, self._unshown = tuple(self._unshown), []
         return events
 
+    async def stop_profiling(self) -> None:
+        await self._profiler.stop()
+
+    def _profiled(self) -> list[SessionEvent]:
+        outcome = self._profiler.finished()
+        if outcome is None:
+            return []
+        self._decisions.record(Decision(DecisionKind.PROFILE, outcome.reason, detail=outcome.detail))
+        return [] if outcome.event is None else [outcome.event]
+
     async def _newly_quarantined(self) -> list[SessionEvent]:
         current = await self._health.quarantined()
         new = [quarantine for quarantine in current if _slot(quarantine) not in self._quarantined]
@@ -136,11 +318,20 @@ class SessionEvents:
 
 
 __all__ = [
+    "ANALYSIS_POLL_SECONDS",
+    "HEAD_MOVED_DURING_PROFILE",
     "MB_BIG_GAIN_BARS",
+    "MB_BOTTLENECK_SHIFT_PP",
+    "PROFILED",
+    "PROFILE_UNAVAILABLE",
+    "UNSUPPORTED_KIND",
     "EventKind",
+    "IntegrationProfiler",
+    "ProfileOutcome",
     "SessionEvent",
     "SessionEvents",
     "behind_integration_pct",
+    "bottleneck_moved",
     "environment_changed",
     "integration_moved",
 ]

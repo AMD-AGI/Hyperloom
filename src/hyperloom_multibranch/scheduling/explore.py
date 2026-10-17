@@ -9,15 +9,17 @@ the admitted forks and repairs, and every judge interval asks the judge, applies
 dashboard. A slot the judge's stops free goes to the queued requests first and only then to the branches the judge
 opens. The judge is asked at once, not at its next interval, when the scheduler itself frees a slot: a repair branch
 stopped at its time limit, a fork the gate did not land, or an admitted fork or repair that failed to start; and when
-an event changes what the branches are worth: a merge that moved the integration head by a large gain, or a quarantined
-measurement node. A branch the judge opens after the opening batch starts from the integration head, briefed on a
-focus. The judge reads the frontier-scored progress, how similar archived sessions went, which running branches made
-much the same change, the events since its last call and how far each branch lies behind the integration head, and
-decides what to stop; a judge call that has not answered by the EXPLORE deadline counts as failed, and a branch that has
-not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background task of its own, in
-rounds as wide as the integration branch's K. When EXPLORE ends that task is cancelled and the integrator abandons its
-round, so the integration head the FINAL candidates are read from no longer moves and no merge test competes with
-FINAL's measurements.
+an event changes what the branches are worth: a merge that moved the integration head by a large gain, the bottleneck
+of the profile taken of the integration head after such a merge moving, or a quarantined measurement node. A branch
+the judge opens after the opening batch starts from the integration head, briefed on a focus. The judge reads the
+frontier-scored progress, how similar archived sessions went, which running branches made much the same change, the
+events since its last call, how far each branch lies behind the integration head and whether a profile of the
+integration head runs, and decides what to stop; a judge call that has not answered by the EXPLORE deadline counts as
+failed, and a branch that has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a
+background task of its own, in rounds as wide as the integration branch's K. When EXPLORE ends that task is cancelled
+and the integrator abandons its round, so the integration head the FINAL candidates are read from no longer moves and
+no merge test competes with FINAL's measurements; a profile of the integration head still running is cancelled before
+that, taking its test back.
 """
 
 from __future__ import annotations
@@ -135,9 +137,12 @@ class Explorer:
             return await self._steer(window, merging)
         finally:
             merging.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await merging
-            await self._integrator.abandon()
+            try:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await merging
+                await self._events.stop_profiling()
+            finally:
+                await self._integrator.abandon()
 
     async def _steer(self, window: ExploreWindow, merging: asyncio.Future[None]) -> SessionStopReason:
         next_judge = self._clock.now() + self._interval
@@ -229,6 +234,7 @@ class Explorer:
             similar_to=await self._similarity.similar_to(),
             events=self._events.hand_over(),
             behind_integration_pct=behind_integration_pct(progress, integration_value, root.values, PRIMARY_METRIC),
+            profile_running=self._events.profiling,
         )
         try:
             decision = await self._clock.wait_for(self._judge.decide(view), window.explore_end - now)

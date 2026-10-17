@@ -23,12 +23,13 @@ import signal
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.common.proctree import running
-from hyperloom.contracts.measurement import Purpose, TestRequest
+from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
 from hyperloom.measure.versions import socket_versions
@@ -38,12 +39,14 @@ from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import QuarantineEvent, ToolResultPointer
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind, QuarantineAction
+from hyperloom_multibranch.contracts.toolbox import CancelOutcome
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.notebook.tests.factories import delta, intent
 from hyperloom_multibranch.scheduling.budget import SessionBudget
 from hyperloom_multibranch.scheduling import branches
+from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE
 from hyperloom_multibranch.scheduling.explore import EXPLORE_TICK_SECONDS, FORK_NOT_LANDED, OPEN_CUT_REASON
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL
 from hyperloom_multibranch.scheduling.forks import ForkDesk
@@ -82,6 +85,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     tagged,
 )
 from hyperloom_multibranch.scheduling.tests.child_sessions import child_with_patch
+from hyperloom_multibranch.toolbox.tools.base import JobStatus
 from hyperloom_multibranch.specialist.prompts import prompt_versions
 
 START = 1_700_000_000.0
@@ -1022,3 +1026,66 @@ async def test_a_whole_node_quarantine_is_shown_to_the_judge_at_once_and_explore
     calls = [json.loads(line) for line in stage.layout.judge.read_text().splitlines()]
     [shown] = [call for call in calls if '"event": "environment_changed"' in call["prompt"]]
     assert at <= shown["at"] <= at + EXPLORE_TICK_SECONDS and '"node": "node-0"' in shown["prompt"]
+
+
+class AnalysingToolbox(RecordingToolbox):
+    """The recording toolbox with an analysis route whose TraceLens job never ends, noting every test taken back; a
+    double for a backend that profiles, not a placeholder."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.analysed: list[str] = []
+        self.taken_back: list[str] = []
+
+    async def submit_analysis(
+        self, branch: str, tool: str, params: Mapping[str, Any], profile_request_id: str = ""
+    ) -> str:
+        self.analysed.append(profile_request_id)
+        return "tracelens-1"
+
+    def tool_status(self, job_id: str) -> JobStatus:
+        return JobStatus.RUNNING
+
+    async def cancel(self, request_id: str) -> CancelOutcome:
+        self.taken_back.append(request_id)
+        return await super().cancel(request_id)
+
+
+def _profiles(toolbox: RecordingToolbox) -> list[tuple[str, TestRequest]]:
+    return [
+        (request_id, request) for request_id, request in toolbox.requests.items() if request.kind is TestKind.PROFILE
+    ]
+
+
+async def test_a_large_merge_profiles_the_integration_head_without_holding_the_judge_up(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.judge = ScriptedCompletion([_reply({"open": 1, "branches": [], "stop": []})])
+    stage.scripts = {"b01": (tagged("c1"),)}
+    stage.toolbox_type = AnalysingToolbox
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, "", 0)
+    head = await stage.repo.head(INTEGRATION_BRANCH)
+    [(request_id, profile)] = _profiles(stage.toolbox)
+    assert (profile.purpose, profile.branch_id, profile.parent_commit) == (Purpose.PROFILE, INTEGRATION_BRANCH, head)
+    assert isinstance(stage.toolbox, AnalysingToolbox) and stage.toolbox.analysed == [request_id]
+    [moved] = [row for row in _decisions(stage) if row["kind"] == "event"]
+    assert moved["detail"]["event"] == "integration_moved"
+    calls = [json.loads(line) for line in stage.layout.judge.read_text().splitlines()]
+    running = [call["at"] for call in calls if '"profile_running": true' in call["prompt"]]
+    assert len(running) >= 2 and running[1] - running[0] == SETTINGS.judge_interval_seconds
+    assert request_id in stage.toolbox.taken_back
+    assert not [row for row in _decisions(stage) if row["kind"] == "profile"]
+
+
+async def test_a_backend_without_tool_jobs_is_asked_for_one_profile_and_noted_as_unable(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    _script(stage)
+
+    await stage.run()
+
+    [(_, profile)] = _profiles(stage.toolbox)
+    assert profile.parent_commit == await stage.repo.head(INTEGRATION_BRANCH)
+    [noted] = [row for row in _decisions(stage) if row["kind"] == "profile"]
+    assert (noted["reason"], noted["detail"]["code"]) == (PROFILE_UNAVAILABLE, "no_tool_executor")

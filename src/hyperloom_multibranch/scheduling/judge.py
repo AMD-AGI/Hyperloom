@@ -5,11 +5,11 @@
 
 The scheduler hands the judge a :class:`JudgeView` (the roster, each branch's frontier progress, the remaining budget,
 the integration branch's recorded value, how similar archived sessions went, whether a branch opened now would
-still pay off, which running branches made much the same change, the events since its last call and how far each
-branch lies behind the integration head). The judge answers with one JSON object, which :func:`parse_decision`
-reads and :func:`cap_decision` cuts to the caps and to the branches that are still live. A failed call or an
-unreadable reply gives ``None``, and the scheduler keeps the status quo. The judge never calls a peer; the scheduler
-applies its decision.
+still pay off, which running branches made much the same change, the events since its last call, how far each
+branch lies behind the integration head and whether a profile of the integration head runs). The judge answers with
+one JSON object, which :func:`parse_decision` reads and :func:`cap_decision` cuts to the caps and to the branches that
+are still live. A failed call or an unreadable reply gives ``None``, and the scheduler keeps the status quo. The judge
+never calls a peer; the scheduler applies its decision.
 """
 
 from __future__ import annotations
@@ -22,9 +22,10 @@ from pathlib import Path
 
 from hyperloom.common.io import append_jsonl
 from hyperloom.common.jsonio import extract_last_json_with_key
+from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, SessionEvent
+from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, SessionEvent
 from hyperloom_multibranch.scheduling.forks import PendingBranch
 from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, RosterCaps
@@ -69,6 +70,11 @@ once when one happens. integration_moved: a merge moved the integration head by 
 times the bar threshold_pct it was judged against. A branch's behind_integration_pct is how far its head's recorded
 value lies below the integration head's, in percent of the root's value: a branch far behind gains little even once
 merged, so it is a candidate to stop, and a branch you open now starts from the new integration head.
+bottleneck_moved: the profile of the integration head taken after it moved found its largest op changed, or that op's
+share fell by more than {MB_BOTTLENECK_SHIFT_PP} percentage points: branches still speeding up the previous largest op
+have less to gain, and a branch you open now is briefed on the new largest op unless you name its focus.
+The integration branch's profile_running is true while that profile runs: its PROFILE test holds one of the
+integration branch's K slots, so merge tests wait for it while that K is 1; size the integration branch's K with it.
 environment_changed: the toolbox quarantined a measurement node after an infrastructure failure (gpu_ids is empty for
 the whole node). Tests still run, on a single node even on the quarantined one, but results measured before and after
 it may compare less well; weigh whether opening more branches is still worth it.
@@ -108,7 +114,7 @@ class JudgeView:
     opened now would still pay off. ``similar_to`` maps a branch to the running branches whose own change is much the
     same as its own; a branch similar to none is not in it. ``events`` are the events detected since the last call,
     and ``behind_integration_pct`` maps a running specialist branch to how far its head lies behind the integration
-    head, in percent of the root's value.
+    head, in percent of the root's value. ``profile_running`` is whether a profile of the integration head runs.
     """
 
     now: float
@@ -128,6 +134,7 @@ class JudgeView:
     similar_to: Mapping[str, tuple[SimilarBranch, ...]]
     events: tuple[SessionEvent, ...]
     behind_integration_pct: Mapping[str, float]
+    profile_running: bool
 
 
 @dataclass(frozen=True)
@@ -201,6 +208,8 @@ def _branch_row(entry: BranchEntry, progress: BranchProgress | None, view: Judge
         "k": entry.k,
         "similar_to": [asdict(item) for item in view.similar_to.get(entry.branch, ())],
     }
+    if entry.branch == INTEGRATION_BRANCH:
+        row["profile_running"] = view.profile_running
     behind = view.behind_integration_pct.get(entry.branch)
     if behind is not None:
         row["behind_integration_pct"] = round(behind, 2)

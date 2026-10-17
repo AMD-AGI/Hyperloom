@@ -16,7 +16,7 @@ from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, FrontierScore
 from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, EventKind, SessionEvent
+from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, EventKind, SessionEvent
 from hyperloom_multibranch.scheduling.judge import (
     JUDGE_PROMPT_VERSION,
     JUDGE_SYSTEM_PROMPT,
@@ -82,6 +82,7 @@ def _view(
     similar_to: dict[str, tuple[SimilarBranch, ...]] | None = None,
     events: tuple[SessionEvent, ...] = (),
     behind: dict[str, float] | None = None,
+    profile_running: bool = False,
 ) -> JudgeView:
     return JudgeView(
         now=NOW,
@@ -113,6 +114,7 @@ def _view(
         similar_to=similar_to or {},
         events=events,
         behind_integration_pct=behind or {},
+        profile_running=profile_running,
     )
 
 
@@ -144,6 +146,35 @@ def test_the_prompt_shows_and_explains_the_events_and_how_far_each_branch_lies_b
     for field in ("events", "integration_moved", "environment_changed", "behind_integration_pct"):
         assert field in prompt
     assert f"at least {MB_BIG_GAIN_BARS} times the bar threshold_pct" in prompt
+
+
+@pytest.mark.parametrize("running", [True, False])
+def test_the_integration_row_shows_whether_its_profile_runs_and_the_prompt_says_it_holds_a_k_slot(
+    running: bool,
+) -> None:
+    rows = {row["branch"]: row for row in _state(_view(profile_running=running))["branches"]}
+
+    assert rows[INTEGRATION_BRANCH]["profile_running"] is running
+    assert "profile_running" not in rows["b01"]
+    prompt = " ".join(JUDGE_SYSTEM_PROMPT.split())
+    assert "profile_running is true while that profile runs" in prompt
+    assert "holds one of the integration branch's K slots" in prompt
+
+
+def test_the_prompt_explains_a_bottleneck_that_moved() -> None:
+    moved = SessionEvent(EventKind.BOTTLENECK_MOVED, "moved", {"largest_op": "gemm", "previous_largest_op": "attn"})
+
+    [shown] = _state(_view(events=(moved,)))["events"]
+
+    assert shown == {
+        "event": "bottleneck_moved",
+        "reason": "moved",
+        "largest_op": "gemm",
+        "previous_largest_op": "attn",
+    }
+    prompt = " ".join(JUDGE_SYSTEM_PROMPT.split())
+    assert "bottleneck_moved" in prompt
+    assert f"fell by more than {MB_BOTTLENECK_SHIFT_PP} percentage points" in prompt
 
 
 def test_the_prompt_shows_no_event_when_none_happened() -> None:

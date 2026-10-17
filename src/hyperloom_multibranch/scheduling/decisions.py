@@ -5,8 +5,8 @@
 way it did.
 
 The scheduler's log, ``MB-scheduling/MB-decisions.jsonl``, gets every phase change, branch opened, forked, repaired,
-re-sized or stopped, judge call, event the judge is shown, final choice and session stop. The integrator keeps its
-merges in a log of its own, ``MB-integration/MB-merges.jsonl``.
+re-sized or stopped, judge call, event the judge is shown, profile of the integration head, final choice and session
+stop. The integrator keeps its merges in a log of its own, ``MB-integration/MB-merges.jsonl``.
 """
 
 from __future__ import annotations
@@ -33,6 +33,7 @@ class DecisionKind(str, Enum):
     JUDGE_FAILED = "judge_failed"
     MERGE = "merge"
     EVENT = "event"
+    PROFILE = "profile"
     FINAL = "final"
     SESSION_STOP = "session_stop"
 
