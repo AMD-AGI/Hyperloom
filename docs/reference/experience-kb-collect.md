@@ -235,9 +235,11 @@ It reads:
   and `rationale.reasoning` from the `Summary:` line of the reasoning log the
   Implementer kept beside that plan (see the
   [autonomous loop](../kernelforge/how-to/autonomous-loop.md)), each cut to
-  three sentences. Logs without one, such as every run made before KernelForge
-  asked for it, give the plan's first three sentences, and those of the
-  Implementer's Claude Code transcript or of the rationale KernelForge recorded;
+  three sentences. Logs without one give the plan's first three sentences, and
+  those of the Implementer's Claude Code transcript or, with no transcript
+  linked, of the rationale KernelForge recorded. A plain forge-loop run made
+  before KernelForge asked for the reasoning log links no transcript, because a
+  session's transcript is linked by the reasoning log its first prompt names;
 - the plan, the reasoning log, the measured kernel, and the lesson as files
   (`rationale.plan_file`, `rationale.reasoning_log`, `change.source_code`,
   `reflection.lesson_file`), and the transcript by its path under the log
@@ -253,6 +255,7 @@ It reads:
 
 A unit is skipped when its logs could not be read as a run, when its iteration
 recorded no decision, or when it has no reasoning, which is always the case for
-a merge of two archived candidates because no agent made it. KernelForge writes
+a merge of two archived candidates because no agent made it, and for a lane of a
+plain run made before KernelForge asked for the reasoning log. KernelForge writes
 naive local times, which collection reads as UTC; that is right for a run made
 in a container, which normally runs in UTC.
