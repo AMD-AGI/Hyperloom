@@ -864,9 +864,7 @@ class ClosePhase(CoordinatorCollaborator):
         elif state.pending_escalate_hint:
             state.discard_pending_escalate_hint()
         _phase_state.record_phase_transition(state, to_phase=target, reason=reason, evidence=evidence, ts_unix=now)
-        machine.fire_phase_exit(
-            Transition(from_phase=prior, to_phase=target, reason=reason, evidence=evidence, loopback=False)
-        )
+        machine.fire_phase_exit(Transition(from_phase=prior, to_phase=target, reason=reason, evidence=evidence))
         _phase_state.record_lifecycle_event(
             state, step=target, status=_phase_state.LIFECYCLE_STATUS_ENTER, phase=target, detail=f"reason={reason}"
         )
@@ -966,7 +964,6 @@ class ClosePhase(CoordinatorCollaborator):
                 to_phase=_phase_state.PHASE_CLOSE,
                 reason=reason,
                 evidence={},
-                loopback=False,
             )
         )
         return True

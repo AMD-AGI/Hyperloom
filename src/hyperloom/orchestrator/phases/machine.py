@@ -40,7 +40,7 @@ class Transition:
     to_phase: str
     reason: str
     evidence: dict
-    loopback: bool
+    loopback: bool = False
 
 
 class MachinePhase(CoordinatorCollaborator):
@@ -448,7 +448,6 @@ class MachinePhase(CoordinatorCollaborator):
             to_phase=(to_phase or "").upper(),
             reason=str(reason or ""),
             evidence=evidence if isinstance(evidence, dict) else {},
-            loopback=bool(isinstance(evidence, dict) and evidence.get("loopback")),
         )
 
         self.fire_phase_exit(tr)
