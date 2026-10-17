@@ -22,10 +22,8 @@ from hyperloom.inference_optimizer.breakdown.recorder.close_out import (
     record_close_step,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_FORGE, make_kernel_recorder
-from hyperloom.inference_optimizer.breakdown.recorder.session_metadata import record_metadata_identity
 from hyperloom.inference_optimizer.breakdown.recorder.warm_start_event import MATCH_MISS, make_warm_start_recorder
 from hyperloom.inference_optimizer.breakdown.workflow_contract import (
-    WORKFLOW_CONTRACT_V1,
     workflow_contract,
     workflow_contract_digest,
     workflow_schema,
@@ -195,47 +193,9 @@ def test_declared_consumer_paths_are_mechanically_covered(tmp_path):
     assert all(value is not None for value in values.values())
 
 
-@pytest.mark.parametrize("explicit", [False, True])
-def test_legacy_manifest_keeps_v1_identity_on_export(tmp_path, explicit: bool):
-    manifest = write_manifest(tmp_path, session_id="legacy-workflow")
-    legacy = {
-        key: value
-        for key, value in manifest.items()
-        if key not in {"workflow_contract_version", "workflow_contract_digest"}
-    }
-    if explicit:
-        legacy["workflow_contract_version"] = WORKFLOW_CONTRACT_V1
-        legacy["workflow_contract_digest"] = workflow_contract_digest(WORKFLOW_CONTRACT_V1)
-    record_metadata_identity(tmp_path, legacy)
-    workflow = build(tmp_path)["metadata"]["workflow"]
-    assert workflow["workflow_contract_version"] == WORKFLOW_CONTRACT_V1
-    assert workflow["contract_digest"] == workflow_contract_digest(WORKFLOW_CONTRACT_V1)
-    assert "stage_reached_recorded" not in build(tmp_path)["outcome"]
-    validate(instance=build(tmp_path), schema=workflow_schema(WORKFLOW_CONTRACT_V1))
-
-    state = SharedState(session_id="legacy-workflow")
-    with session_scope(tmp_path):
-        record_phase_transition(state, to_phase="PRELUDE", reason="phase_entered")
-    state.save(tmp_path)
-    refreshed = build(tmp_path)
-    assert refreshed["metadata"]["workflow"]["workflow_contract_version"] == WORKFLOW_CONTRACT_V1
-    assert refreshed["outcome"]["stage_reached_recorded"] == "prelude"
-    validate(instance=refreshed, schema=workflow_schema(WORKFLOW_CONTRACT_V1))
-
-
-@pytest.mark.parametrize("legacy", [True, False], ids=["v1", "v2"])
-def test_skip_to_close_without_baseline_exports_under_session_contract(tmp_path, legacy: bool):
-    """A v1 session resumed on this code still validates, and still closes as baseline_failed."""
-    manifest = write_manifest(tmp_path, session_id="skip-to-close-contract")
-    version = WORKFLOW_CONTRACT_V1 if legacy else manifest["workflow_contract_version"]
-    if legacy:
-        manifest = {
-            key: value
-            for key, value in manifest.items()
-            if key not in {"workflow_contract_version", "workflow_contract_digest"}
-        }
-        (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-        record_metadata_identity(tmp_path, manifest)
+def test_skip_to_close_without_baseline_exports_under_session_contract(tmp_path):
+    """A skip-to-close with no baseline validates against the contract and still closes as baseline_failed."""
+    write_manifest(tmp_path, session_id="skip-to-close-contract")
     state = SharedState(session_id="skip-to-close-contract", phase="ENABLEMENT", baseline_tput=0.0)
     with session_scope(tmp_path):
         # Open the segment whose exit evidence carries the frozen inputs.
@@ -245,12 +205,11 @@ def test_skip_to_close_without_baseline_exports_under_session_contract(tmp_path,
         assert (target, reason) == ("CLOSE", "baseline_failed")
         assert evidence["baseline_tput"] == 0.0
         frozen = evidence["predicate_inputs"]["global"]
-        assert ("baseline_tput" in frozen) is not legacy
+        assert "baseline_tput" in frozen
         record_phase_transition(state, to_phase=target, reason=reason, evidence=evidence)
     state.save(tmp_path)
 
     exported = build(tmp_path)
-    assert exported["metadata"]["workflow"]["workflow_contract_version"] == version
     exits = [
         segment["exit_evidence"]
         for event in exported["timeline"]
@@ -259,7 +218,7 @@ def test_skip_to_close_without_baseline_exports_under_session_contract(tmp_path,
         if segment.get("exit_reason") == "baseline_failed"
     ]
     assert [row["predicate_inputs"]["global"] for row in exits] == [frozen]
-    validate(instance=exported, schema=workflow_schema(version))
+    validate(instance=exported, schema=workflow_schema())
 
 
 def test_authored_milestones_survive_sbd_export(tmp_path):
