@@ -93,8 +93,7 @@ def build_serving_context_md(
     context = _workload_context(state)
     spec = dict(env_spec) if isinstance(env_spec, Mapping) else {}
     config = spec.get("config") if isinstance(spec.get("config"), Mapping) else {}
-    current_best = getattr(state, "current_best", None)
-    current_best = current_best if isinstance(current_best, Mapping) else {}
+    current_best = getattr(state, "current_best", None) or {}
     serving_config = context.get("serving_config")
     serving_config = serving_config if isinstance(serving_config, Mapping) else {}
 

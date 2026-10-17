@@ -303,7 +303,7 @@ class ClosePhase(CoordinatorCollaborator):
         """Snapshot the configuration the session ended on into the close section."""
         try:
             state = self.shared_state
-            best = state.current_best if isinstance(state.current_best, dict) else {}
+            best = state.current_best
             config = self._coord.writeback.current_best_launch_config()
             action_path: list[str] = []
             for entry in state.optimization_stack or []:

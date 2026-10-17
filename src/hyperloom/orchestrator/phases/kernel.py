@@ -490,10 +490,9 @@ class KernelPhase(CoordinatorCollaborator):
         stack = state.optimization_stack if isinstance(state.optimization_stack, list) else []
         self._kernel_stack_at_entry = [dict(item) for item in stack if isinstance(item, dict)]
         cached = state.last_trace_analyze or {}
-        current_best = state.current_best if isinstance(state.current_best, dict) else {}
         recorder.begin(
             stack_depth_in=state.cumulative_gain_validated_stack_len or None,
-            tput_before=current_best.get("tput"),
+            tput_before=state.current_best.get("tput"),
             session_baseline_tput=state.baseline_tput or None,
             snapshot=cached,
             snapshot_staleness="absent" if not cached else "fresh",
@@ -738,7 +737,6 @@ class KernelPhase(CoordinatorCollaborator):
             return
         self._kernel_timeline_recorder = None
         state = self.shared_state
-        current_best = state.current_best if isinstance(state.current_best, dict) else {}
         stack_before = getattr(self, "_kernel_stack_at_entry", None) or []
         stack_after = [dict(item) for item in (state.optimization_stack or []) if isinstance(item, dict)]
         if len(stack_after) >= len(stack_before):
@@ -749,7 +747,7 @@ class KernelPhase(CoordinatorCollaborator):
             stack_removed = [item for item in stack_before if item not in stack_after]
         recorder.finish(
             exit_reason=exit_reason,
-            tput_after=current_best.get("tput"),
+            tput_after=state.current_best.get("tput"),
             cumulative_gain_validated_out=state.cumulative_gain_validated or None,
             stack_depth_out=state.cumulative_gain_validated_stack_len or None,
             stack_added=stack_added,
@@ -1256,7 +1254,7 @@ class KernelPhase(CoordinatorCollaborator):
             )
             state.save(self.session_dir)
 
-        cb = state.current_best or {}
+        cb = state.current_best
         try:
             env_spec = self._coord.writeback.build_env_spec()
         except (OSError, TypeError, ValueError) as exc:
@@ -1276,9 +1274,7 @@ class KernelPhase(CoordinatorCollaborator):
         measurement = (
             state_measurement
             if isinstance(state_measurement, Mapping) and state_measurement
-            else (
-                cb.get("measurement") if isinstance(cb, Mapping) and isinstance(cb.get("measurement"), Mapping) else {}
-            )
+            else (cb.get("measurement") if isinstance(cb.get("measurement"), Mapping) else {})
         )
         if agentx and not str(spec_config.get("server_launch_flags") or "").strip():
             evidence = measurement.get("launch_evidence")
@@ -2132,7 +2128,7 @@ class KernelPhase(CoordinatorCollaborator):
             return False
         if measured <= 0:
             return False
-        cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
+        cb_now = self.shared_state.current_best
         cb_tput = cb_now.get("tput")
         try:
             accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)

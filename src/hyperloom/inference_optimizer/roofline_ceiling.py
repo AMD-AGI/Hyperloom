@@ -279,11 +279,9 @@ def _server_args_from(entry: Any) -> str:
 
 def _achieved_arm_source(state: Any) -> str:
     """Which arm the roofline ``achieved`` throughput comes from."""
-    cb = getattr(state, "current_best", None)
-    if isinstance(cb, dict):
-        t = cb.get("tput")
-        if isinstance(t, (int, float)) and t > 0:
-            return "current_best"
+    t = (getattr(state, "current_best", None) or {}).get("tput")
+    if isinstance(t, (int, float)) and t > 0:
+        return "current_best"
     return "baseline"
 
 

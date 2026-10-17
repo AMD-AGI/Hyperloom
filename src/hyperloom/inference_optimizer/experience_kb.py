@@ -43,8 +43,7 @@ def _first_value(*values: Any) -> Any:
     return next((value for value in values if value not in (None, "")), None)
 
 
-def _current_best_throughput(value: Any) -> float:
-    current_best = value if isinstance(value, dict) else {}
+def _current_best_throughput(current_best: dict[str, Any]) -> float:
     for name in ("tput", "output_throughput"):
         throughput = current_best.get(name)
         if not isinstance(throughput, bool) and isinstance(throughput, (int, float)) and throughput > 0:

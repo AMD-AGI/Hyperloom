@@ -751,15 +751,6 @@ def _operator_extra_env() -> dict[str, str]:
     return operator_extra_env()
 
 
-def resolve_reference_base() -> tuple[str, dict[str, str]]:
-    """Read the ``--reference-script`` server args / envs from SharedState.
-
-    Returns ``("", {})`` when the run has no reference recipe.
-    """
-    args, envs, _controls = resolve_reference_launch()
-    return args, envs
-
-
 def resolve_reference_launch() -> tuple[str, dict[str, str], dict[str, Any]]:
     """Read the accepted reference recipe and its dedicated launch controls."""
     from hyperloom.inference_optimizer.session.paths import session_dir
