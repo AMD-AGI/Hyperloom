@@ -128,10 +128,11 @@ def render_answer(answer: DedupAnswer) -> str:
 
 def render_claim(claim: Claim) -> str:
     intent = claim.intent
-    return clip(
+    held = clip(
         f"claimed {intent.target} / {intent.mechanism} on {claim.key.parent_commit} for {claim.holder}, "
         f"expires in {claim.expires_at - claim.heartbeat_at:.0f}s"
     )
+    return f"{held}\nintent fingerprint (submit tests with it): {claim.key.intent_fingerprint}"
 
 
 def render_record(record: TestRecord) -> str:

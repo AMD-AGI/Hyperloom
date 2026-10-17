@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.intent import IntentLayer, intent_fingerprint
 from hyperloom_multibranch.contracts.notebook.peers import Validity
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, StartupBrief, TestRecord
 from hyperloom_multibranch.notebook import LocalNotebook
@@ -89,7 +90,10 @@ async def test_a_claim_is_the_handles_and_a_taken_one_is_refused_with_who_holds_
     released = await _call(s1, "release", **FLASH_ON_C1)
     again = await _call(s1, "release", **FLASH_ON_C1)
 
-    assert claimed == "claimed attention / flash decode on c1 for s1, expires in 60s"
+    assert claimed.splitlines() == [
+        "claimed attention / flash decode on c1 for s1, expires in 60s",
+        f"intent fingerprint (submit tests with it): {intent_fingerprint('attention', 'flash decode', IntentLayer.SOURCE)}",
+    ]
     assert refused.startswith(f"{ERROR} refused, in_progress on c1, claimed by s1")
     assert released == "released the claim on c1"
     assert again.startswith(f"{ERROR} ClaimLost:")
@@ -165,9 +169,9 @@ async def test_a_granted_claim_lists_this_sessions_learnings_about_its_direction
         change={"config": {"extra_server_args": "--enable-sampler-fusion"}},
     )
 
-    assert len(claimed) == 3 and claimed[1] == "This session's learnings about it:"
-    assert claimed[2].startswith(f"- [s2, pitfall about flash decode / block size] {pitfall} [")
-    assert len(plain.splitlines()) == 1 and plain.startswith("claimed sampler / top-k fusion on c1")
+    assert len(claimed) == 4 and claimed[2] == "This session's learnings about it:"
+    assert claimed[3].startswith(f"- [s2, pitfall about flash decode / block size] {pitfall} [")
+    assert len(plain.splitlines()) == 2 and plain.startswith("claimed sampler / top-k fusion on c1")
 
 
 async def test_the_learnings_tool_finds_this_sessions_and_what_its_finder_adds(tools_of: Tools) -> None:
