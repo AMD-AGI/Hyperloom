@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 
 import pytest
 
 from hyperloom_multibranch.contracts.notebook import (
     AlreadyTested,
+    CeilingTooLow,
     ClaimHeld,
     ClaimKey,
     ClaimLost,
@@ -19,6 +21,7 @@ from hyperloom_multibranch.contracts.notebook import (
     UnknownRequest,
     WriterNotAllowed,
 )
+from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, ToolResultPointer
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, DedupStatus
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.local.claims import LeaseTaken
@@ -217,6 +220,56 @@ async def test_losing_the_race_for_a_free_claim_is_refused_as_held_and_logged(
     decision = [entry.detail for entry in s2._state().entries if entry.kind is EntryKind.CLAIM][-1]
     assert held.value.answer.claim == winner
     assert (decision["found"], decision["acquired"]) == ("in_progress", False)
+
+
+async def _bar_of_three_pct(open_as: Open) -> None:
+    await open_as(Role.GATE).write_baseline(BaselineRecord("c0", {"output_tps": 1000.0}, {}, {"output_tps": 3.0}, ()))
+
+
+async def test_an_intent_whose_ceiling_is_below_the_bar_is_refused_and_logged(open_as: Open) -> None:
+    s1 = open_as(Role.SPECIALIST_RUNTIME, "s1")
+    await _bar_of_three_pct(open_as)
+    shares = ToolResultPointer("s1", "job-1", "/a/analysis.json", "trace analysed", "c0", "p1", {"moe_gemm": 2.0})
+    await open_as(Role.TOOLBOX).notify_tool_result(shares)
+
+    with pytest.raises(CeilingTooLow) as low:
+        await s1.acquire(replace(intent("s1", "c0"), target_share_pct=2.0), ACTION, ttl_seconds=TTL)
+    granted = await s1.acquire(replace(intent("s1", "c0"), target_share_pct=20.0), ACTION, ttl_seconds=TTL)
+
+    refused, kept = [entry for entry in s1._state().entries if entry.kind is EntryKind.CLAIM]
+    assert (round(low.value.ceiling_pct, 2), low.value.bar_pct) == (2.04, 3.0)
+    assert low.value.profiled is not None and low.value.profiled.job_id == "job-1"
+    assert (refused.detail["acquired"], round(refused.detail["ceiling_pct"], 2), refused.detail["bar_pct"]) == (
+        False,
+        2.04,
+        3.0,
+    )
+    assert "ceiling 2.04% below the bar of 3.00%" in refused.summary
+    assert granted.status is ClaimStatus.HELD and kept.detail["ceiling_pct"] == 25.0
+
+
+async def test_no_intent_is_refused_for_its_ceiling_before_a_baseline_or_without_a_share(open_as: Open) -> None:
+    s1 = open_as(Role.SPECIALIST_RUNTIME, "s1")
+
+    early = await s1.acquire(replace(intent("s1", "c0"), target_share_pct=0.5), ACTION, ttl_seconds=TTL)
+    await _bar_of_three_pct(open_as)
+    unstated = await s1.acquire(intent("s1", "c1"), ACTION, ttl_seconds=TTL)
+
+    assert early.status is unstated.status is ClaimStatus.HELD
+
+
+async def test_op_shares_are_the_latest_a_tool_reported_on_the_commit(open_as: Open) -> None:
+    toolbox = open_as(Role.TOOLBOX)
+    for job, share in (("job-1", 30.0), ("job-2", 41.5)):
+        await toolbox.notify_tool_result(
+            ToolResultPointer("s1", job, "/a", "trace analysed", "c1", "", {"gemm": share})
+        )
+    await toolbox.notify_tool_result(ToolResultPointer("s1", "job-3", "/build.log", "build done"))
+
+    latest = await toolbox.op_shares("c1")
+
+    assert latest is not None and (latest.job_id, dict(latest.shares)) == ("job-2", {"gemm": 41.5})
+    assert await toolbox.op_shares("c0") is None
 
 
 async def test_a_late_result_does_not_complete_the_claim_another_branch_took_over(

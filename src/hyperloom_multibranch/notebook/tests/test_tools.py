@@ -7,19 +7,28 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.intent import IntentLayer, intent_fingerprint
+from hyperloom_multibranch.contracts.intent import Intent, IntentLayer, intent_fingerprint
 from hyperloom_multibranch.contracts.notebook.peers import Validity
-from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, StartupBrief, TestRecord
+from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, OpShares, StartupBrief, TestRecord
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog, SessionLearnings
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, intent, request, result
 from hyperloom_multibranch.notebook.tests.sessions import scripted_session
-from hyperloom_multibranch.notebook.tools import ERROR, MAX_LINES, NotebookTool, lines, notebook_tools, outcome
+from hyperloom_multibranch.notebook.tools import (
+    ERROR,
+    MAX_LINES,
+    NotebookTool,
+    lines,
+    notebook_tools,
+    outcome,
+    render_ceiling,
+)
 
 GEMM_ON_C0 = {"parent_commit": "c0", "target": "moe gemm", "mechanism": "tuned kernel", "layer": "kernel"}
 FLASH_ON_C1 = {"parent_commit": "c1", "target": "attention", "mechanism": "flash decode", "layer": "source"}
@@ -97,6 +106,39 @@ async def test_a_claim_is_the_handles_and_a_taken_one_is_refused_with_who_holds_
     assert refused.startswith(f"{ERROR} refused, in_progress on c1, claimed by s1")
     assert released == "released the claim on c1"
     assert again.startswith(f"{ERROR} ClaimLost:")
+
+
+async def test_a_claim_states_its_ceiling_and_one_that_cannot_reach_the_bar_is_refused(tools_of: Tools) -> None:
+    tools = tools_of("s1")
+
+    claimed = (await _call(tools, "claim", **FLASH_ON_C1, target_share_pct=30)).splitlines()
+    norm_on_c1 = {**FLASH_ON_C1, "target": "rms norm", "mechanism": "fused kernel", "change": TUNED}
+    refused = await _call(tools, "claim", **norm_on_c1, target_share_pct=1.0)
+    wrong = await _call(tools, "claim", **norm_on_c1, target_share_pct="most")
+
+    assert claimed[2] == (
+        "Amdahl ceiling +42.86% for a target worth 30.00% of GPU time; "
+        "unverified, c1 has no op shares (start_analysis profiles it)"
+    )
+    assert refused.startswith(f"{ERROR} refused, a target worth 1.00% of GPU time on c1 can gain at most 1.01%")
+    assert "below the bar of 1.60%" in refused
+    assert wrong.startswith(f"{ERROR} ValueError: target_share_pct is a number")
+    assert tools["notebook_claim"].input_schema["properties"]["target_share_pct"]["maximum"] == 100
+
+
+def test_the_ceiling_line_names_the_parents_largest_ops() -> None:
+    shares = OpShares("c1", "job-7", "p1", {"attention": 22.0, "moe_gemm": 41.5, "norm": 1.0})
+    stated = Intent("s1", "c1", "moe gemm", "tuned kernel", IntentLayer.KERNEL, 41.5)
+    unstated = replace(stated, target_share_pct=None)
+
+    assert render_ceiling(stated, shares).splitlines() == [
+        "Amdahl ceiling +70.94% for a target worth 41.50% of GPU time",
+        "largest ops on c1 (job-7): moe_gemm 41.5% (ceiling +70.9%), attention 22.0% (ceiling +28.2%), "
+        "norm 1.0% (ceiling +1.0%)",
+    ]
+    assert render_ceiling(unstated, shares).startswith("largest ops on c1")
+    assert render_ceiling(replace(unstated, layer=IntentLayer.CONFIG), shares) == ""
+    assert render_ceiling(unstated, None) == ""
 
 
 async def test_search_and_record_answer_in_a_few_lines(tools_of: Tools) -> None:

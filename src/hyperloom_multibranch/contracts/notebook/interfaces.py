@@ -39,6 +39,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     ManifestFingerprint,
     MergeAttempt,
     NotebookSnapshot,
+    OpShares,
     QuarantineEvent,
     RecordedValue,
     RegressionCase,
@@ -72,6 +73,23 @@ class ClaimHeld(_DedupRefusal):
 
 class AlreadyTested(_DedupRefusal):
     """The action was measured on the state, or the intent was and no reason to repeat it was given."""
+
+
+class CeilingTooLow(NotebookError):
+    """The intent's Amdahl ceiling is below the rule gate's bar: no speedup of its target alone could be kept.
+
+    ``profiled`` is the op shares the notebook holds on the intent's parent commit, if any, to pick a larger target.
+    """
+
+    def __init__(self, intent: Intent, ceiling_pct: float, bar_pct: float, profiled: OpShares | None) -> None:
+        super().__init__(
+            f"a target worth {intent.target_share_pct:.2f}% of GPU time on {intent.parent_commit} can gain at most "
+            f"{ceiling_pct:.2f}%, below the bar of {bar_pct:.2f}%"
+        )
+        self.intent = intent
+        self.ceiling_pct = ceiling_pct
+        self.bar_pct = bar_pct
+        self.profiled = profiled
 
 
 class ClaimLost(NotebookError):
@@ -164,7 +182,9 @@ class ClaimService(Protocol):
     async def acquire(self, intent: Intent, action_fingerprint: str, *, ttl_seconds: float, reason: str = "") -> Claim:
         """Claim ``intent`` for the caller's branch; ``reason`` overrides a suspected duplicate.
 
-        Raises :class:`ClaimHeld` or :class:`AlreadyTested` with the answer that refused it.
+        Raises :class:`ClaimHeld` or :class:`AlreadyTested` with the answer that refused it, and :class:`CeilingTooLow`
+        when the intent gives its target's share and the ceiling it puts on the gain is below the smallest
+        ``threshold_pct`` of the baseline. Before a baseline there is no bar, and no intent is refused for its ceiling.
         """
 
     async def renew(self, key: ClaimKey, *, ttl_seconds: float) -> Claim: ...
@@ -266,6 +286,9 @@ class RecordSearch(Protocol):
     async def profiles(self, commit_id: str) -> tuple[TestRecord, ...]:
         """The profile tests of ``commit_id`` that produced an artifact."""
 
+    async def op_shares(self, commit_id: str) -> OpShares | None:
+        """The latest TraceLens op shares a tool reported on ``commit_id``; ``None`` when none was analysed there."""
+
 
 class Notebook(
     TestRecordSink,
@@ -291,6 +314,7 @@ class Notebook(
 __all__ = [
     "AlreadyTested",
     "BranchLogStore",
+    "CeilingTooLow",
     "ClaimHeld",
     "ClaimLost",
     "ClaimService",

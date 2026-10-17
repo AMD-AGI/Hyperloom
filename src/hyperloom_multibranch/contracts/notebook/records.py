@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
@@ -216,6 +217,25 @@ class ToolResultPointer:
             raise ValueError(f"a pointer carries at most {MAX_OP_SHARES} op shares, not {len(self.op_shares)}")
         if self.op_shares and not self.commit_id:
             raise ValueError("op shares need the commit they were profiled on")
+
+
+def amdahl_ceiling_pct(share_pct: float) -> float:
+    """The most, in percent, that speeding up a region worth ``share_pct`` of the time can gain: the region made free."""
+
+    return math.inf if share_pct >= 100.0 else 100.0 * share_pct / (100.0 - share_pct)
+
+
+@dataclass(frozen=True)
+class OpShares:
+    """The latest TraceLens op shares on one commit, with the tool job and the profile test they came from."""
+
+    commit_id: str
+    job_id: str
+    profile_request_id: str
+    shares: Mapping[str, float]
+
+    def largest(self, count: int) -> tuple[tuple[str, float], ...]:
+        return tuple(sorted(self.shares.items(), key=lambda item: (-item[1], item[0]))[:count])
 
 
 @dataclass(frozen=True)
@@ -507,6 +527,7 @@ __all__ = [
     "MergeAttempt",
     "MergeState",
     "NotebookSnapshot",
+    "OpShares",
     "QuarantineEvent",
     "RecordedValue",
     "RegressionCase",
@@ -518,4 +539,5 @@ __all__ = [
     "TriedDirection",
     "Withdrawal",
     "Writer",
+    "amdahl_ceiling_pct",
 ]

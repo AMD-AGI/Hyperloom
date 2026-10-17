@@ -15,6 +15,7 @@
 
 from hyperloom_multibranch.contracts.notebook.interfaces import (
     AlreadyTested,
+    CeilingTooLow,
     ClaimHeld,
     ClaimLost,
     ConflictingWrite,
@@ -30,6 +31,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, R
 __all__ = [
     "INTEGRATION_BRANCH",
     "AlreadyTested",
+    "CeilingTooLow",
     "ClaimHeld",
     "ClaimKey",
     "ClaimLost",

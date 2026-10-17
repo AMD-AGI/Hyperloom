@@ -24,6 +24,7 @@ from hyperloom.contracts.recipe import DIGEST_PREFIX
 from hyperloom_multibranch.contracts.notebook.interfaces import (
     AlreadyTested,
     BranchLogStore,
+    CeilingTooLow,
     ClaimHeld,
     ClaimLost,
     ClaimService,
@@ -70,6 +71,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     ManifestFingerprint,
     MergeAttempt,
     NotebookSnapshot,
+    OpShares,
     QuarantineEvent,
     RecordedValue,
     RegressionCase,
@@ -80,6 +82,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     ToolResultPointer,
     Withdrawal,
     Writer,
+    amdahl_ceiling_pct,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import (
     COMMITTING,
@@ -147,6 +150,23 @@ def _refusal(answer: DedupAnswer, reason: str) -> NotebookError | None:
     if answer.status is DedupStatus.TESTED or (answer.status is DedupStatus.SUSPECTED and not reason.strip()):
         return AlreadyTested(answer)
     return None
+
+
+def _bar_pct(state: NotebookState) -> float | None:
+    """The smallest gain the rule gate keeps, from the latest baseline; ``None`` before there is one."""
+
+    return min(state.baselines[-1].threshold_pct.values(), default=None) if state.baselines else None
+
+
+def _ceiling_pct(intent: Intent) -> float | None:
+    return amdahl_ceiling_pct(intent.target_share_pct) if intent.target_share_pct is not None else None
+
+
+def _ceiling_refusal(state: NotebookState, intent: Intent, bar_pct: float | None) -> CeilingTooLow | None:
+    ceiling = _ceiling_pct(intent)
+    if ceiling is None or bar_pct is None or ceiling >= bar_pct:
+        return None
+    return CeilingTooLow(intent, ceiling, bar_pct, state.op_shares.get(intent.parent_commit))
 
 
 def _released(claim: Claim, now: float) -> Claim:
@@ -476,8 +496,11 @@ class LocalNotebook(
         self._own_branch(intent.branch)
         now = self._clock()
         key = ClaimKey(intent.parent_commit, intent.fingerprint)
-        answer = self._answer(self._state(), key, action_fingerprint, now)
-        refusal = _refusal(answer, reason)
+        state = self._state()
+        answer = self._answer(state, key, action_fingerprint, now)
+        bar = _bar_pct(state)
+        too_low = _ceiling_refusal(state, intent, bar)
+        refusal = _refusal(answer, reason) or too_low
         claim: Claim | None = None
         if refusal is None:
             wanted = Claim(
@@ -497,8 +520,13 @@ class LocalNotebook(
                 answer = replace(answer, status=DedupStatus.IN_PROGRESS, claim=taken.claim)
                 refusal = ClaimHeld(answer)
         matched = tuple(record.request_id for record in answer.records)
-        decision = ClaimDecision(intent, action_fingerprint, answer.status, claim is not None, reason, matched)
-        outcome = "claimed" if claim is not None else f"refused ({answer.status.value})"
+        decision = ClaimDecision(
+            intent, action_fingerprint, answer.status, claim is not None, reason, matched, _ceiling_pct(intent), bar
+        )
+        found = answer.status.value
+        if too_low is not None and refusal is too_low:
+            found = f"ceiling {too_low.ceiling_pct:.2f}% below the bar of {too_low.bar_pct:.2f}%"
+        outcome = "claimed" if claim is not None else f"refused ({found})"
         summary = f"{outcome} {intent.target} / {intent.mechanism} on {intent.parent_commit}"
         self._append(EntryKind.CLAIM, decision, branch=intent.branch, parent=intent.parent_commit, summary=summary)
         if claim is None:
@@ -633,6 +661,9 @@ class LocalNotebook(
 
     async def profiles(self, commit_id: str) -> tuple[TestRecord, ...]:
         return feeds.profiles(self._state(), commit_id)
+
+    async def op_shares(self, commit_id: str) -> OpShares | None:
+        return self._state().op_shares.get(commit_id)
 
     # --- session records and snapshots ----------------------------------------------------------------------------
 

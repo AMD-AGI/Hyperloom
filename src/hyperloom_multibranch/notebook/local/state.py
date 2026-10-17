@@ -25,6 +25,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
     LineageEvent,
     ManifestFingerprint,
     MergeAttempt,
+    OpShares,
     QuarantineEvent,
     RegressionCase,
     SessionProfile,
@@ -52,7 +53,11 @@ class JudgementWrite:
 
 @dataclass(frozen=True)
 class ClaimDecision:
-    """What one claim attempt found and whether it got the claim: what Q6 counts wrong refusals from."""
+    """What one claim attempt found and whether it got the claim: what Q6 counts wrong refusals from.
+
+    ``ceiling_pct`` is the Amdahl ceiling of an intent that gave its target's share, and ``bar_pct`` the bar it was held
+    to, ``None`` before a baseline; a refusal for the ceiling has ``ceiling_pct`` below ``bar_pct``.
+    """
 
     intent: Intent
     action_fingerprint: str
@@ -60,6 +65,8 @@ class ClaimDecision:
     acquired: bool
     reason: str = ""
     matched: tuple[str, ...] = ()
+    ceiling_pct: float | None = None
+    bar_pct: float | None = None
 
 
 #: The type each kind of entry stores in its detail.
@@ -101,6 +108,7 @@ class NotebookState:
         self.branch_logs: dict[str, list[BranchLogRecord]] = {}
         self.learnings: list[LearningRecord] = []
         self.intents: dict[str, Intent] = {}
+        self.op_shares: dict[str, OpShares] = {}
         self.profiles: list[SessionProfile] = []
         self.fingerprints: list[ManifestFingerprint] = []
         self.requested_at: dict[str, float] = {}
@@ -121,7 +129,7 @@ class NotebookState:
             EntryKind.QUARANTINE: lambda _entry, value: self.quarantine.append(value),
             EntryKind.BRANCH_LOG: self._branch_log,
             EntryKind.LEARNING: self._learning,
-            EntryKind.TOOL_RESULT: lambda _entry, _value: None,
+            EntryKind.TOOL_RESULT: self._tool_result,
             EntryKind.CLAIM: self._claim,
         }
         for entry in entries:
@@ -159,6 +167,11 @@ class NotebookState:
 
     def _claim(self, _entry: Entry, decision: ClaimDecision) -> None:
         self.intents.setdefault(decision.intent.fingerprint, decision.intent)
+
+    def _tool_result(self, _entry: Entry, pointer: ToolResultPointer) -> None:
+        if pointer.op_shares:
+            shares = OpShares(pointer.commit_id, pointer.job_id, pointer.profile_request_id, pointer.op_shares)
+            self.op_shares[pointer.commit_id] = shares
 
     def latest_judgement(self, request_id: str) -> JudgementWrite | None:
         history = self.judgements.get(request_id)

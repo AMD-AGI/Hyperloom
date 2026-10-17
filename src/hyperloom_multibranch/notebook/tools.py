@@ -27,6 +27,7 @@ from typing import Any
 from hyperloom.contracts.recipe import RecipeDelta, RecipeError
 from hyperloom_multibranch.contracts.notebook.interfaces import (
     AlreadyTested,
+    CeilingTooLow,
     ClaimHeld,
     Notebook,
     NotebookError,
@@ -47,9 +48,11 @@ from hyperloom_multibranch.contracts.notebook.records import (
     ClaimKey,
     DedupAnswer,
     Learning,
+    OpShares,
     StartupBrief,
     TestRecord,
     TriedDirection,
+    amdahl_ceiling_pct,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
 from hyperloom_multibranch.notebook.learning_search import (
@@ -66,6 +69,7 @@ LINE_CHARS = 160
 MAX_LINES = 20
 MAX_REPLY_CHARS = 4000
 CLAIM_LEARNINGS = 3
+CEILING_OPS = 5
 ERROR = "error:"
 UNKNOWN = "unknown"
 
@@ -135,6 +139,25 @@ def render_claim(claim: Claim) -> str:
     return f"{held}\nintent fingerprint (submit tests with it): {claim.key.intent_fingerprint}"
 
 
+def render_ops(shares: OpShares) -> str:
+    largest = ", ".join(
+        f"{op} {share:.1f}% (ceiling +{amdahl_ceiling_pct(share):.1f}%)" for op, share in shares.largest(CEILING_OPS)
+    )
+    return clip(f"largest ops on {shares.commit_id} ({shares.job_id}): {largest}")
+
+
+def render_ceiling(intent: Intent, shares: OpShares | None) -> str:
+    """What bounds the claimed intent's gain, and whether a profile of its parent commit backs it."""
+
+    if intent.target_share_pct is None:
+        return render_ops(shares) if shares is not None and intent.layer is not IntentLayer.CONFIG else ""
+    ceiling = f"Amdahl ceiling +{amdahl_ceiling_pct(intent.target_share_pct):.2f}% for a target worth "
+    ceiling += f"{intent.target_share_pct:.2f}% of GPU time"
+    if shares is None:
+        return f"{ceiling}; unverified, {intent.parent_commit} has no op shares (start_analysis profiles it)"
+    return f"{ceiling}\n{render_ops(shares)}"
+
+
 def render_record(record: TestRecord) -> str:
     request, judged = record.request, record.judgement
     found = [
@@ -182,6 +205,14 @@ def _key(arguments: Arguments) -> ClaimKey:
     return ClaimKey(str(arguments["parent_commit"]), fingerprint)
 
 
+def _share(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"target_share_pct is a number, not {value!r}")
+    return float(value)
+
+
 def _action(arguments: Arguments) -> str:
     return RecipeDelta.from_document(arguments.get("change") or {}).fingerprint()
 
@@ -202,17 +233,21 @@ class _SpecialistTools:
     async def claim(self, arguments: Arguments) -> str:
         key = _key(arguments)
         target, mechanism = str(arguments["target"]), str(arguments["mechanism"])
-        intent = Intent(self.branch, key.parent_commit, target, mechanism, IntentLayer(arguments["layer"]))
+        share = arguments.get("target_share_pct")
+        layer = IntentLayer(arguments["layer"])
+        intent = Intent(self.branch, key.parent_commit, target, mechanism, layer, _share(share))
         reason = str(arguments.get("reason") or "")
         held = await self.notebook.acquire(intent, _action(arguments), ttl_seconds=self.ttl_seconds, reason=reason)
+        bounded = render_ceiling(intent, await self.notebook.op_shares(key.parent_commit))
         snapshot = await self.notebook.snapshot()
         related = self.finder.here(
             snapshot, f"{target} {mechanism}", limit=CLAIM_LEARNINGS, branch=self.branch, source=RetrievalSource.CLAIM
         )
+        found = [render_claim(held), *([bounded] if bounded else [])]
         if not related:
-            return render_claim(held)
+            return "\n".join(found)
         learnt = [render_session_learning(record, snapshot) for record in related]
-        return "\n".join([render_claim(held), "This session's learnings about it:", *learnt])
+        return "\n".join([*found, "This session's learnings about it:", *learnt])
 
     async def release(self, arguments: Arguments) -> str:
         released = await self.notebook.release(_key(arguments))
@@ -275,6 +310,9 @@ def _guarded(handler: Handler) -> Handler:
             text = await handler(arguments)
         except (ClaimHeld, AlreadyTested) as refused:
             text = f"{ERROR} refused, {render_answer(refused.answer)}"
+        except CeilingTooLow as low:
+            ops = f"\n{render_ops(low.profiled)}" if low.profiled is not None else ""
+            text = f"{ERROR} refused, {low}; claim a larger target or several together{ops}"
         except (NotebookError, RecipeError, ValueError, TypeError, KeyError) as exc:
             text = f"{ERROR} {type(exc).__name__}: {exc}"
         return clip(text, MAX_REPLY_CHARS)
@@ -307,6 +345,15 @@ _CHANGE = {
     }
 }
 _KIND = _text(enum=[kind.value for kind in BranchLogType])
+_SHARE = {
+    "type": "number",
+    "minimum": 0,
+    "maximum": 100,
+    "description": (
+        "For a source or kernel intent: the summed share of GPU time, in percent, of the ops the change speeds up, "
+        "read from the parent commit's own profile. A claim whose ceiling cannot reach the gate's bar is refused."
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -325,7 +372,7 @@ _SPECS = (
     _Spec(
         "claim",
         "Claim an intent on a commit for this branch before testing it; refused, with the reason, when taken.",
-        _schema({**_INTENT, **_CHANGE, "reason": _text()}, *_INTENT),
+        _schema({**_INTENT, **_CHANGE, "reason": _text(), "target_share_pct": _SHARE}, *_INTENT),
     ),
     _Spec("release", "Give up a claim this branch holds.", _schema(_INTENT, *_INTENT)),
     _Spec(
@@ -423,6 +470,7 @@ __all__ = [
     "outcome",
     "render_answer",
     "render_brief",
+    "render_ceiling",
     "render_claim",
     "render_log",
     "render_record",
