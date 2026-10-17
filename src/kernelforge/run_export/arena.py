@@ -509,5 +509,6 @@ def campaign_runs(log: Path, records: list[FileRecord], root: Path) -> ArenaRuns
     )
     units = [port_unit(run, setup, log_files(campaign.files))] if setup.port_start is not None else []
     units += [campaign.iteration_unit(run, iteration) for iteration in logged]
-    claimed = {log} | {record.path for record in records if is_under(record.path, forge_dir)}
+    transcripts = {session.transcript.path for session in campaign.sessions}
+    claimed = {log} | transcripts | {record.path for record in records if is_under(record.path, forge_dir)}
     return ArenaRuns(units, frozenset(claimed))
