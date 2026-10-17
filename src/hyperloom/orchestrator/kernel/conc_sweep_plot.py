@@ -135,6 +135,49 @@ def _unpaired(concs: list[float | None], other: list[float | None]) -> list[bool
     return [c is not None and c not in other for c in concs]
 
 
+def _draw_arm(
+    ax: Any,
+    xs: list[float],
+    ys: list[float],
+    concs: list[float | None],
+    other: list[float | None],
+    *,
+    color: str,
+    marker: str,
+    dy: int,
+    name: str,
+    bg: str,
+) -> bool:
+    """Draw one arm, labelled by concurrency; True when some rung is hollow because the other arm lacks it."""
+    if not xs:
+        return False
+    ax.plot(xs, ys, f"{marker}-", color=color, linewidth=2, markersize=6, label=name)
+    single = _unpaired(concs, other)
+    if any(single):
+        # Hollow: the same concurrency has no point on the other arm, so there is nothing to compare it with.
+        ax.plot(
+            [x for x, s in zip(xs, single) if s],
+            [y for y, s in zip(ys, single) if s],
+            marker,
+            markersize=6,
+            markerfacecolor=bg,
+            markeredgecolor=color,
+            markeredgewidth=1.5,
+            linestyle="none",
+        )
+    for x, y, conc in zip(xs, ys, concs):
+        ax.annotate(
+            f"{_conc_text(conc)} {y:.0f}".strip(),
+            (x, y),
+            textcoords="offset points",
+            xytext=(0, dy),
+            ha="center",
+            fontsize=7,
+            color=color,
+        )
+    return any(single)
+
+
 def _ceiling_series(
     ceiling_data: dict[str, Any],
     tp_eff: float,
@@ -223,33 +266,8 @@ def _render(
         (bx, by, bc, oc, baseline_c, "o", 8, "baseline"),
         (ox, oy, oc, bc, optimized_c, "s", -14, "optimized"),
     ):
-        if not xs:
-            continue
-        ax.plot(xs, ys, f"{marker}-", color=color, linewidth=2, markersize=6, label=name)
-        single = _unpaired(concs, other)
-        if any(single):
-            single_arm_note = True
-            # Hollow: the same concurrency has no point on the other arm, so there is nothing to compare it with.
-            ax.plot(
-                [x for x, s in zip(xs, single) if s],
-                [y for y, s in zip(ys, single) if s],
-                marker,
-                markersize=6,
-                markerfacecolor=bg,
-                markeredgecolor=color,
-                markeredgewidth=1.5,
-                linestyle="none",
-            )
-        for x, y, conc in zip(xs, ys, concs):
-            ax.annotate(
-                f"{_conc_text(conc)} {y:.0f}".strip(),
-                (x, y),
-                textcoords="offset points",
-                xytext=(0, dy),
-                ha="center",
-                fontsize=7,
-                color=color,
-            )
+        drawn = _draw_arm(ax, xs, ys, concs, other, color=color, marker=marker, dy=dy, name=name, bg=bg)
+        single_arm_note = single_arm_note or drawn
     if single_arm_note:
         ax.plot(
             [],
