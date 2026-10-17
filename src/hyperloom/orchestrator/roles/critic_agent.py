@@ -790,12 +790,6 @@ class CriticAgentBackend:
         env.setdefault("CRITIC_SESSION_MEMORY_DIR", str(memory_dir))
         env["CRITIC_KB_CLIENT_MODE"] = self.kb_mode
 
-        # Point the runtime at the sibling robustness findings JSONL.
-        env.setdefault(
-            "ROBUSTNESS_AGENT_SESSION_DIR",
-            str(self.session_dir),
-        )
-
         # Dead-letter dir under the session so cron replays don't cross sessions.
         dlq_dir = self.session_dir / "critic-kb-dead-letter"
         env.setdefault("KB_DEAD_LETTER_DIR", str(dlq_dir))
