@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
+from hyperloom_multibranch.contracts.fork import RepairRequest
 from hyperloom_multibranch.contracts.notebook.interfaces import ClaimService, NotebookError
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus
 from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, JudgeNotebook, Judging
@@ -49,13 +50,14 @@ class Session(Protocol):
 
 @dataclass(frozen=True)
 class SessionStart:
-    """What a run of a branch's specialist starts from: the commit the branch was started at, the startup brief, and
-    how many tests it may have running at once."""
+    """What a run of a branch's specialist starts from: the commit the branch was started at, the startup brief, how
+    many tests it may have running at once, and the repair the branch was opened for, if it was."""
 
     branch: str
     start_commit: str
     brief: str
     k: int
+    repair: RepairRequest | None = None
 
 
 SessionFactory = Callable[[SessionStart], Session]
@@ -77,6 +79,7 @@ class _Branch:
     start_commit: str
     brief: str
     notebook: RuntimeNotebook
+    repair: RepairRequest | None = None
     k: int = 1
     session: Session | None = None
     tasks: list[asyncio.Task[None]] = field(default_factory=list)
@@ -99,10 +102,10 @@ class SpecialistRuntime:
         self._pacing = pacing
         self._branches: dict[str, _Branch] = {}
 
-    async def start(self, branch: str, start_commit: str, brief: str = "") -> None:
+    async def start(self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None) -> None:
         if branch in self._branches:
             raise ValueError(f"branch {branch!r} already has a specialist")
-        state = _Branch(branch, start_commit, brief, self._notebook_for(branch))
+        state = _Branch(branch, start_commit, brief, self._notebook_for(branch), repair)
         self._branches[branch] = state
         judge = BranchJudge(branch, state.notebook, self._judging)
         state.tasks = [
@@ -138,7 +141,8 @@ class SpecialistRuntime:
     async def _supervise(self, state: _Branch) -> None:
         crashes: deque[float] = deque()
         while True:
-            state.session = self._sessions(SessionStart(state.name, state.start_commit, state.brief, state.k))
+            start = SessionStart(state.name, state.start_commit, state.brief, state.k, state.repair)
+            state.session = self._sessions(start)
             try:
                 await state.session.run()
                 return

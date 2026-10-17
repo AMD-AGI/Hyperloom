@@ -92,23 +92,26 @@ class RecordingVerifier:
 
 
 class RecordingLifecycle:
-    """Keeps the start commit, the brief and the current K of every running branch."""
+    """Keeps the start commit, the brief, the repair and the current K of every running branch."""
 
     def __init__(self) -> None:
         self.running: dict[str, str] = {}
         self.briefs: dict[str, str] = {}
+        self.repairs: dict[str, RepairRequest | None] = {}
         self.k: dict[str, int] = {}
 
-    async def start(self, branch: str, start_commit: str, brief: str = "") -> None:
+    async def start(self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None) -> None:
         if branch in self.running:
             raise ValueError(f"branch {branch!r} already has a specialist")
         self.running[branch] = start_commit
         self.briefs[branch] = brief
+        self.repairs[branch] = repair
         self.k[branch] = 1
 
     async def stop(self, branch: str) -> None:
         del self.running[branch]
         del self.briefs[branch]
+        del self.repairs[branch]
         del self.k[branch]
 
     async def set_k(self, branch: str, k: int) -> None:
