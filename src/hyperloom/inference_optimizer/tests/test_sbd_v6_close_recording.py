@@ -82,7 +82,7 @@ def test_mid_sequence_reports_running_not_degraded(sd: Path) -> None:
 
 def test_settled_clean_sequence_succeeds(sd: Path) -> None:
     _run_sequence(sd)
-    record_close_settled(sd, stop_reason="target_reached")
+    record_close_settled(sd)
 
     close = _close(sd)
     assert close["status"] == "succeeded"
@@ -92,7 +92,7 @@ def test_settled_clean_sequence_succeeds(sd: Path) -> None:
 
 def test_failed_step_settles_degraded(sd: Path) -> None:
     _run_sequence(sd, fail="report")
-    record_close_settled(sd, stop_reason="time_exhausted")
+    record_close_settled(sd)
 
     close = _close(sd)
     assert close["status"] == "degraded"
@@ -102,7 +102,7 @@ def test_failed_step_settles_degraded(sd: Path) -> None:
 
 def test_unsettled_step_does_not_count_against_the_verdict(sd: Path) -> None:
     _run_sequence(sd)
-    record_close_settled(sd, stop_reason="target_reached")
+    record_close_settled(sd)
     assert _close(sd)["status"] == "succeeded"
 
 
@@ -133,7 +133,7 @@ def test_artifacts_are_recorded_not_probed(sd: Path) -> None:
     _run_sequence(sd)
     record_close_artifacts(sd, final_json_path=final_json)
     record_close_artifacts(sd, artifact_package_path=package)
-    record_close_settled(sd, stop_reason="target_reached")
+    record_close_settled(sd)
     final_json.unlink()
 
     artifacts = _close(sd)["artifacts"]
@@ -183,7 +183,7 @@ def test_unknown_step_name_is_passed_through_and_warned(sd: Path) -> None:
 
 def test_no_publication_attempt_leaves_no_write_back_key(sd: Path) -> None:
     _run_sequence(sd)
-    record_close_settled(sd, stop_reason="target_reached")
+    record_close_settled(sd)
     assert "kb_write_back" not in _close(sd)
 
 
@@ -323,7 +323,7 @@ def test_queue_depth_is_snapshotted_when_the_attempt_settles(sd: Path) -> None:
 
 def test_second_pass_appends_rather_than_replacing(sd: Path) -> None:
     _run_sequence(sd, fail="report")
-    record_close_settled(sd, stop_reason="time_exhausted")
+    record_close_settled(sd)
     assert _close(sd)["status"] == "degraded"
 
     record_close_opened(sd)
@@ -418,7 +418,7 @@ def test_a_session_that_never_analyzed_reports_no_ceiling_rather_than_zero(sd: P
 
 def test_a_close_that_never_snapshotted_progress_omits_the_key(sd: Path) -> None:
     _run_sequence(sd)
-    record_close_settled(sd, stop_reason="time_exhausted")
+    record_close_settled(sd)
 
     assert "roofline_progress" not in _close(sd)
 
@@ -469,20 +469,20 @@ def test_the_recipe_that_shipped_is_snapshotted_at_the_close(sd: Path) -> None:
 
 def test_a_close_that_never_settled_a_recipe_omits_the_key(sd: Path) -> None:
     _run_sequence(sd)
-    record_close_settled(sd, stop_reason="time_exhausted")
+    record_close_settled(sd)
 
     assert "final_recipe" not in _close(sd)
 
 
 def test_a_close_that_never_snapshotted_the_tally_omits_the_key(sd: Path) -> None:
     _run_sequence(sd)
-    record_close_settled(sd, stop_reason="time_exhausted")
+    record_close_settled(sd)
 
     assert "baseline_progress" not in _close(sd)
 
 
 def test_a_close_that_never_drained_omits_the_candidate(sd: Path) -> None:
     _run_sequence(sd)
-    record_close_settled(sd, stop_reason="time_exhausted")
+    record_close_settled(sd)
 
     assert "geak_candidate" not in _close(sd)

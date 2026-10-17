@@ -101,7 +101,7 @@ def _writer_fixture(tmp_path, *, denied: bool) -> dict:
     else:
         record_close_opened(tmp_path)
         record_close_step(tmp_path, step="report", status="done", optional=False)
-        record_close_settled(tmp_path, stop_reason="target_reached")
+        record_close_settled(tmp_path)
     return build(tmp_path)
 
 
@@ -266,7 +266,7 @@ def test_v2_budget_and_stack_ids_come_from_writers(tmp_path):
         )
     record_stage_reached(tmp_path, "close")
     record_close_opened(tmp_path)
-    record_close_settled(tmp_path, stop_reason="target_reached")
+    record_close_settled(tmp_path)
 
     fixture = build(tmp_path)
     validate(instance=fixture, schema=workflow_schema())
@@ -294,7 +294,7 @@ def test_final_close_refresh_matches_rebuilt_package(tmp_path):
     assert package is not None
     record_close_step(tmp_path, step="artifact_package", status="done", optional=False, artifact_path=str(package))
     record_close_step(tmp_path, step="done", status="done", optional=False)
-    record_close_settled(tmp_path, stop_reason="target_reached")
+    record_close_settled(tmp_path)
     record_stage_reached(tmp_path, "close")
     assert patch_breakdown_close(tmp_path)
     rebuilt = package_session_artifacts(tmp_path, session_id="v2-close", dest_root=tmp_path / "workspace")
