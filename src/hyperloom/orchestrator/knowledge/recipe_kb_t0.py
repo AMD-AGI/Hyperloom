@@ -11,7 +11,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, NamedTuple
 
 from packaging.version import InvalidVersion, Version
 
@@ -909,6 +909,121 @@ def _cascade_warm_start_search(
     return {}, "miss", 0.0
 
 
+class _AnchorRow(NamedTuple):
+    """The seven-tuple identity a T0 anchor row is written under."""
+
+    workload: str
+    hw: str
+    framework: str
+    framework_version: str
+    precision: str
+    extras: dict[str, Any]
+
+
+#: Written by the anchor itself; anything else on the row is a caller's and survives a stamp.
+_ANCHOR_OWNED_FIELDS = frozenset(
+    {
+        "canonical_id",
+        "version",
+        "created_at",
+        "updated_at",
+        "model",
+        "hardware",
+        "framework",
+        "framework_version",
+        "precision",
+        "best_config",
+        "best_throughput",
+        "what_worked",
+        "what_failed",
+        "remaining_gaps",
+        "pitfalls",
+        "lessons",
+        "last_profiled",
+        "stack_fingerprint",
+        "sessions",
+        "authority",
+        "confidence",
+        "evidence_refs",
+        "provenance",
+        "_field_sources",
+        "_sources",
+    }
+)
+
+
+def _preserved_extras(live: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Keep the fields on an authority row that the T0 anchor does not own."""
+    return {k: v for k, v in (live or {}).items() if k not in _ANCHOR_OWNED_FIELDS}
+
+
+def _stamp_local_authority_row(
+    kb: RecipeKB,
+    *,
+    canonical_id: str,
+    session_id: str,
+    fingerprint: Mapping[str, str],
+    row: _AnchorRow,
+) -> None:
+    """Stamp the T0 anchor onto the local store's own authority row.
+
+    A remote store publishes from CLOSE instead, so this is a no-op there.
+    """
+    if getattr(kb, "mode", "") == "remote":
+        log.debug("T0 anchor: remote publication is owned by CLOSE")
+        return
+    try:
+        live = kb.get_authoritative_recipe(canonical_id=canonical_id) or {}
+    except Exception as exc:  # noqa: BLE001 — defensive
+        log.info("T0 anchor authority get_recipe non-fatal failure: %s", exc)
+        live = {}
+
+    # Merge prior extras; new values win.
+    merged_extras: dict[str, Any] = {}
+    prior_extras = _preserved_extras(live)
+    merged_extras.update(prior_extras)
+    merged_extras.update(row.extras)
+
+    # Stack fingerprint — preserve prior values not stamped this round.
+    sfp_payload: dict[str, str] = dict(live.get("stack_fingerprint") or {})
+    if isinstance(fingerprint, Mapping):
+        for fp_key in ("vllm_version", "aiter_commit", "rocm_version"):
+            new = str(fingerprint.get(fp_key.replace("_version", "").replace("_commit", "")) or "").strip()
+            if new and new != "unknown":
+                sfp_payload[fp_key] = new
+
+    try:
+        kb.put_recipe(
+            canonical_id=canonical_id,
+            model=row.workload,
+            hardware=row.hw,
+            framework_name=row.framework or "",
+            framework_version=row.framework_version or "",
+            precision=row.precision or "",
+            best_config=dict(live.get("best_config") or {}),
+            best_throughput=float(live.get("best_throughput") or 0.0),
+            what_worked=list(live.get("what_worked") or []),
+            what_failed=list(live.get("what_failed") or []),
+            remaining_gaps=list(live.get("remaining_gaps") or []),
+            pitfalls=list(live.get("pitfalls") or []),
+            lessons=list(live.get("lessons") or []),
+            last_profiled=str(live.get("last_profiled") or ""),
+            stack_fingerprint=sfp_payload,
+            sessions=list(live.get("sessions") or []),
+            extras=merged_extras,
+            provenance={
+                "source": "hyperloom-inference-optimizer",
+                "generator": "t0_anchor",
+                "generated_at": datetime.now(timezone.utc).isoformat(
+                    timespec="microseconds",
+                ),
+                "details": {"sid": session_id},
+            },
+        )
+    except Exception:
+        log.exception("T0 anchor put_recipe raised unexpectedly")
+
+
 def run_t0_anchor(
     kb: RecipeKB,
     shared_state: Any,
@@ -1030,93 +1145,20 @@ def run_t0_anchor(
         else None
     )
 
-    if getattr(kb, "mode", "") != "remote":
-        # Read-modify-write the selected store's exact authority row so the stamp does not clobber fields or trigger a
-        # broad remote warm-start scan.
-        try:
-            live = kb.get_authoritative_recipe(canonical_id=cid) or {}
-        except Exception as exc:  # noqa: BLE001 — defensive
-            log.info("T0 anchor authority get_recipe non-fatal failure: %s", exc)
-            live = {}
-
-        # Merge prior extras; new values win.
-        merged_extras: dict[str, Any] = {}
-        prior_extras = {
-            k: v
-            for k, v in (live or {}).items()
-            if k
-            not in {
-                "canonical_id",
-                "version",
-                "created_at",
-                "updated_at",
-                "model",
-                "hardware",
-                "framework",
-                "framework_version",
-                "precision",
-                "best_config",
-                "best_throughput",
-                "what_worked",
-                "what_failed",
-                "remaining_gaps",
-                "pitfalls",
-                "lessons",
-                "last_profiled",
-                "stack_fingerprint",
-                "sessions",
-                "authority",
-                "confidence",
-                "evidence_refs",
-                "provenance",
-                "_field_sources",
-                "_sources",
-            }
-        }
-        merged_extras.update(prior_extras)
-        merged_extras.update(_extras)
-
-        # Stack fingerprint — preserve prior values not stamped this round.
-        sfp_payload: dict[str, str] = dict(live.get("stack_fingerprint") or {})
-        if isinstance(fp, Mapping):
-            for fp_key in ("vllm_version", "aiter_commit", "rocm_version"):
-                new = str(fp.get(fp_key.replace("_version", "").replace("_commit", "")) or "").strip()
-                if new and new != "unknown":
-                    sfp_payload[fp_key] = new
-
-        try:
-            kb.put_recipe(
-                canonical_id=cid,
-                model=workload,
-                hardware=hw,
-                framework_name=_framework or "",
-                framework_version=_fw_version or "",
-                precision=_precision or "",
-                best_config=dict(live.get("best_config") or {}),
-                best_throughput=float(live.get("best_throughput") or 0.0),
-                what_worked=list(live.get("what_worked") or []),
-                what_failed=list(live.get("what_failed") or []),
-                remaining_gaps=list(live.get("remaining_gaps") or []),
-                pitfalls=list(live.get("pitfalls") or []),
-                lessons=list(live.get("lessons") or []),
-                last_profiled=str(live.get("last_profiled") or ""),
-                stack_fingerprint=sfp_payload,
-                sessions=list(live.get("sessions") or []),
-                extras=merged_extras,
-                provenance={
-                    "source": "hyperloom-inference-optimizer",
-                    "generator": "t0_anchor",
-                    "generated_at": datetime.now(timezone.utc).isoformat(
-                        timespec="microseconds",
-                    ),
-                    "details": {"sid": sid},
-                },
-            )
-        except Exception:
-            log.exception("T0 anchor put_recipe raised unexpectedly")
-
-    else:
-        log.debug("T0 anchor: remote publication is owned by CLOSE")
+    _stamp_local_authority_row(
+        kb,
+        canonical_id=cid,
+        session_id=sid,
+        fingerprint=fp,
+        row=_AnchorRow(
+            workload=workload,
+            hw=hw,
+            framework=_framework,
+            framework_version=_fw_version,
+            precision=_precision,
+            extras=_extras,
+        ),
+    )
 
     # Exact seven-tuple, then cumulative model/hardware/precision/version relaxations.
     warm_prefer = _build_warm_prefer(shared_state, _fw_version)
