@@ -20,7 +20,6 @@ import json
 import logging
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -970,68 +969,6 @@ def _gemm_tuning_workspace(payload: dict, *, session_dir: Path) -> Path:
     if not suffix:
         suffix = f"request_{int(time.time())}"
     return Path(session_dir) / "runs" / "gemm_tuning" / suffix
-
-
-def _write_gemm_tuning_benchmark_script(
-    *,
-    workspace: Path,
-    model_path: str,
-    framework: str,
-    gpu_type: str,
-    tp: int,
-    conc: int,
-    isl: int,
-    osl: int,
-) -> Path:
-    """Create an isolated benchmark wrapper for GEAK GEMM tuning (distinct port + no global ``pgrep sglang`` cleanup, so it can't kill the main optimizer's server).
-
-    Args:
-        workspace: Directory to write the benchmark script into.
-        model_path: Path to the model under test.
-        framework: Serving framework (e.g. ``sglang``).
-        gpu_type: GPU type used to select the benchmark runner.
-        tp: Tensor-parallel degree.
-        conc: Concurrency.
-        isl: Input sequence length.
-        osl: Output sequence length.
-
-    Returns:
-        The path to the written, executable benchmark script.
-    """
-    inferencex_path = os.environ.get("INFERENCEX_PATH") or "/hyperloom/InferenceX"
-    runner = f"{inferencex_path}/benchmarks/{framework}_{gpu_type}.sh"
-    path = workspace / "geak_gemm_benchmark.sh"
-    path.write_text(
-        f"""#!/usr/bin/env bash
-set -euo pipefail
-export MODEL={shlex.quote(model_path)}
-export TP={int(tp)}
-export CONC={int(conc)}
-export ISL={int(isl)}
-export OSL={int(osl)}
-export RANDOM_RANGE_RATIO="${{RANDOM_RANGE_RATIO:-1}}"
-export NUM_PROMPTS="${{NUM_PROMPTS:-320}}"
-export NUM_WARMUPS="${{NUM_WARMUPS:-8}}"
-# Shape capture consumes throughput only, so it never pays for an accuracy eval.
-export RUN_EVAL="false"
-export RESULT_DIR="${{RESULT_DIR:-$PWD/gemm_benchmark_result}}"
-export RESULT_FILENAME="${{RESULT_FILENAME:-bench_serving.json}}"
-export PORT="${{PORT:-18888}}"
-export PATH="/opt/node20/bin:/opt/venv/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-export INFERENCEX_PATH={shlex.quote(inferencex_path)}
-mkdir -p "$RESULT_DIR"
-cd "$INFERENCEX_PATH"
-exec {shlex.quote(runner)}
-""",
-        encoding="utf-8",
-    )
-    path.chmod(0o755)
-    return path
-
-
-def resolve_gemm_tuning_backend(payload: dict) -> str:
-    """Resolve GEMM tuning backend under the forge-explicit-only invariant."""
-    return "forge" if forge_explicitly_enabled() else "geak"
 
 
 def _parse_forge_gemm_sentinel(stdout: str) -> dict[str, Any] | None:
@@ -3550,145 +3487,12 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
     return updated, snap_dir
 
 
-_GEMM_TUNING_MODULE = "hyperloom.orchestrator.kernel.gemm_tuning"
-
-
-async def _run_geak_gemm_tuning(
-    payload: dict,
-    *,
-    session_dir: Path,
-) -> HandlerResult:
-    """Legacy GEAK GEMM tuning wrapper.
-
-    Hyperloom does not decide precision/framework applicability here; it passes
-    the workload metadata through and lets GEAK decide.
-    """
-    from ..state.shared_state import SharedState
-
-    state = SharedState.load_or_init(session_dir)
-    precision = _normalize_precision(payload.get("precision") or state.precision)
-    framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
-
-    workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)
-    workspace.mkdir(parents=True, exist_ok=True)
-
-    model_path = str(payload.get("model_path") or state.model_path or os.environ.get("MODEL_PATH") or "").strip()
-    if not model_path:
-        return {"status": "failed", "error_class": "model_path_missing", "error": "model_path is required"}
-    tp = int(payload.get("tp") or state.tp or os.environ.get("TP") or 1)
-    conc = int(payload.get("conc") or state.conc or os.environ.get("CONC") or 0)
-    isl = int(payload.get("isl") or state.isl or os.environ.get("ISL") or 0)
-    osl = int(payload.get("osl") or state.osl or os.environ.get("OSL") or 0)
-    gpu_type = str(payload.get("gpu_type") or state.gpu_type or os.environ.get("GPU_TYPE") or "").strip().lower()
-    benchmark_script = str(
-        payload.get("benchmark_script") or os.environ.get("GEAK_GEMM_BENCHMARK_SCRIPT") or ""
-    ).strip()
-    if not benchmark_script:
-        if not gpu_type:
-            gpu_type = "mi355x"
-        benchmark_script = str(
-            _write_gemm_tuning_benchmark_script(
-                workspace=workspace,
-                model_path=model_path,
-                framework=framework,
-                gpu_type=gpu_type,
-                tp=tp,
-                conc=conc,
-                isl=isl,
-                osl=osl,
-            )
-        )
-    geak_config = str(payload.get("config") or os.environ.get("GEAK_CONFIG") or "").strip()
-    baseline_tput = payload.get("baseline_tput")
-    if baseline_tput is None:
-        baseline_tput = state.baseline_tput
-
-    from hyperloom.orchestrator.actions.executors._workload_envs import GEAK_METRIC_OUTPUT
-
-    _geak_e2e_metric, _ = GEAK_METRIC_OUTPUT
-
-    input_json = workspace / "gemm_tuning_input.json"
-    input_payload = {
-        "cwd": str(workspace),
-        "model_path": model_path,
-        "benchmark_script": benchmark_script,
-        "framework": framework,
-        "precision": precision,
-        "gpu_type": gpu_type,
-        "tp": tp,
-        "conc": conc,
-        "isl": isl,
-        "osl": osl,
-        "baseline_tput": float(baseline_tput or 0.0),
-        # Output on every session, interactivity-graded ones included: ``baseline_tput``
-        # above is output throughput, and the fixed ISL/OSL benchmark written above is
-        # not an AgentX replay, so it has no interactivity median for GEAK to tune on.
-        "env": {"E2E_METRIC": _geak_e2e_metric},
-    }
-    if geak_config:
-        input_payload["config"] = geak_config
-    elif not payload.get("dry_run"):
-        return {
-            "status": "skipped",
-            "decision": "REVERT",
-            "backend": "geak",
-            "engine": "geak",
-            "error_class": "legacy_geak_config_missing",
-            "error": (
-                "GEAK GEMM tuning requires GEAK_CONFIG. "
-                "Forge fallback is disabled unless KERNEL_OPT_BACKEND_ORDER=forge."
-            ),
-            "workspace": str(workspace),
-            "precision": precision,
-            "framework": framework,
-            "model_path": model_path,
-            "benchmark_script": benchmark_script,
-        }
-    if payload.get("dry_run"):
-        input_payload["dry_run"] = True
-    input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
-
-    cmd = [
-        "env",
-        f"E2E_METRIC={_geak_e2e_metric}",
-        sys.executable,
-        "-m",
-        _GEMM_TUNING_MODULE,
-        "--input-json",
-        str(input_json),
-    ]
-
-    _gemm_timeout = _gemm_tuning_timeout_sec(payload)
-    try:
-        rc, stdout, stderr = await _run_subprocess(cmd, timeout_sec=_gemm_timeout)
-        result = _shape_tool_result(rc, stdout, stderr)
-    except subprocess.TimeoutExpired as exc:
-        cmd_repr = " ".join(str(c) for c in (getattr(exc, "cmd", None) or cmd))
-        result = {
-            "status": "failed",
-            "error_class": "subprocess_timeout",
-            "error": f"TimeoutExpired after {_gemm_timeout}s: {cmd_repr[:1500]}",
-        }
-    result.setdefault("backend", "geak")
-    result.setdefault("engine", "geak")
-    result.setdefault("workspace", str(workspace))
-    result.setdefault("precision", precision)
-    result.setdefault("framework", framework)
-    result.setdefault("model_path", model_path)
-    result.setdefault("benchmark_script", benchmark_script)
-    return result
-
-
 async def run_gemm_tuning_handler(
     payload: dict,
     *,
     session_dir: Path,
 ) -> HandlerResult:
-    """Run GEMM tuning via GEAK, or forge only when explicitly enabled.
-
-    Backend selection:
-    1. Exact ``KERNEL_OPT_BACKEND_ORDER=forge`` -> forge.
-    2. Everything else -> GEAK.
+    """Run the forge GEMM tuner and record the run in the audit trace.
 
     Args:
         payload: The GEMM-tuning request payload.
@@ -3697,13 +3501,7 @@ async def run_gemm_tuning_handler(
     Returns:
         A ``HandlerResult`` describing the tuning outcome.
     """
-    backend = resolve_gemm_tuning_backend(payload)
-    log.info("run_gemm_tuning: backend=%s", backend)
-
-    if backend == "forge":
-        result = await _run_forge_gemm_tuning(payload, session_dir=session_dir)
-    else:
-        result = await _run_geak_gemm_tuning(payload, session_dir=session_dir)
+    result = await _run_forge_gemm_tuning(payload, session_dir=session_dir)
     result.setdefault("task_id", payload.get("task_id"))
     result.setdefault("macro_cycle", payload.get("macro_cycle"))
     _trace_gemm_tuning_run(result, session_dir=session_dir)
