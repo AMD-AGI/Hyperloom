@@ -95,7 +95,6 @@ CURVES = {
 EXPLORED = {**CURVES, frozenset({"c2"}): {MAIN_POINT: 1060.0}}
 SCRIPTS = {"b01": (tagged("c1"),), "b02": (tagged("c2"),)}
 FIX_REASON = "fix f1 regresses"
-KB_URL = "HYPERLOOM_KB_URL"
 #: An agent CLI as the AI work socket starts one: leading a session of its own.
 AGENT_ARGV = ("sleep", "600")
 #: Real seconds a scripted specialist's change gets to be judged and committed while virtual time stands still.
@@ -112,9 +111,8 @@ STEER = _reply({"open": 0, "branches": [{"branch": "b01", "k": 7}], "stop": [{"b
 
 @pytest.fixture(autouse=True)
 def no_knowledge_targets(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CLOSE's knowledge steps find no Experience KB and no archive: a test session leaves no knowledge behind."""
+    """CLOSE's knowledge steps find no archive: a test session leaves no knowledge behind."""
 
-    monkeypatch.delenv(KB_URL, raising=False)
     monkeypatch.delenv(ARCHIVE_ENV, raising=False)
 
 
@@ -217,7 +215,8 @@ class Stage:
         self.toolbox, self.repo, self.setup = toolbox, repo, setup
         self.briefs = SessionBriefs(self.handle(Role.OBSERVER))
         mcp = McpServer(McpServerConfig(host_token="t" * MIN_TOKEN_LENGTH), campaign=setup.layout.session_id)
-        return Peers(runtime, toolbox, repo, session_gate(self.handle(Role.GATE), toolbox), mcp, self.briefs)
+        gate = session_gate(self.handle(Role.GATE), toolbox)
+        return Peers(runtime, toolbox, repo, gate, mcp, self.briefs, toolbox.config.image_digest)
 
     async def root(self) -> str:
         return (await self.handle(Role.OBSERVER).baseline()).root_commit

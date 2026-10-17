@@ -50,8 +50,6 @@ MERGES_FILE = "MB-merges.jsonl"
 REPORT_FILE = "MB-report.json"
 REPORT_MARKDOWN_FILE = "MB-report.md"
 SCHEDULER_LOG_FILE = "MB-scheduler.log"
-#: Named by the toolbox's interface (board #8), so it carries no ``MB-`` prefix inside ``MB-toolbox``.
-MEASUREMENT_CONFIG_FILE = "measurement-config.json"
 
 SESSION_SUBDIRS: tuple[str, ...] = (
     SCHEDULING_DIR,
@@ -116,11 +114,6 @@ class SessionLayout:
     @property
     def toolbox(self) -> Path:
         return self.root / TOOLBOX_DIR
-
-    @property
-    def measurement_config(self) -> Path:
-        """The canonical measurement config and the base image digest the toolbox measures the session on."""
-        return self.toolbox / MEASUREMENT_CONFIG_FILE
 
     @property
     def integration(self) -> Path:

@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The real peers of a session: built inside the session directory on model-backed specialist sessions, and refused
-when this machine has no agent CLI for them."""
+"""The real peers of a session: built inside the session directory on model-backed specialist sessions and on this
+machine's measurement host, and refused when this machine has no agent CLI for them or its pins cannot be read."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ import pytest
 
 from hyperloom.contracts.recipe import Recipe
 from hyperloom.measure.compile import LocalBlobStore
+from hyperloom.measure.pins import ActiveImage, ToolCommits, pinned_tool_commits
 from hyperloom.orchestrator.kernel.request_handlers import resolve_gemm_tuning_backend
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant
@@ -27,10 +28,12 @@ from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.layout import SESSION_PREFIX, create_session
 from hyperloom_multibranch.scheduling.local_peers import (
+    MB_FAKE_IMAGE_REF,
     MeasurementHost,
     SessionWiring,
     local_peers,
-    mb_fake_measurement_host,
+    machine_parallel_tests,
+    measurement_host,
     specialist_command,
     workload_environment,
 )
@@ -47,7 +50,9 @@ from hyperloom_multibranch.toolbox.mcp_tools import McpSpecialistTokens
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 
 WORKLOAD = Workload("/models/Llama-3-8B", "sglang", 2, 1024, 512, 16, "bf16", "mi355x", KernelOptimizer.FORGE)
-HOST = MeasurementHost((0, 1, 2, 3), "local", MB_FAKE_BASE_IMAGE_DIGEST, "a" * 40, "b" * 40)
+IMAGE = ActiveImage("registry.example/sglang:v1", "sha256:" + "2" * 64)
+HOST = MeasurementHost((0, 1, 2, 3), IMAGE, ToolCommits("a" * 40, "b" * 40))
+IMAGE_VARS = ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST")
 
 
 def _call_tool(grant: SpecialistGrant, name: str) -> dict[str, object]:
@@ -120,9 +125,47 @@ def test_without_the_agent_cli_the_peers_are_refused(tmp_path: Path) -> None:
         specialist_command({"PATH": str(tmp_path), "ANTHROPIC_API_KEY": "dummy"})
 
 
-def test_the_placeholder_host_is_one_machine_on_the_root_recipes_image() -> None:
-    host = mb_fake_measurement_host()
-    assert host.cards == tuple(range(8)) and host.image_digest == MB_FAKE_BASE_IMAGE_DIGEST
+@pytest.fixture
+def four_cards(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This machine shows four cards."""
+
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
+
+
+@pytest.mark.usefixtures("four_cards")
+def test_the_host_is_this_machines_cards_on_the_launchers_image_and_the_pinned_tool_commits() -> None:
+    env = {IMAGE_VARS[0]: IMAGE.ref, IMAGE_VARS[1]: IMAGE.digest}
+
+    host = measurement_host(env)
+
+    assert host == MeasurementHost((0, 1, 2, 3), IMAGE, pinned_tool_commits({}))
+    assert machine_parallel_tests(2) == 2
+
+
+@pytest.mark.usefixtures("four_cards")
+def test_a_session_nobody_names_the_image_of_runs_on_the_placeholder_image() -> None:
+    assert measurement_host({}).image == ActiveImage(MB_FAKE_IMAGE_REF, MB_FAKE_BASE_IMAGE_DIGEST)
+
+
+@pytest.mark.parametrize(
+    ("env", "named"),
+    [
+        ({IMAGE_VARS[0]: IMAGE.ref}, IMAGE_VARS[1]),
+        ({IMAGE_VARS[0]: IMAGE.ref, IMAGE_VARS[1]: MB_FAKE_BASE_IMAGE_DIGEST}, "not a real sha256"),
+        ({"MAGPIE_REF": "main"}, "MAGPIE_REF"),
+    ],
+    ids=["half-named-image", "zero-digest", "moving-tool-ref"],
+)
+@pytest.mark.usefixtures("four_cards")
+def test_pins_that_cannot_be_read_refuse_the_peers(env: dict[str, str], named: str) -> None:
+    with pytest.raises(PeersUnavailable, match=named):
+        measurement_host(env)
+
+
+def test_a_machine_that_shows_no_card_fits_no_test(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "")
+    with pytest.raises(ValueError, match="0 cards"):
+        machine_parallel_tests(1)
 
 
 async def test_the_real_peers_live_inside_the_session_directory(
@@ -157,14 +200,11 @@ async def test_the_real_peers_live_inside_the_session_directory(
         assert isinstance(peers.lifecycle, SpecialistRuntime) and peers.briefs.warm == ()
         assert isinstance(peers.toolbox, LocalHostedToolbox) and isinstance(peers.repo, GitExperimentRepo)
         assert (layout.toolbox / "canonical" / "canonical.yaml").is_file()
-        config = json.loads(layout.measurement_config.read_text(encoding="utf-8"))
-        assert config["base_image_digest"] == HOST.image_digest
-        assert config["config"]["workload"]["kernel_optimizer"] == "forge"
-        assert config["config"]["primary_concurrency"] == WORKLOAD.conc
-        assert (config["config"]["magpie_commit"], config["config"]["cards"]) == ("a" * 40, [0, 1, 2, 3])
+        assert not (layout.toolbox / "measurement-config.json").exists()
+        assert peers.base_image_digest == IMAGE.digest
         assert peers.mcp.url.startswith("http://127.0.0.1:")
         assert {name: os.environ[name] for name in workload_environment(WORKLOAD)} == workload_environment(WORKLOAD)
-        root = await peers.repo.init_root(Recipe(MB_FAKE_BASE_IMAGE_DIGEST))
+        root = await peers.repo.init_root(Recipe(IMAGE.digest))
         assert await peers.repo.head(INTEGRATION_BRANCH) == root
         patch = await peers.repo.store_patch("sglang", "--- a/x\n+++ b/x\n")
         assert LocalBlobStore(layout.blobs).get(patch.sha256) == b"--- a/x\n+++ b/x\n"

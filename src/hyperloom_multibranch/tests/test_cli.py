@@ -20,6 +20,8 @@ from hyperloom_multibranch.scheduling.peers import PeerFactory
 from hyperloom_multibranch.scheduling.roster import RosterCaps
 from hyperloom_multibranch.scheduling.settings import KernelOptimizer, RunSettings, Workload
 
+#: What the session's launcher sets to name the image the session runs on.
+IMAGE_VARS = ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST")
 WORKLOAD_ARGS = [
     "--model", "/models/Llama-3-8B", "--framework", "vllm", "--tp", "2", "--isl", "1024", "--osl", "512",
     "--conc", "16", "--precision", "fp8", "--gpu-type", "mi300x",
@@ -114,12 +116,20 @@ def test_usage_errors_exit_two(argv: list[str], tmp_path: Path, monkeypatch: pyt
     assert not any(tmp_path.iterdir())
 
 
-@pytest.fixture
-def experience_kb(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
-    """The Experience KB configured, no Recipe KB, and a writable RSI archive outside the test's workspace."""
+@pytest.fixture(autouse=True)
+def eight_cards(monkeypatch: pytest.MonkeyPatch) -> None:
+    """This machine shows eight cards."""
 
-    monkeypatch.setenv("HYPERLOOM_KB_URL", "http://127.0.0.1:9/kb")
-    monkeypatch.setenv("HYPERLOOM_KB_TOKEN", "dummy-token")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
+
+
+@pytest.fixture
+def ready_environment(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
+    """No Experience KB, no Recipe KB, no image named, the shipped tool pins, and a writable RSI archive outside the
+    test's workspace."""
+
+    for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN", *IMAGE_VARS, "MAGPIE_REF", "INFERENCEX_REF"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.delenv("KB_STORE_URL", raising=False)
     monkeypatch.delenv("KB_STORE_TOKEN", raising=False)
     monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path_factory.mktemp("rsi-archive")))
@@ -146,8 +156,8 @@ def agent_cli(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPath
     return runs
 
 
-@pytest.mark.usefixtures("experience_kb")
-def test_a_ready_environment_runs_the_session_on_the_model_backed_specialists(
+@pytest.mark.usefixtures("ready_environment")
+def test_a_ready_environment_without_an_experience_kb_runs_the_session_on_the_model_backed_specialists(
     agent_cli: list[RunSettings], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
@@ -157,7 +167,7 @@ def test_a_ready_environment_runs_the_session_on_the_model_backed_specialists(
     assert agent_cli == [_settings()]
 
 
-@pytest.mark.usefixtures("experience_kb", "agent_cli")
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
 def test_run_without_the_agent_cli_fails_loudly_before_creating_anything(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -172,37 +182,23 @@ def test_run_without_the_agent_cli_fails_loudly_before_creating_anything(
     assert not any(tmp_path.iterdir())
 
 
-@pytest.mark.parametrize(
-    ("unset", "named"),
-    [
-        (("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN"), "HYPERLOOM_KB_URL"),
-        (("HYPERLOOM_KB_URL",), "HYPERLOOM_KB_URL"),
-        (("HYPERLOOM_KB_TOKEN",), "HYPERLOOM_KB_TOKEN"),
-    ],
-)
-@pytest.mark.usefixtures("experience_kb", "agent_cli")
-def test_run_without_the_experience_kb_fails_loudly_before_creating_anything(
-    unset: tuple[str, ...],
-    named: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
+def test_tool_pins_that_cannot_be_read_fail_loudly_before_creating_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    for name in unset:
-        monkeypatch.delenv(name)
+    monkeypatch.setenv("MAGPIE_REF", "main")
 
     assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
 
     captured = capsys.readouterr()
-    assert "Experience KB" in captured.err and named in captured.err
-    assert "KB_STORE_URL and KB_STORE_TOKEN configure the Recipe KB only" in captured.err
+    assert "measurement pins" in captured.err and "MAGPIE_REF" in captured.err
     assert captured.out == ""
     assert not any(tmp_path.iterdir())
 
 
 @pytest.mark.parametrize("unset", ["KB_STORE_URL", "KB_STORE_TOKEN"])
-@pytest.mark.usefixtures("experience_kb", "agent_cli")
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
 def test_a_half_configured_recipe_kb_fails_loudly_before_creating_anything(
     unset: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -219,7 +215,7 @@ def test_a_half_configured_recipe_kb_fails_loudly_before_creating_anything(
     assert not any(tmp_path.iterdir())
 
 
-@pytest.mark.usefixtures("experience_kb", "agent_cli")
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
 def test_the_rsi_archive_defaults_to_the_shared_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
     monkeypatch.delenv(ARCHIVE_ENV)
@@ -229,7 +225,7 @@ def test_the_rsi_archive_defaults_to_the_shared_one(tmp_path: Path, monkeypatch:
     assert os.environ[ARCHIVE_ENV] == cli.RSI_ARCHIVE_DEFAULT == "/shared_nfs/hyperloom/rsi-archive/"
 
 
-@pytest.mark.usefixtures("experience_kb", "agent_cli")
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
 def test_a_named_rsi_archive_is_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     archive = tmp_path / "archive"
     archive.mkdir()
@@ -241,7 +237,7 @@ def test_a_named_rsi_archive_is_kept(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert os.environ[ARCHIVE_ENV] == str(archive)
 
 
-@pytest.mark.usefixtures("experience_kb", "agent_cli")
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
 def test_an_rsi_archive_that_is_not_a_writable_directory_fails_loudly_before_creating_anything(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

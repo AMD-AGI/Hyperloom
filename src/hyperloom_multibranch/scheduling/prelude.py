@@ -121,8 +121,11 @@ class Prelude:
         self._decisions = context.decisions
         self._clock = context.clock
 
-    async def root(self, workload: Workload, budget: SessionBudget, hard_stop: HardStop) -> PreludeResult:
-        """Root the session on the main flow's result; raises :class:`PreludeFailed` when there is none.
+    async def root(
+        self, workload: Workload, budget: SessionBudget, hard_stop: HardStop, base_image_digest: str
+    ) -> PreludeResult:
+        """Root the session on the main flow's result, on ``base_image_digest``; raises :class:`PreludeFailed` when
+        there is none.
 
         The baseline is measured afterwards, by :meth:`measure_baseline`, once the integration branch has its K.
         """
@@ -130,7 +133,7 @@ class Prelude:
         child = await self._run_child(workload, budget, hard_stop)
         try:
             artifacts = _succeeded(await asyncio.to_thread(read_prelude, child))
-            recipe = await self._root_recipe(artifacts, workload.framework)
+            recipe = await self._root_recipe(artifacts, workload.framework, base_image_digest)
         except (PreludeReadError, OSError, BlobError) as exc:
             raise PreludeFailed(f"cannot root the session on the baseline prelude in {child}: {exc}") from exc
         atomic_write_json(self._layout.root_recipe, recipe.to_document())
@@ -205,7 +208,7 @@ class Prelude:
         await self._processes.kill_branch(PRELUDE_BRANCH)
         return exit_code
 
-    async def _root_recipe(self, artifacts: PreludeArtifacts, framework: str) -> Recipe:
+    async def _root_recipe(self, artifacts: PreludeArtifacts, framework: str, base_image_digest: str) -> Recipe:
         """The git calls and file reads run off the event loop, so a stop signal is not held up behind them."""
 
         pin = await asyncio.to_thread(framework_pin, artifacts)
@@ -213,7 +216,7 @@ class Prelude:
         for kept in artifacts.kept_patches:
             text = await asyncio.to_thread(kept.patch_file.read_text, encoding="utf-8")
             patches.append(await self._repo.store_patch(framework, text))
-        return await asyncio.to_thread(root_recipe, artifacts, framework, pin, tuple(patches))
+        return await asyncio.to_thread(root_recipe, artifacts, framework, pin, tuple(patches), base_image_digest)
 
     async def measure_baseline(self, root: str) -> None:
         """Measure the baseline on ``root`` through the toolbox and have the rule gate anchor it; raises

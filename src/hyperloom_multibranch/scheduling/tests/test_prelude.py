@@ -45,7 +45,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     measure_no_throughput,
     session_gate,
 )
-from hyperloom_multibranch.toolbox.fake_model import Fate
+from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig
 from hyperloom_multibranch.scheduling.tests.child_sessions import (
     PATCH_TEXT,
     ROOFLINE_PEAK,
@@ -54,6 +54,8 @@ from hyperloom_multibranch.scheduling.tests.child_sessions import (
 )
 
 NOW = 1_000_000.0
+#: The image the fake toolbox measures on, which the root recipe must carry.
+IMAGE = FakeToolboxConfig().image_digest
 STUBBORN_CHILD = ("sh", "-c", "trap '' TERM; sleep 60")
 #: Clock seconds left before the hard stop when the stubborn child's PRELUDE is cancelled.
 NEAR_HARD_STOP_SECONDS = 0.4
@@ -139,7 +141,7 @@ def _warm_start_decision(layout: SessionLayout) -> dict[str, Any]:
 async def _run(prelude: Prelude, budget: SessionBudget) -> PreludeResult:
     """Both PRELUDE steps, as the session runs them once the integration branch has its K."""
 
-    result = await prelude.root(WORKLOAD, budget, HardStop(budget, _clock()))
+    result = await prelude.root(WORKLOAD, budget, HardStop(budget, _clock()), IMAGE)
     await prelude.measure_baseline(result.root_commit)
     return result
 
@@ -188,14 +190,14 @@ async def test_finished_child_roots_the_session_before_any_baseline_test(tmp_pat
     processes, peers = _registry(layout, child), _peers(layout)
 
     budget = SessionBudget.from_hours(2.0, NOW)
-    result = await _prelude(layout, processes, peers).root(WORKLOAD, budget, HardStop(budget, _clock()))
+    result = await _prelude(layout, processes, peers).root(WORKLOAD, budget, HardStop(budget, _clock()), IMAGE)
 
     assert float(processes.argv[processes.argv.index("--max-hours") + 1]) == pytest.approx(2.0)
     assert result.root_commit == await peers.repo.head(INTEGRATION_BRANCH)
     recipe = await peers.repo.read_recipe(result.root_commit)
     [component] = recipe.components
     texts = [await peers.repo.patch_text(result.root_commit, patch.path) for patch in component.patches]
-    assert texts == [PATCH_TEXT]
+    assert texts == [PATCH_TEXT] and recipe.base_image_digest == IMAGE
     assert json.loads(layout.root_recipe.read_text()) == recipe.to_document()
     assert json.loads(layout.prelude_child.read_text())["session_dir"] == str(child)
     assert await processes.leftovers() == ()
@@ -217,7 +219,7 @@ async def test_the_recipe_kb_champions_for_the_profile_become_warm_start_leads(t
     budget = SessionBudget.from_hours(2.0, NOW)
 
     prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), _peers(layout), recipe_kb=kb)
-    result = await prelude.root(WORKLOAD, budget, HardStop(budget, _clock()))
+    result = await prelude.root(WORKLOAD, budget, HardStop(budget, _clock()), IMAGE)
 
     [lead] = result.warm_leads
     assert (lead.canonical_id, lead.server_args, lead.gain_pct) == (
@@ -240,7 +242,7 @@ async def test_without_a_readable_recipe_kb_the_session_roots_with_no_leads(
     budget = SessionBudget.from_hours(2.0, NOW)
 
     prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), _peers(layout), recipe_kb=recipe_kb)
-    result = await prelude.root(WORKLOAD, budget, HardStop(budget, _clock()))
+    result = await prelude.root(WORKLOAD, budget, HardStop(budget, _clock()), IMAGE)
 
     assert result.warm_leads == ()
     assert _warm_start_decision(layout) == {"leads": [], "unread": unread}
@@ -256,7 +258,7 @@ async def test_the_profile_names_the_model_type_and_architectures_of_the_models_
     budget = SessionBudget.from_hours(2.0, NOW)
 
     prelude = _prelude(layout, _registry(layout, child_with_patch(tmp_path)), peers)
-    result = await prelude.root(workload, budget, HardStop(budget, _clock()))
+    result = await prelude.root(workload, budget, HardStop(budget, _clock()), IMAGE)
 
     assert (result.profile.model_type, result.profile.architectures) == ("qwen3", ("Qwen3ForCausalLM",))
     assert await _notebook(layout).session_profile() == result.profile

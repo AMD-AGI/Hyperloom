@@ -5,17 +5,18 @@
 gate's session service, the specialist runtime on them and the MCP service that serves the specialists their tools.
 
 :func:`local_peers` builds them inside the session directory: the repository at ``MB-repo``, the toolbox's
-sandboxes, archive, submit log, measurement points and measurement config under ``MB-toolbox``, and the patch and
-kernel files its environment compiler reads, like the repository, from the session's blob store at ``MB-blobs``. The
-MCP service listens on loopback for the whole session and hands every toolbox call to the loop the peers were built
-on; its learnings tool recalls past sessions' from the Experience KB the environment names. The gate's session
-service and the specialist runtime judge on one InferenceX rule at the workload's conc; the runtime settles through a
+sandboxes, archive, submit log and measurement points under ``MB-toolbox``, and the patch and kernel files its
+environment compiler reads, like the repository, from the session's blob store at ``MB-blobs``. The MCP service listens on loopback for the whole session and hands every toolbox call to the loop the peers were built
+on; its learnings tool recalls this session's learnings only, as MB1 runs on no Experience KB
+(:func:`~hyperloom_multibranch.scheduling.mb_fakes.mb_fake_learning_recall`). Every test is measured on a
+:class:`MeasurementHost`: this machine's cards, the image it runs and the tool commits Hyperloom pins. The gate's
+session service and the specialist runtime judge on one InferenceX rule at the workload's conc; the runtime settles through a
 rule gate that asks the scheduler's fork desk for branches, and the MCP service's ``request_repair`` and
 ``decline_repair`` conclude a blocked candidate through the same gate. The runtime's specialist sessions come from
 a :data:`SpecialistSessions`: :func:`model_backed_sessions` runs each branch's specialist as an agent CLI in a
 worktree of its own, briefed by the session's :class:`SessionBriefs`, whose warm-start leads the session binds once
-PRELUDE has read them. :func:`load_peers` resolves that CLI first and refuses when this machine has none, so the
-command line fails before it creates anything.
+PRELUDE has read them. :func:`load_peers` reads the measurement host and resolves that CLI first, and refuses when
+either cannot be had, so the command line fails before it creates anything.
 
 The toolbox, its measurement points and the agent sessions load the main flow's runtime, so they are imported inside
 the functions that use them: importing this module, the command line or the session loads none of it.
@@ -32,7 +33,6 @@ from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING
 
-from hyperloom.common.io import atomic_write_json
 from hyperloom.common.llm_config import preferred_agent_backend, provider_model_defaults, resolve_forge_llm_model
 from hyperloom.common.model_paths import resolve_serving_model_path
 from hyperloom_multibranch.contracts.notebook import Role, Writer
@@ -40,20 +40,19 @@ from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SpecialistTokens
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
 from hyperloom_multibranch.rulegate.service import GateService
-from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
+from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST, mb_fake_learning_recall
 from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC, Workload
 from hyperloom_multibranch.specialist.judging import Judging
 from hyperloom_multibranch.specialist.runtime import RuntimePacing, SpecialistRuntime
 
 if TYPE_CHECKING:
-    from hyperloom.measure.points import CanonicalMeasurement
+    from hyperloom.measure.pins import ActiveImage, ToolCommits
     from hyperloom_multibranch.specialist.agent_session import AgentCommand
     from hyperloom_multibranch.specialist.model_sessions import ModelSessions
 
@@ -65,11 +64,9 @@ POINTS_DIR = "points"
 #: A claim's lease on the specialist tools: the runtime renews it every 10 minutes (board #26).
 CLAIM_TTL_SECONDS = 1800.0
 
-#: Stands in for the image the local sandboxes run in: they run on this machine, in no image.
+#: Stands in for the reference of the image this machine runs while whoever launches the session names no image;
+#: replaced as :func:`mb_fake_active_image` is.
 MB_FAKE_IMAGE_REF = "local"
-#: Stands in for the Magpie and InferenceX commits the runner checks out; the instruction sheet refuses no commit
-#: of this shape, but a runner cannot fetch it. Replaced when enablement or the command line name the real commits.
-MB_FAKE_TOOL_COMMIT = "0" * 40
 
 
 @dataclass(frozen=True)
@@ -93,14 +90,12 @@ SpecialistSessions = Callable[[SessionWiring], "ModelSessions"]
 @dataclass(frozen=True)
 class MeasurementHost:
     """What the toolbox measures on and the session's workload does not name: the cards of the machine, the image
-    the tests run in (``image_digest`` is also the base image every recipe must carry) and the Magpie and InferenceX
-    commits the runner checks out."""
+    the tests run in (its digest is also the base image every recipe must carry, the root recipe's first) and the
+    Magpie and InferenceX commits the runner checks out."""
 
     cards: tuple[int, ...]
-    image_ref: str
-    image_digest: str
-    magpie_commit: str
-    inferencex_commit: str
+    image: ActiveImage
+    tools: ToolCommits
 
 
 def workload_environment(workload: Workload) -> Mapping[str, str]:
@@ -123,25 +118,6 @@ def workload_environment(workload: Workload) -> Mapping[str, str]:
     }
 
 
-def measurement_config(workload: Workload, host: MeasurementHost, canonical: CanonicalMeasurement) -> dict[str, object]:
-    """The toolbox's measurement config document (board #8): the base image every recipe must carry, and the workload,
-    canonical surface, image and tool commits every test is measured on."""
-
-    return {
-        "base_image_digest": host.image_digest,
-        "config": {
-            "workload": encode(workload),
-            "primary_concurrency": canonical.primary_concurrency,
-            "surface": dict(canonical.surface.fields),
-            "surface_sha256": canonical.surface.sha256,
-            "image_ref": host.image_ref,
-            "magpie_commit": host.magpie_commit,
-            "inferencex_commit": host.inferencex_commit,
-            "cards": list(host.cards),
-        },
-    }
-
-
 def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: PeerSetup) -> Peers:
     """The session's peers on this machine; exports :func:`workload_environment` into this process.
 
@@ -153,7 +129,6 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     from hyperloom.measure.compile import EnvironmentCompiler
     from hyperloom.measure.hosted_spec import SpecContext
     from hyperloom.measure.points import default_canonical
-    from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall
     from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
     from hyperloom_multibranch.toolbox.local_hosted import LocalSession, build_local_toolbox
     from hyperloom_multibranch.toolbox.mcp_tools import (
@@ -170,21 +145,21 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     os.environ.update(workload_environment(workload))
     repo = GitExperimentRepo(layout.repo, setup.blobs)
     canonical = default_canonical(layout.toolbox / CANONICAL_DIR, primary_concurrency=workload.conc)
-    atomic_write_json(layout.measurement_config, measurement_config(workload, host, canonical), indent=2)
-    compiler = EnvironmentCompiler(setup.blobs, host.image_digest)
+    image = host.image
+    compiler = EnvironmentCompiler(setup.blobs, image.digest)
     spec = SpecContext(
-        image_ref=host.image_ref,
-        image_digest=host.image_digest,
+        image_ref=image.ref,
+        image_digest=image.digest,
         gpu_type=workload.gpu_type,
-        magpie_commit=host.magpie_commit,
-        inferencex_commit=host.inferencex_commit,
+        magpie_commit=host.tools.magpie,
+        inferencex_commit=host.tools.inferencex,
         blobs=setup.blobs,
         blob_root=str(setup.blobs.root),
     )
     toolbox = build_local_toolbox(
         LocalSession(layout.toolbox, layout.session_id, host.cards, workload.tp),
         LocalNotebook(layout.notebook, Writer(Role.TOOLBOX, TOOLBOX_WRITER)),
-        AcceptanceSetup(repo, HostedPlanner(compiler, canonical, layout.toolbox / POINTS_DIR), host.image_digest),
+        AcceptanceSetup(repo, HostedPlanner(compiler, canonical, layout.toolbox / POINTS_DIR), image.digest),
         spec,
     )
     gate_notebook = LocalNotebook(layout.notebook, Writer(Role.GATE, GATE_WRITER))
@@ -194,7 +169,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
         return LocalNotebook(layout.notebook, Writer(Role.SPECIALIST_RUNTIME, branch, branch))
 
     mcp = McpServer(McpServerConfig(host_token=secrets.token_hex(32)), campaign=layout.session_id)
-    learnings = LearningRecall.from_env(log=RetrievalLog(layout.reports / LEARNINGS_LOG))
+    learnings = mb_fake_learning_recall(RetrievalLog(layout.reports / LEARNINGS_LOG))
     briefs = SessionBriefs(
         LocalNotebook(layout.notebook, Writer(Role.OBSERVER, BRIEFS_READER)), metric=PRIMARY_METRIC, learnings=learnings
     )
@@ -216,22 +191,45 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
         runtime_notebook, judging, built.factory, pacing=RuntimePacing(claim_ttl_seconds=CLAIM_TTL_SECONDS)
     )
     mcp.start()
-    return Peers(runtime, toolbox, repo, GateService(gate_notebook, toolbox, rule, toolbox), mcp, briefs)
+    gate_service = GateService(gate_notebook, toolbox, rule, toolbox)
+    return Peers(runtime, toolbox, repo, gate_service, mcp, briefs, image.digest)
 
 
-def mb_fake_measurement_host() -> MeasurementHost:
-    """The cards of one node as the toolbox counts them, the root recipe's base image and :data:`MB_FAKE_TOOL_COMMIT`
-    for both tools.
+def machine_cards() -> tuple[int, ...]:
+    """The cards of this machine the session may use, as many as its visible-device mask or ``rocm-smi`` show;
+    none when neither shows any."""
 
-    Stands in for the measurement host enablement or the command line will name; replaced once one of them does.
+    from hyperloom.common.visible_devices import detect_gpu_count
+
+    return tuple(range(detect_gpu_count()))
+
+
+def mb_fake_active_image(env: Mapping[str, str]) -> ActiveImage:
+    """The image ``env`` names through ``hyperloom.measure.pins.active_image``, or :data:`MB_FAKE_IMAGE_REF` on
+    :data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_BASE_IMAGE_DIGEST` when it names neither its reference
+    nor its digest; raises ``ImagePinError`` when it names only one, or a digest that is not real.
+
+    Stands in for the pod launcher setting ``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` on
+    every session (board #8); replaced by ``active_image`` alone once it does.
     """
 
-    from hyperloom_multibranch.toolbox.local_hosted import MAX_CARDS_PER_NODE
+    from hyperloom.measure.pins import IMAGE_DIGEST_VAR, IMAGE_REF_VAR, ActiveImage, active_image
 
-    cards = tuple(range(MAX_CARDS_PER_NODE))
-    return MeasurementHost(
-        cards, MB_FAKE_IMAGE_REF, MB_FAKE_BASE_IMAGE_DIGEST, MB_FAKE_TOOL_COMMIT, MB_FAKE_TOOL_COMMIT
-    )
+    if not (env.get(IMAGE_REF_VAR) or env.get(IMAGE_DIGEST_VAR)):
+        return ActiveImage(MB_FAKE_IMAGE_REF, MB_FAKE_BASE_IMAGE_DIGEST)
+    return active_image(env)
+
+
+def measurement_host(env: Mapping[str, str]) -> MeasurementHost:
+    """This machine's cards, the image it runs and the tool commits Hyperloom pins, ``env`` overriding as
+    ``install.sh`` lets it; raises :class:`PeersUnavailable` when the image or a commit cannot be pinned."""
+
+    from hyperloom.measure.pins import ImagePinError, ToolPinError, pinned_tool_commits
+
+    try:
+        return MeasurementHost(machine_cards(), mb_fake_active_image(env), pinned_tool_commits(env))
+    except (ImagePinError, ToolPinError) as exc:
+        raise PeersUnavailable(f"the measurement pins cannot be read: {exc}") from exc
 
 
 def machine_parallel_tests(tp: int) -> int:
@@ -240,7 +238,7 @@ def machine_parallel_tests(tp: int) -> int:
 
     from hyperloom_multibranch.toolbox.local_hosted import max_parallel_tests
 
-    return max_parallel_tests(len(mb_fake_measurement_host().cards), tp)
+    return max_parallel_tests(len(machine_cards()), tp)
 
 
 def specialist_command(env: Mapping[str, str]) -> AgentCommand:
@@ -309,20 +307,23 @@ def load_peers() -> PeerFactory:
     It creates nothing, so the command line calls it before the session directory exists.
     """
 
-    return partial(local_peers, mb_fake_measurement_host(), model_backed_sessions(specialist_command(os.environ)))
+    host = measurement_host(os.environ)
+    return partial(local_peers, host, model_backed_sessions(specialist_command(os.environ)))
 
 
 __all__ = [
     "CLAIM_TTL_SECONDS",
     "GATE_WRITER",
+    "MB_FAKE_IMAGE_REF",
     "MeasurementHost",
     "SessionWiring",
     "SpecialistSessions",
     "load_peers",
     "local_peers",
+    "machine_cards",
     "machine_parallel_tests",
-    "mb_fake_measurement_host",
-    "measurement_config",
+    "mb_fake_active_image",
+    "measurement_host",
     "model_backed_sessions",
     "specialist_command",
     "workload_environment",

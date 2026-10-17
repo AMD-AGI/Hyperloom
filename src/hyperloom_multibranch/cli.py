@@ -7,11 +7,12 @@
 the kernel optimizer its recipes are scoped to, and the hard limits the judge works within. Exit codes: 0 when the
 session ran its course, 1 when it failed or was stopped, 2 on a usage error. The environment and the peers a session
 needs are checked before anything is created, so a missing one fails the command without leaving a session directory
-behind: the Experience KB the session's CLOSE publishes to must be configured (``HYPERLOOM_KB_URL`` and
-``HYPERLOOM_KB_TOKEN``); the Recipe KB that PRELUDE reads warm-start leads from and CLOSE writes the final recipe back
-to is configured by ``KB_STORE_URL`` and ``KB_STORE_TOKEN``, both or neither, and is not used without them; the RSI
-archive defaults to :data:`RSI_ARCHIVE_DEFAULT`, set in this process's environment for every reader of it, and must be
-a writable directory; and the agent CLI the specialists run must be installed.
+behind: the Recipe KB that PRELUDE reads warm-start leads from and CLOSE writes the final recipe back to is
+configured by ``KB_STORE_URL`` and ``KB_STORE_TOKEN``, both or neither, and is not used without them; the RSI archive
+defaults to :data:`RSI_ARCHIVE_DEFAULT`, set in this process's environment for every reader of it, and must be a
+writable directory; the measurement pins must be readable; and the agent CLI the specialists run must be installed.
+A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
+:data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_EXPERIENCE_KB`).
 """
 
 from __future__ import annotations
@@ -21,12 +22,11 @@ import asyncio
 import logging
 import os
 import sys
-from collections.abc import Mapping, MutableMapping
+from collections.abc import MutableMapping
 from pathlib import Path
 
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient, RemoteRecipeConfigurationError
-from hyperloom_kb.remote import RemoteClientError, RemoteConfig
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS, MB_MIN_PRELUDE_HOURS
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -48,10 +48,6 @@ DEFAULT_JUDGE_INTERVAL_SECONDS = 600.0
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 #: The shared folder of archived search trees, used when ``HYPERLOOM_RSI_ARCHIVE`` names none.
 RSI_ARCHIVE_DEFAULT = "/shared_nfs/hyperloom/rsi-archive/"
-RECIPE_KB_ONLY = "KB_STORE_URL and KB_STORE_TOKEN configure the Recipe KB only"
-EXPERIENCE_KB_UNSET = (
-    f"the Experience KB is not configured: set HYPERLOOM_KB_URL and HYPERLOOM_KB_TOKEN ({RECIPE_KB_ONLY})"
-)
 #: The GPU types Magpie has a benchmark script of their own for. ``hyperloom optimize`` runs mi308x and mi325x on
 #: mi300x's script through a mapping its package keeps private, so a session accepts only these until it is public.
 MAGPIE_RUNNER_GPU_TYPES = ("mi300x", "mi355x")
@@ -131,17 +127,6 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
     return RunSettings(workload, args.max_hours, caps, args.judge_interval_sec)
 
 
-def require_experience_kb(env: Mapping[str, str]) -> None:
-    """Raise :class:`EnvironmentIncomplete` unless ``env`` configures the Experience KB, URL and token."""
-
-    try:
-        configured = RemoteConfig.from_env(env)
-    except RemoteClientError as exc:
-        raise EnvironmentIncomplete(f"the Experience KB is not configured: {exc} ({RECIPE_KB_ONLY})") from exc
-    if configured is None:
-        raise EnvironmentIncomplete(EXPERIENCE_KB_UNSET)
-
-
 def recipe_kb_from_env() -> RemoteRecipeClient | None:
     """The Recipe KB client ``KB_STORE_URL`` and ``KB_STORE_TOKEN`` configure, ``None`` when neither is set; raises
     :class:`EnvironmentIncomplete` when only one is."""
@@ -204,7 +189,6 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format=LOG_FORMAT)
     try:
-        require_experience_kb(os.environ)
         recipe_kb = recipe_kb_from_env()
         require_rsi_archive(os.environ)
         peer_factory = load_peers()
@@ -222,7 +206,6 @@ __all__ = [
     "build_parser",
     "main",
     "recipe_kb_from_env",
-    "require_experience_kb",
     "require_rsi_archive",
     "run_session",
     "settings_from",

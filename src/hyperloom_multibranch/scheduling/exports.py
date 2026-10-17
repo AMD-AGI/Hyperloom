@@ -5,8 +5,9 @@
 and the dashboard.
 
 They read a notebook that no longer changes. The write-back goes first, reading the patch and kernel files of the
-chosen commit's recipe from the session's blob store, then the notebook's knowledge steps (the Experiences and the
-specialists' learnings to the Experience KB, the search tree to the archive), because the breakdown records both
+chosen commit's recipe from the session's blob store, then the notebook's knowledge steps (the search tree to the archive;
+the Experiences and the specialists' learnings go nowhere while MB1 runs on no Experience KB, see
+:func:`~hyperloom_multibranch.scheduling.mb_fakes.mb_fake_close_knowledge`), because the breakdown records both
 outcomes next to the chosen commit's recipe and how FINAL chose it; ``session_breakdown.json`` and the knowledge
 steps' receipts land in ``MB-reports/``, and the dashboard is rebuilt a last time with the queue the stop left.
 """
@@ -30,10 +31,11 @@ from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.dashboard import DashboardFiles
 from hyperloom_multibranch.notebook.knowledge.breakdown import build_breakdown, write_breakdown
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import SKIPPED, FinalRecipe, publish_final_recipe
-from hyperloom_multibranch.notebook.rsi.session import CloseTargets, KnowledgeClose, close_knowledge
+from hyperloom_multibranch.notebook.rsi.session import KnowledgeClose
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.final import FinalChoice
 from hyperloom_multibranch.scheduling.layout import SessionLayout
+from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_close_knowledge
 
 #: The single-lineage CLOSE's status when no Recipe KB is configured.
 KB_DISABLED = "disabled"
@@ -64,8 +66,8 @@ class ExportSources:
 class SessionExports:
     """Exports one stopped session into ``layout``; ``kb_client`` is ``None`` when no Recipe KB is configured.
 
-    ``metric`` is the recorded-value metric and ``budget_seconds`` the session's budget. The Experience KB and the
-    archive are the environment's.
+    ``metric`` is the recorded-value metric and ``budget_seconds`` the session's budget. The archive is the
+    environment's; the Experience KB is :data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_EXPERIENCE_KB`.
     """
 
     def __init__(
@@ -93,11 +95,11 @@ class SessionExports:
         chosen = await self._final_recipe(final)
         kb_write_back = await self._publish(snapshot, chosen)
         knowledge = await asyncio.to_thread(
-            close_knowledge,
+            mb_fake_close_knowledge,
             snapshot,
             self._metric,
             budget_seconds=self._budget_seconds,
-            targets=CloseTargets(receipts=self._layout.reports),
+            receipts=self._layout.reports,
         )
         selection = encode(final) if final is not None else None
         document = build_breakdown(

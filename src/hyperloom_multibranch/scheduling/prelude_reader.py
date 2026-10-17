@@ -24,7 +24,6 @@ from hyperloom.common.jsonio import read_json
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, PatchRef, Recipe, RecipeError
 from hyperloom.inference_optimizer.breakdown.stop_reasons import outcome_status
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
-from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC
 
 #: ``LATEST_STATE_SCHEMA_VERSION`` of src/hyperloom/orchestrator/state/shared_state.py, which this package may not
@@ -175,9 +174,14 @@ def _base_sha(root: Path, base_sha_by_root: Mapping[str, str]) -> str:
 
 
 def root_recipe(
-    artifacts: PreludeArtifacts, framework: str, pin: UpstreamPin | None, patches: tuple[PatchRef, ...]
+    artifacts: PreludeArtifacts,
+    framework: str,
+    pin: UpstreamPin | None,
+    patches: tuple[PatchRef, ...],
+    base_image_digest: str,
 ) -> Recipe:
-    """The baseline as a recipe: the accepted launch config and ``framework`` pinned with the stored ``patches``.
+    """The baseline as a recipe on ``base_image_digest``: the accepted launch config and ``framework`` pinned with the
+    stored ``patches``.
 
     ``patches`` are the kept patches as the experiment repository stored them, in the same order. Every kept patch
     must apply to the framework's own git checkout: a patch on another tree, or on one that is not a git checkout
@@ -190,7 +194,7 @@ def root_recipe(
         raise PreludeReadError(f"{len(patches)} kept patches but no framework checkout to pin them to")
     try:
         components = () if pin is None else (ComponentPatches(framework, pin.repo_url, pin.ref, patches),)
-        return Recipe(base_image_digest=MB_FAKE_BASE_IMAGE_DIGEST, launch=artifacts.launch, components=components)
+        return Recipe(base_image_digest=base_image_digest, launch=artifacts.launch, components=components)
     except RecipeError as exc:
         raise PreludeReadError(f"the prelude's result is not a valid recipe: {exc}") from exc
 

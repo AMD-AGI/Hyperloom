@@ -25,7 +25,6 @@ from hyperloom_multibranch.scheduling.tests.child_sessions import (
     state_document,
     write_child_session,
 )
-from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC
 from hyperloom_multibranch.scheduling.prelude_reader import (
     MB_LATEST_STATE_SCHEMA_VERSION,
@@ -37,6 +36,9 @@ from hyperloom_multibranch.scheduling.prelude_reader import (
     read_prelude,
     root_recipe,
 )
+
+#: The image the toolbox measures on, which the root recipe carries.
+IMAGE = "sha256:" + "1" * 64
 
 
 def test_pinned_schema_version_matches_the_main_flow() -> None:
@@ -170,8 +172,8 @@ def test_framework_without_remote_cannot_be_pinned(tmp_path: Path) -> None:
 def test_root_recipe_pins_the_framework_with_the_stored_patches(tmp_path: Path) -> None:
     artifacts = read_prelude(child_with_patch(tmp_path))
     patch = PatchRef("patch/sglang/0001.patch", "c" * 64)
-    recipe = root_recipe(artifacts, "sglang", UpstreamPin(REMOTE_URL, BASE_SHA), (patch,))
-    assert recipe.base_image_digest == MB_FAKE_BASE_IMAGE_DIGEST
+    recipe = root_recipe(artifacts, "sglang", UpstreamPin(REMOTE_URL, BASE_SHA), (patch,), IMAGE)
+    assert recipe.base_image_digest == IMAGE
     assert recipe.launch == artifacts.launch
     component = recipe.component("sglang")
     assert component is not None
@@ -184,7 +186,7 @@ def test_root_recipe_pins_the_framework_with_the_stored_patches(tmp_path: Path) 
 def test_a_pin_the_recipe_refuses_is_a_read_error(tmp_path: Path, pin: UpstreamPin) -> None:
     artifacts = read_prelude(child_with_patch(tmp_path))
     with pytest.raises(PreludeReadError, match="not a valid recipe"):
-        root_recipe(artifacts, "sglang", pin, (PatchRef("patch/sglang/0001.patch", "c" * 64),))
+        root_recipe(artifacts, "sglang", pin, (PatchRef("patch/sglang/0001.patch", "c" * 64),), IMAGE)
 
 
 def test_root_recipe_without_framework_checkout_has_no_component(tmp_path: Path) -> None:
@@ -192,7 +194,7 @@ def test_root_recipe_without_framework_checkout_has_no_component(tmp_path: Path)
         tmp_path / "child",
         {"schema_version": MB_LATEST_STATE_SCHEMA_VERSION, "stop_reason": COMPLETED_STOP_REASON, "baseline_tput": 9.0},
     )
-    assert root_recipe(read_prelude(session), "sglang", None, ()).components == ()
+    assert root_recipe(read_prelude(session), "sglang", None, (), IMAGE).components == ()
 
 
 def test_patch_on_a_tree_that_is_not_a_git_checkout_is_refused(tmp_path: Path) -> None:
@@ -205,7 +207,7 @@ def test_patch_on_a_tree_that_is_not_a_git_checkout_is_refused(tmp_path: Path) -
     write_child_session(session, state)
     with pytest.raises(PreludeReadError, match="not a git checkout"):
         root_recipe(
-            read_prelude(session), "sglang", UpstreamPin(REMOTE_URL, BASE_SHA), (PatchRef("patch/a", "c" * 64),)
+            read_prelude(session), "sglang", UpstreamPin(REMOTE_URL, BASE_SHA), (PatchRef("patch/a", "c" * 64),), IMAGE
         )
 
 

@@ -27,7 +27,7 @@ from hyperloom_multibranch.notebook.knowledge.tests.fakes import FakeRecipeStore
 from hyperloom_multibranch.notebook.knowledge.tests.test_recipe_writeback import final
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV, ARCHIVED
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring
-from hyperloom_multibranch.notebook.rsi.session import DISABLED, NO_KB
+from hyperloom_multibranch.notebook.rsi.session import DISABLED
 from hyperloom_multibranch.notebook.tests.factories import FakeClock
 from hyperloom_multibranch.notebook.tests.sessions import METRIC, scripted_session
 from hyperloom_multibranch.scheduling.close import Closer
@@ -36,6 +36,7 @@ from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.exports import ExportSources, SessionExports
 from hyperloom_multibranch.scheduling.final import FinalCandidate, FinalChoice
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
+from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_EXPERIENCE_KB
 from hyperloom_multibranch.scheduling.processes import ProcessRecord
 from hyperloom_multibranch.scheduling.stops import SessionStopReason, StopReport
 
@@ -117,7 +118,7 @@ class UnreachableStore(FakeRecipeStore):
 
 @pytest.fixture(autouse=True)
 def no_knowledge_targets(monkeypatch: pytest.MonkeyPatch) -> None:
-    """CLOSE's knowledge steps find no Experience KB and no archive unless a test names one."""
+    """CLOSE's knowledge steps find no archive unless a test names one, and no Experience KB in the environment."""
 
     monkeypatch.delenv(KB_URL, raising=False)
     monkeypatch.delenv(ARCHIVE_ENV, raising=False)
@@ -168,6 +169,7 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path / "archive"))
+    monkeypatch.setenv(KB_URL, "http://127.0.0.1:9/kb")
     store = FakeRecipeStore(champion={"metric": "optimized_throughput", "session_id": "older", "value": 1000.0})
     stopper = _clean()
 
@@ -184,7 +186,8 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     breakdown = json.loads(report.exports.breakdown.read_text())
     assert breakdown["close"]["kb_write_back"]["status"] == "written"
     knowledge = breakdown["close"]["knowledge"]
-    assert (knowledge["experiences"]["status"], knowledge["experiences"]["reason"]) == (DISABLED, NO_KB)
+    for step in ("experiences", "learnings"):
+        assert (knowledge[step]["status"], knowledge[step]["reason"]) == (DISABLED, MB_FAKE_EXPERIENCE_KB)
     assert knowledge["archive"]["status"] == ARCHIVED and any((tmp_path / "archive").iterdir())
     assert breakdown["close"]["final"]["commit_id"] == CHOSEN
     assert breakdown["close"]["selection"]["chosen"]["commit"] == CHOSEN
@@ -198,7 +201,7 @@ async def test_close_publishes_the_final_recipe_exports_and_stops_everything(
     assert (written["stop_reason"], written["stop"]["clean"]) == ("time_exhausted", True)
     assert written["final"]["chosen"]["commit"] == CHOSEN and written["exports"]["knowledge"] == knowledge
     assert "Chosen: integration `i1`" in layout.report_markdown.read_text()
-    assert f"Experiences: {DISABLED} {NO_KB}" in layout.report_markdown.read_text()
+    assert f"Experiences: {DISABLED} {MB_FAKE_EXPERIENCE_KB}" in layout.report_markdown.read_text()
 
 
 async def test_without_a_kb_client_or_a_final_choice_the_write_back_is_recorded_as_not_made(

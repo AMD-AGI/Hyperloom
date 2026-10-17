@@ -35,7 +35,8 @@ class Peers:
     """``repo`` holds nothing until PRELUDE roots it with ``init_root``; ``gate`` writes the baseline PRELUDE measures.
 
     ``mcp`` serves the specialist tools; the session stop stops it. ``briefs`` brief every specialist; they are built
-    before PRELUDE has read the warm-start leads, which the session binds to them once it has.
+    before PRELUDE has read the warm-start leads, which the session binds to them once it has. ``base_image_digest``
+    is the image the toolbox measures on, which every recipe must carry: PRELUDE roots the session on it.
     """
 
     lifecycle: SpecialistLifecycle
@@ -44,6 +45,7 @@ class Peers:
     gate: SessionGate
     mcp: McpServer
     briefs: SessionBriefs
+    base_image_digest: str
 
 
 @dataclass(frozen=True)

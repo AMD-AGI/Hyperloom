@@ -141,6 +141,7 @@ class Session:
         peers = peer_factory(PeerSetup(layout, settings.workload, desk, processes, blobs))
         self._toolbox = peers.toolbox
         self._briefs = peers.briefs
+        self._base_image_digest = peers.base_image_digest
         tests = SessionTests(peers.toolbox, clock)
         budget = budget_seconds(settings.max_hours)
         self._branches = BranchControl(context, peers.lifecycle, peers.toolbox, peers.repo)
@@ -259,7 +260,7 @@ class Session:
         """PRELUDE: the root commit and the warm-start leads every specialist is briefed on, the integration branch
         with its K, then the baseline measured on the root."""
 
-        prelude = await self._prelude.root(self._settings.workload, budget, hard_stop)
+        prelude = await self._prelude.root(self._settings.workload, budget, hard_stop, self._base_image_digest)
         self._briefs.warm = prelude.warm_leads
         self._roster.add_integration(prelude.root_commit, k=1)
         await self._branches.push_quota()

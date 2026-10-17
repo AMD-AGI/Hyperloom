@@ -9,12 +9,30 @@ what is left to replace, and each docstring or comment names what it stands in f
 
 from __future__ import annotations
 
+from dataclasses import replace
+from pathlib import Path
+
+from hyperloom_kb import NoOpExperienceKB
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission
+from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
+from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall
+from hyperloom_multibranch.notebook.learning_search import RetrievalLog
+from hyperloom_multibranch.notebook.rsi.session import (
+    DISABLED,
+    CloseStep,
+    CloseTargets,
+    KnowledgeClose,
+    close_knowledge,
+)
 from hyperloom_multibranch.scheduling.roster import Roster
 
-#: Stands in for the image digest of the root recipe. The main flow builds no image; replaced when enablement or
-#: hosted measurement produce one.
+#: Stands in for the image digest of the machine a session runs on while whoever launches the session does not name
+#: it (``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST``, board #8); replaced by
+#: ``hyperloom.measure.pins.active_image`` alone once the pod launcher sets both.
 MB_FAKE_BASE_IMAGE_DIGEST = "sha256:" + "0" * 64
+#: Why CLOSE wrote nothing to the Experience KB and the specialists recall no past session's learnings: MB1 runs on no
+#: Experience KB, by @zgong's decision (board #22). The online Experience KB service replaces it in a later milestone.
+MB_FAKE_EXPERIENCE_KB = "mb_fake_experience_kb"
 
 
 def mb_fake_refused_fork(refusal: str) -> ForkAdmission:
@@ -57,9 +75,43 @@ def mb_fake_regression_passes(commit: str) -> bool:
     return True
 
 
+def mb_fake_learning_recall(log: RetrievalLog) -> LearningRecall:
+    """The specialists' learnings recall on no Experience KB: this session's learnings only, logged to ``log``.
+
+    Stands in for the recall on the online Experience KB service (:data:`MB_FAKE_EXPERIENCE_KB`); replaced by
+    ``LearningRecall.from_env`` once a session uses that service.
+    """
+
+    return LearningRecall(None, log=log)
+
+
+def mb_fake_close_knowledge(
+    snapshot: NotebookSnapshot, metric: str, *, budget_seconds: float, receipts: Path
+) -> KnowledgeClose:
+    """CLOSE's knowledge steps with the Experiences and the learnings written nowhere: both steps are disabled for
+    :data:`MB_FAKE_EXPERIENCE_KB`, whatever the environment configures; the search tree goes to the environment's
+    archive as usual, and the collection receipts to ``receipts``.
+
+    Stands in for publishing to the online Experience KB service; replaced by ``close_knowledge`` on that service
+    once a session uses it.
+    """
+
+    nowhere = NoOpExperienceKB(MB_FAKE_EXPERIENCE_KB)
+    targets = CloseTargets(experience_kb=nowhere, learning_kb=nowhere, receipts=receipts)
+    done = close_knowledge(snapshot, metric, budget_seconds=budget_seconds, targets=targets)
+    return replace(done, experiences=_faked(done.experiences), learnings=_faked(done.learnings))
+
+
+def _faked(step: CloseStep) -> CloseStep:
+    return replace(step, reason=MB_FAKE_EXPERIENCE_KB) if step.status == DISABLED else step
+
+
 __all__ = [
     "MB_FAKE_BASE_IMAGE_DIGEST",
+    "MB_FAKE_EXPERIENCE_KB",
     "mb_fake_branches_to_add",
+    "mb_fake_close_knowledge",
+    "mb_fake_learning_recall",
     "mb_fake_refused_fork",
     "mb_fake_regression_passes",
     "mb_fake_similar_branches",
