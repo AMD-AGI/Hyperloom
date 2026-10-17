@@ -71,6 +71,19 @@ _EVAL_START_PATCHED = '    export EVAL_RESULT_DIR="$results_dir"\n    echo "HYPE
 _EVAL_START_SENTINEL = "HYPERLOOM_EVAL_START"
 _EVAL_START_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_lib_eval_start_patcher.lock")
 
+
+# The throughput client seeds ``random`` with ``--seed`` (default 0) and InferenceX never passes it, so two rounds with
+# one config send identical prompts. ``$INFERENCEX_BENCH_SEED`` lets one round draw different prompts.
+BENCH_SEED_ENV = "INFERENCEX_BENCH_SEED"
+_BENCH_SEED_LEGACY = '    if [[ -n "$endpoint" ]]; then'
+_BENCH_SEED_PATCHED = (
+    f'    if [[ -n "${{{BENCH_SEED_ENV}:-}}" ]]; then\n'
+    f'        benchmark_cmd+=(--seed "${BENCH_SEED_ENV}")\n'
+    "    fi\n\n" + _BENCH_SEED_LEGACY
+)
+_BENCH_SEED_SENTINEL = BENCH_SEED_ENV
+_BENCH_SEED_LOCK_PATH = str(Path(tempfile.gettempdir()) / "hyperloom_benchmark_lib_seed_patcher.lock")
+
 # Two independent answers to the same budget, injected together.
 _EVAL_PROBE_PY = """
 # --- HYPERLOOM_EVAL_PROBE (early-exit probe + per-request bounds) ------------
@@ -863,6 +876,42 @@ def ensure_benchmark_lib_eval_start_patched(
     )
 
 
+def _is_bench_seed_patched(src: Path) -> bool:
+    """Return whether ``benchmark_lib.sh`` already forwards ``$INFERENCEX_BENCH_SEED`` as ``--seed``."""
+    return file_contains_sentinel(src, _BENCH_SEED_SENTINEL, log, "_inferencex_patcher")
+
+
+def ensure_benchmark_lib_seed_patched(
+    inferencex_path: Path | str | None = None,
+) -> bool:
+    """Ensure ``run_benchmark_serving`` passes ``--seed "$INFERENCEX_BENCH_SEED"`` to the client when that env is set."""
+    return _ensure_patched(
+        _resolve_benchmark_lib_paths(inferencex_path),
+        _is_bench_seed_patched,
+        partial(
+            _apply_line_replacement_atomic,
+            legacy=_BENCH_SEED_LEGACY,
+            patched_line=_BENCH_SEED_PATCHED,
+            missing_msg=(
+                "_inferencex_patcher: expected endpoint branch of run_benchmark_serving not "
+                "found in %s; upstream layout may have changed. A warmup round will replay "
+                "the measured round's prompts."
+            ),
+            success_msg="_inferencex_patcher: added $INFERENCEX_BENCH_SEED pass-through to %s",
+        ),
+        _BENCH_SEED_LOCK_PATH,
+        empty_msg=(
+            "_inferencex_patcher: no InferenceX root discovered "
+            "(checked $INFERENCEX_PATH, $MAGPIE_PATH/InferenceX) or "
+            "benchmark_lib.sh missing — skipping bench-seed patch (fine for "
+            "tests and dry-runs without a real InferenceX tree)"
+        ),
+        failure_msg=(
+            "_inferencex_patcher: failed to bench-seed-patch %s; other discovered roots will still be attempted"
+        ),
+    )
+
+
 def _resolve_eval_sitecustomize_paths(
     inferencex_path: Path | str | None,
 ) -> list[Path]:
@@ -1041,6 +1090,7 @@ _ANCHOR_CONTRACT: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
     ("num_prompts", ("benchmarks", "benchmark_lib.sh"), _PATCH_SENTINEL, _LEGACY_LINE),
     ("eval_dest", ("benchmarks", "benchmark_lib.sh"), _EVAL_DEST_SENTINEL, _EVAL_DEST_LEGACY),
     ("eval_start", ("benchmarks", "benchmark_lib.sh"), _EVAL_START_SENTINEL, _EVAL_START_LEGACY),
+    ("bench_seed", ("benchmarks", "benchmark_lib.sh"), _BENCH_SEED_SENTINEL, _BENCH_SEED_LEGACY),
     (
         _BENCH_SERVING_ANCHOR_NAME,
         # The pinned revision's layout; newer checkouts are resolved by name, not by this path.
@@ -1161,11 +1211,13 @@ def failed_patch_anchors_in(root: Path | str) -> list[AnchorStatus]:
 
 __all__ = [
     "AnchorStatus",
+    "BENCH_SEED_ENV",
     "benchmark_serving_path_in",
     "count_anchor_hits",
     "ensure_benchmark_lib_patched",
     "ensure_benchmark_lib_eval_dest_patched",
     "ensure_benchmark_lib_eval_start_patched",
+    "ensure_benchmark_lib_seed_patched",
     "ensure_benchmark_serving_patched",
     "ensure_eval_probe_patched",
     "ensure_eval_unbound_outputs_patched",

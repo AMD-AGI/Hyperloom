@@ -41,6 +41,11 @@ run_benchmark_serving() {
 _PATCHED_LINE = '        num_prompts="${NUM_PROMPTS:-$max_concurrency}"'
 _LEGACY_LINE = '        num_prompts="$max_concurrency"'
 
+# ``run_benchmark_serving`` copied from InferenceX 3d5581562f (the pinned ref), trailing whitespace stripped.
+_RUN_BENCHMARK_SERVING_UPSTREAM = (Path(__file__).parent / "fixtures" / "run_benchmark_serving.sh.txt").read_text(
+    encoding="utf-8"
+)
+
 
 @pytest.fixture
 def fake_inferencex(tmp_path: Path) -> Path:
@@ -598,7 +603,7 @@ def _write_full_lib(root: Path) -> Path:
     lib = bench_dir / "benchmark_lib.sh"
     bodies = [
         fixture.split("\n", 1)[1] if fixture.startswith("#!") else fixture
-        for fixture in (_UPSTREAM_FIXTURE, _EVAL_DEST_FIXTURE, _EVAL_START_FIXTURE)
+        for fixture in (_RUN_BENCHMARK_SERVING_UPSTREAM, _EVAL_DEST_FIXTURE, _EVAL_START_FIXTURE)
     ]
     lib.write_text("#!/usr/bin/env bash\n" + "\n".join(bodies), encoding="utf-8")
     return lib
@@ -893,7 +898,7 @@ def test_verify_patch_anchors_finds_every_anchor_on_a_pristine_checkout(tmp_path
 
     statuses = verify_patch_anchors(tmp_path)
 
-    assert {s.name for s in statuses} == {"num_prompts", "eval_dest", "eval_start"}
+    assert {s.name for s in statuses} == {"num_prompts", "eval_dest", "eval_start", "bench_seed"}
     assert all(s.ok and s.hits == 1 and not s.patched for s in statuses)
 
 
@@ -1176,3 +1181,83 @@ def test_gate_path_falls_back_to_the_legacy_location(tmp_path: Path) -> None:
     )
 
     assert benchmark_serving_path_in(tmp_path) == tmp_path / "utils" / "bench_serving" / "benchmark_serving.py"
+
+
+# --- bench seed pass-through -------------------------------------------------
+
+
+def _write_serving_lib(root: Path, text: str = _RUN_BENCHMARK_SERVING_UPSTREAM) -> Path:
+    bench_dir = root / "benchmarks"
+    bench_dir.mkdir(parents=True)
+    lib = bench_dir / "benchmark_lib.sh"
+    lib.write_text("#!/usr/bin/env bash\n" + text, encoding="utf-8")
+    return lib
+
+
+def _client_argv(lib: Path, tmp_path: Path, env: dict[str, str]) -> list[str]:
+    """Run the real ``run_benchmark_serving`` with ``python3`` stubbed, and return the argv the client would get."""
+    import os
+    import subprocess
+
+    stub_dir = tmp_path / "stub"
+    stub_dir.mkdir(exist_ok=True)
+    stub = stub_dir / "python3"
+    stub.write_text('#!/bin/sh\nfor a in "$@"; do echo "ARG:$a"; done\n', encoding="utf-8")
+    stub.chmod(0o755)
+    proc = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'source "{lib}"; run_benchmark_serving --model m --port 1 --backend vllm --input-len 8 --output-len 8 '
+            "--random-range-ratio 1 --num-prompts 4 --max-concurrency 2 --result-filename r --result-dir /tmp/r",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={"PATH": f"{stub_dir}:{os.environ['PATH']}", "EVAL_ONLY": "false", **env},
+    )
+    return [line.removeprefix("ARG:") for line in proc.stdout.splitlines() if line.startswith("ARG:")]
+
+
+def test_bench_seed_patch_forwards_the_env_as_seed(tmp_path):
+    lib = _write_serving_lib(tmp_path)
+
+    assert _inferencex_patcher.ensure_benchmark_lib_seed_patched(tmp_path) is True
+
+    argv = _client_argv(lib, tmp_path, {"INFERENCEX_BENCH_SEED": "7"})
+    assert argv[argv.index("--seed") + 1] == "7"
+    assert argv.count("--seed") == 1
+
+
+def test_bench_seed_patch_leaves_the_client_command_alone_when_env_is_unset(tmp_path):
+    lib = _write_serving_lib(tmp_path)
+    before = _client_argv(lib, tmp_path, {})
+
+    _inferencex_patcher.ensure_benchmark_lib_seed_patched(tmp_path)
+
+    assert _client_argv(lib, tmp_path, {}) == before
+    assert "--seed" not in before
+    assert "--seed" not in _client_argv(lib, tmp_path, {"INFERENCEX_BENCH_SEED": ""})
+
+
+def test_bench_seed_patch_is_idempotent(tmp_path):
+    lib = _write_serving_lib(tmp_path)
+
+    _inferencex_patcher.ensure_benchmark_lib_seed_patched(tmp_path)
+    after_first = lib.read_text(encoding="utf-8")
+    assert _inferencex_patcher.ensure_benchmark_lib_seed_patched(tmp_path) is True
+
+    assert lib.read_text(encoding="utf-8") == after_first
+    assert after_first.count("INFERENCEX_BENCH_SEED") == 2
+
+
+def test_bench_seed_patch_reports_a_missing_anchor_and_writes_nothing(tmp_path):
+    reworded = _RUN_BENCHMARK_SERVING_UPSTREAM.replace('if [[ -n "$endpoint" ]]; then', 'if [ -n "$endpoint" ]; then')
+    lib = _write_serving_lib(tmp_path, reworded)
+    before = lib.read_text(encoding="utf-8")
+
+    assert _inferencex_patcher.ensure_benchmark_lib_seed_patched(tmp_path) is False
+
+    assert lib.read_text(encoding="utf-8") == before
+    seed_status = next(s for s in _inferencex_patcher.verify_patch_anchors(tmp_path) if s.name == "bench_seed")
+    assert (seed_status.ok, seed_status.hits) == (False, 0)

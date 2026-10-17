@@ -42,6 +42,7 @@ from ._benchmark_interpreter import (
     _resolve_magpie_python as _resolve_magpie_python,
     _resolve_probe_python as _resolve_probe_python,
 )
+from ._inferencex_patcher import BENCH_SEED_ENV, ensure_benchmark_lib_seed_patched
 from ._recipe_script import launcher_overwritten_envs
 from ._subprocess_kill import (
     AGENTX_PREFLIGHT_ERROR_CLASS,
@@ -536,6 +537,30 @@ async def _settled_measurement(
 def _run_grid_warmup_enabled() -> bool:
     """Whether ``run_grid`` should discard a cold warmup round when possible."""
     return env_flag("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", default=not os.environ.get("PYTEST_CURRENT_TEST"))
+
+
+# The warmup round draws different prompts than the measured round, which keeps the client's default seed so measured
+# numbers stay comparable with earlier runs.
+WARMUP_ROUND_SEED = 1
+WARMUP_SEED_UNPATCHED_WARNING = "run_grid_warmup_seed_unpatched"
+
+
+def _warmup_seed_warnings(warmup_cfg_path: Path) -> list[str]:
+    """Record which seeds the two rounds use, or that the warmup cannot be reseeded.
+
+    Without the benchmark_lib.sh patch the warmup replays the measured round's prompts and primes the server's prefix
+    cache with them, so the result must say so rather than look like a clean warmup.
+    """
+    bench = (yaml.safe_load(warmup_cfg_path.read_text(encoding="utf-8")) or {}).get("benchmark") or {}
+    if is_magpie_agentx(bench):
+        return []
+    if not ensure_benchmark_lib_seed_patched(str(bench.get("inferencex_path") or "").strip() or None):
+        log.warning(
+            "grid_runner: %s is not forwarded by benchmark_lib.sh; the warmup round replays the measured round's prompts",
+            BENCH_SEED_ENV,
+        )
+        return [WARMUP_SEED_UNPATCHED_WARNING]
+    return [f"warmup_round_seed:{WARMUP_ROUND_SEED}", "measured_round_seed:client_default"]
 
 
 def _prepend_magpie_pythonpath(magpie_dir: str, current_pythonpath: str) -> str:
@@ -1104,6 +1129,7 @@ async def run_grid(
                     auto_warmup = False
 
             warmup_tput: float | None = None
+            warmup_seed_warnings: list[str] = []
             if auto_warmup:
                 warmup_slot = slot / "warmup_round"
                 warmup_server_log = warmup_slot / "server.log"
@@ -1124,7 +1150,7 @@ async def run_grid(
                         benchmark_script=benchmark_script,
                         server_lifecycle=warmup_lifecycle,
                         base_args_mode=base_args_mode,
-                        base_extra_envs=base_extra_envs,
+                        base_extra_envs={**(base_extra_envs or {}), BENCH_SEED_ENV: str(WARMUP_ROUND_SEED)},
                         base_remove_args=base_remove_args,
                         base_unset_envs=base_unset_envs,
                     )
@@ -1155,6 +1181,7 @@ async def run_grid(
                         )
                     )
 
+                warmup_seed_warnings = await asyncio.to_thread(_warmup_seed_warnings, warmup_cfg_path)
                 warmup_workspaces_before = snapshot_workspaces(warmup_slot)
                 warmup_started_unix = time.time()
                 # Held in a local because the abort line below has to name the cap the round was actually granted: the
@@ -1734,6 +1761,7 @@ async def run_grid(
                 warnings.append(f"harvested_leaked_artifact:{leak_src}")
             if warmup_tput is not None:
                 warnings.append("run_grid_warmup_discarded_first")
+                warnings.extend(warmup_seed_warnings)
                 warnings.append(f"warmup_round_tput:{float(warmup_tput):.1f}")
 
             if not measurement.get("valid_measurement"):

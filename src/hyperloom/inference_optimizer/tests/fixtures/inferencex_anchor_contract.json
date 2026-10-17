@@ -1,8 +1,9 @@
 {
-  "anchors_fingerprint": "4917512af88fd31cf58f6f29c878266b4ec702ba3d9815dedb41b00177d0d7de",
+  "anchors_fingerprint": "5fb71014088814aada9a6dcd39a5b70c1e3f2d33dedbb1e0fdab191d345e3790",
   "files": {
     "benchmarks/benchmark_lib.sh": {
       "anchors": {
+        "bench_seed": 1,
         "eval_dest": 1,
         "eval_start": 1,
         "num_prompts": 1

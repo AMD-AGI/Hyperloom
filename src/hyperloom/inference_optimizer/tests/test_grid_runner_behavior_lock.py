@@ -879,3 +879,73 @@ class TestVariantHeartbeat:
         assert len(running) >= 3
         assert all(note["output_lines"] > 0 for note in running)
         assert progress_cadence.widest_silence() <= 150.0
+
+
+# Warmup-round prompt seed
+
+_SERVING_LIB = (Path(__file__).parent / "fixtures" / "run_benchmark_serving.sh.txt").read_text(encoding="utf-8")
+
+
+class TestWarmupRoundSeed:
+    """The warmup round must draw different prompts than the measured round, so it cannot prime the server's prefix cache with the prompts the measured round will send."""
+
+    def _run_two_rounds(self, tmp_path, monkeypatch, *, lib_text: str):
+        monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", "1")
+        monkeypatch.delenv("INFERENCEX_PATH", raising=False)
+        monkeypatch.delenv("MAGPIE_PATH", raising=False)
+        ix_root = tmp_path / "InferenceX"
+        (ix_root / "benchmarks").mkdir(parents=True)
+        lib = ix_root / "benchmarks" / "benchmark_lib.sh"
+        lib.write_text(lib_text, encoding="utf-8")
+        base = tmp_path / "base.yaml"
+        _write_base_yaml(base)
+        cfg = yaml.safe_load(base.read_text())
+        cfg["benchmark"]["inferencex_path"] = str(ix_root)
+        base.write_text(yaml.safe_dump(cfg))
+        round_envs: list[dict] = []
+
+        def _run(cmd, *a, **k):
+            slot = Path(cmd[cmd.index("--output-dir") + 1])
+            config = next(Path(c) for c in cmd if str(c).endswith(".yaml"))
+            round_envs.append(yaml.safe_load(config.read_text())["benchmark"]["envs"])
+            _valid_workspace(slot, tput=270.9 if len(round_envs) == 1 else 4701.6)
+            return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+        with (
+            patch.object(sl, "teardown_lifecycle_server"),
+            patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=_run),
+        ):
+            results = asyncio.run(
+                run_grid(
+                    base_yaml_path=base,
+                    base_extra_args="",
+                    grid=[GridVariant(name="cand")],
+                    output_root=tmp_path / "out",
+                    magpie_python=sys.executable,
+                    gpu_type="mi300x",
+                )
+            )
+        return results, round_envs, lib
+
+    def test_warmup_round_gets_its_own_seed_and_the_measured_round_keeps_the_default(self, tmp_path, monkeypatch):
+        results, round_envs, lib = self._run_two_rounds(tmp_path, monkeypatch, lib_text=_SERVING_LIB)
+
+        warmup_envs, measured_envs = round_envs
+        assert warmup_envs["INFERENCEX_BENCH_SEED"] == str(gr.WARMUP_ROUND_SEED)
+        assert "INFERENCEX_BENCH_SEED" not in measured_envs
+        assert "INFERENCEX_BENCH_SEED" in lib.read_text(encoding="utf-8")
+        warnings = results[0].nonfatal_warnings
+        assert "warmup_round_seed:1" in warnings
+        assert "measured_round_seed:client_default" in warnings
+        assert gr.WARMUP_SEED_UNPATCHED_WARNING not in warnings
+
+    def test_a_patch_that_cannot_apply_is_reported_on_the_result(self, tmp_path, monkeypatch):
+        rotted = _SERVING_LIB.replace('if [[ -n "$endpoint" ]]; then', 'if [ -n "$endpoint" ]; then')
+
+        results, round_envs, lib = self._run_two_rounds(tmp_path, monkeypatch, lib_text=rotted)
+
+        assert results[0].status == "succeeded"
+        warnings = results[0].nonfatal_warnings
+        assert gr.WARMUP_SEED_UNPATCHED_WARNING in warnings
+        assert not any(w.startswith("warmup_round_seed:") for w in warnings)
+        assert "INFERENCEX_BENCH_SEED" not in lib.read_text(encoding="utf-8")
