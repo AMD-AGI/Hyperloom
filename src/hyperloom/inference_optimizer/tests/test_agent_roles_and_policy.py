@@ -202,9 +202,8 @@ def test_gate_refuses_a_model_requested_gemm_tuning_run(monkeypatch, precision, 
 
 def test_a_model_requested_kernel_optimization_has_no_handler_to_reach():
     """Source rewrite is the controller's, so the kind is unregistered."""
-    from hyperloom.orchestrator.kernel.request_handlers import get_handler, has_handler
+    from hyperloom.orchestrator.kernel.request_handlers import get_handler
 
-    assert has_handler("run_optimization") is False
     assert get_handler("run_optimization") is None
     assert "run_optimization" not in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
 

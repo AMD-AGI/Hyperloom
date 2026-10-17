@@ -4908,18 +4908,6 @@ KERNEL_REQUEST_HANDLERS: dict[str, HandlerFn] = {
 }
 
 
-def has_handler(kind: str) -> bool:
-    """Report whether a programmatic handler is registered for a request kind.
-
-    Args:
-        kind (str): The kernel request ``kind`` to check.
-
-    Returns:
-        bool: ``True`` if a handler is registered for ``kind``, else ``False``.
-    """
-    return kind in KERNEL_REQUEST_HANDLERS
-
-
 def get_handler(kind: str) -> HandlerFn | None:
     """Look up the programmatic handler registered for a request kind.
 
@@ -4936,7 +4924,6 @@ def get_handler(kind: str) -> HandlerFn | None:
 __all__ = [
     "KERNEL_REQUEST_HANDLERS",
     "get_handler",
-    "has_handler",
     "integrate_handler",
     "run_gemm_tuning_handler",
 ]

@@ -3765,10 +3765,10 @@ async def test_trace_analyze_handler_t4_failure_appends_to_existing_warnings(
 
 def test_handlers_dispatch_table():
     """Dispatch table includes trace_analyze, not the Coordinator-owned lanes or unknown kinds."""
-    assert krh.has_handler("trace_analyze")
-    assert not krh.has_handler("run_gemm_tuning")
-    assert not krh.has_handler("run_optimization")
-    assert not krh.has_handler("totally_unknown_kind")
+    assert krh.get_handler("trace_analyze") is not None
+    assert krh.get_handler("run_gemm_tuning") is None
+    assert krh.get_handler("run_optimization") is None
+    assert krh.get_handler("totally_unknown_kind") is None
 
 
 # _batch_kernel_candidates collapses task_group members.
