@@ -1872,7 +1872,9 @@ class TestTheChartFollowsTheGradedAxis:
         from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
 
         axes = plot._axes_for_metric("total_token_throughput", tp_eff=8.0)
-        xs, ys = plot._arm_series(self._payload("agentx", "total_token_throughput")["baseline"]["points"], 8.0, axes)
+        xs, ys, _concs = plot._arm_series(
+            self._payload("agentx", "total_token_throughput")["baseline"]["points"], 8.0, axes
+        )
         assert xs == [pytest.approx(447.2)]
         assert ys == [pytest.approx(25984.8 / 8.0)]
         assert "P90 Interactivity" in axes.x_label
@@ -1882,7 +1884,9 @@ class TestTheChartFollowsTheGradedAxis:
         from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
 
         axes = plot._axes_for_metric("output_throughput", tp_eff=8.0)
-        xs, ys = plot._arm_series(self._payload("synthetic", "output_throughput")["baseline"]["points"], 8.0, axes)
+        xs, ys, _concs = plot._arm_series(
+            self._payload("synthetic", "output_throughput")["baseline"]["points"], 8.0, axes
+        )
         assert xs == [pytest.approx(183.44 / 8)]
         assert ys == [pytest.approx(183.44 / 8.0)]
 
@@ -1916,7 +1920,7 @@ class TestTheChartFollowsTheGradedAxis:
         payload = self._payload(mode, metric)
         chart_metric = plot._graded_metric_of(payload)
         axes = plot._axes_for_metric(chart_metric, tp_eff=8.0)
-        _xs, ys = plot._arm_series(payload["baseline"]["points"], 8.0, axes)
+        _xs, ys, _concs = plot._arm_series(payload["baseline"]["points"], 8.0, axes)
 
         # AgentX chart: x = interactivity, y = total_token_throughput / tp.
         # Synthetic chart: x = output_throughput / conc, y = output_throughput / tp.
@@ -1937,9 +1941,90 @@ class TestTheChartFollowsTheGradedAxis:
             {"conc": 8, "total_token_throughput": 25984.8},
             {"conc": 4, "total_token_throughput": 20000.0, "e2e_norm_intvty_p90": 500.0},
         ]
-        xs, ys = plot._arm_series(points, 1.0, axes)
+        xs, ys, _concs = plot._arm_series(points, 1.0, axes)
         assert xs == [pytest.approx(500.0)]
         assert ys == [pytest.approx(20000.0)]
+
+
+class TestTheCurveFollowsTheLadder:
+    """A ladder is joined in the order it was walked, and a rung only one arm measured says so."""
+
+    # One real sweep: baseline skipped conc 4 for budget, and optimized conc 4 reads lower interactivity than conc 8.
+    _BASELINE = {8: (72.87, 47001.8), 14: (59.93, 72138.7), 28: (39.36, 153283.4)}
+    _OPTIMIZED = {4: (75.09, 25519.5), 8: (76.30, 47001.8), 14: (61.68, 71828.6), 28: (42.28, 157345.0)}
+
+    @staticmethod
+    def _arm(rows: dict[int, tuple[float, float]]) -> dict[str, Any]:
+        return {
+            "points": [{"conc": c, "e2e_norm_intvty_p90": x, "total_token_throughput": y} for c, (x, y) in rows.items()]
+        }
+
+    def _payload(self) -> dict[str, Any]:
+        return {
+            "benchmark_mode": "agentx",
+            "summary": {"metric": "total_token_throughput"},
+            "baseline": self._arm(self._BASELINE),
+            "optimized": self._arm(self._OPTIMIZED),
+        }
+
+    def test_a_series_runs_in_concurrency_order_even_where_interactivity_does_not(self):
+        from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
+
+        axes = plot._axes_for_metric("total_token_throughput", tp_eff=8.0)
+        xs, _ys, concs = plot._arm_series(self._payload()["optimized"]["points"], 8.0, axes)
+        assert concs == [4.0, 8.0, 14.0, 28.0]
+        # conc 4 reads lower interactivity than conc 8, so an x-sorted series would have put it second.
+        assert xs == [pytest.approx(75.09), pytest.approx(76.30), pytest.approx(61.68), pytest.approx(42.28)]
+
+    def test_the_rendered_line_joins_the_rungs_in_concurrency_order(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+
+        calls = _install_fake_matplotlib(monkeypatch)
+        out_path = tmp_path / "curve.png"
+        assert render_conc_sweep_curve(self._payload(), out_path, tp=8) == out_path
+
+        lines = {
+            kwargs["label"]: args[0]
+            for args, kwargs in calls["plots"]
+            if kwargs.get("label") in {"baseline", "optimized"}
+        }
+        assert lines["optimized"] == [pytest.approx(x) for x, _y in map(self._OPTIMIZED.get, (4, 8, 14, 28))]
+        assert lines["baseline"] == [pytest.approx(x) for x, _y in map(self._BASELINE.get, (8, 14, 28))]
+        assert sorted(text for (text, *_rest), _kw in calls["annotations"] if text.startswith("c=")) == sorted(
+            [f"c={c} {y / 8:.0f}" for c, (_x, y) in self._BASELINE.items()]
+            + [f"c={c} {y / 8:.0f}" for c, (_x, y) in self._OPTIMIZED.items()]
+        )
+
+    def test_a_rung_only_one_arm_measured_is_drawn_hollow_and_explained(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+
+        calls = _install_fake_matplotlib(monkeypatch)
+        render_conc_sweep_curve(self._payload(), tmp_path / "curve.png", tp=8)
+
+        hollow = [(args, kwargs) for args, kwargs in calls["plots"] if "markerfacecolor" in kwargs and args[0]]
+        assert [args[0] for args, _kwargs in hollow] == [[pytest.approx(75.09)]]
+        assert [args[1] for args, _kwargs in hollow] == [[pytest.approx(25519.5 / 8)]]
+        assert any("one arm only" in str(kwargs.get("label", "")) for _args, kwargs in calls["plots"])
+
+    def test_matched_rungs_carry_no_hollow_marker_or_note(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
+
+        calls = _install_fake_matplotlib(monkeypatch)
+        payload = self._payload()
+        payload["optimized"] = self._arm({c: self._OPTIMIZED[c] for c in self._BASELINE})
+        render_conc_sweep_curve(payload, tmp_path / "curve.png", tp=8)
+
+        assert not any("markerfacecolor" in kwargs for _args, kwargs in calls["plots"])
+
+    def test_an_arm_against_an_empty_arm_has_nothing_to_be_unpaired_with(self):
+        from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
+
+        assert plot._unpaired([4.0, 8.0], []) == [False, False]
+        assert plot._unpaired([4.0, 8.0], [8.0]) == [True, False]
 
 
 class TestTheRooflineNeedsBothItsAxisAndARealShape:
@@ -2009,11 +2094,11 @@ def test_render_conc_sweep_curve_missing_matplotlib_returns_none(
     assert result is None
 
 
-def test_conc_sweep_plot_series_helpers_filter_and_sort_points():
+def test_conc_sweep_plot_series_helpers_filter_and_sort_points_by_conc():
     from hyperloom.orchestrator.kernel import conc_sweep_plot
 
     axes = conc_sweep_plot._axes_for_metric("output_throughput", 2.0)
-    xs, ys = conc_sweep_plot._arm_series(
+    xs, ys, concs = conc_sweep_plot._arm_series(
         [
             {"conc": 4, "output_throughput": 800.0},
             {"conc": 2, "output_throughput": 300.0},
@@ -2026,7 +2111,8 @@ def test_conc_sweep_plot_series_helpers_filter_and_sort_points():
     )
     assert xs == [150.0, 200.0]
     assert ys == [150.0, 400.0]
-    assert conc_sweep_plot._arm_series([{"conc": 0, "output_throughput": 0}], 1.0, axes) == ([], [])
+    assert concs == [2.0, 4.0]
+    assert conc_sweep_plot._arm_series([{"conc": 0, "output_throughput": 0}], 1.0, axes) == ([], [], [])
 
     cx, cy = conc_sweep_plot._ceiling_series(
         {
@@ -2123,7 +2209,7 @@ def test_render_conc_sweep_curve_with_fake_matplotlib(tmp_path: Path, monkeypatc
     calls = _install_fake_matplotlib(monkeypatch)
     payload = {
         "baseline": {"points": [{"conc": 4, "output_throughput": 800.0}]},
-        "optimized": {"points": [{"conc": 8, "output_throughput": 1200.0}]},
+        "optimized": {"points": [{"conc": 4, "output_throughput": 1200.0}]},
         "roofline_ceiling": {"rows": [{"conc": 4, "t_peak_tok_s": 1600.0}]},
     }
     out_path = tmp_path / "plots" / "curve.png"

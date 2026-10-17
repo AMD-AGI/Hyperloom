@@ -109,17 +109,75 @@ def _arm_series(
     points: list[dict[str, Any]],
     tp_eff: float,
     axes: _Axes,
-) -> tuple[list[float], list[float]]:
-    """Extract one arm's (x, y) series on *axes*, sorted ascending by x."""
-    pairs: list[tuple[float, float]] = []
+) -> tuple[list[float], list[float], list[float | None]]:
+    """Extract one arm's (x, y, conc) series on *axes*, in concurrency order.
+
+    A ladder is walked by concurrency, and interactivity need not fall as it rises, so sorting by x would join the
+    points in an order nobody ran them in. A point with no recorded concurrency sorts last, by x.
+    """
+    rows: list[tuple[float | None, float, float]] = []
     for pt in points:
         xy = axes.point_xy(pt, tp_eff)
         if xy is not None:
-            pairs.append(xy)
-    pairs.sort(key=lambda p: p[0])
-    if not pairs:
-        return [], []
-    return [p[0] for p in pairs], [p[1] for p in pairs]
+            rows.append((_positive(pt.get("conc")), xy[0], xy[1]))
+    rows.sort(key=lambda r: (r[0] is None, r[0] or 0.0, r[1]))
+    return [r[1] for r in rows], [r[2] for r in rows], [r[0] for r in rows]
+
+
+def _conc_text(conc: float | None) -> str:
+    return "" if conc is None else f"c={conc:g}"
+
+
+def _unpaired(concs: list[float | None], other: list[float | None]) -> list[bool]:
+    """Which of *concs* the other arm has no plotted point for; nothing is unpaired against an empty arm."""
+    if not other:
+        return [False] * len(concs)
+    return [c is not None and c not in other for c in concs]
+
+
+@dataclass(frozen=True)
+class _Arm:
+    """One arm's series and how it is drawn."""
+
+    name: str
+    xs: list[float]
+    ys: list[float]
+    concs: list[float | None]
+    color: str
+    marker: str
+    label_dy: int
+
+
+def _draw_arm(ax: Any, arm: _Arm, other_concs: list[float | None], bg: str) -> bool:
+    """Draw one arm, labelled by concurrency; True when some rung is hollow because the other arm lacks it."""
+    xs, ys, concs, color, marker = arm.xs, arm.ys, arm.concs, arm.color, arm.marker
+    if not xs:
+        return False
+    ax.plot(xs, ys, f"{marker}-", color=color, linewidth=2, markersize=6, label=arm.name)
+    single = _unpaired(concs, other_concs)
+    if any(single):
+        # Hollow: the same concurrency has no point on the other arm, so there is nothing to compare it with.
+        ax.plot(
+            [x for x, s in zip(xs, single) if s],
+            [y for y, s in zip(ys, single) if s],
+            marker,
+            markersize=6,
+            markerfacecolor=bg,
+            markeredgecolor=color,
+            markeredgewidth=1.5,
+            linestyle="none",
+        )
+    for x, y, conc in zip(xs, ys, concs):
+        ax.annotate(
+            f"{_conc_text(conc)} {y:.0f}".strip(),
+            (x, y),
+            textcoords="offset points",
+            xytext=(0, arm.label_dy),
+            ha="center",
+            fontsize=7,
+            color=color,
+        )
+    return any(single)
 
 
 def _ceiling_series(
@@ -177,8 +235,8 @@ def _render(
     baseline_pts = (data.get("baseline") or {}).get("points") or []
     optimized_pts = (data.get("optimized") or {}).get("points") or []
 
-    bx, by = _arm_series(baseline_pts, tp_eff, axes)
-    ox, oy = _arm_series(optimized_pts, tp_eff, axes)
+    bx, by, bc = _arm_series(baseline_pts, tp_eff, axes)
+    ox, oy, oc = _arm_series(optimized_pts, tp_eff, axes)
 
     # Need at least the baseline to draw something useful.
     if not bx and not ox:
@@ -205,31 +263,23 @@ def _render(
         if cx:
             ax.plot(cx, cy, "--", color=ceiling_c, linewidth=1.2, label="Theoretical peak (roofline)")
 
-    if bx:
-        ax.plot(bx, by, "o-", color=baseline_c, linewidth=2, markersize=6, label="baseline")
-        for x, y in zip(bx, by):
-            ax.annotate(
-                f"{y:.0f}",
-                (x, y),
-                textcoords="offset points",
-                xytext=(0, 8),
-                ha="center",
-                fontsize=7,
-                color=baseline_c,
-            )
-
-    if ox:
-        ax.plot(ox, oy, "s-", color=optimized_c, linewidth=2, markersize=6, label="optimized")
-        for x, y in zip(ox, oy):
-            ax.annotate(
-                f"{y:.0f}",
-                (x, y),
-                textcoords="offset points",
-                xytext=(0, -14),
-                ha="center",
-                fontsize=7,
-                color=optimized_c,
-            )
+    single_arm_note = False
+    for arm, other_concs in (
+        (_Arm("baseline", bx, by, bc, baseline_c, "o", 8), oc),
+        (_Arm("optimized", ox, oy, oc, optimized_c, "s", -14), bc),
+    ):
+        single_arm_note = _draw_arm(ax, arm, other_concs, bg) or single_arm_note
+    if single_arm_note:
+        ax.plot(
+            [],
+            [],
+            "o",
+            markerfacecolor=bg,
+            markeredgecolor=fg,
+            markeredgewidth=1.5,
+            linestyle="none",
+            label="hollow: concurrency measured by one arm only",
+        )
 
     ax.set_xlabel(axes.x_label, fontsize=10, color=fg)
     ax.set_ylabel(axes.y_label, fontsize=10, color=fg)
