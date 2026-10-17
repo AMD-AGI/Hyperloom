@@ -589,7 +589,9 @@ def test_export_runs_names_runs_by_their_workspace_from_a_relative_root(
     assert [run["unit_id"] for run in runs] == [f"{WORKSPACE}/iteration-{seq}" for seq in (1, 2, 3)]
 
 
-@pytest.mark.parametrize("unreadable", ["transcript", "plan", "log", "transcript directory", "best bundle"])
+@pytest.mark.parametrize(
+    "unreadable", ["transcript", "plan", "log", "candidate record", "transcript directory", "best bundle"]
+)
 def test_export_runs_stops_naming_a_path_it_cannot_read(tmp_path: Path, unreadable: str) -> None:
     """Claude Code run as root keeps each project's transcripts in a directory only root can list, and Kernel Forge
     creates its best bundles with mkdtemp, so a run copied out of a container holds directories its user cannot list
@@ -604,6 +606,7 @@ def test_export_runs_stops_naming_a_path_it_cannot_read(tmp_path: Path, unreadab
         "transcript": transcript,
         "plan": experiments / "orchestration" / "iter_001" / "optimization_plan.md",
         "log": _loop_log(logs / "forge-loop.log", WORKSPACE),
+        "candidate record": experiments / "candidates" / "iter_001" / "meta.json",
         "transcript directory": transcript.parent,
         "best bundle": experiments / "best" / "iter_001",
     }

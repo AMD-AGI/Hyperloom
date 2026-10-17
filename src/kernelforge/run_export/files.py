@@ -61,13 +61,14 @@ def read_text(path: Path, limit: int = TEXT_LIMIT) -> str:
 
 
 def read_json(path: Path) -> dict[str, Any] | None:
-    """The JSON object ``path`` holds, or None when it is absent, unreadable, too large, or not one object."""
+    """The JSON object ``path`` holds, or None when it is absent, too large, or not one object. A file that is there
+    but cannot be read raises its ``OSError``."""
 
     try:
         if path.stat().st_size > JSON_LIMIT:
             return None
         value = json.loads(read_text(path, JSON_LIMIT))
-    except (OSError, ValueError):
+    except (FileNotFoundError, ValueError):
         return None
     return value if isinstance(value, dict) else None
 
