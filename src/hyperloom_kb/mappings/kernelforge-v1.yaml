@@ -47,9 +47,10 @@ require:
     check: {any: [{ne: [$run.kind, port]}, {present: $run.completed_at}]}
   - reason: >-
       No reasoning, which every Experience requires: the logs hold no reasoning log with a Summary line for this run's
-      candidate, no Claude Code transcript of the agent that made it, and no rationale KernelForge recorded for it (a
-      "[agent] Rationale:" line, or a single session's meta.json). A merge never has one, since no agent made it.
-      Provide logs that record the agent's reasoning.
+      candidate, no Claude Code transcript linked to the agent that made it, and no rationale KernelForge recorded for
+      it (a "[agent] Rationale:" line, or a single session's meta.json). A merge never has one, since no agent made it,
+      and neither does a lane of a plain forge-loop run made before KernelForge asked for the reasoning log. For any
+      other unit, provide logs that record the agent's reasoning.
     check: {present: $run.reasoning}
   - reason: No log files were found for this run.
     check: {present: $run.log_files}
