@@ -2255,7 +2255,7 @@ async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypat
     monkeypatch.setattr(
         ps,
         "compute_next_phase",
-        lambda *a, **k: ("FRAMEWORK_AGENT", "robustness_escalated", {"evidence": "llm_escalation"}),
+        lambda *a, **k: ("FRAMEWORK_AGENT", "optimize_no_more_leverage", {"evidence": "llm_escalation"}),
     )
 
     async def _entered(*, from_phase, to_phase, reason="", evidence=None):
