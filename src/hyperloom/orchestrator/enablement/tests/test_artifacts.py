@@ -69,9 +69,9 @@ def test_every_patch_of_a_round_is_reported(tmp_path):
     for name in ("001_a.patch", "002_b.patch", "003_c.patch"):
         (src / name).write_text("diff\n", encoding="utf-8")
     archive = snapshot_round(tmp_path, _res(patches_applied=[str(p) for p in sorted(src.iterdir())]))
-    assert archive.paths_for(ROLE_PATCH) == tuple(
+    assert [f["path"] for f in archive.to_list() if f["role"] == ROLE_PATCH] == [
         f"reports/enablement/abc123/patches/{n}" for n in ("001_a.patch", "002_b.patch", "003_c.patch")
-    )
+    ]
 
 
 def test_unapplied_workspace_patch_is_preserved_as_evidence(tmp_path):
@@ -85,7 +85,7 @@ def test_unapplied_workspace_patch_is_preserved_as_evidence(tmp_path):
         {"path": "reports/enablement/abc123/attempted_patches/002_try.diff", "role": ROLE_PATCH_EVIDENCE}
     ]
     assert (tmp_path / archive.path_for(ROLE_PATCH_EVIDENCE)).read_bytes() == evidence
-    assert archive.paths_for(ROLE_PATCH) == ()
+    assert [f for f in archive.to_list() if f["role"] == ROLE_PATCH] == []
 
 
 def test_specialist_result_and_prompt_are_copied(tmp_path):
@@ -327,7 +327,7 @@ def test_snapshot_does_not_readmit_vet_rejected_patch(tmp_path, target, before, 
 
     assert patch.read_bytes() == evidence
     assert archive.path_for(ROLE_SPECIALIST_RESULT)
-    assert archive.paths_for(ROLE_PATCH) == ()
+    assert [f for f in archive.to_list() if f["role"] == ROLE_PATCH] == []
     archived_evidence = archive.path_for(ROLE_PATCH_EVIDENCE)
     assert archived_evidence == "reports/enablement/abc123/attempted_patches/manual.patch"
     assert (tmp_path / archived_evidence).read_bytes() == evidence
@@ -395,7 +395,7 @@ def test_whole_file_artifact_is_archived_without_claiming_a_patch(tmp_path):
     target = tmp_path / "framework" / "configs" / "runtime.yaml"
     archive = snapshot_round(tmp_path, _res(artifacts_applied=[{"source": str(source), "target": str(target)}]))
     assert (tmp_path / archive.path_for(ROLE_ARTIFACT_SOURCE)).read_bytes() == content
-    assert archive.paths_for(ROLE_PATCH) == ()
+    assert [f for f in archive.to_list() if f["role"] == ROLE_PATCH] == []
 
 
 def _git(*args):
