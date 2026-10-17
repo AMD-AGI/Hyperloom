@@ -48,6 +48,7 @@ from hyperloom_multibranch.scheduling.integrator import (
     SUPERSEDED,
     Integrator,
     LlmPatchResolver,
+    MergeRecords,
     MergeReport,
 )
 from hyperloom_multibranch.scheduling.llm import CompletionFailed
@@ -238,7 +239,8 @@ async def _bench(
     completion = ScriptedCompletion()
     decisions = tmp_path / "MB-decisions.jsonl"
     resolver = LlmPatchResolver(completion, repo)
-    integrator = Integrator(merger, repo, tests, gate, resolver, DecisionLog(decisions, Clock(now=clock)))
+    records = MergeRecords(merger, DecisionLog(decisions, Clock(now=clock)))
+    integrator = Integrator(records, repo, tests, gate, resolver)
     texts = (CANDIDATE_TEXT, CONFLICTING_TEXT) if conflicting else (CANDIDATE_TEXT,)
     patches = tuple([await repo.store_patch(COMPONENT, text) for text in texts])
     deltas = {"c1": _change("c1", patches), "c2": _change("c2")}

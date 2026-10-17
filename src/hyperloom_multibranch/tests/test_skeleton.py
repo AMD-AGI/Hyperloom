@@ -42,7 +42,7 @@ from hyperloom_multibranch.scheduling.budget import SessionBudget
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL
 from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
-from hyperloom_multibranch.scheduling.lifecycle import CUT_SHORT, Session, SessionOutcome
+from hyperloom_multibranch.scheduling.lifecycle import CUT_SHORT, Session, SessionHost, SessionOutcome, SessionServices
 from hyperloom_multibranch.scheduling.llm import CompletionFailed
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
 from hyperloom_multibranch.scheduling.roster import BranchStatus, RosterCaps, StopCause
@@ -249,16 +249,8 @@ class Stage:
 
     async def run(self) -> SessionOutcome:
         self.time.hold_threads()
-        session = Session(
-            SETTINGS,
-            self.layout,
-            self.factory,
-            self.processes,
-            judge_completion=self.judge,
-            resolver_completion=ScriptedCompletion(),
-            recipe_kb=None,
-            clock=self.time.clock,
-        )
+        host = SessionHost(self.layout, self.processes, self.time.clock)
+        session = Session(SETTINGS, self.factory, host, SessionServices(self.judge, ScriptedCompletion(), None))
         return await session.run()
 
 

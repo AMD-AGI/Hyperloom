@@ -27,6 +27,8 @@ from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling import branches
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.context import SchedulerContext
+from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
@@ -95,13 +97,12 @@ class Stage:
         self.sessions = RecordedSessions(self.toolbox, self.repo, self.notebook, hanging=hanging)
         self.runtime = specialist_runtime(tmp_path / "notebook", self.toolbox, self.repo, self.sessions, now=clock.now)
         self.runtime.refusing = refusing
-        self.branches = BranchControl(
-            self.roster, self.notebook, self.runtime, self.toolbox, self.repo, self.processes, decisions, clock
+        context = SchedulerContext(
+            SessionLayout(tmp_path), self.roster, self.notebook, decisions, self.processes, clock
         )
+        self.branches = BranchControl(context, self.runtime, self.toolbox, self.repo)
         self.mcp = McpServer(McpServerConfig(host_token="t" * MIN_TOKEN_LENGTH), campaign="stops")
-        self.stopper = SessionStopper(
-            self.roster, self.branches, self.toolbox, self.mcp, self.processes, decisions, clock
-        )
+        self.stopper = SessionStopper(context, self.branches, self.toolbox, self.mcp)
 
     async def opened(self) -> Stage:
         baseline = Recipe(MB_FAKE_BASE_IMAGE_DIGEST)

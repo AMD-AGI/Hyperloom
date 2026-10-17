@@ -38,13 +38,14 @@ from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget, budget_seconds
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.close import CloseReport, Closer
+from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
-from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, integration_row
-from hyperloom_multibranch.scheduling.exports import SessionExports
+from hyperloom_multibranch.scheduling.explore import Explorer, ExploreWindow, Steering, integration_row
+from hyperloom_multibranch.scheduling.exports import ExportSources, SessionExports
 from hyperloom_multibranch.scheduling.final import FinalCandidates, FinalChoice, FinalSelector, choose_candidates
 from hyperloom_multibranch.scheduling.forks import ForkDesk
-from hyperloom_multibranch.scheduling.integrator import Integrator, LlmPatchResolver
+from hyperloom_multibranch.scheduling.integrator import Integrator, LlmPatchResolver, MergeRecords
 from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, Judge
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.llm import Completion
@@ -98,26 +99,34 @@ class SessionOutcome:
         return 0 if self.completed else 1
 
 
-class Session:
-    """Wires one session's scheduler, integrator and notebook handles onto the peers ``peer_factory`` builds.
+@dataclass(frozen=True)
+class SessionHost:
+    """Where and when the session runs: its directory, the registry of every process it starts itself (production
+    passes a registry on ``layout.pids``) and its clock."""
 
-    ``processes`` registers every process the session starts itself; production passes a registry on
-    ``layout.pids``. ``recipe_kb`` is the Recipe KB PRELUDE reads the warm-start leads from and CLOSE writes the
-    final recipe back to; ``None`` when none is configured.
-    """
+    layout: SessionLayout
+    processes: ProcessRegistry
+    clock: Clock
+
+
+@dataclass(frozen=True)
+class SessionServices:
+    """What the session calls out to besides its peers: the completions the judge and the patch resolver ask, and the
+    Recipe KB PRELUDE reads the warm-start leads from and CLOSE writes the final recipe back to (``None`` when none is
+    configured)."""
+
+    judge_completion: Completion
+    resolver_completion: Completion
+    recipe_kb: RemoteRecipeClient | None
+
+
+class Session:
+    """Wires one session's scheduler, integrator and notebook handles onto the peers ``peer_factory`` builds."""
 
     def __init__(
-        self,
-        settings: RunSettings,
-        layout: SessionLayout,
-        peer_factory: PeerFactory,
-        processes: ProcessRegistry,
-        *,
-        judge_completion: Completion,
-        resolver_completion: Completion,
-        recipe_kb: RemoteRecipeClient | None,
-        clock: Clock,
+        self, settings: RunSettings, peer_factory: PeerFactory, host: SessionHost, services: SessionServices
     ) -> None:
+        layout, processes, clock = host.layout, host.processes, host.clock
         self._settings = settings
         self._layout = layout
         self._processes = processes
@@ -126,52 +135,30 @@ class Session:
         merger = LocalNotebook(layout.notebook, Writer(Role.INTEGRATOR, INTEGRATOR_WRITER), clock=clock.now)
         self._roster = Roster(settings.caps, layout.roster, clock)
         self._decisions = DecisionLog(layout.decisions, clock)
+        context = SchedulerContext(layout, self._roster, self._notebook, self._decisions, processes, clock)
         desk = ForkDesk(self._roster, self._decisions)
-        merges = DecisionLog(layout.merges, clock)
         blobs = LocalBlobStore(layout.blobs)
         peers = peer_factory(PeerSetup(layout, settings.workload, desk, processes, blobs))
         self._toolbox = peers.toolbox
         tests = SessionTests(peers.toolbox, clock)
         budget = budget_seconds(settings.max_hours)
-        self._branches = BranchControl(
-            self._roster, self._notebook, peers.lifecycle, peers.toolbox, peers.repo, processes, self._decisions, clock
-        )
-        self._stopper = SessionStopper(
-            self._roster, self._branches, peers.toolbox, peers.mcp, processes, self._decisions, clock
-        )
+        self._branches = BranchControl(context, peers.lifecycle, peers.toolbox, peers.repo)
+        self._stopper = SessionStopper(context, self._branches, peers.toolbox, peers.mcp)
         progress = session_frontier(
             self._notebook, PRIMARY_METRIC, budget_seconds=budget, log_path=layout.reports / FRONTIER_LOG
         )
         dashboard = SessionDashboard(self._notebook, progress, peers.toolbox, PRIMARY_METRIC, layout.dashboard)
-        resolver = LlmPatchResolver(resolver_completion, peers.repo)
-        self._prelude = Prelude(
-            layout,
-            processes,
-            self._notebook,
-            peers.repo,
-            peers.gate,
-            tests,
-            self._decisions,
-            clock,
-            recipe_kb=recipe_kb,
+        resolver = LlmPatchResolver(services.resolver_completion, peers.repo)
+        self._prelude = Prelude(context, peers.repo, peers.gate, tests, recipe_kb=services.recipe_kb)
+        integrator = Integrator(
+            MergeRecords(merger, DecisionLog(layout.merges, clock)), peers.repo, tests, peers.gate, resolver
         )
-        self._explorer = Explorer(
-            self._roster,
-            self._branches,
-            desk,
-            Judge(judge_completion, layout.judge, clock),
-            Integrator(merger, peers.repo, tests, peers.gate, resolver, merges),
-            progress,
-            self._notebook,
-            dashboard,
-            self._decisions,
-            settings.judge_interval_seconds,
-            clock,
-        )
+        judge = Judge(services.judge_completion, layout.judge, clock)
+        steering = Steering(judge, settings.judge_interval_seconds, progress, dashboard)
+        self._explorer = Explorer(context, self._branches, desk, integrator, steering)
         self._selector = FinalSelector(tests, peers.gate, settings.workload, PRIMARY_METRIC, clock)
-        closing = SessionExports(
-            layout, self._notebook, peers.repo, blobs, dashboard, PRIMARY_METRIC, budget, kb_client=recipe_kb
-        )
+        sources = ExportSources(self._notebook, peers.repo, blobs, dashboard)
+        closing = SessionExports(layout, sources, PRIMARY_METRIC, budget, kb_client=services.recipe_kb)
         self._closer = Closer(layout, self._stopper, closing, clock)
         self._signals = StopSignals()
 
@@ -370,4 +357,12 @@ def code_version() -> CodeVersion:
     return CodeVersion(package, detect_code_revision(os.environ))
 
 
-__all__ = ["COMPLETED_REASONS", "CodeVersion", "Session", "SessionOutcome", "code_version"]
+__all__ = [
+    "COMPLETED_REASONS",
+    "CodeVersion",
+    "Session",
+    "SessionHost",
+    "SessionOutcome",
+    "SessionServices",
+    "code_version",
+]

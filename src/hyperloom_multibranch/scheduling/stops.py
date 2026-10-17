@@ -25,10 +25,10 @@ from typing import TYPE_CHECKING
 
 from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.scheduling.branches import BranchControl
-from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
-from hyperloom_multibranch.scheduling.processes import ProcessRecord, ProcessRegistry
-from hyperloom_multibranch.scheduling.roster import BranchKind, BranchStop, Roster, StopCause
+from hyperloom_multibranch.scheduling.context import SchedulerContext
+from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
+from hyperloom_multibranch.scheduling.processes import ProcessRecord
+from hyperloom_multibranch.scheduling.roster import BranchKind, BranchStop, StopCause
 from hyperloom_multibranch.scheduling.settle import failure_text, settled
 
 if TYPE_CHECKING:
@@ -126,22 +126,15 @@ class StopReport:
 
 class SessionStopper:
     def __init__(
-        self,
-        roster: Roster,
-        branches: BranchControl,
-        toolbox: RealToolbox,
-        mcp: McpServer,
-        processes: ProcessRegistry,
-        decisions: DecisionLog,
-        clock: Clock,
+        self, context: SchedulerContext, branches: BranchControl, toolbox: RealToolbox, mcp: McpServer
     ) -> None:
-        self._roster = roster
+        self._roster = context.roster
         self._branches = branches
         self._toolbox = toolbox
         self._mcp = mcp
-        self._processes = processes
-        self._decisions = decisions
-        self._clock = clock
+        self._processes = context.processes
+        self._decisions = context.decisions
+        self._clock = context.clock
 
     async def end_exploration(self, reason: SessionStopReason) -> None:
         """Close the roster and stop every specialist branch; the integration branch keeps its quota for FINAL.

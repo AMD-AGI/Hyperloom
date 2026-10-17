@@ -166,6 +166,14 @@ class _TestedMerge:
     judgement: Judgement
 
 
+@dataclass(frozen=True)
+class MergeRecords:
+    """Where the integrator records its rounds: its notebook handle, which writes as the integrator, and the merge log."""
+
+    notebook: Notebook
+    merges: DecisionLog
+
+
 class Integrator:
     """Merges committed specialist commits onto the integration branch; the caller runs one round at a time.
 
@@ -176,19 +184,18 @@ class Integrator:
 
     def __init__(
         self,
-        notebook: Notebook,
+        records: MergeRecords,
         repo: ExperimentRepo,
         tests: SessionTests,
         gate: SessionGate,
         resolver: LlmPatchResolver,
-        decisions: DecisionLog,
     ) -> None:
-        self._notebook = notebook
+        self._notebook = records.notebook
         self._repo = repo
         self._tests = tests
         self._gate = gate
         self._resolver = resolver
-        self._decisions = decisions
+        self._decisions = records.merges
         self._recording: asyncio.Future[str] | None = None
 
     async def integrate_next(self, width: int) -> tuple[MergeReport, ...]:
@@ -307,4 +314,4 @@ def _decision(report: MergeReport) -> Decision:
     return Decision(DecisionKind.MERGE, report.reason, INTEGRATION_BRANCH, detail)
 
 
-__all__ = ["Integrator", "LlmPatchResolver", "MergeReport", "not_stackable_reason"]
+__all__ = ["Integrator", "LlmPatchResolver", "MergeRecords", "MergeReport", "not_stackable_reason"]

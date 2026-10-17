@@ -33,21 +33,18 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle
-from hyperloom_multibranch.contracts.notebook import Notebook
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
-from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
+from hyperloom_multibranch.scheduling.context import SchedulerContext
+from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
 from hyperloom_multibranch.scheduling.forks import DECISION_KINDS, AdmittedBranch
-from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.settle import failure_text, settled
 from hyperloom_multibranch.scheduling.roster import (
     BranchEntry,
     BranchOrigin,
     BranchStatus,
     BranchStop,
-    Roster,
     StopCause,
 )
 
@@ -65,27 +62,19 @@ STARTED_K = 1
 
 
 class BranchControl:
-    """Every change to a branch goes through here; ``notebook`` is the scheduler's handle."""
+    """Every change to a branch goes through here."""
 
     def __init__(
-        self,
-        roster: Roster,
-        notebook: Notebook,
-        lifecycle: SpecialistLifecycle,
-        toolbox: RealToolbox,
-        repo: ExperimentRepo,
-        processes: ProcessRegistry,
-        decisions: DecisionLog,
-        clock: Clock,
+        self, context: SchedulerContext, lifecycle: SpecialistLifecycle, toolbox: RealToolbox, repo: ExperimentRepo
     ) -> None:
-        self._roster = roster
-        self._notebook = notebook
+        self._roster = context.roster
+        self._notebook = context.notebook
         self._lifecycle = lifecycle
         self._toolbox = toolbox
         self._repo = repo
-        self._processes = processes
-        self._decisions = decisions
-        self._clock = clock
+        self._processes = context.processes
+        self._decisions = context.decisions
+        self._clock = context.clock
         self._specialists: set[str] = set()
 
     async def open_branches(

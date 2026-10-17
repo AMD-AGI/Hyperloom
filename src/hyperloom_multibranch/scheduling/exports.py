@@ -50,21 +50,28 @@ class CloseExports:
     dashboard: DashboardFiles
 
 
+@dataclass(frozen=True)
+class ExportSources:
+    """What CLOSE exports from: the scheduler's notebook handle, the repository and the blob store that hold the
+    chosen commit's recipe and its files, and the session's dashboard."""
+
+    notebook: Notebook
+    repo: ExperimentRepo
+    blobs: BlobStore
+    dashboard: SessionDashboard
+
+
 class SessionExports:
     """Exports one stopped session into ``layout``; ``kb_client`` is ``None`` when no Recipe KB is configured.
 
-    ``notebook`` is the scheduler's handle, ``blobs`` the session's blob store, ``dashboard`` the session's
-    dashboard, ``metric`` the recorded-value metric and ``budget_seconds`` the session's budget. The Experience KB
-    and the archive are the environment's.
+    ``metric`` is the recorded-value metric and ``budget_seconds`` the session's budget. The Experience KB and the
+    archive are the environment's.
     """
 
     def __init__(
         self,
         layout: SessionLayout,
-        notebook: Notebook,
-        repo: ExperimentRepo,
-        blobs: BlobStore,
-        dashboard: SessionDashboard,
+        sources: ExportSources,
         metric: str,
         budget_seconds: float,
         *,
@@ -72,10 +79,10 @@ class SessionExports:
     ) -> None:
         self._layout = layout
         self._kb_client = kb_client
-        self._notebook = notebook
-        self._repo = repo
-        self._blobs = blobs
-        self._dashboard = dashboard
+        self._notebook = sources.notebook
+        self._repo = sources.repo
+        self._blobs = sources.blobs
+        self._dashboard = sources.dashboard
         self._metric = metric
         self._budget_seconds = budget_seconds
 
@@ -124,4 +131,4 @@ class SessionExports:
             return RemoteWriteResult(KB_FAILED, f"{type(exc).__name__}: {exc}")
 
 
-__all__ = ["KB_DISABLED", "KB_FAILED", "CloseExports", "SessionExports"]
+__all__ = ["KB_DISABLED", "KB_FAILED", "CloseExports", "ExportSources", "SessionExports"]

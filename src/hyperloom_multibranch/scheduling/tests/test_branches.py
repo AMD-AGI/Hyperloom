@@ -21,6 +21,8 @@ from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling import branches
 from hyperloom_multibranch.scheduling.branches import BranchControl
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.context import SchedulerContext
+from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.forks import AdmittedBranch
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
@@ -103,16 +105,15 @@ class Bench:
         self.control = self.controlling(self.toolbox, tmp_path)
 
     def controlling(self, toolbox: RecordingToolbox, tmp_path: Path) -> BranchControl:
-        return BranchControl(
+        context = SchedulerContext(
+            SessionLayout(tmp_path),
             self.roster,
             self.notebook,
-            self.runtime,
-            toolbox,
-            self.repo,
-            ProcessRegistry(tmp_path / "MB-pids.jsonl", CLOCK),
             DecisionLog(tmp_path / "MB-decisions.jsonl", CLOCK),
+            ProcessRegistry(tmp_path / "MB-pids.jsonl", CLOCK),
             CLOCK,
         )
+        return BranchControl(context, self.runtime, toolbox, self.repo)
 
     async def rooted(self) -> Bench:
         self.root = await self.repo.init_root(BASELINE)

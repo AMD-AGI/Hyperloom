@@ -29,16 +29,15 @@ from hyperloom.inference_optimizer.model_config_utils import summarize_model_con
 from hyperloom.measure.compile import BlobError
 from hyperloom.orchestrator.knowledge.remote_recipe.client import KBStoreError
 from hyperloom_multibranch.contracts.gate import NotMeasured, SessionGate
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Notebook
+from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent, SessionProfile
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook.knowledge.warm_start import RecipeReader, WarmLead, warm_leads
 from hyperloom_multibranch.scheduling.budget import BudgetExhausted, HardStop, SessionBudget
-from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
-from hyperloom_multibranch.scheduling.layout import SessionLayout
+from hyperloom_multibranch.scheduling.context import SchedulerContext
+from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
 from hyperloom_multibranch.scheduling.prelude_reader import (
     PreludeArtifacts,
     PreludeReadError,
@@ -47,7 +46,7 @@ from hyperloom_multibranch.scheduling.prelude_reader import (
     read_prelude,
     root_recipe,
 )
-from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
+from hyperloom_multibranch.scheduling.processes import RegisteredProcess
 from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
 from hyperloom_multibranch.scheduling.settings import Workload
 
@@ -105,26 +104,22 @@ class Prelude:
 
     def __init__(
         self,
-        layout: SessionLayout,
-        processes: ProcessRegistry,
-        notebook: Notebook,
+        context: SchedulerContext,
         repo: ExperimentRepo,
         gate: SessionGate,
         tests: SessionTests,
-        decisions: DecisionLog,
-        clock: Clock,
         *,
         recipe_kb: RecipeReader | None,
     ) -> None:
-        self._layout = layout
+        self._layout = context.layout
         self._recipe_kb = recipe_kb
-        self._processes = processes
-        self._notebook = notebook
+        self._processes = context.processes
+        self._notebook = context.notebook
         self._repo = repo
         self._gate = gate
         self._tests = tests
-        self._decisions = decisions
-        self._clock = clock
+        self._decisions = context.decisions
+        self._clock = context.clock
 
     async def root(self, workload: Workload, budget: SessionBudget, hard_stop: HardStop) -> PreludeResult:
         """Root the session on the main flow's result; raises :class:`PreludeFailed` when there is none.

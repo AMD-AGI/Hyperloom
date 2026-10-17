@@ -33,7 +33,7 @@ from hyperloom_multibranch.notebook.tests.sessions import METRIC, scripted_sessi
 from hyperloom_multibranch.scheduling.close import Closer
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
-from hyperloom_multibranch.scheduling.exports import SessionExports
+from hyperloom_multibranch.scheduling.exports import ExportSources, SessionExports
 from hyperloom_multibranch.scheduling.final import FinalCandidate, FinalChoice
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.processes import ProcessRecord
@@ -151,16 +151,8 @@ def _closer(
     ):
         blobs.put((recipe.files_root / path).read_bytes())
     dashboard = SessionDashboard(notebook, progress, AfterStopToolbox(), METRIC, layout.dashboard)  # type: ignore[arg-type]
-    exports = SessionExports(
-        layout,
-        notebook,
-        ChosenRepo(recipe),
-        blobs,
-        dashboard,
-        METRIC,
-        BUDGET_SECONDS,
-        kb_client=kb_client,  # type: ignore[arg-type]
-    )
+    sources = ExportSources(notebook, ChosenRepo(recipe), blobs, dashboard)
+    exports = SessionExports(layout, sources, METRIC, BUDGET_SECONDS, kb_client=kb_client)  # type: ignore[arg-type]
     return Closer(layout, stopper, exports, CLOCK)  # type: ignore[arg-type]
 
 

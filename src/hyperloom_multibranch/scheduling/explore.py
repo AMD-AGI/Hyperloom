@@ -21,19 +21,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.interfaces import SnapshotQuery
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierScoring
 from hyperloom_multibranch.notebook.rsi.session import judge_history
 from hyperloom_multibranch.scheduling.branches import BranchControl
-from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
-from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
+from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import Integrator
 from hyperloom_multibranch.scheduling.judge import Judge, JudgeDecision, JudgeView
 from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_branches_to_add, mb_fake_similar_branches
-from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStop, Roster, StopCause
+from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStop, StopCause
 from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
 
@@ -56,40 +55,45 @@ class ExploreWindow:
     budget_seconds: float
 
 
+@dataclass(frozen=True)
+class Steering:
+    """How the judge steers EXPLORE: the judge, how often it is asked, the frontier-scored progress it reads, against
+    the archived sessions that progress holds, and the dashboard rebuilt once the opening batch is open and after every
+    later judge call."""
+
+    judge: Judge
+    interval_seconds: float
+    progress: FrontierScoring
+    dashboard: SessionDashboard
+
+
 def integration_row(progress: tuple[BranchProgress, ...]) -> BranchProgress | None:
     return next((row for row in progress if row.branch == INTEGRATION_BRANCH), None)
 
 
 class Explorer:
-    """Runs EXPLORE once; ``progress`` is the frontier-scored progress the judge reads, against the archived sessions
-    it holds, ``notebook`` the snapshot the judge's digest of those sessions compares with them, and ``dashboard`` is
-    rebuilt once the opening batch is open and after every later judge call."""
+    """Runs EXPLORE once; the scheduler's notebook handle gives the snapshot the judge's digest of the archived
+    sessions compares with them."""
 
     def __init__(
         self,
-        roster: Roster,
+        context: SchedulerContext,
         branches: BranchControl,
         desk: ForkDesk,
-        judge: Judge,
         integrator: Integrator,
-        progress: FrontierScoring,
-        notebook: SnapshotQuery,
-        dashboard: SessionDashboard,
-        decisions: DecisionLog,
-        judge_interval_seconds: float,
-        clock: Clock,
+        steering: Steering,
     ) -> None:
-        self._roster = roster
+        self._roster = context.roster
         self._branches = branches
         self._desk = desk
-        self._judge = judge
+        self._judge = steering.judge
         self._integrator = integrator
-        self._progress = progress
-        self._notebook = notebook
-        self._dashboard = dashboard
-        self._decisions = decisions
-        self._interval = judge_interval_seconds
-        self._clock = clock
+        self._progress = steering.progress
+        self._notebook = context.notebook
+        self._dashboard = steering.dashboard
+        self._decisions = context.decisions
+        self._interval = steering.interval_seconds
+        self._clock = context.clock
 
     async def run(self, window: ExploreWindow) -> SessionStopReason:
         """Explore until the deadline or the judge's soft stop; the integrator is stopped before this returns.
@@ -209,4 +213,4 @@ class Explorer:
             logger.error("the judge's stop of %s did not finish cleanly", branch, exc_info=failure)
 
 
-__all__ = ["EXPLORE_TICK_SECONDS", "ExploreWindow", "Explorer", "integration_row"]
+__all__ = ["EXPLORE_TICK_SECONDS", "ExploreWindow", "Explorer", "Steering", "integration_row"]

@@ -31,7 +31,7 @@ from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS, MB_MIN_PRELUDE_HOURS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.layout import create_session
-from hyperloom_multibranch.scheduling.lifecycle import Session
+from hyperloom_multibranch.scheduling.lifecycle import Session, SessionHost, SessionServices
 from hyperloom_multibranch.scheduling.llm import anthropic_completion, default_model
 from hyperloom_multibranch.scheduling.local_peers import load_peers, machine_parallel_tests
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeersUnavailable
@@ -184,16 +184,8 @@ async def _run_session(settings: RunSettings, peer_factory: PeerFactory, recipe_
     layout = create_session(workspace_root(), settings.workload.model_basename, clock)
     print(layout.root, flush=True)
     logging.getLogger().addHandler(_file_handler(layout.scheduler_log))
-    session = Session(
-        settings,
-        layout,
-        peer_factory,
-        ProcessRegistry(layout.pids, clock),
-        judge_completion=judge,
-        resolver_completion=resolver,
-        recipe_kb=recipe_kb,
-        clock=clock,
-    )
+    host = SessionHost(layout, ProcessRegistry(layout.pids, clock), clock)
+    session = Session(settings, peer_factory, host, SessionServices(judge, resolver, recipe_kb))
     return (await session.run()).exit_code
 
 

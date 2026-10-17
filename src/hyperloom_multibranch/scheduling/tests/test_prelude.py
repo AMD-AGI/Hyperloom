@@ -34,6 +34,8 @@ from hyperloom_multibranch.notebook.knowledge.warm_start import RecipeReader
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.context import SchedulerContext
+from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
@@ -158,10 +160,11 @@ def _prelude(
     recipe_kb: RecipeReader | None = None,
 ) -> Prelude:
     clock = clock or _clock()
-    decisions = DecisionLog(layout.decisions, clock)
-    return Prelude(
-        layout, processes, _notebook(layout), peers.repo, peers.gate, peers.tests, decisions, clock, recipe_kb=recipe_kb
+    roster = Roster(RosterCaps(1, 1, 1), layout.roster, clock)
+    context = SchedulerContext(
+        layout, roster, _notebook(layout), DecisionLog(layout.decisions, clock), processes, clock
     )
+    return Prelude(context, peers.repo, peers.gate, peers.tests, recipe_kb=recipe_kb)
 
 
 def _warm_start_decision(layout: SessionLayout) -> dict[str, Any]:
