@@ -42,7 +42,8 @@ from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.settings import Workload
-from hyperloom_multibranch.specialist.runtime import SessionFactory, SpecialistRuntime
+from hyperloom_multibranch.specialist.judging import Judging
+from hyperloom_multibranch.specialist.runtime import RuntimePacing, SessionFactory, SpecialistRuntime
 
 if TYPE_CHECKING:
     from hyperloom.measure.points import CanonicalMeasurement
@@ -137,9 +138,14 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     from hyperloom.measure.points import default_canonical
     from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall
     from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
-    from hyperloom_multibranch.toolbox.local_hosted import build_local_toolbox
-    from hyperloom_multibranch.toolbox.mcp_tools import McpSpecialistTokens, register_specialist_tools
+    from hyperloom_multibranch.toolbox.local_hosted import LocalSession, build_local_toolbox
+    from hyperloom_multibranch.toolbox.mcp_tools import (
+        McpSpecialistTokens,
+        SpecialistToolOptions,
+        register_specialist_tools,
+    )
     from hyperloom_multibranch.toolbox.planner import HostedPlanner
+    from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 
     layout, workload = setup.layout, setup.workload
     os.environ.update(workload_environment(workload))
@@ -157,15 +163,10 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
         blob_root=str(setup.blobs.root),
     )
     toolbox = build_local_toolbox(
-        session_dir=layout.toolbox,
-        run_id=layout.session_id,
-        cards=host.cards,
-        notebook=LocalNotebook(layout.notebook, Writer(Role.TOOLBOX, TOOLBOX_WRITER)),
-        repo=repo,
-        planner=HostedPlanner(compiler, canonical, layout.toolbox / POINTS_DIR),
-        spec=spec,
-        active_image_digest=host.image_digest,
-        tp=workload.tp,
+        LocalSession(layout.toolbox, layout.session_id, host.cards, workload.tp),
+        LocalNotebook(layout.notebook, Writer(Role.TOOLBOX, TOOLBOX_WRITER)),
+        AcceptanceSetup(repo, HostedPlanner(compiler, canonical, layout.toolbox / POINTS_DIR), host.image_digest),
+        spec,
     )
     gate_notebook = LocalNotebook(layout.notebook, Writer(Role.GATE, GATE_WRITER))
     rule = InferenceXRule(gate_notebook, workload.conc)
@@ -174,18 +175,20 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
         return LocalNotebook(layout.notebook, Writer(Role.SPECIALIST_RUNTIME, branch, branch))
 
     mcp = McpServer(McpServerConfig(host_token=secrets.token_hex(32)), campaign=layout.session_id)
-    register_specialist_tools(
-        mcp,
-        toolbox=toolbox,
-        notebooks=runtime_notebook,
+    tool_options = SpecialistToolOptions(
         claim_ttl_seconds=CLAIM_TTL_SECONDS,
         toolbox_loop=asyncio.get_running_loop(),
         learnings=LearningRecall.from_env(log=RetrievalLog(layout.reports / LEARNINGS_LOG)),
+        analysis=toolbox,
     )
+    register_specialist_tools(mcp, toolbox=toolbox, notebooks=runtime_notebook, options=tool_options)
     factory = sessions(setup, repo, toolbox, McpSpecialistTokens(mcp))
-    runtime = SpecialistRuntime(runtime_notebook, RuleGate(gate_notebook, repo, setup.desk), toolbox, rule, factory)
+    judging = Judging(RuleGate(gate_notebook, repo, setup.desk, toolbox), toolbox, rule)
+    runtime = SpecialistRuntime(
+        runtime_notebook, judging, factory, pacing=RuntimePacing(claim_ttl_seconds=CLAIM_TTL_SECONDS)
+    )
     mcp.start()
-    return Peers(runtime, toolbox, repo, GateService(gate_notebook, toolbox, rule), mcp)
+    return Peers(runtime, toolbox, repo, GateService(gate_notebook, toolbox, rule, toolbox), mcp)
 
 
 def mb_fake_measurement_host() -> MeasurementHost:

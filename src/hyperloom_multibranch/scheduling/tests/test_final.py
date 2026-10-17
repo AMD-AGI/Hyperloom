@@ -198,7 +198,7 @@ class Bench:
         self.gate = session_gate(self.handle(Role.GATE), self.toolbox)
         baseline = integration_test_request(TestKind.TEST, Purpose.BASELINE, root)
         await self.gate.establish_baseline(root, [await self.tests.submit(baseline) for _ in range(BASELINE_TESTS)])
-        settler = RuleGate(self.handle(Role.GATE), self.repo, NoForks())
+        settler = RuleGate(self.handle(Role.GATE), self.repo, NoForks(), self.toolbox)
         for branch, tag, value in (("b01", "i1", 1040.0), ("b02", "c7", 1060.0)):
             await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit=root, reason="first"))
             await self.repo.create_branch(branch, root)
@@ -279,7 +279,8 @@ async def test_an_unmeasured_test_a_failed_sweep_or_a_failed_accuracy_disqualifi
 
     bench = await Bench(tmp_path / "again").build({frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0}})
     gate = bench.handle(Role.GATE)
-    bench.gate = RefusingAccuracyGate(gate, bench.toolbox, InferenceXRule(gate, CONC), poll_seconds=GATE_POLL_SECONDS)
+    rule = InferenceXRule(gate, CONC)
+    bench.gate = RefusingAccuracyGate(gate, bench.toolbox, rule, bench.toolbox, poll_seconds=GATE_POLL_SECONDS)
     alone = await bench.selector().select(bench.candidates(both=False), START + 3600.0)
     assert alone.chosen is None and not alone.checks[0].accuracy_passed and alone.checks[0].reproduced
 

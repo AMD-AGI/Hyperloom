@@ -50,9 +50,10 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.local_peers import GATE_WRITER
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
-from hyperloom_multibranch.specialist.runtime import SessionFactory, SpecialistRuntime
-from hyperloom_multibranch.specialist.scripted import BranchHeads, ScriptedSession
-from hyperloom_multibranch.toolbox.fake import FakeToolbox, ToolboxNotebook
+from hyperloom_multibranch.specialist.judging import Judging
+from hyperloom_multibranch.specialist.runtime import RuntimePacing, SessionFactory, SessionStart, SpecialistRuntime
+from hyperloom_multibranch.specialist.scripted import BranchHeads, ScriptedSession, ScriptedSetup
+from hyperloom_multibranch.toolbox.fake import FakeToolbox, FakeWiring
 from hyperloom_multibranch.toolbox.fake_model import DEFAULT_BASELINE, FakeToolboxConfig, NoiseModel
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 
@@ -231,7 +232,7 @@ def session_gate(notebook: GateNotebook, toolbox: FakeToolbox) -> GateService:
     request names none, the workload's; ``notebook`` writes as the gate."""
 
     (conc,) = toolbox.config.main_concurrency
-    return GateService(notebook, toolbox, InferenceXRule(notebook, conc), poll_seconds=GATE_POLL_SECONDS)
+    return GateService(notebook, toolbox, InferenceXRule(notebook, conc), toolbox, poll_seconds=GATE_POLL_SECONDS)
 
 
 def measure_no_throughput(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -367,18 +368,17 @@ class RecordedSessions:
         self.running: set[str] = set()
         self.stopped: list[str] = []
 
-    def __call__(self, branch: str, start_commit: str, k: int) -> RecordedSession:
+    def __call__(self, start: SessionStart) -> RecordedSession:
+        branch = start.branch
         if branch not in self.started:
             policies = self._toolbox.policies
             self.quota_at_start[branch] = policies[-1].branch_k.get(branch) if policies else None
-        self.started.setdefault(branch, start_commit)
-        self.k[branch] = k
+        self.started.setdefault(branch, start.start_commit)
+        self.k[branch] = start.k
         self.running.add(branch)
-        script = self._scripts.get(branch, ())
-        inner = ScriptedSession(
-            branch, script, k, self._toolbox, self._repo, self._notebook, poll_seconds=SPECIALIST_POLL_SECONDS
-        )
-        return RecordedSession(self, branch, inner, self._steps.get(branch))
+        script = tuple(self._scripts.get(branch, ()))
+        setup = ScriptedSetup(script, self._toolbox, self._repo, self._notebook, poll_seconds=SPECIALIST_POLL_SECONDS)
+        return RecordedSession(self, branch, ScriptedSession(start, setup), self._steps.get(branch))
 
 
 class RefusingRuntime(SpecialistRuntime):
@@ -422,9 +422,9 @@ def specialist_runtime(
     def notebook_for(branch: str) -> LocalNotebook:
         return LocalNotebook(notebook, Writer(Role.SPECIALIST_RUNTIME, branch, branch), clock=now)
 
-    gate = RuleGate(gate_notebook, repo, desk or NoForks())
-    rule = InferenceXRule(gate_notebook, conc)
-    return runtime(notebook_for, gate, toolbox, rule, sessions, poll_seconds=SPECIALIST_POLL_SECONDS)
+    gate = RuleGate(gate_notebook, repo, desk or NoForks(), toolbox)
+    judging = Judging(gate, toolbox, InferenceXRule(gate_notebook, conc))
+    return runtime(notebook_for, judging, sessions, pacing=RuntimePacing(poll_seconds=SPECIALIST_POLL_SECONDS))
 
 
 #: What a recipe measures, by the tags its server arguments carry: its primary-metric value per conc, the main
@@ -479,7 +479,7 @@ class RecordingToolbox(FakeToolbox):
 
     def __init__(
         self,
-        notebook: ToolboxNotebook,
+        notebook: LocalNotebook,
         effect: Callable[[TestRequest], float] | None = None,
         accuracy: Mapping[str, float] | None = None,
         conc: int = FakeToolboxConfig.main_concurrency[0],
@@ -488,7 +488,7 @@ class RecordingToolbox(FakeToolbox):
         config = FakeToolboxConfig(
             noise=quiet, effect_fn=effect, accuracy_scores=dict(accuracy or {}), main_concurrency=(conc,)
         )
-        super().__init__(config, notebook=notebook)
+        super().__init__(config, notebook=notebook, wiring=FakeWiring(records=notebook))
         self.serving = False
         self.policies: list[QueuePolicy] = []
         self.cancelled: list[str] = []

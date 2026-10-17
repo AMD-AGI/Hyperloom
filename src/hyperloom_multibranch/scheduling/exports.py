@@ -30,7 +30,7 @@ from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.dashboard import DashboardFiles
 from hyperloom_multibranch.notebook.knowledge.breakdown import build_breakdown, write_breakdown
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import SKIPPED, FinalRecipe, publish_final_recipe
-from hyperloom_multibranch.notebook.rsi.session import KnowledgeClose, close_knowledge
+from hyperloom_multibranch.notebook.rsi.session import CloseTargets, KnowledgeClose, close_knowledge
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.final import FinalChoice
 from hyperloom_multibranch.scheduling.layout import SessionLayout
@@ -90,7 +90,7 @@ class SessionExports:
             snapshot,
             self._metric,
             budget_seconds=self._budget_seconds,
-            receipts=self._layout.reports,
+            targets=CloseTargets(receipts=self._layout.reports),
         )
         selection = encode(final) if final is not None else None
         document = build_breakdown(
