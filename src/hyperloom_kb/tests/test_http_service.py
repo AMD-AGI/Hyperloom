@@ -281,9 +281,11 @@ def test_write_is_immediately_readable_immutable_and_rendered_losslessly(
     assert (read.experiences[0]["baseline_value"], read.experiences[0]["outcome_value"]) == (100.0, 110.0)
     assert read.experiences[0]["decision"] == "keep"
     assert read.experiences[0]["source_run_id"] == "run-1"
+    assert read.experiences[0]["identity"] == {"model": "qwen3", "gpu": "mi325x"}
     assert read.experiences[0]["score"] > 0
     assert read.experiences[0]["why_matched"]
     assert [item["experience_id"] for item in page.items] == [experience.id]
+    assert page.items[0]["identity"] == {"model": "qwen3", "gpu": "mi325x"}
     assert "score" not in page.items[0]
     kb_id = str(health.pop("kb_id"))
     assert kb_id.startswith("kb-")

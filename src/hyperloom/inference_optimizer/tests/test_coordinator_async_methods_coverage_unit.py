@@ -1047,17 +1047,23 @@ async def test_fan_out_wave_rejects_invalid_entries(coord: Coordinator, monkeypa
 
 # -- warm_specialist_params -----------------------------------------------
 @pytest.mark.asyncio
-async def test_warm_specialist_params_fills_defaults(coord: Coordinator) -> None:
+async def test_warm_specialist_params_always_writes_the_unconditional_keys(coord: Coordinator) -> None:
+    """Three keys are written whatever the session holds, so a specialist can read them without a presence test."""
     coord.shared_state.gpu_type = "mi300x"
-    coord.shared_state.tp = 1
-    coord.shared_state.conc = 64
-    coord.shared_state.isl = 256
-    coord.shared_state.osl = 256
     params: dict = {"domain": "kernel_agent"}
+
     await coord.specialist_dispatch.warm_specialist_params(params)
+
     assert params["gpu_type"] == "mi300x"
-    assert params["tp"] == 1
-    assert "kb_subgraph" in params
+    assert params["kb_subgraph"] == {}
+    assert "keep_threshold_pct" in params
+
+    empty: dict = {"domain": "kernel_agent"}
+    coord.shared_state.gpu_type = ""
+
+    await coord.specialist_dispatch.warm_specialist_params(empty)
+
+    assert empty["gpu_type"] == ""
 
 
 #: ``(state field, param key, value to set, value expected on the params)`` for every field whose value
@@ -1103,9 +1109,6 @@ async def test_warm_specialist_params_omits_a_field_state_left_empty(coord: Coor
     await coord.specialist_dispatch.warm_specialist_params(params)
 
     assert [key for _f, key, _v, _e in _STATE_EXPORTS if key in params] == []
-    # Both of these are written whatever the state holds.
-    assert params["gpu_type"] == ""
-    assert "keep_threshold_pct" in params
 
 
 @pytest.mark.asyncio

@@ -803,6 +803,7 @@ async def test_options_includes_system_prompt_and_max_turns():
     assert captured["options_kwargs"]["max_turns"] == 8
     assert captured["options_kwargs"]["system_prompt"] == "sys"
     assert "Read" in captured["options_kwargs"]["allowed_tools"]
+    assert captured["options_kwargs"]["tools"] == ["Read"]
     # Output instructions appended to prompt
     assert "OUTPUT FORMAT" in captured["prompt"]
 
@@ -834,9 +835,10 @@ async def test_options_includes_mcp_server_when_emit_intent_enabled():
     )
     assert backend.mcp_server_config is not None
     assert backend.mcp_tool_name == EMIT_INTENT_TOOL_QUALIFIED
-    await backend.run("p", tools=["Read"])
+    await backend.run("p", tools=["Read", "emit_intent", "get_failure"])
     kw = captured["options_kwargs"]
     assert "mcp_servers" in kw
     assert "inference_optimizer" in kw["mcp_servers"]
     # emit_intent qualified tool name auto-added to allowed_tools
     assert EMIT_INTENT_TOOL_QUALIFIED in kw["allowed_tools"]
+    assert kw["tools"] == ["Read"]

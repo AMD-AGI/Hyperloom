@@ -34,12 +34,13 @@ from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 
 
 # agent_role
-def test_default_claude_model_is_opus_5():
+def test_default_claude_model_is_opus_5_5():
     """The allowlist ladder is headed by the default, and the older rungs are the fallback order."""
     from hyperloom.inference_optimizer.cli.credentials import _CLAUDE_ALLOWED_MODELS
 
-    assert DEFAULT_CLAUDE_MODEL == "claude-opus-5"
+    assert DEFAULT_CLAUDE_MODEL == "claude-opus-5-5"
     assert _CLAUDE_ALLOWED_MODELS == (
+        "claude-opus-5-5",
         "claude-opus-5",
         "claude-opus-4-8",
         "claude-opus-4-7",

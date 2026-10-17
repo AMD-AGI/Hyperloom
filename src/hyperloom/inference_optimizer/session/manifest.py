@@ -17,7 +17,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env import env_bool
 from hyperloom.common.provenance import build_provenance
 from hyperloom.common.timeutil import now_iso, utc_now_compact
 
@@ -221,26 +220,12 @@ def build_manifest(
     }
     # An agentic replay takes its request shape from the corpus, so $ISL/$OSL
     # are inert. The Critic reads this block, so it carries the distribution.
-    _agentx_on = env_bool("HYPERLOOM_AGENTX")
-    if _agentx_on:
-        from hyperloom.inference_optimizer.agentx.mapping import (
-            CANONICAL_CORPUS_DURATION_S,
-            CANONICAL_CORPUS_ENTRIES,
-            CANONICAL_CORPUS_LOADER,
-            CANONICAL_ISL,
-            CANONICAL_OSL,
-            CANONICAL_PREFIX_CACHE_HIT,
-        )
+    from hyperloom.common.perf_metric import agentx_enabled
+    from hyperloom.common.benchmark_config import benchmark_config_path
 
-        workload.update(
-            benchmark_mode="agentx",
-            corpus_loader=CANONICAL_CORPUS_LOADER,
-            corpus_entries=CANONICAL_CORPUS_ENTRIES,
-            corpus_duration_s=CANONICAL_CORPUS_DURATION_S,
-            isl_distribution=dict(CANONICAL_ISL),
-            osl_distribution=dict(CANONICAL_OSL),
-            prefix_cache_hit=CANONICAL_PREFIX_CACHE_HIT,
-        )
+    _agentx_on = agentx_enabled()
+    if _agentx_on:
+        workload.update(benchmark_mode="agentx", benchmark_config=str(benchmark_config_path() or ""))
     else:
         workload["isl"] = int(os.environ["ISL"]) if os.environ.get("ISL", "").strip().isdigit() else None
         workload["osl"] = int(os.environ["OSL"]) if os.environ.get("OSL", "").strip().isdigit() else None

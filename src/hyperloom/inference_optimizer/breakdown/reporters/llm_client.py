@@ -41,7 +41,7 @@ class OpenAIHttpClient:
     """OpenAI-compatible chat-completions client for the narrative pass."""
 
     client: Any
-    model: str = "claude-opus-5"
+    model: str = llm_config.DEFAULT_CLAUDE_MODEL
     max_output_tokens: int = 1024
 
     def complete(self, *, system: str, user: str) -> str:
@@ -64,7 +64,7 @@ class OpenAIHttpClient:
 class AnthropicClient:
     """Anthropic client for the narrative pass."""
 
-    model: str = "claude-opus-5"
+    model: str = llm_config.DEFAULT_CLAUDE_MODEL
     max_output_tokens: int = 1024
     timeout: Any = None
     timeout_s: float = REPORT_HTTP_TIMEOUT_SEC
@@ -88,7 +88,7 @@ def build_client_from_env() -> Any | None:
     backend = (os.environ.get("HYPERLOOM_REPORT_LLM_BACKEND") or "none").lower()
     if backend in ("", "none", "off", "disabled"):
         return None
-    model = os.environ.get("HYPERLOOM_REPORT_MODEL") or "claude-opus-5"
+    model = os.environ.get("HYPERLOOM_REPORT_MODEL") or llm_config.DEFAULT_CLAUDE_MODEL
     try:
         max_tokens = int(os.environ.get("HYPERLOOM_REPORT_MAX_TOKENS") or "1024")
     except ValueError:

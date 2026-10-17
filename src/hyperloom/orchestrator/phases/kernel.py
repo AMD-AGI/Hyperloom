@@ -1114,7 +1114,7 @@ class KernelPhase(CoordinatorCollaborator):
         not flags and so cannot be recovered from the accepted-flags handoff --
         while letting its own bench repeats run again.
 
-        Resolution mirrors ``aiperf_client.sh``: the same ``AGENTX_SERVER_SCRIPT``
+        Resolution mirrors ``mlperf_agentic_client.sh``: the same ``AGENTX_SERVER_SCRIPT``
         override, the same ``{framework}_{gpu}.sh`` fallback, the same
         ``<checkout>/benchmarks/`` directory and deliberately no recursive
         search, so what we advertise is the path that would have booted the
@@ -1277,8 +1277,6 @@ class KernelPhase(CoordinatorCollaborator):
             else (cb.get("measurement") if isinstance(cb.get("measurement"), Mapping) else {})
         )
         if agentx and not str(spec_config.get("server_launch_flags") or "").strip():
-            # An agentic recipe builds its server command inside the script, so
-            # only the launch it recorded says what GEAK has to serve.
             evidence = measurement.get("launch_evidence")
             server_log = str(evidence.get("actual_server_log_path") or "") if isinstance(evidence, Mapping) else ""
             recipe_launch = recipe_server_launch(server_log)
@@ -1316,7 +1314,6 @@ class KernelPhase(CoordinatorCollaborator):
         else:
             reference_verification_status = "unverified"
         if agentx:
-            # Matching launch identities do not make AgentX and GEAK's proxy workload comparable.
             reference_verification_status = "unverified_workload"
         reference_verified = reference_verification_status == "verified_observed"
         observed_identity = str(measurement.get("observed_launch_identity") or "")
@@ -1337,16 +1334,11 @@ class KernelPhase(CoordinatorCollaborator):
             "osl": int(state.osl),
             "conc": int(state.conc or 64),
         }
-        # Forward the benchmark settings and GPU placement used by Hyperloom.
         _recipe_path = str(state.baseline_config_path or "")
-        # Parse once so every handoff field uses the same recipe snapshot.
         _recipe_envs = self._read_recipe_bench_envs(_recipe_path)
         bench_protocol = self._resolve_bench_protocol(_recipe_path, envs=_recipe_envs)
-        # Preserve the run's actual GPU pin; {} means the whole machine.
         gpu_pin = resolve_gpu_pin(recipe_envs=_recipe_envs)
-        # Resolve TP and GPU ids together so the values cannot disagree.
         _tp = coerce_tp(_recipe_envs.get("TP"), os.environ.get("TP"))
-        # Clamp ids to the visible mask, then TP to the resulting device set.
         _gpu_ids = _resolve_handoff_gpu_ids(gpu_pin=gpu_pin, tp=_tp)
         _tp = _resolve_handoff_tp(gpu_ids=_gpu_ids, tp=_tp)
         _gpu_ids_space = _resolve_handoff_gpu_ids_space(gpu_pin=gpu_pin)
@@ -1481,6 +1473,10 @@ class KernelPhase(CoordinatorCollaborator):
             # baseline_env_spec still folds the recorded EXTRA_ATOM_ARGS.
             if not launch_server_script:
                 handoff["bench_launcher"] = "native"
+
+        from hyperloom.inference_optimizer.agentx.geak_proxy import seed_native_geak_proxy
+
+        seed_native_geak_proxy(handoff, benchmark=recipe_bench, measurement=measurement or {})
 
         out_dir = self.session_dir / "geak"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1837,6 +1833,14 @@ class KernelPhase(CoordinatorCollaborator):
         """
         state = self.shared_state
         params = self._coord.writeback.geak_rebench_params(reason=reason)
+        from .geak_native_revalidation import ORIGIN, finish_invalid_source, revalidate_source
+
+        if params.get("origin") == ORIGIN:
+            await revalidate_source(self._coord, params)
+            return
+        if params.get("reason") == "geak_native_source_invalid":
+            finish_invalid_source(self._coord, str(params["error"]))
+            return
         skip_reason = params.get("reason") if params.get("skipped") else None
         if skip_reason == "geak_invalid_config":
             return
@@ -1911,33 +1915,24 @@ class KernelPhase(CoordinatorCollaborator):
         if not isinstance(result, dict):
             return False
         result.setdefault("kernel_event_id", kernel_event_id(int(self.shared_state.macro_cycle or 0)))
+        from .geak_native_revalidation import matching_review
+
+        reviewed_product = matching_review(self.shared_state, result)
         try:
             accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
         except ValueError as exc:
             self.reject_geak_promotion(result, measured_tput=0.0, current_best_tput=0.0, reason=str(exc))
             return False
-        # A material artifact can still be rechecked without a GEAK throughput claim.
         if result.get("status") not in ("ok",) and not _geak_has_accepted_kernel(result):
             return True
         new_tput = float(result.get("final_throughput_tok_s") or 0.0)
         if new_tput <= 0:
             return True
-        # ``new_tput`` is read on whatever axis GEAK measured, so the reference must be too. The interactivity
-        # bases are spelled as this session's snapshot keys, so ``baseline_perf`` holds their reference directly;
-        # an axis it does not hold reads 0.0 and leaves the gain unset. A result with no basis predates the field
-        # and was measured on output.
         basis = str(result.get("metric_basis") or GEAK_METRIC_OUTPUT[1])
         if basis == GEAK_METRIC_OUTPUT[1]:
             base = float(self.shared_state.baseline_tput or 0.0)
         else:
             base = axis_of(self.shared_state.baseline_perf, basis)
-        # ``base`` is OUR measurement and ``new_tput`` is GEAK's, so this
-        # percentage is defined only when both were measured on the same
-        # workload. GEAK states that verdict in
-        # ``baseline_basis.workload_comparability``; when it reports the
-        # workloads differ, any gain computed here is the workload difference
-        # rather than the kernels. In AgentX mode the difference is enormous --
-        # our agentic baseline against a GEAK run that took the handoff's
         # synthetic isl/osl at face value reads as roughly +175% with nothing
         # optimized. The downstream rebench would eventually reject it, but the
         # number would already be recorded, so refuse to compute it here.
@@ -1982,6 +1977,7 @@ class KernelPhase(CoordinatorCollaborator):
             },
             "ts": datetime.now(timezone.utc).isoformat(),
         }
+        self.shared_state.geak_pending.update(reviewed_product)
         recorder = self.timeline()
         if recorder is not None:
             recorder.record_geak_claim(
@@ -2257,7 +2253,7 @@ class KernelPhase(CoordinatorCollaborator):
         # Where the session stood before GEAK ran: the anchor both the journey rejection and the route-level residual
         # measure from.
         pre_geak = float(cb_tput) if isinstance(cb_tput, (int, float)) and cb_tput > 0 else base
-        self._record_geak_adopted_kernels(
+        self.record_geak_adopted_kernels(
             result,
             measured_tput=measured,
             baseline_tput=base,
@@ -2313,7 +2309,7 @@ class KernelPhase(CoordinatorCollaborator):
         journey = cls._load_geak_journey(result)
         return [kernel for kernel in journey.get("kernels") or [] if isinstance(kernel, dict)]
 
-    def _record_geak_adopted_kernels(
+    def record_geak_adopted_kernels(
         self,
         result: dict[str, Any],
         *,
@@ -2323,6 +2319,8 @@ class KernelPhase(CoordinatorCollaborator):
         overlay_loaded: bool | None,
     ) -> None:
         """Write one adoption row per accepted GEAK kernel."""
+        from .geak_adoption import AdoptionMeasurement, adoption_entry
+
         if not isinstance(result, dict):
             return
         # Both acceptance lanes, ``env`` selections excluded and alias twins collapsed.
@@ -2349,53 +2347,25 @@ class KernelPhase(CoordinatorCollaborator):
         ledger = self.shared_state.kernel_integrate_attempts
         if not isinstance(ledger, dict):
             return
+        measurement = AdoptionMeasurement(
+            measured_tput=measured_tput,
+            rebench_gain=rebench_gain,
+            attributable=attributable,
+            provenance=provenance,
+            ts=ts,
+            cycle=int(self.shared_state.macro_cycle or 0),
+            overlay_loaded=overlay_loaded,
+            basis=basis,
+            alignment_status=alignment_status,
+        )
         for row in rows:
             kid = row["kernel_id"]
             spec = row["spec"]
-            entry = dict(ledger.get(kid) or {})
-            attempts = list(entry.get("attempts") or [])
-            attempt_decision = "KEEP" if attributable else "UNATTRIBUTED"
-            attempt_status = "ok" if attributable else "unvalidated"
-            attempts.append(
-                {
-                    "decision": attempt_decision,
-                    "status": attempt_status,
-                    "new_tput": measured_tput,
-                    "gain_pct": rebench_gain if attributable else None,
-                    "decision_reason": provenance,
-                    "artifact_kind": str(spec.get("kind") or "authored"),
-                    "ts": ts,
-                    "cycle": int(self.shared_state.macro_cycle or 0),
-                }
-            )
-            # Max over attempts, matching the canonical ledger writer in ``_kernel_decisions.py`` -- ``by_kernel`` and
-            # ``kernel_lifecycle`` read this one field from both writers, so a second, worse rebench must not lower
-            # the kernel's best.
-            gains = [
-                float(a["gain_pct"])
-                for a in attempts
-                if isinstance(a, dict) and isinstance(a.get("gain_pct"), (int, float))
-            ]
-            entry.update(
-                {
-                    "key": kid,
-                    "kernel_id": kid,
-                    "source": "geak_e2e",
-                    "attempts": attempts,
-                    "attempt_count": len(attempts),
-                    "best_gain_pct": max(gains) if gains else None,
-                    "last_decision": attempt_decision,
-                    "last_status": attempt_status,
-                    "validated": attributable,
-                    "overlay_loaded": bool(overlay_loaded),
-                    "basis": basis,
-                    "alignment_status": alignment_status,
-                    # GEAK's own same-config A/B, kept beside the orchestrator number so the two are never confused
-                    # for each other.
-                    "geak_same_config_delta_pct": spec.get("e2e_delta_pct"),
-                    "geak_isolated_speedup": spec.get("isolated"),
-                    "updated_at": ts,
-                }
+            entry = adoption_entry(
+                ledger.get(kid) or {},
+                kid=kid,
+                spec=spec,
+                measurement=measurement,
             )
             ledger[kid] = entry
             # GEAK adopts by writing this ledger directly rather than through

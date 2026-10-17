@@ -304,7 +304,6 @@ ignore_imports =
     hyperloom.orchestrator.enablement.lane -> hyperloom.orchestrator.phases.machine_state
     hyperloom.orchestrator.enablement.params -> hyperloom.orchestrator.actions.executors._apply_feedback
     hyperloom.orchestrator.enablement.recipe.keep_probe -> hyperloom.orchestrator.actions.executors._benchmark_interpreter
-    hyperloom.orchestrator.enablement.recipe.keep_probe -> hyperloom.orchestrator.actions.executors._grid_runner
     hyperloom.orchestrator.enablement.recipe.keep_probe -> hyperloom.orchestrator.actions.executors._server_argv
     hyperloom.orchestrator.enablement.recipe.keep_probe -> hyperloom.orchestrator.actions.executors.benchmark_backend
     hyperloom.orchestrator.enablement.revalidation -> hyperloom.orchestrator.actions.executors._accuracy_gate

@@ -995,7 +995,7 @@ KV_ARTIFACT_NAME = "kv_metrics.json"
 #: them makes every statistic meaningless: ``boot`` has no traffic at all, ``warmup`` runs a deliberately cold cache,
 #: and ``eval`` drives accuracy traffic whose shape has nothing to do with the throughput benchmark. Only ``measured``
 #: may enter a comparison.
-PHASES = ("boot", "warmup", "measured", "eval")
+PHASES = ("boot", "warmup", "measured", "finished", "eval")
 
 #: The one phase whose numbers may be compared against another round's.
 _COMPARABLE_PHASE = "measured"
