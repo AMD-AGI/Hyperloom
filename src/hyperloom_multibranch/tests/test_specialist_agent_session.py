@@ -180,6 +180,41 @@ async def test_a_session_that_ends_as_it_should_is_followed_by_a_fresh_one(rig):
     assert rig.worktree.head() == rig.root
 
 
+async def test_each_launch_shows_the_brief_rebuilt_at_the_head_it_starts_at(rig):
+    asked = []
+
+    async def briefs(branch, head):
+        asked.append((branch, head))
+        return f"brief {len(asked)} for {branch} at {head}"
+
+    session = rig.session(briefs=briefs)
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the first launch")
+    rig.runner.end(1, EXITED_WELL, 3600.0)
+    await _until(lambda: len(rig.runner.specs) == 2, "a fresh session")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    first, second = rig.runner.prompts
+    assert asked == [(BRANCH, rig.root), (BRANCH, rig.root)]
+    assert first.startswith(f"Startup brief:\nbrief 1 for {BRANCH} at {rig.root}")
+    assert second.startswith(f"Startup brief:\nbrief 2 for {BRANCH} at {rig.root}")
+
+
+async def test_a_brief_that_cannot_be_rebuilt_leaves_the_first_one_and_a_warning(rig, caplog):
+    async def briefs(branch, head):
+        raise RuntimeError("the Experience KB is unreachable")
+
+    session = rig.session(briefs=briefs)
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert rig.runner.prompts[0].startswith("Startup brief:\nleads: fp8 KV cache")
+    assert "could not be rebuilt" in caplog.text and "the Experience KB is unreachable" in caplog.text
+
+
 async def test_a_lost_session_is_killed_collected_and_raised_for_the_runtime(rig):
     session = rig.session()
     running = asyncio.create_task(session.run())

@@ -4,8 +4,8 @@
 """A specialist backed by a model: agent CLI sessions launched through the AI work socket, one after another for as
 long as its branch runs.
 
-Every session starts at the branch head, with the worktree synced to it and a launch prompt built from the startup
-brief and the branch log. A session that ends as a session should, its model's turn done or its deadline reached, is
+Every session starts at the branch head, with the worktree synced to it and a launch prompt built from the brief,
+rebuilt at that head when the setup can, and the branch log. A session that ends as a session should, its model's turn done or its deadline reached, is
 followed by a fresh one: a branch runs until the scheduler stops it. One that is lost, exits with an error or ends
 within ``min_session_seconds`` raises, and the runtime decides whether to restart it. The session's process registry
 adopts every process the socket starts, so the session stop kills it even when this stop cannot.
@@ -17,7 +17,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
@@ -120,6 +120,8 @@ class AgentSetup:
     """What every model-backed session of a session shares: the CLI and its role, and what a session reaches.
 
     ``env`` is the environment the CLI runs with, the branch's MCP token added; the session decides nothing about it.
+    ``briefs(branch, head)`` rebuilds a branch's brief at the head a launch starts at; without it, every launch shows
+    the brief the branch was started with.
     """
 
     command: AgentCommand
@@ -129,6 +131,7 @@ class AgentSetup:
     tokens: SpecialistTokens
     processes: Processes
     repo: ExperimentRepo
+    briefs: Callable[[str, str], Awaitable[str]] | None = None
     session_seconds: float = LONG_RUNNING_SESSION_SEC
     min_session_seconds: float = MIN_SESSION_S
     poll_seconds: float = 5.0
@@ -174,7 +177,8 @@ class AgentSession:
         branch, worktree, clock = self._start.branch, self._place.worktree, self._setup.clock
         head = await sync_to_head(self._setup.repo, branch, worktree)
         recent = await self._place.notebook.branch_log(branch)
-        prompt = launch_prompt(self._start, head=head, worktree=str(worktree.path), recent=recent, last_end=last_end)
+        start = await self._briefed(head)
+        prompt = launch_prompt(start, head=head, worktree=str(worktree.path), recent=recent, last_end=last_end)
         spec = await asyncio.to_thread(self._spec, grant, prompt)
         started = clock()
         handle = self._handle = await self._setup.runner.launch(spec)
@@ -194,6 +198,23 @@ class AgentSession:
         ):
             raise SessionCrashed(_describe(status, seconds))
         return "it reached its deadline" if status.timed_out else "its model finished its turn"
+
+    async def _briefed(self, head: str) -> SessionStart:
+        """The start a launch at ``head`` shows: its brief rebuilt there, or the first one when that fails."""
+        if self._setup.briefs is None:
+            return self._start
+        branch = self._start.branch
+        try:
+            brief = await self._setup.briefs(branch, head)
+        except Exception:
+            logger.warning(
+                "the brief of %s could not be rebuilt at %s; the launch shows the first one",
+                branch,
+                head,
+                exc_info=True,
+            )
+            return self._start
+        return replace(self._start, brief=brief)
 
     def _spec(self, grant: SpecialistGrant, prompt: str) -> AgentLaunchSpec:
         setup, workspace, worktree = self._setup, self._place.workspace, self._place.worktree.path
