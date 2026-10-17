@@ -34,6 +34,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import (
 )
 
 CLAIM_TOKEN_LENGTH = 24
+MAX_OP_SHARES = 50
 
 
 @dataclass(frozen=True)
@@ -195,12 +196,26 @@ class QuarantineEvent:
 
 @dataclass(frozen=True)
 class ToolResultPointer:
-    """Where an asynchronous tool's result is; the result itself never enters the notebook."""
+    """Where an asynchronous tool's result is; the result itself never enters the notebook.
+
+    The one exception is ``op_shares``, which a TraceLens analysis fills with each op's ``percent_of_total`` on
+    ``commit_id``, at most :data:`MAX_OP_SHARES` of them, so the Amdahl ceiling of a claim can be read on that commit.
+    ``profile_request_id`` names the profile test whose trace was analysed, when it came from one.
+    """
 
     branch: str
     job_id: str
     location: str
     summary: str
+    commit_id: str = ""
+    profile_request_id: str = ""
+    op_shares: Mapping[str, float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if len(self.op_shares) > MAX_OP_SHARES:
+            raise ValueError(f"a pointer carries at most {MAX_OP_SHARES} op shares, not {len(self.op_shares)}")
+        if self.op_shares and not self.commit_id:
+            raise ValueError("op shares need the commit they were profiled on")
 
 
 @dataclass(frozen=True)
@@ -471,6 +486,7 @@ class NotebookSnapshot:
 
 __all__ = [
     "CLAIM_TOKEN_LENGTH",
+    "MAX_OP_SHARES",
     "BaselineRecord",
     "BranchLogRecord",
     "BranchNode",

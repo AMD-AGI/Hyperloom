@@ -86,6 +86,27 @@ def test_claims_and_lineage_views_round_trip() -> None:
     assert codec.decode(records.LineageView, codec.encode(view)) == view
 
 
+def test_a_tool_result_pointer_keeps_its_op_shares_and_an_older_one_loads_without_them() -> None:
+    pointer = records.ToolResultPointer(
+        "s1", "job-7", "/artifacts/analysis.json", "trace analysed", "c1", "r1", {"moe_gemm": 41.5, "attention": 22.0}
+    )
+    older = {"branch": "s1", "job_id": "job-3", "location": "/artifacts/build.log", "summary": "build done"}
+
+    assert codec.decode(records.ToolResultPointer, json.loads(json.dumps(codec.encode(pointer)))) == pointer
+    assert codec.decode(records.ToolResultPointer, older) == records.ToolResultPointer(
+        "s1", "job-3", "/artifacts/build.log", "build done"
+    )
+
+
+@pytest.mark.parametrize(
+    ("commit_id", "shares"),
+    [("c1", {f"op{index}": 1.0 for index in range(records.MAX_OP_SHARES + 1)}), ("", {"moe_gemm": 41.5})],
+)
+def test_op_shares_are_bounded_and_need_their_commit(commit_id: str, shares: dict[str, float]) -> None:
+    with pytest.raises(ValueError):
+        records.ToolResultPointer("s1", "job-7", "/artifacts/analysis.json", "trace analysed", commit_id, "", shares)
+
+
 @pytest.mark.parametrize(
     ("kind", "data"),
     [
