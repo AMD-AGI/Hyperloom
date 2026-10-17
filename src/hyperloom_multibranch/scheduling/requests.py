@@ -5,20 +5,25 @@
 
 PRELUDE's baseline, the integrator's merge tests and FINAL's validation differ only in what they measure, from which
 commit and why; :func:`integration_test_request` builds each one the same way. Whether a test runs the eval is the
-toolbox's call: it adds the accuracy rounds the session's rule reads from every session measurement.
+toolbox's call: it adds the accuracy rounds the session's rule reads from every session measurement. The integrator
+and FINAL check a commit the same way too: :class:`SessionChecks` measures it, judges the measurement and runs the
+regression set on it.
 """
 
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest, TestResult
 from hyperloom.contracts.recipe import RecipeDelta
+from hyperloom_multibranch.contracts.gate import SessionGate
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.toolbox import Backpressure
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.mb_fakes import MbFakeRegressionCheck
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
@@ -111,9 +116,20 @@ async def together(*measurements: asyncio.Future[Any]) -> None:
         raise failure
 
 
+@dataclass(frozen=True)
+class SessionChecks:
+    """What the scheduling side checks a commit on the integration branch with: ``tests`` measures it, ``gate``
+    judges the measurement and ``regression`` runs the regression set on it."""
+
+    tests: SessionTests
+    gate: SessionGate
+    regression: MbFakeRegressionCheck
+
+
 __all__ = [
     "NO_DELTA",
     "RESUBMIT_SECONDS",
+    "SessionChecks",
     "SessionTests",
     "integration_test_request",
     "together",

@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING
 
 from hyperloom.common.llm_config import preferred_agent_backend, provider_model_defaults, resolve_forge_llm_model
 from hyperloom.common.model_paths import resolve_serving_model_path
+from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
@@ -46,7 +47,11 @@ from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
 from hyperloom_multibranch.rulegate.service import GateService
-from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST, mb_fake_learning_recall
+from hyperloom_multibranch.scheduling.mb_fakes import (
+    MB_FAKE_BASE_IMAGE_DIGEST,
+    MbFakeRegressionOutcome,
+    mb_fake_learning_recall,
+)
 from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC, Workload
 from hyperloom_multibranch.specialist.judging import Judging
@@ -81,6 +86,19 @@ class MbFakeNoSplitLanding:
     async def land_split(self, branch: str) -> bool:
         del branch
         return False
+
+
+class MbFakePassingRegressionCheck:
+    """The session's :class:`~hyperloom_multibranch.scheduling.mb_fakes.MbFakeRegressionCheck`: every merge and every
+    FINAL candidate passes, as in MB1.
+
+    Stands in for the rule gate's ``RegressionCheck`` (board #61, request D); replaced by it once it lands. No
+    regression case is written in production yet, so the real set would pass everything as well.
+    """
+
+    async def check(self, base_commit: str, candidate_delta: RecipeDelta) -> MbFakeRegressionOutcome:
+        del base_commit, candidate_delta
+        return MbFakeRegressionOutcome(passed=True)
 
 
 @dataclass(frozen=True)
@@ -206,7 +224,8 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     )
     mcp.start()
     gate_service = GateService(gate_notebook, toolbox, rule, toolbox)
-    return Peers(runtime, toolbox, repo, gate_service, mcp, briefs, image.digest, MbFakeNoSplitLanding())
+    landing, regression = MbFakeNoSplitLanding(), MbFakePassingRegressionCheck()
+    return Peers(runtime, toolbox, repo, gate_service, mcp, briefs, image.digest, landing, regression)
 
 
 def machine_cards() -> tuple[int, ...]:
@@ -357,6 +376,7 @@ __all__ = [
     "MB_FAKE_IMAGE_REF",
     "MeasurementHost",
     "MbFakeNoSplitLanding",
+    "MbFakePassingRegressionCheck",
     "SessionWiring",
     "SpecialistSessions",
     "load_peers",

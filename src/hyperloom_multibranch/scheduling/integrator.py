@@ -14,8 +14,9 @@ The experiment repository carries the candidate's own change onto the integratio
 where the two set a server argument or environment variable differently the candidate's value wins, and the
 integrator records every overridden value in the decision log; a patch that does not apply where the merge puts it
 goes to :class:`LlmPatchResolver`, and a merge it cannot resolve is skipped and recorded. The merged change is tested
-from the integration head and judged by the rule gate before anything is written, so only an improvement reaches the
-integration branch and nothing on it is ever reverted.
+from the integration head and judged by the rule gate, and an improvement about to be merged runs the regression set,
+before anything is written, so only an improvement that keeps the regression set passing reaches the integration
+branch and nothing on it is ever reverted.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from hyperloom.common.jsonio import extract_last_json_with_key
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import PatchRef, Recipe, RecipeDelta, RecipeError, ValueChange, apply
 from hyperloom.measure.compile import BlobError
-from hyperloom_multibranch.contracts.gate import NotMeasured, SessionGate
+from hyperloom_multibranch.contracts.gate import NotMeasured
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Notebook
 from hyperloom_multibranch.contracts.notebook.records import CommittedCommit, MergeAttempt
@@ -38,8 +39,7 @@ from hyperloom_multibranch.contracts.repo import ExperimentRepo, PatchConflict, 
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed
-from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_regression_passes
-from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
+from hyperloom_multibranch.scheduling.requests import SessionChecks, integration_test_request
 
 logger = logging.getLogger(__name__)
 
@@ -141,16 +141,15 @@ def _untried(commit: CommittedCommit, head: str) -> bool:
     return commit.merged_into is None and (last is None or last.integration_head != head)
 
 
-def not_stackable_reason(candidate: str, judgement: Judgement) -> str:
-    """Why the merge test of ``candidate`` keeps it off the integration branch; empty when it may be merged.
+def not_stackable_reason(judgement: Judgement) -> str:
+    """Why a merge test judged ``judgement`` keeps its candidate off the integration branch; empty when it may be
+    merged once the regression set passes.
 
     Only a confirmed gain that passed the accuracy gate is ``IMPROVED``.
     """
 
     if judgement.verdict is not Verdict.IMPROVED:
         return f"{judgement.verdict.value} {judgement.gain_pct:+.2f}% on the integration head"
-    if not mb_fake_regression_passes(candidate):
-        return "the regression set failed"
     return ""
 
 
@@ -191,14 +190,14 @@ class Integrator:
         self,
         records: MergeRecords,
         repo: ExperimentRepo,
-        tests: SessionTests,
-        gate: SessionGate,
+        checks: SessionChecks,
         resolver: LlmPatchResolver,
     ) -> None:
         self._notebook = records.notebook
         self._repo = repo
-        self._tests = tests
-        self._gate = gate
+        self._tests = checks.tests
+        self._gate = checks.gate
+        self._regression = checks.regression
         self._resolver = resolver
         self._decisions = records.merges
         self._recording: asyncio.Future[str] | None = None
@@ -264,10 +263,13 @@ class Integrator:
         return MergeReport(candidate, head, MergeOutcome.CONFLICT_SKIPPED, reason)
 
     async def _conclude(self, tested: _TestedMerge, superseded: bool) -> MergeReport:
-        """A superseded improvement gets no integration judgement: it stays pending and is tried on the new head."""
+        """A superseded improvement gets no integration judgement and runs no regression set: it stays pending and is
+        tried on the new head. Any other improvement is merged once the regression set passes on the merge."""
 
         report, judgement = tested.report, tested.judgement
-        reason = not_stackable_reason(report.candidate, judgement)
+        reason = not_stackable_reason(judgement)
+        if not reason and not superseded:
+            reason = await self._regression_failure(report.onto, tested.delta)
         if reason:
             await self._notebook.write_judgement(str(report.request_id), judgement, Conclusion.NOT_STACKABLE)
             return replace(report, outcome=MergeOutcome.NOT_STACKABLE, reason=reason)
@@ -284,6 +286,10 @@ class Integrator:
             gain_pct=judgement.gain_pct,
             threshold_pct=judgement.threshold_pct,
         )
+
+    async def _regression_failure(self, head: str, delta: RecipeDelta) -> str:
+        outcome = await self._regression.check(head, delta)
+        return "" if outcome.passed else f"the regression set failed: {outcome.reason}"
 
     async def _record_merge(self, tested: MergeReport, delta: RecipeDelta, judgement: Judgement) -> str:
         """Commit the merge and record it; runs shielded, so a cancelled merge never moves only one of the two.

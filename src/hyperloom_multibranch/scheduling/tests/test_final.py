@@ -18,7 +18,7 @@ from hyperloom.contracts.measurement import (
     TestResult,
     Validity,
 )
-from hyperloom.contracts.recipe import Recipe
+from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
@@ -42,12 +42,13 @@ from hyperloom_multibranch.scheduling.final import (
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, BranchOrigin, BranchStop, StopCause
 from hyperloom_multibranch.scheduling.settings import KernelOptimizer, Workload
-from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
+from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests, integration_test_request
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     BASELINE_VALUE,
     GATE_POLL_SECONDS,
     MAIN_POINT,
     Curves,
+    FakeRegressionCheck,
     NoForks,
     RecordingToolbox,
     VirtualClock,
@@ -184,6 +185,7 @@ class Bench:
         self.tmp_path = tmp_path
         self.time = VirtualClock(START)
         self.commits: dict[str, str] = {}
+        self.regression = FakeRegressionCheck()
 
     def handle(self, role: Role) -> LocalNotebook:
         return LocalNotebook(self.tmp_path / "notebook", Writer(role, role.value), clock=self.time.now)
@@ -222,7 +224,7 @@ class Bench:
         return FinalCandidates(integration, replace(BRANCH, commit=self.commits["c7"]) if both else None)
 
     def selector(self) -> FinalSelector:
-        return FinalSelector(self.tests, self.gate, WORKLOAD, METRIC, self.time.clock)
+        return FinalSelector(SessionChecks(self.tests, self.gate, self.regression), WORKLOAD, METRIC, self.time.clock)
 
     def fail(self, tag: str, fate: Fate, kind: TestKind | None = None) -> None:
         """Every FINAL test of ``tag``'s commit (of ``kind`` when given) ends in ``fate``."""
@@ -283,6 +285,21 @@ async def test_an_unmeasured_test_a_failed_sweep_or_a_failed_accuracy_disqualifi
     bench.gate = RefusingAccuracyGate(gate, bench.toolbox, rule, bench.toolbox, poll_seconds=GATE_POLL_SECONDS)
     alone = await bench.selector().select(bench.candidates(both=False), START + 3600.0)
     assert alone.chosen is None and not alone.checks[0].accuracy_passed and alone.checks[0].reproduced
+
+
+async def test_a_candidate_the_regression_set_fails_on_its_own_commit_is_not_eligible(tmp_path: Path) -> None:
+    curves = {
+        frozenset({"i1"}): {MAIN_POINT: 1080.0, CONC: 1080.0},
+        frozenset({"c7"}): {MAIN_POINT: 1060.0, CONC: 1060.0},
+    }
+    bench = await Bench(tmp_path).build(curves)
+    bench.regression.failures = {bench.commits["i1"]: "case kv-overflow reproduced"}
+
+    choice = await bench.selector().select(bench.candidates(), START + 3600.0)
+
+    assert choice.chosen == bench.candidates().best_branch
+    assert [check.regression_passed for check in choice.checks] == [False, True]
+    assert sorted(bench.regression.calls) == sorted((bench.commits[tag], RecipeDelta()) for tag in ("i1", "c7"))
 
 
 class CrashedSweepTests(SessionTests):

@@ -7,7 +7,8 @@ Each ``MbFake`` class stands in for another owner's module until it lands: the m
 specialist lifecycle is the specialist runtime itself on scripted sessions (:class:`RecordedSessions`,
 :func:`specialist_runtime`). The toolbox is the toolbox module's
 :class:`~hyperloom_multibranch.toolbox.fake.FakeToolbox`, noise-free and noting what the scheduler asked of it; what a
-test measures follows from the recipe it measures (:func:`recipe_effect`). The experiment repository and the rule gate
+test measures follows from the recipe it measures (:func:`recipe_effect`). The regression set is scripted per base
+commit (:class:`FakeRegressionCheck`). The experiment repository and the rule gate
 are their owners' own; :func:`session_gate` is the gate's session service as the session's peers build it.
 """
 
@@ -65,6 +66,7 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.local_peers import GATE_WRITER
+from hyperloom_multibranch.scheduling.mb_fakes import MbFakeRegressionOutcome
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
 from hyperloom_multibranch.specialist.judging import Judging
 from hyperloom_multibranch.specialist.runtime import RuntimePacing, SessionFactory, SessionStart, SpecialistRuntime
@@ -644,6 +646,20 @@ class StuckToolbox(RecordingToolbox):
         await asyncio.Event().wait()
 
 
+@dataclass
+class FakeRegressionCheck:
+    """The regression set for the tests: fails on a base commit ``failures`` names, with its reason, and passes on
+    any other; ``calls`` notes every ``(base_commit, candidate_delta)`` it was asked about."""
+
+    failures: Mapping[str, str] = field(default_factory=dict)
+    calls: list[tuple[str, RecipeDelta]] = field(default_factory=list)
+
+    async def check(self, base_commit: str, candidate_delta: RecipeDelta) -> MbFakeRegressionOutcome:
+        self.calls.append((base_commit, candidate_delta))
+        reason = self.failures.get(base_commit)
+        return MbFakeRegressionOutcome(reason is None, reason or "")
+
+
 def judged(verdict: Verdict, gain_pct: float, request_id: str, value: float) -> Judgement:
     return Judgement(verdict, gain_pct, 1.0, (request_id,), {GRADED_OUTPUT: value}, accuracy_ok=True)
 
@@ -712,6 +728,7 @@ __all__ = [
     "TOOLBOX_DOWN",
     "Curves",
     "DownToolbox",
+    "FakeRegressionCheck",
     "HeldGitRepo",
     "MbFakeChildRegistry",
     "MbFakeHeldRegistry",

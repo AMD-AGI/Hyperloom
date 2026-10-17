@@ -6,7 +6,8 @@
 The candidates are the integration head and the specialist head with the highest recorded value, whatever stopped
 its branch. Each is validated through the toolbox as a session measurement: one ``SWEEP`` test over the concs
 :data:`SWEEP_FACTORS` places around the workload's conc, read per conc from its rounds, and a cold-start reproduction
-the rule gate judges against the commit's own recorded value and holds to the accuracy gate. The toolbox measures a
+the rule gate judges against the commit's own recorded value and holds to the accuracy gate, and the regression set of
+the commit's own ancestry run on the commit itself. The toolbox measures a
 sweep over the concs its request names and the primary one alone when it names none, so FINAL names them.
 The primary operating point (the workload's conc) decides; a candidate
 whose other sweep points fall more than :data:`MB_SWEEP_DEGRADATION_PCT` below the other candidate's at the same conc
@@ -22,15 +23,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Validity
-from hyperloom_multibranch.contracts.gate import NotMeasured, SessionGate
+from hyperloom_multibranch.contracts.gate import NotMeasured
 from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, TestWithdrawn
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_regression_passes
 from hyperloom_multibranch.scheduling.requests import (
-    SessionTests,
+    NO_DELTA,
+    SessionChecks,
     integration_test_request,
     together,
 )
@@ -202,11 +203,12 @@ class _Reproduction:
 
 
 class FinalSelector:
-    """Validates the candidates through the toolbox and the rule gate."""
+    """Validates the candidates through the toolbox, the rule gate and the regression set."""
 
-    def __init__(self, tests: SessionTests, gate: SessionGate, workload: Workload, metric: str, clock: Clock) -> None:
-        self._tests = tests
-        self._gate = gate
+    def __init__(self, checks: SessionChecks, workload: Workload, metric: str, clock: Clock) -> None:
+        self._tests = checks.tests
+        self._gate = checks.gate
+        self._regression = checks.regression
         self._workload = workload
         self._metric = metric
         self._clock = clock
@@ -232,7 +234,8 @@ class FinalSelector:
     async def _check(self, candidate: FinalCandidate) -> CandidateCheck:
         sweep = asyncio.ensure_future(self._sweep(candidate.commit))
         repro = asyncio.ensure_future(self._reproduction(candidate.commit))
-        await together(sweep, repro)
+        regression = asyncio.ensure_future(self._regression.check(candidate.commit, NO_DELTA))
+        await together(sweep, repro, regression)
         swept = sweep.result()
         measured = swept.validity is Validity.SUCCEEDED
         check = CandidateCheck(
@@ -240,7 +243,7 @@ class FinalSelector:
             sweep_curve(swept, self._metric) if measured else {},
             repro.result().accuracy_passed,
             repro.result().reproduced,
-            mb_fake_regression_passes(candidate.commit),
+            regression.result().passed,
         )
         if not measured:
             reason = swept.failure_reason or "no reason given"

@@ -54,7 +54,7 @@ from hyperloom_multibranch.scheduling.peers import PeerFactory, PeerSetup
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
 from hyperloom_multibranch.scheduling.prelude import Prelude, PreludeFailed, PreludeResult
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
-from hyperloom_multibranch.scheduling.requests import SessionTests
+from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests
 from hyperloom_multibranch.scheduling.roster import QUOTA_POLICY_VERSION, Roster
 from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC, RunSettings
 from hyperloom_multibranch.scheduling.stops import (
@@ -152,6 +152,7 @@ class Session:
         self._briefs = peers.briefs
         self._base_image_digest = peers.base_image_digest
         tests = SessionTests(peers.toolbox, clock)
+        checks = SessionChecks(tests, peers.gate, peers.regression)
         budget = budget_seconds(settings.max_hours)
         self._branches = BranchControl(context, peers.lifecycle, peers.toolbox, peers.repo, peers.briefs)
         self._stopper = SessionStopper(context, self._branches, peers.toolbox, peers.mcp)
@@ -161,9 +162,7 @@ class Session:
         dashboard = SessionDashboard(self._notebook, progress, peers.toolbox, PRIMARY_METRIC, layout.dashboard)
         resolver = LlmPatchResolver(services.resolver_completion, peers.repo)
         self._prelude = Prelude(context, peers.repo, peers.gate, tests, recipe_kb=services.recipe_kb)
-        integrator = Integrator(
-            MergeRecords(merger, DecisionLog(layout.merges, clock)), peers.repo, tests, peers.gate, resolver
-        )
+        integrator = Integrator(MergeRecords(merger, DecisionLog(layout.merges, clock)), peers.repo, checks, resolver)
         judge = Judge(services.judge_completion, layout.judge, clock)
         widening = Widening(peers.toolbox, self._roster, progress.policy)
         similarity = BranchSimilarity(peers.repo, self._roster)
@@ -171,7 +170,7 @@ class Session:
         events = SessionEvents(self._notebook, self._decisions, profiler)
         steering = Steering(judge, settings.judge_interval_seconds, progress, dashboard, widening, similarity, events)
         self._explorer = Explorer(context, self._branches, integrator, steering, peers.split_landing)
-        self._selector = FinalSelector(tests, peers.gate, settings.workload, PRIMARY_METRIC, clock)
+        self._selector = FinalSelector(checks, settings.workload, PRIMARY_METRIC, clock)
         sources = ExportSources(self._notebook, peers.repo, blobs, dashboard)
         closing = SessionExports(layout, sources, PRIMARY_METRIC, budget, kb_client=services.recipe_kb)
         self._closer = Closer(layout, self._stopper, closing, clock)

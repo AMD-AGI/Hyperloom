@@ -67,6 +67,7 @@ from hyperloom_multibranch.scheduling.stops import (
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     MAIN_POINT,
     SPECIALIST_POLL_SECONDS,
+    FakeRegressionCheck,
     HeldGitRepo,
     MbFakeHeldRegistry,
     OneChampionKB,
@@ -204,6 +205,7 @@ class Stage:
     repo: HeldGitRepo = field(init=False)
     setup: PeerSetup = field(init=False)
     splits: SplittingDesk = field(init=False)
+    regression: FakeRegressionCheck = field(default_factory=FakeRegressionCheck)
     briefs: SessionBriefs = field(init=False)
     forks: list[ForkAdmission] = field(default_factory=list)
     watchers: list[asyncio.Future[None]] = field(default_factory=list)
@@ -236,7 +238,8 @@ class Stage:
         self.briefs = SessionBriefs(self.handle(Role.OBSERVER))
         mcp = McpServer(McpServerConfig(host_token="t" * MIN_TOKEN_LENGTH), campaign=setup.layout.session_id)
         gate = session_gate(self.handle(Role.GATE), toolbox)
-        return Peers(runtime, toolbox, repo, gate, mcp, self.briefs, toolbox.config.image_digest, self.splits)
+        digest = toolbox.config.image_digest
+        return Peers(runtime, toolbox, repo, gate, mcp, self.briefs, digest, self.splits, self.regression)
 
     async def root(self) -> str:
         return (await self.handle(Role.OBSERVER).baseline()).root_commit

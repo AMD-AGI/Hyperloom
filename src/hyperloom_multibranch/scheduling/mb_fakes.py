@@ -9,10 +9,11 @@ what is left to replace, and each docstring or comment names what it stands in f
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
+from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_kb import NoOpExperienceKB
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
 from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall
@@ -57,14 +58,27 @@ async def mb_fake_settle_voided(branch: str, reason: str) -> None:
     del branch, reason
 
 
-def mb_fake_regression_passes(commit: str) -> bool:
-    """Whether ``commit`` passes the regression set: always true.
+@dataclass(frozen=True)
+class MbFakeRegressionOutcome:
+    """What the regression set found: ``passed``, or why not in ``reason``.
 
-    Stands in for the MB2 regression set run before a merge or a final pick; replaced when that set exists.
+    Stands in for the ``RegressionOutcome`` proposed on board #61 (request D); replaced by it, together with
+    :class:`MbFakeRegressionCheck`, once the regression set lands.
     """
 
-    del commit
-    return True
+    passed: bool
+    reason: str = ""
+
+
+class MbFakeRegressionCheck(Protocol):
+    """Runs the regression set of ``base_commit``'s ancestry on ``base_commit`` with ``candidate_delta`` applied.
+
+    The integrator asks it before a merge, FINAL for every candidate. Stands in for the rule gate's
+    ``RegressionCheck`` proposed on board #61 (request D); replaced by it, and the stand-ins implementing this, once it
+    lands.
+    """
+
+    async def check(self, base_commit: str, candidate_delta: RecipeDelta) -> MbFakeRegressionOutcome: ...
 
 
 def mb_fake_learning_recall(log: RetrievalLog) -> LearningRecall:
@@ -101,9 +115,10 @@ def _faked(step: CloseStep) -> CloseStep:
 __all__ = [
     "MB_FAKE_BASE_IMAGE_DIGEST",
     "MB_FAKE_EXPERIENCE_KB",
+    "MbFakeRegressionCheck",
+    "MbFakeRegressionOutcome",
     "MbFakeSplitLanding",
     "mb_fake_close_knowledge",
     "mb_fake_learning_recall",
-    "mb_fake_regression_passes",
     "mb_fake_settle_voided",
 ]

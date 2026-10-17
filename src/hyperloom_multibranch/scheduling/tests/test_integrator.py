@@ -54,11 +54,12 @@ from hyperloom_multibranch.scheduling.integrator import (
 from hyperloom_multibranch.scheduling.llm import CompletionFailed
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
-from hyperloom_multibranch.scheduling.requests import SessionTests, integration_test_request
+from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests, integration_test_request
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     MAIN_POINT,
     TAG_FLAG,
     Curves,
+    FakeRegressionCheck,
     RecordingToolbox,
     ScriptedCompletion,
     measure_no_throughput,
@@ -147,6 +148,7 @@ class Bench:
     completion: ScriptedCompletion
     integrator: Integrator
     decisions: Path
+    regression: FakeRegressionCheck
 
     def handle(self, role: Role) -> LocalNotebook:
         return LocalNotebook(self.root_dir, Writer(role, role.value), clock=self.clock)
@@ -240,11 +242,12 @@ async def _bench(
     decisions = tmp_path / "MB-decisions.jsonl"
     resolver = LlmPatchResolver(completion, repo)
     records = MergeRecords(merger, DecisionLog(decisions, Clock(now=clock)))
-    integrator = Integrator(records, repo, tests, gate, resolver)
+    regression = FakeRegressionCheck()
+    integrator = Integrator(records, repo, SessionChecks(tests, gate, regression), resolver)
     texts = (CANDIDATE_TEXT, CONFLICTING_TEXT) if conflicting else (CANDIDATE_TEXT,)
     patches = tuple([await repo.store_patch(COMPONENT, text) for text in texts])
     deltas = {"c1": _change("c1", patches), "c2": _change("c2")}
-    made = Bench(notebook, clock, repo, root, {}, deltas, toolbox, completion, integrator, decisions)
+    made = Bench(notebook, clock, repo, root, {}, deltas, toolbox, completion, integrator, decisions, regression)
     await _commit_specialist_work(made, invalid)
     return made
 
@@ -306,6 +309,21 @@ async def test_a_merge_that_does_not_improve_is_not_stackable(
     assert await bench.outcome("c1") is MergeOutcome.NOT_STACKABLE
 
 
+async def test_an_improving_merge_the_regression_set_fails_is_not_stackable(bench: Bench) -> None:
+    bench.regression.failures = {bench.root: "case kv-overflow reproduced"}
+
+    report = await _one(bench)
+
+    assert report is not None and report.outcome is MergeOutcome.NOT_STACKABLE
+    assert report.reason == "the regression set failed: case kv-overflow reproduced"
+    [test] = bench.merge_tests().values()
+    assert bench.regression.calls == [(bench.root, test.delta)]
+    assert await bench.repo.head(INTEGRATION_BRANCH) == bench.root
+    record = await bench.handle(Role.OBSERVER).record(str(report.request_id))
+    assert (record.conclusion, record.commit_id) == (Conclusion.NOT_STACKABLE, None)
+    assert [row["reason"] for row in bench.logged()] == [report.reason]
+
+
 async def test_a_merge_measuring_no_throughput_is_not_stackable_and_merging_goes_on(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -351,6 +369,7 @@ async def test_a_round_tests_k_candidates_at_once_and_merges_the_first_improveme
     ]
     superseded = await bench.handle(Role.OBSERVER).record(str(first[1].request_id))
     assert superseded.conclusion is None
+    assert [base for base, _ in bench.regression.calls] == [bench.root, merged]
     assert [(r.candidate, r.onto, r.outcome) for r in second] == [(c2, merged, MergeOutcome.MERGED)]
     head = await bench.repo.read_recipe(await bench.repo.head(INTEGRATION_BRANCH))
     assert TAG_FLAG + "c1" in head.launch.server_args and TAG_FLAG + "c2" in head.launch.server_args
