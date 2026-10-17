@@ -47,6 +47,12 @@ def check_kind(request: TestRequest, supported: Collection[str] | None) -> None:
         )
 
 
+def _check_profile(request: TestRequest) -> None:
+    """A profile test is one profiled round: it evaluates no accuracy (several concurrencies the contract refuses)."""
+    if request.kind is TestKind.PROFILE and request.accuracy:
+        raise RequestRejected("a profile test does not evaluate accuracy")
+
+
 class MeasurementPlanner(Protocol):
     """Compiles the test environment, generates the measurement points and checks the surface (acceptance steps 2 to 4).
 
@@ -98,6 +104,7 @@ class Acceptance:
 
         if not replay and request.request_id:
             raise RequestRejected("request_id is assigned by the toolbox; submit the request without one")
+        _check_profile(request)
         if not replay and request.retest_of is not None and not self._is_accepted(request.retest_of):
             raise RequestRejected(f"retest_of {request.retest_of!r} names no accepted request", "unknown_retest")
         recipe = await self._read_parent(request)

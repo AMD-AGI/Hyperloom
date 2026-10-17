@@ -232,7 +232,7 @@ def test_a_point_whose_run_eval_contradicts_the_call_is_refused(grid, tmp_path, 
     assert grid.calls == []
 
 
-@pytest.mark.parametrize("kind", ["profile", "repro"])
+@pytest.mark.parametrize("kind", ["repro"])
 def test_a_kind_the_local_backend_does_not_run_is_refused(grid, tmp_path, kind):
     with pytest.raises(TestCallRefused, match="runs kinds"):
         _run(_call(tmp_path, kind=kind))
@@ -550,3 +550,99 @@ def test_an_environment_that_cannot_be_rebuilt_is_refused_with_the_reason(grid, 
     with pytest.raises(TestCallRefused, match="cannot be rebuilt here"):
         _run(_call(tmp_path, point, environment=compiled))
     assert grid.calls == []
+
+
+# --- profile test -------------------------------------------------------------------------------------------------
+
+
+def _profile_point(directory: Path, *, profile: object = "1", enabled: bool = True) -> Path:
+    envs: dict[str, object] = {"TP": 1, "CONC": 4, "RUN_EVAL": "false"}
+    if profile is not None:
+        envs["PROFILE"] = profile
+    config = {"benchmark": {"framework": "sglang", "envs": envs, "profiler": {"torch_profiler": {"enabled": enabled}}}}
+    path = directory / "profile.yaml"
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    return path
+
+
+def _with_trace(grid: _Grid, name: str = "test", where: str = "torch_trace") -> VariantResult:
+    result = grid.result(name)
+    trace = Path(result.workspace) / where / "rank0.pt.trace.json.gz"
+    trace.parent.mkdir(parents=True, exist_ok=True)
+    trace.write_bytes(b"trace")
+    grid.answers[name] = result
+    return result
+
+
+def test_a_profile_test_is_one_profiled_round_with_no_warmup_before_it(grid, tmp_path):
+    _with_trace(grid)
+    call = _call(tmp_path, _profile_point(tmp_path), kind="profile", rounds=RoundPlan(warmup_rounds=1))
+
+    outcome = _run(call)
+
+    (kwargs,) = grid.calls
+    assert [v.name for v in kwargs["grid"]] == ["test"]
+    assert kwargs["warmup_before_measure"] is False, "a profiled round is not a statistic: no warmup before it"
+    assert outcome.returncode == 0 and [r.phase for r in outcome.rounds] == ["measure"]
+
+
+def test_the_traces_of_a_profile_test_move_into_the_output_profile_directory(grid, tmp_path):
+    result = _with_trace(grid)
+    sidecar = Path(result.workspace).parent / "capture_traces" / "graph.json"
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text("{}")
+
+    _run(_call(tmp_path, _profile_point(tmp_path), kind="profile"))
+
+    profile = tmp_path / "out" / "profile"
+    assert (profile / "torch_trace" / "rank0.pt.trace.json.gz").read_bytes() == b"trace"
+    assert (profile / "capture_traces" / "graph.json").is_file(), "the capture sidecars keep their directory name"
+    assert not (Path(result.workspace) / "torch_trace").exists(), "the bundle must carry each trace once"
+
+
+def test_a_profile_test_that_left_no_trace_does_not_end_as_a_success(grid, tmp_path):
+    outcome = _run(_call(tmp_path, _profile_point(tmp_path), kind="profile"))
+
+    assert outcome.returncode != 0 and "profile_no_trace" in outcome.stderr
+    assert not (tmp_path / "out" / "profile").exists()
+
+
+def test_a_failed_profile_round_moves_no_trace(grid, tmp_path):
+    result = _with_trace(grid)
+    grid.answers["test"] = VariantResult(**{**result.__dict__, "status": "failed", "returncode": 1})
+
+    outcome = _run(_call(tmp_path, _profile_point(tmp_path), kind="profile"))
+
+    assert outcome.returncode == 1 and "profile_no_trace" not in outcome.stderr
+    assert (Path(result.workspace) / "torch_trace").exists()
+
+
+@pytest.mark.parametrize(
+    ("point", "kwargs", "match"),
+    [
+        (dict(profile=None), {}, "does not turn the torch profiler on"),
+        (dict(profile="0"), {}, "does not turn the torch profiler on"),
+        (dict(enabled=False), {}, "does not turn the torch profiler on"),
+        ({}, dict(accuracy=True), "does not run accuracy"),
+        ({}, dict(prep="conc_sweep"), "not a sweep"),
+    ],
+)
+def test_a_profile_call_that_would_not_profile_or_asks_for_more_is_refused(grid, tmp_path, point, kwargs, match):
+    run_eval = "true" if kwargs.get("accuracy") else "false"
+    path = _profile_point(tmp_path, **point)
+    if run_eval == "true":
+        config = yaml.safe_load(path.read_text())
+        config["benchmark"]["envs"]["RUN_EVAL"] = "true"
+        path.write_text(yaml.safe_dump(config))
+
+    with pytest.raises(TestCallRefused, match=match):
+        _run(_call(tmp_path, path, kind="profile", **kwargs))
+    assert grid.calls == []
+
+
+def test_a_plain_test_does_not_gather_traces(grid, tmp_path):
+    _with_trace(grid)
+
+    _run(_call(tmp_path))
+
+    assert not (tmp_path / "out" / "profile").exists()

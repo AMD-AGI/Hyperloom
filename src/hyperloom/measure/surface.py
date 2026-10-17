@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -159,10 +159,15 @@ def check_launch_envs(names: Iterable[str]) -> None:
         )
 
 
-def check_surface(config: Mapping[str, Any], canonical: MeasurementSurface) -> None:
-    """Refuse a configuration whose surface differs from the canonical one, naming each differing field."""
+def check_surface(config: Mapping[str, Any], canonical: MeasurementSurface, *, ignore: Collection[str] = ()) -> None:
+    """Refuse a configuration whose surface differs from the canonical one, naming each differing field.
 
-    differences = canonical.differences(extract_surface(config))
+    ``ignore`` names fields that may differ (a profile test lowers its output length so the capture fits).
+    """
+
+    differences = {
+        name: pair for name, pair in canonical.differences(extract_surface(config)).items() if name not in ignore
+    }
     if differences:
         detail = "; ".join(f"{name}: canonical {want!r}, test {got!r}" for name, (want, got) in differences.items())
         raise SurfaceViolation(f"the test changes the measurement surface ({detail})")

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.measurement import Purpose
+from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import ComponentChange, Recipe, RecipeDelta
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
 from hyperloom_multibranch.toolbox.tests.helpers import BAD_DELTA, IMAGE, OTHER_IMAGE, FakeRepo, build, req
@@ -81,6 +81,20 @@ async def test_a_valid_request_is_accepted_and_written_to_the_notebook(tmp_path:
     row = rig.notebook._state().requests[request_id]
     assert (row.request_id, row.branch, row.purpose, row.priority) == (request_id, "b1", "confirm", 0)
     assert row.retest_of is not None
+
+
+async def test_a_profile_test_that_asks_for_accuracy_is_refused_and_never_queues(tmp_path: Path) -> None:
+    rig = build(tmp_path)
+    await _rejected(rig, req(kind=TestKind.PROFILE, purpose=Purpose.PROFILE, accuracy=True), "invalid_request")
+    assert not list(rig.toolbox._log.entries())
+
+
+async def test_a_profile_test_is_accepted_without_accuracy_whatever_the_workload(tmp_path: Path) -> None:
+    rig = build(tmp_path)  # an InferenceX campaign: the gate-read purposes get accuracy, a profile does not
+    request_id = await rig.toolbox.submit_test(req(kind=TestKind.PROFILE, purpose=Purpose.PROFILE))
+    await rig.toolbox.drain()
+    ran = next(j for j in rig.executor.jobs if j.request.request_id == request_id)
+    assert ran.request.kind is TestKind.PROFILE and ran.request.accuracy is False
 
 
 # --- an InferenceX campaign runs the purposes the rule gate reads with accuracy (board topic 14) -------------------------------

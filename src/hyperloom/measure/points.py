@@ -21,7 +21,7 @@ from typing import Any
 
 import yaml
 
-from hyperloom.contracts.measurement import TestRequest
+from hyperloom.contracts.measurement import TestKind, TestRequest
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeError
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.measure.compile import CompiledEnvironment, EnvironmentCompiler
@@ -64,6 +64,16 @@ def _render(canonical: CanonicalMeasurement, out_dir: Path, name: str, **overrid
     )
     with path.open(encoding="utf-8") as handle:
         return yaml.safe_load(handle) or {}
+
+
+def _reference(canonical: CanonicalMeasurement, pins: Mapping[str, str]) -> dict[str, Any]:
+    """The canonical configuration rendered with ``pins``, which a generated point is compared with."""
+
+    scratch = Path(tempfile.mkdtemp(prefix="hl-ref-"))
+    try:
+        return _render(canonical, scratch, "reference.yaml", extra_envs=pins)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def default_canonical(
@@ -125,11 +135,7 @@ def generate_points(
     for index, level in enumerate(_concurrencies(concurrency, canonical)):
         run_eval = "true" if accuracy else "false"
         pins = {"CONC": str(level), "RUN_EVAL": run_eval}
-        scratch = Path(tempfile.mkdtemp(prefix="hl-ref-"))
-        try:
-            reference = _render(canonical, scratch, "reference.yaml", extra_envs=pins)
-        finally:
-            shutil.rmtree(scratch, ignore_errors=True)
+        reference = _reference(canonical, pins)
         name = f"point-{index}-c{level}.yaml"
         config = _render(
             canonical,
@@ -143,6 +149,55 @@ def generate_points(
         _check_launch_present(config, launch, environment.envs)
         points.append(out_dir / name)
     return tuple(points)
+
+
+#: Surface fields a profile point may change: the profile run lowers its output length to fit the capture window.
+_PROFILE_SURFACE_EXEMPT = ("envs.OSL",)
+#: What the profile point takes from the canonical rendering, so the profile configuration's own defaults for the
+#: workload (a different input length, another TP) cannot make it profile a workload the tests do not run.
+_PROFILE_PINNED = ("TP", "EP", "ISL", "RANDOM_RANGE_RATIO", "MAX_MODEL_LEN")
+
+
+def _profile_canonical(canonical: CanonicalMeasurement) -> CanonicalMeasurement:
+    """The canonical measurement rendered from the shipped profile configuration of its framework."""
+
+    framework = canonical.surface.fields.get("benchmark.framework") or framework_registry.DEFAULT_FRAMEWORK
+    name = framework_registry.shipped_config_name("profile", str(framework))
+    path = default_baseline_config().parent / name
+    if not path.is_file():
+        raise PointError(f"there is no shipped profile configuration for framework {framework!r}")
+    return CanonicalMeasurement(path, canonical.surface, canonical.primary_concurrency, canonical.materialize)
+
+
+def generate_profile_point(
+    environment: CompiledEnvironment, canonical: CanonicalMeasurement, out_dir: Path
+) -> tuple[Path, ...]:
+    """The one point of a ``profile`` test: the recipe's launch on the shipped profile configuration.
+
+    The profile configuration turns the torch profiler on (``PROFILE=1``, ``PROFILE_EXTRA_BODY``, the framework's
+    capture flags) and the renderer sizes the capture window from the workload, as the single-lineage profile does.
+    The point runs at the primary concurrency without accuracy; apart from the output length the measurement surface
+    must still be the canonical one.
+    """
+
+    launch = environment.recipe.launch
+    check_launch_envs([*launch.envs, *environment.envs])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    level = canonical.primary_concurrency
+    pins = {"CONC": str(level), "RUN_EVAL": "false"}
+    reference = benchmark_envs(_reference(canonical, pins))
+    workload = {name: str(reference[name]) for name in _PROFILE_PINNED if reference.get(name) is not None}
+    config = _render(
+        _profile_canonical(canonical),
+        out_dir,
+        "point-profile.yaml",
+        extra_server_args=launch.server_args,
+        extra_envs={**launch.envs, **environment.envs, **workload, **pins},
+    )
+    check_surface(config, canonical.surface, ignore=_PROFILE_SURFACE_EXEMPT)
+    check_point(config, concurrency=level, accuracy=False, reference={})
+    _check_launch_present(config, launch, environment.envs)
+    return (out_dir / "point-profile.yaml",)
 
 
 @dataclass(frozen=True)
@@ -167,6 +222,8 @@ def accept_measurement(
     """
 
     environment = compiler.compile(parent_recipe, request.delta)
+    if request.kind is TestKind.PROFILE:
+        return AcceptedMeasurement(environment, generate_profile_point(environment, canonical, out_dir))
     points = generate_points(
         environment, canonical, out_dir, concurrency=request.concurrency, accuracy=request.accuracy
     )
@@ -180,4 +237,5 @@ __all__ = [
     "accept_measurement",
     "default_canonical",
     "generate_points",
+    "generate_profile_point",
 ]

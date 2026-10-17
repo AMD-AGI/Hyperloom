@@ -38,6 +38,7 @@ from hyperloom.measure.attachments import AttachmentError, place_attachments, su
 from hyperloom.measure.accuracy import read_accuracy
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
 from hyperloom.measure.farm import FarmError, build_farm, prepend_pythonpath, verify_farm
+from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces
 from hyperloom.sandbox.node import node_name
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.spec import Attachment
@@ -72,7 +73,8 @@ _OUTPUT_POLL_SEC = 5.0
 _LOG_TAIL_CHARS = 64 * 1024
 _ACCURACY = "accuracy"
 _UTF8 = "utf-8"
-_SUPPORTED_KINDS = ("test", _ACCURACY)
+_PROFILE = "profile"
+_SUPPORTED_KINDS = ("test", _ACCURACY, _PROFILE)
 #: The kinds of ``TestCall`` this backend runs; a toolbox refuses any other at acceptance.
 SUPPORTED_KINDS = _SUPPORTED_KINDS
 
@@ -94,6 +96,7 @@ class _Run:
     unset_envs: list[str]
     results: list[tuple[int, VariantResult]] = field(default_factory=list)
     stopped_rc: int | None = None
+    traceless: bool = False
     notes: list[str] = field(default_factory=list)
 
     def add(self, point: int, result: VariantResult) -> bool:
@@ -118,15 +121,20 @@ class LocalMeasurementBackend:
             with _watch_output(call):
                 asyncio.run(_sweep(run) if call.prep == "conc_sweep" else _single(run))
         _raise_on_timeout(run)
+        if call.kind == _PROFILE:
+            _gather_traces(run)
         return _outcome(run)
 
 
 # --- validation ---------------------------------------------------------------------------------------------------
 
 
+def _point_config(point: Path) -> dict[str, Any]:
+    return yaml.safe_load(Path(point).read_text(encoding=_UTF8)) or {}
+
+
 def _point_envs(point: Path) -> dict[str, Any]:
-    config = yaml.safe_load(Path(point).read_text(encoding=_UTF8)) or {}
-    return dict((config.get("benchmark") or {}).get("envs") or {})
+    return dict((_point_config(point).get("benchmark") or {}).get("envs") or {})
 
 
 def _validate(call: TestCall) -> None:
@@ -138,6 +146,8 @@ def _validate(call: TestCall) -> None:
         raise TestCallRefused(f"a single-point test has exactly one point, got {len(call.points)}")
     if call.kind == _ACCURACY and not call.accuracy:
         raise TestCallRefused("an accuracy test must ask for accuracy")
+    if call.kind == _PROFILE:
+        _validate_profile(call)
     _, dropped = filter_untrusted_env_mapping(call.env_overrides, allow_predicate=is_allowed_variant_env_key)
     if dropped:
         raise TestCallRefused(f"env_overrides may not set {sorted(dropped)}")
@@ -145,6 +155,22 @@ def _validate(call: TestCall) -> None:
         _check_run_eval(point, call.accuracy)
     if call.prep == "conc_sweep":
         _check_sweep_levels(call.points)
+
+
+def _validate_profile(call: TestCall) -> None:
+    """A profile test is one profiled round of one point: no accuracy, no sweep, and the point must turn the profiler on.
+
+    A point that does not would run a plain round and leave no trace, which the result would then be refused for.
+    """
+    if call.prep != "grid":
+        raise TestCallRefused("a profile test profiles one point; it is not a sweep")
+    if call.accuracy:
+        raise TestCallRefused("a profile test does not run accuracy")
+    config = _point_config(call.points[0])
+    envs = (config.get("benchmark") or {}).get("envs") or {}
+    torch_profiler = ((config.get("benchmark") or {}).get("profiler") or {}).get("torch_profiler") or {}
+    if str(envs.get("PROFILE", "")).strip() != "1" or torch_profiler.get("enabled") is not True:
+        raise TestCallRefused(f"{call.points[0]} does not turn the torch profiler on (PROFILE=1 and torch_profiler)")
 
 
 def _check_run_eval(point: Path, accuracy: bool) -> None:
@@ -305,7 +331,8 @@ async def _grid(run: _Run, point: int, name: str, **kwargs: Any) -> VariantResul
 
 
 async def _single(run: _Run) -> None:
-    warmup = run.call.rounds.warmup_rounds
+    # A profiled round is not a statistic: it runs once, with no warmup before it.
+    warmup = 0 if run.call.kind == _PROFILE else run.call.rounds.warmup_rounds
     result = await _grid(run, 0, "test", warmup_before_measure=None if warmup is None else bool(warmup))
     run.add(0, result)
 
@@ -400,6 +427,16 @@ async def _sweep_by_restart(run: _Run, order: list[int]) -> None:
             return
 
 
+def _gather_traces(run: _Run) -> None:
+    """Move the profiled round's traces into ``<output_dir>/profile``, where the bundle and the analysis find them."""
+    destination = Path(run.call.output_dir) / PROFILE_DIR
+    ok = [result for _, result in run.results if result.workspace and not _is_failure(result)]
+    moved = sum(collect_traces(Path(result.workspace), destination) for result in ok)
+    if ok and not moved:
+        run.traceless = True
+        run.notes.append("profile_no_trace: the profiled round left no trace file")
+
+
 # --- the outcome --------------------------------------------------------------------------------------------------
 
 
@@ -478,7 +515,7 @@ def _outcome(run: _Run) -> TestOutcome:
     call = run.call
     rounds = [r for point, result in run.results for r in _rounds(run, point, result)]
     failed = [r for r in rounds if r.returncode != 0]
-    returncode = failed[0].returncode if failed else 0
+    returncode = failed[0].returncode if failed else int(run.traceless)
     stderr = "\n".join([*(result.error for _, result in run.results if result.error), *run.notes])
     logs = [stderr, *(_read_tail(result.server_log_path) for _, result in run.results if _is_failure(result))]
     verdict = classify_test_failure(returncode=returncode, logs=logs)

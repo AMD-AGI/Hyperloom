@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,13 @@ from hyperloom.measure.compile import (
     PackageBase,
     compile_environment,
 )
-from hyperloom.measure.points import PointError, accept_measurement, default_canonical, generate_points
+from hyperloom.measure.points import (
+    PointError,
+    accept_measurement,
+    default_canonical,
+    generate_points,
+    generate_profile_point,
+)
 from hyperloom.measure.surface import SurfaceViolation
 from hyperloom.measure.tests._recipes import IMAGE, recipe_with, sha
 from hyperloom.orchestrator.actions.executors._workload_envs import default_baseline_config
@@ -177,3 +184,53 @@ def test_acceptance_refuses_a_request_on_another_image_before_generating_anythin
     with pytest.raises(BaseImageMismatchError):
         accept_measurement(request_for(RecipeDelta()), recipe_with(), compiler, canonical, tmp_path / "points")
     assert not (tmp_path / "points").exists()
+
+
+# --- profile points ------------------------------------------------------------------------------------------------
+
+
+def test_a_profile_point_carries_the_profiler_settings_and_the_recipes_launch(canonical, blobs, tmp_path):
+    delta = RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS, envs={"HSA_FORCE_FINE_GRAIN_PCIE": "1"}))
+
+    (point,) = generate_profile_point(environment(blobs, tmp_path, delta=delta), canonical, tmp_path / "points")
+
+    config = load(point)
+    envs = config["benchmark"]["envs"]
+    assert config["benchmark"]["profiler"]["torch_profiler"]["enabled"] is True
+    assert envs["PROFILE"] == "1" and json.loads(envs["PROFILE_EXTRA_BODY"])["num_steps"] > 0
+    assert "--enable-profile-cuda-graph" in envs["EXTRA_SGLANG_ARGS"]
+    assert "--max-running-requests 77" in envs["EXTRA_SGLANG_ARGS"], "the profile runs the candidate's launch"
+    assert envs["HSA_FORCE_FINE_GRAIN_PCIE"] == "1"
+    assert (envs["CONC"], envs["RUN_EVAL"]) == ("32", "false")
+
+
+def test_a_normal_point_does_not_turn_the_profiler_on(canonical, blobs, tmp_path):
+    (point,) = generate_points(environment(blobs, tmp_path), canonical, tmp_path / "points")
+
+    config = load(point)
+    assert "PROFILE" not in config["benchmark"]["envs"]
+    assert config["benchmark"].get("profiler", {}).get("torch_profiler", {}).get("enabled") is not True
+
+
+def test_a_profile_point_may_lower_the_output_length_but_not_change_the_rest_of_the_surface(
+    canonical, blobs, tmp_path, monkeypatch
+):
+    env = environment(blobs, tmp_path)
+    monkeypatch.setenv("OSL", "8")
+    generate_profile_point(env, canonical, tmp_path / "ok")  # the output length is the profile's own to size
+    monkeypatch.setenv("ISL", "16")
+
+    with pytest.raises(SurfaceViolation, match="envs.ISL"):
+        generate_profile_point(env, canonical, tmp_path / "bad")
+
+
+def test_acceptance_generates_the_profile_point_for_a_profile_request(canonical, blobs, tmp_path):
+    compiler = EnvironmentCompiler(blobs, IMAGE, locator=lambda _l: PackageBase("sglang", tmp_path, None, None))
+    request = TestRequest(
+        kind=TestKind.PROFILE, purpose=Purpose.PROFILE, branch_id="b1", parent_commit="c" * 40, delta=RecipeDelta()
+    )
+
+    accepted = accept_measurement(request, recipe_with(), compiler, canonical, tmp_path / "points")
+
+    assert len(accepted.points) == 1
+    assert load(accepted.points[0])["benchmark"]["envs"]["PROFILE"] == "1"

@@ -13,7 +13,9 @@ measures nothing: what it writes is chosen by ``fake_mode`` and friends in the Y
 ``other_spec`` (the manifest names another sandbox, request or sheet), ``extra_file`` (a file the manifest does not
 list), ``no_manifest`` and ``hang`` (never finishes). ``fake_delay`` seconds pass before the work starts;
 ``fake_throughput`` and ``fake_completed`` set the report. ``fake_accuracy`` adds an accuracy round to the rounds file
-with that score (``none``: a round that holds no score).
+with that score (``none``: a round that holds no score). ``fake_trace: true`` adds the torch-profiler trace a profile
+test leaves (``profile/torch_trace/...``); ``fake_report: false`` leaves out the benchmark report, as a profiled round
+that printed no readable measurement.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ from hyperloom.measure.manifest import RESULT_SCHEMA, encode_manifest
 from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
 
 REPORT_PATH = "benchmark_fake_20261014_000000/benchmark_report.json"
+TRACE_PATH = "profile/torch_trace/rank0.pt.trace.json.gz"
 
 
 def _atomic(path: Path, data: bytes) -> None:
@@ -78,8 +81,12 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
             "num_prompts": int(config.get("fake_requested", 64)),
         },
     }
-    files = {REPORT_PATH: json.dumps(report).encode(), "server.log": b"server up\nserver down\n"}
-    if config.get("fake_warmup"):
+    files = {"server.log": b"server up\nserver down\n"}
+    if config.get("fake_report", True):
+        files[REPORT_PATH] = json.dumps(report).encode()
+    if config.get("fake_trace"):
+        files[TRACE_PATH] = b"fake trace bytes"
+    if config.get("fake_warmup") and REPORT_PATH in files:
         files["warmup_round/benchmark_fake_20261014_000000/benchmark_report.json"] = files[REPORT_PATH]
     if mode == "fail_test":
         files["server.log"] = b"ModuleNotFoundError: No module named 'sglang_kernel'\n"

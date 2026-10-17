@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.contracts.measurement import Purpose, TestKind, TestResult, Validity
+from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind, TestResult, Validity
 from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
 from hyperloom.measure.local import SUPPORTED_KINDS
 from hyperloom.measure.tests.hosted_fixtures import spec_context
@@ -43,6 +43,12 @@ from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.tools import op_shares as op_shares_module
 
 LOCATION = "tests/p1/attempt-1/trace"
+_ATTACHMENT = AttachmentRef("case", "file", "a" * 64)
+
+
+def _attachments_of(kind: TestKind) -> tuple[AttachmentRef, ...]:
+    """A repro request must carry its case."""
+    return (_ATTACHMENT,) if kind is TestKind.REPRO else ()
 
 
 @dataclass
@@ -185,7 +191,7 @@ async def test_a_kind_the_local_backend_does_not_run_is_refused_before_it_is_que
     try:
         await toolbox.start()
         with pytest.raises(RequestRejected) as refused:
-            await toolbox.submit_test(req(kind=TestKind.PROFILE, purpose=Purpose.PROFILE, server_args="--p"))
+            await toolbox.submit_test(req(kind=TestKind.REPRO, purpose=Purpose.REPRO, attachments=(_ATTACHMENT,)))
         assert refused.value.code == "unsupported_kind" and "unsupported_kind" in REJECTION_CODES
         assert not list(toolbox._log.entries())
         assert not toolbox._queue.items()
@@ -203,11 +209,19 @@ async def test_the_fake_toolbox_still_accepts_a_profile_test() -> None:
 
 @pytest.mark.parametrize(
     ("kind", "refused"),
-    [(TestKind.TEST, False), (TestKind.SWEEP, False), (TestKind.PROFILE, True), (TestKind.ACCURACY, False)],
+    [
+        (TestKind.TEST, False),
+        (TestKind.SWEEP, False),
+        (TestKind.PROFILE, False),
+        (TestKind.ACCURACY, False),
+        (TestKind.REPRO, True),
+    ],
 )
 def test_the_kinds_come_from_the_backend_and_a_sweep_is_a_test(kind: TestKind, refused: bool) -> None:
-    assert sorted(SUPPORTED_KINDS) == ["accuracy", "test"]
-    request = req(kind=kind, purpose=Purpose.EXPLORE, accuracy=kind is TestKind.ACCURACY)
+    assert sorted(SUPPORTED_KINDS) == ["accuracy", "profile", "test"]
+    request = req(
+        kind=kind, purpose=Purpose.EXPLORE, accuracy=kind is TestKind.ACCURACY, attachments=_attachments_of(kind)
+    )
     if refused:
         with pytest.raises(RequestRejected) as error:
             check_kind(request, SUPPORTED_KINDS)

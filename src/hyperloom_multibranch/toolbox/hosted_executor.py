@@ -51,7 +51,8 @@ from hyperloom.measure.hosted import HostedMeasurementBackend, Reverified
 from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMITTED, Record
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.points import AcceptedMeasurement
-from hyperloom.measure.socket import RoundOutcome, TestCall, TestMeta, TestOutcome
+from hyperloom.measure.profile_traces import PROFILE_DIR, has_traces, is_trace_file
+from hyperloom.measure.socket import RoundOutcome, RoundPlan, TestCall, TestMeta, TestOutcome
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
@@ -70,6 +71,8 @@ _UNFINISHED = (STATE_SUBMITTED, STATE_SENT)
 _SWEEP = "conc_sweep"
 _ACCURACY = "accuracy"
 _MEASURE = "measure"
+#: A profiled round runs once with no warmup before it: it is not a statistic.
+_PROFILE_ROUNDS = RoundPlan(warmup_rounds=0)
 _REASON_DETAIL_CHARS = 300
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
 
@@ -174,6 +177,7 @@ class HostedExecutor:
             kind=backend_kind(request.kind),  # type: ignore[arg-type]
             prep=_SWEEP if request.kind is TestKind.SWEEP or len(accepted.points) > 1 else "grid",
             accuracy=request.accuracy,
+            rounds=_PROFILE_ROUNDS if request.kind is TestKind.PROFILE else RoundPlan.from_env(),
             meta=TestMeta(
                 purpose=request.purpose.value,
                 priority=job.priority,
@@ -202,14 +206,8 @@ class HostedExecutor:
         if refusal:
             failure = FailureClass.CANDIDATE
         finished = self._clock()
-        accuracy: tuple[AccuracyValue, ...] = ()
-        if failure is None:
-            rounds = _round_values(outcome.rounds, accepted.points)
-            if not any(r.phase == _MEASURE for r in rounds):
-                raise MeasurementRefused("the verified result holds no readable measured round")
-            accuracy = _accuracy_values(outcome.rounds, wanted=request.accuracy)
-        else:
-            rounds = ()
+        rounds, accuracy = _measured_values(request, accepted, outcome) if failure is None else ((), ())
+        location = self._profile_location(call) if failure is None and request.kind is TestKind.PROFILE else ""
         gpu_seconds = max(0.0, finished - started) * facts.gpu_count
         return TestResult(
             request_id=request_id,
@@ -223,8 +221,17 @@ class HostedExecutor:
             started_at=started,
             finished_at=finished,
             gpu_seconds=gpu_seconds,
+            profile_location=location,
             **audit,
         )
+
+    def _profile_location(self, call: TestCall) -> str:
+        """Where the landed traces of a profile test are, relative to the session; a profile with none is no result."""
+        directory = Path(call.output_dir) / PROFILE_DIR
+        location = _relative(directory, self._session)
+        if not location or not has_traces(directory):
+            raise MeasurementRefused("the verified profile result holds no trace file")
+        return location
 
     def _cacheless_baseline(self, request: TestRequest, accepted: AcceptedMeasurement, outcome: TestOutcome) -> str:
         """Why an AgentX baseline measured with the prefix cache off is refused, or ``""`` (main's #1884).
@@ -291,8 +298,22 @@ def _unlike_bundle(result: TestResult, derived: Reverified) -> str | None:
         return (
             f"validity: recorded succeeded, the bundle's outcome has return code {derived.manifest.outcome.returncode}"
         )
+    if result.profile_location:
+        return _profile_difference(result, derived.manifest)
     values = _round_values_at(derived.rounds, tuple(_concurrency_in(text) for text in derived.point_yaml))
     return first_value_difference(result, values, _scores_of(derived.rounds))
+
+
+def _profile_difference(result: TestResult, manifest: ResultManifest) -> str | None:
+    """A profile result holds no measured value and names the traces the signed manifest lists."""
+    if result.rounds or result.accuracy:
+        return "rounds: a profile result records no measured value"
+    expected = f"{result.output_dir}/{PROFILE_DIR}"
+    if result.profile_location != expected:
+        return f"profile_location: recorded {result.profile_location!r}, the bundle's traces are at {expected!r}"
+    if not any(f.path.startswith(f"{PROFILE_DIR}/") and is_trace_file(f.path) for f in manifest.files):
+        return "profile_location: the bundle lists no trace file"
+    return None
 
 
 def _unmeasured_difference(result: TestResult) -> str | None:
@@ -310,6 +331,23 @@ def _failure_class_of(outcome: TestOutcome) -> FailureClass | None:
     if outcome.failure_class is not None:
         return FailureClass(getattr(outcome.failure_class, "value", outcome.failure_class))
     return None
+
+
+def _measured_values(
+    request: TestRequest, accepted: AcceptedMeasurement, outcome: TestOutcome
+) -> tuple[tuple[RoundValue, ...], tuple[AccuracyValue, ...]]:
+    """The rounds and accuracy a successful test reports.
+
+    A profile test reports none: its one round ran with the profiler on, so its numbers are not a measurement and the
+    rule gate, which reads measure-phase rounds, finds nothing to compare. Every other kind must hold a readable
+    measured round.
+    """
+    if request.kind is TestKind.PROFILE:
+        return (), ()
+    rounds = _round_values(outcome.rounds, accepted.points)
+    if not any(r.phase == _MEASURE for r in rounds):
+        raise MeasurementRefused("the verified result holds no readable measured round")
+    return rounds, _accuracy_values(outcome.rounds, wanted=request.accuracy)
 
 
 def _refuse_unless_measured(outcome: TestOutcome) -> None:
