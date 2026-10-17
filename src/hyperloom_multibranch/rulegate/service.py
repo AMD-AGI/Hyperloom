@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from typing import Protocol
 
 from hyperloom.contracts.measurement import Validity
-from hyperloom_multibranch.contracts.gate import NotMeasured
+from hyperloom_multibranch.contracts.gate import NotMeasured, ResultVerifier
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook.interfaces import CommitQuery, GateRecords, RecordSearch, SnapshotQuery
 from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, TestRecord
@@ -34,12 +34,25 @@ class GateNotebook(RecordSearch, SnapshotQuery, CommitQuery, GateRecords, Protoc
 
 
 class GateService:
-    """The session's :class:`~hyperloom_multibranch.contracts.gate.SessionGate`; ``rule`` judges its workload."""
+    """The session's :class:`~hyperloom_multibranch.contracts.gate.SessionGate`; ``rule`` judges its workload.
 
-    def __init__(self, notebook: GateNotebook, toolbox: Toolbox, rule: Rule, *, poll_seconds: float = 5.0) -> None:
+    Every measured test it judges by is first re-verified with ``verifier``; one that does not re-verify raises
+    :class:`~hyperloom_multibranch.contracts.gate.ResultUnverified`, a :class:`NotMeasured`.
+    """
+
+    def __init__(
+        self,
+        notebook: GateNotebook,
+        toolbox: Toolbox,
+        rule: Rule,
+        verifier: ResultVerifier,
+        *,
+        poll_seconds: float = 5.0,
+    ) -> None:
         self._notebook = notebook
         self._toolbox = toolbox
         self._rule = rule
+        self._verifier = verifier
         self._poll_seconds = poll_seconds
 
     async def baseline_test_count(self) -> int:
@@ -50,6 +63,8 @@ class GateService:
         measured = [record for record in records if _succeeded(record)]
         if len(measured) < MIN_BASELINES:
             raise NotMeasured(f"{len(measured)} of {len(records)} root tests measured; the bar needs {MIN_BASELINES}")
+        for record in measured:
+            await self._verifier.reverify(record.request_id)
         with _judgeable():
             return await self._rule.baseline(self._notebook, root_commit, measured)
 
@@ -87,6 +102,7 @@ class GateService:
         if not _succeeded(record):
             reason = record.result.failure_reason or "no reason given"
             raise NotMeasured(f"{request_id} ended {record.result.validity.value} ({reason})")
+        await self._verifier.reverify(request_id)
         return record
 
     async def _ended(self, request_id: str) -> TestRecord:

@@ -6,15 +6,17 @@ import pytest
 from hyperloom.common.accuracy import ACCURACY_METRICS
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta
-from hyperloom_multibranch.contracts.gate import NotMeasured
+from hyperloom_multibranch.contracts.gate import NotMeasured, ResultUnverified
 from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.notebook.interfaces import NotRecorded
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import delta
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
 from hyperloom_multibranch.rulegate.service import GateService
+from hyperloom_multibranch.tests.fakes import RecordingVerifier
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
 from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig, NoiseModel
 
@@ -63,10 +65,12 @@ class _Session:
         )
         self.scheduler = LocalNotebook(root, Writer(Role.SCHEDULER, "scheduler"))
         self.notebook = LocalNotebook(root, Writer(Role.GATE, "gate"))
+        self.verifier = RecordingVerifier()
         self.gate = self.new_gate()
 
     def new_gate(self) -> GateService:
-        return GateService(self.notebook, self.toolbox, InferenceXRule(self.notebook, CONC), poll_seconds=0.001)
+        rule = InferenceXRule(self.notebook, CONC)
+        return GateService(self.notebook, self.toolbox, rule, self.verifier, poll_seconds=0.001)
 
     async def record_root(self) -> None:
         event = LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=ROOT, recipe_digest=RECIPE.digest())
@@ -101,6 +105,19 @@ async def test_prelude_sets_the_bar_from_the_root_tests_that_measured(tmp_path):
 
     assert record.request_ids == tuple(ids[1:])
     assert await session.notebook.baseline() == record
+    assert session.verifier.asked == ids[1:]
+    await session.toolbox.close()
+
+
+async def test_prelude_with_a_root_test_that_does_not_re_verify_sets_no_bar(tmp_path):
+    session = _Session(tmp_path / "notebook")
+    ids = await session.root_tests()
+    session.verifier.rejects = frozenset(ids[1:2])
+
+    with pytest.raises(ResultUnverified, match=f"{ids[1]} did not re-verify"):
+        await session.gate.establish_baseline(ROOT, ids)
+    with pytest.raises(NotRecorded):
+        await session.notebook.baseline()
     await session.toolbox.close()
 
 
@@ -130,6 +147,17 @@ async def test_a_merge_gain_counts_once_another_node_repeats_it(session):
     (retest,) = session.retests()
     assert (judgement.verdict, judgement.request_ids) == (Verdict.IMPROVED, (merge, retest.request_id))
     assert retest.avoid_nodes == ((await session.notebook.record(merge)).result.sandbox.node_name,)
+    assert session.verifier.asked[-2:] == [merge, retest.request_id]
+
+
+async def test_a_merge_whose_retest_does_not_re_verify_cannot_be_judged(session):
+    merge = await session.toolbox.submit_test(_request(Purpose.INTEGRATION, FAST))
+    await session.gate.compare(merge)
+    (retest,) = session.retests()
+    session.verifier.rejects = frozenset({retest.request_id})
+
+    with pytest.raises(NotMeasured, match=f"{retest.request_id} did not re-verify"):
+        await session.new_gate().compare(merge)
 
 
 async def test_a_flat_merge_is_judged_without_a_retest(session):
@@ -170,3 +198,11 @@ async def test_an_accuracy_test_is_judged_on_its_eval_score(session, change, pas
     check = await session.toolbox.submit_test(_request(Purpose.ACCURACY, change, kind=TestKind.ACCURACY))
 
     assert await session.gate.accuracy_passes(check) is passes
+
+
+async def test_an_accuracy_test_that_does_not_re_verify_is_not_judged(session):
+    check = await session.toolbox.submit_test(_request(Purpose.ACCURACY, FAST, kind=TestKind.ACCURACY))
+    session.verifier.rejects = frozenset({check})
+
+    with pytest.raises(ResultUnverified):
+        await session.gate.accuracy_passes(check)
