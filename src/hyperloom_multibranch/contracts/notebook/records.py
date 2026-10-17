@@ -488,6 +488,7 @@ class NotebookSnapshot:
     quarantined: tuple[QuarantineEvent, ...]
     branch_logs: Mapping[str, tuple[BranchLogRecord, ...]]
     learnings: tuple[LearningRecord, ...] = ()
+    op_shares: Mapping[str, OpShares] = field(default_factory=dict)
 
     @property
     def baseline(self) -> BaselineRecord | None:

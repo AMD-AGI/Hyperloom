@@ -127,7 +127,8 @@ class FrontierBasis(str, Enum):
 
     ``trend`` is the branch's own recent gain; ``prior`` what similar archived branches still gained; ``observing`` the
     floor of a branch whose kernel-layer direction may still pay off; ``new`` the floor of a branch too young to have a
-    trend; ``headroom`` the roofline bound that capped any of them.
+    trend; ``headroom`` the roofline bound that capped any of them; ``amdahl`` the most that speeding up the head's
+    largest op could gain, which capped any of them.
     """
 
     TREND = "trend"
@@ -135,6 +136,7 @@ class FrontierBasis(str, Enum):
     OBSERVING = "observing"
     NEW = "new"
     HEADROOM = "headroom"
+    AMDAHL = "amdahl"
 
 
 __all__ = [

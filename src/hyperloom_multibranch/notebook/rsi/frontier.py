@@ -12,14 +12,15 @@
 * ``prior_remaining_pct``: what similar archived branches still gained after spending as many tests, weighted by task
   similarity, with ``prior_effective_sessions``, the sessions behind it each counted by its similarity; a session less
   than half similar does not count, and the prior is left out while they add up to less than 1.5;
-* ``observing``: 1 while a kernel-layer direction the branch tested lately may still be paying off.
+* ``observing``: 1 while a kernel-layer direction the branch tested lately may still be paying off;
+* ``amdahl_ceiling_pct``: the most that speeding up the head's largest op could gain, when the head was profiled.
 
 The expected gain is the prior where there is one, else the trend; a branch under observation keeps at least
 ``observation_floor_pct``, and so does a branch scored by its trend that has not yet been open a window nor committed,
-since its trend cannot be anything but zero; the headroom caps it, and it is never negative. ``basis`` names which of
-them the score rests on. The formula is a prototype: what the score means is the scheduler's call (gongzheng's), and it
-stays here until then. :func:`score_at` is the formula alone, on a branch as an archived tree has it, so the live
-scoring and the calibration score with the same one.
+since its trend cannot be anything but zero; the headroom and the Amdahl ceiling cap it, and it is never negative.
+``basis`` names which of them the score rests on. The formula is a prototype: what the score means is the scheduler's
+call (gongzheng's), and it stays here until then. :func:`score_at` is the formula alone, on a branch as an archived
+tree has it, so the live scoring and the calibration score with the same one.
 
 Given a ``log`` path, the scoring appends one :data:`FRONTIER_LOG_FORMAT` line per round it scored anything: when, on
 the session clock too, and each scored branch's spend, head value and score. Checking the scores against the gains that
@@ -41,6 +42,8 @@ from hyperloom_multibranch.contracts.notebook.records import (
     FrontierScore,
     LineageView,
     NotebookSnapshot,
+    OpShares,
+    amdahl_ceiling_pct,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, FrontierBasis
 from hyperloom_multibranch.notebook.codec import encode
@@ -141,6 +144,13 @@ def headroom_pct(ceiling: float | None, head: float | None) -> float | None:
     return max(0.0, (ceiling / head - 1.0) * 100.0) if ceiling and head else None
 
 
+def largest_ceiling_pct(shares: OpShares | None) -> float | None:
+    """The Amdahl ceiling of the largest op in ``shares``; ``None`` for a commit that was not profiled."""
+
+    largest = shares.largest(1) if shares is not None else ()
+    return amdahl_ceiling_pct(largest[0][1]) if largest else None
+
+
 @dataclass(frozen=True)
 class ScoringContext:
     """What a branch is scored against: its session's ``task``, the archived ``history`` and the ``policy``."""
@@ -150,22 +160,29 @@ class ScoringContext:
     policy: FrontierPolicy
 
 
-def score_at(
-    branch: TreeBranch,
-    t_s: float,
-    context: ScoringContext,
-    *,
-    observing: bool = False,
-    headroom: float | None = None,
-) -> FrontierScore:
-    """The frontier score of ``branch`` as it stood at ``t_s`` on its session's clock: the one formula.
+@dataclass(frozen=True)
+class Readings:
+    """What the scoring reads about a branch besides its tree: whether it is ``observing`` and its two bounds.
 
     ``observing`` is whether a kernel-layer direction the branch tested within the observation period may still be
-    paying off, and ``headroom`` how far its head is below the roofline bound (:func:`headroom_pct`). The scoring reads
-    both off the notebook; the calibration reads them, and the branch as of ``t_s``, off an archived tree.
+    paying off, ``headroom_pct`` how far its head is below the roofline bound (:func:`headroom_pct`), and
+    ``amdahl_pct`` the ceiling of the head's largest op (:func:`largest_ceiling_pct`).
+    """
+
+    observing: bool = False
+    headroom_pct: float | None = None
+    amdahl_pct: float | None = None
+
+
+def score_at(branch: TreeBranch, t_s: float, context: ScoringContext, readings: Readings = Readings()) -> FrontierScore:
+    """The frontier score of ``branch`` as it stood at ``t_s`` on its session's clock: the one formula.
+
+    The scoring reads the ``readings`` off the notebook; the calibration reads them, and the branch as of ``t_s``, off
+    an archived tree.
     """
 
     policy = context.policy
+    observing = readings.observing
     trend = branch.gain_at(t_s) - branch.gain_at(t_s - policy.window_seconds)
     components = {
         "trend_pct": trend,
@@ -183,10 +200,14 @@ def score_at(
     young = t_s - branch.opened_s < policy.window_seconds and not branch.commits
     if basis is FrontierBasis.TREND and young and expected < policy.new_branch_floor_pct:
         expected, basis = policy.new_branch_floor_pct, FrontierBasis.NEW
-    if headroom is not None:
-        components["headroom_pct"] = headroom
-        if headroom < expected:
-            expected, basis = headroom, FrontierBasis.HEADROOM
+    for key, bound, capped in (
+        ("headroom_pct", readings.headroom_pct, FrontierBasis.HEADROOM),
+        ("amdahl_ceiling_pct", readings.amdahl_pct, FrontierBasis.AMDAHL),
+    ):
+        if bound is not None:
+            components[key] = bound
+            if bound < expected:
+                expected, basis = bound, capped
     return FrontierScore(expected_gain_pct=max(0.0, expected), components=components, basis=basis)
 
 
@@ -205,8 +226,11 @@ def score_branch(
         branch,
         snapshot.taken_at - session_start(snapshot),
         ScoringContext(tree.task, history, policy),
-        observing=_observing(snapshot, row.branch, snapshot.taken_at - policy.observation_seconds),
-        headroom=headroom_pct(ceiling, row.head_value.get(policy.metric)),
+        Readings(
+            observing=_observing(snapshot, row.branch, snapshot.taken_at - policy.observation_seconds),
+            headroom_pct=headroom_pct(ceiling, row.head_value.get(policy.metric)),
+            amdahl_pct=largest_ceiling_pct(snapshot.op_shares.get(row.head_commit)),
+        ),
     )
 
 
@@ -298,10 +322,12 @@ __all__ = [
     "WINDOW_SECONDS",
     "FrontierPolicy",
     "FrontierScoring",
+    "Readings",
     "RemainingPrior",
     "ScoringContext",
     "frontier_log_line",
     "headroom_pct",
+    "largest_ceiling_pct",
     "remaining_prior",
     "score_at",
     "score_branch",

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The frontier score of each running specialist branch: trend, spend, headroom, history prior, observation."""
+"""The frontier score of each running specialist branch: trend, spend, headroom, Amdahl ceiling, prior, observation."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent, NotebookSnapshot
+from hyperloom_multibranch.contracts.notebook.records import LineageEvent, NotebookSnapshot, ToolResultPointer
 from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree
@@ -127,6 +127,29 @@ def test_the_headroom_caps_the_score_and_observation_keeps_a_floor(snapshot: Not
     assert stalled.basis is FrontierBasis.OBSERVING
     assert unwatched is not None and unwatched.expected_gain_pct == 0.0
     assert unwatched.basis is FrontierBasis.TREND
+
+
+async def test_the_largest_op_on_the_profiled_head_caps_the_score_at_its_amdahl_ceiling(tmp_path: Path) -> None:
+    clock = FakeClock()
+    observer = await scripted_session(tmp_path / "notebook", clock)
+    toolbox = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"), clock=clock)
+    s1 = next(row for row in (await observer.snapshot()).progress if row.branch == "s1")
+    await toolbox.notify_tool_result(
+        ToolResultPointer("s1", "job-1", "/a", "trace analysed", s1.start_commit, "", {"gemm": 0.5})
+    )
+    unprofiled = _scores(await observer.snapshot())["s1"]
+    await toolbox.notify_tool_result(
+        ToolResultPointer("s1", "job-2", "/a", "trace analysed", s1.head_commit, "", {"gemm": 3.0, "norm": 1.0})
+    )
+
+    capped = _scores(await observer.snapshot())["s1"]
+
+    assert unprofiled is not None and unprofiled.basis is FrontierBasis.TREND
+    assert "amdahl_ceiling_pct" not in unprofiled.components
+    assert capped is not None and capped.basis is FrontierBasis.AMDAHL
+    assert capped.expected_gain_pct == pytest.approx(300.0 / 97.0)
+    assert capped.components["amdahl_ceiling_pct"] == pytest.approx(300.0 / 97.0)
+    assert capped.components["headroom_pct"] > capped.expected_gain_pct
 
 
 def test_a_shorter_session_looks_back_and_observes_for_less_and_a_longer_one_keeps_the_defaults() -> None:

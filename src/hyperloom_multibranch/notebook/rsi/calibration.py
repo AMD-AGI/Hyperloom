@@ -39,6 +39,7 @@ from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeBranch
 from hyperloom_multibranch.notebook.rsi.frontier import (
     NEW_BRANCH_FLOOR_PCT,
     FrontierPolicy,
+    Readings,
     ScoringContext,
     headroom_pct,
     score_at,
@@ -163,8 +164,10 @@ def score_archived(
         then,
         t_s,
         ScoringContext(tree.task, history, policy),
-        observing=any(since <= when <= t_s for when in then.kernel_test_times),
-        headroom=headroom_pct(ceiling, 1.0 + then.gain_at(t_s) / _PERCENT),
+        Readings(
+            observing=any(since <= when <= t_s for when in then.kernel_test_times),
+            headroom_pct=headroom_pct(ceiling, 1.0 + then.gain_at(t_s) / _PERCENT),
+        ),
     )
 
 
