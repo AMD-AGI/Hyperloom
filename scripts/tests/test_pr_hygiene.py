@@ -35,7 +35,7 @@ def _workflow(name: str) -> dict:
         ("src/hyperloom/orchestrator/tests/test_x.py", False),
         ("scripts/tests/test_pr_hygiene.py", False),
         ("src/kernelforge/test/helpers.py", False),
-        ("scripts/test_conc_sweep_flow.py", False),
+        ("src/hyperloom/test_x.py", False),
         ("src/hyperloom/conftest.py", False),
         ("src/hyperloom/x_test.py", False),
         ("docs/conf.py", False),
