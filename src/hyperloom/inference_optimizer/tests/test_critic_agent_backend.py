@@ -1332,7 +1332,6 @@ async def test_required_context_surfaces_in_metadata(
 """End-to-end test: real critic-agent runtime + mocked Codex + Coordinator.
 
 Shells out to the real ``hyperloom/agents/critic/runtime/cli.py`` (only Codex is faked).
-Marker ``critic_agent_e2e`` lets devs without the checkout skip it.
 """
 
 
@@ -1351,9 +1350,6 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-
-
-pytestmark = pytest.mark.critic_agent_e2e
 
 
 # Fake Codex (only the LLM layer; the runtime is real).

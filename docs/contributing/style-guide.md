@@ -260,7 +260,7 @@ CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix
 
 **E2E markers** (skipped in CI by default):
 
-- `critic_agent_e2e`, `targeted_build_e2e`
+- `targeted_build_e2e`
 
 **What to test:** Pin the **exported surface** — CLI flags, public functions, persisted schemas, artifact layouts — with tests that state the contract *and* its failure modes; those are what callers outside this repo depend on. Pick the boundary by what is being protected: a focused unit test for deterministic logic, or a CLI/filesystem/serialization integration test where that pins the contract more directly. Internal functions that only thread a business flow together do not each need one: per-function tests there assert the current implementation and break on the next refactor. Prefer covering those flows through their entry point, and unit-test an internal helper when it carries real logic of its own.
 
@@ -334,7 +334,7 @@ pip install pre-commit ruff mypy reuse
 pre-commit install
 pre-commit run --all-files   # first-time baseline
 
-pytest -m "not critic_agent_e2e and not targeted_build_e2e"
+pytest -m "not targeted_build_e2e"
 ruff check . && ruff format --check .
 mypy src/hyperloom
 reuse lint
