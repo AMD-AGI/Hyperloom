@@ -9,7 +9,6 @@ import re
 import pytest
 
 from hyperloom.common.jsonio import (
-    coerce_dict,
     extract_first_json_with_key,
     extract_last_json_with_key,
     read_json,
@@ -109,23 +108,6 @@ class TestReadJsonl:
         p.write_text("{not json}\n")
         with pytest.raises(json.JSONDecodeError):
             read_jsonl(p)
-
-
-class TestCoerceDict:
-    def test_dict_returned(self):
-        data = {"x": 1}
-        assert coerce_dict(data) is data
-
-    def test_path_to_dict(self, tmp_path):
-        p = tmp_path / "value.json"
-        p.write_text('{"x": 1}')
-        assert coerce_dict(p) == {"x": 1}
-
-    def test_invalid_or_non_dict_default(self, tmp_path):
-        p = tmp_path / "list.json"
-        p.write_text("[1, 2]")
-        assert coerce_dict(p) == {}
-        assert coerce_dict(None, default={"fallback": True}) == {"fallback": True}
 
 
 class TestExtractFirstJson:

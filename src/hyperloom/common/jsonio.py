@@ -122,25 +122,6 @@ def read_jsonl(
     return rows
 
 
-def coerce_dict(value: dict[str, Any] | Path | str | None, *, default: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Return a dict value or load one from a JSON path."""
-    fallback = {} if default is None else default
-    if value is None:
-        return fallback
-    if isinstance(value, dict):
-        return value
-    path = Path(value) if isinstance(value, (str, Path)) else None
-    if path is None:
-        return fallback
-    try:
-        is_file = path.is_file()
-    except OSError:
-        return fallback
-    if not is_file:
-        return fallback
-    return read_json(path, default=fallback, require_dict=True)
-
-
 def _qualifying(chunks: Iterable[str], required_key: str | None) -> Iterator[dict[str, Any]]:
     """Every JSON object in ``chunks``, in order, that carries ``required_key``."""
     for chunk in chunks:
@@ -181,35 +162,9 @@ def extract_last_json_with_key(
     return _last(_qualifying(chain(fenced, (text,)), required_key))
 
 
-def iter_sse_objects(raw: str) -> Iterator[Any]:
-    """Yield JSON objects decoded from an MCP HTTP response body."""
-    text = raw.lstrip()
-    if text.startswith(("{", "[")):
-        try:
-            yield json.loads(text)
-        except json.JSONDecodeError:
-            return
-        return
-    for block in re.split(r"\r?\n\r?\n", raw):
-        parts: list[str] = []
-        for line in block.splitlines():
-            if line.startswith("data:"):
-                seg = line[5:]
-                parts.append(seg[1:] if seg.startswith(" ") else seg)
-        payload = "\n".join(parts).strip()
-        if not payload:
-            continue
-        try:
-            yield json.loads(payload)
-        except json.JSONDecodeError:
-            continue
-
-
 __all__ = [
-    "coerce_dict",
     "extract_first_json_with_key",
     "extract_last_json_with_key",
-    "iter_sse_objects",
     "read_json",
     "read_jsonl",
 ]
