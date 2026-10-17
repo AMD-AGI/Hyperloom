@@ -155,7 +155,7 @@ class FaultBlocklist:
 
 def gpu_healthy(gpu_ids: str = "") -> bool:
     """Best-effort: rocm-smi responds and the target GPU(s) are not wedged."""
-    gpus = check_gpu_status(skip=False)
+    gpus = check_gpu_status()
     if not gpus:
         return False
     wanted = {g.strip() for g in gpu_ids.split(",") if g.strip()}
