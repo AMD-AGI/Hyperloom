@@ -41,7 +41,21 @@ def describe(result: Mapping[str, Any], *, ok_text: str, keys: tuple[str, ...] =
     return f"{ok_text}" + (f" ({shown})" if shown else "")
 
 
-class ExecutorTool:
+class _Reporting:
+    """What both adapters share: a tool's result becomes its :class:`ToolOutput`; a subclass may add to it."""
+
+    _ok_text: str
+    _keys: tuple[str, ...]
+
+    def output(self, result: Mapping[str, Any], request: ToolRequest) -> ToolOutput:
+        return ToolOutput(
+            result=result,
+            summary=describe(result, ok_text=self._ok_text, keys=self._keys),
+            ok=not result_failed(result),
+        )
+
+
+class ExecutorTool(_Reporting):
     """``name`` -> the executor ``factory(workdir)`` builds; the executor's task kind is ``kind``."""
 
     def __init__(
@@ -75,17 +89,13 @@ class ExecutorTool:
     async def run(self, request: ToolRequest, workdir: Path) -> ToolOutput:
         executor = self._factory(workdir)
         result = await executor(self.context(request, workdir))
-        return ToolOutput(
-            result=result,
-            summary=describe(result, ok_text=self._ok_text, keys=self._keys),
-            ok=not result_failed(result),
-        )
+        return self.output(result, request)
 
 
 Handler = Callable[..., Awaitable[dict]]
 
 
-class HandlerTool:
+class HandlerTool(_Reporting):
     """A kernel-request handler ``handler(payload, session_dir=...)`` of the orchestrator, run as one tool."""
 
     def __init__(
@@ -110,8 +120,4 @@ class HandlerTool:
 
     async def run(self, request: ToolRequest, workdir: Path) -> ToolOutput:
         result = await self._handler(dict(request.params), session_dir=workdir)
-        return ToolOutput(
-            result=result,
-            summary=describe(result, ok_text=self._ok_text, keys=self._keys),
-            ok=not result_failed(result),
-        )
+        return self.output(result, request)

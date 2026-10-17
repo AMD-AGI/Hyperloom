@@ -67,6 +67,9 @@ class ToolOutput:
     result: Mapping[str, Any]
     summary: str
     ok: bool = True
+    commit_id: str = ""
+    profile_request_id: str = ""
+    op_shares: Mapping[str, float] = field(default_factory=dict)
 
 
 class AsyncTool(Protocol):
@@ -101,6 +104,16 @@ class _Job:
 def _short(text: str) -> str:
     one_line = " ".join(str(text).split())
     return one_line if len(one_line) <= _SUMMARY_LIMIT else one_line[: _SUMMARY_LIMIT - 3] + "..."
+
+
+def _share_fields(output: ToolOutput | None) -> dict[str, Any]:
+    if output is None or not output.op_shares:
+        return {}
+    return {
+        "commit_id": output.commit_id,
+        "profile_request_id": output.profile_request_id,
+        "op_shares": dict(output.op_shares),
+    }
 
 
 class ToolJobs:
@@ -209,6 +222,7 @@ class ToolJobs:
             job_id=job.job_id,
             location=str(job.workdir / RESULT_FILE),
             summary=_short(f"{job.status.value}: {summary}"),
+            **_share_fields(output),
         )
         await self._push(job)
 
