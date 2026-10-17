@@ -253,7 +253,9 @@ class TestApplyDeclared:
 
     def test_both_declared_are_both_restored(self, tmp_path):
         applied, smi = _apply(tmp_path, perf_level="determinism")
-        assert applied.record["originals"]["4"] == {"power_cap_w": 1400.0, "perf_level": "auto", "sclk_max_mhz": 2400.0}
+        assert applied.record["originals"]["4"] == {"power_cap_w": 1400.0, "perf_level": "auto"}, (
+            "auto resets the limit"
+        )
         assert ["amd-smi", "set", "-g", "4", "5", "6", "7", "-l", "DETERMINISM"] in smi.calls
         applied.restore()
         assert smi.calls[-1] == ["amd-smi", "set", "-g", "4", "5", "6", "7", "-l", "AUTO"]
@@ -327,6 +329,23 @@ class TestApplyDeclared:
             ["amd-smi", "set", "-g", "4", "5", "6", "7", "-l", "MANUAL"],
             ["amd-smi", "set", "-g", "4", "5", "6", "7", "-L", "sclk", "max", "2100"],
         ]
+
+    def test_a_perf_level_apply_needs_the_sclk_limit_only_where_the_restore_sets_it(self, tmp_path):
+        """From auto the restore resets the limit itself, so an unreadable limit there must not refuse the apply."""
+        auto_unread = _cards(sclk=None)
+        applied, smi = _apply(tmp_path, power_cap_w=None, perf_level="manual", observed=[auto_unread, auto_unread])
+        assert applied.record["originals"]["4"] == {"perf_level": "auto"}
+        applied.restore()
+        manual_unread = _cards(level="manual", sclk=None)
+        with pytest.raises(GpuPowerSettingsError, match=r"sclk max of GPU\(s\) 4"):
+            _apply(tmp_path, power_cap_w=None, perf_level="auto", observed=[manual_unread, manual_unread])
+
+    def test_a_restore_whose_commands_fail_but_whose_cards_are_back_clears_the_record(self, tmp_path):
+        """Without set privilege the apply changes nothing and the restore's sets fail too; the cards decide."""
+        smi = _AmdSmi(fail_on="ppt0")
+        with pytest.raises(GpuPowerSettingsError, match="permission denied"):
+            _apply(tmp_path, smi=smi)
+        assert orphaned_power_records(tmp_path) == {}, "the cards read back at their originals, so nothing to recover"
 
     def test_a_restore_the_card_did_not_take_is_reported_and_its_record_kept(self, tmp_path):
         """amd-smi can exit 0 without the card taking the value; the record must survive for the next launch."""

@@ -115,17 +115,25 @@ def _refuse_busy_cards(gpus: set[int], resident: Mapping[int, float]) -> None:
         )
 
 
-def _originals(observed: Mapping[int, Mapping[str, Any]], gpus: set[int], touched: list[str]) -> dict:
+def _originals(
+    observed: Mapping[int, Mapping[str, Any]], gpus: set[int], touched: list[str], *, sclk_coupled: bool = False
+) -> dict:
     """Each card's current value of every setting this session changes; refuses when one cannot be read.
 
     A value that cannot be read cannot be put back: restore would skip it, report success and clear the record,
     leaving the card at the applied setting with nothing left to recover it.
     """
     originals = {gpu: {key: (observed.get(gpu) or {}).get(key) for key in touched} for gpu in sorted(gpus)}
+    if sclk_coupled:
+        # Recorded only to put back an operator's limit, which only a manual card can hold: restoring any other level
+        # resets the limit itself, so for those cards it is neither needed nor required to be readable.
+        for row in originals.values():
+            if normalize_perf_level(row.get(_PERF_LEVEL)) != PERF_LEVEL_MANUAL:
+                row.pop(_SCLK_MAX_MHZ, None)
     unreadable = sorted(
         gpu
         for gpu, row in originals.items()
-        if any(row[key] is None or isinstance(row[key], bool) or row[key] == "" for key in touched)
+        if any(value is None or isinstance(value, bool) or value == "" for value in row.values())
     )
     if unreadable:
         raise GpuPowerSettingsError(
@@ -177,14 +185,17 @@ def _restore_mismatches(observed: Mapping[int, Mapping[str, Any]], originals: Ma
 
 
 def _restore_and_verify(hooks: _Hooks, originals: Mapping[int, Mapping[str, Any]]) -> list[str]:
-    """Put the originals back and read them back: an amd-smi set can exit 0 without the card taking the value."""
+    """Put the originals back and judge the cards by what they read back, not by the commands' exit codes.
+
+    An amd-smi set can exit 0 without the card taking the value, and fail on a card that never changed (an apply that
+    was refused for lack of privilege); either way the cards' state decides whether the record can go.
+    """
     problems = hooks.restore(originals)
-    if problems:
-        return problems
     try:
-        return _restore_mismatches(hooks.read(), originals)
+        mismatches = _restore_mismatches(hooks.read(), originals)
     except GpuPowerSettingsError as exc:
-        return [f"the restored settings could not be read back: {exc}"]
+        return [*problems, f"the restored settings could not be read back: {exc}"]
+    return [*problems, *mismatches] if mismatches else []
 
 
 def _recover_orphans(lease: Any, hooks: _Hooks) -> list[int]:
@@ -241,7 +252,9 @@ def apply_declared_gpu_power_settings(
     try:
         recovered = _recover_orphans(lease, hooks)
         _refuse_busy_cards(gpus, hooks.resident_vram())
-        originals = _originals(hooks.read(), gpus, touched)
+        originals = _originals(
+            hooks.read(), gpus, touched, sclk_coupled=_SCLK_MAX_MHZ in touched and _SCLK_MAX_MHZ not in applied_keys
+        )
         _refuse_unrestorable_levels(originals, sclk_applied=declared.sclk_max_mhz is not None)
         lease.record(originals, applied={key: wanted[key] for key in applied_keys}, owner=owner)
     except GpuPowerSettingsError:

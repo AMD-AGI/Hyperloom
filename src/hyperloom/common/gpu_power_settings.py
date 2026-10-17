@@ -187,7 +187,7 @@ def read_gpu_power_settings(
         clocks = _gpu_rows(_query("metric", "--clock"))
     except GpuPowerSettingsError:
         # Where only the clock read fails, the sclk limit reads as unread: that refuses a declared --gpu-sclk-max-mhz,
-        # not a cap or perf level that can still be checked.
+        # and a perf-level apply on a manual card whose limit it would have to put back, not a cap or level check.
         clocks = []
     for row in clocks:
         if row["gpu"] in settings:

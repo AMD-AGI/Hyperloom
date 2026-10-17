@@ -301,15 +301,18 @@ It needs `amd-smi set` privileges and refuses, with nothing left changed:
 Only the declared settings are set, and only the settings they change are put back.
 The perf level and the sclk limit change each other (a clock limit puts the
 card in `manual`, and setting a level resets the limit), so applying either
-records and puts back both: the level first, then the limit, and from `auto`
-the level alone, since it resets the limit itself. A starting level a restore could not bring
+records and puts back both: the level first, then the limit. A card that
+started at `auto` gets the level alone, since restoring `auto` resets the
+limit itself, so its limit need not be readable. A starting level a restore could not bring
 back is refused before anything is set: `determinism` whenever the perf level
 or sclk cap is applied (its clock soft-max is set with `amd-smi set -d`, which
 a perf-level restore does not carry), and any level other than `auto` or
 `manual` when an sclk cap is applied (setting it again would leave the card in
-`manual`). After every restore the cards are read back; a card not back at its
-recorded values is reported and its record kept, so the next launch warns or
-recovers it.
+`manual`). After every restore the cards are read back, and that reading decides: a card
+not back at its recorded values is reported and its record kept, so the next
+launch warns or recovers it, while cards that read back at their originals
+clear the record even if a restore command failed (an apply refused for lack
+of privilege changed nothing).
 The originals are written to a per-card record under
 `/var/tmp/hyperloom/gpu_power_settings/` before anything is set. That path is
 host-local and fixed, whatever `HYPERLOOM_RUNTIME_DIR` or `USER_DATA_PATH` say,
