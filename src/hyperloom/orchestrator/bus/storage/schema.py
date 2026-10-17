@@ -7,8 +7,7 @@ from __future__ import annotations
 
 import sqlite3
 
-# There are no in-place migrations: a database recorded at an older version is refused.
-SCHEMA_VERSION = 7
+from hyperloom.inference_optimizer.session.coordinator_db import SCHEMA_VERSION, refuse_older_schema
 
 
 # Default lane capacities; ``--research-lane-capacity`` overrides research_lane at boot.
@@ -179,27 +178,12 @@ def set_lane_capacity(
         cur.close()
 
 
-def _refuse_older_layout(cur: sqlite3.Cursor) -> None:
-    """Raise when the database already records a schema version older than this build's."""
-    cur.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'")
-    if cur.fetchone() is None:
-        return
-    cur.execute("SELECT MAX(version) FROM schema_version")
-    (stored,) = cur.fetchone()
-    if stored is not None and int(stored) < SCHEMA_VERSION:
-        raise RuntimeError(
-            f"coordinator.db is at schema version {stored}, older than this build's {SCHEMA_VERSION}: "
-            "sessions created before this release cannot be resumed. Finish the session under the build "
-            "that started it, or start a new session."
-        )
-
-
 def ensure_schema(conn: sqlite3.Connection) -> int:
     """Idempotently create all tables, seed lane_capacity defaults, and record the schema version."""
     cur = conn.cursor()
     try:
         cur.execute("BEGIN IMMEDIATE")
-        _refuse_older_layout(cur)
+        refuse_older_schema(cur)
         for stmt in _DDL:
             cur.execute(stmt)
         _seed_default_lane_capacity(cur)
