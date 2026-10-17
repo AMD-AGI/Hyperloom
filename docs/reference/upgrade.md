@@ -122,9 +122,9 @@ Apply the following changes in order. Required steps must be completed before ru
 The `optimize` CLI multi-node image and per-node GPU flags were renamed
 and the legacy names are no longer accepted (no alias). Any launcher that
 passes the old flags will fail with `unrecognized arguments`. The image
-and per-node GPU count are now set purely through flags; the previous
-`INFERENCE_OPTIMIZER_RAYJOB_IMAGE` env is no longer read, so move its value
-onto `--mn-image`.
+is platform-owned and `--mn-image` is accepted but ignored; the per-node GPU
+count is set through `--gpus-per-node`. The previous
+`INFERENCE_OPTIMIZER_RAYJOB_IMAGE` env is no longer read.
 
 ```diff
 # run launchers, k8s ConfigMaps, .env
@@ -133,7 +133,6 @@ onto `--mn-image`.
 - --rayjob-gpus-per-node 8
 + --gpus-per-node 8
 - INFERENCE_OPTIMIZER_RAYJOB_IMAGE=harbor/...
-+ --mn-image harbor/...
 ```
 
 The new flags cover both multi-node backends (`rayjob` head+workers and

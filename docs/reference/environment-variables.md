@@ -565,11 +565,6 @@ Infera external mode requires `HYPERLOOM_MN_EXT_SSH_KEY` plus at least one
 `*_IPS` list, or the run fails fast at startup. RayJob external mode ignores
 the SSH / IP vars and uses `HYPERLOOM_MN_EXT_HEAD_IP` for restarts.
 
-Multi-node SSH fanout creates session-scoped keys under the active session
-directory. Treat `mn_id_ed25519` and `mn_id_ed25519.pub` as sensitive session
-artifacts: keep the session directory on an access-controlled filesystem and
-do not publish it unchanged in support bundles.
-
 ---
 
 ## Quantization prelude
