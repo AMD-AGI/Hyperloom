@@ -91,10 +91,13 @@ _START_ANALYSIS: dict[str, Any] = {
     "type": _OBJECT,
     "properties": {
         "tool": {"type": _STRING, "description": f"One of: {', '.join(ANALYSIS_TOOLS)}."},
-        "params": {"type": _OBJECT, "description": "The tool's own parameters, such as trace_input for tracelens."},
+        "params": {
+            "type": _OBJECT,
+            "description": "The tool's own parameters. trace_input, commit_id and profile_request_id are set by the server and refused here.",
+        },
         "profile_request_id": {
             "type": _STRING,
-            "description": "The id of a profile test of this branch whose trace is analysed; checked by the server.",
+            "description": "The id of a profile test of this branch whose trace is analysed; required for tracelens, checked by the server.",
         },
     },
     "required": ["tool"],
