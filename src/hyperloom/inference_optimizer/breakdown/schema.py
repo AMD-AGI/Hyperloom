@@ -1254,18 +1254,6 @@ class V6PhaseMarker(TypedDict, total=False):
     ts: str
 
 
-class V6PhaseDenial(TypedDict, total=False):
-    """One author-time PolicyGate refusal in the phase where it happened."""
-
-    actor: str
-    proposal_msg_id: str | None
-    action: str
-    phase: str
-    rule: str
-    hint: str
-    denied_at: str
-
-
 class V6PhaseProposalReview(TypedDict, total=False):
     """The Critic's ruling on one proposal, filed on the proposal."""
 

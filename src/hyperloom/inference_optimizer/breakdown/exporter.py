@@ -11,7 +11,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env import env_bool
 from hyperloom.common.io import atomic_write_json, atomic_write_text
 from hyperloom.common.jsonio import read_json
 
@@ -209,10 +208,7 @@ def _load_assembled(
     session_dir: Path,
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Assemble recorder fragments into ``{section: value}`` (empty on opt-out or when no fragments exist)."""
-    if env_bool("INFERENCE_OPTIMIZER_BREAKDOWN_DISABLE_RECORDER"):
-        warnings.append("recorder: disabled by INFERENCE_OPTIMIZER_BREAKDOWN_DISABLE_RECORDER")
-        return {}
+    """Assemble recorder fragments into ``{section: value}`` (empty when no fragments exist)."""
     try:
         from .recorder import assemble_parts, has_parts
 
