@@ -1101,11 +1101,7 @@ def _function_line_from_ast(path: Path, function_name: str) -> int | None:
     return None
 
 
-def _resolve_source_target(
-    candidate: dict[str, Any],
-    *,
-    source_root: Path | None,
-) -> dict[str, Any] | None:
+def _resolve_source_target(candidate: dict[str, Any]) -> dict[str, Any] | None:
     """Resolve a candidate's source location to a source-target triple.
 
     A row TraceLens resolved carries the verdict directly in ``source_file`` /
@@ -1115,7 +1111,6 @@ def _resolve_source_target(
 
     Args:
         candidate: The candidate dict carrying resolved source / launcher paths.
-        source_root: Optional root to resolve relative paths against.
 
     Returns:
         A ``(source_path, definition_line, function_name)`` dict, or ``None``
@@ -1125,8 +1120,6 @@ def _resolve_source_target(
     source_file = str(candidate.get("source_file") or "")
     if source_file and isinstance(source_line, int) and source_line > 0:
         source_path = Path(source_file)
-        if not source_path.is_absolute() and source_root is not None:
-            source_path = source_root / source_path
         return {
             "source_path": str(source_path),
             "definition_line": source_line,
@@ -1143,8 +1136,6 @@ def _resolve_source_target(
     if not raw_path:
         return None
     source_path = Path(raw_path)
-    if not source_path.is_absolute() and source_root is not None:
-        source_path = source_root / source_path
     function_name = reported_func or source_path.stem
     definition_line = reported_line or 1
     if source_path.exists() and reported_func:
@@ -1197,11 +1188,7 @@ def _is_native_source(path: str) -> bool:
     return str(path).lower().endswith(_NATIVE_SOURCE_SUFFIXES)
 
 
-def aggregate_by_source_function(
-    candidates: list[dict[str, Any]],
-    *,
-    source_root: Path | str | None = None,
-) -> list[dict[str, Any]]:
+def aggregate_by_source_function(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Group TraceLens candidates into per-kernel ``task_group`` dicts.
 
     Groups are sorted by aggregate time (descending). Native symbols are
@@ -1214,7 +1201,6 @@ def aggregate_by_source_function(
 
     Args:
         candidates: The TraceLens candidate rows to group.
-        source_root: Optional root to resolve relative source paths against.
 
     Returns:
         The task-group dicts. Unparseable candidates are left out for legacy
@@ -1222,12 +1208,6 @@ def aggregate_by_source_function(
     """
     if not candidates:
         return []
-    root: Path | None = None
-    if source_root:
-        root = Path(source_root).expanduser()
-        if not root.is_dir():
-            root = None
-
     # Versioned identity builder. Operation normalization keeps different
     # kernels in one source separate while template/shape instances of one
     # operator merge.
@@ -1235,7 +1215,7 @@ def aggregate_by_source_function(
     for cand in candidates:
         if not isinstance(cand, dict):
             continue
-        target = _resolve_source_target(cand, source_root=root)
+        target = _resolve_source_target(cand)
         if target is None:
             continue
         operation = str(cand.get("name") or "").strip()

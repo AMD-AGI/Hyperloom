@@ -2546,39 +2546,6 @@ def test_unpatched_sglang_capture_sorts_behind_the_workload_trace(tmp_path):
     assert traces[0] == real
 
 
-def test_skip_split_route_analyses_the_promoted_candidate(tmp_path):
-    """The promotion must hold on the route xDiT actually takes."""
-    from unittest.mock import patch
-
-    trace_dir = tmp_path / "torch_trace"
-    trace_dir.mkdir()
-    empty = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=0, cpu_events=400)
-    populated = _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=12)
-
-    # The skill runs in-process, so the analysed trace never reaches a subprocess argv the way the splitter's does --
-    # the skill's own arguments are the only place the promotion is observable.
-    class _StopAfterSkillDispatch(Exception):
-        """Ends the run once the skill's input trace has been recorded."""
-
-    seen: list[Path] = []
-
-    async def fake_skill(*, trace_path, **_kw):
-        seen.append(trace_path)
-        raise _StopAfterSkillDispatch(trace_path.name)
-
-    with patch.object(tla, "run_tracelens_skill", fake_skill):
-        captured = _drive_main_over_capture_dir(
-            tmp_path,
-            trace_dir,
-            extra_argv=["--skip-split", "--use-llm-orchestrator"],
-        )
-
-    assert _find_splitter_cmd(captured) is None, "--skip-split must skip the splitter"
-    assert seen, "the TraceLens skill was never reached"
-    assert seen[0] == populated, f"analysed {seen[0].name}, expected {populated.name}"
-    assert empty not in seen
-
-
 def test_capture_under_an_ancestor_named_trace_split_still_orders_correctly(tmp_path):
     """An ancestor directory name must not flatten the whole ranking."""
     trace_dir = tmp_path / "trace_split" / "run" / "torch_trace"

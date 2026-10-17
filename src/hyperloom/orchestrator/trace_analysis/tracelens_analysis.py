@@ -244,7 +244,7 @@ def _graph_coverage_from_raw_trace(trace_path: str | Path | None) -> dict[str, A
     ``graph_coverage`` is derived from the launch/kernel correlation scan and is
     independent of the returned aggregation lists, so we pass ``emit_launches=
     False`` and ``top_k=1`` to avoid materializing the per-launch rows and full
-    top-N lists on large ``--skip-split`` raw traces.
+    top-N lists on large raw traces.
     """
     if not trace_path:
         return {}
@@ -3798,11 +3798,7 @@ def _enrich_kernel_contract(item: dict[str, Any], model_params: dict[str, Any] |
         item["kernel_contract"] = contract
 
 
-def build_task_groups(
-    candidates: list[dict[str, Any]],
-    *,
-    source_root: Path | str | None = None,
-) -> list[dict[str, Any]]:
+def build_task_groups(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Aggregate reusable candidates by AST-resolved source function.
 
     A wrapper over :func:`aggregate_by_source_function`; only
@@ -3810,7 +3806,6 @@ def build_task_groups(
 
     Args:
         candidates: The hot-kernel candidate rows.
-        source_root: Optional root to resolve relative source paths against.
 
     Returns:
         The task-group dicts, or ``[]`` when none carries a parseable launcher
@@ -3819,7 +3814,7 @@ def build_task_groups(
     reusable = [c for c in candidates if isinstance(c, dict) and c.get("reusable_native_kernel")]
     if not reusable:
         return []
-    return aggregate_by_source_function(reusable, source_root=source_root)
+    return aggregate_by_source_function(reusable)
 
 
 def build_audit_summary(
@@ -3950,8 +3945,7 @@ def write_reports(
         "created_at": now_iso(timespec="auto"),
     }
     # Aggregate reusable candidates into source-function task groups.
-    source_root_str = getattr(args, "source_root", None)
-    task_groups = build_task_groups(candidates, source_root=source_root_str)
+    task_groups = build_task_groups(candidates)
     report = {
         "model_name": args.model_name,
         "framework": args.framework,
@@ -4395,18 +4389,6 @@ def main() -> int:
     parser.add_argument("--target-platform", default="MI355X")
     parser.add_argument("--analysis-mode", default="default")
     parser.add_argument(
-        "--source-root",
-        default=os.environ.get("TRACELENS_SOURCE_ROOT", "") or None,
-        help=(
-            "Optional root directory against which TraceLens launcher "
-            "paths (e.g. ``aiter/ops/rmsnorm.py(76): rmsnorm``) are "
-            "resolved for AST-based function-line lookup. Used only by "
-            "the PR-B source-function aggregation pass; absolute paths "
-            "in the report don't need this. Defaults to "
-            "$TRACELENS_SOURCE_ROOT when set."
-        ),
-    )
-    parser.add_argument(
         "--workspace-path",
         default=_default_workspace_path(),
         help=(
@@ -4503,15 +4485,6 @@ def main() -> int:
             "Disable the Claude SDK TraceLens skill runner. Production runs "
             "will fail rather than falling back to intermediate/CSV candidate "
             "parsers; --dry-run still uses the test-only raw parser."
-        ),
-    )
-    parser.add_argument(
-        "--skip-split",
-        action="store_true",
-        help=(
-            "Disable TraceLens trace splitting (#127). When set, the raw "
-            "filtered trace is fed directly to TraceLens; useful for debugging "
-            "or when the splitter binary isn't available."
         ),
     )
     parser.add_argument(
@@ -4957,61 +4930,60 @@ def main() -> int:
             # chunk may drop the graph-launch runtime events the detector needs.
             raw_trace_path = analysis_trace_path
             trace_split_blocked = False
-            if not args.skip_split:
-                update_status(
-                    status_path,
-                    state="running",
-                    current_step="split_trace",
-                    log_path=log_path,
-                    artifact_paths=artifacts,
-                    run_id=run_id,
-                    started_at=started_at,
-                )
-                split_dir = tracelens_dir / "trace_split"
-                cli_trace_path, split_meta = _run_trace_split(
-                    args,
-                    analysis_trace_path,
-                    split_dir,
-                    tl_root,
-                    log_path,
-                    trace_health_warnings,
-                )
-                run_meta["split"].update(split_meta)
-                run_meta["selection"].update(
-                    {
-                        "requested_mode": args.steady_state_mode,
-                        "chunk_label": split_meta.get("chunk_label"),
-                        "selected_chunk": str(cli_trace_path),
-                        "selected_chunk_count": split_meta.get("selected_chunk_count"),
-                        "available_modes": split_meta.get("available_modes"),
-                        "fell_back_to_full_trace": False,
-                    }
-                )
-                _note_step(
-                    "split_trace",
-                    category="split",
-                    status="ok",
-                    returncode=split_meta.get("returncode"),
-                    num_steps=split_meta.get("num_steps"),
-                    chunks_extracted=split_meta["chunks_extracted"],
-                )
-                _note_step(
-                    "select_chunk",
-                    category="select",
-                    status="ok",
-                    requested_mode=args.steady_state_mode,
-                    selected_chunk=cli_trace_path.name,
-                    selected_chunk_count=split_meta.get("selected_chunk_count"),
-                )
-                artifacts["tracelens_trace_split_dir"] = str(split_dir)
-                artifacts["tracelens_steady_state_trace"] = str(cli_trace_path)
-                append_log(
-                    log_path,
-                    f"trace split OK: "
-                    f"{split_meta['chunks_by_mode']}; "
-                    f"--steady-state-mode={args.steady_state_mode} -> "
-                    f"using {cli_trace_path.name} for perf report",
-                )
+            update_status(
+                status_path,
+                state="running",
+                current_step="split_trace",
+                log_path=log_path,
+                artifact_paths=artifacts,
+                run_id=run_id,
+                started_at=started_at,
+            )
+            split_dir = tracelens_dir / "trace_split"
+            cli_trace_path, split_meta = _run_trace_split(
+                args,
+                analysis_trace_path,
+                split_dir,
+                tl_root,
+                log_path,
+                trace_health_warnings,
+            )
+            run_meta["split"].update(split_meta)
+            run_meta["selection"].update(
+                {
+                    "requested_mode": args.steady_state_mode,
+                    "chunk_label": split_meta.get("chunk_label"),
+                    "selected_chunk": str(cli_trace_path),
+                    "selected_chunk_count": split_meta.get("selected_chunk_count"),
+                    "available_modes": split_meta.get("available_modes"),
+                    "fell_back_to_full_trace": False,
+                }
+            )
+            _note_step(
+                "split_trace",
+                category="split",
+                status="ok",
+                returncode=split_meta.get("returncode"),
+                num_steps=split_meta.get("num_steps"),
+                chunks_extracted=split_meta["chunks_extracted"],
+            )
+            _note_step(
+                "select_chunk",
+                category="select",
+                status="ok",
+                requested_mode=args.steady_state_mode,
+                selected_chunk=cli_trace_path.name,
+                selected_chunk_count=split_meta.get("selected_chunk_count"),
+            )
+            artifacts["tracelens_trace_split_dir"] = str(split_dir)
+            artifacts["tracelens_steady_state_trace"] = str(cli_trace_path)
+            append_log(
+                log_path,
+                f"trace split OK: "
+                f"{split_meta['chunks_by_mode']}; "
+                f"--steady-state-mode={args.steady_state_mode} -> "
+                f"using {cli_trace_path.name} for perf report",
+            )
 
             # Graph-capture folder for TraceLens inference graph replay analysis.
             trace_input_path = Path(args.trace_input).expanduser().resolve()
