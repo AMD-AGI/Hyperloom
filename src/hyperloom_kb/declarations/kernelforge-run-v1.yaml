@@ -1,5 +1,6 @@
-# KernelForge runs, one Experience per run: the forge-rewrite PORT step when the session ran forge-rewrite, and each
-# forge-loop iteration, which measures one candidate kernel and keeps or reverts it.
+# KernelForge runs, one Experience per forge-loop iteration, which measures one candidate kernel and keeps or reverts
+# it. A forge-rewrite PORT step's logs record no reasoning from the agent that ported the kernel, so the step becomes
+# no Experience (reasoning is required, below); its PORT OK and PORT FAILED decisions are declared for logs that do.
 # Hyperloom gives every declaration the rationale fields reasoning, alternatives, and preconditions, so they are not
 # listed here. rationale.reasoning holds the Summary line the implementer's reasoning log (rationale.reasoning_log)
 # opens with, at most three sentences stating the problem it solved and its approach. When the session kept no such
