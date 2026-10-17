@@ -1048,38 +1048,6 @@ async def aanthropic_completion(
         )
 
 
-def stream_chat_completion_text(
-    client: object,
-    *,
-    component: str = "",
-    operation: str = "",
-    **params: object,
-) -> "tuple[str, object | None]":
-    """Streamed chat completion; returns ``(text, usage)``."""
-    params["stream"] = True
-    params["stream_options"] = {"include_usage": True}
-    parts: list[str] = []
-    usage_obj: object | None = None
-    with observed_request(
-        protocol=PROTOCOL_OPENAI_CHAT,
-        component=component,
-        operation=operation,
-        model=params.get("model"),
-        streamed=True,
-    ) as observation:
-        stream = client.chat.completions.create(**_tag_request(params, component, operation))  # type: ignore[union-attr]
-        for chunk in stream:
-            _observe_stream_chunk(observation, chunk)
-            if getattr(chunk, "usage", None) is not None:
-                usage_obj = chunk.usage
-            if chunk.choices:
-                delta = chunk.choices[0].delta
-                if delta is not None and delta.content:
-                    parts.append(delta.content)
-        observation.update(usage=_openai_usage_counts(usage_obj))
-    return "".join(parts), usage_obj
-
-
 async def astream_chat_completion_text(
     client: object,
     *,
@@ -1181,6 +1149,5 @@ __all__ = [
     "provider_model_defaults",
     "resolve_forge_llm_model",
     "resolve_openai_client_config",
-    "stream_chat_completion_text",
     "with_synthesized_anthropic_keys",
 ]
