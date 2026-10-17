@@ -210,9 +210,9 @@ _STACK_BASE_FIELDS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
 )
 
 
-def stack_base_params(current_best: Any) -> dict[str, Any]:
+def stack_base_params(current_best: dict[str, Any] | None) -> dict[str, Any]:
     """``base_*`` params projected from the fields ``current_best`` carries."""
-    cb = current_best if isinstance(current_best, dict) else {}
+    cb = current_best or {}
     return {key: normalize(cb[source]) for key, source, normalize in _STACK_BASE_FIELDS if source in cb}
 
 
@@ -906,8 +906,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         args_mode = params.get("args_mode") if "args_mode" in params else params.get("base_args_mode")
         context["args_mode"] = str(args_mode or "append").strip().lower()
 
-        current_best = self.current_best if isinstance(self.current_best, dict) else {}
-        raw_envs = current_best.get("extra_envs") or {}
+        raw_envs = self.current_best.get("extra_envs") or {}
         extra_envs = (
             {
                 str(key): str(value)
@@ -918,7 +917,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             else {}
         )
         serving_config = {
-            "extra_server_args": str(current_best.get("extra_server_args") or "").strip(),
+            "extra_server_args": str(self.current_best.get("extra_server_args") or "").strip(),
             "extra_envs": extra_envs,
         }
         if any((serving_config["extra_server_args"], extra_envs)):
@@ -953,8 +952,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if arm == "baseline":
             self.last_profile_workload_action = "baseline"
         else:
-            current_best = self.current_best if isinstance(self.current_best, dict) else {}
-            self.last_profile_workload_action = str(current_best.get("action") or "")
+            self.last_profile_workload_action = str(self.current_best.get("action") or "")
         self.last_profile_args = str(self.last_profile_workload.get("server_args") or "")
         return self.last_profile_workload
 
@@ -963,7 +961,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Return the profile identity for the active current-best runtime."""
-        current_best = self.current_best if isinstance(self.current_best, dict) else {}
+        current_best = self.current_best
         incoming = overrides if isinstance(overrides, dict) else {}
         params: dict[str, Any] = {}
         runtime_keys = {
@@ -1097,6 +1095,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             filtered["kernel_opt_task_attempts"] = {}
         if not isinstance(filtered.get("pending_kernel_integrations"), dict):
             filtered["pending_kernel_integrations"] = {}
+        if not isinstance(filtered.get("current_best"), dict):
+            filtered["current_best"] = {}
         # Normalize the unified ``explore_search`` ledger at load.
         filtered["explore_search"] = cls._build_explore_search(
             existing=filtered.get("explore_search"),
@@ -1260,8 +1260,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             if not framework_registry.is_scriptable(fw):
                 return
             cb = self.current_best
-            if not isinstance(cb, dict):
-                return
             if cb.get("e2el_mean_ms") is not None:
                 return
             tput = cb.get("tput")
@@ -1275,7 +1273,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
     def _langfuse_status_summary(self) -> dict[str, Any]:
         """Flatten the state into an OTEL-friendly scalar status snapshot."""
-        cb = self.current_best if isinstance(self.current_best, dict) else {}
         last = self.lifecycle[-1] if self.lifecycle else {}
         summary: dict[str, Any] = {
             "phase": self.phase or "",
@@ -1305,7 +1302,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             )
         except Exception:
             log.debug("explore runtime telemetry derivation failed", exc_info=True)
-        tput = cb.get("tput") if isinstance(cb, dict) else None
+        tput = self.current_best.get("tput")
         if isinstance(tput, (int, float)) and not isinstance(tput, bool):
             summary["current_best_tput"] = round(float(tput), 1)
         if isinstance(last, dict):
@@ -2347,8 +2344,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                     forced_arm,
                 )
                 forced_arm = ""
-            cb = self.current_best if isinstance(self.current_best, dict) else {}
-            cb_tput = cb.get("tput")
+            cb_tput = self.current_best.get("tput")
             if forced_arm == "baseline":
                 snapshot_arm = "baseline"
                 achieved_tput = self._resolve_baseline_achieved_tput()
