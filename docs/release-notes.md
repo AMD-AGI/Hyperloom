@@ -404,6 +404,30 @@ Session and report consumers have to follow these changes; no aliases are kept:
   `X.Y.Z`) rather than an npm version spec, and the installer no longer installs
   Node.js.
 
+- **The concurrency sweep runs both arms at each CONC before moving down the
+  ladder, so a budget cut keeps every pair it finished.** The sweep used to
+  run the optimized arm's whole ladder before the baseline arm started, and a
+  pair needs both arms at one CONC: with long rungs (an hour-long window plus a
+  server start), a 30000 s `--conc-sweep-total-budget-sec` ran out
+  inside the optimized arm, the baseline arm never ran, and the sweep ended
+  `skipped` with zero pairs. It now runs the ladder one CONC level at a time,
+  highest first, the optimized arm and then the baseline arm at each level. A
+  level starts only when the time left admits a rung of both arms by the rung
+  cost estimate (twice the per-rung admission the grid already applies), so a
+  level the estimate says cannot finish is not started; once a level's first arm
+  has run, its partner is admitted even if that rung overran the estimate, so
+  a budget cut never leaves a level with one arm measured. One or more
+  finished pairs is `succeeded` as before.
+  Because the arms now take turns on the same GPUs, every rung boots its own
+  server: a lifecycle-capable framework no longer boots once per arm and reuses
+  the server down the ladder, so each rung pays a server start and the
+  `conc_sweep` event records `strategy=server_restart` with
+  `stage=server_restart` rungs. To pair `L` levels, size the budget as
+  `(L - 1) × 2 × W` plus `2 × rung_cost_sec × passes`, where `W` is one rung's
+  wall time including its server start and `passes` is 2 with the default
+  warm-up round, 1 without, plus 1 on a multi-node run with its benchmark
+  warm-up on.
+
 - **Bump validated SGLang stack to 0.5.21 (ROCm 10 docker).** Updates
   `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
   `lmsysorg/sglang-rocm:v0.5.21-rocm10-*` image tags, `models.tsv`, and the
