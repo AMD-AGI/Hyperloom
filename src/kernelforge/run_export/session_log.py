@@ -16,8 +16,9 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from kernelforge.knowledge.kb_store.identity.kernel_recipe import DEFAULT_SCHEME_NAME, KERNEL_CANONICAL_DIMENSIONS
 from kernelforge.loop.merge_candidates import MERGE_PLAN_PREFIX
-from kernelforge.run_export.archive import first_sentences, reasoning_text
+from kernelforge.run_export.archive import first_sentences, rationale_text
 from kernelforge.run_export.units import OBJECTIVE, CandidateOrigin, Run
 
 #: Lines a printed message spans are logged at most this far apart.
@@ -47,6 +48,9 @@ _MERGE_PLAN = re.compile(rf"^{re.escape(MERGE_PLAN_PREFIX)} (\d+)\+(\d+): ")
 _LANE = re.compile(r"^lane (\d+)$")
 _COMMITTED = re.compile(r"^Committed verified best: ([0-9a-f]{7,40})$")
 _KB_PUBLISH = re.compile(r"^KEEP KB publish \(([0-9a-f]{7,40})\): (\S+)")
+#: A record as the KB store names it, ``<canonical id>/<session id>``. forge-rewrite prints the reason no record was
+#: written in the same place (``kernelforge/rewrite_by_flydsl/runner.py``), and no reason has this shape.
+_KB_RECORD = re.compile(rf"^{re.escape(DEFAULT_SCHEME_NAME)}(?::[^:/\s]+){{{len(KERNEL_CANONICAL_DIMENSIONS)}}}/\S+$")
 _KB_WRITTEN = re.compile(r"^experience written: (\S+)")
 _SESSION_END = re.compile(r"^backend=\S+ reason=(\S+)")
 _SOURCE_BASELINE = re.compile(r"^source baseline: ([-+0-9.eE]+) ms \(full suite, cases=\[(.*)\]\)$")
@@ -233,7 +237,7 @@ class Setup:
         elif _PORT_FAILED.match(rest) is not None:
             self.port_decision, self.port_end = "PORT FAILED", index
         elif rest.startswith("PORT KB publish: "):
-            self.port_kb_record = rest.split(": ", 1)[1].strip()
+            self.port_kb_record = _published_record(rest.split(": ", 1)[1])
         elif (match := _INTERIM.match(rest)) is not None:
             self.interim_speedup, self.interim_end = float(match.group(3)), index
         elif rest.startswith("optimize cutoff reached"):
@@ -349,7 +353,7 @@ class _IterationReader:
             self._in_session = True
         elif rest.startswith(_RATIONALE):
             text, index = _continuation(self.lines, index, limit=len(_RATIONALE) + _RATIONALE_CHARS)
-            self.item["reasoning"] = reasoning_text([text[len(_RATIONALE) :]])
+            self.item["reasoning"] = rationale_text(text[len(_RATIONALE) :])
         elif rest.startswith("ERROR: "):
             self.item["agent_error"] = True
         elif (match := _COMMITTED.match(rest)) is not None:
@@ -440,9 +444,16 @@ def _kb_publishes(lines: list[LogLine]) -> dict[str, str]:
     publishes: dict[str, str] = {}
     for line in lines:
         match = _KB_PUBLISH.match(line.rest) if line.forge and line.tag == _FORGE_REWRITE else None
-        if match:
-            publishes[match.group(1)] = match.group(2)
+        if match and (record := _published_record(match.group(2))):
+            publishes[match.group(1)] = record
     return publishes
+
+
+def _published_record(payload: str) -> str | None:
+    """The KB record a publication line names, or None when the line names why no record was written."""
+
+    payload = payload.strip()
+    return payload if _KB_RECORD.match(payload) else None
 
 
 def _kb_written(lines: list[LogLine]) -> str | None:

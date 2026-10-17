@@ -39,6 +39,8 @@ SETUP: list[Message] = [
 HEADER = "[FORGE] --- Iteration 1 (best mean case speedup: 1.250000x, remaining: 50 min) ---"
 QUERY = "[FORGE]   [agent] Querying agent for kernel modification..."
 KEEP_LINE = "[FORGE]   [KEEP] mean case speedup=1.305x — NEW BEST (+4.4%); raw mean=0.9000ms"
+KB_RECORD = "kernel:flydsl:gemm_a8w8:aiter:unknown:flydsl:mi355x/rewrite-gemm_a8w8-0123abcd99ef-5a6b7c8d9e0f"
+KEEP_PUBLISH = f"[FORGE] [forge-rewrite] KEEP KB publish (0123abcd99): {KB_RECORD}"
 KEPT: list[Message] = [
     "[FORGE] [search-policy] mode=EXPLOIT reason=fresh",
     HEADER,
@@ -53,12 +55,15 @@ KEPT: list[Message] = [
     + "raw mean=0.9 ms",
     "[FORGE]   [agent] Committed verified best: 0123abcd",
     KEEP_LINE,
-    "[FORGE] [forge-rewrite] KEEP KB publish (0123abcd99): kb-record-77 published",
+    KEEP_PUBLISH,
 ]
 MERGED: list[Message] = [
     "[FORGE] --- Iteration 2 (best mean case speedup: 1.305000x, remaining: 40 min) ---",
     "[FORGE]   [merge] declined: iterations 1+3 share case m1",
     "[FORGE]   [merge] stacked candidates 1+3: Tile K by 128 | Vectorize the epilogue",
+    "[FORGE]   [validate] Stage 1 correctness: PASS SNR=44.0dB",
+    "[FORGE]   [bench] pristine-relative scores=[1.19, 1.21]; sigma=0.01; mean score=1.2x; required=1.32x; "
+    + "raw mean=0.95 ms",
     "[FORGE]   [REVERT] mean case speedup=1.2x not better than best=1.305x (required 1.32x)",
 ]
 UNFINISHED: list[Message] = [
@@ -183,17 +188,44 @@ def test_a_session_yields_its_port_and_each_iteration(tmp_path: Path) -> None:
     )
     assert (kept["decision"], kept["mean_case_speedup"], kept["best_mean_case_speedup"]) == ("KEEP", 1.305, 1.25)
     assert kept["provenance"]["commit"] == "0123abcd"
-    assert kept["provenance"]["kb_record"] == "kb-record-77"
+    assert kept["provenance"]["kb_record"] == KB_RECORD
     assert kept["provenance"]["candidate_origin"] == "session"
     assert kept["log_files"] == port["log_files"]
 
     assert merged["provenance"]["candidate_origin"] == "merge"
     assert merged["approach"] == "stacked candidates 1+3: Tile K by 128 | Vectorize the epilogue"
     assert merged["alternatives"] == ["merge declined: iterations 1+3 share case m1"]
-    assert merged["decision"] == "REVERT_PERF"
+    assert (merged["decision"], merged["mean_case_speedup"]) == ("REVERT_PERF", 1.2)
 
     assert "completed_at" not in unfinished and "decision" not in unfinished
     assert (unfinished["stop"], unfinished["stop_line"]) == ("log-ended", QUERY.removeprefix("[FORGE]").strip())
+
+
+def test_the_gate_outcome_kernelforge_puts_before_a_rationale_is_not_reasoning(tmp_path: Path) -> None:
+    gate = "[gate edits=3 pass=True end=candidate_submitted turns=20 mean_case_speedup=1.305000x raw_mean=0.9000ms]"
+    rationale = f"[FORGE]   [agent] Rationale: {gate} Tiled the K loop by 128 so each wave reuses its A tile."
+    _session(tmp_path, [*SETUP, HEADER, QUERY, rationale, KEEP_LINE])
+    iteration = _units(tmp_path)["sess-gemm/iteration-1"]
+    assert iteration["reasoning"] == "Tiled the K loop by 128 so each wave reuses its A tile."
+
+
+@pytest.mark.parametrize(
+    ("payload", "record"),
+    [
+        pytest.param(KB_RECORD, KB_RECORD, id="written"),
+        pytest.param("not_configured", None, id="reason"),
+        pytest.param("HTTPError: 503 Service Unavailable", None, id="error"),
+    ],
+)
+def test_a_kb_publication_line_names_a_record_only_when_one_was_written(
+    tmp_path: Path, payload: str, record: str | None
+) -> None:
+    port_publish = f"[FORGE] [forge-rewrite] PORT KB publish: {payload}"
+    keep_publish = f"[FORGE] [forge-rewrite] KEEP KB publish (0123abcd99): {payload}"
+    _session(tmp_path, [*SETUP[:-1], port_publish, SETUP[-1], *KEPT[:-1], keep_publish])
+    units = _units(tmp_path)
+    assert units["sess-gemm/port"]["provenance"].get("kb_record") == record
+    assert units["sess-gemm/iteration-1"]["provenance"].get("kb_record") == record
 
 
 VALIDATION_FAILED = "[FORGE]   [REVERT] Validation failed (stage 1)"
