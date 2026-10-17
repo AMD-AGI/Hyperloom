@@ -1505,42 +1505,6 @@ class V6Critic(TypedDict, total=False):
     iterations: list[CriticIteration]
 
 
-class V6RobustnessIntent(TypedDict, total=False):
-    """One intent the robustness agent raised on a turn."""
-
-    type: str
-    severity: str
-    topic: str
-    payload: dict[str, Any]
-
-
-class V6RobustnessTurn(TypedDict, total=False):
-    """The robustness agent's account of one turn.
-
-    ``outcome`` distinguishes a turn that produced intents from one the agent
-    could not complete, which is the distinction the section it replaces could
-    not express: a mute agent and a silent session looked identical."""
-
-    turn_idx: int
-    outcome: Literal["intents", "invalid_envelope", "no_envelope"]
-    ts: str
-    tick_index: int
-    intents: list[V6RobustnessIntent]
-    parse_warnings: list[str]
-    workdir: str
-    detail: str
-
-
-class V6Robustness(TypedDict, total=False):
-    """What the robustness agent raised, outside the business timeline.
-
-    The agent watches the session from the side, so its turns belong to no
-    phase or macro cycle and it keeps a fixed top-level place instead. An
-    empty ``turns`` is an answer, not a gap: the agent never completed a turn."""
-
-    turns: list[V6RobustnessTurn]
-
-
 class V6RobustnessFinding(TypedDict, total=False):
     """One firing of the robustness ladder, as the ladder itself persisted it.
 
@@ -2616,7 +2580,6 @@ class SessionBreakdown(TypedDict, total=False):
     timeline: list[V6TimelineEvent]
     close: V6Close
     critic: V6Critic
-    robustness: V6Robustness
 
 
 __all__ = [
@@ -2733,10 +2696,7 @@ __all__ = [
     "V6PhaseProposalOutcome",
     "V6PhaseProposalReview",
     "V6PhaseSegment",
-    "V6Robustness",
     "V6RobustnessFinding",
-    "V6RobustnessIntent",
-    "V6RobustnessTurn",
     "V6RooflineEventSnapshot",
     "V6RooflineExt",
     "V6RooflineKernel",

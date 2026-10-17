@@ -185,7 +185,6 @@ def build(session_dir: Path | str) -> dict[str, Any]:
         default={},
     )
     v6_critic = collectors.collect_v6_critic(assembled.get("critic"))
-    v6_robustness = collectors.collect_v6_robustness(assembled.get("robustness"))
     # Snapshot last: every collector above feeds this one list, and this is the
     # single place a collection failure surfaces.
     if isinstance(metadata, dict):
@@ -200,7 +199,6 @@ def build(session_dir: Path | str) -> dict[str, Any]:
         "timeline": timeline,
         "close": v6_close,
         "critic": v6_critic,
-        "robustness": v6_robustness,
     }
 
 
@@ -503,8 +501,7 @@ def write_minimal_final_report(
         "",
         "## Structured detail",
         "",
-        f"See `{breakdown_link.name}` (sibling of session root) for the "
-        f"complete `timeline` / `critic` / `robustness` blocks.",
+        f"See `{breakdown_link.name}` (sibling of session root) for the complete `timeline` / `critic` blocks.",
         "",
     ]
 
