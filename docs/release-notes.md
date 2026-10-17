@@ -1,13 +1,13 @@
 ---
 myst:
   html_meta:
-    "description": "Hyperloom release notes: headline capabilities for version 1.1.3, a patch release on top of 1.1.2; plus the 1.1.2 release, which validates ROCm 10, makes ENABLEMENT its own phase, retires robustness supervision in favour of explicit resume and recovery, and supports ATOM end to end, and the 1.1.1 and 1.1.0 releases."
+    "description": "Hyperloom release notes: headline capabilities for version 1.1.4, which makes `hyperloom <command>` the only entry point, runs every specialist as a Claude CLI subprocess, ships the Experience KB and GPU power measurement, and removes several options, environment variables and launch paths 1.1.3 accepted; plus the 1.1.3 patch release, the 1.1.2 release, which validates ROCm 10, makes ENABLEMENT its own phase, retires robustness supervision in favour of explicit resume and recovery, and supports ATOM end to end, and the 1.1.1 and 1.1.0 releases."
     "keywords": "Hyperloom, release notes, LLM inference, AMD GPU, ROCm, agentic optimization, TraceLens, GEAK, KernelForge, Primus-Claw, bare metal, kernel optimization"
 ---
 
 # Hyperloom release notes
 
-The current packaged version is 1.1.3 (`pyproject.toml`). For the
+The current packaged version is 1.1.4 (`pyproject.toml`). For the
 per-change history since the initial snapshot, and for a detailed breakdown of
 all previous Hyperloom pre-release versions, see
 [Releases](https://github.com/AMD-AGI/Hyperloom/releases); this page
@@ -19,6 +19,253 @@ release has shipped yet.
 Merged to `main` and not yet carried by a tagged release. Each entry moves
 into the [release](https://github.com/AMD-AGI/Hyperloom/releases) that ships
 it.
+
+## Hyperloom 1.1.4 release
+
+The [1.1.4 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.1.4)
+follows 1.1.3. Every command now runs as `hyperloom <command>`, every
+specialist runs as a Claude CLI subprocess in its own worktree, and the kernel
+tools move into the packages that own them. The release adds the Experience
+KB, per-GPU power measurement, operator-defined specialists, runtime findings
+from server logs and an opt-in MLPerf agentic backend, and a session whose
+container is gone can now be released and resumed. A 1.1.3 `state.json` still
+loads: keys this release no longer carries are dropped. Several options,
+environment variables and launch paths 1.1.3 accepted are removed, and some
+defaults move; see "Before upgrading from 1.1.3" below. The per-change history
+is on the [Releases](https://github.com/AMD-AGI/Hyperloom/releases) page.
+
+### Before upgrading from 1.1.3
+
+Console scripts, options and module paths 1.1.3 accepted are removed. The
+parser is strict, so a launch, resume or install command that still carries
+one exits with `unrecognized arguments` (or exit `2`) before the session
+starts.
+
+| Removed | What to do |
+|---|---|
+| `inference_optimizer` and `quantization-agent` console scripts; `python -m hyperloom.inference_optimizer.{cli,multi_node,setup}` and `python -m hyperloom.inference_optimizer.tools.*` | Run `hyperloom <command>`. `recover-session` becomes `hyperloom recover`, and `--verbose` goes after the command. The full old-to-new table is in [Upgrade Hyperloom version](reference/upgrade.md). |
+| `--kernel-codex`, `--kernel-claude`, `--kernel-prompt` | Delete them; they were ignored. |
+| `--max-minutes-{prelude,framework,explore,kernel,sweep,close}-pct`, `--phase-budget-explore-pct` | Use `--phase-budget-<phase>-pct` (`--phase-budget-framework-pct` covers what the explore spelling set). |
+| `recover --backfill-trace` | Run `hyperloom session backfill --session-dir S`. |
+| `--specialist-dispatch-mode`, `--specialist-per-turn-max-seconds` | Delete them. Specialists always run as a Claude CLI subprocess; a session that finds no claude CLI stops at startup. |
+| `--target-summary`, `--warm-replay-min-reproduce-pct`, `--plateau-kernel-revert-streak`, `--plateau-kernel-keep-gain`, `--plateau-kernel-lookback` | Delete them; none changed a decision (see *Removed*). |
+| `install.sh --skip-kernel-agent`; running `install_kernel_tools.sh` on its own | Delete the option. The kernel tools install as part of `install.sh`; the standalone script exits `2` and points at it. |
+| `forge-rewrite-by-flydsl --op-name` | Use `--logical-op-name`. |
+| `hyperloom.agents.kernel.tools.*` modules, including the `forge_gemm_tuning` and `forge_fusion` wrappers; the TraceLens and bypass trace-analysis options `--runtime-env`, `--roofline-json`, `--height`, `--width`, `--cfg-batch`, `--top-k` | Run the tools as `python -m hyperloom.orchestrator.trace_analysis.<tool>` or `python -m hyperloom.orchestrator.kernel.<tool>`. The kernel request handlers now build the forge GEMM tuning and fusion commands themselves, and nothing passed the removed analysis options. |
+| `src/kernelforge/data/examples/...` | Example tasks live under `src/kernelforge/examples/` (`resource_path('examples')`). |
+
+Environment variables fail differently: nothing refuses most of them, so a box
+that still exports one starts normally and behaves as though it were unset.
+Find them by reading launch scripts, `.env` and the kernel-agent env file. Two
+settings do stop the run, and are marked below.
+
+| Removed or changed variable | What to do |
+|---|---|
+| `HYPERLOOM_KERNEL_AGENT_ROOT`, `KERNEL_AGENT_ROOT` | Delete them. Preflight reads the kernel-agent env file only from `$KERNEL_AGENT_ENV` or `$USER_DATA_PATH/runtime/kernel-agent.env.sh`, and **exits 2** when that file yields no supported variable; rerun `install.sh` to regenerate it. |
+| `AGENTX_SERVER_SCRIPT` naming an InferenceX `agentic/` recipe | **Exits 2** at server boot. Move the recipe's server arguments into `--server-args` and its environment into `--extra-env`, and drop `INFERENCEX_PATH` so Hyperloom clones its own InferenceX. Runs that leave `AGENTX_SERVER_SCRIPT` unset are unaffected. |
+| `INFERENCEX_PATH` as a patch target | No change needed. The InferenceX checkout is no longer a framework source root, so integrate, enablement and specialists can no longer patch it, in any session. |
+| `AGENTX_PROFILE_WARMUP_S`, `INFERENCE_OPTIMIZER_INLINE_FAST_ACTIONS`, `INFERENCE_OPTIMIZER_INLINE_ACTION_TIMEOUT_S`, `INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX` | Delete them. |
+| `KERNEL_AGENT_SKIP_MODEL_LOAD`, `KERNEL_AGENT_BUILD_GEAK_RAG_INDEX`, `KERNEL_AGENT_NUM_GPUS` | Delete them; nothing read them. |
+| `KERNEL_OPT_BACKEND_BUDGET_MIN`, `KERNEL_OPT_MAX_PARALLEL`, `INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL`, `HYPERLOOM_FORGE_NOMINATION_AUTO`, `HYPERLOOM_LLM_SOURCE_MODEL`, `INFERENCE_OPTIMIZER_ENABLEMENT_ON_EVAL_FAIL`, `INFERENCE_OPTIMIZER_ENABLEMENT_ACCURACY_FLOOR`, `HYPERLOOM_FORGE_REWRITE_BY_FLYDSL`, `GEMM_TUNING_BACKEND`, `INFERENCE_OPTIMIZER_REQUIRE_FRAMEWORK_ACCURACY`, `INFERENCE_OPTIMIZER_MODEL_PATH_ROOTS`, `HYPERLOOM_REAP_BACKEND` | Delete them; nothing read them, and they are gone from `.env.template` and the env reference. A kernel-agent env file still carrying `HYPERLOOM_FORGE_REWRITE_BY_FLYDSL` now draws preflight's `ignoring unsupported kernel-agent env key` warning. |
+| `SGLANG_FP8_BLOCKSCALE_CK_MAX_M` | Delete it. The SGLang 0.5.12 CK fp8 block-scale serving patch it triggered is retired (it was already inert on 0.5.20 and later). |
+| `HYPERLOOM_CLAUDE_CODE_VERSION` as an npm version spec | Use `stable`, `latest` or an exact `X.Y.Z`. |
+| `ISL`, `OSL`, `CONC`, `TP`, `EP`, `PRECISION`, `MAX_MODEL_LEN` pinned through `--extra-env` or exported in the shell | Every `--extra-env` pin is now exported under its own name, so a launch script that pinned `TP=4` or `ISL=4096` that way now runs at that shape, where 1.1.3 ran the default and recorded the pin. On a fresh launch each name resolves as flag, then `$NAME`, then the resumed session's value, then the default, so a shell export of `ISL`, `OSL`, `CONC`, `TP`, `EP` or `PRECISION`, which 1.1.3 ignored, now takes effect; unset any you did not mean. On `--resume-from` the session's recorded `ISL` / `OSL` / `CONC` / `TP` / `EP` / `MAX_MODEL_LEN` win over stale shell exports unless a flag or `--extra-env` re-pins them, but an exported `PRECISION` still overrides the recorded precision: unset it before resuming. |
+| A malformed numeric value for a strictly parsed variable | Fix it: the run now stops with `EnvValueError` instead of using the default (list under *Changed*). |
+
+Defaults and gates that move, so the same command behaves differently:
+
+- **AgentX sessions skip the concurrency sweep unless asked.**
+  `--enable-conc-sweep` now defaults to unset and resolves to off under AgentX,
+  so no sweep runs and no `reports/conc_sweep_summary.json` is written unless
+  you pass `--enable-conc-sweep`; `AGENTX_DEFAULT_CONCS` applies only then.
+  Synthetic sessions are unchanged, and a resumed session keeps its persisted
+  value.
+- **Single-node `--ep N` reaches the server.** sglang now gets `--ep-size N`
+  and atom `--enable-expert-parallel`, where 1.1.3 ran them TP-only while
+  recording `ep=N`; vLLM keeps its flag through replace-mode variants. Server
+  arguments that pin an sglang EP size contradicting `--ep` now fail at
+  materialize instead of launching with the pin.
+- **AgentX grading.** Default aiperf AgentX `integrate_patch` and enablement
+  candidates grade accuracy on the request error rate, so a patch above the 10%
+  error ceiling is now reverted where 1.1.3 kept it. The comparability gate now
+  admits a candidate whose error rate is up to 0.5 percentage points above the
+  anchor's instead of refusing any extra failed request, and REVERT reasons
+  name the refusing gate (`p50_gain_below_threshold`, `p90_regressed`,
+  `output_regressed`, `duration_drift`, `extra_failed_requests`,
+  `comparability_inputs_missing`) instead of `median_or_guard_failed`; update
+  log scrapers that match the old reason.
+- **GLM-5.3 AgentX baselines move.** A GLM-5.3 model now replays the uncapped
+  `semianalysis_cc_traces_weka_062126` corpus (mean ISL about 180k, as
+  InferenceX does) instead of the 256k-capped one, so its baselines and gains
+  are not comparable with 1.1.3 runs. To keep the old corpus, declare it
+  canonical with
+  `AGENTX_CANONICAL_DATASET=semianalysis_cc_traces_weka_062126_256k`; pinning
+  it through `AGENTX_DATASET` instead stamps every result
+  `submission_valid=false`, so nothing can KEEP.
+- **A failing LLM backend ends the session.** After one hour without a
+  successful turn, or after 50 consecutive agent turns that emit no intent, the
+  session stops with `stop_reason=backend_unhealthy` (outcome `aborted`; CLOSE
+  still publishes the best stack). 1.1.3 retried every tick until the budget
+  ran out.
+
+Installation prerequisites move:
+
+- `install.sh` installs Claude Code with the native installer into
+  `~/.local/bin` and needs `curl` and access to `claude.ai`; it no longer
+  installs Node.js, and an install that cannot provide claude fails.
+- The recommended SGLang image is
+  `lmsysorg/sglang-rocm:v0.5.21-rocm10-mi30x|mi35x-20261008`.
+- During kernel-tool install, variables exported in the shell now win over
+  `.env`.
+- The kernel agent's bypass route needs an importable TraceLens and fails with
+  `tracelens_root_missing` without it.
+
+Session and report consumers have to follow these changes; no aliases are kept:
+
+- `state.json` drops `target_gap_pct`, `budget_extensions`,
+  `framework_agent_authoring_enabled`, `last_specialist`,
+  `last_consumed_escalate_hint` / `_ts`, `reference_source`,
+  `last_profile_kernel_breakdown`, `orchestration_memory_history`,
+  `cycle_directive_history`, `current_action`, `target_summary`,
+  `warm_replay_min_reproduce_pct` and `resume_pending_revalidation`;
+  `orchestration_memory` shrinks to `{next_cycle_directive, for_cycle,
+  parse_error}`. `optimization_stack` entries no longer carry
+  `stack_member_identities` or `stack_validation_started_at`, and an in-flight
+  stack checkpoint written by 1.1.4 cannot be resumed by 1.1.3.
+- SBD `phase_action.decision` takes `adopted` / `refused` / `reverted` /
+  `failed` / `recorded`. `optimization_journal.json` outcomes are derived from
+  that decision: `KEEP` for adopted, `REVERT` for reverted, `no_promote` for
+  refused and failed, and the new `recorded` for steps with nothing to adopt
+  (analysis, specialist, report). The workflow-evaluation
+  `prelude_inputs.double_run` key is gone from both schemas. Both workflow
+  contract digests change, and new sessions stamp the v2 workflow-evaluation
+  contract (older sessions keep v1).
+- Orchestration prompt snapshots are named
+  `system_prompt.cN.PHASE.snapshot.md`, and the orchestration agent's
+  `UPDATE_STATE` intent is gone: an intent that still carries it is refused
+  with `intents[<i>].intent_type '<type>' not in allowed set`.
+- Enablement writes `reports/enablement/enablement_setup.sh` and
+  `setup_files/` instead of `reports/enablement/patches/` and
+  `reports/enablement/artifacts/`.
+- `tool_versions[kernel_agent]` reports the package version instead of a git
+  SHA. A failed roofline profile is no longer retried on the same config, so
+  `retry_after_*` reasons and the `all 3 profile attempts failed` prefix are
+  gone, and the CUDA-graph diagnosis is written as
+  `diagnostics/roofline_cuda_graph_capture_<task_id>.json`.
+- KernelForge workspace JSON artifacts and the forge-loop checkpoint drop
+  `schema_version`, and `forge-loop --resume` on a workspace written by an
+  older kernelforge fails instead of migrating it.
+- A session persisted by v1.1.0 or earlier with a pending non-git warm replay
+  now stops on resume with `warm_replay_rollback_failed`.
+- `session_breakdown.json` exported by earlier builds carried credential-shaped
+  `--extra-env` values in plaintext under `metadata.task_config.launch_env`;
+  1.1.4 writes them as `[REDACTED]`, including on re-export. Rotate any
+  credential passed that way.
+
+### Added
+
+- **Experience KB.** The wheel ships the `hyperloom_kb` Experience KB.
+  `hyperloom-setup` configures a per-workspace loopback KB service and asks
+  about a global KB, and FRAMEWORK_AGENT orchestration and specialist prompts
+  of throughput-graded runs receive measured Experiences from earlier
+  sessions. New: the `hyperloom-kb-serve` and `hyperloom-kb-collect` console
+  scripts, `experience_kb_service init-env|ensure|push|pull`, the
+  `hyperloom-global-kb` skill, the `HYPERLOOM_KB_URL` / `HYPERLOOM_KB_TOKEN` /
+  `HYPERLOOM_GLOBAL_KB_URL` / `HYPERLOOM_GLOBAL_KB_TOKEN` /
+  `HYPERLOOM_KB_AUTO_PUSH` / `LOCAL_KB_PLANNER_*` settings,
+  `state.json` `experience_kb_injections` and `reports/experience_collect.json`.
+
+- **Per-GPU power measurement and declared power state.** Each round samples
+  power through `amd-smi` over its measured phase on the serving cards only and
+  writes `gpu_power.json` and `gpu_power_avg_w` (`HYPERLOOM_GPU_POWER_SAMPLING=0`
+  disables it, `HYPERLOOM_GPU_POWER_INTERVAL_S` sets the cadence). The platform
+  fingerprint records the observed power cap and performance level, and
+  `--gpu-power-cap-w` / `--gpu-perf-level` refuse a launch or resume with exit
+  `2` when the GPUs do not match the declaration or it cannot be checked.
+
+- **Operator-defined specialist.** `--custom-specialist-prompt-file` and
+  `--custom-specialist-description`, passed together, define a
+  `custom_specialist` that orchestration can dispatch and that runs at least
+  once in FRAMEWORK_AGENT. It persists in state and can be replaced on
+  `--resume-from`. Combining it with `--orch-prompt`, `--no-framework-agent`,
+  `--research-lane-capacity 0` or `--reset-state` fails at launch.
+
+- **Runtime findings from server logs.** Every measured slot writes
+  `runtime_findings.json` from a server-log scan (rules such as
+  `vllm.unknown_env`, `feature_disabled`, `aiter.tuned_miss`,
+  `runtime.traceback`), surfaced through the `get_runtime_findings` context
+  tool, the specialist prompt and `trace-evidence.md`. A specialist patch that
+  declares `resolves_finding` can KEEP with up to a 3% drop on the graded axis,
+  recorded as `keep_reason=correctness_fix`, and the stack ledger reports
+  `attributed_gain_pct_excluding_fixes`.
+
+- **MLPerf agentic backend for AgentX.** `HYPERLOOM_AGENTIC_BACKEND=mlperf`
+  (with `HYPERLOOM_AGENTX=1`) runs the MLCommons `run_agentic.sh` harness,
+  graded on output throughput with inline-accuracy KEEP gating and a
+  trajectory-sized default benchmark timeout. It measures Kimi-K3 only and
+  refuses any other model. On that model it accepts every registered serving
+  framework (sglang, vllm, atom) and refuses scriptable and unregistered ones,
+  and `AGENTX_KEEP_ALIVE_ENV` names the server keep-alive
+  variable (default 900 s). **Upgrade note:** the same change makes default
+  aiperf AgentX candidates grade accuracy on the request error rate (see
+  "Before upgrading from 1.1.3").
+
+- **Release a vanished container's scope.**
+  `hyperloom recover --session-dir S --confirm-scope-gone OWNER_SCOPE --confirmation-reason TEXT`
+  cancels the unfinished tasks of an execution scope whose container is gone
+  and releases its execution and GPU leases, so `optimize --resume-from` can
+  resume the session. It refuses the current scope, unexpired leases of another
+  scope and tasks that span two scopes.
+
+- **`--max-latency-ms` for scriptable frameworks.** For xdit and custom
+  frameworks it vetoes any KEEP whose mean end-to-end latency exceeds the
+  ceiling or is unmeasured (`latency_budget_exceeded` / `latency_unmeasured`),
+  and a baseline already over it stops the run with
+  `baseline_over_latency_budget`. Serving frameworks reject the flag with exit
+  `2`.
+
+- **Reproducible enablement setup.** Enablement writes
+  `reports/enablement/enablement_setup.sh` plus `setup_files/`, which
+  reproduce the setup per root with sha256, mode and package-version checks
+  without starting a server; `enablement_setting.sh` runs it before launching,
+  and the recipe carries `setup_script: {path, sha256, standalone}`.
+
+- **KernelForge roofline ceiling.** A new `kernelforge roofline-ceiling`
+  subcommand writes `performance_ceiling.json` and
+  `performance_ceiling_analysis.md`. `forge-loop --roofline-ceiling on|off`
+  (default off) feeds per-case attainment to the planner, `--roofline-target`
+  stops a campaign on mean attainment, and `forge-rewrite-by-flydsl
+  --roofline-ceiling` forwards to its nested forge-loop.
+
+- **`kbmine`.** A standalone CLI under `tools/kbmine` (installed separately
+  with `pip install -e tools/kbmine`; nothing in the optimizer imports it)
+  estimates a target's inference uplift from Recipe KB and Pulse evidence
+  without running a session, configured by `KB_STORE_URL` / `PULSE_URL` /
+  `KB_STORE_TOKEN` and `--ca-bundle`.
+
+- **`HYPERLOOM_CLAUDE_CLI_PATH`.** Specialist dispatch and the Claude backend
+  resolve the CLI as `HYPERLOOM_CLAUDE_CLI_PATH`, then the installer-recorded
+  `GEAK_CLAUDE_BIN`, then `PATH`, so a claude installed outside `PATH` is
+  found.
+
+- **Explore skips no-op variants.** Before booting a server, explore drops a
+  variant whose every changed setting and environment value already matches
+  the running stack's observed launch record, recorded as `SKIPPED_DEDUP`
+  `reason=baseline_noop` and counted as `baseline_noop=N` in the dedup log
+  line; `launch_evidence` gains `observed_server_config`.
+
+- **Kernel tuning tool and GEAK backend visibility.** Preflight's warn-only
+  `check_kernel_tuning_clis` step prints
+  `Preflight: WARNING — <cli> not on PATH` for a missing `hipblaslt-bench` or
+  `ckProfiler` (skipped with `--no-kernel`), and GEAK's `absent_backends`
+  appear in the log, in `state.json` `geak_result.absent_backends` and as a
+  kernel-summary takeaway.
+
+- **Richer workflow evaluation.** New sessions stamp the manifest with the v2
+  workflow-evaluation contract identity and digest. The Session Breakdown
+  records stage milestones, outcome source-event IDs, integration-to-stack
+  adoption links and CLOSE receipts, and the final breakdown and package are
+  refreshed after CLOSE settles. The SBD wire version stays v6.0.
 
 ### Removed
 
@@ -41,8 +288,11 @@ it.
   only, annotating the settled outcome with `below_historical_reproduce_pct`
   and `historical_reproduce_bar_pct` and rejecting nothing. Those two keys are
   gone from `warm_replay_outcome` and from the SBD V6 `warm_replay` verdict
-  row; the reproduced/drift decision an operator sees is unchanged, and
-  `--no-warm-replay` and `--warm-replay-min-confidence` are untouched. The
+  row; removing the flag leaves the reproduced/drift decision unchanged (a
+  local legacy replay is now held to the keep threshold rather than any
+  positive gain, but that comes from warm replay honouring graded adoption,
+  below), and `--no-warm-replay` and `--warm-replay-min-confidence` are
+  untouched. The
   flag's cost was a threshold operators could tune for hours without moving an
   adoption.
 
@@ -58,7 +308,101 @@ it.
   where its text reads the same predicate the exit rule does. The
   `--plateau-explore-*` flags are untouched.
 
+- **The old command-line entry points.** `inference_optimizer`,
+  `quantization-agent`, `python -m hyperloom.inference_optimizer.{cli,multi_node,setup}`
+  and the `python -m ...tools.*` session tools are gone; every command now runs
+  as `hyperloom <command>` (see *Changed*). Removed with them:
+  `--kernel-codex` / `--kernel-claude` / `--kernel-prompt` (ignored no-ops),
+  the `--max-minutes-*-pct` and `--phase-budget-explore-pct` aliases,
+  `recover --backfill-trace` (use `hyperloom session backfill`),
+  `INFERENCE_OPTIMIZER_CLAUDE_FOLLOWS_CODEX`, and the critic runtime's
+  `init-session`, `close-session`, `list-priors`, `write-verdict`,
+  `write-kb-drafts` and `add-contradiction` subcommands, which nothing called.
+  A removed flag now fails argument parsing instead of being ignored.
+
+- **In-process specialist dispatch.** `--specialist-dispatch-mode` and
+  `--specialist-per-turn-max-seconds` are no longer accepted: every specialist
+  runs as a Claude CLI subprocess in its own worktree. A session that finds no
+  claude CLI (`HYPERLOOM_CLAUDE_CLI_PATH`, `GEAK_CLAUDE_BIN` or `PATH`) stops at
+  startup instead of silently running every specialist in-process without
+  source roots or tools. A specialist that ends without `specialist_done.json`
+  is recorded as `no_specialist_done_emitted`.
+
+- **Kernelforge readers for its own historical workspace formats.**
+  `forge-loop --resume` on a workspace written by an older kernelforge now fails
+  with a missing/unknown-field error instead of migrating it; start a fresh
+  campaign. Workspace JSON artifacts and the forge-loop result's `checkpoint`
+  no longer carry `schema_version`. `forge-rewrite-by-flydsl --op-name` is gone
+  (use `--logical-op-name`), agent providers registered only under the
+  `kernel_agents.agent_providers` entry-point group are no longer loaded
+  (register under `kernelforge.agent_providers`), and the already-ignored
+  `KERNEL_AGENTS_MAX_TURNS` no longer warns.
+
+- **The kernel agent's standalone install and run paths.** `install.sh` runs
+  the kernel-tool steps with its own helpers, lock and environment, so
+  `--skip-kernel-agent` is gone and `install_kernel_tools.sh` run on its own
+  exits `2`. The kernel request handlers run forge GEMM tuning and forge fusion
+  as one child process each, so the `forge_gemm_tuning` / `forge_fusion`
+  wrappers and their `forge_*_input.json` files are gone, as are the
+  trace-analysis options no handler passed.
+
+- **`HYPERLOOM_KERNEL_AGENT_ROOT` / `KERNEL_AGENT_ROOT`.** The kernel tools now
+  live in `hyperloom.orchestrator.trace_analysis` and
+  `hyperloom.orchestrator.kernel` and are started as
+  `sys.executable -m <module>`, so nothing reads a kernel-agent source root and
+  the `hyperloom.agents.kernel.tools.*` paths are gone. The installers stop
+  writing the two variables and still scrub them from the shell.
+
+- **The AgentX agentic-recipe launch path.** Pointing `AGENTX_SERVER_SCRIPT` at
+  an InferenceX `single_node/agentic/*.sh` recipe, which ran its own replay,
+  could not be profiled and depended on uncommitted patches in a shared
+  InferenceX checkout. AgentX now has one launch path: the generic InferenceX
+  launcher with the model's arguments from `--server-args` and its environment
+  from `--extra-env`. The recipe renderer, the `*.hl-<digest>.sh` recipe
+  copies and the `recipe_lever_unavailable` error class go with it, and the
+  InferenceX checkout stops being a patchable source root.
+
+- **The orchestration delegation leftovers.** The `UPDATE_STATE` intent,
+  `INFERENCE_OPTIMIZER_INLINE_FAST_ACTIONS` /
+  `INFERENCE_OPTIMIZER_INLINE_ACTION_TIMEOUT_S` and the `state.json` fields
+  listed under "Before upgrading from 1.1.3" are removed. `extend_*_budget`
+  hints and resume phase budgets now take effect, warm replay honours graded
+  adoption, and vLLM profile runs no longer build the profiler summary table.
+
+- **The SGLang 0.5.12 CK fp8 block-scale serving patch.** Forge + SGLang + FP8
+  block-scale runs on gfx942 no longer enqueue the synthetic
+  `ck_blockscale_backend_switch` candidate or spend a full E2E round on it, and
+  the `serving_patches/` resource tree is gone. No supported stack loses an
+  optimization: the patch was already inert on SGLang 0.5.20 and later.
+
+- **Twelve environment variables nothing read** are dropped from
+  `.env.template` and the env reference (listed under "Before upgrading from
+  1.1.3"), so operators stop setting knobs that did nothing. The orchestration
+  prompt no longer describes a PARTIAL kernel-opt retry cap that never existed.
+
 ### Changed
+
+- **One `hyperloom <command>` entry point.** Setup, preflight, optimization,
+  recovery, quantization, the session tools and the multi-node CLI all run as
+  `hyperloom <command>` (or `python -m hyperloom <command>`), and
+  `hyperloom --help` lists them: `hyperloom setup`, `hyperloom check`,
+  `hyperloom optimize`, `hyperloom recover` (was `recover-session`),
+  `hyperloom quantize`, `hyperloom session breakdown|report|backfill|events|state`
+  and `hyperloom multi-node <sub>`. `--verbose` now goes after the command, and
+  a failed `--quantize` prelude exits `4` (exit `3` is only "session lock
+  held"). Invalid PD combinations on rayjob now fail at startup instead of being
+  dropped. External launchers must switch; the old-to-new table is in
+  [Upgrade Hyperloom version](reference/upgrade.md).
+
+- **The installer owns the one claude CLI every consumer runs.** It installs
+  Claude Code with the native installer into `~/.local/bin`, puts that first on
+  `PATH` before GEAK's bootstrap runs, and writes the same file into
+  `GEAK_CLAUDE_BIN`, so GEAK, the specialists and Forge resolve one copy. An
+  install that cannot provide claude (no curl, or `claude.ai` unreachable) now
+  exits with an error instead of a warning. `HYPERLOOM_CLAUDE_CODE_VERSION`
+  takes the native installer's targets (`stable`, `latest` or an exact
+  `X.Y.Z`) rather than an npm version spec, and the installer no longer installs
+  Node.js.
 
 - **Bump validated SGLang stack to 0.5.21 (ROCm 10 docker).** Updates
   `SGLANG_REF`, `SGLANG_PRETEND_VERSION`, recommended
@@ -72,10 +416,14 @@ it.
   `INFERENCE_OPTIMIZER_BACKEND_ERROR_STREAK_THRESHOLD`,
   `INFERENCE_OPTIMIZER_REACTOR_TURN_TIMEOUT_SEC`,
   `INFERENCE_OPTIMIZER_KERNEL_IDLE_MAX_TICKS`,
-  `INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS`, `SWEEP_VARIANT_TIMEOUT_SEC`,
-  `HYPERLOOM_FUSION_KEEP_PCT`, `GEAK_E2E_TIMEOUT_S`, `GEAK_BUDGET_MARGIN_S`,
-  `GEAK_MIN_RUN_S` and `GEAK_TERM_GRACE_S` now raise `EnvValueError` naming the
-  variable and the value when they are set to something that is not a number.
+  `INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS`,
+  `INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC`, `SWEEP_VARIANT_TIMEOUT_SEC`,
+  `HYPERLOOM_FUSION_KEEP_PCT`, `HYPERLOOM_GEMM_PAIRED_PAIRS`, `GEAK_E2E_TIMEOUT_S`,
+  `GEAK_BUDGET_MARGIN_S`, `GEAK_MIN_RUN_S` and `GEAK_TERM_GRACE_S`, and
+  `MAX_MODEL_LEN` and `GPU_MEMORY_UTILIZATION` where they stand in for a
+  `--max-model-len` / `--gpu-memory-utilization` the baseline server arguments
+  do not carry, now raise `EnvValueError` naming the variable and the value when
+  they are set to something that is not a number.
   A typo used to be swallowed: the run proceeded on the default, so a session
   launched with `GEAK_MIN_RUN_S=600s` or `SWEEP_VARIANT_TIMEOUT_SEC=40m` spent
   its hours under limits nobody had chosen, and the report gave no sign the
@@ -84,6 +432,308 @@ it.
   same as malformed: a non-positive or non-finite reactor turn timeout, and a
   KERNEL idle tick count below `1` or an idle window at or below `0`, continue
   to fall back to the default.
+
+- **Specialists run alongside the tick.** The tick no longer waits for
+  dispatched specialists: orchestration and the Critic take turns while work
+  runs, so long specialists mean more LLM calls. FRAMEWORK candidates are
+  authored in parallel up to `research_lane_capacity`, untested specialist
+  proposals are benched four at a time as `auto-explore-c<cycle>-<hash>`
+  explore grids (also on a single node), CPU specialists see no GPUs and use
+  workspace-local compiler caches, the specialist wall budget is 60 minutes for
+  a patch and 10 minutes for research, and specialists honour
+  `CLAUDE_CONFIG_DIR`.
+
+- **The kernel agent reads TraceLens directly.** It reads TraceLens
+  `analysis.json` and resolves kernel sources through TraceLens
+  `resolve_kernel_source`, so `kernel_candidates.json` source paths come from
+  the installed framework tree (fewer resolve when it is not mounted).
+  Tensile, CK and MIOpen kernels land in `skipped_kernels` with a dispatcher
+  `source_file`, Triton-named wrappers over native kernels are no longer routed
+  as patchable, and bypass rows gain `identity_route` / `op_to_source_*`.
+
+- **Kernel-opt dispatch order.** The kernel_opt gate orders untried hot kernels
+  by TraceLens priority rank and impact score instead of raw `gpu_pct`, which
+  changes the forge-route queue and the order of `untried_hot_kernels` in the
+  mission summary and report. `HYPERLOOM_KERNEL_OPT_GATE_TOP_N` now caps ranked
+  and unranked (for example NCCL) rows separately, so the gate can return up to
+  `2N` ids.
+
+- **Explore no longer pre-drops variants by probing `--help`.** Variants
+  carrying `--enable-flashinfer-mla`, `--enable-deepep-moe` or
+  `--enable-ep-moe` now launch and, on a framework that lacks the flag, fail at
+  argument parsing (recorded as failed with `server_log_path`) instead of
+  being skipped as "likely too old"; the "compatibility probe ... produced no
+  help text" warning is gone.
+
+- **RULE F2 no longer points orchestration at
+  `INFERENCE_OPTIMIZER_RESCUE_PATHS`**, which it could not set.
+
+- **KernelForge packaged resources move out of `kernelforge/data`.** Example
+  tasks live under `src/kernelforge/examples/` (`resource_path('examples')`)
+  and the shipped knowledge base under
+  `kernelforge/knowledge/local_wiki/resources/`. **Upgrade note:** the 1.1.3
+  quick-start path `src/kernelforge/data/examples/...` no longer exists;
+  `resource_path('local_knowledge')` and `KERNELFORGE_PROJECT_ROOT` overrides
+  keep working.
+
+- **A rejected roofline profile logs one warning.** The profile runs once and
+  a rejected attempt logs
+  `roofline profile failed (<error class>): <message>`, and profile timeline
+  rows' `duration_sec` now include the post-attempt liveness probe and
+  capture-evidence collection.
+
+### Fixed
+
+Resume and recovery:
+
+- **A session resumed in SWEEP with no recorded sweep outcome** (for example
+  one cancelled by `recover`) re-fires the SWEEP entry hook once and measures
+  its sweep instead of idling until the lost sweep's grant runs out.
+- **Resuming on the same node after a container restart.** The lease owner
+  scope adds the start time of the PID namespace's PID 1 (two-part scopes are
+  still recognised), so `recover --confirm-scope-gone` and the resume guard no
+  longer mistake a lost container's scope for the current one.
+- **A container lost mid-`integrate_patch`** no longer always stops the resume
+  with `patch_recovery_incomplete`: once its tasks are confirmed stopped the
+  session resumes, the resume report carries `rolled_back_pending_integrate`
+  (`tree_replaced: true`, `unrestored_stash_oid`; the lost checkout's
+  uncommitted stash is not recovered), and an env-only or server-args-only KEEP
+  that reached the task row is replayed into the stack
+  (`replayed_pending_integrate`).
+- **Every sweep, explore and baseline round stops the server its AgentX client
+  booted** (read from `agentx_server.pid`) however the round ended, so a round
+  killed at the benchmark cap or cancelled no longer leaves a server holding
+  the port and GPU memory for later rungs to measure against or fail on with
+  `magpie_nonzero_invalid_measurement`. A server that outlives SIGKILL is
+  reported as `server_survived_teardown:<pid>` in `nonfatal_warnings`.
+- **On `--resume-from`, recorded workload shape outranks stale shell exports.**
+  The session's `ISL` / `OSL` / `CONC` / `TP` / `EP` / `MAX_MODEL_LEN` win over
+  exports left in the shell (for example by sourcing a generated repro script)
+  unless a flag or `--extra-env` re-pins them.
+- **`optimize --resume-from` without `--framework`** runs preflight against
+  the session's persisted framework instead of the sglang default; a
+  conflicting explicit `--framework`, an unregistered persisted framework, or a
+  manifest without `state.json` is refused with exit `2` before any install
+  step.
+- **An interrupted stack validation is unwound from its apply rows** even when
+  the ledger cannot attribute them, where resume used to halt with
+  `stack recovery lacks structured member evidence` and a patched tree; a
+  decided KEEP it cannot bind stops with `patch_recovery_incomplete` instead of
+  an unhandled `KeyError`. **Upgrade note:** see the persisted-state changes
+  under "Before upgrading from 1.1.3".
+- **A SWEEP entry or resume that cannot settle or bind a stack checkpoint**
+  stops with `patch_recovery_incomplete` instead of logging and continuing, an
+  `optimization_stack` row naming no members stops at load, and a guard-only
+  interrupted attempt left by v1.1.2 is recovered at resume with its members
+  selectable again.
+- **Non-git warm-replay teardown restores through the backup ledger** and
+  verifies `pre_image_sha256`, so a backup corrupted after apply leaves the
+  tree untouched with a `baseline_executor: nogit patch restore failed` warning
+  instead of copying corrupt bytes and reporting success. **Upgrade note:** a
+  session persisted by v1.1.0 or earlier with a pending non-git warm replay
+  stops on resume with `warm_replay_rollback_failed`.
+- **A cancelled `integrate_patch` with a restored critic verdict** always gets
+  its `-reconcile<n>` child: the check uses exact case-sensitive prefix
+  matching instead of SQL `LIKE`, which skipped near-identical keys.
+- **A resumed session leg no longer re-pushes earlier spans and Scores** into
+  the shared Langfuse trace, and a flush after CLOSE ships rows recorded after
+  CLOSE; `langfuse_receipt.json` gains a `rows_sent` cursor map (the old keys
+  are still read) and `decision_trace.jsonl` rows gain `decision_id`.
+- **A session started under workflow contract v1 and resumed on current code**
+  exports a breakdown that validates against the v1 schema, where every
+  FRAMEWORK_AGENT, KERNEL_AGENT or SWEEP exit used to fail export validation.
+
+Scheduling, phases and the LLM backend:
+
+- **A failing LLM backend is retried with exponential backoff** (2 s doubling
+  to 5 min) instead of every tick. **Upgrade note:** after an hour without a
+  successful turn the session stops with `stop_reason=backend_unhealthy`, and
+  both workflow contract digests change.
+- **An orchestrator Claude turn is cut** after
+  `INFERENCE_OPTIMIZER_CLAUDE_TURN_TIMEOUT_SEC` (default 1500 s), with leftover
+  CLI processes killed and a `backend_error` recorded, instead of stalling the
+  tick loop for 70-110 minutes behind CLI `api_retry` frames; CLI retries are
+  logged.
+- **The `emit_intent` MCP tool is offered when Claude Code's remote flags are
+  unavailable** (for example under `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`,
+  `DISABLE_TELEMETRY` or `DO_NOT_TRACK`); `agents/orchestration/mcp_setup.json`
+  records the CLI version, MCP tools and server status, and 50 consecutive
+  intent-less turns stop the session with `backend_unhealthy` after a
+  high-severity `no_intent_streak` observation.
+- **Long runs no longer fall into a permanent "Prompt is too long" loop.** The
+  specialist findings, inbox, priors-match and `current_best=` prompt sections
+  are bounded, with notes for what was omitted or held for the next turn.
+- **GPU action leases** (baseline, roofline, profile, explore,
+  `integrate_patch`) last at least one measured baseline round plus 10%
+  instead of the static catalogue TTL, so `lease_expires_in_sec` no longer goes
+  negative on healthy slow rounds and orchestration stops needing routine
+  `extend_lease` calls.
+- **A cancelled concurrency sweep** stops at its current rung and reports
+  `status: "cancelled"` with `cancel_reason`, so `stop_reason` names the cause
+  (for example `time_exhausted`) instead of `sweep_failed`, and SWEEP no longer
+  cancels its own sweep at the per-phase cap while it is inside the budget SWEEP
+  granted it.
+- **PRELUDE and ENABLEMENT wait for the initial roofline** (`reason=prelude_initial`)
+  instead of killing it at the phase-exit barrier, so the kernel phase gets its
+  analysis and candidates, and a cancelled roofline stops after one attempt
+  instead of booting two more servers.
+- **After a GEAK run ends with status `timeout`**, the GEAK-owned KERNEL phase
+  exits to the next phase instead of staying open on per-kernel pending work.
+- **A `skip_to_kernel` hint emitted outside FRAMEWORK_AGENT** is dropped with a
+  log line instead of ending FRAMEWORK_AGENT, or the whole optimize phase when
+  the kernel phase is disabled, on entry.
+- **`--no-kernel` and `--no-framework-agent` budgets.** With `--no-kernel`
+  FRAMEWORK_AGENT dispatches for its full redistributed share (79.5% instead of
+  pausing at 38%); with `--no-framework-agent` KERNEL_AGENT dispatch, lane TTL,
+  GEAK kill budget and rewrite timeouts are sized from 81.3% instead of 47%.
+  The enablement stall cap closes the lane `failed` / `stalled` with
+  `enablement_attempts_exhausted` instead of raising `AttributeError`.
+- **A session that closes on `skip_to_close` without ever measuring a
+  baseline** ends with `stop_reason=baseline_failed` instead of the
+  success-shaped `time_exhausted` or `global_converged`.
+- **The SWEEP status `cycle_reloop_feasible`** shown to orchestration reports
+  the same decision the transition takes, and the baseline warm-patch HEAD read
+  timeout rises from 5 s to 30 s.
+- **On terminal fallback and deadline paths CLOSE is recorded before** the
+  report and breakdown tasks are dispatched, so their phase attribution matches
+  the CLOSE receipt.
+
+Measurement, profiling and AgentX:
+
+- **AgentX roofline profiles run again.** `AGENTX_PHASE_WAIT_TIMEOUT_S` is
+  exported as an integer (`'7800'`, not `'7800.0'`, which made
+  `aiperf_client.sh` exit `2`), and the critic preflight's 60 s timeout reaches
+  the HTTP transport, so a slow gateway no longer stops the session.
+  **Upgrade note:** a failed roofline profile is no longer retried on the same
+  config (`max_attempts` 1; the `retry_after_*` reasons and
+  `PROFILE_ATTEMPT_AFTER_*` exports are gone), and the CUDA-graph diagnosis is
+  renamed to `diagnostics/roofline_cuda_graph_capture_<task_id>.json`.
+- **Server-bounded AgentX profile captures** (SGLang `num_steps`, vLLM
+  `--profiler-config.max_iterations`) end on the server's own step bound
+  instead of the client's 20 s window and a redundant `/stop_profile`, so
+  complete traces are no longer recorded `stop_profile_failed` or come back
+  empty. New failure reason `bounded_capture_incomplete`, a one-time safety
+  stop at `AGENTX_TRACE_FIRST_FILE_TIMEOUT_S` (default 900 s), and
+  `AGENTX_PROFILE_WINDOW_S` applies only to unbounded captures.
+- **The roofline records the last profile only with a successful trace
+  analysis**, so a failed analysis keeps the previous good record instead of
+  showing an unanalysed trace as `succeeded` (which drew false "roofline stuck
+  in trace_analyze" alerts).
+- **vLLM profile runs produce GPU kernel and `cuda_runtime` events.** The
+  profile start-up shim drops `ROCPROFILER_REGISTER_LIBRARY` before the
+  EngineCore child loads HIP, so traces are no longer CPU-only.
+- **SGLang 0.5.18-0.5.21 per-batch-size CUDA-graph capture works on profiling
+  rounds.** The TraceLens `sglang_gc_patch` is applied, so DSA models no longer
+  crash during capture, capture traces are named `bs_<n>[_dense|_sparse]`, and
+  the shape manifest keeps dense, sparse and draft variants apart.
+  Multi-node DSA runs need `HYPERLOOM_SGLANG_VERSION_PIN` when the version
+  cannot be detected, and `HYPERLOOM_ENABLE_PATCH=0` disables the patch.
+- **Profile and roofline servers import the same trees as baseline.** Every
+  launch-path prepend site builds `PYTHONPATH` / `PATH` / `LD_LIBRARY_PATH` on
+  the inherited value when the config lacks the key, instead of dropping the
+  operator's and the image's entries.
+- **A vLLM GEMM tuning request records the model's GEMM shapes** (the
+  `PYTORCH_TUNABLEOP_*` recording variables are no longer unset in the
+  shape-capture config) instead of always failing with `shape_capture_failed`.
+- **AIPerf KV and server metrics are filtered by `phase_time_ranges`**, so
+  whole-run counters are no longer attributed to both warmup and profiling.
+- **Under `HYPERLOOM_AGENTX=1` an explore KEEP graded on interactivity**
+  promotes to `current_best` instead of being dropped as
+  `candidate_axes_missing` or turned into a lift REVERT.
+- **GLM-5.3 AgentX sessions replay the uncapped corpus**, matching InferenceX.
+  **Upgrade note:** baselines and gains shift; see "Before upgrading from
+  1.1.3".
+- **Guard-refused explore variants render with their graded gain and refusal
+  reason** in orchestration and critic prompts (new `graded_gain_pct` and
+  `reason` keys on tested rows) instead of `no_meas`.
+- **A baseline boot no longer writes `runs/baseline/<id>/aiter_jit_backup/`**
+  (about 3.5 GB per sglang session) into the session directory; the dropped
+  aiter modules are parked in `<aiter>/jit/hyperloom_jit_backup`. Explore
+  tested and winner rows carry every graded axis, adding
+  `output_tput_per_gpu`.
+- **MoE PerfModel ceilings follow a runtime `--quantization` / `--dtype`
+  override** for models whose `config.json` declares `expert_dtype` at the
+  same precision as the other weights.
+- **An atom baseline's `EXTRA_ATOM_ARGS` are read**, so KB workload tags appear
+  on atom recipe, lesson and pitfall records; measured results are unaffected.
+
+Enablement:
+
+- **A non-install setup command proposed by an enablement round** ends the
+  round `apply_failed` (`setup_commands_refused`) naming every refused command,
+  and the next mandate carries a `SETUP COMMAND REFUSED` block, instead of the
+  command being dropped silently. The run-provisioned venv `pip` is accepted,
+  stopped or Ray-infeasible baselines no longer become boot evidence, and a
+  kept round no longer banks a duplicated `extra_server_args` flag.
+- **Enablement ladder rungs 3 and 4 run.** Mandates carry the resolved failure
+  class, PR discovery searches for the failure, a runtime-only round is
+  benched, patches apply to the tree the attempt imports, and later rounds boot
+  on a kept runtime. A queued `enablement_specialist` task from an older
+  `coordinator.db` costs one failed round on `--resume-from`.
+- **Enablement rounds that move a boot failure to a new root cause** are kept
+  as advanced instead of reverted as stalled; PR discovery no longer fails with
+  GitHub HTTP 422, roofline profile runs skip the gsm8k eval (about 40 minutes
+  shorter), and repeated watermark crossings get a fresh roofline.
+- **A passing enablement revalidation baseline** that finishes between the
+  dispatcher pump and the next reconcile is no longer lost, so the lane ends
+  `succeeded` with its `setup_script` record.
+- **vLLM enablements with JSON- or enum-valued arguments** (for example
+  `--compilation-config`) are compared structurally from vLLM's
+  `non-default args:` record, so `replay_sufficiency` can reach `sufficient`;
+  KEEP assertions always include the serving framework version.
+- **Enablement KEEP capture fails closed.** A KEEP whose framework tree,
+  materialized config or build output cannot be read is recorded as
+  `levers_unverified` / `build_carry_unverified`, and a baseline with a
+  missing, invalid or empty materialized config fails with `ConfigUnreadable`.
+- **A patch already bound to a patch root by an earlier round** keeps that
+  tree at KEEP instead of being re-pointed by the KEEP round's done payload.
+- **Credentialed URLs in rejected setup commands are redacted** to
+  `<index_url>` / `<vcs_url>` instead of being echoed verbatim.
+
+Install, preflight and environment:
+
+- **Specialists, the Critic and GEAK authenticate to a gateway.** Preflight
+  expands `${ANTHROPIC_API_KEY}`, `${ANTHROPIC_AUTH_TOKEN}` and
+  `${OPENAI_API_KEY}` references in `ANTHROPIC_CUSTOM_HEADERS` /
+  `OPENAI_CUSTOM_HEADERS` instead of every call failing with HTTP 401.
+- **ROCm 10 vLLM images.** Both installers find the image Python in
+  `/opt/python/bin` instead of refusing with "no torch" or "pip is required".
+- **`install.sh` run as a background job completes.** Every `ray start`
+  detaches the Ray daemons into their own session with stdin from `/dev/null`.
+- **A hand-started local Ray head without the `serving_slot` resource** is
+  restarted with it when that is safe; otherwise the error says why and the
+  session stops `baseline_failed` on the first `ray_cluster_infeasible`
+  baseline. Two identical `subprocess_nonzero` baseline failures stop at two
+  attempts.
+- **Preflight honours exported `RAY_VERSION` and `RAY_CLI_CLICK_MAX_VERSION`**,
+  and an explicit Ray pin must match exactly and is never replaced by the
+  automatic fallback.
+- **Forge GPU-target detection ignores rocminfo's generic ISA names** (for
+  example `amdgcn-amd-amdhsa--gfx12-generic`).
+- **xDiT sessions resolve their framework tree**, atom's eager fallback passes
+  `--enforce-eager`, and an unregistered framework now fails visibly (resume
+  exits `2`) instead of silently using sglang defaults.
+- **Integrate refuses a git tree whose HEAD cannot be read** with an `OSError`
+  naming the tree before applying any patch, instead of reporting patches
+  reversed while they stayed on the tree.
+
+Reports and exports:
+
+- **Credentials in the exported launch environment are masked.**
+  Credential-shaped variables in `metadata.task_config.launch_env` of
+  `session_breakdown.json` are written as `[REDACTED]`, also on re-export of
+  older sessions. **Upgrade note:** rotate any credential passed through
+  `--extra-env` before this release.
+- **Session Breakdown keeps rows whose external identifier contains a colon**
+  (for example `aiter:paged_attention_ragged`).
+- **Config-arm explore attempts in SBD v6 carry `attempt.proposal_ref`**, and
+  Langfuse Generation metadata includes `call_id`.
+- **A failing inbox, recent-outcomes or running-tasks context tool** logs its
+  traceback under `context tool <name> failed`.
+- **Bypass failure reports** carry the configured `profiling_enabled`, a
+  `phase=server` never-ready report measures `execution_time` from boot start,
+  and in-progress `conc_sweep_summary.json` lists `concs_requested` in caller
+  order.
 
 ## Hyperloom 1.1.3 release
 
