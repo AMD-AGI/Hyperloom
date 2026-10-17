@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 import yaml
 
@@ -778,6 +778,94 @@ def session_grid_bounds(shared_state: Any) -> tuple[float | None, float | None]:
     return (deadline, variant_sec)
 
 
+class _RoundBudget(NamedTuple):
+    """The benchmark passes one variant costs, and how many of them are warmups."""
+
+    warmup: int
+    total: int
+
+
+class _RoundProcess(NamedTuple):
+    """What the benchmark subprocess of one grid round returned."""
+
+    returncode: Any
+    stdout: str
+    stderr: str
+
+
+class _RoundError(NamedTuple):
+    """Why a grid round measured nothing, and under which class it is recorded."""
+
+    summary: str
+    error_class: str
+
+
+def _invalid_measurement_error(
+    proc: _RoundProcess,
+    *,
+    report: Any,
+    death_excerpt: str,
+    workspace: Any,
+    slot: Any,
+) -> _RoundError:
+    """Say why a round that finished produced no valid measurement.
+
+    The bypass and scriptable paths run the customer body in a child whose
+    stderr goes to ``benchmark_stderr.log``, not the parent pipe, so the pipe is
+    often empty and the real diagnostic is only on disk; ``report.errors`` is the
+    last resort when the pipe and the on-disk logs are both empty.
+    """
+    if proc.returncode != 0:
+        error = death_excerpt or redact_secret_values((proc.stderr or proc.stdout)[-2000:])
+        if not error.strip():
+            error = redact_secret_values(_on_disk_stderr_tail(workspace, slot))
+        if not error.strip():
+            error = redact_secret_values(_report_errors_summary(report))
+        return _RoundError(error, "magpie_nonzero_invalid_measurement")
+    if not report:
+        return _RoundError(death_excerpt or "benchmark_report missing", "benchmark_report_missing")
+    return _RoundError(
+        death_excerpt or "benchmark_report missing valid throughput/completed requests",
+        "benchmark_report_invalid_metric",
+    )
+
+
+def _preflight_abort_error(proc: _RoundProcess) -> _RoundError:
+    """Say what AgentX's preflight reported when it aborted the round."""
+    return _RoundError(
+        redact_secret_values((proc.stderr or "").strip()[-2000:]) or "AgentX preflight aborted the round",
+        AGENTX_PREFLIGHT_ERROR_CLASS,
+    )
+
+
+def _missing_workspace_error(proc: _RoundProcess, server_log: Any) -> _RoundError:
+    """Say why a round that ran to the end produced no benchmark workspace."""
+    return _RoundError(
+        server_log_death_excerpt(str(server_log))
+        or (
+            redact_secret_values((proc.stderr or proc.stdout)[-2000:])
+            if proc.returncode != 0
+            else "no benchmark_* workspace produced"
+        ),
+        "no_benchmark_workspace",
+    )
+
+
+def _variant_rounds(variant_expected_sec: Any, auto_warmup_requested: bool) -> _RoundBudget:
+    """How many full benchmark passes one variant costs, and how many are warmups."""
+    _mn_warmup_rounds = 0
+    _mn_warmup_rounds = 0
+    if variant_expected_sec is not None:
+        from ._multi_node_env import (
+            is_multi_node as _mn_is_multi_node,
+            mn_bench_warmup_enabled as _mn_bench_warmup_enabled,
+        )
+
+        _mn_warmup_rounds = 1 if (_mn_is_multi_node() and _mn_bench_warmup_enabled()) else 0
+    variant_rounds = 1 + (1 if auto_warmup_requested else 0) + _mn_warmup_rounds
+    return _RoundBudget(warmup=_mn_warmup_rounds, total=variant_rounds)
+
+
 async def run_grid(
     *,
     base_yaml_path: Path,
@@ -940,16 +1028,8 @@ async def run_grid(
             return True
         return not keep_going_on_failure
 
-    # How many full benchmark passes one variant costs.
-    _mn_warmup_rounds = 0
-    if variant_expected_sec is not None:
-        from ._multi_node_env import (
-            is_multi_node as _mn_is_multi_node,
-            mn_bench_warmup_enabled as _mn_bench_warmup_enabled,
-        )
-
-        _mn_warmup_rounds = 1 if (_mn_is_multi_node() and _mn_bench_warmup_enabled()) else 0
-    variant_rounds = 1 + (1 if auto_warmup_requested else 0) + _mn_warmup_rounds
+    _budget = _variant_rounds(variant_expected_sec, auto_warmup_requested)
+    _mn_warmup_rounds, variant_rounds = _budget.warmup, _budget.total
 
     def _skip_rest_for_budget(idx: int, *, spent_on: str, rounds_left: int = variant_rounds) -> bool:
         """Skip variant ``idx`` and every one after it, or say the budget still fits."""
@@ -1649,18 +1729,13 @@ async def run_grid(
             if workspace is None:
                 harvest_tags = [f"harvested_leaked_artifact:{src}" for src, _ in harvested]
                 agentx_preflight_abort = rc == AGENTX_PREFLIGHT_RETURNCODE
-                if agentx_preflight_abort:
-                    no_ws_error_class = AGENTX_PREFLIGHT_ERROR_CLASS
-                    no_ws_error_summary = (
-                        redact_secret_values((stderr or "").strip()[-2000:]) or "AgentX preflight aborted the round"
-                    )
-                else:
-                    no_ws_error_class = "no_benchmark_workspace"
-                    no_ws_error_summary = server_log_death_excerpt(str(server_log)) or (
-                        redact_secret_values((stderr or stdout)[-2000:])
-                        if rc != 0
-                        else "no benchmark_* workspace produced"
-                    )
+                _proc = _RoundProcess(rc, stdout, stderr)
+                _no_ws = (
+                    _preflight_abort_error(_proc)
+                    if agentx_preflight_abort
+                    else _missing_workspace_error(_proc, server_log)
+                )
+                no_ws_error_class, no_ws_error_summary = _no_ws.error_class, _no_ws.summary
                 log.warning(
                     "grid_runner: variant %d/%d name=%s aborted: %s (rc=%s)",
                     i + 1,
@@ -1754,23 +1829,14 @@ async def run_grid(
                     await _report_finished_variant(i)
                     continue
                 death_excerpt = server_log_death_excerpt(str(server_log))
-                if rc != 0:
-                    error = death_excerpt or redact_secret_values((stderr or stdout)[-2000:])
-                    # The bypass/scriptable path runs the customer body in a child whose stderr is redirected to
-                    # benchmark_stderr.log, not the parent pipe — so `stderr`/`stdout` here are often empty and the real
-                    # diagnostic (e.g. argparse "unrecognized arguments") is only on disk.
-                    if not error.strip():
-                        error = redact_secret_values(_on_disk_stderr_tail(workspace, slot))
-                    # Last resort: report.errors when the pipe and on-disk logs are all empty.
-                    if not error.strip():
-                        error = redact_secret_values(_report_errors_summary(report))
-                    invalid_class = "magpie_nonzero_invalid_measurement"
-                elif not report:
-                    error = death_excerpt or "benchmark_report missing"
-                    invalid_class = "benchmark_report_missing"
-                else:
-                    error = death_excerpt or "benchmark_report missing valid throughput/completed requests"
-                    invalid_class = "benchmark_report_invalid_metric"
+                _invalid = _invalid_measurement_error(
+                    _RoundProcess(rc, stdout, stderr),
+                    report=report,
+                    death_excerpt=death_excerpt,
+                    workspace=workspace,
+                    slot=slot,
+                )
+                error, invalid_class = _invalid.summary, _invalid.error_class
                 log.warning(
                     "grid_runner: variant %d/%d name=%s aborted: %s (rc=%s): %s",
                     i + 1,
