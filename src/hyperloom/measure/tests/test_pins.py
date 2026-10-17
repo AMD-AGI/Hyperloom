@@ -26,9 +26,16 @@ def test_pins_come_from_the_shipped_install_script() -> None:
 
 
 def test_the_preflight_default_stays_in_lockstep() -> None:
-    from hyperloom.inference_optimizer.cli import preflight
+    # Main moved the default to the public ``inferencex_checkout.DEFAULT_REF``; the old private name is read only
+    # until that move is merged here.
+    try:
+        from hyperloom.inference_optimizer.inferencex_checkout import DEFAULT_REF as default_ref
+    except ImportError:
+        from hyperloom.inference_optimizer.cli import preflight
 
-    assert pinned_tool_commits({}).inferencex == preflight._INFERENCEX_REF_DEFAULT
+        default_ref = preflight._INFERENCEX_REF_DEFAULT
+
+    assert pinned_tool_commits({}).inferencex == default_ref
 
 
 def test_environment_overrides_win_and_empty_does_not() -> None:
