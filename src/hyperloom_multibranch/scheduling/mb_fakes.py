@@ -45,16 +45,6 @@ def mb_fake_refused_fork(refusal: str) -> ForkAdmission:
     return ForkAdmission(AdmissionStatus.REJECTED, refusal)
 
 
-def mb_fake_branches_to_add(roster: Roster) -> int:
-    """How many branches to open beyond the opening batch: always 0.
-
-    Stands in for the MB2 later batches and refill of stopped slots; replaced when MB2 schedules them.
-    """
-
-    del roster
-    return 0
-
-
 def mb_fake_similar_branches(roster: Roster) -> tuple[str, ...]:
     """Branches to stop because they duplicate another: always none.
 
@@ -109,7 +99,6 @@ def _faked(step: CloseStep) -> CloseStep:
 __all__ = [
     "MB_FAKE_BASE_IMAGE_DIGEST",
     "MB_FAKE_EXPERIENCE_KB",
-    "mb_fake_branches_to_add",
     "mb_fake_close_knowledge",
     "mb_fake_learning_recall",
     "mb_fake_refused_fork",

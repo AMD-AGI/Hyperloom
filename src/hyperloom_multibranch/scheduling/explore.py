@@ -5,11 +5,14 @@
 
 The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it stops the repair branches that used up their time, starts the
 forks and repairs the fork desk admitted, consults the MB2 placeholders, and every judge interval asks the judge,
-applies what it decided and rebuilds the dashboard. The judge reads the frontier-scored progress and how similar
-archived sessions went; a judge call that has not answered by the EXPLORE deadline counts as failed, and a branch that
-has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background task of its own, in rounds as wide as the integration branch's K. When EXPLORE ends
-that task is cancelled and the integrator abandons its round, so the integration head the FINAL candidates are read
-from no longer moves and no merge test competes with FINAL's measurements.
+applies what it decided and rebuilds the dashboard. The judge is asked at once, not at its next interval, when the
+scheduler itself frees a slot: a repair branch stopped at its time limit, or an admitted fork or repair that failed to
+start. A branch the judge opens after the opening batch starts from the integration head, briefed on a focus. The
+judge reads the frontier-scored progress and how similar archived sessions went; a judge call that has not answered by
+the EXPLORE deadline counts as failed, and a branch that has not opened by then is withdrawn, so neither eats into
+FINAL. The integrator merges in a background task of its own, in rounds as wide as the integration branch's K. When
+EXPLORE ends that task is cancelled and the integrator abandons its round, so the integration head the FINAL
+candidates are read from no longer moves and no merge test competes with FINAL's measurements.
 """
 
 from __future__ import annotations
@@ -24,18 +27,18 @@ from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierScoring
 from hyperloom_multibranch.notebook.rsi.session import judge_history
-from hyperloom_multibranch.scheduling.branches import BranchControl
+from hyperloom_multibranch.scheduling.branches import BatchStart, BranchControl
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import Integrator
 from hyperloom_multibranch.scheduling.judge import Judge, JudgeDecision, JudgeView
-from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_branches_to_add, mb_fake_similar_branches
+from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_similar_branches
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchOrigin, BranchStop, StopCause
 from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
-from hyperloom_multibranch.scheduling.widening import Widening
+from hyperloom_multibranch.scheduling.widening import Widening, refill_focus
 
 logger = logging.getLogger(__name__)
 
@@ -106,9 +109,10 @@ class Explorer:
         """
 
         opening = await self._ask(window, opening=True)
+        first_batch = BatchStart(BranchOrigin.FIRST_BATCH, window.root_commit, window.explore_end)
         if opening is None:
-            await self._open_batch(1, 1, window.root_commit, BranchOrigin.FIRST_BATCH, window.explore_end)
-        elif await self._apply(opening, window.root_commit, BranchOrigin.FIRST_BATCH, window.explore_end):
+            await self._open_batch(1, 1, first_batch)
+        elif await self._apply(opening, first_batch):
             return SessionStopReason.GLOBAL_CONVERGED
         if self._clock.now() >= window.explore_end:
             return SessionStopReason.TIME_EXHAUSTED
@@ -127,15 +131,14 @@ class Explorer:
         while (now := self._clock.now()) < window.explore_end:
             if merging.done():
                 merging.result()
-            await self._branches.stop_overrun_repairs()
-            await self._start_admitted(window.explore_end)
-            await self._consult_placeholders(window)
+            overrun = await self._branches.stop_overrun_repairs()
+            if await self._start_admitted(window.explore_end) or overrun:
+                next_judge = now
+            await self._consult_placeholders()
             if now >= next_judge:
                 next_judge = now + self._interval
                 decision = await self._ask(window, opening=False)
-                if decision is not None and await self._apply(
-                    decision, window.root_commit, BranchOrigin.REFILL, window.explore_end
-                ):
+                if decision is not None and await self._apply(decision, await self._refill(window)):
                     return SessionStopReason.GLOBAL_CONVERGED
                 await self._dashboard.refresh()
             await self._clock.sleep(min(EXPLORE_TICK_SECONDS, window.explore_end - now))
@@ -147,17 +150,25 @@ class Explorer:
             if not await self._integrator.integrate_next(width):
                 await self._clock.sleep(EXPLORE_TICK_SECONDS)
 
-    async def _start_admitted(self, deadline: float) -> None:
+    async def _start_admitted(self, deadline: float) -> bool:
+        """Start the forks and repairs the fork desk admitted; true when one failed to start, freeing its slot."""
+
+        freed = False
         for admitted in self._desk.waiting():
             if await self._branches.start_admitted(admitted, deadline):
                 self._desk.release(admitted.branch)
+                stop = self._roster.entry(admitted.branch).stop
+                freed = freed or (stop is not None and stop.cause is StopCause.START_FAILED)
+        return freed
 
-    async def _consult_placeholders(self, window: ExploreWindow) -> None:
+    async def _consult_placeholders(self) -> None:
         for branch in mb_fake_similar_branches(self._roster):
             await self._stop(branch, SIMILAR_BRANCH_REASON)
-        extra = min(mb_fake_branches_to_add(self._roster), self._roster.free_slots())
-        if extra:
-            await self._branches.open_branches(extra, window.root_commit, 1, BranchOrigin.REFILL, window.explore_end)
+
+    async def _refill(self, window: ExploreWindow) -> BatchStart:
+        """Where the branches a steering judge call opens start: the integration head, which no judge stop moves."""
+
+        return BatchStart(BranchOrigin.REFILL, await self._branches.integration_head(), window.explore_end)
 
     async def _ask(self, window: ExploreWindow, *, opening: bool) -> JudgeDecision | None:
         now = self._clock.now()
@@ -192,9 +203,9 @@ class Explorer:
             self._decisions.record(Decision(DecisionKind.JUDGE_FAILED, "kept the status quo"))
         return decision
 
-    async def _apply(self, decision: JudgeDecision, start_commit: str, origin: BranchOrigin, deadline: float) -> bool:
-        """Apply the stop and K orders, then open the branches the judge asked for, of ``origin`` from
-        ``start_commit``; True, and nothing opened, when the judge asked to stop the session."""
+    async def _apply(self, decision: JudgeDecision, start: BatchStart) -> bool:
+        """Apply the stop and K orders, then open the branches the judge asked for as ``start`` says, into the slots the
+        stops freed; True, and nothing opened, when the judge asked to stop the session."""
 
         self._decisions.record(
             Decision(
@@ -214,19 +225,24 @@ class Explorer:
             await self._branches.apply_k({order.branch: order.k for order in decision.k})
         if decision.session_stop:
             return True
-        await self._open_batch(decision.open_count, decision.open_k, start_commit, origin, deadline)
+        focus = await self._focus(decision, start) if start.origin is BranchOrigin.REFILL else ()
+        await self._open_batch(decision.open_count, decision.open_k, start, focus)
         return False
 
-    async def _open_batch(
-        self, count: int, k: int, start_commit: str, origin: BranchOrigin, deadline: float
-    ) -> tuple[BranchEntry, ...]:
-        """Open up to ``count`` branches of ``origin`` at K ``k`` from ``start_commit``, each by ``deadline``; none
-        once the deadline has passed. The only place a batch is cut to the free slots: a fork or repair admitted while
-        the batch starts can take the last ones, and the branches that found no slot are recorded as ``open_cut``."""
+    async def _focus(self, decision: JudgeDecision, start: BatchStart) -> tuple[str, ...]:
+        shares = await self._notebook.op_shares(start.start_commit)
+        return refill_focus(decision.focus, decision.open_count, shares)
 
-        if self._clock.now() >= deadline:
+    async def _open_batch(
+        self, count: int, k: int, start: BatchStart, focus: tuple[str, ...] = ()
+    ) -> tuple[BranchEntry, ...]:
+        """Open up to ``count`` branches at K ``k`` as ``start`` says, briefed on ``focus``; none once its deadline has
+        passed. The only place a batch is cut to the free slots: a fork or repair admitted while the batch starts can
+        take the last ones, and the branches that found no slot are recorded as ``open_cut``."""
+
+        if self._clock.now() >= start.deadline:
             return ()
-        opened = await self._branches.open_branches(count, start_commit, k, origin, deadline)
+        opened = await self._branches.open_branches(count, k, start, focus)
         if len(opened) < count:
             detail = {"requested": count, "opened": len(opened), "open_cut": count - len(opened)}
             self._decisions.record(Decision(DecisionKind.OPEN, OPEN_CUT_REASON, detail=detail))

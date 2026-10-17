@@ -226,6 +226,8 @@ def test_a_reply_in_the_mb1_format_still_parses(reply: dict[str, object], decisi
         _reply({"open": 1, "stop": [{"branch": "b01"}]}),
         _reply({"open": 1, "stop": "b01"}),
         _reply({"open": 1, "stop_session": "yes"}),
+        _reply({"open": 1, "focus": "attention"}),
+        _reply({"open": 1, "focus": [3]}),
     ],
 )
 def test_malformed_reply_gives_no_decision(reply: str) -> None:
@@ -252,7 +254,7 @@ def test_cap_drops_unknown_stopped_and_integration_orders_and_clamps_k() -> None
     )
 
     assert cap_decision(decision, _view()) == JudgeDecision(
-        open_count=0,
+        open_count=3,
         k=(KOrder("b01", 2), KOrder(INTEGRATION_BRANCH, 1)),
         stop=(StopOrder("b02", "flat"),),
         session_stop="done",
@@ -260,10 +262,55 @@ def test_cap_drops_unknown_stopped_and_integration_orders_and_clamps_k() -> None
 
 
 @pytest.mark.parametrize(("asked", "granted"), [(0, 1), (2, 2), (7, 4)])
-def test_opening_count_is_clamped_to_one_and_the_free_slots(asked: int, granted: int) -> None:
-    view = _view(opening=True, roster=OPENING_ROSTER, free_slots=4)
+def test_opening_count_is_clamped_to_one_and_the_branch_cap(asked: int, granted: int) -> None:
+    view = _view(opening=True, roster=OPENING_ROSTER, free_slots=1)
 
     assert cap_decision(JudgeDecision(open_count=asked), view).open_count == granted
+
+
+@pytest.mark.parametrize(("asked", "granted"), [(0, 0), (1, 1), (7, 4)])
+def test_a_later_call_opens_what_it_asks_up_to_the_branch_cap_and_never_one_by_default(
+    asked: int, granted: int
+) -> None:
+    assert cap_decision(JudgeDecision(open_count=asked), _view()).open_count == granted
+
+
+def test_a_full_roster_still_opens_the_branch_a_stop_in_the_same_answer_frees() -> None:
+    full = _view(free_slots=0)
+    parsed = parse_decision(_reply({"open": 1, "stop": [{"branch": "b02", "reason": STOP_REASON}]}))
+
+    assert parsed is not None
+    capped = cap_decision(parsed, full)
+    assert (capped.open_count, capped.stop) == (1, (StopOrder("b02", STOP_REASON),))
+
+
+@pytest.mark.parametrize(
+    ("reply", "focus"),
+    [
+        ({"open": 2, "focus": ["attention", "moe_gemm"]}, ("attention", "moe_gemm")),
+        ({"open": 2, "focus": [None, " moe_gemm "]}, ("", "moe_gemm")),
+        ({"open": 2}, ()),
+    ],
+)
+def test_a_reply_names_the_focus_of_the_branches_it_opens_or_leaves_it_out(
+    reply: dict[str, object], focus: tuple[str, ...]
+) -> None:
+    parsed = parse_decision(_reply(reply))
+
+    assert parsed is not None and (parsed.open_count, parsed.focus) == (2, focus)
+
+
+def test_a_focus_past_the_branches_opened_is_dropped() -> None:
+    capped = cap_decision(JudgeDecision(open_count=1, focus=("attention", "moe_gemm")), _view())
+
+    assert capped.focus == ("attention",)
+
+
+def test_the_prompt_explains_opening_at_any_call_its_focus_and_the_free_slots() -> None:
+    assert _state(_view())["free_branch_slots"] == 2
+    for text in ("at any call", "focus", "free_branch_slots", "integration head"):
+        assert text in JUDGE_SYSTEM_PROMPT
+    assert '"focus"' in render_prompt(_view())
 
 
 async def test_decide_returns_the_capped_decision_and_logs_the_exchange(tmp_path: Path) -> None:
@@ -278,7 +325,7 @@ async def test_decide_returns_the_capped_decision_and_logs_the_exchange(tmp_path
 
     decision = await judge.decide(_view())
 
-    assert decision == JudgeDecision(open_count=0, k=(KOrder("b01", 2),))
+    assert decision == JudgeDecision(open_count=3, k=(KOrder("b01", 2),))
     assert seen == [(JUDGE_SYSTEM_PROMPT, render_prompt(_view()))]
     (row,) = [json.loads(line) for line in transcript.read_text().splitlines()]
     assert row["at"] == NOW and row["error"] == "" and row["prompt"] == seen[0][1]

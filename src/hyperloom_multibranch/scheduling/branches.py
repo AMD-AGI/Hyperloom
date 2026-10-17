@@ -5,7 +5,8 @@
 notebook in step.
 
 Opening a branch records its ``OPEN`` lineage, cuts it in the experiment repository at its start commit, starts its
-specialist there and gives it its K. A repair the fork desk admitted is opened the same way at the commit its blocked
+specialist there and gives it its K; a branch the scheduler opens in a batch starts on the session's brief of it, on
+the focus it was opened with. A repair the fork desk admitted is opened the same way at the commit its blocked
 candidate was measured against; a fork is cut by the rule gate, which lands the fix on it first and records its
 ``SPLIT`` lineage, so it gets no ``OPEN``: it is opened at its head once that head has moved past the commit it was cut
 at, and stopped as not started when that has not happened within :data:`SPECIALIST_START_SECONDS` of its admission.
@@ -31,10 +32,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from hyperloom_multibranch.contracts.fork import RepairRequest
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle
+from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
@@ -51,6 +54,7 @@ from hyperloom_multibranch.scheduling.roster import (
 )
 
 if TYPE_CHECKING:
+    from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
 
 logger = logging.getLogger(__name__)
@@ -67,37 +71,59 @@ REPAIR_BRANCH_SECONDS = 2 * 3600.0
 REPAIR_TIME_LIMIT_REASON = f"a repair branch runs at most {REPAIR_BRANCH_SECONDS / 3600:g} hours"
 
 
+@dataclass(frozen=True)
+class BatchStart:
+    """Where a batch of specialist branches opens: their origin, the commit they start from, and the clock time each
+    must have started by."""
+
+    origin: BranchOrigin
+    start_commit: str
+    deadline: float
+
+
 class BranchControl:
-    """Every change to a branch goes through here."""
+    """Every change to a branch goes through here; ``briefs`` brief each specialist it starts."""
 
     def __init__(
-        self, context: SchedulerContext, lifecycle: SpecialistLifecycle, toolbox: RealToolbox, repo: ExperimentRepo
+        self,
+        context: SchedulerContext,
+        lifecycle: SpecialistLifecycle,
+        toolbox: RealToolbox,
+        repo: ExperimentRepo,
+        briefs: SessionBriefs,
     ) -> None:
         self._roster = context.roster
         self._notebook = context.notebook
         self._lifecycle = lifecycle
         self._toolbox = toolbox
         self._repo = repo
+        self._briefs = briefs
         self._processes = context.processes
         self._decisions = context.decisions
         self._clock = context.clock
         self._specialists: set[str] = set()
 
+    async def integration_head(self) -> str:
+        return await self._repo.head(INTEGRATION_BRANCH)
+
     async def open_branches(
-        self, count: int, start_commit: str, k: int, origin: BranchOrigin, deadline: float
+        self, count: int, k: int, start: BatchStart, focus: tuple[str, ...] = ()
     ) -> tuple[BranchEntry, ...]:
-        """Open up to ``count`` specialist branches of ``origin`` from ``start_commit``, record ``OPEN``, start them,
-        each by ``deadline`` (clock seconds); the branches opened before the roster first refuses one.
+        """Open up to ``count`` specialist branches at K ``k`` as ``start`` says, record ``OPEN``, start them; the
+        branches opened before the roster first refuses one. The n-th branch is briefed on ``focus[n]``, on none past
+        its end or where it is ``""``.
 
         Forks and repairs are admitted while a branch starts, so the roster is asked again before each branch, right
         before its branch id is issued: a refused branch takes no id."""
 
         opened = []
-        for _ in range(count):
+        for index in range(count):
             if self._roster.open_refusal():
                 break
-            entry = self._roster.open(self._roster.next_branch_id(), origin=origin, start_commit=start_commit, k=k)
-            opened.append(await self._open(entry, start_commit, deadline, repair=None))
+            branch = self._roster.next_branch_id()
+            entry = self._roster.open(branch, origin=start.origin, start_commit=start.start_commit, k=k)
+            aim = focus[index] if index < len(focus) else ""
+            opened.append(await self._open(entry, start.start_commit, start.deadline, repair=None, focus=aim))
         return tuple(opened)
 
     async def start_admitted(self, admitted: AdmittedBranch, deadline: float) -> bool:
@@ -134,19 +160,28 @@ class BranchControl:
         return "" if head == parent_commit else head
 
     async def _open(
-        self, entry: BranchEntry, start_commit: str, deadline: float, *, repair: RepairRequest | None
+        self,
+        entry: BranchEntry,
+        start_commit: str,
+        deadline: float,
+        *,
+        repair: RepairRequest | None,
+        focus: str | None = None,
     ) -> BranchEntry:
         """Record ``OPEN`` and cut a branch the scheduler cuts, give the toolbox its K and start its specialist, on
-        ``repair`` for a repair branch; a branch any of that fails for, or that is not done within
-        :data:`SPECIALIST_START_SECONDS` or by ``deadline``, is stopped with the failure as the reason."""
+        ``repair`` for a repair branch, and on the session's brief on ``focus`` unless that is ``None``; a branch any of
+        that fails for, or that is not done within :data:`SPECIALIST_START_SECONDS` or by ``deadline``, is stopped
+        with the failure as the reason."""
 
         seconds = min(SPECIALIST_START_SECONDS, deadline - self._clock.now())
-        started = await settled(self._clock.wait_for(self._launch(entry, start_commit, repair), seconds))
+        started = await settled(self._clock.wait_for(self._launch(entry, start_commit, repair, focus), seconds))
         if isinstance(started, BaseException):
             logger.error("the specialist of %s did not start", entry.branch, exc_info=started)
             await self._fail_start(entry, failure_text(started))
             return entry
-        detail = {"start_commit": start_commit, "k": entry.k, "from_branch": entry.from_branch}
+        detail: dict[str, object] = {"start_commit": start_commit, "k": entry.k, "from_branch": entry.from_branch}
+        if focus is not None:
+            detail["focus"] = focus
         kind = DECISION_KINDS.get(entry.origin, DecisionKind.OPEN)
         self._decisions.record(Decision(kind, f"{entry.origin.value} branch started", entry.branch, detail))
         return entry
@@ -171,11 +206,12 @@ class BranchControl:
             self._decisions.record(Decision(DecisionKind.SET_K, f"K {entry.k}", branch, detail))
         await self.push_quota()
 
-    async def stop_overrun_repairs(self) -> None:
-        """Stop every repair branch admitted :data:`REPAIR_BRANCH_SECONDS` ago or earlier; a step that fails is
-        logged, as CLOSE kills what the stop left."""
+    async def stop_overrun_repairs(self) -> tuple[str, ...]:
+        """Stop every repair branch admitted :data:`REPAIR_BRANCH_SECONDS` ago or earlier and return them; a step that
+        fails is logged, as CLOSE kills what the stop left."""
 
         now = self._clock.now()
+        stopped = []
         for entry in self._roster.entries():
             if entry.origin is not BranchOrigin.REPAIR or entry.stop is not None:
                 continue
@@ -184,6 +220,8 @@ class BranchControl:
             stop = BranchStop(StopCause.REPAIR_TIME_LIMIT, REPAIR_TIME_LIMIT_REASON, now)
             for failure in await self.stop_branch(entry.branch, stop):
                 logger.error("the time-limit stop of %s did not finish cleanly", entry.branch, exc_info=failure)
+            stopped.append(entry.branch)
+        return tuple(stopped)
 
     async def stop_branch(self, branch: str, stop: BranchStop) -> tuple[BaseException, ...]:
         """Withdraw everything of ``branch`` and return the steps that failed; stopping it again does nothing.
@@ -240,7 +278,12 @@ class BranchControl:
     async def push_quota(self) -> None:
         await self._toolbox.set_policy(self._roster.quota_policy())
 
-    async def _launch(self, entry: BranchEntry, start_commit: str, repair: RepairRequest | None) -> None:
+    async def _launch(
+        self, entry: BranchEntry, start_commit: str, repair: RepairRequest | None, focus: str | None
+    ) -> None:
+        """Start the specialist; without a ``focus`` it starts unbriefed, and the runtime briefs each launch itself."""
+
+        brief = "" if focus is None else await self._briefs.text(entry.branch, start_commit, focus=focus)
         if entry.origin.cut_by_scheduler:
             reason = f"{entry.origin.value} branch" + (f" of {entry.from_branch}" if entry.from_branch else "")
             await self._notebook.record_lineage(
@@ -249,7 +292,7 @@ class BranchControl:
             await self._repo.create_branch(entry.branch, start_commit)
         await self.push_quota()
         self._specialists.add(entry.branch)
-        started = await settled(self._lifecycle.start(entry.branch, start_commit, repair=repair))
+        started = await settled(self._lifecycle.start(entry.branch, start_commit, brief=brief, repair=repair))
         if isinstance(started, BaseException):
             self._specialists.discard(entry.branch)
             raise started
@@ -273,5 +316,6 @@ __all__ = [
     "REPAIR_TIME_LIMIT_REASON",
     "SPECIALIST_CALL_SECONDS",
     "SPECIALIST_START_SECONDS",
+    "BatchStart",
     "BranchControl",
 ]

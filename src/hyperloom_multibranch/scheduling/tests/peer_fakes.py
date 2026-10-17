@@ -347,7 +347,8 @@ class RecordedSessions:
     :class:`~hyperloom_multibranch.specialist.scripted.ScriptedSession` of its branch's script, after the branch's
     ``step`` when one is given; a branch without a script idles until it is stopped.
 
-    ``started`` keeps the start commit of every branch a run started on, ``repairs`` the repair a repair branch's
+    ``started`` keeps the start commit of every branch a run started on, ``briefs`` the brief its first run started
+    on, ``repairs`` the repair a repair branch's
     first run started on, ``k`` its last K and ``quota_at_start`` the K the toolbox's policy gave it as its first run
     started; ``running`` holds the branches whose last run was not
     stopped, and ``stopped`` every stop a run was asked for. A run of a branch in ``hanging`` never returns from its
@@ -371,6 +372,7 @@ class RecordedSessions:
         self._steps = dict(steps or {})
         self.hanging = hanging
         self.started: dict[str, str] = {}
+        self.briefs: dict[str, str] = {}
         self.repairs: dict[str, RepairRequest] = {}
         self.k: dict[str, int] = {}
         self.quota_at_start: dict[str, int | None] = {}
@@ -383,6 +385,7 @@ class RecordedSessions:
             policies = self._toolbox.policies
             self.quota_at_start[branch] = policies[-1].branch_k.get(branch) if policies else None
         self.started.setdefault(branch, start.start_commit)
+        self.briefs.setdefault(branch, start.brief)
         if start.repair is not None:
             self.repairs.setdefault(branch, start.repair)
         self.k[branch] = start.k

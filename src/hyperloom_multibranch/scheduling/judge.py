@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The judge: an LLM that, inside the scheduler's hard caps, decides the branches' K, the opening count and the stops.
+"""The judge: an LLM that, inside the scheduler's hard caps, decides the branches' K, what to open and the stops.
 
 The scheduler hands the judge a :class:`JudgeView` (the roster, each branch's frontier progress, the remaining budget,
 the integration branch's recorded value, how similar archived sessions went and whether a branch opened now would
@@ -30,6 +30,7 @@ from hyperloom_multibranch.specialist.prompts import VERSION_HEX
 
 _KEY_OPEN = "open"
 _KEY_OPEN_K = "open_k"
+_KEY_FOCUS = "focus"
 _KEY_BRANCHES = "branches"
 _KEY_STOP = "stop"
 _KEY_STOP_SESSION = "stop_session"
@@ -39,8 +40,15 @@ _KEY_REASON = "reason"
 JUDGE_SYSTEM_PROMPT = """You are the scheduler's judge in a multi-branch LLM inference optimization session.
 Specialist branches explore optimizations in parallel; the integration branch merges their kept commits.
 Each branch has K, the number of tests it may run at once. Within the hard caps you are given, decide:
-how many branches to open (only when the view says opening is true), each branch's K (the integration branch
-included), which specialist branches to stop and why, and whether the whole session should stop early.
+how many branches to open, each branch's K (the integration branch included), which specialist branches to stop and
+why, and whether the whole session should stop early.
+You may open branches at any call. opening is true only for the call that sizes the opening batch, which opens at
+least one branch from the root commit. A branch opened at a later call starts from the integration head, briefed on
+its focus: the op it should speed up. Name the focus of each, or leave it out and the branch is briefed on the
+largest op of the integration head's latest profile, or on none when that head was never profiled. The opening batch
+is given no focus. free_branch_slots counts the branches that may still be opened before your stops take effect: a
+branch you stop frees its slot for a branch you open in the same answer, and branches beyond the slots left are not
+opened.
 Spend the budget where the expected gain is highest: a branch whose frontier expected_gain_pct is low and that is not
 observing a slow-paying direction is a candidate to stop or to lower K; keep K where the gain is high.
 A branch's basis says what its expected gain rests on: its own trend, a prior from similar past sessions, the floor
@@ -58,8 +66,10 @@ Stop the session only when no branch is expected to gain anything worth the rema
 Answer with exactly ONE JSON object and nothing after it."""
 
 _REPLY_FORMAT = """Reply with one JSON object of this shape:
-{"open": <int, branches to open now; 0 unless opening is true>,
- "open_k": <int, the K of every branch opened now; ignored unless opening is true>,
+{"open": <int, branches to open now; 0 opens none>,
+ "open_k": <int, the K of every branch opened now>,
+ "focus": ["<op the first branch opened now should speed up>", ...] (optional; null for a branch you leave to the
+  default),
  "branches": [{"branch": "<branch id>", "k": <int>}],
  "stop": [{"branch": "<branch id>", "reason": "<why>"}],
  "stop_session": null or {"reason": "<why the session should stop now>"}}
@@ -71,7 +81,8 @@ JUDGE_PROMPT_VERSION = hashlib.sha256(f"{JUDGE_SYSTEM_PROMPT}\n{_REPLY_FORMAT}".
 
 @dataclass(frozen=True)
 class JudgeView:
-    """What the judge sees; ``opening`` is true only for the call that sizes the opening batch.
+    """What the judge sees; ``opening`` is true only for the call that sizes the opening batch, which opens at least
+    one branch.
 
     ``free_slots`` is the roster's own count of branches that may still be opened; ``history`` is the notebook's
     digest of similar archived sessions, empty when the archive holds none. ``widening`` says whether a branch
@@ -109,11 +120,14 @@ class StopOrder:
 class JudgeDecision:
     """A non-empty ``session_stop`` is the reason the judge asks for a soft stop of the session.
 
-    ``open_k`` is the K of the branches opened now; a K order cannot name them before they exist.
+    ``open_k`` is the K of the branches opened now; a K order cannot name them before they exist. ``focus`` is the op
+    the judge names for each branch opened now, in the order they open; ``""`` and a branch past its end leave the
+    branch to the default focus.
     """
 
     open_count: int = 0
     open_k: int = 1
+    focus: tuple[str, ...] = ()
     k: tuple[KOrder, ...] = ()
     stop: tuple[StopOrder, ...] = ()
     session_stop: str = ""
@@ -217,6 +231,13 @@ def _objects(payload: Mapping[str, object], key: str) -> list[Mapping[str, objec
     return items
 
 
+def _focus(payload: Mapping[str, object]) -> tuple[str, ...]:
+    items = payload.get(_KEY_FOCUS) or []
+    if not isinstance(items, list) or not all(item is None or isinstance(item, str) for item in items):
+        raise _MalformedReply(f"{_KEY_FOCUS} is not a list of ops")
+    return tuple((item or "").strip() for item in items)
+
+
 def _session_stop(payload: Mapping[str, object]) -> str:
     request = payload.get(_KEY_STOP_SESSION)
     if request is None:
@@ -236,6 +257,7 @@ def parse_decision(reply: str) -> JudgeDecision | None:
         return JudgeDecision(
             open_count=_int_field(payload, _KEY_OPEN),
             open_k=_int_field(payload, _KEY_OPEN_K) if _KEY_OPEN_K in payload else 1,
+            focus=_focus(payload),
             k=tuple(
                 KOrder(_str_field(item, _KEY_BRANCH), _int_field(item, "k"))
                 for item in _objects(payload, _KEY_BRANCHES)
@@ -254,7 +276,9 @@ def cap_decision(decision: JudgeDecision, view: JudgeView) -> JudgeDecision:
     """``decision`` cut to the caps and to the live branches; applying it twice changes nothing more.
 
     Orders naming an unknown or stopped branch are dropped, the integration branch cannot be stopped, a branch being
-    stopped gets no K order, and a later order for the same branch replaces an earlier one.
+    stopped gets no K order, and a later order for the same branch replaces an earlier one. The opening call opens at
+    least one branch; no call opens more than ``max_branches``. The free slots are not a cut here: they are read before
+    the stops free theirs, and the branches that find no slot are cut as they open.
     """
 
     live = {entry.branch: entry for entry in view.roster if entry.stop is None}
@@ -268,10 +292,11 @@ def cap_decision(decision: JudgeDecision, view: JudgeView) -> JudgeDecision:
         for order in decision.k
         if order.branch in live and order.branch not in stops
     }
-    opened = min(max(decision.open_count, 1), view.free_slots) if view.opening else 0
+    opened = min(max(decision.open_count, 1 if view.opening else 0), view.caps.max_branches)
     return JudgeDecision(
         open_count=opened,
         open_k=view.caps.clamp_k(decision.open_k),
+        focus=decision.focus[:opened],
         k=tuple(ks.values()),
         stop=tuple(stops.values()),
         session_stop=decision.session_stop,

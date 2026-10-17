@@ -32,15 +32,18 @@ from hyperloom.contracts.recipe import Recipe, RecipeDelta, apply
 from hyperloom.hosted.mcp_server import MIN_TOKEN_LENGTH, McpServer, McpServerConfig
 from hyperloom.measure.versions import socket_versions
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
+from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
+from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent
+from hyperloom_multibranch.contracts.notebook.records import LineageEvent, ToolResultPointer
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.notebook.tests.factories import delta, intent
 from hyperloom_multibranch.scheduling.budget import SessionBudget
-from hyperloom_multibranch.scheduling.explore import OPEN_CUT_REASON
+from hyperloom_multibranch.scheduling import branches
+from hyperloom_multibranch.scheduling.explore import EXPLORE_TICK_SECONDS, OPEN_CUT_REASON
 from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL
 from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
@@ -703,3 +706,199 @@ async def test_a_judge_stop_the_runtime_refuses_does_not_end_the_session(tmp_pat
     [stop] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == "b02"]
     assert stop["detail"]["failures"] == ["RuntimeError: the runtime refused to stop b02"]
     assert stage.pids and not any(running(pid) for pid in stage.pids)
+
+
+def _refill_steer(open_count: int) -> str:
+    """A steering reply on a full roster: stop ``b02`` and open ``open_count`` branches, the first on attention."""
+
+    stop = [{"branch": "b02", "reason": STOP_REASON}]
+    return _reply({"open": open_count, "focus": ["attention"], "branches": [], "stop": stop})
+
+
+def _origins(stage: Stage) -> dict[str, str]:
+    roster = json.loads(stage.layout.roster.read_text())
+    return {entry["branch"]: entry["origin"] for entry in roster["entries"] if entry["branch"] != INTEGRATION_BRANCH}
+
+
+def _judge_times(stage: Stage) -> list[float]:
+    return [json.loads(line)["at"] for line in stage.layout.judge.read_text().splitlines()]
+
+
+async def _refilled_on_a_full_roster(stage: Stage, open_count: int) -> str:
+    """Run the session in which the judge, on a roster ``b01``, ``b02`` and the fork ``b03`` fill, stops ``b02`` and
+    asks for ``open_count`` branches; the one branch opened, which must have started at the integration head."""
+
+    _script(stage)
+    stage.judge = ScriptedCompletion([OPENING, _refill_steer(open_count)])
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    [refill] = [branch for branch, origin in _origins(stage).items() if origin == BranchOrigin.REFILL.value]
+    start = stage.sessions.started[refill]
+    assert recipe_tags(await stage.repo.read_recipe(start)) == {"c1"}
+    [opened] = [row for row in _decisions(stage) if row["kind"] == "open" and row["branch"] == refill]
+    assert stage.sessions.briefs[refill].startswith(f"Startup brief from {start}")
+    assert stage.briefs.for_branch(refill).focus == "attention" and opened["detail"]["focus"] == "attention"
+    return refill
+
+
+async def test_a_judge_stop_on_a_full_roster_frees_a_slot_refilled_at_once_from_the_integration_head(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+
+    refill = await _refilled_on_a_full_roster(stage, 1)
+
+    assert refill == "b04"
+    assert not [row for row in _decisions(stage) if row["kind"] == "open" and not row["branch"]]
+
+
+async def test_a_judge_asking_for_more_than_its_stops_free_opens_what_fits_and_records_the_cut(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+
+    await _refilled_on_a_full_roster(stage, 2)
+
+    sessionwide = [row for row in _decisions(stage) if row["kind"] in ("judge", "open") and not row["branch"]]
+    assert [row["kind"] for row in sessionwide][:3] == ["judge", "judge", "open"]
+    assert sessionwide[1]["detail"]["open"] == 2
+    assert (sessionwide[2]["reason"], sessionwide[2]["detail"]) == (
+        OPEN_CUT_REASON,
+        {"requested": 2, "opened": 1, "open_cut": 1},
+    )
+
+
+async def test_a_judge_opens_a_later_batch_without_stopping_a_branch_on_the_largest_op_of_the_head(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    opening = _reply({"open": 1, "focus": ["attention"], "branches": [], "stop": []})
+    stage.judge = ScriptedCompletion([opening, _reply({"open": 1, "branches": [], "stop": []})])
+
+    async def profiled(branch: str) -> None:
+        shares = {"moe_gemm": 41.5, "attention": 22.0}
+        pointer = ToolResultPointer(branch, "job-1", "/a", "trace analysed", await stage.root(), "", shares)
+        await stage.handle(Role.TOOLBOX).notify_tool_result(pointer)
+
+    stage.steps = {"b01": profiled}
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    assert _origins(stage) == {"b01": BranchOrigin.FIRST_BATCH.value, "b02": BranchOrigin.REFILL.value}
+    root = await stage.root()
+    assert stage.sessions.started == {"b01": root, "b02": root}
+    assert stage.briefs.for_branch("b01").focus == "" and stage.briefs.for_branch("b02").focus == "moe_gemm"
+
+
+def _admit_on_start(stage: Stage, admit: Callable[[str, str], Awaitable[ForkAdmission]]) -> type[RefusingRuntime]:
+    """A runtime that, once ``b01`` has started, has ``admit`` ask for a fork or repair of it; a test double for a
+    specialist's branch request, not a placeholder."""
+
+    class AskingRuntime(RefusingRuntime):
+        async def start(
+            self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None
+        ) -> None:
+            await super().start(branch, start_commit, brief, repair)
+            if branch == "b01":
+                stage.forks.append(await admit(branch, start_commit))
+
+    return AskingRuntime
+
+
+def _repair(branch: str, parent_commit: str) -> RepairRequest:
+    intent = Intent(branch, parent_commit, "attention", "fp8 kv cache", IntentLayer.CONFIG)
+    blocked = Judgement(Verdict.BLOCKED, 6.0, 2.0, ("r1", "r2"), {GRADED_OUTPUT: 1060.0}, accuracy_ok=False)
+    return RepairRequest(intent, tagged("fp8-kv"), blocked, "per-tensor KV scales; scale per head")
+
+
+def _judged_within_a_tick_of(stage: Stage, freed_at: float) -> None:
+    """The judge was asked within one tick of ``freed_at``, well before its interval would have asked it."""
+
+    times = _judge_times(stage)
+    assert any(freed_at <= at <= freed_at + EXPLORE_TICK_SECONDS for at in times), (freed_at, times)
+    assert freed_at + EXPLORE_TICK_SECONDS < times[0] + SETTINGS.judge_interval_seconds
+
+
+async def test_a_repair_stopped_at_its_time_limit_has_the_judge_asked_at_the_next_tick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(branches, "REPAIR_BRANCH_SECONDS", 60.0)
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.runtime_type = _admit_on_start(stage, lambda b, c: stage.setup.desk.admit_repair(_repair(b, c)))
+
+    await stage.run()
+
+    [(status, repair)] = [(admission.status, admission.branch) for admission in stage.forks]
+    assert status is AdmissionStatus.ACCEPTED
+    [stop] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == repair]
+    assert str(stop["reason"]).startswith(StopCause.REPAIR_TIME_LIMIT.value)
+    _judged_within_a_tick_of(stage, float(str(stop["at"])))
+
+
+async def test_an_admitted_fork_that_fails_to_start_has_the_judge_asked_at_the_next_tick(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.runtime_type = _admit_on_start(stage, lambda b, c: stage.setup.desk.admit(ForkRequest(b, c, FIX_REASON)))
+
+    await stage.run()
+
+    [(status, fork)] = [(admission.status, admission.branch) for admission in stage.forks]
+    assert status is AdmissionStatus.ACCEPTED
+    [stop] = [row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] == fork]
+    assert str(stop["reason"]).startswith(StopCause.START_FAILED.value)
+    _judged_within_a_tick_of(stage, float(str(stop["at"])))
+
+
+class NoRefillRuntime(RefusingRuntime):
+    """A runtime that cannot start any branch past ``b01``; a failure double, not a placeholder."""
+
+    async def start(self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None) -> None:
+        if branch != "b01":
+            raise RuntimeError(f"no specialist CLI for {branch}")
+        await super().start(branch, start_commit, brief, repair)
+
+
+async def test_a_branch_the_judge_opens_that_fails_to_start_does_not_have_the_judge_asked_early(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.judge = ScriptedCompletion([_reply({"open": 1})], fallback=_reply({"open": 1}))
+    stage.runtime_type = NoRefillRuntime
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    failed = [
+        row for row in _decisions(stage) if row["kind"] == "stop" and row["branch"] not in ("b01", INTEGRATION_BRANCH)
+    ]
+    assert failed and all(str(row["reason"]).startswith(StopCause.START_FAILED.value) for row in failed)
+    times = _judge_times(stage)
+    assert len(times) > 2
+    assert all(later - earlier >= SETTINGS.judge_interval_seconds for earlier, later in zip(times, times[1:]))
+
+
+async def test_a_repair_admitted_while_a_refill_starts_cuts_the_refill_and_the_session_goes_on(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.judge = ScriptedCompletion([_reply({"open": 1}), _reply({"open": 2})])
+
+    class CrowdingRefill(RefusingRuntime):
+        async def start(
+            self, branch: str, start_commit: str, brief: str = "", repair: RepairRequest | None = None
+        ) -> None:
+            await super().start(branch, start_commit, brief, repair)
+            if branch == "b02":
+                stage.forks.append(await stage.setup.desk.admit_repair(_repair("b01", start_commit)))
+
+    stage.runtime_type = CrowdingRefill
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
+    assert [(admission.status, admission.branch) for admission in stage.forks] == [(AdmissionStatus.ACCEPTED, "b03")]
+    assert _origins(stage) == {
+        "b01": BranchOrigin.FIRST_BATCH.value,
+        "b02": BranchOrigin.REFILL.value,
+        "b03": BranchOrigin.REPAIR.value,
+    }
+    [cut] = [row for row in _decisions(stage) if row["kind"] == "open" and not row["branch"]]
+    assert (cut["reason"], cut["detail"]) == (OPEN_CUT_REASON, {"requested": 2, "opened": 1, "open_cut": 1})

@@ -1,17 +1,20 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Whether a branch opened now would still pay off: signals the judge weighs, never a cap the scheduler enforces.
+"""Opening branches during EXPLORE: whether one opened now would still pay off, and what each is briefed to attack.
 
 Whether a branch may be opened at all is the roster's answer (its free slots, a closed roster, a stopping session).
-These signals say whether one opened now has the time and the test capacity to show progress: the least EXPLORE time
-a new branch needs to show a trend, and how many more tests the toolbox would run at once.
+The signals here are what the judge weighs, never a cap the scheduler enforces: whether a branch opened now has the
+time and the test capacity to show progress, as the least EXPLORE time a new branch needs to show a trend and how many
+more tests the toolbox would run at once. A branch opened after the opening batch is briefed on a focus: the op the
+judge names for it, or else the largest op of the latest profile of the commit it starts from.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+from hyperloom_multibranch.contracts.notebook.records import OpShares
 from hyperloom_multibranch.contracts.toolbox import QueueState, Toolbox
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy
 from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS
@@ -47,6 +50,14 @@ def toolbox_headroom(caps: RosterCaps, queue_state: QueueState) -> int:
     return caps.max_parallel_tests - queue_state.running - queue_state.queued
 
 
+def refill_focus(asked: tuple[str, ...], count: int, shares: OpShares | None) -> tuple[str, ...]:
+    """The focus of each of ``count`` branches opened after the opening batch, in order: the op the judge ``asked``
+    for it, else the largest of ``shares``, the start commit's op shares; ``""`` when neither names one."""
+
+    default = next((op for op, _ in shares.largest(1)), "") if shares is not None else ""
+    return tuple((asked[index] if index < len(asked) else "") or default for index in range(count))
+
+
 class Widening:
     """Reads the signals off the toolbox's queue, the roster's caps and the frontier policy the session scores with.
 
@@ -72,5 +83,6 @@ __all__ = [
     "Widening",
     "WideningSignals",
     "min_useful_seconds",
+    "refill_focus",
     "toolbox_headroom",
 ]

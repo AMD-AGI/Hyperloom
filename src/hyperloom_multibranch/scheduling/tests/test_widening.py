@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom_multibranch.contracts.notebook.records import OpShares
 from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy
 from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS
@@ -20,6 +21,7 @@ from hyperloom_multibranch.scheduling.widening import (
     Widening,
     WideningSignals,
     min_useful_seconds,
+    refill_focus,
     toolbox_headroom,
 )
 
@@ -78,3 +80,14 @@ def test_signals_read_the_queue_the_toolbox_reports_now(tmp_path: Path) -> None:
     assert asyncio.run(widening.signals()) == WideningSignals(SPECIALIST_START_SECONDS, None, 5)
     toolbox.state = _queue(running=2, cold_start=100.0)
     assert asyncio.run(widening.signals()) == WideningSignals(SPECIALIST_START_SECONDS + 200.0, 100.0, 6)
+
+
+SHARES = OpShares("c-head", "job-1", "profile-1", {"attention": 22.0, "moe_gemm": 41.5, "allreduce": 9.0})
+
+
+def test_a_refill_takes_the_judges_focus_and_else_the_largest_op_of_its_start_commit() -> None:
+    assert refill_focus(("attention", ""), 3, SHARES) == ("attention", "moe_gemm", "moe_gemm")
+
+
+def test_a_refill_from_a_commit_never_profiled_has_no_focus_unless_the_judge_names_one() -> None:
+    assert refill_focus(("attention",), 2, None) == ("attention", "")

@@ -151,7 +151,7 @@ class Session:
         self._base_image_digest = peers.base_image_digest
         tests = SessionTests(peers.toolbox, clock)
         budget = budget_seconds(settings.max_hours)
-        self._branches = BranchControl(context, peers.lifecycle, peers.toolbox, peers.repo)
+        self._branches = BranchControl(context, peers.lifecycle, peers.toolbox, peers.repo, peers.briefs)
         self._stopper = SessionStopper(context, self._branches, peers.toolbox, peers.mcp)
         progress = session_frontier(
             self._notebook, PRIMARY_METRIC, budget_seconds=budget, log_path=layout.reports / FRONTIER_LOG

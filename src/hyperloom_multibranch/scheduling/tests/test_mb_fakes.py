@@ -17,7 +17,6 @@ from hyperloom_multibranch.notebook.learning_search import RetrievalLog
 from hyperloom_multibranch.notebook.tests.factories import profile
 from hyperloom_multibranch.scheduling.mb_fakes import (
     MB_FAKE_BASE_IMAGE_DIGEST,
-    mb_fake_branches_to_add,
     mb_fake_learning_recall,
     mb_fake_refused_fork,
     mb_fake_regression_passes,
@@ -39,7 +38,6 @@ def test_a_fork_the_roster_cannot_take_is_rejected_never_pending() -> None:
 
 def test_mb2_policies_are_inert(tmp_path: Path) -> None:
     roster = _roster(tmp_path)
-    assert mb_fake_branches_to_add(roster) == 0
     assert mb_fake_similar_branches(roster) == ()
     assert mb_fake_regression_passes("any-commit")
 

@@ -23,9 +23,10 @@ from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
 from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling import branches
-from hyperloom_multibranch.scheduling.branches import BranchControl
+from hyperloom_multibranch.scheduling.branches import BatchStart, BranchControl
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.layout import SessionLayout
@@ -100,7 +101,7 @@ class Stage:
         context = SchedulerContext(
             SessionLayout(tmp_path), self.roster, self.notebook, decisions, self.processes, clock
         )
-        self.branches = BranchControl(context, self.runtime, self.toolbox, self.repo)
+        self.branches = BranchControl(context, self.runtime, self.toolbox, self.repo, SessionBriefs(self.notebook))
         self.mcp = McpServer(McpServerConfig(host_token="t" * MIN_TOKEN_LENGTH), campaign="stops")
         self.stopper = SessionStopper(context, self.branches, self.toolbox, self.mcp)
 
@@ -109,7 +110,7 @@ class Stage:
         self.root = await self.repo.init_root(baseline)
         await self.notebook.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=self.root))
         self.roster.add_integration(self.root, k=1)
-        await self.branches.open_branches(2, self.root, 1, BranchOrigin.FIRST_BATCH, HARD_STOP)
+        await self.branches.open_branches(2, 1, BatchStart(BranchOrigin.FIRST_BATCH, self.root, HARD_STOP))
         await asyncio.sleep(SPECIALIST_POLL_SECONDS)
         await self.branches.stop_branch("b02", JUDGE_STOP)
         self.roster.open("b03", origin=BranchOrigin.FORK, start_commit="", k=1, from_branch="b01")
