@@ -63,11 +63,6 @@ class NominationOutcome:
         """No usable patch. A valid outcome, and not the same as a failure."""
         return not self.patches
 
-    @property
-    def is_clean_empty(self) -> bool:
-        """Selected nothing, and said so in a shape this build understands."""
-        return not self.patches and not self.schema_error
-
 
 def parse_outcome(payload: Any) -> NominationOutcome:
     """Read a forge result envelope into usable patches plus explained drops."""

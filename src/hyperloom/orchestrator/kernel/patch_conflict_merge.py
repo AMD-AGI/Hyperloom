@@ -310,11 +310,6 @@ def _resolver_backend() -> str:
     return backend if anthropic_transport_ready() else ""
 
 
-def llm_resolution_available() -> bool:
-    """Whether a conflict resolver could actually issue a call right now."""
-    return bool(_resolver_backend())
-
-
 def _blank_trimmed(lines: list[str]) -> list[str]:
     while lines and not lines[0].strip():
         lines.pop(0)
@@ -658,5 +653,4 @@ __all__ = [
     "ConflictResolver",
     "PatchMergeOutcome",
     "apply_patch_resolving_conflicts",
-    "llm_resolution_available",
 ]
