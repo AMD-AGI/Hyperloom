@@ -35,6 +35,9 @@ _PLAN_LINE = re.compile(r"^PLAN:\s*(\S.*?)\s*$", re.M)
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z`*\"'(\[])")
 _LIST_MARKER = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
 _SUMMARY_PROMPT = re.compile(r"^Stop working on the kernel\. Iteration \d+ is over")
+#: The in-session gate's outcome, which KernelForge puts in front of the agent's own text when it records the
+#: session's rationale (``_gate_outcome_tag`` in ``kernelforge/orchestrator/agent.py``).
+_GATE_TAG = re.compile(r"^\[gate edits=[^\]]*\]\s*")
 
 
 def first_sentences(text: str, count: int = _EXCERPT_SENTENCES) -> str | None:
@@ -100,6 +103,12 @@ def reasoning_text(messages: Sequence[str]) -> str | None:
     """What an Experience keeps of the implementer's own account of its work, given as its messages in order."""
 
     return first_sentences("\n\n".join(messages))
+
+
+def rationale_text(rationale: str) -> str | None:
+    """What an Experience keeps of the rationale KernelForge recorded for a session, without the gate's outcome."""
+
+    return reasoning_text([_GATE_TAG.sub("", rationale, count=1)])
 
 
 def plan_title(plan: str) -> str | None:

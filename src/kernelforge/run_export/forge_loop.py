@@ -38,8 +38,8 @@ from kernelforge.run_export.archive import (
     first_sentences,
     implementer_fields,
     is_transcript,
+    rationale_text,
     read_transcript,
-    reasoning_text,
 )
 from kernelforge.run_export.files import FileRecord, read_json, read_text
 from kernelforge.run_export.units import OBJECTIVE, CandidateOrigin, Run, log_files, read_error
@@ -58,8 +58,6 @@ _ITERATION_HEADER = re.compile(r"^--- Iteration (\d+)\b")
 _KB_WRITTEN = re.compile(r"^\s*\[kb\] experience written: (\S+)")
 _CANDIDATE_DIR = re.compile(r"^iter_(\d+)$")
 _LANE_RATIONALE = re.compile(r"^lane \d+ of a fan-out round$")
-#: The in-session gate's outcome, which Kernel Forge puts in front of the agent's own text.
-_GATE_TAG = re.compile(r"^\[gate edits=[^\]]*\]\s*")
 _CLOCK = re.compile(r"^(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d)$")
 
 
@@ -220,7 +218,7 @@ def _origin_fields(origin: CandidateOrigin, meta: dict[str, Any], plan: str) -> 
     if origin is CandidateOrigin.MERGE:
         return {"approach": plan.splitlines()[0], "plan": first_sentences(plan)}
     if origin is CandidateOrigin.SESSION:
-        return {"reasoning": reasoning_text([_GATE_TAG.sub("", str(meta.get("rationale") or ""), count=1)])}
+        return {"reasoning": rationale_text(str(meta.get("rationale") or ""))}
     return {}
 
 
