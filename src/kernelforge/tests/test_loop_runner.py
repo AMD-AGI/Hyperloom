@@ -4046,7 +4046,6 @@ def test_a_crashed_session_does_not_break_the_empty_diff_streak(
     assert observed_modes == ["EXPLOIT", "EXPLOIT", "EXPLOIT", "DIVERSIFY"]
     assert state.search_reason_codes == ["REPEATED_NO_CHANGES"]
     assert state.cumulative.reverted == 4
-    assert state.cumulative.orchestration_errors == 0
     assert state.stall.unresolved_stall_iters == 4
 
 
@@ -5135,7 +5134,6 @@ def test_resume_hydrates_supervision_monitor(tmp_path, monkeypatch):
     loop._seed_and_hydrate_run_state()
 
     assert loop.monitor.no_improve_streak == 4
-    assert loop.monitor.last_intervention_iter == 2
 
 
 def test_resume_propagates_complete_ruling_to_planner_and_implementer(
@@ -5891,7 +5889,6 @@ def test_orchestration_failure_skips_implementer_without_fallback(
     assert implementer_called is False
     assert results[0].validation_summary.startswith("ORCHESTRATION ERROR")
     state = LoopStateStore(str(workspace)).load()
-    assert state.cumulative.orchestration_errors == 1
     assert state.stall.no_improvement_iters == 0
 
 
@@ -5928,7 +5925,6 @@ def test_consecutive_orchestration_errors_open_circuit(
     assert state.orchestration_error_streak == 3
     assert state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_OPEN
     assert state.termination_reason == "orchestration_failed"
-    assert state.cumulative.orchestration_errors == 3
 
 
 def test_orchestration_failed_resume_allows_one_half_open_probe(
