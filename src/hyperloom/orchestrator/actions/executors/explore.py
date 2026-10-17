@@ -63,6 +63,7 @@ from ._accuracy_gate import (
 from . import _framework_switch_manifest as _switch_manifest
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import effective_fingerprint, normalize_proposal
+from ._baseline_noop_plan import BaselineNoopPlan
 from ._grid_base import (
     TS_FAILED,
     TS_KILLED_OVERTIME,
@@ -970,10 +971,10 @@ class ExploreExecutor:
         # Attach the per-variant fingerprint as an attribute so the result loop needn't recompute.
         ws_sig = workload_signature()
 
-        # Drop variants that already match the current stack's observed launch.
+        # Find the variants that restate the stack's observed launch; ``noop_plan`` decides when each may be skipped.
         _pre_noop_grid_len = len(grid)
         observed_config, observed_env = observed_launch_from_state(ss)
-        grid, _noop_dropped = filter_baseline_noop_variants(
+        _noop_kept, _noop_judged = filter_baseline_noop_variants(
             grid,
             framework=framework,
             base_yaml_path=config_path,
@@ -988,12 +989,10 @@ class ExploreExecutor:
             observed_server_config=observed_config,
             observed_server_env=observed_env,
         )
+        noop_plan = BaselineNoopPlan(grid, _noop_kept, _noop_judged)
 
-        unique_in_round: dict[str, GridVariant] = {}
+        unique_in_round: dict[object, GridVariant] = {}
         skipped_dup: list[dict[str, Any]] = []
-        for _nm, _reason in _noop_dropped:
-            log.info("explore: skipping baseline-noop variant %s (%s)", _nm, _reason)
-            skipped_dup.append({"name": _nm, "reason": "baseline_noop", "detail": _reason})
         for gv in grid:
             fp = effective_fingerprint(
                 gv.extra_server_args,
@@ -1004,7 +1003,7 @@ class ExploreExecutor:
                 base_args_mode=base_args_mode,
             )
             gv.canonical_fp = fp  # type: ignore[attr-defined]
-            if fp in unique_in_round:
+            if noop_plan.slot(gv, fp) in unique_in_round:
                 # In-round duplicate — keep the first occurrence.
                 skipped_dup.append(
                     {
@@ -1014,17 +1013,9 @@ class ExploreExecutor:
                     }
                 )
                 continue
-            unique_in_round[fp] = gv
+            unique_in_round[noop_plan.slot(gv, fp)] = gv
 
         runnable: list[GridVariant] = list(unique_in_round.values())
-
-        log.info(
-            "explore dedup: payload=%d → runnable=%d (round_dup=%d baseline_noop=%d)",
-            _pre_noop_grid_len,
-            len(runnable),
-            sum(1 for sd in skipped_dup if sd.get("reason") == "round_dup"),
-            len(_noop_dropped),
-        )
 
         # Multi-node grid shaping.
         if runnable:
@@ -1063,6 +1054,14 @@ class ExploreExecutor:
                 runnable,
                 priority_tags=_MN_PARAMS_PRIORITY + _MN_BACKENDS_PRIORITY,
             )
+        runnable = noop_plan.drop_leading(runnable, skipped_dup)
+        log.info(
+            "explore dedup: payload=%d → runnable=%d (round_dup=%d baseline_noop=%d)",
+            _pre_noop_grid_len,
+            len(runnable),
+            sum(1 for sd in skipped_dup if sd.get("reason") == "round_dup"),
+            noop_plan.dropped_now,
+        )
 
         # Seeded by the Coordinator from the durable cursor: this executor holds no
         # history of its own, so it cannot count the rounds before this one.
@@ -1173,7 +1172,7 @@ class ExploreExecutor:
             return True
 
         try:
-            for idx, gv in enumerate(runnable):
+            for idx, gv in noop_plan.turns(runnable, _measured_against, skipped_dup):
                 # A warm-decision variant pays for both rounds, so admitting it on the decision round alone would let
                 # it in and then strand it mid-variant with a discarded warmup and no measurement.
                 if decision_expected_sec is not None:
