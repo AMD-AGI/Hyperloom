@@ -1060,8 +1060,6 @@ class ReadResult:
 @dataclass(frozen=True)
 class ReadTrace:
     request: ReadRequest
-    query_plan: WeightedQueryPlan
-    retrieval_configuration_id: str
     execution: WeightedQueryExecution
 
 
@@ -1110,14 +1108,7 @@ class KnowledgeReadService:
                 lease=lease,
             )
             if self._trace_sink is not None:
-                self._trace_sink(
-                    ReadTrace(
-                        request,
-                        plan,
-                        self._configuration.configuration_id,
-                        execution,
-                    )
-                )
+                self._trace_sink(ReadTrace(request, execution))
         except (RuntimeError, ValueError) as exc:
             return _empty_read(
                 ReadStatus.FAILED,
