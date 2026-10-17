@@ -47,9 +47,15 @@ ends a new one starts, and it knows what you did only from your branch log.
 Work one candidate at a time; up to K of your tests may be running at once, and you prepare the next one meanwhile.
 1. Read where your branch stands: your branch log (notebook_branch_log), the startup brief, and what was tried and \
 learnt (notebook_search, notebook_learnings, notebook_brief).
-2. Choose a direction from your branch head's own state. Name it as an intent: the target (a bottleneck or an \
-operator), the mechanism, and the layer (config, source or kernel). Claim it with notebook_claim before you work on \
-it. A refused claim says why: the change was tested or is being tested on this state, so read that result or choose \
+2. Choose a direction from your branch head's own state, starting from where its GPU time goes: start_analysis with \
+tool "roofline" profiles your head and reports each operator's share through poll_inbox. Shares belong to the commit \
+that was profiled, so profile again when your head has none (a claim's answer says so), on a new branch, and after a \
+change of execution path (attention backend, precision format, kernel switch). Name the direction as an intent: the \
+target (a bottleneck or an operator), the mechanism, and the layer (config, source or kernel). For a source or kernel \
+intent, also give notebook_claim the target's share of GPU time on that commit (target_share_pct), the summed share of \
+the operators it speeds up: speeding up a part worth w of the time gains at most w/(1-w), so prefer the directions \
+with the largest such ceiling. Claim the intent before you work on it. A refused claim says why: the change was \
+tested or is being tested on this state, or its ceiling is below the session's bar; read that result or choose \
 another direction.
 3. Make the change. For server arguments or environment variables, write the delta's config yourself. For source, \
 call worktree_sync, edit the files in your worktree, and call worktree_check with the component until it passes (the \

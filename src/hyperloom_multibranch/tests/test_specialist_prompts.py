@@ -21,6 +21,7 @@ WORKLOAD = "qwen3-8b on vllm, TP 1, ISL 1024, OSL 1024, concurrency 64, Inferenc
 TOOLS = (
     "notebook_branch_log",
     "notebook_claim",
+    "start_analysis",
     "worktree_sync",
     "worktree_check",
     "worktree_patch",
@@ -48,6 +49,7 @@ def test_the_role_names_the_workload_every_step_s_tool_and_the_rules():
     assert f"The session optimizes one workload: {WORKLOAD}." in prompt
     assert all(tool in prompt for tool in TOOLS)
     assert 'Never submit purpose "confirm"' in prompt
+    assert "target_share_pct" in prompt and "w/(1-w)" in prompt
     assert BASH_KILL_SAFETY_PREAMBLE in prompt
     with pytest.raises(ValueError, match="names the workload"):
         role_prompt(" \n")
