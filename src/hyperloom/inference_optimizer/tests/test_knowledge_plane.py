@@ -44,7 +44,7 @@ async def test_on_enter_the_optimisation_phase_runs_without_plane(tmp_path: Path
     coord.shared_state = _make_bare_shared_state()
     coord.session_dir = tmp_path
     await coord.phase_framework.on_enter_framework(
-        Transition(from_phase="PRELUDE", to_phase="FRAMEWORK", reason="test", evidence={}, loopback=False)
+        Transition(from_phase="PRELUDE", to_phase="FRAMEWORK", reason="test", evidence={})
     )
 
 
