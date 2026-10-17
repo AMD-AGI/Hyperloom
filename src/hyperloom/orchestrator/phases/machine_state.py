@@ -24,7 +24,6 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
 )
 from ..kernel.patch_landing import IntegratedStack
 from ..state.kernel_decision_settings import resolve_kernel_opt_max_failures
-from .session_contract import bound_session_declares
 from ..state.shared_state import (
     ESCALATE_HINT_SKIP_TO_CLOSE,
     ESCALATE_HINT_SKIP_TO_KERNEL,
@@ -1127,9 +1126,8 @@ def _budget_predicate_inputs(
         "cap_sec": phase_cap_seconds(state),
         "entry_elapsed_sec": phase_elapsed_seconds(state, now_unix=now_unix),
         "cumulative_elapsed_sec": phase_cumulative_seconds(state, now_unix=now_unix),
+        "current_balance": remaining_sec,
     }
-    if bound_session_declares("phase_budget", "current_balance"):
-        budget["current_balance"] = remaining_sec
     return budget
 
 
@@ -1157,11 +1155,8 @@ def _base_workflow_predicate_inputs(
         "cycle_reloop_min_remaining_sec": (
             _cycle_reloop_min_remaining_sec(state) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else 0.0
         ),
+        "baseline_tput": ((_number(state.baseline_tput) or 0.0) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else None),
     }
-    if bound_session_declares("workflow_global", "baseline_tput"):
-        global_inputs["baseline_tput"] = (
-            (_number(state.baseline_tput) or 0.0) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else None
-        )
     return {
         "current_phase": current,
         "now_unix": now_unix,
