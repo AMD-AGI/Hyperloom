@@ -135,24 +135,26 @@ def _unpaired(concs: list[float | None], other: list[float | None]) -> list[bool
     return [c is not None and c not in other for c in concs]
 
 
-def _draw_arm(
-    ax: Any,
-    xs: list[float],
-    ys: list[float],
-    concs: list[float | None],
-    other: list[float | None],
-    *,
-    color: str,
-    marker: str,
-    dy: int,
-    name: str,
-    bg: str,
-) -> bool:
+@dataclass(frozen=True)
+class _Arm:
+    """One arm's series and how it is drawn."""
+
+    name: str
+    xs: list[float]
+    ys: list[float]
+    concs: list[float | None]
+    color: str
+    marker: str
+    label_dy: int
+
+
+def _draw_arm(ax: Any, arm: _Arm, other_concs: list[float | None], bg: str) -> bool:
     """Draw one arm, labelled by concurrency; True when some rung is hollow because the other arm lacks it."""
+    xs, ys, concs, color, marker = arm.xs, arm.ys, arm.concs, arm.color, arm.marker
     if not xs:
         return False
-    ax.plot(xs, ys, f"{marker}-", color=color, linewidth=2, markersize=6, label=name)
-    single = _unpaired(concs, other)
+    ax.plot(xs, ys, f"{marker}-", color=color, linewidth=2, markersize=6, label=arm.name)
+    single = _unpaired(concs, other_concs)
     if any(single):
         # Hollow: the same concurrency has no point on the other arm, so there is nothing to compare it with.
         ax.plot(
@@ -170,7 +172,7 @@ def _draw_arm(
             f"{_conc_text(conc)} {y:.0f}".strip(),
             (x, y),
             textcoords="offset points",
-            xytext=(0, dy),
+            xytext=(0, arm.label_dy),
             ha="center",
             fontsize=7,
             color=color,
@@ -262,12 +264,11 @@ def _render(
             ax.plot(cx, cy, "--", color=ceiling_c, linewidth=1.2, label="Theoretical peak (roofline)")
 
     single_arm_note = False
-    for xs, ys, concs, other, color, marker, dy, name in (
-        (bx, by, bc, oc, baseline_c, "o", 8, "baseline"),
-        (ox, oy, oc, bc, optimized_c, "s", -14, "optimized"),
+    for arm, other_concs in (
+        (_Arm("baseline", bx, by, bc, baseline_c, "o", 8), oc),
+        (_Arm("optimized", ox, oy, oc, optimized_c, "s", -14), bc),
     ):
-        drawn = _draw_arm(ax, xs, ys, concs, other, color=color, marker=marker, dy=dy, name=name, bg=bg)
-        single_arm_note = single_arm_note or drawn
+        single_arm_note = _draw_arm(ax, arm, other_concs, bg) or single_arm_note
     if single_arm_note:
         ax.plot(
             [],

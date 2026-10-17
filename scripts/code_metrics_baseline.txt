@@ -1201,7 +1201,7 @@ function-lines src/hyperloom/orchestrator/kernel/attempt_summary.py::build_kerne
 function-lines src/hyperloom/orchestrator/kernel/conc_sweep.py::_build_roofline_ceiling 93
 function-lines src/hyperloom/orchestrator/kernel/conc_sweep.py::_sweep_one_arm_single_server 335
 function-lines src/hyperloom/orchestrator/kernel/conc_sweep.py::run_conc_sweep 243
-function-lines src/hyperloom/orchestrator/kernel/conc_sweep_plot.py::_render 113
+function-lines src/hyperloom/orchestrator/kernel/conc_sweep_plot.py::_render 105
 function-lines src/hyperloom/orchestrator/kernel/controller_patch_integration.py::integrate_controller_patches 261
 function-lines src/hyperloom/orchestrator/kernel/forge_fusion.py::_normalize_manifest 147
 function-lines src/hyperloom/orchestrator/kernel/forge_fusion.py::salvage_forge_fusion_from_workspace 82
