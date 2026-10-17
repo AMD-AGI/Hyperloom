@@ -12,7 +12,6 @@ import kernelforge.gemm_tune.aiter_splitk_validate as mod
 from kernelforge.gemm_tune.aiter_splitk_validate import (
     make_support_fn,
     max_supported_splitk,
-    supported_ops,
 )
 
 OP = "a8w8_blockscale"
@@ -89,8 +88,7 @@ class TestOpAwareness:
     def test_only_verified_ops_are_registered(self):
         # bpreshuffle's ck/cktile wrappers take no splitK argument at all, so
         # there is no production limit to measure for them.
-        assert supported_ops() == {"a8w8_blockscale"}
-        assert "a8w8_blockscale_bpreshuffle" not in supported_ops()
+        assert set(mod._TRIAL_OPS) == {"a8w8_blockscale"}
 
     def test_unregistered_op_never_trials(self, monkeypatch):
         calls = []
