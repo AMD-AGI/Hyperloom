@@ -19,17 +19,18 @@ little. The archive does not date claims, so a kernel direction counts as under 
 was requested within the observation period.
 
 :func:`calibrate` sets the current policy, sized to each session's budget, beside :data:`VARIATIONS` of one parameter
-each, and beside the scores the sessions logged when their logs are given. It recommends a variation only when it beats
-the current policy's rank correlation by :data:`MIN_IMPROVEMENT` over at least :data:`MIN_SESSIONS` sessions and
-:data:`MIN_ROUNDS` rounds; otherwise it says why not. The advice is for the scheduler's owner; nothing here changes a
-parameter.
+each, beside other scores given as :class:`Baseline` rows (such as the island bandit of :mod:`rsi.bandit`), and beside
+the scores the sessions logged when their logs are given. It recommends a variation, or a baseline that may be advice,
+only when it beats the current policy's rank correlation by :data:`MIN_IMPROVEMENT` over at least
+:data:`MIN_SESSIONS` sessions and :data:`MIN_ROUNDS` rounds; otherwise it says why not. The advice is for the
+scheduler's owner; nothing here changes a parameter.
 """
 
 from __future__ import annotations
 
 import math
 import statistics
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -92,6 +93,19 @@ VARIATIONS = (
     Variation("similarity bar 0.3", min_similarity=0.3),
     Variation("similarity bar 0.7", min_similarity=0.7),
 )
+
+
+#: A score of ``branch`` of ``tree`` at ``t_s`` on the session clock, against the other archived sessions.
+Scorer = Callable[[SearchTree, TreeBranch, float, tuple[SearchTree, ...]], float]
+
+
+@dataclass(frozen=True)
+class Baseline:
+    """Another score set beside the frontier score's; ``advisable`` when it could replace it, and so be advice."""
+
+    label: str
+    score: Scorer
+    advisable: bool = False
 
 
 @dataclass(frozen=True)
@@ -221,10 +235,18 @@ def _open_at(tree: SearchTree, t_s: float) -> list[TreeBranch]:
     ]
 
 
+@dataclass(frozen=True)
+class _PolicyScore:
+    variation: Variation
+
+    def __call__(self, tree: SearchTree, branch: TreeBranch, t_s: float, history: tuple[SearchTree, ...]) -> float:
+        return score_archived(tree, branch, t_s, history, session_policy(tree, self.variation)).expected_gain_pct
+
+
 def _session_rounds(
     tree: SearchTree,
     history: tuple[SearchTree, ...],
-    policy: FrontierPolicy,
+    scorer: Scorer,
     round_seconds: float,
     horizon_seconds: float | None,
 ) -> list[_Round]:
@@ -234,7 +256,7 @@ def _session_rounds(
         branches = _open_at(tree, t_s)
         if len(branches) < 2:
             continue
-        scores = [score_archived(tree, branch, t_s, history, policy).expected_gain_pct for branch in branches]
+        scores = [scorer(tree, branch, t_s, history) for branch in branches]
         rounds.append(_judged(scores, [gain_after(tree, branch, t_s, horizon_seconds) for branch in branches]))
     return rounds
 
@@ -267,7 +289,7 @@ def _summary(label: str, rounds: Mapping[str, Sequence[_Round]]) -> PolicyCalibr
 
 
 def _advice(
-    rows: Sequence[PolicyCalibration], min_sessions: int, min_rounds: int
+    rows: Sequence[PolicyCalibration], eligible: frozenset[str], min_sessions: int, min_rounds: int
 ) -> tuple[PolicyCalibration | None, str]:
     current = rows[0]
     if current.sessions < min_sessions or current.rounds < min_rounds:
@@ -281,7 +303,7 @@ def _advice(
     better = [
         row
         for row in rows[1:]
-        if row.label != LOGGED and row.rank_correlation is not None and row.rank_correlation >= bar
+        if row.label in eligible and row.rank_correlation is not None and row.rank_correlation >= bar
     ]
     if not better:
         return None, f"Keep the current policy: no variation ranks the branches better by {MIN_IMPROVEMENT} or more."
@@ -298,27 +320,31 @@ def calibrate(
     variations: Sequence[Variation] = VARIATIONS,
     logs: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     settings: CalibrationSettings = CalibrationSettings(),
+    baselines: Sequence[Baseline] = (),
 ) -> CalibrationReport:
-    """Every variation's calibration over ``trees``, the first variation being the current policy.
+    """Every variation's calibration over ``trees``, the first variation being the current policy, then each of
+    ``baselines``.
 
     ``logs`` maps a session id to its scores log (``frontier.jsonl``, one decoded line per round), whose scores are set
     beside the gains its archived tree went on to make.
     """
 
     horizon_seconds = settings.horizon_seconds
+    scorers: list[tuple[str, Scorer]] = [(variation.label, _PolicyScore(variation)) for variation in variations]
+    scorers += [(baseline.label, baseline.score) for baseline in baselines]
     rows = []
-    for variation in variations:
+    for label, scorer in scorers:
         rounds = {
             tree.session_id: _session_rounds(
                 tree,
                 tuple(other for other in trees if other.session_id != tree.session_id),
-                session_policy(tree, variation),
+                scorer,
                 settings.round_seconds,
                 horizon_seconds,
             )
             for tree in trees
         }
-        rows.append(_summary(variation.label, rounds))
+        rows.append(_summary(label, rounds))
     if logs:
         by_id = {tree.session_id: tree for tree in trees}
         logged = {
@@ -331,7 +357,11 @@ def calibrate(
             if session_id in by_id
         }
         rows.append(_summary(LOGGED, logged))
-    recommended, note = _advice(rows, settings.min_sessions, settings.min_rounds)
+    eligible = frozenset(
+        [variation.label for variation in variations[1:]]
+        + [baseline.label for baseline in baselines if baseline.advisable]
+    )
+    recommended, note = _advice(rows, eligible, settings.min_sessions, settings.min_rounds)
     return CalibrationReport(tuple(rows), horizon_seconds, recommended, note)
 
 
@@ -343,9 +373,11 @@ __all__ = [
     "MIN_SESSIONS",
     "ROUND_SECONDS",
     "VARIATIONS",
+    "Baseline",
     "CalibrationReport",
     "CalibrationSettings",
     "PolicyCalibration",
+    "Scorer",
     "Variation",
     "calibrate",
     "gain_after",

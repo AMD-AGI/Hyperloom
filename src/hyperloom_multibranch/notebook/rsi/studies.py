@@ -11,7 +11,8 @@
 ``python -m hyperloom_multibranch.notebook.rsi.studies`` runs each study and prints its report, in markdown or, with
 ``--json``, as JSON:
 
-* ``frontier --archive DIR [--log SESSION_ID=frontier.jsonl ...]``: the frontier calibration (:mod:`rsi.calibration`);
+* ``frontier --archive DIR [--log SESSION_ID=frontier.jsonl ...]``: the frontier calibration (:mod:`rsi.calibration`),
+  with the island bandit's rows beside it (:mod:`rsi.bandit`);
 * ``branch-cap --archive DIR --like SESSION_ID [--caps 2,3,4]``: the branch cap replay, for sessions like that one;
 * ``learnings --notebook DIR --log learnings.jsonl``: one session's learnings retrieval (:mod:`rsi.learning_eval`);
 * ``dispersion --shadow consistency.jsonl [--labels FILE] [--archive DIR] --model M --tp N --gpu G``: the dispersion
@@ -33,6 +34,7 @@ from typing import Any
 from hyperloom.common.jsonio import read_jsonl
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.rsi.archive import SearchTree, TreeArchive
+from hyperloom_multibranch.notebook.rsi.bandit import bandit_baselines
 from hyperloom_multibranch.notebook.rsi.calibration import ROUND_SECONDS, CalibrationSettings, calibrate
 from hyperloom_multibranch.notebook.rsi.frontier import MIN_EFFECTIVE_SESSIONS
 from hyperloom_multibranch.notebook.rsi.learning_eval import read_session
@@ -136,7 +138,7 @@ def _frontier(args: argparse.Namespace) -> Any:
     logs = {session_id: read_jsonl(path, skip_malformed=True, skip_non_dict=True) for session_id, path in args.log}
     trees = TreeArchive(args.archive).load()
     settings = CalibrationSettings(round_seconds=args.round_seconds, horizon_seconds=args.horizon_seconds)
-    return calibrate(trees, logs=logs, settings=settings)
+    return calibrate(trees, logs=logs, settings=settings, baselines=bandit_baselines(trees))
 
 
 def _branch_cap(args: argparse.Namespace) -> Any:
