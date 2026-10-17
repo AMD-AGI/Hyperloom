@@ -551,16 +551,16 @@ def _attach_baseline_launch_evidence(
     """Persist the declared and observed server identity for a baseline result."""
     from ._grid_runner import _measurement_server_log_path
 
-    if result.get("benchmark_backend") == "magpie_agentx":
-        from hyperloom.inference_optimizer.agentx.report import native_launch_evidence
-
-        evidence = native_launch_evidence(result, config_path)
-        result["launch_evidence"] = evidence
-        result["launch_evidence_path"] = persist_launch_evidence(evidence, slot=output_dir)
-        return
     workspace = Path(str(result.get("workspace") or "")) if result.get("workspace") else None
     actual_log = _measurement_server_log_path(output_dir / "server.log", workspace, slot=output_dir)
     result["server_log_path"] = actual_log or ""
+    if result.get("benchmark_backend") == "magpie_agentx":
+        from hyperloom.inference_optimizer.agentx.report import native_launch_evidence
+
+        evidence = native_launch_evidence(result, config_path, actual_server_log=actual_log)
+        result["launch_evidence"] = evidence
+        result["launch_evidence_path"] = persist_launch_evidence(evidence, slot=output_dir)
+        return
     evidence = build_launch_evidence(
         config_path=config_path,
         actual_server_log=actual_log,
@@ -785,6 +785,24 @@ def _resolve_result_dir(output_dir: Path, override_result_dir: str | None) -> Pa
     if result_dir.is_absolute():
         return result_dir
     return (output_dir / result_dir).resolve()
+
+
+def _benchmark_process_env(
+    config_path: Path, output_dir: Path, result_dir: Path, inferencex_path: str
+) -> dict[str, str]:
+    """Build the client environment without overriding Magpie's native checkout selection."""
+    from .magpie_agentx import native_config
+
+    env = scrub_benchmark_process_env(os.environ.copy())
+    env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
+    if inferencex_path and not native_config(config_path):
+        env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
+    env["RESULT_DIR"] = str(result_dir)
+    # InferenceX removes EVAL_RESULT_DIR after processing lm-eval output.
+    env["EVAL_RESULT_DIR"] = str(result_dir / "eval_output")
+    env["SERVER_LOG"] = str(output_dir / "server.log")
+    env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
+    return env
 
 
 def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] | None = None) -> bool:
@@ -3373,12 +3391,8 @@ class BenchmarkRunExecutor:
             config_path=config_path,
             output_dir=output_dir,
         )
-        env = scrub_benchmark_process_env(os.environ.copy())
-        env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-        if inferencex_path:
-            env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
         result_dir = _resolve_result_dir(output_dir, override_result_dir)
-        env["RESULT_DIR"] = str(result_dir)
+        env = _benchmark_process_env(config_path, output_dir, result_dir, inferencex_path)
         # Config/eval-contract facts echoed onto every failure result so an eval-rooted failure can be fingerprinted
         # and re-run by enablement.
         capture_meta = {
@@ -3386,13 +3400,6 @@ class BenchmarkRunExecutor:
             "result_dir": str(result_dir),
             "run_eval_disabled": bool(run_eval_disabled),
         }
-        # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing lm-eval output.
-        env["EVAL_RESULT_DIR"] = str(result_dir / "eval_output")
-        # Pin SERVER_LOG / GPU_METRICS_CSV per-task so wrappers write into the task workspace;
-        # ``harvest_leaked_artifacts`` is the defense-in-depth net.
-        env["SERVER_LOG"] = str(output_dir / "server.log")
-        env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
-
         # The materialized YAML is authoritative for the framework: params and $FRAMEWORK are both optional on a
         # baseline task.
         framework = (

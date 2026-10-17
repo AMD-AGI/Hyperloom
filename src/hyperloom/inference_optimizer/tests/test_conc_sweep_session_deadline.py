@@ -67,7 +67,7 @@ def sweep_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_backend):
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(conc_sweep, "materialize_benchmark_config", lambda *args, **kwargs: base)
+    monkeypatch.setattr(conc_sweep, "prepare_grid_benchmark_config", lambda *args, **kwargs: base)
     state = shared_state.SharedState()
     state.baseline_tput = 100.0
     state.baseline_runtime_sec = 5.0

@@ -14,6 +14,12 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.launch_log_evidence import (
+    engine_adjusted_settings_from_log,
+    observed_server_config_from_log,
+    observed_server_identity_from_log,
+)
+
 
 def agentx_measurement(report: dict[str, Any]) -> dict[str, Any]:
     """Use the public report exclusively; invalid replays cannot be salvaged."""
@@ -70,7 +76,9 @@ def agentx_measurement(report: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def native_launch_evidence(measurement: dict[str, Any], config_path: Path) -> dict[str, Any]:
+def native_launch_evidence(
+    measurement: dict[str, Any], config_path: Path, *, actual_server_log: str | None = None
+) -> dict[str, Any]:
     """Adapt the launch Magpie already verified into the optimizer's evidence shape."""
     bench = yaml.safe_load(config_path.read_text())["benchmark"]
     launch = measurement["agentx_metrics"]["server_launch"]
@@ -81,20 +89,27 @@ def native_launch_evidence(measurement: dict[str, Any], config_path: Path) -> di
     model = str(bench.get("envs", {}).get("MODEL_PATH") or bench["model"])
     digest = "sha256:" + hashlib.sha256(model.encode()).hexdigest()
     recipe = measurement["agentx_metrics"]["recipe"]
+    framework = bench["framework"]
     return {
         "schema_version": 1,
         "materialized_config_path": str(config_path),
         "recipe_digest": "sha256:" + hashlib.sha256(config_path.read_bytes()).hexdigest(),
-        "framework": bench["framework"],
+        "framework": framework,
         "model_path": model,
         "requested_server_args": flags,
         "requested_server_flags": flags,
         "requested_server_env": env,
         "observed_server_launch_flags": flags,
         "observed_server_env": env,
-        "observed_server_config": {},
-        "observed_server_identity": {},
-        "engine_adjusted_settings": {},
+        "observed_server_config": observed_server_config_from_log(actual_server_log, framework)
+        if actual_server_log
+        else {},
+        "observed_server_identity": observed_server_identity_from_log(actual_server_log, framework)
+        if actual_server_log
+        else {},
+        "engine_adjusted_settings": engine_adjusted_settings_from_log(actual_server_log, framework)
+        if actual_server_log
+        else {},
         "requested_model_digest": digest,
         "observed_model_binding": {
             "model_digest": digest,
@@ -102,7 +117,7 @@ def native_launch_evidence(measurement: dict[str, Any], config_path: Path) -> di
             "pp": str(recipe.get("pp", 1)),
             "dp": str(recipe.get("dp", 1)),
         },
-        "actual_server_log_path": "",
+        "actual_server_log_path": actual_server_log or "",
         "warm_reuse": {"reused": False},
         "magpie_server_launch": launch,
     }

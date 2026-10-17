@@ -192,11 +192,10 @@ if [ -n "${MAGPIE_PATH:-}" ]; then
 fi
 MAGPIE_PATH="${MAGPIE_PATH:-${_open_source_root}/Magpie}"
 INFERENCEX_REPO="${INFERENCEX_REPO:-https://github.com/SemiAnalysisAI/InferenceX.git}"
-# Pin InferenceX to a current default-branch HEAD *commit SHA* so the
-# per-install clone is reproducible (same rationale as MAGPIE_REF). Operators
-# can re-pin with INFERENCEX_REF=<tag|branch|sha>.
-# Matches the InferenceX revision supported by the pinned Magpie release.
-INFERENCEX_REF="${INFERENCEX_REF:-408c015be4b22d14c69518643609669405507077}"
+# Synthetic and MLPerf patches target this revision. Native AgentX delegates
+# InferenceX checkout selection to the pinned Magpie release. Operators can
+# re-pin synthetic runs with INFERENCEX_REF=<tag|branch|sha>.
+INFERENCEX_REF="${INFERENCEX_REF:-3d5581562f643f9bdeb8410cd924e2c70906c966}"
 _INFERENCEX_SHA="$(_resolve_ref_sha "$INFERENCEX_REPO" "$INFERENCEX_REF")"
 INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/InferenceX@${_INFERENCEX_SHA}}"
 

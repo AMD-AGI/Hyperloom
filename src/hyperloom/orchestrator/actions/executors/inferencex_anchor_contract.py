@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import subprocess
 
-from hyperloom.inference_optimizer.cli.preflight import INFERENCEX_REPO_DEFAULT
+from hyperloom.inference_optimizer.inferencex_checkout import DEFAULT_REPO
 
 from ._inferencex_patcher import (
     _ANCHOR_CONTRACT,
@@ -78,7 +78,7 @@ def fetch_pinned_file(rel_path: str, ref: str) -> str | None:
             [
                 "gh",
                 "api",
-                f"repos/{github_slug(INFERENCEX_REPO_DEFAULT)}/contents/{rel_path}?ref={ref}",
+                f"repos/{github_slug(DEFAULT_REPO)}/contents/{rel_path}?ref={ref}",
                 "-H",
                 "Accept: application/vnd.github.raw",
             ],

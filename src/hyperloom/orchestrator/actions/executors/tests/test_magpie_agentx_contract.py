@@ -253,7 +253,8 @@ def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path,
     assert constraint_veto_reason(measured, SimpleNamespace()) == "agentx_evidence_invalid"
 
 
-def test_native_baseline_runs_through_the_real_executor(source, tmp_path, monkeypatch, report):
+@pytest.mark.parametrize("checkout", ["default", "yaml", "environment"])
+def test_native_baseline_runs_through_the_real_executor(source, tmp_path, monkeypatch, report, checkout):
     import asyncio
     import subprocess
 
@@ -261,6 +262,14 @@ def test_native_baseline_runs_through_the_real_executor(source, tmp_path, monkey
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     monkeypatch.setenv(BENCHMARK_CONFIG_ENV, str(source))
+    monkeypatch.setenv("INFERENCEX_PATH", "/synthetic/InferenceX")
+    monkeypatch.delenv("MAGPIE_INFERENCEX_PATH", raising=False)
+    if checkout == "yaml":
+        config = yaml.safe_load(source.read_text())
+        config["benchmark"]["inferencex_path"] = "/native/InferenceX"
+        source.write_text(yaml.safe_dump(config))
+    elif checkout == "environment":
+        monkeypatch.setenv("MAGPIE_INFERENCEX_PATH", "/native/InferenceX")
     report["agentx_metrics"]["server_launch"] = {
         "effective_argv": [
             "python3",
@@ -277,6 +286,10 @@ def test_native_baseline_runs_through_the_real_executor(source, tmp_path, monkey
     def run(cmd, **kwargs):
         config = Path(cmd[cmd.index("--benchmark-config") + 1])
         observed.update(load_benchmark(config))
+        assert kwargs["env"].get("MAGPIE_INFERENCEX_PATH") == (
+            "/native/InferenceX" if checkout == "environment" else None
+        )
+        assert observed.get("inferencex_path") == ("/native/InferenceX" if checkout == "yaml" else None)
         slot = Path(cmd[cmd.index("--output-dir") + 1])
         workspace = slot / "benchmark_sglang_contract"
         workspace.mkdir(parents=True)

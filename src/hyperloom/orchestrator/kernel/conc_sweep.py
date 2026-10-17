@@ -4,7 +4,7 @@
 """Concurrency sweep over the CONC ladder."""
 
 from __future__ import annotations
-from hyperloom.orchestrator.actions.executors._workload_envs import materialize_benchmark_config
+from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
 
 import csv
 import json
@@ -1247,7 +1247,7 @@ async def run_conc_sweep(
     )
     benchmark_script = state.accepted_baseline_script()
     try:
-        base_yaml_path = materialize_benchmark_config(
+        base_yaml_path = prepare_grid_benchmark_config(
             base_yaml_path,
             workspace,
             model_path=resolved_model or None,

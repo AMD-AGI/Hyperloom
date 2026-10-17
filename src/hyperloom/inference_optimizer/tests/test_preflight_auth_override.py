@@ -42,7 +42,7 @@ def stub_install_steps(monkeypatch, tmp_path):
     (inferencex_dir / "benchmarks").mkdir(parents=True)
     (inferencex_dir / "benchmarks" / "benchmark_lib.sh").write_text("# stub", encoding="utf-8")
     monkeypatch.setenv("INFERENCEX_PATH", str(inferencex_dir))
-    monkeypatch.setattr(cli_preflight, "_clone_inferencex", lambda dest: str(inferencex_dir))
+    monkeypatch.setattr(cli_preflight.inferencex_checkout, "clone", lambda dest: str(inferencex_dir))
 
     def _fake_which(name: str):
         return f"/usr/bin/{name}"

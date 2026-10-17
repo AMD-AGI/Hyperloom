@@ -58,5 +58,13 @@ For detailed documentation on Magpie, see [Magpie on ROCm Docs](https://rocm.doc
 
 Native AgentX currently pins Magpie to
 `6a1ee26f9053363d3750b43e3d5afb5d1c4ce84e` and InferenceX to
-`408c015be4b22d14c69518643609669405507077`.
+`408c015be4b22d14c69518643609669405507077`. Magpie owns the native InferenceX
+checkout and resolves its `inferencex-e2e/` project layout. To supply a checkout,
+set `benchmark.inferencex_path` in the workload YAML or `MAGPIE_INFERENCEX_PATH`.
+Native runs do not inherit the synthetic checkout from `INFERENCEX_PATH`.
+
+The general installer and synthetic/MLPerf preflight retain InferenceX
+`3d5581562f643f9bdeb8410cd924e2c70906c966`, which the GSM8K and profiling patches
+support. Those paths continue to honor `INFERENCEX_PATH` and `INFERENCEX_REF`;
+native AgentX skips these compatibility patches.
 See [the AgentX workflow](../how-to/optimize.md#optimize-an-agentx-workload).

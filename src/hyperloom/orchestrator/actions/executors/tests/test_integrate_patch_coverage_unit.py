@@ -337,7 +337,7 @@ async def test_bench_patch_forwards_the_session_budget_to_the_grid(tmp_path, mon
         return []
 
     monkeypatch.setattr(ip_mod, "run_grid", fake_run_grid)
-    monkeypatch.setattr(ip_mod, "materialize_benchmark_config", lambda *a, **k: config_path)
+    monkeypatch.setattr(ip_mod, "prepare_grid_benchmark_config", lambda *a, **k: config_path)
 
     await IntegratePatchExecutor(session_dir=session)._bench_patch(
         params={"config_path": str(config_path)},
@@ -741,7 +741,7 @@ def _FakeVR(**kw):
 async def test_bench_patch_no_accuracy(tmp_path, monkeypatch):
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("x: 1\n", encoding="utf-8")
-    monkeypatch.setattr(ip, "materialize_benchmark_config", lambda *a, **k: cfg)
+    monkeypatch.setattr(ip, "prepare_grid_benchmark_config", lambda *a, **k: cfg)
 
     async def _fake_run_grid(**kwargs):
         return [_FakeVR(output_throughput=200.0)]
@@ -763,7 +763,7 @@ async def test_bench_patch_no_accuracy(tmp_path, monkeypatch):
 async def test_bench_patch_with_accuracy(tmp_path, monkeypatch):
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("x: 1\n", encoding="utf-8")
-    monkeypatch.setattr(ip, "materialize_benchmark_config", lambda *a, **k: cfg)
+    monkeypatch.setattr(ip, "prepare_grid_benchmark_config", lambda *a, **k: cfg)
 
     async def _fake_run_grid(**kwargs):
         return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
@@ -788,7 +788,7 @@ async def test_bench_patch_with_accuracy(tmp_path, monkeypatch):
 async def test_bench_patch_accuracy_regression_fails(tmp_path, monkeypatch):
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("x: 1\n", encoding="utf-8")
-    monkeypatch.setattr(ip, "materialize_benchmark_config", lambda *a, **k: cfg)
+    monkeypatch.setattr(ip, "prepare_grid_benchmark_config", lambda *a, **k: cfg)
 
     async def _fake_run_grid(**kwargs):
         return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
@@ -813,7 +813,7 @@ async def test_bench_patch_accuracy_regression_fails(tmp_path, monkeypatch):
 async def test_bench_patch_missing_baseline_skips_with_warning(tmp_path, monkeypatch, caplog):
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("x: 1\n", encoding="utf-8")
-    monkeypatch.setattr(ip, "materialize_benchmark_config", lambda *a, **k: cfg)
+    monkeypatch.setattr(ip, "prepare_grid_benchmark_config", lambda *a, **k: cfg)
 
     async def _fake_run_grid(**kwargs):
         return [_FakeVR(status="succeeded", workspace=str(tmp_path))]

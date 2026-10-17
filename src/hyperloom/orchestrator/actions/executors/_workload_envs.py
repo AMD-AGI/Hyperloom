@@ -1191,6 +1191,15 @@ def _profile_capture_window(
     return delay_iters, max_iters
 
 
+def prepare_grid_benchmark_config(config_path: Path, output_dir: Path, **overrides: Any) -> Path:
+    """Keep the verified native baseline intact until the grid composes its candidate."""
+    from .magpie_agentx import native_config
+
+    if native_config(config_path):
+        return config_path
+    return materialize_config_with_envs(config_path, output_dir, **overrides)
+
+
 def materialize_benchmark_config(config_path: Path, output_dir: Path, **overrides: Any) -> Path:
     """Resolve the workload owner before applying server candidate changes."""
     import yaml

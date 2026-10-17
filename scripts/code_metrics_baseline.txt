@@ -60,7 +60,7 @@ cognitive-complexity src/hyperloom/orchestrator/actions/executors/_ray_serving.p
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py::_communicate_with_watchdog 62
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_workload_envs.py::materialize_config_with_envs 286
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_once 173
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 120
+cognitive-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 119
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::_apply_warm_patches 175
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/benchmark_result.py::_rescue_candidate_paths 39
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/benchmark_result.py::extract_benchmark_measurement 35
@@ -293,7 +293,7 @@ cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_ray_serving.
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_subprocess_kill.py::_communicate_with_watchdog 23
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_workload_envs.py::materialize_config_with_envs 110
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_once 54
-cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 39
+cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 38
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/baseline.py::_apply_warm_patches 52
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/benchmark_result.py::harvest_mn_gpu_metrics 30
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/explore.py::ExploreExecutor.__call__ 76
@@ -1073,7 +1073,7 @@ function-lines src/hyperloom/inference_optimizer/cli/multi_node.py::_replay_kern
 function-lines src/hyperloom/inference_optimizer/cli/parser.py::_build_parser 1013
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_check_serving_framework 162
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_ensure_lm_eval_dep 89
-function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_preflight 216
+function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_preflight 214
 function-lines src/hyperloom/inference_optimizer/multi_node/cli.py::build_parser 288
 function-lines src/hyperloom/inference_optimizer/multi_node/commands/infera.py::_infera_restart_server 200
 function-lines src/hyperloom/inference_optimizer/multi_node/scripts/apply_tracelens_patch_multinode.py::_apply_on_pod 101
@@ -1122,7 +1122,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::Benchma
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._preflight_server_argv 103
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_once 659
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_retrying 97
-function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 578
+function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::BenchmarkRunExecutor._run_single_benchmark 567
 function-lines src/hyperloom/orchestrator/actions/executors/baseline.py::_apply_warm_patches 416
 function-lines src/hyperloom/orchestrator/actions/executors/benchmark_result.py::extract_benchmark_measurement 133
 function-lines src/hyperloom/orchestrator/actions/executors/benchmark_result.py::harvest_leaked_artifacts 85
@@ -1132,7 +1132,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/bypass_report.py::bu
 function-lines src/hyperloom/orchestrator/actions/executors/bypass_runner.py::run_benchmark 129
 function-lines src/hyperloom/orchestrator/actions/executors/explore.py::ExploreExecutor.__call__ 1124
 function-lines src/hyperloom/orchestrator/actions/executors/explore.py::filter_baseline_noop_variants 99
-function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._bench_patch 263
+function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._bench_patch 262
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._enablement_keep_records 211
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_enablement 267
 function-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py::IntegratePatchExecutor._gate_perf 445
@@ -1482,7 +1482,7 @@ module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.p
 module-lines src/hyperloom/inference_optimizer/breakdown/schema.py 2770
 module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2569
 module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1821
-module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2785
+module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2709
 module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1990
 module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1479
 module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2163
@@ -1491,7 +1491,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lif
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2161
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4253
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1880
-module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4793
+module-lines src/hyperloom/orchestrator/actions/executors/integrate_patch.py 4792
 module-lines src/hyperloom/orchestrator/actions/executors/profile.py 1395
 module-lines src/hyperloom/orchestrator/actions/executors/report.py 1387
 module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1303

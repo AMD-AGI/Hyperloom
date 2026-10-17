@@ -2014,7 +2014,7 @@ def _attach_grid_launch_evidence(
 
         if result.benchmark_backend == "magpie_agentx" and workspace is not None:
             measurement = agentx_measurement(_parse_report(workspace) or {})
-            evidence = native_launch_evidence(measurement, config_path)
+            evidence = native_launch_evidence(measurement, config_path, actual_server_log=actual_log)
         else:
             evidence = build_launch_evidence(
                 config_path=config_path,

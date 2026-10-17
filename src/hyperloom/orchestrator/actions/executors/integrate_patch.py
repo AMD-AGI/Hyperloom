@@ -4,7 +4,7 @@
 """Apply specialist patches to live framework roots and KEEP or REVERT by benchmark."""
 
 from __future__ import annotations
-from hyperloom.orchestrator.actions.executors._workload_envs import materialize_benchmark_config
+from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
 import asyncio
 import csv
 import functools
@@ -4539,7 +4539,7 @@ class IntegratePatchExecutor:
         )
         override_script = sanitize_script_name(params.get("benchmark_script"))
         override_result_dir = sanitize_result_dir(params.get("result_dir"))
-        config_path = materialize_benchmark_config(
+        config_path = prepare_grid_benchmark_config(
             config_path,
             output_root,
             model_path=resolved_model or None,
@@ -4568,7 +4568,6 @@ class IntegratePatchExecutor:
             extra_server_args=extra_server_args_applied,
             extra_envs=variant_envs,
             unset_envs=to_str_list(unset_envs),
-            args_mode=args_mode,
             note=f"integrate_patch:{specialist_task_id}{variant_suffix}",
         )
         variant.overlay_pythonpath = params.get("overlay_pythonpath", "")

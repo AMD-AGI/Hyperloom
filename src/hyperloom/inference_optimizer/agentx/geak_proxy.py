@@ -80,6 +80,12 @@ def seed_native_geak_proxy(
         raise ValueError("Native AgentX GEAK server launch argv is missing")
     flags = _tunable_flags(argv, str(handoff.get("framework") or ""))
     runtime = dict(evidence.get("runtime_environment") or {})
+    explicit_env = evidence.get("effective_env") or {}
+    for name, value in explicit_env.items():
+        if value is None:
+            runtime.pop(name, None)
+        else:
+            runtime[name] = value
     if argv and Path(argv[0]).is_absolute():
         executable_dir = str(Path(argv[0]).parent)
         runtime["PATH"] = ":".join(part for part in (executable_dir, runtime.get("PATH", "")) if part)
@@ -88,6 +94,9 @@ def seed_native_geak_proxy(
     spec = copy.deepcopy(handoff.get("baseline_env_spec") or {})
     config = spec.setdefault("config", {})
     config.update({"server_launch_flags": flags, "extra_server_args": "", "extra_envs": runtime})
+    unset = set(config.get("unset_envs") or []) - explicit_env.keys()
+    unset.update(name for name, value in explicit_env.items() if value is None)
+    config["unset_envs"] = sorted(unset)
     handoff["baseline_env_spec"] = spec
     handoff["accepted_flags"] = ""
     handoff["accepted_env"] = shlex.join(f"{name}={value}" for name, value in runtime.items())
