@@ -27,6 +27,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     _scan_logs_increment,
     _scan_server_log_increment,
     _server_log_shows_death,
+    engine_capacity_cause,
     kill_my_spawned_server,
     new_session_kwargs,
     run_with_session_kill,
@@ -1057,6 +1058,73 @@ def test_server_log_death_excerpt_surfaces_config_validation_arch_miss(tmp_path)
     sig = classify_failure(excerpt)
     assert sig.kind == "missing_model_arch"
     assert sig.offending_symbol == "deepseek_v4"
+
+
+_MAMBA_CAPACITY_LINE = (
+    "(EngineCore pid=7) ValueError: max_num_seqs (256) exceeds available Mamba cache blocks (237). "
+    "Each decode sequence requires one Mamba cache block, so CUDA graph capture cannot proceed. "
+    "Please lower max_num_seqs to at most 237 or increase gpu_memory_utilization."
+)
+_KV_MEMORY_LINE = (
+    "ValueError: To serve at least one request with the model's max seq len (262144), (24.5 GiB KV cache is "
+    "needed, which is larger than the available KV cache memory (9.1 GiB). Try increasing "
+    "`gpu_memory_utilization` or decreasing `max_model_len` when initializing the engine."
+)
+_KV_EMPTY_LINE = (
+    "ValueError: No available memory for the cache blocks. Try increasing `gpu_memory_utilization` "
+    "when initializing the engine."
+)
+
+
+def _engine_start_failure_log(cause: str) -> str:
+    """vLLM logs the marker first and the traceback after it, so the cause is its last line."""
+    frames = "".join(f"(EngineCore pid=7)     frame {i}\n" for i in range(55))
+    return (
+        "(EngineCore pid=7) ERROR core.py:1349] EngineCore failed to start.\n"
+        "(EngineCore pid=7) Traceback (most recent call last):\n"
+        f"{frames}{cause}\n"
+        "(APIServer pid=1) RuntimeError: Engine core initialization failed. "
+        "See root cause above. Failed core proc(s): {}\n"
+    )
+
+
+def test_server_log_death_excerpt_keeps_the_exception_below_the_marker(tmp_path):
+    """``EngineCore failed to start`` precedes its traceback, so the cause sits tens of lines below it."""
+    log_path = tmp_path / "server.log"
+    log_path.write_text(_engine_start_failure_log(_MAMBA_CAPACITY_LINE))
+    excerpt = server_log_death_excerpt(str(log_path))
+    assert excerpt is not None
+    assert "EngineCore failed to start" in excerpt
+    assert "max_num_seqs (256) exceeds available Mamba cache blocks (237)" in excerpt
+
+
+def test_engine_capacity_cause_parses_the_numbers():
+    assert engine_capacity_cause(_MAMBA_CAPACITY_LINE) == {
+        "kind": "mamba_cache_blocks",
+        "requested": 256,
+        "available": 237,
+    }
+    assert engine_capacity_cause(_KV_MEMORY_LINE) == {
+        "kind": "kv_cache_memory",
+        "max_model_len": 262144,
+        "needed_gib": 24.5,
+        "available_gib": 9.1,
+    }
+    assert engine_capacity_cause(_KV_EMPTY_LINE) == {"kind": "kv_cache_empty"}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "RuntimeError: HIP out of memory. Tried to allocate 10.54 GiB",
+        "hipErrorNoBinaryForGpu: no kernel image is available for execution on the device",
+        "Transformers does not recognize this architecture",
+        "INFO max_num_seqs=256 gpu_memory_utilization=0.9",
+    ],
+)
+def test_engine_capacity_cause_ignores_other_failures(text):
+    assert engine_capacity_cause(text) is None
 
 
 def test_fatal_text_does_not_kill_a_running_child(tmp_path):

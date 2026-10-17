@@ -434,3 +434,30 @@ async def test_server_dead_surfaces_log_excerpt(tmp_path, monkeypatch):
     assert "mla_gluon" in (r.error or ""), "excerpt should mention mla_gluon"
     assert r.server_log_path is not None
     assert r.server_log_path.endswith("server.log")
+
+
+@pytest.mark.asyncio
+async def test_server_dead_with_a_capacity_cause_is_engine_capacity(tmp_path, monkeypatch):
+    """A watchdog-reaped variant whose server.log ends in the capacity error is not a generic init death."""
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+    cause = "ValueError: max_num_seqs (256) exceeds available Mamba cache blocks (237)."
+
+    def _dead(magpie_python, config_path, output_dir, **_k):
+        slog = Path(output_dir) / "server.log"
+        slog.parent.mkdir(parents=True, exist_ok=True)
+        frames = "".join(f"    frame {i}\n" for i in range(55))
+        slog.write_text(f"EngineCore failed to start.\nTraceback (most recent call last):\n{frames}{cause}\n")
+        return gr.SERVER_DEAD_RETURNCODE, "", ""
+
+    monkeypatch.setattr(gr, "_run_magpie", _dead)
+    results = await run_grid(
+        base_yaml_path=base,
+        base_extra_args="",
+        grid=[GridVariant("fp8_kv")],
+        output_root=tmp_path / "out",
+    )
+    r = results[0]
+    assert r.status == "failed"
+    assert r.error_class == "engine_capacity"
+    assert cause in (r.error or "")

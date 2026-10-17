@@ -83,6 +83,7 @@ from ._subprocess_kill import (
     DETOKENIZER_STALL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     clear_server_ready_stamp,
+    engine_capacity_cause,
     post_ready_runtime_sec,
     resolve_benchmark_timeouts,
     run_with_session_kill,
@@ -3705,6 +3706,8 @@ class BenchmarkRunExecutor:
         server_init_dead_error = server_death_excerpt or (
             "server engine/worker init failed (reaped by liveness watchdog); see server.log"
         )
+        # The card holds less than the launch settings ask for: a config limit, not an engine fault.
+        engine_capacity = engine_capacity_cause(server_death_excerpt or "")
 
         registry_mismatch = is_aiter_jit_registry_mismatch(
             server_log_text,
@@ -3779,6 +3782,15 @@ class BenchmarkRunExecutor:
                     ),
                     **failure_extras,
                 }
+            if engine_capacity is not None:
+                return {
+                    "status": "failed",
+                    "error_class": "engine_capacity",
+                    "returncode": proc_returncode,
+                    "error": redact_secret_values(server_init_dead_error),
+                    "capacity": engine_capacity,
+                    **failure_extras,
+                }
             if server_init_dead:
                 return {
                     "status": "failed",
@@ -3835,6 +3847,9 @@ class BenchmarkRunExecutor:
             elif cuda_graph_capture_failed:
                 error_class = "cuda_graph_capture_failed"
                 error = server_init_dead_error if server_init_dead else ((proc_stderr or proc_stdout or "")[-2000:])
+            elif engine_capacity is not None:
+                error_class = "engine_capacity"
+                error = server_init_dead_error
             elif server_init_dead:
                 error_class = "server_init_dead"
                 error = server_init_dead_error
@@ -3853,6 +3868,7 @@ class BenchmarkRunExecutor:
                 error_class = "invalid_measurement"
                 error = "benchmark report did not contain positive throughput and completed requests"
             error = redact_secret_values(error)
+            capacity_extra = {"capacity": engine_capacity} if error_class == "engine_capacity" else {}
             return {
                 "status": "failed",
                 "error_class": error_class,
@@ -3866,6 +3882,7 @@ class BenchmarkRunExecutor:
                 "subprocess_runtime_sec": round(subprocess_runtime_sec, 2),
                 "nonfatal_warnings": warnings,
                 **capture_meta,
+                **capacity_extra,
             }
 
         nonzero_error = redact_secret_values((proc_stderr or proc_stdout or "")[-2000:])

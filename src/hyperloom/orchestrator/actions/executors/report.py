@@ -27,6 +27,7 @@ from hyperloom.inference_optimizer.breakdown.stop_reasons import (
 from hyperloom.inference_optimizer.session.paths import db_path_for
 from ...measurement.baseline_budget import BASELINE_BUDGET_STOP_EXPLANATIONS
 from ...state.shared_state import SharedState
+from ._subprocess_kill import engine_capacity_cause
 
 
 log = logging.getLogger(__name__)
@@ -92,6 +93,8 @@ def _classify_root_cause_type(error_class: str, error_text: str) -> str:
     blob = f"{error_class} {error_text}".lower()
     if error_class == "kv_cache_oom" or any(m in blob for m in _KV_CACHE_OOM_MARKERS):
         return "kv_cache_oom"
+    if error_class == "engine_capacity" or engine_capacity_cause(error_text) is not None:
+        return "engine_capacity"
     if "out of memory" in blob or "hip oom" in blob:
         return "oom"
     if error_class == "timeout" or "benchmark exceeded" in blob:
@@ -114,6 +117,9 @@ def _pick_failure_headline(text: str) -> str:
     lines = [ln.strip() for ln in str(text or "").splitlines() if ln.strip()]
     if not lines:
         return ""
+    for ln in lines:
+        if engine_capacity_cause(ln) is not None:
+            return ln
     priority = (
         "out of memory",
         "fatal",
@@ -192,7 +198,7 @@ def _build_failure_summary(
             if excerpt:
                 error_text = excerpt.strip()
                 if error_class in ("", "unknown"):
-                    error_class = "server_init_dead"
+                    error_class = "engine_capacity" if engine_capacity_cause(error_text) else "server_init_dead"
         if not error_text:
             error_text = "(no terminal error captured; see logs)"
 

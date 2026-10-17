@@ -203,6 +203,37 @@ _MARKER_WINDOW_LINES: int = 60
 #: Lines of preceding context a legacy bootstrap marker keeps.
 _MARKER_CONTEXT_LINES: int = 2
 
+#: vLLM start-time capacity errors: the card holds less than the launch asked for. Each entry names its kind and
+#: captures the numbers the message carries.
+_ENGINE_CAPACITY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (
+        "mamba_cache_blocks",
+        re.compile(r"max_num_seqs \((?P<requested>\d+)\) exceeds available Mamba cache blocks \((?P<available>\d+)\)"),
+    ),
+    (
+        "kv_cache_memory",
+        re.compile(
+            r"max seq len \((?P<max_model_len>\d+)\), \((?P<needed_gib>[\d.]+) GiB KV cache is needed, "
+            r"which is larger than the available KV cache memory \((?P<available_gib>[\d.]+) GiB\)"
+        ),
+    ),
+    ("kv_cache_empty", re.compile(r"No available memory for the cache blocks")),
+)
+
+
+def engine_capacity_cause(text: str) -> dict[str, Any] | None:
+    """Return the parsed vLLM engine-capacity error in ``text``, else ``None``.
+
+    The dict names the ``kind`` and the numbers the message carries; a capacity failure is the host lacking room for
+    the launch settings, so it never reads as a kernel or architecture gap.
+    """
+    for kind, pattern in _ENGINE_CAPACITY_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            numbers = {k: float(v) if "." in v else int(v) for k, v in match.groupdict().items()}
+            return {"kind": kind, **numbers}
+    return None
+
 
 # Sentinel ``returncode`` when the detokenizer-stall watchdog reaps a child that came up healthy but then produced no
 # generation progress (hung engine / detokenizer wedge).
@@ -500,9 +531,11 @@ def _first_marker_excerpt(path: str, *, max_chars: int) -> str | None:
                 # of ``AsyncEngineDeadError`` -- and a legacy line must keep the
                 # legacy extraction, whose cause sits above the marker.
                 if any(marker in line for marker in _SERVER_DEAD_MARKERS):
-                    after = _read_lines(fh, _MARKER_CONTEXT_LINES)
-                    excerpt = "\n".join([*before, line, *after]).strip()
-                    return excerpt[-max_chars:] or None
+                    # ``EngineCore failed to start`` is logged ahead of its traceback, so the cause can sit below.
+                    window = _read_lines(fh, _MARKER_WINDOW_LINES)
+                    head = "\n".join([*before, line, *window[:_MARKER_CONTEXT_LINES]]).strip()[-max_chars:]
+                    causes = _exception_lines(window[_MARKER_CONTEXT_LINES:], room=max_chars - len(head) - 1)
+                    return "\n".join([head, *causes]) or None
                 if any(marker in line for marker in _FATAL_ENGINE_MARKERS):
                     return _cause_first_excerpt(
                         line.strip(), _read_lines(fh, _MARKER_WINDOW_LINES - 1), max_chars=max_chars
@@ -524,6 +557,21 @@ def _read_lines(fh: Any, count: int) -> list[str]:
     return out
 
 
+def _exception_lines(window: list[str], *, room: int) -> list[str]:
+    """Return the lines of ``window`` that name an exception, nearest first, within ``room`` characters."""
+    causes: list[str] = []
+    used = 0
+    for line in window:
+        if not _EXCEPTION_LINE.search(line):
+            continue
+        text = line.strip()
+        if used + len(text) + 1 > room:
+            break
+        causes.append(text)
+        used += len(text) + 1
+    return causes
+
+
 def _cause_first_excerpt(head: str, window: list[str], *, max_chars: int) -> str | None:
     """Return the marker line followed by the exceptions it names, nearest first.
 
@@ -537,16 +585,7 @@ def _cause_first_excerpt(head: str, window: list[str], *, max_chars: int) -> str
     room = max_chars - len(head) - 1
     if room <= 0:
         return head[:max_chars] or None
-    causes: list[str] = []
-    used = 0
-    for line in window:
-        if not _EXCEPTION_LINE.search(line):
-            continue
-        text = line.strip()
-        if used + len(text) + 1 > room:
-            break
-        causes.append(text)
-        used += len(text) + 1
+    causes = _exception_lines(window, room=room)
     if causes:
         return head + "\n" + "\n".join(causes)
     rest = "\n".join(window).strip()
