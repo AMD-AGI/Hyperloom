@@ -3,8 +3,9 @@
 
 """What the model behind a branch's specialist is told: its role once, and at every launch where its branch stands.
 
-The role says how a long-running specialist works through the session's tools, how its candidates are judged and
-which gains the toolbox refuses as fake (main's ``FAKE_GAINS`` catalog, so a new row reaches the role). The
+The role says how a long-running specialist works through the session's tools, how its candidates are judged, how it
+declares a correctness fix with its repro case, and which gains the toolbox refuses as fake (main's ``FAKE_GAINS``
+catalog, so a new row reaches the role). The
 launch prompt opens with the repair a repair branch was opened for and the startup brief, right after the role, then
 the branch, its head, K and the branch's latest memory, so a new session goes on where the last one stopped.
 :func:`prompt_versions` names the text of both for the session's manifest fingerprint.
@@ -19,6 +20,7 @@ from collections.abc import Sequence
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_SAFETY_PREAMBLE
 from hyperloom_multibranch.contracts.fork import RepairRequest
 from hyperloom_multibranch.contracts.notebook.records import BranchLogRecord
+from hyperloom_multibranch.rulegate.fix_case import CASE_SCRIPT
 from hyperloom_multibranch.specialist.judging import NOTICE
 from hyperloom_multibranch.specialist.runtime import SessionStart
 
@@ -106,6 +108,18 @@ starts from its change and your diagnosis; you go on on your branch. An intent i
 - An inherent trade-off is one where the gain comes from the defect itself: a lower precision that costs accuracy \
 whatever the scales, a P50 gain bought with P90. Write the lesson with notebook_learn, citing the candidate in \
 request_ids, then call decline_repair; it is refused until such a learning exists.
+
+A correctness fix removes a defect your branch head shows (wrong or failed outputs, a crash, a hang). It counts only \
+when the head reproduces the defect, your change removes it, and its trigger is reachable under the session's \
+workload. Declare it with its reproduction case:
+- Write {CASE_SCRIPT}, a bash script the toolbox runs against the test's server, at $HL_BASE_URL serving $HL_MODEL: \
+exit 1 when the defect occurs and 0 when it does not. Any other exit is a broken case, never a fix.
+- Call fix_case with the script and your diagnosis (the defect, its trigger, why the change removes it), then \
+submit_test the fix as any candidate, passing the attachment fix_case returned in attachments.
+The gate runs the case on the parent and on the candidate, and a reviewer checks that the trigger is reachable. A \
+proven fix that costs no performance is committed with its case, which then guards every later commit; one that costs \
+performance is forked to a new branch cut at its parent, and you go on on yours. A fix not proven or not accepted by \
+the reviewer is recorded only, and a notice says why. A gain that carries a case is committed on its gain either way.
 
 Rules:
 - Write only in your worktree and your workspace; the source base and other branches' worktrees are not yours.

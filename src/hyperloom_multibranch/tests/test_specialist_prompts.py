@@ -39,6 +39,7 @@ TOOLS = (
     "notebook_learn",
     "request_repair",
     "decline_repair",
+    "fix_case",
 )
 
 
@@ -85,6 +86,17 @@ def test_the_role_tests_a_replayable_champion_on_the_head_before_other_direction
     prompt = role_prompt(WORKLOAD)
 
     assert "get its delta with notebook_replay and test it on your head before other directions" in prompt
+
+
+def test_the_role_says_how_to_declare_a_correctness_fix_and_what_becomes_of_it():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "reachable under the session's" in prompt
+    assert "$HL_BASE_URL serving $HL_MODEL" in prompt
+    assert "exit 1 when the defect occurs and 0 when it does not" in prompt and "never a fix" in prompt
+    assert prompt.index("Call fix_case") < prompt.index("passing the attachment fix_case returned in attachments")
+    for outcome in ("committed with its case", "forked to a new branch cut at its parent", "recorded only"):
+        assert outcome in prompt
 
 
 def test_the_role_lists_every_known_fake_gain_with_its_refusal():
