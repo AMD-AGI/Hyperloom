@@ -1385,16 +1385,13 @@ def test_the_visits_own_measurements_are_held_by_the_event_that_asked_for_them(t
     Recording it here rather than as a top-level baseline event is what keeps the gate's verdict
     and the measurement behind it in one place.
     """
-    from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import make_baseline_recorder
+    from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import BaselineRequest, make_baseline_recorder
     from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
 
     recorder = _forge_recorder()
     guest = make_baseline_recorder(
         make_sink(recorder.event_id, producer="orchestrator"),
-        task_id="integrate-k001",
-        task_kind="baseline",
-        reason="candidate_ab",
-        framework="sglang",
+        BaselineRequest(task_id="integrate-k001", task_kind="baseline", reason="candidate_ab", framework="sglang"),
         owns_event=False,
     )
     assert guest is not None
@@ -1414,7 +1411,7 @@ def test_a_measurement_that_lands_after_the_visit_closed_is_still_published(tmp_
 
     The verdict they settle republishes the event, and that is what carries the measurement in.
     """
-    from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import make_baseline_recorder
+    from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import BaselineRequest, make_baseline_recorder
     from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
     from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_integrate_verdict
 
@@ -1424,8 +1421,7 @@ def test_a_measurement_that_lands_after_the_visit_closed_is_still_published(tmp_
 
     guest = make_baseline_recorder(
         make_sink(recorder.event_id, producer="orchestrator"),
-        task_id="integrate-stack-k001+k004",
-        task_kind="baseline",
+        BaselineRequest(task_id="integrate-stack-k001+k004", task_kind="baseline"),
         owns_event=False,
     )
     assert guest is not None

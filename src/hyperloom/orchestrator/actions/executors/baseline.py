@@ -43,6 +43,9 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     RUN_AFTER_EVAL_FAILURE,
     RUN_AFTER_MOE_RUNNER_FAILURE,
     RUN_INITIAL,
+    BaselineRequest,
+    BenchmarkRound,
+    LaunchInvocation,
     make_baseline_recorder,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
@@ -2442,13 +2445,15 @@ class BenchmarkRunExecutor:
         # guessed at by parsing the server's own log back.
         if recorder is not None:
             recorder.record_invocation(
-                run_index=run_index,
-                framework_args=effective_extra_server_args,
-                extra_envs=base_extra_envs,
-                config_path=materialized_config_path,
-                framework=fw,
-                model_path=resolved_model,
-                args_mode=str(params.get("args_mode") or "append"),
+                run_index,
+                LaunchInvocation(
+                    framework_args=effective_extra_server_args,
+                    extra_envs=base_extra_envs,
+                    config_path=materialized_config_path,
+                    framework=fw,
+                    model_path=resolved_model,
+                    args_mode=str(params.get("args_mode") or "append"),
+                ),
             )
         # MLPerf prepares its delegated client off-loop; native AgentX is entirely managed by Magpie.
         _agx_err = await asyncio.to_thread(
@@ -3133,12 +3138,14 @@ class BenchmarkRunExecutor:
             if recorder is None:
                 return
             recorder.record_round(
-                run_index=run_index,
-                label=label,
-                started_at=started_at,
-                duration_sec=round(time.monotonic() - started_monotonic, 3),
-                timeout_sec=common.get("timeout_sec"),
-                result=result,
+                run_index,
+                BenchmarkRound(
+                    label=label,
+                    started_at=started_at,
+                    duration_sec=round(time.monotonic() - started_monotonic, 3),
+                    timeout_sec=common.get("timeout_sec"),
+                    result=result,
+                ),
             )
 
         try:
@@ -4167,14 +4174,16 @@ class BaselineExecutor(BenchmarkRunExecutor):
         streak, total = self._failure_counters(ctx)
         recorder = make_baseline_recorder(
             self._resolve_sink(ctx),
-            task_id=str(getattr(ctx.task, "task_id", "") or ""),
-            task_kind=str(getattr(ctx.task, "kind", "") or ""),
-            reason=str(params.get("reason") or ""),
-            framework=self._resolve_framework(ctx),
-            establishes_quality_ref=_should_establish_quality_ref(getattr(ctx.task, "kind", ""), params),
-            params=params,
-            failure_streak_before=streak,
-            total_failures_before=total,
+            BaselineRequest(
+                task_id=str(getattr(ctx.task, "task_id", "") or ""),
+                task_kind=str(getattr(ctx.task, "kind", "") or ""),
+                reason=str(params.get("reason") or ""),
+                framework=self._resolve_framework(ctx),
+                establishes_quality_ref=_should_establish_quality_ref(getattr(ctx.task, "kind", ""), params),
+                params=params,
+                failure_streak_before=streak,
+                total_failures_before=total,
+            ),
             owns_event=not str(params.get(INLINE_EVENT_PARAM) or ""),
         )
         try:
