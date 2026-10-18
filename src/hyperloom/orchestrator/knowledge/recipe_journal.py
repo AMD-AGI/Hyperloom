@@ -157,7 +157,7 @@ def _record_config_attempts(
     recorder = coord._coord.phase_framework.timeline()
     if recorder is None:
         return
-    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG, GateVerdict
 
     task_id = str(getattr(task, "task_id", "") or "")
     params = getattr(task, "params", None) or {}
@@ -259,11 +259,13 @@ def _record_config_attempts(
                 continue
             recorder.record_attempt_gate(
                 attempt_id,
-                str(gate.get("gate")),
-                passed=gate.get("passed"),
-                reason=str(gate.get("reason") or ""),
-                observed=gate.get("observed"),
-                threshold=gate.get("threshold"),
+                GateVerdict(
+                    gate=str(gate.get("gate")),
+                    passed=gate.get("passed"),
+                    reason=str(gate.get("reason") or ""),
+                    observed=gate.get("observed"),
+                    threshold=gate.get("threshold"),
+                ),
             )
         recorded += 1
     proposal_ref = str(params.get("proposal_msg_id") or "")

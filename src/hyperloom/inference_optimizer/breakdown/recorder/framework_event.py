@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from .event_fields import (
@@ -154,7 +155,9 @@ __all__ = [
     "STEP_REAUTHORED",
     "STEP_REVIEWED",
     "STEP_ROUTED",
+    "CriticReview",
     "FrameworkEventRecorder",
+    "GateVerdict",
     "assemble_framework_ext",
     "framework_event_id",
     "record_review_evidence",
@@ -223,6 +226,80 @@ def _resume_gate_ordinals(event: str) -> dict[tuple[str, str], int]:
         key = (str(row.get("attempt_id") or ""), str(row.get("gate") or ""))
         gates[key] = _int_or_none(row.get("ordinal")) or 0
     return gates
+
+
+@dataclass(frozen=True)
+class CriticReview:
+    """The Critic's ruling on one proposal.
+
+    Both verdicts are kept: a reject the loop held to a rule that only declared
+    ``advise`` is two facts, and reporting either alone misreads the round.
+
+    Attributes:
+        advisory: Recorded as given, since the vocabulary is the Critic's
+            own and a re-spelling here would drift from what it emitted.
+        variants: Per-variant rulings for a grid reviewed by ``verdict_map``;
+            a rejected variant reaches no bench, so no attempt row carries
+            its ruling.
+    """
+
+    verdict: str
+    effective_verdict: str = ""
+    held_to_rule: str = ""
+    reviewer: str = REVIEWER_CRITIC
+    iteration: Any = None
+    reason: str = ""
+    confidence: Any = None
+    failure_reason_code: str = ""
+    concerns: Any = None
+    advisory: Mapping[str, Any] | None = None
+    variants: Iterable[Mapping[str, Any]] | None = None
+
+    def block(self) -> dict[str, Any]:
+        """The ``critic_review`` block this ruling persists as."""
+        authored = str(self.verdict or "")
+        review: dict[str, Any] = {
+            "verdict": authored,
+            "effective_verdict": str(self.effective_verdict or "") or authored,
+            "held_to_rule": str(self.held_to_rule or ""),
+            "reviewer": str(self.reviewer or ""),
+            "iteration": _int_or_none(self.iteration),
+            "reason": str(self.reason or ""),
+            "confidence": _float_or_none(self.confidence),
+            "failure_reason_code": str(self.failure_reason_code or ""),
+            "concerns": [str(item) for item in (self.concerns or []) if str(item or "")],
+            "reviewed_at": _now(),
+        }
+        for field, value in _as_dict(self.advisory).items():
+            name = str(field or "")
+            if name and name not in review:
+                review[name] = value
+        rows = [
+            {
+                "variant_name": str(row.get("variant_name") or ""),
+                "verdict": str(row.get("verdict") or ""),
+                "effective_verdict": str(row.get("effective_verdict") or "") or str(row.get("verdict") or ""),
+                "held_to_rule": str(row.get("held_to_rule") or ""),
+                "reason": str(row.get("reason") or ""),
+                "failure_reason_code": str(row.get("failure_reason_code") or ""),
+            }
+            for row in (self.variants or [])
+            if str(row.get("variant_name") or "")
+        ]
+        if rows:
+            review["variants"] = rows
+        return review
+
+
+@dataclass(frozen=True)
+class GateVerdict:
+    """One gate's verdict on an attempt. ``passed`` of ``None`` is a gate that ran but could not rule."""
+
+    gate: str
+    passed: bool | None
+    reason: str = ""
+    observed: Any = None
+    threshold: Any = None
 
 
 class FrameworkEventRecorder:
@@ -420,73 +497,18 @@ class FrameworkEventRecorder:
             row["confidence"] = _float_or_none(fields.get("confidence"))
         self._sink.record(SECTION_PROPOSAL, row, row_type=ROW_PROPOSAL, natural_ids=_key(key))
 
-    def record_proposal_review(
-        self,
-        proposal_id: str,
-        *,
-        verdict: str,
-        effective_verdict: str = "",
-        held_to_rule: str = "",
-        reviewer: str = REVIEWER_CRITIC,
-        iteration: Any = None,
-        reason: str = "",
-        confidence: Any = None,
-        failure_reason_code: str = "",
-        concerns: Any = None,
-        advisory: Mapping[str, Any] | None = None,
-        variants: Iterable[Mapping[str, Any]] | None = None,
-    ) -> None:
+    def record_proposal_review(self, proposal_id: str, review: CriticReview) -> None:
         """Record the Critic's ruling on one proposal, inline on its row.
 
         The review lives on the proposal so that it follows the proposal
-        wherever it was raised. Both verdicts are kept: a reject the loop held
-        to a rule that only declared ``advise`` is two facts, and reporting
-        either alone misreads the round.
-
-        Args:
-            advisory: Recorded as given, since the vocabulary is the Critic's
-                own and a re-spelling here would drift from what it emitted.
-            variants: Per-variant rulings for a grid reviewed by
-                ``verdict_map``; a rejected variant reaches no bench, so no
-                attempt row carries its ruling.
+        wherever it was raised.
         """
         key = str(proposal_id or "")
         if not key:
             return
-        authored = str(verdict or "")
-        review: dict[str, Any] = {
-            "verdict": authored,
-            "effective_verdict": str(effective_verdict or "") or authored,
-            "held_to_rule": str(held_to_rule or ""),
-            "reviewer": str(reviewer or ""),
-            "iteration": _int_or_none(iteration),
-            "reason": str(reason or ""),
-            "confidence": _float_or_none(confidence),
-            "failure_reason_code": str(failure_reason_code or ""),
-            "concerns": [str(item) for item in (concerns or []) if str(item or "")],
-            "reviewed_at": _now(),
-        }
-        for field, value in _as_dict(advisory).items():
-            name = str(field or "")
-            if name and name not in review:
-                review[name] = value
-        rows = [
-            {
-                "variant_name": str(row.get("variant_name") or ""),
-                "verdict": str(row.get("verdict") or ""),
-                "effective_verdict": str(row.get("effective_verdict") or "") or str(row.get("verdict") or ""),
-                "held_to_rule": str(row.get("held_to_rule") or ""),
-                "reason": str(row.get("reason") or ""),
-                "failure_reason_code": str(row.get("failure_reason_code") or ""),
-            }
-            for row in (variants or [])
-            if str(row.get("variant_name") or "")
-        ]
-        if rows:
-            review["variants"] = rows
         self._sink.record(
             SECTION_PROPOSAL,
-            {"proposal_id": key, "critic_review": review},
+            {"proposal_id": key, "critic_review": review.block()},
             row_type=ROW_PROPOSAL,
             natural_ids=_key(key),
         )
@@ -699,26 +721,16 @@ class FrameworkEventRecorder:
             }
         self._sink.record(SECTION_ATTEMPT, row, row_type=ROW_ATTEMPT, natural_ids=_key(key))
 
-    def record_attempt_gate(
-        self,
-        attempt_id: str,
-        gate: str,
-        *,
-        passed: bool | None,
-        reason: str = "",
-        observed: Any = None,
-        threshold: Any = None,
-    ) -> None:
+    def record_attempt_gate(self, attempt_id: str, verdict: GateVerdict) -> None:
         """Record one gate's verdict on one attempt, as it is evaluated.
 
         A gate that was never reached writes no row, which is how assembly
         tells "did not pass" apart from "did not apply". A whole gating
         sequence fits inside one clock tick, so order comes from an ordinal
-        assigned on the first evaluation and reused. ``passed`` of ``None``
-        is a gate that ran but could not rule.
+        assigned on the first evaluation and reused.
         """
         key = str(attempt_id or "")
-        name = str(gate or "")
+        name = str(verdict.gate or "")
         if not key or not name:
             return
         ordinal = self._gate_ordinals.get((key, name))
@@ -731,10 +743,10 @@ class FrameworkEventRecorder:
                 "attempt_id": key,
                 "gate": name,
                 "ordinal": ordinal,
-                "passed": None if passed is None else bool(passed),
-                "reason": str(reason or ""),
-                "observed": _float_or_none(observed),
-                "threshold": _float_or_none(threshold),
+                "passed": None if verdict.passed is None else bool(verdict.passed),
+                "reason": str(verdict.reason or ""),
+                "observed": _float_or_none(verdict.observed),
+                "threshold": _float_or_none(verdict.threshold),
                 # The latest ruling's time; position comes from the ordinal.
                 "ts": _now_precise(),
             },

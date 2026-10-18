@@ -393,11 +393,13 @@ def _record_review_outcome(
     candidate does not say what let it through. ``verdict`` is only passed on
     the deny path, which is the only one carrying the rationale.
     """
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import CriticReview
+
     recorder = _recorder(coord)
     if recorder is None or not proposal_id:
         return
     if verdict:
-        recorder.record_proposal_review(proposal_id, verdict=verdict, reason=reason)
+        recorder.record_proposal_review(proposal_id, CriticReview(verdict=verdict, reason=reason))
         recorder.record_proposal_step(proposal_id, step="reviewed", outcome=verdict, reason=reason)
     recorder.record_proposal_review_outcome(proposal_id, **outcome)
 
@@ -499,7 +501,7 @@ def _record_source_attempt(
     recorder = _recorder(coord)
     if recorder is None:
         return
-    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_SOURCE
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_SOURCE, GateVerdict
 
     task_id = str(getattr(task, "task_id", "") or "")
     if not task_id:
@@ -603,26 +605,30 @@ def _record_source_attempt(
     if isinstance(delta_pct, (int, float)) and isinstance(keep_threshold, (int, float)):
         recorder.record_attempt_gate(
             task_id,
-            "keep_threshold",
-            passed=float(delta_pct) >= float(keep_threshold),
-            observed=delta_pct,
-            threshold=keep_threshold,
+            GateVerdict(
+                gate="keep_threshold",
+                passed=float(delta_pct) >= float(keep_threshold),
+                observed=delta_pct,
+                threshold=keep_threshold,
+            ),
         )
     if accuracy_pass is not None:
         recorder.record_attempt_gate(
             task_id,
-            "accuracy",
-            passed=bool(accuracy_pass),
-            observed=result.get("accuracy_value"),
-            threshold=result.get("accuracy_reference"),
+            GateVerdict(
+                gate="accuracy",
+                passed=bool(accuracy_pass),
+                observed=result.get("accuracy_value"),
+                threshold=result.get("accuracy_reference"),
+            ),
         )
     parity = result.get("switch_off_parity")
     if isinstance(parity, Mapping) and parity.get("ran"):
         recorder.record_attempt_gate(
             task_id,
-            "switch_off_parity",
-            passed=bool(parity.get("ok")),
-            reason=str(parity.get("reason") or ""),
+            GateVerdict(
+                gate="switch_off_parity", passed=bool(parity.get("ok")), reason=str(parity.get("reason") or "")
+            ),
         )
     _record_step(
         coord,
