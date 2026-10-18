@@ -731,10 +731,12 @@ def test_a_single_lane_runs_the_ordinary_session(tmp_path, monkeypatch):
 
     asyncio.run(
         loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-            orchestration_service=object(),
-            agent_factory=_lane_agent_factory({}),
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                agent_factory=_lane_agent_factory({}),
+                orchestration_service=object(),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
 
@@ -763,10 +765,12 @@ def test_more_than_one_lane_fans_the_round_out(tmp_path, monkeypatch):
 
     asyncio.run(
         loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-            orchestration_service=object(),
-            agent_factory=_lane_agent_factory({}),
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                agent_factory=_lane_agent_factory({}),
+                orchestration_service=object(),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
 
@@ -804,10 +808,12 @@ def _fan_out_iteration(tmp_path, monkeypatch, rounds, **plan_kwargs):
 
     asyncio.run(
         loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-            orchestration_service=object(),
-            agent_factory=_lane_agent_factory({}),
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                agent_factory=_lane_agent_factory({}),
+                orchestration_service=object(),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
     return [
@@ -965,10 +971,12 @@ def _round_admission_loop(
 
     asyncio.run(
         loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-            orchestration_service=object(),
-            agent_factory=_lane_agent_factory({}),
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                agent_factory=_lane_agent_factory({}),
+                orchestration_service=object(),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
     return loop, workspace
@@ -1100,7 +1108,7 @@ def test_a_resumed_campaign_reports_a_planning_share_within_its_definition(
         lambda: 0.0 if loop.results else 12 * 3600.0,
     )
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     summary = loop._round_budget_summary()
     share = summary["planning_share_pct"]
@@ -1147,10 +1155,12 @@ def test_a_finished_round_records_what_its_planning_cost(tmp_path, monkeypatch):
 
     asyncio.run(
         loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-            orchestration_service=object(),
-            agent_factory=_lane_agent_factory({}),
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                agent_factory=_lane_agent_factory({}),
+                orchestration_service=object(),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
 
@@ -1166,7 +1176,7 @@ def test_an_iteration_that_did_not_plan_records_no_round_cost(tmp_path, monkeypa
     """A campaign with no orchestration never learns that planning is free."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert loop.results
     assert LoopStateStore(str(workspace)).load().round_costs.rounds == 0
@@ -1540,10 +1550,12 @@ def test_a_stack_does_not_take_an_iteration_that_is_holding_a_plan(tmp_path, mon
 
     asyncio.run(
         loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-            orchestration_service=object(),
-            agent_factory=_lane_agent_factory({}),
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                agent_factory=_lane_agent_factory({}),
+                orchestration_service=object(),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
 
@@ -1880,7 +1892,7 @@ def test_a_queue_that_never_empties_does_not_starve_stacking(tmp_path, monkeypat
     loop, workspace = _stalled_loop_behind_a_full_queue(tmp_path, monkeypatch)
     monkeypatch.setattr(loop, "run_one_iteration", _reverting_iteration)
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     events = LoopStateStore(str(workspace)).read_events()
     staged = [item for item in events if item.get("type") == "merge_attempt_staged"]
@@ -1906,7 +1918,7 @@ def test_a_fresh_run_still_measures_the_candidates_it_bought(tmp_path, monkeypat
     loop, workspace = _stalled_loop_behind_a_full_queue(tmp_path, monkeypatch, stall=MERGE_ATTEMPT_STALL_THRESHOLD - 1)
     monkeypatch.setattr(loop, "run_one_iteration", _reverting_iteration)
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     events = LoopStateStore(str(workspace)).read_events()
 
@@ -1930,7 +1942,7 @@ def test_taking_precedence_and_failing_to_stage_costs_the_queue_nothing(tmp_path
     )
     monkeypatch.setattr(loop, "run_one_iteration", _reverting_iteration)
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     events = LoopStateStore(str(workspace)).read_events()
 
@@ -1974,7 +1986,7 @@ def test_a_merge_streak_is_bounded_so_the_queue_is_reached(tmp_path, monkeypatch
     loop, workspace = _stalled_loop_behind_a_full_queue(tmp_path, monkeypatch, candidates=4, iterations=5)
     monkeypatch.setattr(loop, "run_one_iteration", _reverting_iteration)
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     # Each of those iterations has to have reached the KEEP gate and been
     # turned down there, because that is the outcome that leaves the stall
@@ -2029,7 +2041,7 @@ def test_what_precedence_records_is_a_queue_depth(tmp_path, monkeypatch):
     loop._persist_lane_queue()
     monkeypatch.setattr(loop, "run_one_iteration", _reverting_iteration)
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     events = LoopStateStore(str(workspace)).read_events()
 
@@ -2591,7 +2603,7 @@ def test_agent_error_is_reduced_and_persisted(tmp_path, monkeypatch):
     async def failing_agent(*_args, **_kwargs):
         raise RuntimeError("agent exploded")
 
-    asyncio.run(loop.run(agent_fn=failing_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=failing_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -2626,10 +2638,7 @@ def test_agent_error_with_diff_is_handed_to_outer_validation(tmp_path, monkeypat
 
     monkeypatch.setattr(loop, "run_one_iteration", reject_candidate)
     asyncio.run(
-        loop.run(
-            agent_fn=editing_then_failing_agent,
-            supervisor_fn=_unused_supervisor,
-        )
+        loop.run(runner_module.LoopAgents(agent_fn=editing_then_failing_agent, supervisor_fn=_unused_supervisor))
     )
 
     decisions = [
@@ -2676,12 +2685,7 @@ def test_integrity_violation_restores_and_skips_canonical_validation(
 
     monkeypatch.setattr(loop, "run_one_iteration", unexpected_validation)
 
-    asyncio.run(
-        loop.run(
-            agent_fn=unsafe_agent,
-            supervisor_fn=_unused_supervisor,
-        )
-    )
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=unsafe_agent, supervisor_fn=_unused_supervisor)))
 
     assert validation_calls == []
     assert kernel.read_text() == "def kernel():\n    return 1\n"
@@ -2724,12 +2728,7 @@ def test_a_contended_workspace_skips_the_canonical_measurement(
 
     monkeypatch.setattr(loop, "run_one_iteration", unexpected_validation)
 
-    asyncio.run(
-        loop.run(
-            agent_fn=contended_agent,
-            supervisor_fn=_unused_supervisor,
-        )
-    )
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=contended_agent, supervisor_fn=_unused_supervisor)))
 
     assert validation_calls == []
     # Unmeasured means unkept: HEAD stays at the last state a benchmark ever
@@ -2813,10 +2812,12 @@ def test_one_contended_lane_costs_the_whole_round_its_measurement(
 
     asyncio.run(
         loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-            orchestration_service=object(),
-            agent_factory=_lane_agent_factory({"tune prefill": ("return 1", "return 2")}),
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                agent_factory=_lane_agent_factory({"tune prefill": ("return 1", "return 2")}),
+                orchestration_service=object(),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
 
@@ -2874,10 +2875,12 @@ def test_a_leaked_probe_costs_the_round_its_measurement(tmp_path, monkeypatch):
 
     asyncio.run(
         loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-            orchestration_service=_ProbeLeakingService(),
-            agent_factory=_lane_agent_factory({"tune prefill": ("return 1", "return 2")}),
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                agent_factory=_lane_agent_factory({"tune prefill": ("return 1", "return 2")}),
+                orchestration_service=_ProbeLeakingService(),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
 
@@ -2924,9 +2927,8 @@ def test_a_hazard_outlives_the_iteration_that_found_it(tmp_path, monkeypatch):
 
     asyncio.run(
         loop.run(
-            agent_fn=agent,
-            supervisor_fn=_unused_supervisor,
-            on_iteration=free_the_device_after_the_second_refusal,
+            runner_module.LoopAgents(agent_fn=agent, supervisor_fn=_unused_supervisor),
+            callbacks=runner_module.LoopCallbacks(on_iteration=free_the_device_after_the_second_refusal),
         )
     )
 
@@ -2958,12 +2960,7 @@ def test_a_hazard_nothing_clears_stops_the_run_rather_than_spinning(
     _fake_device(monkeypatch, {4321: 99})
     monkeypatch.setattr(runner_module, "processes_under", lambda _dir: {4321})
 
-    asyncio.run(
-        loop.run(
-            agent_fn=_contended_agent,
-            supervisor_fn=_unused_supervisor,
-        )
-    )
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_contended_agent, supervisor_fn=_unused_supervisor)))
 
     decisions = [
         event.get("decision")
@@ -2991,7 +2988,7 @@ def test_an_api_outage_is_not_recorded_as_an_agent_decision(tmp_path, monkeypatc
         session_sink["end_reason"] = "api_error"
         return "agent session ended with an API error"
 
-    asyncio.run(loop.run(agent_fn=api_failed_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=api_failed_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     decisions = [event.get("decision") for event in store.read_events() if event.get("type") == "iteration_result"]
@@ -3002,7 +2999,7 @@ def test_an_api_outage_is_not_recorded_as_an_agent_decision(tmp_path, monkeypatc
 
 def test_no_change_attempt_is_reduced_and_persisted(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -3050,9 +3047,9 @@ def test_optimization_plan_path_is_injected_before_implementer(
     monkeypatch.setattr(loop, "_run_orchestration", run_orchestration)
     asyncio.run(
         loop.run(
-            agent_fn=agent_fn,
-            orchestration_service=orchestration_service,
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(
+                agent_fn=agent_fn, orchestration_service=orchestration_service, supervisor_fn=_unused_supervisor
+            )
         )
     )
 
@@ -3141,12 +3138,7 @@ def test_lessons_are_orchestration_evidence_and_handoff_is_audit_only(
     monkeypatch,
 ):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(
-        loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-        )
-    )
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
     loop.config = SimpleNamespace(
         experiments_dir=workspace / "forge_experiments",
         gpu_target="gfx942",
@@ -3922,7 +3914,7 @@ def test_repeated_empty_diffs_escalate_before_the_generic_stall_threshold(
         observed_modes.append(loop.run_state.search_mode)
         return "No source change was needed."
 
-    asyncio.run(loop.run(agent_fn=stuck_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=stuck_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -3938,7 +3930,7 @@ def test_single_empty_diff_does_not_escalate(tmp_path, monkeypatch):
     """One session that found nothing to change is not proof of a dead end."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     state = LoopStateStore(str(workspace)).load()
 
@@ -3971,7 +3963,7 @@ def test_the_empty_diff_streak_survives_a_reworded_plan_headline(
         observed_modes.append(loop.run_state.search_mode)
         return "No source change was needed."
 
-    asyncio.run(loop.run(agent_fn=reworded_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=reworded_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -4005,7 +3997,7 @@ def test_api_outage_does_not_break_the_empty_diff_streak(tmp_path, monkeypatch):
             return "agent session ended with an API error"
         return "No source change was needed."
 
-    asyncio.run(loop.run(agent_fn=flaky_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=flaky_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -4038,7 +4030,7 @@ def test_a_crashed_session_does_not_break_the_empty_diff_streak(
             raise RuntimeError("SDK stream died mid-session")
         return "No source change was needed."
 
-    asyncio.run(loop.run(agent_fn=crashing_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=crashing_agent, supervisor_fn=_unused_supervisor)))
 
     store = LoopStateStore(str(workspace))
     state = store.load()
@@ -4077,7 +4069,7 @@ def test_an_outage_run_cannot_push_the_first_empty_diff_out_of_the_window(
             return "agent session ended with an API error"
         return "No source change was needed."
 
-    asyncio.run(loop.run(agent_fn=outage_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=outage_agent, supervisor_fn=_unused_supervisor)))
 
     reopened = LoopStateStore(str(workspace))
     live = reopened.load()
@@ -4509,9 +4501,7 @@ def test_keep_defers_incremental_analysis_until_next_request(
     async def exercise():
         service = AnalysisService()
         await loop.run(
-            agent_fn=editing_agent,
-            analysis_service=service,
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(agent_fn=editing_agent, analysis_service=service, supervisor_fn=_unused_supervisor)
         )
         assert len(analysis_calls) == 1
         assert loop._analysis_bundle is None
@@ -5058,9 +5048,9 @@ def test_loop_refreshes_stale_analysis_before_supervisor(
 
     asyncio.run(
         loop.run(
-            agent_fn=editing_agent,
-            analysis_service=AnalysisService(),
-            supervisor_fn=supervisor,
+            runner_module.LoopAgents(
+                agent_fn=editing_agent, analysis_service=AnalysisService(), supervisor_fn=supervisor
+            )
         )
     )
 
@@ -5101,9 +5091,9 @@ def test_handoff_records_optimization_plan_path(
     monkeypatch.setattr(loop, "_run_orchestration", create_plan)
     asyncio.run(
         loop.run(
-            agent_fn=agent_fn,
-            orchestration_service=object(),
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(
+                agent_fn=agent_fn, orchestration_service=object(), supervisor_fn=_unused_supervisor
+            )
         )
     )
 
@@ -5195,9 +5185,7 @@ def test_resume_propagates_complete_ruling_to_planner_and_implementer(
 
     asyncio.run(
         loop.run(
-            agent_fn=agent,
-            orchestration_service=object(),
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(agent_fn=agent, orchestration_service=object(), supervisor_fn=_unused_supervisor)
         )
     )
 
@@ -5300,7 +5288,7 @@ def test_run_fails_before_agent_without_baseline_cases(
         RuntimeError,
         match="requires pristine per-case timings",
     ):
-        asyncio.run(loop.run(agent_fn=agent))
+        asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent)))
 
     assert called is False
 
@@ -5485,7 +5473,7 @@ def test_resume_restores_baselines_before_best_publication_reconcile(
     monkeypatch.setattr(loop, "_reconcile_best_publication", inspect_reconcile)
     monkeypatch.setattr(loop, "_time_remaining", lambda: 0.0)
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent)))
 
     assert observed == [(0.8, 1.0)]
 
@@ -5662,7 +5650,7 @@ def test_intervention_reset_is_persisted_before_agent_runs(tmp_path, monkeypatch
         raise asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(loop.run(agent_fn=cancelled_agent, supervisor_fn=supervisor))
+        asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=cancelled_agent, supervisor_fn=supervisor)))
 
     persisted = LoopStateStore(str(workspace)).load()
     assert loop.run_state.stall.no_improvement_iters == 0
@@ -5719,12 +5707,7 @@ def test_empty_supervisor_expires_prior_ruling_without_resetting_stall(
         )
 
     monkeypatch.setattr(loop, "run_one_iteration", reverted_iteration)
-    asyncio.run(
-        loop.run(
-            agent_fn=editing_agent,
-            supervisor_fn=empty_supervisor,
-        )
-    )
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent, supervisor_fn=empty_supervisor)))
 
     assert loop.monitor.intervention_count == 0
     assert loop.run_state.stall.no_improvement_iters == 3
@@ -5795,9 +5778,7 @@ def test_free_form_supervisor_ruling_still_creates_fresh_plan_each_iteration(
     monkeypatch.setattr(loop, "run_one_iteration", reverted_iteration)
     asyncio.run(
         loop.run(
-            agent_fn=editing_agent,
-            orchestration_service=object(),
-            supervisor_fn=supervisor,
+            runner_module.LoopAgents(agent_fn=editing_agent, orchestration_service=object(), supervisor_fn=supervisor)
         )
     )
 
@@ -5894,9 +5875,9 @@ def test_orchestration_failure_skips_implementer_without_fallback(
     monkeypatch.setattr(loop, "_run_orchestration", orchestration)
     results = asyncio.run(
         loop.run(
-            agent_fn=implementer,
-            orchestration_service=object(),
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(
+                agent_fn=implementer, orchestration_service=object(), supervisor_fn=_unused_supervisor
+            )
         )
     )
 
@@ -5927,9 +5908,9 @@ def test_consecutive_orchestration_errors_open_circuit(
 
     results = asyncio.run(
         loop.run(
-            agent_fn=implementer,
-            orchestration_service=service,
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(
+                agent_fn=implementer, orchestration_service=service, supervisor_fn=_unused_supervisor
+            )
         )
     )
 
@@ -5958,9 +5939,11 @@ def test_orchestration_failed_resume_allows_one_half_open_probe(
     first_backend = _OrchestrationTestBackend([_orchestration_api_failure() for _ in range(3)])
     asyncio.run(
         first.run(
-            agent_fn=_no_change_agent,
-            orchestration_service=_runner_orchestration_service(first_backend),
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                orchestration_service=_runner_orchestration_service(first_backend),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
 
@@ -5978,9 +5961,11 @@ def test_orchestration_failed_resume_allows_one_half_open_probe(
     failed_backend = _OrchestrationTestBackend([_orchestration_api_failure()])
     failed_results = asyncio.run(
         failed_probe.run(
-            agent_fn=_no_change_agent,
-            orchestration_service=_runner_orchestration_service(failed_backend),
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                orchestration_service=_runner_orchestration_service(failed_backend),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
 
@@ -6022,9 +6007,11 @@ def test_orchestration_failed_resume_allows_one_half_open_probe(
     )
     successful_results = asyncio.run(
         successful_probe.run(
-            agent_fn=_no_change_agent,
-            orchestration_service=_runner_orchestration_service(successful_backend),
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(
+                agent_fn=_no_change_agent,
+                orchestration_service=_runner_orchestration_service(successful_backend),
+                supervisor_fn=_unused_supervisor,
+            )
         )
     )
 
@@ -6038,7 +6025,7 @@ def test_orchestration_failed_resume_allows_one_half_open_probe(
 
 def test_two_loop_instances_resume_global_iteration_and_fresh_budget(tmp_path, monkeypatch):
     first, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(first.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     first_state = LoopStateStore(str(workspace)).load()
     first_experiment = first.experiment
@@ -6058,7 +6045,9 @@ def test_two_loop_instances_resume_global_iteration_and_fresh_budget(tmp_path, m
         "_time_remaining",
         lambda: _AMPLE_BUDGET_SEC if len(second.results) < 1 else 0.0,
     )
-    second_results = asyncio.run(second.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    second_results = asyncio.run(
+        second.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    )
 
     resumed = LoopStateStore(str(workspace)).load()
     assert [result.iteration for result in second_results] == [2]
@@ -6078,7 +6067,7 @@ def test_two_loop_instances_resume_global_iteration_and_fresh_budget(tmp_path, m
 
 def test_resume_advances_past_abruptly_started_event(tmp_path, monkeypatch):
     first, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(first.run(agent_fn=_no_change_agent))
+    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent)))
     store = LoopStateStore(str(workspace))
     state = store.load()
     interrupted_iteration = state.next_iteration
@@ -6101,7 +6090,7 @@ def test_resume_advances_past_abruptly_started_event(tmp_path, monkeypatch):
         "_time_remaining",
         lambda: _AMPLE_BUDGET_SEC if len(resumed.results) < 1 else 0.0,
     )
-    results = asyncio.run(resumed.run(agent_fn=_no_change_agent))
+    results = asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=_no_change_agent)))
 
     assert [result.iteration for result in results] == [interrupted_iteration + 1]
     assert LoopStateStore(str(workspace)).load().next_iteration == (interrupted_iteration + 2)
@@ -6142,12 +6131,7 @@ def test_validated_warm_start_is_immediately_recoverable_without_keep(
     loop.ic.warm_start_commit = warm_commit
     loop.ic.warm_start_solution_slug = "kernelforge-exp/op/run"
 
-    asyncio.run(
-        loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-        )
-    )
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     state = LoopStateStore(str(workspace)).load()
     manifest = json.loads((workspace / "forge_experiments" / "best" / "manifest.json").read_text())
@@ -6236,12 +6220,7 @@ def test_validated_warm_start_reuses_cli_prepublication(
         pytest.fail("runner must not republish a CLI-published warm-start")
 
     monkeypatch.setattr(loop, "_publish_best_result", duplicate_publication)
-    asyncio.run(
-        loop.run(
-            agent_fn=_no_change_agent,
-            supervisor_fn=_unused_supervisor,
-        )
-    )
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     persisted_manifest = json.loads((workspace / "forge_experiments" / "best" / "manifest.json").read_text())
     assert persisted_manifest == manifest
@@ -6279,7 +6258,7 @@ def test_keep_with_missing_diagnostic_wall_time_completes(
 
     monkeypatch.setattr(loop, "run_one_iteration", successful_iteration)
 
-    results = asyncio.run(loop.run(agent_fn=editing_agent))
+    results = asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     assert len(results) == 1
     assert results[0].kept is True
@@ -6325,7 +6304,7 @@ def test_keep_archive_failure_retains_pending_journal(
     monkeypatch.setattr(loop, "run_one_iteration", successful_iteration)
     monkeypatch.setattr(runner_module.CandidateArchive, "record", fail_record)
 
-    asyncio.run(loop.run(agent_fn=editing_agent))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     pending_path = workspace / "forge_experiments" / "pending_keep.json"
     assert not pending_path.is_file()
@@ -6363,7 +6342,7 @@ def test_recovered_keep_archive_none_retains_pending_journal(
 
 def test_fresh_run_rejects_existing_campaign_without_modifying_state(tmp_path, monkeypatch):
     first, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(first.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
     state_path = workspace / "forge_experiments" / "run_state.json"
     before = state_path.read_bytes()
 
@@ -6374,10 +6353,7 @@ def test_fresh_run_rejects_existing_campaign_without_modifying_state(tmp_path, m
     )
     with pytest.raises(ValueError, match="--resume"):
         asyncio.run(
-            duplicate_fresh.run(
-                agent_fn=_no_change_agent,
-                supervisor_fn=_unused_supervisor,
-            )
+            duplicate_fresh.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
         )
 
     assert state_path.read_bytes() == before
@@ -6386,7 +6362,7 @@ def test_fresh_run_rejects_existing_campaign_without_modifying_state(tmp_path, m
 def test_a_rejected_fresh_run_persists_no_pr_references(tmp_path, monkeypatch):
     """Deferred PR writes must not survive an invocation the guard rejects."""
     first, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(first.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     def tree() -> dict:
         """Every workspace file, git included, so nothing can slip through."""
@@ -6408,10 +6384,7 @@ def test_a_rejected_fresh_run_persists_no_pr_references(tmp_path, monkeypatch):
     )
     with pytest.raises(ValueError, match="--resume"):
         asyncio.run(
-            duplicate_fresh.run(
-                agent_fn=_no_change_agent,
-                supervisor_fn=_unused_supervisor,
-            )
+            duplicate_fresh.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
         )
 
     assert tree() == before
@@ -6436,7 +6409,7 @@ def test_a_snapshot_write_failure_records_degradation_and_continues(
         fail_snapshot,
     )
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     events = [event for event in LoopStateStore(str(workspace)).read_events() if event["type"] == "pr_refs_refreshed"]
     assert len(events) == 1
@@ -6462,7 +6435,7 @@ def test_a_pr_event_write_failure_cannot_abort_the_campaign(
 
     monkeypatch.setattr(LoopStateStore, "append_event", fail_pr_event)
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert "warning: event not recorded" in capsys.readouterr().out
 
@@ -6482,7 +6455,7 @@ def test_resume_rejects_identity_mismatch_without_modifying_state(
     error,
 ):
     first, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(first.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
     state_path = workspace / "forge_experiments" / "run_state.json"
     before = state_path.read_bytes()
     experiment_count = len(first.tracker.list_experiments())
@@ -6496,10 +6469,7 @@ def test_resume_rejects_identity_mismatch_without_modifying_state(
     )
     with pytest.raises(ValueError, match=error):
         asyncio.run(
-            mismatched.run(
-                agent_fn=_no_change_agent,
-                supervisor_fn=_unused_supervisor,
-            )
+            mismatched.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
         )
 
     assert state_path.read_bytes() == before
@@ -6508,7 +6478,7 @@ def test_resume_rejects_identity_mismatch_without_modifying_state(
 
 def test_resume_rejects_head_mismatch_without_modifying_state(tmp_path, monkeypatch):
     first, workspace = _make_loop(tmp_path, monkeypatch)
-    asyncio.run(first.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(first.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
     state_path = workspace / "forge_experiments" / "run_state.json"
     before = state_path.read_bytes()
 
@@ -6529,10 +6499,7 @@ def test_resume_rejects_head_mismatch_without_modifying_state(tmp_path, monkeypa
     )
     with pytest.raises(ValueError, match="HEAD mismatch"):
         asyncio.run(
-            mismatched.run(
-                agent_fn=_no_change_agent,
-                supervisor_fn=_unused_supervisor,
-            )
+            mismatched.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
         )
 
     assert state_path.read_bytes() == before
@@ -7004,7 +6971,7 @@ def test_an_unreadable_kernel_reaches_the_prompt_as_unchecked(tmp_path, monkeypa
         session_sink["summarize"] = summarizer
         return "rationale"
 
-    asyncio.run(loop.run(agent_fn=agent_fn))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent_fn)))
 
     assert len(prompts) == 2
     assert "were not checked against the current kernel" in prompts[1]
@@ -7431,7 +7398,7 @@ def test_an_unscored_case_does_not_reopen_a_stored_negative_in_the_prompt(tmp_pa
         session_sink["plan"] = "inspect only"
         return "No source change was needed."
 
-    asyncio.run(loop.run(agent_fn=agent_fn))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent_fn)))
 
     assert loop._scored_case_ids() == ["decode-t1", "prefill-t16384"]
     assert prompts and "swept split-K" in prompts[0]
@@ -7866,7 +7833,7 @@ def test_lesson_flows_from_one_iteration_into_the_next_prompt(tmp_path, monkeypa
         session_sink["summarize"] = summarizer
         return "rationale"
 
-    asyncio.run(loop.run(agent_fn=agent_fn))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent_fn)))
 
     # The first iteration produced a document with both authors' halves.
     first = (workspace / "forge_experiments" / "lessons" / "iter_001.md").read_text()
@@ -7907,7 +7874,7 @@ def test_prompt_omits_the_digest_once_lessons_exist(tmp_path, monkeypatch):
         session_sink["summarize"] = summarizer
         return "rationale"
 
-    asyncio.run(loop.run(agent_fn=agent_fn))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent_fn)))
 
     # The archive digest's own header would appear verbatim if it were inlined.
     assert "Solution archive — your lineage so far" not in prompts[1]

@@ -169,8 +169,8 @@ def _install_cli_fakes(monkeypatch, tmp_path):
         def _checkpoint_llm_usage(self):
             captured["final_usage_checkpointed"] = True
 
-        async def run(self, **_kwargs):
-            captured["run_kwargs"] = _kwargs
+        async def run(self, agents, **_kwargs):
+            captured["run_kwargs"] = {"agents": agents, **_kwargs}
             try:
                 with LoopStateStore(str(self.ic.workspace_dir)).workspace_lock():
                     pass
@@ -773,8 +773,8 @@ def test_forge_loop_defaults_to_fresh_and_workspace_campaign_root(tmp_path, monk
     assert len(captured["warmstarts"]) == 1
     assert captured["run_kwargs"]["workspace_lock_held"] is True
     assert captured["run_kwargs"]["usage"] is not None
-    assert captured["run_kwargs"]["orchestration_service"] is captured["orchestration_service"]
-    assert captured["run_kwargs"]["analysis_service"] is captured["analysis_service"]
+    assert captured["run_kwargs"]["agents"].orchestration_service is captured["orchestration_service"]
+    assert captured["run_kwargs"]["agents"].analysis_service is captured["analysis_service"]
     assert captured["analysis_service_kwargs"]["profiling_enabled"] is False
     assert captured["agent_fn_setup"].task.profiling_enabled is False
     assert captured["orchestration_service_kwargs"]["enable_plan_critic"] is False
@@ -813,7 +813,7 @@ def test_short_forge_budget_keeps_profiling_disabled(
     )
 
     assert result.exit_code == 0, result.output
-    assert captured["run_kwargs"]["analysis_service"] is captured["analysis_service"]
+    assert captured["run_kwargs"]["agents"].analysis_service is captured["analysis_service"]
     assert captured["analysis_service_kwargs"]["profiling_enabled"] is False
     assert captured["analysis_service_kwargs"]["timeout_sec"] == 7200
     assert captured["agent_fn_setup"].task.profiling_enabled is False
@@ -1096,14 +1096,14 @@ def test_keep_callback_snapshots_result_and_kb_before_iteration_callback(
         ],
     )
     assert result.exit_code == 0, result.output
-    assert "on_iteration" not in captured["run_kwargs"]
+    assert captured["run_kwargs"]["callbacks"].on_iteration is None
 
     # Discard finalization effects and invoke the exact callback that runner calls synchronously after a durable KEEP,
     # before post-KEEP profiling.
     result_json.unlink()
     captured["kb_writes"].clear()
     captured["loops"][0].experiment = None
-    callback = captured["run_kwargs"]["on_best_committed"]
+    callback = captured["run_kwargs"]["callbacks"].on_best_committed
     callback(
         SimpleNamespace(
             kept=True,
@@ -1122,7 +1122,7 @@ def test_keep_callback_snapshots_result_and_kb_before_iteration_callback(
     assert snapshot["best_ms"] == 0.8
     assert snapshot["search_start_mean_case_speedup"] == 1.0
     assert not captured["kb_writes"]
-    remote_callback = captured["run_kwargs"]["on_best_ready"]
+    remote_callback = captured["run_kwargs"]["callbacks"].on_best_ready
     remote_callback(SimpleNamespace(kept=True))
     assert captured["kb_writes"]
     assert captured["kb_writes"][-1]["publication"].llm_summary is False

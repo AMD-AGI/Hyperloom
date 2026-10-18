@@ -328,8 +328,9 @@ def test_new_file_only_candidate_is_named_and_taken_off_the_tree(tmp_path, monke
 
     asyncio.run(
         loop.run(
-            agent_fn=_new_file_agent(workspace, "configs/tuned.json"),
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(
+                agent_fn=_new_file_agent(workspace, "configs/tuned.json"), supervisor_fn=_unused_supervisor
+            )
         )
     )
 
@@ -344,8 +345,7 @@ def test_new_file_only_candidate_outside_the_allowlist_is_still_reported(tmp_pat
 
     asyncio.run(
         loop.run(
-            agent_fn=_new_file_agent(workspace, "notes.txt"),
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(agent_fn=_new_file_agent(workspace, "notes.txt"), supervisor_fn=_unused_supervisor)
         )
     )
 
@@ -503,8 +503,9 @@ def test_revert_leaves_an_allowlisted_file_the_candidate_did_not_create(tmp_path
 
     asyncio.run(
         loop.run(
-            agent_fn=_new_file_agent(workspace, "configs/tuned.json"),
-            supervisor_fn=_unused_supervisor,
+            runner_module.LoopAgents(
+                agent_fn=_new_file_agent(workspace, "configs/tuned.json"), supervisor_fn=_unused_supervisor
+            )
         )
     )
 
@@ -809,12 +810,12 @@ def test_resume_recovery_does_not_delete_an_operators_new_file(tmp_path, monkeyp
 
     monkeypatch.setattr(first, "_git_commit", interrupt_commit)
     with pytest.raises(KeyboardInterrupt):
-        asyncio.run(first.run(agent_fn=editing_agent))
+        asyncio.run(first.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     assert (workspace / "forge_experiments" / "pending_keep.json").is_file()
 
     resumed = _campaign_loop(workspace, kernel, driver, tracker, session_count=0, resume=True)
     resumed.ic = replace(resumed.ic, commit_new_paths=["configs/*.json"])
-    asyncio.run(resumed.run(agent_fn=None))
+    asyncio.run(resumed.run(runner_module.LoopAgents(agent_fn=None)))
 
     assert operator.read_text() == '{"kept": true}\n'

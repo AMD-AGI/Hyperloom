@@ -1712,7 +1712,7 @@ def forge_loop(request: ForgeLoopRequest):
             f" from {seed_stats['src'] or 'n/a'}"
         )
 
-    from kernelforge.loop.runner import IterationLoop
+    from kernelforge.loop.runner import IterationLoop, LoopAgents, LoopCallbacks
     from kernelforge.loop.runner import IterationConfig
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
     from kernelforge.loop.insession_gate import GateMeasurement
@@ -2007,13 +2007,17 @@ def forge_loop(request: ForgeLoopRequest):
 
     asyncio.run(
         loop_runner.run(
-            agent_fn=agent_fn,
-            agent_factory=_lane_agent_factory if request.loop_shape.lanes > 1 else None,
-            analysis_service=analysis_service,
-            orchestration_service=orchestration_service,
-            supervisor_fn=supervisor_fn,
-            on_best_committed=_checkpoint_on_best_committed,
-            on_best_ready=_publish_remote_best,
+            LoopAgents(
+                agent_fn=agent_fn,
+                agent_factory=_lane_agent_factory if request.loop_shape.lanes > 1 else None,
+                analysis_service=analysis_service,
+                orchestration_service=orchestration_service,
+                supervisor_fn=supervisor_fn,
+            ),
+            callbacks=LoopCallbacks(
+                on_best_committed=_checkpoint_on_best_committed,
+                on_best_ready=_publish_remote_best,
+            ),
             usage=usage,
             workspace_lock_held=True,
         )
