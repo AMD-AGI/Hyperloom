@@ -731,12 +731,14 @@ def main(argv: list[str] | None = None) -> int:
         _report.render_analysis_md(
             candidates,
             analyze,
-            model_name=args.model_name,
-            framework=args.framework,
-            target_platform=args.target_platform,
-            throughput_unit=throughput_unit,
-            metrics_csv_path=str(kernel_metrics_csv_path),
-            summary_csv_path=str(kernel_summary_csv_path),
+            _report.BypassReportContext(
+                model_name=args.model_name,
+                framework=args.framework,
+                target_platform=args.target_platform,
+                throughput_unit=throughput_unit,
+                metrics_csv_path=str(kernel_metrics_csv_path),
+                summary_csv_path=str(kernel_summary_csv_path),
+            ),
         ),
     )
     atomic_write_json(candidates_path, candidates, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))

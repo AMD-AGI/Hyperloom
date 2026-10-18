@@ -644,7 +644,9 @@ def test_roofline_rows_flag_placeholder_not_measured():
 def test_render_analysis_md_sections_textgen():
     analyze = _analyze([dict(k) for k in _KERNELS])
     cands = report.build_candidates(analyze, framework="vllm", target_platform="MI300X")
-    md = report.render_analysis_md(cands, analyze, model_name="Llama", framework="vllm", target_platform="MI300X")
+    md = report.render_analysis_md(
+        cands, analyze, report.BypassReportContext(model_name="Llama", framework="vllm", target_platform="MI300X")
+    )
     for header in (
         # Shared canonical spine (identical across routes).
         "# Performance Analysis Report \u2014 Llama",
@@ -685,11 +687,13 @@ def test_render_analysis_md_top10_and_csv_and_no_stale_text():
     md = report.render_analysis_md(
         cands,
         analyze,
-        model_name="M",
-        framework="vllm",
-        target_platform="mi300x",
-        metrics_csv_path="/x/kernel_metrics.csv",
-        summary_csv_path="/x/kernel_summary.csv",
+        report.BypassReportContext(
+            model_name="M",
+            framework="vllm",
+            target_platform="mi300x",
+            metrics_csv_path="/x/kernel_metrics.csv",
+            summary_csv_path="/x/kernel_summary.csv",
+        ),
     )
     assert "## Top 10 Kernels by Optimization Priority" in md
     assert "| # | kernel_id | Name | Category | GPU% | Bound | AI | Eff% | Priority | Suggestion |" in md
@@ -704,7 +708,11 @@ def test_render_analysis_md_xdit_unit():
     analyze = _analyze([dict(k) for k in _KERNELS])
     cands = report.build_candidates(analyze, framework="xdit", target_platform="MI300X")
     md = report.render_analysis_md(
-        cands, analyze, model_name="FLUX", framework="xdit", target_platform="MI300X", throughput_unit="img/s"
+        cands,
+        analyze,
+        report.BypassReportContext(
+            model_name="FLUX", framework="xdit", target_platform="MI300X", throughput_unit="img/s"
+        ),
     )
     assert "throughput_unit=img/s" in md
     assert "Throughput unit: img/s" in md
@@ -714,7 +722,9 @@ def test_render_empty_kernels_is_valid():
     analyze = _analyze([])
     cands = report.build_candidates(analyze, framework="vllm", target_platform="MI300X")
     assert cands["hot_kernels"] == []
-    md = report.render_analysis_md(cands, analyze, model_name="Empty", framework="vllm", target_platform="MI300X")
+    md = report.render_analysis_md(
+        cands, analyze, report.BypassReportContext(model_name="Empty", framework="vllm", target_platform="MI300X")
+    )
     assert "_No GPU kernels found in trace._" in md
     assert "_No rewritable compute-kernel candidates identified._" in md
 
@@ -933,7 +943,9 @@ def test_render_surfaces_source_dispatchability_and_task_groups(monkeypatch):
     ]
     analyze = _analyze(kernels)
     cands = report.build_candidates(analyze, framework="vllm", target_platform="MI300X")
-    md = report.render_analysis_md(cands, analyze, model_name="M", framework="vllm", target_platform="MI300X")
+    md = report.render_analysis_md(
+        cands, analyze, report.BypassReportContext(model_name="M", framework="vllm", target_platform="MI300X")
+    )
     # dispatchable split line present
     assert "rewritable candidate(s) are auto-dispatchable" in md
     # resolved source surfaced with method

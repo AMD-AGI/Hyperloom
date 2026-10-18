@@ -13,13 +13,14 @@ import csv
 import io
 import re
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from typing import Any
 
 from ._bypass_benchmark_resolver import find_benchmark_files, repo_root_from_source
 from ._bypass_classify import classify_kernel
 from ._bypass_fusion import analyze_fusion
-from ._analysis_md import render_report
-from ._bypass_roofline import compute_roofline
+from ._analysis_md import AnalysisReport, render_report
+from ._bypass_roofline import KernelAggregate, compute_roofline
 from ._kernel_category import canonical_category
 from ._kernel_partition import build_kernel_candidates_document
 
@@ -448,10 +449,12 @@ def build_candidates(
             shape_entries[0]["shape"] if shape_entries and shape_provenance in _DISPATCHABLE_SHAPE_PROVENANCE else ""
         )
         rl = compute_roofline(
-            category=kc.category,
-            shape_str=_roofline_shape,
-            gpu_time_us=float(cand["duration_us"] or 0.0),
-            call_count=int(cand["call_count"] or 1),
+            KernelAggregate(
+                category=kc.category,
+                shape_str=_roofline_shape,
+                gpu_time_us=float(cand["duration_us"] or 0.0),
+                call_count=int(cand["call_count"] or 1),
+            ),
             gpu_type=target_platform,
         )
         if rl:
@@ -761,18 +764,27 @@ def build_category_summary_csv(candidates: dict[str, Any]) -> str:
     return _rows_to_csv(_SUMMARY_COLUMNS, build_category_summary(candidates))
 
 
+@dataclass(frozen=True)
+class BypassReportContext:
+    """The run identity and CSV links a bypass ``analysis.md`` names."""
+
+    model_name: str
+    framework: str
+    target_platform: str
+    throughput_unit: str = "tok/s"
+    metrics_csv_path: str = ""
+    summary_csv_path: str = ""
+
+
 def render_analysis_md(
     candidates: dict[str, Any],
     analyze_out: dict[str, Any],
-    *,
-    model_name: str,
-    framework: str,
-    target_platform: str,
-    throughput_unit: str = "tok/s",
-    metrics_csv_path: str = "",
-    summary_csv_path: str = "",
+    context: BypassReportContext,
 ) -> str:
     """Render the human/downstream ``analysis.md`` report (bypass route)."""
+    framework = context.framework
+    target_platform = context.target_platform
+    throughput_unit = context.throughput_unit
     timeline = analyze_out.get("timeline") or {}
     attribution = analyze_out.get("attribution") or {}
     hot = candidates.get("hot_kernels") or []
@@ -819,9 +831,6 @@ def render_analysis_md(
     # One P-item per routable candidate (ranked by optimization ROI). %E2E and launcher Kernel Path are not modelled
     # by bypass.
     routable = [c for c in hot if c.get("reusable_native_kernel")]
-    # Auto-dispatchable == resolved source AND a dispatch-grade operand shape; a geometry-only (launch_grid/tile_name)
-    # shape does not satisfy the gate.
-    dispatchable = [c for c in routable if c.get("source_file") and c.get("shape_dispatchable")]
     p_items = []
     for i, c in enumerate(routable, start=1):
         shapes = c.get("input_shapes") or c.get("shapes") or []
@@ -855,54 +864,42 @@ def render_analysis_md(
         f"operand shapes + measured kernel time (roofline_source=analytical)."
     )
 
-    extra = _render_bypass_extra_sections(
-        candidates,
-        analyze_out,
-        hot=hot,
-        rollup=rollup,
-        routable=routable,
-        dispatchable=dispatchable,
-        timeline=timeline,
-        attribution=attribution,
-        framework=framework,
-        target_platform=target_platform,
-        throughput_unit=throughput_unit,
-        scope=scope,
-        metrics_csv_path=metrics_csv_path,
-        summary_csv_path=summary_csv_path,
-    )
+    extra = _render_bypass_extra_sections(candidates, analyze_out, context)
 
     return render_report(
-        route="bypass",
-        model_name=model_name or "Workload",
-        provenance_detail=provenance,
-        exec_summary=exec_summary,
-        system_signals=system_signals,
-        idle_threshold=resolve_idle_pct_threshold(),
-        hot_kernels=hot_rows,
-        p_items=p_items,
-        extra_sections=extra,
+        AnalysisReport(
+            route="bypass",
+            model_name=context.model_name or "Workload",
+            provenance_detail=provenance,
+            exec_summary=exec_summary,
+            system_signals=system_signals,
+            idle_threshold=resolve_idle_pct_threshold(),
+            hot_kernels=hot_rows,
+            p_items=p_items,
+            extra_sections=extra,
+        )
     )
 
 
 def _render_bypass_extra_sections(
     candidates: dict[str, Any],
     analyze_out: dict[str, Any],
-    *,
-    hot: list[dict[str, Any]],
-    rollup: list[dict[str, Any]],
-    routable: list[dict[str, Any]],
-    dispatchable: list[dict[str, Any]],
-    timeline: dict[str, Any],
-    attribution: dict[str, Any],
-    framework: str,
-    target_platform: str,
-    throughput_unit: str,
-    scope: str,
-    metrics_csv_path: str,
-    summary_csv_path: str,
+    context: BypassReportContext,
 ) -> str:
     """Render the bypass-only richer sections appended after the shared spine."""
+    framework = context.framework
+    target_platform = context.target_platform
+    throughput_unit = context.throughput_unit
+    metrics_csv_path = context.metrics_csv_path
+    summary_csv_path = context.summary_csv_path
+    hot = candidates.get("hot_kernels") or []
+    rollup = _category_rollup(analyze_out)
+    attribution = analyze_out.get("attribution") or {}
+    scope = candidates.get("aggregation_scope", "full_trace")
+    routable = [c for c in hot if c.get("reusable_native_kernel")]
+    # Auto-dispatchable == resolved source AND a dispatch-grade operand shape; a geometry-only (launch_grid/tile_name)
+    # shape does not satisfy the gate.
+    dispatchable = [c for c in routable if c.get("source_file") and c.get("shape_dispatchable")]
     L: list[str] = []
 
     # Top Operations (category rollup) + analytical bound distribution.
@@ -1122,10 +1119,12 @@ def build_workload_roofline_totals(
             shape_entries = _trace_shape_entries(k.get("backfill_shapes") or [], k.get("backfill_dtypes") or [], _count)
         rl = (
             compute_roofline(
-                category=kc.category,
-                shape_str=shape_entries[0]["shape"] if shape_entries else "",
-                gpu_time_us=dur,
-                call_count=int(k.get("count") or 1),
+                KernelAggregate(
+                    category=kc.category,
+                    shape_str=shape_entries[0]["shape"] if shape_entries else "",
+                    gpu_time_us=dur,
+                    call_count=int(k.get("count") or 1),
+                ),
                 gpu_type=target_platform,
             )
             if shape_entries
