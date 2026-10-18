@@ -37,7 +37,7 @@ from kernelforge.rewrite_by_flydsl.kb import (
     try_flydsl_kb_warmstart,
     write_flydsl_kb_solution,
 )
-from kernelforge.rewrite_by_flydsl.optimize import run_optimize
+from kernelforge.rewrite_by_flydsl.optimize import OptimizeOptions, OptimizeRequest, run_optimize
 from kernelforge.rewrite_by_flydsl.port_loop import PortRequest, PortResult, run_port_loop
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET, RewriteBudgetPolicy
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
@@ -780,20 +780,20 @@ def run_rewrite(
             spec,
             driver_path,
             config,
-            experiments_dir=experiments_dir,
-            max_hours=remaining_hours,
-            git_branch=optimize_git_branch,
-            permission_mode=permission_mode,
-            supervisor_backend=supervisor_backend,
-            profile_timeout_sec=profile_timeout_sec,
-            roofline_ceiling=roofline_ceiling,
-            deadline_unix=deadline_unix,
-            stop_at_unix=search_stop_unix,
-            # Anchor the loop on the source, so every score it reports -- each KEEP published below and the run's
-            # final result -- already divides by the kernel this rewrite replaced.
-            source_ms=source_ms,
-            source_case_ms=source_case_ms,
-            on_new_best=_publish_keep if rewrite_kb_enabled else None,
+            OptimizeRequest(
+                experiments_dir,
+                OptimizeOptions(optimize_git_branch, supervisor_backend, profile_timeout_sec),
+                roofline_ceiling=roofline_ceiling,
+                permission_mode=permission_mode,
+                max_hours=remaining_hours,
+                deadline_unix=deadline_unix,
+                stop_at_unix=search_stop_unix,
+                # Anchor the loop on the source, so every score it reports -- each KEEP published below and the run's
+                # final result -- already divides by the kernel this rewrite replaced.
+                source_ms=source_ms,
+                source_case_ms=source_case_ms,
+                on_new_best=_publish_keep if rewrite_kb_enabled else None,
+            ),
         )
     else:
         print(

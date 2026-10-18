@@ -21,6 +21,7 @@ from kernelforge.option_groups import option_group
 from kernelforge.config import Config
 from kernelforge.knowledge.kb_store.config import KnowledgeConfig
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.rewrite_by_flydsl.optimize import OptimizeOptions
 
 
 def _validate_rewrite_framework(_ctx, _param, value):
@@ -115,15 +116,6 @@ class ApplybackTarget:
 
     framework: str
     applyback_import_modules: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class OptimizeOptions:
-    """The nested forge-loop's branch, supervisor backend and Analysis timeout."""
-
-    git_branch: str
-    supervisor_backend: str
-    profile_timeout_sec: int
 
 
 @dataclass(frozen=True)

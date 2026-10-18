@@ -142,8 +142,7 @@ def test_optimize_does_not_forward_shapes_to_forge_loop(tmp_path, monkeypatch):
         _spec(tmp_path),
         "driver.py",
         Config.from_env(workspace=str(tmp_path)),
-        experiments_dir=str(tmp_path),
-        result_json=str(tmp_path / "missing.json"),
+        optimize.OptimizeRequest(str(tmp_path), result_json=str(tmp_path / "missing.json")),
     )
 
     assert result["best_ms"] == 0.7
@@ -182,9 +181,7 @@ def test_optimize_anchors_the_loop_on_the_source_when_given_its_timings(tmp_path
         _spec(tmp_path),
         "driver.py",
         Config.from_env(workspace=str(tmp_path)),
-        experiments_dir=str(tmp_path),
-        source_ms=101.0,
-        source_case_ms={"small": 1.0, "big": 100.0},
+        optimize.OptimizeRequest(str(tmp_path), source_ms=101.0, source_case_ms={"small": 1.0, "big": 100.0}),
     )
 
     command = captured["command"]
@@ -206,10 +203,7 @@ def test_optimize_leaves_the_loop_on_its_own_baseline_when_not_given_one(tmp_pat
     monkeypatch.setattr(optimize.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(optimize, "_restore_best_kernel", lambda *a, **k: None)
     optimize.run_optimize(
-        _spec(tmp_path),
-        "driver.py",
-        Config.from_env(workspace=str(tmp_path)),
-        experiments_dir=str(tmp_path),
+        _spec(tmp_path), "driver.py", Config.from_env(workspace=str(tmp_path)), optimize.OptimizeRequest(str(tmp_path))
     )
 
     assert "--baseline-json" not in captured["command"]
@@ -231,8 +225,7 @@ def test_optimize_spells_the_roofline_switch_out_for_the_nested_loop(tmp_path, m
         _spec(tmp_path),
         "driver.py",
         Config.from_env(workspace=str(tmp_path)),
-        experiments_dir=str(tmp_path),
-        **requested,
+        optimize.OptimizeRequest(str(tmp_path), **requested),
     )
 
     command = captured["command"]
@@ -249,8 +242,8 @@ def test_run_rewrite_hands_the_source_timings_to_optimize(tmp_path, monkeypatch)
     _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=0.5, source_ms=1.0)
     seen = {}
 
-    def capture_optimize(*_args, **kwargs):
-        seen.update(kwargs)
+    def capture_optimize(_spec, _driver_path, _config, request):
+        seen["request"] = request
         return {"best_ms": 0.4, "mean_case_speedup": 2.5, "best_commit": "flydsl-best"}
 
     monkeypatch.setattr(runner, "run_optimize", capture_optimize)
@@ -264,12 +257,12 @@ def test_run_rewrite_hands_the_source_timings_to_optimize(tmp_path, monkeypatch)
         config=Config.from_env(workspace=str(tmp_path)),
     )
 
-    assert seen["source_ms"] == pytest.approx(1.0)
-    assert seen["source_case_ms"] == {"case0": 1.0}
+    assert seen["request"].source_ms == pytest.approx(1.0)
+    assert seen["request"].source_case_ms == {"case0": 1.0}
     # Anchored on the source, the loop's own score is what the run publishes.
     assert out["speedup"] == pytest.approx(2.5)
     # Nobody asked for a ceiling, so the loop is not handed one to estimate.
-    assert seen["roofline_ceiling"] is False
+    assert seen["request"].roofline_ceiling is False
 
 
 def test_run_rewrite_hands_the_roofline_switch_to_optimize(tmp_path, monkeypatch):
@@ -280,8 +273,8 @@ def test_run_rewrite_hands_the_roofline_switch_to_optimize(tmp_path, monkeypatch
     _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=0.5, source_ms=1.0)
     seen = {}
 
-    def capture_optimize(*_args, **kwargs):
-        seen.update(kwargs)
+    def capture_optimize(_spec, _driver_path, _config, request):
+        seen["request"] = request
         return {"best_ms": 0.4, "mean_case_speedup": 2.5, "best_commit": "flydsl-best"}
 
     monkeypatch.setattr(runner, "run_optimize", capture_optimize)
@@ -296,7 +289,7 @@ def test_run_rewrite_hands_the_roofline_switch_to_optimize(tmp_path, monkeypatch
         roofline_ceiling=True,
     )
 
-    assert seen["roofline_ceiling"] is True
+    assert seen["request"].roofline_ceiling is True
 
 
 def test_optimize_trusts_result_json_by_experiment_id(tmp_path, monkeypatch):
@@ -306,7 +299,7 @@ def test_optimize_trusts_result_json_by_experiment_id(tmp_path, monkeypatch):
     monkeypatch.setattr(optimize.subprocess, "Popen", _fake_popen(["Experiment: EXP1\n", "working...\n"]))
     # agent_model set -> the --model flag is forwarded to the nested forge-loop.
     cfg = Config.from_env(workspace=str(tmp_path), agent_model="my-model")
-    out = optimize.run_optimize(s, "driver.py", cfg, experiments_dir=str(tmp_path), result_json=str(rj))
+    out = optimize.run_optimize(s, "driver.py", cfg, optimize.OptimizeRequest(str(tmp_path), result_json=str(rj)))
     assert out["best_ms"] == 0.5 and out["experiment_id"] == "EXP1"
 
 
@@ -316,7 +309,7 @@ def test_optimize_falls_back_to_stdout_sentinel(tmp_path, monkeypatch, capsys):
     lines = ["Experiment: EXP2\n", '__FORGE_RESULT__{"best_ms": 0.7}__FORGE_RESULT__\n']
     monkeypatch.setattr(optimize.subprocess, "Popen", _fake_popen(lines))
     cfg = Config.from_env(workspace=str(tmp_path))
-    out = optimize.run_optimize(s, "driver.py", cfg, experiments_dir=str(tmp_path), result_json=str(rj))
+    out = optimize.run_optimize(s, "driver.py", cfg, optimize.OptimizeRequest(str(tmp_path), result_json=str(rj)))
     assert out["best_ms"] == 0.7
     assert "__FORGE_RESULT__" not in capsys.readouterr().out
 
@@ -376,10 +369,12 @@ def test_optimize_hands_over_every_new_best_exactly_once(tmp_path, monkeypatch):
         _spec(tmp_path),
         "driver.py",
         Config.from_env(workspace=str(tmp_path)),
-        experiments_dir=str(tmp_path),
-        result_json=str(rj),
-        on_new_best=lambda payload: seen.append((payload["best_commit"], payload["best_ms"])),
-        new_best_poll_sec=0.0,
+        optimize.OptimizeRequest(
+            str(tmp_path),
+            result_json=str(rj),
+            on_new_best=lambda payload: seen.append((payload["best_commit"], payload["best_ms"])),
+            new_best_poll_sec=0.0,
+        ),
     )
 
     assert [commit for commit, _ms in seen] == ["c1", "c2", "c3"]
@@ -403,9 +398,9 @@ def test_optimize_hands_over_a_best_recorded_after_the_last_poll(tmp_path, monke
         _spec(tmp_path),
         "driver.py",
         Config.from_env(workspace=str(tmp_path)),
-        experiments_dir=str(tmp_path),
-        result_json=str(rj),
-        on_new_best=lambda payload: seen.append(payload["best_commit"]),
+        optimize.OptimizeRequest(
+            str(tmp_path), result_json=str(rj), on_new_best=lambda payload: seen.append(payload["best_commit"])
+        ),
     )
 
     assert seen == ["final"]
@@ -426,9 +421,9 @@ def test_optimize_never_hands_over_another_run_s_result(tmp_path, monkeypatch):
         _spec(tmp_path),
         "driver.py",
         Config.from_env(workspace=str(tmp_path)),
-        experiments_dir=str(tmp_path),
-        result_json=str(rj),
-        on_new_best=lambda payload: seen.append(payload["best_commit"]),
+        optimize.OptimizeRequest(
+            str(tmp_path), result_json=str(rj), on_new_best=lambda payload: seen.append(payload["best_commit"])
+        ),
     )
 
     assert seen == []
@@ -452,9 +447,7 @@ def test_optimize_survives_a_failing_new_best_handler(tmp_path, monkeypatch):
         _spec(tmp_path),
         "driver.py",
         Config.from_env(workspace=str(tmp_path)),
-        experiments_dir=str(tmp_path),
-        result_json=str(rj),
-        on_new_best=explode,
+        optimize.OptimizeRequest(str(tmp_path), result_json=str(rj), on_new_best=explode),
     )
 
     assert out["best_ms"] == 4.0
@@ -485,8 +478,7 @@ def test_optimize_recovers_the_loop_ledger_from_its_experiment_record(tmp_path, 
         _spec(tmp_path),
         "driver.py",
         Config.from_env(workspace=str(tmp_path)),
-        experiments_dir=str(tmp_path),
-        result_json=str(tmp_path / "never-written.json"),
+        optimize.OptimizeRequest(str(tmp_path), result_json=str(tmp_path / "never-written.json")),
     )
 
     assert out["llm_usage"]["input_tokens"] == 400
@@ -518,8 +510,7 @@ def test_optimize_prefers_the_furthest_along_ledger_snapshot(tmp_path, monkeypat
         _spec(tmp_path),
         "driver.py",
         Config.from_env(workspace=str(tmp_path)),
-        experiments_dir=str(tmp_path),
-        result_json=str(rj),
+        optimize.OptimizeRequest(str(tmp_path), result_json=str(rj)),
     )
 
     assert out["llm_usage"] == {"input_tokens": 300, "calls": 3}
@@ -545,8 +536,7 @@ def test_optimize_marks_a_cleanly_finished_ledger_complete(tmp_path, monkeypatch
         _spec(tmp_path),
         "driver.py",
         Config.from_env(workspace=str(tmp_path)),
-        experiments_dir=str(tmp_path),
-        result_json=str(rj),
+        optimize.OptimizeRequest(str(tmp_path), result_json=str(rj)),
     )
 
     assert out["llm_usage"] == {"input_tokens": 500, "calls": 5}
@@ -565,7 +555,9 @@ def test_optimize_no_trusted_result_returns_empty(tmp_path, monkeypatch):
     s = _spec(tmp_path)
     monkeypatch.setattr(optimize.subprocess, "Popen", _fake_popen(["Experiment: EXP9\n", "no result here\n"]))
     cfg = Config.from_env(workspace=str(tmp_path))
-    out = optimize.run_optimize(s, "driver.py", cfg, experiments_dir=str(tmp_path), permission_mode="acceptEdits")
+    out = optimize.run_optimize(
+        s, "driver.py", cfg, optimize.OptimizeRequest(str(tmp_path), permission_mode="acceptEdits")
+    )
     assert out == {}
 
 
@@ -578,7 +570,7 @@ def test_optimize_returns_empty_on_launch_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(optimize.subprocess, "Popen", _boom)
     cfg = Config.from_env(workspace=str(tmp_path))
     out = optimize.run_optimize(
-        s, "driver.py", cfg, experiments_dir=str(tmp_path), result_json=str(tmp_path / "r.json")
+        s, "driver.py", cfg, optimize.OptimizeRequest(str(tmp_path), result_json=str(tmp_path / "r.json"))
     )
     assert out == {}
 
@@ -621,9 +613,9 @@ def test_optimize_cutoff_terminates_loop_and_restores_port_kernel(
         s,
         "driver.py",
         Config.from_env(workspace=str(tmp_path)),
-        experiments_dir=str(tmp_path),
-        result_json=str(tmp_path / "missing.json"),
-        stop_at_unix=time.time() - 1,
+        optimize.OptimizeRequest(
+            str(tmp_path), result_json=str(tmp_path / "missing.json"), stop_at_unix=time.time() - 1
+        ),
     )
 
     assert out["terminated_for_deadline"] is True
@@ -1714,8 +1706,8 @@ def test_run_rewrite_publishes_each_keep_from_its_own_commit(tmp_path, monkeypat
 
     monkeypatch.setattr(runner, "_git", fake_git)
 
-    def fake_optimize(*_args, **kwargs):
-        publish = kwargs["on_new_best"]
+    def fake_optimize(_spec, _driver_path, _config, request):
+        publish = request.on_new_best
         publish({"experiment_id": "EXP", "best_ms": 0.9, "best_commit": "c1"})
         publish({"experiment_id": "EXP", "best_ms": 0.7, "best_commit": "c2"})
         return {"best_ms": 0.7, "best_commit": "c2", "experiment_id": "EXP"}
@@ -1780,8 +1772,8 @@ def test_run_rewrite_records_accuracy_only_for_the_artifact_it_measured(
 
     monkeypatch.setattr(runner, "_git", fake_git)
 
-    def fake_optimize(*_args, **kwargs):
-        kwargs["on_new_best"]({"experiment_id": "EXP", "best_ms": 0.9, "best_commit": "c1"})
+    def fake_optimize(_spec, _driver_path, _config, request):
+        request.on_new_best({"experiment_id": "EXP", "best_ms": 0.9, "best_commit": "c1"})
         return {"best_ms": 0.9, "best_commit": "c1", "experiment_id": "EXP"}
 
     monkeypatch.setattr(runner, "run_optimize", fake_optimize)
@@ -1861,8 +1853,8 @@ def test_run_rewrite_skips_a_keep_whose_commit_lacks_the_kernel(tmp_path, monkey
         lambda *args: subprocess.CompletedProcess(args, 128, stdout="", stderr="bad object"),
     )
 
-    def fake_optimize(*_args, **kwargs):
-        kwargs["on_new_best"]({"experiment_id": "EXP", "best_ms": 0.9, "best_commit": "gone"})
+    def fake_optimize(_spec, _driver_path, _config, request):
+        request.on_new_best({"experiment_id": "EXP", "best_ms": 0.9, "best_commit": "gone"})
         return {"best_ms": 0.9, "best_commit": "gone", "experiment_id": "EXP"}
 
     monkeypatch.setattr(runner, "run_optimize", fake_optimize)
