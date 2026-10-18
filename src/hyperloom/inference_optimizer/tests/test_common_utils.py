@@ -104,11 +104,11 @@ def test_common_atomic_writes_and_cleanup(tmp_path: Path, monkeypatch: pytest.Mo
     from hyperloom.common import io
 
     text_path = tmp_path / "nested" / "value.txt"
-    io.atomic_write_text(text_path, "hello", make_parents=True)
+    io.atomic_write_text(text_path, "hello", options=io.WriteOptions(make_parents=True))
     assert text_path.read_text(encoding="utf-8") == "hello"
 
     json_path = tmp_path / "data.json"
-    io.atomic_write_json(json_path, {"b": 2, "a": 1}, indent=None, trailing_newline=True)
+    io.atomic_write_json(json_path, {"b": 2, "a": 1}, fmt=io.JsonFormat(indent=None, trailing_newline=True))
     assert json_path.read_text(encoding="utf-8") == '{"a": 1, "b": 2}\n'
 
     def _boom(_tmp, _dst):
@@ -124,7 +124,7 @@ def test_common_io_bytes_and_safe_mtime_edges(monkeypatch: pytest.MonkeyPatch, t
     from hyperloom.common import io
 
     path = tmp_path / "nested" / "payload.bin"
-    io.atomic_write_bytes(path, b"abc", make_parents=True, fsync=True, mode=0o777)
+    io.atomic_write_bytes(path, b"abc", options=io.WriteOptions(make_parents=True, fsync=True, mode=0o777))
     assert path.read_bytes() == b"abc"
     assert path.stat().st_mode & 0o777 == 0o700
 

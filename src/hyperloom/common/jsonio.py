@@ -52,54 +52,61 @@ def _iter_json_objects(text: str) -> Iterator[dict[str, Any]]:
             yield data
 
 
+def _not_object(path: Path, data: Any) -> ValueError:
+    return ValueError(f"expected a JSON object at {path}, got {type(data).__name__}")
+
+
+def read_json_strict(path: Path, *, require_dict: bool = False, empty_value: Any = _EMPTY_UNSET) -> Any:
+    """Parse JSON from *path*, raising ``OSError`` / ``ValueError`` on any failure.
+
+    ``empty_value``, when given, is returned for a blank file instead of a decode error.
+    """
+    text = path.read_text(encoding="utf-8")
+    if empty_value is not _EMPTY_UNSET and not text.strip():
+        data = empty_value
+    else:
+        data = json.loads(text)
+    if require_dict and not isinstance(data, dict):
+        raise _not_object(path, data)
+    return data
+
+
 def read_json(
     path: Path,
     default: Any = None,
     *,
     require_dict: bool = False,
-    strict: bool = False,
     on_error: Callable[[BaseException], None] | None = None,
-    empty_value: Any = _EMPTY_UNSET,
 ) -> Any:
-    """Parse JSON from *path*."""
+    """Parse JSON from *path*; on failure report to ``on_error`` and return ``default``."""
     try:
-        text = path.read_text(encoding="utf-8")
-        if empty_value is not _EMPTY_UNSET and not text.strip():
-            data = empty_value
-        else:
-            data = json.loads(text)
+        data = read_json_strict(path)
     except (OSError, json.JSONDecodeError) as exc:
-        if strict:
-            raise
         if on_error is not None:
             on_error(exc)
         return default
     if require_dict and not isinstance(data, dict):
-        exc = ValueError(f"expected a JSON object at {path}, got {type(data).__name__}")
-        if strict:
-            raise exc
         if on_error is not None:
-            on_error(exc)
+            on_error(_not_object(path, data))
         return default
     return data
 
 
 def read_jsonl(
     path: Path,
-    default: Any = None,
     *,
     require_dict: bool = False,
     skip_malformed: bool = False,
     skip_non_dict: bool = False,
     on_error: Callable[[BaseException], None] | None = None,
 ) -> list[Any]:
-    """Parse a JSONL file."""
+    """Parse a JSONL file; an unreadable file is reported to ``on_error`` and yields ``[]``."""
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as exc:
         if on_error is not None:
             on_error(exc)
-        return [] if default is None else default
+        return []
 
     rows: list[Any] = []
     for line_no, line in enumerate(lines, start=1):
@@ -166,5 +173,6 @@ __all__ = [
     "extract_first_json_with_key",
     "extract_last_json_with_key",
     "read_json",
+    "read_json_strict",
     "read_jsonl",
 ]
