@@ -20,7 +20,15 @@ import click
 from kernelforge.llm.git import git
 
 from . import __version__
-from .author import AUTHOR_RC_FAILED, AUTHOR_RC_SAFETY, build_multi_author_prompt, run_author
+from .author import (
+    AUTHOR_RC_FAILED,
+    AUTHOR_RC_SAFETY,
+    AuthorAgent,
+    AuthorBrief,
+    AuthorWorkspace,
+    build_multi_author_prompt,
+    run_author,
+)
 from .campaign import LOOP_CAMPAIGN_STATE, _safe_artifact_id, fused_module_path, run_recipe_campaign
 from .anchor import AnchorReport, AnchorResolutionError, KernelAnchor, discover_anchored_recipes, resolve_anchor
 from .diagnose import diagnose_trace
@@ -381,25 +389,27 @@ def _run_author_only(
     author_sources = _recipe_files(authored)
     prompt = build_multi_author_prompt(
         [r.to_dict() for r in authored],
-        framework=framework,
-        ab_hint=ab_hint,
-        target_speedup=target_speedup,
-        harness_path=prompt_harness_path,
-        gpu_arch=run_arch,
-        model_path=model_path,
+        AuthorBrief(
+            framework=framework,
+            ab_hint=ab_hint,
+            target_speedup=target_speedup,
+            harness_path=prompt_harness_path,
+            gpu_arch=run_arch,
+            model_path=model_path,
+        ),
     )
     (out / "author_prompt.md").write_text(prompt, encoding="utf-8")
     rc = run_author(
         prompt,
-        workdir=repo_root or ".",
-        log_path=str(out / "author.log"),
-        gpu=gpu,
-        model=llm_model,
-        max_turns=max_turns,
-        backend=agent_factory,
-        timeout_s=_agent_timeout_sec(),
-        target_files=[*author_sources, prompt_harness_path],
-        new_module_dirs=_author_module_dirs(author_sources),
+        AuthorWorkspace(
+            workdir=repo_root or ".",
+            log_path=str(out / "author.log"),
+            target_files=[*author_sources, prompt_harness_path],
+            new_module_dirs=_author_module_dirs(author_sources),
+        ),
+        AuthorAgent(
+            backend=agent_factory, gpu=gpu, model=llm_model, max_turns=max_turns, timeout_s=_agent_timeout_sec()
+        ),
     )
     harness_ok, harness_error = _finish_author_harness(
         author_harness_path,
@@ -1513,10 +1523,7 @@ def _run_fusion_autoloop(
             harness_path=harness_path,
             repo_root=repo_root,
             out=out,
-            gpu=gpu,
-            llm_model=llm_model,
-            max_turns=max_turns,
-            backend=agent_factory,
+            agent=AuthorAgent(backend=agent_factory, gpu=gpu, model=llm_model, max_turns=max_turns),
         )
         if not ready:
             # Not this recipe's failure: recording it as one would file a wrong lesson that the next recipe's campaign

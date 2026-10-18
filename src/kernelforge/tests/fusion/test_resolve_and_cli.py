@@ -30,6 +30,8 @@ from kernelforge.fusion import command as cli_module
 from kernelforge.fusion import harness_authoring
 from kernelforge.fusion.author import (
     AUTHOR_RC_SAFETY,
+    AuthorAgent,
+    AuthorWorkspace,
     run_author,
 )
 from kernelforge.fusion.agent_selection import _create_agent_backend, _resolve_agent_choice
@@ -663,10 +665,8 @@ def test_framework_transaction_restores_non_target_claude_shell_edits(tmp_path):
 
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(tmp_path / "author-shell-gap.log"),
-        backend=Backend(),
-        target_files=[str(source)],
+        AuthorWorkspace(workdir=str(repo), log_path=str(tmp_path / "author-shell-gap.log"), target_files=[str(source)]),
+        AuthorAgent(backend=Backend()),
     )
 
     assert rc == AUTHOR_RC_SAFETY

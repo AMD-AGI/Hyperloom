@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import hashlib
 import logging
 import os
@@ -15,7 +16,7 @@ import stat
 from pathlib import Path
 from typing import Optional
 
-from .author import run_author
+from .author import AuthorAgent, AuthorWorkspace, run_author
 from .campaign import build_campaign_program_md
 from .harness_contract import harness_contract
 from .shapes import harness_group_dim_mismatch
@@ -179,10 +180,7 @@ def _author_baseline_harness(
     harness_path: str,
     repo_root: str,
     out: Path,
-    gpu: str,
-    llm_model: Optional[str],
-    max_turns: int,
-    backend,
+    agent: AuthorAgent,
 ) -> tuple[bool, str]:
     """Write the harness ``recipe``'s campaign benchmarks, before it starts.
 
@@ -211,15 +209,8 @@ def _author_baseline_harness(
         (out / f"harness_prompt{suffix}.md").write_text(prompt, encoding="utf-8")
         rc = run_author(
             prompt,
-            workdir=repo_root or ".",
-            log_path=str(out / "harness_author.log"),
-            gpu=gpu,
-            model=llm_model,
-            max_turns=max_turns,
-            backend=backend,
-            timeout_s=_agent_timeout_sec(),
-            target_files=[target],
-            new_module_dirs=[],
+            AuthorWorkspace(workdir=repo_root or ".", log_path=str(out / "harness_author.log"), target_files=[target]),
+            dataclasses.replace(agent, timeout_s=_agent_timeout_sec()),
         )
         published, error = _finish_author_harness(staging, harness_path, inherited=False, author_ok=rc == 0)
         if rc != 0:
@@ -250,7 +241,7 @@ def _author_baseline_harness(
             recipe,
             harness_path=harness_path,
             repo_root=repo_root,
-            gpu=gpu,
+            gpu=agent.gpu,
         )
         if aligned is None:
             log.info("harness eager-arm alignment unchecked: %s", why)
