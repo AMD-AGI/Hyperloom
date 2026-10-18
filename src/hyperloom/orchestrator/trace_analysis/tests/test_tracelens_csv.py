@@ -999,15 +999,17 @@ def test_124_build_orchestrator_prompt_supplies_step0_inputs(tmp_path):
     capture = tmp_path / "capture_traces"
 
     prompt = tlr.build_orchestrator_prompt(
-        skill_path=skill,
-        trace_path=trace,
-        output_dir=out,
-        tracelens_root=root,
-        tracelens_internal_root=tmp_path / "TraceLens-internal",
-        platform="MI300X",
-        framework="vllm",
-        analysis_mode="default",
-        capture_folder=capture,
+        tlr.TraceLensSkillRequest(
+            skill_path=skill,
+            trace_path=trace,
+            output_dir=out,
+            tracelens_root=root,
+            tracelens_internal_root=tmp_path / "TraceLens-internal",
+            platform="MI300X",
+            framework="vllm",
+            analysis_mode="default",
+            capture_folder=capture,
+        )
     )
 
     assert str(skill) in prompt
@@ -1155,18 +1157,19 @@ def test_124_run_tracelens_skill_uses_sdk_and_artifacts(tmp_path):
 
     res = asyncio.run(
         tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=tmp_path / "TraceLens-internal",
-            platform="MI300X",
-            framework="sglang",
-            analysis_mode="default",
-            capture_folder=None,
+            tlr.TraceLensSkillRequest(
+                skill_path=tmp_path / "skill.md",
+                trace_path=tmp_path / "trace.json.gz",
+                output_dir=output_dir,
+                tracelens_root=tmp_path,
+                tracelens_internal_root=tmp_path / "TraceLens-internal",
+                platform="MI300X",
+                framework="sglang",
+                analysis_mode="default",
+                capture_folder=None,
+            ),
             budget_minutes=1,
-            sdk_query_factory=_fake_query,
-            sdk_options_cls=_FakeOptions,
+            sdk=tlr.SdkEntryPoints(query=_fake_query, options_cls=_FakeOptions),
         )
     )
 
@@ -1218,19 +1221,20 @@ def test_run_tracelens_skill_aligns_cli_background_wait_with_tool_idle_bound(
 
     asyncio.run(
         tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=tmp_path / "TraceLens-internal",
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
-            capture_folder=None,
+            tlr.TraceLensSkillRequest(
+                skill_path=tmp_path / "skill.md",
+                trace_path=tmp_path / "trace.json.gz",
+                output_dir=output_dir,
+                tracelens_root=tmp_path,
+                tracelens_internal_root=tmp_path / "TraceLens-internal",
+                platform="MI355X",
+                framework="vllm",
+                analysis_mode="inference",
+                capture_folder=None,
+            ),
             budget_minutes=1,
             model="claude-sonnet-4-5-20250929",
-            sdk_query_factory=_fake_query,
-            sdk_options_cls=_FakeOptions,
+            sdk=tlr.SdkEntryPoints(query=_fake_query, options_cls=_FakeOptions),
         )
     )
 
@@ -1303,19 +1307,20 @@ def test_run_tracelens_skill_books_its_requests_on_the_trajectory(tmp_path):
     with tt.trajectory_scope(session_dir=session_dir, component="tracelens", task_id="t-tl", parent_span_id="t-tl"):
         asyncio.run(
             tlr.run_tracelens_skill(
-                skill_path=tmp_path / "skill.md",
-                trace_path=tmp_path / "trace.json.gz",
-                output_dir=output_dir,
-                tracelens_root=tmp_path,
-                tracelens_internal_root=tmp_path / "TraceLens-internal",
-                platform="MI355X",
-                framework="sglang",
-                analysis_mode="default",
-                capture_folder=None,
+                tlr.TraceLensSkillRequest(
+                    skill_path=tmp_path / "skill.md",
+                    trace_path=tmp_path / "trace.json.gz",
+                    output_dir=output_dir,
+                    tracelens_root=tmp_path,
+                    tracelens_internal_root=tmp_path / "TraceLens-internal",
+                    platform="MI355X",
+                    framework="sglang",
+                    analysis_mode="default",
+                    capture_folder=None,
+                ),
                 budget_minutes=1,
                 model="claude-tl",
-                sdk_query_factory=_fake_query,
-                sdk_options_cls=_FakeOptions,
+                sdk=tlr.SdkEntryPoints(query=_fake_query, options_cls=_FakeOptions),
             )
         )
 
@@ -1403,18 +1408,19 @@ def test_run_tracelens_skill_records_nothing_outside_a_session(tmp_path):
 
     res = asyncio.run(
         tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=tmp_path / "TraceLens-internal",
-            platform="MI355X",
-            framework="sglang",
-            analysis_mode="default",
-            capture_folder=None,
+            tlr.TraceLensSkillRequest(
+                skill_path=tmp_path / "skill.md",
+                trace_path=tmp_path / "trace.json.gz",
+                output_dir=output_dir,
+                tracelens_root=tmp_path,
+                tracelens_internal_root=tmp_path / "TraceLens-internal",
+                platform="MI355X",
+                framework="sglang",
+                analysis_mode="default",
+                capture_folder=None,
+            ),
             budget_minutes=1,
-            sdk_query_factory=_fake_query,
-            sdk_options_cls=_FakeOptions,
+            sdk=tlr.SdkEntryPoints(query=_fake_query, options_cls=_FakeOptions),
         )
     )
 
@@ -1458,19 +1464,20 @@ def test_run_tracelens_skill_uses_hermetic_claude_env(tmp_path, monkeypatch):
 
     asyncio.run(
         tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=tmp_path / "TraceLens-internal",
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
-            capture_folder=None,
+            tlr.TraceLensSkillRequest(
+                skill_path=tmp_path / "skill.md",
+                trace_path=tmp_path / "trace.json.gz",
+                output_dir=output_dir,
+                tracelens_root=tmp_path,
+                tracelens_internal_root=tmp_path / "TraceLens-internal",
+                platform="MI355X",
+                framework="vllm",
+                analysis_mode="inference",
+                capture_folder=None,
+            ),
             budget_minutes=1,
             model="claude-sonnet-4-5-20250929",
-            sdk_query_factory=_fake_query,
-            sdk_options_cls=_FakeOptions,
+            sdk=tlr.SdkEntryPoints(query=_fake_query, options_cls=_FakeOptions),
         )
     )
 
@@ -1519,20 +1526,20 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
 
     res = asyncio.run(
         tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=None,
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
-            capture_folder=None,
+            tlr.TraceLensSkillRequest(
+                skill_path=tmp_path / "skill.md",
+                trace_path=tmp_path / "trace.json.gz",
+                output_dir=output_dir,
+                tracelens_root=tmp_path,
+                tracelens_internal_root=None,
+                platform="MI355X",
+                framework="vllm",
+                analysis_mode="inference",
+                capture_folder=None,
+            ),
             budget_minutes=30,
             model="gpt-5.5",
-            sdk_query_factory=_no_claude_query,
-            sdk_options_cls=object,
-            codex_turn_runner=_fake_codex_turn,
+            sdk=tlr.SdkEntryPoints(query=_no_claude_query, options_cls=object, codex_turn_runner=_fake_codex_turn),
         )
     )
 
@@ -1587,17 +1594,19 @@ def test_run_tracelens_skill_codex_grants_the_capture_folder_write_access(tmp_pa
 
     asyncio.run(
         tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=None,
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
-            capture_folder=capture_folder,
+            tlr.TraceLensSkillRequest(
+                skill_path=tmp_path / "skill.md",
+                trace_path=tmp_path / "trace.json.gz",
+                output_dir=output_dir,
+                tracelens_root=tmp_path,
+                tracelens_internal_root=None,
+                platform="MI355X",
+                framework="vllm",
+                analysis_mode="inference",
+                capture_folder=capture_folder,
+            ),
             budget_minutes=30,
-            codex_turn_runner=_fake_codex_turn,
+            sdk=tlr.SdkEntryPoints(codex_turn_runner=_fake_codex_turn),
         )
     )
 
@@ -1622,17 +1631,19 @@ def test_run_tracelens_skill_codex_floors_the_turn_timeout(tmp_path, monkeypatch
 
     asyncio.run(
         tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=None,
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
-            capture_folder=None,
+            tlr.TraceLensSkillRequest(
+                skill_path=tmp_path / "skill.md",
+                trace_path=tmp_path / "trace.json.gz",
+                output_dir=output_dir,
+                tracelens_root=tmp_path,
+                tracelens_internal_root=None,
+                platform="MI355X",
+                framework="vllm",
+                analysis_mode="inference",
+                capture_folder=None,
+            ),
             budget_minutes=0.1,
-            codex_turn_runner=_fake_codex_turn,
+            sdk=tlr.SdkEntryPoints(codex_turn_runner=_fake_codex_turn),
         )
     )
 
@@ -1655,17 +1666,19 @@ def test_run_tracelens_skill_codex_raises_when_report_missing(tmp_path, monkeypa
     with pytest.raises(RuntimeError) as excinfo:
         asyncio.run(
             tlr.run_tracelens_skill(
-                skill_path=tmp_path / "skill.md",
-                trace_path=tmp_path / "trace.json.gz",
-                output_dir=output_dir,
-                tracelens_root=tmp_path,
-                tracelens_internal_root=None,
-                platform="MI355X",
-                framework="vllm",
-                analysis_mode="inference",
-                capture_folder=None,
+                tlr.TraceLensSkillRequest(
+                    skill_path=tmp_path / "skill.md",
+                    trace_path=tmp_path / "trace.json.gz",
+                    output_dir=output_dir,
+                    tracelens_root=tmp_path,
+                    tracelens_internal_root=None,
+                    platform="MI355X",
+                    framework="vllm",
+                    analysis_mode="inference",
+                    capture_folder=None,
+                ),
                 budget_minutes=5,
-                codex_turn_runner=_failing_codex_turn,
+                sdk=tlr.SdkEntryPoints(codex_turn_runner=_failing_codex_turn),
             )
         )
 
@@ -1689,17 +1702,19 @@ def test_run_tracelens_skill_codex_keeps_report_written_before_failure(tmp_path,
 
     res = asyncio.run(
         tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=None,
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
-            capture_folder=None,
+            tlr.TraceLensSkillRequest(
+                skill_path=tmp_path / "skill.md",
+                trace_path=tmp_path / "trace.json.gz",
+                output_dir=output_dir,
+                tracelens_root=tmp_path,
+                tracelens_internal_root=None,
+                platform="MI355X",
+                framework="vllm",
+                analysis_mode="inference",
+                capture_folder=None,
+            ),
             budget_minutes=5,
-            codex_turn_runner=_late_failure,
+            sdk=tlr.SdkEntryPoints(codex_turn_runner=_late_failure),
         )
     )
 
@@ -1723,17 +1738,19 @@ def test_run_tracelens_skill_codex_reports_in_band_turn_error(tmp_path, monkeypa
 
     res = asyncio.run(
         tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=None,
-            platform="MI355X",
-            framework="vllm",
-            analysis_mode="inference",
-            capture_folder=None,
+            tlr.TraceLensSkillRequest(
+                skill_path=tmp_path / "skill.md",
+                trace_path=tmp_path / "trace.json.gz",
+                output_dir=output_dir,
+                tracelens_root=tmp_path,
+                tracelens_internal_root=None,
+                platform="MI355X",
+                framework="vllm",
+                analysis_mode="inference",
+                capture_folder=None,
+            ),
             budget_minutes=5,
-            codex_turn_runner=_in_band_error,
+            sdk=tlr.SdkEntryPoints(codex_turn_runner=_in_band_error),
         )
     )
 
@@ -1787,18 +1804,19 @@ async def _run_and_time(tlr_mod, query, options_cls, tmp_path, output_dir):
 
     t0 = _time.monotonic()
     res = await tlr_mod.run_tracelens_skill(
-        skill_path=tmp_path / "skill.md",
-        trace_path=tmp_path / "trace.json.gz",
-        output_dir=output_dir,
-        tracelens_root=tmp_path,
-        tracelens_internal_root=tmp_path / "TraceLens-internal",
-        platform="MI300X",
-        framework="sglang",
-        analysis_mode="default",
-        capture_folder=None,
+        tlr.TraceLensSkillRequest(
+            skill_path=tmp_path / "skill.md",
+            trace_path=tmp_path / "trace.json.gz",
+            output_dir=output_dir,
+            tracelens_root=tmp_path,
+            tracelens_internal_root=tmp_path / "TraceLens-internal",
+            platform="MI300X",
+            framework="sglang",
+            analysis_mode="default",
+            capture_folder=None,
+        ),
         budget_minutes=1,
-        sdk_query_factory=query,
-        sdk_options_cls=options_cls,
+        sdk=tlr.SdkEntryPoints(query=query, options_cls=options_cls),
     )
     return res, _time.monotonic() - t0
 
@@ -1841,18 +1859,19 @@ def test_t2_run_tracelens_skill_ignores_intermediate_sidecars(tmp_path):
 
     res = asyncio.run(
         tlr.run_tracelens_skill(
-            skill_path=tmp_path / "skill.md",
-            trace_path=tmp_path / "trace.json.gz",
-            output_dir=output_dir,
-            tracelens_root=tmp_path,
-            tracelens_internal_root=tmp_path / "TraceLens-internal",
-            platform="MI300X",
-            framework="sglang",
-            analysis_mode="default",
-            capture_folder=None,
+            tlr.TraceLensSkillRequest(
+                skill_path=tmp_path / "skill.md",
+                trace_path=tmp_path / "trace.json.gz",
+                output_dir=output_dir,
+                tracelens_root=tmp_path,
+                tracelens_internal_root=tmp_path / "TraceLens-internal",
+                platform="MI300X",
+                framework="sglang",
+                analysis_mode="default",
+                capture_folder=None,
+            ),
             budget_minutes=1,
-            sdk_query_factory=_fake_query,
-            sdk_options_cls=_FakeOptions,
+            sdk=tlr.SdkEntryPoints(query=_fake_query, options_cls=_FakeOptions),
         )
     )
 
@@ -1891,18 +1910,19 @@ def test_t2_missing_analysis_md_still_raises(tmp_path):
     with pytest.raises(RuntimeError, match="analysis.md"):
         asyncio.run(
             tlr.run_tracelens_skill(
-                skill_path=tmp_path / "skill.md",
-                trace_path=tmp_path / "trace.json.gz",
-                output_dir=output_dir,
-                tracelens_root=tmp_path,
-                tracelens_internal_root=tmp_path / "TraceLens-internal",
-                platform="MI300X",
-                framework="sglang",
-                analysis_mode="default",
-                capture_folder=None,
+                tlr.TraceLensSkillRequest(
+                    skill_path=tmp_path / "skill.md",
+                    trace_path=tmp_path / "trace.json.gz",
+                    output_dir=output_dir,
+                    tracelens_root=tmp_path,
+                    tracelens_internal_root=tmp_path / "TraceLens-internal",
+                    platform="MI300X",
+                    framework="sglang",
+                    analysis_mode="default",
+                    capture_folder=None,
+                ),
                 budget_minutes=1,
-                sdk_query_factory=_fake_query,
-                sdk_options_cls=_FakeOptions,
+                sdk=tlr.SdkEntryPoints(query=_fake_query, options_cls=_FakeOptions),
             )
         )
 

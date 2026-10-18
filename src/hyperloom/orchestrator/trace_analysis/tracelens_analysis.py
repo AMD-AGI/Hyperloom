@@ -49,6 +49,7 @@ except ImportError:
 
 from .tracelens_arch_benchmark import normalize_platform, populate_gpu_arch_json
 from .tracelens_skill_runner import (
+    TraceLensSkillRequest,
     aggregate_by_source_function,
     discover_capture_folder,
     extract_compute_pct_from_analysis_md,
@@ -5023,15 +5024,17 @@ def main() -> int:
                     with _trajectory_scope(args):
                         skill_result = asyncio.run(
                             run_tracelens_skill(
-                                skill_path=skill,
-                                trace_path=cli_trace_path,
-                                output_dir=tracelens_dir,
-                                tracelens_root=tl_root,
-                                tracelens_internal_root=tl_internal_root,
-                                platform=args.target_platform,
-                                framework=args.framework,
-                                analysis_mode=args.analysis_mode,
-                                capture_folder=capture_folder,
+                                TraceLensSkillRequest(
+                                    skill_path=skill,
+                                    trace_path=cli_trace_path,
+                                    output_dir=tracelens_dir,
+                                    tracelens_root=tl_root,
+                                    tracelens_internal_root=tl_internal_root,
+                                    platform=args.target_platform,
+                                    framework=args.framework,
+                                    analysis_mode=args.analysis_mode,
+                                    capture_folder=capture_folder,
+                                ),
                                 budget_minutes=args.budget_minutes,
                                 model=_resolve_tracelens_model(),
                                 log=lambda msg: append_log(log_path, msg),
