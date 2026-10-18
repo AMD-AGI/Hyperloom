@@ -502,8 +502,18 @@ def _exit_code_for_run(llm_error, loop_result) -> None:
         raise SystemExit(EXIT_INFRASTRUCTURE_FAILURE)
 
 
-def _settle_single_patch_workspace(run: _FusionRun, top_recipe, artifacts, exported_ok: bool):
-    """Export what a single-patch run produced and put the framework tree back as it was."""
+def _settle_single_patch_workspace(run: _FusionRun, top_recipe, outcome: RunOutcome, exported_ok: bool):
+    """Export what a single-patch run produced and put the framework tree back as it was.
+
+    None of this runs for the other two paths. The multi-patch nomination already
+    exported each sibling and restored the tree to base inside its own
+    transaction, so exporting again would diff the wrong (reset) tree and file a
+    bogus discard; a compile_pass claim likewise runs inside its own restore
+    transaction and authors no modules.
+    """
+    artifacts = outcome.artifacts
+    if outcome.patches is not None or outcome.compile_pass is not None:
+        return artifacts
     repo_root, out, pristine_dir = run.repo_root, run.out, run.pristine_dir
     # Only export a patch when the run produced a USABLE fusion (validate path: kernel parity + speedup AND
     # serving survived).
@@ -1067,10 +1077,12 @@ def run(request: FuseRequest) -> None:
             exported_ok = rc == 0
             log.info("author finished rc=%s (no validation requested)", rc)
 
-        # The multi-patch nomination and a compile_pass claim each export and restore inside their own transaction,
-        # so exporting again here would diff a reset tree.
-        if patches_out is None and compile_pass_outcome is None:
-            artifacts = _settle_single_patch_workspace(fusion_run, top_recipe, artifacts, exported_ok)
+        artifacts = _settle_single_patch_workspace(
+            fusion_run,
+            top_recipe,
+            RunOutcome(artifacts=artifacts, compile_pass=compile_pass_outcome, patches=patches_out),
+            exported_ok,
+        )
 
     manifest, path = publish(
         RunOutcome(

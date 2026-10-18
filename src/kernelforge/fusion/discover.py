@@ -1353,6 +1353,11 @@ def _run_agent_discovery_once(
     return result
 
 
+def _override_or_env(override: Any, name: str, default: float, cast: Callable[[Any], Any]) -> Any:
+    """An explicit override, else the environment setting ``name`` with its default."""
+    return cast(override) if override is not None else cast(env_setting(name, default, cast=cast))
+
+
 def registered_agent_llm_fn(
     backend: Any,
     session: DiscoverySession = DiscoverySession(),
@@ -1363,50 +1368,15 @@ def registered_agent_llm_fn(
 
     timeout_s, log_path, workdir = session.timeout_s, session.log_path, session.workdir
     selected_model = session.model.strip() or str(getattr(getattr(backend, "runtime", None), "model", "")).strip()
-    resolved_attempts = (
-        int(retry.attempts)
-        if retry.attempts is not None
-        else int(
-            env_setting(
-                "FORGE_FUSION_LLM_ATTEMPTS",
-                DEFAULT_ATTEMPTS,
-                cast=int,
-            )
-        )
+    resolved_attempts = _override_or_env(retry.attempts, "FORGE_FUSION_LLM_ATTEMPTS", DEFAULT_ATTEMPTS, int)
+    resolved_turns = max(1, int(env_setting("FORGE_FUSION_DISCOVERY_TURNS", DEFAULT_DISCOVERY_TURNS, cast=int)))
+    resolved_base_delay = _override_or_env(
+        retry.base_delay_sec, "FORGE_FUSION_LLM_RETRY_BASE_SEC", DEFAULT_BASE_DELAY_SEC, float
     )
-    resolved_turns = max(
-        1,
-        int(env_setting("FORGE_FUSION_DISCOVERY_TURNS", DEFAULT_DISCOVERY_TURNS, cast=int)),
+    resolved_max_delay = _override_or_env(
+        retry.max_delay_sec, "FORGE_FUSION_LLM_RETRY_MAX_SEC", DEFAULT_MAX_DELAY_SEC, float
     )
-    resolved_base_delay = (
-        float(retry.base_delay_sec)
-        if retry.base_delay_sec is not None
-        else float(
-            env_setting(
-                "FORGE_FUSION_LLM_RETRY_BASE_SEC",
-                DEFAULT_BASE_DELAY_SEC,
-                cast=float,
-            )
-        )
-    )
-    resolved_max_delay = (
-        float(retry.max_delay_sec)
-        if retry.max_delay_sec is not None
-        else float(
-            env_setting(
-                "FORGE_FUSION_LLM_RETRY_MAX_SEC",
-                DEFAULT_MAX_DELAY_SEC,
-                cast=float,
-            )
-        )
-    )
-    resolved_deadline = float(
-        env_setting(
-            "FORGE_LLM_RETRY_DEADLINE_SEC",
-            DEFAULT_DEADLINE_SEC,
-            cast=float,
-        )
-    )
+    resolved_deadline = float(env_setting("FORGE_LLM_RETRY_DEADLINE_SEC", DEFAULT_DEADLINE_SEC, cast=float))
     pause = retry.sleep or _time.sleep
     clock = _time.monotonic
     protected = list(session.protected_files or [])
