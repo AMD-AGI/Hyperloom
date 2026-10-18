@@ -218,11 +218,11 @@ def _record_phase_proposal_review(
     if not proposal_id:
         return
     try:
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event, phase_records
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
 
         fields = payload or {}
         advice = advisory or {}
-        review = phase_records.ProposalReview(
+        phase_event.record_proposal_review(
             proposal_msg_id=proposal_id,
             verdict=authored or effective,
             effective_verdict=effective,
@@ -236,7 +236,6 @@ def _record_phase_proposal_review(
             alternative_action=advice.get("alternative_action"),
             variants=variants,
         )
-        phase_event.record_proposal_review(review)
     except Exception:
         log.debug("phase timeline: proposal review row failed for %s", proposal_id, exc_info=True)
 
@@ -324,16 +323,15 @@ def _record_phase_proposal_outcome(pending: Any, **outcome: Any) -> None:
     if not proposal_id:
         return
     try:
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event, phase_records
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
 
-        settled = phase_records.ProposalOutcome(
+        phase_event.record_proposal_outcome(
             proposal_msg_id=proposal_id,
             materialized=bool(outcome.get("materialized")),
             denied=bool(outcome.get("denied")),
             reauthored=bool(outcome.get("reauthored")),
             patch_verdict_key=outcome.get("patch_verdict_key"),
         )
-        phase_event.record_proposal_outcome(settled)
     except Exception:
         log.debug("phase timeline: proposal outcome row failed for %s", proposal_id, exc_info=True)
 
@@ -1583,18 +1581,18 @@ class IntentRouter(CoordinatorCollaborator):
             tick=int(self.shared_state.tick or 0),
             intent_payload=intent.payload,
         )
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event, phase_records
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
 
         payload = intent.payload or {}
         proposal_msg_id = (
             payload.get("proposal_msg_id") or payload.get("target_proposal_msg_id") or payload.get("proposal_id")
         )
-        denial = phase_records.PolicyDenial(
-            at=phase_records.PhaseCycle(str(self.shared_state.phase or ""), int(self.shared_state.macro_cycle or 0)),
+        phase_event.record_denial(
             actor=source,
             proposal_msg_id=str(proposal_msg_id) if proposal_msg_id else None,
             action=resolved_action,
+            phase=str(self.shared_state.phase or ""),
+            macro_cycle=int(self.shared_state.macro_cycle or 0),
             rule=str(denied.rule or ""),
             hint=str(denied.hint or ""),
         )
-        phase_event.record_denial(denial)

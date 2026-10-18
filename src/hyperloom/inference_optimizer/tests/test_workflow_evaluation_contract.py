@@ -30,7 +30,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.phase_records import (
     PhaseCycle,
     PhaseEntry,
     PhaseExit,
-    PolicyDenial,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.warm_start_event import MATCH_MISS, make_warm_start_recorder
 from hyperloom.inference_optimizer.breakdown.workflow_contract import (
@@ -88,14 +87,13 @@ def _writer_fixture(tmp_path, *, denied: bool) -> dict:
         )
         if denied:
             phase_event.record_denial(
-                PolicyDenial(
-                    at=PhaseCycle("PRELUDE", 0),
-                    actor="framework-agent",
-                    proposal_msg_id=None,
-                    action="profile",
-                    rule="phase_action_not_allowed",
-                    hint="use an allowed PRELUDE action",
-                )
+                actor="framework-agent",
+                proposal_msg_id=None,
+                action="profile",
+                phase="PRELUDE",
+                macro_cycle=0,
+                rule="phase_action_not_allowed",
+                hint="use an allowed PRELUDE action",
             )
         phase_event.record_exit(
             PhaseExit(

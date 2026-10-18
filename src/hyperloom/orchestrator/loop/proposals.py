@@ -232,10 +232,11 @@ def _record_proposal_materialized(proposal_msg_id: str, task_id: str) -> None:
         return
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ProposalOutcome
 
         phase_event.record_proposal_outcome(
-            ProposalOutcome(proposal_msg_id=str(proposal_msg_id), materialized=True, task_id=str(task_id))
+            proposal_msg_id=str(proposal_msg_id),
+            materialized=True,
+            task_id=str(task_id),
         )
     except Exception:
         log.debug("phase timeline: proposal task link failed for %s", proposal_msg_id, exc_info=True)
