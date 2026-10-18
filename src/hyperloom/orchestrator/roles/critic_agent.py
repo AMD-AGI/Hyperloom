@@ -44,7 +44,7 @@ from hyperloom.inference_optimizer.session.session_paths import allocate_turn_wo
 from hyperloom.common.token_usage import uncached_input_tokens
 from hyperloom.inference_optimizer.trace._row_utils import coerce_optional_int
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
-from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
 from hyperloom.inference_optimizer.trace.parse_usage import reasoning_output_tokens
 from hyperloom.inference_optimizer.trace.trajectory_trace import current_context
 from .base import BackendError, BackendTurnResult, LLMCallFailed, build_chat_messages, parse_call_timeout_env
@@ -1225,16 +1225,15 @@ class CriticAgentBackend:
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for a call that never returned."""
         try:
-            record = LLMCallRecord.for_failure(
+            site = LLMCallSite(
                 session_id=self.session_dir.name,
                 component="critic",
                 role="critic",
-                error=error,
-                call_id=call_id,
-                model=self._review_model,
                 tick=self._trace_tick,
                 phase=self._trace_phase,
-                latency_ms=latency_ms,
+            )
+            record = LLMCallRecord.for_failure(
+                site, error, model=self._review_model, call_id=call_id, latency_ms=latency_ms
             )
             append_llm_call(session_dir=self.session_dir, record=record)
         except Exception:

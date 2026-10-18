@@ -24,7 +24,7 @@ from hyperloom.common.llm_config import (
 from ..roles.base import parse_call_timeout_env
 from hyperloom.common.timeutil import format_exc_brief
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
-from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
 from hyperloom.inference_optimizer.trace.parse_usage import reasoning_output_tokens
 
 log = logging.getLogger(__name__)
@@ -380,17 +380,15 @@ class ProposalScorer:
         if self.session_dir is None:
             return
         try:
-            record = LLMCallRecord.for_failure(
+            site = LLMCallSite(
                 session_id=self.session_dir.name,
                 component="proposal_scorer",
                 role="proposal_scorer",
-                error=error,
-                model=str(model),
                 task_id=task_id,
                 tick=tick,
                 phase=phase,
-                latency_ms=latency_ms,
             )
+            record = LLMCallRecord.for_failure(site, error, model=str(model), latency_ms=latency_ms)
             append_llm_call(session_dir=self.session_dir, record=record)
         except Exception:
             log.debug(
