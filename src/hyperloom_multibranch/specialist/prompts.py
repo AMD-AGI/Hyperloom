@@ -3,7 +3,8 @@
 
 """What the model behind a branch's specialist is told: its role once, and at every launch where its branch stands.
 
-The role says how a long-running specialist works through the session's tools and how its candidates are judged. The
+The role says how a long-running specialist works through the session's tools, how its candidates are judged and
+which gains the toolbox refuses as fake (main's ``FAKE_GAINS`` catalog, so a new row reaches the role). The
 launch prompt opens with the repair a repair branch was opened for and the startup brief, right after the role, then
 the branch, its head, K and the branch's latest memory, so a new session goes on where the last one stopped.
 :func:`prompt_versions` names the text of both for the session's manifest fingerprint.
@@ -58,9 +59,10 @@ ends a new one starts, and it knows what you did only from your branch log.
 Work one candidate at a time; up to K of your tests may be running at once, and you prepare the next one meanwhile.
 1. Read where your branch stands: your branch log (notebook_branch_log), the startup brief, and what was tried and \
 learnt (notebook_search, notebook_learnings, notebook_brief).
-2. Choose a direction from your branch head's own state, starting from where its GPU time goes: start_analysis with \
-tool "roofline" profiles your head and reports each operator's share through poll_inbox. Shares belong to the commit \
-that was profiled, so profile again when your head has none (a claim's answer says so), on a new branch, and after a \
+2. Choose a direction from your branch head's own state, starting from where its GPU time goes. Profile your head: \
+submit_test with kind "profile", purpose "profile", your head as the parent commit and no delta; once it succeeded, \
+start_analysis with tool "tracelens" and that test's id as profile_request_id reports each operator's share through \
+poll_inbox. Shares belong to the commit that was profiled, so profile again when your head has none (a claim's answer says so), on a new branch, and after a \
 change of execution path (attention backend, precision format, kernel switch). Name the direction as an intent: the \
 target (a bottleneck or an operator), the mechanism, and the layer (config, source or kernel). For a source or kernel \
 intent, also give notebook_claim the target's share of GPU time on that commit (target_share_pct), the summed share of \
@@ -75,7 +77,9 @@ to test.
 4. Submit it with submit_test: kind "test", purpose "explore", the parent commit, the delta, and the intent \
 fingerprint your claim returned. Never submit purpose "confirm": the runtime retests a measured gain on another node \
 itself.
-5. poll_inbox tells you when a result or a judgement arrives; test_result shows it.
+5. poll_inbox tells you when a result or a judgement arrives; test_result shows it. A "brief" item means the \
+session moved under your branch: call notebook_brief with the head it names and reconsider your direction before \
+your next claim.
 6. After every result, write to your branch log (notebook_append_branch_log): the hypothesis, what you tried, the \
 outcome and why, and your next plan. Entries that start with "{NOTICE}" are the runtime's: a gain that landed, one \
 held back, or a test that could not be judged. What another specialist should know, now or in a later session, goes \
@@ -85,6 +89,10 @@ How a candidate is judged: it is compared with its parent's recorded value at th
 gain must clear the session's bar, set from the spread of the baseline measurements, and hold when it is measured \
 again on another node; every commit must also pass the accuracy gate. A gain lands on your branch only while your \
 branch head is still the parent it was measured against: submit on your current head.
+
+Known fake gains: a measurement can show them without the candidate being better, so the toolbox refuses them; do \
+not spend tests on them.
+{{fake_gains}}
 
 A blocked candidate cleared the bar on both measurements and was held back on both by the same defect: the accuracy \
 gate, or on AgentX a guard (P90, output throughput) or more failed requests than its parent. It waits for your \
@@ -110,7 +118,7 @@ def role_prompt(workload: str) -> str:
     named = " ".join(workload.split())
     if not named:
         raise ValueError("a specialist's role names the workload its session optimizes")
-    return _ROLE.format(workload=named)
+    return _ROLE.format(workload=named, fake_gains=_fake_gains())
 
 
 def launch_prompt(
@@ -136,8 +144,16 @@ def launch_prompt(
 
 def prompt_versions() -> dict[str, str]:
     """``{prompt name: the first hex digits of the sha256 of its text}``, for the session's manifest fingerprint."""
-    texts = {"specialist_role": _ROLE, "specialist_launch": "\n".join(_LAUNCH)}
+    role = _ROLE.format(workload="{workload}", fake_gains=_fake_gains())
+    texts = {"specialist_role": role, "specialist_launch": "\n".join(_LAUNCH)}
     return {name: hashlib.sha256(text.encode()).hexdigest()[:VERSION_HEX] for name, text in texts.items()}
+
+
+def _fake_gains() -> str:
+    # Imported here: the catalog loads main's flow runtime, which importing the multi-branch command must not.
+    from hyperloom.measure.fake_gain import FAKE_GAINS
+
+    return "\n".join(f"- {row.shows_as} Refused as {row.refusal_code}." for row in FAKE_GAINS)
 
 
 def _repair(request: RepairRequest) -> str:

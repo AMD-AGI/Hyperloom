@@ -6,6 +6,7 @@ import json
 import pytest
 
 from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
+from hyperloom.measure.fake_gain import FAKE_GAINS
 from hyperloom.orchestrator.prompts.specialist_prompt_builder import BASH_KILL_SAFETY_PREAMBLE
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.fork import RepairRequest
@@ -63,6 +64,27 @@ def test_the_role_names_the_workload_every_step_s_tool_and_the_rules():
     assert prompt.index("notebook_learn, citing the candidate") < prompt.index("then call decline_repair")
     with pytest.raises(ValueError, match="names the workload"):
         role_prompt(" \n")
+
+
+def test_the_role_profiles_through_a_profile_test_and_tracelens_never_roofline():
+    prompt = role_prompt(WORKLOAD)
+
+    assert 'submit_test with kind "profile", purpose "profile"' in prompt
+    assert 'start_analysis with tool "tracelens" and that test\'s id as profile_request_id' in prompt
+    assert "roofline" not in prompt
+
+
+def test_the_role_says_a_brief_item_asks_for_the_brief_again_before_the_next_claim():
+    prompt = role_prompt(WORKLOAD)
+
+    assert 'A "brief" item' in prompt
+    assert prompt.index("call notebook_brief with the head it names") < prompt.index("before your next claim")
+
+
+def test_the_role_lists_every_known_fake_gain_with_its_refusal():
+    prompt = role_prompt(WORKLOAD)
+
+    assert all(f"{row.shows_as} Refused as {row.refusal_code}." in prompt for row in FAKE_GAINS)
 
 
 def test_a_launch_opens_with_the_brief_then_says_where_the_branch_stands():
