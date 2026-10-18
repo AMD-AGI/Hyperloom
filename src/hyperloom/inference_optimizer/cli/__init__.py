@@ -11,7 +11,6 @@ from dataclasses import dataclass
 import json
 import logging
 import os
-import shlex
 import sys
 import time
 from collections.abc import Mapping
@@ -58,6 +57,8 @@ from ..model_config_utils import (
     summarize_model_config,
 )
 from .bootstrap import (
+    LaunchInfo,
+    _emit_launch_info,
     constraint_budget_resume_conflict,
     resolve_launch_gpu_power,
     _begin_resume_leg,
@@ -425,39 +426,6 @@ def _apply_atom_auto_tighten(args: argparse.Namespace) -> list[str]:
         "--nodes>=2 guard active — see SKILL.md IR-8"
     )
     return auto_disabled
-
-
-def _emit_launch_info(
-    *,
-    pid: int,
-    session_dir: Path,
-    session_id: str,
-    run_log: str,
-    gpu_type: str,
-    framework: str,
-    model: str,
-    launch_info_file: str | None,
-) -> dict[str, Any]:
-    """Print the machine-readable HYPERLOOM_LAUNCH stdout line; optionally JSON-dump to ``launch_info_file``."""
-    launch_info: dict[str, Any] = {
-        "event": "launch",
-        "pid": pid,
-        "session_dir": str(session_dir),
-        "session_id": session_id,
-        "run_log": run_log,
-        "manifest": str(session_dir / "manifest.json"),
-        "gpu_type": gpu_type,
-        "framework": framework,
-        "model": model,
-    }
-    kv_body = " ".join(f"{k}={shlex.quote(str(v))}" for k, v in launch_info.items())
-    print(f"HYPERLOOM_LAUNCH {kv_body}")
-    if launch_info_file:
-        path = Path(launch_info_file)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(launch_info, indent=2))
-        print(f"Launch info file: {path}")
-    return launch_info
 
 
 # Exit code for "another optimizer already owns this session".
@@ -1863,7 +1831,7 @@ def _reexport_session_environment(
         print(f"  re-exported GPU_TYPE  : {state.gpu_type}")
         if runner_gpu_type != state.gpu_type:
             print(f"  Magpie runner GPU_TYPE: {runner_gpu_type}")
-    _emit_launch_info(
+    info = LaunchInfo(
         pid=os.getpid(),
         session_dir=session_dir,
         session_id=str(manifest.get("session_id") or ""),
@@ -1871,8 +1839,8 @@ def _reexport_session_environment(
         gpu_type=state.gpu_type or "",
         framework=state.framework or "",
         model=str(state.model_path or ""),
-        launch_info_file=getattr(args, "launch_info_file", None),
     )
+    _emit_launch_info(info, launch_info_file=getattr(args, "launch_info_file", None))
     _seed_env_from_resumed_state(state, resume_extra_env)
     # The seeding above puts the recorded workload on the environment rung, so it outranks a shell export while an
     # explicit --isl/--conc/... on this resume still wins. The resolved values are then projected back into env so
@@ -2230,7 +2198,7 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
     _print_session_skeleton(session_dir)
 
     # Machine-readable launch info: stable point for launcher scripts to harvest pid/session_dir/run_log.
-    _emit_launch_info(
+    info = LaunchInfo(
         pid=os.getpid(),
         session_dir=session_dir,
         session_id=str(manifest["session_id"]),
@@ -2238,8 +2206,8 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
         gpu_type=gpu_type or "",
         framework=args.framework or "",
         model=str(args.model) if args.model else "",
-        launch_info_file=getattr(args, "launch_info_file", None),
     )
+    _emit_launch_info(info, launch_info_file=getattr(args, "launch_info_file", None))
     # Placed here, not at the top of _run_optimize, because everything it weighs is resolved by now and none of it
     # was then: the framework (whether anything fans out), args.gpu_type (the CU fallback), and args.model, which
     # --quantize rewrites to the exported checkpoint -- sizing partitions against the source model would weigh the
