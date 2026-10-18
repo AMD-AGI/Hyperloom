@@ -519,6 +519,49 @@ async def test_a_merge_the_recipe_contract_refuses_is_skipped_and_the_round_goes
     assert await bench.outcome("c1") is MergeOutcome.CONFLICT_SKIPPED
 
 
+async def _commit_moving_the_component(bench: Bench, ref: str) -> str:
+    """Branch ``s2`` starts from the root and commits ``c3`` (+1%), which pins ``vllm`` at ``ref``."""
+
+    scheduler, toolbox, gate = (bench.handle(role) for role in (Role.SCHEDULER, Role.TOOLBOX, Role.GATE))
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s2", from_commit=bench.root, reason="second batch"))
+    await bench.repo.create_branch("s2", bench.root)
+    patch = await bench.repo.store_patch(COMPONENT, _patch_text("x.py", "old", "moved"))
+    change = RecipeDelta(components=(ComponentChange(COMPONENT, ref, UPSTREAM_REPO, add_patches=(patch,)),))
+    commit = await bench.repo.commit("s2", bench.root, apply(await bench.repo.read_recipe(bench.root), change), "c3")
+    test = request("rc3", intent("s2", bench.root, mechanism="c3"), change)
+    await toolbox.write_request(test)
+    await toolbox.write_result(result(test.request_id))
+    await gate.write_judgement(test.request_id, judgement(1.0, (test.request_id,)), Conclusion.COMMITTED, commit)
+    return commit
+
+
+async def test_a_merge_that_moves_a_component_the_head_moved_too_is_skipped_and_recorded(bench: Bench) -> None:
+    await _one(bench)
+    head = await bench.repo.head(INTEGRATION_BRANCH)
+    ref = "b" * 40
+    moved = await _commit_moving_the_component(bench, ref)
+
+    reports = await bench.integrator.integrate_next(2)
+
+    prefix = f"the merge does not combine: both sides moved {COMPONENT}"
+    [skipped] = [report for report in reports if report.candidate == moved]
+    assert (skipped.onto, skipped.outcome, skipped.request_id) == (head, MergeOutcome.CONFLICT_SKIPPED, None)
+    assert skipped.reason.startswith(prefix)
+    tested_refs = {change.upstream_ref for test in bench.merge_tests().values() for change in test.delta.components}
+    assert ref not in tested_refs
+    by_commit = {commit.commit_id: commit for commit in await bench.handle(Role.OBSERVER).committed()}
+    assert by_commit[moved].last_merge is not None
+    assert by_commit[moved].last_merge.outcome is MergeOutcome.CONFLICT_SKIPPED
+    [attempt] = await bench.handle(Role.OBSERVER).search(f"both sides moved {COMPONENT}")
+    assert attempt.summary.startswith(f"merge {moved} onto {head}, skipped: {prefix}")
+    [logged] = [row for row in bench.logged() if row["detail"]["candidate"] == moved]
+    assert (logged["kind"], logged["branch"]) == (DecisionKind.MERGE.value, INTEGRATION_BRANCH)
+    assert str(logged["reason"]).startswith(prefix)
+    assert logged["detail"]["outcome"] == MergeOutcome.CONFLICT_SKIPPED.value
+    pinned = (await bench.repo.read_recipe(await bench.repo.head(INTEGRATION_BRANCH))).component(COMPONENT)
+    assert pinned is not None and pinned.upstream_ref == UPSTREAM_REF
+
+
 async def test_a_merge_test_the_toolbox_refuses_is_skipped_and_the_round_goes_on(bench: Bench) -> None:
     bench.refuse("c1")
 
