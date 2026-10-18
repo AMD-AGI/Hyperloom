@@ -6,6 +6,8 @@ import subprocess
 from pathlib import Path
 
 from kernelforge.loop import knowledge_integration as integ
+from kernelforge.knowledge.kb_store.identity.run import LoopKernel
+from kernelforge.loop.knowledge_integration import ExperiencePublication, WarmStartHarness
 import pytest
 
 
@@ -270,7 +272,9 @@ def test_kb_warmstart_reference_only_when_patch_empty(monkeypatch, tmp_path):
     )
 
     warm = integ.kb_warmstart(
-        config=object(), kernel=str(repo / "kernel.py"), driver="d.py", workspace_dir=str(repo), kernel_backend="triton"
+        config=object(),
+        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
+        harness=WarmStartHarness(driver="d.py"),
     )
     assert warm["candidate"] is True
     assert warm["applied"] is False
@@ -301,11 +305,8 @@ def test_write_experience_to_kb_does_not_synthesize_speedup(monkeypatch, tmp_pat
     status = integ.write_experience_to_kb(
         config=object(),
         loop_runner=_LR(),
-        workspace_dir=str(tmp_path),
-        kernel=str(kernel),
-        kernel_backend="triton",
-        gpu_target="gfx942",
-        base_sha="base",
+        kernel=LoopKernel(kernel_path=str(kernel), kernel_backend="triton", workspace=str(tmp_path)),
+        publication=ExperiencePublication(base_sha="base", gpu_target="gfx942"),
     )
     assert status == {
         "written": False,
@@ -322,7 +323,9 @@ def test_kb_warmstart_swallows_reader_error(monkeypatch, tmp_path):
 
     monkeypatch.setattr("kernelforge.knowledge.kb_store.reader.read_top_solutions", boom)
     warm = integ.kb_warmstart(
-        config=object(), kernel=str(repo / "kernel.py"), driver="d.py", workspace_dir=str(repo), kernel_backend="triton"
+        config=object(),
+        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
+        harness=WarmStartHarness(driver="d.py"),
     )
     assert warm == {
         "candidate": False,

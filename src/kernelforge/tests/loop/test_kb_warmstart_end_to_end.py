@@ -13,6 +13,8 @@ from kernelforge.loop import knowledge_integration as integration
 from kernelforge.knowledge.kb_store import writer as sink
 from kernelforge.knowledge.kb_store.config import KnowledgeConfig
 from kernelforge.loop import recovery
+from kernelforge.knowledge.kb_store.identity.run import LoopKernel
+from kernelforge.loop.knowledge_integration import WarmStartHarness
 
 
 PRODUCER_KERNEL_PATH = Path("packages/src/aiter_meta/ops/triton/deterministic_kernel.py")
@@ -197,11 +199,13 @@ def _warm_start(
 ) -> dict:
     return integration.kb_warmstart(
         config=_run_config(gpu_type),
-        kernel=str(consumer_kernel),
-        driver="unused-driver.py",
-        workspace_dir=str(consumer_workspace),
-        kernel_backend="triton",
-        source_files=source_files,
+        kernel=LoopKernel(
+            kernel_path=str(consumer_kernel),
+            kernel_backend="triton",
+            source_files=source_files,
+            workspace=str(consumer_workspace),
+        ),
+        harness=WarmStartHarness(driver="unused-driver.py"),
     )
 
 

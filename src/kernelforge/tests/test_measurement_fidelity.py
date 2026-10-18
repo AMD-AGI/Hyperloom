@@ -309,16 +309,19 @@ def test_driver_aggregates_repeats_by_median():
 def test_cli_can_actually_call_kb_warmstart():
     """The CLI's call site must match the function it calls."""
     import inspect
-    import re
+    import textwrap
 
     from kernelforge.cli import forge_loop_command
     from kernelforge.loop.knowledge_integration import kb_warmstart
 
     accepted = set(inspect.signature(kb_warmstart).parameters)
-    src = inspect.getsource(forge_loop_command._read_kb_warm_start)
-    call = src[src.index("kb_warmstart(") + len("kb_warmstart(") :]
-    call = call[: call.index(")\n")]
-    passed = set(re.findall(r"(?:^|[\s,(])([a-z_][a-z0-9_]*)\s*=", call))
+    tree = ast.parse(textwrap.dedent(inspect.getsource(forge_loop_command._read_kb_warm_start)))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "kb_warmstart"
+    ]
+    passed = {keyword.arg for call in calls for keyword in call.keywords}
     assert passed, "could not read the CLI call site"
     unknown = passed - accepted
     assert not unknown, f"CLI passes keywords kb_warmstart rejects: {sorted(unknown)}"

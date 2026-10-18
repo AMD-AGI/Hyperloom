@@ -25,6 +25,8 @@ from kernelforge.knowledge.kb_store.record_store import (
 
 from kernelforge.tests.test_rewrite_by_flydsl_kb import InMemoryKBStore, _remote_config
 from kernelforge.conftest import kb_store_run_config as _remote_config_with_token
+from kernelforge.knowledge.kb_store.identity.run import LoopKernel
+from kernelforge.loop.knowledge_integration import WarmStartHarness
 
 PRODUCER_KERNEL_PATH = Path("packages/src/aiter_meta/ops/triton/deterministic_kernel.py")
 CONSUMER_KERNEL_PATH = Path("src/aiter/ops/triton/deterministic_kernel.py")
@@ -238,10 +240,8 @@ class _StubClock:
 def _warm_start(workspace: Path, kernel: Path) -> dict:
     return integration.kb_warmstart(
         config=_run_config(),
-        kernel=str(kernel),
-        driver="unused-driver.py",
-        workspace_dir=str(workspace),
-        kernel_backend="triton",
+        kernel=LoopKernel(kernel_path=str(kernel), kernel_backend="triton", workspace=str(workspace)),
+        harness=WarmStartHarness(driver="unused-driver.py"),
     )
 
 

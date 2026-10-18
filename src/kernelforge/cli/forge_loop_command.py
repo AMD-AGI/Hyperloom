@@ -49,8 +49,11 @@ from kernelforge.cli.publication import (
 from kernelforge.cli.session_budget import _forge_session_timeout_sec, _is_long_horizon
 from kernelforge.config import Config
 from kernelforge.knowledge.kb_store.config import KnowledgeConfig
+from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.knowledge.pr_knowledge.context import PrReferenceQuery
 from kernelforge.loop.knowledge_integration import (
+    ExperiencePublication,
+    WarmStartHarness,
     WarmStartRollbackError,
     git_head,
     kb_reference_program_md,
@@ -371,21 +374,25 @@ class _RunReporter:
             status = write_experience_to_kb(
                 config=self.run.config,
                 loop_runner=self.loop_runner,
-                workspace_dir=self.run.iter_config.workspace_dir,
-                kernel=self.run.iter_config.kernel_file,
-                kernel_backend=self.run.campaign.kernel_backend,
-                gpu_target=self.run.config.gpu_target,
-                base_sha=self.run.campaign.base_commit,
-                pristine_baseline_ms=self.warm_start.kb_pristine_baseline_ms,
-                reused_speedup=self.warm_start.kb_reused_speedup,
-                source_files=self.run.iter_config.source_files,
-                target_functions=self.run.iter_config.target_functions,
-                framework=self.run.campaign.framework,
-                experience_id=self.run.request.artifacts.experience_id,
-                operator_name=self.run.campaign.operator_name,
-                llm_summary=llm_summary,
-                incremental_summary=incremental_summary,
-                snr_db_override=snr_db_override,
+                kernel=LoopKernel(
+                    kernel_path=self.run.iter_config.kernel_file,
+                    kernel_backend=self.run.campaign.kernel_backend,
+                    target_functions=self.run.iter_config.target_functions,
+                    source_files=self.run.iter_config.source_files,
+                    framework=self.run.campaign.framework,
+                    operator_name=self.run.campaign.operator_name,
+                    workspace=self.run.iter_config.workspace_dir,
+                ),
+                publication=ExperiencePublication(
+                    base_sha=self.run.campaign.base_commit,
+                    gpu_target=self.run.config.gpu_target,
+                    experience_id=self.run.request.artifacts.experience_id,
+                    pristine_baseline_ms=self.warm_start.kb_pristine_baseline_ms,
+                    reused_speedup=self.warm_start.kb_reused_speedup,
+                    snr_db_override=snr_db_override,
+                    llm_summary=llm_summary,
+                    incremental_summary=incremental_summary,
+                ),
                 usage=self.run.usage,
             )
         except Exception as e:  # noqa: BLE001 - checkpoint publish must never break the loop
@@ -751,16 +758,16 @@ def _read_kb_warm_start(run: _ForgeRun, program_md: str, kb_warmstart_enabled: b
         try:
             warm = kb_warmstart(
                 config=config,
-                kernel=kernel,
-                driver=driver,
-                workspace_dir=workspace_dir,
-                kernel_backend=kernel_backend,
-                target_functions=target_functions_list,
-                framework=framework,
-                snr_threshold=snr_threshold,
-                source_files=source_files_list,
-                operator_name=operator_name,
-                bench_repeat=bench_repeat,
+                kernel=LoopKernel(
+                    kernel_path=kernel,
+                    kernel_backend=kernel_backend,
+                    target_functions=target_functions_list,
+                    source_files=source_files_list,
+                    framework=framework,
+                    operator_name=operator_name,
+                    workspace=workspace_dir,
+                ),
+                harness=WarmStartHarness(driver, snr_threshold=snr_threshold, bench_repeat=bench_repeat),
             )
         except WarmStartRollbackError as error:
             failure = click.ClickException(f"warm-start rollback failed; workspace may be inconsistent: {error}")

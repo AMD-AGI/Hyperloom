@@ -181,7 +181,7 @@ def _install_cli_fakes(monkeypatch, tmp_path):
     def fake_warmstart(**kwargs):
         captured["warmstarts"].append(kwargs)
         try:
-            with LoopStateStore(str(kwargs["workspace_dir"])).workspace_lock():
+            with LoopStateStore(str(kwargs["kernel"].workspace)).workspace_lock():
                 pass
         except WorkspaceLockError:
             captured["lock_held_during_warmstart"] = True
@@ -194,7 +194,7 @@ def _install_cli_fakes(monkeypatch, tmp_path):
     def fake_write(**kwargs):
         captured["kb_writes"].append(kwargs)
         try:
-            with LoopStateStore(str(kwargs["workspace_dir"])).workspace_lock():
+            with LoopStateStore(str(kwargs["kernel"].workspace)).workspace_lock():
                 pass
         except WorkspaceLockError:
             captured["lock_held_during_finalization"] = True
@@ -572,8 +572,8 @@ def test_warm_start_publication_failure_rolls_back_and_continues_reference_only(
     captured = _install_cli_fakes(monkeypatch, tmp_path)
 
     def applied_warmstart(**kwargs):
-        workspace = Path(kwargs["workspace_dir"])
-        kernel = Path(kwargs["kernel"])
+        workspace = Path(kwargs["kernel"].workspace)
+        kernel = Path(kwargs["kernel"].kernel_path)
         kernel.write_text("def kernel():\n    return 2\n")
         subprocess.run(["git", "add", "-u"], cwd=workspace, check=True)
         subprocess.run(
@@ -1077,7 +1077,7 @@ def test_resume_reuses_persisted_framework_without_inference(
 
     assert result.exit_code == 0, result.output
     assert store.load().framework == "vllm"
-    assert captured["kb_writes"][-1]["framework"] == "vllm"
+    assert captured["kb_writes"][-1]["kernel"].framework == "vllm"
 
 
 def test_keep_callback_snapshots_result_and_kb_before_iteration_callback(
@@ -1125,7 +1125,7 @@ def test_keep_callback_snapshots_result_and_kb_before_iteration_callback(
     remote_callback = captured["run_kwargs"]["on_best_ready"]
     remote_callback(SimpleNamespace(kept=True))
     assert captured["kb_writes"]
-    assert captured["kb_writes"][-1]["llm_summary"] is False
+    assert captured["kb_writes"][-1]["publication"].llm_summary is False
     checkpoint = captured["checkpoints"]["hyperloom"]
     assert checkpoint["best_commit"] == "best-commit"
     assert checkpoint["search_start_mean_case_speedup"] == 1.0

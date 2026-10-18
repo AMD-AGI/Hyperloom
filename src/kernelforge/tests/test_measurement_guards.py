@@ -24,6 +24,7 @@ from kernelforge.loop.baseline_reference import (
     check_baseline_against_reference,
     load_reference_case_times,
 )
+from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.loop.recovery import CallerRecovery, publish_warm_start_recovery
 from kernelforge.loop.run_state import IterationVerdict, LoopStanding, LoopStateStore, RunState, apply_iteration
 from kernelforge.loop import runner as runner_module
@@ -309,18 +310,17 @@ def test_kb_warm_start_adopts_a_high_scoring_prior_solution(
 
     trial = integration._try_apply_candidate(
         {"solution_slug": "prior-solution"},
-        kernel=str(tmp_path / "kernel.py"),
-        driver=str(tmp_path / "driver.py"),
-        workspace_dir=str(tmp_path),
-        snr_threshold=30.0,
-        source_files=None,
-        # A real pristine bench reports both halves of its measurement; the aggregate is dominated by the one
-        # expensive case.
-        pristine_bench={
-            "case_times": pristine,
-            "median_ms": EXPENSIVE_PRISTINE_MS,
-        },
-        allowed_paths=None,
+        integration._CandidateField(
+            LoopKernel(kernel_path=str(tmp_path / "kernel.py"), kernel_backend="", workspace=str(tmp_path)),
+            integration.WarmStartHarness(str(tmp_path / "driver.py"), snr_threshold=30.0),
+            # A real pristine bench reports both halves of its measurement; the aggregate is dominated by the one
+            # expensive case.
+            pristine_bench={
+                "case_times": pristine,
+                "median_ms": EXPENSIVE_PRISTINE_MS,
+            },
+            allowed_paths=None,
+        ),
         pre_untracked=set(),
     )
 
@@ -352,18 +352,17 @@ def test_kb_warm_start_still_adopts_a_modest_prior_solution(
 
     trial = integration._try_apply_candidate(
         {"solution_slug": "prior-solution"},
-        kernel=str(tmp_path / "kernel.py"),
-        driver=str(tmp_path / "driver.py"),
-        workspace_dir=str(tmp_path),
-        snr_threshold=30.0,
-        source_files=None,
-        # Both halves of the pristine measurement, agreeing at 5.72x: the candidate has to beat the aggregate as well
-        # as the per-case mean.
-        pristine_bench={
-            "case_times": pristine,
-            "median_ms": TIMING_FLOOR_MS * MODEST_SPEEDUP,
-        },
-        allowed_paths=None,
+        integration._CandidateField(
+            LoopKernel(kernel_path=str(tmp_path / "kernel.py"), kernel_backend="", workspace=str(tmp_path)),
+            integration.WarmStartHarness(str(tmp_path / "driver.py"), snr_threshold=30.0),
+            # Both halves of the pristine measurement, agreeing at 5.72x: the candidate has to beat the aggregate as well
+            # as the per-case mean.
+            pristine_bench={
+                "case_times": pristine,
+                "median_ms": TIMING_FLOOR_MS * MODEST_SPEEDUP,
+            },
+            allowed_paths=None,
+        ),
         pre_untracked=set(),
     )
 
@@ -544,13 +543,12 @@ def test_a_warm_start_without_a_pristine_aggregate_refuses_to_adopt(
 
     trial = integration._try_apply_candidate(
         {"solution_slug": "prior-solution"},
-        kernel=str(tmp_path / "kernel.py"),
-        driver=str(tmp_path / "driver.py"),
-        workspace_dir=str(tmp_path),
-        snr_threshold=30.0,
-        source_files=None,
-        pristine_bench={"case_times": pristine},
-        allowed_paths=None,
+        integration._CandidateField(
+            LoopKernel(kernel_path=str(tmp_path / "kernel.py"), kernel_backend="", workspace=str(tmp_path)),
+            integration.WarmStartHarness(str(tmp_path / "driver.py"), snr_threshold=30.0),
+            pristine_bench={"case_times": pristine},
+            allowed_paths=None,
+        ),
         pre_untracked=set(),
     )
 
