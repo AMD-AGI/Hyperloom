@@ -192,7 +192,7 @@ class RoundRequest:
 
     request_id: str
     now_unix: float
-    evidence: Mapping[str, Any] = _NO_EVIDENCE
+    evidence: Mapping[str, Any] = field(default_factory=lambda: _NO_EVIDENCE)
 
 
 @dataclass(frozen=True)
