@@ -83,8 +83,9 @@ def _service(home: Path, global_url: str | None = None, **options: Any) -> Exper
     global_kb = None if global_url is None else RemoteClient(RemoteConfig(global_url, TOKEN))
     schema = options.pop("schema", SCHEMA)
     database = options.pop("database", None) or fresh_database()
+    name = options.pop("name", "")
     return ExperienceHTTPService(
-        HTTPServiceConfig(home, TOKEN), schema, None, database=database, global_kb=global_kb, **options
+        HTTPServiceConfig(home, TOKEN, name=name), schema, None, database=database, global_kb=global_kb, **options
     )
 
 

@@ -268,6 +268,10 @@ def _reject_unknown(body: Mapping[str, JsonValue], allowed: frozenset[str]) -> N
 class HTTPServiceConfig:
     home: Path
     token: str
+    #: How this service names itself in health, metrics and to the KBs it syncs with.
+    name: str = ""
+    #: Digest of the settings the service was started with, reported by health.
+    config_digest: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "home", Path(self.home).expanduser())
@@ -325,16 +329,14 @@ class ExperienceHTTPService:
         *,
         database: Database,
         global_kb: RemoteClient | None = None,
-        config_digest: str = "",
-        name: str = "",
     ) -> None:
         self.config = config
         self.declaration = declaration
-        self.name = name
+        self.name = config.name
         self._database = database
         config.home.mkdir(parents=True, exist_ok=True)
         self.kb_id = database.resolve_kb()
-        self._config_digest = config_digest
+        self._config_digest = config.config_digest
         self._code_digest = code_digest()
         self._records = RecordFiles(config.home, self.kb_id)
         self._files = FileStore(config.home, self.kb_id)
@@ -1467,13 +1469,13 @@ def main(argv: list[str] | None = None) -> int:
             raise SystemExit(str(exc)) from None
         stack.callback(database.close)
         app = ExperienceHTTPService(
-            HTTPServiceConfig(home, os.environ.get("HYPERLOOM_KB_TOKEN", "")),
+            HTTPServiceConfig(
+                home, os.environ.get("HYPERLOOM_KB_TOKEN", ""), name=args.name, config_digest=settings.digest()
+            ),
             load_declaration(args.declaration),
             planner,
             database=database,
             global_kb=None if settings.global_kb is None else RemoteClient(settings.global_kb),
-            config_digest=settings.digest(),
-            name=args.name,
         )
         for seed in args.seed_jsonl:
             log.info("seeded %s: %s", seed, _canonical(app.seed(seed)))
