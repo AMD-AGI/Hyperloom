@@ -45,7 +45,7 @@ from kernelforge.agent_backends.codex import (
     resolve_codex_reasoning_effort,
 )
 from kernelforge.config import Config
-from kernelforge.cli.options import _agent_runtime_overrides
+from kernelforge.cli.options import AgentRuntimeOptions, _agent_runtime_overrides
 from kernelforge.orchestrator import agent as agent_module
 from kernelforge.tracker.usage import UsageAccumulator
 
@@ -708,15 +708,17 @@ def test_config_loads_generic_provider_runtime(
 def test_shared_model_option_is_provider_neutral() -> None:
     """Map --model directly to the selected provider runtime."""
     overrides = _agent_runtime_overrides(
-        model="provider-model",
-        agent_backend="codex",
-        agent_cli=None,
-        agent_timeout_sec=None,
-        agent_reasoning_effort=None,
-        agent_sandbox_mode=None,
-        agent_fallback_provider=None,
-        agent_precheck=None,
-        agent_options_json=None,
+        AgentRuntimeOptions(
+            model="provider-model",
+            agent_backend="codex",
+            agent_cli=None,
+            agent_timeout_sec=None,
+            agent_reasoning_effort=None,
+            agent_sandbox_mode=None,
+            agent_fallback_provider=None,
+            agent_precheck=None,
+            agent_options_json=None,
+        )
     )
 
     assert overrides == {

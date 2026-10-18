@@ -23,6 +23,7 @@ from kernelforge.agent_backends.registry import (
     resolve_agent_runtime,
     select_default_agent_provider,
 )
+from kernelforge.option_groups import option_group
 from kernelforge.roofline_ceiling.analyst import AnalystSession, CeilingTask
 from kernelforge.roofline_ceiling.contract import CeilingReport
 from kernelforge.roofline_ceiling.estimate import (
@@ -147,51 +148,84 @@ def _emit(report: CeilingReport, *, source: str, report_path: Path | None) -> No
     click.echo(RESULT_SENTINEL)
 
 
+@dataclass(frozen=True)
+class CeilingInputs:
+    """The workspace and task settings the estimate is taken from."""
+
+    workspace_dir: str
+    kernel_files: tuple[str, ...]
+    driver_script: str
+    config_path: str
+    performance_command: str
+
+
+@dataclass(frozen=True)
+class AnalystOptions:
+    """The analyst session's provider, model, budget and sandbox as typed on the command line."""
+
+    agent_provider: str
+    agent_model: str
+    agent_timeout_sec: int
+    agent_sandbox_mode: str | None
+
+
+@dataclass(frozen=True)
+class CeilingRequest:
+    """Every option of one ``roofline-ceiling`` invocation, grouped by concern."""
+
+    inputs: CeilingInputs
+    output_dir: str
+    arch: str
+    analyst: AnalystOptions
+    run_timeout_sec: int
+
+
 @click.command("roofline-ceiling")
-@click.option("--workspace", "workspace_dir", required=True, help="Kernel workspace to analyse")
-@click.option(
-    "--kernel",
-    "kernel_files",
-    multiple=True,
-    help="Source file the analyst models; repeatable. Defaults to config.yaml 'source_file_path'.",
+@option_group(
+    "request",
+    CeilingRequest,
+    option_group(
+        "inputs",
+        CeilingInputs,
+        click.option("--workspace", "workspace_dir", required=True, help="Kernel workspace to analyse"),
+        click.option(
+            "--kernel",
+            "kernel_files",
+            multiple=True,
+            help="Source file the analyst models; repeatable. Defaults to config.yaml 'source_file_path'.",
+        ),
+        click.option("--driver", "driver_script", default="", help="Measurement driver, for the analyst's context"),
+        click.option(
+            "--config",
+            "config_path",
+            default="",
+            help=f"Task configuration. Defaults to <workspace>/{CONFIG_FILENAME}.",
+        ),
+        click.option(
+            "--performance-command",
+            default="",
+            help="Shell command that runs the timed benchmark. Overrides config.yaml 'performance_command'.",
+        ),
+    ),
+    click.option("--output-dir", default="", help=f"Where to publish. Defaults to <workspace>/{WORKSPACE_SUBDIR}."),
+    click.option("--arch", default="", help="Target arch (gfx950, gfx942). Detected via rocminfo when omitted."),
+    option_group(
+        "analyst",
+        AnalystOptions,
+        click.option(
+            "--agent-provider", default="", help="Agent provider (claude, codex). Auto-selected when omitted."
+        ),
+        click.option("--agent-model", default="", help="Agent model. Falls back to the provider default."),
+        click.option("--agent-timeout-sec", default=3600, type=int, help="Wall-clock budget for the analyst session"),
+        click.option(
+            "--agent-sandbox-mode",
+            default=None,
+            help="Provider sandbox mode. Defaults to FORGE_AGENT_SANDBOX_MODE, as for every other command.",
+        ),
+    ),
+    click.option("--run-timeout-sec", default=1800, type=int, help="Wall-clock budget for each measurement subprocess"),
 )
-@click.option("--driver", "driver_script", default="", help="Measurement driver, for the analyst's context")
-@click.option(
-    "--config",
-    "config_path",
-    default="",
-    help=f"Task configuration. Defaults to <workspace>/{CONFIG_FILENAME}.",
-)
-@click.option(
-    "--performance-command",
-    default="",
-    help="Shell command that runs the timed benchmark. Overrides config.yaml 'performance_command'.",
-)
-@click.option("--output-dir", default="", help=f"Where to publish. Defaults to <workspace>/{WORKSPACE_SUBDIR}.")
-@click.option("--arch", default="", help="Target arch (gfx950, gfx942). Detected via rocminfo when omitted.")
-@click.option("--agent-provider", default="", help="Agent provider (claude, codex). Auto-selected when omitted.")
-@click.option("--agent-model", default="", help="Agent model. Falls back to the provider default.")
-@click.option("--agent-timeout-sec", default=3600, type=int, help="Wall-clock budget for the analyst session")
-@click.option(
-    "--agent-sandbox-mode",
-    default=None,
-    help="Provider sandbox mode. Defaults to FORGE_AGENT_SANDBOX_MODE, as for every other command.",
-)
-@click.option("--run-timeout-sec", default=1800, type=int, help="Wall-clock budget for each measurement subprocess")
-def roofline_ceiling_command(
-    workspace_dir: str,
-    kernel_files: tuple[str, ...],
-    driver_script: str,
-    config_path: str,
-    performance_command: str,
-    output_dir: str,
-    arch: str,
-    agent_provider: str,
-    agent_model: str,
-    agent_timeout_sec: int,
-    agent_sandbox_mode: str | None,
-    run_timeout_sec: int,
-) -> None:
+def roofline_ceiling_command(request: CeilingRequest) -> None:
     """Estimate the theoretical achievable latency of one kernel, per scored shape.
 
     The answer is an optimistic lower bound under hardware limits and legal
@@ -201,32 +235,36 @@ def roofline_ceiling_command(
     """
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s", stream=sys.stderr)
 
-    workspace = Path(workspace_dir).expanduser().resolve()
+    inputs = request.inputs
+    analyst = request.analyst
+    workspace = Path(inputs.workspace_dir).expanduser().resolve()
     if not workspace.is_dir():
         raise click.ClickException(f"workspace is not a directory: {workspace}")
 
-    config_file = Path(config_path).expanduser() if config_path.strip() else workspace / CONFIG_FILENAME
+    config_file = Path(inputs.config_path).expanduser() if inputs.config_path.strip() else workspace / CONFIG_FILENAME
     document = _load_config(config_file)
-    command = _resolve_performance_command(performance_command, document, config_file)
-    sources = _resolve_kernel_files(kernel_files, document, workspace)
+    command = _resolve_performance_command(inputs.performance_command, document, config_file)
+    sources = _resolve_kernel_files(inputs.kernel_files, document, workspace)
     sandbox_mode = Config.from_env(
-        **({"agent_sandbox_mode": agent_sandbox_mode} if agent_sandbox_mode is not None else {})
+        **({"agent_sandbox_mode": analyst.agent_sandbox_mode} if analyst.agent_sandbox_mode is not None else {})
     ).agent_sandbox_mode
 
     click.echo("[ceiling] collecting evidence (driver run, device profile, trace)...")
     try:
         outcome = asyncio.run(
             estimate_ceiling(
-                resolve_analyst_backend(AnalystAgent(agent_provider, agent_model, agent_timeout_sec, sandbox_mode)),
-                CeilingTask(
-                    run=PerformanceRun(command, workspace, float(run_timeout_sec)),
-                    kernel_files=sources,
-                    driver_script=driver_script,
-                    case_params=document.get("shapes") or document.get("cases") or {},
-                    arch=arch,
+                resolve_analyst_backend(
+                    AnalystAgent(analyst.agent_provider, analyst.agent_model, analyst.agent_timeout_sec, sandbox_mode)
                 ),
-                AnalystSession(model=agent_model, timeout_sec=agent_timeout_sec),
-                Path(output_dir).expanduser() if output_dir.strip() else None,
+                CeilingTask(
+                    run=PerformanceRun(command, workspace, float(request.run_timeout_sec)),
+                    kernel_files=sources,
+                    driver_script=inputs.driver_script,
+                    case_params=document.get("shapes") or document.get("cases") or {},
+                    arch=request.arch,
+                ),
+                AnalystSession(model=analyst.agent_model, timeout_sec=analyst.agent_timeout_sec),
+                Path(request.output_dir).expanduser() if request.output_dir.strip() else None,
             )
         )
     except ESTIMATE_ERRORS as exc:
