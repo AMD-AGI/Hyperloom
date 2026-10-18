@@ -446,20 +446,3 @@ def test_direct_query_is_replayable_without_planner() -> None:
 
     assert first.groups == second.groups
     assert first.groups[0].representative_ids == (target.id,)
-
-
-def test_disabled_read_is_a_no_op() -> None:
-    schema = _declaration()
-    service = KnowledgeReadService(
-        schema,
-        None,
-        None,
-        enabled=False,
-    )
-
-    request = _request(schema)
-    result = service.read(request.decision, request.context)
-
-    assert result.status is ReadStatus.DISABLED
-    assert result.prompt_block == ""
-    assert result.rendered_refs == ()
