@@ -947,16 +947,31 @@ class SummaryOutcome:
         return bool(self.text)
 
 
+@dataclass(frozen=True)
+class PrReferenceNote:
+    """The upstream PR references a run surfaced: their labels and the rendered context."""
+
+    labels: tuple[str, ...] = ()
+    context: str = ""
+
+
 async def summarize_iteration(
     *,
     store: LessonStore,
     iteration: int,
+    end_reason: str,
     summarizer,
-    prompt: str,
+    references: PrReferenceNote = PrReferenceNote(),
 ) -> SummaryOutcome:
-    """Ask the just-finished implementer session to write its lesson document from ``prompt``."""
+    """Ask the just-finished implementer session to write its lesson document."""
     if summarizer is None:
         return SummaryOutcome(reason="provider cannot resume the session")
+    prompt = build_summary_prompt(
+        iteration=iteration,
+        end_reason=end_reason,
+        pr_references=references.labels,
+        pr_reference_context=references.context,
+    )
     try:
         text = await summarizer(prompt)
     except Exception as error:  # noqa: BLE001 - never break the loop over this

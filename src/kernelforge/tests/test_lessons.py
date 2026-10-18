@@ -235,8 +235,8 @@ def test_summarize_writes_the_returned_text(tmp_path):
         summarize_iteration(
             store=store,
             iteration=2,
+            end_reason="turn_cap",
             summarizer=fake_summarizer,
-            prompt=build_summary_prompt(iteration=2, end_reason="turn_cap"),
         )
     )
 
@@ -252,8 +252,8 @@ def test_summarize_without_a_resumable_provider(tmp_path):
         summarize_iteration(
             store=store,
             iteration=2,
+            end_reason="",
             summarizer=None,
-            prompt=build_summary_prompt(iteration=2, end_reason=""),
         )
     )
     assert not outcome
@@ -272,8 +272,8 @@ def test_summarize_reports_why_a_failing_session_produced_nothing(tmp_path):
         summarize_iteration(
             store=store,
             iteration=2,
+            end_reason="",
             summarizer=broken,
-            prompt=build_summary_prompt(iteration=2, end_reason=""),
         )
     )
     assert not outcome
@@ -292,8 +292,8 @@ def test_summarize_ignores_an_empty_reply(tmp_path):
         summarize_iteration(
             store=store,
             iteration=2,
+            end_reason="",
             summarizer=empty,
-            prompt=build_summary_prompt(iteration=2, end_reason=""),
         )
     )
     assert not outcome
@@ -312,8 +312,8 @@ def test_summarize_reports_a_lesson_store_write_failure(tmp_path, monkeypatch):
         summarize_iteration(
             store=store,
             iteration=2,
+            end_reason="",
             summarizer=summary,
-            prompt=build_summary_prompt(iteration=2, end_reason=""),
         )
     )
 

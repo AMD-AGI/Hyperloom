@@ -41,10 +41,10 @@ from kernelforge.loop.lessons import (
     LessonScope,
     LessonStore,
     OutcomeMeasurement,
+    PrReferenceNote,
     SessionEnd,
     SessionObservations,
     build_fallback_document,
-    build_summary_prompt,
     cases_named_in,
     format_outcome_line,
     format_scope_line,
@@ -630,6 +630,13 @@ class LoopCallbacks:
     on_iteration: Any = None
     on_best_committed: Any = None
     on_best_ready: Any = None
+
+
+def _verdict_of(result: "IterationResult", decision: str, plan: str) -> IterationVerdict:
+    """The run-state verdict of one decided iteration."""
+    return IterationVerdict(
+        result.iteration, decision, result.kept, result.wall_ms, result.commit_hash, plan, result.mean_case_speedup
+    )
 
 
 class _Attempt(NamedTuple):
@@ -3670,20 +3677,8 @@ class IterationLoop(AnalysisRuntimeMixin):
             if newly_applied:
                 apply_iteration(
                     self.run_state,
-                    IterationVerdict(
-                        iteration=result.iteration,
-                        decision=decision_label,
-                        kept=result.kept,
-                        wall_ms=result.wall_ms,
-                        commit_hash=result.commit_hash,
-                        plan=plan,
-                        mean_case_speedup=result.mean_case_speedup,
-                    ),
-                    LoopStanding(
-                        baseline_wall_ms=self.ic.baseline_wall_ms,
-                        best_wall_ms=self.best_wall_ms,
-                        best_mean_case_speedup=self.best_mean_case_speedup,
-                    ),
+                    _verdict_of(result, decision_label, plan),
+                    LoopStanding(self.ic.baseline_wall_ms, self.best_wall_ms, self.best_mean_case_speedup),
                     self._stall_policy(),
                 )
             elif result.kept and (
@@ -3962,13 +3957,9 @@ class IterationLoop(AnalysisRuntimeMixin):
                 outcome = await summarize_iteration(
                     store=store,
                     iteration=iteration,
+                    end_reason=result.session_end_reason,
                     summarizer=session_sink.get("summarize"),
-                    prompt=build_summary_prompt(
-                        iteration=iteration,
-                        end_reason=result.session_end_reason,
-                        pr_references=self.ic.pr_reference_labels,
-                        pr_reference_context=self.ic.pr_reference_context,
-                    ),
+                    references=PrReferenceNote(self.ic.pr_reference_labels, self.ic.pr_reference_context),
                 )
                 has_narrative = bool(outcome)
                 agent_narrative = has_narrative
@@ -4045,22 +4036,19 @@ class IterationLoop(AnalysisRuntimeMixin):
         except Exception:
             log.debug("lessons: scope append failed", exc_info=True)
 
+        turns, failure = (None, "") if has_narrative else (result.turns, summary_failure)
         store.append_outcome(
             iteration,
             format_outcome_line(
                 decision=decision,
                 measurement=OutcomeMeasurement(
-                    wall_ms=result.wall_ms,
-                    best_wall_ms=self.best_wall_ms,
-                    snr_db=result.snr_db,
-                    mean_case_speedup=result.mean_case_speedup,
-                    best_mean_case_speedup=self.best_mean_case_speedup,
+                    result.wall_ms,
+                    self.best_wall_ms,
+                    result.snr_db,
+                    result.mean_case_speedup,
+                    self.best_mean_case_speedup,
                 ),
-                session=SessionEnd(
-                    result.session_end_reason,
-                    turns=result.turns if not has_narrative else None,
-                    summary_failure=(summary_failure if not has_narrative else ""),
-                ),
+                session=SessionEnd(result.session_end_reason, turns=turns, summary_failure=failure),
             ),
         )
 
@@ -5942,14 +5930,13 @@ class IterationLoop(AnalysisRuntimeMixin):
         """
         iteration, session_sink = frame.iteration, frame.session_sink
         optimization_plan_path, optimization_plan_created = round_plan.path, round_plan.executable
-        plan = session_sink.get("plan", "")
         self.results.append(result)
         self._apply_iteration_planning_state(
             optimization_plan_created=optimization_plan_created,
         )
         self._record_iteration_outcome(
             result,
-            plan=plan,
+            plan=session_sink.get("plan", ""),
             decision_label=decision_label,
         )
         await self._record_lesson(
@@ -6156,7 +6143,6 @@ class IterationLoop(AnalysisRuntimeMixin):
 
         agent_fn, agent_factory, supervisor_fn = agents.agent_fn, agents.agent_factory, agents.supervisor_fn
         analysis_service, orchestration_service = agents.analysis_service, agents.orchestration_service
-        on_best_committed = callbacks.on_best_committed
 
         global print
         print = functools.partial(print, flush=True)  # noqa: A001 - deliberate flush-on-print rebind
@@ -6206,7 +6192,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             current_ruling_path=current_ruling_path,
             agent_fn=agent_fn,
             orchestration_service=orchestration_service,
-            on_best_committed=on_best_committed,
+            on_best_committed=callbacks.on_best_committed,
         )
 
         # Anchor the campaign clock now that the state carrying what earlier sessions spent is loaded.
@@ -6412,7 +6398,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     optimization_plan_created=optimization_plan_executable,
                 )
 
-            ruling = self._rule_on_attempt(result, attempt, frame, on_best_committed=on_best_committed)
+            ruling = self._rule_on_attempt(result, attempt, frame, on_best_committed=callbacks.on_best_committed)
 
             await self._close_iteration(result, attempt, frame, ruling=ruling, callbacks=callbacks)
 
