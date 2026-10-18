@@ -135,27 +135,29 @@ def time_paired(
     return PairedTiming(mb, mc, best_ratio)
 
 
-def judge_candidates(
-    shape: str,
-    candidates: list[dict[str, Any]],
-    *,
-    baseline: Callable[[], Any],
-    dispatch: Callable[[dict[str, Any]], Callable[[], Any] | None],
-    is_correct: Callable[[Callable[[], Any]], bool] | None = None,
-    sync: Callable[[], Any] | None = None,
-) -> Judgement:
+@dataclass(frozen=True)
+class ShapeHarness:
+    """The calls that re-time one shape: its baseline, a candidate dispatcher, a correctness check and a device sync."""
+
+    baseline: Callable[[], Any]
+    dispatch: Callable[[dict[str, Any]], Callable[[], Any] | None]
+    is_correct: Callable[[Callable[[], Any]], bool] | None = None
+    sync: Callable[[], Any] | None = None
+
+
+def judge_candidates(shape: str, candidates: list[dict[str, Any]], harness: ShapeHarness) -> Judgement:
     """Re-time one shape's candidates and pick the best that stands up."""
     result = Judgement(shape=shape)
     for cand in candidates:
-        call = dispatch(cand)
+        call = harness.dispatch(cand)
         if call is None:
             result.timings.append((cand, PairedTiming(0.0, 0.0, None, "not dispatchable")))
             continue
-        if is_correct is not None and not is_correct(call):
+        if harness.is_correct is not None and not harness.is_correct(call):
             result.rejected_incorrect += 1
             result.timings.append((cand, PairedTiming(0.0, 0.0, None, "failed the correctness check")))
             continue
-        timing = time_paired(baseline, call, sync=sync)
+        timing = time_paired(harness.baseline, call, sync=harness.sync)
         result.timings.append((cand, timing))
         if timing.usable and (
             result.best_timing is None

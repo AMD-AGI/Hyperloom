@@ -20,6 +20,7 @@ from kernelforge.gemm_tune.tier3 import (
     validate_output_csv,
 )
 from kernelforge.gemm_tune.tier3.coverage import CoverageGap
+from kernelforge.gemm_tune.tier3.referee import ShapeHarness
 from kernelforge.gemm_tune.tier3.dispatch import MAX_MOE_MEAN_ERROR, MOE_CORRECTNESS_TRIALS, MOE_TABLE
 from kernelforge.gemm_tune.tuners.base import TuneResult
 
@@ -379,8 +380,10 @@ class TestReferee:
         j = judge_candidates(
             "16x1536x7168",
             cands,
-            baseline=clock.call(2e-6),
-            dispatch=lambda c: clock.call(1e-6),
+            ShapeHarness(
+                baseline=clock.call(2e-6),
+                dispatch=lambda c: clock.call(1e-6),
+            ),
         )
         assert j.improved
         assert j.best_timing.speedup == pytest.approx(2.0)
@@ -390,18 +393,22 @@ class TestReferee:
         j = judge_candidates(
             "s",
             cands,
-            baseline=clock.call(2e-6),
-            dispatch=lambda c: clock.call(1e-6),
-            is_correct=lambda call: True,
+            ShapeHarness(
+                baseline=clock.call(2e-6),
+                dispatch=lambda c: clock.call(1e-6),
+                is_correct=lambda call: True,
+            ),
         )
         assert j.rejected_incorrect == 0
 
         j2 = judge_candidates(
             "s",
             cands,
-            baseline=clock.call(2e-6),
-            dispatch=lambda c: clock.call(1e-6),
-            is_correct=lambda call: False,
+            ShapeHarness(
+                baseline=clock.call(2e-6),
+                dispatch=lambda c: clock.call(1e-6),
+                is_correct=lambda call: False,
+            ),
         )
         assert j2.rejected_incorrect == 2
         assert j2.best is None and not j2.improved
@@ -410,8 +417,10 @@ class TestReferee:
         j = judge_candidates(
             "s",
             [{"backend": "unknown"}],
-            baseline=clock.call(1e-6),
-            dispatch=lambda c: None,
+            ShapeHarness(
+                baseline=clock.call(1e-6),
+                dispatch=lambda c: None,
+            ),
         )
         assert j.best is None
         assert j.timings[0][1].reason == "not dispatchable"
@@ -421,8 +430,10 @@ class TestReferee:
         j = judge_candidates(
             "s",
             [{"n": k} for k in costs],
-            baseline=clock.call(8e-6),
-            dispatch=lambda c: clock.call(costs[c["n"]]),
+            ShapeHarness(
+                baseline=clock.call(8e-6),
+                dispatch=lambda c: clock.call(costs[c["n"]]),
+            ),
         )
         assert j.best == {"n": "b"}
         assert j.improved
@@ -431,8 +442,10 @@ class TestReferee:
         j = judge_candidates(
             "s",
             [{"n": "a"}],
-            baseline=clock.call(1e-6),
-            dispatch=lambda c: clock.call(4e-6),
+            ShapeHarness(
+                baseline=clock.call(1e-6),
+                dispatch=lambda c: clock.call(4e-6),
+            ),
         )
         assert not j.improved
         assert j.best_timing.speedup == pytest.approx(0.25)
@@ -441,8 +454,10 @@ class TestReferee:
         j = judge_candidates(
             "s",
             [{"n": "a"}],
-            baseline=clock.call(2e-6),
-            dispatch=lambda c: clock.call(1e-6),
+            ShapeHarness(
+                baseline=clock.call(2e-6),
+                dispatch=lambda c: clock.call(1e-6),
+            ),
         )
         assert json.loads(json.dumps(j.to_dict()))["improved"] is True
 
@@ -475,8 +490,10 @@ class TestAWinHasToClearTheNoise:
         j = judge_candidates(
             "8192x3456x1152",
             [{"backend": "torch", "config": ""}],
-            baseline=clock.call(1.0076e-6),
-            dispatch=lambda c: clock.call(1e-6),
+            ShapeHarness(
+                baseline=clock.call(1.0076e-6),
+                dispatch=lambda c: clock.call(1e-6),
+            ),
         )
         assert j.best_timing.usable
         assert j.best_timing.speedup == pytest.approx(1.0076)
@@ -489,8 +506,10 @@ class TestAWinHasToClearTheNoise:
         j = judge_candidates(
             "s",
             [{"n": "a"}],
-            baseline=clock.call(clearly_over),
-            dispatch=lambda c: clock.call(1e-6),
+            ShapeHarness(
+                baseline=clock.call(clearly_over),
+                dispatch=lambda c: clock.call(1e-6),
+            ),
         )
         assert j.improved
 
@@ -499,8 +518,10 @@ class TestAWinHasToClearTheNoise:
         j = judge_candidates(
             "s",
             [{"n": "a"}],
-            baseline=clock.call(1.002e-6),
-            dispatch=lambda c: clock.call(1e-6),
+            ShapeHarness(
+                baseline=clock.call(1.002e-6),
+                dispatch=lambda c: clock.call(1e-6),
+            ),
         )
         assert not j.improved
         assert j.to_dict()["best_timing"]["speedup"] == pytest.approx(1.002)

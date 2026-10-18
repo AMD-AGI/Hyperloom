@@ -113,20 +113,20 @@ open({str(out)!r}, "w").write("done\\n")
 sys.exit(1)
 """,
         )
-        r = sandbox.run_generated_tuner(script, tmp_path, expect=[out], timeout_s=60)
+        r = sandbox.run_generated_tuner(script, tmp_path, expect=[out], limits=sandbox.SandboxLimits(timeout_s=60))
         assert r.ok and r.returncode == 1
 
     def test_a_script_that_writes_nothing_fails(self, tmp_path):
         out = tmp_path / "out.csv"
         script = self._script(tmp_path, "print('I did nothing')\n")
-        r = sandbox.run_generated_tuner(script, tmp_path, expect=[out], timeout_s=60)
+        r = sandbox.run_generated_tuner(script, tmp_path, expect=[out], limits=sandbox.SandboxLimits(timeout_s=60))
         assert not r.ok and out.name not in "".join(r.produced)
 
     def test_stale_output_from_a_previous_attempt_is_cleared(self, tmp_path):
         out = tmp_path / "out.csv"
         out.write_text("last week's rows\n", encoding="utf-8")
         script = self._script(tmp_path, "print('nothing new')\n")
-        r = sandbox.run_generated_tuner(script, tmp_path, expect=[out], timeout_s=60)
+        r = sandbox.run_generated_tuner(script, tmp_path, expect=[out], limits=sandbox.SandboxLimits(timeout_s=60))
         assert not r.ok, "a leftover file would otherwise pass as this run's output"
 
     def test_a_timeout_keeps_what_was_already_written(self, tmp_path):
@@ -139,12 +139,14 @@ open({str(out)!r}, "w").write("partial\\n")
 time.sleep(30)
 """,
         )
-        r = sandbox.run_generated_tuner(script, tmp_path, expect=[out], timeout_s=3)
+        r = sandbox.run_generated_tuner(script, tmp_path, expect=[out], limits=sandbox.SandboxLimits(timeout_s=3))
         assert r.timed_out and r.ok, "partial output is the contract check's to judge"
 
     def test_a_crash_is_a_result_not_an_exception(self, tmp_path):
         script = self._script(tmp_path, "raise SystemExit(139)\n")
-        r = sandbox.run_generated_tuner(script, tmp_path, expect=[tmp_path / "out.csv"], timeout_s=60)
+        r = sandbox.run_generated_tuner(
+            script, tmp_path, expect=[tmp_path / "out.csv"], limits=sandbox.SandboxLimits(timeout_s=60)
+        )
         assert not r.ok and r.returncode == 139
 
     def test_the_child_is_confined_to_one_device(self, tmp_path):
@@ -156,7 +158,9 @@ import os
 open({str(out)!r}, "w").write(os.environ.get("HIP_VISIBLE_DEVICES", "?"))
 """,
         )
-        sandbox.run_generated_tuner(script, tmp_path, expect=[out], gpu_id="3", timeout_s=60)
+        sandbox.run_generated_tuner(
+            script, tmp_path, expect=[out], limits=sandbox.SandboxLimits(gpu_id="3", timeout_s=60)
+        )
         assert out.read_text(encoding="utf-8") == "3"
 
     def test_the_build_is_sized_to_the_container(self, tmp_path, monkeypatch):
@@ -173,7 +177,7 @@ import os
 open({str(out)!r}, "w").write(os.environ.get("MAX_JOBS", "?"))
 """,
         )
-        sandbox.run_generated_tuner(script, tmp_path, expect=[out], timeout_s=60)
+        sandbox.run_generated_tuner(script, tmp_path, expect=[out], limits=sandbox.SandboxLimits(timeout_s=60))
         assert out.read_text(encoding="utf-8") == "44"
 
     def test_a_caller_who_named_a_number_keeps_it(self, tmp_path, monkeypatch):
@@ -186,7 +190,9 @@ import os
 open({str(out)!r}, "w").write(os.environ.get("MAX_JOBS", "?"))
 """,
         )
-        sandbox.run_generated_tuner(script, tmp_path, expect=[out], timeout_s=60, env_overrides={"MAX_JOBS": "8"})
+        sandbox.run_generated_tuner(
+            script, tmp_path, expect=[out], limits=sandbox.SandboxLimits(timeout_s=60, env_overrides={"MAX_JOBS": "8"})
+        )
         assert out.read_text(encoding="utf-8") == "8"
 
 
@@ -204,21 +210,25 @@ class TestLedger:
         for i in range(3):
             r = ledger.record_outcome(
                 path,
-                digest=d,
-                table="t.csv",
-                model="model-a",
-                improved=True,
-                speedup=1.2,
+                ledger.TunerUse(
+                    digest=d,
+                    table="t.csv",
+                    model="model-a",
+                    improved=True,
+                    speedup=1.2,
+                ),
             )
         # Three successes, one model: not enough.
         assert r.successes == 3 and not r.eligible_for_trust
         r = ledger.record_outcome(
             path,
-            digest=d,
-            table="t.csv",
-            model="model-b",
-            improved=True,
-            speedup=1.1,
+            ledger.TunerUse(
+                digest=d,
+                table="t.csv",
+                model="model-b",
+                improved=True,
+                speedup=1.1,
+            ),
         )
         assert r.eligible_for_trust
 
@@ -228,19 +238,23 @@ class TestLedger:
         for model in ("a", "b", "c"):
             ledger.record_outcome(
                 path,
-                digest=d,
-                table="t.csv",
-                model=model,
-                improved=True,
-                speedup=1.2,
+                ledger.TunerUse(
+                    digest=d,
+                    table="t.csv",
+                    model=model,
+                    improved=True,
+                    speedup=1.2,
+                ),
             )
         r = ledger.record_outcome(
             path,
-            digest=d,
-            table="t.csv",
-            model="d",
-            improved=False,
-            speedup=0.8,
+            ledger.TunerUse(
+                digest=d,
+                table="t.csv",
+                model="d",
+                improved=False,
+                speedup=0.8,
+            ),
         )
         assert r.regressions == 1 and not r.eligible_for_trust
 
@@ -249,11 +263,13 @@ class TestLedger:
         path = tmp_path / "ledger.json"
         r = ledger.record_outcome(
             path,
-            digest="d",
-            table="t.csv",
-            model="a",
-            improved=False,
-            speedup=None,
+            ledger.TunerUse(
+                digest="d",
+                table="t.csv",
+                model="a",
+                improved=False,
+                speedup=None,
+            ),
         )
         assert r.regressions == 0
 
@@ -263,11 +279,13 @@ class TestLedger:
         for model in ("a", "b", "c"):
             r = ledger.record_outcome(
                 path,
-                digest="d1",
-                table="t.csv",
-                model=model,
-                improved=True,
-                speedup=1.3,
+                ledger.TunerUse(
+                    digest="d1",
+                    table="t.csv",
+                    model=model,
+                    improved=True,
+                    speedup=1.3,
+                ),
             )
         assert r.eligible_for_trust
         assert not ledger.is_trusted("d1"), "only an operator grants trust"
@@ -279,11 +297,13 @@ class TestLedger:
         path.write_text("{not json", encoding="utf-8")
         r = ledger.record_outcome(
             path,
-            digest="d",
-            table="t.csv",
-            model="a",
-            improved=True,
-            speedup=1.1,
+            ledger.TunerUse(
+                digest="d",
+                table="t.csv",
+                model="a",
+                improved=True,
+                speedup=1.1,
+            ),
         )
         assert r.successes == 1
         assert json.loads(path.read_text(encoding="utf-8"))["d"]["successes"] == 1

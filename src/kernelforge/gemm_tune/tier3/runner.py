@@ -15,9 +15,9 @@ from .contract import load_candidates, validate_output_csv
 from .coverage import CoverageGap
 from .gate import GateDecision, should_generate
 from .generate import generate_tuner
-from .ledger import record_outcome, script_digest
+from .ledger import TunerUse, record_outcome, script_digest
 from .mandate import build_mandate, write_mandate
-from .referee import CaptureFailed, Judgement, judge_candidates
+from .referee import CaptureFailed, Judgement, ShapeHarness, judge_candidates
 from .sandbox import run_generated_tuner
 
 log = logging.getLogger(__name__)
@@ -158,10 +158,12 @@ def attempt_generated_tuner(
             judge_candidates(
                 shape,
                 cands,
-                baseline=baseline,
-                dispatch=make_dispatch(shape),
-                is_correct=make_correctness(shape) if make_correctness else None,
-                sync=sync,
+                ShapeHarness(
+                    baseline=baseline,
+                    dispatch=make_dispatch(shape),
+                    is_correct=make_correctness(shape) if make_correctness else None,
+                    sync=sync,
+                ),
             )
         )
 
@@ -178,11 +180,7 @@ def attempt_generated_tuner(
 
     record = record_outcome(
         work_root / "tier3" / "ledger.json",
-        digest=outcome.digest,
-        table=gap.table,
-        model=model_name,
-        improved=outcome.ok,
-        speedup=best,
+        TunerUse(digest=outcome.digest, table=gap.table, model=model_name, improved=outcome.ok, speedup=best),
     )
     from .ledger import is_trusted
 
