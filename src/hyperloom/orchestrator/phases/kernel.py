@@ -22,8 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
-from . import geak_rebench as _geak_rebench
-from . import machine_state as _phase_state
+from . import geak_rebench as _geak_rebench, machine_state as _phase_state
 from .kernel_round_budget import controller_round_stop, integrate_within_phase, measurement_round_sec
 from hyperloom.common.env import env_bool, env_float, env_int
 from hyperloom.common.io import WriteOptions, atomic_write_json
@@ -1376,7 +1375,7 @@ class KernelPhase(CoordinatorCollaborator):
             "schema_version": 3,
             "model_path": str(state.model_path or os.environ.get("MODEL_PATH", "")),
             "framework": str(state.framework or os.environ.get("FRAMEWORK", "") or "sglang"),
-            "gpu_type": str(state.gpu_type or os.environ.get("GPU_TYPE", "")),
+            **_resolve_handoff_gpu_identity(state.gpu_type or os.environ.get("GPU_TYPE", "")),
             "tp": _tp,
             "workload": workload,
             "accepted_flags": accepted_flags,
@@ -1419,7 +1418,6 @@ class KernelPhase(CoordinatorCollaborator):
             # that instead writes ROCR itself needs to know which it holds.
             "gpu_ids_space": _gpu_ids_space,
         }
-        handoff.update(_resolve_handoff_gpu_identity(handoff["gpu_type"]))
         if gpu_pin:
             # ABSOLUTE ids + the var they came from, so a consumer that writes
             # ROCR_VISIBLE_DEVICES itself re-applies the same pin instead of

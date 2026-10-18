@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 
@@ -62,6 +63,25 @@ def _runner_framework_error(gpu_type: str, framework: str) -> str | None:
         f"Magpie runner {runner!r} is currently validated only for "
         f"{', '.join(sorted(supported))}; framework {framework!r} has no validated {runner} runner"
     )
+
+
+def require_runner_framework(gpu_type: str, framework: str) -> None:
+    """Exit at launch when the selected runner cannot serve the framework."""
+    unsupported = _runner_framework_error(gpu_type, framework)
+    if unsupported:
+        print(f"ERROR: {unsupported}", file=sys.stderr)
+        sys.exit(2)
+
+
+def warn_family_runner(gpu_type: str, framework: str) -> None:
+    """Say when a product launches through its architecture family's Magpie runner."""
+    runner = gpu_runner_type(gpu_type)
+    if gpu_type and runner != gpu_type:
+        print(
+            f"WARN: {gpu_type} uses {runner} as Magpie runner_type (architecture-family runner; "
+            f"Magpie has no per-SKU {framework}_{gpu_type}.sh)",
+            file=sys.stderr,
+        )
 
 
 def _resolve_gpu_type(

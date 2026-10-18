@@ -59,8 +59,7 @@ from hyperloom.common.workload_defaults import (
 )
 from hyperloom.inference_optimizer.gpu_types import gpu_runner_type
 from hyperloom.inference_optimizer.session.paths import asset_root
-from hyperloom.inference_optimizer.framework_paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
-from hyperloom.inference_optimizer.framework_paths import GENERIC_FRAMEWORK_ROOT_ENV
+from hyperloom.inference_optimizer.framework_paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS, GENERIC_FRAMEWORK_ROOT_ENV
 from hyperloom.inference_optimizer.framework_paths import flydsl_extra_source_dirs
 from ._benchmark_interpreter import _resolve_probe_python
 from hyperloom.inference_optimizer.grid_server_args import (

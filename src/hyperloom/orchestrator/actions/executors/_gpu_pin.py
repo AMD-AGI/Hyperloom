@@ -345,15 +345,16 @@ def _pin_renumbers_devices(pin: Mapping[str, Any] | None) -> bool:
 
 
 def _resolve_handoff_gpu_identity(gpu_type: str | None) -> dict[str, str]:
-    """GEAK's explicit product/ISA pin for the handoff.
+    """The handoff's ``gpu_type``, plus GEAK's explicit product/ISA pin.
 
-    Only the concrete R9700 carries one; other boards keep GEAK's own device
+    Only the concrete R9700 carries a pin; other boards keep GEAK's own device
     probe, and a bare architecture is never promoted to a product.
     """
-    product = str(gpu_type or "").strip().lower()
+    identity = {"gpu_type": str(gpu_type or "")}
+    product = identity["gpu_type"].strip().lower()
     if product != "r9700":
-        return {}
-    return {"expected_target": product, "expected_gfx": gfx_arch_for_gpu_type(product) or ""}
+        return identity
+    return {**identity, "expected_target": product, "expected_gfx": gfx_arch_for_gpu_type(product) or ""}
 
 
 def _resolve_handoff_gpu_ids_space(*, gpu_pin: Mapping[str, Any] | None) -> str:
