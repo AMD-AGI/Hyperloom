@@ -8,7 +8,7 @@ Each test submits a ``TestRequest`` to a toolbox built by ``build_local_toolbox`
 directory and an InferenceX checkout; set ``HL_W13_MODEL``, ``HL_W13_INFERENCEX`` and ``HL_W13_OUT`` (an empty
 directory), and optionally ``HL_W13_CARDS`` (default ``6,7``). Anywhere else the module is skipped. The profile test
 also needs a TraceLens checkout (``TRACELENS_ROOT``), the agent runtime credentials the TraceLens skill route runs on, and
-``HL_W13_CARDS`` to be exactly two cards.
+``HL_W13_CARDS`` to be exactly two cards. ``HL_W13_OUT`` must be on a filesystem that accepts ``:`` in file names.
 """
 
 from __future__ import annotations
@@ -244,6 +244,16 @@ def _require_tracelens() -> None:
     assert (root / ".git").exists(), f"no TraceLens git checkout at {root}: set TRACELENS_ROOT to one"
 
 
+def _require_colon_filenames(root: Path) -> None:
+    """TraceLens' splitter writes ``..._iteration_0:4.json.gz``; a filesystem that refuses ``:`` (NFS) fails it."""
+    probe = root / "colon:probe"
+    try:
+        probe.touch()
+    except OSError as error:
+        raise AssertionError(f"{root} cannot hold a file name with ':' (TraceLens split output): {error}") from error
+    probe.unlink()
+
+
 class _Pointers:
     """Remembers every tool-result pointer the toolbox hands to the notebook, then lets the notebook take it."""
 
@@ -276,6 +286,7 @@ async def test_a_profile_on_two_cards_is_analysed_by_the_real_tracelens_into_op_
     _require_tracelens()
     monkeypatch.setenv("TP", "2")
     root = _run_root("profile")
+    _require_colon_filenames(root)
     toolbox, notebook, _ = _toolbox(root, "w45-profile", tp=2)
     pointers = _Pointers(notebook)
     try:
