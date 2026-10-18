@@ -38,7 +38,7 @@ from kernelforge.rewrite_by_flydsl.kb import (
     write_flydsl_kb_solution,
 )
 from kernelforge.rewrite_by_flydsl.optimize import run_optimize
-from kernelforge.rewrite_by_flydsl.port_loop import PortResult, run_port_loop
+from kernelforge.rewrite_by_flydsl.port_loop import PortRequest, PortResult, run_port_loop
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET, RewriteBudgetPolicy
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 from kernelforge.tracker import UsageAccumulator, UsageLedgerFile, combine_usage_totals
@@ -638,10 +638,7 @@ def run_rewrite(
                 spec,
                 driver_path,
                 config,
-                max_attempts=max_port_attempts,
-                permission_mode=permission_mode,
-                stop_at_unix=search_stop_unix,
-                pre_task_context=kb_read.reference_context,
+                PortRequest(max_port_attempts, permission_mode, search_stop_unix, kb_read.reference_context),
                 usage=usage,
             )
         )

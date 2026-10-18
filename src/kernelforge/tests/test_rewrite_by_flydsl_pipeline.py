@@ -1121,7 +1121,7 @@ def _stub_preflight(monkeypatch, *, source_ms=1.0, best_ms=0.5, case_ids=("case0
 def _wire_stub_pipeline(monkeypatch, *, port_ok=True, best_ms=0.5, source_ms=1.0):
     """Stub every GPU/LLM stage of run_rewrite so only the wiring is exercised."""
 
-    async def _fake_port(spec, driver_path, config, **kw):
+    async def _fake_port(spec, driver_path, config, request, **kw):
         return port_loop.PortResult(ok=port_ok, attempts=1, snr_db=143.0)
 
     monkeypatch.setattr(runner, "run_port_loop", _fake_port)
@@ -1252,7 +1252,7 @@ def test_run_rewrite_reports_total_usage_across_local_and_forge_loop_agents(
     _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=0.5, source_ms=1.0)
     seen_usage = []
 
-    async def counted_port(spec, driver_path, config, **kwargs):
+    async def counted_port(spec, driver_path, config, request, **kwargs):
         del spec, driver_path, config
         usage = kwargs["usage"]
         seen_usage.append(usage)
@@ -1329,7 +1329,7 @@ def test_run_rewrite_publishes_partial_usage_when_the_forge_loop_ledger_is_trunc
     driver.write_text("print('drive')\n")
     _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=0.5, source_ms=1.0)
 
-    async def counted_port(spec, driver_path, config, **kwargs):
+    async def counted_port(spec, driver_path, config, request, **kwargs):
         del spec, driver_path, config
         kwargs["usage"].add_usage({"input_tokens": 10, "output_tokens": 2}, total_cost_usd=0.1)
         return port_loop.PortResult(ok=True, attempts=1, snr_db=143.0)
@@ -2077,7 +2077,10 @@ def test_port_loop_accepts_a_correct_flydsl_port(tmp_path, monkeypatch):
     monkeypatch.setattr(port_loop, "run_validation_pipeline", _passing_validation)
     res = _run(
         port_loop.run_port_loop(
-            s, str(tmp_path / "driver.py"), Config.from_env(workspace=str(tmp_path)), max_attempts=2
+            s,
+            str(tmp_path / "driver.py"),
+            Config.from_env(workspace=str(tmp_path)),
+            port_loop.PortRequest(max_attempts=2),
         )
     )
     assert res.ok is True and res.attempts == 1 and res.snr_db == 143.0
@@ -2098,7 +2101,10 @@ def test_port_loop_rejects_a_cheating_port_before_validation(tmp_path, monkeypat
     monkeypatch.setattr(port_loop, "run_validation_pipeline", _spy_validation)
     res = _run(
         port_loop.run_port_loop(
-            s, str(tmp_path / "driver.py"), Config.from_env(workspace=str(tmp_path)), max_attempts=2
+            s,
+            str(tmp_path / "driver.py"),
+            Config.from_env(workspace=str(tmp_path)),
+            port_loop.PortRequest(max_attempts=2),
         )
     )
     assert res.ok is False
@@ -2112,7 +2118,10 @@ def test_port_loop_reports_validation_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(port_loop, "run_validation_pipeline", _failing_validation)
     res = _run(
         port_loop.run_port_loop(
-            s, str(tmp_path / "driver.py"), Config.from_env(workspace=str(tmp_path)), max_attempts=2
+            s,
+            str(tmp_path / "driver.py"),
+            Config.from_env(workspace=str(tmp_path)),
+            port_loop.PortRequest(max_attempts=2),
         )
     )
     assert res.ok is False and "SNR too low" in res.error_tail
@@ -2133,7 +2142,10 @@ def test_port_loop_survives_a_session_crash(tmp_path, monkeypatch):
     monkeypatch.setattr(port_loop, "run_validation_pipeline", _passing_validation)
     res = _run(
         port_loop.run_port_loop(
-            s, str(tmp_path / "driver.py"), Config.from_env(workspace=str(tmp_path)), max_attempts=2
+            s,
+            str(tmp_path / "driver.py"),
+            Config.from_env(workspace=str(tmp_path)),
+            port_loop.PortRequest(max_attempts=2),
         )
     )
     assert res.ok is False
@@ -2182,10 +2194,7 @@ def test_port_loop_restores_protected_inputs_without_validation(
 
     result = _run(
         port_loop.run_port_loop(
-            spec,
-            str(driver),
-            Config.from_env(workspace=str(tmp_path)),
-            max_attempts=1,
+            spec, str(driver), Config.from_env(workspace=str(tmp_path)), port_loop.PortRequest(max_attempts=1)
         )
     )
 
@@ -2212,7 +2221,7 @@ def test_port_loop_does_not_create_an_agent_after_the_search_cutoff(
             s,
             str(tmp_path / "driver.py"),
             Config.from_env(workspace=str(tmp_path)),
-            stop_at_unix=time.time() - 1,
+            port_loop.PortRequest(stop_at_unix=time.time() - 1),
         )
     )
     assert res.ok is False
@@ -2247,7 +2256,7 @@ def test_port_loop_injects_rejected_kb_candidates_as_reference_context(
             s,
             str(tmp_path / "driver.py"),
             Config.from_env(workspace=str(tmp_path)),
-            pre_task_context="## Historical FlyDSL rewrite references\nREFERENCE",
+            port_loop.PortRequest(pre_task_context="## Historical FlyDSL rewrite references\nREFERENCE"),
         )
     )
     assert res.ok is True
