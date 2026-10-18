@@ -169,6 +169,8 @@ def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str
     """Add ``roofline_provenance`` (+ ``perfmodel_breakdown`` when the PerfModel succeeds) for *arm*."""
     try:
         from .roofline_ceiling import (
+            ComputeTarget,
+            DecodeShape,
             apply_runtime_dtype,
             compute_roofline_from_perfmodel,
             load_model_meta,
@@ -186,12 +188,8 @@ def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str
         compute_precision_tag = rt.compute_precision_tag or runtime.precision or "bf16"
         pm_bd = compute_roofline_from_perfmodel(
             meta=meta,
-            gpu_type=runtime.gpu_type,
-            concurrency=runtime.concurrency,
-            isl=runtime.isl,
-            osl=runtime.osl,
-            num_gpus=runtime.tp,
-            precision_tag=compute_precision_tag,
+            target=ComputeTarget(gpu_type=runtime.gpu_type, num_gpus=runtime.tp, precision_tag=compute_precision_tag),
+            shape=DecodeShape(isl=runtime.isl, osl=runtime.osl, concurrency=runtime.concurrency),
         )
         snapshot["roofline_provenance"] = {
             "formula": "perfmodel" if pm_bd is not None else "legacy",
