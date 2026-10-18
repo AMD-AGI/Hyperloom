@@ -855,13 +855,7 @@ def _summarize_shape_results(shape_results: list[dict[str, Any]]) -> dict[str, A
 
 
 def _invoke_tuner(
-    *,
-    script: Path,
-    base_args: list[str],
-    input_csv: Path,
-    tuned_csv: Path,
-    work_dir: Path,
-    aiter_root: Path | None,
+    invocation: _tr.TunerInvocation,
     ctx: TuneContext,
     tuner_name: str,
 ) -> tuple[int, str, str, Path | None]:
@@ -871,9 +865,19 @@ def _invoke_tuner(
     aiter instead of hanging the run.
     """
     if not _tr.is_isolation_enabled():
-        cmd = _tr.with_task_timeout(["python3", str(script), "-i", str(input_csv), "-o", str(tuned_csv), *base_args])
+        cmd = _tr.with_task_timeout(
+            [
+                "python3",
+                str(invocation.script),
+                "-i",
+                str(invocation.input_csv),
+                "-o",
+                str(invocation.tuned_csv),
+                *invocation.base_args,
+            ]
+        )
         rc, stdout, stderr = run_subprocess(
-            cmd, cwd=aiter_root, timeout_s=ctx.timeout_s, log_file=work_dir / "tune.log"
+            cmd, cwd=invocation.aiter_root, timeout_s=ctx.timeout_s, log_file=invocation.work_dir / "tune.log"
         )
         return rc, stdout, stderr, None
     # Per-shape process isolation + provenance-keyed fault blocklist.
@@ -887,16 +891,13 @@ def _invoke_tuner(
         },
     )
     return _tr.run_isolated(
-        script=str(script),
-        base_args=base_args,
-        input_csv=input_csv,
-        tuned_stem=tuned_csv.stem,
-        work_dir=work_dir,
-        aiter_root=aiter_root,
-        outer_timeout_s=ctx.timeout_s,
-        task_timeout_s=_tr.DEFAULT_TASK_TIMEOUT_S,
-        gpu_ids=getattr(ctx, "gpu_ids", "") or "",
-        blocklist=blocklist,
+        invocation,
+        _tr.IsolationGuard(
+            outer_timeout_s=ctx.timeout_s,
+            task_timeout_s=_tr.DEFAULT_TASK_TIMEOUT_S,
+            gpu_ids=getattr(ctx, "gpu_ids", "") or "",
+            blocklist=blocklist,
+        ),
     )
 
 
@@ -1072,14 +1073,9 @@ def run_aiter_dense_tuner(
     run_start_time = time.time()
 
     rc, stdout, stderr, iso_candidate = _invoke_tuner(
-        script=script,
-        base_args=base_args,
-        input_csv=input_csv,
-        tuned_csv=tuned_csv,
-        work_dir=work_dir,
-        aiter_root=aiter_root,
-        ctx=ctx,
-        tuner_name=tuner_name,
+        _tr.TunerInvocation(script, base_args, input_csv, tuned_csv, work_dir, aiter_root),
+        ctx,
+        tuner_name,
     )
 
     if rc == 124:
