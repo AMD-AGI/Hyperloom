@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 import asyncio
+import re
 
 import pytest
 
@@ -22,9 +23,16 @@ from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, Lin
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, Conclusion, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import delta, judgement, result
-from hyperloom_multibranch.rulegate.regression import RESUBMIT_SECONDS, RegressionSet, ReproRun, ReproRunner
+from hyperloom_multibranch.rulegate.regression import (
+    RESUBMIT_SECONDS,
+    FixNotProven,
+    RegressionSet,
+    ReproRun,
+    ReproRunner,
+    prove_fix,
+)
 from hyperloom_multibranch.rulegate.service import Polling
-from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingVerifier, ReproToolbox
+from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingVerifier, ReproAnswer, ReproToolbox
 
 BASELINE = Recipe("rocm/vllm@sha256:" + "c" * 64, LaunchConfig(server_args="--max-num-seqs 128"))
 ROOT = "c0"
@@ -34,6 +42,21 @@ FIX = delta("--kv-cache-dtype fp8 --clamp-scales")
 GUARD = delta("--guard-nan-logits")
 MERGE = delta("--max-num-seqs 256")
 NO_DELTA = RecipeDelta()
+OOB = (AttachmentRef("oob_8k", "dir", "e" * 64),)
+BOUNDS = delta("--max-model-len 8192 --check-bounds")
+ON_C1 = TestRequest(TestKind.TEST, Purpose.EXPLORE, "s1", "c1", BOUNDS, request_id="r9")
+ON_ROOT = TestRequest(TestKind.TEST, Purpose.EXPLORE, "s1", ROOT, BOUNDS, request_id="r9")
+
+
+def _fixed_by_bounds(*, root: ReproAnswer = REPRODUCED):
+    """The case reproduces on every recipe without ``BOUNDS``, the root answering ``root``."""
+
+    def answer(request):
+        if request.delta == BOUNDS:
+            return NOT_REPRODUCED
+        return root if request.parent_commit == ROOT else REPRODUCED
+
+    return answer
 
 
 class _Rig:
@@ -143,7 +166,7 @@ class _Session(_Rig):
 
     def __init__(self, root):
         self.answers = {}
-        super().__init__(root, lambda request: self.answers.get(request.attachments[0].id, NOT_REPRODUCED))
+        super().__init__(root, self._answer)
         self.scheduler = LocalNotebook(root, Writer(Role.SCHEDULER, "scheduler"))
         self.repo = InMemoryRepo(BASELINE)
         self.regression = RegressionSet(self.notebook, self.runner, self.repo)
@@ -167,10 +190,19 @@ class _Session(_Rig):
         case_request = await self.toolbox.submit_test(repro)
         await self.notebook.add_regression_case(RegressionCase(case[0].id, commit, case_request))
 
+    def _answer(self, request):
+        """A case's answer, or what a callable answer makes of the request."""
+
+        answer = self.answers.get(request.attachments[0].id, NOT_REPRODUCED)
+        return answer(request) if callable(answer) else answer
+
     def runs(self) -> list[TestRequest]:
         """The repro tests run after the session's own two."""
 
         return self.toolbox.submitted[2:]
+
+    async def prove(self, candidate: TestRequest):
+        return await prove_fix(self.runner, self.notebook, candidate, OOB)
 
 
 @pytest.fixture
@@ -286,3 +318,69 @@ async def test_a_cancelled_check_takes_every_case_back(session):
         await checking
 
     assert sorted(session.toolbox.cancelled) == ["p3", "p4"]
+
+
+async def test_a_fix_is_proven_on_its_parent_its_candidate_and_the_root_at_once(session):
+    session.answers["oob_8k"] = _fixed_by_bounds()
+    session.toolbox.hold = True
+    proving = asyncio.create_task(session.prove(ON_C1))
+    while len(session.runs()) < 3:
+        await asyncio.sleep(0)
+
+    await session.toolbox.finish()
+
+    proof = await proving
+    assert (proof.parent.verdict, proof.candidate.verdict, proof.root.verdict) == (
+        REPRODUCED,
+        NOT_REPRODUCED,
+        REPRODUCED,
+    )
+    assert proof.foundation
+    assert sorted((run.parent_commit, run.delta.fingerprint()) for run in session.runs()) == sorted(
+        [("c1", NO_DELTA.fingerprint()), ("c1", BOUNDS.fingerprint()), (ROOT, NO_DELTA.fingerprint())]
+    )
+    assert {(run.branch_id, run.attachments) for run in session.runs()} == {("s1", OOB)}
+    assert proof.candidate.request_id == next(run.request_id for run in session.runs() if run.delta == BOUNDS)
+
+
+@pytest.mark.parametrize(
+    ("root", "cause"), [(NOT_REPRODUCED, NOT_REPRODUCED), (None, "withdrawn (the branch was stopped)")]
+)
+async def test_a_fix_of_a_bug_the_root_does_not_show_is_no_foundation_fix(session, root, cause):
+    session.answers["oob_8k"] = _fixed_by_bounds(root=root)
+
+    proof = await session.prove(ON_C1)
+
+    assert not proof.foundation
+    assert proof.root.outcome == cause
+
+
+async def test_a_fix_whose_parent_is_the_root_runs_the_parent_once(session):
+    session.answers["oob_8k"] = _fixed_by_bounds()
+
+    proof = await session.prove(ON_ROOT)
+
+    assert proof.root == proof.parent
+    assert proof.foundation
+    assert len(session.runs()) == 2
+
+
+@pytest.mark.parametrize(
+    ("answer", "reason"),
+    [
+        (lambda request: NOT_REPRODUCED, "the case did not reproduce on the parent c1: not_reproduced"),
+        (lambda request: None, "the case did not reproduce on the parent c1: withdrawn (the branch was stopped)"),
+        (lambda request: REPRODUCED, "the case did not run clean on the candidate: reproduced"),
+        (
+            lambda request: Validity.MEASUREMENT_FAILED if request.delta == BOUNDS else REPRODUCED,
+            "the case did not run clean on the candidate: ended measurement_failed (the server did not start)",
+        ),
+    ],
+)
+async def test_a_fix_its_case_does_not_tell_from_its_parent_is_not_proven(session, answer, reason):
+    session.answers["oob_8k"] = answer
+
+    with pytest.raises(FixNotProven, match=re.escape(reason)) as raised:
+        await session.prove(ON_C1)
+
+    assert raised.value.reason == reason

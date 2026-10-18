@@ -17,6 +17,7 @@ from typing import Protocol, TypeVar
 
 from hyperloom.contracts.measurement import (
     NOT_REPRODUCED,
+    REPRODUCED,
     AttachmentRef,
     Purpose,
     TestKind,
@@ -34,6 +35,7 @@ from hyperloom_multibranch.rulegate.service import Polling
 
 #: Seconds before a repro test the toolbox refused with backpressure is submitted again.
 RESUBMIT_SECONDS = 30.0
+NO_DELTA = RecipeDelta()
 
 T = TypeVar("T")
 
@@ -170,6 +172,55 @@ class RegressionSet:
         return run.outcome
 
 
+class FixNotProven(Exception):
+    """The case did not reproduce on the fix's parent, or did not run clean on the candidate; ``reason`` says which
+    and why."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class FixProof:
+    """A correctness fix's case: ``reproduced`` on the ``parent``, ``not_reproduced`` on the ``candidate`` (whose
+    request is the one its regression case is registered from), and what it did on the session's ``root``."""
+
+    parent: ReproRun
+    candidate: ReproRun
+    root: ReproRun
+
+    @property
+    def foundation(self) -> bool:
+        """The bug was in the baseline already; a root run that ended without a verdict says it was not, and keeps
+        why in ``root.failure``."""
+
+        return self.root.verdict == REPRODUCED
+
+
+async def prove_fix(
+    runner: ReproRunner, notebook: CommitQuery, candidate: TestRequest, case: tuple[AttachmentRef, ...]
+) -> FixProof:
+    """Run ``case`` on ``candidate``'s branch, on its parent, on the parent with its delta and on the baseline's root
+    commit, at once; the parent's run stands for the root's when the parent is the root.
+
+    Raises :class:`FixNotProven` unless the parent reproduced and the candidate ran clean.
+    """
+
+    parent, root = candidate.parent_commit, (await notebook.baseline()).root_commit
+    targets = [(parent, NO_DELTA), (parent, candidate.delta)]
+    if root != parent:
+        targets.append((root, NO_DELTA))
+    runs = await _gathered(runner.run(commit, delta, case, branch=candidate.branch) for commit, delta in targets)
+    parent_run, candidate_run, *root_run = runs
+    proof = FixProof(parent_run, candidate_run, root_run[0] if root_run else parent_run)
+    if proof.parent.verdict != REPRODUCED:
+        raise FixNotProven(f"the case did not reproduce on the parent {parent}: {proof.parent.outcome}")
+    if proof.candidate.verdict != NOT_REPRODUCED:
+        raise FixNotProven(f"the case did not run clean on the candidate: {proof.candidate.outcome}")
+    return proof
+
+
 async def _gathered(awaitables: Iterable[Awaitable[T]]) -> list[T]:
     """Await every one concurrently; once one raises, or the caller is cancelled, the others are cancelled and awaited,
     so each takes its test back before this returns."""
@@ -183,4 +234,14 @@ async def _gathered(awaitables: Iterable[Awaitable[T]]) -> list[T]:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-__all__ = ["RESUBMIT_SECONDS", "RegressionNotebook", "RegressionSet", "ReproRun", "ReproRunner"]
+__all__ = [
+    "NO_DELTA",
+    "RESUBMIT_SECONDS",
+    "FixNotProven",
+    "FixProof",
+    "RegressionNotebook",
+    "RegressionSet",
+    "ReproRun",
+    "ReproRunner",
+    "prove_fix",
+]
