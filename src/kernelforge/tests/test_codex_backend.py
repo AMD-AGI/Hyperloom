@@ -24,6 +24,7 @@ from kernelforge.agent_backends.base import (
     AgentRunResult,
     AgentRunSpec,
     AgentRuntimeConfig,
+    AgentRuntimeSettings,
     AgentToolPolicy,
     StdioMcpServer,
 )
@@ -764,18 +765,10 @@ def test_backend_factory_falls_back_only_when_enabled(
     )
 
     with pytest.raises(CodexUnavailableError):
-        create_registered_backend(
-            resolve_agent_runtime(
-                "codex",
-                fallback_provider="",
-            )
-        )
+        create_registered_backend(resolve_agent_runtime("codex", settings=AgentRuntimeSettings(fallback_provider="")))
 
     backend = create_registered_backend(
-        resolve_agent_runtime(
-            "codex",
-            fallback_provider="claude",
-        )
+        resolve_agent_runtime("codex", settings=AgentRuntimeSettings(fallback_provider="claude"))
     )
 
     assert backend.name == "claude"
@@ -1178,9 +1171,7 @@ def test_make_agent_fn_falls_back_after_gateway_probe_failure(
         """Return the fallback selected by the registered backend factory."""
         backend = FakeClaudeBackend()
         backend.runtime = resolve_agent_runtime(
-            "claude",
-            model="claude-fallback-model",
-            fallback_provider="",
+            "claude", model="claude-fallback-model", settings=AgentRuntimeSettings(fallback_provider="")
         )
         backend.fallback_reason = "gateway returned 401"
         return backend
