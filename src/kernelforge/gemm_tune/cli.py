@@ -735,20 +735,7 @@ def run(
 
     # Build report
     total_elapsed = time.time() - start_time
-    report = build_report(
-        results,
-        skipped,
-        profile=profile,
-        framework=framework,
-        precision=precision,
-        quant_type=quant_type,
-        gpu_type=gpu_type,
-        tp=tp,
-        conc=conc,
-        tokens=token_list,
-        started_at=started_at,
-        total_elapsed_s=total_elapsed,
-    )
+    report = build_report(results, skipped, ctx, started_at, total_elapsed)
 
     # Write report to file
     report_path = write_report(report, output_path)
@@ -762,13 +749,7 @@ def run(
             results,
             output_path,
             shape_manifest_path=shapes_manifest or None,
-            gpu_type=gpu_type,
-            framework=framework,
-            precision=precision,
-            quant_type=quant_type,
-            tp=tp,
             tuner_lib_version=kb_current_lib,
-            generated_at=report.finished_at,
         )
 
     # Emit sentinel-wrapped JSON to stdout
