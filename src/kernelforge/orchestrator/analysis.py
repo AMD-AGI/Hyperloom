@@ -26,11 +26,7 @@ from kernelforge.agent_backends import (
     create_registered_backend,
     watchdog_timeout_sec,
 )
-from kernelforge.agent_backends.session_resume import (
-    EXHAUSTED_END_REASON,
-    ResumePolicy,
-    run_session_with_api_resume,
-)
+from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON, ResumePolicy, run_session_with_api_resume
 from kernelforge.config import Config
 from kernelforge.orchestrator.contracts import (
     CaseEvidence,

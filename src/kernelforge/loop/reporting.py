@@ -111,7 +111,7 @@ class KeepScore:
     best_wall_ms: float
     mean_case_speedup: float
     search_start_mean_case_speedup: float
-    snr_db: float | None
+    snr_db: float | None = None
     search_start_ms: float | None = None
 
 
