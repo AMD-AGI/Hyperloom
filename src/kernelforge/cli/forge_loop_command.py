@@ -1544,6 +1544,7 @@ def forge_loop(request: ForgeLoopRequest):
 
     from kernelforge.loop.campaign_config import (
         CampaignConfigStore,
+        CampaignInputs,
         derive_campaign_implementation_contract,
     )
     from kernelforge.loop.run_state import WorkspaceLock, WorkspaceLockError
@@ -1590,25 +1591,27 @@ def forge_loop(request: ForgeLoopRequest):
     try:
         resolution = resolve_campaign(
             str(workspace),
+            CampaignInputs(
+                kernel=request.campaign.kernel,
+                driver=request.campaign.driver,
+                snr_threshold=request.campaign.snr_threshold,
+                source_files=request.identity.source_files or "",
+                program_md_file=request.task_context.program_md_file,
+                target_functions=request.identity.target_functions or "",
+                operator_name=request.identity.operator_name or "",
+                producer=request.knowledge.producer or "",
+                kernel_backend=request.task_context.kernel_backend or "",
+                git_branch=request.git_branch or "",
+                gpu_target=request.gpu.gpu_target or "",
+                gpu_type=request.gpu.gpu_type,
+                task_type=request.identity.task_type or "",
+                framework=request.identity.framework or "",
+                nproc_per_node=request.loop_shape.nproc_per_node,
+                bench_repeat=request.loop_shape.bench_repeat,
+                commit_new_paths=tuple(request.loop_shape.commit_new_paths),
+            ),
             resume=resume,
             prepare_task=request.prepare_task,
-            kernel=request.campaign.kernel,
-            driver=request.campaign.driver,
-            source_files=request.identity.source_files or "",
-            program_md_file=request.task_context.program_md_file,
-            target_functions=request.identity.target_functions or "",
-            operator_name=request.identity.operator_name or "",
-            producer=request.knowledge.producer or "",
-            kernel_backend=request.task_context.kernel_backend or "",
-            git_branch=request.git_branch or "",
-            gpu_target=request.gpu.gpu_target or "",
-            gpu_type=request.gpu.gpu_type,
-            task_type=request.identity.task_type or "",
-            framework=request.identity.framework or "",
-            snr_threshold=request.campaign.snr_threshold,
-            nproc_per_node=request.loop_shape.nproc_per_node,
-            bench_repeat=request.loop_shape.bench_repeat,
-            commit_new_paths=list(request.loop_shape.commit_new_paths),
         )
     except (OSError, ValueError) as error:
         raise click.ClickException(str(error)) from error

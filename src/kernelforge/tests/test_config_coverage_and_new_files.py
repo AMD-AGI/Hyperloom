@@ -625,8 +625,7 @@ def test_forge_loop_option_reaches_the_campaign_and_survives_resume(tmp_path, mo
     """The allowlist has to arrive through the real construction path."""
     monkeypatch.setenv("GPU_TARGET", "gfx950")
     workspace, kernel, driver = _git_workspace(tmp_path)
-    args = _base_args(workspace, kernel, driver)
-    args["commit_new_paths"] = ["configs/*.json", " ", "configs/*.json"]
+    args = _base_args(workspace, kernel, driver, commit_new_paths=("configs/*.json", " ", "configs/*.json"))
 
     resolved = resolve_campaign(**args)
 
@@ -643,8 +642,7 @@ def test_forge_loop_option_reaches_the_campaign_and_survives_resume(tmp_path, mo
 def test_campaign_configuration_refuses_a_recursive_allowlist_pattern(tmp_path, monkeypatch):
     monkeypatch.setenv("GPU_TARGET", "gfx950")
     workspace, kernel, driver = _git_workspace(tmp_path)
-    args = _base_args(workspace, kernel, driver)
-    args["commit_new_paths"] = ["configs/**/*.json"]
+    args = _base_args(workspace, kernel, driver, commit_new_paths=("configs/**/*.json",))
 
     with pytest.raises(ValueError, match=r"\*\*"):
         resolve_campaign(**args)

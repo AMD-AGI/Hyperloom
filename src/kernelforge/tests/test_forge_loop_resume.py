@@ -23,6 +23,7 @@ from kernelforge.cli.session_budget import _forge_session_timeout_sec
 from kernelforge.config import Config
 from kernelforge.loop.campaign_config import (
     CampaignConfigStore,
+    CampaignInputs,
     create_campaign_config,
 )
 from kernelforge.loop.experience import ExperienceLedger
@@ -286,11 +287,8 @@ def _invoke_forge_loop(
     workspace, kernel, driver = _initialize_workspace(tmp_path)
     if existing_config:
         config = create_campaign_config(
-            workspace_dir=str(workspace),
-            kernel=str(kernel),
-            driver=str(driver),
-            source_files=[],
-            program_md_file=None,
+            str(workspace),
+            CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=None),
         )
         CampaignConfigStore(str(workspace)).save(config)
     if existing_state or existing_config or "--resume" in extra_args:
@@ -720,11 +718,7 @@ def _driver_integrity_resume(tmp_path, monkeypatch):
     monkeypatch.setenv("GPU_TARGET", "gfx942")
     monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
     campaign = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=None,
+        str(workspace), CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=None)
     )
     CampaignConfigStore(str(workspace)).save(campaign)
     iter_config = IterationConfig(
@@ -1053,12 +1047,8 @@ def test_resume_reuses_persisted_framework_without_inference(
     captured = _install_cli_fakes(monkeypatch, tmp_path)
     workspace, kernel, driver = _initialize_workspace(tmp_path)
     campaign = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=None,
-        framework="vllm",
+        str(workspace),
+        CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=None, framework="vllm"),
     )
     store = CampaignConfigStore(str(workspace))
     store.save(campaign)
@@ -1193,11 +1183,7 @@ def test_forge_loop_resume_adds_existing_kb_reference_pointer(
     captured = _install_cli_fakes(monkeypatch, tmp_path)
     workspace, kernel, driver = _initialize_workspace(tmp_path)
     campaign = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=None,
+        str(workspace), CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=None)
     )
     store = CampaignConfigStore(str(workspace))
     store.save(campaign)
@@ -1405,11 +1391,8 @@ def test_resume_rejects_missing_or_changed_program_context(
     source_program = tmp_path / "program.md"
     source_program.write_text("# Immutable task context\n")
     campaign = create_campaign_config(
-        workspace_dir=str(workspace),
-        kernel=str(kernel),
-        driver=str(driver),
-        source_files=[],
-        program_md_file=str(source_program),
+        str(workspace),
+        CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", program_md_file=str(source_program)),
     )
     store = CampaignConfigStore(str(workspace))
     store.save(campaign, program_md=source_program.read_text())
