@@ -34,6 +34,7 @@ from hyperloom.measure.tests.hosted_fixtures import make_call, make_rig
 
 MODEL = os.environ.get("HL_MB0_MODEL", "")
 INFERENCEX = os.environ.get("HL_MB0_INFERENCEX", "")
+USES_REAL_GPUS = True  # keep the host's amd-smi and rocm-smi: see hyperloom.measure.tests.gpu_free_host
 pytestmark = pytest.mark.skipif(
     importlib.util.find_spec("sglang") is None or not Path(MODEL).is_dir() or not Path(INFERENCEX, ".git").exists(),
     reason="needs SGLang, HL_MB0_MODEL and HL_MB0_INFERENCEX (a git checkout)",

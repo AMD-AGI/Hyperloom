@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
-import stat
 from pathlib import Path
 from typing import Any
 
@@ -32,30 +30,6 @@ from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 from hyperloom_multibranch.toolbox.tests.helpers import IMAGE, FakeRepo, req
 from hyperloom_multibranch.toolbox.tests.test_hosted_executor import PointPlanner
-
-
-_GPU_TOOLS = ("amd-smi", "rocm-smi")
-_UNREADABLE_TOOL = "#!/bin/sh\nexit 1\n"
-
-
-@pytest.fixture(autouse=True)
-def _machine_without_readable_gpus(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the tests independent of the host's GPUs.
-
-    The shipped runner reads the model from ``amd-smi`` and the VRAM in use from ``rocm-smi``. On a GPU host the real
-    tools answer and the runner compares them with the stand-in sheet, so these tests would see a hardware mismatch
-    instead of the no-GPU outcome they assert. Tools that exit non-zero ahead of the real ones on ``PATH`` give every
-    host the same answer: nothing readable, so no hardware check is made.
-    """
-    shadow = tmp_path / "gpu-tools-shadow"
-    shadow.mkdir()
-    for name in _GPU_TOOLS:
-        tool = shadow / name
-        tool.write_text(_UNREADABLE_TOOL)
-        tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
-    monkeypatch.setenv("PATH", f"{shadow}{os.pathsep}{os.environ.get('PATH', '')}")
-    for name in ("HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES"):
-        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.mark.parametrize(("cards", "tp", "expected"), [(8, 1, 8), (8, 2, 4), (8, 8, 1), (16, 2, 4), (2, 1, 2)])

@@ -50,6 +50,7 @@ MODEL = os.environ.get("HL_W13_MODEL", "")
 INFERENCEX = os.environ.get("HL_W13_INFERENCEX", "")
 OUT = os.environ.get("HL_W13_OUT", "")
 CARDS = [int(card) for card in os.environ.get("HL_W13_CARDS", "6,7").split(",")]
+USES_REAL_GPUS = True  # keep the host's amd-smi and rocm-smi: see hyperloom.measure.tests.gpu_free_host
 pytestmark = pytest.mark.skipif(
     importlib.util.find_spec("sglang") is None or not Path(MODEL).is_dir() or not Path(INFERENCEX, ".git").exists(),
     reason="needs SGLang, HL_W13_MODEL and HL_W13_INFERENCEX (a git checkout)",
