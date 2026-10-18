@@ -690,13 +690,15 @@ class CriticAgentBackend:
 
             critic_out.record_critic_iteration(
                 self.session_dir,
-                iter_n=turn_idx,
-                request=request,
-                judge_bundle=judge_bundle,
-                review=review,
-                emit=emit,
-                workdir=workdir,
-                kb_priors=kb_priors_trace,
+                critic_out.CriticIteration(
+                    iter_n=turn_idx,
+                    request=request,
+                    judge_bundle=judge_bundle,
+                    review=review,
+                    emit=emit,
+                    workdir=workdir,
+                    kb_priors=kb_priors_trace,
+                ),
             )
         except Exception:  # noqa: BLE001
             pass
