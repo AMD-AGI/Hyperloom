@@ -16,8 +16,9 @@ ACCURACY_SCORE = "accuracy_score"
 class Verdict(str, Enum):
     """``NEEDS_CONFIRM`` is the only provisional verdict: a retest on another sandbox settles it.
 
-    ``BLOCKED`` is a gain both measurements showed, held back by a defect both showed too: a failed accuracy gate, or on
-    AgentX a broken guard or more failed requests than the parent. ``INCONCLUSIVE`` is a retest that disagreed with the
+    ``BLOCKED`` is a gain both measurements showed, held back by a defect both showed too: a failed accuracy gate, on
+    InferenceX requests the graded rounds did not complete, or on AgentX a broken guard or more failed requests than the
+    parent. ``INCONCLUSIVE`` is a retest that disagreed with the
     first measurement on the gain or the defect.
     """
 

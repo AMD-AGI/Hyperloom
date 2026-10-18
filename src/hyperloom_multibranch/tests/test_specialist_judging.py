@@ -19,7 +19,7 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import delta
 from hyperloom_multibranch.rulegate.baseline import write_inferencex_baseline
 from hyperloom_multibranch.rulegate.gate import RuleGate
-from hyperloom_multibranch.rulegate.inferencex import GAIN_NOT_CONFIRMED
+from hyperloom_multibranch.rulegate.inferencex import DROPPED_REQUESTS, GAIN_NOT_CONFIRMED
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
 from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, Judging
 from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler, RecordingVerifier
@@ -190,6 +190,21 @@ async def test_a_gain_the_accuracy_gate_holds_back_twice_is_held_for_the_special
         f"{NOTICE} {first} cleared the bar twice and is held back by the accuracy gate; "
         "diagnose it, then request_repair or decline_repair"
     )
+
+
+async def test_a_gain_that_drops_requests_on_both_measurements_is_held_for_the_specialist(tmp_path):
+    session = _Session(tmp_path / "notebook", error_rates={FAST.fingerprint(): 1.0})
+    await session.prelude()
+    first = await session.explore(FAST)
+    await session.step()
+    await session.step()
+
+    record = await session.runtime.record(first)
+    assert (record.judgement.verdict, record.judgement.refused_by) == (Verdict.BLOCKED, (DROPPED_REQUESTS,))
+    assert record.conclusion is Conclusion.DIAGNOSIS_PENDING
+    assert await session.repo.head(BRANCH) == ROOT
+    (notice,) = await session.notices()
+    assert f"{first} cleared the bar twice and is held back by {DROPPED_REQUESTS};" in notice
 
 
 async def test_a_failed_measurement_takes_no_judgement(session):

@@ -95,7 +95,8 @@ not spend tests on them.
 {{fake_gains}}
 
 A blocked candidate cleared the bar on both measurements and was held back on both by the same defect: the accuracy \
-gate, or on AgentX a guard (P90, output throughput) or more failed requests than its parent. It waits for your \
+gate, on InferenceX requests it did not complete (dropped_requests), or on AgentX a guard (P90, output throughput) or \
+more failed requests than its parent. It waits for your \
 diagnosis; conclude it before your next candidate. Read both results with test_result and find the cause.
 - A fixable defect is one a concrete change removes while the gain stays: quantization scales computed per tensor \
 where the model needs them per head or per channel, a kernel path with a numerical bug, a setting that makes requests \
