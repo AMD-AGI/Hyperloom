@@ -17,12 +17,12 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.recipe import Recipe
+from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 from hyperloom.measure import compile as compile_module
 from hyperloom.measure.compile import ComponentLayout, LocalBlobStore, PackageBase, UnsupportedComponentError
 from hyperloom.measure.pins import ActiveImage, ToolCommits, pinned_tool_commits
-from hyperloom.orchestrator.kernel.request_handlers import resolve_gemm_tuning_backend
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant
@@ -135,7 +135,7 @@ def test_the_kernel_optimizer_flag_picks_the_backend_kernel_tuning_runs(
 ) -> None:
     for name, value in workload_environment(replace(WORKLOAD, kernel_optimizer=optimizer)).items():
         monkeypatch.setenv(name, value)
-    assert resolve_gemm_tuning_backend({}) == optimizer.value
+    assert forge_explicitly_enabled() is (optimizer is KernelOptimizer.FORGE)
 
 
 def test_the_model_is_exported_as_the_directory_a_server_loads_it_from(
