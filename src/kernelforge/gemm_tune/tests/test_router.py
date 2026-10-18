@@ -11,7 +11,7 @@ from kernelforge.gemm_tune import router
 from kernelforge.gemm_tune.model_analyzer import ModelProfile
 from kernelforge.gemm_tune.report import build_report
 from kernelforge.gemm_tune.tuners.base import TuneContext
-from kernelforge.gemm_tune.router import RoutingTarget, ShapeEvidence, select_tuners
+from kernelforge.gemm_tune.router import select_tuners
 
 
 def _tune_ctx(**fields) -> TuneContext:
@@ -34,27 +34,27 @@ def _make_profile(is_moe=False, num_experts=0, **kwargs):
 class TestSelectTuners:
     def test_sglang_moe_bf16(self):
         profile = _make_profile(is_moe=True, num_experts=128, num_experts_per_tok=8, moe_intermediate_size=768)
-        specs = select_tuners(profile, RoutingTarget(framework="sglang", precision="bf16", quant_type="none"))
+        specs = select_tuners(profile, framework="sglang", precision="bf16", quant_type="none")
         names = [s.name for s in specs if s.should_run]
         assert "fmoe_ck" in names
         assert "sglang_dense_bf16" in names
 
     def test_sglang_moe_fp8_per_token_skips(self):
         profile = _make_profile(is_moe=True, num_experts=128, num_experts_per_tok=8, moe_intermediate_size=768)
-        specs = select_tuners(profile, RoutingTarget(framework="sglang", precision="fp8", quant_type="per_token"))
+        specs = select_tuners(profile, framework="sglang", precision="fp8", quant_type="per_token")
         fmoe = [s for s in specs if s.name == "fmoe_ck"][0]
         assert not fmoe.should_run
         assert "1-stage ASM" in fmoe.skip_reason
 
     def test_sglang_moe_fp8_blockscale_runs(self):
         profile = _make_profile(is_moe=True, num_experts=128, num_experts_per_tok=8, moe_intermediate_size=768)
-        specs = select_tuners(profile, RoutingTarget(framework="sglang", precision="fp8", quant_type="blockscale"))
+        specs = select_tuners(profile, framework="sglang", precision="fp8", quant_type="blockscale")
         fmoe = [s for s in specs if s.name == "fmoe_ck"][0]
         assert fmoe.should_run
 
     def test_sglang_dense_bf16(self):
         profile = _make_profile(is_moe=False)
-        specs = select_tuners(profile, RoutingTarget(framework="sglang", precision="bf16", quant_type="none"))
+        specs = select_tuners(profile, framework="sglang", precision="bf16", quant_type="none")
         names = [s.name for s in specs if s.should_run]
         assert "sglang_dense_bf16" in names
         assert "fmoe_ck" not in names
@@ -72,9 +72,7 @@ class TestSelectTuners:
                 "a8w8_blockscale_bpreshuffle",
             ),
         ]:
-            specs = select_tuners(
-                profile, RoutingTarget(framework="sglang", precision="fp8", quant_type=qt, gpu_type="mi300x")
-            )
+            specs = select_tuners(profile, framework="sglang", precision="fp8", quant_type=qt, gpu_type="mi300x")
             names = [s.name for s in specs if s.should_run]
             assert expected in names, f"{qt} -> {names}"
 
@@ -83,9 +81,7 @@ class TestSelectTuners:
         # AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE — the exact config table the gemm_a8w8_bpreshuffle serving op reads.
         profile = _make_profile(is_moe=False)
 
-        specs = select_tuners(
-            profile, RoutingTarget(framework="sglang", precision="fp8", quant_type="bpreshuffle", gpu_type="mi300x")
-        )
+        specs = select_tuners(profile, framework="sglang", precision="fp8", quant_type="bpreshuffle", gpu_type="mi300x")
         names = [s.name for s in specs if s.should_run]
         assert "a8w8_bpreshuffle" in names, names
         # The blockscale+bpreshuffle tuner (different config table) must NOT be substituted for a per-token
@@ -97,9 +93,7 @@ class TestSelectTuners:
         # tuner writes a table the per-token serving op never reads, so tuning is skipped with a reason rather than
         # silently producing an unused config.
         profile = _make_profile(is_moe=False)
-        specs = select_tuners(
-            profile, RoutingTarget(framework="sglang", precision="fp8", quant_type="bpreshuffle", gpu_type="mi355x")
-        )
+        specs = select_tuners(profile, framework="sglang", precision="fp8", quant_type="bpreshuffle", gpu_type="mi355x")
         bpre = [s for s in specs if s.name == "a8w8_bpreshuffle"]
         assert bpre, [s.name for s in specs]
         assert not bpre[0].should_run
@@ -111,9 +105,7 @@ class TestSelectTuners:
         # Degenerate config (no dims) + no csv/shapes -> graceful skip, not a hard validation failure (M2).
         profile = _make_profile(is_moe=False, hidden_size=0, intermediate_size=0)
         specs = select_tuners(
-            profile,
-            RoutingTarget(framework="sglang", precision="fp8", quant_type="blockscale"),
-            ShapeEvidence(has_untuned_csv=False),
+            profile, framework="sglang", precision="fp8", quant_type="blockscale", has_untuned_csv=False
         )
         blockscale = [s for s in specs if s.name == "a8w8_blockscale"][0]
         assert not blockscale.should_run
@@ -122,9 +114,7 @@ class TestSelectTuners:
     def test_sglang_dense_fp8_runs_when_config_derivable(self):
         profile = _make_profile(is_moe=False)  # has hidden/intermediate
         specs = select_tuners(
-            profile,
-            RoutingTarget(framework="sglang", precision="fp8", quant_type="blockscale"),
-            ShapeEvidence(has_untuned_csv=False),
+            profile, framework="sglang", precision="fp8", quant_type="blockscale", has_untuned_csv=False
         )
         blockscale = [s for s in specs if s.name == "a8w8_blockscale"][0]
         assert blockscale.should_run
@@ -134,9 +124,7 @@ class TestSelectTuners:
         # skipped.
         profile = _make_profile(is_moe=False)
         specs = select_tuners(
-            profile,
-            RoutingTarget(framework="sglang", precision="fp8", quant_type="blockscale"),
-            ShapeEvidence(has_untuned_csv=False),
+            profile, framework="sglang", precision="fp8", quant_type="blockscale", has_untuned_csv=False
         )
         blockscale = [s for s in specs if s.name == "a8w8_blockscale"][0]
         assert blockscale.should_run
@@ -145,33 +133,31 @@ class TestSelectTuners:
     def test_sglang_dense_fp8_blockscale_with_csv(self):
         profile = _make_profile(is_moe=False)
         specs = select_tuners(
-            profile,
-            RoutingTarget(framework="sglang", precision="fp8", quant_type="blockscale"),
-            ShapeEvidence(has_untuned_csv=True),
+            profile, framework="sglang", precision="fp8", quant_type="blockscale", has_untuned_csv=True
         )
         blockscale = [s for s in specs if s.name == "a8w8_blockscale"][0]
         assert blockscale.should_run
 
     def test_vllm_moe(self):
         profile = _make_profile(is_moe=True, num_experts=64, num_experts_per_tok=4)
-        specs = select_tuners(profile, RoutingTarget(framework="vllm", precision="bf16"))
+        specs = select_tuners(profile, framework="vllm", precision="bf16")
         names = [s.name for s in specs if s.should_run]
         assert "vllm_moe_triton" in names
 
     def test_vllm_aiter_uses_sglang_tuners(self):
         profile = _make_profile(is_moe=True, num_experts=128, num_experts_per_tok=8, moe_intermediate_size=768)
-        specs = select_tuners(profile, RoutingTarget(framework="vllm-aiter", precision="bf16", quant_type="none"))
+        specs = select_tuners(profile, framework="vllm-aiter", precision="bf16", quant_type="none")
         names = [s.name for s in specs if s.should_run]
         assert "fmoe_ck" in names
 
     def test_unknown_framework(self):
         profile = _make_profile()
-        specs = select_tuners(profile, RoutingTarget(framework="unknown", precision="bf16"))
+        specs = select_tuners(profile, framework="unknown", precision="bf16")
         assert len(specs) == 0
 
     def test_priority_order(self):
         profile = _make_profile(is_moe=True, num_experts=128, num_experts_per_tok=8, moe_intermediate_size=768)
-        specs = select_tuners(profile, RoutingTarget(framework="sglang", precision="bf16", quant_type="none"))
+        specs = select_tuners(profile, framework="sglang", precision="bf16", quant_type="none")
         runnable = [s for s in specs if s.should_run]
         priorities = [s.priority for s in runnable]
         assert priorities == sorted(priorities)
@@ -183,9 +169,7 @@ class TestFp4Gfx942Skip:
     def test_dense_fp4_skipped_on_gfx942(self):
         profile = _make_profile(is_moe=False)
         specs = select_tuners(
-            profile,
-            RoutingTarget(framework="sglang", precision="fp4", quant_type="fp4", gpu_type="mi300x"),
-            ShapeEvidence(has_untuned_csv=True),
+            profile, framework="sglang", precision="fp4", quant_type="fp4", gpu_type="mi300x", has_untuned_csv=True
         )
         a4w4 = [s for s in specs if s.name == "a4w4_blockscale"][0]
         assert not a4w4.should_run
@@ -195,18 +179,14 @@ class TestFp4Gfx942Skip:
     def test_dense_fp4_runs_on_gfx950(self):
         profile = _make_profile(is_moe=False)
         specs = select_tuners(
-            profile,
-            RoutingTarget(framework="sglang", precision="fp4", quant_type="fp4", gpu_type="mi355x"),
-            ShapeEvidence(has_untuned_csv=True),
+            profile, framework="sglang", precision="fp4", quant_type="fp4", gpu_type="mi355x", has_untuned_csv=True
         )
         a4w4 = [s for s in specs if s.name == "a4w4_blockscale"][0]
         assert a4w4.should_run
 
     def test_moe_mxfp4_skipped_on_gfx942(self):
         profile = _make_profile(is_moe=True, num_experts=128, num_experts_per_tok=8, moe_intermediate_size=768)
-        specs = select_tuners(
-            profile, RoutingTarget(framework="sglang", precision="mxfp4", quant_type="mxfp4", gpu_type="mi300x")
-        )
+        specs = select_tuners(profile, framework="sglang", precision="mxfp4", quant_type="mxfp4", gpu_type="mi300x")
         fmoe = [s for s in specs if s.name == "fmoe_ck"][0]
         assert not fmoe.should_run
         assert "gfx942" in fmoe.skip_reason
@@ -214,9 +194,7 @@ class TestFp4Gfx942Skip:
 
     def test_moe_mxfp4_runs_on_gfx950(self):
         profile = _make_profile(is_moe=True, num_experts=128, num_experts_per_tok=8, moe_intermediate_size=768)
-        specs = select_tuners(
-            profile, RoutingTarget(framework="sglang", precision="mxfp4", quant_type="mxfp4", gpu_type="mi355x")
-        )
+        specs = select_tuners(profile, framework="sglang", precision="mxfp4", quant_type="mxfp4", gpu_type="mi355x")
         fmoe = [s for s in specs if s.name == "fmoe_ck"][0]
         assert fmoe.should_run
 
@@ -224,9 +202,7 @@ class TestFp4Gfx942Skip:
         for gpu_type in ("mi308x", "mi325x"):
             profile = _make_profile(is_moe=False)
             specs = select_tuners(
-                profile,
-                RoutingTarget(framework="sglang", precision="fp4", quant_type="fp4", gpu_type=gpu_type),
-                ShapeEvidence(has_untuned_csv=True),
+                profile, framework="sglang", precision="fp4", quant_type="fp4", gpu_type=gpu_type, has_untuned_csv=True
             )
             a4w4 = [s for s in specs if s.name == "a4w4_blockscale"][0]
             assert not a4w4.should_run, f"{gpu_type} should skip fp4"
@@ -235,8 +211,11 @@ class TestFp4Gfx942Skip:
         profile = _make_profile(is_moe=False)
         specs = select_tuners(
             profile,
-            RoutingTarget(framework="sglang", precision="fp8", quant_type="blockscale", gpu_type="mi300x"),
-            ShapeEvidence(has_untuned_csv=True),
+            framework="sglang",
+            precision="fp8",
+            quant_type="blockscale",
+            gpu_type="mi300x",
+            has_untuned_csv=True,
         )
         blockscale = [s for s in specs if s.name == "a8w8_blockscale"][0]
         assert blockscale.should_run
@@ -249,9 +228,7 @@ class TestGpuTypeAutoDetect:
         monkeypatch.setattr(router, "_detect_local_gfx_arch", lambda: "gfx942")
         profile = _make_profile(is_moe=False)
         specs = select_tuners(
-            profile,
-            RoutingTarget(framework="sglang", precision="fp4", quant_type="fp4", gpu_type="auto"),
-            ShapeEvidence(has_untuned_csv=True),
+            profile, framework="sglang", precision="fp4", quant_type="fp4", gpu_type="auto", has_untuned_csv=True
         )
         a4w4 = [s for s in specs if s.name == "a4w4_blockscale"][0]
         assert not a4w4.should_run
@@ -261,9 +238,7 @@ class TestGpuTypeAutoDetect:
         monkeypatch.setattr(router, "_detect_local_gfx_arch", lambda: "gfx950")
         profile = _make_profile(is_moe=False)
         specs = select_tuners(
-            profile,
-            RoutingTarget(framework="sglang", precision="fp4", quant_type="fp4", gpu_type="auto"),
-            ShapeEvidence(has_untuned_csv=True),
+            profile, framework="sglang", precision="fp4", quant_type="fp4", gpu_type="auto", has_untuned_csv=True
         )
         a4w4 = [s for s in specs if s.name == "a4w4_blockscale"][0]
         assert a4w4.should_run
@@ -272,9 +247,7 @@ class TestGpuTypeAutoDetect:
         monkeypatch.setattr(router, "_detect_local_gfx_arch", lambda: "")
         profile = _make_profile(is_moe=False)
         specs = select_tuners(
-            profile,
-            RoutingTarget(framework="sglang", precision="fp4", quant_type="fp4", gpu_type="auto"),
-            ShapeEvidence(has_untuned_csv=True),
+            profile, framework="sglang", precision="fp4", quant_type="fp4", gpu_type="auto", has_untuned_csv=True
         )
         a4w4 = [s for s in specs if s.name == "a4w4_blockscale"][0]
         assert a4w4.should_run
@@ -373,7 +346,7 @@ class TestOnlyTheMeasuredPrecisionIsTuned:
 
     @staticmethod
     def _triton_spec(profile, **select_kwargs):
-        specs = select_tuners(profile, RoutingTarget(framework="vllm", **select_kwargs))
+        specs = select_tuners(profile, framework="vllm", **select_kwargs)
         (spec,) = [s for s in specs if s.name == "vllm_moe_triton"]
         return spec
 
@@ -432,7 +405,7 @@ class TestOnlyTheMeasuredPrecisionIsTuned:
         # micro_decision=failed), which Hyperloom records as forge_failed. A router skip never starts it, and a run
         # left with nothing to do reports that it was skipped.
         profile = self._moe_profile(quant_method="awq")
-        specs = select_tuners(profile, RoutingTarget(framework="vllm", precision="bf16", quant_type="auto"))
+        specs = select_tuners(profile, framework="vllm", precision="bf16", quant_type="auto")
         assert not any(spec.should_run for spec in specs)
 
         report = build_report(

@@ -20,7 +20,6 @@ import click
 from kernelforge.option_groups import option_group
 
 from . import __version__
-from .router import RoutingTarget
 
 if TYPE_CHECKING:
     from .tuners.base import TuneContext, TuneResult
@@ -453,6 +452,16 @@ def gemm_tune():
 
 
 @dataclass(frozen=True)
+class RoutingTarget:
+    """The deployment the tuners are routed for: framework, precision, quant type and GPU."""
+
+    framework: str
+    precision: str
+    quant_type: str
+    gpu_type: str
+
+
+@dataclass(frozen=True)
 class ServingWorkload:
     """The serving deployment the token coverage is computed for."""
 
@@ -629,7 +638,7 @@ class TuneRequest:
 def run(request: TuneRequest):
     """Run GEMM tuning for the specified model and framework."""
     from .model_analyzer import analyze_model
-    from .router import ShapeEvidence, resolve_gpu_type, select_tuners
+    from .router import resolve_gpu_type, select_tuners
     from .shapes import compute_token_coverage
     from .utils import emit_result_json
     from .tuners.base import TuneContext
@@ -690,17 +699,18 @@ def run(request: TuneRequest):
     # Select tuners
     tuner_specs = select_tuners(
         profile,
-        target,
-        ShapeEvidence(
-            kernel_signature_log=kernel_signature_log or None,
-            has_untuned_csv=bool(untuned_csv),
-            # A demand file is a shape source like the others, and a stronger one: it lists the keys the runtime
-            # actually asked for.
-            has_shapes_json=bool(shapes_json or shapes_manifest or demand_json),
-            has_tunableop_input=bool(sources.tunableop_input),
-            # ...and a stronger *selection* input for the same reason.
-            demand_report=demand_report,
-        ),
+        framework=target.framework,
+        precision=target.precision,
+        quant_type=target.quant_type,
+        gpu_type=target.gpu_type,
+        kernel_signature_log=kernel_signature_log or None,
+        has_untuned_csv=bool(untuned_csv),
+        # A demand file is a shape source like the others, and a stronger one: it lists the keys the runtime actually
+        # asked for.
+        has_shapes_json=bool(shapes_json or shapes_manifest or demand_json),
+        has_tunableop_input=bool(sources.tunableop_input),
+        # ...and a stronger *selection* input for the same reason.
+        demand_report=demand_report,
     )
 
     # What the runtime asked for that nothing selected can write.
@@ -920,7 +930,7 @@ def plan(model_path: str, target: RoutingTarget, inputs: RoutingInputs):
     import tempfile
 
     from .model_analyzer import analyze_model
-    from .router import ShapeEvidence, resolve_gpu_type, select_tuners
+    from .router import resolve_gpu_type, select_tuners
 
     profile = analyze_model(model_path)
     try:
@@ -938,14 +948,15 @@ def plan(model_path: str, target: RoutingTarget, inputs: RoutingInputs):
 
         tuner_specs = select_tuners(
             profile,
-            target,
-            ShapeEvidence(
-                kernel_signature_log=kernel_signature_log or None,
-                has_untuned_csv=bool(inputs.untuned_csv),
-                has_shapes_json=bool(inputs.shapes_json or inputs.shapes_manifest or demand_json),
-                has_tunableop_input=bool(inputs.tunableop_input),
-                demand_report=_load_demand_report(demand_json),
-            ),
+            framework=target.framework,
+            precision=target.precision,
+            quant_type=target.quant_type,
+            gpu_type=target.gpu_type,
+            kernel_signature_log=kernel_signature_log or None,
+            has_untuned_csv=bool(inputs.untuned_csv),
+            has_shapes_json=bool(inputs.shapes_json or inputs.shapes_manifest or demand_json),
+            has_tunableop_input=bool(inputs.tunableop_input),
+            demand_report=_load_demand_report(demand_json),
         )
 
     click.echo(f"Model: {model_path}")

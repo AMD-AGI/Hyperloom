@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from kernelforge.gemm_tune.model_analyzer import ModelProfile
-from kernelforge.gemm_tune.router import RoutingTarget, ShapeEvidence, select_tuners
+from kernelforge.gemm_tune.router import select_tuners
 
 _CK = "[aiter] [fused_moe] using 2stage ck for (256, {tok}, 4096, 2048, 8, 2)"
 _ASM = "[aiter] [fused_moe] using 1stage asm for (256, {tok}, 4096, 2048, 8, 2)"
@@ -42,11 +42,15 @@ def _names(specs) -> list[str]:
     return [s.name for s in specs if not s.skip_reason]
 
 
-def _select(tmp_path, lines):
+def _select(tmp_path, lines, **kw):
     return select_tuners(
         _moe_profile(),
-        RoutingTarget(framework="vllm", precision="bf16", quant_type="none", gpu_type="mi355x"),
-        ShapeEvidence(kernel_signature_log=_log(tmp_path, lines) if lines is not None else None),
+        framework="vllm",
+        precision="bf16",
+        quant_type="none",
+        gpu_type="mi355x",
+        kernel_signature_log=_log(tmp_path, lines) if lines is not None else None,
+        **kw,
     )
 
 
@@ -143,8 +147,11 @@ class TestVllmMoeRouting:
         )
         specs = select_tuners(
             dense,
-            RoutingTarget(framework="vllm", precision="bf16", quant_type="none", gpu_type="mi355x"),
-            ShapeEvidence(kernel_signature_log=_log(tmp_path, [_CK.format(tok=16)])),
+            framework="vllm",
+            precision="bf16",
+            quant_type="none",
+            gpu_type="mi355x",
+            kernel_signature_log=_log(tmp_path, [_CK.format(tok=16)]),
         )
         assert "fmoe_ck" not in [s.name for s in specs]
 
@@ -157,8 +164,11 @@ class TestVllmMoeRouting:
         # anything.
         specs = select_tuners(
             _moe_profile(),
-            RoutingTarget(framework="sglang", precision="bf16", quant_type="none", gpu_type="mi355x"),
-            ShapeEvidence(kernel_signature_log=_log(tmp_path, [_CK.format(tok=16), _MISS.format(tok=16)])),
+            framework="sglang",
+            precision="bf16",
+            quant_type="none",
+            gpu_type="mi355x",
+            kernel_signature_log=_log(tmp_path, [_CK.format(tok=16), _MISS.format(tok=16)]),
         )
         names = [s.name for s in specs]
         assert names.count("fmoe_ck") == 1

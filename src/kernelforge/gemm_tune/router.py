@@ -298,39 +298,22 @@ def _routed_formats(
     return moe, _with_quant_type(profile.dense_precision or precision)
 
 
-@dataclass(frozen=True)
-class RoutingTarget:
-    """The deployment the tuners are routed for: framework, precision, quant type and GPU."""
-
-    framework: str
-    precision: str
-    quant_type: str = "auto"
-    gpu_type: str = "auto"
-
-
-@dataclass(frozen=True)
-class ShapeEvidence:
-    """The serving log, the shape inputs supplied and the demand the routing may rely on."""
-
-    kernel_signature_log: str | None = None
-    has_untuned_csv: bool = False
-    has_shapes_json: bool = False
-    has_tunableop_input: bool = False
-    demand_report: dict[str, Any] | None = None
-
-
 def select_tuners(
     profile: ModelProfile,
-    target: RoutingTarget,
-    evidence: ShapeEvidence = ShapeEvidence(),
+    *,
+    framework: str,
+    precision: str,
+    quant_type: str = "auto",
+    gpu_type: str = "auto",
+    kernel_signature_log: str | None = None,
+    has_untuned_csv: bool = False,
+    has_shapes_json: bool = False,
+    has_tunableop_input: bool = False,
+    demand_report: dict[str, Any] | None = None,
 ) -> list[TunerSpec]:
     """Select which tuner(s) to run based on model + framework + precision."""
-    framework = target.framework
-    quant_type = target.quant_type
-    kernel_signature_log = evidence.kernel_signature_log
-    has_shapes_json = evidence.has_shapes_json
-    resolved_precision = _normalize_precision(target.precision)
-    gfx_arch = _resolve_gfx_arch(target.gpu_type)
+    resolved_precision = _normalize_precision(precision)
+    gfx_arch = _resolve_gfx_arch(gpu_type)
     tuners: list[TunerSpec] = []
 
     if framework in ("sglang", "vllm-aiter"):
@@ -343,7 +326,8 @@ def select_tuners(
                 profile,
                 dense_precision,
                 dense_quant_type,
-                evidence.has_untuned_csv or has_shapes_json,
+                has_untuned_csv,
+                has_shapes_json,
                 gfx_arch,
             )
         )
@@ -354,7 +338,7 @@ def select_tuners(
                 resolved_precision,
                 _resolve_quant_type(resolved_precision, quant_type, profile, kernel_signature_log),
                 has_shapes_json,
-                evidence.has_tunableop_input,
+                has_tunableop_input,
             )
         )
         tuners.extend(
@@ -368,7 +352,7 @@ def select_tuners(
         log.warning("Unknown framework %r; no tuners selected", framework)
 
     # Last, so it sees everything the framework branch decided and can only widen it.
-    tuners.extend(_tuners_the_demand_says_are_needed(evidence.demand_report, tuners))
+    tuners.extend(_tuners_the_demand_says_are_needed(demand_report, tuners))
 
     # Sort by priority
     tuners.sort(key=lambda t: t.priority)
@@ -527,7 +511,8 @@ def _select_sglang_dense_tuners(
     profile: ModelProfile,
     precision: str,
     quant_type: str,
-    has_shape_input: bool,
+    has_untuned_csv: bool,
+    has_shapes_json: bool,
     gfx_arch: str,
 ) -> list[TunerSpec]:
     """Select the dense GEMM tuners for the sglang framework."""
@@ -537,7 +522,7 @@ def _select_sglang_dense_tuners(
     # Dense fp8/fp4 tuners do not require an externally-recorded CSV: when none is supplied they derive GEMM shapes
     # from the model config (same as the bf16 dense path).
     def _dense_spec(name: str) -> TunerSpec:
-        if has_shape_input or _profile_can_derive_dense(profile):
+        if has_untuned_csv or has_shapes_json or _profile_can_derive_dense(profile):
             return TunerSpec(name, priority=20, estimated_minutes=20)
         return TunerSpec(
             name,
