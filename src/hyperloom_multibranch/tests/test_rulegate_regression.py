@@ -11,17 +11,28 @@ from hyperloom.contracts.measurement import (
     AttachmentRef,
     Purpose,
     TestKind,
+    TestRequest,
     Validity,
 )
+from hyperloom.contracts.recipe import LaunchConfig, Recipe, apply
+from hyperloom_multibranch.contracts.gate import RegressionOutcome
+from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.notebook.records import BaselineRecord, LineageEvent, RegressionCase
+from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, Conclusion, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.tests.factories import delta
-from hyperloom_multibranch.rulegate.regression import RESUBMIT_SECONDS, ReproRun, ReproRunner
+from hyperloom_multibranch.notebook.tests.factories import delta, judgement, result
+from hyperloom_multibranch.rulegate.regression import RESUBMIT_SECONDS, RegressionSet, ReproRun, ReproRunner
 from hyperloom_multibranch.rulegate.service import Polling
-from hyperloom_multibranch.tests.fakes import RecordingVerifier, ReproToolbox
+from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingVerifier, ReproToolbox
 
+BASELINE = Recipe("rocm/vllm@sha256:" + "c" * 64, LaunchConfig(server_args="--max-num-seqs 128"))
+ROOT = "c0"
 OVERFLOW = (AttachmentRef("fp8_overflow", "dir", "b" * 64),)
+NAN = (AttachmentRef("nan_logits", "dir", "d" * 64),)
 FIX = delta("--kv-cache-dtype fp8 --clamp-scales")
+GUARD = delta("--guard-nan-logits")
+MERGE = delta("--max-num-seqs 256")
 
 
 class _Rig:
@@ -123,3 +134,125 @@ async def test_a_cancelled_run_takes_its_test_back(tmp_path):
 
     assert rig.toolbox.cancelled == ["p1"]
     assert (await rig.notebook.record("p1")).withdrawal_reason == "cancelled by its caller"
+
+
+class _Session(_Rig):
+    """``c0`` is the root; ``s1``'s fix ``c1`` carries the case ``fp8_overflow`` (request ``p1``) and ``s2``'s fix
+    ``c2`` the case ``nan_logits`` (``p2``). Each case's answer is in ``answers``, ``not_reproduced`` until set."""
+
+    def __init__(self, root):
+        self.answers = {}
+        super().__init__(root, lambda request: self.answers.get(request.attachments[0].id, NOT_REPRODUCED))
+        self.scheduler = LocalNotebook(root, Writer(Role.SCHEDULER, "scheduler"))
+        self.repo = InMemoryRepo(BASELINE)
+        self.regression = RegressionSet(self.notebook, self.runner)
+
+    async def start(self) -> None:
+        await self.scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=ROOT))
+        await self.notebook.write_baseline(BaselineRecord(ROOT, {"output_tps": 1000.0}, {}, {}, ("b1", "b2")))
+        await self._fix("s1", FIX, OVERFLOW)
+        await self._fix("s2", GUARD, NAN)
+
+    async def _fix(self, branch, change, case) -> None:
+        await self.scheduler.record_lineage(LineageEvent(LineageKind.OPEN, branch, from_commit=ROOT, reason="opened"))
+        await self.repo.create_branch(branch, ROOT)
+        measured = TestRequest(TestKind.TEST, Purpose.EXPLORE, branch, ROOT, change, request_id=f"r-{branch}")
+        await self.toolbox.notebook.write_request(measured)
+        await self.toolbox.notebook.write_result(result(measured.request_id))
+        commit = await self.repo.commit(branch, ROOT, apply(BASELINE, change), "a correctness fix")
+        flat = judgement(0.1, (measured.request_id,), verdict=Verdict.FLAT, fixes_correctness=True)
+        await self.notebook.write_judgement(measured.request_id, flat, Conclusion.COMMITTED_WITH_REPRO, commit)
+        repro = TestRequest(TestKind.REPRO, Purpose.REPRO, branch, ROOT, change, attachments=case)
+        case_request = await self.toolbox.submit_test(repro)
+        await self.notebook.add_regression_case(RegressionCase(case[0].id, commit, case_request))
+
+    def runs(self) -> list[TestRequest]:
+        """The repro tests run after the session's own two."""
+
+        return self.toolbox.submitted[2:]
+
+
+@pytest.fixture
+async def session(tmp_path):
+    session = _Session(tmp_path / "notebook")
+    await session.start()
+    return session
+
+
+async def test_a_commit_no_fix_built_on_passes_without_a_test(session):
+    outcome = await session.regression.check(ROOT, MERGE, sources=())
+
+    assert outcome == RegressionOutcome(True)
+    assert session.runs() == []
+
+
+async def test_each_case_of_the_base_and_the_sources_runs_once_on_the_candidate_concurrently(session):
+    session.toolbox.hold = True
+    checking = asyncio.create_task(session.regression.check("c1", MERGE, sources=("c2", "c1")))
+    while len(session.runs()) < 2:
+        await asyncio.sleep(0)
+
+    await session.toolbox.finish()
+
+    assert await checking == RegressionOutcome(True)
+    runs = session.runs()
+    assert [(run.branch_id, run.parent_commit, run.delta) for run in runs] == [(INTEGRATION_BRANCH, "c1", MERGE)] * 2
+    assert {run.attachments for run in runs} == {OVERFLOW, NAN}
+    assert all((run.kind, run.purpose) == (TestKind.REPRO, Purpose.REPRO) for run in runs)
+
+
+@pytest.mark.parametrize(
+    ("answer", "cause"),
+    [
+        (REPRODUCED, "fp8_overflow: reproduced"),
+        (None, "fp8_overflow: withdrawn (the branch was stopped)"),
+        (Validity.CANDIDATE_FAILED, "fp8_overflow: ended candidate_failed (the server did not start)"),
+        ("", "fp8_overflow: succeeded without a verdict"),
+    ],
+)
+async def test_a_case_that_does_not_run_clean_fails_the_set_with_its_cause(session, answer, cause):
+    session.answers["fp8_overflow"] = answer
+
+    outcome = await session.regression.check("c2", MERGE, sources=("c1",))
+
+    assert outcome == RegressionOutcome(False, cause)
+
+
+async def test_a_case_whose_result_does_not_re_verify_fails_the_set(session):
+    session.verifier.rejects = frozenset({"p3"})
+
+    outcome = await session.regression.check("c1", MERGE, sources=())
+
+    assert outcome == RegressionOutcome(
+        False, "fp8_overflow: p3 did not re-verify: the manifest hash is not the recorded one"
+    )
+
+
+async def test_a_case_the_toolbox_refuses_fails_the_set(session):
+    session.toolbox.refuse = lambda request: True
+
+    outcome = await session.regression.check("c1", MERGE, sources=())
+
+    assert not outcome.passed
+    assert outcome.reason.startswith("fp8_overflow: refused by the toolbox (unknown_parent:")
+
+
+async def test_every_failed_case_is_named(session):
+    session.answers.update({"fp8_overflow": REPRODUCED, "nan_logits": None})
+
+    outcome = await session.regression.check("c1", MERGE, sources=("c2",))
+
+    assert outcome.reason == "fp8_overflow: reproduced; nan_logits: withdrawn (the branch was stopped)"
+
+
+async def test_a_cancelled_check_takes_every_case_back(session):
+    session.toolbox.hold = True
+    checking = asyncio.create_task(session.regression.check("c1", MERGE, sources=("c2",)))
+    while len(session.runs()) < 2:
+        await asyncio.sleep(0)
+
+    checking.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await checking
+
+    assert sorted(session.toolbox.cancelled) == ["p3", "p4"]

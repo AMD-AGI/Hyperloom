@@ -5,24 +5,36 @@
 
 A reproduction case is the attachments of a repro test: a directory with a ``repro.sh`` at its top, whose verdict on a
 commit is ``reproduced`` (the failure occurs) or ``not_reproduced`` (it ran clean). :class:`ReproRunner` is the one
-place that submits repro tests.
+place that submits repro tests; :class:`RegressionSet` runs the cases of every fix a commit builds on.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Iterable
 from dataclasses import dataclass
+from typing import Protocol, TypeVar
 
-from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind, TestRequest, Validity
+from hyperloom.contracts.measurement import (
+    NOT_REPRODUCED,
+    AttachmentRef,
+    Purpose,
+    TestKind,
+    TestRequest,
+    Validity,
+)
 from hyperloom.contracts.recipe import RecipeDelta
-from hyperloom_multibranch.contracts.gate import ResultUnverified, ResultVerifier
-from hyperloom_multibranch.contracts.notebook.interfaces import RecordSearch
-from hyperloom_multibranch.contracts.notebook.records import TestRecord
+from hyperloom_multibranch.contracts.gate import RegressionOutcome, ResultUnverified, ResultVerifier
+from hyperloom_multibranch.contracts.notebook.interfaces import CommitQuery, RecordSearch
+from hyperloom_multibranch.contracts.notebook.records import RegressionCase, TestRecord
+from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.toolbox import Backpressure, RequestRejected, Toolbox
 from hyperloom_multibranch.rulegate.service import Polling
 
 #: Seconds before a repro test the toolbox refused with backpressure is submitted again.
 RESUBMIT_SECONDS = 30.0
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -108,4 +120,52 @@ class ReproRunner:
         return ReproRun(request_id, verdict=result.repro_verdict)
 
 
-__all__ = ["RESUBMIT_SECONDS", "ReproRun", "ReproRunner"]
+class RegressionNotebook(RecordSearch, CommitQuery, Protocol):
+    """What the regression set reads: the cases of a commit's ancestry and the repro test each case came from."""
+
+
+class RegressionSet:
+    """The session's :class:`~hyperloom_multibranch.contracts.gate.RegressionCheck`, running each case on the
+    integration branch with ``runner``, with the attachments of the repro test the case was registered from."""
+
+    def __init__(self, notebook: RegressionNotebook, runner: ReproRunner) -> None:
+        self._notebook = notebook
+        self._runner = runner
+
+    async def check(
+        self, base_commit: str, candidate_delta: RecipeDelta, *, sources: tuple[str, ...]
+    ) -> RegressionOutcome:
+        cases = await self._cases((base_commit, *sources))
+        outcomes = await _gathered(self._outcome(case, base_commit, candidate_delta) for case in cases)
+        failed = [f"{case.case_ref}: {outcome}" for case, outcome in zip(cases, outcomes) if outcome != NOT_REPRODUCED]
+        return RegressionOutcome(not failed, "; ".join(failed))
+
+    async def _cases(self, commits: Iterable[str]) -> list[RegressionCase]:
+        """Every commit's cases, each once, in the order they are first found."""
+
+        found: dict[str, RegressionCase] = {}
+        for commit in commits:
+            for case in await self._notebook.regression_cases_for(commit):
+                found.setdefault(case.request_id, case)
+        return list(found.values())
+
+    async def _outcome(self, case: RegressionCase, commit: str, delta: RecipeDelta) -> str:
+        attachments = (await self._notebook.record(case.request_id)).request.attachments
+        run = await self._runner.run(commit, delta, attachments, branch=INTEGRATION_BRANCH)
+        return run.outcome
+
+
+async def _gathered(awaitables: Iterable[Awaitable[T]]) -> list[T]:
+    """Await every one concurrently; once one raises, or the caller is cancelled, the others are cancelled and awaited,
+    so each takes its test back before this returns."""
+
+    tasks = [asyncio.ensure_future(awaitable) for awaitable in awaitables]
+    try:
+        return list(await asyncio.gather(*tasks))
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+__all__ = ["RESUBMIT_SECONDS", "RegressionNotebook", "RegressionSet", "ReproRun", "ReproRunner"]
