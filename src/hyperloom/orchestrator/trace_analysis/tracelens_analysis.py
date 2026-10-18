@@ -253,7 +253,7 @@ def _graph_coverage_from_raw_trace(trace_path: str | Path | None) -> dict[str, A
     try:
         from . import _bypass_trace_reader as _reader
 
-        analyze = _reader.analyze_trace(str(trace_path), top_k=1, emit_launches=False)
+        analyze = _reader.analyze_trace(str(trace_path), _reader.TraceAnalysisOptions(top_k=1, emit_launches=False))
         if analyze.get("truncated"):
             return {}
         cov = analyze.get("graph_coverage") if isinstance(analyze, dict) else None

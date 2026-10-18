@@ -355,7 +355,7 @@ def test_reader_enriches_launches_and_feeds_producer(tmp_path):
     with gzip.open(trace, "wt", encoding="utf-8") as fh:
         json.dump({"traceEvents": events}, fh)
 
-    analysis = reader.analyze_trace(trace, top_k=0, emit_launches=True)
+    analysis = reader.analyze_trace(trace, reader.TraceAnalysisOptions(top_k=0, emit_launches=True))
     launches = analysis["kernel_launches"]
     assert launches and launches[0]["shapes"] == [[64, 4096], [4096, 4096]]
     assert launches[0]["dtypes"] == ["c10::BFloat16", "c10::BFloat16"]

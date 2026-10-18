@@ -796,7 +796,7 @@ def test_capture_shards_are_capped_by_default(tmp_path, monkeypatch):
     )
     analyzed: list[object] = []
 
-    def _analyze(path, **kw):
+    def _analyze(path, options):
         analyzed.append(path)
         return {"status": "empty"}
 
@@ -896,7 +896,7 @@ def test_reader_marks_graph_attributed_not_unlinked(tmp_path):
     # graph_under_recorded.
     trace = tmp_path / "g.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _graph_under_recorded_events()}).encode("utf-8"))
-    out = bta._reader.analyze_trace(str(trace), top_k=0)
+    out = bta._reader.analyze_trace(str(trace), bta._reader.TraceAnalysisOptions(top_k=0))
     attr = out["attribution"]
     cov = out["graph_coverage"]
     assert attr["graph_mode"] is True
@@ -912,7 +912,7 @@ def test_reader_marks_graph_attributed_not_unlinked(tmp_path):
 def test_reader_no_graph_mode_when_no_graph_launches(tmp_path):
     trace = tmp_path / "ng.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _TRACE_EVENTS}).encode("utf-8"))
-    out = bta._reader.analyze_trace(str(trace), top_k=0)
+    out = bta._reader.analyze_trace(str(trace), bta._reader.TraceAnalysisOptions(top_k=0))
     assert out["attribution"]["graph_mode"] is False
     assert out["graph_coverage"]["graph_under_recorded"] is False
 
@@ -954,7 +954,7 @@ def _graph_partial_replay_events():
 def test_graph_under_recorded_partial_replay_moderate_busy(tmp_path):
     trace = tmp_path / "partial.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _graph_partial_replay_events()}).encode("utf-8"))
-    cov = bta._reader.analyze_trace(str(trace), top_k=0)["graph_coverage"]
+    cov = bta._reader.analyze_trace(str(trace), bta._reader.TraceAnalysisOptions(top_k=0))["graph_coverage"]
     assert cov["graph_launch_count"] == 3
     assert 0.5 < cov["busy_fraction"] < 0.9
     assert cov["graph_under_recorded"] is True
@@ -968,7 +968,7 @@ def test_single_graph_launch_low_busy_not_under_recorded(tmp_path):
     ]
     trace = tmp_path / "single.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": events}).encode("utf-8"))
-    cov = bta._reader.analyze_trace(str(trace), top_k=0)["graph_coverage"]
+    cov = bta._reader.analyze_trace(str(trace), bta._reader.TraceAnalysisOptions(top_k=0))["graph_coverage"]
     assert cov["graph_launch_count"] == 1
     assert cov["graph_under_recorded"] is False
 
@@ -997,7 +997,7 @@ def _graph_fully_recorded_idle_events():
 def test_graph_fully_recorded_low_busy_not_under_recorded(tmp_path):
     trace = tmp_path / "idle.trace.json"
     trace.write_bytes(json.dumps({"traceEvents": _graph_fully_recorded_idle_events()}).encode("utf-8"))
-    cov = bta._reader.analyze_trace(str(trace), top_k=0)["graph_coverage"]
+    cov = bta._reader.analyze_trace(str(trace), bta._reader.TraceAnalysisOptions(top_k=0))["graph_coverage"]
     assert cov["graph_launch_count"] == 4
     assert cov["graph_launches_with_kernels"] == 4
     assert cov["busy_fraction"] < 0.5
@@ -1031,16 +1031,11 @@ def test_finalize_graph_coverage_is_whole_trace_scoped_under_steady_window():
         ("graph_k2", 100.0, 7, 6_000_000.0, 6_000_100.0),
         ("graph_k3", 100.0, 8, 9_000_000.0, 9_000_100.0),
     ]
+    buffers = bta._reader._TraceBuffers(k_events=k_events, graph_launch_corrs={5, 6, 7, 8})
     out = bta._reader._finalize(
-        k_events,
-        [],
-        {},
-        {},
-        {},
+        buffers,
         window=(0.0, 2_000_000.0),  # clips to only the corr-5 replay
         top_k=0,
-        graph_launch_corrs=frozenset({5, 6, 7, 8}),
-        graph_launch_count=4,
     )
     cov = out["graph_coverage"]
     assert cov["graph_launch_count"] == 4
@@ -1069,13 +1064,13 @@ def test_graph_launch_events_required_for_detection(tmp_path):
     # Raw trace (with hipGraphLaunch events) -> detected as graph, under-recorded.
     raw = tmp_path / "raw.trace.json"
     raw.write_bytes(json.dumps({"traceEvents": _graph_under_recorded_events()}).encode("utf-8"))
-    raw_cov = bta._reader.analyze_trace(str(raw), top_k=0)["graph_coverage"]
+    raw_cov = bta._reader.analyze_trace(str(raw), bta._reader.TraceAnalysisOptions(top_k=0))["graph_coverage"]
     assert raw_cov["graph_mode"] is True
     assert raw_cov["graph_under_recorded"] is True
     # Chunk with the launch runtime events stripped -> looks non-graph, so the artifact would be missed.
     chunk = tmp_path / "chunk.trace.json"
     chunk.write_bytes(json.dumps({"traceEvents": _graph_launch_stripped_events()}).encode("utf-8"))
-    chunk_cov = bta._reader.analyze_trace(str(chunk), top_k=0)["graph_coverage"]
+    chunk_cov = bta._reader.analyze_trace(str(chunk), bta._reader.TraceAnalysisOptions(top_k=0))["graph_coverage"]
     assert chunk_cov["graph_mode"] is False
     assert chunk_cov["graph_under_recorded"] is False
 

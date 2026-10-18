@@ -321,7 +321,9 @@ def _maybe_build_shape_manifest(
         capture_hashes: dict[str, str] = {}
         variant_meta: dict[str, dict[str, Any]] = {}
         for path, label, mode in shards:
-            shard_an = _reader.analyze_trace(path, top_k=0, steady_state=False, emit_launches=True)
+            shard_an = _reader.analyze_trace(
+                path, _reader.TraceAnalysisOptions(top_k=0, steady_state=False, emit_launches=True)
+            )
             if shard_an.get("status") != "ok" or shard_an.get("truncated"):
                 continue
             capture_variants.append((label, shard_an))
@@ -488,12 +490,14 @@ def main(argv: list[str] | None = None) -> int:
             # top_k=0 -> keep all device-kernel aggregates; candidate slicing uses top_k.
             analyze = _reader.analyze_trace(
                 args.trace_input,
-                top_k=0,
-                steady_state=enable_steady,
-                framework=args.framework,
-                emit_launches=True,
-                require_single_rank=args.require_single_rank,
-                tensor_parallel_size=args.tensor_parallel_size or None,
+                _reader.TraceAnalysisOptions(
+                    top_k=0,
+                    steady_state=enable_steady,
+                    framework=args.framework,
+                    emit_launches=True,
+                    require_single_rank=args.require_single_rank,
+                    tensor_parallel_size=args.tensor_parallel_size or None,
+                ),
             )
         except Exception as exc:  # noqa: BLE001 — never abort the pipeline
             analyze = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}

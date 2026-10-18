@@ -15,6 +15,7 @@ from typing import Any, Iterable, Sequence
 
 from ._bypass_trace_reader import (
     _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX,
+    TraceAnalysisOptions,
     _MAX_EVENT_CHARS,
     _MAX_TRACE_PREFIX_CHARS,
     _open_trace_binary,
@@ -661,7 +662,7 @@ def certify_trace_dir(
     # When the live resolver would open a different file, measure that file too.
     production_pick = None
     if inv["production_selected_path"] and inv["production_selected_path"] != selected:
-        probe = analyze_trace(inv["production_selected_path"], top_k=1, steady_state=False)
+        probe = analyze_trace(inv["production_selected_path"], TraceAnalysisOptions(top_k=1, steady_state=False))
         # ``analyze_trace`` reports the kernel count inside ``attribution`` and has no ``parse_ok`` key at all --
         # parse health is the emptiness of ``stream_errors``.
         probe_errors = probe.get("stream_errors") or []
@@ -677,7 +678,7 @@ def certify_trace_dir(
         record["trace_dir_level"]["production_pick_probe"] = production_pick
 
     # Pass 1: the shipping reader, whole-trace scope. Groups 1, 3, 4, 5.
-    analysis = analyze_trace(sel, top_k=1, steady_state=False, framework=framework)
+    analysis = analyze_trace(sel, TraceAnalysisOptions(top_k=1, steady_state=False, framework=framework))
     # Pass 2: step structure and subtree attribution. Groups 6, 7, 8.
     sp = StepPass()
     pass2_errors = sp.scan(sel)
