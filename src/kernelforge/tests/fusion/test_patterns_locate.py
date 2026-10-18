@@ -10,7 +10,7 @@ import json
 from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares
 from kernelforge.fusion.locate import FrameworkInstall, build_recipes
 from kernelforge.fusion.patterns import match_patterns
-from kernelforge.fusion.report import build_manifest
+from kernelforge.fusion.report import LocatedFusions, ManifestSubject, build_manifest
 from kernelforge.fusion.shapes import resolve_decode_shapes
 
 
@@ -101,12 +101,8 @@ class TestBuildRecipesAndManifest:
         d = _candidate_diag({"gemm": 0.45, "add": 0.18, "rmsnorm": 0.12})
         recipes = build_recipes(d, install=FrameworkInstall(framework="sglang"), model_path=str(tmp_path))
         m = build_manifest(
-            framework="sglang",
-            model_path=str(tmp_path),
-            model_type="toylm",
-            diagnosis=d,
-            recipe=recipes[0],
-            candidates=recipes,
+            ManifestSubject(framework="sglang", model_path=str(tmp_path), model_type="toylm", diagnosis=d),
+            LocatedFusions(recipe=recipes[0], candidates=recipes),
         )
         assert m["verdict"] == "candidate"
         assert m["fusion"]["pattern"] == "residual_add_rmsnorm"
@@ -119,6 +115,9 @@ class TestBuildRecipesAndManifest:
 
     def test_manifest_verdict_no_opportunity(self, tmp_path):
         d = diagnose_from_shares(TraceProfile({"gemm": 0.8, "attention": 0.15}, busy_fraction_of_wall=0.72))
-        m = build_manifest(framework="sglang", model_path=str(tmp_path), model_type="qwen3", diagnosis=d, recipe=None)
+        m = build_manifest(
+            ManifestSubject(framework="sglang", model_path=str(tmp_path), model_type="qwen3", diagnosis=d),
+            LocatedFusions(recipe=None),
+        )
         assert m["verdict"] == "no_opportunity"
         assert m["fusion_candidates"] == []

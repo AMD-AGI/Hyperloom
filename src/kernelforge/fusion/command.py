@@ -52,6 +52,9 @@ from .report import (
     ANCHOR_REPORT_NAME,
     ANCHOR_RESOLVED_VERDICT,
     LLM_UNAVAILABLE_VERDICT,
+    LocatedFusions,
+    ManifestSubject,
+    RunOutcome,
     build_manifest,
     write_anchor_report,
     write_manifest,
@@ -848,17 +851,7 @@ def run(
     top_recipe = recipes[0] if recipes else None
     _log_located_recipes(discovery, dry_run=dry_run)
 
-    def publish(
-        patches: Optional[list[dict[str, Any]]],
-        *,
-        validation=None,
-        artifacts=None,
-        loop=None,
-        compile_pass=None,
-        verdict_override: str = "",
-        error=None,
-        nomination=None,
-    ) -> tuple[dict[str, Any], Path]:
+    def publish(outcome: RunOutcome) -> tuple[dict[str, Any], Path]:
         """Write the run's manifest, as complete as the run has so far got.
 
         The aggregate is the only thing that points at a keeper, so it cannot wait for every
@@ -868,21 +861,13 @@ def run(
         compile-pass / error fields before any exit.
         """
         manifest = build_manifest(
-            framework=framework,
-            model_path=model_path,
-            model_type=model_type,
-            diagnosis=diagnosis,
-            recipe=top_recipe,
-            candidates=recipes,
-            anchor=anchor_report.to_dict() if anchor_report is not None else None,
-            validation=validation,
-            artifacts=artifacts,
-            loop=loop,
-            compile_pass=compile_pass,
-            verdict_override=verdict_override,
-            error=error,
-            patches=patches,
-            nomination=nomination,
+            ManifestSubject(framework=framework, model_path=model_path, model_type=model_type, diagnosis=diagnosis),
+            LocatedFusions(
+                recipe=top_recipe,
+                candidates=recipes,
+                anchor=anchor_report.to_dict() if anchor_report is not None else None,
+            ),
+            outcome,
         )
         if selected_agent is not None:
             manifest["agent_backend"] = selected_agent.name
@@ -1059,14 +1044,16 @@ def run(
         )
 
     manifest, path = publish(
-        patches_out,
-        validation=validation,
-        artifacts=artifacts,
-        loop=loop_manifest,
-        compile_pass=compile_pass_outcome,
-        verdict_override=_verdict_override(llm_error, anchor_report, dry_run),
-        error=(llm_error.to_dict() if llm_error is not None else None),
-        nomination=nomination_summary,
+        RunOutcome(
+            patches=patches_out,
+            validation=validation,
+            artifacts=artifacts,
+            loop=loop_manifest,
+            compile_pass=compile_pass_outcome,
+            verdict_override=_verdict_override(llm_error, anchor_report, dry_run),
+            error=(llm_error.to_dict() if llm_error is not None else None),
+            nomination=nomination_summary,
+        )
     )
     log.info("wrote manifest: %s (verdict=%s)", path, manifest["verdict"])
     _echo_run_summary(manifest, path, recipes, compile_pass_outcome, validation)
@@ -1104,14 +1091,16 @@ def _publish_partial_nomination(
     _mirror_legacy_patch(best.patch_path, out)
     try:
         publish(
-            [_recipe_patch_envelope(p, repo_root=repo_root) for p in smoked],
-            artifacts=FusionArtifacts(patch=best.patch_path, repo_root=repo_root),
-            loop={
-                "kept": True,
-                "best": {"kernel_speedup": best.micro_speedup},
-                "best_env_flag": best.env_flag,
-                "termination_reason": "in_progress",
-            },
+            RunOutcome(
+                patches=[_recipe_patch_envelope(p, repo_root=repo_root) for p in smoked],
+                artifacts=FusionArtifacts(patch=best.patch_path, repo_root=repo_root),
+                loop={
+                    "kept": True,
+                    "best": {"kernel_speedup": best.micro_speedup},
+                    "best_env_flag": best.env_flag,
+                    "termination_reason": "in_progress",
+                },
+            )
         )
     except OSError as exc:
         # A manifest that could not be written is not a reason to drop a proven keeper; the
