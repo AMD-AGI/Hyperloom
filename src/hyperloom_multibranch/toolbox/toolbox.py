@@ -17,9 +17,9 @@ import time
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from hyperloom.contracts.measurement import FailureClass, TestRequest, TestResult, Validity
+from hyperloom.contracts.measurement import AttachmentRef, FailureClass, TestRequest, TestResult, Validity
 from hyperloom_multibranch.contracts.notebook.interfaces import (
     ClaimLost,
     ClaimService,
@@ -49,6 +49,7 @@ from hyperloom_multibranch.toolbox.analysis import (
     analysis_request,
 )
 from hyperloom_multibranch.toolbox.acceptance import Acceptance, MeasurementPlanner, check_kind
+from hyperloom_multibranch.toolbox.attachments import store_attachment
 from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES, AttemptRunner, Executor, TestJob
 from hyperloom_multibranch.toolbox.quarantine import Quarantine
 from hyperloom_multibranch.toolbox.queue import QueuedTest, QueuePolicy, WorkQueue, sandbox_priority
@@ -112,6 +113,8 @@ class RealToolbox:
     """
 
     trace_root: Path | None = None
+    #: The session's blob store (``put``/``get``) that ``put_attachment`` writes to; ``None``: attachments unsupported.
+    blobs: Any = None
 
     def __init__(
         self,
@@ -215,6 +218,13 @@ class RealToolbox:
         """The cards this toolbox can measure on; a toolbox with no card pool of its own reports it as unknown."""
 
         return MeasurementCapacity.unknown()
+
+    async def put_attachment(self, attachment_id: str, kind: Literal["file", "dir"], data: bytes) -> AttachmentRef:
+        """Keep ``data`` in the session's blob store for a repro request to carry; see the interface."""
+
+        if self.blobs is None:
+            raise RequestRejected("this toolbox has no blob store for attachments", "attachments_unsupported")
+        return store_attachment(self.blobs, attachment_id, kind, data)
 
     # --- beyond the interface ------------------------------------------------------------------------------------
 

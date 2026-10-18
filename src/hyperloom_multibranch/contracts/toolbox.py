@@ -21,9 +21,9 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Protocol
+from typing import Literal, Protocol
 
-from hyperloom.contracts.measurement import PRIORITY_HIGHEST, PRIORITY_LOWEST, TestRequest
+from hyperloom.contracts.measurement import PRIORITY_HIGHEST, PRIORITY_LOWEST, AttachmentRef, TestRequest
 from hyperloom_multibranch.contracts.notebook.interfaces import NodeHealth, TestRecordSink
 
 
@@ -81,6 +81,10 @@ REJECTION_CODES = (
     "speculative_context_copy_on_synthetic",  # an InferenceX candidate introduces or changes a context-copy draft
     "speculative_decoding_pinned",  # an AgentX candidate changes the draft or simulated acceptance its parent pins
     "unsupported_kind",  # the toolbox's backend does not run this kind of test (a local backend: profile, repro)
+    "attachment_too_large",  # ``put_attachment``: the data, or what a directory archive expands to, passes the cap
+    "attachment_unreadable",  # ``put_attachment``: a ``dir`` attachment is not a tar archive
+    "attachment_unsafe",  # ``put_attachment``: a ``dir`` archive has a path that escapes, a link, or too many entries
+    "attachments_unsupported",  # ``put_attachment``: this toolbox has no blob store to keep attachments in
 )
 
 
@@ -198,6 +202,14 @@ class Toolbox(Protocol):
 
     async def measurement_capacity(self) -> MeasurementCapacity:
         """The cards this toolbox can still measure on; read-only, see :class:`MeasurementCapacity`."""
+
+    async def put_attachment(self, attachment_id: str, kind: Literal["file", "dir"], data: bytes) -> AttachmentRef:
+        """Store ``data`` in the session's blob store and return the reference a repro ``TestRequest`` carries.
+
+        ``dir`` data is a tar archive of the directory. Content-addressed, so the same bytes twice give the same
+        reference. Raises :class:`RequestRejected` (``attachment_too_large``, ``attachment_unreadable``,
+        ``attachments_unsupported``) and stores nothing when the data is refused.
+        """
 
 
 __all__ = [

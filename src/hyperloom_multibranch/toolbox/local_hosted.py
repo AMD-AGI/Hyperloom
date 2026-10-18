@@ -248,4 +248,5 @@ def build_local_toolbox(
         tuning=ToolboxTuning(policy=_capped(options.policy, parallel), max_infra_retries=options.max_infra_retries),
     )
     toolbox.backend, toolbox.provider, toolbox.trace_root = backend, provider, directory
+    toolbox.blobs = spec.blobs
     return toolbox

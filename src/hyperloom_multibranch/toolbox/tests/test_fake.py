@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import gzip
+import io
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -491,3 +494,32 @@ async def test_the_fake_reverifies_the_result_it_produced_and_names_a_mismatch_o
     with pytest.raises(ResultUnverified) as stranger:
         await box.executor.reverify(replace(result, request_id="other"))
     assert stranger.value.reason == "the fake executor produced no result for this request"
+
+
+async def test_the_fake_keeps_an_attachment_and_returns_a_usable_ref() -> None:
+    fake = FakeToolbox()
+    ref = await fake.put_attachment("note-1", "file", b"hello")
+
+    assert (ref.id, ref.kind) == ("note-1", "file") and fake.blobs.get(ref.sha256) == b"hello"
+    assert await fake.put_attachment("note-1", "file", b"hello") == ref
+    with pytest.raises(RequestRejected) as refused:
+        await fake.put_attachment("case", "dir", b"not a tar")
+    assert refused.value.code == "attachment_unreadable"
+
+    escaping, buffer = b"x", io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        info = tarfile.TarInfo("../escape")
+        info.size = len(escaping)
+        tar.addfile(info, io.BytesIO(escaping))
+    with pytest.raises(RequestRejected) as unsafe:
+        await fake.put_attachment("case", "dir", buffer.getvalue())
+    assert unsafe.value.code == "attachment_unsafe"
+
+
+async def test_the_fake_refuses_an_attachment_id_the_sheet_would_refuse_and_a_truncated_archive() -> None:
+    fake = FakeToolbox()
+    with pytest.raises(RequestRejected, match="must match"):
+        await fake.put_attachment("../x", "file", b"hello")
+    with pytest.raises(RequestRejected) as truncated:
+        await fake.put_attachment("case", "dir", gzip.compress(b"x" * 2000)[:20])
+    assert truncated.value.code == "attachment_unreadable"

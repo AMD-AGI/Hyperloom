@@ -41,6 +41,7 @@ __all__ = [
     "SpecContext",
     "SpecRefused",
     "build_spec",
+    "dir_entries",
     "dir_manifest_sha256",
     "gpu_count_of",
     "split_result_dir",
@@ -260,6 +261,9 @@ def _dir_entries(ref: AttachmentRef, data: bytes) -> list[tuple[str, int, str]]:
         raise SpecRefused(
             "attachment_unreadable", f"attachment {ref.id}: not a tar archive ({type(exc).__name__})"
         ) from None
+
+
+dir_entries = _dir_entries  # public name for callers that vet a directory attachment before storing it
 
 
 def _attachment_entries(refs: Iterable[AttachmentRef], ctx: SpecContext) -> list[dict[str, str]]:

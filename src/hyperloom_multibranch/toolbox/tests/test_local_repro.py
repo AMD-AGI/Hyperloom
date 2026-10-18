@@ -12,9 +12,11 @@ the result and the verification again.
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import stat
 import sys
+import tarfile
 from dataclasses import replace
 from pathlib import Path
 
@@ -26,7 +28,8 @@ from hyperloom.measure.tests.repro_fixtures import case_attachment
 from hyperloom.measure.tests.test_hosted_real_runner import _git_repo, _point
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.toolbox import WorkloadKind
+from hyperloom.measure.hosted_spec import MAX_ATTACHMENT_BYTES
+from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.toolbox.local_hosted import (
     LocalHostedToolbox,
@@ -163,5 +166,54 @@ async def test_a_tampered_verdict_is_not_verified(tmp_path: Path, checkout: tupl
         archived.write_text(json.dumps({"verdict": "not_reproduced", "exit_code": 0}))
         with pytest.raises(ResultUnverified, match="bundle was rejected"):
             await executor.reverify(result)
+    finally:
+        await rig.toolbox.close()
+
+
+def _tar(script: str) -> bytes:
+    data, buffer = script.encode(), io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w") as tar:
+        info = tarfile.TarInfo("repro.sh")
+        info.size = len(data)
+        tar.addfile(info, io.BytesIO(data))
+    return buffer.getvalue()
+
+
+async def test_an_attachment_put_through_the_toolbox_is_the_case_a_repro_request_runs(
+    tmp_path: Path, checkout: tuple[Path, str]
+) -> None:
+    rig = await _rig(tmp_path, checkout)
+    try:
+        case = await rig.toolbox.put_attachment("case-9", "dir", _tar("exit 1\n"))
+        assert await rig.toolbox.put_attachment("case-9", "dir", _tar("exit 1\n")) == case  # content-addressed
+
+        request_id = await rig.toolbox.submit_test(req(kind=TestKind.REPRO, purpose=Purpose.REPRO, attachments=(case,)))
+        await asyncio.wait_for(rig.toolbox.drain(), 120)
+        entry = rig.toolbox._log.get(request_id)
+        assert entry is not None and entry.outcome is not None and "result" in entry.outcome, entry
+        result = TestResult.from_document(entry.outcome["result"])
+        assert result.validity is Validity.SUCCEEDED and result.repro_verdict == "reproduced", result
+    finally:
+        await rig.toolbox.close()
+
+
+@pytest.mark.parametrize(
+    ("data", "code"),
+    [
+        (b"\0" * (MAX_ATTACHMENT_BYTES + 1), "attachment_too_large"),
+        (b"this is not a tar archive", "attachment_unreadable"),
+    ],
+    ids=["oversized", "not_a_tar"],
+)
+async def test_an_oversized_or_non_tar_directory_attachment_is_refused_and_not_stored(
+    tmp_path: Path, checkout: tuple[Path, str], data: bytes, code: str
+) -> None:
+    rig = await _rig(tmp_path, checkout)
+    try:
+        with pytest.raises(RequestRejected) as refused:
+            await rig.toolbox.put_attachment("case-1", "dir", data)
+
+        assert refused.value.code == code
+        assert not any(rig.spec.blobs.root.iterdir())
     finally:
         await rig.toolbox.close()

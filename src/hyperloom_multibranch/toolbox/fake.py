@@ -26,6 +26,7 @@ from typing import Protocol
 
 from hyperloom.contracts.measurement import TestKind, TestRequest, TestResult, Validity
 from hyperloom.contracts.recipe import Recipe
+from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.notebook.interfaces import ClaimService, RecordSearch
 from hyperloom_multibranch.contracts.notebook.records import QuarantineEvent, Withdrawal
 from hyperloom_multibranch.contracts.toolbox import (
@@ -237,6 +238,8 @@ class FakeToolbox(RealToolbox):
         path = log_path or Path(self._scratch.name) / "submissions.jsonl"  # type: ignore[union-attr]
         self._rejections: list[Callable[[TestRequest], RequestRejected | None]] = []
         self._started = False
+        self._blob_scratch = tempfile.TemporaryDirectory(prefix="fake-blobs-")
+        self.blobs = LocalBlobStore(Path(self._blob_scratch.name))
         stores = ToolboxStores(
             log=SubmissionLog(path, str(self.config.campaign_id)),
             sink=self.notebook,  # type: ignore[arg-type]

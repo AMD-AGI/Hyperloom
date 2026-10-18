@@ -69,6 +69,7 @@ _FINGERPRINT_LEN = 16
 
 
 _ID_RE = re.compile(_ATTACHMENT_ID)
+ATTACHMENT_ID_RE = _ID_RE  # public name for callers that vet an attachment id before a sheet is built
 _COMMIT_RE = re.compile(_COMMIT)
 _MODE_RE = re.compile(r"0[0-7]{3}")
 

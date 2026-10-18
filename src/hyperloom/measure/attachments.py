@@ -18,7 +18,7 @@ from pathlib import Path, PurePosixPath
 
 from hyperloom.measure.spec import Attachment
 
-__all__ = ["AttachmentError", "place_attachments", "substitute"]
+__all__ = ["AttachmentError", "place_attachments", "safe_members", "substitute"]
 
 _PLACEHOLDER = re.compile(r"\$\{HL_ATTACH:([A-Za-z0-9][A-Za-z0-9._-]{0,63})\}")
 _MAX_MEMBERS = 100_000
@@ -37,6 +37,9 @@ def _safe_members(archive: tarfile.TarFile, attachment_id: str) -> list[tarfile.
         if path.is_absolute() or ".." in path.parts or not (member.isreg() or member.isdir()):
             raise AttachmentError(f"attachment {attachment_id}: refused entry {member.name!r}")
     return members
+
+
+safe_members = _safe_members  # public name for callers that vet an archive before it is stored
 
 
 def _unpack_dir(data: bytes, destination: Path, attachment_id: str) -> None:
