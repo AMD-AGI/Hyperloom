@@ -9,7 +9,8 @@ import dataclasses
 import subprocess
 from pathlib import Path
 
-from kernelforge.loop.insession_gate import GateMeasurement, GateScope, InSessionGate
+from kernelforge.loop.gate_settings import GateMeasurement, GateScope
+from kernelforge.loop.insession_gate import InSessionGate
 
 _MEASUREMENT_FIELDS = [field.name for field in dataclasses.fields(GateMeasurement)]
 _SCOPE_FIELDS = [field.name for field in dataclasses.fields(GateScope)]

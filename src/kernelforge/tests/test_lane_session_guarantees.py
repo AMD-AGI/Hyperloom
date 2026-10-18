@@ -29,6 +29,7 @@ import click
 import pytest
 
 import kernelforge.loop.insession_gate as gate_module
+from kernelforge.loop.gate_settings import GateMeasurement, GateScope
 import kernelforge.orchestrator.agent as agent_module
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
@@ -402,8 +403,8 @@ def test_both_gate_modes_share_one_protected_path_rule(tmp_path, stop_check):
     """Neither mode may re-derive what counts as the measurement surface."""
     workspace = _tree(tmp_path / "workspace")
     gate = gate_module.InSessionGate(
-        gate_module.GateMeasurement(driver_script=str(workspace / "forge_driver.py"), snr_threshold=30.0),
-        gate_module.GateScope(kernel_file=str(workspace / "src" / "kernel.py")),
+        GateMeasurement(driver_script=str(workspace / "forge_driver.py"), snr_threshold=30.0),
+        GateScope(kernel_file=str(workspace / "src" / "kernel.py")),
     )
 
     hooks = gate.make_agent_hooks(stop_check=stop_check)

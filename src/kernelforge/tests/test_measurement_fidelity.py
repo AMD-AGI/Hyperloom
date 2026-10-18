@@ -7,7 +7,8 @@ import asyncio
 import json
 import pathlib
 
-from kernelforge.loop.insession_gate import GateMeasurement, InSessionGate
+from kernelforge.loop.gate_settings import GateMeasurement
+from kernelforge.loop.insession_gate import InSessionGate
 from kernelforge.loop.scoring import (
     keep_score,
     passes_keep_threshold,

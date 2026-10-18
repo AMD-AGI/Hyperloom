@@ -87,6 +87,28 @@ def _gate_scoring_context(baseline_case_times: dict | None, best_mean_case_speed
     )
 
 
+def _gate_scope(
+    source_files: list[str],
+    is_repo_task: bool,
+    extra_protected_globs: list[str] | None,
+    extra_protected_paths: list[str] | None,
+) -> GateScope:
+    """What every session's gate protects, before the per-session kernel and workspace are known."""
+    return GateScope(
+        # Declared sources seed profiling/JIT orientation.
+        target_files=(source_files or None),
+        # Combine repo reference/test globs (repo tasks) with any caller-supplied protected globs (e.g. the
+        # rewrite port loop protects the source kernel it ports FROM, which is also the correctness oracle).
+        extra_protected_globs=(
+            (_REPO_EXTRA_PROTECTED_GLOBS if is_repo_task else []) + list(extra_protected_globs or [])
+        )
+        or None,
+        # Exact-path measurement files (e.g. the PORT phase's source kernel, which the driver imports as the
+        # oracle).
+        extra_protected_paths=extra_protected_paths,
+    )
+
+
 def _resolve_implementer_backend(config: Config, agent_backend: str | None, usage) -> tuple[Any, str]:
     """The backend this loop's sessions run on, and the provider that was asked for.
 
@@ -126,27 +148,26 @@ def _bullet_list(items: list[str]) -> str:
     return "\n".join(f"  - {item}" for item in items)
 
 
-def _assembly_target_section(source_files: list[str]) -> str:
-    """The prompt section of an assembly session: the declared ``.s`` is editable and everything else is frozen."""
-    return (
-        "## Editable assembly source\n"
-        + _bullet_list(source_files)
-        + "\nAll other tracked files are frozen, including the Python launcher and reference.\n"
-    )
-
-
 def _target_section(
     kernel_path: str,
     *,
     is_repo_task: bool,
     source_files: list[str],
     target_functions: list[str],
+    assembly_session: bool,
 ) -> str:
     """The prompt section naming what this session may edit, and what is only a hint.
 
     On a repository task the declared source files and target functions are
-    orientation, never the edit boundary.
+    orientation, never the edit boundary; an assembly session is the opposite,
+    with everything but the declared ``.s`` frozen.
     """
+    if assembly_session:
+        return (
+            "## Editable assembly source\n"
+            + _bullet_list(source_files)
+            + "\nAll other tracked files are frozen, including the Python launcher and reference.\n"
+        )
     if not (is_repo_task and (source_files or target_functions)):
         return f"## Target kernel\n{kernel_path}\n"
     section = (
@@ -578,19 +599,7 @@ Never `cat` a whole file — use the Read tool (it's cheaper than a shell pipe).
     # Without the stop check the gate is protection only: its hooks deny an edit or a shell write to the measurement
     # surface while the session runs, and nothing decides when the session may end.
     gate_stop_check = gate_enabled and session.insession_gate_stop_check
-    gate_scope = GateScope(
-        # Declared sources seed profiling/JIT orientation.
-        target_files=(source_files or None),
-        # Combine repo reference/test globs (repo tasks) with any caller-supplied protected globs (e.g. the
-        # rewrite port loop protects the source kernel it ports FROM, which is also the correctness oracle).
-        extra_protected_globs=(
-            (_REPO_EXTRA_PROTECTED_GLOBS if is_repo_task else []) + list(extra_protected_globs or [])
-        )
-        or None,
-        # Exact-path measurement files (e.g. the PORT phase's source kernel, which the driver imports as the
-        # oracle).
-        extra_protected_paths=extra_protected_paths,
-    )
+    gate_scope = _gate_scope(source_files, is_repo_task, extra_protected_globs, extra_protected_paths)
     gate_system_prompt = f"""\
 You are a GPU kernel optimization agent working in ONE self-correcting session.
 
@@ -710,15 +719,12 @@ Never `cat` a whole file — use the Read tool.
             session_sink.setdefault("session_started", True)
             session_sink["progress_log"] = progress_log
 
-        target_section = (
-            _assembly_target_section(source_files)
-            if assembly_session
-            else _target_section(
-                kernel_path,
-                is_repo_task=is_repo_task,
-                source_files=source_files,
-                target_functions=target_functions,
-            )
+        target_section = _target_section(
+            kernel_path,
+            is_repo_task=is_repo_task,
+            source_files=source_files,
+            target_functions=target_functions,
+            assembly_session=assembly_session,
         )
 
         # One value drives both the run spec's hard deadline and the deadline the session is told, so the enforced cut

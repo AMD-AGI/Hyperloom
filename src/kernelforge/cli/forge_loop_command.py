@@ -512,12 +512,7 @@ def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
     to the prep agent, and a preparation that fails ends the run rather than
     measuring against a driver nobody vouched for.
     """
-    config = run.config
-    workspace_dir = run.iter_config.workspace_dir
-    kernel = run.iter_config.kernel_file
     driver = run.iter_config.driver_script
-    target_functions_list = run.iter_config.target_functions
-    source_files_list = run.iter_config.source_files
     snr_threshold = run.iter_config.snr_threshold
     nproc_per_node = run.iter_config.nproc_per_node
     program_md_file = run.request.task_context.program_md_file
@@ -581,14 +576,14 @@ def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
             f"max_attempts={_tp.PREPARE_MAX_ATTEMPTS}"
         )
         prep = prepare_task_sync(
-            config=config,
+            config=run.config,
             task=PreparationTask(
-                workspace_dir=workspace_dir,
-                kernel=kernel,
+                workspace_dir=run.iter_config.workspace_dir,
+                kernel=run.iter_config.kernel_file,
                 driver=driver,
                 program_md=program_md,
-                target_functions=target_functions_list,
-                source_files=source_files_list,
+                target_functions=run.iter_config.target_functions,
+                source_files=run.iter_config.source_files,
                 snr_threshold=snr_threshold,
                 invocation_spec_file=invocation_spec_file or "",
                 expected_case_ids=expected_case_ids,
@@ -1715,7 +1710,7 @@ def forge_loop(request: ForgeLoopRequest):
     from kernelforge.loop.runner import IterationLoop, LoopAgents, LoopCallbacks
     from kernelforge.loop.runner import IterationConfig
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
-    from kernelforge.loop.insession_gate import GateMeasurement
+    from kernelforge.loop.gate_settings import GateMeasurement
     from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask, SessionOptions, make_agent_fn
     from kernelforge.roofline_ceiling.command import AnalystAgent
 

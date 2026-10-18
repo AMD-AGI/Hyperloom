@@ -6,7 +6,8 @@ from pathlib import Path
 
 import kernelforge.loop.insession_gate as gate_module
 import pytest
-from kernelforge.loop.insession_gate import GateMeasurement, GateScope, InSessionGate
+from kernelforge.loop.gate_settings import GateMeasurement, GateScope
+from kernelforge.loop.insession_gate import InSessionGate
 from kernelforge.llm.git import GitError
 
 

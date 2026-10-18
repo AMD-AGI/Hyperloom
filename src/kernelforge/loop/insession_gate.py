@@ -24,9 +24,9 @@ from kernelforge.llm.workspace_policy import (
     protected_path_inventory,
 )
 from kernelforge.llm.git import git
+from kernelforge.loop.gate_settings import GateMeasurement, GateScope
 from kernelforge.loop.jit_rebuild import JitRebuildUnavailable, force_jit_rebuild_for_changes
 from kernelforge.loop.scoring import (
-    DEFAULT_SNR_THRESHOLD_DB,
     KEEP_MEASUREMENT_COUNT,
     keep_score,
     passes_keep_threshold,
@@ -283,11 +283,6 @@ def _is_disposable_redirect_target(raw: str) -> bool:
     return not target or target == "/dev/null" or target.startswith(("/tmp/", "$tmp", "${tmp"))
 
 
-# Max times the Stop hook will BLOCK a stop for an unrestored protected-harness change before it gives up, allows the
-# stop, and hands off to the outer loop's force-REVERT.
-_MAX_STOP_BLOCKS = 3
-
-
 @dataclass(frozen=True)
 class _ProtectedFileState:
     """Restorable state for one protected filesystem path."""
@@ -445,32 +440,6 @@ def _python_write_targets(source: str) -> tuple[set[str], bool, bool]:
         if targets is not None:
             written.record(targets, constants)
     return written.paths, written.ambiguous, written.found_write
-
-
-@dataclass(frozen=True)
-class GateMeasurement:
-    """How the gate judges a candidate: its driver (and any interposed wrapper), threshold, budgets and timeouts."""
-
-    driver_script: str | None = None
-    snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB
-    max_blocks: int = 10
-    stage_timeout_sec: int = 1800
-    bench_timeout_sec: int = 300
-    bench_repeat: int = 1
-    correctness_only: bool = False
-    interposed_driver_path: str | None = None
-    max_stop_blocks: int = _MAX_STOP_BLOCKS
-
-
-@dataclass(frozen=True)
-class GateScope:
-    """What one session works on and what the gate refuses to let it touch beyond the driver."""
-
-    kernel_file: str = ""
-    target_files: list[str] | None = None
-    extra_protected_globs: list[str] | None = None
-    extra_protected_paths: list[str] | None = None
-    workspace: str | Path | None = None
 
 
 class InSessionGate:
