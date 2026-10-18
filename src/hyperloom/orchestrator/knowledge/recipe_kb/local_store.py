@@ -14,8 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from hyperloom.common.io import atomic_write_json
-from hyperloom.common.jsonio import read_json
+from hyperloom.common.io import WriteOptions, atomic_write_json
+from hyperloom.common.jsonio import read_json_strict
 from hyperloom.common.timeutil import now_iso
 
 from .canonical_id import (
@@ -70,7 +70,7 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
     try:
-        return read_json(path, strict=True, require_dict=True)
+        return read_json_strict(path, require_dict=True)
     except FileNotFoundError:
         # Race: file disappeared between is_file() and open(); treat as missing.
         return None
@@ -275,12 +275,7 @@ class LocalRecipeStore:
                         "snapshot": snapshot,
                     }
                     atomic_write_json(
-                        archive_path,
-                        archive_payload,
-                        indent=2,
-                        sort_keys=True,
-                        make_parents=True,
-                        fsync=True,
+                        archive_path, archive_payload, options=WriteOptions(make_parents=True, fsync=True)
                     )
 
             # Build payload via ``Recipe.from_dict`` so dataclass instances and dicts both round-trip into the same
@@ -321,12 +316,7 @@ class LocalRecipeStore:
             recipe = Recipe.from_dict(payload_dict)
             written = recipe.to_dict()
             atomic_write_json(
-                self._live_path(canonical_id),
-                written,
-                indent=2,
-                sort_keys=True,
-                make_parents=True,
-                fsync=True,
+                self._live_path(canonical_id), written, options=WriteOptions(make_parents=True, fsync=True)
             )
             counts = _collection_counts(written)
 
