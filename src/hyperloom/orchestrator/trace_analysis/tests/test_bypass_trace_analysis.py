@@ -696,7 +696,7 @@ def test_maybe_build_shape_manifest_enabled_caps_and_writes(tmp_path, monkeypatc
     monkeypatch.setattr(bta, "_sha256_file", lambda p: "hash")
     monkeypatch.setattr(bta._reader, "analyze_trace", lambda *a, **k: {"status": "ok"})
     monkeypatch.setattr(bta, "_build_manifest_provenance", lambda args: {"src": "stub"})
-    monkeypatch.setattr(bta._tsm, "build_shape_manifest", lambda **k: {"rows": [{"m": 1}], "warnings": []})
+    monkeypatch.setattr(bta._tsm, "build_shape_manifest", lambda *a, **k: {"rows": [{"m": 1}], "warnings": []})
     res = bta._maybe_build_shape_manifest(_mk_args(), {"trace_file": "main.json"}, tmp_path, generated_at="2026-01-01")
     assert res["status"] == "ok"
     assert res["variant_count"] == 1  # 2 shards capped to 1
@@ -714,7 +714,7 @@ def test_maybe_build_shape_manifest_bad_max_caps_and_skips_bad_shard(tmp_path, m
     _seq = iter([{"status": "ok"}, {"status": "error"}])
     monkeypatch.setattr(bta._reader, "analyze_trace", lambda *a, **k: next(_seq))
     monkeypatch.setattr(bta, "_build_manifest_provenance", lambda args: {})
-    monkeypatch.setattr(bta._tsm, "build_shape_manifest", lambda **k: {"rows": [], "warnings": ["w"]})
+    monkeypatch.setattr(bta._tsm, "build_shape_manifest", lambda *a, **k: {"rows": [], "warnings": ["w"]})
     res = bta._maybe_build_shape_manifest(_mk_args(analysis_mode=None), {"trace_file": ""}, tmp_path, generated_at="t0")
     assert res["status"] == "ok"
     assert res["variant_count"] == 1  # second (non-ok) shard skipped
@@ -769,7 +769,9 @@ def test_the_cap_keeps_a_deterministic_spread_of_batch_sizes(tmp_path, monkeypat
         monkeypatch.setattr(
             bta._tsm,
             "build_shape_manifest",
-            lambda **k: (seen.extend(label for label, _an in k["capture_variants"]), {"rows": [], "warnings": []})[1],
+            lambda main, captures, origin, **k: (seen.extend(c.label for c in captures), {"rows": [], "warnings": []})[
+                1
+            ],
         )
         bta._maybe_build_shape_manifest(_mk_args(), {"trace_file": ""}, tmp_path, generated_at="t0")
         return seen

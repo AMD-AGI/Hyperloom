@@ -317,35 +317,30 @@ def _maybe_build_shape_manifest(
                 shards = [shards[last]]
             else:
                 shards = [shards[round(i * last / (max_caps - 1))] for i in range(max_caps)]
-        capture_variants: list[tuple[str, dict[str, Any]]] = []
-        capture_hashes: dict[str, str] = {}
-        variant_meta: dict[str, dict[str, Any]] = {}
+        capture_variants: list[_tsm.CaptureShard] = []
         for path, label, mode in shards:
             shard_an = _reader.analyze_trace(
                 path, _reader.TraceAnalysisOptions(top_k=0, steady_state=False, emit_launches=True)
             )
             if shard_an.get("status") != "ok" or shard_an.get("truncated"):
                 continue
-            capture_variants.append((label, shard_an))
-            capture_hashes[label] = _sha256_file(path)
             bs_m = re.search(r"bs_(\d+)", label)
-            variant_meta[label] = {
-                "batch_size": bs_m.group(1) if bs_m else None,
-                "mode": mode,
-                "file": path.name,
-            }
+            capture_variants.append(
+                _tsm.CaptureShard(
+                    label=label,
+                    analysis=shard_an,
+                    trace_hash=_sha256_file(path),
+                    meta={"batch_size": bs_m.group(1) if bs_m else None, "mode": mode, "file": path.name},
+                )
+            )
 
         # phase hint from the analysis mode the coordinator forwards.
         phase_hint = (args.analysis_mode or "mixed").lower() or "mixed"
         manifest = _tsm.build_shape_manifest(
-            main_analysis=analyze,
-            capture_variants=capture_variants,
+            analyze,
+            capture_variants,
+            _tsm.ManifestOrigin(main_trace_hash=main_hash, generated_at=generated_at),
             provenance=_build_manifest_provenance(args),
-            main_trace_hash=main_hash,
-            capture_trace_hashes=capture_hashes,
-            variant_meta=variant_meta,
-            analysis_route="bypass",
-            generated_at=generated_at,
             phase_hint=phase_hint,
         )
         out_path = bypass_dir / "trace_shape_manifest.json"
