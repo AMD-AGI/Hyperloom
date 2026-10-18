@@ -159,12 +159,14 @@ def build(session_dir: Path | str) -> dict[str, Any]:
     outcome = _safe_collect(
         "outcome",
         lambda: collectors.collect_v6_outcome(
-            session=session_section,
-            close=v6_close,
-            state=state,
-            timeline=timeline,
-            warnings=warnings,
-            recorded=assembled.get("outcome"),
+            collectors.OutcomeSources(
+                session=session_section,
+                close=v6_close,
+                state=state,
+                timeline=timeline,
+                recorded=assembled.get("outcome"),
+            ),
+            warnings,
         ),
         warnings,
         default={},
@@ -172,14 +174,16 @@ def build(session_dir: Path | str) -> dict[str, Any]:
     metadata = _safe_collect(
         "metadata",
         lambda: collectors.collect_v6_metadata(
+            collectors.MetadataSources(
+                session=session_section,
+                workload=workload,
+                model_info=model_info,
+                langfuse=langfuse,
+                state=state,
+                recorded=assembled.get("metadata"),
+            ),
             exported_at_utc=exported_at,
-            session=session_section,
-            workload=workload,
-            model_info=model_info,
-            langfuse=langfuse,
-            state=state,
             warnings=warnings,
-            recorded=assembled.get("metadata"),
         ),
         warnings,
         default={},

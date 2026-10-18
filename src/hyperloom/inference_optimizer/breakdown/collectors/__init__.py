@@ -37,6 +37,8 @@ from .sessions import (
 )
 from .langfuse import collect_langfuse as collect_langfuse
 from .v6 import (
+    MetadataSources as MetadataSources,
+    OutcomeSources as OutcomeSources,
     collect_v6_metadata as collect_v6_metadata,
     langfuse_block as langfuse_block,
     collect_v6_outcome as collect_v6_outcome,
@@ -46,6 +48,8 @@ from .v6_close import collect_v6_close as collect_v6_close
 from .v6_critic import collect_v6_critic as collect_v6_critic
 
 __all__ = [
+    "MetadataSources",
+    "OutcomeSources",
     "collect_langfuse",
     "collect_model_info",
     "collect_session",

@@ -190,10 +190,9 @@ def test_the_delivered_manifest_describes_the_rebuilt_bundle(tmp_path):
 # ---------------------------------------------------------------------------
 def _v6_outcome(timeline: list | None = None) -> dict:
     return v6_collectors.collect_v6_outcome(
-        session={"stop_reason": "target_reached"},
-        close={},
-        state={"phase": "CLOSE"},
-        timeline=timeline or [],
+        v6_collectors.OutcomeSources(
+            session={"stop_reason": "target_reached"}, close={}, state={"phase": "CLOSE"}, timeline=timeline or []
+        )
     )
 
 
