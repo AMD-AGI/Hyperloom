@@ -262,10 +262,9 @@ def _discover_anchored(
         recipes = discover_anchored_recipes(
             DiscoveryTarget(
                 model_type=model_type,
-                framework=framework,
+                install=FrameworkInstall(framework, framework_root),
                 source_file=source_file,
                 shapes=shapes,
-                framework_root=framework_root,
                 repo_scope=repo_scope,
                 repo_root=discovery_root,
             ),
@@ -325,12 +324,11 @@ def _discover_by_llm(
             diagnosis,
             DiscoveryTarget(
                 model_type=model_type,
-                framework=framework,
+                # The same install build_recipes gets: each proposal is checked against THIS install's compile-pass
+                # config, and that verdict rewrites the pattern id.
+                install=FrameworkInstall(framework, framework_root),
                 source_file=source_file,
                 shapes=shapes,
-                # Forwarded for the same reason build_recipes gets it: each proposal is checked against THIS install's
-                # compile-pass config, and that verdict rewrites the pattern id.
-                framework_root=framework_root,
                 repo_scope=repo_scope,
                 repo_root=discovery_workdir,
             ),

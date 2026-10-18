@@ -285,7 +285,12 @@ def anchor_trace_evidence(report: AnchorReport) -> dict[str, Any]:
 
 def build_anchored_discovery_prompt(target: DiscoveryTarget, source_files: Sequence[str], report: AnchorReport) -> str:
     """Assemble a discovery prompt whose target is fixed and whose fusion is not; ``source_files`` are embedded."""
-    model_type, framework, shapes, repo_scope = target.model_type, target.framework, target.shapes, target.repo_scope
+    model_type, framework, shapes, repo_scope = (
+        target.model_type,
+        target.install.framework,
+        target.shapes,
+        target.repo_scope,
+    )
     if repo_scope:
         source_block = render_repo_scope_brief(
             target.repo_root,

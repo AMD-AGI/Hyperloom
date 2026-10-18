@@ -36,6 +36,7 @@ from .llm_failure import (
     retry_delay,
 )
 from .locate import (
+    FrameworkInstall,
     _read_source,
     _unclaimable_note,
     covered_by_vllm_compile_pass,
@@ -44,7 +45,7 @@ from .locate import (
     vllm_compile_pass_state,
 )
 from .models import Diagnosis, Recipe
-from .vllm_passes import PassState, resolve_target_runtime
+from .vllm_passes import resolve_target_runtime
 
 log = logging.getLogger("forge_fusion")
 
@@ -53,14 +54,12 @@ LlmFn = Callable[[str], str]  # prompt -> raw model text (expected to contain JS
 
 @dataclass(frozen=True)
 class DiscoveryTarget:
-    """What discovery proposes fusions for: model, framework install and its pass probe, source, shapes, scope."""
+    """What discovery proposes fusions for: the model, the framework install, the source file, shapes and scope."""
 
     model_type: str
-    framework: str
+    install: FrameworkInstall
     source_file: str
     shapes: dict[str, Any]
-    framework_root: str = ""
-    pass_probe: Optional[Callable[[str], PassState]] = None
     repo_scope: bool = False
     repo_root: str = ""
 
@@ -751,7 +750,12 @@ def build_discovery_prompt(
     Repo scope embeds no source at all and points the agent at the repository
     instead, naming the target's source file as the entry point to start from.
     """
-    model_type, framework, shapes, repo_scope = target.model_type, target.framework, target.shapes, target.repo_scope
+    model_type, framework, shapes, repo_scope = (
+        target.model_type,
+        target.install.framework,
+        target.shapes,
+        target.repo_scope,
+    )
     diagnosis, hot_kernels = evidence.diagnosis, evidence.hot_kernels
     if repo_scope:
         source_block = render_repo_scope_brief(
@@ -1082,9 +1086,14 @@ def parse_discovered_recipes(
     files IT named. A proposal whose call site does not resolve is dropped rather
     than retargeted onto the target's source file.
     """
-    model_type, framework, source_file, shapes = target.model_type, target.framework, target.source_file, target.shapes
-    repo_scope, repo_root, pass_probe = target.repo_scope, target.repo_root, target.pass_probe
-    runtime = resolve_target_runtime(framework, framework_root=target.framework_root)
+    model_type, framework, source_file, shapes = (
+        target.model_type,
+        target.install.framework,
+        target.source_file,
+        target.shapes,
+    )
+    repo_scope, repo_root, pass_probe = target.repo_scope, target.repo_root, target.install.pass_probe
+    runtime = resolve_target_runtime(framework, framework_root=target.install.framework_root)
     scope_files = [p for p in [source_file] if p]
     # The same files the prompt embedded, re-read so the scope gate below judges a proposal against exactly the source
     # the model was shown. Repo scope embedded nothing, so there is no run-wide source text to judge against.

@@ -8,6 +8,7 @@ from __future__ import annotations
 import gzip
 import json
 
+from kernelforge.fusion.locate import FrameworkInstall
 from kernelforge.fusion.discover import DiscoveryEvidence, DiscoveryPrompting, DiscoveryTarget
 from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares
 from kernelforge.fusion.discover import (
@@ -283,7 +284,12 @@ class TestDiscoveryPrompt:
         d = _candidate_diag()
         hot = [{"name": "vectorized_elementwise mul", "category": "mul", "share": 0.14, "count": 60, "avg_us": 3.2}]
         p = build_discovery_prompt(
-            DiscoveryTarget(model_type="zaya", framework="sglang", source_file="", shapes={"hidden_size": 2048}),
+            DiscoveryTarget(
+                model_type="zaya",
+                install=FrameworkInstall(framework="sglang"),
+                source_file="",
+                shapes={"hidden_size": 2048},
+            ),
             "class CCA:\n    def _normalize_qk(self, q, k): ...\n",
             DiscoveryEvidence(diagnosis=d, hot_kernels=hot),
         )
@@ -299,7 +305,12 @@ class TestDiscoveryPrompt:
     def test_prompt_includes_ordered_boundaries_and_existing_operator_evidence(self):
         d = _candidate_diag()
         prompt = build_discovery_prompt(
-            DiscoveryTarget(model_type="toy", framework="sglang", source_file="", shapes={"hidden_size": 4096}),
+            DiscoveryTarget(
+                model_type="toy",
+                install=FrameworkInstall(framework="sglang"),
+                source_file="",
+                shapes={"hidden_size": 4096},
+            ),
             "def forward(x): return self.mlp(x)\n",
             DiscoveryEvidence(
                 diagnosis=d,
@@ -331,7 +342,7 @@ class TestDiscoveryPrompt:
 
     def test_prompt_excludes_terminal_attention_from_the_fusable_span(self):
         prompt = build_discovery_prompt(
-            DiscoveryTarget(model_type="toy", framework="sglang", source_file="", shapes={}),
+            DiscoveryTarget(model_type="toy", install=FrameworkInstall(framework="sglang"), source_file="", shapes={}),
             "def forward(x): return x\n",
             DiscoveryEvidence(
                 diagnosis=_candidate_diag(),
@@ -355,7 +366,7 @@ class TestDiscoveryPrompt:
 
     def test_prompt_shows_recall_scores(self):
         prompt = build_discovery_prompt(
-            DiscoveryTarget(model_type="toy", framework="sglang", source_file="", shapes={}),
+            DiscoveryTarget(model_type="toy", install=FrameworkInstall(framework="sglang"), source_file="", shapes={}),
             "def forward(x): return x\n",
             DiscoveryEvidence(
                 diagnosis=_candidate_diag(),
@@ -403,7 +414,10 @@ class TestParse:
         recipes = parse_discovered_recipes(
             text,
             DiscoveryTarget(
-                model_type="zaya", framework="sglang", source_file="/sgl/models/zaya.py", shapes={"hidden_size": 2048}
+                model_type="zaya",
+                install=FrameworkInstall(framework="sglang"),
+                source_file="/sgl/models/zaya.py",
+                shapes={"hidden_size": 2048},
             ),
         )
         assert len(recipes) == 1
@@ -417,7 +431,10 @@ class TestParse:
     def test_ranks_by_priority(self):
         text = '[{"name":"a","priority":0.3},{"name":"b","priority":0.8}]'
         rs = parse_discovered_recipes(
-            text, DiscoveryTarget(model_type="zaya", framework="sglang", source_file="/x.py", shapes={})
+            text,
+            DiscoveryTarget(
+                model_type="zaya", install=FrameworkInstall(framework="sglang"), source_file="/x.py", shapes={}
+            ),
         )
         assert [r.pattern_id for r in rs] == ["llm:b", "llm:a"]
 
@@ -434,7 +451,10 @@ class TestParse:
         )
 
         recipe = parse_discovered_recipes(
-            text, DiscoveryTarget(model_type="toy", framework="sglang", source_file="/x.py", shapes={})
+            text,
+            DiscoveryTarget(
+                model_type="toy", install=FrameworkInstall(framework="sglang"), source_file="/x.py", shapes={}
+            ),
         )[0]
 
         assert recipe.candidate_kind == "integration"
@@ -455,7 +475,10 @@ class TestParse:
         )
 
         recipe = parse_discovered_recipes(
-            text, DiscoveryTarget(model_type="toy", framework="sglang", source_file="/x.py", shapes={})
+            text,
+            DiscoveryTarget(
+                model_type="toy", install=FrameworkInstall(framework="sglang"), source_file="/x.py", shapes={}
+            ),
         )[0]
 
         assert recipe.candidate_kind == "new_fusion"
@@ -474,7 +497,10 @@ class TestParse:
         )
 
         recipe = parse_discovered_recipes(
-            text, DiscoveryTarget(model_type="toy", framework="sglang", source_file="/x.py", shapes={})
+            text,
+            DiscoveryTarget(
+                model_type="toy", install=FrameworkInstall(framework="sglang"), source_file="/x.py", shapes={}
+            ),
         )[0]
 
         assert recipe.candidate_kind == "integration"
@@ -490,7 +516,10 @@ class TestParse:
             '  {"name": "c", "env_flag": "ZAYA_FUSED_C", "rationale": "this got cut o'
         )
         rs = parse_discovered_recipes(
-            text, DiscoveryTarget(model_type="zaya", framework="sglang", source_file="/x.py", shapes={})
+            text,
+            DiscoveryTarget(
+                model_type="zaya", install=FrameworkInstall(framework="sglang"), source_file="/x.py", shapes={}
+            ),
         )
         assert [r.pattern_id for r in rs] == ["llm:a", "llm:b"]  # 2 salvaged, ranked
         assert rs[0].env_flag == "ZAYA_FUSED_A"
@@ -498,7 +527,10 @@ class TestParse:
     def test_no_json_returns_empty(self):
         assert (
             parse_discovered_recipes(
-                "no json here", DiscoveryTarget(model_type="zaya", framework="sglang", source_file="/x.py", shapes={})
+                "no json here",
+                DiscoveryTarget(
+                    model_type="zaya", install=FrameworkInstall(framework="sglang"), source_file="/x.py", shapes={}
+                ),
             )
             == []
         )
@@ -506,7 +538,9 @@ class TestParse:
     def test_bare_array_without_fence(self):
         rs = parse_discovered_recipes(
             'prose [{"name":"x","env_flag":"ZAYA_FUSED_X"}] tail',
-            DiscoveryTarget(model_type="zaya", framework="sglang", source_file="/x.py", shapes={}),
+            DiscoveryTarget(
+                model_type="zaya", install=FrameworkInstall(framework="sglang"), source_file="/x.py", shapes={}
+            ),
         )
         assert len(rs) == 1 and rs[0].env_flag == "ZAYA_FUSED_X"
 
@@ -534,7 +568,12 @@ class TestDiscoverRecipes:
 
         recipes = discover_recipes(
             d,
-            DiscoveryTarget(model_type="zaya", framework="sglang", source_file=str(src), shapes={"hidden_size": 2048}),
+            DiscoveryTarget(
+                model_type="zaya",
+                install=FrameworkInstall(framework="sglang"),
+                source_file=str(src),
+                shapes={"hidden_size": 2048},
+            ),
             trace_path=str(trace),
             llm_fn=fake_llm,
         )
@@ -576,7 +615,9 @@ class TestDiscoverRecipes:
 
         recipes = discover_recipes(
             _candidate_diag(),
-            DiscoveryTarget(model_type="toy", framework="sglang", source_file=str(src), shapes={}),
+            DiscoveryTarget(
+                model_type="toy", install=FrameworkInstall(framework="sglang"), source_file=str(src), shapes={}
+            ),
             trace_path=str(trace),
             llm_fn=fake_llm,
             prompting=DiscoveryPrompting(knowledge_root=knowledge),
@@ -601,7 +642,9 @@ class TestDiscoverRecipes:
 
         discover_recipes(
             _candidate_diag(),
-            DiscoveryTarget(model_type="toy", framework="sglang", source_file=str(src), shapes={}),
+            DiscoveryTarget(
+                model_type="toy", install=FrameworkInstall(framework="sglang"), source_file=str(src), shapes={}
+            ),
             trace_path=str(trace),
             llm_fn=fake_llm,
             prompting=DiscoveryPrompting(max_fusions=3),
@@ -623,7 +666,9 @@ class TestDiscoverRecipes:
         def run():
             discover_recipes(
                 _candidate_diag(),
-                DiscoveryTarget(model_type="toy", framework="sglang", source_file=str(src), shapes={}),
+                DiscoveryTarget(
+                    model_type="toy", install=FrameworkInstall(framework="sglang"), source_file=str(src), shapes={}
+                ),
                 trace_path=str(trace),
                 llm_fn=fake_llm,
             )
@@ -649,7 +694,9 @@ class TestDiscoverRecipes:
         assert (
             discover_recipes(
                 d,
-                DiscoveryTarget(model_type="zaya", framework="sglang", source_file="/x.py", shapes={}),
+                DiscoveryTarget(
+                    model_type="zaya", install=FrameworkInstall(framework="sglang"), source_file="/x.py", shapes={}
+                ),
                 trace_path="/x",
                 llm_fn=fake_llm,
             )

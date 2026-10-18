@@ -16,6 +16,7 @@ import os
 import subprocess
 from pathlib import Path
 
+from kernelforge.fusion.locate import FrameworkInstall
 from kernelforge.fusion.discover import DiscoveryTarget
 from kernelforge.fusion.anchor import AnchorReport, Slot, build_anchored_discovery_prompt
 from kernelforge.fusion.campaign import (
@@ -97,7 +98,7 @@ def _parse(raw: str, *, root: Path, model_file: Path) -> list[Recipe]:
         raw,
         DiscoveryTarget(
             model_type="deepseek_v4",
-            framework="sglang",
+            install=FrameworkInstall(framework="sglang"),
             source_file=str(model_file),
             shapes={},
             repo_scope=True,
@@ -183,7 +184,7 @@ class TestPrompt:
         prompt = build_anchored_discovery_prompt(
             DiscoveryTarget(
                 model_type="deepseek_v4",
-                framework="sglang",
+                install=FrameworkInstall(framework="sglang"),
                 source_file="",
                 shapes={},
                 repo_scope=True,
@@ -204,7 +205,9 @@ class TestPrompt:
         _root, model_file, _runtime = _repo(tmp_path)
 
         prompt = build_anchored_discovery_prompt(
-            DiscoveryTarget(model_type="deepseek_v4", framework="sglang", source_file="", shapes={}),
+            DiscoveryTarget(
+                model_type="deepseek_v4", install=FrameworkInstall(framework="sglang"), source_file="", shapes={}
+            ),
             [str(model_file)],
             _anchor_report(),
         )

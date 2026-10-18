@@ -10,6 +10,7 @@ import json
 
 import pytest
 
+from kernelforge.fusion.locate import FrameworkInstall
 from kernelforge.fusion.discover import DiscoveryTarget
 from kernelforge.fusion.anchor import (
     AnchorResolutionError,
@@ -181,7 +182,12 @@ class TestPromptEvidence:
         model.write_text("class DeepseekV4Attention:\n    def forward(self): ...\n", encoding="utf-8")
 
         prompt = build_anchored_discovery_prompt(
-            DiscoveryTarget(model_type="deepseek_v4", framework="sglang", source_file="", shapes={"hidden_size": 2048}),
+            DiscoveryTarget(
+                model_type="deepseek_v4",
+                install=FrameworkInstall(framework="sglang"),
+                source_file="",
+                shapes={"hidden_size": 2048},
+            ),
             [str(model)],
             report,
         )

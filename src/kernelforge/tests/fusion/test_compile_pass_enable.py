@@ -197,7 +197,10 @@ class TestDiscoveryRoute:
         recipes = parse_discovered_recipes(
             self._payload(),
             DiscoveryTarget(
-                model_type="m", framework="vllm", source_file="/x.py", shapes={}, pass_probe=_fake_probe(enabled=False)
+                model_type="m",
+                install=FrameworkInstall(framework="vllm", pass_probe=_fake_probe(enabled=False)),
+                source_file="/x.py",
+                shapes={},
             ),
         )
         assert len(recipes) == 1
@@ -209,7 +212,10 @@ class TestDiscoveryRoute:
         recipes = parse_discovered_recipes(
             self._payload(),
             DiscoveryTarget(
-                model_type="m", framework="vllm", source_file="/x.py", shapes={}, pass_probe=_fake_probe(enabled=True)
+                model_type="m",
+                install=FrameworkInstall(framework="vllm", pass_probe=_fake_probe(enabled=True)),
+                source_file="/x.py",
+                shapes={},
             ),
         )
         assert recipes == []
@@ -229,7 +235,10 @@ class TestDiscoveryRoute:
             recipes = parse_discovered_recipes(
                 payload,
                 DiscoveryTarget(
-                    model_type="m", framework="vllm", source_file="/x.py", shapes={}, pass_probe=_fake_probe(**kw)
+                    model_type="m",
+                    install=FrameworkInstall(framework="vllm", pass_probe=_fake_probe(**kw)),
+                    source_file="/x.py",
+                    shapes={},
                 ),
             )
             kinds = [r.candidate_kind for r in recipes]
@@ -254,7 +263,10 @@ class TestDiscoveryRoute:
         recipes = parse_discovered_recipes(
             payload,
             DiscoveryTarget(
-                model_type="m", framework="vllm", source_file="/x.py", shapes={}, pass_probe=_fake_probe(enabled=False)
+                model_type="m",
+                install=FrameworkInstall(framework="vllm", pass_probe=_fake_probe(enabled=False)),
+                source_file="/x.py",
+                shapes={},
             ),
         )
         assert [r.candidate_kind for r in recipes] == ["compile_pass", "new_fusion"]

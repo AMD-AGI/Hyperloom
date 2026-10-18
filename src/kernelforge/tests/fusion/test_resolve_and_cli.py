@@ -1373,7 +1373,7 @@ class TestCliDryRun:
         )
 
         assert res.exit_code == 0, res.output
-        assert seen["target"].framework_root == str(root)
+        assert seen["target"].install.framework_root == str(root)
 
     def test_unreachable_llm_is_not_written_as_no_opportunity(self, tmp_path, monkeypatch):
         """The incident, end to end: launch-bound trace + a dead gateway."""
