@@ -648,3 +648,9 @@ def test_an_accuracy_round_without_scores_reaches_the_outcome_without_scores(rig
     r = rig()
     _, outcome = _run(r, tmp_path, fake_accuracy="null")
     assert [(x.phase, x.accuracy) for x in outcome.rounds] == [("measure", ()), ("accuracy", ())]
+
+
+def test_the_warnings_of_a_round_reach_the_outcome_from_the_signed_rounds_file(rig, tmp_path) -> None:
+    r = rig()
+    _, outcome = _run(r, tmp_path, fake_warnings='["warmup_round_seed:1", "other", "warmup_round_seed:1"]')
+    assert [x.nonfatal_warnings for x in outcome.rounds] == [("warmup_round_seed:1", "other", "warmup_round_seed:1")]

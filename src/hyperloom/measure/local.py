@@ -548,6 +548,8 @@ def _rounds(run: _Run, point: int, result: VariantResult) -> list[RoundOutcome]:
         rounds.append(RoundOutcome(point, "measure", workspace, _result_returncode(result)))
     if run.call.accuracy and not _is_failure(result):
         rounds.append(RoundOutcome(point, _ACCURACY, workspace, _eval_returncode(result), read_accuracy(workspace)))
+    if rounds:
+        rounds[0] = dataclasses.replace(rounds[0], nonfatal_warnings=tuple(result.nonfatal_warnings))
     return rounds
 
 

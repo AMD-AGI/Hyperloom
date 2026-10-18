@@ -41,6 +41,8 @@ def rounds_document(outcome: TestOutcome | None, files_dir: Path) -> list[dict[s
             "dir": relative.as_posix(),
             "returncode": round_.returncode,
         }
+        if round_.nonfatal_warnings:
+            entry["nonfatal_warnings"] = list(round_.nonfatal_warnings)
         if round_.phase == ACCURACY_PHASE:
             entry["accuracy"] = [value.to_document() for value in round_.accuracy]
         entries.append(entry)

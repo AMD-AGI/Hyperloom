@@ -136,6 +136,8 @@ class RoundOutcome:
     """One round of a test; ``point`` indexes ``TestCall.points``.
 
     ``accuracy`` is set on an ``accuracy`` round only: the scores the evaluation wrote for the measured round.
+    ``nonfatal_warnings`` are the warnings ``run_grid`` wrote for the point, kept as written and carried by the first
+    round of the point only, so a reader that joins the rounds' lists gets each warning once.
     """
 
     point: int
@@ -143,6 +145,7 @@ class RoundOutcome:
     output_dir: Path
     returncode: int
     accuracy: tuple[AccuracyValue, ...] = ()
+    nonfatal_warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

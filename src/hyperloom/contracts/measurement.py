@@ -147,6 +147,11 @@ def _items(value: object, what: str) -> tuple[object, ...]:
     return tuple(value)
 
 
+def _strings(value: object, what: str) -> None:
+    if not isinstance(value, tuple) or not all(isinstance(item, str) for item in value):
+        raise MeasurementError(f"{what} must be a tuple of strings, got {value!r}")
+
+
 def _relative_dir(value: object, what: str) -> str:
     text = _text(value, what) if value != "" else ""
     path = PurePosixPath(text)
@@ -564,6 +569,7 @@ class TestResult:
     gpu_seconds: float = 0.0
     profile_location: str = ""
     repro_verdict: str = ""
+    nonfatal_warnings: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.request_id, "request_id")
@@ -583,6 +589,7 @@ class TestResult:
             _optional_number(value, what)
         _optional_number(self.finished_at, "finished_at")
         self._check_repro_verdict()
+        _strings(self.nonfatal_warnings, "nonfatal_warnings")
 
     def _check_repro_verdict(self) -> None:
         if self.repro_verdict not in ("", *REPRO_VERDICTS):
@@ -629,6 +636,7 @@ class TestResult:
             "gpu_seconds": self.gpu_seconds,
             "profile_location": self.profile_location,
             "repro_verdict": self.repro_verdict,
+            "nonfatal_warnings": list(self.nonfatal_warnings),
         }
 
     @classmethod
@@ -655,6 +663,7 @@ class TestResult:
             gpu_seconds=f.get("gpu_seconds", 0.0),
             profile_location=f.get("profile_location", ""),
             repro_verdict=f.get("repro_verdict", ""),
+            nonfatal_warnings=tuple(_items(f.get("nonfatal_warnings", ()), "nonfatal_warnings")),
         )
 
 

@@ -67,3 +67,12 @@ def test_an_accuracy_round_lists_its_scores_and_no_other_round_does(tmp_path: Pa
     assert "accuracy" not in measure
     assert scored["accuracy"] == [{"task": "gsm8k", "metric": "exact_match,flexible-extract", "score": 0.64}]
     assert empty["accuracy"] == [], "a round that scored nothing says so: the reader must not guess"
+
+
+def test_the_warnings_of_a_round_are_listed_as_written_and_a_round_without_any_lists_no_key(tmp_path: Path) -> None:
+    files = tmp_path / "files"
+    warned = RoundOutcome(0, "measure", files / "a", 0, (), ("warmup_round_seed:1", "x", "x"))
+    quiet = RoundOutcome(1, "measure", files / "b", 0)
+    document = rounds_document(_outcome(warned, quiet), files)
+    assert document[0]["nonfatal_warnings"] == ["warmup_round_seed:1", "x", "x"]
+    assert "nonfatal_warnings" not in document[1]

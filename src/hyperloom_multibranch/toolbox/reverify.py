@@ -31,10 +31,23 @@ def first_hash_difference(recorded: TestResult, manifest: ResultManifest) -> str
 
 
 def first_value_difference(
-    recorded: TestResult, rounds: Sequence[RoundValue], accuracy: Sequence[AccuracyValue]
+    recorded: TestResult,
+    rounds: Sequence[RoundValue],
+    accuracy: Sequence[AccuracyValue],
+    warnings: Sequence[str] = (),
 ) -> str | None:
-    """The first round or accuracy field that differs between the record and the values derived from the bundle."""
-    return _round_difference(recorded.rounds, tuple(rounds)) or _accuracy_difference(recorded.accuracy, tuple(accuracy))
+    """The first round, accuracy or warning field that differs between the record and what the bundle derives."""
+    return (
+        _round_difference(recorded.rounds, tuple(rounds))
+        or _accuracy_difference(recorded.accuracy, tuple(accuracy))
+        or _warning_difference(recorded.nonfatal_warnings, tuple(warnings))
+    )
+
+
+def _warning_difference(recorded: tuple[str, ...], derived: tuple[str, ...]) -> str | None:
+    if recorded != derived:
+        return f"nonfatal_warnings: recorded {list(recorded)!r}, the bundle has {list(derived)!r}"
+    return None
 
 
 def _round_difference(recorded: tuple[RoundValue, ...], derived: tuple[RoundValue, ...]) -> str | None:

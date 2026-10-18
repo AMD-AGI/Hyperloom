@@ -240,3 +240,42 @@ async def test_a_failed_result_that_records_measured_rounds_is_named(tmp_path: P
     executor, result = await _accepted(tmp_path, rig)
     failed = replace(result, validity=Validity.CANDIDATE_FAILED, accuracy=())
     assert await _reason(executor, failed) == "rounds: a result that did not succeed records measured rounds"
+
+
+WARNINGS = '["warmup_round_seed:1", "other"]'
+
+
+async def test_the_warnings_of_the_rounds_reach_the_result_in_order(tmp_path: Path, rig) -> None:
+    executor, result = await _accepted(tmp_path, rig, fake_warnings=WARNINGS)
+    assert result.nonfatal_warnings == ("warmup_round_seed:1", "other")
+    assert executor.difference(result) is None
+
+
+async def test_a_result_of_a_run_without_warnings_records_none(tmp_path: Path, rig) -> None:
+    executor, result = await _accepted(tmp_path, rig)
+    assert result.nonfatal_warnings == ()
+    assert executor.difference(result) is None
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        lambda have: (),
+        lambda have: (*have, "invented"),
+        lambda have: have[:1],
+        lambda have: have[::-1],
+    ],
+    ids=["dropped", "added", "shortened", "reordered"],
+)
+async def test_an_edited_warning_list_is_named(tmp_path: Path, rig, edit) -> None:
+    executor, result = await _accepted(tmp_path, rig, fake_warnings=WARNINGS)
+    difference = executor.difference(replace(result, nonfatal_warnings=edit(result.nonfatal_warnings)))
+    assert difference is not None and difference.startswith("nonfatal_warnings: recorded ")
+    assert "the bundle has ['warmup_round_seed:1', 'other']" in difference
+
+
+async def test_warnings_added_to_a_run_that_had_none_are_named(tmp_path: Path, rig) -> None:
+    executor, result = await _accepted(tmp_path, rig)
+    assert await _reason(executor, replace(result, nonfatal_warnings=("x",))) == (
+        "nonfatal_warnings: recorded ['x'], the bundle has []"
+    )

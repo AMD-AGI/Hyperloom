@@ -104,7 +104,9 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
         if "fake_accuracy_version" in config:
             values = [{**value, "version": config["fake_accuracy_version"]} for value in values]
         rounds.append({**rounds[0], "phase": "accuracy", "accuracy": values})
-    if config.get("fake_rounds") or "fake_accuracy" in config:
+    if "fake_warnings" in config:
+        rounds[0]["nonfatal_warnings"] = list(config["fake_warnings"])
+    if config.get("fake_rounds") or "fake_accuracy" in config or "fake_warnings" in config:
         files["rounds.json"] = json.dumps(rounds).encode()
     for relative, data in files.items():
         _atomic(out / "files" / relative, data)

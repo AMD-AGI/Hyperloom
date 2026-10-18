@@ -229,6 +229,7 @@ class HostedExecutor:
             gpu_seconds=gpu_seconds,
             profile_location=location,
             repro_verdict=verdict,
+            nonfatal_warnings=_warnings_of(outcome.rounds) if failure is None else (),
             **audit,
         )
 
@@ -310,7 +311,7 @@ def _unlike_bundle(result: TestResult, derived: Reverified, landed: Path) -> str
     if result.repro_verdict or _lists_verdict(derived.manifest):
         return _repro_difference(result, derived.manifest, landed)
     values = _round_values_at(derived.rounds, tuple(_concurrency_in(text) for text in derived.point_yaml))
-    return first_value_difference(result, values, _scores_of(derived.rounds))
+    return first_value_difference(result, values, _scores_of(derived.rounds), _warnings_of(derived.rounds))
 
 
 def _profile_difference(result: TestResult, manifest: ResultManifest) -> str | None:
@@ -475,6 +476,11 @@ def _metrics_of(measurement: Mapping[str, Any]) -> dict[str, float]:
         for key, value in measurement.items()
         if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
     }
+
+
+def _warnings_of(rounds: tuple[RoundOutcome, ...]) -> tuple[str, ...]:
+    """The warnings ``run_grid`` wrote for the rounds of this test, in round order, as written."""
+    return tuple(warning for r in rounds for warning in r.nonfatal_warnings)
 
 
 def _scores_of(rounds: tuple[RoundOutcome, ...]) -> tuple[AccuracyValue, ...]:

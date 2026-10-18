@@ -382,3 +382,27 @@ def test_result_is_replaceable_but_revalidated() -> None:
     result = _result()
     with pytest.raises(MeasurementError, match="succeeded test has no failure_class"):
         replace(result, failure_class=FailureClass.INFRA)
+
+
+def test_nonfatal_warnings_round_trip_in_order_without_dedup() -> None:
+    warnings = ("warmup_round_seed:1", "run_grid_warmup_discarded_first", "warmup_round_seed:1")
+    assert _roundtrip(_result(nonfatal_warnings=warnings)).nonfatal_warnings == warnings
+
+
+def test_a_document_written_before_the_warnings_loads_with_none() -> None:
+    document = _result().to_document()
+    del document["nonfatal_warnings"]
+    assert TestResult.from_document(document).nonfatal_warnings == ()
+
+
+@pytest.mark.parametrize("bad", [("ok", 3), "a string", ["list"], (None,)])
+def test_warnings_must_be_a_tuple_of_strings(bad: object) -> None:
+    with pytest.raises(MeasurementError, match="nonfatal_warnings must be a tuple of strings"):
+        _result(nonfatal_warnings=bad)
+
+
+def test_a_document_with_a_non_string_warning_is_refused() -> None:
+    with pytest.raises(MeasurementError, match="nonfatal_warnings must be a tuple of strings"):
+        TestResult.from_document({**_result().to_document(), "nonfatal_warnings": ["ok", 3]})
+    with pytest.raises(MeasurementError, match="nonfatal_warnings must be a list"):
+        TestResult.from_document({**_result().to_document(), "nonfatal_warnings": "oops"})

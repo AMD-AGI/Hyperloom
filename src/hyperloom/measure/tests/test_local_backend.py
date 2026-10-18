@@ -147,6 +147,21 @@ def test_a_discarded_warmup_round_is_reported_as_its_own_round(grid, tmp_path):
     assert outcome.rounds[0].output_dir == outcome.rounds[1].output_dir.parent / "warmup_round"
 
 
+def test_the_warnings_run_grid_wrote_ride_on_the_first_round_of_the_point_once(grid, tmp_path):
+    warnings = ["warmup_round_seed:1", "run_grid_warmup_discarded_first", "warmup_round_seed:1"]
+    grid.answers["test"] = grid.result("test", nonfatal_warnings=warnings)
+
+    outcome = _run(_call(tmp_path))
+
+    assert [r.nonfatal_warnings for r in outcome.rounds] == [tuple(warnings), ()]
+    assert [w for r in outcome.rounds for w in r.nonfatal_warnings] == warnings
+
+
+def test_a_point_that_run_grid_did_not_warn_about_carries_none(grid, tmp_path):
+    outcome = _run(_call(tmp_path))
+    assert [r.nonfatal_warnings for r in outcome.rounds] == [()]
+
+
 def test_an_accuracy_test_reports_the_accuracy_round_with_the_eval_exit_code(grid, tmp_path):
     result = grid.result("test", returncode=0)
     (Path(result.workspace) / "eval_returncode").write_text("3\n", encoding="utf-8")

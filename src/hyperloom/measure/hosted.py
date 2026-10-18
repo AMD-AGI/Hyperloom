@@ -813,6 +813,7 @@ def _rounds_of(verified: VerifiedBundle, output: Path) -> tuple[RoundOutcome, ..
                 output / r["dir"],
                 int(r["returncode"]),
                 tuple(AccuracyValue.from_document(v) for v in r.get("accuracy", ())),
+                tuple(str(w) for w in r.get("nonfatal_warnings", ())),
             )
             for r in document
         )
