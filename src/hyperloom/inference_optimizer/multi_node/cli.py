@@ -267,57 +267,29 @@ def _infera_ssh_bash_with_env(
 def _short_poll(
     *,
     label: str,
-    fetch: callable,
-    is_ok: callable,
-    is_fail: callable,
+    fetch: Callable[[], tuple[Any, str]],
     interval_s: int,
     timeout_s: int,
-    failure_diag: callable | None = None,
-    quiet_fetch_error_grace_s: float = 0.0,
-    is_quiet_fetch_error: Callable[[BaseException], bool] | None = None,
 ) -> Any:
-    """Run many short polls within one CLI invocation budget; returns the state_obj on success."""
+    """Poll a Ray job with many short fetches within one CLI invocation budget; returns the job on a terminal OK."""
     started = time.monotonic()
     attempt = 0
     while True:
         attempt += 1
-        fetch_was_quiet = False
         try:
             obj, summary = fetch()
         except Exception as exc:  # noqa: BLE001
-            elapsed_mid = time.monotonic() - started
-            fetch_was_quiet = (
-                quiet_fetch_error_grace_s > 0.0
-                and elapsed_mid < quiet_fetch_error_grace_s
-                and is_quiet_fetch_error is not None
-                and is_quiet_fetch_error(exc)
-            )
-            if fetch_was_quiet:
-                info(
-                    f"{label} poll #{attempt} t={elapsed_mid:.0f}s -> "
-                    f"GET workload not visible yet (404); retrying "
-                    f"(expected within ~{quiet_fetch_error_grace_s:.0f}s after create)"
-                )
-            else:
-                warn(f"{label} poll #{attempt} fetch error: {exc}")
+            warn(f"{label} poll #{attempt} fetch error: {exc}")
             obj, summary = None, str(exc)
 
         elapsed = time.monotonic() - started
-        if not fetch_was_quiet:
-            info(f"{label} poll #{attempt} t={elapsed:.0f}s -> {summary}")
+        info(f"{label} poll #{attempt} t={elapsed:.0f}s -> {summary}")
 
         if obj is not None:
-            if is_ok(obj):
+            status = str(obj.get("status", "")).upper()
+            if status in _TERMINAL_OK_STATUSES:
                 return obj
-            if is_fail(obj):
-                if failure_diag is not None:
-                    diag, snapshot = failure_diag(obj)
-                    raise WorkloadTerminalFailure(
-                        label=label,
-                        phase=str(obj.get("phase") if isinstance(obj, dict) else "?"),
-                        diag=diag,
-                        snapshot=snapshot,
-                    )
+            if status in _TERMINAL_FAIL_STATUSES:
                 raise RuntimeError(f"{label} terminal failure: {summary}")
 
         if elapsed >= timeout_s:
@@ -383,8 +355,6 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         result = _short_poll(
             label=f"bootstrap {sub_id}",
             fetch=_fetch,
-            is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-            is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
             interval_s=args.poll_interval,
             timeout_s=_poll_timeout_from_args(args),
         )
@@ -429,8 +399,6 @@ def cmd_verify(args: argparse.Namespace) -> int:
         result = _short_poll(
             label=f"verify {sub_id}",
             fetch=_fetch,
-            is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-            is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
             interval_s=args.poll_interval,
             timeout_s=_poll_timeout_from_args(args),
         )
@@ -577,8 +545,6 @@ def _exec_kill_submission(
         _short_poll(
             label=f"{label} {kill_sub}",
             fetch=_fetch_kill,
-            is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-            is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
             interval_s=args.poll_interval,
             timeout_s=_poll_timeout_from_args(args),
         )
@@ -930,8 +896,6 @@ def _submit_and_collect_pod_json(
         result = _short_poll(
             label=label,
             fetch=_fetch,
-            is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-            is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
             interval_s=poll_interval,
             timeout_s=poll_timeout,
         )
@@ -1294,8 +1258,6 @@ def _start_pd_router(
     router_result = _short_poll(
         label=f"router {router_sub}",
         fetch=_fetch_router,
-        is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-        is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
         interval_s=args.poll_interval,
         timeout_s=_poll_timeout_from_args(args),
     )
@@ -1403,8 +1365,6 @@ def _restart_multinode(args: argparse.Namespace, state: dict, nnodes: int) -> in
         result = _short_poll(
             label=f"launch {launch_sub}",
             fetch=_fetch_launch,
-            is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-            is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
             interval_s=args.poll_interval,
             timeout_s=_poll_timeout_from_args(args),
         )
@@ -1489,8 +1449,6 @@ def _restart_single_node(args: argparse.Namespace, state: dict) -> int:
         result = _short_poll(
             label=f"restart {sub_id}",
             fetch=_fetch,
-            is_ok=lambda j: str(j.get("status", "")).upper() in _TERMINAL_OK_STATUSES,
-            is_fail=lambda j: str(j.get("status", "")).upper() in _TERMINAL_FAIL_STATUSES,
             interval_s=args.poll_interval,
             timeout_s=_poll_timeout_from_args(args),
         )
