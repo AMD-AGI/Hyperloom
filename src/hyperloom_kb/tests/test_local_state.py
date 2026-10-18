@@ -15,14 +15,9 @@ import pytest
 
 from hyperloom_kb import (
     Experience,
-    ExperienceDeclaration,
     ExperienceHTTPService,
     ExperienceStatus,
-    FieldDeclaration,
-    FieldKind,
-    FieldRole,
     HTTPServiceConfig,
-    ObjectiveDeclaration,
     Provenance,
     ReadQuery,
     RemoteClient,
@@ -33,23 +28,11 @@ from hyperloom_kb import (
 )
 from hyperloom_kb.database import Database
 from hyperloom_kb.tests.conftest import fresh_database
+from hyperloom_kb.tests.declaration_fixtures import throughput_declaration
 
 TOKEN = "state-token"
 NOW = datetime(2026, 10, 1, tzinfo=timezone.utc)
-SCHEMA = ExperienceDeclaration(
-    objectives=(ObjectiveDeclaration("throughput@v1", "Maximize throughput."),),
-    identity=(FieldDeclaration("model", "Model."),),
-    baseline=(FieldDeclaration("config", "Baseline.", group=True),),
-    change=(
-        FieldDeclaration("knob", "Knob.", group=True),
-        FieldDeclaration("summary", "What changed.", role=FieldRole.SUMMARY),
-    ),
-    outcome=(
-        FieldDeclaration("decision", "Decision.", role=FieldRole.DECISION, values=("keep", "revert")),
-        FieldDeclaration("value", "Throughput.", kind=FieldKind.NUMBER, role=FieldRole.MEASUREMENT),
-    ),
-    reflection=(FieldDeclaration("text", "Reflection.", kind=FieldKind.TEXT),),
-)
+SCHEMA = throughput_declaration()
 
 
 def _experience(seq: int) -> Experience:
