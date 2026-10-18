@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-from kernelforge.fusion.driver_shim import write_driver
+from kernelforge.fusion.driver_shim import DriverSpec, write_driver
 from kernelforge.fusion.models import Recipe, ValidationResult
 from kernelforge.fusion.shadow_repo import SHADOW_BRANCH
 from kernelforge.fusion.harness_contract import trace_kernels_block
@@ -335,13 +335,15 @@ def run_recipe_campaign(
     Path(report_log).unlink(missing_ok=True)
     driver_path = write_driver(
         out / f"driver_{stem}.py",
-        harness_path,
-        env_flags,
-        report_log=report_log,
-        case_id=stem,
-        fused_module=fused_module,
-        workspace=workspace,
-        git_env=shadow_env,
+        DriverSpec(
+            harness_path,
+            env_flags,
+            report_log=report_log,
+            case_id=stem,
+            fused_module=fused_module,
+            workspace=workspace,
+            git_env=shadow_env,
+        ),
     )
 
     program_md_file = str(out / f"program_{stem}.md")

@@ -19,7 +19,7 @@ from kernelforge.fusion.campaign import (
     fused_module_path,
     run_recipe_campaign,
 )
-from kernelforge.fusion.driver_shim import render_driver
+from kernelforge.fusion.driver_shim import DriverSpec, render_driver
 from kernelforge.fusion.models import Recipe
 from kernelforge.fusion.shadow_repo import SHADOW_BRANCH, ensure_git_workspace
 
@@ -440,11 +440,13 @@ class TestDriverShim:
         driver = tmp_path / "driver.py"
         driver.write_text(
             render_driver(
-                str(harness),
-                ("LFM2_FUSED_RESIDUAL",),
-                report_log=str(tmp_path / "reports.jsonl"),
-                case_id="decode",
-                fused_module=fused_module,
+                DriverSpec(
+                    str(harness),
+                    ("LFM2_FUSED_RESIDUAL",),
+                    report_log=str(tmp_path / "reports.jsonl"),
+                    case_id="decode",
+                    fused_module=fused_module,
+                )
             ),
             encoding="utf-8",
         )
@@ -1163,12 +1165,14 @@ class TestCampaignCommand:
         driver = tmp_path / "driver.py"
         driver.write_text(
             render_driver(
-                str(harness),
-                (),
-                report_log=str(report_log),
-                case_id="decode",
-                fused_module=fused_module_path(recipe),
-                workspace=str(tmp_path),
+                DriverSpec(
+                    str(harness),
+                    (),
+                    report_log=str(report_log),
+                    case_id="decode",
+                    fused_module=fused_module_path(recipe),
+                    workspace=str(tmp_path),
+                )
             ),
             encoding="utf-8",
         )
@@ -1190,12 +1194,14 @@ class TestCampaignCommand:
         driver = tmp_path / "driver.py"
         driver.write_text(
             render_driver(
-                str(harness),
-                (),
-                report_log=str(report_log),
-                case_id="decode",
-                fused_module=fused_module_path(recipe),
-                workspace=str(tmp_path),
+                DriverSpec(
+                    str(harness),
+                    (),
+                    report_log=str(report_log),
+                    case_id="decode",
+                    fused_module=fused_module_path(recipe),
+                    workspace=str(tmp_path),
+                )
             ),
             encoding="utf-8",
         )
