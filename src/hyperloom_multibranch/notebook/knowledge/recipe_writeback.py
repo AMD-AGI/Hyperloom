@@ -10,11 +10,12 @@ read from the session's blob store by the hash the recipe pins (the experiment r
 copied out of a checkout when no store is given, and staged under the refs ``value`` names; each is checked against
 its pinned hash, so the KB stores exactly what was measured.
 
-InferenceX sessions compare ``optimized_throughput`` with the champion of their partition. An AgentX champion compares
-an interactivity gain graded on two axes the multi-branch gate does not record yet, so AgentX sessions are skipped,
-with that reason, until it does. When the notebook recorded the final commit's recipe digest, a recipe with another
-digest is skipped too (``recipe_digest_mismatch``): CLOSE was handed some other commit's recipe. A recipe that names
-anything as unexpressed does not rebuild what was measured, so it is skipped as well (``incomplete_recipe``).
+InferenceX sessions compare ``optimized_throughput`` with the champion of their partition. An AgentX session compares,
+as the main flow's AgentX records do, its gain in P50 interactivity over its own baseline (``interactivity_gain_pct``,
+objective ``agentx_keep``), and carries both interactivities beside it, with both total throughputs when the gate
+recorded them. When the notebook recorded the final commit's recipe digest, a recipe with another digest is skipped
+(``recipe_digest_mismatch``): CLOSE was handed some other commit's recipe. A recipe that names anything as unexpressed
+does not rebuild what was measured, so it is skipped as well (``incomplete_recipe``).
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from hyperloom.common.perf_metric import GRADED_TOTAL
 from hyperloom.contracts.recipe import Recipe, RecipeError
 from hyperloom.inference_optimizer.recipe_snapshot_constants import recipe_canonical_id
 from hyperloom.measure.compile import BlobStore
@@ -48,6 +50,8 @@ from hyperloom_multibranch.notebook.knowledge.recipe_kb import overlay_ref, to_r
 KB_METRIC = "optimized_throughput"
 GAIN_METRIC = "validated_e2e_gain"
 OBJECTIVE_SCHEMA = "single_throughput"
+AGENTX_METRIC = "interactivity_gain_pct"
+AGENTX_OBJECTIVE_SCHEMA = "agentx_keep"
 PRODUCER = "hyperloom-multibranch"
 SKIPPED = "skipped"
 AGENTX = "agentx"
@@ -57,9 +61,9 @@ AGENTX = "agentx"
 class FinalRecipe:
     """The commit CLOSE publishes, its recipe, and where the patch and kernel files the recipe names are read from.
 
-    ``metric`` is the recorded-value metric that is the session's output throughput. With ``blobs`` (the session's
-    blob store) every file is read from it by its pinned sha256 and ``files_root`` is not read; without it the files
-    are taken from the checkout at ``files_root``.
+    ``metric`` is the recorded-value metric the session is graded on: output throughput for InferenceX, P50
+    interactivity for AgentX. With ``blobs`` (the session's blob store) every file is read from it by its pinned sha256
+    and ``files_root`` is not read; without it the files are taken from the checkout at ``files_root``.
     """
 
     commit_id: str
@@ -87,22 +91,36 @@ def recipe_identity(profile: SessionProfile) -> tuple[str, RecipeScope]:
     return canonical_id, scope
 
 
+def _metrics(snapshot: NotebookSnapshot, final: FinalRecipe, scope: RecipeScope) -> dict[str, float]:
+    """The record's metrics, named as the main flow names them for the session's kind of workload."""
+
+    current = snapshot.value_of(final.commit_id)
+    anchor = snapshot.baseline.values if snapshot.baseline else {}
+    value, baseline = current.get(final.metric), anchor.get(final.metric)
+    if value is None or not baseline:
+        raise RecipeError(f"{final.commit_id} and the baseline need a recorded {final.metric} to publish")
+    gain = (value / baseline - 1.0) * 100.0
+    if scope.identity_scheme != AGENTX:
+        return {KB_METRIC: value, GAIN_METRIC: gain}
+    metrics = {AGENTX_METRIC: gain, "candidate_interactivity": value, "baseline_interactivity": baseline}
+    total, baseline_total = current.get(GRADED_TOTAL), anchor.get(GRADED_TOTAL)
+    if total and baseline_total:
+        metrics.update({GRADED_TOTAL: total, "baseline_total_throughput": baseline_total})
+    return metrics
+
+
 def knowledge_document(
     snapshot: NotebookSnapshot, profile: SessionProfile, final: FinalRecipe, scope: RecipeScope
 ) -> dict[str, object]:
     """The record's knowledge: metrics, workload shape, ``value`` columns, experience lists and provenance."""
 
-    value = snapshot.value_of(final.commit_id).get(final.metric)
-    baseline = snapshot.baseline.values.get(final.metric) if snapshot.baseline else None
-    if value is None or not baseline:
-        raise RecipeError(f"{final.commit_id} and the baseline need a recorded {final.metric} to publish")
+    metrics = _metrics(snapshot, final, scope)
     lessons = session_lessons(snapshot, final.commit_id)
     return sanitize_shared_knowledge(
         {
             "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
             "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
-            KB_METRIC: value,
-            GAIN_METRIC: (value / baseline - 1.0) * 100.0,
+            **metrics,
             "workload_shape": {key: item for key, item in scope.as_dict().items() if key != "kernel_optimizer"},
             "value": to_recipe_kb_value(final.recipe),
             "what_worked": list(lessons.worked),
@@ -168,14 +186,14 @@ def publish_final_recipe(
         canonical_id, scope = recipe_identity(profile)
     except RemoteRecipeValidationError:
         return RemoteWriteResult(SKIPPED, "invalid_recipe_scope", session_id=profile.session_id)
-    if scope.identity_scheme == AGENTX:
-        return RemoteWriteResult(SKIPPED, "agentx_objective_not_recorded", canonical_id, profile.session_id)
     if not final.recipe.complete:
         return RemoteWriteResult(SKIPPED, "incomplete_recipe", canonical_id, profile.session_id)
     commit = snapshot.lineage.commit(final.commit_id)
     if commit is not None and commit.recipe_digest not in (None, final.recipe.digest()):
         return RemoteWriteResult(SKIPPED, "recipe_digest_mismatch", canonical_id, profile.session_id)
     knowledge = knowledge_document(snapshot, profile, final, scope)
+    agentx = scope.identity_scheme == AGENTX
+    metric, objective = (AGENTX_METRIC, AGENTX_OBJECTIVE_SCHEMA) if agentx else (KB_METRIC, OBJECTIVE_SCHEMA)
     with tempfile.TemporaryDirectory(prefix="hyperloom-multibranch-recipe-") as temporary:
         staging = Path(temporary)
         bundle = KnowledgeBundle(knowledge, stage_files(final.recipe, final.files_root, staging, final.blobs))
@@ -185,13 +203,15 @@ def publish_final_recipe(
             bundle,
             scope=scope,
             files_dir=staging,
-            primary_metric=KB_METRIC,
-            primary_value=float(knowledge[KB_METRIC]),
-            objective_schema=OBJECTIVE_SCHEMA,
+            primary_metric=metric,
+            primary_value=float(knowledge[metric]),
+            objective_schema=objective,
         )
 
 
 __all__ = [
+    "AGENTX_METRIC",
+    "AGENTX_OBJECTIVE_SCHEMA",
     "KB_METRIC",
     "OBJECTIVE_SCHEMA",
     "FinalRecipe",

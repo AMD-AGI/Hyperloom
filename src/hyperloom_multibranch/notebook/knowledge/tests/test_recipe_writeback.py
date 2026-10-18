@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_TOTAL
 from hyperloom.contracts.recipe import (
     DIGEST_PREFIX,
     ComponentPatches,
@@ -28,6 +29,8 @@ from hyperloom.orchestrator.knowledge.remote_recipe.values import knowledge_to_w
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
 from hyperloom_multibranch.notebook.knowledge.recipe_kb import from_recipe_kb_value, to_recipe_kb_value
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import (
+    AGENTX_METRIC,
+    AGENTX_OBJECTIVE_SCHEMA,
     KB_METRIC,
     OBJECTIVE_SCHEMA,
     FinalRecipe,
@@ -168,7 +171,6 @@ def test_the_final_commit_needs_a_recorded_value(snapshot: NotebookSnapshot, fin
     [
         (None, "no_session_profile"),
         (profile(kernel_optimizer=""), "invalid_recipe_scope"),
-        (profile(isl=None, osl=None), "agentx_objective_not_recorded"),
     ],
 )
 def test_a_session_the_kb_cannot_file_is_skipped_with_the_reason(
@@ -182,6 +184,67 @@ def test_a_session_the_kb_cannot_file_is_skipped_with_the_reason(
 
     assert (outcome.status, outcome.reason) == ("skipped", reason)
     assert store.scopes == []
+
+
+def _agentx(snapshot: NotebookSnapshot, baseline: dict[str, float], final: dict[str, float]) -> NotebookSnapshot:
+    """The scripted session as an AgentX one: no ISL or OSL, and interactivity recorded at the root and at ``i1``."""
+
+    root = dataclasses.replace(snapshot.baselines[-1], values=baseline)
+    records = tuple(
+        dataclasses.replace(record, judgement=dataclasses.replace(record.judgement, recorded_value=final))
+        if record.commit_id == "i1" and record.judgement is not None
+        else record
+        for record in snapshot.records
+    )
+    return dataclasses.replace(
+        snapshot, profile=profile(isl=None, osl=None), baselines=(*snapshot.baselines[:-1], root), records=records
+    )
+
+
+def test_an_agentx_session_writes_its_interactivity_gain_as_the_main_flow_does(
+    snapshot: NotebookSnapshot, final: FinalRecipe
+) -> None:
+    store = FakeRecipeStore(champion={"metric": AGENTX_METRIC, "session_id": "older", "value": 5.0})
+    agentx = _agentx(
+        snapshot, {GRADED_INTVTY_P50: 10.0, GRADED_TOTAL: 2000.0}, {GRADED_INTVTY_P50: 11.0, GRADED_TOTAL: 2100.0}
+    )
+
+    outcome = publish_final_recipe(
+        RemoteRecipeClient(store), agentx, dataclasses.replace(final, metric=GRADED_INTVTY_P50)
+    )
+
+    assert (outcome.status, outcome.primary_metric) == ("written", AGENTX_METRIC)
+    assert outcome.canonical_id.startswith("agentx:")
+    assert store.promoted == ("sess-1", AGENTX_METRIC, pytest.approx(10.0))
+    assert store.objective_schema == AGENTX_OBJECTIVE_SCHEMA
+    knowledge = store.knowledge
+    assert knowledge is not None
+    metrics = ("candidate_interactivity", "baseline_interactivity", GRADED_TOTAL, "baseline_total_throughput")
+    assert [knowledge[key] for key in metrics] == [11.0, 10.0, 2100.0, 2000.0]
+    assert KB_METRIC not in knowledge and knowledge["workload_shape"] == {"tp": 8, "conc": 64}
+    warm = knowledge_to_warm_recipe({"knowledge": knowledge, "session_id": "sess-1"})
+    assert warm["validated_gain_pct"] == pytest.approx(10.0)
+
+
+def test_an_agentx_session_without_total_throughput_carries_interactivity_alone_and_meets_the_champion_on_it(
+    snapshot: NotebookSnapshot, final: FinalRecipe
+) -> None:
+    agentx = _agentx(snapshot, {GRADED_INTVTY_P50: 10.0}, {GRADED_INTVTY_P50: 11.0})
+    on_interactivity = dataclasses.replace(final, metric=GRADED_INTVTY_P50)
+    written, kept = (
+        FakeRecipeStore(champion={"metric": AGENTX_METRIC, "session_id": "older", "value": value})
+        for value in (5.0, 20.0)
+    )
+
+    publish_final_recipe(RemoteRecipeClient(written), agentx, on_interactivity)
+    outcome = publish_final_recipe(RemoteRecipeClient(kept), agentx, on_interactivity)
+
+    assert written.knowledge is not None
+    assert {key: written.knowledge.get(key) for key in (GRADED_TOTAL, "baseline_total_throughput")} == {
+        GRADED_TOTAL: None,
+        "baseline_total_throughput": None,
+    }
+    assert (outcome.status, outcome.reason, kept.promoted) == ("skipped", "not_better_than_champion", None)
 
 
 def _recorded_with(snapshot: NotebookSnapshot, commit_id: str, digest: str) -> NotebookSnapshot:
