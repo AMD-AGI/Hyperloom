@@ -174,9 +174,9 @@ def test_ordinary_sessions_carry_no_ceiling() -> None:
 #: ``orchestration`` -- the round partition divides ground the analyses already
 #: name, which is a reading task rather than the deepest reasoning the round
 #: does, while the plans behind it keep the maximum. Named here as one file
-#: rather than one call because reaching the spec from the call site is three
-#: keyword pass-throughs (``_run`` -> ``_run_result`` -> ``_run_spec``); the
-#: cap is still written in exactly one place, ``ROUND_PARTITION_EFFORT_CEILING``.
+#: rather than one call because the cap travels in the partition's ``_Turn``
+#: to the spec ``_run_spec`` builds from it; the cap is still written in
+#: exactly one place, ``ROUND_PARTITION_EFFORT_CEILING``.
 _CAPPED_CALL_SITES = {"orchestrator/plan_critic.py", "orchestrator/orchestration.py"}
 
 

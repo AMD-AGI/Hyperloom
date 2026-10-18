@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -520,6 +521,20 @@ class SpecialistOutcome:
                 else None
             ),
         }
+
+
+@dataclass(frozen=True)
+class SpecialistRound:
+    """What one round's specialists produced: the dispatch they ran under, the cases covered and every outcome."""
+
+    dispatch_plan: DispatchPlan
+    outcomes: Sequence[SpecialistOutcome]
+    coverage: Mapping[str, object]
+
+    @property
+    def analyses(self) -> list[SpecialistOutcome]:
+        """The outcomes that carry an analysis."""
+        return [outcome for outcome in self.outcomes if outcome.content is not None]
 
 
 @dataclass(frozen=True)
