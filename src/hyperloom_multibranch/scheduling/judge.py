@@ -82,8 +82,10 @@ have less to gain, and a branch you open now is briefed on the new largest op un
 The integration branch's profile_running is true while that profile runs: its PROFILE test holds one of the
 integration branch's K slots, so merge tests wait for it while that K is 1; size the integration branch's K with it.
 environment_changed: the toolbox quarantined a measurement node after an infrastructure failure (gpu_ids is empty for
-the whole node). Tests still run, on a single node even on the quarantined one, but results measured before and after
-it may compare less well; weigh whether opening more branches is still worth it.
+the whole node), or a node's measurement environment moved between two of its results (changed names each of
+image_digest, gpu_model, power_cap_w and partition_mode that moved, before and after, and request_id the first result
+measured after the move). Tests still run, on a single node even on the quarantined one, but results measured before
+and after it may compare less well; weigh whether opening more branches is still worth it.
 Before opening a branch, weigh whether it would still pay off. min_useful_seconds is the least EXPLORE time a branch
 opened now needs to show a trend: the frontier's trend window, or its specialist's start-up plus the sandbox cold
 starts its first tests wait through, when that is longer. cold_start is the recent sandbox cold start in seconds, or

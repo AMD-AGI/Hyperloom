@@ -5,8 +5,9 @@
 
 The integration head moving by a large gain or by a foundation fix (``integration_moved``) leaves the branches started
 before it behind it, its bottleneck moving (``bottleneck_moved``) leaves the branches attacking the old one with less to
-gain, and a measurement node quarantined (``environment_changed``) may make results on either side of it compare less
-well. The scheduler records each event as a decision, shows it at the judge's next call and asks the judge at once;
+gain, and a measurement node quarantined or a node's measurement environment moving between two of its results
+(``environment_changed``: its image, GPU model, power cap or partition mode, as the notebook reads them off the
+results' sandbox facts) may make results on either side of it compare less well. The scheduler records each event as a decision, shows it at the judge's next call and asks the judge at once;
 what to stop and what to open is the judge's decision. A quarantine never stops the session: it only widens the nodes
 the toolbox avoids, and on a single node the toolbox still measures there. What does stop it is the toolbox having
 fewer usable cards than one test needs (``no_measurement_cards``): cards it lost for good are never leased again, so
@@ -36,8 +37,13 @@ from typing import TYPE_CHECKING
 
 from hyperloom.contracts.measurement import Purpose, TestKind, Validity
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.interfaces import NodeHealth, RecordSearch
-from hyperloom_multibranch.contracts.notebook.records import BranchProgress, OpShares, QuarantineEvent
+from hyperloom_multibranch.contracts.notebook.interfaces import RecordSearch, SnapshotQuery
+from hyperloom_multibranch.contracts.notebook.records import (
+    BranchProgress,
+    EnvironmentChange,
+    OpShares,
+    QuarantineEvent,
+)
 from hyperloom_multibranch.contracts.notebook.vocab import MergeOutcome
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, RequestRejected, Toolbox
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -123,6 +129,19 @@ def environment_changed(quarantine: QuarantineEvent) -> SessionEvent:
 
     detail = {"node": quarantine.node, "gpu_ids": list(quarantine.gpu_ids), "quarantine_reason": quarantine.reason}
     return SessionEvent(EventKind.ENVIRONMENT_CHANGED, f"node {quarantine.node} quarantined", detail)
+
+
+def environment_moved(change: EnvironmentChange) -> SessionEvent:
+    """The event of ``change``: each field that moved on the node, from its last known value to its value under the
+    result that moved it."""
+
+    moved = ", ".join(f"{name} {before} -> {after}" for name, (before, after) in sorted(change.changed.items()))
+    detail = {
+        "node": change.node,
+        "request_id": change.request_id,
+        "changed": {name: {"before": before, "after": after} for name, (before, after) in change.changed.items()},
+    }
+    return SessionEvent(EventKind.ENVIRONMENT_CHANGED, f"node {change.node} moved: {moved}", detail)
 
 
 def no_measurement_cards(capacity: MeasurementCapacity, cards_per_test: int) -> SessionEvent | None:
@@ -280,27 +299,29 @@ class SessionEvents:
     """Detects the events of one EXPLORE and holds them until the judge's next call.
 
     The integrator's task hands over each round's merge reports with :meth:`note_merges`; :meth:`detect` turns them,
-    the quarantines put in force since the last tick and the profile ``profiler`` finished, into events, and has the
-    head a large merge moved to profiled. A quarantine lifted and put in force again is a new event.
+    the quarantines put in force and the environment changes the ``notebook`` shows since the last tick and the
+    profile ``profiler`` finished, into events, and has the head a large merge moved to profiled. A quarantine lifted
+    and put in force again is a new event; an environment change is one event, however many ticks see it.
     :meth:`record_card_shortage` reads the cards ``toolbox`` can still measure on against the ``cards_per_test`` one
     test needs.
     """
 
     def __init__(
         self,
-        health: NodeHealth,
+        notebook: SnapshotQuery,
         decisions: DecisionLog,
         profiler: IntegrationProfiler,
         toolbox: Toolbox,
         cards_per_test: int,
     ) -> None:
-        self._health = health
+        self._notebook = notebook
         self._decisions = decisions
         self._profiler = profiler
         self._toolbox = toolbox
         self._cards_per_test = cards_per_test
         self._merges: list[MergeReport] = []
         self._quarantined: frozenset[tuple[str, tuple[int, ...]]] = frozenset()
+        self._changes_seen: set[tuple[str, str]] = set()
         self._unshown: list[SessionEvent] = []
 
     def note_merges(self, reports: Iterable[MergeReport]) -> None:
@@ -323,7 +344,7 @@ class SessionEvents:
         if moved:
             self._profiler.start(str(merged[-1].merged_commit), merged[0].onto)
         self._merges.clear()
-        found = [*moved, *await self._newly_quarantined(), *found]
+        found = [*moved, *await self._environment(), *found]
         for event in found:
             self._record(event)
         self._unshown.extend(found)
@@ -358,11 +379,20 @@ class SessionEvents:
         self._decisions.record(Decision(DecisionKind.PROFILE, outcome.reason, detail=outcome.detail))
         return [] if outcome.event is None else [outcome.event]
 
-    async def _newly_quarantined(self) -> list[SessionEvent]:
-        current = await self._health.quarantined()
+    async def _environment(self) -> list[SessionEvent]:
+        """The quarantines put in force and the environment changes recorded since the last look, from one read."""
+
+        snapshot = await self._notebook.snapshot()
+        current = snapshot.quarantined
         new = [quarantine for quarantine in current if _slot(quarantine) not in self._quarantined]
         self._quarantined = frozenset(map(_slot, current))
-        return [environment_changed(quarantine) for quarantine in new]
+        changes = [
+            change
+            for change in snapshot.environment_changes
+            if (change.node, change.request_id) not in self._changes_seen
+        ]
+        self._changes_seen.update((change.node, change.request_id) for change in changes)
+        return [*map(environment_changed, new), *map(environment_moved, changes)]
 
 
 __all__ = [
@@ -381,6 +411,7 @@ __all__ = [
     "behind_integration_pct",
     "bottleneck_moved",
     "environment_changed",
+    "environment_moved",
     "integration_moved",
     "no_measurement_cards",
 ]

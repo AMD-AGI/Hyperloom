@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +17,12 @@ import pytest
 
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
-from hyperloom_multibranch.contracts.notebook.records import BranchProgress, OpShares, QuarantineEvent
+from hyperloom_multibranch.contracts.notebook.records import (
+    BranchProgress,
+    EnvironmentChange,
+    OpShares,
+    QuarantineEvent,
+)
 from hyperloom_multibranch.contracts.notebook.vocab import MergeOutcome, QuarantineAction
 from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, RequestRejected
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -105,17 +110,27 @@ def test_each_running_specialist_branch_is_shown_how_far_it_lies_behind_the_inte
     assert behind_integration_pct(progress, {}, {METRIC: 1000.0}, METRIC) == {}
 
 
+@dataclass(frozen=True)
+class _Snapshot:
+    """The two views of a notebook snapshot the events read."""
+
+    quarantined: tuple[QuarantineEvent, ...]
+    environment_changes: tuple[EnvironmentChange, ...]
+
+
 class _Health:
-    """The notebook's quarantine list: the quarantines in force."""
+    """The notebook's snapshot as the events read it: the quarantines in force and the environment changes."""
 
     def __init__(self) -> None:
         self.events: list[QuarantineEvent] = []
+        self.changes: list[EnvironmentChange] = []
 
     async def record_quarantine(self, event: QuarantineEvent) -> None:
         self.events.append(event)
 
-    async def quarantined(self) -> tuple[QuarantineEvent, ...]:
-        return tuple(event for event in self.events if event.action is QuarantineAction.QUARANTINE)
+    async def snapshot(self) -> Any:
+        quarantined = tuple(event for event in self.events if event.action is QuarantineAction.QUARANTINE)
+        return _Snapshot(quarantined, tuple(self.changes))
 
 
 def _logged(path: Path) -> list[dict[str, object]]:
@@ -214,6 +229,33 @@ async def test_a_whole_node_quarantine_is_shown_once_and_recorded(log: Path) -> 
         "node node-0 quarantined",
         "environment_changed",
     )
+
+
+async def test_a_node_whose_environment_moved_is_shown_once_with_each_field_before_and_after(log: Path) -> None:
+    health = _Health()
+    events = _events(health, log)
+    health.changes.append(
+        EnvironmentChange("node-0", "r7", 5.0, {"power_cap_w": ("750.0", "600.0"), "image_digest": ("sha:a", "sha:b")})
+    )
+
+    assert await events.detect()
+    [shown] = events.hand_over()
+
+    assert shown.kind is EventKind.ENVIRONMENT_CHANGED
+    assert shown.reason == "node node-0 moved: image_digest sha:a -> sha:b, power_cap_w 750.0 -> 600.0"
+    assert shown.detail == {
+        "node": "node-0",
+        "request_id": "r7",
+        "changed": {
+            "power_cap_w": {"before": "750.0", "after": "600.0"},
+            "image_digest": {"before": "sha:a", "after": "sha:b"},
+        },
+    }
+    assert not await events.detect()
+    health.changes.append(EnvironmentChange("node-0", "r9", 6.0, {"gpu_model": ("MI300X", "MI355X")}))
+    assert await events.detect()
+    assert [event.detail["request_id"] for event in events.hand_over()] == ["r9"]
+    assert [row["detail"]["event"] for row in _logged(log)] == ["environment_changed", "environment_changed"]
 
 
 async def test_a_big_merge_is_an_event_at_the_next_detection_and_a_small_one_is_not(log: Path) -> None:
