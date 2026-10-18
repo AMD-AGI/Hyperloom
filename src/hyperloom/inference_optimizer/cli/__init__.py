@@ -31,6 +31,8 @@ from .kb import (
     _bootstrap_knowledge_plane,
 )
 from .backends import (
+    CriticSetup,
+    ModelRouting,
     _build_backends,
     _build_proposal_scorer,
     critic_review_target,
@@ -2591,15 +2593,19 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     state = SharedState.load_or_init(session_dir)
 
     backends = _build_backends(
-        claude_model=args.claude_model,
-        codex_model=args.codex_model,
-        critic_choice=critic_choice,
+        ModelRouting(
+            claude_model=args.claude_model,
+            codex_model=args.codex_model,
+            codex_follows_claude=codex_follows_claude,
+            claude_follows_codex=claude_follows_codex,
+        ),
+        CriticSetup(
+            choice=critic_choice,
+            agent_root=critic_agent_root,
+            kb_mode=critic_kb_mode,
+            protocol=args.critic_protocol,
+        ),
         session_dir=session_dir,
-        critic_agent_root=critic_agent_root,
-        critic_kb_mode=critic_kb_mode,
-        codex_follows_claude=codex_follows_claude,
-        claude_follows_codex=claude_follows_codex,
-        critic_protocol=args.critic_protocol,
     )
     # Expose active session_dir to in-process executors via the canonical pin env var; reinforced here for resume
     # paths.

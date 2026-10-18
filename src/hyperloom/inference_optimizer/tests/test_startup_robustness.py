@@ -366,12 +366,11 @@ def test_build_backends_keeps_anthropic_critic_when_codex_follows_claude(
     monkeypatch.setattr(cli_backends, "CriticAgentBackend", _FakeCriticAgent)
 
     built = cli_backends._build_backends(
-        claude_model="claude-opus-4-8",
-        codex_model="stale-codex-model",
-        critic_choice="agent",
+        cli_backends.ModelRouting(
+            claude_model="claude-opus-4-8", codex_model="stale-codex-model", codex_follows_claude=True
+        ),
+        cli_backends.CriticSetup(choice="agent", agent_root=tmp_path),
         session_dir=tmp_path,
-        critic_agent_root=tmp_path,
-        codex_follows_claude=True,
     )
 
     critic = built["critic"]
