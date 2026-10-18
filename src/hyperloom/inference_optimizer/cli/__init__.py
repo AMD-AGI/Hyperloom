@@ -102,7 +102,7 @@ from .recover import (
 __all__ = ["main"]
 from .. import framework_registry
 from ..session.manifest import load_manifest, write_manifest
-from ..protocol.action_surfaces import ACTION_CATALOGUE, ActionMetadata
+from ..protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.collaborator import OrchestrationPrompt as _OrchestrationPrompt
 from hyperloom.inference_optimizer.framework_paths import resolve_framework_tree, resolve_kernel_search_roots
@@ -334,46 +334,52 @@ def _objective_summary_for_prompt(objective: Objective) -> tuple[str, float | st
     return kind, value
 
 
+@dataclass(frozen=True)
+class OrchestrationPromptContext:
+    """What the Orchestration prompt says about the session itself; fixed for the run while cycles and phases move."""
+
+    no_kernel: bool
+    framework: str
+    objective: Objective
+    max_minutes: int
+    no_framework_agent: bool = False
+    transport: str = TRANSPORT_TOOLS
+    benchmark_mode: str = ""
+    agentx_corpus_shape: Mapping[str, Any] | None = None
+    agentx_grading: Mapping[str, Any] | None = None
+    agentx_backend: str = ""
+
+
 def _build_orchestration_prompt(
+    context: OrchestrationPromptContext,
     *,
-    no_kernel: bool,
-    framework: str,
-    objective: Objective,
-    max_minutes: int,
-    no_framework_agent: bool = False,
     macro_cycle: int = 0,
     cycle_directive: str = "",
     cycle_strategy: Mapping[str, Any] | None = None,
     phase: str = "",
-    transport: str = TRANSPORT_TOOLS,
-    action_registry: Mapping[str, ActionMetadata] | None = None,
-    benchmark_mode: str = "",
-    agentx_corpus_shape: Mapping[str, Any] | None = None,
-    agentx_grading: Mapping[str, Any] | None = None,
-    agentx_backend: str = "",
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides)."""
-    registry = action_registry or ACTION_CATALOGUE
+    no_kernel, no_framework_agent, framework = context.no_kernel, context.no_framework_agent, context.framework
     enabled = default_enabled_actions(no_kernel=no_kernel, no_optimize=no_framework_agent)
-    kind, value = _objective_summary_for_prompt(objective)
+    kind, value = _objective_summary_for_prompt(context.objective)
     return build_orchestration_prompt(
-        action_registry=registry,
+        action_registry=ACTION_CATALOGUE,
         enabled_actions=enabled,
         framework=framework,
         kernel_enabled=not no_kernel,
         framework_agent_phase_enabled=not no_framework_agent,
         objective_kind=kind,
         objective_value=value,
-        max_minutes=int(max_minutes),
+        max_minutes=int(context.max_minutes),
         macro_cycle=int(macro_cycle),
         cycle_directive=cycle_directive,
         cycle_strategy=cycle_strategy,
         phase=phase,
-        transport=transport,
-        benchmark_mode=benchmark_mode,
-        agentx_corpus_shape=agentx_corpus_shape,
-        agentx_grading=agentx_grading,
-        agentx_backend=agentx_backend,
+        transport=context.transport,
+        benchmark_mode=context.benchmark_mode,
+        agentx_corpus_shape=context.agentx_corpus_shape,
+        agentx_grading=context.agentx_grading,
+        agentx_backend=context.agentx_backend,
         rules_fragment_path=_orchestration_rules_fragment_path(),
         framework_source_roots=resolve_kernel_search_roots(),
         session_framework_tree=resolve_framework_tree(framework),
@@ -2643,22 +2649,25 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # The role record always names Claude; the deployment's provider shape is what actually decides, so read the
     # transport off the built backend.
     _orch_transport = getattr(coordinator.backends.get("orchestration"), "transport", TRANSPORT_TOOLS)
+    prompt_context = OrchestrationPromptContext(
+        no_kernel=no_kernel,
+        no_framework_agent=no_framework_agent,
+        framework=framework_for_prompt,
+        objective=objective,
+        max_minutes=max_minutes_for_prompt,
+        transport=_orch_transport,
+        benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
+        agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
+        agentx_grading=coordinator.shared_state.grading,
+        agentx_backend=coordinator.shared_state.agentx_backend,
+    )
     prompts: dict[str, str] = {
         "orchestration": args.orch_prompt
         or _build_orchestration_prompt(
-            no_kernel=no_kernel,
-            no_framework_agent=no_framework_agent,
-            framework=framework_for_prompt,
-            objective=objective,
-            max_minutes=max_minutes_for_prompt,
+            prompt_context,
             macro_cycle=_initial_macro_cycle,
             cycle_directive=_initial_directive,
             phase=_initial_phase,
-            transport=_orch_transport,
-            benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
-            agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
-            agentx_grading=coordinator.shared_state.grading,
-            agentx_backend=coordinator.shared_state.agentx_backend,
         ),
         "critic": args.critic_prompt or _load_critic_prompt(),
     }
@@ -2667,19 +2676,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     coordinator.orch_prompt = _OrchestrationPrompt(
         overrides=prompts,
         is_user_supplied=bool(args.orch_prompt),
-        rebuild=_functools.partial(
-            _build_orchestration_prompt,
-            no_kernel=no_kernel,
-            no_framework_agent=no_framework_agent,
-            framework=framework_for_prompt,
-            objective=objective,
-            max_minutes=max_minutes_for_prompt,
-            transport=_orch_transport,
-            benchmark_mode=str(getattr(coordinator.shared_state, "benchmark_mode", "") or ""),
-            agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
-            agentx_grading=coordinator.shared_state.grading,
-            agentx_backend=coordinator.shared_state.agentx_backend,
-        ),
+        rebuild=_functools.partial(_build_orchestration_prompt, prompt_context),
     )
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
     specialist_capacity = int(getattr(args, "research_lane_capacity", 1) or 0)
