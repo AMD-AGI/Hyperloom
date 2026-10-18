@@ -39,13 +39,10 @@ async def test_run_one_attempt_captures_sdk_error(tmp_path: Path) -> None:
         return _gen()
 
     result = await runner.run_one_attempt(
-        user_prompt="quantize",
-        workspace=tmp_path / "ws",
-        quark_root=tmp_path,
+        runner.AttemptContext(user_prompt="quantize", workspace=tmp_path / "ws", quark_root=tmp_path),
         skill_path=skill,
-        sdk_query_factory=_factory,
-        sdk_options_cls=_Options,
         log=logs.append,
+        sdk=runner.ClaudeAgentSdk(query=_factory, options_cls=_Options),
     )
     # SDK error captured, not raised.
     assert "sdk blew up" in result.sdk_error
@@ -70,13 +67,10 @@ async def test_run_one_attempt_options_typeerror_fallback(tmp_path: Path) -> Non
         return _empty_gen()
 
     result = await runner.run_one_attempt(
-        user_prompt="quantize",
-        workspace=tmp_path / "ws",
-        quark_root=tmp_path,
+        runner.AttemptContext(user_prompt="quantize", workspace=tmp_path / "ws", quark_root=tmp_path),
         skill_path=skill,
         model="some-model",
-        sdk_query_factory=_factory,
-        sdk_options_cls=_Options,
+        sdk=runner.ClaudeAgentSdk(query=_factory, options_cls=_Options),
     )
     assert result.sdk_error == ""
 
@@ -87,12 +81,9 @@ def test_run_one_attempt_missing_skill(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         asyncio.run(
             runner.run_one_attempt(
-                user_prompt="x",
-                workspace=tmp_path / "ws",
-                quark_root=tmp_path,
+                runner.AttemptContext(user_prompt="x", workspace=tmp_path / "ws", quark_root=tmp_path),
                 skill_path=tmp_path / "nope_SKILL.md",
-                sdk_query_factory=lambda **k: iter(()),
-                sdk_options_cls=dict,
+                sdk=runner.ClaudeAgentSdk(query=lambda **k: iter(()), options_cls=dict),
             )
         )
 

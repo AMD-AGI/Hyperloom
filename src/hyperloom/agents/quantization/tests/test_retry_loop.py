@@ -15,7 +15,7 @@ from hyperloom.agents.quantization.driver.retry import (
     _resolve_interactive,
     quantize_via_prompt,
 )
-from hyperloom.agents.quantization.driver.runner import AttemptResult
+from hyperloom.agents.quantization.driver.runner import AttemptContext, AttemptResult
 
 
 # ───────────────────────────────────────────────────────────────────────────── helpers
@@ -29,10 +29,10 @@ class _StubRunner:
         self.side_effects = side_effects
         self.calls: list[dict[str, Any]] = []
 
-    async def __call__(self, **kwargs: Any) -> AttemptResult:
-        self.calls.append(kwargs)
-        workspace = Path(kwargs["workspace"])
-        attempt = kwargs["attempt_number"]
+    async def __call__(self, attempt_context: AttemptContext, **kwargs: Any) -> AttemptResult:
+        self.calls.append(attempt_context)
+        workspace = Path(attempt_context.workspace)
+        attempt = attempt_context.attempt_number
         idx = attempt - 1
         sdk_error = ""
         if idx < len(self.side_effects):
@@ -429,9 +429,7 @@ def test_resolve_interactive_auto_no_tty(monkeypatch):
 def test_decide_next_step_none_outcome(tmp_path):
     d = _decide_next_step(
         None,
-        workspace=tmp_path,
-        attempt_number=1,
-        interactive=False,
+        AttemptContext(user_prompt="p", workspace=tmp_path, quark_root=tmp_path, attempt_number=1, interactive=False),
         max_requantize_attempts=3,
         counter=0,
     )
@@ -442,9 +440,7 @@ def test_decide_next_step_none_outcome(tmp_path):
 def test_decide_next_step_auto_fail(tmp_path):
     d = _decide_next_step(
         OutcomeId.must_validate_md5_mismatch,
-        workspace=tmp_path,
-        attempt_number=1,
-        interactive=False,
+        AttemptContext(user_prompt="p", workspace=tmp_path, quark_root=tmp_path, attempt_number=1, interactive=False),
         max_requantize_attempts=3,
         counter=0,
     )
@@ -455,9 +451,7 @@ def test_decide_next_step_auto_fail(tmp_path):
 def test_decide_next_step_auto_recover(tmp_path):
     d = _decide_next_step(
         OutcomeId.eval_env_unavailable,
-        workspace=tmp_path,
-        attempt_number=1,
-        interactive=False,
+        AttemptContext(user_prompt="p", workspace=tmp_path, quark_root=tmp_path, attempt_number=1, interactive=False),
         max_requantize_attempts=3,
         counter=0,
     )
@@ -469,9 +463,7 @@ def test_decide_next_step_ask_retryable_with_hypothesis(tmp_path):
     (tmp_path / "fix_hypothesis_attempt_2.md").write_text("x", encoding="utf-8")
     d = _decide_next_step(
         OutcomeId.exec_oom,
-        workspace=tmp_path,
-        attempt_number=1,
-        interactive=False,
+        AttemptContext(user_prompt="p", workspace=tmp_path, quark_root=tmp_path, attempt_number=1, interactive=False),
         max_requantize_attempts=2,
         counter=0,
     )
@@ -481,9 +473,7 @@ def test_decide_next_step_ask_retryable_with_hypothesis(tmp_path):
 def test_decide_next_step_ask_retryable_without_hypothesis(tmp_path):
     d = _decide_next_step(
         OutcomeId.exec_oom,
-        workspace=tmp_path,
-        attempt_number=1,
-        interactive=False,
+        AttemptContext(user_prompt="p", workspace=tmp_path, quark_root=tmp_path, attempt_number=1, interactive=False),
         max_requantize_attempts=2,
         counter=0,
     )
@@ -495,9 +485,7 @@ def test_decide_next_step_unclassified_failure(tmp_path):
     (tmp_path / "fix_hypothesis_attempt_2.md").write_text("x", encoding="utf-8")
     d = _decide_next_step(
         OutcomeId.unclassified_failure,
-        workspace=tmp_path,
-        attempt_number=1,
-        interactive=False,
+        AttemptContext(user_prompt="p", workspace=tmp_path, quark_root=tmp_path, attempt_number=1, interactive=False),
         max_requantize_attempts=2,
         counter=0,
     )
@@ -508,9 +496,7 @@ def test_decide_next_step_checkpoint_aborted_never_retries(tmp_path):
     (tmp_path / "fix_hypothesis_attempt_2.md").write_text("x", encoding="utf-8")
     d = _decide_next_step(
         OutcomeId.checkpoint_aborted,
-        workspace=tmp_path,
-        attempt_number=1,
-        interactive=True,
+        AttemptContext(user_prompt="p", workspace=tmp_path, quark_root=tmp_path, attempt_number=1, interactive=True),
         max_requantize_attempts=2,
         counter=0,
     )
@@ -524,9 +510,7 @@ def test_decide_next_step_eval_gap_accepted_promotes(tmp_path, monkeypatch):
     monkeypatch.setattr(rmod, "_ask_operator", lambda msg: True)
     d = _decide_next_step(
         OutcomeId.eval_gap_exceeded,
-        workspace=tmp_path,
-        attempt_number=1,
-        interactive=True,
+        AttemptContext(user_prompt="p", workspace=tmp_path, quark_root=tmp_path, attempt_number=1, interactive=True),
         max_requantize_attempts=0,
         counter=0,
     )
