@@ -20,12 +20,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     ROUTE_FORGE,
     make_kernel_recorder,
 )
-from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
-    KernelEntryMeasures,
-    KernelRewriteRun,
-    KernelVisitExit,
-    LaneRunFields,
-)
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelRewriteRun, LaneRunFields
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -47,14 +42,14 @@ def _visited_kernel(*, macro_cycle: int) -> None:
     """Run one KERNEL visit that produced a rewrite, and close it."""
     recorder = make_kernel_recorder(macro_cycle=macro_cycle, route=ROUTE_FORGE)
     assert recorder is not None
-    recorder.begin(KernelEntryMeasures(tput_before=1000.0))
+    recorder.begin(tput_before=1000.0)
     recorder.record_kernel_rewrite(
         KernelRewriteRun(
             lane=LaneRunFields(run_id="attempt-1", status="success", micro_decision="keep", integrate_ref="int-1"),
             kernel_id="k001",
         )
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
 
 def _state(*, macro_cycle: int) -> SharedState:

@@ -23,7 +23,6 @@ from hyperloom.inference_optimizer.breakdown.recorder.close_out import (
     record_close_step,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_FORGE, make_kernel_recorder
-from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelEntryMeasures
 from hyperloom.inference_optimizer.breakdown.recorder.phase_records import (
     ActionDispatch,
     ActionSettlement,
@@ -248,7 +247,7 @@ def test_authored_milestones_survive_sbd_export(tmp_path):
         record_phase_transition(state, to_phase="KERNEL_AGENT", reason="phase_entered")
         kernel = make_kernel_recorder(macro_cycle=0, route=ROUTE_FORGE)
         assert kernel is not None
-        kernel.begin(KernelEntryMeasures(tput_before=100.0))
+        kernel.begin(tput_before=100.0)
         assert build(tmp_path)["outcome"]["stage_reached_recorded"] == "kernel"
 
 

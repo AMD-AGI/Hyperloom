@@ -14,7 +14,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_GEAK, make_kernel_recorder
-from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelEntryMeasures, KernelVisitExit
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -108,7 +107,7 @@ def promotion(tmp_path, monkeypatch, request):
         recorder = make_kernel_recorder(macro_cycle=0, route=ROUTE_GEAK)
         assert recorder is not None
         if request.node.get_closest_marker("asyncio") is None:
-            recorder.begin(KernelEntryMeasures(tput_before=110.0))
+            recorder.begin(tput_before=110.0)
         coord.phase_kernel._kernel_timeline_recorder = recorder
         yield coord, result, recorder
 
@@ -144,7 +143,7 @@ async def test_geak_acceptance_requires_native_retention(
     promotion, monkeypatch, lane, claimed_intvty, fresh_intvty, accepted
 ):
     coord, result, recorder = promotion
-    recorder.begin(KernelEntryMeasures(tput_before=110.0))
+    recorder.begin(tput_before=110.0)
     state = coord.shared_state
     state.benchmark_mode = "agentx"
     result["e2e_norm_intvty_p90"] = claimed_intvty
@@ -214,7 +213,7 @@ async def test_geak_acceptance_requires_native_retention(
             "graded_comparison_rejected",
             "rebench_did_not_beat_current_best",
         }
-    recorder.finish(KernelVisitExit(tput_after=state.current_best["tput"]))
+    recorder.finish(tput_after=state.current_best["tput"])
     if lane == "2b":
         event = next(event for event in read_timeline_events(coord.session_dir) if event.get("type") == "kernel")
         rebench = event["ext"]["rebench"]
@@ -230,7 +229,7 @@ async def test_geak_acceptance_requires_native_retention(
 @pytest.mark.parametrize("via_orchestrator", [False, True])
 async def test_fallback_rejection_is_conclusive_and_not_validated(promotion, monkeypatch, via_orchestrator):
     coord, result, recorder = promotion
-    recorder.begin(KernelEntryMeasures(tput_before=110.0))
+    recorder.begin(tput_before=110.0)
     state = coord.shared_state
     state.geak_result = deepcopy(result)
     coord.phase_kernel._record_geak_candidate(result)
@@ -322,7 +321,7 @@ async def test_terminal_rejection_cannot_attribute_geak_claims(
     )
 
     coord, result, recorder = promotion
-    recorder.begin(KernelEntryMeasures(tput_before=110.0))
+    recorder.begin(tput_before=110.0)
     state = coord.shared_state
     result["final_throughput_tok_s"] = 150.0
     result["kernel_journey_path"] = _journey_with_validated_keeps(coord.session_dir, [1.5])
@@ -339,7 +338,7 @@ async def test_terminal_rejection_cannot_attribute_geak_claims(
     if journey_missing:
         Path(result["kernel_journey_path"]).unlink()
     if closed:
-        recorder.finish(KernelVisitExit(tput_after=110.0))
+        recorder.finish(tput_after=110.0)
 
     async def fresh_replay(**_kwargs):
         return {"status": "succeeded", "promotion_measurement": {"output_throughput": 150.0, "accuracy": 0.1}}
@@ -357,7 +356,7 @@ async def test_terminal_rejection_cannot_attribute_geak_claims(
     assert state.geak_pending == {}
     assert state.geak_result["revalidation_status"] == "no_promote"
     assert not state.kernel_integrate_attempts
-    recorder.finish(KernelVisitExit(tput_after=110.0))
+    recorder.finish(tput_after=110.0)
     event = next(event for event in read_timeline_events(coord.session_dir) if event.get("type") == "kernel")
     assert event["ext"]["outcome"]["delivered"] == []
     assert event["ext"]["geak"]["rebench"]["final_status"] == "no_promote"

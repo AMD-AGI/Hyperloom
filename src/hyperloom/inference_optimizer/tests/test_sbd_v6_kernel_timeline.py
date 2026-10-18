@@ -29,18 +29,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     record_trace_analyze_request,
     reject_geak_attempts,
 )
-from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
-    FusionRun,
-    GeakProduct,
-    IntegrateVerdict,
-    KernelEntryMeasures,
-    KernelRewriteRun,
-    KernelVisitExit,
-    LaneRunFields,
-    RebenchAttempt,
-    ReprofileOutcome,
-    TraceAnalyzeRun,
-)
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelRewriteRun, LaneRunFields
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.phases.kernel import KernelPhase
@@ -65,13 +54,11 @@ def _forge_recorder():
     )
     assert recorder is not None
     recorder.begin(
-        KernelEntryMeasures(
-            stack_depth_in=2,
-            tput_before=1000.0,
-            session_baseline_tput=800.0,
-            snapshot={"roofline_snapshot_id": 4, "ts": "2026-09-02T00:00:00"},
-            snapshot_staleness="fresh",
-        )
+        stack_depth_in=2,
+        tput_before=1000.0,
+        session_baseline_tput=800.0,
+        snapshot={"roofline_snapshot_id": 4, "ts": "2026-09-02T00:00:00"},
+        snapshot_staleness="fresh",
     )
     return recorder
 
@@ -79,7 +66,7 @@ def _forge_recorder():
 def _geak_recorder(*, macro_cycle: int = 1):
     recorder = make_kernel_recorder(macro_cycle=macro_cycle, route=ROUTE_GEAK)
     assert recorder is not None
-    recorder.begin(KernelEntryMeasures(tput_before=900.0))
+    recorder.begin(tput_before=900.0)
     return recorder
 
 
@@ -95,7 +82,7 @@ def _phase_with_recorder(tmp_path: Path, recorder: Any) -> KernelPhase:
 
 def test_one_event_per_entry_with_macro_cycle_at_the_top(tmp_path):
     recorder = _forge_recorder()
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     events = _kernel_events(tmp_path)
     assert len(events) == 1
@@ -143,7 +130,7 @@ def test_a_forge_keep_is_settled_by_the_lane_that_timed_it(tmp_path):
             speedup=1.4,
         )
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
     row = ext["attempts"][0]
@@ -168,7 +155,7 @@ def test_a_keep_nothing_measured_is_delivered_without_claiming_a_gain(tmp_path):
             lane=LaneRunFields(run_id="attempt-7", status="success", micro_decision="keep"), kernel_id="k001"
         )
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
     assert ext["attempts"][0]["outcome"] == "adopted"
@@ -186,19 +173,17 @@ def test_a_bus_requested_analysis_accounts_for_the_snapshot_it_advanced(tmp_path
         )
     )
     record_trace_analyze_request(
-        3,
-        TraceAnalyzeRun(
-            run_id="msg-42",
-            status="ok",
-            result={"hot_kernels": [{"name": "fused_moe", "gpu_pct": 31.5}]},
-            requested_by="kernel_agent",
-            request_msg_id="msg-42",
-            trace_input="traces/rank0.pt.trace.json",
-            top_k=15,
-            snapshot={"roofline_snapshot_id": 4, "analysis_md_path": "reports/analysis.md"},
-        ),
+        macro_cycle=3,
+        run_id="msg-42",
+        status="ok",
+        result={"hot_kernels": [{"name": "fused_moe", "gpu_pct": 31.5}]},
+        requested_by="kernel_agent",
+        request_msg_id="msg-42",
+        trace_input="traces/rank0.pt.trace.json",
+        top_k=15,
+        snapshot={"roofline_snapshot_id": 4, "analysis_md_path": "reports/analysis.md"},
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     runs = _kernel_events(tmp_path)[0]["ext"]["forge"]["trace_analyze_runs"]
     assert len(runs) == 1
@@ -211,10 +196,14 @@ def test_a_bus_requested_analysis_accounts_for_the_snapshot_it_advanced(tmp_path
 
 def test_a_bus_requested_analysis_after_the_visit_closed_still_lands(tmp_path):
     recorder = _forge_recorder()
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     record_trace_analyze_request(
-        3, TraceAnalyzeRun(run_id="msg-42", status="ok", result={}, snapshot={"roofline_snapshot_id": 4})
+        macro_cycle=3,
+        run_id="msg-42",
+        status="ok",
+        result={},
+        snapshot={"roofline_snapshot_id": 4},
     )
 
     runs = _kernel_events(tmp_path)[0]["ext"]["forge"]["trace_analyze_runs"]
@@ -223,7 +212,11 @@ def test_a_bus_requested_analysis_after_the_visit_closed_still_lands(tmp_path):
 
 def test_a_bus_request_with_no_visit_running_mints_no_event(tmp_path):
     record_trace_analyze_request(
-        3, TraceAnalyzeRun(run_id="msg-42", status="ok", result={}, snapshot={"roofline_snapshot_id": 4})
+        macro_cycle=3,
+        run_id="msg-42",
+        status="ok",
+        result={},
+        snapshot={"roofline_snapshot_id": 4},
     )
 
     assert _kernel_events(tmp_path) == []
@@ -232,19 +225,17 @@ def test_a_bus_request_with_no_visit_running_mints_no_event(tmp_path):
 def test_a_bus_requested_analysis_carries_the_kernel_table_it_produced(tmp_path):
     recorder = _forge_recorder()
     record_trace_analyze_request(
-        3,
-        TraceAnalyzeRun(
-            run_id="msg-42",
-            status="ok",
-            result={},
-            snapshot={
-                "roofline_snapshot_id": 4,
-                "reusable_native_kernel_ids": ["k001"],
-                "hot_kernels_top15": [{"kernel_id": "k001", "name": "fused_moe", "gpu_pct": 31.5}],
-            },
-        ),
+        macro_cycle=3,
+        run_id="msg-42",
+        status="ok",
+        result={},
+        snapshot={
+            "roofline_snapshot_id": 4,
+            "reusable_native_kernel_ids": ["k001"],
+            "hot_kernels_top15": [{"kernel_id": "k001", "name": "fused_moe", "gpu_pct": 31.5}],
+        },
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     discovered = _kernel_events(tmp_path)[0]["ext"]["forge"]["discovered_kernels"]
     assert [row["kernel_id"] for row in discovered] == ["k001"]
@@ -259,18 +250,16 @@ def test_an_adoption_states_the_basis_its_gain_was_measured_on(tmp_path):
         )
     )
     record_integrate_verdict(
-        IntegrateVerdict(
-            macro_cycle=3,
-            integration_id="geak-k001",
-            kernel_id="k001",
-            decision="KEEP",
-            gain_pct=6.0,
-            basis="hot",
-            alignment_status="aligned",
-            gain_attributed=False,
-        )
+        macro_cycle=3,
+        integration_id="geak-k001",
+        kernel_id="k001",
+        decision="KEEP",
+        gain_pct=6.0,
+        basis="hot",
+        alignment_status="aligned",
+        gain_attributed=False,
     )
-    recorder.finish(KernelVisitExit(tput_after=1060.0))
+    recorder.finish(tput_after=1060.0)
 
     row = _kernel_events(tmp_path)[0]["ext"]["integrate"][0]
     assert row["basis"] == "hot"
@@ -286,10 +275,8 @@ def test_the_integrate_gate_is_what_settles_a_forge_candidate(tmp_path):
             kernel_id="k001",
         )
     )
-    record_integrate_verdict(
-        IntegrateVerdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="KEEP", gain_pct=6.0)
-    )
-    recorder.finish(KernelVisitExit(tput_after=1060.0))
+    record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="KEEP", gain_pct=6.0)
+    recorder.finish(tput_after=1060.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
     row = ext["attempts"][0]
@@ -316,7 +303,7 @@ def test_a_lane_that_declined_its_own_candidate_needs_no_gate(tmp_path):
             lane=LaneRunFields(run_id="attempt-7", status="success", micro_decision="revert"), kernel_id="k001"
         )
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
     row = ext["attempts"][0]
@@ -335,10 +322,8 @@ def test_a_reverted_kernel_is_rejected_by_the_gate_not_left_pending(tmp_path):
             kernel_id="k001",
         )
     )
-    record_integrate_verdict(
-        IntegrateVerdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="REVERT")
-    )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="REVERT")
+    recorder.finish(tput_after=1000.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
     assert ext["attempts"][0]["outcome"] == "rejected"
@@ -355,21 +340,21 @@ def test_a_kernel_gated_twice_is_settled_by_the_verdict_that_stands(tmp_path):
         )
     )
     record_integrate_verdict(
-        IntegrateVerdict(
-            macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="REVERT", settled_at="2026-09-02T00:01:00"
-        )
+        macro_cycle=3,
+        integration_id="int-1",
+        kernel_id="k001",
+        decision="REVERT",
+        settled_at="2026-09-02T00:01:00",
     )
     record_integrate_verdict(
-        IntegrateVerdict(
-            macro_cycle=3,
-            integration_id="int-2",
-            kernel_id="k001",
-            decision="KEEP",
-            gain_pct=4.0,
-            settled_at="2026-09-02T00:09:00",
-        )
+        macro_cycle=3,
+        integration_id="int-2",
+        kernel_id="k001",
+        decision="KEEP",
+        gain_pct=4.0,
+        settled_at="2026-09-02T00:09:00",
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
     assert ext["attempts"][0]["outcome"] == "adopted"
@@ -387,9 +372,13 @@ def test_an_adopted_rewrite_states_the_backend_that_produced_it(tmp_path):
         )
     )
     record_integrate_verdict(
-        IntegrateVerdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="KEEP", gain_pct=6.0)
+        macro_cycle=3,
+        integration_id="int-1",
+        kernel_id="k001",
+        decision="KEEP",
+        gain_pct=6.0,
     )
-    recorder.finish(KernelVisitExit(tput_after=1060.0))
+    recorder.finish(tput_after=1060.0)
 
     row = _kernel_events(tmp_path)[0]["ext"]["attempts"][0]
     assert row["outcome"] == "adopted"
@@ -404,26 +393,24 @@ def test_an_integrate_verdict_lands_after_the_visit_has_closed(tmp_path):
             kernel_id="k001",
         )
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     # Closing wrote the event's own fragment; nothing is assembled until export.
     assert _kernel_events(tmp_path)[0]["ext"]["integrate"] == []
 
     record_integrate_verdict(
-        IntegrateVerdict(
-            macro_cycle=3,
-            integration_id="int-1",
-            kernel_id="k001",
-            decision="KEEP",
-            status="succeeded",
-            attempt_count=2,
-            fault_count=1,
-            gain_pct=4.5,
-            accuracy_pass=True,
-            patch_path="patches/k001.diff",
-            target_file="vllm/attention.py",
-            settled_at="2026-09-02T00:20:00",
-        )
+        macro_cycle=3,
+        integration_id="int-1",
+        kernel_id="k001",
+        decision="KEEP",
+        status="succeeded",
+        attempt_count=2,
+        fault_count=1,
+        gain_pct=4.5,
+        accuracy_pass=True,
+        patch_path="patches/k001.diff",
+        target_file="vllm/attention.py",
+        settled_at="2026-09-02T00:20:00",
     )
 
     ext = _kernel_events(tmp_path)[0]["ext"]
@@ -469,28 +456,24 @@ def test_a_later_unrelated_integration_cannot_rewrite_an_exact_attempt(tmp_path)
             lane=LaneRunFields(run_id="attempt-7", status="success", integrate_ref="int-1"), kernel_id="k001"
         )
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     record_integrate_verdict(
-        IntegrateVerdict(
-            macro_cycle=3,
-            integration_id="int-1",
-            kernel_id="k001",
-            decision="KEEP",
-            gain_pct=6.0,
-            settled_at="2026-09-02T00:10:00",
-        )
+        macro_cycle=3,
+        integration_id="int-1",
+        kernel_id="k001",
+        decision="KEEP",
+        gain_pct=6.0,
+        settled_at="2026-09-02T00:10:00",
     )
     record_integrate_verdict(
-        IntegrateVerdict(
-            macro_cycle=3,
-            integration_id="int-2",
-            kernel_id="k001",
-            decision="REVERT",
-            gain_pct=None,
-            rejected_reason="fault_attempts_exhausted_2",
-            settled_at="2026-09-02T00:30:00",
-        )
+        macro_cycle=3,
+        integration_id="int-2",
+        kernel_id="k001",
+        decision="REVERT",
+        gain_pct=None,
+        rejected_reason="fault_attempts_exhausted_2",
+        settled_at="2026-09-02T00:30:00",
     )
 
     ext = _kernel_events(tmp_path)[0]["ext"]
@@ -506,7 +489,7 @@ def test_a_kernel_that_was_never_gated_has_no_e2e_block(tmp_path):
     recorder.record_kernel_rewrite(
         KernelRewriteRun(lane=LaneRunFields(run_id="attempt-7", status="success"), kernel_id="k001")
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     assert _kernel_events(tmp_path)[0]["ext"]["attempts"][0]["e2e"] is None
 
@@ -518,19 +501,17 @@ def test_same_kernel_name_without_integration_ref_does_not_claim_a_gate(tmp_path
             lane=LaneRunFields(run_id="attempt-7", status="success", micro_decision="keep"), kernel_id="k001"
         )
     )
-    record_integrate_verdict(
-        IntegrateVerdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="REVERT")
-    )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="REVERT")
+    recorder.finish(tput_after=1000.0)
 
     assert _kernel_events(tmp_path)[0]["ext"]["attempts"][0]["e2e"] is None
 
 
 def test_a_verdict_with_no_event_to_belong_to_is_dropped(tmp_path):
     recorder = _forge_recorder()
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
-    record_integrate_verdict(IntegrateVerdict(macro_cycle=9, integration_id="int-1", kernel_id="k001", decision="KEEP"))
+    record_integrate_verdict(macro_cycle=9, integration_id="int-1", kernel_id="k001", decision="KEEP")
 
     assert [event["id"] for event in _kernel_events(tmp_path)] == [kernel_event_id(3)]
 
@@ -539,19 +520,21 @@ def test_a_fusion_is_settled_by_the_integration_it_queued(tmp_path):
     """Fusion produces no kernel of its own, so the gate is found by integration id."""
     recorder = _forge_recorder()
     recorder.record_fusion_run(
-        FusionRun(
-            lane=LaneRunFields(
-                run_id="fusion-1", status="success", micro_decision="keep", integrate_ref="int-fusion-1"
-            ),
-            pattern="rmsnorm+silu",
-            applied=True,
-            gain_pct=2.0,
-        )
+        run_id="fusion-1",
+        status="success",
+        pattern="rmsnorm+silu",
+        applied=True,
+        gain_pct=2.0,
+        micro_decision="keep",
+        integrate_ref="int-fusion-1",
     )
     record_integrate_verdict(
-        IntegrateVerdict(macro_cycle=3, integration_id="int-fusion-1", kernel_id="", decision="REVERT")
+        macro_cycle=3,
+        integration_id="int-fusion-1",
+        kernel_id="",
+        decision="REVERT",
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
     row = ext["attempts"][0]
@@ -569,7 +552,7 @@ def test_each_gain_names_the_anchor_it_was_measured_against(tmp_path):
     be inferred.
     """
     recorder = _forge_recorder()
-    recorder.finish(KernelVisitExit(tput_after=1100.0))
+    recorder.finish(tput_after=1100.0)
 
     throughput = _kernel_events(tmp_path)[0]["ext"]["outcome"]["throughput"]
     assert throughput["before"] == 1000.0
@@ -583,8 +566,8 @@ def test_a_gain_is_not_claimed_against_an_anchor_that_was_never_measured(tmp_pat
     """A percentage of a missing or zero anchor states nothing, so it is absent."""
     recorder = make_kernel_recorder(macro_cycle=4, route=ROUTE_FORGE)
     assert recorder is not None
-    recorder.begin(KernelEntryMeasures(tput_before=0.0))
-    recorder.finish(KernelVisitExit(tput_after=1100.0))
+    recorder.begin(tput_before=0.0)
+    recorder.finish(tput_after=1100.0)
 
     throughput = _kernel_events(tmp_path)[0]["ext"]["outcome"]["throughput"]
     assert throughput["after"] == 1100.0
@@ -605,15 +588,13 @@ def test_geak_handoff_and_product_do_not_share_the_accepted_flags_name(tmp_path)
         }
     )
     recorder.record_geak_product(
-        GeakProduct(
-            accepted_flags=["--enable-torch-compile", "--attention-backend=aiter"],
-            accepted_envs={"A": "1", "B": "2"},
-            cfg_hash="deadbeef",
-            final_overlay="/s/geak/overlay",
-            final_overlay_digest="d1",
-        )
+        accepted_flags=["--enable-torch-compile", "--attention-backend=aiter"],
+        accepted_envs={"A": "1", "B": "2"},
+        cfg_hash="deadbeef",
+        final_overlay="/s/geak/overlay",
+        final_overlay_digest="d1",
     )
-    recorder.finish(KernelVisitExit(tput_after=900.0))
+    recorder.finish(tput_after=900.0)
 
     geak = _kernel_events(tmp_path)[0]["ext"]["geak"]
     assert geak["handoff"]["baseline_flags"] == "--enable-torch-compile"
@@ -636,7 +617,7 @@ def test_the_handoff_records_which_cards_geak_was_given(tmp_path):
             "gpu_pin": {"ids": "6,7", "var": "ROCR_VISIBLE_DEVICES", "source": "recipe"},
         }
     )
-    recorder.finish(KernelVisitExit(tput_after=900.0))
+    recorder.finish(tput_after=900.0)
 
     handoff = _kernel_events(tmp_path)[0]["ext"]["geak"]["handoff"]
     assert handoff["gpu_ids"] == "0,1"
@@ -648,7 +629,7 @@ def test_the_handoff_records_which_cards_geak_was_given(tmp_path):
 def test_a_handoff_without_a_pin_is_not_read_as_a_pin_to_card_zero(tmp_path):
     recorder = _geak_recorder()
     recorder.record_geak_handoff({"schema_version": 3, "gpu_ids": "0,1"})
-    recorder.finish(KernelVisitExit(tput_after=900.0))
+    recorder.finish(tput_after=900.0)
 
     handoff = _kernel_events(tmp_path)[0]["ext"]["geak"]["handoff"]
     assert handoff["schema_version"] == 3
@@ -670,7 +651,7 @@ def test_geak_env_selections_are_recorded_as_their_own_source(tmp_path):
             },
         ],
     )
-    recorder.finish(KernelVisitExit(tput_after=900.0))
+    recorder.finish(tput_after=900.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
     claim = ext["geak"]["claim"]
@@ -713,7 +694,7 @@ def test_geak_attempts_carry_what_it_tried_not_only_what_it_kept(tmp_path):
             ],
         }
     )
-    recorder.finish(KernelVisitExit(tput_after=900.0))
+    recorder.finish(tput_after=900.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
     assert ext["geak"]["discovery_runs"][0]["hot_kernel_count"] == 3
@@ -746,11 +727,13 @@ def test_geak_opaque_ids_survive_acceptance_rebench_integration_and_late_rejecti
     recorder.record_geak_claim({}, specs=[{"kind": "env", "short_name": kernel_id, "e2e_delta_pct": 4.0}])
     _geak_rebench(recorder, "geak:rebench:0", REBENCH_VALIDATED)
     record_integrate_verdict(
-        IntegrateVerdict(
-            macro_cycle=0, integration_id=f"geak:{kernel_id}", kernel_id=kernel_id, decision="KEEP", gain_pct=4.0
-        )
+        macro_cycle=0,
+        integration_id=f"geak:{kernel_id}",
+        kernel_id=kernel_id,
+        decision="KEEP",
+        gain_pct=4.0,
     )
-    recorder.finish(KernelVisitExit(tput_after=950.0))
+    recorder.finish(tput_after=950.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
     assert ext["geak"]["discovery_runs"][0]["source"] == "trace:1"
@@ -810,7 +793,7 @@ def test_an_attempt_carries_what_made_the_kernel_worth_trying(tmp_path):
             ]
         }
     )
-    recorder.finish(KernelVisitExit(tput_after=900.0))
+    recorder.finish(tput_after=900.0)
 
     kernel = _kernel_events(tmp_path)[0]["ext"]["attempts"][0]
     assert kernel["name"] == "fused_moe_kernel"
@@ -833,7 +816,7 @@ def test_the_isolated_speedup_is_read_from_wherever_the_journey_states_it(tmp_pa
             ]
         }
     )
-    recorder.finish(KernelVisitExit(tput_after=900.0))
+    recorder.finish(tput_after=900.0)
 
     assert _kernel_events(tmp_path)[0]["ext"]["attempts"][0]["speedup"] == 2.4
 
@@ -843,7 +826,7 @@ def test_an_attempt_with_no_op_kind_of_its_own_takes_the_dispatchs(tmp_path):
     recorder.record_geak_attempts(
         {"kernels": [{"kernel_id": "k001", "dispatch": {"dispatched": True, "op_kind": "attn"}}]}
     )
-    recorder.finish(KernelVisitExit(tput_after=900.0))
+    recorder.finish(tput_after=900.0)
 
     assert _kernel_events(tmp_path)[0]["ext"]["attempts"][0]["detail"]["op_kind"] == "attn"
 
@@ -860,7 +843,7 @@ def test_the_latency_geak_measured_survives_a_run_that_kept_nothing(tmp_path):
             "status": "no_gain",
         }
     )
-    recorder.finish(KernelVisitExit(tput_after=900.0))
+    recorder.finish(tput_after=900.0)
 
     claim = _kernel_events(tmp_path)[0]["ext"]["geak"]["claim"]
     assert claim["ttft_mean_ms"] == 42.5
@@ -874,7 +857,7 @@ def test_the_measurement_lands_beside_the_claim_it_belongs_to(tmp_path):
     recorder = _geak_recorder()
     recorder.record_geak_claim({"self_reported_gain_pct": 7.5, "geak_status": "ok"})
     recorder.record_geak_measurement({"ttft_ms": 42.5, "output_parity": False})
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     claim = _kernel_events(tmp_path)[0]["ext"]["geak"]["claim"]
     assert claim["self_reported_gain_pct"] == 7.5
@@ -898,7 +881,7 @@ def test_a_collapsed_alias_twin_leaves_its_name_on_the_survivor(tmp_path):
             }
         ],
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     authored = _kernel_events(tmp_path)[0]["ext"]["geak"]["claim"]["authored_kernels"][0]
     assert authored["alias_collapsed"] is True
@@ -908,7 +891,7 @@ def test_a_collapsed_alias_twin_leaves_its_name_on_the_survivor(tmp_path):
 def test_a_geak_attempt_names_its_route_rather_than_engaging_forge(tmp_path):
     recorder = _geak_recorder()
     recorder.record_geak_attempts({"kernels": [{"kernel_id": "k001", "dispatch": {"dispatched": True}}]})
-    recorder.finish(KernelVisitExit(tput_after=900.0))
+    recorder.finish(tput_after=900.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
     # Both routes share the attempts array, so the row states which produced it
@@ -920,7 +903,7 @@ def test_a_geak_attempt_names_its_route_rather_than_engaging_forge(tmp_path):
 def test_two_entries_in_one_session_assemble_from_their_own_rows_only(tmp_path):
     first = _geak_recorder(macro_cycle=1)
     first.record_geak_attempts({"kernels": [{"kernel_id": "k001", "dispatch": {"dispatched": True}}]})
-    first.finish(KernelVisitExit(tput_after=900.0))
+    first.finish(tput_after=900.0)
 
     second = _geak_recorder(macro_cycle=2)
     second.record_geak_attempts(
@@ -931,7 +914,7 @@ def test_two_entries_in_one_session_assemble_from_their_own_rows_only(tmp_path):
             ]
         }
     )
-    second.finish(KernelVisitExit(tput_after=900.0))
+    second.finish(tput_after=900.0)
 
     events = {event["id"]: event for event in _kernel_events(tmp_path)}
     assert set(events) == {kernel_event_id(1), kernel_event_id(2)}
@@ -1016,7 +999,7 @@ def test_a_fault_mid_visit_is_named_without_ending_the_visit(tmp_path):
             lane=LaneRunFields(run_id="attempt-7", status="success", micro_decision="revert"), kernel_id="k001"
         )
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     event = _kernel_events(tmp_path)[0]
     outcome = event["ext"]["outcome"]
@@ -1043,7 +1026,7 @@ def test_a_measured_win_outranks_a_fault_the_visit_survived(tmp_path):
             speedup=1.4,
         )
     )
-    recorder.finish(KernelVisitExit(tput_after=1400.0))
+    recorder.finish(tput_after=1400.0)
 
     outcome = _kernel_events(tmp_path)[0]["ext"]["outcome"]
     assert outcome["verdict"] == "improved"
@@ -1057,7 +1040,7 @@ def test_the_first_fault_is_the_one_kept(tmp_path):
     recorder = _forge_recorder()
     recorder.record_fault(stage="tick_body", error_class="RuntimeError", message="the cause")
     recorder.record_fault(stage="advance_phase", error_class="KeyError", message="the consequence")
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     outcome = _kernel_events(tmp_path)[0]["ext"]["outcome"]
     assert outcome["error_class"] == "RuntimeError"
@@ -1103,22 +1086,20 @@ def test_an_unfinished_visit_states_no_verdict(tmp_path):
 def test_the_trace_analyze_run_records_the_only_legal_kernel_id_source(tmp_path):
     recorder = _forge_recorder()
     record_trace_analyze_request(
-        3,
-        TraceAnalyzeRun(
-            run_id="ta-1",
-            status="ok",
-            requested_by="orchestration",
-            trace_input="/s/traces",
-            top_k=10,
-            result={
-                "analysis_meta": {"route": "agent", "tool": "tracelens"},
-                "hot_kernels_top15": [{"name": "aten::mm", "gpu_pct": 10.0}],
-                "candidates_path": "/s/candidates.json",
-            },
-            snapshot={"roofline_snapshot_id": 5, "reusable_native_kernel_ids": ["k001", "k002"]},
-        ),
+        macro_cycle=3,
+        run_id="ta-1",
+        status="ok",
+        requested_by="orchestration",
+        trace_input="/s/traces",
+        top_k=10,
+        result={
+            "analysis_meta": {"route": "agent", "tool": "tracelens"},
+            "hot_kernels_top15": [{"name": "aten::mm", "gpu_pct": 10.0}],
+            "candidates_path": "/s/candidates.json",
+        },
+        snapshot={"roofline_snapshot_id": 5, "reusable_native_kernel_ids": ["k001", "k002"]},
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     run = _kernel_events(tmp_path)[0]["ext"]["forge"]["trace_analyze_runs"][0]
     assert run["route"] == "agent"
@@ -1140,7 +1121,7 @@ def _geak_rebench(recorder, attempt_id: str, decision: str | None, **overrides: 
         "status": "settled",
     }
     fields.update(overrides)
-    recorder.record_geak_rebench_attempt(RebenchAttempt(**fields), max_attempts=4)
+    recorder.record_geak_rebench_attempt(max_attempts=4, **fields)
 
 
 def _geak_with_one_acceptance():
@@ -1160,7 +1141,7 @@ def test_conflicting_geak_rebenches_leave_the_candidate_pending(tmp_path, decisi
     recorder = _geak_with_one_acceptance()
     _geak_rebench(recorder, "geak-rb-1", decisions[0])
     _geak_rebench(recorder, "geak-rb-2", decisions[1])
-    recorder.finish(KernelVisitExit(tput_after=950.0))
+    recorder.finish(tput_after=950.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
     assert ext["geak"]["rebench"]["conflicting_decisions"] == sorted(set(decisions))
@@ -1176,7 +1157,7 @@ def test_agreeing_geak_rebenches_still_settle_the_candidate(tmp_path):
     recorder = _geak_with_one_acceptance()
     _geak_rebench(recorder, "geak-rb-1", REBENCH_VALIDATED)
     _geak_rebench(recorder, "geak-rb-2", REBENCH_VALIDATED)
-    recorder.finish(KernelVisitExit(tput_after=950.0))
+    recorder.finish(tput_after=950.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
     assert "conflicting_decisions" not in ext["geak"]["rebench"]
@@ -1188,7 +1169,7 @@ def test_agreeing_geak_rebenches_still_settle_the_candidate(tmp_path):
 def test_the_rebench_ledger_is_shared_rather_than_nested_in_the_route(tmp_path):
     recorder = _geak_with_one_acceptance()
     _geak_rebench(recorder, "geak-rb-1", REBENCH_VALIDATED)
-    recorder.finish(KernelVisitExit(tput_after=950.0))
+    recorder.finish(tput_after=950.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
     assert [row["attempt_id"] for row in ext["rebench"]] == ["geak-rb-1"]
@@ -1204,7 +1185,7 @@ def test_a_visit_that_produced_nothing_ran_without_improving_anything(tmp_path):
     fact the array already states without the verdict encoding it twice.
     """
     recorder = _forge_recorder()
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     outcome = _kernel_events(tmp_path)[0]["ext"]["outcome"]
     assert outcome["verdict"] == "no_improvement"
@@ -1215,7 +1196,7 @@ def test_a_visit_that_produced_nothing_ran_without_improving_anything(tmp_path):
 def test_the_verdict_comes_from_the_gate_and_not_from_the_caller(tmp_path):
     recorder = _forge_recorder()
     _forge_rewrite_with_gate(recorder, decision="KEEP", gain_pct=10.0)
-    recorder.finish(KernelVisitExit(tput_after=1100.0))
+    recorder.finish(tput_after=1100.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
     assert ext["outcome"]["verdict"] == "improved"
@@ -1230,13 +1211,13 @@ def _forge_rewrite_with_gate(recorder, **verdict: Any) -> None:
             kernel_id="k001",
         )
     )
-    record_integrate_verdict(IntegrateVerdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", **verdict))
+    record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", **verdict)
 
 
 def test_a_gate_concluding_against_the_candidate_still_succeeds_the_entry(tmp_path):
     recorder = _forge_recorder()
     _forge_rewrite_with_gate(recorder, decision="REVERT")
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     assert _kernel_events(tmp_path)[0]["status"] == "succeeded"
 
@@ -1248,7 +1229,7 @@ def test_a_visit_that_found_no_win_still_closes_as_a_completed_visit(tmp_path):
             lane=LaneRunFields(run_id="attempt-7", status="success", micro_decision="revert"), kernel_id="k001"
         )
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     assert _kernel_events(tmp_path)[0]["status"] == "succeeded"
 
@@ -1258,7 +1239,7 @@ def test_an_entry_whose_every_attempt_failed_is_failed(tmp_path):
     recorder.record_kernel_rewrite(
         KernelRewriteRun(lane=LaneRunFields(run_id="attempt-7", status="failed"), kernel_id="k001")
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     event = _kernel_events(tmp_path)[0]
     assert event["status"] == "failed"
@@ -1272,7 +1253,7 @@ def test_a_failed_attempt_is_not_read_as_a_rejection(tmp_path):
     recorder.record_kernel_rewrite(
         KernelRewriteRun(
             lane=LaneRunFields(
-                run_id="attempt-7", status="failed", failure_reason="triton compile failed", error_class="compile_error"
+                run_id="attempt-7", status="failed", error_class="compile_error", failure_reason="triton compile failed"
             ),
             kernel_id="k001",
         )
@@ -1282,7 +1263,7 @@ def test_a_failed_attempt_is_not_read_as_a_rejection(tmp_path):
             lane=LaneRunFields(run_id="attempt-8", status="success", micro_decision="revert"), kernel_id="k002"
         )
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     rows = {row["attempt_id"]: row for row in _kernel_events(tmp_path)[0]["ext"]["attempts"]}
     assert rows["attempt-7"]["outcome"] == "failed"
@@ -1300,7 +1281,7 @@ def test_a_fallback_verdict_is_inconclusive_rather_than_a_rejection(tmp_path):
         measured_tput=None,
         engagement={"config_matched": True, "overlay_loaded": False},
     )
-    recorder.finish(KernelVisitExit(tput_after=900.0))
+    recorder.finish(tput_after=900.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
     assert ext["rebench"][0]["engagement"]["overlay_loaded"] is False
@@ -1313,7 +1294,7 @@ def test_recording_the_same_rebench_twice_updates_one_row(tmp_path):
     recorder = _geak_with_one_acceptance()
     _geak_rebench(recorder, "geak-rb-1", None, measured_tput=None, status="dispatched", settled_at=None)
     _geak_rebench(recorder, "geak-rb-1", REBENCH_VALIDATED, settled_at="2026-09-02T00:09:00")
-    recorder.finish(KernelVisitExit(tput_after=950.0))
+    recorder.finish(tput_after=950.0)
 
     ledger = _kernel_events(tmp_path)[0]["ext"]["rebench"]
     assert len(ledger) == 1
@@ -1323,13 +1304,9 @@ def test_recording_the_same_rebench_twice_updates_one_row(tmp_path):
 
 def test_attempts_are_ordered_by_when_they_started(tmp_path):
     recorder = _forge_recorder()
-    recorder.record_fusion_run(
-        FusionRun(lane=LaneRunFields(run_id="late", status="success", started_at="2026-09-02T00:05:00"))
-    )
-    recorder.record_fusion_run(
-        FusionRun(lane=LaneRunFields(run_id="early", status="success", started_at="2026-09-02T00:01:00"), applied=True)
-    )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.record_fusion_run(run_id="late", status="success", started_at="2026-09-02T00:05:00")
+    recorder.record_fusion_run(run_id="early", status="success", started_at="2026-09-02T00:01:00", applied=True)
+    recorder.finish(tput_after=1000.0)
 
     rows = _kernel_events(tmp_path)[0]["ext"]["attempts"]
     assert [row["attempt_id"] for row in rows] == ["early", "late"]
@@ -1341,7 +1318,7 @@ def _record_inline_reprofile(recorder, *, task_id: str = "rp-1") -> None:
     from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
     from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import RooflineRequest, make_roofline_recorder
 
-    recorder.record_reprofile(ReprofileOutcome(ran=True, task_kind="roofline", trigger="gain", task_id=task_id))
+    recorder.record_reprofile(ran=True, task_kind="roofline", trigger="gain", task_id=task_id)
     inline = make_roofline_recorder(
         make_sink(recorder.event_id, producer="orchestrator"),
         RooflineRequest(task_id=task_id, task_kind="roofline", reason="kernel_entry_reprofile"),
@@ -1354,7 +1331,7 @@ def _record_inline_reprofile(recorder, *, task_id: str = "rp-1") -> None:
 def test_an_inline_reprofile_survives_the_active_close(tmp_path):
     recorder = _forge_recorder()
     _record_inline_reprofile(recorder)
-    recorder.finish(KernelVisitExit(tput_after=1050.0))
+    recorder.finish(tput_after=1050.0)
 
     reprofile = _kernel_events(tmp_path)[0]["ext"]["forge"]["reprofile"]
     assert reprofile["ran"] is True
@@ -1397,7 +1374,7 @@ def test_the_visits_own_measurements_are_held_by_the_event_that_asked_for_them(t
     )
     assert guest is not None
     guest.finish({"status": "succeeded", "output_throughput": 1100.0})
-    recorder.finish(KernelVisitExit(tput_after=1100.0))
+    recorder.finish(tput_after=1100.0)
 
     events = _kernel_events(tmp_path)
     assert len(events) == 1
@@ -1417,7 +1394,7 @@ def test_a_measurement_that_lands_after_the_visit_closed_is_still_published(tmp_
     from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_integrate_verdict
 
     recorder = _forge_recorder()
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
     assert _kernel_events(tmp_path)[0]["ext"]["measurements"] == []
 
     guest = make_baseline_recorder(
@@ -1429,9 +1406,11 @@ def test_a_measurement_that_lands_after_the_visit_closed_is_still_published(tmp_
     assert guest is not None
     guest.finish({"status": "succeeded", "output_throughput": 1100.0})
     record_integrate_verdict(
-        IntegrateVerdict(
-            macro_cycle=3, integration_id="stack-k001+k004", kernel_id="k001+k004", decision="KEEP", status="ok"
-        )
+        macro_cycle=3,
+        integration_id="stack-k001+k004",
+        kernel_id="k001+k004",
+        decision="KEEP",
+        status="ok",
     )
 
     event = _kernel_events(tmp_path)[0]
@@ -1474,7 +1453,7 @@ def test_discovered_kernels_carry_profiling_fields(tmp_path):
         },
         provenance="entry_snapshot",
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     forge = _kernel_events(tmp_path)[0]["ext"]["forge"]
     assert len(forge["discovered_kernels"]) == 2
@@ -1491,28 +1470,26 @@ def test_discovered_kernels_carry_profiling_fields(tmp_path):
 def test_trace_analyze_run_also_records_discovered_kernels(tmp_path):
     recorder = _forge_recorder()
     record_trace_analyze_request(
-        3,
-        TraceAnalyzeRun(
-            run_id="ta-2",
-            status="ok",
-            result={"analysis_meta": {"route": "agent", "tool": "tracelens"}},
-            snapshot={
-                "roofline_snapshot_id": 6,
-                "hot_kernels_top15": [
-                    {
-                        "kernel_id": "k001",
-                        "name": "aten::mm",
-                        "gpu_pct": 10.0,
-                        "duration_us": 50.0,
-                        "call_count": 8,
-                        "bound_type": "memory",
-                    }
-                ],
-                "reusable_native_kernel_ids": ["k001"],
-            },
-        ),
+        macro_cycle=3,
+        run_id="ta-2",
+        status="ok",
+        result={"analysis_meta": {"route": "agent", "tool": "tracelens"}},
+        snapshot={
+            "roofline_snapshot_id": 6,
+            "hot_kernels_top15": [
+                {
+                    "kernel_id": "k001",
+                    "name": "aten::mm",
+                    "gpu_pct": 10.0,
+                    "duration_us": 50.0,
+                    "call_count": 8,
+                    "bound_type": "memory",
+                }
+            ],
+            "reusable_native_kernel_ids": ["k001"],
+        },
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     discovered = _kernel_events(tmp_path)[0]["ext"]["forge"]["discovered_kernels"]
     assert discovered[0]["kernel_id"] == "k001"
@@ -1557,7 +1534,7 @@ def test_record_backend_versions_and_timeline_mirrors_each_attempt(tmp_path):
         },
         recorder=recorder,
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     rows = _kernel_events(tmp_path)[0]["ext"]["attempts"]
     assert [row["attempt_id"] for row in rows] == ["a1", "a2"]
@@ -1589,7 +1566,7 @@ def test_controller_integrations_are_wired_to_forge_rewrites(tmp_path):
             },
         }
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     rows = _kernel_events(tmp_path)[0]["ext"]["attempts"]
     assert [row["name"] for row in rows] == ["rmsnorm", "rope"]
@@ -1630,7 +1607,7 @@ def test_gemm_and_fusion_handlers_record_their_forge_lanes(tmp_path):
             "patch_path": "/tmp/fusion.patch",
         }
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     rows = {row["source_kind"]: row for row in _kernel_events(tmp_path)[0]["ext"]["attempts"]}
     assert rows["gemm_tuning"]["detail"]["shapes_total"] == 12
@@ -1680,7 +1657,7 @@ def test_gemm_tuning_records_one_row_per_tuner_not_a_merged_row(tmp_path):
             ],
         }
     )
-    recorder.finish(KernelVisitExit(tput_after=1000.0))
+    recorder.finish(tput_after=1000.0)
 
     rows = {row["detail"]["tuner"]: row for row in _kernel_events(tmp_path)[0]["ext"]["attempts"]}
     assert set(rows) == {"fmoe_ck", "a4w4_blockscale"}
@@ -1739,7 +1716,7 @@ def test_geak_runner_outcome_is_wired_to_geak_delegation(tmp_path):
         runner_timeout_sec=300,
         kill_timeout_sec=360,
     )
-    recorder.finish(KernelVisitExit(tput_after=900.0))
+    recorder.finish(tput_after=900.0)
 
     delegation = _kernel_events(tmp_path)[0]["ext"]["geak"]["delegation"]
     assert delegation["runner_status"] == "ok"
@@ -1751,11 +1728,9 @@ def test_geak_runner_outcome_is_wired_to_geak_delegation(tmp_path):
 def test_finish_records_stack_delta(tmp_path):
     recorder = _forge_recorder()
     recorder.finish(
-        KernelVisitExit(
-            tput_after=1100.0,
-            stack_added=[{"action": "integrate_patch", "variant_name": "fused_gemm"}],
-            stack_removed=[],
-        )
+        tput_after=1100.0,
+        stack_added=[{"action": "integrate_patch", "variant_name": "fused_gemm"}],
+        stack_removed=[],
     )
 
     delta = _kernel_events(tmp_path)[0]["ext"]["outcome"]["stack_delta"]
@@ -1771,7 +1746,7 @@ def test_a_dropped_candidates_verdict_survives_the_slot_it_was_read_from(tmp_pat
         final_error_class="subprocess_nonzero",
         final_error="GEAK harness fallback did not validate",
     )
-    recorder.finish(KernelVisitExit(tput_after=900.0))
+    recorder.finish(tput_after=900.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
     rebench = ext["geak"]["rebench"]
@@ -1787,7 +1762,7 @@ def test_a_verdict_with_no_failure_behind_it_carries_no_error(tmp_path):
     recorder = _geak_with_one_acceptance()
     _geak_rebench(recorder, "geak-rb-1", REBENCH_NO_PROMOTE)
     recorder.record_geak_rebench_conclusion(final_status="no_promote")
-    recorder.finish(KernelVisitExit(tput_after=900.0))
+    recorder.finish(tput_after=900.0)
 
     rebench = _kernel_events(tmp_path)[0]["ext"]["geak"]["rebench"]
     assert rebench["final_status"] == "no_promote"
