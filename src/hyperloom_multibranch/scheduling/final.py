@@ -4,14 +4,15 @@
 """FINAL: which commit the session hands on, the integration head or the best single branch's head.
 
 The candidates are the integration head and the specialist head with the highest recorded value, whatever stopped
-its branch. Each is validated through the toolbox as a session measurement: one ``SWEEP`` test over the concs
-:data:`SWEEP_FACTORS` places around the workload's conc, read per conc from its rounds, and a cold-start reproduction
-the rule gate judges against the commit's own recorded value and holds to the accuracy gate, and the regression set of
-the commit's own ancestry run on the commit itself. The toolbox measures a
+its branch. Each is validated through the toolbox as a session measurement: one ``SWEEP`` test over the workload's
+:attr:`~hyperloom_multibranch.scheduling.settings.Workload.final_concs`, read per conc from its rounds, and a
+cold-start reproduction the rule gate judges against the commit's own recorded value and holds to the accuracy gate,
+and the regression set of the commit's own ancestry run on the commit itself. The toolbox measures a
 sweep over the concs its request names and the primary one alone when it names none, so FINAL names them.
 The primary operating point (the workload's conc) decides; a candidate
 whose other sweep points fall more than :data:`MB_SWEEP_DEGRADATION_PCT` below the other candidate's at the same conc
-is passed over while the other one does not degrade in turn.
+is passed over while the other one does not degrade in turn. An AgentX workload defines no other operating point, so
+its candidates are measured at the primary one alone, and the choice's reason says so.
 """
 
 from __future__ import annotations
@@ -41,19 +42,11 @@ from hyperloom_multibranch.scheduling.settings import Workload
 #: How far below the other candidate a non-primary sweep point may fall before the candidate is passed over.
 MB_SWEEP_DEGRADATION_PCT = 5.0
 
-#: The sweep's concs as multiples of the workload's conc; the primary operating point is one of them.
-SWEEP_FACTORS = (0.5, 1.0, 2.0)
-
 MEASURE_PHASE = "measure"
+PRIMARY_POINT_ONLY = "measured at the primary operating point alone: the workload defines no conc sweep"
 
 INTEGRATION_LABEL = "integration"
 BEST_BRANCH_LABEL = "best_branch"
-
-
-def sweep_concs(conc: int) -> tuple[int, ...]:
-    """The concs FINAL sweeps around ``conc``, ascending."""
-
-    return tuple(sorted({max(round(conc * factor), 1) for factor in SWEEP_FACTORS}))
 
 
 def sweep_curve(result: TestResult, metric: str) -> dict[int, float]:
@@ -205,19 +198,22 @@ class _Reproduction:
 class FinalSelector:
     """Validates the candidates through the toolbox, the rule gate and the regression set."""
 
-    def __init__(self, checks: SessionChecks, workload: Workload, metric: str, clock: Clock) -> None:
+    def __init__(self, checks: SessionChecks, workload: Workload, clock: Clock) -> None:
         self._tests = checks.tests
         self._gate = checks.gate
         self._regression = checks.regression
         self._workload = workload
-        self._metric = metric
+        self._metric = workload.metric
         self._clock = clock
 
     async def select(self, candidates: FinalCandidates, deadline: float) -> FinalChoice:
         """Validate every candidate concurrently by ``deadline`` (clock seconds) and pick one."""
 
         checks = await asyncio.gather(*(self._bounded(candidate, deadline) for candidate in candidates.each))
-        return pick_final(tuple(checks), self._metric, self._workload.conc)
+        choice = pick_final(tuple(checks), self._metric, self._workload.conc)
+        if self._workload.final_concs == (self._workload.conc,):
+            return replace(choice, reason=f"{choice.reason}; {PRIMARY_POINT_ONLY}")
+        return choice
 
     async def _bounded(self, candidate: FinalCandidate, deadline: float) -> CandidateCheck:
         try:
@@ -253,7 +249,7 @@ class FinalSelector:
         return check
 
     async def _sweep(self, commit: str) -> TestResult:
-        concs = sweep_concs(self._workload.conc)
+        concs = self._workload.final_concs
         return await self._tests.result(
             integration_test_request(TestKind.SWEEP, Purpose.FINAL, commit, concurrency=concs)
         )
@@ -269,7 +265,7 @@ class FinalSelector:
 
 __all__ = [
     "MB_SWEEP_DEGRADATION_PCT",
-    "SWEEP_FACTORS",
+    "PRIMARY_POINT_ONLY",
     "CandidateCheck",
     "FinalCandidate",
     "FinalCandidates",
@@ -277,6 +273,5 @@ __all__ = [
     "FinalSelector",
     "choose_candidates",
     "pick_final",
-    "sweep_concs",
     "sweep_curve",
 ]

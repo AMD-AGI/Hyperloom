@@ -13,20 +13,28 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50
 from hyperloom.measure import compile as compile_module
 from hyperloom.measure.compile import PackageBase
 from hyperloom_multibranch import cli
+from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.scheduling.budget import MB_DEFAULT_MAX_HOURS
+from hyperloom_multibranch.scheduling.local_peers import AGENTX_ENV
 from hyperloom_multibranch.scheduling.peers import PeerFactory
 from hyperloom_multibranch.scheduling.roster import RosterCaps
-from hyperloom_multibranch.scheduling.settings import KernelOptimizer, RunSettings, Workload
+from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, RunSettings, Workload
 
 #: What the session's launcher sets to name the image the session runs on.
 IMAGE_VARS = ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST")
 WORKLOAD_ARGS = [
     "--model", "/models/Llama-3-8B", "--framework", "vllm", "--tp", "2", "--isl", "1024", "--osl", "512",
-    "--conc", "16", "--precision", "fp8", "--gpu-type", "mi300x",
+    "--conc", "16", "--precision", "fp8", "--workload", "inferencex", "--gpu-type", "mi300x",
+]  # fmt: skip
+#: The same workload as an AgentX trace replay: no sequence lengths.
+AGENTX_ARGS = [
+    "--model", "/models/Llama-3-8B", "--framework", "vllm", "--tp", "2", "--conc", "16", "--precision", "fp8",
+    "--workload", "agentx", "--gpu-type", "mi300x",
 ]  # fmt: skip
 
 
@@ -49,8 +57,13 @@ IMPORT_PROBE = (
 )
 
 
-def _settings(*extra: str) -> RunSettings:
-    return cli.settings_from(cli.build_parser().parse_args(["run", *WORKLOAD_ARGS, *extra]))
+def _settings(*extra: str, workload: list[str] = WORKLOAD_ARGS) -> RunSettings:
+    return cli.settings_from(cli.build_parser().parse_args(["run", *workload, *extra]))
+
+
+def _without(args: list[str], option: str) -> list[str]:
+    at = args.index(option)
+    return [*args[:at], *args[at + 2 :]]
 
 
 def test_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
@@ -62,7 +75,9 @@ def test_help_exits_zero(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_run_defaults() -> None:
     assert _settings() == RunSettings(
-        Workload("/models/Llama-3-8B", "vllm", 2, 1024, 512, 16, "fp8", "mi300x", KernelOptimizer.FORGE),
+        Workload(
+            "/models/Llama-3-8B", "vllm", 2, 16, "fp8", "mi300x", KernelOptimizer.FORGE, InferenceXShape(1024, 512)
+        ),
         max_hours=MB_DEFAULT_MAX_HOURS,
         max_gpu_hours=0.0,
         caps=RosterCaps(max_branches=4, max_k_per_branch=2, max_parallel_tests=4),
@@ -79,6 +94,13 @@ def test_run_options_override_the_defaults() -> None:
     assert (settings.max_hours, settings.max_gpu_hours) == (12.0, 40.0)
     assert settings.caps == RosterCaps(6, 3, 3)
     assert settings.judge_interval_seconds == 120.0
+
+
+def test_an_agentx_run_has_no_sequence_lengths_and_is_graded_on_p50_interactivity_at_its_conc_alone() -> None:
+    workload = _settings(workload=AGENTX_ARGS).workload
+
+    assert workload == Workload("/models/Llama-3-8B", "vllm", 2, 16, "fp8", "mi300x", KernelOptimizer.FORGE, None)
+    assert (workload.kind, workload.metric, workload.final_concs) == (WorkloadKind.AGENTX, GRADED_INTVTY_P50, (16,))
 
 
 def test_kernel_optimizer_can_be_geak() -> None:
@@ -112,6 +134,13 @@ def test_parallel_tests_default_fills_the_machine() -> None:
         ["run", *WORKLOAD_ARGS, "--gpu-type", "mi325x"],
         ["run", *WORKLOAD_ARGS, "--gpu-type", "mi308x"],
         ["run", *WORKLOAD_ARGS, "--kernel-optimizer", "triton"],
+        ["run", *_without(WORKLOAD_ARGS, "--workload")],
+        ["run", *WORKLOAD_ARGS, "--workload", "sharegpt"],
+        ["run", *_without(WORKLOAD_ARGS, "--isl")],
+        ["run", *_without(WORKLOAD_ARGS, "--osl")],
+        ["run", *WORKLOAD_ARGS, "--isl", "0"],
+        ["run", *AGENTX_ARGS, "--isl", "1024"],
+        ["run", *AGENTX_ARGS, "--osl", "512"],
     ],
 )
 def test_usage_errors_exit_two(argv: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -124,9 +153,32 @@ def test_usage_errors_exit_two(argv: list[str], tmp_path: Path, monkeypatch: pyt
 
 @pytest.fixture(autouse=True)
 def eight_cards(monkeypatch: pytest.MonkeyPatch) -> None:
-    """This machine shows eight cards."""
+    """This machine shows eight cards, and the operator names no AgentX switch."""
 
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
+    monkeypatch.delenv(AGENTX_ENV, raising=False)
+
+
+@pytest.mark.parametrize(
+    ("workload", "switch"),
+    [(WORKLOAD_ARGS, "1"), (WORKLOAD_ARGS, "true"), (AGENTX_ARGS, "0"), (AGENTX_ARGS, ""), (AGENTX_ARGS, "maybe")],
+)
+def test_an_agentx_switch_that_contradicts_the_workload_exits_two(
+    workload: list[str],
+    switch: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv(AGENTX_ENV, switch)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", *workload])
+
+    assert exc.value.code == cli.EXIT_USAGE
+    assert AGENTX_ENV in capsys.readouterr().err
+    assert not any(tmp_path.iterdir())
 
 
 @pytest.fixture
@@ -173,6 +225,24 @@ def test_a_ready_environment_without_an_experience_kb_runs_the_session_on_the_mo
     assert cli.main(["run", *WORKLOAD_ARGS]) == 0
 
     assert agent_cli == [_settings()]
+
+
+@pytest.mark.parametrize(("workload", "switch"), [(AGENTX_ARGS, None), (AGENTX_ARGS, "1"), (WORKLOAD_ARGS, "0")])
+@pytest.mark.usefixtures("ready_environment")
+def test_an_agentx_switch_that_agrees_with_the_workload_runs_the_session(
+    workload: list[str],
+    switch: str | None,
+    agent_cli: list[RunSettings],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    if switch is not None:
+        monkeypatch.setenv(AGENTX_ENV, switch)
+
+    assert cli.main(["run", *workload]) == 0
+
+    assert agent_cli == [_settings(workload=workload)]
 
 
 @pytest.mark.usefixtures("ready_environment", "agent_cli")

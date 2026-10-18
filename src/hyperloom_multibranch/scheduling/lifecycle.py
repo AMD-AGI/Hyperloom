@@ -56,7 +56,7 @@ from hyperloom_multibranch.scheduling.prelude import Prelude, PreludeFailed, Pre
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests
 from hyperloom_multibranch.scheduling.roster import QUOTA_POLICY_VERSION, Roster
-from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC, RunSettings
+from hyperloom_multibranch.scheduling.settings import RunSettings
 from hyperloom_multibranch.scheduling.stops import (
     TOOLBOX_CLOSE_SECONDS,
     SessionStopper,
@@ -157,12 +157,13 @@ class Session:
         tests = SessionTests(peers.toolbox, clock)
         checks = SessionChecks(tests, peers.gate, peers.regression)
         budget = budget_seconds(settings.max_hours)
+        metric = settings.workload.metric
         self._branches = BranchControl(context, peers.lifecycle, peers.toolbox, peers.repo, peers.briefs)
         self._stopper = SessionStopper(context, self._branches, peers.toolbox, peers.mcp)
         progress = session_frontier(
-            self._notebook, PRIMARY_METRIC, budget_seconds=budget, log_path=layout.reports / FRONTIER_LOG
+            self._notebook, metric, budget_seconds=budget, log_path=layout.reports / FRONTIER_LOG
         )
-        dashboard = SessionDashboard(self._notebook, progress, peers.toolbox, PRIMARY_METRIC, layout.dashboard)
+        dashboard = SessionDashboard(self._notebook, progress, peers.toolbox, metric, layout.dashboard)
         llm_usage = CompletionMeter()
         resolver = LlmPatchResolver(llm_usage.metered(services.resolver_completion), peers.repo)
         self._prelude = Prelude(context, peers.repo, peers.gate, tests, recipe_kb=services.recipe_kb)
@@ -176,9 +177,9 @@ class Session:
             judge, settings.judge_interval_seconds, progress, dashboard, widening, similarity, events, llm_usage
         )
         self._explorer = Explorer(context, self._branches, integrator, steering, peers.split_landing)
-        self._selector = FinalSelector(checks, settings.workload, PRIMARY_METRIC, clock)
+        self._selector = FinalSelector(checks, settings.workload, clock)
         sources = ExportSources(self._notebook, peers.repo, blobs, dashboard)
-        closing = SessionExports(layout, sources, PRIMARY_METRIC, budget, kb_client=services.recipe_kb)
+        closing = SessionExports(layout, sources, metric, budget, kb_client=services.recipe_kb)
         self._closer = Closer(layout, self._stopper, closing, clock)
         self._signals = StopSignals()
 
@@ -300,7 +301,11 @@ class Session:
         if integration is None:
             raise RuntimeError("the notebook has no integration branch after PRELUDE recorded its root")
         return choose_candidates(
-            self._roster.entries(), progress, integration.head_commit, integration.head_value, PRIMARY_METRIC
+            self._roster.entries(),
+            progress,
+            integration.head_commit,
+            integration.head_value,
+            self._settings.workload.metric,
         )
 
     async def _close(self, ending: SessionOutcome, hard_stop: HardStop) -> SessionOutcome:
@@ -363,7 +368,7 @@ class Session:
             "started_at": budget.started_at,
             "deadline": budget.deadline,
             "settings": encode(self._settings),
-            "metric": PRIMARY_METRIC,
+            "metric": self._settings.workload.metric,
             "policy_versions": POLICY_VERSIONS,
         }
         atomic_write_json(self._layout.manifest, document, indent=2, sort_keys=True)

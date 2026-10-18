@@ -17,20 +17,24 @@ from pathlib import Path
 import pytest
 
 from hyperloom.contracts.recipe import Recipe
+from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 from hyperloom.measure import compile as compile_module
 from hyperloom.measure.compile import ComponentLayout, LocalBlobStore, PackageBase, UnsupportedComponentError
 from hyperloom.measure.pins import ActiveImage, ToolCommits, pinned_tool_commits
 from hyperloom.orchestrator.kernel.request_handlers import resolve_gemm_tuning_backend
-from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
+from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.layout import SESSION_PREFIX, create_session
 from hyperloom_multibranch.scheduling.local_peers import (
+    AGENTX_ENV,
     MB_FAKE_IMAGE_REF,
     MeasurementHost,
     SessionWiring,
@@ -41,12 +45,14 @@ from hyperloom_multibranch.scheduling.local_peers import (
     require_framework_package,
     specialist_command,
     workload_environment,
+    workload_rule,
+    _specialist_role,
 )
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.peers import PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
-from hyperloom_multibranch.scheduling.settings import KernelOptimizer, Workload
+from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions
 from hyperloom_multibranch.specialist.runtime import SessionStart, SpecialistRuntime
 from hyperloom_multibranch.specialist.worktree import BranchWorktree
@@ -54,7 +60,10 @@ from hyperloom_multibranch.toolbox.local_hosted import LocalHostedToolbox
 from hyperloom_multibranch.toolbox.mcp_tools import McpSpecialistTokens
 from hyperloom_multibranch.toolbox.queue import QueuePolicy
 
-WORKLOAD = Workload("/models/Llama-3-8B", "sglang", 2, 1024, 512, 16, "bf16", "mi355x", KernelOptimizer.FORGE)
+WORKLOAD = Workload(
+    "/models/Llama-3-8B", "sglang", 2, 16, "bf16", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1024, 512)
+)
+AGENTX = replace(WORKLOAD, inferencex=None)
 IMAGE = ActiveImage("registry.example/sglang:v1", "sha256:" + "2" * 64)
 HOST = MeasurementHost((0, 1, 2, 3), IMAGE, ToolCommits("a" * 40, "b" * 40))
 IMAGE_VARS = ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST")
@@ -97,6 +106,29 @@ def test_the_workload_reaches_the_renderer_as_hyperloom_optimize_exports_it(monk
     }
 
 
+def test_an_agentx_workload_reaches_the_renderer_and_the_prelude_child_as_agentx_without_sequence_lengths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    environment = workload_environment(AGENTX)
+
+    assert not {"ISL", "OSL"} & set(environment)
+    assert environment[AGENTX_ENV] == "1" and agentx_enabled(environment)
+    assert AGENTX_ENV not in workload_environment(WORKLOAD)
+
+
+def test_the_rule_follows_the_workload(tmp_path: Path) -> None:
+    notebook = LocalNotebook(tmp_path, Writer(Role.GATE, "rule-gate"))
+
+    assert workload_rule(WORKLOAD, notebook) == InferenceXRule(notebook, WORKLOAD.conc)
+    assert isinstance(workload_rule(AGENTX, notebook), AgentXRule)
+
+
+def test_the_specialists_are_told_an_agentx_workload_and_no_sequence_lengths() -> None:
+    assert _specialist_role(WORKLOAD) == "Llama-3-8B on sglang, bf16, TP 2, ISL 1024, OSL 512, concurrency 16, mi355x"
+    assert _specialist_role(AGENTX) == "Llama-3-8B on sglang, bf16, TP 2, AgentX trace replay, concurrency 16, mi355x"
+
+
 @pytest.mark.parametrize("optimizer", list(KernelOptimizer))
 def test_the_kernel_optimizer_flag_picks_the_backend_kernel_tuning_runs(
     optimizer: KernelOptimizer, monkeypatch: pytest.MonkeyPatch
@@ -111,7 +143,9 @@ def test_the_model_is_exported_as_the_directory_a_server_loads_it_from(
 ) -> None:
     (tmp_path / "Llama-3-8B").mkdir()
     monkeypatch.setenv("HL_MODEL_BASE", str(tmp_path))
-    hub_id = Workload("meta-llama/Llama-3-8B", "vllm", 1, 1, 1, 1, "fp8", "mi355x", KernelOptimizer.FORGE)
+    hub_id = Workload(
+        "meta-llama/Llama-3-8B", "vllm", 1, 1, "fp8", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1, 1)
+    )
     assert workload_environment(hub_id)["MODEL_PATH"] == str(tmp_path / "Llama-3-8B")
 
 

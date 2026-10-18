@@ -89,13 +89,16 @@ class PreludeResult:
 
 
 def prelude_argv(workload: Workload, max_hours: float, launch_info: Path) -> tuple[str, ...]:
-    """The child's command line: ``hyperloom optimize`` on the interpreter this package runs on."""
+    """The child's command line: ``hyperloom optimize`` on the interpreter this package runs on. An AgentX child is
+    given no sequence lengths; the environment the peers export tells it the workload is AgentX."""
 
+    shape = workload.inferencex
+    lengths = () if shape is None else ("--isl", str(shape.isl), "--osl", str(shape.osl))
     return (
         sys.executable,
         *HYPERLOOM_COMMAND,
         *("--model", workload.model, "--framework", workload.framework, "--gpu-type", workload.gpu_type),
-        *("--tp", str(workload.tp), "--isl", str(workload.isl), "--osl", str(workload.osl)),
+        *("--tp", str(workload.tp), *lengths),
         *("--conc", str(workload.conc), "--precision", workload.precision),
         *PRELUDE_FLAGS,
         *("--max-hours", f"{max_hours:.6f}", "--launch-info-file", str(launch_info)),
@@ -272,8 +275,10 @@ def _session_profile(
     session_id: str, workload: Workload, artifacts: PreludeArtifacts, model_config: Mapping[str, Any]
 ) -> SessionProfile:
     """``model_config`` is :func:`summarize_model_config` of the model; its type and architectures are left empty
-    when the model's ``config.json`` does not name them."""
+    when the model's ``config.json`` does not name them. An AgentX profile has no sequence lengths, and the roofline
+    ceiling is kept only on the metric the session is graded on."""
 
+    shape = workload.inferencex
     return SessionProfile(
         session_id=session_id,
         model=workload.model,
@@ -285,10 +290,12 @@ def _session_profile(
         conc=workload.conc,
         model_type=model_config.get("model_type", ""),
         architectures=tuple(model_config.get("architectures", ())),
-        isl=workload.isl,
-        osl=workload.osl,
+        isl=None if shape is None else shape.isl,
+        osl=None if shape is None else shape.osl,
         kernel_optimizer=workload.kernel_optimizer.value,
-        roofline_ceiling=dict(artifacts.roofline_ceiling),
+        roofline_ceiling={
+            metric: ceiling for metric, ceiling in artifacts.roofline_ceiling.items() if metric == workload.metric
+        },
     )
 
 

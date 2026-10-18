@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 import hyperloom
+from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
@@ -37,7 +38,7 @@ from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
 from hyperloom_multibranch.scheduling.prelude import Prelude, PreludeFailed, PreludeResult, prelude_argv
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
 from hyperloom_multibranch.scheduling.requests import SessionTests
-from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC, KernelOptimizer, Workload
+from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     OneChampionKB,
     LAUNCH_FLAG,
@@ -64,13 +65,13 @@ WORKLOAD = Workload(
     model="/models/Llama-3-8B",
     framework="sglang",
     tp=1,
-    isl=1024,
-    osl=1024,
     conc=16,
     precision="bf16",
     gpu_type="mi355x",
     kernel_optimizer=KernelOptimizer.GEAK,
+    inferencex=InferenceXShape(isl=1024, osl=1024),
 )
+AGENTX = replace(WORKLOAD, inferencex=None)
 
 
 class StubbornRegistry(ProcessRegistry):
@@ -186,6 +187,28 @@ def test_child_command_uses_only_options_the_main_flow_declares(tmp_path: Path) 
     assert argv[argv.index("--gpu-type") + 1] == "mi355x"
 
 
+def test_an_agentx_child_is_given_no_sequence_lengths(tmp_path: Path) -> None:
+    inferencex = prelude_argv(WORKLOAD, 1.5, tmp_path / "launch.json")
+    agentx = prelude_argv(AGENTX, 1.5, tmp_path / "launch.json")
+
+    assert (inferencex[inferencex.index("--isl") + 1], inferencex[inferencex.index("--osl") + 1]) == ("1024", "1024")
+    assert not {"--isl", "--osl"} & set(agentx)
+    assert [arg for arg in inferencex if arg not in ("--isl", "--osl", "1024")] == list(agentx)
+
+
+async def test_an_agentx_session_profile_has_no_sequence_lengths_and_no_throughput_ceiling(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    processes, peers = _registry(layout, child_with_patch(tmp_path)), _peers(layout)
+
+    budget = SessionBudget.from_hours(2.0, NOW)
+    result = await _prelude(layout, processes, peers).root(AGENTX, budget, HardStop(budget, _clock()), IMAGE)
+
+    profile = await _notebook(layout).session_profile()
+    assert profile == result.profile
+    assert (profile.isl, profile.osl, dict(profile.roofline_ceiling)) == (None, None, {})
+    assert not {"--isl", "--osl"} & set(processes.argv)
+
+
 async def test_finished_child_roots_the_session_before_any_baseline_test(tmp_path: Path) -> None:
     layout = _layout(tmp_path)
     child = child_with_patch(tmp_path)
@@ -209,7 +232,8 @@ async def test_finished_child_roots_the_session_before_any_baseline_test(tmp_pat
     profile = await _notebook(layout).session_profile()
     assert profile == result.profile
     assert (profile.session_id, profile.hardware, profile.framework_version) == (layout.session_id, "mi355x", "0.4.1")
-    assert dict(profile.roofline_ceiling) == {PRIMARY_METRIC: ROOFLINE_PEAK}
+    assert dict(profile.roofline_ceiling) == {GRADED_OUTPUT: ROOFLINE_PEAK}
+    assert (profile.isl, profile.osl) == (1024, 1024)
     assert profile.kernel_optimizer == "geak"
     assert (profile.model_type, profile.architectures) == ("", ())
     assert peers.toolbox.requests == {}
@@ -304,8 +328,8 @@ async def test_baseline_is_measured_through_the_toolbox(tmp_path: Path) -> None:
     baseline = await _notebook(layout).baseline()
     assert baseline.root_commit == result.root_commit
     assert sorted(baseline.request_ids) == sorted(requests)
-    assert baseline.values[PRIMARY_METRIC] == pytest.approx(1000.0)
-    assert dict(baseline.threshold_pct) == {PRIMARY_METRIC: 1.0}
+    assert baseline.values[GRADED_OUTPUT] == pytest.approx(1000.0)
+    assert dict(baseline.threshold_pct) == {GRADED_OUTPUT: 1.0}
     assert set(peers.toolbox.results) == set(requests)
     for request in requests.values():
         assert (request.branch_id, request.parent_commit) == (INTEGRATION_BRANCH, result.root_commit)

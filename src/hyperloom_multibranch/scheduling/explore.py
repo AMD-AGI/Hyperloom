@@ -48,7 +48,6 @@ from hyperloom_multibranch.scheduling.judge import Judge, JudgeDecision, JudgeVi
 from hyperloom_multibranch.scheduling.llm import CompletionMeter
 from hyperloom_multibranch.scheduling.mb_fakes import MbFakeSplitLanding
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchOrigin, BranchStop, StopCause
-from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC
 from hyperloom_multibranch.scheduling.settle import failure_text, settled
 from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
@@ -124,6 +123,7 @@ class Explorer:
         self._judge = steering.judge
         self._integrator = integrator
         self._progress = steering.progress
+        self._metric = steering.progress.policy.metric
         self._notebook = context.notebook
         self._dashboard = steering.dashboard
         self._decisions = context.decisions
@@ -247,20 +247,20 @@ class Explorer:
             progress=progress,
             integration_value=integration_value,
             roofline_ceiling=window.roofline_ceiling,
-            metric=PRIMARY_METRIC,
+            metric=self._metric,
             opening=opening,
             free_slots=self._roster.free_slots(),
             pending=self._desk.pending(),
             history=judge_history(
                 await self._notebook.snapshot(),
                 self._progress.history,
-                PRIMARY_METRIC,
+                self._metric,
                 budget_seconds=window.budget_seconds,
             ),
             widening=await self._widening.signals(),
             similar_to=await self._similarity.similar_to(),
             events=self._events.hand_over(),
-            behind_integration_pct=behind_integration_pct(progress, integration_value, root.values, PRIMARY_METRIC),
+            behind_integration_pct=behind_integration_pct(progress, integration_value, root.values, self._metric),
             profile_running=self._events.profiling,
             gpu_hours_used=spent_gpu_seconds(progress) / MB_SECONDS_PER_HOUR,
             explore_gpu_hours=_hours_or_none(window.explore_gpu_seconds),

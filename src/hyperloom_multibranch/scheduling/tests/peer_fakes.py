@@ -60,7 +60,7 @@ from hyperloom_multibranch.rulegate import rules as rulegate_rules
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.inferencex import InferenceXReading
 from hyperloom_multibranch.rulegate.readings import inferencex_reading
-from hyperloom_multibranch.rulegate.rules import InferenceXRule
+from hyperloom_multibranch.rulegate.rules import InferenceXRule, Rule
 from hyperloom_multibranch.rulegate.service import GateNotebook, GateService
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -246,12 +246,13 @@ class HeldGitRepo(GitExperimentRepo):
 GATE_POLL_SECONDS = 0.001
 
 
-def session_gate(notebook: GateNotebook, toolbox: FakeToolbox) -> GateService:
-    """The rule gate's session service on the InferenceX rule at the conc ``toolbox`` measures a test at when its
-    request names none, the workload's; ``notebook`` writes as the gate."""
+def session_gate(notebook: GateNotebook, toolbox: FakeToolbox, rule: Rule | None = None) -> GateService:
+    """The rule gate's session service on ``rule``, by default the InferenceX rule at the conc ``toolbox`` measures a
+    test at when its request names none, the workload's; ``notebook`` writes as the gate."""
 
     (conc,) = toolbox.config.main_concurrency
-    return GateService(notebook, toolbox, InferenceXRule(notebook, conc), toolbox, poll_seconds=GATE_POLL_SECONDS)
+    judged_on = InferenceXRule(notebook, conc) if rule is None else rule
+    return GateService(notebook, toolbox, judged_on, toolbox, poll_seconds=GATE_POLL_SECONDS)
 
 
 def measure_no_throughput(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -482,9 +483,11 @@ def specialist_runtime(
     now: Callable[[], float],
     desk: ForkAdmissionService | None = None,
     runtime: type[RefusingRuntime] = RefusingRuntime,
+    rule: Rule | None = None,
 ) -> RefusingRuntime:
-    """The specialist runtime of the notebook at ``notebook`` on the tests' toolbox, judging on the InferenceX rule at
-    the conc ``toolbox`` measures at, as the session's peers build it; ``desk`` answers its branch requests."""
+    """The specialist runtime of the notebook at ``notebook`` on the tests' toolbox, judging on ``rule``, by default
+    the InferenceX rule at the conc ``toolbox`` measures at, as the session's peers build it; ``desk`` answers its
+    branch requests."""
 
     gate_notebook = LocalNotebook(notebook, Writer(Role.GATE, GATE_WRITER), clock=now)
     (conc,) = toolbox.config.main_concurrency
@@ -493,7 +496,7 @@ def specialist_runtime(
         return LocalNotebook(notebook, Writer(Role.SPECIALIST_RUNTIME, branch, branch), clock=now)
 
     gate = RuleGate(gate_notebook, repo, desk or NoForks(), toolbox)
-    judging = Judging(gate, toolbox, InferenceXRule(gate_notebook, conc))
+    judging = Judging(gate, toolbox, InferenceXRule(gate_notebook, conc) if rule is None else rule)
     return runtime(notebook_for, judging, sessions, pacing=RuntimePacing(poll_seconds=SPECIALIST_POLL_SECONDS))
 
 

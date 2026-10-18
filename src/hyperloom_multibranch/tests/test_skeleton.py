@@ -27,7 +27,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.common.perf_metric import GRADED_OUTPUT
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50, GRADED_OUTPUT
 from hyperloom.common.proctree import running
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import Recipe, RecipeDelta
@@ -48,16 +48,17 @@ from hyperloom_multibranch.scheduling.budget import MB_SECONDS_PER_HOUR, Session
 from hyperloom_multibranch.scheduling import branches
 from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE
 from hyperloom_multibranch.scheduling.explore import EXPLORE_TICK_SECONDS, FORK_NOT_LANDED, OPEN_CUT_REASON
-from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL
+from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL, PRIMARY_POINT_ONLY
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.lifecycle import CUT_SHORT, Session, SessionHost, SessionOutcome, SessionServices
+from hyperloom_multibranch.scheduling.local_peers import workload_rule
 from hyperloom_multibranch.scheduling.llm import CompletionFailed, CompletionReply, CompletionUsage
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStatus, RosterCaps, StopCause
-from hyperloom_multibranch.scheduling.settings import KernelOptimizer, RunSettings, Workload
+from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, RunSettings, Workload
 from hyperloom_multibranch.scheduling.stops import (
     STOP_OVERRAN,
     TOOLBOX_CLOSE_OVERRAN,
@@ -91,7 +92,11 @@ from hyperloom_multibranch.specialist.prompts import prompt_versions
 
 START = 1_700_000_000.0
 CONC = 16
-WORKLOAD = Workload("/models/Llama-3-8B", "sglang", 1, 1024, 1024, CONC, "bf16", "mi355x", KernelOptimizer.FORGE)
+WORKLOAD = Workload(
+    "/models/Llama-3-8B", "sglang", 1, CONC, "bf16", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1024, 1024)
+)
+#: The same workload as an AgentX trace replay.
+AGENTX = replace(WORKLOAD, inferencex=None)
 SETTINGS = RunSettings(
     WORKLOAD, max_hours=0.5, max_gpu_hours=0.0, caps=RosterCaps(3, 2, 8), judge_interval_seconds=600.0
 )
@@ -225,6 +230,7 @@ class Stage:
         if isinstance(toolbox, StuckToolbox) and self.stuck:
             toolbox.stuck = self.stuck
         repo = self.repo_type(setup.layout.repo, setup.blobs, self.time)
+        rule = workload_rule(setup.workload, self.handle(Role.GATE))
         self.sessions = RecordedSessions(
             toolbox, repo, self.handle(Role.OBSERVER), scripts=self.scripts, steps=self.steps, hanging=self.hanging
         )
@@ -238,12 +244,13 @@ class Stage:
             now=self.time.now,
             desk=self.splits,
             runtime=self.runtime_type,
+            rule=rule,
         )
         runtime.refusing = self.refusing
         self.toolbox, self.repo, self.setup = toolbox, repo, setup
         self.briefs = SessionBriefs(self.handle(Role.OBSERVER))
         mcp = McpServer(McpServerConfig(host_token="t" * MIN_TOKEN_LENGTH), campaign=setup.layout.session_id)
-        gate = session_gate(self.handle(Role.GATE), toolbox)
+        gate = session_gate(self.handle(Role.GATE), toolbox, rule)
         digest = toolbox.config.image_digest
         return Peers(runtime, toolbox, repo, gate, mcp, self.briefs, digest, self.splits, self.regression)
 
@@ -435,6 +442,36 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     ):
         assert path.is_file(), path
     assert all(entry.name.startswith("MB-") for entry in stage.layout.root.iterdir())
+
+
+async def test_an_agentx_session_is_judged_on_p50_interactivity_and_validated_at_its_conc_alone(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(SETTINGS, workload=AGENTX)
+    stage.scripts = SCRIPTS
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.TIME_EXHAUSTED, "", 0)
+    observer = stage.handle(Role.OBSERVER)
+    profile = await observer.session_profile()
+    assert (profile.isl, profile.osl, dict(profile.roofline_ceiling)) == (None, None, {})
+    [child] = [row for row in _decisions(stage) if row["kind"] == "prelude" and row["reason"] == "child started"]
+    assert not {"--isl", "--osl"} & set(child["detail"]["argv"])
+    assert GRADED_INTVTY_P50 in (await observer.baseline()).threshold_pct
+    c1, c2 = await stage.repo.head("b01"), await stage.repo.head("b02")
+    merged = {item.commit_id: item.last_merge.outcome.value for item in await observer.committed() if item.last_merge}
+    assert merged == {c1: "merged", c2: "not_stackable"}
+    opening = _judge_state(_judge_prompts(stage)[0])
+    assert opening["metric"] == GRADED_INTVTY_P50
+    assert (opening["integration"]["roofline_ceiling"], opening["integration"]["headroom_pct"]) == ({}, None)
+
+    head = await stage.repo.head(INTEGRATION_BRANCH)
+    assert outcome.final is not None and outcome.final.chosen is not None and outcome.final.chosen.commit == head
+    assert outcome.final.metric == GRADED_INTVTY_P50 and outcome.final.reason.endswith(PRIMARY_POINT_ONLY)
+    sweeps = [request for request in stage.toolbox.requests.values() if request.kind is TestKind.SWEEP]
+    assert sorted(request.parent_commit for request in sweeps) == sorted((head, c2))
+    assert {request.concurrency for request in sweeps} == {(CONC,)}
+    assert json.loads(stage.layout.manifest.read_text())["metric"] == GRADED_INTVTY_P50
 
 
 async def test_the_specialists_are_briefed_on_the_warm_start_leads_prelude_read(tmp_path: Path) -> None:

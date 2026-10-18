@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 import hyperloom
+from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.recipe import PatchRef
 from hyperloom_multibranch.scheduling.tests.child_sessions import (
     BASE_SHA,
@@ -25,7 +26,7 @@ from hyperloom_multibranch.scheduling.tests.child_sessions import (
     state_document,
     write_child_session,
 )
-from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC
+
 from hyperloom_multibranch.scheduling.prelude_reader import (
     MB_LATEST_STATE_SCHEMA_VERSION,
     PreludeArtifacts,
@@ -70,7 +71,7 @@ def test_completed_child_session_is_read(tmp_path: Path) -> None:
     assert [kept.patch_file for kept in artifacts.kept_patches] == [session / "enablement" / "1.patch"]
     assert artifacts.foreign_patches == ()
     assert artifacts.framework_root == tmp_path / "framework"
-    assert artifacts.roofline_ceiling == {PRIMARY_METRIC: ROOFLINE_PEAK}
+    assert artifacts.roofline_ceiling == {GRADED_OUTPUT: ROOFLINE_PEAK}
     assert artifacts.framework_version == "0.4.1"
     assert artifacts.unexpressed == ("setup_commands",)
     assert artifacts.setup_script == session / "reports" / "enablement" / "enablement_setting.sh"
@@ -101,7 +102,7 @@ def test_without_a_roofline_snapshot_the_baseline_arm_ceiling_is_read(tmp_path: 
 
     artifacts = read_prelude(write_child_session(tmp_path / "child", state))
 
-    assert artifacts.roofline_ceiling == {PRIMARY_METRIC: ROOFLINE_PEAK}
+    assert artifacts.roofline_ceiling == {GRADED_OUTPUT: ROOFLINE_PEAK}
 
 
 @pytest.mark.parametrize(

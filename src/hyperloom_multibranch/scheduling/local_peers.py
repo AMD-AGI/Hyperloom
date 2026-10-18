@@ -10,7 +10,7 @@ environment compiler reads, like the repository, from the session's blob store a
 on; its learnings tool recalls this session's learnings only, as MB1 runs on no Experience KB
 (:func:`~hyperloom_multibranch.scheduling.mb_fakes.mb_fake_learning_recall`). Every test is measured on a
 :class:`MeasurementHost`: this machine's cards, the image it runs and the tool commits Hyperloom pins. The gate's
-session service and the specialist runtime judge on one InferenceX rule at the workload's conc; the runtime settles through a
+session service and the specialist runtime judge on one rule, :func:`workload_rule`; the runtime settles through a
 rule gate that asks the scheduler's fork desk for branches, and the MCP service's ``request_repair`` and
 ``decline_repair`` conclude a blocked candidate through the same gate. The runtime's specialist sessions come from
 a :data:`SpecialistSessions`: :func:`model_backed_sessions` runs each branch's specialist as an agent CLI in a
@@ -38,14 +38,14 @@ from hyperloom.common.llm_config import preferred_agent_backend, provider_model_
 from hyperloom.common.model_paths import resolve_serving_model_path
 from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore
+from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore, CommitQuery
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SpecialistTokens
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.gate import RuleGate
-from hyperloom_multibranch.rulegate.rules import InferenceXRule
+from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule, Rule
 from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.scheduling.mb_fakes import (
     MB_FAKE_BASE_IMAGE_DIGEST,
@@ -53,7 +53,7 @@ from hyperloom_multibranch.scheduling.mb_fakes import (
     mb_fake_learning_recall,
 )
 from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup, PeersUnavailable
-from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC, Workload
+from hyperloom_multibranch.scheduling.settings import Workload
 from hyperloom_multibranch.specialist.judging import Judging
 from hyperloom_multibranch.specialist.runtime import RuntimePacing, SpecialistRuntime
 
@@ -69,6 +69,9 @@ CANONICAL_DIR = "canonical"
 POINTS_DIR = "points"
 #: A claim's lease on the specialist tools: the runtime renews it every 10 minutes (board #26).
 CLAIM_TTL_SECONDS = 1800.0
+#: The switch the main flow and the measurement renderer read an AgentX workload from
+#: (``hyperloom.common.perf_metric.agentx_enabled``).
+AGENTX_ENV = "HYPERLOOM_AGENTX"
 
 #: Stands in for the reference of the image this machine runs while whoever launches the session names no image;
 #: replaced as :func:`mb_fake_active_image` is.
@@ -135,19 +138,30 @@ def workload_environment(workload: Workload) -> Mapping[str, str]:
     renders the canonical measurement and every test's points with, and to the kernel tuning the toolbox runs, which
     takes its backend from ``KERNEL_OPT_BACKEND_ORDER``; ``hyperloom optimize`` exports the same, the model resolved to
     the directory a server loads it from. The command line accepts only GPU types that are their own Magpie runner
-    type, so ``GPU_TYPE`` and ``TARGET_GPU_TYPE`` are the same."""
+    type, so ``GPU_TYPE`` and ``TARGET_GPU_TYPE`` are the same. An InferenceX workload carries its sequence lengths;
+    an AgentX one carries :data:`AGENTX_ENV` instead, which the PRELUDE child inherits."""
 
+    shape = workload.inferencex
+    workload_specific = {AGENTX_ENV: "1"} if shape is None else {"ISL": str(shape.isl), "OSL": str(shape.osl)}
     return {
         "FRAMEWORK": workload.framework,
         "MODEL_PATH": resolve_serving_model_path(workload.model),
         "TP": str(workload.tp),
-        "ISL": str(workload.isl),
-        "OSL": str(workload.osl),
+        **workload_specific,
         "PRECISION": workload.precision,
         "GPU_TYPE": workload.gpu_type,
         "TARGET_GPU_TYPE": workload.gpu_type,
         "KERNEL_OPT_BACKEND_ORDER": workload.kernel_optimizer.value,
     }
+
+
+def workload_rule(workload: Workload, notebook: CommitQuery) -> Rule:
+    """The rule a session of ``workload`` is judged on: InferenceX throughput at the workload's conc against the
+    PRELUDE bar ``notebook`` holds, or AgentX P50 interactivity with its guards."""
+
+    if workload.inferencex is None:
+        return AgentXRule()
+    return InferenceXRule(notebook, workload.conc)
 
 
 def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: PeerSetup) -> Peers:
@@ -188,14 +202,15 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
         blobs=setup.blobs,
         blob_root=str(setup.blobs.root),
     )
+    planner = HostedPlanner(compiler, canonical, layout.toolbox / POINTS_DIR)
     toolbox = build_local_toolbox(
         LocalSession(layout.toolbox, layout.session_id, host.cards, workload.tp),
         LocalNotebook(layout.notebook, Writer(Role.TOOLBOX, TOOLBOX_WRITER)),
-        AcceptanceSetup(repo, HostedPlanner(compiler, canonical, layout.toolbox / POINTS_DIR), image.digest),
+        AcceptanceSetup(repo, planner, image.digest, workload_kind=workload.kind),
         spec,
     )
     gate_notebook = LocalNotebook(layout.notebook, Writer(Role.GATE, GATE_WRITER))
-    rule = InferenceXRule(gate_notebook, workload.conc)
+    rule = workload_rule(workload, gate_notebook)
 
     def runtime_notebook(branch: str) -> LocalNotebook:
         return LocalNotebook(layout.notebook, Writer(Role.SPECIALIST_RUNTIME, branch, branch))
@@ -203,7 +218,9 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     mcp = McpServer(McpServerConfig(host_token=secrets.token_hex(32)), campaign=layout.session_id)
     learnings = mb_fake_learning_recall(RetrievalLog(layout.reports / LEARNINGS_LOG))
     briefs = SessionBriefs(
-        LocalNotebook(layout.notebook, Writer(Role.OBSERVER, BRIEFS_READER)), metric=PRIMARY_METRIC, learnings=learnings
+        LocalNotebook(layout.notebook, Writer(Role.OBSERVER, BRIEFS_READER)),
+        metric=workload.metric,
+        learnings=learnings,
     )
     tool_options = SpecialistToolOptions(
         claim_ttl_seconds=CLAIM_TTL_SECONDS,
@@ -315,9 +332,11 @@ def require_framework_package(framework: str) -> None:
 def _specialist_role(workload: Workload) -> str:
     """The workload as the specialists' role prompt names it."""
 
+    shape = workload.inferencex
+    requests = "AgentX trace replay" if shape is None else f"ISL {shape.isl}, OSL {shape.osl}"
     return (
         f"{workload.model_basename} on {workload.framework}, {workload.precision}, TP {workload.tp}, "
-        f"ISL {workload.isl}, OSL {workload.osl}, concurrency {workload.conc}, {workload.gpu_type}"
+        f"{requests}, concurrency {workload.conc}, {workload.gpu_type}"
     )
 
 
@@ -371,6 +390,7 @@ def load_peers(workload: Workload) -> PeerFactory:
 
 
 __all__ = [
+    "AGENTX_ENV",
     "CLAIM_TTL_SECONDS",
     "GATE_WRITER",
     "MB_FAKE_IMAGE_REF",
@@ -389,4 +409,5 @@ __all__ = [
     "require_framework_package",
     "specialist_command",
     "workload_environment",
+    "workload_rule",
 ]

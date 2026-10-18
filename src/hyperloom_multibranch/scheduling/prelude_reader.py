@@ -22,10 +22,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.jsonio import read_json
+from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, PatchRef, Recipe, RecipeError, with_unexpressed
 from hyperloom.inference_optimizer.breakdown.stop_reasons import outcome_status
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
-from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC
 
 #: ``LATEST_STATE_SCHEMA_VERSION`` of src/hyperloom/orchestrator/state/shared_state.py, which this package may not
 #: import; a test compares the two.
@@ -90,7 +90,7 @@ class PreludeArtifacts:
     ``None`` when the child named neither or it is not a git checkout (an installed package). ``kept_patches`` apply to
     that checkout; ``foreign_patches`` apply to any other tree, so no component can carry them. ``unexpressed`` names,
     as recipe ``unexpressed`` entries, the foreign patches and whatever else enablement kept that a recipe cannot
-    express yet. ``roofline_ceiling`` is keyed by the recorded-value metric. ``setup_script`` is the child's
+    express yet. ``roofline_ceiling`` is keyed by the metric it bounds. ``setup_script`` is the child's
     ``enablement_setting.sh``, ``None`` when it wrote none.
     """
 
@@ -290,7 +290,7 @@ def _kept_patches(
 
 
 def _roofline_ceiling(snapshots: object, baseline_ceiling: object) -> Mapping[str, float]:
-    """The latest snapshot's decode ceiling, else the baseline-arm ceiling.
+    """The latest snapshot's decode ceiling, else the baseline-arm ceiling, as a bound on output throughput.
 
     The main flow keeps the newest snapshot last, and records the baseline-arm ceiling as the backup for a run whose
     profiling wrote no snapshot (src/hyperloom/orchestrator/state/shared_state.py ``record_baseline_roofline_ceiling``).
@@ -299,7 +299,7 @@ def _roofline_ceiling(snapshots: object, baseline_ceiling: object) -> Mapping[st
     for snapshot in (*reversed(_snapshot_list(snapshots)), _mapping(baseline_ceiling, "baseline_roofline_ceiling")):
         peak = snapshot.get(MB_ROOFLINE_PEAK_KEY) if isinstance(snapshot, Mapping) else None
         if isinstance(peak, (int, float)) and not isinstance(peak, bool) and peak > 0:
-            return {PRIMARY_METRIC: float(peak)}
+            return {GRADED_OUTPUT: float(peak)}
     return {}
 
 

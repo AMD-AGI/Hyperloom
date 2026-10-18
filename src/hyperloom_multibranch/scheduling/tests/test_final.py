@@ -9,6 +9,10 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
+from hyperloom.common.perf_metric import GRADED_INTVTY_P50
+
 from hyperloom.contracts.measurement import (
     FailureClass,
     Purpose,
@@ -33,15 +37,15 @@ from hyperloom_multibranch.scheduling.final import (
     CandidateCheck,
     FinalCandidate,
     FinalCandidates,
+    PRIMARY_POINT_ONLY,
     FinalSelector,
     choose_candidates,
     pick_final,
-    sweep_concs,
     sweep_curve,
 )
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, BranchOrigin, BranchStop, StopCause
-from hyperloom_multibranch.scheduling.settings import KernelOptimizer, Workload
+from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload, sweep_concs
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests, integration_test_request
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     BASELINE_VALUE,
@@ -61,7 +65,7 @@ from hyperloom_multibranch.toolbox.fake_model import Fate
 
 METRIC = "output_throughput"
 CONC = 64
-WORKLOAD = Workload("org/model", "vllm", 8, 1024, 1024, CONC, "fp8", "mi355x", KernelOptimizer.FORGE)
+WORKLOAD = Workload("org/model", "vllm", 8, CONC, "fp8", "mi355x", KernelOptimizer.FORGE, InferenceXShape(1024, 1024))
 START = 100.0
 INTEGRATION = FinalCandidate("integration", INTEGRATION_BRANCH, "i1", 1040.0)
 BRANCH = FinalCandidate("best_branch", "b02", "c7", 1060.0)
@@ -223,8 +227,8 @@ class Bench:
         integration = replace(INTEGRATION, commit=self.commits["i1"])
         return FinalCandidates(integration, replace(BRANCH, commit=self.commits["c7"]) if both else None)
 
-    def selector(self) -> FinalSelector:
-        return FinalSelector(SessionChecks(self.tests, self.gate, self.regression), WORKLOAD, METRIC, self.time.clock)
+    def selector(self, workload: Workload = WORKLOAD) -> FinalSelector:
+        return FinalSelector(SessionChecks(self.tests, self.gate, self.regression), workload, self.time.clock)
 
     def fail(self, tag: str, fate: Fate, kind: TestKind | None = None) -> None:
         """Every FINAL test of ``tag``'s commit (of ``kind`` when given) ends in ``fate``."""
@@ -266,6 +270,22 @@ async def test_each_candidate_is_swept_and_reproduced_with_accuracy_as_a_session
     }
     assert all(test.accuracy for test in tests) and all(check.accuracy_passed for check in choice.checks)
     assert (choice.metric, choice.primary_conc) == (METRIC, CONC)
+
+
+async def test_an_agentx_candidate_is_measured_at_the_primary_operating_point_alone(tmp_path: Path) -> None:
+    curves = {
+        frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0},
+        frozenset({"c7"}): {MAIN_POINT: 1000.0, CONC: 1060.0},
+    }
+    bench = await Bench(tmp_path).build(curves)
+
+    choice = await bench.selector(replace(WORKLOAD, inferencex=None)).select(bench.candidates(), START + 3600.0)
+
+    sweeps = [test.concurrency for test in bench.final_tests().values() if test.kind is TestKind.SWEEP]
+    assert sweeps == [(CONC,), (CONC,)]
+    assert dict(choice.checks[0].curve) == {CONC: pytest.approx(52.0)}
+    assert (choice.chosen, choice.metric) == (bench.candidates().integration, GRADED_INTVTY_P50)
+    assert choice.reason == f"the higher {GRADED_INTVTY_P50} at conc {CONC}; {PRIMARY_POINT_ONLY}"
 
 
 async def test_an_unmeasured_test_a_failed_sweep_or_a_failed_accuracy_disqualifies(tmp_path: Path) -> None:
