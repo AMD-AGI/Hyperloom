@@ -8,6 +8,7 @@ import math
 import os
 import statistics
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -98,44 +99,66 @@ def _run_source_stage(stage: dict) -> torch.Tensor:
     )
 
 
+@dataclass(frozen=True)
+class _Activation:
+    """One GEMM's MXFP8 activation and scales, and how many routed rows read each activation row."""
+
+    a_q: torch.Tensor
+    a_scale: torch.Tensor
+    a_div: int
+
+
+@dataclass(frozen=True)
+class _Weights:
+    """One GEMM's MXFP8 expert weights and their scales."""
+
+    w: torch.Tensor
+    w_scale: torch.Tensor
+
+
+@dataclass(frozen=True)
+class _Routing:
+    """How a case's tokens reach their experts; both GEMMs of the case share it."""
+
+    sorted_token_ids: torch.Tensor
+    expert_ids: torch.Tensor
+    num_tokens_post_padded: torch.Tensor
+    num_valid_tokens: int
+    top_k: int
+
+
 def _make_stage(
+    activation: _Activation,
+    weights: _Weights,
+    routing: _Routing,
     *,
-    a_q: torch.Tensor,
-    a_scale: torch.Tensor,
-    w: torch.Tensor,
-    w_scale: torch.Tensor,
-    sorted_token_ids: torch.Tensor,
-    expert_ids: torch.Tensor,
-    num_tokens_post_padded: torch.Tensor,
-    num_valid_tokens: int,
-    top_k: int,
     out_dtype: torch.dtype,
-    a_div: int,
     topk_weights: torch.Tensor | None = None,
 ) -> dict:
-    experts, n_cols, k_cols = w.shape
+    a_q = activation.a_q
+    experts, n_cols, k_cols = weights.w.shape
     return {
         "a_q": a_q,
-        "a_scale": a_scale,
-        "w": w,
-        "w_scale": w_scale,
-        "sorted_token_ids": sorted_token_ids,
-        "expert_ids": expert_ids,
-        "num_tokens_post_padded": num_tokens_post_padded,
-        "num_valid_tokens": num_valid_tokens,
-        "num_sorted_tokens": sorted_token_ids.numel(),
-        "top_k": top_k,
+        "a_scale": activation.a_scale,
+        "w": weights.w,
+        "w_scale": weights.w_scale,
+        "sorted_token_ids": routing.sorted_token_ids,
+        "expert_ids": routing.expert_ids,
+        "num_tokens_post_padded": routing.num_tokens_post_padded,
+        "num_valid_tokens": routing.num_valid_tokens,
+        "num_sorted_tokens": routing.sorted_token_ids.numel(),
+        "top_k": routing.top_k,
         "block_m": BLOCK_M,
         "out_dtype": out_dtype,
         "out_dtype_name": "f32" if out_dtype == torch.float32 else "bf16",
-        "a_div": a_div,
+        "a_div": activation.a_div,
         "mul_weight": topk_weights is not None,
         "topk_weights": topk_weights if topk_weights is not None else a_q,
         "experts": experts,
         "n_cols": n_cols,
         "k_cols": k_cols,
         "candidate_out": torch.empty(
-            (num_valid_tokens, n_cols),
+            (routing.num_valid_tokens, n_cols),
             dtype=out_dtype,
             device=a_q.device,
         ),
@@ -195,19 +218,13 @@ def _make_case(case: dict, *, correctness: bool) -> tuple[dict, dict]:
         topk_ids, BLOCK_M, experts
     )
     a_q, a_scale = mxfp8_e4m3_quantize(hidden)
+    routing = _Routing(sorted_ids, expert_ids, num_post, routed_tokens, top_k)
 
     gemm1 = _make_stage(
-        a_q=a_q,
-        a_scale=a_scale,
-        w=w13_fp8,
-        w_scale=w13_scale,
-        sorted_token_ids=sorted_ids,
-        expert_ids=expert_ids,
-        num_tokens_post_padded=num_post,
-        num_valid_tokens=routed_tokens,
-        top_k=top_k,
+        _Activation(a_q, a_scale, a_div=top_k),
+        _Weights(w13_fp8, w13_scale),
+        routing,
         out_dtype=torch.bfloat16,
-        a_div=top_k,
     )
     source_gemm1 = _run_source_stage(gemm1)
     activation = swiglu_oai_split(
@@ -219,17 +236,10 @@ def _make_case(case: dict, *, correctness: bool) -> tuple[dict, dict]:
     )
     act_q, act_scale = mxfp8_e4m3_quantize(activation)
     gemm2 = _make_stage(
-        a_q=act_q,
-        a_scale=act_scale,
-        w=w2_fp8,
-        w_scale=w2_scale,
-        sorted_token_ids=sorted_ids,
-        expert_ids=expert_ids,
-        num_tokens_post_padded=num_post,
-        num_valid_tokens=routed_tokens,
-        top_k=top_k,
+        _Activation(act_q, act_scale, a_div=1),
+        _Weights(w2_fp8, w2_scale),
+        routing,
         out_dtype=torch.float32,
-        a_div=1,
         topk_weights=topk_weights.reshape(-1),
     )
     return gemm1, gemm2
