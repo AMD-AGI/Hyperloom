@@ -23,7 +23,6 @@ import logging
 import time
 from collections.abc import Mapping
 from contextvars import ContextVar, Token
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -382,40 +381,36 @@ def _reads_block(reads: list[dict[str, Any]]) -> dict[str, Any] | None:
     }
 
 
-@dataclass(frozen=True)
-class WarmStartMatch:
-    """The record T0 anchored on, at the tier and confidence it was served."""
-
-    tier: str
-    confidence: Any
-    source: str
-    canonical_id: str
-    recipe: Mapping[str, Any] | None
-    expected_gain_pct: Any = None
-    lessons: Any = None
-    pitfalls: Any = None
-
-
-def matched_block(match: WarmStartMatch) -> dict[str, Any]:
+def matched_block(
+    *,
+    tier: str,
+    confidence: Any,
+    source: str,
+    canonical_id: str,
+    recipe: Mapping[str, Any] | None,
+    expected_gain_pct: Any = None,
+    lessons: Any = None,
+    pitfalls: Any = None,
+) -> dict[str, Any]:
     """Build the ``matched`` block from the record T0 anchored on."""
-    row = _as_dict(match.recipe)
-    tier_text = str(match.tier or "").strip()
+    row = _as_dict(recipe)
+    tier_text = str(tier or "").strip()
     block: dict[str, Any] = {
         "match_type": _EXACT_TIER if tier_text.lower() == _EXACT_TIER else "degraded",
         "tier": tier_text,
-        "confidence": _float_or_none(match.confidence),
-        "source": str(match.source or ""),
-        "canonical_id": str(match.canonical_id or ""),
+        "confidence": _float_or_none(confidence),
+        "source": str(source or ""),
+        "canonical_id": str(canonical_id or ""),
         "optimized_throughput": _float_or_none(row.get("best_throughput")),
         "validated_gain_pct": _float_or_none(row.get("validated_gain_pct")),
-        "expected_gain_pct": _float_or_none(match.expected_gain_pct),
+        "expected_gain_pct": _float_or_none(expected_gain_pct),
         "replayable": _bool_or_none(row.get("replayable")),
         "replay_disabled_reason": _text_or_none(row.get("replay_disabled_reason")),
         "replay_material_available": _bool_or_none(row.get("replay_material_available")),
         "view_source": _text_or_none(row.get("view_source")),
         "experience": {
-            "lessons_count": len(match.lessons) if isinstance(match.lessons, list) else 0,
-            "pitfalls_count": len(match.pitfalls) if isinstance(match.pitfalls, list) else 0,
+            "lessons_count": len(lessons) if isinstance(lessons, list) else 0,
+            "pitfalls_count": len(pitfalls) if isinstance(pitfalls, list) else 0,
         },
     }
     shape = _as_dict(row.get("workload_shape"))
@@ -453,7 +448,6 @@ __all__ = [
     "STATUS_FAILED",
     "STATUS_SUCCEEDED",
     "WarmStartEventRecorder",
-    "WarmStartMatch",
     "assemble_warm_start_ext",
     "make_warm_start_recorder",
     "matched_block",
