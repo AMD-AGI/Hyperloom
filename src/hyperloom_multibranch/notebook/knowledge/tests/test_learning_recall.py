@@ -14,6 +14,8 @@ from hyperloom_kb import ReadStatus, RemoteReadResult
 from hyperloom_multibranch.contracts.notebook.records import Learning, LearningRecord, NotebookSnapshot
 from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
 from hyperloom_multibranch.notebook.knowledge.learning_recall import (
+    AGENTX_SESSION,
+    INFERENCEX_SESSION,
     LEARNING_DECISION,
     LearningRecall,
     read_past_learnings,
@@ -70,6 +72,24 @@ def test_past_learnings_say_which_conditions_differ_and_leave_this_session_out()
         5,
         {"id": "specialist_learning@v1"},
         {"query": "kv cache"},
+    )
+
+
+def test_a_learning_of_the_other_kind_of_session_says_which_kind() -> None:
+    agentx_conditions = {key: value for key, value in SAME.items() if key not in ("isl", "osl")}
+    reader = FakeExperienceReader(completed_read(_past("exp-inferencex", SAME), _past("exp-agentx", agentx_conditions)))
+
+    in_agentx = read_past_learnings(reader, profile(isl=None, osl=None), "kv cache", limit=5)
+    in_inferencex = read_past_learnings(reader, profile(), "kv cache", limit=5)
+
+    assert [item.render() for item in in_agentx.items] == [
+        f"- [sess-0, learnt in an {INFERENCEX_SESSION} session, measured] what exp-inferencex learnt about the kv"
+        " cache [exp-inferencex]",
+        "- [sess-0, same conditions, measured] what exp-agentx learnt about the kv cache [exp-agentx]",
+    ]
+    assert [item.render() for item in in_inferencex.items][1] == (
+        f"- [sess-0, isl, osl differ, learnt in an {AGENTX_SESSION} session, measured] what exp-agentx learnt about"
+        " the kv cache [exp-agentx]"
     )
 
 

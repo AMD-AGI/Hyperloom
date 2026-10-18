@@ -173,7 +173,7 @@ def test_an_export_that_fails_leaves_the_experience_one_to_reverify(caplog: pyte
     assert "unreachable" in caplog.text
 
 
-def test_an_experience_on_another_objective_is_left_out_and_one_found_nowhere_is_to_reverify() -> None:
+def test_an_experience_on_another_objective_is_to_reverify_after_the_rest_and_names_its_objective() -> None:
     export = FakeExport(
         [
             {"id": "exp-throughput", "identity": SAME, "objective": THROUGHPUT_OBJECTIVE},
@@ -189,11 +189,16 @@ def test_an_experience_on_another_objective_is_left_out_and_one_found_nowhere_is
     assert [(item.experience_id, item.tier, item.differing) for item in inferencex.experiences] == [
         ("exp-throughput", RecallTier.PRIOR, ()),
         ("exp-elsewhere", RecallTier.REVERIFY, ("objective",)),
+        ("exp-interactivity", RecallTier.REVERIFY, ("objective",)),
     ]
     assert [(item.experience_id, item.tier) for item in agentx.experiences] == [
         ("exp-interactivity", RecallTier.PRIOR),
         ("exp-elsewhere", RecallTier.REVERIFY),
+        ("exp-throughput", RecallTier.REVERIFY),
     ]
+    assert agentx.experiences[-1].describe() == (
+        "--kv-cache-dtype fp8: keep +10.00% on e2e_throughput@v1 (objective differ) [exp-throughput]"
+    )
 
 
 def test_an_index_is_built_only_on_a_reader_whose_service_exports() -> None:
@@ -233,7 +238,7 @@ def _declared(path: Path, result: RemoteReadResult) -> SimpleNamespace:
     return SimpleNamespace(read=fake.read, calls=fake.calls, declaration=load_mapping(path).declaration)
 
 
-def test_both_declarations_read_as_one_and_only_one_declaring_the_objective_is_asked() -> None:
+def test_both_declarations_read_as_one_with_the_same_context() -> None:
     kernel = experience_summary("exp-kernel", SAME)
     shared = _declared(MAPPING_PATH, completed_read(experience_summary("exp-config", SAME)))
     own = _declared(
@@ -242,10 +247,8 @@ def test_both_declarations_read_as_one_and_only_one_declaring_the_objective_is_a
             "read-2", "completed", "", (RenderedRef("exp-kernel", "representative"),), ("slow",), (kernel,)
         ),
     )
-    readers = ExperienceReaders((shared, own))
 
-    both = recall_experiences(readers, profile(), 1000.0, ATTENTION)
-    agentx = recall_experiences(readers, profile(isl=None, osl=None), 4.5, ATTENTION)
+    both = recall_experiences(ExperienceReaders((shared, own)), profile(isl=None, osl=None), 4.5, ATTENTION)
 
     assert [item.experience_id for item in both.experiences] == ["exp-config", "exp-kernel"]
     assert (both.read_id, both.rendered_refs, both.warnings) == (
@@ -253,8 +256,8 @@ def test_both_declarations_read_as_one_and_only_one_declaring_the_objective_is_a
         ("exp-config", "exp-kernel"),
         ("slow",),
     )
-    assert [item.experience_id for item in agentx.experiences] == ["exp-kernel"]
-    assert (len(shared.calls), len(own.calls)) == (1, 2)
+    (shared_call,), (own_call,) = shared.calls, own.calls
+    assert shared_call == own_call and shared_call[1]["objective"]["id"] == INTERACTIVITY_OBJECTIVE
 
 
 def test_a_failed_read_of_one_declaration_leaves_the_others_answer_and_says_why() -> None:

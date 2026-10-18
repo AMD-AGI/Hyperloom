@@ -24,7 +24,11 @@ from hyperloom_multibranch.contracts.notebook.records import (
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LearningKind, LineageKind
 from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.knowledge.recall import THROUGHPUT_OBJECTIVE, IdentityIndex
+from hyperloom_multibranch.notebook.knowledge.recall import (
+    INTERACTIVITY_OBJECTIVE,
+    THROUGHPUT_OBJECTIVE,
+    IdentityIndex,
+)
 from hyperloom_multibranch.notebook.knowledge.tests.fakes import (
     FakeExperienceReader,
     FakeExport,
@@ -160,6 +164,25 @@ async def test_a_recalled_summary_without_conditions_is_sorted_by_the_index_the_
     assert (await with_index.startup_brief("c0")).leads == ("prior: --block-size 16: keep +10.00% [exp-faster]",)
     assert without.identities is None
     assert (await without.startup_brief("c0")).leads == ()
+
+
+async def test_an_experience_of_the_other_kind_of_session_is_only_a_lesson_to_reverify_naming_its_objective(
+    tmp_path: Path,
+) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    agentx = {"id": "exp-agentx", "identity": SAME, "objective": INTERACTIVITY_OBJECTIVE}
+    faster = {"id": "exp-faster", "identity": SAME, "objective": THROUGHPUT_OBJECTIVE}
+    reader = _reader(_recalled("exp-agentx", "keep", 1120.0), _recalled("exp-faster", "keep", 1100.0))
+
+    briefing = CrossSessionBriefing(
+        notebook, experiences=reader, identities=IdentityIndex(FakeExport([agentx, faster]))
+    )
+    brief = await briefing.startup_brief("c0")
+
+    assert brief.leads == ("prior: --block-size 16: keep +10.00% [exp-faster]",)
+    assert brief.lessons[-1] == (
+        "to re-verify: --block-size 16: keep +12.00% on e2e_interactivity@v1 (objective differ) [exp-agentx]"
+    )
 
 
 async def test_recalled_leads_take_turns_by_the_layer_they_change(tmp_path: Path) -> None:

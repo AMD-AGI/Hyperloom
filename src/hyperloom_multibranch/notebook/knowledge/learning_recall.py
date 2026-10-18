@@ -6,7 +6,8 @@
 :class:`LearningRecall` is the session's one ``LearningFinder`` with a knowledge base: this session's learnings first
 (``notebook.learning_search``), then a read of the Experience KB's ``multibranch-learning-v1`` schema with this
 session's conditions. Each past learning says whether it was learnt under every one of them (model, GPU, framework,
-TP, concurrency, sequence lengths) and whether tests backed it. Each query is read once a session, since a read plans
+TP, concurrency, sequence lengths), whether tests backed it, and whether it was learnt in the other kind of session:
+an AgentX session queries no sequence lengths, so only that label tells it an InferenceX session's learning apart. Each query is read once a session, since a read plans
 with an LLM; until some session has published learnings the service does not know the schema, and the read says it is
 unavailable. Given a ``RetrievalLog``, each retrieval is one line of it, this session's and past sessions' learnings
 together.
@@ -44,20 +45,33 @@ LEARNING_CONDITIONS = ("model", "gpu", "framework", "tp", "conc", "isl", "osl")
 PAST_HEADING = "Past sessions' learnings:"
 MEASURED = "measured"
 CACHE_SIZE = 64
+AGENTX_SESSION = "AgentX"
+INFERENCEX_SESSION = "InferenceX"
 
 
 @dataclass(frozen=True)
 class PastLearning:
+    """A past session's learning; ``workload`` names its kind of session when that is not this session's."""
+
     experience_id: str
     content: str
     measured: bool
     source_run_id: str
     differing: tuple[str, ...]
+    workload: str = ""
 
     def render(self) -> str:
-        where = "same conditions" if not self.differing else f"{', '.join(self.differing)} differ"
+        where = [f"{', '.join(self.differing)} differ"] if self.differing else []
+        if self.workload:
+            where.append(f"learnt in an {self.workload} session")
         backed = MEASURED if self.measured else "unmeasured"
-        return f"- [{self.source_run_id}, {where}, {backed}] {self.content} [{self.experience_id}]"
+        return f"- [{self.source_run_id}, {', '.join(where) or 'same conditions'}, {backed}] {self.content} [{self.experience_id}]"
+
+
+def _session_kind(identity: Mapping[str, Any]) -> str:
+    """The kind of session conditions were recorded in: an AgentX trace replay has no input length."""
+
+    return INFERENCEX_SESSION if "isl" in identity else AGENTX_SESSION
 
 
 @dataclass(frozen=True)
@@ -99,17 +113,21 @@ def read_past_learnings(
     limit: int,
     identities: IdentityIndex | None = None,
 ) -> PastLearnings:
-    """Past sessions' learnings for ``query``, each marked by the conditions it differs in; this session's left out."""
+    """Past sessions' learnings for ``query``, each marked by the conditions it differs in and, learnt in the other
+    kind of session (AgentX or InferenceX), by that kind; this session's left out."""
 
     if reader is None:
         return PastLearnings(ReadStatus.DISABLED.value)
     result = reader.read(LEARNING_DECISION, learning_context(profile, query), limit=limit)
     conditions = learning_conditions(profile)
+    ours = _session_kind(experience_identity(profile))
     items = []
     for item in result.experiences:
         recalled = classify(item, conditions, identities)
         if recalled.source_run_id == profile.session_id:
             continue
+        identity = item.get("identity") or (identities.identity(recalled.experience_id) if identities else {})
+        theirs = _session_kind(identity) if identity else ours
         items.append(
             PastLearning(
                 recalled.experience_id,
@@ -117,6 +135,7 @@ def read_past_learnings(
                 recalled.decision == MEASURED,
                 recalled.source_run_id,
                 recalled.differing,
+                theirs if theirs != ours else "",
             )
         )
     return PastLearnings(
@@ -207,7 +226,9 @@ def _rendered_past(past: PastLearnings | None) -> list[str]:
 
 
 __all__ = [
+    "AGENTX_SESSION",
     "CACHE_SIZE",
+    "INFERENCEX_SESSION",
     "LEARNING_CONDITIONS",
     "LEARNING_DECISION",
     "LEARNING_OBJECTIVE",

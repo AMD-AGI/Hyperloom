@@ -15,11 +15,12 @@ condition, so it is one to re-verify, never a prior. The summaries carry no chan
 it from the same export, so a recalled Experience names the layer it changed.
 
 The session's Experiences live under two declarations, the shared ``inference-recipe-v1`` and the notebook's own
-``multibranch-recipe-v1`` for kernel changes and AgentX sessions; :class:`ExperienceReaders` reads both as one, and an
-AgentX session asks for the interactivity objective only the second declares. The second holds Experiences on both
-objectives, and a read may return any of a schema's Experiences, so an AgentX session's gains never stand in for an
-InferenceX session's or the reverse: recall leaves out an Experience the index finds recorded on another objective,
-and one whose objective is found nowhere is one to re-verify, never a prior.
+``multibranch-recipe-v1`` for kernel changes and AgentX sessions; :class:`ExperienceReaders` reads both as one. An
+AgentX session asks for the interactivity objective, an InferenceX session for output throughput, and a read may
+return any of a schema's Experiences. What one kind of session learnt may hold for the other, a crash, a failed
+accuracy gate or a faster kernel, but its gain is on another objective and another workload. So an Experience the
+index finds recorded on another objective is one to re-verify, never a prior, after those on the session's own, and
+it names its objective; one whose objective is found nowhere is one to re-verify as well.
 """
 
 from __future__ import annotations
@@ -172,9 +173,8 @@ class IdentityIndex:
 class ExperienceReaders:
     """Several Experience KB readers read as one, such as one per declaration the session's Experiences live under.
 
-    A reader whose declaration does not declare the read's objective is not asked. The completed answers are merged
-    in the readers' order, each at most ``limit`` Experiences; the warnings are every answer's. With none completed,
-    the first answer is the result.
+    Every reader is asked with the same context. The completed answers are merged in the readers' order, each at most
+    ``limit`` Experiences; the warnings are every answer's. With none completed, the first answer is the result.
     """
 
     readers: tuple[ExperienceReader, ...]
@@ -191,10 +191,7 @@ class ExperienceReaders:
         return cls(readers) if readers else None
 
     def read(self, decision: str, context: Mapping[str, Any], *, limit: int | None = None) -> RemoteReadResult:
-        objective = (context.get("objective") or {}).get("id")
-        answers = [
-            reader.read(decision, context, limit=limit) for reader in self.readers if _declares(reader, objective)
-        ]
+        answers = [reader.read(decision, context, limit=limit) for reader in self.readers]
         completed = [answer for answer in answers if str(answer.status) == ReadStatus.COMPLETED.value]
         if not completed:
             return answers[0] if answers else RemoteReadResult("", ReadStatus.DISABLED.value, "", (), ())
@@ -208,15 +205,10 @@ class ExperienceReaders:
         )
 
 
-def _declares(reader: object, objective: object) -> bool:
-    declaration = getattr(reader, "declaration", None)
-    if declaration is None or not isinstance(objective, str):
-        return True
-    return declaration.objective(objective) is not None
-
-
 @dataclass(frozen=True)
 class RecalledExperience:
+    """One recalled Experience; ``objective`` is the one it was recorded on when that is not the session's."""
+
     experience_id: str
     tier: RecallTier
     differing: tuple[str, ...]
@@ -226,6 +218,7 @@ class RecalledExperience:
     outcome_value: float | None
     source_run_id: str
     change_family: str = ""
+    objective: str = ""
 
     @property
     def layer(self) -> IntentLayer | None:
@@ -243,8 +236,9 @@ class RecalledExperience:
 
     def describe(self) -> str:
         gain = "n/a" if self.gain_pct is None else f"{self.gain_pct:+.2f}%"
+        on = f" on {self.objective}" if self.objective else ""
         where = f" ({', '.join(self.differing)} differ)" if self.differing else ""
-        return f"{self.change_summary}: {self.decision} {gain}{where} [{self.experience_id}]"
+        return f"{self.change_summary}: {self.decision} {gain}{on}{where} [{self.experience_id}]"
 
     def render(self) -> str:
         return f"- {self.describe()}"
@@ -370,7 +364,8 @@ def recall_experiences(
     """Read the Experiences relevant to ``wanted`` on this session's task; ``reader`` is ``None`` without a KB.
 
     A summary without an identity is looked up in ``identities``, and so is every Experience's objective: one recorded
-    on another objective than the session's is left out, and one whose objective is not found is one to re-verify.
+    on another objective than the session's, or on one not found, is one to re-verify, and those on another objective
+    come after the rest, each naming its objective.
     """
 
     if reader is None:
@@ -381,27 +376,21 @@ def recall_experiences(
     result = reader.read(DECISION, context, limit=wanted.limit)
     query = recall_conditions(profile, wanted.bottleneck)
     objective = str(context["objective"]["id"])
-    recalled = (classify(item, query, identities) for item in result.experiences)
+    recalled = [_on_objective(classify(item, query, identities), objective, identities) for item in result.experiences]
     return Recall(
         status=str(result.status),
         read_id=str(result.read_id),
-        experiences=tuple(
-            kept for found in recalled if (kept := _on_objective(found, objective, identities)) is not None
-        ),
+        experiences=tuple(sorted(recalled, key=lambda found: bool(found.objective))),
         rendered_refs=tuple(ref.id for ref in result.rendered_refs),
         warnings=tuple(str(warning) for warning in result.warnings),
     )
 
 
-def _on_objective(
-    found: RecalledExperience, objective: str, identities: IdentityIndex | None
-) -> RecalledExperience | None:
+def _on_objective(found: RecalledExperience, objective: str, identities: IdentityIndex | None) -> RecalledExperience:
     recorded = identities.objective(found.experience_id) if identities is not None else objective
     if recorded == objective:
         return found
-    if recorded:
-        return None
-    return replace(found, tier=RecallTier.REVERIFY, differing=(*found.differing, "objective"))
+    return replace(found, tier=RecallTier.REVERIFY, differing=(*found.differing, "objective"), objective=recorded)
 
 
 __all__ = [
