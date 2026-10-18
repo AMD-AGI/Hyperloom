@@ -174,7 +174,15 @@ class Session:
         profiler = IntegrationProfiler(peers.toolbox, tests, self._notebook, clock)
         events = SessionEvents(self._notebook, self._decisions, profiler)
         steering = Steering(
-            judge, settings.judge_interval_seconds, progress, dashboard, widening, similarity, events, llm_usage
+            judge,
+            settings.judge_interval_seconds,
+            progress,
+            dashboard,
+            widening,
+            similarity,
+            events,
+            llm_usage,
+            peers.specialist_status,
         )
         self._explorer = Explorer(context, self._branches, integrator, steering, peers.split_landing)
         self._selector = FinalSelector(checks, settings.workload, clock)

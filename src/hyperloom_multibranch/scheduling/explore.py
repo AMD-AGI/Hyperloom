@@ -14,11 +14,12 @@ of the profile taken of the integration head after such a merge moving, or a qua
 the judge opens after the opening batch starts from the integration head, briefed on a focus. The judge reads the
 frontier-scored progress, how similar archived sessions went, which running branches made much the same change, the
 events since its last call, how far each branch lies behind the integration head, whether a profile of the
-integration head runs, and the GPU hours and scheduler LLM tokens used so far, and decides what to stop; a judge call
-that has not answered by the EXPLORE deadline counts as failed, and a branch that has not opened by then is
-withdrawn, so neither eats into FINAL. The integrator merges in a background task of its own, in rounds as wide as
-the integration branch's K. When EXPLORE ends that task is cancelled
-and the integrator abandons its round, so the integration head the FINAL candidates are read from no longer moves and
+integration head runs, the GPU hours and scheduler LLM tokens used so far, and what is known of each running
+branch's specialist (given up after its crashes, stopped because its judging failed, its heartbeat lost again and
+again), and decides what to stop; a judge call that has not answered by the EXPLORE deadline counts as failed, and a
+branch that has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background
+task of its own, in rounds as wide as the integration branch's K. When EXPLORE ends that task is cancelled and the
+integrator abandons its round, so the integration head the FINAL candidates are read from no longer moves and
 no merge test competes with FINAL's measurements; a profile of the integration head still running is cancelled before
 that, taking its test back. Under ``--max-gpu-hours`` EXPLORE also ends, at a tick, once the session's tests have used
 the GPU hours FINAL's share leaves it.
@@ -46,8 +47,8 @@ from hyperloom_multibranch.scheduling.events import SessionEvents, behind_integr
 from hyperloom_multibranch.scheduling.integrator import Integrator
 from hyperloom_multibranch.scheduling.judge import Judge, JudgeDecision, JudgeView
 from hyperloom_multibranch.scheduling.llm import CompletionMeter
-from hyperloom_multibranch.scheduling.mb_fakes import MbFakeSplitLanding
-from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchOrigin, BranchStop, StopCause
+from hyperloom_multibranch.scheduling.mb_fakes import MbFakeSpecialistState, MbFakeSpecialistStatus, MbFakeSplitLanding
+from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, BranchOrigin, BranchStop, StopCause
 from hyperloom_multibranch.scheduling.settle import failure_text, settled
 from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
 from hyperloom_multibranch.scheduling.stops import SessionStopReason
@@ -80,8 +81,8 @@ class Steering:
     """How the judge steers EXPLORE: the judge, how often it is asked, the frontier-scored progress it reads, against
     the archived sessions that progress holds, the dashboard rebuilt once the opening batch is open and after every
     later judge call, the signals of whether a branch opened now would still pay off, which running branches made
-    much the same change, the events that have the judge asked at once, and the meter of the judge's and the patch
-    resolver's LLM tokens."""
+    much the same change, the events that have the judge asked at once, the meter of the judge's and the patch
+    resolver's LLM tokens, and what is known of each running branch's specialist."""
 
     judge: Judge
     interval_seconds: float
@@ -91,6 +92,7 @@ class Steering:
     similarity: BranchSimilarity
     events: SessionEvents
     llm_usage: CompletionMeter
+    specialists: MbFakeSpecialistStatus
 
 
 def spent_gpu_seconds(progress: Iterable[BranchProgress]) -> float:
@@ -133,6 +135,7 @@ class Explorer:
         self._similarity = steering.similarity
         self._events = steering.events
         self._llm_usage = steering.llm_usage
+        self._specialists = steering.specialists
 
     async def run(self, window: ExploreWindow) -> SessionStopReason:
         """Explore until the deadline or the judge's soft stop; the integrator is stopped before this returns.
@@ -265,6 +268,7 @@ class Explorer:
             gpu_hours_used=spent_gpu_seconds(progress) / MB_SECONDS_PER_HOUR,
             explore_gpu_hours=_hours_or_none(window.explore_gpu_seconds),
             scheduler_llm=self._llm_usage.used,
+            specialists=await self._specialist_states(),
         )
         try:
             decision = await self._clock.wait_for(self._judge.decide(view), window.explore_end - now)
@@ -274,6 +278,18 @@ class Explorer:
         if decision is None:
             self._decisions.record(Decision(DecisionKind.JUDGE_FAILED, "kept the status quo"))
         return decision
+
+    async def _specialist_states(self) -> dict[str, MbFakeSpecialistState]:
+        """What is known of the specialist of every live specialist branch; a branch whose state is unknown is left
+        out."""
+
+        states: dict[str, MbFakeSpecialistState] = {}
+        for entry in self._roster.entries():
+            if entry.kind is BranchKind.SPECIALIST and entry.stop is None:
+                state = await self._specialists.status(entry.branch)
+                if state is not None:
+                    states[entry.branch] = state
+        return states
 
     async def _apply(self, decision: JudgeDecision, start: BatchStart) -> bool:
         """Apply the stop and K orders, move the queued forks and repairs onto the slots the stops freed, then open the

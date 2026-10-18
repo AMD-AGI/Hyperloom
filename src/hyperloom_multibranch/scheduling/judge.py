@@ -6,11 +6,11 @@
 The scheduler hands the judge a :class:`JudgeView` (the roster, each branch's frontier progress, the remaining budget,
 the integration branch's recorded value, how similar archived sessions went, whether a branch opened now would
 still pay off, which running branches made much the same change, the events since its last call, how far each
-branch lies behind the integration head, whether a profile of the integration head runs, and the GPU hours and LLM
-tokens the session has used). The judge answers with one JSON object, which :func:`parse_decision` reads and
-:func:`cap_decision` cuts to the caps and to the branches that are still live. A failed call or an unreadable reply
-gives ``None``, and the scheduler keeps the status quo. The judge never calls a peer; the scheduler applies its
-decision.
+branch lies behind the integration head, whether a profile of the integration head runs, the GPU hours and LLM
+tokens the session has used, and what is known of each running branch's specialist). The judge answers with one JSON
+object, which :func:`parse_decision` reads and :func:`cap_decision` cuts to the caps and to the branches that are
+still live. A failed call or an unreadable reply gives ``None``, and the scheduler keeps the status quo. The judge
+never calls a peer; the scheduler applies its decision.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, SessionEvent
 from hyperloom_multibranch.scheduling.forks import PendingBranch
 from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed, CompletionUsage
+from hyperloom_multibranch.scheduling.mb_fakes import MbFakeSpecialistState
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, RosterCaps
 from hyperloom_multibranch.scheduling.similarity import SimilarBranch
 from hyperloom_multibranch.scheduling.widening import WideningSignals
@@ -96,6 +97,13 @@ explore_gpu_hours is the gpu_hours_used at which EXPLORE ends to leave FINAL its
 limited: as gpu_hours_used nears it, a branch opened now has few tests left to run, and the session stops exploring
 there whatever you decide. scheduler_llm_tokens are the tokens your own calls and the patch resolver's have used; the
 specialists' LLM spend is not in it.
+A specialist branch's specialist, shown only when the specialist runtime reports it, says whether its specialist is
+running, how many times it crashed (crashes) and how many times it was restarted after its heartbeat was lost (lost),
+whether the runtime gave up restarting it after repeated crashes (gave_up), and whether it was stopped because judging
+its tests failed (judge_failed). A branch whose specialist gave up or whose judging failed makes no more progress
+but holds its slot until you stop it: stop it, and open a branch in its place if one would still pay off. A
+specialist whose heartbeat is lost again and again is restarted every time and never given up on, each loss costing
+minutes: weigh its lost count against its progress, and stop it when it keeps losing its heartbeat without gaining.
 Stop the session only when no branch is expected to gain anything worth the remaining time.
 Answer with exactly ONE JSON object and nothing after it."""
 
@@ -128,7 +136,8 @@ class JudgeView:
     ``gpu_hours_used`` are the GPU hours of the session's tests that have a result: the root's baseline is among them,
     a test withdrawn before its result and the PRELUDE child's own measurements are not. ``explore_gpu_hours`` is where
     EXPLORE ends under ``--max-gpu-hours``, ``None`` without a limit, and ``scheduler_llm`` the tokens the judge and
-    the patch resolver used.
+    the patch resolver used. ``specialists`` maps a running specialist branch to what the specialist runtime knows of
+    its specialist; a branch whose specialist's state is not known is not in it.
     """
 
     now: float
@@ -152,6 +161,7 @@ class JudgeView:
     gpu_hours_used: float
     explore_gpu_hours: float | None
     scheduler_llm: CompletionUsage
+    specialists: Mapping[str, MbFakeSpecialistState]
 
 
 @dataclass(frozen=True)
@@ -232,6 +242,9 @@ def _branch_row(entry: BranchEntry, progress: BranchProgress | None, view: Judge
         row["behind_integration_pct"] = round(behind, 2)
     if entry.stop is not None:
         row["stopped"] = entry.stop.summary
+    specialist = view.specialists.get(entry.branch)
+    if specialist is not None:
+        row["specialist"] = asdict(specialist)
     row.update(_progress_row(progress))
     return row
 

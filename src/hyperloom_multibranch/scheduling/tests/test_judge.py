@@ -31,6 +31,7 @@ from hyperloom_multibranch.scheduling.judge import (
 )
 from hyperloom_multibranch.scheduling.forks import PendingBranch
 from hyperloom_multibranch.scheduling.llm import CompletionFailed, CompletionReply, CompletionUsage
+from hyperloom_multibranch.scheduling.mb_fakes import MbFakeSpecialistState
 from hyperloom_multibranch.scheduling.roster import (
     BranchEntry,
     BranchKind,
@@ -84,6 +85,7 @@ def _view(
     behind: dict[str, float] | None = None,
     profile_running: bool = False,
     explore_gpu_hours: float | None = None,
+    specialists: dict[str, MbFakeSpecialistState] | None = None,
 ) -> JudgeView:
     return JudgeView(
         now=NOW,
@@ -119,6 +121,7 @@ def _view(
         gpu_hours_used=1.23456,
         explore_gpu_hours=explore_gpu_hours,
         scheduler_llm=CompletionUsage(input_tokens=5200, output_tokens=310),
+        specialists=specialists or {},
     )
 
 
@@ -140,6 +143,32 @@ def test_the_prompt_shows_and_explains_the_gpu_hours_and_llm_tokens_used() -> No
     assert "the baseline measured on the root commit included" in prompt
     assert "the measurements the PRELUDE run that built the root commit made on its own" in prompt
     assert "the specialists' LLM spend is not in it" in prompt
+
+
+def test_a_branch_row_shows_what_is_known_of_its_specialist_and_the_prompt_says_to_stop_one_that_gave_up() -> None:
+    gave_up = MbFakeSpecialistState(running=False, crashes=4, lost=1, gave_up=True, judge_failed=False)
+    hanging = MbFakeSpecialistState(running=True, crashes=0, lost=6, gave_up=False, judge_failed=False)
+
+    rows = {row["branch"]: row for row in _state(_view(specialists={"b01": gave_up, "b02": hanging}))["branches"]}
+
+    assert rows["b01"]["specialist"] == {
+        "running": False,
+        "crashes": 4,
+        "lost": 1,
+        "gave_up": True,
+        "judge_failed": False,
+    }
+    assert rows["b02"]["specialist"]["lost"] == 6
+    assert "specialist" not in rows[INTEGRATION_BRANCH] and "specialist" not in rows["b03"]
+    prompt = " ".join(JUDGE_SYSTEM_PROMPT.split())
+    for field in ("crashes", "lost", "gave_up", "judge_failed"):
+        assert f"({field})" in prompt
+    assert "A branch whose specialist gave up or whose judging failed makes no more progress" in prompt
+    assert "weigh its lost count against its progress" in prompt
+
+
+def test_a_branch_whose_specialist_is_not_known_shows_none() -> None:
+    assert not [row for row in _state(_view())["branches"] if "specialist" in row]
 
 
 def test_a_branch_row_lists_its_similar_branches_and_the_prompt_says_which_twin_to_stop() -> None:
