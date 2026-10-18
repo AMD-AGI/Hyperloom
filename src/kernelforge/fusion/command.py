@@ -29,7 +29,15 @@ from .author import (
     build_multi_author_prompt,
     run_author,
 )
-from .campaign import LOOP_CAMPAIGN_STATE, _safe_artifact_id, fused_module_path, run_recipe_campaign
+from .campaign import (
+    LOOP_CAMPAIGN_STATE,
+    CampaignBrief,
+    CampaignRuntime,
+    CampaignWorkspace,
+    _safe_artifact_id,
+    fused_module_path,
+    run_recipe_campaign,
+)
 from .anchor import AnchorReport, AnchorResolutionError, KernelAnchor, discover_anchored_recipes, resolve_anchor
 from .diagnose import diagnose_trace
 from .discover import discover_recipes, registered_agent_llm_fn
@@ -1531,20 +1539,22 @@ def _run_fusion_autoloop(
             raise FusionAbort(f"no harness for {recipe.pattern_id}: {reason}")
         outcome = run_recipe_campaign(
             recipe,
-            workspace=shadow.root,
-            harness_path=harness_path,
-            output_dir=str(out),
-            experience=experience,
-            gpu=gpu,
-            gpu_target=gpu_arch,
+            CampaignWorkspace(root=shadow.root, output_dir=str(out), git_env=shadow.env),
+            CampaignBrief(
+                harness_path=harness_path,
+                experience=experience,
+                fused_module=fused_module_path(recipe),
+                repo_scope=repo_scope,
+                tracked_roots=tracked_roots,
+            ),
+            CampaignRuntime(
+                gpu=gpu,
+                gpu_target=gpu_arch,
+                model=llm_model or "",
+                agent_backend=agent_backend,
+                agent_sandbox_mode=agent_sandbox_mode,
+            ),
             target_speedup=keep_bar,
-            model=llm_model or "",
-            agent_backend=agent_backend,
-            agent_sandbox_mode=agent_sandbox_mode,
-            shadow_env=shadow.env,
-            fused_module=fused_module_path(recipe),
-            repo_scope=repo_scope,
-            tracked_roots=tracked_roots,
         )
         if outcome.experiment_id:
             campaign_experiments[recipe.pattern_id] = outcome.experiment_id

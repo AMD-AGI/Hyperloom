@@ -13,6 +13,10 @@ from pathlib import Path
 
 from kernelforge.fusion import campaign as campaign_module
 from kernelforge.fusion.campaign import (
+    CampaignBrief,
+    CampaignPaths,
+    CampaignRuntime,
+    CampaignWorkspace,
     build_campaign_program_md,
     build_forge_loop_command,
     committed_tree_id,
@@ -640,12 +644,14 @@ class TestCampaignCommand:
     def test_the_loop_is_told_who_owns_what(self, tmp_path):
         cmd = build_forge_loop_command(
             _recipe(),
-            workspace="/fw",
-            driver_path="/out/driver.py",
-            experiments_dir="/out/exp",
-            result_json="/out/r.json",
-            program_md_file="/out/p.md",
-            gpu_target="gfx950",
+            CampaignPaths(
+                workspace="/fw",
+                driver_path="/out/driver.py",
+                experiments_dir="/out/exp",
+                result_json="/out/r.json",
+                program_md_file="/out/p.md",
+            ),
+            runtime=CampaignRuntime(gpu_target="gfx950"),
             fused_module="/sgl/models/lfm2_fused_residual_add_rmsnorm.py",
         )
         assert "forge-loop" in cmd
@@ -667,22 +673,26 @@ class TestCampaignCommand:
         """A lane measures a copy; fusion is measured through the real install."""
         cmd = build_forge_loop_command(
             _recipe(),
-            workspace="/fw",
-            driver_path="/out/driver.py",
-            experiments_dir="/out/exp",
-            result_json="/out/r.json",
-            program_md_file="/out/p.md",
+            CampaignPaths(
+                workspace="/fw",
+                driver_path="/out/driver.py",
+                experiments_dir="/out/exp",
+                result_json="/out/r.json",
+                program_md_file="/out/p.md",
+            ),
         )
         assert cmd[cmd.index("--lanes") + 1] == "1"
 
     def test_fusion_records_go_to_their_own_producer_and_never_warm_start(self, tmp_path):
         cmd = build_forge_loop_command(
             _recipe(),
-            workspace="/fw",
-            driver_path="/out/driver.py",
-            experiments_dir="/out/exp",
-            result_json="/out/r.json",
-            program_md_file="/out/p.md",
+            CampaignPaths(
+                workspace="/fw",
+                driver_path="/out/driver.py",
+                experiments_dir="/out/exp",
+                result_json="/out/r.json",
+                program_md_file="/out/p.md",
+            ),
         )
         assert "--experience-kb" in cmd and "--no-experience-kb" not in cmd
         assert cmd[cmd.index("--producer") + 1] == "fusion"
@@ -695,13 +705,14 @@ class TestCampaignCommand:
         """The loop resolves its own runtime from Config defaults otherwise."""
         cmd = build_forge_loop_command(
             _recipe(),
-            workspace="/fw",
-            driver_path="/out/driver.py",
-            experiments_dir="/out/exp",
-            result_json="/out/r.json",
-            program_md_file="/out/p.md",
-            agent_backend="codex",
-            agent_sandbox_mode="workspace-write",
+            CampaignPaths(
+                workspace="/fw",
+                driver_path="/out/driver.py",
+                experiments_dir="/out/exp",
+                result_json="/out/r.json",
+                program_md_file="/out/p.md",
+            ),
+            runtime=CampaignRuntime(agent_backend="codex", agent_sandbox_mode="workspace-write"),
         )
         assert cmd[cmd.index("--agent-backend") + 1] == "codex"
         assert cmd[cmd.index("--agent-sandbox-mode") + 1] == "workspace-write"
@@ -709,8 +720,9 @@ class TestCampaignCommand:
     def test_the_task_document_names_the_only_writable_module(self, tmp_path):
         program = build_campaign_program_md(
             _recipe(),
-            harness_path="/out/kernel_harness.py",
-            fused_module="/sgl/models/lfm2_fused_residual_add_rmsnorm.py",
+            CampaignBrief(
+                harness_path="/out/kernel_harness.py", fused_module="/sgl/models/lfm2_fused_residual_add_rmsnorm.py"
+            ),
         )
         assert "/sgl/models/lfm2_fused_residual_add_rmsnorm.py" in program
         assert "Do NOT create any other new module." in program
@@ -719,8 +731,9 @@ class TestCampaignCommand:
         """The implementer is measured by this file, so it may not author it."""
         program = build_campaign_program_md(
             _recipe(),
-            harness_path="/out/kernel_harness.py",
-            fused_module="/sgl/models/lfm2_fused_residual_add_rmsnorm.py",
+            CampaignBrief(
+                harness_path="/out/kernel_harness.py", fused_module="/sgl/models/lfm2_fused_residual_add_rmsnorm.py"
+            ),
         )
         assert "/out/kernel_harness.py" in program
         assert "READ-ONLY" in program
@@ -729,7 +742,7 @@ class TestCampaignCommand:
 
     def test_the_authoring_pass_gets_no_harness_section(self, tmp_path):
         """It states its own contract, which is to WRITE the file."""
-        program = build_campaign_program_md(_recipe(), harness_path="")
+        program = build_campaign_program_md(_recipe(), CampaignBrief(harness_path=""))
 
         assert "harness" not in program.lower()
 
@@ -746,7 +759,7 @@ class TestCampaignCommand:
                 ],
             }
         )
-        program = build_campaign_program_md(recipe, harness_path="")
+        program = build_campaign_program_md(recipe, CampaignBrief(harness_path=""))
 
         assert "GROUND TRUTH" in program
         assert "void tgemm_bf16(int)" in program
@@ -756,14 +769,12 @@ class TestCampaignCommand:
 
     def test_unanchored_discovery_renders_no_trace_section(self):
         """An empty heading would read as "the trace recorded nothing"."""
-        assert "GROUND TRUTH" not in build_campaign_program_md(_recipe(), harness_path="")
+        assert "GROUND TRUTH" not in build_campaign_program_md(_recipe(), CampaignBrief(harness_path=""))
 
     def test_the_task_document_demands_the_call_site_be_rewired(self):
         """A fused module nothing calls is the failure this text exists to stop."""
         program = build_campaign_program_md(
-            _recipe(),
-            harness_path="/out/kernel_harness.py",
-            fused_module="/sgl/models/lfm2_fused.py",
+            _recipe(), CampaignBrief(harness_path="/out/kernel_harness.py", fused_module="/sgl/models/lfm2_fused.py")
         )
 
         assert "REPLACE the original call site" in program
@@ -777,10 +788,10 @@ class TestCampaignCommand:
         )
         outcome = run_recipe_campaign(
             _recipe(),
-            workspace=str(tmp_path),
-            harness_path=str(tmp_path / "kernel_harness.py"),
-            output_dir=str(tmp_path),
-            experience="earlier: parity failed at 12 dB",
+            CampaignWorkspace(root=str(tmp_path), output_dir=str(tmp_path)),
+            CampaignBrief(
+                harness_path=str(tmp_path / "kernel_harness.py"), experience="earlier: parity failed at 12 dB"
+            ),
         )
         written = {p.name for p in tmp_path.iterdir() if p.is_file()}
         assert "driver_residual_add_rmsnorm.py" in written
@@ -817,10 +828,8 @@ class TestCampaignCommand:
         monkeypatch.setattr(campaign_module.subprocess, "Popen", fake_popen)
         return run_recipe_campaign(
             recipe,
-            workspace=str(tmp_path),
-            harness_path=str(tmp_path / "kernel_harness.py"),
-            output_dir=str(tmp_path),
-            fused_module=fused_module_path(recipe),
+            CampaignWorkspace(root=str(tmp_path), output_dir=str(tmp_path)),
+            CampaignBrief(harness_path=str(tmp_path / "kernel_harness.py"), fused_module=fused_module_path(recipe)),
         )
 
     def test_a_campaign_that_beat_the_bar_is_kept(self, tmp_path, monkeypatch):
@@ -1029,9 +1038,8 @@ class TestCampaignCommand:
         monkeypatch.setattr(campaign_module.subprocess, "Popen", lambda *a, **k: _Proc())
         outcome = run_recipe_campaign(
             _recipe(),
-            workspace=str(tmp_path),
-            harness_path=str(tmp_path / "kernel_harness.py"),
-            output_dir=str(tmp_path),
+            CampaignWorkspace(root=str(tmp_path), output_dir=str(tmp_path)),
+            CampaignBrief(harness_path=str(tmp_path / "kernel_harness.py")),
         )
 
         assert outcome.result.kept is False

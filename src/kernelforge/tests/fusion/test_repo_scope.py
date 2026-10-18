@@ -17,7 +17,12 @@ import subprocess
 from pathlib import Path
 
 from kernelforge.fusion.anchor import AnchorReport, Slot, build_anchored_discovery_prompt
-from kernelforge.fusion.campaign import build_campaign_program_md, build_forge_loop_command
+from kernelforge.fusion.campaign import (
+    CampaignBrief,
+    CampaignPaths,
+    build_campaign_program_md,
+    build_forge_loop_command,
+)
 from kernelforge.fusion.discover import parse_discovered_recipes, resolve_repo_file
 from kernelforge.fusion.emit import FusionFiles, export_artifacts
 from kernelforge.fusion.models import Recipe
@@ -213,11 +218,13 @@ class TestCampaignHandoff:
 
         cmd = build_forge_loop_command(
             recipe,
-            workspace="/fw",
-            driver_path="/out/driver.py",
-            experiments_dir="/out/exp",
-            result_json="/out/result.json",
-            program_md_file="/out/program.md",
+            CampaignPaths(
+                workspace="/fw",
+                driver_path="/out/driver.py",
+                experiments_dir="/out/exp",
+                result_json="/out/result.json",
+                program_md_file="/out/program.md",
+            ),
             fused_module="/fw/fused.py",
         )
 
@@ -232,10 +239,12 @@ class TestCampaignHandoff:
 
         text = build_campaign_program_md(
             recipe,
-            harness_path="/out/harness.py",
-            fused_module="/fw/fused.py",
-            repo_scope=True,
-            tracked_roots=[str(root / "python")],
+            CampaignBrief(
+                harness_path="/out/harness.py",
+                fused_module="/fw/fused.py",
+                repo_scope=True,
+                tracked_roots=[str(root / "python")],
+            ),
         )
 
         assert str(root / "python") in text

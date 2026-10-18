@@ -736,8 +736,8 @@ def test_autoloop_runs_one_forge_loop_campaign_per_recipe(tmp_path, monkeypatch)
 
     seen: list[dict] = []
 
-    def fake_campaign(recipe, **kwargs):
-        seen.append(kwargs)
+    def fake_campaign(recipe, workspace, brief, runtime, target_speedup):
+        seen.append({"workspace": workspace, "brief": brief, "target_speedup": target_speedup})
         return SimpleNamespace(
             result=SimpleNamespace(kept=True, kernel_speedup=1.2),
             experiment_id="exp-1",
@@ -748,17 +748,17 @@ def test_autoloop_runs_one_forge_loop_campaign_per_recipe(tmp_path, monkeypatch)
 
     assert len(seen) == 1
     # Harness path is now per-recipe: kernel_harness_{stem}.py
-    assert "kernel_harness_" in seen[0]["harness_path"]
-    assert seen[0]["harness_path"].endswith(".py")
-    assert seen[0]["experience"] == "prior experience"
+    assert "kernel_harness_" in seen[0]["brief"].harness_path
+    assert seen[0]["brief"].harness_path.endswith(".py")
+    assert seen[0]["brief"].experience == "prior experience"
     assert seen[0]["target_speedup"] == 1.03
     # The shadow repository is visible through the .git pointer file in the tree, so shadow_env may be empty (pointer
     # case) or carry GIT_DIR (env fallback).
-    shadow_env = seen[0]["shadow_env"]
+    shadow_env = seen[0]["workspace"].git_env
     assert isinstance(shadow_env, dict)
     # The author is given a module that is already tracked, not left to create one that ``git add -u`` could never
     # commit.
-    assert seen[0]["fused_module"].endswith("qwen3_fused_residual_add_rmsnorm.py")
+    assert seen[0]["brief"].fused_module.endswith("qwen3_fused_residual_add_rmsnorm.py")
 
 
 def test_autoloop_gives_the_loop_a_git_workspace(tmp_path, monkeypatch):
@@ -794,8 +794,8 @@ def test_autoloop_restores_the_baseline_before_every_campaign(tmp_path, monkeypa
 
     on_entry: list[tuple[str, str]] = []
 
-    def fake_campaign(recipe, **kwargs):
-        fused = Path(kwargs["fused_module"])
+    def fake_campaign(recipe, workspace, brief, *_args, **_kwargs):
+        fused = Path(brief.fused_module)
         on_entry.append((source.read_text(encoding="utf-8"), fused.read_text(encoding="utf-8")))
         # Stand in for what the loop commits on its own smaller margin, which fusion then judges a miss.
         fused.write_text("FUSED = 1\n", encoding="utf-8")
@@ -884,8 +884,8 @@ def test_autoloop_clears_the_loop_state_that_would_reject_the_next_recipe(tmp_pa
 
     seen_state: list[bool] = []
 
-    def fake_campaign(recipe, *, workspace, **_kwargs):
-        state = Path(workspace) / "forge_experiments"
+    def fake_campaign(recipe, workspace, *_args, **_kwargs):
+        state = Path(workspace.root) / "forge_experiments"
         seen_state.append(state.exists())
         (state / "candidates").mkdir(parents=True, exist_ok=True)
         (state / "run_state.json").write_text("{}", encoding="utf-8")
@@ -917,7 +917,7 @@ def test_autoloop_records_which_forge_loop_run_answered_each_recipe(tmp_path, mo
     source = model_dir / "qwen3.py"
     source.write_text("SOURCE = 'baseline'\n", encoding="utf-8")
 
-    def fake_campaign(recipe, **_kwargs):
+    def fake_campaign(recipe, *_args, **_kwargs):
         return SimpleNamespace(
             result=SimpleNamespace(kept=True, kernel_speedup=1.2),
             experiment_id="exp-42",

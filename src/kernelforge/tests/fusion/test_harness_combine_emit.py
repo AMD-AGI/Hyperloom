@@ -131,9 +131,8 @@ class TestArtifactId:
         )
         campaign_module.run_recipe_campaign(
             combined,
-            workspace=str(tmp_path),
-            harness_path=str(tmp_path / "kernel_harness.py"),
-            output_dir=str(tmp_path),
+            campaign_module.CampaignWorkspace(root=str(tmp_path), output_dir=str(tmp_path)),
+            campaign_module.CampaignBrief(harness_path=str(tmp_path / "kernel_harness.py")),
         )
 
         written = [p.name for p in tmp_path.iterdir() if p.is_file()]

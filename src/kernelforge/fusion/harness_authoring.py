@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from .author import AuthorAgent, AuthorWorkspace, run_author
-from .campaign import build_campaign_program_md
+from .campaign import CampaignBrief, build_campaign_program_md
 from .harness_contract import harness_contract
 from .shapes import harness_group_dim_mismatch
 from .validate import HarnessKernelRunner, eager_trace_alignment
@@ -200,7 +200,7 @@ def _author_baseline_harness(
             return False, reason
         target = staging or harness_path
         prompt = (
-            build_campaign_program_md(recipe, harness_path="")
+            build_campaign_program_md(recipe, CampaignBrief(harness_path=""))
             + harness_contract(target, recipe.env_flag)
             + "\nWrite ONLY that harness. Do not edit the framework source and do "
             "not create any other file; the fused kernel is authored after this.\n" + feedback
