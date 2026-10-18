@@ -24,13 +24,14 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom.measure.compile import LocalBlobStore
-from hyperloom_multibranch.contracts.judgement import Verdict
+from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.gate import RuleGate
+from hyperloom_multibranch.rulegate.inferencex import DROPPED_REQUESTS
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService, Polling
 from hyperloom_multibranch.scheduling.final import (
@@ -178,6 +179,14 @@ class RefusingAccuracyGate(GateService):
         return False
 
 
+class DroppingRequestsGate(GateService):
+    """The rule gate's session service, which blocks every cold start for requests it dropped on both runs; a failure
+    double, not a placeholder."""
+
+    async def compare(self, request_id: str) -> Judgement:
+        return Judgement(Verdict.BLOCKED, 0.0, 1.0, (request_id,), {}, True, (DROPPED_REQUESTS,))
+
+
 class Bench:
     """FINAL's toolbox fake, git repository and rule gate, on a virtual clock and an anchored notebook.
 
@@ -320,6 +329,19 @@ async def test_a_candidate_the_regression_set_fails_on_its_own_commit_is_not_eli
     assert choice.chosen == bench.candidates().best_branch
     assert [check.regression_passed for check in choice.checks] == [False, True]
     assert sorted(bench.regression.calls) == sorted((bench.commits[tag], RecipeDelta(), ()) for tag in ("i1", "c7"))
+
+
+async def test_a_cold_start_that_dropped_requests_is_not_reproduced(tmp_path: Path) -> None:
+    bench = await Bench(tmp_path).build({frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0}})
+    gate = bench.handle(Role.GATE)
+    rule = InferenceXRule(gate, CONC)
+    bench.gate = DroppingRequestsGate(gate, bench.toolbox, rule, bench.toolbox, polling=Polling(GATE_POLL_SECONDS))
+
+    choice = await bench.selector().select(bench.candidates(both=False), START + 3600.0)
+
+    check = choice.checks[0]
+    assert check.reproduced is False and check.accuracy_passed and check.regression_passed
+    assert choice.chosen is None
 
 
 class CrashedSweepTests(SessionTests):

@@ -30,6 +30,7 @@ from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, TestWithdrawn
 from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.integrator import GAIN_ONLY_REFUSALS
 from hyperloom_multibranch.scheduling.requests import (
     NO_DELTA,
     SessionChecks,
@@ -188,8 +189,9 @@ def pick_final(checks: tuple[CandidateCheck, ...], metric: str, conc: int) -> Fi
 
 @dataclass(frozen=True)
 class _Reproduction:
-    """A cold start of a candidate: ``reproduced`` when it holds the commit's own recorded value, that is anything but
-    a regression past the bar, and ``accuracy_passed`` when it clears the accuracy gate."""
+    """A cold start of a candidate: ``reproduced`` when it holds the commit's own recorded value, that is neither a
+    regression past the bar nor refused by anything but the missing gain (dropped requests, a broken guard, a pair
+    that did not measure the same work), and ``accuracy_passed`` when it clears the accuracy gate."""
 
     reproduced: bool
     accuracy_passed: bool
@@ -260,7 +262,9 @@ class FinalSelector:
 
     async def _judge_reproduction(self, request_id: str) -> _Reproduction:
         judgement = await self._gate.compare(request_id)
-        return _Reproduction(judgement.verdict is not Verdict.REGRESSED, await self._gate.accuracy_passes(request_id))
+        defects = [reason for reason in judgement.refused_by if reason not in GAIN_ONLY_REFUSALS]
+        reproduced = judgement.verdict is not Verdict.REGRESSED and not defects
+        return _Reproduction(reproduced, await self._gate.accuracy_passes(request_id))
 
 
 __all__ = [
