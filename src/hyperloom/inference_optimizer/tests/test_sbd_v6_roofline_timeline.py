@@ -32,6 +32,7 @@ from hyperloom.orchestrator.actions.executors.profile import (
     CHECK_GRAPH_LAUNCH_COVERAGE,
     CHECK_RANK_SHAPE,
     CHECK_TRACE_HAS_OPS,
+    _TraceProbe,
     _build_trace_validate,
 )
 from hyperloom.orchestrator.actions.executors.trace_analyze import _analysis_steady_state
@@ -836,21 +837,23 @@ def _certificate(*, density: dict[str, Any], verdict: dict[str, Any], rank_count
 def test_trace_validate_keeps_the_two_verdict_axes_apart() -> None:
     out = _build_trace_validate(
         {"checks": [{"check_id": CHECK_TRACE_HAS_OPS, "status": "passed"}]},
-        trace_dir=Path("/w"),
-        framework="sglang",
-        certificate=_certificate(
-            density={
-                "graph_mode": True,
-                "graph_launch_count": 128,
-                "graph_launches_with_kernels": 1,
-                "graph_launch_coverage": 0.0078,
-                "graph_under_recorded": True,
-            },
-            verdict={
-                "usable_by": ["bypass", "tracelens"],
-                "decode_conclusions_valid": False,
-                "silently_wrong": True,
-            },
+        _TraceProbe(
+            Path("/w"),
+            "sglang",
+            certificate=_certificate(
+                density={
+                    "graph_mode": True,
+                    "graph_launch_count": 128,
+                    "graph_launches_with_kernels": 1,
+                    "graph_launch_coverage": 0.0078,
+                    "graph_under_recorded": True,
+                },
+                verdict={
+                    "usable_by": ["bypass", "tracelens"],
+                    "decode_conclusions_valid": False,
+                    "silently_wrong": True,
+                },
+            ),
         ),
     )
     assert out["verdict"]["usable_by"] == ["bypass", "tracelens"]
@@ -871,17 +874,23 @@ def test_trace_validate_keeps_the_two_verdict_axes_apart() -> None:
 def test_eager_capture_skips_coverage_instead_of_failing_it() -> None:
     out = _build_trace_validate(
         {"checks": []},
-        trace_dir=Path("/w"),
-        framework="sglang",
-        certificate=_certificate(
-            density={
-                "graph_mode": False,
-                "graph_launch_count": 0,
-                "graph_launches_with_kernels": 0,
-                "graph_launch_coverage": None,
-                "graph_under_recorded": False,
-            },
-            verdict={"usable_by": ["bypass", "tracelens"], "decode_conclusions_valid": True, "silently_wrong": False},
+        _TraceProbe(
+            Path("/w"),
+            "sglang",
+            certificate=_certificate(
+                density={
+                    "graph_mode": False,
+                    "graph_launch_count": 0,
+                    "graph_launches_with_kernels": 0,
+                    "graph_launch_coverage": None,
+                    "graph_under_recorded": False,
+                },
+                verdict={
+                    "usable_by": ["bypass", "tracelens"],
+                    "decode_conclusions_valid": True,
+                    "silently_wrong": False,
+                },
+            ),
         ),
     )
     coverage = next(row for row in out["checks"] if row["check_id"] == CHECK_GRAPH_LAUNCH_COVERAGE)
@@ -892,12 +901,14 @@ def test_eager_capture_skips_coverage_instead_of_failing_it() -> None:
 def test_tensor_parallel_capture_reports_the_uncertified_ranks() -> None:
     out = _build_trace_validate(
         {"checks": []},
-        trace_dir=Path("/w"),
-        framework="sglang",
-        certificate=_certificate(
-            density={"graph_mode": True, "graph_under_recorded": False},
-            verdict={"usable_by": ["bypass"], "decode_conclusions_valid": True, "silently_wrong": False},
-            rank_count=8,
+        _TraceProbe(
+            Path("/w"),
+            "sglang",
+            certificate=_certificate(
+                density={"graph_mode": True, "graph_under_recorded": False},
+                verdict={"usable_by": ["bypass"], "decode_conclusions_valid": True, "silently_wrong": False},
+                rank_count=8,
+            ),
         ),
     )
     shape = next(row for row in out["checks"] if row["check_id"] == CHECK_RANK_SHAPE)
@@ -909,9 +920,7 @@ def test_tensor_parallel_capture_reports_the_uncertified_ranks() -> None:
 def test_probe_failure_is_recorded_rather_than_read_as_a_verdict() -> None:
     out = _build_trace_validate(
         {"checks": [{"check_id": CHECK_TRACE_HAS_OPS, "status": "passed"}]},
-        trace_dir=Path("/w"),
-        framework="sglang",
-        probe_error="OSError: trace unreadable",
+        _TraceProbe(Path("/w"), "sglang", error="OSError: trace unreadable"),
     )
     assert out["probe_status"] == "failed"
     assert out["probe_error"] == "OSError: trace unreadable"
