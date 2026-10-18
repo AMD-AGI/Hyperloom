@@ -237,7 +237,7 @@ def test_diffusion_report_totals_param_marks_full_scope():
         "no_perf_model_us": 0.0,
     }
     # kernels_aggregated reflects the all-kernel count, not len(hot_kernels).
-    r = dr.build_report_from_bypass([], {"busy_pct": 90.0}, 8, 10, totals=totals, kernels_aggregated=137)
+    r = dr.build_report_from_bypass([], {"busy_pct": 90.0}, 8, 10, workload=dr.WorkloadTotals(totals, kernel_count=137))
     assert r["kernel_scope"] == "all_device_kernels"
     assert r["kernels_aggregated"] == 137
     assert r["totals"]["sigma_actual_kernel_us"] == 100.0

@@ -800,7 +800,7 @@ def main(argv: list[str] | None = None) -> int:
     diffusion_roofline_path: str | None = None
     if framework_registry.is_scriptable(args.framework):
         try:
-            from .diffusion_roofline import build_report_from_bypass
+            from .diffusion_roofline import WorkloadTotals, build_report_from_bypass
 
             _diff_steps = resolve_perstep_divisor(
                 requested_steps=requested_denoise_steps,
@@ -814,8 +814,7 @@ def main(argv: list[str] | None = None) -> int:
                 analyze.get("timeline") or {},
                 _diff_steps,
                 top_k,
-                totals=_workload_totals,
-                kernels_aggregated=len(_all_kernels),
+                workload=WorkloadTotals(_workload_totals, kernel_count=len(_all_kernels)),
             )
             _diff_path = run_dir / "diffusion_roofline.json"
             atomic_write_json(_diff_path, _diff_report, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
