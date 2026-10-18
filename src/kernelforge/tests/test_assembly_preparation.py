@@ -83,11 +83,8 @@ def campaign(tmp_path, monkeypatch):
     git(tmp_path, "commit", "-m", "original")
     options = dict(
         config=SimpleNamespace(workspace=str(tmp_path), gpu_target="gfx950"),
-        kernel=str(kernel),
-        driver=str(driver),
-        sources=[],
+        task=prepare.AssemblyTask(kernel=str(kernel), driver=str(driver), sources=[], threshold=50.0),
         base_commit=git(tmp_path, "rev-parse", "HEAD"),
-        threshold=50.0,
         deadline=time.time() + 600,
     )
 
@@ -304,9 +301,7 @@ def test_probe_restores_source_on_timeout(campaign, monkeypatch, timeout_call):
 
     monkeypatch.setattr(prepare, "_validate", timeout_on_probe)
     with pytest.raises(asyncio.TimeoutError):
-        asyncio.run(
-            prepare.verify_assembly(root / "kernel.py", source, options["driver"], "gfx950", 50, options["deadline"])
-        )
+        asyncio.run(prepare.verify_assembly(source, options["task"].driver, "gfx950", 50, options["deadline"]))
     assert source.read_text() == ASM
 
 
@@ -425,8 +420,8 @@ def test_no_keep_selects_original_and_can_resume(campaign, monkeypatch):
     root, options = campaign
     record = asyncio.run(prepare.prepare_assembly(**options))
     config = IterationConfig(
-        kernel_file=options["kernel"],
-        driver_script=options["driver"],
+        kernel_file=options["task"].kernel,
+        driver_script=options["task"].driver,
         workspace_dir=str(root),
         campaign_base_commit=options["base_commit"],
         kernel_backend="assembly",

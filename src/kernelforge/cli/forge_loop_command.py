@@ -910,17 +910,14 @@ def _prepare_assembly_task(run: _ForgeRun, program_md: str) -> _AssemblyPreparat
     unchanged = _AssemblyPreparation(None, source_files_list, run.request.knowledge.kb_warmstart_enabled, program_md)
     if kernel_backend != "assembly":
         return unchanged
-    from kernelforge.assembly.prepare import prepare_assembly, seed_source_baseline
+    from kernelforge.assembly.prepare import AssemblyTask, prepare_assembly, seed_source_baseline
 
     try:
         assembly_preparation = asyncio.run(
             prepare_assembly(
-                config=config,
-                kernel=kernel,
-                driver=driver,
-                sources=source_files_list,
+                config,
+                AssemblyTask(kernel=kernel, driver=driver, sources=source_files_list, threshold=snr_threshold),
                 base_commit=campaign.base_commit,
-                threshold=snr_threshold,
                 deadline=deadline_unix - finalize_reserve_sec,
                 resume=resume,
             )

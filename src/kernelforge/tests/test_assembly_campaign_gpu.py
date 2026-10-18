@@ -21,7 +21,7 @@ if not torch.cuda.get_device_properties(torch.cuda.current_device()).gcnArchName
     pytest.skip("vector-add campaign test targets gfx950", allow_module_level=True)
 pytest.importorskip("flydsl.compiler")
 
-from kernelforge.assembly.prepare import prepare_assembly
+from kernelforge.assembly.prepare import AssemblyTask, prepare_assembly
 from kernelforge.config import Config
 from kernelforge.loop.validation import run_validation_pipeline
 from kernelforge.mcp_server.tools.bench import bench_wallclock
@@ -45,12 +45,9 @@ def test_flydsl_capture_wrong_result_and_clean_export(tmp_path, monkeypatch):
     driver = str(workspace / "driver.py")
     record = asyncio.run(
         prepare_assembly(
-            config=Config(workspace=str(workspace), gpu_target="gfx950"),
-            kernel=str(workspace / "kernel.py"),
-            driver=driver,
-            sources=[],
+            Config(workspace=str(workspace), gpu_target="gfx950"),
+            AssemblyTask(kernel=str(workspace / "kernel.py"), driver=driver, sources=[], threshold=50.0),
             base_commit=base,
-            threshold=50.0,
             deadline=time.time() + 1800,
         )
     )

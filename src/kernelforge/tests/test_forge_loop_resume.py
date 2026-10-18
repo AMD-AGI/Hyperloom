@@ -668,10 +668,10 @@ def test_assembly_cli_prepares_before_optimizer_and_keeps_original_export_base(t
     workspace, kernel, driver = _initialize_workspace(tmp_path)
     original = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=workspace, text=True).strip()
 
-    async def prepare(**kwargs):
+    async def prepare(_config, task, **kwargs):
         assert captured["loops"] == []
         assert kwargs["base_commit"] == original
-        assert kwargs["kernel"] == str(kernel)
+        assert task.kernel == str(kernel)
         if not prepare_ok:
             raise preparation.AssemblyPreparationError("injected preparation failure")
         return {

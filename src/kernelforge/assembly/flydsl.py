@@ -65,7 +65,6 @@ def with_assembly(
     gpu_target: str,
     toolchain_dir: Path | str,
     binary_name: str | None = None,
-    timeout_sec: float = 60,
 ) -> CompiledFunction:
     """Return an independently owned callable using an edited AMDHSA assembly file.
 
@@ -107,7 +106,6 @@ def with_assembly(
             Path(scratch) / "kernel.hsaco",
             gpu_target=gpu_target,
             toolchain_dir=Path(toolchain_dir),
-            timeout_sec=timeout_sec,
         ).read_bytes()
 
     with _create_mlir_context(), ir.Location.unknown():
