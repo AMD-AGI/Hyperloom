@@ -35,7 +35,6 @@ from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.timeutil import now_iso
-from hyperloom.inference_optimizer.breakdown.recorder import baseline_event
 from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_ACCURACY,
     ROUND_MEASURE,
@@ -2442,7 +2441,8 @@ class BenchmarkRunExecutor:
         # their say by here, and after the launch the same answer can only be
         # guessed at by parsing the server's own log back.
         if recorder is not None:
-            invocation = baseline_event.LaunchInvocation(
+            recorder.record_invocation(
+                run_index=run_index,
                 framework_args=effective_extra_server_args,
                 extra_envs=base_extra_envs,
                 config_path=materialized_config_path,
@@ -2450,7 +2450,6 @@ class BenchmarkRunExecutor:
                 model_path=resolved_model,
                 args_mode=str(params.get("args_mode") or "append"),
             )
-            recorder.record_invocation(run_index, invocation)
         # MLPerf prepares its delegated client off-loop; native AgentX is entirely managed by Magpie.
         _agx_err = await asyncio.to_thread(
             prepare_agentx_runtime,
@@ -3133,14 +3132,14 @@ class BenchmarkRunExecutor:
         def _record(result: dict[str, Any]) -> None:
             if recorder is None:
                 return
-            benchmark_round = baseline_event.BenchmarkRound(
+            recorder.record_round(
+                run_index=run_index,
                 label=label,
                 started_at=started_at,
                 duration_sec=round(time.monotonic() - started_monotonic, 3),
                 timeout_sec=common.get("timeout_sec"),
                 result=result,
             )
-            recorder.record_round(run_index, benchmark_round)
 
         try:
             result = await self._run_single_benchmark(
@@ -4166,8 +4165,8 @@ class BaselineExecutor(BenchmarkRunExecutor):
         """Open the baseline event, run the action, and close it either way."""
         params = ctx.task.params or {}
         streak, total = self._failure_counters(ctx)
-        sink = self._resolve_sink(ctx)
-        request = baseline_event.BaselineRequest(
+        recorder = make_baseline_recorder(
+            self._resolve_sink(ctx),
             task_id=str(getattr(ctx.task, "task_id", "") or ""),
             task_kind=str(getattr(ctx.task, "kind", "") or ""),
             reason=str(params.get("reason") or ""),
@@ -4176,8 +4175,8 @@ class BaselineExecutor(BenchmarkRunExecutor):
             params=params,
             failure_streak_before=streak,
             total_failures_before=total,
+            owns_event=not str(params.get(INLINE_EVENT_PARAM) or ""),
         )
-        recorder = make_baseline_recorder(sink, request, owns_event=not str(params.get(INLINE_EVENT_PARAM) or ""))
         try:
             result = await self._run_retrying(ctx, recorder=recorder)
             shared_state = (getattr(ctx, "extra", None) or {}).get("shared_state")
