@@ -11,6 +11,7 @@ import random
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 
@@ -28,19 +29,22 @@ DEFAULT_RETRY_MAX = 3
 DEFAULT_BACKOFF_BASE = 1.0  # seconds
 
 
+@dataclass(frozen=True)
+class KBListQuery:
+    """Which entries one ``POST /api/kb/list`` reads, how many and in what order."""
+
+    scope_filter: dict[str, Any]
+    kind: str | None = None
+    metadata_filter: dict[str, Any] | None = None
+    limit: int = 10
+    sort_by: str = "updated_at_desc"
+    include_deleted: bool = False
+
+
 class KBClient(Protocol):
     """Protocol shared between ``HTTPKBClient`` and ``InMemoryKBClient``."""
 
-    def list(
-        self,
-        *,
-        scope_filter: dict[str, Any],
-        kind: str | None = None,
-        metadata_filter: dict[str, Any] | None = None,
-        limit: int = 10,
-        sort_by: str = "updated_at_desc",
-        include_deleted: bool = False,
-    ) -> dict[str, Any]:
+    def list(self, query: KBListQuery) -> dict[str, Any]:
         """Read entries matching a scope via ``POST /api/kb/list``."""
 
     def upsert(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -69,7 +73,6 @@ class HTTPKBClient:
         token: str | None = None,
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
         retry_max: int = DEFAULT_RETRY_MAX,
-        backoff_base: float = DEFAULT_BACKOFF_BASE,
         sleep_fn=time.sleep,
     ):
         """Configure the HTTP transport."""
@@ -79,31 +82,21 @@ class HTTPKBClient:
         self.token = token or os.environ.get("KB_SERVICE_TOKEN") or ""
         self.timeout_s = float(timeout_ms) / 1000.0
         self.retry_max = retry_max
-        self.backoff_base = backoff_base
         self._sleep = sleep_fn
 
     # Public API — one method per endpoint.
-    def list(
-        self,
-        *,
-        scope_filter: dict[str, Any],
-        kind: str | None = None,
-        metadata_filter: dict[str, Any] | None = None,
-        limit: int = 10,
-        sort_by: str = "updated_at_desc",
-        include_deleted: bool = False,
-    ) -> dict[str, Any]:
+    def list(self, query: KBListQuery) -> dict[str, Any]:
         """Read entries matching a scope via ``POST /api/kb/list``."""
         body: dict[str, Any] = {
-            "scope_filter": scope_filter,
-            "limit": limit,
-            "sort_by": sort_by,
-            "include_deleted": include_deleted,
+            "scope_filter": query.scope_filter,
+            "limit": query.limit,
+            "sort_by": query.sort_by,
+            "include_deleted": query.include_deleted,
         }
-        if kind is not None:
-            body["kind"] = kind
-        if metadata_filter is not None:
-            body["metadata_filter"] = metadata_filter
+        if query.kind is not None:
+            body["kind"] = query.kind
+        if query.metadata_filter is not None:
+            body["metadata_filter"] = query.metadata_filter
         return self._request("/api/kb/list", body)
 
     def upsert(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -168,7 +161,7 @@ class HTTPKBClient:
 
     def _backoff_for(self, attempt: int) -> float:
         """Compute the sleep duration before the next retry."""
-        base = self.backoff_base * (2 ** (attempt - 1))
+        base = DEFAULT_BACKOFF_BASE * (2 ** (attempt - 1))
         return base * (0.9 + 0.2 * random.random())
 
 
@@ -178,4 +171,5 @@ __all__ = [
     "DEFAULT_TIMEOUT_MS",
     "HTTPKBClient",
     "KBClient",
+    "KBListQuery",
 ]
