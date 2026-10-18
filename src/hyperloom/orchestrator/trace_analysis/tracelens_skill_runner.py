@@ -668,9 +668,9 @@ async def _drive_sdk_stream(
 
 async def _run_tracelens_skill_codex(
     run: _SkillRun,
+    turn: CodexTurnRequest,
     *,
     model: str,
-    timeout_sec: float,
     codex_turn_runner: Callable[..., Awaitable[CodexSessionResult]],
 ) -> TraceLensSkillRunResult:
     """Run the TraceLens skill on the Codex Agent SDK.
@@ -689,8 +689,9 @@ async def _run_tracelens_skill_codex(
     Args:
         run (_SkillRun): The run's request, command-prefix cache path (reported
             as an artifact) and logging callback.
+        turn (CodexTurnRequest): The orchestrator prompt and the turn's
+            wall-clock budget.
         model (str): The Codex model id.
-        timeout_sec (float): Wall-clock budget for the turn.
         codex_turn_runner (Callable[..., Awaitable[CodexSessionResult]]): The
             Codex turn entry point (injected by tests).
 
@@ -710,7 +711,7 @@ async def _run_tracelens_skill_codex(
         roots = (output_dir, capture_folder) if capture_folder else (output_dir,)
         result = await codex_turn_runner(
             config=CodexSessionConfig(cwd=run.request.tracelens_root, model=model, writable_roots=roots),
-            request=CodexTurnRequest(build_orchestrator_prompt(run.request), timeout_sec=timeout_sec),
+            request=turn,
             developer_instructions=_CODEX_DEVELOPER_INSTRUCTIONS,
         )
     except CodexSessionError as exc:
@@ -795,8 +796,8 @@ async def run_tracelens_skill(
         codex_model = resolved_model or (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
         return await _run_tracelens_skill_codex(
             _SkillRun(request, prefix_path, log),
+            CodexTurnRequest(prompt, timeout_sec=max(60.0, float(budget_minutes) * 60.0)),
             model=codex_model,
-            timeout_sec=max(60.0, float(budget_minutes) * 60.0),
             codex_turn_runner=sdk.codex_turn_runner or run_codex_turn,
         )
 
