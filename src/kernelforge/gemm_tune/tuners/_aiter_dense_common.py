@@ -620,6 +620,7 @@ def _conform_csv_columns(
 def _derive_input_csv_from_config(ctx: TuneContext, work_dir: Path, needs_q_dtype_w: bool = False) -> Path | None:
     """Synthesize an untuned CSV from the model config when none was supplied."""
     from ..dense_shapes import (
+        DenseGeometry,
         compute_dense_m_values,
         compute_dense_nk_shapes,
         write_mnk_untuned_csv,
@@ -639,19 +640,19 @@ def _derive_input_csv_from_config(ctx: TuneContext, work_dir: Path, needs_q_dtyp
     num_heads = int(getattr(profile, "num_attention_heads", 0) or 0)
     num_kv_heads = int(getattr(profile, "num_key_value_heads", 0) or num_heads or 0)
     nk_shapes = compute_dense_nk_shapes(
-        hidden_size=hidden_size,
-        intermediate_size=intermediate_size,
-        num_heads=num_heads,
-        num_kv_heads=num_kv_heads,
-        tp=ctx.tp,
-        head_dim=int(getattr(profile, "head_dim", 0) or 0),
-        v_head_dim=int(getattr(profile, "v_head_dim", 0) or 0),
-        q_lora_rank=int(getattr(profile, "q_lora_rank", 0) or 0),
-        kv_lora_rank=int(getattr(profile, "kv_lora_rank", 0) or 0),
-        qk_nope_head_dim=int(getattr(profile, "qk_nope_head_dim", 0) or 0),
-        qk_rope_head_dim=int(getattr(profile, "qk_rope_head_dim", 0) or 0),
-        o_lora_rank=int(getattr(profile, "o_lora_rank", 0) or 0),
-        o_groups=int(getattr(profile, "o_groups", 0) or 0),
+        DenseGeometry(
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=int(getattr(profile, "head_dim", 0) or 0),
+            v_head_dim=int(getattr(profile, "v_head_dim", 0) or 0),
+            q_lora_rank=int(getattr(profile, "q_lora_rank", 0) or 0),
+            kv_lora_rank=int(getattr(profile, "kv_lora_rank", 0) or 0),
+            qk_nope_head_dim=int(getattr(profile, "qk_nope_head_dim", 0) or 0),
+            qk_rope_head_dim=int(getattr(profile, "qk_rope_head_dim", 0) or 0),
+        ),
+        ctx.tp,
     )
     if not nk_shapes:
         return None

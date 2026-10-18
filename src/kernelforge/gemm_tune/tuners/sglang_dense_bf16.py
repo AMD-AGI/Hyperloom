@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .base import BaseTuner, TuneResult, micro_metrics
-from ..dense_shapes import compute_dense_nk_shapes, compute_dense_m_values
+from ..dense_shapes import DenseGeometry, compute_dense_nk_shapes, compute_dense_m_values
 from ..evidence import demand_for_tuner, demand_shapes, load_demand
 from ..script_discovery import discover_tuner_script
 from ..script_probe import filter_args, probe_script
@@ -277,19 +277,19 @@ class SglangDenseBf16Tuner(BaseTuner):
         num_heads = profile.raw_config.get("num_attention_heads", 32)
         num_kv_heads = profile.raw_config.get("num_key_value_heads", num_heads)
         return _compute_nk_shapes(
-            hidden_size=profile.hidden_size,
-            intermediate_size=profile.intermediate_size,
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
-            tp=self.ctx.tp,
-            head_dim=int(getattr(profile, "head_dim", 0) or 0),
-            v_head_dim=int(getattr(profile, "v_head_dim", 0) or 0),
-            q_lora_rank=int(getattr(profile, "q_lora_rank", 0) or 0),
-            kv_lora_rank=int(getattr(profile, "kv_lora_rank", 0) or 0),
-            qk_nope_head_dim=int(getattr(profile, "qk_nope_head_dim", 0) or 0),
-            qk_rope_head_dim=int(getattr(profile, "qk_rope_head_dim", 0) or 0),
-            o_lora_rank=int(getattr(profile, "o_lora_rank", 0) or 0),
-            o_groups=int(getattr(profile, "o_groups", 0) or 0),
+            DenseGeometry(
+                hidden_size=profile.hidden_size,
+                intermediate_size=profile.intermediate_size,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=int(getattr(profile, "head_dim", 0) or 0),
+                v_head_dim=int(getattr(profile, "v_head_dim", 0) or 0),
+                q_lora_rank=int(getattr(profile, "q_lora_rank", 0) or 0),
+                kv_lora_rank=int(getattr(profile, "kv_lora_rank", 0) or 0),
+                qk_nope_head_dim=int(getattr(profile, "qk_nope_head_dim", 0) or 0),
+                qk_rope_head_dim=int(getattr(profile, "qk_rope_head_dim", 0) or 0),
+            ),
+            self.ctx.tp,
         )
 
     def _shape_budget(self) -> int:
