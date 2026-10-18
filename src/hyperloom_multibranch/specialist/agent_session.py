@@ -36,7 +36,7 @@ from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, SpecialistTokens
 from hyperloom_multibranch.specialist.prompts import launch_prompt
-from hyperloom_multibranch.specialist.runtime import SessionStart
+from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionStart
 from hyperloom_multibranch.specialist.tools import sync_to_head
 from hyperloom_multibranch.specialist.worktree import BranchWorktree
 
@@ -53,10 +53,6 @@ PROMPT_FILE, ROLE_FILE, DONE_FILE, HEARTBEAT_FILE = (
     "heartbeat.json",
 )
 _RUNNING = "running"
-
-
-class SessionCrashed(RuntimeError):
-    """A session of the specialist ended the way no working session ends."""
 
 
 class Processes(Protocol):
@@ -173,7 +169,9 @@ class AgentSession:
         self._setup.tokens.revoke(self._start.branch)
 
     async def _session(self, grant: SpecialistGrant, last_end: str) -> str:
-        """Run one CLI session to its end and say how it ended; raises :class:`SessionCrashed` when it did not work."""
+        """Run one CLI session to its end and say how it ended; raises :class:`SessionCrashed` when it did not work.
+
+        ``last_end`` is how the previous session of this run ended, empty until one ended well."""
         branch, worktree, clock = self._start.branch, self._place.worktree, self._setup.clock
         head = await sync_to_head(self._setup.repo, branch, worktree)
         recent = await self._place.notebook.branch_log(branch)
@@ -196,7 +194,7 @@ class AgentSession:
             or (status.returncode and not status.timed_out)
             or seconds < self._setup.min_session_seconds
         ):
-            raise SessionCrashed(_describe(status, seconds))
+            raise SessionCrashed(_describe(status, seconds), lost=status.state == STATE_LOST, worked=bool(last_end))
         return "it reached its deadline" if status.timed_out else "its model finished its turn"
 
     async def _briefed(self, head: str) -> SessionStart:
@@ -276,5 +274,4 @@ __all__ = [
     "AgentSetup",
     "BranchPlace",
     "Processes",
-    "SessionCrashed",
 ]

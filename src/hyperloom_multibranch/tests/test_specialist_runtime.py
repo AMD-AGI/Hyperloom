@@ -9,6 +9,7 @@ import pytest
 from hyperloom.contracts.recipe import LaunchConfig, Recipe
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, RepairRequest
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, ClaimStatus, LineageKind
@@ -18,9 +19,11 @@ from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
 from hyperloom_multibranch.specialist.judging import NOTICE, Judging
 from hyperloom_multibranch.specialist.runtime import (
+    MAX_LOSS_RESTARTS,
     MAX_RESTARTS,
     RESTART_WINDOW_S,
     RuntimePacing,
+    SessionCrashed,
     SessionStart,
     SpecialistRuntime,
 )
@@ -35,10 +38,11 @@ SCRIPT = tuple(delta(f"--max-num-seqs {n}") for n in (256, 384, 512))
 
 
 class _Runs:
-    """Every run the runtime starts: the first ``crashes`` of them crash, the others idle until stopped."""
+    """Every run the runtime starts: the first ones raise ``errors`` in turn, the next ``crashes`` crash, the others
+    idle until stopped."""
 
-    def __init__(self, crashes: int = 0) -> None:
-        self.crashes = crashes
+    def __init__(self, crashes: int = 0, errors: tuple[Exception, ...] = ()) -> None:
+        self.crashes, self.errors = crashes, list(errors)
         self.started: list[_Run] = []
 
     def __call__(self, start: SessionStart) -> "_Run":
@@ -53,6 +57,8 @@ class _Run:
         self.k, self.brief = start.k, start.brief
 
     async def run(self) -> None:
+        if self._runs.errors:
+            raise self._runs.errors.pop(0)
         if self._runs.crashes:
             self._runs.crashes -= 1
             raise RuntimeError("the agent CLI exited 1")
@@ -178,8 +184,54 @@ async def test_past_the_restarts_a_window_allows_the_specialist_stays_down(sessi
     await _until(lambda: _any_notice(session, "not restarted"), "the runtime to give up")
 
     assert len(runs.started) == 1 + MAX_RESTARTS
+    assert await runtime.status(BRANCH) == SpecialistStatus(False, 1 + MAX_RESTARTS, 0, True, False)
     await runtime.set_k(BRANCH, 2)
     await runtime.stop(BRANCH)
+
+
+def _lost(*, worked: bool = False) -> SessionCrashed:
+    return SessionCrashed("the session was lost (no heartbeat for more than 300s)", lost=True, worked=worked)
+
+
+async def test_losses_in_a_row_stop_the_restarts_however_far_apart_they_are(session):
+    losses = MAX_LOSS_RESTARTS + 1
+    runs = _Runs(errors=tuple(_lost() for _ in range(losses + 2)))
+    ticks = itertools.count(step=RESTART_WINDOW_S + 1)
+    runtime = session.runtime(runs, clock=lambda: next(ticks))
+
+    await runtime.start(BRANCH, await session.repo.head(BRANCH))
+    await _until(lambda: _any_notice(session, "not restarted"), "the runtime to give up")
+
+    assert len(runs.started) == losses == 3
+    assert any(f"lost {losses} sessions in a row" in notice for notice in await session.notices())
+    assert await runtime.status(BRANCH) == SpecialistStatus(False, losses, losses, True, False)
+    await runtime.stop(BRANCH)
+
+
+async def test_a_session_that_worked_between_losses_counts_them_again_from_its_own(session):
+    runs = _Runs(errors=(_lost(), _lost(), _lost(worked=True), _lost()))
+    ticks = itertools.count(step=RESTART_WINDOW_S + 1)
+    runtime = session.runtime(runs, clock=lambda: next(ticks))
+
+    await runtime.start(BRANCH, await session.repo.head(BRANCH))
+    await _until(lambda: _true(len(runs.started) == 5), "every loss to be restarted")
+
+    assert not any("not restarted" in notice for notice in await session.notices())
+    assert await runtime.status(BRANCH) == SpecialistStatus(True, 4, 4, False, False)
+    await runtime.stop(BRANCH)
+
+
+async def test_the_status_is_known_only_while_the_runtime_runs_the_branch(session):
+    runs = _Runs(crashes=1)
+    runtime = session.runtime(runs)
+    assert await runtime.status(BRANCH) is None
+
+    await runtime.start(BRANCH, await session.repo.head(BRANCH))
+    await _until(lambda: _true(len(runs.started) == 2), "the restart")
+
+    assert await runtime.status(BRANCH) == SpecialistStatus(True, 1, 0, False, False)
+    await runtime.stop(BRANCH)
+    assert await runtime.status(BRANCH) is None
 
 
 async def test_crashes_further_apart_than_the_window_do_not_add_up(session):
@@ -203,6 +255,7 @@ async def test_a_failed_judge_stops_the_specialist_and_is_not_restarted(session)
 
     (run,) = runs.started
     assert run.stopped.is_set()
+    assert await runtime.status(BRANCH) == SpecialistStatus(False, 0, 0, False, True)
     await runtime.stop(BRANCH)
 
 

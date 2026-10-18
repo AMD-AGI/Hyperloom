@@ -5,9 +5,26 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol
 
 from hyperloom_multibranch.contracts.fork import RepairRequest
+
+
+@dataclass(frozen=True)
+class SpecialistStatus:
+    """What the runtime knows of a branch's specialist.
+
+    ``running`` says a session of it runs or will be restarted. ``crashes`` counts its sessions that crashed, the lost
+    ones included; ``lost`` counts those that lost their heartbeat. ``gave_up`` says the runtime stopped restarting it,
+    ``judge_failed`` that it was stopped because judging the branch failed; the branch keeps its slot either way.
+    """
+
+    running: bool
+    crashes: int
+    lost: int
+    gave_up: bool
+    judge_failed: bool
 
 
 class SpecialistLifecycle(Protocol):
@@ -32,5 +49,9 @@ class SpecialistLifecycle(Protocol):
     async def set_k(self, branch: str, k: int) -> None:
         """How many tests the branch's specialist may have running at once."""
 
+    async def status(self, branch: str) -> SpecialistStatus | None:
+        """The state of the branch's specialist; ``None`` for a branch the runtime does not run (never started or
+        stopped)."""
 
-__all__ = ["SpecialistLifecycle"]
+
+__all__ = ["SpecialistLifecycle", "SpecialistStatus"]

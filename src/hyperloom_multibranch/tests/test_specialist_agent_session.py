@@ -24,9 +24,8 @@ from hyperloom_multibranch.specialist.agent_session import (
     AgentSession,
     AgentSetup,
     BranchPlace,
-    SessionCrashed,
 )
-from hyperloom_multibranch.specialist.runtime import SessionStart
+from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionStart
 from hyperloom_multibranch.specialist.worktree import SourceBase
 
 BRANCH, TOKEN_ENV, FIRST_PID = "s1", "HYPERLOOM_SPECIALIST_MCP_TOKEN", 4000
@@ -36,6 +35,7 @@ ROOT = Recipe(
     components=(ComponentPatches("vllm", "https://github.com/vllm-project/vllm", "1" * 40),),
 )
 EXITED_WELL = AgentStatus("exited", 0, None)
+LOST = AgentStatus("lost", None, None, error="no heartbeat for more than 300s")
 
 
 class _Clock:
@@ -220,11 +220,26 @@ async def test_a_lost_session_is_killed_collected_and_raised_for_the_runtime(rig
     running = asyncio.create_task(session.run())
     await _until(lambda: len(rig.runner.specs) == 1, "the launch")
 
-    rig.runner.end(1, AgentStatus("lost", None, None, error="no heartbeat for more than 300s"), 900.0)
+    rig.runner.end(1, LOST, 900.0)
 
-    with pytest.raises(SessionCrashed, match="lost"):
+    with pytest.raises(SessionCrashed, match="lost") as raised:
         await asyncio.wait_for(running, 1)
+    assert (raised.value.lost, raised.value.worked) == (True, False)
     assert (rig.runner.cancelled, rig.runner.collected) == ([1], [1])
+
+
+async def test_a_loss_after_a_session_that_worked_says_so(rig):
+    session = rig.session()
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the launch")
+    rig.runner.end(1, EXITED_WELL, 3600.0)
+    await _until(lambda: len(rig.runner.specs) == 2, "a fresh session")
+
+    rig.runner.end(2, LOST, 900.0)
+
+    with pytest.raises(SessionCrashed, match="lost") as raised:
+        await asyncio.wait_for(running, 1)
+    assert (raised.value.lost, raised.value.worked) == (True, True)
 
 
 @pytest.mark.parametrize(
@@ -239,8 +254,9 @@ async def test_a_session_that_errs_or_ends_within_minutes_is_raised(rig, status,
 
     rig.runner.end(1, status, seconds)
 
-    with pytest.raises(SessionCrashed, match=said):
+    with pytest.raises(SessionCrashed, match=said) as raised:
         await asyncio.wait_for(running, 1)
+    assert not raised.value.lost
 
 
 def test_codex_reads_its_role_with_the_prompt(tmp_path):

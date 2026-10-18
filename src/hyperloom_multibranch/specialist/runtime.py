@@ -3,9 +3,10 @@
 
 """The specialist lifecycle: on each branch, the specialist's session and the branch's judge.
 
-A session that crashes is restarted on its branch, at most ``MAX_RESTARTS`` times within ``RESTART_WINDOW_S``; past
-that the branch keeps its judge, which settles what was already measured, and the scheduler stops it as it stops any
-branch that makes no progress. A judge that fails is a defect of this code, not of the specialist: it is not
+A session that crashes is restarted on its branch, at most ``MAX_RESTARTS`` times within ``RESTART_WINDOW_S``, and a
+lost one at most ``MAX_LOSS_RESTARTS`` times in a row with no session working in between: a loss takes the heartbeat
+timeout, so losses alone never fill the window. Past either the branch keeps its judge, which settles what was already measured,
+and the scheduler stops it as it stops any branch that makes no progress; ``status`` tells it. A judge that fails is a defect of this code, not of the specialist: it is not
 restarted, and the branch's session is stopped so no candidate is measured that nothing would judge. Both leave a
 notice in the branch log. While the specialist writes a change, the runtime renews the claims it holds, so a claim does
 not lapse while a model thinks; once a test carries a claim, the toolbox renews it.
@@ -23,6 +24,7 @@ from typing import Protocol
 
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.fork import RepairRequest
+from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.notebook.interfaces import ClaimService, NotebookError
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus
 from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, JudgeNotebook, Judging
@@ -31,14 +33,27 @@ logger = logging.getLogger(__name__)
 
 MAX_RESTARTS = 3
 RESTART_WINDOW_S = 600.0
+MAX_LOSS_RESTARTS = 2
 
 
 class RuntimeNotebook(JudgeNotebook, ClaimService, Protocol):
     """A branch's runtime handle: what its judge reads and writes, and the claims its specialist holds."""
 
 
+class SessionCrashed(RuntimeError):
+    """A run of a branch's specialist ended the way no working session ends.
+
+    ``lost`` says its session lost its heartbeat; ``worked`` says an earlier session of the same run ended well.
+    """
+
+    def __init__(self, reason: str, *, lost: bool = False, worked: bool = False) -> None:
+        super().__init__(reason)
+        self.lost, self.worked = lost, worked
+
+
 class Session(Protocol):
-    """One run of a branch's specialist: ``run`` returns once its work is done and raises when it crashed."""
+    """One run of a branch's specialist: ``run`` returns once its work is done and raises when it crashed, a
+    :class:`SessionCrashed` when it can say how."""
 
     async def run(self) -> None: ...
 
@@ -83,6 +98,10 @@ class _Branch:
     k: int = 1
     session: Session | None = None
     tasks: list[asyncio.Task[None]] = field(default_factory=list)
+    crashes: int = 0
+    lost: int = 0
+    gave_up: bool = False
+    judge_failed: bool = False
 
 
 class SpecialistRuntime:
@@ -127,6 +146,13 @@ class SpecialistRuntime:
             await state.session.set_k(k)
         await _notice(state, f"you may now have {k} tests running at once")
 
+    async def status(self, branch: str) -> SpecialistStatus | None:
+        state = self._branches.get(branch)
+        if state is None:
+            return None
+        running = not state.tasks[0].done()
+        return SpecialistStatus(running, state.crashes, state.lost, state.gave_up, state.judge_failed)
+
     async def stop(self, branch: str) -> None:
         state = self._branches.pop(branch)
         supervisor, *others = state.tasks
@@ -140,6 +166,7 @@ class SpecialistRuntime:
 
     async def _supervise(self, state: _Branch) -> None:
         crashes: deque[float] = deque()
+        losses = 0
         while True:
             start = SessionStart(state.name, state.start_commit, state.brief, state.k, state.repair)
             state.session = self._sessions(start)
@@ -149,16 +176,26 @@ class SpecialistRuntime:
             except Exception as error:
                 logger.exception("the specialist of %s crashed", state.name)
                 await state.session.stop()
+                lost = isinstance(error, SessionCrashed) and error.lost
+                if isinstance(error, SessionCrashed) and error.worked:
+                    losses = 0
+                losses += lost
+                state.crashes += 1
+                state.lost += lost
                 now = self._pacing.clock()
                 crashes.append(now)
                 while now - crashes[0] > RESTART_WINDOW_S:
                     crashes.popleft()
                 if len(crashes) > MAX_RESTARTS:
-                    state.session = None
-                    window = f"{len(crashes)} times in {RESTART_WINDOW_S / 60:g} minutes"
-                    await _notice(state, f"the specialist crashed {window} ({error!r}); it is not restarted")
-                    return
-                await _notice(state, f"the specialist crashed ({error!r}) and is restarted on this branch")
+                    why = f"crashed {len(crashes)} times in {RESTART_WINDOW_S / 60:g} minutes"
+                elif losses > MAX_LOSS_RESTARTS:
+                    why = f"lost {losses} sessions in a row, none working in between"
+                else:
+                    await _notice(state, f"the specialist crashed ({error!r}) and is restarted on this branch")
+                    continue
+                state.session, state.gave_up = None, True
+                await _notice(state, f"the specialist {why} ({error!r}); it is not restarted")
+                return
 
     async def _judge(self, state: _Branch, judge: BranchJudge) -> None:
         try:
@@ -171,6 +208,7 @@ class SpecialistRuntime:
             await asyncio.gather(supervisor, renewal, return_exceptions=True)
             if state.session is not None:
                 await state.session.stop()
+            state.judge_failed = True
             await _notice(state, f"judging this branch failed ({error!r}); its specialist is stopped")
 
     async def _renew(self, state: _Branch) -> None:
@@ -198,10 +236,12 @@ def _log_failure(task: asyncio.Task[None]) -> None:
 
 
 __all__ = [
+    "MAX_LOSS_RESTARTS",
     "MAX_RESTARTS",
     "RESTART_WINDOW_S",
     "RuntimePacing",
     "Session",
+    "SessionCrashed",
     "SessionFactory",
     "SessionStart",
     "SpecialistRuntime",
