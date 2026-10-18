@@ -2192,8 +2192,7 @@ class IntegratePatchExecutor:
             candidate=candidate,
             params=params,
             framework_root=framework_root,
-            output_root=scratch,
-            slug=_candidate_slug(candidate),
+            dest=scratch / f"{_candidate_slug(candidate)}.patch",
             diff_fetch_timeout_sec=DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
         )
         if materialized.failure is not None:

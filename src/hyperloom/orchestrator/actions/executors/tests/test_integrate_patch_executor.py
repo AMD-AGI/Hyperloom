@@ -667,7 +667,7 @@ async def test_upstream_resolve_threads_attempt_and_preserves_fetch_failure(tmp_
             "patches_applied": [],
             "patches_reverted": [],
             "patch_source_mode": "diff_url",
-            "workspace": str(captured[0]["output_root"]),
+            "workspace": str(captured[0]["dest"].parent),
         }
     else:
         assert result["status"] == "no_patches"

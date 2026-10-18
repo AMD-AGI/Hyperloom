@@ -214,11 +214,10 @@ def materialize_candidate_patches(
     candidate: dict[str, Any],
     params: dict[str, Any],
     framework_root: Path,
-    output_root: Path,
-    slug: str,
+    dest: Path,
     diff_fetch_timeout_sec: float,
 ) -> PrMaterialization:
-    """Resolve an upstream-PR candidate into local patch files."""
+    """Resolve an upstream-PR candidate into local patch files; a fetched diff is written to ``dest``."""
     explicit_patches = params.get("patches") or None
     if isinstance(explicit_patches, list) and explicit_patches:
         found: list[Path] = []
@@ -267,7 +266,6 @@ def materialize_candidate_patches(
             },
         )
 
-    dest = output_root / f"{slug}.patch"
     if use_checkout_head:
         mode = "checkout_head"
         ok, err = _materialize_pr_diff_from_head(
