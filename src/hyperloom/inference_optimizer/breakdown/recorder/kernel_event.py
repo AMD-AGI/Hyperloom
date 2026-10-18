@@ -76,9 +76,15 @@ from .kernel_records import (
     SOURCE_GEMM_TUNING,
     SOURCE_KERNEL_REWRITE,
     FusionRun,
+    GeakDelegation,
+    GeakProduct,
     GemmTuningRun,
     IntegrateVerdict,
+    KernelEntryMeasures,
     KernelRewriteRun,
+    KernelVisitExit,
+    RebenchAttempt,
+    ReprofileOutcome,
     TraceAnalyzeRun,
 )
 from .baseline_event import assemble_baseline_actions
@@ -864,63 +870,6 @@ def _discovered_kernel_row(
     }
 
 
-def _rebench_row(
-    *,
-    attempt_id: str,
-    source_kind: str,
-    ledger: str,
-    source_ref: str | None = None,
-    idempotency_key: str | None = None,
-    task_id: str | None = None,
-    dispatched_at: str | None = None,
-    settled_at: str | None = None,
-    base_tput: float | None = None,
-    measured_tput: float | None = None,
-    decision: str | None = None,
-    decision_reason: str | None = None,
-    status: str | None = None,
-    engagement: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Build one rebench attempt row.
-
-    ``engagement`` is the part the orchestrator already computed but never
-    persisted: the GEAK verdict path compares the config fingerprint and the
-    overlay digest to decide ``validated`` versus ``fallback``, and dropped both
-    booleans on the floor once the decision was made.
-
-    """
-    verified = _as_dict(engagement)
-    base = _float_or_none(base_tput)
-    measured = _float_or_none(measured_tput)
-    delta = None
-    if base is not None and measured is not None and base > 0:
-        delta = round((measured - base) / base * 100.0, 4)
-    return {
-        "attempt_id": str(attempt_id or ""),
-        "source_kind": str(source_kind),
-        "ledger": str(ledger),
-        "source_ref": _text(source_ref),
-        "idempotency_key": _text(idempotency_key),
-        "task_id": _text(task_id),
-        "dispatched_at": _text(dispatched_at),
-        "settled_at": _text(settled_at),
-        "base_tput": base,
-        "measured_tput": measured,
-        "delta_pct": delta,
-        "decision": _text(decision),
-        "decision_reason": _text(decision_reason),
-        "status": _text(status),
-        "engagement": {
-            "config_matched": verified.get("config_matched"),
-            "overlay_loaded": verified.get("overlay_loaded"),
-            "expected_cfg_hash": _text(verified.get("expected_cfg_hash")),
-            "observed_cfg_hash": _text(verified.get("observed_cfg_hash")),
-            "expected_overlay_digest": _text(verified.get("expected_overlay_digest")),
-            "observed_overlay_digest": _text(verified.get("observed_overlay_digest")),
-        },
-    }
-
-
 def _acceptance_rows(specs: Any) -> list[dict[str, Any]]:
     """Split GEAK's acceptances into authored kernels and env selections."""
     rows: list[dict[str, Any]] = []
@@ -1024,37 +973,9 @@ class KernelEventRecorder:
 
     # ---- lifecycle -------------------------------------------------------
 
-    def begin(
-        self,
-        *,
-        stack_depth_in: Any = None,
-        budget_remaining_sec: Any = None,
-        tput_before: Any = None,
-        session_baseline_tput: Any = None,
-        snapshot: dict[str, Any] | None = None,
-        snapshot_staleness: str = "",
-    ) -> None:
+    def begin(self, measures: KernelEntryMeasures = KernelEntryMeasures()) -> None:
         """Record the entry measurements and put the event on the timeline."""
-        inherited = _as_dict(snapshot)
-        self._sink.record(
-            SECTION_EVENT,
-            {
-                "entry": {
-                    "stack_depth_in": _int_or_none(stack_depth_in),
-                    "budget_remaining_sec": _float_or_none(budget_remaining_sec),
-                    "roofline_snapshot_id": _int_or_none(inherited.get("roofline_snapshot_id")),
-                    "roofline_snapshot_ts": _text(inherited.get("ts")),
-                    "roofline_baseline_gain_at_snapshot": _float_or_none(
-                        inherited.get("roofline_baseline_gain_at_snapshot")
-                    ),
-                    "snapshot_staleness": _text(snapshot_staleness),
-                },
-                "outcome": {
-                    "tput_before": _float_or_none(tput_before),
-                    "session_baseline_tput": _float_or_none(session_baseline_tput),
-                },
-            },
-        )
+        self._sink.record(SECTION_EVENT, measures.payload())
         self._sequence = open_event(
             EventHeader(EVENT_TYPE, self._event_id, EVENT_KIND, self._start_time),
             event_section=SECTION_EVENT,
@@ -1095,36 +1016,9 @@ class KernelEventRecorder:
 
     # ---- forge -----------------------------------------------------------
 
-    def record_reprofile(
-        self,
-        *,
-        ran: bool,
-        task_kind: str = "",
-        trigger: str = "",
-        skipped_reason: str = "",
-        idempotency_reason: str = "",
-        snapshot_landed: bool = False,
-        snapshot_id_before: Any = None,
-        snapshot_id_after: Any = None,
-        task_id: str = "",
-    ) -> None:
+    def record_reprofile(self, reprofile: ReprofileOutcome) -> None:
         """Record the entry re-profile that decides whether analysis is stale."""
-        self._sink.record(
-            SECTION_EVENT,
-            {
-                "forge_reprofile": {
-                    "ran": bool(ran),
-                    "task_id": _text(task_id),
-                    "task_kind": _text(task_kind),
-                    "trigger": _text(trigger),
-                    "skipped_reason": _text(skipped_reason),
-                    "idempotency_reason": _text(idempotency_reason),
-                    "snapshot_landed": bool(snapshot_landed),
-                    "snapshot_id_before": _int_or_none(snapshot_id_before),
-                    "snapshot_id_after": _int_or_none(snapshot_id_after),
-                }
-            },
-        )
+        self._sink.record(SECTION_EVENT, {"forge_reprofile": reprofile.block()})
 
     def _record_lane_run(self, row: Mapping[str, Any]) -> None:
         """Write one lane row, keyed by the run it describes."""
@@ -1200,48 +1094,9 @@ class KernelEventRecorder:
             },
         )
 
-    def record_geak_delegation(
-        self,
-        *,
-        runner_status: str,
-        started_at: str = "",
-        ended_at: str = "",
-        duration_sec: Any = None,
-        error_class: str = "",
-        error: str = "",
-        returncode: Any = None,
-        runner_timeout_sec: Any = None,
-        kill_timeout_sec: Any = None,
-        exp_root: str = "",
-        eval_dir: str = "",
-        report_path: str = "",
-        versions: dict[str, Any] | None = None,
-        recovered_from_disk: bool = False,
-        stages_reached: Any = None,
-    ) -> None:
+    def record_geak_delegation(self, delegation: GeakDelegation) -> None:
         """Record how the delegated runner itself ended."""
-        self._sink.record(
-            SECTION_EVENT,
-            {
-                "geak_delegation": {
-                    "runner_status": str(runner_status or ""),
-                    "started_at": _text(started_at),
-                    "ended_at": _text(ended_at),
-                    "duration_sec": _float_or_none(duration_sec),
-                    "error_class": _text(error_class),
-                    "error": _clip(error) or None,
-                    "returncode": _int_or_none(returncode),
-                    "runner_timeout_sec": _int_or_none(runner_timeout_sec),
-                    "kill_timeout_sec": _int_or_none(kill_timeout_sec),
-                    "exp_root": _text(exp_root),
-                    "eval_dir": _text(eval_dir),
-                    "report_path": _text(report_path),
-                    "versions": _as_dict(versions),
-                    "recovered_from_disk": bool(recovered_from_disk),
-                    "stages_reached": [str(item) for item in _as_list(stages_reached)],
-                }
-            },
-        )
+        self._sink.record(SECTION_EVENT, {"geak_delegation": delegation.block()})
 
     def record_geak_attempts(self, journey: dict[str, Any] | None) -> None:
         """Replay what GEAK tried, from the journey it emits."""
@@ -1306,45 +1161,13 @@ class KernelEventRecorder:
             },
         )
 
-    def record_geak_product(
-        self,
-        *,
-        accepted_flags: Any = None,
-        accepted_envs: dict[str, Any] | None = None,
-        accepted_config: dict[str, Any] | None = None,
-        cfg_hash: str = "",
-        final_overlay: str = "",
-        final_overlay_digest: str = "",
-        final_launch_script: str = "",
-        bench_script: str = "",
-        final_patch: str = "",
-    ) -> None:
+    def record_geak_product(self, product: GeakProduct) -> None:
         """Record the reproducible configuration GEAK handed back."""
-        flags = accepted_flags
-        self._sink.record(
-            SECTION_EVENT,
-            {
-                "geak_product": {
-                    "accepted_flags": [str(item) for item in _as_list(flags)]
-                    if not isinstance(flags, str)
-                    else _text(flags),
-                    "accepted_envs": _as_dict(accepted_envs),
-                    "accepted_config": _as_dict(accepted_config),
-                    "cfg_hash": _text(cfg_hash),
-                    "final_overlay": _text(final_overlay),
-                    "final_overlay_digest": _text(final_overlay_digest),
-                    "final_launch_script": _text(final_launch_script),
-                    "bench_script": _text(bench_script),
-                    "final_patch": _text(final_patch),
-                }
-            },
-        )
+        self._sink.record(SECTION_EVENT, {"geak_product": product.block()})
 
-    def record_geak_rebench_attempt(self, *, max_attempts: Any = None, **fields: Any) -> None:
+    def record_geak_rebench_attempt(self, attempt: RebenchAttempt, *, max_attempts: Any = None) -> None:
         """Record one GEAK rebench attempt."""
-        fields.setdefault("source_kind", SOURCE_GEAK_AUTHORED_KERNEL)
-        fields["ledger"] = LEDGER_GEAK
-        row = _rebench_row(**fields)
+        row = attempt.row()
         self._sink.record(
             SECTION_REBENCH,
             row,
@@ -1376,17 +1199,7 @@ class KernelEventRecorder:
 
     # ---- conclusion ------------------------------------------------------
 
-    def finish(
-        self,
-        *,
-        exit_reason: str = "",
-        failed: bool = False,
-        tput_after: Any = None,
-        cumulative_gain_validated_out: Any = None,
-        stack_depth_out: Any = None,
-        stack_added: Any = None,
-        stack_removed: Any = None,
-    ) -> None:
+    def finish(self, visit: KernelVisitExit = KernelVisitExit()) -> None:
         """Record the exit facts, assemble the event and close it.
 
         The phase states what it measured on the way out, not how the visit
@@ -1408,17 +1221,8 @@ class KernelEventRecorder:
                 "in_flight_stage": None,
                 "end_time": end_time,
                 "duration_sec": round(time.monotonic() - self._t0, 3),
-                "closed_status": STATUS_FAILED if failed else "",
-                "outcome": {
-                    "exit_reason": _text(exit_reason),
-                    "tput_after": _float_or_none(tput_after),
-                    "cumulative_gain_validated_out": _float_or_none(cumulative_gain_validated_out),
-                    "stack_depth_out": _int_or_none(stack_depth_out),
-                    "stack_delta": {
-                        "added": [_as_dict(row) for row in _as_list(stack_added)],
-                        "removed": [_as_dict(row) for row in _as_list(stack_removed)],
-                    },
-                },
+                "closed_status": STATUS_FAILED if visit.failed else "",
+                "outcome": visit.outcome(),
             },
         )
         # Both families of sections: an inline roofline recorded its rows into this event, and assembly needs them to
@@ -1495,7 +1299,7 @@ class KernelEventRecorder:
                 )
             },
         )
-        self.finish(exit_reason=str(stage or ""), failed=True)
+        self.finish(KernelVisitExit(exit_reason=str(stage or ""), failed=True))
 
     def finish_crashed(self, exc: BaseException) -> None:
         """Close an event whose phase raised instead of returning."""

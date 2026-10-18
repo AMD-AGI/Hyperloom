@@ -24,6 +24,7 @@ from hyperloom.common.launch_log_evidence import (
     observed_sglang_server_identity_from_log,
 )
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import RebenchAttempt
 from hyperloom.orchestrator.lever import (
     FRAMEWORK_STACK_ACTION,
     LEVER_CONFIG,
@@ -2316,25 +2317,27 @@ class WritebackCollaborator(CoordinatorCollaborator):
             return
         params = task.params or {}
         recorder.record_geak_rebench_attempt(
-            attempt_id=str(task.idempotency_key or task.task_id or ""),
-            source_ref=None,
-            idempotency_key=str(task.idempotency_key or ""),
-            task_id=str(task.task_id or ""),
-            dispatched_at=None,
-            settled_at=None,
-            base_tput=params.get("base_tput"),
-            measured_tput=measured,
-            decision=decision,
-            decision_reason=str(params.get("reason") or ""),
-            status=pending_status,
-            engagement={
-                "config_matched": config_matched,
-                "overlay_loaded": overlay_loaded,
-                "expected_cfg_hash": params.get("expected_cfg_hash"),
-                "observed_cfg_hash": got_hash,
-                "expected_overlay_digest": params.get("expected_overlay_digest"),
-                "observed_overlay_digest": got_overlay_digest,
-            },
+            RebenchAttempt(
+                attempt_id=str(task.idempotency_key or task.task_id or ""),
+                source_ref=None,
+                idempotency_key=str(task.idempotency_key or ""),
+                task_id=str(task.task_id or ""),
+                dispatched_at=None,
+                settled_at=None,
+                base_tput=params.get("base_tput"),
+                measured_tput=measured,
+                decision=decision,
+                decision_reason=str(params.get("reason") or ""),
+                status=pending_status,
+                engagement={
+                    "config_matched": config_matched,
+                    "overlay_loaded": overlay_loaded,
+                    "expected_cfg_hash": params.get("expected_cfg_hash"),
+                    "observed_cfg_hash": got_hash,
+                    "expected_overlay_digest": params.get("expected_overlay_digest"),
+                    "observed_overlay_digest": got_overlay_digest,
+                },
+            )
         )
 
     def _record_geak_rebench_conclusion(

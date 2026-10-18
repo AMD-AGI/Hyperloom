@@ -17,6 +17,7 @@ from hyperloom.orchestrator.kernel.geak_config import (
     geak_spec_name,
 )
 from hyperloom.orchestrator.phases.kernel import KernelPhase
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelEntryMeasures, KernelVisitExit
 
 
 def _spec(name: str, delta: float, **extra: Any) -> dict[str, Any]:
@@ -273,8 +274,8 @@ def test_a_geak_adoption_reaches_the_kernel_events_integrate_ledger(tmp_path: Pa
     with session_scope(tmp_path):
         recorder = make_kernel_recorder(macro_cycle=3, route=ROUTE_GEAK)
         assert recorder is not None
-        recorder.begin(tput_before=100.0)
-        recorder.finish(tput_after=120.0)
+        recorder.begin(KernelEntryMeasures(tput_before=100.0))
+        recorder.finish(KernelVisitExit(tput_after=120.0))
 
         _record(
             _phase(),
@@ -308,8 +309,8 @@ def test_an_unattributable_geak_adoption_says_so_on_the_timeline(tmp_path: Path)
     with session_scope(tmp_path):
         recorder = make_kernel_recorder(macro_cycle=3, route=ROUTE_GEAK)
         assert recorder is not None
-        recorder.begin(tput_before=100.0)
-        recorder.finish(tput_after=120.0)
+        recorder.begin(KernelEntryMeasures(tput_before=100.0))
+        recorder.finish(KernelVisitExit(tput_after=120.0))
 
         _record(
             _phase(),

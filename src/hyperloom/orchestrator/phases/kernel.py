@@ -43,7 +43,17 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     record_geak_attempts,
     reject_geak_attempts,
 )
-from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import FusionRun, GemmTuningRun, LaneRunFields
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import (
+    FusionRun,
+    GeakDelegation,
+    GeakProduct,
+    GemmTuningRun,
+    KernelEntryMeasures,
+    KernelVisitExit,
+    LaneRunFields,
+    RebenchAttempt,
+    ReprofileOutcome,
+)
 from ..actions.stop_attribution import stopped_by_the_run_class
 from hyperloom.inference_optimizer.session.optimization_journal import (
     KIND_GEMM_TUNING,
@@ -372,13 +382,13 @@ class KernelPhase(CoordinatorCollaborator):
         workload_changed = self._profile_workload_changed()
         recorder = self.timeline()
 
-        def _note_reprofile(**fields: Any) -> None:
+        def _note_reprofile(outcome: ReprofileOutcome) -> None:
             if recorder is None:
                 return
-            recorder.record_reprofile(**fields)
+            recorder.record_reprofile(outcome)
 
         if cur <= 0:
-            _note_reprofile(ran=False, skipped_reason="no_projected_tput")
+            _note_reprofile(ReprofileOutcome(ran=False, skipped_reason="no_projected_tput"))
             return
         # With a measured trace, reprofile only on a material gain or a change in what is being measured.
         if (
@@ -387,7 +397,7 @@ class KernelPhase(CoordinatorCollaborator):
             and not config_changed
             and not workload_changed
         ):
-            _note_reprofile(ran=False, skipped_reason="within_tolerance")
+            _note_reprofile(ReprofileOutcome(ran=False, skipped_reason="within_tolerance"))
             return
         trigger = "config_changed" if config_changed else ("workload_changed" if workload_changed else "gain")
         if config_changed or workload_changed:
@@ -413,12 +423,14 @@ class KernelPhase(CoordinatorCollaborator):
         denied = self._coord.dispatcher.time_budget_denial_for_action(task_kind)
         if params is None or denied is not None:
             _note_reprofile(
-                ran=False,
-                task_kind=task_kind,
-                trigger=trigger,
-                skipped_reason=denied.rule if denied else analysis_skip_reason(self.shared_state),
-                idempotency_reason=idempotency_reason,
-                snapshot_id_before=snapshot_id_before,
+                ReprofileOutcome(
+                    ran=False,
+                    task_kind=task_kind,
+                    trigger=trigger,
+                    skipped_reason=denied.rule if denied else analysis_skip_reason(self.shared_state),
+                    idempotency_reason=idempotency_reason,
+                    snapshot_id_before=snapshot_id_before,
+                )
             )
             return
         # profile_lane conflicts with the benchmark_lane the kernel_agent task holds, so the reprofile is a step of
@@ -429,12 +441,14 @@ class KernelPhase(CoordinatorCollaborator):
         except Exception:
             log.exception("kernel-entry reprofile failed; the phase proceeds on the existing snapshot")
             _note_reprofile(
-                ran=True,
-                task_kind=task_kind,
-                trigger=trigger,
-                skipped_reason="dispatch_failed",
-                idempotency_reason=idempotency_reason,
-                snapshot_id_before=snapshot_id_before,
+                ReprofileOutcome(
+                    ran=True,
+                    task_kind=task_kind,
+                    trigger=trigger,
+                    skipped_reason="dispatch_failed",
+                    idempotency_reason=idempotency_reason,
+                    snapshot_id_before=snapshot_id_before,
+                )
             )
             return
         # Advance the anchor only when a new snapshot actually landed.
@@ -454,14 +468,16 @@ class KernelPhase(CoordinatorCollaborator):
         else:
             log.warning("kernel-entry reprofile produced no new snapshot; the phase targets the existing trace")
         _note_reprofile(
-            ran=True,
-            task_kind=task_kind,
-            trigger=trigger,
-            idempotency_reason=idempotency_reason,
-            snapshot_landed=bool(snapshot_landed),
-            snapshot_id_before=snapshot_id_before,
-            snapshot_id_after=snapshot_id_after,
-            task_id=str(getattr(reprofile_task, "task_id", "") or ""),
+            ReprofileOutcome(
+                ran=True,
+                task_kind=task_kind,
+                trigger=trigger,
+                idempotency_reason=idempotency_reason,
+                snapshot_landed=bool(snapshot_landed),
+                snapshot_id_before=snapshot_id_before,
+                snapshot_id_after=snapshot_id_after,
+                task_id=str(getattr(reprofile_task, "task_id", "") or ""),
+            )
         )
         if snapshot_landed:
             self._record_kernel_discovered_from_cache(provenance="reprofile_snapshot")
@@ -495,11 +511,13 @@ class KernelPhase(CoordinatorCollaborator):
         self._kernel_stack_at_entry = [dict(item) for item in stack if isinstance(item, dict)]
         cached = state.last_trace_analyze or {}
         recorder.begin(
-            stack_depth_in=state.cumulative_gain_validated_stack_len or None,
-            tput_before=state.current_best.get("tput"),
-            session_baseline_tput=state.baseline_tput or None,
-            snapshot=cached,
-            snapshot_staleness="absent" if not cached else "fresh",
+            KernelEntryMeasures(
+                stack_depth_in=state.cumulative_gain_validated_stack_len or None,
+                tput_before=state.current_best.get("tput"),
+                session_baseline_tput=state.baseline_tput or None,
+                snapshot=cached,
+                snapshot_staleness="absent" if not cached else "fresh",
+            )
         )
         self._record_kernel_discovered_from_cache(provenance="entry_snapshot")
 
@@ -760,12 +778,14 @@ class KernelPhase(CoordinatorCollaborator):
             stack_added = [item for item in stack_after if item not in stack_before]
             stack_removed = [item for item in stack_before if item not in stack_after]
         recorder.finish(
-            exit_reason=exit_reason,
-            tput_after=state.current_best.get("tput"),
-            cumulative_gain_validated_out=state.cumulative_gain_validated or None,
-            stack_depth_out=state.cumulative_gain_validated_stack_len or None,
-            stack_added=stack_added,
-            stack_removed=stack_removed,
+            KernelVisitExit(
+                exit_reason=exit_reason,
+                tput_after=state.current_best.get("tput"),
+                cumulative_gain_validated_out=state.cumulative_gain_validated or None,
+                stack_depth_out=state.cumulative_gain_validated_stack_len or None,
+                stack_added=stack_added,
+                stack_removed=stack_removed,
+            )
         )
 
     async def on_enter_kernel(self, tr: "Transition") -> None:
@@ -1989,13 +2009,15 @@ class KernelPhase(CoordinatorCollaborator):
                 specs=self._geak_acceptance_specs(result),
             )
             recorder.record_geak_product(
-                accepted_flags=accepted_flags,
-                accepted_envs=dict(parsed_envs),
-                accepted_config=result.get("accepted_config"),
-                final_overlay=result.get("final_overlay") or "",
-                final_launch_script=result.get("final_launch_script") or "",
-                bench_script=result.get("bench_script") or "",
-                final_patch=result.get("final_patch") or "",
+                GeakProduct(
+                    accepted_flags=accepted_flags,
+                    accepted_envs=dict(parsed_envs),
+                    accepted_config=result.get("accepted_config"),
+                    final_overlay=result.get("final_overlay") or "",
+                    final_launch_script=result.get("final_launch_script") or "",
+                    bench_script=result.get("bench_script") or "",
+                    final_patch=result.get("final_patch") or "",
+                )
             )
         # Surface a large cross-harness measurement divergence as a warning only.
         bb = result.get("baseline_basis") or {}
@@ -2105,12 +2127,14 @@ class KernelPhase(CoordinatorCollaborator):
         recorder = KernelPhase.timeline(self)
         if recorder is not None:
             recorder.record_geak_rebench_attempt(
-                attempt_id=attempt_id,
-                base_tput=current_best_tput,
-                measured_tput=measured_tput if measured_tput > 0 else None,
-                decision="no_promote",
-                decision_reason=reason,
-                status="no_promote",
+                RebenchAttempt(
+                    attempt_id=attempt_id,
+                    base_tput=current_best_tput,
+                    measured_tput=measured_tput if measured_tput > 0 else None,
+                    decision="no_promote",
+                    decision_reason=reason,
+                    status="no_promote",
+                )
             )
             recorder.record_geak_rebench_conclusion(final_status="no_promote", final_error=reason)
 
@@ -2423,23 +2447,25 @@ class KernelPhase(CoordinatorCollaborator):
         versions = result.get("versions")
         versions = versions if isinstance(versions, dict) else {}
         recorder.record_geak_delegation(
-            runner_status=str(result.get("status") or "unknown"),
-            started_at=started_at or str(result.get("started_at") or ""),
-            ended_at=str(result.get("ended_at") or datetime.now(timezone.utc).isoformat()),
-            duration_sec=duration_sec if duration_sec is not None else result.get("duration_sec"),
-            error_class=str(result.get("error_class") or ""),
-            error=str(result.get("error") or ""),
-            returncode=result.get("returncode"),
-            runner_timeout_sec=(
-                runner_timeout_sec if runner_timeout_sec is not None else result.get("runner_timeout_s")
-            ),
-            kill_timeout_sec=kill_timeout_sec if kill_timeout_sec is not None else result.get("kill_timeout_s"),
-            exp_root=str(result.get("exp_root") or handoff.get("exp_root") or ""),
-            eval_dir=str(result.get("eval_dir") or handoff.get("eval_dir") or ""),
-            report_path=str(result.get("report_path") or ""),
-            versions=versions,
-            recovered_from_disk=recovered_from_disk,
-            stages_reached=result.get("stages_reached"),
+            GeakDelegation(
+                runner_status=str(result.get("status") or "unknown"),
+                started_at=started_at or str(result.get("started_at") or ""),
+                ended_at=str(result.get("ended_at") or datetime.now(timezone.utc).isoformat()),
+                duration_sec=duration_sec if duration_sec is not None else result.get("duration_sec"),
+                error_class=str(result.get("error_class") or ""),
+                error=str(result.get("error") or ""),
+                returncode=result.get("returncode"),
+                runner_timeout_sec=(
+                    runner_timeout_sec if runner_timeout_sec is not None else result.get("runner_timeout_s")
+                ),
+                kill_timeout_sec=kill_timeout_sec if kill_timeout_sec is not None else result.get("kill_timeout_s"),
+                exp_root=str(result.get("exp_root") or handoff.get("exp_root") or ""),
+                eval_dir=str(result.get("eval_dir") or handoff.get("eval_dir") or ""),
+                report_path=str(result.get("report_path") or ""),
+                versions=versions,
+                recovered_from_disk=recovered_from_disk,
+                stages_reached=result.get("stages_reached"),
+            )
         )
 
     def _record_geak_kernel_journey(self, result: dict[str, Any]) -> None:
