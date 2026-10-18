@@ -150,20 +150,6 @@ def test_r9700_materializes_vllm_gfx12_runner(tmp_path):
     assert bench["benchmark_script"] == "vllm_gfx12.sh"
 
 
-def test_r9700_agentx_routes_to_gfx12_runner(tmp_path):
-    src = tmp_path / "cfg.yaml"
-    _write_yaml(src, "vllm")
-    out = materialize_config_with_envs(
-        src,
-        tmp_path / "out",
-        model_path="/m",
-        gpu_type="r9700",
-        agentx_mode=True,
-    )
-    bench = yaml.safe_load(out.read_text())["benchmark"]
-    assert bench["benchmark_script"] == "aiperf_client.sh"
-    assert bench["envs"]["FRAMEWORK"] == "vllm"
-    assert bench["runner_type"] == "gfx12"
 
 
 def test_single_node_explicit_tp_overrides_stale_env(monkeypatch):

@@ -216,8 +216,8 @@ def test_r9700_baseline_and_profile_use_vllm_gfx12_runner(tmp_path, monkeypatch)
     import yaml
 
     monkeypatch.setenv("FRAMEWORK", "vllm")
-    for config_path in (_default_baseline_config(), _PROFILE_VLLM_CONFIG):
-        out = _materialize_config_with_envs(
+    for config_path in (default_baseline_config(), _PROFILE_VLLM_CONFIG):
+        out = materialize_benchmark_config(
             config_path,
             tmp_path / config_path.stem,
             gpu_type="r9700",
