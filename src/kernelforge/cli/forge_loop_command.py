@@ -478,6 +478,224 @@ class _RunReporter:
 
 
 @dataclass(frozen=True)
+class _ForgeRun:
+    """The request, campaign and collaborators every stage of one forge-loop run works from."""
+
+    request: ForgeLoopRequest
+    campaign: CampaignConfig
+    campaign_store: CampaignConfigStore
+    config: Config
+    iter_config: IterationConfig
+    tracker: ExperimentTracker
+    usage: UsageAccumulator
+    deadline: _ForgeDeadline
+
+    @property
+    def caller_experiment_id(self) -> str:
+        """The caller-owned experiment ID: an external recovery channel."""
+        return (self.request.artifacts.experiment_id or "").strip()
+
+
+def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
+    """Make the driver conform to the measurement contract, or leave with the reason it cannot.
+
+    A driver that already conforms is left alone; one that does not is handed
+    to the prep agent, and a preparation that fails ends the run rather than
+    measuring against a driver nobody vouched for.
+    """
+    config = run.config
+    workspace_dir = run.iter_config.workspace_dir
+    kernel = run.iter_config.kernel_file
+    driver = run.iter_config.driver_script
+    target_functions_list = run.iter_config.target_functions
+    source_files_list = run.iter_config.source_files
+    kernel_backend = run.iter_config.kernel_backend
+    snr_threshold = run.iter_config.snr_threshold
+    nproc_per_node = run.iter_config.nproc_per_node
+    program_md_file = run.request.task_context.program_md_file
+    invocation_spec_file = run.request.task_context.invocation_spec_file
+    result_json = run.request.artifacts.result_json
+    deadline_unix = run.deadline.deadline_unix
+    finalize_reserve_sec = run.deadline.finalize_reserve_sec
+    usage = run.usage
+    from kernelforge.loop.task_preparer import (
+        declared_case_ids,
+        preflight_task,
+        prepare_task_sync,
+    )
+
+    # Preparation runs the driver, so it needs the rank count before the loop that normally exports it exists.
+    if nproc_per_node > 1:
+        os.environ["FORGE_NPROC_PER_NODE"] = str(nproc_per_node)
+    else:
+        os.environ.pop("FORGE_NPROC_PER_NODE", None)
+
+    run.deadline.require("task preparation", 10.0)
+    # The spec's declared suite gates this too: a driver that times a subset of the task's cases is not "already
+    # conforming", it just measures less than the task asks for, and accepting it here skips the only step that
+    # would have repaired it.
+    try:
+        expected_case_ids = declared_case_ids(invocation_spec_file)
+    except ValueError as exc:
+        # Continuing would switch the driver's case check off and spend the whole run measuring a suite the
+        # operator never got to state.
+        raise click.ClickException(str(exc)) from exc
+    pf = preflight_task(
+        driver=driver,
+        snr_threshold=snr_threshold,
+        require_graph=True,
+        require_profile=True,
+        require_ranks=max(1, int(nproc_per_node or 1)),
+        deadline_unix=deadline_unix - finalize_reserve_sec,
+        expected_case_ids=expected_case_ids,
+    )
+    if pf.ok:
+        print("  [prepare] task already conforms to the driver contract; skipping")
+        _persist_declared_spec(invocation_spec_file or "", driver)
+    else:
+        print(f"  [prepare] task does not conform ({pf.summary()}); invoking prep agent...")
+        # The budget that actually applies is min(wall, what the per-kernel deadline leaves), and it decides how
+        # many attempts ever start.
+        from kernelforge.loop import task_preparer as _tp
+
+        _prep_wall = min(
+            float(_tp.PREPARE_MAX_WALL_SEC),
+            max(0.0, deadline_unix - finalize_reserve_sec - time.time()),
+        )
+        print(
+            f"  [prepare] budget: wall={_prep_wall:.0f}s "
+            f"attempt_cap={_tp.PER_ATTEMPT_CAP_SEC}s "
+            f"max_attempts={_tp.PREPARE_MAX_ATTEMPTS}"
+        )
+        prep = prepare_task_sync(
+            config=config,
+            workspace_dir=workspace_dir,
+            kernel=kernel,
+            driver=driver,
+            program_md=program_md,
+            target_functions=target_functions_list,
+            source_files=source_files_list,
+            kernel_backend=kernel_backend,
+            snr_threshold=snr_threshold,
+            preflight=pf,
+            invocation_spec_file=invocation_spec_file or "",
+            expected_case_ids=expected_case_ids,
+            # Let the default PREPARE_MAX_WALL_SEC (3000s, sized for a cold-JIT preflight) apply; prepare_task
+            # clamps it to the per-kernel deadline_unix below.
+            deadline_unix=deadline_unix - finalize_reserve_sec,
+            # A collective task needs a driver that launches its own ranks; the preparer cannot infer that from
+            # the kernel source.
+            nproc_per_node=nproc_per_node,
+            read_only_files=[path for path in (program_md_file, invocation_spec_file) if path],
+            usage=usage,
+        )
+        if prep.ok:
+            # Cap the file list: an external driver bundle can legitimately publish dozens of files, and one run
+            # scrolled ~700 cache paths through the operator's log for a 3-file change.
+            _shown = prep.wrote_files[:12]
+            _extra = len(prep.wrote_files) - len(_shown)
+            print(
+                f"  [prepare] prepared measurement driver in {prep.attempts} attempt(s); "
+                f"wrote {', '.join(_shown) or '(none)'}" + (f" (+{_extra} more)" if _extra > 0 else "")
+            )
+            # Telemetry only: never let a missing field break a good prep.
+            _pf_sec = getattr(prep.final_preflight, "duration_sec", 0.0) or 0.0
+            if _pf_sec:
+                _stages = ", ".join(
+                    f"{name}={detail['seconds']:.0f}s"
+                    for name, detail in (getattr(prep.final_preflight, "details", {}) or {}).items()
+                    if isinstance(detail, dict) and "seconds" in detail
+                )
+                print(f"  [prepare] preflight: {_pf_sec:.0f}s" + (f" ({_stages})" if _stages else ""))
+            if prep.audit_dir:
+                print(f"  [prepare] audit: {prep.audit_dir}")
+        else:
+            # prep.message carries the real failure reason (e.g. "driver conformed but commit didn't land"); the
+            # preflight summary can read "ok" even when prep failed downstream, so lead with prep.message and
+            # append the preflight summary as extra context.
+            detail = prep.message or (prep.final_preflight.summary() if prep.final_preflight else "")
+            if prep.message and prep.final_preflight:
+                detail = f"{prep.message} | preflight: {prep.final_preflight.summary()}"
+            disposition = "rolled back" if prep.rolled_back else "workspace preserved"
+            print(f"  [prepare] FAILED after {prep.attempts} attempt(s); {disposition}. {detail}")
+            err_result = {
+                "error": "task_preparation_failed",
+                "detail": detail,
+                "attempts": prep.attempts,
+                "rolled_back": prep.rolled_back,
+                "experiment_id": None,
+            }
+            if prep.audit_dir:
+                err_result["task_preparation_audit_dir"] = prep.audit_dir
+            err_payload = json.dumps(err_result)
+            if result_json:
+                atomic_write_json(result_json, err_result)
+            click.echo(f"__FORGE_RESULT__{err_payload}__FORGE_RESULT__")
+            sys.exit(2)
+
+
+def _collect_pr_kb_context(run: _ForgeRun) -> tuple[str, str]:
+    """Inject PR references into the loop's prompt context, and say which repo they came from.
+
+    Independent of the experience-KB lifecycle, and skipped outright when
+    too little of the deadline is left to collect them.
+    """
+    iter_config = run.iter_config
+    campaign = run.campaign
+    deadline = run.deadline
+    pr_task_context = ""
+    pr_kb_repo = ""
+    if not _pr_kb_enabled(run.request.knowledge.pr_kb):
+        return pr_task_context, pr_kb_repo
+    from kernelforge.knowledge.pr_knowledge.context import (
+        REASON_LOCAL_FAILURE,
+        REASON_SKIPPED_DEADLINE,
+    )
+
+    if deadline.remaining(reserve=deadline.finalize_reserve_sec) < 20.0:
+        print("  [pr-kb] skipped (deadline)")
+        iter_config.pr_kb_event = _pr_refs_event_fields(
+            REASON_SKIPPED_DEADLINE,
+            {},
+        )
+    else:
+        pr_result = _collect_pr_references(
+            iter_config.workspace_dir,
+            PrReferenceQuery(
+                kernel_backend=campaign.kernel_backend or "",
+                git_remote=_git_remote_url(Path(iter_config.workspace_dir).resolve()),
+                source_files=campaign.source_files,
+                operator_name=campaign.operator_name or "",
+                target_functions=iter_config.target_functions,
+            ),
+            min(PR_KB_BUDGET_SEC, deadline.remaining(reserve=deadline.finalize_reserve_sec)),
+        )
+        if pr_result is None:
+            iter_config.pr_kb_event = _pr_refs_event_fields(
+                REASON_LOCAL_FAILURE,
+                {"degraded_reason": REASON_LOCAL_FAILURE},
+            )
+        else:
+            pr_task_context = pr_result.prompt_context
+            pr_kb_repo = pr_result.repo
+            iter_config.pr_reference_context = pr_task_context
+            iter_config.pr_reference_labels = tuple(
+                f"{reference.repo}#{reference.number}" for reference in pr_result.references
+            )
+            iter_config.pr_kb_event = _pr_refs_event_fields(pr_result.reason, pr_result.stats)
+            iter_config.pr_kb_snapshot = pr_result.pending_snapshot
+            if pr_result.injected:
+                print(
+                    f"  [pr-kb] injected "
+                    f"{pr_result.stats.get('injected_entries', 0)} "
+                    f"references ({pr_result.stats.get('injected_bytes', 0)} B)"
+                )
+            else:
+                print(f"  [pr-kb] no references ({pr_result.reason or 'empty'})")
+    return pr_task_context, pr_kb_repo
+
+
+@dataclass(frozen=True)
 class _WarmStart:
     """What the Experience KB offered this run before iteration 1.
 
@@ -489,6 +707,159 @@ class _WarmStart:
     program_md: str
     kb_pristine_baseline_ms: float | None
     kb_reused_speedup: float | None
+
+
+def _read_kb_warm_start(run: _ForgeRun, program_md: str, kb_warmstart_enabled: bool) -> _WarmStart:
+    """Adopt the best prior solution the KB offers, so iteration 1 starts from it rather than from scratch."""
+    iter_config = run.iter_config
+    config = run.config
+    workspace_dir = iter_config.workspace_dir
+    kernel = iter_config.kernel_file
+    driver = iter_config.driver_script
+    kernel_backend = iter_config.kernel_backend
+    target_functions_list = iter_config.target_functions
+    source_files_list = iter_config.source_files
+    framework = run.campaign.framework
+    operator_name = run.campaign.operator_name
+    snr_threshold = iter_config.snr_threshold
+    bench_repeat = iter_config.bench_repeat
+    resume = run.request.resume
+    experience_kb = run.request.knowledge.experience_kb
+    result_json = run.request.artifacts.result_json
+    experience_id = run.request.artifacts.experience_id
+    deadline = run.deadline
+    base_sha = run.campaign.base_commit
+    caller_experiment_id = run.caller_experiment_id
+    tracker = run.tracker
+    # KB warm-start: apply the best prior solution as the starting point and inject its experience into the prompt, so
+    # the agent continues from the best-known state instead of from scratch.
+    kb_pristine_baseline_ms = None
+    kb_reused_speedup = None
+    warm = {
+        "candidate": False,
+        "read_reason": "resume" if resume else "deadline",
+        "read_error": "",
+    }
+    if (
+        experience_kb
+        and kb_warmstart_enabled
+        and not resume
+        and deadline.remaining(reserve=deadline.finalize_reserve_sec) >= 600
+    ):
+        try:
+            warm = kb_warmstart(
+                config=config,
+                kernel=kernel,
+                driver=driver,
+                workspace_dir=workspace_dir,
+                kernel_backend=kernel_backend,
+                target_functions=target_functions_list,
+                framework=framework,
+                snr_threshold=snr_threshold,
+                source_files=source_files_list,
+                operator_name=operator_name,
+                bench_repeat=bench_repeat,
+            )
+        except WarmStartRollbackError as error:
+            failure = click.ClickException(f"warm-start rollback failed; workspace may be inconsistent: {error}")
+            failure.exit_code = 2
+            raise failure from error
+        warm.setdefault(
+            "read_reason",
+            "hit" if warm.get("candidate") else "solution_pages_missing",
+        )
+        warm.setdefault("read_error", "")
+    elif not resume and not experience_kb:
+        warm["read_reason"] = "disabled"
+        print("  [kb] experience KB disabled by caller")
+    elif not resume:
+        print("  [kb] warm-start skipped: absolute deadline reserve")
+    if warm.get("candidate"):
+        kb_pristine_baseline_ms = warm.get("pristine_ms")
+        if warm.get("applied"):
+            # The floor this campaign starts from.
+            kb_reused_speedup = warm.get("mean_case_speedup")
+            iter_config.publication_baseline_wall_ms = warm.get("pristine_ms")
+            try:
+                published = publish_warm_start_recovery(
+                    workspace_dir=workspace_dir,
+                    base_commit=base_sha,
+                    warm=warm,
+                    caller_experiment_id=caller_experiment_id,
+                    experience_id=experience_id,
+                    tracker=tracker,
+                    result_json=result_json,
+                )
+                if published:
+                    iter_config.warm_start_publication = dict(published)
+                if published and published.get("persistence_degraded"):
+                    print(
+                        "  [warm-start] recovery publication degraded: "
+                        + "; ".join(published.get("persistence_errors") or []),
+                        flush=True,
+                    )
+                print(
+                    "  [warm-start] published recoverable best before iteration 1",
+                    flush=True,
+                )
+            except Exception as error:  # noqa: BLE001 - translated into a rollback below
+                try:
+                    rollback_unpublished_warm_start(
+                        workspace_dir,
+                        base_commit=base_sha,
+                        result_json=result_json,
+                    )
+                except Exception as rollback_error:
+                    raise click.ClickException(
+                        "failed to publish validated warm-start and could not "
+                        f"restore pristine workspace: {rollback_error}"
+                    ) from rollback_error
+                warm["applied"] = False
+                warm["keep_baseline_ms"] = warm.get("pristine_ms")
+                mark_kb_reference_rejected(
+                    workspace_dir,
+                    int(warm.get("applied_rank") or 0),
+                    "publication_failed",
+                )
+                warm["program_md_addition"] = kb_reference_program_md(
+                    workspace_dir,
+                    detect_applied=False,
+                ) or warm.get(
+                    "reference_program_md_addition",
+                    "## Warm-start reference only\n"
+                    "The prior patch could not be published durably and was "
+                    "removed before optimization.",
+                )
+                iter_config.publication_baseline_wall_ms = None
+                print(
+                    "  [warm-start] recovery publication failed; restored "
+                    f"pristine source and continuing reference-only ({error})",
+                    flush=True,
+                )
+        if warm.get("program_md_addition"):
+            program_md = program_md + "\n\n" + warm["program_md_addition"]
+        # Keep the pristine raw baseline immutable.
+        if warm.get("pristine_ms"):
+            iter_config.baseline_wall_ms = warm["pristine_ms"]
+        if warm.get("baseline_case_times"):
+            iter_config.baseline_case_times = dict(warm["baseline_case_times"])
+        iter_config.preloop_baseline_unscored_cases = list(warm.get("baseline_unscored_cases") or [])
+        if warm.get("applied"):
+            iter_config.pristine_baseline_wall_ms = warm.get("pristine_ms")
+            iter_config.warm_start_wall_ms = warm.get("keep_baseline_ms")
+            iter_config.warm_start_mean_case_speedup = warm.get("mean_case_speedup")
+            iter_config.warm_start_bench = {
+                "case_times": dict(warm.get("case_times") or {}),
+                "unscored_cases": list(warm.get("unscored_cases") or []),
+            }
+            iter_config.warm_start_commit = warm.get("applied_commit", "")
+            iter_config.warm_start_solution_slug = warm.get("solution_slug", "")
+    return _WarmStart(
+        warm=warm,
+        program_md=program_md,
+        kb_pristine_baseline_ms=kb_pristine_baseline_ms,
+        kb_reused_speedup=kb_reused_speedup,
+    )
 
 
 def _profile_timeout_override(env_timeout, profile_timeout_sec: int) -> int:
@@ -517,425 +888,58 @@ class _AssemblyPreparation:
     program_md: str
 
 
-@dataclass(frozen=True)
-class _ForgeRun:
-    """The request, campaign and collaborators every stage of one forge-loop run works from."""
+def _prepare_assembly_task(run: _ForgeRun, program_md: str) -> _AssemblyPreparation:
+    """Export and bind the compiler output an assembly task is optimized against.
 
-    request: ForgeLoopRequest
-    campaign: CampaignConfig
-    campaign_store: CampaignConfigStore
-    config: Config
-    iter_config: IterationConfig
-    tracker: ExperimentTracker
-    usage: UsageAccumulator
-    deadline: _ForgeDeadline
+    A task on any other backend passes through untouched.
+    """
+    config = run.config
+    iter_config = run.iter_config
+    campaign = run.campaign
+    kernel_backend = campaign.kernel_backend
+    kernel = iter_config.kernel_file
+    driver = iter_config.driver_script
+    source_files_list = iter_config.source_files
+    workspace = Path(iter_config.workspace_dir).resolve()
+    snr_threshold = iter_config.snr_threshold
+    deadline_unix = run.deadline.deadline_unix
+    finalize_reserve_sec = run.deadline.finalize_reserve_sec
+    resume = run.request.resume
+    unchanged = _AssemblyPreparation(None, source_files_list, program_md)
+    if kernel_backend != "assembly":
+        return unchanged
+    from kernelforge.assembly.prepare import prepare_assembly, seed_source_baseline
 
-    @property
-    def caller_experiment_id(self) -> str:
-        """The caller-owned experiment ID: an external recovery channel."""
-        return (self.request.artifacts.experiment_id or "").strip()
-
-    def prepare_measurement_driver(self, program_md: str) -> None:
-        """Make the driver conform to the measurement contract, or leave with the reason it cannot.
-
-        A driver that already conforms is left alone; one that does not is handed
-        to the prep agent, and a preparation that fails ends the run rather than
-        measuring against a driver nobody vouched for.
-        """
-        config = self.config
-        workspace_dir = self.iter_config.workspace_dir
-        kernel = self.iter_config.kernel_file
-        driver = self.iter_config.driver_script
-        target_functions_list = self.iter_config.target_functions
-        source_files_list = self.iter_config.source_files
-        kernel_backend = self.iter_config.kernel_backend
-        snr_threshold = self.iter_config.snr_threshold
-        nproc_per_node = self.iter_config.nproc_per_node
-        program_md_file = self.request.task_context.program_md_file
-        invocation_spec_file = self.request.task_context.invocation_spec_file
-        result_json = self.request.artifacts.result_json
-        deadline_unix = self.deadline.deadline_unix
-        finalize_reserve_sec = self.deadline.finalize_reserve_sec
-        usage = self.usage
-        from kernelforge.loop.task_preparer import (
-            declared_case_ids,
-            preflight_task,
-            prepare_task_sync,
-        )
-
-        # Preparation runs the driver, so it needs the rank count before the loop that normally exports it exists.
-        if nproc_per_node > 1:
-            os.environ["FORGE_NPROC_PER_NODE"] = str(nproc_per_node)
-        else:
-            os.environ.pop("FORGE_NPROC_PER_NODE", None)
-
-        self.deadline.require("task preparation", 10.0)
-        # The spec's declared suite gates this too: a driver that times a subset of the task's cases is not "already
-        # conforming", it just measures less than the task asks for, and accepting it here skips the only step that
-        # would have repaired it.
-        try:
-            expected_case_ids = declared_case_ids(invocation_spec_file)
-        except ValueError as exc:
-            # Continuing would switch the driver's case check off and spend the whole run measuring a suite the
-            # operator never got to state.
-            raise click.ClickException(str(exc)) from exc
-        pf = preflight_task(
-            driver=driver,
-            snr_threshold=snr_threshold,
-            require_graph=True,
-            require_profile=True,
-            require_ranks=max(1, int(nproc_per_node or 1)),
-            deadline_unix=deadline_unix - finalize_reserve_sec,
-            expected_case_ids=expected_case_ids,
-        )
-        if pf.ok:
-            print("  [prepare] task already conforms to the driver contract; skipping")
-            _persist_declared_spec(invocation_spec_file or "", driver)
-        else:
-            print(f"  [prepare] task does not conform ({pf.summary()}); invoking prep agent...")
-            # The budget that actually applies is min(wall, what the per-kernel deadline leaves), and it decides how
-            # many attempts ever start.
-            from kernelforge.loop import task_preparer as _tp
-
-            _prep_wall = min(
-                float(_tp.PREPARE_MAX_WALL_SEC),
-                max(0.0, deadline_unix - finalize_reserve_sec - time.time()),
-            )
-            print(
-                f"  [prepare] budget: wall={_prep_wall:.0f}s "
-                f"attempt_cap={_tp.PER_ATTEMPT_CAP_SEC}s "
-                f"max_attempts={_tp.PREPARE_MAX_ATTEMPTS}"
-            )
-            prep = prepare_task_sync(
+    try:
+        assembly_preparation = asyncio.run(
+            prepare_assembly(
                 config=config,
-                workspace_dir=workspace_dir,
                 kernel=kernel,
                 driver=driver,
-                program_md=program_md,
-                target_functions=target_functions_list,
-                source_files=source_files_list,
-                kernel_backend=kernel_backend,
-                snr_threshold=snr_threshold,
-                preflight=pf,
-                invocation_spec_file=invocation_spec_file or "",
-                expected_case_ids=expected_case_ids,
-                # Let the default PREPARE_MAX_WALL_SEC (3000s, sized for a cold-JIT preflight) apply; prepare_task
-                # clamps it to the per-kernel deadline_unix below.
-                deadline_unix=deadline_unix - finalize_reserve_sec,
-                # A collective task needs a driver that launches its own ranks; the preparer cannot infer that from
-                # the kernel source.
-                nproc_per_node=nproc_per_node,
-                read_only_files=[path for path in (program_md_file, invocation_spec_file) if path],
-                usage=usage,
+                sources=source_files_list,
+                base_commit=campaign.base_commit,
+                threshold=snr_threshold,
+                deadline=deadline_unix - finalize_reserve_sec,
+                resume=resume,
             )
-            if prep.ok:
-                # Cap the file list: an external driver bundle can legitimately publish dozens of files, and one run
-                # scrolled ~700 cache paths through the operator's log for a 3-file change.
-                _shown = prep.wrote_files[:12]
-                _extra = len(prep.wrote_files) - len(_shown)
-                print(
-                    f"  [prepare] prepared measurement driver in {prep.attempts} attempt(s); "
-                    f"wrote {', '.join(_shown) or '(none)'}" + (f" (+{_extra} more)" if _extra > 0 else "")
-                )
-                # Telemetry only: never let a missing field break a good prep.
-                _pf_sec = getattr(prep.final_preflight, "duration_sec", 0.0) or 0.0
-                if _pf_sec:
-                    _stages = ", ".join(
-                        f"{name}={detail['seconds']:.0f}s"
-                        for name, detail in (getattr(prep.final_preflight, "details", {}) or {}).items()
-                        if isinstance(detail, dict) and "seconds" in detail
-                    )
-                    print(f"  [prepare] preflight: {_pf_sec:.0f}s" + (f" ({_stages})" if _stages else ""))
-                if prep.audit_dir:
-                    print(f"  [prepare] audit: {prep.audit_dir}")
-            else:
-                # prep.message carries the real failure reason (e.g. "driver conformed but commit didn't land"); the
-                # preflight summary can read "ok" even when prep failed downstream, so lead with prep.message and
-                # append the preflight summary as extra context.
-                detail = prep.message or (prep.final_preflight.summary() if prep.final_preflight else "")
-                if prep.message and prep.final_preflight:
-                    detail = f"{prep.message} | preflight: {prep.final_preflight.summary()}"
-                disposition = "rolled back" if prep.rolled_back else "workspace preserved"
-                print(f"  [prepare] FAILED after {prep.attempts} attempt(s); {disposition}. {detail}")
-                err_result = {
-                    "error": "task_preparation_failed",
-                    "detail": detail,
-                    "attempts": prep.attempts,
-                    "rolled_back": prep.rolled_back,
-                    "experiment_id": None,
-                }
-                if prep.audit_dir:
-                    err_result["task_preparation_audit_dir"] = prep.audit_dir
-                err_payload = json.dumps(err_result)
-                if result_json:
-                    atomic_write_json(result_json, err_result)
-                click.echo(f"__FORGE_RESULT__{err_payload}__FORGE_RESULT__")
-                sys.exit(2)
-
-    def collect_pr_kb_context(self) -> tuple[str, str]:
-        """Inject PR references into the loop's prompt context, and say which repo they came from.
-
-        Independent of the experience-KB lifecycle, and skipped outright when
-        too little of the deadline is left to collect them.
-        """
-        iter_config = self.iter_config
-        campaign = self.campaign
-        deadline = self.deadline
-        pr_task_context = ""
-        pr_kb_repo = ""
-        if not _pr_kb_enabled(self.request.knowledge.pr_kb):
-            return pr_task_context, pr_kb_repo
-        from kernelforge.knowledge.pr_knowledge.context import (
-            REASON_LOCAL_FAILURE,
-            REASON_SKIPPED_DEADLINE,
         )
-
-        if deadline.remaining(reserve=deadline.finalize_reserve_sec) < 20.0:
-            print("  [pr-kb] skipped (deadline)")
-            iter_config.pr_kb_event = _pr_refs_event_fields(
-                REASON_SKIPPED_DEADLINE,
-                {},
-            )
-        else:
-            pr_result = _collect_pr_references(
-                iter_config.workspace_dir,
-                PrReferenceQuery(
-                    kernel_backend=campaign.kernel_backend or "",
-                    git_remote=_git_remote_url(Path(iter_config.workspace_dir).resolve()),
-                    source_files=campaign.source_files,
-                    operator_name=campaign.operator_name or "",
-                    target_functions=iter_config.target_functions,
-                ),
-                min(PR_KB_BUDGET_SEC, deadline.remaining(reserve=deadline.finalize_reserve_sec)),
-            )
-            if pr_result is None:
-                iter_config.pr_kb_event = _pr_refs_event_fields(
-                    REASON_LOCAL_FAILURE,
-                    {"degraded_reason": REASON_LOCAL_FAILURE},
-                )
-            else:
-                pr_task_context = pr_result.prompt_context
-                pr_kb_repo = pr_result.repo
-                iter_config.pr_reference_context = pr_task_context
-                iter_config.pr_reference_labels = tuple(
-                    f"{reference.repo}#{reference.number}" for reference in pr_result.references
-                )
-                iter_config.pr_kb_event = _pr_refs_event_fields(pr_result.reason, pr_result.stats)
-                iter_config.pr_kb_snapshot = pr_result.pending_snapshot
-                if pr_result.injected:
-                    print(
-                        f"  [pr-kb] injected "
-                        f"{pr_result.stats.get('injected_entries', 0)} "
-                        f"references ({pr_result.stats.get('injected_bytes', 0)} B)"
-                    )
-                else:
-                    print(f"  [pr-kb] no references ({pr_result.reason or 'empty'})")
-        return pr_task_context, pr_kb_repo
-
-    def read_kb_warm_start(self, program_md: str, kb_warmstart_enabled: bool) -> _WarmStart:
-        """Adopt the best prior solution the KB offers, so iteration 1 starts from it rather than from scratch."""
-        iter_config = self.iter_config
-        config = self.config
-        workspace_dir = iter_config.workspace_dir
-        kernel = iter_config.kernel_file
-        driver = iter_config.driver_script
-        kernel_backend = iter_config.kernel_backend
-        target_functions_list = iter_config.target_functions
-        source_files_list = iter_config.source_files
-        framework = self.campaign.framework
-        operator_name = self.campaign.operator_name
-        snr_threshold = iter_config.snr_threshold
-        bench_repeat = iter_config.bench_repeat
-        resume = self.request.resume
-        experience_kb = self.request.knowledge.experience_kb
-        result_json = self.request.artifacts.result_json
-        experience_id = self.request.artifacts.experience_id
-        deadline = self.deadline
-        base_sha = self.campaign.base_commit
-        caller_experiment_id = self.caller_experiment_id
-        tracker = self.tracker
-        # KB warm-start: apply the best prior solution as the starting point and inject its experience into the prompt, so
-        # the agent continues from the best-known state instead of from scratch.
-        kb_pristine_baseline_ms = None
-        kb_reused_speedup = None
-        warm = {
-            "candidate": False,
-            "read_reason": "resume" if resume else "deadline",
-            "read_error": "",
-        }
-        if (
-            experience_kb
-            and kb_warmstart_enabled
-            and not resume
-            and deadline.remaining(reserve=deadline.finalize_reserve_sec) >= 600
-        ):
-            try:
-                warm = kb_warmstart(
-                    config=config,
-                    kernel=kernel,
-                    driver=driver,
-                    workspace_dir=workspace_dir,
-                    kernel_backend=kernel_backend,
-                    target_functions=target_functions_list,
-                    framework=framework,
-                    snr_threshold=snr_threshold,
-                    source_files=source_files_list,
-                    operator_name=operator_name,
-                    bench_repeat=bench_repeat,
-                )
-            except WarmStartRollbackError as error:
-                failure = click.ClickException(f"warm-start rollback failed; workspace may be inconsistent: {error}")
-                failure.exit_code = 2
-                raise failure from error
-            warm.setdefault(
-                "read_reason",
-                "hit" if warm.get("candidate") else "solution_pages_missing",
-            )
-            warm.setdefault("read_error", "")
-        elif not resume and not experience_kb:
-            warm["read_reason"] = "disabled"
-            print("  [kb] experience KB disabled by caller")
-        elif not resume:
-            print("  [kb] warm-start skipped: absolute deadline reserve")
-        if warm.get("candidate"):
-            kb_pristine_baseline_ms = warm.get("pristine_ms")
-            if warm.get("applied"):
-                # The floor this campaign starts from.
-                kb_reused_speedup = warm.get("mean_case_speedup")
-                iter_config.publication_baseline_wall_ms = warm.get("pristine_ms")
-                try:
-                    published = publish_warm_start_recovery(
-                        workspace_dir=workspace_dir,
-                        base_commit=base_sha,
-                        warm=warm,
-                        caller_experiment_id=caller_experiment_id,
-                        experience_id=experience_id,
-                        tracker=tracker,
-                        result_json=result_json,
-                    )
-                    if published:
-                        iter_config.warm_start_publication = dict(published)
-                    if published and published.get("persistence_degraded"):
-                        print(
-                            "  [warm-start] recovery publication degraded: "
-                            + "; ".join(published.get("persistence_errors") or []),
-                            flush=True,
-                        )
-                    print(
-                        "  [warm-start] published recoverable best before iteration 1",
-                        flush=True,
-                    )
-                except Exception as error:  # noqa: BLE001 - translated into a rollback below
-                    try:
-                        rollback_unpublished_warm_start(
-                            workspace_dir,
-                            base_commit=base_sha,
-                            result_json=result_json,
-                        )
-                    except Exception as rollback_error:
-                        raise click.ClickException(
-                            "failed to publish validated warm-start and could not "
-                            f"restore pristine workspace: {rollback_error}"
-                        ) from rollback_error
-                    warm["applied"] = False
-                    warm["keep_baseline_ms"] = warm.get("pristine_ms")
-                    mark_kb_reference_rejected(
-                        workspace_dir,
-                        int(warm.get("applied_rank") or 0),
-                        "publication_failed",
-                    )
-                    warm["program_md_addition"] = kb_reference_program_md(
-                        workspace_dir,
-                        detect_applied=False,
-                    ) or warm.get(
-                        "reference_program_md_addition",
-                        "## Warm-start reference only\n"
-                        "The prior patch could not be published durably and was "
-                        "removed before optimization.",
-                    )
-                    iter_config.publication_baseline_wall_ms = None
-                    print(
-                        "  [warm-start] recovery publication failed; restored "
-                        f"pristine source and continuing reference-only ({error})",
-                        flush=True,
-                    )
-            if warm.get("program_md_addition"):
-                program_md = program_md + "\n\n" + warm["program_md_addition"]
-            # Keep the pristine raw baseline immutable.
-            if warm.get("pristine_ms"):
-                iter_config.baseline_wall_ms = warm["pristine_ms"]
-            if warm.get("baseline_case_times"):
-                iter_config.baseline_case_times = dict(warm["baseline_case_times"])
-            iter_config.preloop_baseline_unscored_cases = list(warm.get("baseline_unscored_cases") or [])
-            if warm.get("applied"):
-                iter_config.pristine_baseline_wall_ms = warm.get("pristine_ms")
-                iter_config.warm_start_wall_ms = warm.get("keep_baseline_ms")
-                iter_config.warm_start_mean_case_speedup = warm.get("mean_case_speedup")
-                iter_config.warm_start_bench = {
-                    "case_times": dict(warm.get("case_times") or {}),
-                    "unscored_cases": list(warm.get("unscored_cases") or []),
-                }
-                iter_config.warm_start_commit = warm.get("applied_commit", "")
-                iter_config.warm_start_solution_slug = warm.get("solution_slug", "")
-        return _WarmStart(
-            warm=warm,
-            program_md=program_md,
-            kb_pristine_baseline_ms=kb_pristine_baseline_ms,
-            kb_reused_speedup=kb_reused_speedup,
-        )
-
-    def prepare_assembly_task(self, program_md: str) -> _AssemblyPreparation:
-        """Export and bind the compiler output an assembly task is optimized against.
-
-        A task on any other backend passes through untouched.
-        """
-        config = self.config
-        iter_config = self.iter_config
-        campaign = self.campaign
-        kernel_backend = campaign.kernel_backend
-        kernel = iter_config.kernel_file
-        driver = iter_config.driver_script
-        source_files_list = iter_config.source_files
-        workspace = Path(iter_config.workspace_dir).resolve()
-        snr_threshold = iter_config.snr_threshold
-        deadline_unix = self.deadline.deadline_unix
-        finalize_reserve_sec = self.deadline.finalize_reserve_sec
-        resume = self.request.resume
-        unchanged = _AssemblyPreparation(None, source_files_list, program_md)
-        if kernel_backend != "assembly":
-            return unchanged
-        from kernelforge.assembly.prepare import prepare_assembly, seed_source_baseline
-
-        try:
-            assembly_preparation = asyncio.run(
-                prepare_assembly(
-                    config=config,
-                    kernel=kernel,
-                    driver=driver,
-                    sources=source_files_list,
-                    base_commit=campaign.base_commit,
-                    threshold=snr_threshold,
-                    deadline=deadline_unix - finalize_reserve_sec,
-                    resume=resume,
-                )
-            )
-            if not resume:
-                seed_source_baseline(iter_config, assembly_preparation)
-        except (ValueError, OSError, subprocess.SubprocessError, asyncio.TimeoutError) as error:
-            raise click.ClickException(f"assembly preparation failed; optimization was not started: {error}") from error
-        source_files_list = [str(workspace / assembly_preparation["assembly"])]
-        iter_config.source_files = source_files_list
-        iter_config.commit_new_paths = []
-        return _AssemblyPreparation(
-            preparation=assembly_preparation,
-            source_files=source_files_list,
-            program_md=program_md
-            + (
-                "\n\nAssembly preparation is complete. Optimize only "
-                + source_files_list[0]
-                + ". The Python launcher, original reference, driver, ABI and specialization are frozen."
-            ),
-        )
+        if not resume:
+            seed_source_baseline(iter_config, assembly_preparation)
+    except (ValueError, OSError, subprocess.SubprocessError, asyncio.TimeoutError) as error:
+        raise click.ClickException(f"assembly preparation failed; optimization was not started: {error}") from error
+    source_files_list = [str(workspace / assembly_preparation["assembly"])]
+    iter_config.source_files = source_files_list
+    iter_config.commit_new_paths = []
+    return _AssemblyPreparation(
+        preparation=assembly_preparation,
+        source_files=source_files_list,
+        program_md=program_md
+        + (
+            "\n\nAssembly preparation is complete. Optimize only "
+            + source_files_list[0]
+            + ". The Python launcher, original reference, driver, ABI and specialization are frozen."
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -1773,7 +1777,7 @@ def forge_loop(request: ForgeLoopRequest):
     # BEFORE base_sha is captured, so any scaffolding the prep step commits becomes part of pristine (never the
     # solution diff).
     if request.prepare_task and not resume:
-        run.prepare_measurement_driver(program_md)
+        _prepare_measurement_driver(run, program_md)
 
     # Fix the fresh campaign's canonical driver digest and pristine base_commit from the POST-preparation state and
     # persist the immutable config now.
@@ -1804,7 +1808,7 @@ def forge_loop(request: ForgeLoopRequest):
         except (OSError, ValueError) as error:
             raise click.ClickException(str(error)) from error
 
-    assembly = run.prepare_assembly_task(program_md)
+    assembly = _prepare_assembly_task(run, program_md)
     assembly_preparation = assembly.preparation
     source_files_list = assembly.source_files
     # A cached whole-implementation patch could replace the launcher preparation just verified.
@@ -1847,7 +1851,7 @@ def forge_loop(request: ForgeLoopRequest):
         except (OSError, ValueError) as error:
             raise click.ClickException(str(error)) from error
 
-    warm_start = run.read_kb_warm_start(program_md, kb_warmstart_enabled)
+    warm_start = _read_kb_warm_start(run, program_md, kb_warmstart_enabled)
     warm = warm_start.warm
     program_md = warm_start.program_md
 
@@ -1867,7 +1871,7 @@ def forge_loop(request: ForgeLoopRequest):
         f"(campaign budget {max_hours:g}h; turn backstop {config.max_turns})"
     )
     # PR references are independent of the experience-KB lifecycle.
-    pr_task_context, pr_kb_repo = run.collect_pr_kb_context()
+    pr_task_context, pr_kb_repo = _collect_pr_kb_context(run)
 
     selected_runtime = config.agent_runtime()
     agent_fn = make_agent_fn(
