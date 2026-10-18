@@ -22,6 +22,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.warm_start_event import (
     MATCH_HIT,
     MATCH_MISS,
     MATCH_SEED_ONLY,
+    WarmStartMatch,
     make_warm_start_recorder,
     matched_block,
     record_read,
@@ -82,14 +83,16 @@ def _recipe(**overrides: Any) -> dict[str, Any]:
 
 def _matched(*, tier: str = "exact") -> dict[str, Any]:
     return matched_block(
-        tier=tier,
-        confidence=1.0 if tier == "exact" else 0.72,
-        source="kb-store",
-        canonical_id=CID,
-        recipe=_recipe(),
-        expected_gain_pct=36.23,
-        lessons=[{"a": 1}, {"b": 2}],
-        pitfalls=[{"c": 3}],
+        WarmStartMatch(
+            tier=tier,
+            confidence=1.0 if tier == "exact" else 0.72,
+            source="kb-store",
+            canonical_id=CID,
+            recipe=_recipe(),
+            expected_gain_pct=36.23,
+            lessons=[{"a": 1}, {"b": 2}],
+            pitfalls=[{"c": 3}],
+        )
     )
 
 
