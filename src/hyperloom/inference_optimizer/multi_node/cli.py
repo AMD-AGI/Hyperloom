@@ -13,6 +13,7 @@ import shlex
 import tempfile
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -208,45 +209,29 @@ def _infera_default_ssh_port(state: dict[str, Any]) -> int:
 def _infera_ssh_run_script(
     state: dict[str, Any],
     ip: str,
-    script: str,
-    interpreter: str,
-    script_args: str,
+    script: ssh_client.RemoteScript,
     *,
     timeout: int,
-    env: dict[str, str] | None = None,
-    remote_path: str | None = None,
     port: int | None = None,
 ):
     """Run a script on an Infera pod over SSH with host-key retry."""
-    key_path = state["ssh_key_path"]
-    ssh_port = int(port if port is not None else _infera_default_ssh_port(state))
-    known_hosts = _infera_known_hosts_path(state)
-    remote_path = remote_path or str(Path(tempfile.gettempdir()) / "mn_infera_launch")
+    target = ssh_client.SshTarget(
+        host=ip,
+        key_path=state["ssh_key_path"],
+        port=int(port if port is not None else _infera_default_ssh_port(state)),
+        known_hosts=_infera_known_hosts_path(state),
+    )
 
-    def _run(kh: Path):
-        return ssh_client.ssh_run_script(
-            ip,
-            script,
-            interpreter,
-            script_args,
-            key_path=key_path,
-            known_hosts=kh,
-            port=ssh_port,
-            timeout=timeout,
-            env=env,
-            remote_path=remote_path,
-        )
-
-    cp = _run(known_hosts)
+    cp = ssh_client.ssh_run_script(target, script, timeout=timeout)
     if cp.returncode != 0 and ssh_known_hosts.is_host_key_error(cp.stderr):
-        warn(f"infera ssh {ip}:{ssh_port}: host key mismatch; refreshing known_hosts and retrying once")
+        warn(f"infera ssh {ip}:{target.port}: host key mismatch; refreshing known_hosts and retrying once")
         try:
-            known_hosts = _refresh_infera_known_hosts([(ip, ssh_port)], state=state)
+            known_hosts = _refresh_infera_known_hosts([(ip, target.port)], state=state)
         except RuntimeError as exc:
-            warn(f"infera ssh {ip}:{ssh_port}: known_hosts refresh failed: {exc}")
+            warn(f"infera ssh {ip}:{target.port}: known_hosts refresh failed: {exc}")
             return cp
         _save_state(state)
-        cp = _run(known_hosts)
+        cp = ssh_client.ssh_run_script(replace(target, known_hosts=known_hosts), script, timeout=timeout)
     return cp
 
 
@@ -254,37 +239,28 @@ def _infera_ssh_bash_with_env(
     state: dict[str, Any],
     ip: str,
     script: str,
-    env: dict[str, str] | None,
     *,
     timeout: int,
     port: int | None = None,
 ):
     """Run a bash script on an Infera pod via SSH stdin with host-key retry."""
-    key_path = state["ssh_key_path"]
-    ssh_port = int(port if port is not None else _infera_default_ssh_port(state))
-    known_hosts = _infera_known_hosts_path(state)
+    target = ssh_client.SshTarget(
+        host=ip,
+        key_path=state["ssh_key_path"],
+        port=int(port if port is not None else _infera_default_ssh_port(state)),
+        known_hosts=_infera_known_hosts_path(state),
+    )
 
-    def _run(kh: Path):
-        return ssh_client.ssh_run_bash_with_env(
-            ip,
-            script,
-            env,
-            key_path=key_path,
-            known_hosts=kh,
-            port=ssh_port,
-            timeout=timeout,
-        )
-
-    cp = _run(known_hosts)
+    cp = ssh_client.ssh_run_bash_with_env(target, script, None, timeout=timeout)
     if cp.returncode != 0 and ssh_known_hosts.is_host_key_error(cp.stderr):
-        warn(f"infera ssh {ip}:{ssh_port}: host key mismatch; refreshing known_hosts and retrying once")
+        warn(f"infera ssh {ip}:{target.port}: host key mismatch; refreshing known_hosts and retrying once")
         try:
-            known_hosts = _refresh_infera_known_hosts([(ip, ssh_port)], state=state)
+            known_hosts = _refresh_infera_known_hosts([(ip, target.port)], state=state)
         except RuntimeError as exc:
-            warn(f"infera ssh {ip}:{ssh_port}: known_hosts refresh failed: {exc}")
+            warn(f"infera ssh {ip}:{target.port}: known_hosts refresh failed: {exc}")
             return cp
         _save_state(state)
-        cp = _run(known_hosts)
+        cp = ssh_client.ssh_run_bash_with_env(replace(target, known_hosts=known_hosts), script, None, timeout=timeout)
     return cp
 
 

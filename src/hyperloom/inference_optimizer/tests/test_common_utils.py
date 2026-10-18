@@ -479,8 +479,8 @@ def test_infera_forward_env_and_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, str]] = []
     monkeypatch.setattr(inf._mn_cli, "_read_pod_script", lambda name: f"script:{name}")
 
-    def _run(state, ip, script, python, launch_args, **kw):
-        calls.append((ip, launch_args))
+    def _run(state, ip, script, **kw):
+        calls.append((ip, script.args))
         if ip == "10.0.0.2":
             raise subprocess.TimeoutExpired(cmd=["ssh"], timeout=kw["timeout"])
         return _Completed(returncode=1 if ip == "10.0.0.3" else 0, stdout='noise {"status":"ok"}\n', stderr="bad")
@@ -724,8 +724,8 @@ def test_infera_tracelens_and_geak_install(monkeypatch: pytest.MonkeyPatch, tmp_
     monkeypatch.setattr(
         inf._mn_cli,
         "_infera_ssh_run_script",
-        lambda st, ip, script, python, op_args, **kw: (
-            calls.append((ip, python, op_args))
+        lambda st, ip, script, **kw: (
+            calls.append((ip, script.interpreter, script.args))
             or _Completed(returncode=0, stdout='{"status":"applied","per_pod":[{"status":"applied"}]}', stderr="")
         ),
     )

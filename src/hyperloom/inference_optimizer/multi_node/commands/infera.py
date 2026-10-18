@@ -18,6 +18,7 @@ from .._internal import infera_support
 from .._internal.env_safety import filter_forward_env
 from .._internal.log import info, warn, err
 from .._internal.server_args_safety import ServerArgsRejected, validate_server_args
+from .._internal.ssh_client import RemoteScript
 
 import logging
 
@@ -152,11 +153,8 @@ def _infera_fanout_launch(
             cp = _mn_cli._infera_ssh_run_script(
                 state,
                 ip,
-                script,
-                "python3",
-                launch_args,
+                RemoteScript(script, "python3", launch_args, env=forward_env),
                 timeout=poll_timeout,
-                env=forward_env,
                 port=port,
             )
         except subprocess.TimeoutExpired:
@@ -280,7 +278,7 @@ def _infera_servers_alive(
             return False
         port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
         try:
-            cp = _mn_cli._infera_ssh_bash_with_env(state, ip, _INFERA_PID_PROBE, None, timeout=timeout, port=port)
+            cp = _mn_cli._infera_ssh_bash_with_env(state, ip, _INFERA_PID_PROBE, timeout=timeout, port=port)
         except subprocess.TimeoutExpired:
             return False
         if cp.returncode != 0 or "MN_ALIVE" not in (cp.stdout or ""):
@@ -537,9 +535,7 @@ def _infera_ssh_node_op(
         cp = _mn_cli._infera_ssh_run_script(
             state,
             ip,
-            script,
-            "python3",
-            op_args,
+            RemoteScript(script, "python3", op_args),
             timeout=timeout,
             port=port,
         )
@@ -589,9 +585,7 @@ def _infera_apply_tracelens_patch(args: argparse.Namespace) -> int:
             cp = _mn_cli._infera_ssh_run_script(
                 state,
                 ip,
-                script,
-                pod_python,
-                op_args,
+                RemoteScript(script, pod_python, op_args),
                 timeout=timeout,
                 port=port,
             )
@@ -820,9 +814,7 @@ def cmd_install_geak(args: argparse.Namespace) -> int:
             cp = _mn_cli._infera_ssh_run_script(
                 state,
                 ip,
-                script,
-                "bash",
-                shlex.quote(str(geak_src)),
+                RemoteScript(script, "bash", shlex.quote(str(geak_src))),
                 timeout=_mn_cli._poll_timeout_from_args(args),
                 port=port,
             )
