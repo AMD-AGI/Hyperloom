@@ -81,11 +81,11 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--framework", required=True, help="Inference framework, e.g. vllm or sglang.")
     run.add_argument("--gpu-type", required=True, choices=MAGPIE_RUNNER_GPU_TYPES, help="GPU type.")
     run.add_argument("--workload", required=True, choices=[kind.value for kind in WorkloadKind], help="Workload kind.")
-    run.add_argument("--tp", type=int, required=True)
+    run.add_argument("--tp", type=int, required=True, help="Tensor-parallel size; must fit the machine's cards.")
     run.add_argument("--conc", type=int, required=True, help="Concurrency of the primary operating point.")
     for name in SEQUENCE_LENGTHS:
         run.add_argument(f"--{name}", type=int, default=None, help="Required for inferencex; refused for agentx.")
-    run.add_argument("--precision", required=True)
+    run.add_argument("--precision", required=True, help="Model precision, as hyperloom optimize spells it.")
     run.add_argument(
         "--kernel-optimizer",
         choices=[optimizer.value for optimizer in KernelOptimizer],
