@@ -23,6 +23,7 @@ from .errors import (
 from .inbox_parser import parse_inbox_prompt
 from .intent_envelope import (
     Intent,
+    ReviewVerdict,
     build_advice_intent,
     build_envelope,
     build_idle_intent,
@@ -210,6 +211,26 @@ class CommitOutcome:
 
 
 # ---------------------------------------------------------------------------
+def _review_verdict(item: dict[str, Any], target: str, verdict: str, advice_text: str) -> ReviewVerdict:
+    """The verdict one validated ``review.review_verdicts`` item states, carrying its merged advice."""
+    return ReviewVerdict(
+        target_proposal_msg_id=target,
+        verdict=verdict,
+        reasoning=item.get("reasoning", ""),
+        source=item.get("source", "critic"),
+        confidence=item.get("confidence"),
+        predicted_gain_pct=item.get("predicted_gain_pct"),
+        kb_evidence=item.get("kb_evidence") or [],
+        packet_evidence=item.get("packet_evidence") or [],
+        risks=item.get("risks") or [],
+        required_evidence=item.get("required_evidence") or [],
+        alternative_action=item.get("alternative_action"),
+        advice_text=advice_text,
+        notes=item.get("notes") or [],
+        failure_reason_code=str(item.get("failure_reason_code") or ""),
+    )
+
+
 class DecisionReviewer:
     """Orchestrator for the Critic prepare/commit lifecycle."""
 
@@ -493,22 +514,7 @@ class DecisionReviewer:
             ]
             advice_text = "\n\n".join(advice_parts)
             try:
-                intent = build_review_verdict_intent(
-                    target_proposal_msg_id=target,
-                    verdict=verdict,
-                    reasoning=item.get("reasoning", ""),
-                    source=item.get("source", "critic"),
-                    confidence=item.get("confidence"),
-                    predicted_gain_pct=item.get("predicted_gain_pct"),
-                    kb_evidence=item.get("kb_evidence") or [],
-                    packet_evidence=item.get("packet_evidence") or [],
-                    risks=item.get("risks") or [],
-                    required_evidence=item.get("required_evidence") or [],
-                    alternative_action=item.get("alternative_action"),
-                    advice_text=advice_text,
-                    notes=item.get("notes") or [],
-                    failure_reason_code=str(item.get("failure_reason_code") or ""),
-                )
+                intent = build_review_verdict_intent(_review_verdict(item, target, verdict, advice_text))
             except IntentEnvelopeValidationError as exc:
                 raise ReviewValidationError(str(exc)) from exc
             validated.append((item, target, verdict, intent))
