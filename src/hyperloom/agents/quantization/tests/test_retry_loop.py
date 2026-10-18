@@ -429,7 +429,8 @@ def test_resolve_interactive_auto_no_tty(monkeypatch):
 def test_decide_next_step_none_outcome(tmp_path):
     d = _decide_next_step(
         None,
-        AttemptContext(user_prompt="p", workspace=tmp_path, quark_root=tmp_path, attempt_number=1, interactive=False),
+        fix_hypothesis=tmp_path / "fix_hypothesis_attempt_2.md",
+        interactive=False,
         max_requantize_attempts=3,
         counter=0,
     )
@@ -440,7 +441,8 @@ def test_decide_next_step_none_outcome(tmp_path):
 def test_decide_next_step_auto_fail(tmp_path):
     d = _decide_next_step(
         OutcomeId.must_validate_md5_mismatch,
-        AttemptContext(user_prompt="p", workspace=tmp_path, quark_root=tmp_path, attempt_number=1, interactive=False),
+        fix_hypothesis=tmp_path / "fix_hypothesis_attempt_2.md",
+        interactive=False,
         max_requantize_attempts=3,
         counter=0,
     )
@@ -451,7 +453,8 @@ def test_decide_next_step_auto_fail(tmp_path):
 def test_decide_next_step_auto_recover(tmp_path):
     d = _decide_next_step(
         OutcomeId.eval_env_unavailable,
-        AttemptContext(user_prompt="p", workspace=tmp_path, quark_root=tmp_path, attempt_number=1, interactive=False),
+        fix_hypothesis=tmp_path / "fix_hypothesis_attempt_2.md",
+        interactive=False,
         max_requantize_attempts=3,
         counter=0,
     )
@@ -463,7 +466,8 @@ def test_decide_next_step_ask_retryable_with_hypothesis(tmp_path):
     (tmp_path / "fix_hypothesis_attempt_2.md").write_text("x", encoding="utf-8")
     d = _decide_next_step(
         OutcomeId.exec_oom,
-        AttemptContext(user_prompt="p", workspace=tmp_path, quark_root=tmp_path, attempt_number=1, interactive=False),
+        fix_hypothesis=tmp_path / "fix_hypothesis_attempt_2.md",
+        interactive=False,
         max_requantize_attempts=2,
         counter=0,
     )
@@ -473,7 +477,8 @@ def test_decide_next_step_ask_retryable_with_hypothesis(tmp_path):
 def test_decide_next_step_ask_retryable_without_hypothesis(tmp_path):
     d = _decide_next_step(
         OutcomeId.exec_oom,
-        AttemptContext(user_prompt="p", workspace=tmp_path, quark_root=tmp_path, attempt_number=1, interactive=False),
+        fix_hypothesis=tmp_path / "fix_hypothesis_attempt_2.md",
+        interactive=False,
         max_requantize_attempts=2,
         counter=0,
     )
@@ -485,7 +490,8 @@ def test_decide_next_step_unclassified_failure(tmp_path):
     (tmp_path / "fix_hypothesis_attempt_2.md").write_text("x", encoding="utf-8")
     d = _decide_next_step(
         OutcomeId.unclassified_failure,
-        AttemptContext(user_prompt="p", workspace=tmp_path, quark_root=tmp_path, attempt_number=1, interactive=False),
+        fix_hypothesis=tmp_path / "fix_hypothesis_attempt_2.md",
+        interactive=False,
         max_requantize_attempts=2,
         counter=0,
     )
@@ -496,7 +502,8 @@ def test_decide_next_step_checkpoint_aborted_never_retries(tmp_path):
     (tmp_path / "fix_hypothesis_attempt_2.md").write_text("x", encoding="utf-8")
     d = _decide_next_step(
         OutcomeId.checkpoint_aborted,
-        AttemptContext(user_prompt="p", workspace=tmp_path, quark_root=tmp_path, attempt_number=1, interactive=True),
+        fix_hypothesis=tmp_path / "fix_hypothesis_attempt_2.md",
+        interactive=True,
         max_requantize_attempts=2,
         counter=0,
     )
@@ -510,7 +517,8 @@ def test_decide_next_step_eval_gap_accepted_promotes(tmp_path, monkeypatch):
     monkeypatch.setattr(rmod, "_ask_operator", lambda msg: True)
     d = _decide_next_step(
         OutcomeId.eval_gap_exceeded,
-        AttemptContext(user_prompt="p", workspace=tmp_path, quark_root=tmp_path, attempt_number=1, interactive=True),
+        fix_hypothesis=tmp_path / "fix_hypothesis_attempt_2.md",
+        interactive=True,
         max_requantize_attempts=0,
         counter=0,
     )
