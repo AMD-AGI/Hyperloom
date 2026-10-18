@@ -86,9 +86,16 @@ def _load_key(environ: MutableMapping[str, str]):
     if not path:
         raise RunnerFailure(_START_FAILED, f"{_KEY_ENV} is not set")
     try:
-        return signing.load_private_key(Path(path))
+        key = signing.load_private_key(Path(path))
     except (signing.SigningError, OSError) as exc:
         raise RunnerFailure(_START_FAILED, f"signing key unusable: {exc}") from exc
+    # The key lives in this process from here on. A file left on disk would be readable by everything the test runs
+    # as this account (the inference server, a repro case), which could then sign a result of its own.
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError as exc:
+        raise RunnerFailure(_START_FAILED, f"signing key file cannot be removed: {type(exc).__name__}") from exc
+    return key
 
 
 def _parse(raw: bytes) -> MeasurementSpec:

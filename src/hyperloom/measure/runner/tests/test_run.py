@@ -284,3 +284,38 @@ def test_only_a_repro_call_is_told_which_attachments_are_its_case(tmp_path, env,
     _go(tmp_path, env, _repro_sheet(tmp_path, "test"))
 
     assert backend.calls[0].attachments == ()
+
+
+def test_the_signing_key_file_is_gone_before_the_test_runs_and_the_result_is_still_signed(
+    tmp_path, env, key, monkeypatch
+):
+    key_file = tmp_path / "key.pem"
+    seen: list[bool] = []
+
+    def observing(call: TestCall) -> TestOutcome:
+        seen.append(key_file.exists())
+        return _ok(call)
+
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", _Backend(observing))
+
+    assert _go(tmp_path, env, _sheet()) == 0
+
+    assert seen == [False], "what the test runs must not be able to read the key"
+    out = tmp_path / "out"
+    assert signing.verify(
+        (out / "manifest.json").read_bytes(), (out / "manifest.sig").read_text(), signing.public_key_pem(key)
+    )
+
+
+def test_a_signing_key_file_that_cannot_be_removed_stops_the_runner_at_start(tmp_path, env, monkeypatch):
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+
+    def refuse(self, missing_ok=False):
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(runner.Path, "unlink", refuse)
+
+    assert _go(tmp_path, env, _sheet()) != 0
+
+    assert _status(tmp_path)["error_class"] == "runner_start_failed" and backend.calls == []
