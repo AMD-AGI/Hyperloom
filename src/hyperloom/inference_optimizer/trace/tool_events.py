@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -60,29 +61,32 @@ def tool_status(*, result_seen: bool, is_error: Any) -> str:
     return STATUS_FAILED if is_error is True else STATUS_COMPLETED
 
 
-def tool_attributes(
-    *,
-    name: str,
-    tool_use_id: str | None,
-    tool_input: Any,
-    result_content: Any = None,
-    result_seen: bool = False,
-    is_error: Any = None,
-    **extra: Any,
-) -> dict[str, Any]:
+@dataclass(frozen=True)
+class ToolCall:
+    """One tool call and, once ``result_seen``, the result it got back."""
+
+    name: str
+    tool_use_id: str | None
+    tool_input: Any
+    result_content: Any = None
+    result_seen: bool = False
+    is_error: Any = None
+
+
+def tool_attributes(call: ToolCall, **extra: Any) -> dict[str, Any]:
     """Attributes of one ``tool`` row; the error preview is redacted and clipped like the input summary."""
     attributes: dict[str, Any] = {
-        "name": name,
-        "tool_use_id": tool_use_id,
-        "input_summary": _summarize_tool_input(tool_input),
-        "input_chars": _input_chars(tool_input),
+        "name": call.name,
+        "tool_use_id": call.tool_use_id,
+        "input_summary": _summarize_tool_input(call.tool_input),
+        "input_chars": _input_chars(call.tool_input),
         **extra,
     }
-    if result_seen:
-        text = content_text(result_content)
+    if call.result_seen:
+        text = content_text(call.result_content)
         attributes["result_chars"] = len(text)
-        attributes["is_error"] = is_error is True
-        if is_error is True:
+        attributes["is_error"] = call.is_error is True
+        if call.is_error is True:
             attributes["error_preview"] = redact_secret_values(text[: _ERROR_PREVIEW_CHARS * 4])[:_ERROR_PREVIEW_CHARS]
     return attributes
 
@@ -145,12 +149,14 @@ def record_stream_json_tools(log_path: str | Path) -> int:
             EVENT_TOOL,
             status=tool_status(result_seen=result_seen, is_error=call.get("is_error")),
             attributes=tool_attributes(
-                name=call["name"],
-                tool_use_id=call["tool_use_id"],
-                tool_input=call.get("tool_input"),
-                result_content=call.get("result_content"),
-                result_seen=result_seen,
-                is_error=call.get("is_error"),
+                ToolCall(
+                    name=call["name"],
+                    tool_use_id=call["tool_use_id"],
+                    tool_input=call.get("tool_input"),
+                    result_content=call.get("result_content"),
+                    result_seen=result_seen,
+                    is_error=call.get("is_error"),
+                ),
                 message_id=call.get("message_id"),
                 parent_tool_use_id=call.get("parent_tool_use_id"),
                 timing_source=TIMING_NONE,
@@ -162,6 +168,7 @@ def record_stream_json_tools(log_path: str | Path) -> int:
 
 __all__ = [
     "TIMING_NONE",
+    "ToolCall",
     "content_text",
     "record_stream_json_tools",
     "stream_json_tool_events",

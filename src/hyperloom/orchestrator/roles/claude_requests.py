@@ -19,13 +19,14 @@ from datetime import datetime, timezone
 from typing import Any
 
 from hyperloom.inference_optimizer.trace.context_events import COMPACT_BOUNDARY, compaction_attributes
-from hyperloom.inference_optimizer.trace.tool_events import tool_attributes, tool_status
+from hyperloom.inference_optimizer.trace.tool_events import ToolCall, tool_attributes, tool_status
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
     EVENT_CONTEXT_COMPACTION,
     EVENT_LLM_REQUEST,
     EVENT_TOOL,
     STATUS_COMPLETED,
     STATUS_FAILED,
+    EventWindow,
     new_span_id,
     record_event,
 )
@@ -237,8 +238,7 @@ class ClaudeRequestTracker:
                 EVENT_LLM_REQUEST,
                 status=STATUS_COMPLETED if record["complete"] else STATUS_FAILED,
                 span_id=request.span_id,
-                start_ts=_iso(start),
-                ts=_iso(end if end is not None else now),
+                window=EventWindow(start_ts=_iso(start), ts=_iso(end if end is not None else now)),
                 attributes={**record, "name": model, "model": model, "attempt": attempt},
             )
         for tool in self._tools.values():
@@ -246,15 +246,16 @@ class ClaudeRequestTracker:
             record_event(
                 EVENT_TOOL,
                 status=tool_status(result_seen=tool.end is not None, is_error=tool.is_error),
-                start_ts=_iso(tool.start),
-                ts=_iso(tool.end if tool.end is not None else now),
+                window=EventWindow(start_ts=_iso(tool.start), ts=_iso(tool.end if tool.end is not None else now)),
                 attributes=tool_attributes(
-                    name=tool.name,
-                    tool_use_id=tool.tool_use_id,
-                    tool_input=tool.tool_input,
-                    result_content=tool.result_content,
-                    result_seen=tool.end is not None,
-                    is_error=tool.is_error,
+                    ToolCall(
+                        name=tool.name,
+                        tool_use_id=tool.tool_use_id,
+                        tool_input=tool.tool_input,
+                        result_content=tool.result_content,
+                        result_seen=tool.end is not None,
+                        is_error=tool.is_error,
+                    ),
                     parent_tool_use_id=tool.parent_tool_use_id,
                     latency_ms=_elapsed_ms(tool.start, tool.end),
                     attempt=attempt,
@@ -264,7 +265,7 @@ class ClaudeRequestTracker:
         for at, data in self._compactions:
             record_event(
                 EVENT_CONTEXT_COMPACTION,
-                ts=_iso(at),
+                window=EventWindow(ts=_iso(at)),
                 attributes={**compaction_attributes(data), "attempt": attempt},
             )
 
