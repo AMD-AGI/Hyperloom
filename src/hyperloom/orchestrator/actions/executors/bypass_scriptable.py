@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import subprocess
 from contextlib import ExitStack, nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -95,18 +96,29 @@ def build_scriptable_env(
     return build_benchmark_env(defaults, bench.get("envs"), run_scoped)
 
 
+@dataclass(frozen=True)
+class ScriptableBenchmark:
+    """Which scriptable entrypoint runs, from which InferenceX checkout, with the benchmark config it reads."""
+
+    framework: str
+    runner_type: str
+    inferencex_root: str
+    bench: dict[str, Any]
+
+
 def run_scriptable(
-    *,
-    framework: str,
-    runner_type: str,
-    inferencex_root: str,
-    bench: dict[str, Any],
+    benchmark: ScriptableBenchmark,
     workspace: Path,
+    *,
     timeout_s: float,
     profile: bool = False,
     profile_dir: str | None = None,
 ) -> tuple[int, str | None]:
     """Run the scriptable benchmark script."""
+    framework = benchmark.framework
+    runner_type = benchmark.runner_type
+    inferencex_root = benchmark.inferencex_root
+    bench = benchmark.bench
     script = resolve_scriptable_script(framework, runner_type, inferencex_root, bench)
     if script is None:
         name = _scriptable_script_name(framework, runner_type)
