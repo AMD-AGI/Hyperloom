@@ -12,6 +12,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.checkpoint_quant import (
+    WeightDeclaration,
+    checkpoint_format,
+    most_declared_format,
+    weight_declarations,
+)
+
 log = logging.getLogger(__name__)
 
 
@@ -75,6 +82,37 @@ class ModelProfile:
     def keeps_dense_layers_at_model_dtype(self) -> bool:
         """Whether substantial dense GEMMs stay at model dtype after quantization."""
         return any(name.rsplit(".", 1)[-1].lower() != "lm_head" for name in self.unquantized_linear_modules)
+
+    @property
+    def expert_precision(self) -> str:
+        """Precision ``quantization_config`` nests for the routed experts, empty when it nests none."""
+        return _nested_precisions(self.raw_config)[0]
+
+    @property
+    def dense_precision(self) -> str:
+        """Precision ``quantization_config`` nests for the other linear layers, empty when it nests none."""
+        return _nested_precisions(self.raw_config)[1]
+
+
+def _targets_routed_experts(decl: WeightDeclaration) -> bool:
+    # A Quark module-class entry names sglang's MoE layer class (FusedMoE, DeepEPMoE, ...), not the experts.
+    targets = decl.targets.lower()
+    return "expert" in targets or "moe" in targets
+
+
+def _nested_precisions(raw_config: dict[str, Any]) -> tuple[str, str]:
+    """``(routed experts, other linear layers)`` precisions nested in the checkpoint's ``quantization_config``.
+
+    A per-layer declaration overrides the whole-checkpoint one for the layers it targets, so each side takes what is
+    declared for its own layers and otherwise the whole-checkpoint format -- which compressed-tensors states only
+    through its groups.
+    """
+    quant_cfg = raw_config.get("quantization_config")
+    default = checkpoint_format(quant_cfg)
+    _, per_layer = weight_declarations(quant_cfg)
+    experts = [d for d in per_layer if _targets_routed_experts(d)]
+    others = [d for d in per_layer if not _targets_routed_experts(d)]
+    return most_declared_format(experts) or default, most_declared_format(others) or default
 
 
 def _resolve_llm_config(config: dict[str, Any]) -> dict[str, Any]:

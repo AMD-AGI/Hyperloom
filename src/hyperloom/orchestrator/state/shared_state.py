@@ -23,7 +23,7 @@ from hyperloom.common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.timeutil import now_iso
-from hyperloom.common.jsonio import read_json
+from hyperloom.common.jsonio import read_json_strict
 from hyperloom.common.profile_args import sanitize_profile_server_args
 
 if TYPE_CHECKING:  # import cycle: perf_metric is imported lazily at call time
@@ -46,20 +46,16 @@ resolve_hot_kernel_min_gpu_pct = _kernel_decision_settings.resolve_hot_kernel_mi
 resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_max_failures
 
 # escalate_strategy_change hint vocabulary (closed enum; unknown hints ignored). ``skip_to_kernel`` is the
-# "exhausted the current lever" signal from EXPLORE or FRAMEWORK_AGENT; it advances to KERNEL.
+# "exhausted the current lever" signal from FRAMEWORK_AGENT; it advances to KERNEL.
 # KERNEL exits automatically when settled with no pending work — the LLM does not self-set a sweep hint.
 ESCALATE_HINT_SKIP_TO_KERNEL: str = "skip_to_kernel"
 ESCALATE_HINT_SKIP_TO_SWEEP: str = "skip_to_sweep"
 ESCALATE_HINT_SKIP_TO_CLOSE: str = "skip_to_close"
-ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
-ESCALATE_HINT_EXTEND_KERNEL_BUDGET: str = "extend_kernel_budget"
 ESCALATE_HINT_VOCAB: frozenset[str] = frozenset(
     {
         ESCALATE_HINT_SKIP_TO_KERNEL,
         ESCALATE_HINT_SKIP_TO_SWEEP,
         ESCALATE_HINT_SKIP_TO_CLOSE,
-        ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
-        ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
     }
 )
 
@@ -126,20 +122,18 @@ def resolve_graded_comparison(
         VERDICT_REVERT,
         axis_of,
         holds_within_band,
-        latency_veto_reason,
+        constraint_veto_reason,
+        incomparability_reason,
         output_tput_of,
         perf_snapshot_from_mapping,
         resolve_grading_anchor_perf,
-        rounds_are_comparable,
         total_tput_of,
     )
     from hyperloom.inference_optimizer.grading import resolved_grading
 
     on_intvty, noise_pct = resolved_grading(state)
-    # The session's latency ceiling vetoes a candidate the gain gates would KEEP, on whichever axis graded it. A
-    # candidate that already lost carries no veto, so the ledger names the gate that actually refused it.
-    budget_ms = float(getattr(state, "latency_budget_ms", 0.0))
-    observed_ms = measurement.get("e2el_mean_ms") if isinstance(measurement, Mapping) else None
+    # The session's constraints (latency, power) veto a candidate the gain gates would KEEP, on whichever axis graded
+    # it. A candidate that already lost carries no veto, so the ledger names the gate that actually refused it.
     degrade_reason = ""
     if on_intvty:
         if anchor_perf is not None:
@@ -154,24 +148,25 @@ def resolve_graded_comparison(
             gain = gain_pct(axis_of(cand_perf, GRADED_INTVTY_P50), axis_of(ref_perf, GRADED_INTVTY_P50))
             # The output guard reads the raw aggregate: the chip count divides both sides of the ratio, so the band
             # holds identically per GPU.
-            guards_hold = holds_within_band(
-                cand_perf, ref_perf, GRADED_INTVTY, noise_pct=noise_pct
-            ) and holds_within_band(cand_perf, ref_perf, GRADED_OUTPUT, noise_pct=noise_pct)
-            keep = (
-                gain is not None
-                and gain >= AGENTX_KEEP_P50_THRESHOLD_PCT
-                and guards_hold
-                and rounds_are_comparable(cand_perf, ref_perf)
+            gates = (
+                ("p50_gain_below_threshold", gain is not None and gain >= AGENTX_KEEP_P50_THRESHOLD_PCT),
+                ("p90_regressed", holds_within_band(cand_perf, ref_perf, GRADED_INTVTY, noise_pct=noise_pct)),
+                ("output_regressed", holds_within_band(cand_perf, ref_perf, GRADED_OUTPUT, noise_pct=noise_pct)),
             )
-            sla_veto = latency_veto_reason(observed_ms, budget_ms) if keep else ""
+            refused = [gate for gate, held in gates if not held]
+            incomparable = incomparability_reason(cand_perf, ref_perf)
+            if incomparable:
+                refused.append(incomparable)
+            sla_veto = "" if refused else constraint_veto_reason(measurement, state)
             return GradedComparison(
                 objective=GRADED_INTVTY_P50,
                 candidate=axis_of(cand_perf, GRADED_INTVTY_P50),
                 reference=axis_of(ref_perf, GRADED_INTVTY_P50),
-                verdict=VERDICT_KEEP if keep and not sla_veto else VERDICT_REVERT,
+                verdict=VERDICT_REVERT if refused or sla_veto else VERDICT_KEEP,
                 tput_candidate=total_tput_of(cand_perf),
                 tput_reference=total_tput_of(ref_perf),
                 veto_reason=sla_veto,
+                refused_by=",".join(refused),
             )
         degrade_reason = reason or "candidate_axes_missing"
 
@@ -189,7 +184,7 @@ def resolve_graded_comparison(
         verdict = VERDICT_REVERT
     else:
         verdict = VERDICT_KEEP if gain is not None and gain >= keep_threshold_pct else VERDICT_REVERT
-    sla_veto = latency_veto_reason(observed_ms, budget_ms) if verdict == VERDICT_KEEP else ""
+    sla_veto = constraint_veto_reason(measurement, state) if verdict == VERDICT_KEEP else ""
     return GradedComparison(
         objective=GRADED_OUTPUT,
         candidate=candidate,
@@ -215,9 +210,9 @@ _STACK_BASE_FIELDS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
 )
 
 
-def stack_base_params(current_best: Any) -> dict[str, Any]:
+def stack_base_params(current_best: dict[str, Any] | None) -> dict[str, Any]:
     """``base_*`` params projected from the fields ``current_best`` carries."""
-    cb = current_best if isinstance(current_best, dict) else {}
+    cb = current_best or {}
     return {key: normalize(cb[source]) for key, source, normalize in _STACK_BASE_FIELDS if source in cb}
 
 
@@ -394,6 +389,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Ceiling on mean end-to-end latency (ms) from ``--max-latency-ms``; 0.0 leaves KEEP behaviour unchanged. The
     # only copy of the budget: it is written once at launch and archived with the session, so a resume restores it.
     latency_budget_ms: float = 0.0
+    power_budget_w: float = 0.0  # --max-power-w: total W over the serving cards; 0.0 is off. Archived, like latency.
+    power_budget_per_gpu_w: dict[str, float] = field(default_factory=dict)  # --max-per-gpu-power-w {GPU id: W}
     # The GPU power settings the session is measured under: {"declared": {power_cap_w, perf_level}, "observed":
     # {gpu: {power_cap_w, perf_level}}}. Read at launch and asserted on resume; never set by the optimizer.
     gpu_power_settings: dict[str, Any] = field(default_factory=dict)
@@ -412,6 +409,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     baseline_roofline_ceiling: dict[str, Any] = field(default_factory=dict)
     baseline_failure_streak: int = 0
     baseline_arg_error_streak: int = 0
+    # Signature of the last failure counted in ``baseline_failure_streak``; two in a row that match end the run.
+    baseline_last_failure_signature: str = ""
     # Combined backstop counting ANY baseline failure regardless of error_class, catching mixed classes that never
     # trip a per-class streak (anti time-exhaustion).
     baseline_total_failures: int = 0
@@ -477,6 +476,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     reference_model: str = ""
     # Operator launch shape, persisted so a bare --resume serves the same contract.
     operator_server_args: str = ""
+    # Operator-defined specialist (``--custom-specialist-*``); empty prompt means not configured.
+    custom_specialist_prompt: str = ""
+    custom_specialist_description: str = ""
+    # ``HYPERLOOM_CUSTOM_SPECIALIST_ONLY``: FRAMEWORK_AGENT runs the custom specialist and its bench alone.
+    custom_specialist_only: bool = False
     # ``--extra-env NAME=VALUE`` pins.
     operator_extra_env: dict[str, str] = field(default_factory=dict)
     # Operator-supplied custom-workload paths.
@@ -550,6 +554,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Operator's ``--closing-grace-sec``; ``None`` derives it from max_minutes.
     closing_grace_sec: float | None = None
     last_profile_trace: str = ""
+    # Launch evidence of the run that produced ``last_profile_trace``; its runtime findings share the trace's shapes.
+    last_profile_launch_evidence_path: str = ""
     # ``succeeded``/``failed`` for most recent profile; failed allows re-run even when last_profile_trace is non-empty.
     last_profile_status: str = ""
     # Workload context captured with ``last_profile_trace``; strict matching prevents consumers from reusing runtime
@@ -583,6 +589,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Why this stack can never record GPU kernels; set once from a parsed trace with host ops and no kernels, so the
     # Coordinator stops auto-enqueueing analysis that cannot succeed. Empty means GPU tracing is still presumed usable.
     gpu_trace_unsupported_reason: str = ""
+    # Analysis failures that recur on the same input, keyed by that input; ``analysis_failures`` owns the schema.
+    analysis_failures: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     # Feature toggles (mirrored from ``cli.py`` flags at session start).
     framework_agent_phase_enabled: bool = True
@@ -639,6 +647,9 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # Durable watermark from the last real conc_sweep measurement; survives the macro-cycle reloop clearing
     # ``last_conc_sweep`` so redundant closeout is skipped when no validated gain landed since the prior conc_sweep.
     last_conc_sweep_watermark: dict[str, Any] = field(default_factory=dict)
+    # Wall-clock instant (unix seconds) until which the ``conc_sweep`` SWEEP enqueued is entitled to run: its granted
+    # budget plus the lease grace. SWEEP's own budget exits defer to it while no result has landed; 0 means no grant.
+    conc_sweep_granted_until_unix: float = 0.0
     # Most recent per-kernel optimization record.
     last_kernel_opt: dict[str, Any] = field(default_factory=dict)
     # Most recent forge-fusion run result and its e2e integrate result; persisted so resume does not rerun a completed
@@ -756,7 +767,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # consumer, domain, gap_canonical_id, read_id, experience_ids, experiences, prompt_block}. Coordinator-only writer.
     experience_kb_injections: list[dict[str, Any]] = field(default_factory=list)
     # Wall-clock budget share per phase: seeded once at phase init from CLI flags/defaults with disabled phases' shares
-    # redistributed, raised by ``extend_*_budget`` hints, kept on resume unless a --*-pct flag is given.
+    # redistributed, kept on resume unless a --*-pct flag is given.
     phase_budget_pct: dict[str, float] = field(default_factory=dict)
     # Cyclic phase machine macro-cycle counter (cycle 0 is the first pass; each SWEEP→FRAMEWORK_AGENT loopback
     # increments it).
@@ -767,6 +778,8 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
     # no-gain cycle streak.
     gain_at_cycle_start: float = 0.0
     no_gain_cycle_streak: int = 0
+    # Decision points the PrimaTune predictor has been asked about (``predictor/pump.py``); each is asked once.
+    predictor_asked_keys: list[str] = field(default_factory=list)
     # Cyclic bottleneck re-direction: set when a cyclic config plateau winds the cycle down; the next macro-cycle's
     # prompt surfaces a redirect advisory off ``last_cycle_bottleneck``.
     pending_bottleneck_switch: bool = False
@@ -893,8 +906,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         args_mode = params.get("args_mode") if "args_mode" in params else params.get("base_args_mode")
         context["args_mode"] = str(args_mode or "append").strip().lower()
 
-        current_best = self.current_best if isinstance(self.current_best, dict) else {}
-        raw_envs = current_best.get("extra_envs") or {}
+        raw_envs = self.current_best.get("extra_envs") or {}
         extra_envs = (
             {
                 str(key): str(value)
@@ -905,7 +917,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             else {}
         )
         serving_config = {
-            "extra_server_args": str(current_best.get("extra_server_args") or "").strip(),
+            "extra_server_args": str(self.current_best.get("extra_server_args") or "").strip(),
             "extra_envs": extra_envs,
         }
         if any((serving_config["extra_server_args"], extra_envs)):
@@ -940,8 +952,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if arm == "baseline":
             self.last_profile_workload_action = "baseline"
         else:
-            current_best = self.current_best if isinstance(self.current_best, dict) else {}
-            self.last_profile_workload_action = str(current_best.get("action") or "")
+            self.last_profile_workload_action = str(self.current_best.get("action") or "")
         self.last_profile_args = str(self.last_profile_workload.get("server_args") or "")
         return self.last_profile_workload
 
@@ -950,7 +961,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         overrides: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Return the profile identity for the active current-best runtime."""
-        current_best = self.current_best if isinstance(self.current_best, dict) else {}
+        current_best = self.current_best
         incoming = overrides if isinstance(overrides, dict) else {}
         params: dict[str, Any] = {}
         runtime_keys = {
@@ -1038,7 +1049,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if not path.exists():
             inst = cls()
         else:
-            inst = cls.from_dict(read_json(path, require_dict=True, strict=True))
+            inst = cls.from_dict(read_json_strict(path, require_dict=True))
         # Remember the session dir for breakdown instrumentation (not serialized).
         inst._session_dir = Path(session_dir)
         return inst
@@ -1067,14 +1078,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         # Filter to known fields; unknown keys dropped, missing keys default.
         known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in raw.items() if k in known}
-        # A state written before per-phase totals existed still records every transition in phase_history, so the
-        # completed segments are reconstructible.
-        if not isinstance(filtered.get("phase_elapsed_totals"), dict):
-            from ..phases.machine_state import phase_elapsed_totals_from_history
-
-            filtered["phase_elapsed_totals"] = phase_elapsed_totals_from_history(
-                filtered.get("phase_history"),
-            )
         # The charge anchor belongs to a live leg, not to the file: only
         # ``begin_leg`` arms it, so ``elapsed_charged_sec`` alone survives a load.
         filtered["leg_anchor_unix"] = 0.0
@@ -1084,17 +1087,12 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             filtered["kernel_opt_task_attempts"] = {}
         if not isinstance(filtered.get("pending_kernel_integrations"), dict):
             filtered["pending_kernel_integrations"] = {}
+        if not isinstance(filtered.get("current_best"), dict):
+            filtered["current_best"] = {}
         # Normalize the unified ``explore_search`` ledger at load.
         filtered["explore_search"] = cls._build_explore_search(
             existing=filtered.get("explore_search"),
         )
-
-        # A state written before the budget was charged forward records spend
-        # only as ``start_ts``; carry ``now - start_ts`` across so a resume does
-        # not hand the session its whole budget again.
-        if "elapsed_charged_sec" not in raw:
-            started = to_unix(raw.get("start_ts"))
-            filtered["elapsed_charged_sec"] = max(0.0, time.time() - started) if started else 0.0
 
         if isinstance(filtered.get("enablement"), dict):
             filtered["enablement"] = EnablementRound.from_dict(filtered["enablement"])
@@ -1192,7 +1190,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         # so current_best carries the primary latency metric. Best-effort.
         self._backfill_scriptable_latency()
         path = self.state_path(session_dir)
-        atomic_write_json(path, self.to_dict(), indent=2, sort_keys=True)
+        atomic_write_json(path, self.to_dict())
         # Author-time breakdown capture: snapshot state-owned sections into the recorder spool right after persisting.
         self._session_dir = Path(session_dir)
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
@@ -1247,8 +1245,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             if not framework_registry.is_scriptable(fw):
                 return
             cb = self.current_best
-            if not isinstance(cb, dict):
-                return
             if cb.get("e2el_mean_ms") is not None:
                 return
             tput = cb.get("tput")
@@ -1262,7 +1258,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
 
     def _langfuse_status_summary(self) -> dict[str, Any]:
         """Flatten the state into an OTEL-friendly scalar status snapshot."""
-        cb = self.current_best if isinstance(self.current_best, dict) else {}
         last = self.lifecycle[-1] if self.lifecycle else {}
         summary: dict[str, Any] = {
             "phase": self.phase or "",
@@ -1292,7 +1287,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             )
         except Exception:
             log.debug("explore runtime telemetry derivation failed", exc_info=True)
-        tput = cb.get("tput") if isinstance(cb, dict) else None
+        tput = self.current_best.get("tput")
         if isinstance(tput, (int, float)) and not isinstance(tput, bool):
             summary["current_best_tput"] = round(float(tput), 1)
         if isinstance(last, dict):
@@ -1441,16 +1436,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             return ""
         self.pending_escalate_hint = ""
         return hint
-
-    def bump_phase_budget(self, hint: str) -> None:
-        """Raise the phase share an ``extend_*_budget`` hint names."""
-        from ..phases.machine_state import PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, apply_escalate_budget_bump
-
-        phase = {
-            ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: PHASE_FRAMEWORK_AGENT,
-            ESCALATE_HINT_EXTEND_KERNEL_BUDGET: PHASE_KERNEL_AGENT,
-        }[hint]
-        self.phase_budget_pct = apply_escalate_budget_bump(self.phase_budget_pct, phase=phase)
 
     def discard_pending_escalate_hint(self) -> str:
         """Pop the pending hint because an unrelated transition fired without acting on it; returns cleared hint."""
@@ -1719,30 +1704,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         _m.record_gemm_tuning(self, result)
 
     # Multi-KEEP integrate queue helpers.
-    def _kernel_ids_with_integrate_attempts(self) -> set[str]:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m._kernel_ids_with_integrate_attempts(self)
-
-    def integrate_attempt_count_for_kernel(self, kernel_id: str) -> int:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.integrate_attempt_count_for_kernel(self, kernel_id)
-
-    def integrate_attempt_count_for_integration(
-        self,
-        integration_id: str,
-    ) -> int:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.integrate_attempt_count_for_integration(
-            self,
-            integration_id,
-        )
-
     def next_pending_keep_kernel_id(self) -> str:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
@@ -1946,7 +1907,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             from hyperloom.inference_optimizer.session.session_paths import failure_evidence_path
 
             try:
-                atomic_write_json(failure_evidence_path(session_dir, fid), fe, make_parents=True)
+                atomic_write_json(failure_evidence_path(session_dir, fid), fe)
             except OSError:
                 log.debug("failure evidence mirror failed for %s", fid, exc_info=True)
 
@@ -2010,15 +1971,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 try:
                     data = json.loads(sidecar.read_text(encoding="utf-8"))
                     data = data if isinstance(data, dict) else {}
-                    # Priority: full-pipeline analytic ceiling (ms) > DiT-only analytic ceiling (us) > trace-summed
-                    # per-kernel ideal (us).
+                    # Priority: full-pipeline analytic ceiling (ms) > trace-summed per-kernel ideal (us).
                     approach_a = data.get("analytic_ceiling")
-                    analytic = data.get("analytic_dit_ceiling")
                     totals = data.get("totals")
                     if isinstance(approach_a, dict) and float(approach_a.get("ideal_ms") or 0.0) > 0:
                         roofline_ideal_ms = float(approach_a["ideal_ms"])
-                    elif isinstance(analytic, dict) and float(analytic.get("ideal_compute_us") or 0.0) > 0:
-                        roofline_ideal_ms = float(analytic["ideal_compute_us"]) / 1000.0
                     elif isinstance(totals, dict) and float(totals.get("sigma_ideal_roofline_us") or 0.0) > 0:
                         roofline_ideal_ms = float(totals["sigma_ideal_roofline_us"]) / 1000.0
                 except (OSError, ValueError, TypeError, json.JSONDecodeError):
@@ -2344,8 +2301,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                     forced_arm,
                 )
                 forced_arm = ""
-            cb = self.current_best if isinstance(self.current_best, dict) else {}
-            cb_tput = cb.get("tput")
+            cb_tput = self.current_best.get("tput")
             if forced_arm == "baseline":
                 snapshot_arm = "baseline"
                 achieved_tput = self._resolve_baseline_achieved_tput()
@@ -2673,6 +2629,15 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if usable is None:
             return None
         return time.monotonic() + usable
+
+    @property
+    def has_validated_gain_stamp(self) -> bool:
+        """Whether a cumulative gain has been validated against the current anchor."""
+        return bool(
+            self.cumulative_gain_validated_ts
+            or self.cumulative_gain_validated_stack_len
+            or self.cumulative_gain_validated
+        )
 
     def optimization_stack_has_unvalidated_keeps(self) -> bool:
         """True iff ``current_best`` changed since the last validated measurement (stack grew or a lift landed)."""

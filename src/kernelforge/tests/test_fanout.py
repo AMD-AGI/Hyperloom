@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge import cli
+from kernelforge.cli import lanes as cli_lanes
 from kernelforge.config import Config
 from kernelforge.loop import fanout
 from kernelforge.llm.process_reaping import ReapReport
@@ -678,12 +678,14 @@ def _campaign(tmp_path: Path) -> tuple[Config, Path, Path]:
 
 
 def _lane_factory(config: Config, workspace: Path, implementer) -> object:
-    return cli._make_lane_agent_factory(
+    return cli_lanes._make_lane_agent_factory(
         make_agent=implementer,
         config=config,
-        workspace_dir=str(workspace),
-        driver=str(workspace / DRIVER_NAME),
-        source_files=[str(workspace / "src" / "kernel.py")],
+        binding=cli_lanes.LaneBinding(
+            workspace_dir=str(workspace),
+            driver=str(workspace / DRIVER_NAME),
+            source_files=[str(workspace / "src" / "kernel.py")],
+        ),
         session_kwargs={"program_md": "", "kernel_backend_name": "ck"},
     )
 
@@ -739,12 +741,14 @@ def test_a_relative_path_is_read_against_the_workspace_it_names(tmp_path):
     """Not against wherever forge was launched from."""
     config, workspace, lane_dir = _campaign(tmp_path)
     implementer = _RecordingImplementer()
-    factory = cli._make_lane_agent_factory(
+    factory = cli_lanes._make_lane_agent_factory(
         make_agent=implementer,
         config=config,
-        workspace_dir=str(workspace),
-        driver=DRIVER_NAME,
-        source_files=["src/kernel.py"],
+        binding=cli_lanes.LaneBinding(
+            workspace_dir=str(workspace),
+            driver=DRIVER_NAME,
+            source_files=["src/kernel.py"],
+        ),
         session_kwargs={},
     )
 
@@ -770,12 +774,14 @@ def test_a_driver_outside_the_workspace_stops_the_lane(tmp_path):
     outside = tmp_path / "elsewhere" / DRIVER_NAME
     outside.parent.mkdir()
     outside.write_text("pass\n")
-    factory = cli._make_lane_agent_factory(
+    factory = cli_lanes._make_lane_agent_factory(
         make_agent=_RecordingImplementer(),
         config=config,
-        workspace_dir=str(workspace),
-        driver=str(outside),
-        source_files=[str(workspace / "src" / "kernel.py")],
+        binding=cli_lanes.LaneBinding(
+            workspace_dir=str(workspace),
+            driver=str(outside),
+            source_files=[str(workspace / "src" / "kernel.py")],
+        ),
         session_kwargs={},
     )
 
@@ -792,12 +798,14 @@ def test_a_source_file_outside_the_workspace_stops_the_lane(tmp_path):
     outside = tmp_path / "elsewhere" / "kernel.py"
     outside.parent.mkdir()
     outside.write_text("VALUE = 0\n")
-    factory = cli._make_lane_agent_factory(
+    factory = cli_lanes._make_lane_agent_factory(
         make_agent=_RecordingImplementer(),
         config=config,
-        workspace_dir=str(workspace),
-        driver=str(workspace / DRIVER_NAME),
-        source_files=[str(outside)],
+        binding=cli_lanes.LaneBinding(
+            workspace_dir=str(workspace),
+            driver=str(workspace / DRIVER_NAME),
+            source_files=[str(outside)],
+        ),
         session_kwargs={},
     )
 

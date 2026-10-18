@@ -18,13 +18,12 @@ from hyperloom.orchestrator.lever import (
     LEVER_SOURCE_PATCH,
     LEVER_UPSTREAM_PR,
 )
-from hyperloom.inference_optimizer.breakdown.recorder.phase_event import is_phase_transition_row
 from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
 )
+from ..kernel.patch_landing import IntegratedStack
 from ..state.kernel_decision_settings import resolve_kernel_opt_max_failures
-from .session_contract import bound_session_declares
 from ..state.shared_state import (
     ESCALATE_HINT_SKIP_TO_CLOSE,
     ESCALATE_HINT_SKIP_TO_KERNEL,
@@ -143,12 +142,6 @@ PHASE_COORDINATOR_RESERVED: dict[str, frozenset[str]] = {
 }
 
 
-def coordinator_reserved_in_phase(action_name: str, phase: str) -> bool:
-    """Return True iff ``phase`` reserves ``action_name`` for the Coordinator."""
-    reserved = PHASE_COORDINATOR_RESERVED.get((phase or "").strip().upper(), frozenset())
-    return (action_name or "").strip() in reserved
-
-
 def allowed_actions_for(phase: str) -> tuple[str, ...]:
     """Return the phase's LLM-proposable actions as a sorted tuple (deterministic)."""
     key = (phase or "").strip().upper()
@@ -160,7 +153,7 @@ def render_phase_action_bullets(
     *,
     disabled_suffix: dict[str, str] | None = None,
 ) -> list[str]:
-    """Render per-phase action bullets for the prompt (informational, not enforced)."""
+    """Render per-phase action bullets for the prompt; admission refuses anything outside them."""
     suffix = disabled_suffix or {}
     out: list[str] = []
     for phase in PHASE_NAMES:
@@ -224,10 +217,6 @@ def _default_cycle_reloop_min_remaining_sec() -> float:
     v = _env_float("INFERENCE_OPTIMIZER_CYCLE_RELOOP_MIN_REMAINING_SEC", default=10800.0)
     return v if v > 0 else 10800.0
 
-
-# Minimum session wall-clock (seconds) that must remain to justify opening a new macro-cycle; below this we wind down
-# to CLOSE instead of starting a cycle we cannot meaningfully use.
-DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC: float = _default_cycle_reloop_min_remaining_sec()
 
 # R7 global convergence: number of consecutive no-gain macro-cycles after which the run is considered converged (stop
 # looping → CLOSE).
@@ -310,16 +299,11 @@ def _kernel_idle_max_ticks() -> int:
     return val if val >= 1 else 3
 
 
-KERNEL_IDLE_MAX_TICKS: int = _kernel_idle_max_ticks()
-
-
 def _kernel_idle_min_seconds() -> float:
     """Wall-clock seconds a KERNEL idle streak must last before winding down."""
     val = _env_float("INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS", default=600.0)
     return val if val > 0.0 else 600.0
 
-
-KERNEL_IDLE_MIN_SECONDS: float = _kernel_idle_min_seconds()
 
 #: How often the intent router refreshes the inline-step liveness stamp.
 KERNEL_HEARTBEAT_SEC: float = 150.0
@@ -341,29 +325,6 @@ def kernel_inline_step_running(state: Any, *, now_unix: float | None = None) -> 
         return False
     now = float(now_unix if now_unix is not None else _now_unix(state))
     return 0.0 <= (now - seen) <= KERNEL_INLINE_STEP_STALE_SECONDS
-
-
-# ``extend_*_budget`` hints raise a phase budget by DELTA up to CAP.
-ESCALATE_HINT_BUDGET_BUMP_DELTA: float = 0.05  # +5 percentage points per hint
-ESCALATE_HINT_BUDGET_BUMP_CAP: float = 0.80  # absolute ceiling
-
-
-def apply_escalate_budget_bump(
-    current_budget_pct: dict[str, float] | None,
-    *,
-    phase: str,
-    delta: float = ESCALATE_HINT_BUDGET_BUMP_DELTA,
-    cap: float = ESCALATE_HINT_BUDGET_BUMP_CAP,
-) -> dict[str, float]:
-    """Return a budget map with ``phase`` raised by ``delta`` (capped at 80%)."""
-    phase_key = (phase or "").strip().upper()
-    if phase_key not in PHASE_NAMES:
-        return dict(current_budget_pct or {})
-    out = normalize_budget_pct(current_budget_pct)
-    new_val = float(out.get(phase_key, 0.0)) + float(delta or 0.0)
-    new_val = min(float(cap), max(0.0, new_val))
-    out[phase_key] = new_val
-    return out
 
 
 def normalize_budget_pct(
@@ -511,26 +472,6 @@ def phase_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float
     started = max(started, _resume_boundary_unix(state))
     now = float(now_unix if now_unix is not None else _now_unix(state))
     return max(0.0, now - started)
-
-
-def phase_elapsed_totals_from_history(history: Any) -> dict[str, float]:
-    """Rebuild per-phase completed-segment totals from a ``phase_history`` log."""
-    if not isinstance(history, list):
-        return {}
-    rows = [row for row in history if isinstance(row, dict)]
-    totals: dict[str, float] = {}
-    transition_rows = [row for row in rows if is_phase_transition_row(row)]
-    for idx in range(len(transition_rows) - 1):
-        phase = str(transition_rows[idx].get("to_phase") or "").strip().upper()
-        try:
-            entered = float(transition_rows[idx].get("ts_unix") or 0.0)
-            exited = float(transition_rows[idx + 1].get("ts_unix") or 0.0)
-        except (TypeError, ValueError):
-            continue
-        if not phase or entered <= 0.0 or exited <= entered:
-            continue
-        totals[phase] = totals.get(phase, 0.0) + (exited - entered)
-    return totals
 
 
 def phase_cumulative_seconds(
@@ -893,16 +834,7 @@ def kernel_work_pending(state: Any) -> bool:
         return True
 
     rejected = {str(x) for x in (state.rejected_kernel_ids or [])}
-    integrated_entries: list[dict[str, Any]] = []
-    integrated_sources: set[str] = set()
-    for entry in state.optimization_stack or []:
-        if not isinstance(entry, dict):
-            continue
-        if str(entry.get("action") or "") == "integrate":
-            integrated_entries.append(entry)
-            source_file = str(entry.get("target_file") or entry.get("source_file") or "")
-            if source_file:
-                integrated_sources.add(source_file)
+    integrated = IntegratedStack.of(state.optimization_stack)
 
     attempts = state.kernel_opt_task_attempts or {}
     if not isinstance(attempts, dict):
@@ -913,23 +845,7 @@ def kernel_work_pending(state: Any) -> bool:
         kernel_id = str(attempt.get("current_kernel_id") or attempt.get("kernel_id") or ledger_id)
         source_file = str(attempt.get("last_source_file") or "")
         task_group_key = str(attempt.get("task_group_key") or "")
-        integrated = False
-        for integrated_entry in integrated_entries:
-            integrated_key = str(integrated_entry.get("task_group_key") or "")
-            if task_group_key and integrated_key:
-                integrated = task_group_key == integrated_key
-            else:
-                if str(integrated_entry.get("kernel_id") or "") != kernel_id:
-                    continue
-                integrated_source = str(
-                    integrated_entry.get("target_file") or integrated_entry.get("source_file") or ""
-                )
-                integrated = not source_file or not integrated_source or source_file == integrated_source
-            if integrated:
-                break
-        if integrated:
-            continue
-        if source_file and source_file in integrated_sources:
+        if integrated.covers(kernel_ids=(kernel_id,), task_group_key=task_group_key, source_file=source_file):
             continue
         decision = str(attempt.get("last_decision") or "").strip().upper()
         status = str(attempt.get("last_status") or "").strip().lower()
@@ -1210,9 +1126,8 @@ def _budget_predicate_inputs(
         "cap_sec": phase_cap_seconds(state),
         "entry_elapsed_sec": phase_elapsed_seconds(state, now_unix=now_unix),
         "cumulative_elapsed_sec": phase_cumulative_seconds(state, now_unix=now_unix),
+        "current_balance": remaining_sec,
     }
-    if bound_session_declares("phase_budget", "current_balance"):
-        budget["current_balance"] = remaining_sec
     return budget
 
 
@@ -1240,11 +1155,8 @@ def _base_workflow_predicate_inputs(
         "cycle_reloop_min_remaining_sec": (
             _cycle_reloop_min_remaining_sec(state) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else 0.0
         ),
+        "baseline_tput": ((_number(state.baseline_tput) or 0.0) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else None),
     }
-    if bound_session_declares("workflow_global", "baseline_tput"):
-        global_inputs["baseline_tput"] = (
-            (_number(state.baseline_tput) or 0.0) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else None
-        )
     return {
         "current_phase": current,
         "now_unix": now_unix,
@@ -1284,6 +1196,20 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
     }
 
 
+def _rounds_since_phase_entry(state: Any) -> list[dict[str, Any]]:
+    """This cycle's specialist rounds booked since the current phase was entered.
+
+    PRELUDE shares macro-cycle 0 with FRAMEWORK_AGENT, and ``source_phase`` names a round's ownership lane rather
+    than the phase it ran in, so only the entry time separates this phase's rounds from earlier ones.
+    """
+    rows = _rows_for_current_cycle(state.specialist_rounds or [], state)
+    entered = _phase_started_unix(state)
+    # No entry time: keep every row of the cycle. With one: a row with no parseable completed_at is not counted.
+    if entered <= 0.0:
+        return rows
+    return [row for row in rows if (to_unix(row.get("completed_at")) or 0.0) >= entered]
+
+
 def _framework_predicate_inputs(
     state: Any,
     *,
@@ -1296,7 +1222,7 @@ def _framework_predicate_inputs(
         if key not in {"config_arm_plateaued", "source_arm_plateaued", "switch_bottleneck"}
     }
     plateau["attempt_count"] = len(_rows_for_current_cycle(state.attempts or [], state))
-    plateau["specialist_round_count"] = len(_rows_for_current_cycle(state.specialist_rounds or [], state))
+    plateau["specialist_round_count"] = len(_rounds_since_phase_entry(state))
     return plateau, _budget_predicate_inputs(state, now_unix=now_unix)
 
 
@@ -1366,7 +1292,32 @@ def _sweep_predicate_inputs(
             "min_remaining_sec": _cycle_reloop_min_remaining_sec(state),
         },
     }
-    return result, _budget_predicate_inputs(state, now_unix=now_unix)
+    budget = _budget_predicate_inputs(state, now_unix=now_unix)
+    if not result["status"]:
+        _extend_budget_to_sweep_grant(budget, state, now_unix=now_unix)
+    return result, budget
+
+
+def _extend_budget_to_sweep_grant(budget: dict[str, Any], state: Any, *, now_unix: float) -> None:
+    """Widen SWEEP's budget to cover the conc_sweep it granted and is still waiting on.
+
+    SWEEP's only work is the sweep it enqueued on entry, whose budget is already clamped to the session clock. The
+    per-phase cap is a share of the whole session (5% of three hours is nine minutes) and would otherwise cancel that
+    sweep mid-ladder. The widened numbers are what the predicate compares, so a replay of the frozen inputs reaches
+    the same decision.
+    """
+    grant_left = (_number(state.conc_sweep_granted_until_unix) or 0.0) - float(now_unix)
+    if grant_left <= 0.0:
+        return
+    remaining = _number(budget.get("remaining_sec"))
+    if remaining is not None and remaining < grant_left:
+        budget["remaining_sec"] = grant_left
+        if "current_balance" in budget:
+            budget["current_balance"] = grant_left
+    cap = _number(budget.get("cap_sec"))
+    cumulative = _number(budget.get("cumulative_elapsed_sec")) or 0.0
+    if cap is not None and cap < cumulative + grant_left:
+        budget["cap_sec"] = cumulative + grant_left
 
 
 def workflow_predicate_inputs(
@@ -1587,11 +1538,13 @@ def _sweep_exit(inputs: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
             if spent_without_pair or (no_pair and not evidence["sweep_skip_reason"]):
                 return "sweep_failed", evidence
         return "sweep_done", evidence
+    # Anything else -- nothing landed yet, or a sweep the orchestrator cancelled -- leaves the phase to its budget:
+    # a cancelled sweep was stopped by a session-wide stop that already decided the run is over.
     return _budget_exit(
         dict(inputs.get("budget") or {}),
         exhausted_reason="sweep_budget_exhausted",
         cap_reason="sweep_budget_cap",
-        evidence={},
+        evidence={"sweep_status": status} if status else {},
     )
 
 
@@ -1705,7 +1658,7 @@ def _skip_to_close_reason(
 def _holds_for_initial_analysis(baseline: dict[str, Any]) -> bool:
     """Whether the phase must stay open for an initial roofline it enqueued but has not booked yet.
 
-    The transition barrier stops every running action, so leaving now would kill that analysis.
+    Leaving now would hand that analysis to the next phase instead of seeding this one with it.
     The hold is bounded by the optimization reserve, which it must never eat into.
     """
     if not bool(baseline.get("initial_analysis_pending")):
@@ -1910,9 +1863,6 @@ def make_history_row(
 
 
 # Lifecycle events — operator-facing phase/step boundary log.
-LIFECYCLE_STATUS_START = "START"
-LIFECYCLE_STATUS_END = "END"
-LIFECYCLE_STATUS_ERROR = "ERROR"
 # Phase-boundary marker: a point-in-time "entered <phase>" mark with no matching END (unlike START, which pairs with a
 # later END for the same step).
 LIFECYCLE_STATUS_ENTER = "ENTER"
@@ -2064,6 +2014,7 @@ def record_phase_transition(
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import phase_event, record_stage_reached
         from hyperloom.inference_optimizer.breakdown.recorder.outcome_stage import PHASE_STAGES
+        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseEntry, PhaseExit
         from hyperloom.inference_optimizer.session.session_binding import bound_session
 
         # The phase itself, as a timeline event: close the span being left on
@@ -2073,23 +2024,25 @@ def record_phase_transition(
         # row at all to close the segment the session ended in.
         if from_phase and from_phase != str(row.get("to_phase") or ""):
             phase_event.record_exit(
-                phase=from_phase,
-                macro_cycle=prev_cycle,
-                to_phase=str(row.get("to_phase") or ""),
-                reason=str(row.get("reason") or ""),
-                evidence=dict(row.get("evidence") or {}),
-                exited_at=str(row.get("ts") or ""),
-                exited_unix=now_unix,
+                PhaseExit(
+                    at=PhaseCycle(from_phase, prev_cycle),
+                    to_phase=str(row.get("to_phase") or ""),
+                    reason=str(row.get("reason") or ""),
+                    evidence=dict(row.get("evidence") or {}),
+                    exited_at=str(row.get("ts") or ""),
+                    exited_unix=now_unix,
+                )
             )
         phase_event.record_entry(
-            phase=str(row.get("to_phase") or ""),
-            macro_cycle=entry_cycle,
-            sequence=len(history),
-            from_phase=from_phase,
-            reason=str(row.get("reason") or ""),
-            evidence=dict(row.get("evidence") or {}),
-            entered_at=str(row.get("ts") or ""),
-            entered_unix=now_unix,
+            PhaseEntry(
+                at=PhaseCycle(str(row.get("to_phase") or ""), entry_cycle),
+                sequence=len(history),
+                from_phase=from_phase,
+                reason=str(row.get("reason") or ""),
+                evidence=dict(row.get("evidence") or {}),
+                entered_at=str(row.get("ts") or ""),
+                entered_unix=now_unix,
+            )
         )
         stage = PHASE_STAGES.get(str(row.get("to_phase") or ""))
         if stage:
@@ -2130,14 +2083,16 @@ def append_phase_history_event(
     state.phase_history = history
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseMarker
 
         phase_event.record_marker(
-            phase=phase,
-            macro_cycle=state.macro_cycle,
-            sequence=len(history),
-            reason=str(row.get("reason") or ""),
-            evidence=dict(row.get("evidence") or {}),
-            ts=str(row.get("ts") or ""),
+            PhaseMarker(
+                at=PhaseCycle(phase, state.macro_cycle),
+                sequence=len(history),
+                reason=str(row.get("reason") or ""),
+                evidence=dict(row.get("evidence") or {}),
+                ts=str(row.get("ts") or ""),
+            )
         )
     except Exception:  # noqa: BLE001 -- telemetry must never block the marker
         pass
@@ -2185,12 +2140,7 @@ __all__ = [
     "DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK",
     "DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT",
     "DEFAULT_PLATEAU_EXPLORE_LOOKBACK",
-    "ESCALATE_HINT_BUDGET_BUMP_CAP",
-    "ESCALATE_HINT_BUDGET_BUMP_DELTA",
-    "LIFECYCLE_STATUS_END",
     "LIFECYCLE_STATUS_ENTER",
-    "LIFECYCLE_STATUS_ERROR",
-    "LIFECYCLE_STATUS_START",
     "LIFECYCLE_STEP_LABELS",
     "ENABLEMENT_MAX_ATTEMPTS",
     "PHASE_ALLOWED_ACTIONS",
@@ -2207,20 +2157,17 @@ __all__ = [
     "lifecycle_label",
     "make_lifecycle_event",
     "DEFAULT_MAX_MACRO_CYCLES",
-    "DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC",
     "DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES",
     "DEFAULT_LONGRUN_THRESHOLD_MINUTES",
     "is_long_run",
     "resolve_keep_threshold",
     "allowed_actions_for",
-    "apply_escalate_budget_bump",
     "bank_phase_segment",
     "compute_next_phase",
     "cycle_reloop_decision",
     "initial_workflow_predicate_inputs",
     "replay_next_phase",
     "workflow_predicate_inputs",
-    "coordinator_reserved_in_phase",
     "per_lever_dryness",
     "append_phase_evidence_row",
     "append_phase_history_event",
@@ -2240,7 +2187,6 @@ __all__ = [
     "phase_budget_remaining_seconds",
     "phase_cumulative_seconds",
     "phase_elapsed_seconds",
-    "phase_elapsed_totals_from_history",
     "phase_index",
     "phase_status_summary",
     "session_remaining_seconds",

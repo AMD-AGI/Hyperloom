@@ -60,6 +60,14 @@ class FakeResultMessage:
 
 
 @dataclass
+class FakeSystemMessage:
+    """Stand-in for the SDK's SystemMessage; the CLI's init frame carries its tool list in ``data``."""
+
+    subtype: str
+    data: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class FakeOptions:
     """Stand-in for ClaudeAgentOptions — captures kwargs for assertions."""
 
@@ -477,6 +485,38 @@ async def test_run_without_an_emit_intent_call_returns_no_intents():
     assert "just thinking" in result.raw_text
 
 
+@pytest.mark.parametrize(
+    ("offered_tools", "offered"),
+    [
+        pytest.param([EMIT_INTENT_TOOL_QUALIFIED, "mcp__other__tool"], True, id="offered"),
+        pytest.param(["mcp__other__tool"], False, id="dropped"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_mcp_setup_diagnostic_reports_what_the_cli_offered(offered_tools, offered):
+    """Registering emit_intent does not mean the CLI offered it, so the setup snapshot carries the CLI's own account."""
+    init = FakeSystemMessage(
+        subtype="init",
+        data={
+            "claude_code_version": "2.1.294",
+            "tools": ["Read", *offered_tools],
+            "mcp_servers": [{"name": "inference_optimizer", "status": "connected"}],
+        },
+    )
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_query_factory([init, FakeAssistantMessage(content=[TextBlock(text="hi")])]),
+        sdk_options_cls=FakeOptions,
+        enable_mcp_emit_intent=False,
+    )
+    assert backend.get_mcp_setup_diagnostic()["emit_intent"]["offered"] is None
+    await backend.run("p")
+    setup = backend.get_mcp_setup_diagnostic()
+    assert setup["cli_version"] == "2.1.294"
+    assert setup["mcp_tools"] == sorted(offered_tools)
+    assert setup["mcp_server_status"] == {"inference_optimizer": "connected"}
+    assert setup["emit_intent"]["offered"] is offered
+
+
 @pytest.mark.asyncio
 async def test_run_invalid_tool_use_input_drops_block_silently():
     """Bad tool_use input shouldn't crash the run — just drop the bad block."""
@@ -763,6 +803,7 @@ async def test_options_includes_system_prompt_and_max_turns():
     assert captured["options_kwargs"]["max_turns"] == 8
     assert captured["options_kwargs"]["system_prompt"] == "sys"
     assert "Read" in captured["options_kwargs"]["allowed_tools"]
+    assert captured["options_kwargs"]["tools"] == ["Read"]
     # Output instructions appended to prompt
     assert "OUTPUT FORMAT" in captured["prompt"]
 
@@ -794,9 +835,10 @@ async def test_options_includes_mcp_server_when_emit_intent_enabled():
     )
     assert backend.mcp_server_config is not None
     assert backend.mcp_tool_name == EMIT_INTENT_TOOL_QUALIFIED
-    await backend.run("p", tools=["Read"])
+    await backend.run("p", tools=["Read", "emit_intent", "get_failure"])
     kw = captured["options_kwargs"]
     assert "mcp_servers" in kw
     assert "inference_optimizer" in kw["mcp_servers"]
     # emit_intent qualified tool name auto-added to allowed_tools
     assert EMIT_INTENT_TOOL_QUALIFIED in kw["allowed_tools"]
+    assert kw["tools"] == ["Read"]

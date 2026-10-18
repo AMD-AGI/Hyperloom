@@ -300,8 +300,7 @@ OnKeepFn = Callable[[Recipe, ValidationResult], Optional[RecipePatch]]
 def _outcome_label(vr: ValidationResult) -> str:
     """Compact, objective outcome tag for the ledger (ground truth)."""
     if not vr.correctness_passed:
-        head = (vr.note or "").split(":", 1)[0].strip() or "CORRECTNESS FAILED"
-        return head
+        return (vr.note or "").split(":", 1)[0].strip() or "CORRECTNESS FAILED"
     if vr.kept:
         return f"KEPT (speedup={vr.kernel_speedup}x)"
     if vr.kernel_speedup is None:
@@ -344,12 +343,11 @@ def run_fusion_loop(
     framework: str,
     campaign_fn: CampaignFn,
     config: Optional[LoopConfig] = None,
-    ledger: Optional[FusionExperienceLedger] = None,
     on_keep: Optional[OnKeepFn] = None,
 ) -> LoopResult:
     """Try each ranked recipe as one forge-loop campaign, best first."""
     cfg = config or LoopConfig()
-    ledger = ledger or FusionExperienceLedger(cfg.output_dir)
+    ledger = FusionExperienceLedger(cfg.output_dir)
 
     history: list[LoopIteration] = []
     best_result: Optional[ValidationResult] = None

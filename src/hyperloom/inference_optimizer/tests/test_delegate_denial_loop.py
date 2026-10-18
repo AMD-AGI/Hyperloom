@@ -28,7 +28,7 @@ def _silent_coordinator(session_dir) -> Coordinator:
 
 def _delegate(
     *,
-    action: str = "long_running",
+    action: str = "target_analysis",  # proposable in the default PRELUDE phase
     params: dict | None = None,
     key: str | None = "dup-key-1",
 ) -> Intent:
@@ -49,7 +49,7 @@ async def test_delegate_terminal_collision_appends_retry_suffix(session_dir):
     c = _silent_coordinator(session_dir)
     try:
         first, _ = await c.tasks.create_or_return_existing(
-            kind="long_running",
+            kind="target_analysis",
             params={"x": 1},
             idempotency_key="dup-key-1",
             dispatch_class="llm",
@@ -70,7 +70,7 @@ async def test_delegate_running_collision_denies_without_new_task(session_dir):
     c = _silent_coordinator(session_dir)
     try:
         await c.tasks.create_or_return_existing(
-            kind="long_running",
+            kind="target_analysis",
             params={"x": 1},
             idempotency_key="dup-key-run",
             dispatch_class="llm",
@@ -96,6 +96,7 @@ async def test_delegate_source_patch_without_git_root_prunes_without_retry(sessi
     try:
         c.shared_state.framework = "sglang"
         c.shared_state.framework_repo_path = ""
+        c.shared_state.phase = "FRAMEWORK_AGENT"
         await c.router.handle_delegate(
             "orchestration",
             _delegate(
@@ -126,7 +127,7 @@ async def test_delegate_fallback_key_uses_tick_and_content_fingerprint(session_d
         assert len(queued) == 1
         key = queued[0].idempotency_key
         assert re.match(
-            r"^orchestration:long_running:t42:[0-9a-f]{10}$",
+            r"^orchestration:target_analysis:t42:[0-9a-f]{10}$",
             key,
         )
     finally:
@@ -137,6 +138,7 @@ async def test_delegate_fallback_key_uses_tick_and_content_fingerprint(session_d
 async def test_policy_denial_records_target_proposal_message_id(session_dir):
     from hyperloom.inference_optimizer.breakdown.exporter import build
     from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseEntry, PhaseExit
     from hyperloom.inference_optimizer.session.session_binding import session_scope
     from hyperloom.orchestrator.phases.machine_state import workflow_predicate_inputs
     from hyperloom.orchestrator.policy.gate import PolicyDenied
@@ -146,7 +148,7 @@ async def test_policy_denial_records_target_proposal_message_id(session_dir):
     coordinator.shared_state.macro_cycle = 0
     try:
         with session_scope(session_dir):
-            phase_event.record_entry(phase="PRELUDE", macro_cycle=0, sequence=1)
+            phase_event.record_entry(PhaseEntry(at=PhaseCycle("PRELUDE", 0), sequence=1))
             intent = Intent(
                 type=IntentType.DELEGATE,
                 payload={"action_name": "baseline", "target_proposal_msg_id": "proposal-42"},
@@ -157,11 +159,12 @@ async def test_policy_denial_records_target_proposal_message_id(session_dir):
                 PolicyDenied("denied", rule="phase_action_not_allowed", hint="wait"),
             )
             phase_event.record_exit(
-                phase="PRELUDE",
-                macro_cycle=0,
-                to_phase="CLOSE",
-                reason="prelude_baseline_failed",
-                evidence={"predicate_inputs": workflow_predicate_inputs(coordinator.shared_state)},
+                PhaseExit(
+                    at=PhaseCycle("PRELUDE", 0),
+                    to_phase="CLOSE",
+                    reason="prelude_baseline_failed",
+                    evidence={"predicate_inputs": workflow_predicate_inputs(coordinator.shared_state)},
+                )
             )
         breakdown = build(session_dir)
     finally:
@@ -271,11 +274,11 @@ async def test_successful_delegate_resets_policy_denial_streak(session_dir):
             "orchestration",
             intent,
             pd,
-            action_name="long_running",
+            action_name="target_analysis",
         )
-        assert c.shared_state.policy_denial_streak.get("long_running:duplicate_idempotency_key") == 1
+        assert c.shared_state.policy_denial_streak.get("target_analysis:duplicate_idempotency_key") == 1
         await c.router.handle_delegate("orchestration", _delegate(key="fresh-key"))
-        assert not any(k.startswith("long_running:") for k in c.shared_state.policy_denial_streak)
+        assert not any(k.startswith("target_analysis:") for k in c.shared_state.policy_denial_streak)
     finally:
         await c.stop()
 

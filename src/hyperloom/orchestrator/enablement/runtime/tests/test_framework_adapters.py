@@ -6,15 +6,10 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
-from hyperloom.common.failure_signature import (
-    MISSING_MODEL_ARCH,
-    RESOURCE_CONSTRAINT,
-    CapabilityGap,
-    FailureSignature,
-)
 from hyperloom.orchestrator.enablement.runtime import adapters as ad
 from hyperloom.orchestrator.enablement.runtime.adapters import (
     AtomAdapter,
@@ -24,17 +19,19 @@ from hyperloom.orchestrator.enablement.runtime.adapters import (
     XditAdapter,
     get_adapter,
 )
+from hyperloom.orchestrator.enablement.runtime.stack_actions import EnablementStackAction, RuntimeRequest
 
-
-def _gap(kind: str = MISSING_MODEL_ARCH) -> CapabilityGap:
-    return CapabilityGap.from_signature(FailureSignature(kind=kind, confidence=0.9))
+_PINS = "torch==2.11.0+rocm7.2\ntriton==3.7.0+amd.rocm7.2.0"
 
 
 class _FakeRun:
-    """Programmable fake subprocess shim: maps argv-substring -> (rc, out, err)."""
+    """Programmable fake subprocess shim: maps argv-substring -> (rc, out, err).
+
+    The ROCm-pin probe answers with a pinned torch unless a rule says otherwise.
+    """
 
     def __init__(self, rules: list[tuple[str, int, str, str]] | None = None, default_rc: int = 0):
-        self.rules = rules or []
+        self.rules = [*(rules or []), ("named={'torch'", 0, _PINS, "")]
         self.default_rc = default_rc
         self.calls: list[list[str]] = []
 
@@ -46,32 +43,41 @@ class _FakeRun:
                 return subprocess.CompletedProcess(argv, rc, out, err)
         return subprocess.CompletedProcess(argv, self.default_rc, "", "")
 
-
-# supports / registry
-
-
-def test_vllm_supports_missing_arch_not_resource_constraint():
-    a = VllmRocmAdapter()
-    assert a.supports(_gap(MISSING_MODEL_ARCH)) is True
-    assert a.supports(_gap(RESOURCE_CONSTRAINT)) is False
+    def pip_calls(self) -> list[list[str]]:
+        return [c for c in self.calls if c[1:4] == ["-m", "pip", "install"]]
 
 
-def test_sglang_supports_missing_arch_not_resource_constraint():
-    a = SglangAdapter()
-    assert a.supports(_gap(MISSING_MODEL_ARCH)) is True
-    assert a.supports(_gap(RESOURCE_CONSTRAINT)) is False
+@pytest.fixture(autouse=True)
+def _no_real_venv(monkeypatch):
+    monkeypatch.setattr(ad, "create_venv", lambda venv_dir: None)
 
 
-def test_atom_and_xdit_never_acquire_a_runtime():
-    for adapter in (AtomAdapter(), XditAdapter()):
-        assert adapter.build_stack_action(_gap(MISSING_MODEL_ARCH)) is None
+# the request a specialist emits
 
 
-def test_get_adapter_unknown_returns_null_no_raise():
-    a = get_adapter("totally_unknown_fw")
-    assert isinstance(a, NullAdapter)
-    assert a.supports(_gap()) is False
-    assert a.build_stack_action(_gap()) is None
+def test_a_request_without_a_ref_or_packages_asks_for_nothing():
+    assert RuntimeRequest.from_payload(None) is None
+    assert RuntimeRequest.from_payload({"reason": "newer sglang"}) is None
+    assert RuntimeRequest.from_payload({"packages": ["", "  "]}) is None
+
+
+def test_a_request_parses_its_fields():
+    request = RuntimeRequest.from_payload(
+        {"ref": " PR:123 ", "packages": "transformers==4.57.1", "capability": "glm5_arch", "reason": "r"}
+    )
+    assert request == RuntimeRequest(
+        ref="PR:123", packages=("transformers==4.57.1",), capability="glm5_arch", reason="r"
+    )
+
+
+# registry
+
+
+def test_frameworks_without_a_venv_runtime_acquire_nothing():
+    request = RuntimeRequest(ref="v0.5.0", packages=("x==1",))
+    for adapter in (AtomAdapter(), XditAdapter(), get_adapter("totally_unknown_fw")):
+        assert adapter.build_stack_action(request) is None
+    assert isinstance(get_adapter("totally_unknown_fw"), NullAdapter)
 
 
 def test_get_adapter_case_insensitive():
@@ -79,63 +85,75 @@ def test_get_adapter_case_insensitive():
     assert isinstance(get_adapter("SGLang"), SglangAdapter)
 
 
-# build_stack_action: ROCm index gating (never PyPI CUDA fallback)
+# build_stack_action: the request becomes the action, with no operator setting in the way
 
 
-def test_vllm_no_rocm_index_returns_none(monkeypatch):
-    monkeypatch.delenv("HYPERLOOM_VLLM_ROCM_INDEX_URL", raising=False)
-    a = VllmRocmAdapter()
-    assert a.build_stack_action(_gap()) is None
+def test_sglang_pr_url_becomes_an_editable_checkout_of_that_repo():
+    action = SglangAdapter().build_stack_action(
+        RuntimeRequest(ref="https://github.com/fork/sglang/pull/77", capability="glm5_arch")
+    )
+    assert action is not None
+    assert (action.acquisition_method, action.repo_url, action.ref) == (
+        "editable_ref",
+        "https://github.com/fork/sglang",
+        "PR:77",
+    )
+    assert action.gap_id == "gap.enablement.glm5_arch"
 
 
-def test_vllm_with_rocm_index_builds_wheel_action(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_VLLM_ROCM_INDEX_URL", "https://rocm.repo/whl")
-    monkeypatch.delenv("HYPERLOOM_ENABLEMENT_INDEX_ALLOWLIST", raising=False)
-    a = VllmRocmAdapter()
-    action = a.build_stack_action(_gap(), gpu_type="mi355x")
+def test_sglang_tag_defaults_to_the_upstream_repo_and_keeps_its_packages():
+    action = SglangAdapter().build_stack_action(RuntimeRequest(ref="v0.5.21", packages=("transformers==4.57.1",)))
+    assert action is not None
+    assert action.repo_url == "https://github.com/sgl-project/sglang.git"
+    assert action.ref == "v0.5.21"
+    assert action.packages == ("transformers==4.57.1",)
+
+
+def test_a_ref_naming_no_checkout_is_refused():
+    assert SglangAdapter().build_stack_action(RuntimeRequest(ref="https://example.com/some/repo")) is None
+
+
+@pytest.mark.parametrize("adapter", [SglangAdapter, VllmRocmAdapter])
+def test_packages_alone_become_a_package_install(adapter):
+    action = adapter().build_stack_action(
+        RuntimeRequest(packages=("transformers==4.57.1",), index_url="https://idx.example/simple")
+    )
     assert action is not None
     assert action.acquisition_method == "wheel"
-    assert action.index_url == "https://rocm.repo/whl"
-    assert action.packages == ("vllm",)
+    assert action.packages == ("transformers==4.57.1",)
+    assert action.index_url == "https://idx.example/simple"
 
 
-def test_vllm_index_not_in_allowlist_returns_none(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_VLLM_ROCM_INDEX_URL", "https://evil.repo/whl")
-    monkeypatch.setenv("HYPERLOOM_ENABLEMENT_INDEX_ALLOWLIST", "https://rocm.repo")
-    a = VllmRocmAdapter()
-    assert a.build_stack_action(_gap()) is None
+def test_vllm_refuses_a_checkout_because_it_compiles():
+    assert VllmRocmAdapter().build_stack_action(RuntimeRequest(ref="v0.11.0")) is None
 
 
-def test_vllm_resource_constraint_returns_none(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_VLLM_ROCM_INDEX_URL", "https://rocm.repo/whl")
-    a = VllmRocmAdapter()
-    assert a.build_stack_action(_gap(RESOURCE_CONSTRAINT)) is None
+# ROCm pins
 
 
-def test_sglang_editable_ref_action(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_SGLANG_REPO_URL", "https://github.com/sgl-project/sglang.git")
-    monkeypatch.setenv("HYPERLOOM_SGLANG_REF", "v0.4.9")
-    monkeypatch.delenv("HYPERLOOM_ENABLEMENT_ORIGIN_ALLOWLIST", raising=False)
-    a = SglangAdapter()
-    action = a.build_stack_action(_gap())
-    assert action is not None
-    assert action.acquisition_method == "editable_ref"
-    assert action.ref == "v0.4.9"
+def test_every_install_is_held_to_the_rocm_pins(tmp_path):
+    run = _FakeRun(rules=[("sysconfig", 0, f"{tmp_path}\n", "")])
+    action = SglangAdapter().build_stack_action(RuntimeRequest(packages=("transformers==4.57.1",)))
+    assert SglangAdapter(run=run).provision(action, tmp_path / "attempt").ok
+    (pip,) = run.pip_calls()
+    assert "--upgrade" not in pip
+    constraints = Path(pip[pip.index("--constraint") + 1])
+    assert constraints.read_text(encoding="utf-8").splitlines() == _PINS.splitlines()
 
 
-def test_sglang_no_source_no_index_returns_none(monkeypatch):
-    for k in ("HYPERLOOM_SGLANG_REPO_URL", "HYPERLOOM_SGLANG_REF", "HYPERLOOM_SGLANG_INDEX_URL"):
-        monkeypatch.delenv(k, raising=False)
-    a = SglangAdapter()
-    assert a.build_stack_action(_gap()) is None
+def test_an_interpreter_without_torch_fails_before_pip(tmp_path):
+    run = _FakeRun(rules=[("named={'torch'", 0, "", "")])
+    action = SglangAdapter().build_stack_action(RuntimeRequest(packages=("x==1",)))
+    result = SglangAdapter(run=run).provision(action, tmp_path / "attempt")
+    assert result.ok is False
+    assert "torch version" in result.error
+    assert run.pip_calls() == []
 
 
 # provision + ROCm verification (mocked run)
 
 
-def _wheel_action() -> "ad.EnablementStackAction":
-    from hyperloom.orchestrator.enablement.runtime.stack_actions import EnablementStackAction
-
+def _wheel_action() -> EnablementStackAction:
     return EnablementStackAction(
         kind="runtime_candidate",
         framework="vllm",
@@ -150,17 +168,9 @@ def _wheel_action() -> "ad.EnablementStackAction":
 _PURELIB = "/attempt/venv/lib/python3.12/site-packages"
 
 
-def test_vllm_provision_ok(tmp_path, monkeypatch):
-    # venv create ok, pip ok, torch-rocm ok, vllm-rocm ok, versions resolvable.
-    run = _FakeRun(
-        rules=[
-            ("importlib.metadata", 0, "0.21.0", ""),
-            ("sysconfig", 0, f"{_PURELIB}\n", ""),
-        ],
-        default_rc=0,
-    )
-    a = VllmRocmAdapter(run=run)
-    result = a.provision(_wheel_action(), tmp_path / "attempt")
+def test_vllm_provision_ok(tmp_path):
+    run = _FakeRun(rules=[("m.version(", 0, "0.21.0", ""), ("sysconfig", 0, f"{_PURELIB}\n", "")])
+    result = VllmRocmAdapter(run=run).provision(_wheel_action(), tmp_path / "attempt")
     assert result.ok is True, result.error
     assert result.runtime.venv_root.endswith("venv")
     assert result.runtime.bin_path.endswith("bin")
@@ -168,106 +178,89 @@ def test_vllm_provision_ok(tmp_path, monkeypatch):
 
 
 def test_vllm_provision_pip_fail(tmp_path):
-    run = _FakeRun(rules=[("-m pip install", 1, "", "no matching distribution")], default_rc=0)
-    a = VllmRocmAdapter(run=run)
-    result = a.provision(_wheel_action(), tmp_path / "attempt")
+    run = _FakeRun(rules=[("-m pip install", 1, "", "no matching distribution")])
+    result = VllmRocmAdapter(run=run).provision(_wheel_action(), tmp_path / "attempt")
     assert result.ok is False
     assert "pip install failed" in result.error
 
 
 def test_vllm_provision_rejects_cuda_torch(tmp_path):
-    # torch-is-rocm probe fails (rc=1) -> reject a CUDA torch swap-in.
-    run = _FakeRun(rules=[("getattr(torch.version,'hip'", 1, "", "")], default_rc=0)
-    a = VllmRocmAdapter(run=run)
-    result = a.provision(_wheel_action(), tmp_path / "attempt")
+    run = _FakeRun(rules=[("getattr(torch.version,'hip'", 1, "", "")])
+    result = VllmRocmAdapter(run=run).provision(_wheel_action(), tmp_path / "attempt")
     assert result.ok is False
     assert "not a ROCm build" in result.error
 
 
 def test_vllm_provision_rejects_non_rocm_vllm(tmp_path):
-    # torch-rocm ok but vllm platform probe fails.
-    def _run(argv, env, cwd):
-        joined = " ".join(argv)
-        if "getattr(torch.version,'hip'" in joined and "vllm" not in joined:
-            return subprocess.CompletedProcess(argv, 0, "", "")  # torch is rocm
-        if "import vllm" in joined or "current_platform" in joined:
-            return subprocess.CompletedProcess(argv, 1, "", "not rocm")  # vllm not rocm
-        return subprocess.CompletedProcess(argv, 0, "", "")
-
-    a = VllmRocmAdapter(run=_run)
-    result = a.provision(_wheel_action(), tmp_path / "attempt")
+    run = _FakeRun(rules=[("current_platform", 1, "", "not rocm")])
+    result = VllmRocmAdapter(run=run).provision(_wheel_action(), tmp_path / "attempt")
     assert result.ok is False
     assert "ROCm platform" in result.error
-
-
-def test_vllm_provision_requires_index(tmp_path):
-    from hyperloom.orchestrator.enablement.runtime.stack_actions import EnablementStackAction
-
-    action = EnablementStackAction(
-        kind="runtime_candidate", framework="vllm", gap_id="g", capability="c", acquisition_method="wheel"
-    )
-    a = VllmRocmAdapter(run=_FakeRun())
-    result = a.provision(action, tmp_path / "attempt")
-    assert result.ok is False
-    assert "ROCm wheel index" in result.error
 
 
 # the tree an acquired runtime imports, which is the tree its patches apply to
 
 
-def test_vllm_provision_records_the_tree_the_wheel_lands_in(tmp_path):
-    """The wheel occupies the attempt venv alone; the shared framework tree is untouched by it."""
-    run = _FakeRun(rules=[("sysconfig", 0, f"{_PURELIB}\n", "")], default_rc=0)
-    result = VllmRocmAdapter(run=run).provision(_wheel_action(), tmp_path / "attempt")
+@pytest.mark.parametrize("adapter, package", [(VllmRocmAdapter, "vllm"), (SglangAdapter, "sglang")])
+def test_a_framework_installed_into_the_venv_is_the_tree_patches_land_in(tmp_path, adapter, package):
+    (tmp_path / "purelib" / package).mkdir(parents=True)
+    run = _FakeRun(rules=[("sysconfig", 0, f"{tmp_path / 'purelib'}\n", "")])
+    action = adapter().build_stack_action(RuntimeRequest(packages=(f"{package}==9.9",)))
+    result = adapter(run=run).provision(action, tmp_path / "attempt")
     assert result.ok is True, result.error
-    assert result.runtime.source_root == _PURELIB
+    assert result.runtime.source_root == str(tmp_path / "purelib")
 
 
-def _sglang_wheel_action() -> "ad.EnablementStackAction":
-    from hyperloom.orchestrator.enablement.runtime.stack_actions import EnablementStackAction
-
-    return EnablementStackAction(
-        kind="runtime_candidate",
-        framework="sglang",
-        gap_id="g",
-        capability="c",
-        acquisition_method="wheel",
-        index_url="https://rocm.repo/whl",
-    )
+def test_a_dependency_only_runtime_leaves_patches_on_the_shared_tree(tmp_path):
+    """The framework is still imported from the shared tree, so the venv's site-packages is not its source."""
+    (tmp_path / "purelib").mkdir()
+    run = _FakeRun(rules=[("sysconfig", 0, f"{tmp_path / 'purelib'}\n", "")])
+    action = SglangAdapter().build_stack_action(RuntimeRequest(packages=("transformers==4.57.1",)))
+    result = SglangAdapter(run=run).provision(action, tmp_path / "attempt")
+    assert result.ok is True, result.error
+    assert result.runtime.source_root == ""
 
 
-@pytest.mark.parametrize(
-    "adapter, action",
-    [
-        pytest.param(VllmRocmAdapter, _wheel_action, id="vllm"),
-        pytest.param(SglangAdapter, _sglang_wheel_action, id="sglang"),
-    ],
-)
-def test_a_wheel_runtime_with_no_site_packages_fails_to_provision(tmp_path, adapter, action):
-    """Without the tree the wheel landed in, its patches would edit a tree the server never imports."""
-    run = _FakeRun(rules=[("sysconfig", 1, "", "")], default_rc=0)
-    result = adapter(run=run).provision(action(), tmp_path / "attempt")
+@pytest.mark.parametrize("adapter", [VllmRocmAdapter, SglangAdapter])
+def test_a_wheel_runtime_with_no_site_packages_fails_to_provision(tmp_path, adapter):
+    run = _FakeRun(rules=[("sysconfig", 1, "", "")])
+    action = adapter().build_stack_action(RuntimeRequest(packages=("x==1",)))
+    result = adapter(run=run).provision(action, tmp_path / "attempt")
     assert result.ok is False
     assert "site-packages" in result.error
 
 
-def test_sglang_editable_provision_records_the_clone_it_imports(tmp_path):
+def test_sglang_editable_provision_fetches_the_pr_head_and_records_the_clone_it_imports(tmp_path):
     """An editable install executes the clone, and its diffs are cut against the repo root."""
-    from hyperloom.orchestrator.enablement.runtime.stack_actions import EnablementStackAction
-
-    action = EnablementStackAction(
-        kind="runtime_candidate",
-        framework="sglang",
-        gap_id="g",
-        capability="c",
-        acquisition_method="editable_ref",
-        repo_url="https://github.com/sgl-project/sglang.git",
-        ref="v0.4.9",
-    )
-    result = SglangAdapter(run=_FakeRun()).provision(action, tmp_path / "attempt")
+    run = _FakeRun()
+    action = SglangAdapter().build_stack_action(RuntimeRequest(ref="PR:123", packages=("transformers==4.57.1",)))
+    result = SglangAdapter(run=run).provision(action, tmp_path / "attempt")
     assert result.ok is True, result.error
-    assert result.runtime.source_root == str(tmp_path / "attempt" / "src")
-    assert result.runtime.pythonpath_prefix == str(tmp_path / "attempt" / "src" / "python")
+    checkout = tmp_path / "attempt" / "src"
+    assert [
+        "git",
+        "-C",
+        str(checkout),
+        "fetch",
+        "-q",
+        "--depth",
+        "1",
+        action.repo_url,
+        "refs/pull/123/head",
+    ] in run.calls
+    assert result.runtime.source_root == str(checkout)
+    assert result.runtime.pythonpath_prefix == str(checkout / "python")
+    (pip,) = run.pip_calls()
+    assert pip[-3:] == ["-e", str(checkout / "python"), "transformers==4.57.1"]
+
+
+def test_sglang_editable_provision_reports_a_ref_it_cannot_fetch(tmp_path):
+    run = _FakeRun(rules=[(" fetch ", 128, "", "couldn't find remote ref v9")])
+    action = SglangAdapter().build_stack_action(RuntimeRequest(ref="v9"))
+    result = SglangAdapter(run=run).provision(action, tmp_path / "attempt")
+    assert result.ok is False
+    assert "git checkout of v9 failed" in result.error
+    assert run.pip_calls() == []
 
 
 # verify helpers

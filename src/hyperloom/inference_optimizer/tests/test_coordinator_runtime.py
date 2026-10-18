@@ -28,7 +28,7 @@ from hyperloom.orchestrator.roles import (
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.writeback import _BASELINE_FINGERPRINT_KEYS, WritebackCollaborator
 from hyperloom.orchestrator.loop.proposals import ProposalsCollaborator
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType, NoIntentEmitted
 from hyperloom.orchestrator.state.objective import TargetGainObjective
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.loop.sub_agent_runner import (
@@ -177,7 +177,7 @@ async def test_stop_signals_follow_the_normal_terminal_path(session_dir, stop_si
         finalize_calls += 1
 
     async def _cancel_tick(_now):
-        raise asyncio.CancelledError()
+        raise asyncio.CancelledError
 
     if cancelled:
         monkeypatch.setattr(c.reconciler, "run", _cancel_tick)
@@ -234,7 +234,7 @@ async def test_mock_backend_records_calls():
     assert backend.calls[0]["tools"] == ["emit_intent"]
 
 
-# SubAgentRunner (standalone)
+# SubAgentRunner, standalone
 @pytest.mark.asyncio
 async def test_sub_agent_runner_succeeds(tmp_path):
     db = SqliteConnection(tmp_path / "x.db")
@@ -703,6 +703,46 @@ async def test_run_stops_once_a_backend_has_failed_for_the_unhealthy_window(sess
 
 
 @pytest.mark.asyncio
+async def test_a_no_intent_streak_stops_the_session_once(session_dir, monkeypatch):
+    """An agent that keeps answering without an intent ends the run, whichever way its turns come back empty."""
+    monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._NO_INTENT_STOP_TURNS", 3)
+    plan = ScriptedPlan(
+        turns=[MockTurn(raise_error=NoIntentEmitted("no envelope")), MockTurn(raw_text="thinking out loud")],
+        loop_last=True,
+    )
+    c = Coordinator(session_dir, backends=_build_backends({"orchestration": plan}))
+    try:
+        for _ in range(2):
+            await c.reactor_pass("orchestration")
+        assert not c.shared_state.stop_reason
+        for _ in range(2):
+            await c.reactor_pass("orchestration")
+        assert c.shared_state.stop_reason == "backend_unhealthy"
+        observations = await c.bus.tail(n=50, topic="observation")
+        streaks = [o.payload for o in observations if (o.payload or {}).get("kind") == "no_intent_streak"]
+        assert len(streaks) == 1
+        assert streaks[0]["agent"] == "orchestration"
+        assert streaks[0]["consecutive_turns"] == 3
+        assert streaks[0]["severity"] == "high"
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_turn_with_an_intent_ends_the_no_intent_streak(session_dir, monkeypatch):
+    monkeypatch.setattr("hyperloom.orchestrator.loop.coordinator._NO_INTENT_STOP_TURNS", 3)
+    silent = MockTurn(raw_text="thinking out loud")
+    plan = ScriptedPlan(turns=[silent, silent, MockTurn(intents=[_heartbeat()]), silent, silent])
+    c = Coordinator(session_dir, backends=_build_backends({"orchestration": plan}))
+    try:
+        for _ in range(5):
+            await c.reactor_pass("orchestration")
+        assert not c.shared_state.stop_reason
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_coordinator_propose_action_creates_pending(session_dir):
     propose = Intent(
         type=IntentType.PROPOSE_ACTION,
@@ -953,7 +993,7 @@ async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
     propose = Intent(
         type=IntentType.PROPOSE_ACTION,
         payload={
-            "action_name": "params",
+            "action_name": "explore",
             "predicted_gain_pct": 3.0,
         },
     )
@@ -1087,7 +1127,7 @@ def _silent_backends() -> dict[str, object]:
 
 def _mute_action_scoring(coordinator: Coordinator) -> None:
     """No-op kept for back-compat."""
-    return None
+    return
 
 
 def _mk_task(kind: str, task_id: str = "t-aud-1") -> Task:
@@ -1475,6 +1515,36 @@ async def test_a_stopped_baseline_round_does_not_clear_a_real_failure_streak(ses
         )
         assert c.shared_state.baseline_failure_streak == 1
         assert c.shared_state.baseline_total_failures == 1
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_baseline_round_keeps_the_real_boot_failure_as_enablement_evidence(session_dir):
+    """The boot that failed stays the lane's "before"; a round the run cancelled observed nothing."""
+    c = Coordinator(session_dir, backends=_silent_backends())
+    _mute_action_scoring(c)
+    try:
+        await c.writeback.handle_unpromotable_result(
+            _mk_task("baseline", "t-real"),
+            {
+                "status": "failed",
+                "error_class": "subprocess_nonzero",
+                "error": "NameError: name 'deep_gemm' is not defined",
+                "boot_observation_path": "/obs/real.json",
+            },
+        )
+        await c.writeback.handle_unpromotable_result(
+            _mk_task("baseline", "t-cancelled"),
+            {
+                "status": "failed",
+                "error_class": "orchestrator_cancelled",
+                "error": "the orchestrator cancelled this action while this round was running",
+                "boot_observation_path": "/obs/cancelled.json",
+            },
+        )
+        assert c.shared_state.enablement.launch_observation_path == "/obs/real.json"
+        assert "deep_gemm" in c.shared_state.enablement.launch_log
     finally:
         await c.stop()
 
@@ -2563,19 +2633,11 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
 @pytest.mark.asyncio
 async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
     # Defensive audit (log-only): a queued task whose kind has no registered executor is flagged in the process log;
-    # dispatch itself is unchanged (the task still fails on the missing runner).
+    # dispatch itself is unchanged (the task still fails on the missing runner). Admission refuses such a kind from
+    # the orchestrator, so the task is queued directly, the way a Coordinator-internal producer would.
     import logging
 
-    delegate = Intent(
-        type=IntentType.DELEGATE,
-        payload={
-            "action_name": "long_running",
-            "params": {},
-            "idempotency_key": "k-audit-dispatch-1",
-        },
-    )
-    plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
-    c = Coordinator(session_dir, backends=_build_backends(plans))
+    c = Coordinator(session_dir, backends=_build_backends({}))
 
     async def _noop_executor(ctx):
         return {}
@@ -2584,9 +2646,9 @@ async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
     # one unrelated executor first.
     c.sub.register_executor("report", _noop_executor)
     try:
+        await c.tasks.create(kind="long_running", params={}, idempotency_key="k-audit-dispatch-1")
         with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"):
-            await c.tick(1)
-        await pump_until_settled(c.dispatcher)
+            await pump_until_settled(c.dispatcher)
         assert any("dispatch audit" in r.getMessage() and "long_running" in r.getMessage() for r in caplog.records)
         assert await c.tasks.by_state("failed")
     finally:

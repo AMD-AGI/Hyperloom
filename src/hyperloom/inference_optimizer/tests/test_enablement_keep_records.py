@@ -21,7 +21,6 @@ import yaml
 from hyperloom.orchestrator.enablement.recipe.section import collect_enablement
 from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _git_commit_kept,
-    patch_declared_ops,
     replayed_stack_ops,
 )
 from hyperloom.orchestrator.actions.executors._git import _git_head_sha
@@ -1010,52 +1009,6 @@ def _patch(tmp_path: Path, name: str, body: str) -> Path:
     return path
 
 
-def test_a_deletion_is_declared_by_its_dev_null_post_image(repo: Path, tmp_path: Path):
-    patch = _patch(
-        tmp_path,
-        "del.patch",
-        f"--- a/{TARGET}\n+++ /dev/null\n@@ -1 +0,0 @@\n-{BASE_TEXT}",
-    )
-    assert patch_declared_ops(repo, [patch]) == {TARGET: "delete"}
-
-
-def test_a_creation_is_an_upsert_even_when_the_tree_does_not_hold_it(repo: Path, tmp_path: Path):
-    """The stripped-inputs case, stated as a unit.
-
-    A KEEP reached without its mutation inputs boots against the base tree, so
-    the created file is absent at capture time. A tree probe reads that absence
-    as a deletion and declares a target the snapshot then satisfies trivially;
-    the diff says the file must exist, and that is what a replay must produce.
-    """
-    rel = "srt/created.py"
-    assert not (repo / rel).exists()
-    patch = _patch(tmp_path, "new.patch", f"--- /dev/null\n+++ b/{rel}\n@@ -0,0 +1 @@\n+x = 1\n")
-    assert patch_declared_ops(repo, [patch]) == {rel: "upsert"}
-
-
-def test_a_later_patch_recreating_a_deleted_file_wins(repo: Path, tmp_path: Path):
-    """Order, not set-merge: the accumulated upsert/delete lists put every
-    deletion last, so the recreation loses and the replay removes a file the
-    accepted stack requires."""
-    first = _patch(tmp_path, "1.patch", f"--- a/{TARGET}\n+++ /dev/null\n@@ -1 +0,0 @@\n-{BASE_TEXT}")
-    second = _patch(tmp_path, "2.patch", f"--- /dev/null\n+++ b/{TARGET}\n@@ -0,0 +1 @@\n+{PATCHED_TEXT}")
-    assert patch_declared_ops(repo, [first, second]) == {TARGET: "upsert"}
-    # ...and the other way round, so this is an ordering rule and not a
-    # preference for one operation.
-    assert patch_declared_ops(repo, [second, first]) == {TARGET: "delete"}
-
-
-def test_a_rename_declares_both_ends(repo: Path, tmp_path: Path):
-    moved = "srt/moved.py"
-    patch = _patch(tmp_path, "mv.patch", f"--- a/{TARGET}\n+++ b/{moved}\n@@ -1 +1 @@\n-{BASE_TEXT}+{BASE_TEXT}")
-    assert patch_declared_ops(repo, [patch]) == {TARGET: "delete", moved: "upsert"}
-
-
-def test_a_plain_modify_declares_no_deletion_of_the_file_it_writes(repo: Path, tmp_path: Path):
-    patch = _patch(tmp_path, "mod.patch", f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}")
-    assert patch_declared_ops(repo, [patch]) == {TARGET: "upsert"}
-
-
 def test_the_keep_records_what_each_kept_patch_declares(repo: Path, tmp_path: Path):
     """Pins the producer of ``enablement_patch_targets``.
 
@@ -1260,9 +1213,7 @@ def test_a_modification_that_was_never_applied_declares_nothing(repo: Path, tmp_
     """
     base_sha = _git_head_sha(repo)
     patch = _patch(tmp_path, "mod.patch", f"--- a/{TARGET}\n+++ b/{TARGET}\n@@ -1 +1 @@\n-{BASE_TEXT}+{PATCHED_TEXT}")
-    # The headers still say what the patch WOULD do...
-    assert patch_declared_ops(repo, [patch]) == {TARGET: "upsert"}
-    # ...but the replay produces bytes the captured tree does not have.
+    # The replay produces bytes the captured tree does not have.
     assert replayed_stack_ops(repo, [patch], base_sha=base_sha) is None
     assert (repo / TARGET).read_text(encoding="utf-8") == BASE_TEXT
 
@@ -1394,9 +1345,7 @@ def test_a_mixed_diff_declares_its_metadata_only_block_too(repo: Path, tmp_path:
     )
     _git(repo, "apply", str(mixed))
     _commit_all(repo, "mixed applied")
-    # The header parse still sees only the text half...
-    assert patch_declared_ops(repo, [mixed]) == {TARGET: "upsert"}
-    # ...while git reports both entries the apply actually touched.
+    # git reports both entries the apply actually touched.
     assert replayed_stack_ops(repo, [mixed], base_sha=base_sha) == {
         str(mixed): {TARGET: "upsert", "srt/exec.sh": "upsert"}
     }
@@ -1414,9 +1363,6 @@ def test_a_p0_deletion_is_not_recorded_against_a_path_that_never_existed(repo: P
     _git(repo, "apply", "-p0", str(patch))
     _commit_all(repo, "deleted")
 
-    # The header-only reader falls back to -p1 and names a path that was never
-    # in the tree.
-    assert patch_declared_ops(repo, [patch]) == {"gone.py": "delete"}
     assert replayed_stack_ops(repo, [patch], base_sha=base_sha) == {str(patch): {"srt/gone.py": "delete"}}
 
 
@@ -2763,3 +2709,23 @@ def test_an_empty_drop_in_directory_is_not_a_credential_store(tmp_path):
     (drop_in / "private.conf").write_text("machine repo login u password p\n", encoding="utf-8")
 
     assert detect_credential_channels({}, fs_root=str(tmp_path)) == ["apt_auth"]
+
+
+def test_an_in_place_patch_asserts_the_serving_framework_at_the_keep(tmp_path: Path):
+    """A KEEP that only patches the framework tree provisions and builds nothing,
+    so it named no package and the assertion set was empty -- while its patches
+    hold only against the framework version that was graded."""
+    params = {
+        "runtime_override": {
+            "runtime_python_exe": sys.executable,
+            "pythonpath_prefixes": [_installed_dist(tmp_path, "vllm", "0.30.0")],
+        }
+    }
+    _closure, assertions = probe_keep_environment(
+        params,
+        framework="vllm",
+        build_manifest=[],
+        specialist_task_id=PROBE_TASK,
+        provision_result=None,
+    )
+    assert assertions == {"vllm": "0.30.0"}

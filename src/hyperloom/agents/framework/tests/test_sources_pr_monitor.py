@@ -11,6 +11,7 @@ import urllib.error
 
 import pytest
 
+from hyperloom.agents.framework.models import PRMonitorConfig
 from hyperloom.agents.framework.sources import pr_monitor as pc
 from hyperloom.agents.framework.sources._shared import GitHubPr
 
@@ -55,9 +56,7 @@ def test_list_perf_prs_parses_items_list(monkeypatch) -> None:
     ).encode("utf-8")
     _install_urlopen(monkeypatch, lambda req: _FakeResp(200, body))
     prs = pc.list_perf_prs(
-        "https://github.com/sgl-project/sglang.git",
-        base_url="http://x",
-        limit=2,
+        "https://github.com/sgl-project/sglang.git", monitor=PRMonitorConfig(base_url="http://x"), limit=2
     )
     assert len(prs) == 2
     assert prs[0] == GitHubPr(number=1, title="a", html_url="u1")
@@ -75,7 +74,7 @@ def test_base_url_may_include_v1_suffix(monkeypatch) -> None:
     _install_urlopen(monkeypatch, handler)
     pc.list_perf_prs(
         "https://github.com/sgl-project/sglang.git",
-        base_url="https://pr-monitor.example.com/knowledge-base/pr-monitor/v1",
+        monitor=PRMonitorConfig(base_url="https://pr-monitor.example.com/knowledge-base/pr-monitor/v1"),
         limit=1,
     )
     assert "/v1/v1/" not in seen["url"]
@@ -102,7 +101,7 @@ def test_search_prs_unwraps_summary_match_records(monkeypatch) -> None:
     _install_urlopen(monkeypatch, lambda req: _FakeResp(200, body))
     prs = pc.search_perf_prs_via_pr_monitor_search(
         "https://github.com/ROCm/vllm.git",
-        base_url="http://x",
+        monitor=PRMonitorConfig(base_url="http://x"),
         query="dsv4",
         state="all",
         limit=5,
@@ -124,20 +123,14 @@ def test_list_perf_prs_hard_fails_on_http_error(monkeypatch) -> None:
 
     _install_urlopen(monkeypatch, handler)
     with pytest.raises(pc.PRMonitorError, match="HTTP 503"):
-        pc.list_perf_prs(
-            "https://github.com/sgl-project/sglang.git",
-            base_url="http://x",
-        )
+        pc.list_perf_prs("https://github.com/sgl-project/sglang.git", monitor=PRMonitorConfig(base_url="http://x"))
 
 
 def test_list_perf_prs_hard_fails_on_bad_json(monkeypatch) -> None:
     """Non-JSON body propagates as PRMonitorError."""
     _install_urlopen(monkeypatch, lambda req: _FakeResp(200, b"<html>not json"))
     with pytest.raises(pc.PRMonitorError, match="non-JSON"):
-        pc.list_perf_prs(
-            "https://github.com/sgl-project/sglang.git",
-            base_url="http://x",
-        )
+        pc.list_perf_prs("https://github.com/sgl-project/sglang.git", monitor=PRMonitorConfig(base_url="http://x"))
 
 
 def test_list_perf_prs_hard_fails_on_url_error(monkeypatch) -> None:
@@ -148,7 +141,4 @@ def test_list_perf_prs_hard_fails_on_url_error(monkeypatch) -> None:
 
     _install_urlopen(monkeypatch, handler)
     with pytest.raises(pc.PRMonitorError, match="unreachable"):
-        pc.list_perf_prs(
-            "https://github.com/sgl-project/sglang.git",
-            base_url="http://x",
-        )
+        pc.list_perf_prs("https://github.com/sgl-project/sglang.git", monitor=PRMonitorConfig(base_url="http://x"))

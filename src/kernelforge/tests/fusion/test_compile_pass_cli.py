@@ -11,7 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from kernelforge.fusion.command import run as main
-from kernelforge.fusion.vllm_passes import PassState
+from kernelforge.fusion.vllm_passes import PassState, TargetRuntime
 
 FLAG = "enable_qk_norm_rope_fusion"
 CONFIG_BODY = (
@@ -82,9 +82,9 @@ class Harness:
             for f in flags
         }
 
-    def serving(self, model_path, env_flags, **kw):
+    def serving(self, server, **kw):
         idx = len(self.arm_calls)
-        self.arm_calls.append({"env_flags": dict(env_flags or {}), "kw": kw})
+        self.arm_calls.append({"env_flags": dict(server.env_flags or {}), "server": server, "kw": kw})
         ok, tok_s = self.arms[min(idx, len(self.arms) - 1)]
         metrics = kw.get("metrics")
         if metrics is not None and ok:
@@ -104,17 +104,17 @@ class Harness:
         )
 
     def install(self, monkeypatch):
-        import kernelforge.fusion.command as cli
+        import kernelforge.fusion.compile_pass_claim as compile_pass_claim
         import kernelforge.fusion.locate as locate
 
-        rt = cli.TargetRuntime(
+        rt = TargetRuntime(
             framework="vllm", python="/fake/python", launcher_exe="/fake/vllm", require_root=str(self.root)
         )
         monkeypatch.setattr(locate, "probe_pass_states", self.probe)
         monkeypatch.setattr(locate, "resolve_target_runtime", lambda *a, **k: rt)
-        monkeypatch.setattr(cli, "resolve_target_runtime", lambda *a, **k: rt)
-        monkeypatch.setattr(cli, "serving_smoke", self.serving)
-        monkeypatch.setattr(cli, "verify_pass_enabled", self.verify)
+        monkeypatch.setattr(compile_pass_claim, "resolve_target_runtime", lambda *a, **k: rt)
+        monkeypatch.setattr(compile_pass_claim, "serving_smoke", self.serving)
+        monkeypatch.setattr(compile_pass_claim, "verify_pass_enabled", self.verify)
         return self
 
     def make_mixed(self):
@@ -189,8 +189,8 @@ class TestKeepPath:
         assert hz.arm_calls[0]["env_flags"] == {}
         assert hz.arm_calls[1]["env_flags"].get("VLLM_LOGGING_LEVEL") == "DEBUG"
         # Both arms must hit the SAME pinned launcher and request shape.
-        assert {c["kw"]["launcher_exe"] for c in hz.arm_calls} == {"/fake/vllm"}
-        assert {(c["kw"]["isl"], c["kw"]["osl"]) for c in hz.arm_calls} == {(512, 128)}
+        assert {c["server"].launcher_exe for c in hz.arm_calls} == {"/fake/vllm"}
+        assert {(c["kw"]["load"].isl, c["kw"]["load"].osl) for c in hz.arm_calls} == {(512, 128)}
 
 
 class TestRejectPaths:
@@ -231,12 +231,12 @@ class TestRejectPaths:
         self._assert_rejected(hz, hz.run(), "baseline (pass disabled) arm failed")
 
     def test_exception_mid_run_still_restores(self, hz, monkeypatch):
-        import kernelforge.fusion.command as cli
+        import kernelforge.fusion.compile_pass_claim as compile_pass_claim
 
         def boom(*a, **k):
             raise RuntimeError("export exploded")
 
-        monkeypatch.setattr(cli, "export_artifacts", boom)
+        monkeypatch.setattr(compile_pass_claim, "export_artifacts", boom)
         res = hz.run()
         assert res.exit_code != 0
         hz.assert_config_restored()

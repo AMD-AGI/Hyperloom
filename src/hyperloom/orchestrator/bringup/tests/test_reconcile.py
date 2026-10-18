@@ -141,7 +141,7 @@ async def test_a_round_whose_holder_cannot_be_confirmed_dead_still_releases(db):
 
     settled = await rounds.get("round-spec-1")
     assert settled.outcome == ""
-    assert settled.excludes_at(_NOW + 10.0) is True
+    assert settled.state == OPEN
     assert state.stop_reason == "", "an unobservable reap does not end the session"
 
 
@@ -155,7 +155,6 @@ async def test_age_never_requests_a_reap_of_a_running_holder(db):
 
     settled = await rounds.get("round-spec-1")
     assert settled.state == OPEN
-    assert settled.excludes_at(_NOW + 10.0) is True
     assert state.stop_reason == ""
 
 
@@ -620,3 +619,28 @@ async def test_a_round_wedged_by_lane_rows_stays_wedged_and_is_reported(db):
     assert (await rounds.get("round-spec-1")).state == OPEN
     # The lane rows are still there, and counted for the operator.
     assert report.leases_unverifiable >= 1
+
+
+@pytest.mark.asyncio
+async def test_a_revalidation_window_whose_result_is_still_to_be_booked_is_left_alone(db):
+    """A terminal row whose result the dispatcher has not booked yet still reports."""
+    state = _State()
+    state.enablement.validation_pending = True
+    state.enablement.revalidation_task_id = "reval-1"
+    owed = {"reval-1"}
+    rec, _, tasks, _ = _build(db, state=state, result_pending=lambda task_id: task_id in owed)
+    await tasks.create(kind="baseline", params={}, idempotency_key="k:reval-1", task_id="reval-1")
+    await tasks.transition("reval-1", "running")
+    await tasks.transition("reval-1", "succeeded")
+
+    report = await rec.run(_NOW + 1.0)
+
+    assert report.closed_windows == []
+    assert state.enablement.validation_pending is True
+    assert state.enablement.revalidation_task_id == "reval-1"
+
+    owed.clear()
+    report = await rec.run(_NOW + 2.0)
+
+    assert report.closed_windows == ["reval-1"]
+    assert state.enablement.validation_pending is False

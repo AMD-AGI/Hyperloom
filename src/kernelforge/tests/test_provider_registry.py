@@ -139,7 +139,7 @@ def test_builtin_model_ownership_predicates() -> None:
     """Recognize each built-in provider's model family without env coupling."""
     claude = get_agent_provider("claude")
     codex = get_agent_provider("codex")
-    assert claude.default_model == "claude-opus-5"
+    assert claude.default_model == "claude-opus-5-5"
     assert codex.default_model == "gpt-5.6-sol"
     assert claude.owns_model("claude-opus-5")
     assert not claude.owns_model("gpt-5.6")

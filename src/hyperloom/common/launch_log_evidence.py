@@ -12,10 +12,17 @@ import re
 import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, NamedTuple
+
+from hyperloom.common.env_safety import is_allowed_external_env_key
 
 
 log = logging.getLogger(__name__)
+
+#: Evidence logs are read for content, not fidelity; drop bytes that are not
+#: valid UTF-8 instead of raising.
+_DECODE_ERRORS = "ignore"
 
 #: Launch flags that are RUN-/TOPOLOGY-specific (host, device set, model path,
 #: parallelism, ports, seeds); stripped from forwarded server-launch flags.
@@ -30,6 +37,8 @@ _RUN_SPECIFIC_LAUNCH_FLAGS: frozenset[str] = frozenset(
         "--served-model-name",
         "--host",
         "--port",
+        # ATOM's HTTP port; its ``--port`` is the engine-internal one.
+        "--server-port",
         "--nccl-port",
         "--dist-init-addr",
         "--base-gpu-id",
@@ -83,6 +92,10 @@ def split_launch_flags(argv_tail: str) -> str:
         tokens = shlex.split(argv_tail)
     except ValueError:
         tokens = argv_tail.split()
+    return " ".join(_kept_launch_tokens(tokens))
+
+
+def _kept_launch_tokens(tokens: list[str]) -> list[str]:
     kept: list[str] = []
     index = 0
     while index < len(tokens):
@@ -105,7 +118,7 @@ def split_launch_flags(argv_tail: str) -> str:
             continue
         kept.append(token)
         index += 1
-    return " ".join(kept)
+    return kept
 
 
 def launch_flag_setting_name(flag: str, framework: str) -> str:
@@ -126,7 +139,7 @@ def launch_argv_from_log(path: str, framework: str) -> str:
         return ""
     pattern = re.compile(r"(?:-m\s+\S*" + re.escape(marker) + r"\S*|" + re.escape(marker) + r")\b(.*)$")
     try:
-        with open(path, encoding="utf-8", errors="ignore") as handle:
+        with open(path, encoding="utf-8", errors=_DECODE_ERRORS) as handle:
             for line in handle:
                 if marker not in line:
                     continue
@@ -150,6 +163,98 @@ def launch_argv_from_log(path: str, framework: str) -> str:
     except OSError:
         return ""
     return ""
+
+
+#: InferenceX recipes record the exact server argv here (``write_command``).
+_RECIPE_SERVER_COMMAND_FILE = "server_command.txt"
+#: The recipe's ``set -x`` trace, captured beside its server log.
+_RECIPE_TRACE_FILE = "benchmark_stderr.log"
+_TRACE_EXPORT_RE = re.compile(r"^\++ export (.+)$")
+_TRACE_LAUNCH_RE = re.compile(r"^\++ write_command \S*" + re.escape(_RECIPE_SERVER_COMMAND_FILE) + r"\b")
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class RecipeServerLaunch(NamedTuple):
+    """Server flags and environment a recipe recorded for its own launch."""
+
+    flags: str
+    env: dict[str, str]
+
+
+def recipe_server_launch(server_log_path: str) -> RecipeServerLaunch:
+    """Read the server launch an InferenceX recipe recorded beside its server log.
+
+    Agentic recipes build the server command inside the script, so neither the
+    recipe YAML nor an ATOM server log carries it; ``server_command.txt`` and the
+    script's ``export`` trace up to that command are the only record.
+    """
+    if not server_log_path:
+        return RecipeServerLaunch("", {})
+    run_dir = Path(server_log_path).parent
+    return RecipeServerLaunch(
+        _recipe_server_flags(run_dir / _RECIPE_SERVER_COMMAND_FILE),
+        _recipe_server_env(run_dir / _RECIPE_TRACE_FILE),
+    )
+
+
+def _recipe_server_flags(path: Path) -> str:
+    try:
+        tokens = shlex.split(path.read_text(encoding="utf-8", errors=_DECODE_ERRORS))
+    except (OSError, ValueError):
+        return ""
+    start = next((index for index, token in enumerate(tokens) if token.startswith("--")), len(tokens))
+    kept = _kept_launch_tokens(tokens[start:])
+    # GEAK re-renders structured values shell-quoted and its native launchers
+    # expand the args unquoted, so a JSON or list value would reach the server
+    # with its quotes and fail to parse. Such flags stay with the recipe.
+    scalar: list[str] = []
+    skipped: list[str] = []
+    index = 0
+    while index < len(kept):
+        token = kept[index]
+        has_value = index + 1 < len(kept) and not kept[index + 1].startswith("-")
+        value = kept[index + 1] if has_value else token.partition("=")[2]
+        if value[:1] in ("[", "{"):
+            skipped.append(token.partition("=")[0])
+        else:
+            scalar.extend(kept[index : index + 2] if has_value else [token])
+        index += 2 if has_value else 1
+    if skipped:
+        log.info("recipe server launch: structured-value flags not forwarded: %s", " ".join(skipped))
+    return shlex.join(scalar)
+
+
+def _recipe_server_env(path: Path) -> dict[str, str]:
+    env: dict[str, str] = {}
+    try:
+        with open(path, encoding="utf-8", errors=_DECODE_ERRORS) as handle:
+            for line in handle:
+                if _TRACE_LAUNCH_RE.match(line):
+                    return env
+                match = _TRACE_EXPORT_RE.match(line.rstrip("\n"))
+                if not match:
+                    continue
+                try:
+                    words = shlex.split(match.group(1))
+                except ValueError:
+                    continue
+                for word in words:
+                    name, assigned, value = word.partition("=")
+                    if assigned and _ENV_NAME_RE.match(name) and _is_server_env(name):
+                        env[name] = value
+    except OSError:
+        return {}
+    # Without the launch marker there is no telling which exports the server saw.
+    return {}
+
+
+def _is_server_env(name: str) -> bool:
+    # Device masks are pinned per run by the consumer; AIPERF_* configure the client.
+    if name.endswith("_VISIBLE_DEVICES") or name.startswith("AIPERF_"):
+        return False
+    # Credentials, loader and path variables are rejected by the one owner of that
+    # policy (env_safety); this reader does not re-judge them with a weaker denylist.
+    return is_allowed_external_env_key(name)
 
 
 #: Every spelling of the model operand the supported launchers emit. SGLang
@@ -239,7 +344,7 @@ def observed_model_binding_from_log(path: str, framework: str) -> dict[str, Any]
     if not marker:
         return {}
     try:
-        with open(path, encoding="utf-8", errors="ignore") as handle:
+        with open(path, encoding="utf-8", errors=_DECODE_ERRORS) as handle:
             for line in handle:
                 if marker not in line:
                     continue
@@ -295,34 +400,6 @@ _SGLANG_OBSERVED_IDENTITY_FIELDS = frozenset(
 #: requested setting is judged unconfirmed for want of an observed side.
 _VLLM_NON_DEFAULT_ARGS_RE = re.compile(r"non[-_]default args:\s*\{", re.IGNORECASE)
 
-#: The vLLM spellings of the settings the decision compares. Names differ from
-#: SGLang's for the same knob, so the allowlist is per engine even though the
-#: reader is not.
-_VLLM_OBSERVED_IDENTITY_FIELDS: frozenset[str] = frozenset(
-    {
-        "model",
-        "tokenizer",
-        "served_model_name",
-        "tensor_parallel_size",
-        "pipeline_parallel_size",
-        "data_parallel_size",
-        "max_model_len",
-        "gpu_memory_utilization",
-        "quantization",
-        "dtype",
-        "kv_cache_dtype",
-        "block_size",
-        "max_num_seqs",
-        "max_num_batched_tokens",
-        "enable_chunked_prefill",
-        "enable_expert_parallel",
-        "enforce_eager",
-        "trust_remote_code",
-        "swap_space",
-        "cpu_offload_gb",
-    }
-)
-
 #: vLLM's flag names are the keys it reports, so nothing needs folding.
 _VLLM_FLAG_ALIASES: dict[str, str] = {}
 
@@ -339,8 +416,9 @@ class _LaunchRecord:
 
     #: Header the record follows. Matched outside quoted runs only.
     marker: re.Pattern[str]
-    #: Keys the identity read keeps; the config read keeps the whole record.
-    identity_fields: frozenset[str]
+    #: Keys the identity read keeps; ``None`` keeps the whole record, as the
+    #: config read always does.
+    identity_fields: frozenset[str] | None
     #: Launch-flag spellings folded to the names this engine reports.
     flag_aliases: Mapping[str, str]
     #: Whether an unreadable value in an allowlisted field voids the record.
@@ -359,7 +437,12 @@ _LAUNCH_RECORDS: dict[str, _LaunchRecord] = {
     ),
     "vllm": _LaunchRecord(
         marker=_VLLM_NON_DEFAULT_ARGS_RE,
-        identity_fields=_VLLM_OBSERVED_IDENTITY_FIELDS,
+        # vLLM's record lists only what the launch changed from the defaults,
+        # so every key in it is a setting someone asked for. An allowlist here
+        # dropped most of them -- ``compilation_config``, ``speculative_config``,
+        # the parsers, ``async_scheduling`` -- and every such requested flag was
+        # then judged unconfirmed however plainly the record showed it.
+        identity_fields=None,
         flag_aliases=_VLLM_FLAG_ALIASES,
         identity_rejects_unreadable_values=False,
     ),
@@ -444,6 +527,67 @@ def _balance_from(text: str, start: int) -> str:
                 expression = text[start : index + 1]
                 return f"_ServerArgs{expression}" if text[start] == "(" else expression
     return ""
+
+
+#: An object repr in a record: ``<CompilationMode.VLLM_COMPILE: 3>``. Python
+#: cannot parse it, and vLLM prints one inside ``compilation_config`` on every
+#: launch that sets it, so one such value made the whole record unreadable.
+_MAX_REPR_CHARS = 512
+
+
+def _quote_object_reprs(text: str) -> str:
+    """Rewrite each ``<...>`` repr outside a string literal as a string literal.
+
+    The repr text is kept verbatim, so the value still says what it was; it is
+    only made parseable. ``<`` cannot otherwise occur outside a string in a
+    dict of literals, so this rewrites nothing a literal parse could have read.
+    """
+    if "<" not in text:
+        return text
+    out: list[str] = []
+    quote = ""
+    escaped = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            out.append(char)
+            index += 1
+            continue
+        if char in ("'", '"'):
+            quote = char
+        elif char == "<":
+            end = _repr_end(text, index)
+            if end > index:
+                out.append(repr(text[index : end + 1]))
+                index = end + 1
+                continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _repr_end(text: str, start: int) -> int:
+    """Index of the ``>`` closing the repr opened at ``text[start]``, or -1."""
+    quote = ""
+    for index in range(start + 1, min(len(text), start + _MAX_REPR_CHARS)):
+        char = text[index]
+        if quote:
+            if char == quote:
+                quote = ""
+        elif char in ("'", '"'):
+            quote = char
+        elif char == "<":
+            return -1
+        elif char == ">":
+            return index
+    return -1
 
 
 def _safe_server_args_value(node: ast.AST) -> Any:
@@ -563,13 +707,13 @@ def observed_sglang_server_identity_from_log(path: str) -> dict[str, Any]:
     return observed_server_identity_from_log(path, "sglang")
 
 
-def observed_vllm_server_identity_from_log(path: str) -> dict[str, Any]:
-    """Parse allowlisted identity from vLLM's ``non-default args: {...}`` record."""
-    return observed_server_identity_from_log(path, "vllm")
+def _read_launch_record(path: str, spec: _LaunchRecord) -> str:
+    """The launch record's payload, read under the line and character caps, or "".
 
-
-def _server_args_from_log(path: str, spec: _LaunchRecord, *, keep: frozenset[str] | None) -> dict[str, Any]:
-    """Parse a capped launch record, limited to ``keep`` when given."""
+    The caps bound how much of a serving log is read for one record; crossing
+    either without finding a balanced payload is reported, because it is the one
+    case where "no record" might mean "not read far enough".
+    """
     chunks: list[str] = []
     remaining = _SERVER_ARGS_MAX_CHARS
     scanned_lines = 0
@@ -590,36 +734,56 @@ def _server_args_from_log(path: str, spec: _LaunchRecord, *, keep: frozenset[str
                 if remaining <= 0:
                     break
     except OSError:
-        return {}
-    text = "".join(chunks)
-    content = parsed or _balanced_record_payload(text, spec.marker)
-    if not content or len(content) > _SERVER_ARGS_MAX_CHARS:
-        if scanned_lines >= _SERVER_ARGS_MAX_LINES or remaining <= 0:
-            log.debug(
-                "launch record unavailable after scanning bounded log %s (lines=%d chars_remaining=%d)",
-                path,
-                scanned_lines,
-                remaining,
-            )
+        return ""
+    content = parsed or _balanced_record_payload("".join(chunks), spec.marker)
+    if content and len(content) <= _SERVER_ARGS_MAX_CHARS:
+        return content
+    if scanned_lines >= _SERVER_ARGS_MAX_LINES or remaining <= 0:
+        log.debug(
+            "launch record unavailable after scanning bounded log %s (lines=%d chars_remaining=%d)",
+            path,
+            scanned_lines,
+            remaining,
+        )
+    return ""
+
+
+def _record_fields(record: ast.expr) -> list[tuple[str, ast.expr]] | None:
+    """The ``name -> value`` pairs a launch record states, or None when it states none readably.
+
+    Both shapes the engines emit are accepted: a dict literal, and a call whose
+    keywords are the settings.
+    """
+    if isinstance(record, ast.Dict):
+        if len(record.keys) > _SERVER_ARGS_MAX_FIELDS:
+            return None
+        fields: list[tuple[str, ast.expr]] = []
+        for key, value in zip(record.keys, record.values):
+            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+                return None
+            fields.append((key.value, value))
+        return fields
+    if isinstance(record, ast.Call):
+        if len(record.keywords) > _SERVER_ARGS_MAX_FIELDS:
+            return None
+        if any(keyword.arg is None for keyword in record.keywords):
+            return None
+        return [(keyword.arg, keyword.value) for keyword in record.keywords]
+    return None
+
+
+def _server_args_from_log(path: str, spec: _LaunchRecord, *, keep: frozenset[str] | None) -> dict[str, Any]:
+    """Parse a capped launch record, limited to ``keep`` when given."""
+    content = _read_launch_record(path, spec)
+    if not content:
         return {}
     try:
-        record = ast.parse(content, mode="eval").body
-        fields: list[tuple[str, ast.expr]] = []
-        if isinstance(record, ast.Dict):
-            if len(record.keys) > _SERVER_ARGS_MAX_FIELDS:
-                return {}
-            for key, value in zip(record.keys, record.values):
-                if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
-                    return {}
-                fields.append((key.value, value))
-        elif isinstance(record, ast.Call):
-            if len(record.keywords) > _SERVER_ARGS_MAX_FIELDS:
-                return {}
-            for keyword in record.keywords:
-                if keyword.arg is None:
-                    return {}
-                fields.append((keyword.arg, keyword.value))
-        else:
+        # Only where a repr is expected: SGLang's record is all literals, and one
+        # that is not is still read as not the record we think it is.
+        if not spec.identity_rejects_unreadable_values:
+            content = _quote_object_reprs(content)
+        fields = _record_fields(ast.parse(content, mode="eval").body)
+        if fields is None:
             return {}
         values: dict[str, Any] = {}
         for name, value in fields:

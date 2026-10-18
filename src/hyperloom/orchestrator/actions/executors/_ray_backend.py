@@ -6,11 +6,11 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.env import env_flag
 from hyperloom.common.env_safety import scrub_benchmark_process_env
+from hyperloom.common.visible_devices import hip_mask_within_rocr
 
 log = logging.getLogger(__name__)
 
@@ -69,13 +69,12 @@ def serving_slot_busy() -> bool:
         return False
 
 
-@dataclass
-class SubprocessResult:
-    """Declarative shape for a subprocess executed inside a Ray worker."""
-
-    returncode: int
-    stdout: str
-    stderr: str
+def align_hip_with_ray_rocr(env: dict[str, str]) -> dict[str, str]:
+    """Ray narrows only ``ROCR_VISIBLE_DEVICES`` per task; re-index HIP into that view, in place."""
+    hip = hip_mask_within_rocr(env)
+    if hip is not None:
+        env["HIP_VISIBLE_DEVICES"] = hip
+    return env
 
 
 def _merge_worker_env(caller_env: dict[str, str] | None) -> dict[str, str]:
@@ -85,7 +84,7 @@ def _merge_worker_env(caller_env: dict[str, str] | None) -> dict[str, str]:
         if key in _RAY_OWNED_VISIBLE_DEVICE_VARS:
             continue
         merged[key] = value
-    return scrub_benchmark_process_env(merged)
+    return scrub_benchmark_process_env(align_hip_with_ray_rocr(merged))
 
 
 def _run_subprocess_worker(
@@ -134,24 +133,26 @@ class RayExecutionBackend:
             quiet_ray_init,
         )
 
-        resolved = num_gpus
-        if resolved is None:
-            env_n = os.environ.get("INFERENCE_OPTIMIZER_RAY_NUM_GPUS", "").strip()
-            resolved = int(env_n) if env_n.isdigit() else None
+        resolved = _resolve_head_num_gpus(num_gpus)
         ensure_ray_cluster(num_gpus=resolved, log_path=log_path)
         quiet_ray_init(num_gpus=resolved, log_path=log_path)
         self._ensured = True
 
+    def restart_local_head(self, log_path: Path | None = None) -> None:
+        """Replace the local head with one that declares ``serving_slot`` and reconnect to it."""
+        from ._ray_runtime import restart_local_head_with_serving_slot
 
-def resolve_shared_artifact_root(session_dir: Path | str) -> Path:
-    """Resolve the shared artifact root for per-task artifacts."""
-    session_dir = Path(session_dir)
-    mn_root = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
-    from ._multi_node_env import is_multi_node
+        self._ensured = False
+        restart_local_head_with_serving_slot(num_gpus=_resolve_head_num_gpus(None), log_path=log_path)
+        self._ensured = True
 
-    if is_multi_node() and mn_root:
-        return Path(mn_root)
-    return session_dir
+
+def _resolve_head_num_gpus(num_gpus: int | None) -> int | None:
+    """Return the ``--num-gpus`` for a head this process starts: the argument, else the env override."""
+    if num_gpus is not None:
+        return num_gpus
+    env_n = os.environ.get("INFERENCE_OPTIMIZER_RAY_NUM_GPUS", "").strip()
+    return int(env_n) if env_n.isdigit() else None
 
 
 def strip_visible_devices_from_config(config_path: Path | str) -> Path:
@@ -209,10 +210,8 @@ def mark_ray_backend_unhealthy() -> None:
 
 __all__ = [
     "RayExecutionBackend",
-    "SubprocessResult",
     "_should_use_ray_backend",
     "get_ray_backend",
     "mark_ray_backend_unhealthy",
-    "resolve_shared_artifact_root",
     "strip_visible_devices_from_config",
 ]

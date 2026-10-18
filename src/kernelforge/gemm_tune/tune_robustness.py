@@ -12,6 +12,7 @@ import os
 import re
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -155,7 +156,7 @@ class FaultBlocklist:
 
 def gpu_healthy(gpu_ids: str = "") -> bool:
     """Best-effort: rocm-smi responds and the target GPU(s) are not wedged."""
-    gpus = check_gpu_status(skip=False)
+    gpus = check_gpu_status()
     if not gpus:
         return False
     wanted = {g.strip() for g in gpu_ids.split(",") if g.strip()}
@@ -169,36 +170,95 @@ def compare_temp_env() -> dict[str, str]:
     return {"TMPDIR": str(Path(tempfile.gettempdir()).resolve())}
 
 
-def run_isolated(
-    *,
-    script: str,
-    base_args: list[str],
+def _read_csv_lines(path: Path) -> list[str]:
+    """One per-shape CSV's lines, best-effort: an unreadable file contributes none."""
+    try:
+        return path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+
+
+class _MergedCsv:
+    """Rows gathered from many per-shape CSVs, under the first header seen."""
+
+    def __init__(self) -> None:
+        self.header: str | None = None
+        self.rows: list[str] = []
+
+    def absorb(self, lines: list[str]) -> None:
+        """Take one shape's lines; a file with none contributes neither header nor rows."""
+        if not lines:
+            return
+        if self.header is None:
+            self.header = lines[0]
+        self.rows.extend(lines[1:])
+
+    def text(self) -> str:
+        """The merged CSV, header first."""
+        return f"{self.header}\n" + "\n".join(self.rows) + "\n"
+
+
+def _rows_to_tune(
     input_csv: str | Path,
-    tuned_stem: str,
-    work_dir: Path,
-    aiter_root: Path | None,
-    outer_timeout_s: int,
-    task_timeout_s: int,
-    gpu_ids: str,
     blocklist: FaultBlocklist | None,
+) -> tuple[str, list[str], tuple[int, str] | None]:
+    """The header and shape rows to tune, or the exit code and message that says there are none.
+
+    An input with no rows is a failure; an input whose every shape is
+    blocklisted is not -- the shapes were skipped on purpose.
+    """
+    header, rows = read_untuned_csv(input_csv)
+    if not rows:
+        return header, [], (1, f"no data rows in {input_csv}")
+    if blocklist is None:
+        return header, rows, None
+    rows, skipped = blocklist.filter_rows(rows)
+    if skipped:
+        log.warning("skipping %d blocklisted shape(s) on this regime", len(skipped))
+    if not rows:
+        return header, [], (0, "all shapes blocklisted (skipped)")
+    return header, rows, None
+
+
+@dataclass(frozen=True)
+class TunerInvocation:
+    """One aiter tuner script run: the script and its shared flags, the shapes it reads, and where it writes."""
+
+    script: str | Path
+    base_args: list[str]
+    input_csv: str | Path
+    tuned_csv: Path
+    work_dir: Path
+    aiter_root: Path | None
+
+
+@dataclass(frozen=True)
+class IsolationGuard:
+    """How each isolated shape run is bounded, and where a fault is checked and recorded."""
+
+    outer_timeout_s: int
+    task_timeout_s: int
+    gpu_ids: str
+    blocklist: FaultBlocklist | None
+
+
+def run_isolated(
+    invocation: TunerInvocation,
+    guard: IsolationGuard,
     env_override: dict[str, str] | None = None,
 ) -> tuple[int, str, str, Path | None]:
     """Run the aiter tuner once per shape (process isolation), merge results."""
-    header, rows = read_untuned_csv(input_csv)
-    if not rows:
-        return 1, "", f"no data rows in {input_csv}", None
-
-    if blocklist is not None:
-        rows, skipped = blocklist.filter_rows(rows)
-        if skipped:
-            log.warning("skipping %d blocklisted shape(s) on this regime", len(skipped))
-        if not rows:
-            return 0, "", "all shapes blocklisted (skipped)", None
+    base_args = invocation.base_args
+    work_dir = invocation.work_dir
+    tuned_stem = invocation.tuned_csv.stem
+    blocklist = guard.blocklist
+    header, rows, nothing_to_tune = _rows_to_tune(invocation.input_csv, blocklist)
+    if nothing_to_tune is not None:
+        return nothing_to_tune[0], "", nothing_to_tune[1], None
 
     merged_out: list[str] = []
     merged_err: list[str] = []
-    merged_candidate_rows: list[str] = []
-    candidate_header: str | None = None
+    candidates = _MergedCsv()
     n_ok = 0
     env_override = {**compare_temp_env(), **(env_override or {})}
     compare_dir = Path(env_override["TMPDIR"]) / "aiter_compare"
@@ -209,8 +269,7 @@ def run_isolated(
         shared_profile: Path | None = Path(base_args[profile_idx + 1])
     except (ValueError, IndexError):
         profile_idx, shared_profile = -1, None
-    merged_profile_rows: list[str] = []
-    profile_header: str | None = None
+    profiles = _MergedCsv()
 
     for idx, row in enumerate(rows):
         sig = shape_signature(row)
@@ -224,14 +283,14 @@ def run_isolated(
         if profile_idx >= 0:
             shape_args[profile_idx + 1] = str(shape_profile)
         cmd = with_task_timeout(
-            ["python3", str(script), "-i", str(shape_csv), "-o", str(shape_out), *shape_args],
-            task_timeout_s,
+            ["python3", str(invocation.script), "-i", str(shape_csv), "-o", str(shape_out), *shape_args],
+            guard.task_timeout_s,
         )
         start = time.time()
         rc, out, err = run_subprocess(
             cmd,
-            cwd=aiter_root,
-            timeout_s=outer_timeout_s,
+            cwd=invocation.aiter_root,
+            timeout_s=guard.outer_timeout_s,
             log_file=work_dir / f"_iso_{tuned_stem}_{idx}.log",
             env_override=env_override,
         )
@@ -241,14 +300,7 @@ def run_isolated(
         # Accumulate this shape's profile candidates (best-effort) so the merged profile downstream carries every
         # shape, not just the last.
         if profile_idx >= 0 and shape_profile.is_file():
-            try:
-                plines = [ln for ln in shape_profile.read_text(encoding="utf-8").splitlines() if ln.strip()]
-            except OSError:
-                plines = []
-            if plines:
-                if profile_header is None:
-                    profile_header = plines[0]
-                merged_profile_rows.extend(plines[1:])
+            profiles.absorb([line for line in _read_csv_lines(shape_profile) if line.strip()])
 
         fault = classify_fault(rc, out, err)
         soft = count_soft_faults(out, err)
@@ -256,7 +308,7 @@ def run_isolated(
             log.warning("shape %d/%d faulted (%s); recording to blocklist", idx + 1, len(rows), fault)
             if blocklist is not None:
                 blocklist.record(sig, fault, row)
-            if not gpu_healthy(gpu_ids):
+            if not gpu_healthy(guard.gpu_ids):
                 log.error("GPU unhealthy after fault; aborting remaining shapes")
                 merged_err.append("gpu_unhealthy_abort")
                 break
@@ -277,32 +329,23 @@ def run_isolated(
         # Collect this shape's compare candidate (aiter writes it under compare_dir).
         cand = _latest_candidate(compare_dir, shape_out.stem, start)
         if cand is not None:
-            try:
-                clines = cand.read_text(encoding="utf-8").splitlines()
-            except OSError:
-                clines = []
-            if clines:
-                if candidate_header is None:
-                    candidate_header = clines[0]
-                merged_candidate_rows.extend(clines[1:])
+            candidates.absorb(_read_csv_lines(cand))
 
     if blocklist is not None:
         blocklist.save()
 
     # Merge every shape's profile back into the shared -o2 path so the serve-safe split-K cap sees candidates for ALL
     # shapes, not just the last.
-    if profile_idx >= 0 and shared_profile is not None and profile_header is not None:
+    if profile_idx >= 0 and shared_profile is not None and profiles.header is not None:
         try:
-            shared_profile.write_text(profile_header + "\n" + "\n".join(merged_profile_rows) + "\n", encoding="utf-8")
+            shared_profile.write_text(profiles.text(), encoding="utf-8")
         except OSError:
             pass
 
     merged_candidate_path: Path | None = None
-    if candidate_header is not None:
+    if candidates.header is not None:
         merged_candidate_path = work_dir / f"candidate_{tuned_stem}.merged.csv"
-        merged_candidate_path.write_text(
-            candidate_header + "\n" + "\n".join(merged_candidate_rows) + "\n", encoding="utf-8"
-        )
+        merged_candidate_path.write_text(candidates.text(), encoding="utf-8")
 
     # rc: 0 if at least one shape tuned; 1 only if all faulted/failed.
     final_rc = 0 if n_ok > 0 else 1
@@ -331,6 +374,8 @@ __all__ = [
     "read_untuned_csv",
     "shape_signature",
     "FaultBlocklist",
+    "IsolationGuard",
+    "TunerInvocation",
     "gpu_healthy",
     "run_isolated",
 ]

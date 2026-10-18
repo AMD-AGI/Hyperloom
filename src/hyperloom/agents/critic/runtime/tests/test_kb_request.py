@@ -8,6 +8,7 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.agents.critic.runtime.errors import KBValidationError, RequestValidationError
+from hyperloom.agents.critic.runtime.kb_client import KBListQuery
 from hyperloom.agents.critic.runtime.in_memory_kb_client import (
     InMemoryKBClient,
     _deep_merge,
@@ -43,12 +44,12 @@ def test_deep_merge_nested() -> None:
 def test_list_validation_and_filters() -> None:
     kb = InMemoryKBClient(time_fn=lambda: 1.0)
     with pytest.raises(KBValidationError):
-        kb.list(scope_filter="nope")  # type: ignore[arg-type]
+        kb.list(KBListQuery(scope_filter="nope"))  # type: ignore[arg-type]
 
     kb.upsert({"scope": {"model": "M"}, "kind": "technique", "slug": "slug-aaaa", "importance": 0.5})
-    res = kb.list(scope_filter={"model": "m"}, kind="pitfall")
+    res = kb.list(KBListQuery(scope_filter={"model": "m"}, kind="pitfall"))
     assert res["count"] == 0
-    res2 = kb.list(scope_filter={"model": "m"}, kind="technique")
+    res2 = kb.list(KBListQuery(scope_filter={"model": "m"}, kind="technique"))
     assert res2["count"] == 1
 
 

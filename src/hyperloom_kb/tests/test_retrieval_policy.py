@@ -3,59 +3,50 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
 
 from hyperloom_kb import (
     LEXICAL_FUZZY_PROVIDER_REF,
-    Change,
     Experience,
     ExperienceDeclaration,
-    ExperienceService,
     ExperienceStatus,
     FieldDeclaration,
+    FieldKind,
+    FieldRole,
     InMemoryExperienceStore,
     InMemoryQueryViewStore,
-    InMemorySchemaRegistry,
     LexicalFuzzyProvider,
-    LocalRetrievalService,
     ObjectiveDeclaration,
-    ObjectiveDirection,
-    Outcome,
     Provenance,
-    QueryRequest,
-    QueryViewMaintainer,
     RepresentativePolicy,
     RetrievalCapability,
     RetrievalConfiguration,
     RetrievalPolicyError,
-    RetrievalRunner,
-    SemanticCandidateProvider,
-    SemanticHit,
     derive_experience_id,
-    provider_refs,
 )
+from hyperloom_kb.tests.view_fixtures import publish_view, submit_complete
 
 NOW = datetime(2026, 9, 21, tzinfo=timezone.utc)
 
 
-def _declaration() -> ExperienceDeclaration:
+def _declaration(*, content_search: float | None = None) -> ExperienceDeclaration:
     return ExperienceDeclaration(
+        objectives=(ObjectiveDeclaration("throughput@v1", "Maximize throughput."),),
         identity=(
             FieldDeclaration("model", "Model."),
             FieldDeclaration("gpu", "GPU."),
         ),
-        baseline_identity=(FieldDeclaration("config", "Baseline."),),
-        change_identity=(FieldDeclaration("knob", "Knob."),),
-        objectives=(
-            ObjectiveDeclaration(
-                "throughput@v1",
-                ObjectiveDirection.HIGHER_IS_BETTER,
-                "Throughput.",
-            ),
+        baseline=(FieldDeclaration("config", "Baseline.", group=True),),
+        change=(
+            FieldDeclaration("knob", "Knob.", group=True),
+            FieldDeclaration("summary", "What changed.", role=FieldRole.SUMMARY, search=4),
+            FieldDeclaration("content", "The change.", kind=FieldKind.TEXT, search=content_search),
         ),
-        decisions=("keep", "revert"),
+        outcome=(FieldDeclaration("decision", "Decision.", role=FieldRole.DECISION, values=("keep", "revert")),),
+        reflection=(FieldDeclaration("text", "Reflection.", kind=FieldKind.TEXT),),
     )
 
 
@@ -66,6 +57,7 @@ def _experience(
     reasoning: str,
     *,
     model: str = "qwen3",
+    content: str = "",
 ) -> Experience:
     return Experience(
         id=derive_experience_id("policy-test", run_id, 0),
@@ -75,47 +67,23 @@ def _experience(
         completed_at=NOW,
         identity={"model": model, "gpu": "mi355x"},
         objective="throughput@v1",
-        baseline_identity={"config": "default"},
-        baseline_value=100.0,
+        baseline={"config": "default"},
         provenance=Provenance("policy-test", "1"),
         schema_ref=schema.schema_ref,
         status=ExperienceStatus.COMPLETE,
-        reasoning=reasoning,
-        change=Change({"knob": knob}, f"Change {knob}.", kind="config"),
-        outcome=Outcome("keep", 110.0),
-        reflection="The measured result improved.",
+        rationale={"reasoning": reasoning},
+        change={"knob": knob, "summary": f"Change {knob}.", **({"content": content} if content else {})},
+        outcome={"decision": "keep"},
+        reflection={"text": "The measured result improved."},
     )
 
 
-def _setup():
-    schema = _declaration()
-    schemas = InMemorySchemaRegistry()
+def _views(schema: ExperienceDeclaration, *records: Experience):
     experiences = InMemoryExperienceStore()
     views = InMemoryQueryViewStore()
-    service = ExperienceService(schemas, experiences)
-    service.register_schema(schema)
-    page = _experience(
-        schema,
-        "run-page",
-        "page_size",
-        "Page size may reduce allocator fragmentation.",
-    )
-    chunk = _experience(
-        schema,
-        "run-chunk",
-        "chunk",
-        "Larger chunks may reduce scheduler dispatch overhead.",
-    )
-    for item in (page, chunk):
-        service.submit_complete(item)
-    fuzzy = LexicalFuzzyProvider(experiences)
-    view = QueryViewMaintainer(schemas, experiences, views).rebuild(
-        schema.schema_ref,
-        fuzzy_ready=True,
-        semantic_ready=False,
-    )
-    retrieval = LocalRetrievalService(experiences, views, providers=(fuzzy,))
-    return schema, experiences, view, retrieval, page, chunk, fuzzy
+    submit_complete(schema, experiences, *records)
+    publish_view(schema, experiences, views, fuzzy_ready=True)
+    return experiences, views.current_view(schema.schema_ref)
 
 
 def test_configuration_is_content_addressed_and_round_trips() -> None:
@@ -161,105 +129,38 @@ def test_configuration_cannot_silently_omit_fuzzy() -> None:
         )
 
 
-def test_runner_executes_available_capabilities_and_records_unavailable() -> None:
-    schema, _, view, retrieval, page, chunk, fuzzy = _setup()
-    config = RetrievalConfiguration.create(
-        schema.schema_ref,
-        "parallel-tools@v1",
-        provider_refs={RetrievalCapability.FUZZY: fuzzy.provider_ref},
-        ranking_policy_ref="capability-priority@v1",
+def test_fuzzy_finds_an_experience_by_its_notes() -> None:
+    schema = _declaration()
+    plain = _experience(schema, "run-plain", "page_size", "The measured bottleneck suggests this knob.")
+    noted = replace(
+        _experience(schema, "run-noted", "chunk", "The measured bottleneck suggests this knob."),
+        notes={"interconnect": "XGMI links saturate during the all-reduce."},
     )
-    request = QueryRequest(
-        schema.schema_ref,
-        exact_where={"change.identity.knob": "page_size"},
-        filter_where={"identity.model": "qwen3"},
-        intent="scheduler dispatch chunks",
+    experiences, view = _views(schema, plain, noted)
+
+    hits = LexicalFuzzyProvider(experiences, schema).recall({"text": "xgmi links saturate"}, view, limit=10)
+
+    assert [(hit.experience_id, hit.details["matched_tokens"]) for hit in hits] == [
+        (noted.id, ["link", "saturate", "xgmi"]),
+        (plain.id, []),
+    ]
+
+
+@pytest.mark.parametrize(("content_search", "matched"), [(None, []), (1.0, ["fragmentation"])])
+def test_fuzzy_reads_only_the_fields_the_declaration_weights(content_search, matched) -> None:
+    schema = _declaration(content_search=content_search)
+    record = _experience(
+        schema, "run-content", "page_size", "The measured bottleneck suggests this knob.", content="--fix fragmentation"
     )
+    experiences, view = _views(schema, record)
 
-    result = RetrievalRunner(
-        retrieval,
-        provider_refs=provider_refs((fuzzy,)),
-    ).execute(request, config, view=view)
+    hits = LexicalFuzzyProvider(experiences, schema).recall({"text": "fragmentation"}, view, limit=10)
 
-    assert RetrievalCapability.EXACT in result.retrieval.executed_capabilities
-    assert RetrievalCapability.FILTER in result.retrieval.executed_capabilities
-    assert RetrievalCapability.FUZZY in result.retrieval.executed_capabilities
-    assert result.retrieval.unavailable_capabilities == (RetrievalCapability.SEMANTIC,)
-    assert result.representative_ids[0] == page.id
-    assert {page.id, chunk.id} >= set(result.representative_ids)
-    assert result.ranked_group_keys
-    assert result.retrieval.rendered.rendered_refs
-    assert result.candidate_count == 2
-
-
-class _SemanticBackend:
-    provider_ref = "test-semantic@v1"
-
-    def __init__(self, experience_id: str) -> None:
-        self.experience_id = experience_id
-
-    def search(self, text: str, *, limit: int) -> tuple[SemanticHit, ...]:
-        assert text
-        return (SemanticHit(self.experience_id, 0.95, {"backend": "test"}),)[:limit]
-
-
-def test_semantic_adapter_is_version_pinned() -> None:
-    schema, experiences, _, _, page, _, fuzzy = _setup()
-    semantic = SemanticCandidateProvider(_SemanticBackend(page.id))
-    schemas = InMemorySchemaRegistry()
-    schemas.register_schema(schema)
-    views = InMemoryQueryViewStore()
-    view = QueryViewMaintainer(schemas, experiences, views).rebuild(
-        schema.schema_ref,
-        fuzzy_ready=True,
-        semantic_ready=True,
-    )
-    service = LocalRetrievalService(experiences, views, providers=(fuzzy, semantic))
-    config = RetrievalConfiguration.create(
-        schema.schema_ref,
-        "semantic@v1",
-        provider_refs={
-            RetrievalCapability.FUZZY: fuzzy.provider_ref,
-            RetrievalCapability.SEMANTIC: semantic.provider_ref,
-        },
-    )
-
-    result = RetrievalRunner(
-        service,
-        provider_refs=provider_refs((fuzzy, semantic)),
-    ).execute(
-        QueryRequest(schema.schema_ref, intent="allocator fragmentation"),
-        config,
-        view=view,
-    )
-
-    assert RetrievalCapability.SEMANTIC in result.retrieval.executed_capabilities
-    assert result.retrieval.unavailable_capabilities == ()
-    assert page.id in result.representative_ids
-
-
-def test_runner_rejects_provider_version_drift() -> None:
-    schema, _, view, retrieval, _, _, fuzzy = _setup()
-    config = RetrievalConfiguration.create(
-        schema.schema_ref,
-        "pinned@v1",
-        provider_refs={RetrievalCapability.FUZZY: "different-provider@v1"},
-    )
-
-    with pytest.raises(RetrievalPolicyError, match="provider does not match"):
-        RetrievalRunner(
-            retrieval,
-            provider_refs=provider_refs((fuzzy,)),
-        ).execute(QueryRequest(schema.schema_ref, intent="scheduler"), config, view=view)
+    assert [hit.details["matched_tokens"] for hit in hits] == [matched]
 
 
 def test_fuzzy_penalizes_explicit_model_size_mismatch() -> None:
     schema = _declaration()
-    schemas = InMemorySchemaRegistry()
-    experiences = InMemoryExperienceStore()
-    views = InMemoryQueryViewStore()
-    service = ExperienceService(schemas, experiences)
-    service.register_schema(schema)
     qwen14 = _experience(
         schema,
         "run-qwen14",
@@ -274,28 +175,8 @@ def test_fuzzy_penalizes_explicit_model_size_mismatch() -> None:
         "Wider batching may reduce scheduler overhead.",
         model="Qwen3-8B",
     )
-    for item in (qwen14, qwen8):
-        service.submit_complete(item)
-    fuzzy = LexicalFuzzyProvider(experiences)
-    view = QueryViewMaintainer(schemas, experiences, views).rebuild(
-        schema.schema_ref,
-        fuzzy_ready=True,
-    )
-    retrieval = LocalRetrievalService(experiences, views, providers=(fuzzy,))
-    config = RetrievalConfiguration.create(
-        schema.schema_ref,
-        "model-boundary@v1",
-        provider_refs={RetrievalCapability.FUZZY: fuzzy.provider_ref},
-        ranking_policy_ref="max-hit-score@v1",
-    )
+    experiences, view = _views(schema, qwen14, qwen8)
 
-    result = RetrievalRunner(
-        retrieval,
-        provider_refs=provider_refs((fuzzy,)),
-    ).execute(
-        QueryRequest(schema.schema_ref, intent="Qwen 14B scheduler batching"),
-        config,
-        view=view,
-    )
+    hits = LexicalFuzzyProvider(experiences, schema).recall({"text": "Qwen 14B scheduler batching"}, view, limit=10)
 
-    assert result.representative_ids[:2] == (qwen14.id, qwen8.id)
+    assert [hit.experience_id for hit in hits[:2]] == [qwen14.id, qwen8.id]

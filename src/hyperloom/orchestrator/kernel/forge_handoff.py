@@ -5,15 +5,23 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import is_secret_shaped_env_name, redact_secret_values
-from hyperloom.common.io import atomic_write_text
+from hyperloom.common.io import WriteOptions, atomic_write_text
 from hyperloom.common.kernel_source_contract import SOURCE_RESOLUTION_FILENAME
+from hyperloom.inference_optimizer.roofline_snapshot import extract_workload_summary
 from hyperloom.inference_optimizer.session.session_paths import forge_handoff_dir
 from hyperloom.orchestrator.kernel.campaign_baseline import campaign_repositories
+from hyperloom.orchestrator.kernel.gemm_shape_coverage import parse_aiter_shape_lookups, traced_gemm_shapes
+from hyperloom.orchestrator.measurement.runtime_findings import (
+    AITER_TUNED_MISS,
+    load_runtime_findings,
+    render_runtime_findings,
+)
 
 WORKLOAD_FILENAME = "workload.md"
 SERVING_CONTEXT_FILENAME = "serving-context.md"
@@ -85,8 +93,7 @@ def build_serving_context_md(
     context = _workload_context(state)
     spec = dict(env_spec) if isinstance(env_spec, Mapping) else {}
     config = spec.get("config") if isinstance(spec.get("config"), Mapping) else {}
-    current_best = getattr(state, "current_best", None)
-    current_best = current_best if isinstance(current_best, Mapping) else {}
+    current_best = getattr(state, "current_best", None) or {}
     serving_config = context.get("serving_config")
     serving_config = serving_config if isinstance(serving_config, Mapping) else {}
 
@@ -201,7 +208,53 @@ def build_trace_evidence_md(state: Any) -> str:
                 lines.append(f"- {_display(warning)}")
     else:
         lines.append("- none")
+
+    lines.extend(
+        ["", "## Exposed Memcpy", "", "```text", _exposed_memcpy_line(analysis.get("analysis_md_path")), "```"]
+    )
+    lines.extend(["", "## Runtime Findings", ""])
+    measurement = getattr(state, "current_best_measurement", None)
+    lines.extend(["```text", render_runtime_findings(measurement) if measurement else "not available", "```"])
+    lines.extend(["", "## Hot GEMMs Missing Tuned Config", ""])
+    profiled = {"launch_evidence_path": str(getattr(state, "last_profile_launch_evidence_path", "") or "")}
+    lines.extend(["```text", *_tuned_miss_lines(candidates_path, profiled), "```"])
     return "\n".join(lines) + "\n"
+
+
+def _exposed_memcpy_line(analysis_md_path: Any) -> str:
+    """Exposed memcpy share read beside analysis.md, which omits it."""
+    path_text = _absolute_path(analysis_md_path)
+    memcpy_pct = extract_workload_summary(path_text)["memcpy_pct"] if path_text else None
+    return "not available" if memcpy_pct is None else f"exposed_memcpy={memcpy_pct}% of GPU time"
+
+
+def _tuned_miss_lines(candidates_path: str, profiled: Mapping[str, Any]) -> list[str]:
+    """Name the candidate GEMM rows whose traced shapes the profiled run's server log reported as untuned.
+
+    Prefill M depends on batching, so only the run that produced the trace can match its shapes.
+    """
+    findings = load_runtime_findings(profiled)
+    entry = next((f for f in (findings or {}).get("findings", []) if f["rule_id"] == AITER_TUNED_MISS), None)
+    if entry is None or not candidates_path or not Path(candidates_path).is_file():
+        return ["not available"]
+    if entry["status"] == "unknown":
+        return [f"unknown: {entry['reason']}"]
+    if entry["status"] == "not_detected":
+        return ["none: the profiled server log reports no tuned-config miss"]
+    missed, _hit = parse_aiter_shape_lookups(Path(findings["log_path"]).read_text(encoding="utf-8", errors="replace"))
+    rows = json.loads(Path(candidates_path).read_text(encoding="utf-8")).get("hot_kernels", [])
+    lines = []
+    for row in rows:
+        shapes = sorted({shape for shape, _calls in traced_gemm_shapes(row) if shape in missed})
+        if shapes:
+            dims = ", ".join(f"M={m} N={n} K={k}" for m, n, k in shapes)
+            lines.append(
+                f"- {_display(row.get('kernel_id'))} {_display(row.get('name'))} gpu_pct={row.get('gpu_pct')}: {dims}"
+            )
+    if not lines:
+        lines.append(f"- no hot GEMM shape matches the {len(missed)} missed shape(s)")
+    lines.append("Rows not listed: unknown; a tuned-config hit is only logged under AITER_LOG_TUNED_CONFIG.")
+    return lines
 
 
 def write_forge_handoff(
@@ -228,10 +281,7 @@ def write_forge_handoff(
         atomic_write_text(
             handoff_dir / filename,
             text,
-            make_parents=True,
-            fsync=True,
-            fsync_dir=True,
-            mode=0o600,
+            options=WriteOptions(make_parents=True, fsync=True, fsync_dir=True, mode=0o600),
         )
     return handoff_dir
 

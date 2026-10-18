@@ -442,7 +442,7 @@ async def bench_wallclock(
         if on_result:
             on_result(result)
         return result
-    elif agg_match:
+    if agg_match:
         stat_label = agg_match.group(1)  # "median_ms" or "mean_ms"
         agg_value = float(agg_match.group(2))
         stat_name = "mean" if stat_label == "mean_ms" else "median"
@@ -460,15 +460,14 @@ async def bench_wallclock(
         if on_result:
             on_result(result)
         return result
-    else:
-        return {
-            "success": False,
-            "message": (
-                "NO TIMING DATA in output. Driver must print 'wall_ms: X.XX' "
-                "per iteration or a single 'median_ms: X.XX' / 'mean_ms: X.XX' summary."
-            ),
-            "output": full_output[-1500:],
-        }
+    return {
+        "success": False,
+        "message": (
+            "NO TIMING DATA in output. Driver must print 'wall_ms: X.XX' "
+            "per iteration or a single 'median_ms: X.XX' / 'mean_ms: X.XX' summary."
+        ),
+        "output": full_output[-1500:],
+    }
 
 
 def _sweep_failure(message: str, **extra: Any) -> dict:

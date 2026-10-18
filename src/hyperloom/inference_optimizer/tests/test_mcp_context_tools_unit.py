@@ -97,6 +97,19 @@ def test_recent_outcomes_not_wired_and_wired():
     assert p2.recent_outcomes(4) == "out(4)"
 
 
+def test_runtime_findings_reads_current_best_slot(tmp_path):
+    slot = tmp_path / "variant_00_v"
+    slot.mkdir()
+    (slot / "runtime_findings.json").write_text(
+        json.dumps({"framework": "vllm", "log_path": "/s/server.log", "findings": []}), encoding="utf-8"
+    )
+    state = SimpleNamespace(current_best_measurement={"launch_evidence_path": str(slot / "launch_evidence.json")})
+    p = mct.ContextProvider(shared_state=state)
+
+    assert p.runtime_findings() == "runtime findings for /s/server.log [vllm]"
+    assert "get_runtime_findings" in mct.CONTEXT_TOOL_NAMES
+
+
 def test_tool_name_tuples():
     assert "get_mission_status" in mct.CONTEXT_TOOL_NAMES
     assert mct.CONTEXT_TOOL_QUALIFIED_NAMES[0].startswith("mcp__")

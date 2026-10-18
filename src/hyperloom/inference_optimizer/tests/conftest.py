@@ -422,12 +422,6 @@ def build_coord(tmp_path):
     return make_coordinator(tmp_path)
 
 
-@pytest.fixture
-def build_lifecycle(build_coord):
-    """``BuildLifecycleCollaborator`` from the ``build_coord`` coordinator."""
-    return build_coord.build_lifecycle
-
-
 def patch_integrate_patch_roots(monkeypatch, tmp_path: Path) -> None:
     """Register common tmp_path framework repos as integrate_patch search roots."""
     from hyperloom.orchestrator.actions.executors import integrate_patch as ip
@@ -619,3 +613,44 @@ def serving_lease_on_a_ray_double(monkeypatch):
     monkeypatch.setattr(rb, "get_ray_backend", lambda: SimpleNamespace(ensure=lambda **_kw: None))
     with rs.ServingLease(num_gpus=1) as lease:
         yield lease
+
+
+def cli_call_sequence(entry: str) -> list[str]:
+    """Every call ``entry`` makes, in source order, descending into this module's own functions.
+
+    The optimize driver's phases live in sibling functions rather than in one
+    body, so an ordering contract that once read off a single function now spans
+    several. Flattening the path restores the only thing those contracts were
+    ever about -- what happens before what -- and keeps them readable from the
+    source, which is the point of asserting on it at all.
+
+    Recursion stops at a function already on the path, so a cycle cannot hang
+    the test.
+    """
+    import ast
+    import pathlib
+
+    from hyperloom.inference_optimizer import cli
+
+    tree = ast.parse(pathlib.Path(cli.__file__).read_text(encoding="utf-8"))
+    functions = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+    def own_calls(node: ast.AST) -> list[str]:
+        found = [
+            (call.lineno, call.col_offset, call.func.id)
+            for call in ast.walk(node)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+        ]
+        return [name for _lineno, _col, name in sorted(found)]
+
+    def walk(name: str, path: tuple[str, ...]) -> list[str]:
+        if name in path or name not in functions:
+            return []
+        sequence: list[str] = []
+        for called in own_calls(functions[name]):
+            sequence.append(called)
+            sequence.extend(walk(called, path + (name,)))
+        return sequence
+
+    assert entry in functions, f"{entry} is not a module-level function of the CLI any more"
+    return walk(entry, ())

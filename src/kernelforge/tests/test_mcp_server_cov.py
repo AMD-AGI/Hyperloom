@@ -205,13 +205,3 @@ def test_bench_bad_case_ms_skipped(tmp_path):
     drv = _write_driver(tmp_path, "b.py", "print('wall_ms: 1.0')\nprint('case_ms: caseB notanumber')\n")
     result = asyncio.run(bench_wallclock(drv))
     assert result["case_times"] == {}
-
-
-# ─── build / pmc / registers dispatch (mock the GPU-bound tool coroutines) ───
-
-
-def _async_stub(return_value):
-    async def _stub(*args, **kwargs):
-        return return_value
-
-    return _stub

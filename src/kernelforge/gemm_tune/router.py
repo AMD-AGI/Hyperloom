@@ -146,8 +146,8 @@ def _detect_1stage_from_log(log_path: str | None) -> bool:
         return False
 
 
-# Normalize non-canonical quant-type spellings callers may pass (e.g. a runtime --quantization value or a tuner name)
-# to the router's canonical vocabulary.
+# Normalize non-canonical quant-type spellings callers may pass (e.g. a runtime --quantization value or a tuner name),
+# and aiter's QuantType names as its dispatch lines print them, to the router's canonical vocabulary.
 _QUANT_TYPE_ALIASES: dict[str, str] = {
     "w8a8_fp8": "per_token",
     "fp8_w8a8": "per_token",
@@ -165,6 +165,8 @@ _QUANT_TYPE_ALIASES: dict[str, str] = {
     "blockscale+bpreshuffle": "blockscale_bpreshuffle",
     "a4w4_blockscale": "fp4",
     "a4w4": "fp4",
+    "per_1x32": "fp4",
+    "no": "none",
 }
 
 
@@ -189,6 +191,36 @@ def _normalize_precision(precision_arg: str) -> str:
     """Map a caller-supplied precision onto the router's canonical vocabulary."""
     p = (precision_arg or "").strip().lower()
     return _PRECISION_ALIASES.get(p, p)
+
+
+# The fused-MoE weight dtypes aiter prints, as the precision the MoE tuners route on. Only formats those tuners have an
+# arm for are listed; any other dtype is no evidence, and the checkpoint's declared expert format decides.
+_PRECISION_BY_AITER_DTYPE: dict[str, str] = {
+    "torch.float4_e2m1fn_x2": "fp4",
+    "torch.float8_e4m3fn": "fp8",
+    "torch.float8_e4m3fnuz": "fp8",
+    "torch.bfloat16": "bf16",
+    "torch.float16": "fp16",
+}
+# The aiter QuantType members, lower-cased, that _normalize_quant_type maps onto a MoE tuner arm. Like an unlisted
+# dtype, any other member is no evidence.
+_MOE_AITER_QUANT_TYPES = frozenset({"no", "per_tensor", "per_token", "per_1x32", "per_1x128"})
+
+
+def _logged_moe_format(kernel_signature_log: str | None) -> tuple[str, str] | None:
+    """The precision and quant type the runtime's most-missed fused-MoE problem ran at, if the log shows one."""
+    if not kernel_signature_log or not Path(kernel_signature_log).is_file():
+        return None
+    from .evidence import moe_dispatch_keys, parse_log_file
+
+    keys = moe_dispatch_keys(parse_log_file(kernel_signature_log))
+    if not keys:
+        return None
+    precision = _PRECISION_BY_AITER_DTYPE.get(keys[0]["q_dtype_w"])
+    quant_type = keys[0]["q_type"].rpartition(".")[2].lower()
+    if precision is None or quant_type not in _MOE_AITER_QUANT_TYPES:
+        return None
+    return precision, _normalize_quant_type(quant_type)
 
 
 def _profile_can_derive_dense(profile: ModelProfile) -> bool:
@@ -239,6 +271,33 @@ def _resolve_quant_type(
     return "none"
 
 
+def _routed_formats(
+    profile: ModelProfile,
+    precision: str,
+    quant_type: str,
+    kernel_signature_log: str | None,
+) -> tuple[tuple[str, str], tuple[str, str]]:
+    """The (precision, quant type) pairs the MoE and the dense tuners route on, in that order.
+
+    An empty precision, or one that only names the checkpoint's quantization toolkit (Quark's ``quark``), says nothing
+    the router can route on. Unless the caller named a quant type, the MoE lane then routes on the format the serving
+    log shows the experts dispatching at. Otherwise -- and always for the dense lane, which that line does not cover --
+    the formats nested in the checkpoint stand in: one for the routed experts and one for the other linear layers,
+    which a Quark checkpoint can store differently (MXFP4 experts, fp8 attention). Any other precision is the caller's
+    statement of what runs, and holds for both.
+    """
+
+    def _with_quant_type(lane_precision: str) -> tuple[str, str]:
+        return lane_precision, _resolve_quant_type(lane_precision, quant_type, profile, kernel_signature_log)
+
+    if precision and precision != _normalize_precision(profile.quant_method):
+        stated = _with_quant_type(precision)
+        return stated, stated
+    logged = _logged_moe_format(kernel_signature_log) if quant_type in ("", "auto") else None
+    moe = logged or _with_quant_type(profile.expert_precision or precision)
+    return moe, _with_quant_type(profile.dense_precision or precision)
+
+
 def select_tuners(
     profile: ModelProfile,
     *,
@@ -254,17 +313,19 @@ def select_tuners(
 ) -> list[TunerSpec]:
     """Select which tuner(s) to run based on model + framework + precision."""
     resolved_precision = _normalize_precision(precision)
-    resolved_qt = _resolve_quant_type(resolved_precision, quant_type, profile, kernel_signature_log)
     gfx_arch = _resolve_gfx_arch(gpu_type)
     tuners: list[TunerSpec] = []
 
     if framework in ("sglang", "vllm-aiter"):
+        (moe_precision, moe_quant_type), (dense_precision, dense_quant_type) = _routed_formats(
+            profile, resolved_precision, quant_type, kernel_signature_log
+        )
+        tuners.extend(_select_sglang_moe_tuners(profile, moe_precision, moe_quant_type, kernel_signature_log, gfx_arch))
         tuners.extend(
-            _select_sglang_tuners(
+            _select_sglang_dense_tuners(
                 profile,
-                resolved_precision,
-                resolved_qt,
-                kernel_signature_log,
+                dense_precision,
+                dense_quant_type,
                 has_untuned_csv,
                 has_shapes_json,
                 gfx_arch,
@@ -275,7 +336,7 @@ def select_tuners(
             _select_vllm_tuners(
                 profile,
                 resolved_precision,
-                resolved_qt,
+                _resolve_quant_type(resolved_precision, quant_type, profile, kernel_signature_log),
                 has_shapes_json,
                 has_tunableop_input,
             )
@@ -384,20 +445,17 @@ def _tuners_the_demand_says_are_needed(
     return added
 
 
-def _select_sglang_tuners(
+def _select_sglang_moe_tuners(
     profile: ModelProfile,
     precision: str,
     quant_type: str,
     kernel_signature_log: str | None,
-    has_untuned_csv: bool,
-    has_shapes_json: bool,
-    gfx_arch: str = "",
+    gfx_arch: str,
 ) -> list[TunerSpec]:
-    """Select tuners for sglang framework."""
+    """Select the MoE tuner for the sglang framework."""
     tuners: list[TunerSpec] = []
     fp4_unsupported = _fp4_unsupported_on(gfx_arch)
 
-    # --- MoE tuning ---
     if profile.is_moe:
         if quant_type == "per_token":
             # 1-stage ASM already optimal (validated in experiments)
@@ -446,9 +504,23 @@ def _select_sglang_tuners(
                     estimated_minutes=0,
                 )
             )
+    return tuners
 
-    # --- Dense GEMM tuning --- Dense fp8/fp4 tuners do not require an externally-recorded CSV: when none is
-    # supplied they derive GEMM shapes from the model config (same as the bf16 dense path).
+
+def _select_sglang_dense_tuners(
+    profile: ModelProfile,
+    precision: str,
+    quant_type: str,
+    has_untuned_csv: bool,
+    has_shapes_json: bool,
+    gfx_arch: str,
+) -> list[TunerSpec]:
+    """Select the dense GEMM tuners for the sglang framework."""
+    tuners: list[TunerSpec] = []
+    fp4_unsupported = _fp4_unsupported_on(gfx_arch)
+
+    # Dense fp8/fp4 tuners do not require an externally-recorded CSV: when none is supplied they derive GEMM shapes
+    # from the model config (same as the bf16 dense path).
     def _dense_spec(name: str) -> TunerSpec:
         if has_untuned_csv or has_shapes_json or _profile_can_derive_dense(profile):
             return TunerSpec(name, priority=20, estimated_minutes=20)

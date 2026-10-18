@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from hyperloom.orchestrator.actions.executors._grid_runner import (
+from hyperloom.inference_optimizer.grid_server_args import (
     DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC,
     inject_sglang_watchdog_timeout,
     resolve_sglang_watchdog_timeout,

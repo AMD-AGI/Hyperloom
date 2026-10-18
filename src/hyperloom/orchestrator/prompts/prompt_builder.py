@@ -219,7 +219,7 @@ def _section_phase_semantics(
         "",
         "The Coordinator runs the optimization as a linear pipeline.",
         "Each tick it injects a `=== Phase ===` block with the current",
-        "phase. Per-phase proposable action sets (informational):",
+        "phase. Per-phase proposable action sets (enforced at admission):",
         "",
     ]
     if disabled_suffix:
@@ -246,7 +246,7 @@ def _section_phase_semantics(
             "KERNEL_AGENT / SWEEP; the wall-clock deadline (closing phase) routes",
             "to CLOSE.",
             "You may also emit `escalate_strategy_change{next_action_hint=",
-            "'skip_to_kernel'}` in EXPLORE or FRAMEWORK_AGENT when you judge",
+            "'skip_to_kernel'}` in FRAMEWORK_AGENT when you judge",
             "the current phase exhausted; the Coordinator validates the hint",
             "vocab and routes the transition on the next tick. `skip_to_close`",
             "is not in that set — see the exception below for when it applies.",
@@ -559,6 +559,15 @@ def _section_action_catalogue(actions: list[ActionMetadata]) -> list[str]:
     return lines
 
 
+def _stop_report_step(phase_key: str) -> str:
+    """The Stop step's ``report`` instruction: admission refuses ``report`` in a phase that does not offer it."""
+    from ..phases.machine_state import allowed_actions_for
+
+    if not phase_key or "report" in allowed_actions_for(phase_key):
+        return "propose `report` once (if not already done)"
+    return "do not propose `report` (only CLOSE allows it, and the Coordinator routes the run there)"
+
+
 def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transport: str = "") -> list[str]:
     """Build the DECISION FRAMEWORK section lines.
 
@@ -597,7 +606,7 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
         "sequence. Read the dynamic SharedState section and decide:",
         "",
         "1. **Stop**: if `stop_reason` is set OR `cumulative_gain_validated >= target_gain_pct`,",
-        "   propose `report` once (if not already done) then send an observation 'goal-reached'.",
+        f"   {_stop_report_step(phase_key)} then send an observation 'goal-reached'.",
         *measure_lines,
         "3. **Stack-aware grids**: route every grid attempt through",
         "   ``delegate{action_name='explore', params={grid: [...] }}``;",
@@ -631,10 +640,12 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
             "   c. **KB sub-graphs + warm-start recipe** when present —",
             "      cross-session priors carry " + "*qualitative* hints (what worked / what failed last time).",
             "   d. **`=== Untested proposals (current cycle) ===`** — the",
-            "      executable specialist proposals this cycle that no explore",
-            "      round has benched, ranked by gap severity. The Coordinator",
+            "      executable proposals this cycle that no explore round has",
+            "      benched: predictor rows (`provenance: primatune`) first, then",
+            "      specialist proposals ranked by gap severity. The Coordinator",
             "      benches this queue itself; your own grid adds only what it",
-            "      does not already hold.",
+            "      does not already hold, except predictor rows, which you copy",
+            "      verbatim unless the block names them as already in a grid.",
             "   e. **Ordering facts**: baseline runs before anything else",
             "      (invariant). ``analysis.md`` / ``last_profile_trace`` arrive",
             "      automatically from the Coordinator-owned analysis task at",
@@ -647,7 +658,7 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
             "   In OPTIMIZE the Plateau advisory reports each arm separately: BOTH arms",
             "   dry advances to KERNEL_AGENT (``reason=optimize_no_more_leverage``) at",
             "   the next phase-compute, while one arm dry means work the other.",
-            "   When you judge EXPLORE or FRAMEWORK_AGENT exhausted,",
+            "   When you judge FRAMEWORK_AGENT exhausted,",
             "   emit ``escalate_strategy_change{next_action_hint=",
             "   'skip_to_kernel'}``. `skip_to_close` is not a",
             "   phase advance -- see PHASE CONTRACT before emitting it.",
@@ -756,7 +767,8 @@ def _idea_generation_lines() -> list[str]:
         "",
         "The Coordinator benches `=== Untested proposals (current cycle) ===`",
         "itself; build your own grid from the five moves above to a target of 4",
-        "(hard maximum 6), leaving out anything that queue already holds.",
+        "(hard maximum 6), leaving out anything that queue already holds except",
+        "the predictor rows it asks you to carry verbatim.",
         "",
         "An explore round that produces zero new ideas is a bug — send an observation",
         "with body_md='idea-pipeline-empty' and explain which search directions are exhausted.",

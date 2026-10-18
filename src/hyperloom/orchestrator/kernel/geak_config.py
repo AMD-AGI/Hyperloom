@@ -268,7 +268,7 @@ def _geak_has_accepted_kernel(result: Any) -> bool:
     return bool(_geak_accepted_kernel_specs(result))
 
 
-def _geak_overlay_is_loadable(overlay: str) -> bool:
+def geak_overlay_is_loadable(overlay: str) -> bool:
     """Report whether an overlay dir can actually install an authored kernel."""
     from hyperloom.common.overlay import overlay_is_loadable
 
@@ -308,11 +308,18 @@ def _geak_overlay_digest(overlay: str) -> str:
 
 
 def _geak_sweep_measured_tput(res: dict[str, Any]) -> float | None:
-    """The measured throughput a ``sweep_via_geak`` replay produced, or None."""
+    """The value a ``sweep_via_geak`` replay measured on its requested axis, or None.
+
+    ``measured_value`` is the axis-neutral field; the ``output_throughput`` fallback keeps results recorded before it
+    existed readable. Off the output axis only the neutral field is populated, because there the number is not a
+    throughput.
+    """
     if not isinstance(res, dict):
         return None
     best = res.get("promotion_measurement")
     if not isinstance(best, dict):
         return None
-    tput = best.get("output_throughput")
+    tput = best.get("measured_value")
+    if not isinstance(tput, (int, float)):
+        tput = best.get("output_throughput")
     return float(tput) if isinstance(tput, (int, float)) and tput > 0 else None

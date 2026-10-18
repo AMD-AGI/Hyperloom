@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from .event_fields import (
@@ -43,7 +44,7 @@ from .event_fields import (
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
 from .event_sink import RecordSink, make_sink
-from .event_timeline import finish_event, open_event
+from .event_timeline import EventHeader, finish_event, open_event
 
 log = logging.getLogger(__name__)
 
@@ -89,6 +90,7 @@ ROLE_AUTHORING = "authoring"
 PRODUCER_SPECIALIST = "specialist"
 PRODUCER_ORCHESTRATION = "orchestration_agent"
 PRODUCER_SEED_GRID = "seed_grid"
+PRODUCER_PRIMATUNE = "primatune"
 
 #: Which reader evaluated a plateau. The advisory asks whether to switch arms
 #: and the exit whether the phase may leave, so a snapshot that did not say
@@ -100,11 +102,9 @@ PLATEAU_PATH_EXIT = "exit"
 #: derived from counters, so a candidate re-authored twice reads as two steps.
 STEP_PROPOSED = "proposed"
 STEP_REVIEWED = "reviewed"
-STEP_AUDITED = "audited"
 STEP_ROUTED = "routed"
 STEP_AUTHORED = "authored"
 STEP_REAUTHORED = "reauthored"
-STEP_APPLY_RETRIED = "apply_retried"
 STEP_ATTEMPTED = "attempted"
 STEP_DROPPED = "dropped"
 
@@ -133,6 +133,7 @@ __all__ = [
     "PLATEAU_PATH_EXIT",
     "PRODUCER",
     "PRODUCER_ORCHESTRATION",
+    "PRODUCER_PRIMATUNE",
     "PRODUCER_SEED_GRID",
     "PRODUCER_SPECIALIST",
     "REVIEWER_CRITIC",
@@ -147,9 +148,7 @@ __all__ = [
     "SECTION_PROPOSAL",
     "SECTION_PROPOSAL_STEP",
     "SECTION_RUN",
-    "STEP_APPLY_RETRIED",
     "STEP_ATTEMPTED",
-    "STEP_AUDITED",
     "STEP_AUTHORED",
     "STEP_DROPPED",
     "STEP_PROPOSED",
@@ -157,6 +156,7 @@ __all__ = [
     "STEP_REVIEWED",
     "STEP_ROUTED",
     "FrameworkEventRecorder",
+    "GateVerdict",
     "assemble_framework_ext",
     "framework_event_id",
     "record_review_evidence",
@@ -177,6 +177,8 @@ def producer_for_provenance(provenance: Any) -> tuple[str, str]:
         return PRODUCER_SPECIALIST, label.split(":", 1)[1].strip()
     if label == "default_grid":
         return PRODUCER_SEED_GRID, ""
+    if label == PRODUCER_PRIMATUNE:
+        return PRODUCER_PRIMATUNE, ""
     return PRODUCER_ORCHESTRATION, ""
 
 
@@ -225,6 +227,17 @@ def _resume_gate_ordinals(event: str) -> dict[tuple[str, str], int]:
     return gates
 
 
+@dataclass(frozen=True)
+class GateVerdict:
+    """One gate's verdict on an attempt. ``passed`` of ``None`` is a gate that ran but could not rule."""
+
+    gate: str
+    passed: bool | None
+    reason: str = ""
+    observed: Any = None
+    threshold: Any = None
+
+
 class FrameworkEventRecorder:
     """Records one FRAMEWORK_AGENT entry's facts, one fragment per row.
 
@@ -259,12 +272,9 @@ class FrameworkEventRecorder:
         """Put the event on the timeline. Opening is idempotent, so a phase
         whose entry hook runs twice in a cycle shares one timeline entry."""
         self._sequence = open_event(
-            event_type=EVENT_TYPE,
-            event=self.event_id,
+            EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
             event_section=SECTION_EVENT,
             producer=PRODUCER,
-            kind=EVENT_KIND,
-            start_time=self._start_time,
         )
 
     def record_policy(self, **fields: Any) -> None:
@@ -702,26 +712,16 @@ class FrameworkEventRecorder:
             }
         self._sink.record(SECTION_ATTEMPT, row, row_type=ROW_ATTEMPT, natural_ids=_key(key))
 
-    def record_attempt_gate(
-        self,
-        attempt_id: str,
-        gate: str,
-        *,
-        passed: bool | None,
-        reason: str = "",
-        observed: Any = None,
-        threshold: Any = None,
-    ) -> None:
+    def record_attempt_gate(self, attempt_id: str, verdict: GateVerdict) -> None:
         """Record one gate's verdict on one attempt, as it is evaluated.
 
         A gate that was never reached writes no row, which is how assembly
         tells "did not pass" apart from "did not apply". A whole gating
         sequence fits inside one clock tick, so order comes from an ordinal
-        assigned on the first evaluation and reused. ``passed`` of ``None``
-        is a gate that ran but could not rule.
+        assigned on the first evaluation and reused.
         """
         key = str(attempt_id or "")
-        name = str(gate or "")
+        name = str(verdict.gate or "")
         if not key or not name:
             return
         ordinal = self._gate_ordinals.get((key, name))
@@ -734,10 +734,10 @@ class FrameworkEventRecorder:
                 "attempt_id": key,
                 "gate": name,
                 "ordinal": ordinal,
-                "passed": None if passed is None else bool(passed),
-                "reason": str(reason or ""),
-                "observed": _float_or_none(observed),
-                "threshold": _float_or_none(threshold),
+                "passed": None if verdict.passed is None else bool(verdict.passed),
+                "reason": str(verdict.reason or ""),
+                "observed": _float_or_none(verdict.observed),
+                "threshold": _float_or_none(verdict.threshold),
                 # The latest ruling's time; position comes from the ordinal.
                 "ts": _now_precise(),
             },
@@ -846,13 +846,10 @@ class FrameworkEventRecorder:
         try:
             ext, derived = assemble_framework_ext(framework_event_parts(self.event_id), event=self.event_id)
             finish_event(
-                event_type=EVENT_TYPE,
-                event=self.event_id,
+                EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
                 sequence=self._sequence,
                 status=derived or status or "succeeded",
                 ext=ext,
-                kind=EVENT_KIND,
-                start_time=self._start_time,
                 end_time=end_time,
             )
         except RECORDING_ERRORS as exc:

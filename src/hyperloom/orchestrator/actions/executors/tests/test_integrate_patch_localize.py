@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import types
 
 import pytest
@@ -71,27 +72,36 @@ _CUDA_DIFF = "diff --git a/csrc/attn.cu b/csrc/attn.cu\n--- a/csrc/attn.cu\n+++ 
     [
         pytest.param({}, id="not_an_enablement_round"),
         pytest.param({"enablement": True}, id="no_dispatched_verdict"),
+        pytest.param(
+            {
+                "enablement": True,
+                "enablement_failure_signature": classify_failure(
+                    "torch.OutOfMemoryError: HIP out of memory. Tried to allocate 2.00 GiB"
+                ).to_dict(),
+            },
+            id="resource_constraint",
+        ),
         pytest.param(_params(enablement_launch_only=True), id="launch_only_bench"),
     ],
 )
 async def test_rounds_that_acquire_nothing_are_a_noop(_executor, params):
     """Only an enablement round dispatched on a code-acquirable verdict localizes."""
     attempt = _attempt()
-    assert await _executor._stage_localize_source(attempt, params, "t-1") is None
+    await _executor._stage_localize_source(attempt, params)
     assert attempt.localization_patches == []
 
 
 async def test_without_a_bridging_candidate_nothing_is_fetched(_executor):
     """A round whose discovery found no upstream ref has nothing to backport."""
     attempt = _attempt(candidate_refs=())
-    assert await _executor._stage_localize_source(attempt, _params(), "t-1") is None
+    await _executor._stage_localize_source(attempt, _params())
     assert attempt.localization_patches == []
 
 
 async def test_a_bridge_repo_candidate_is_not_localized(_executor):
     """A diff cut from aiter does not apply to the framework tree."""
     attempt = _attempt(candidate_refs=("https://github.com/ROCm/aiter/pull/99",))
-    assert await _executor._stage_localize_source(attempt, _params(), "t-1") is None
+    await _executor._stage_localize_source(attempt, _params())
     assert attempt.localization_patches == []
 
 
@@ -104,7 +114,7 @@ async def test_the_framework_ref_is_preferred_over_a_higher_ranked_bridge_ref(_e
     attempt = _attempt(
         candidate_refs=("https://github.com/ROCm/aiter/pull/99", "https://github.com/ROCm/vllm/pull/1234")
     )
-    assert await _executor._stage_localize_source(attempt, _params(), "t-1") is None
+    await _executor._stage_localize_source(attempt, _params())
     assert fetched == [("ROCm/vllm", 1234)]
 
 
@@ -124,8 +134,7 @@ async def test_python_only_writes_patch(_executor, monkeypatch):
 
     monkeypatch.setattr(gh, "pr_patches", _pr_patches)
     attempt = _attempt(candidate_refs=("PR:1234",))
-    out = await _executor._stage_localize_source(attempt, _params(), "t-1")
-    assert out is None, out
+    await _executor._stage_localize_source(attempt, _params())
     # The ref discovery recorded on the round is the PR that gets backported.
     assert fetched == [("ROCm/vllm", 1234)]
     assert len(attempt.localization_patches) == 1
@@ -152,35 +161,100 @@ async def test_localizing_does_not_displace_the_runtime_action(_executor, monkey
     attempt = _attempt()
     attempt.stack_action = runtime_action
 
-    assert await _executor._stage_localize_source(attempt, _params(), "t-1") is None
+    await _executor._stage_localize_source(attempt, _params())
     assert attempt.stack_action is runtime_action
     assert attempt.localization_action is not None
     assert attempt.localization_action.kind == "pr_backport"
 
 
 # ---------------------------------------------------------------------------
-# compiled-closure deferral: reverted, no patch
+# a change that cannot be localized is skipped, never reverted
+# ---------------------------------------------------------------------------
+
+_OUT_OF_PACKAGE_DIFF = "diff --git a/tests/test_x.py b/tests/test_x.py\n--- a/tests/test_x.py\n+++ b/tests/test_x.py\n@@ -1 +1 @@\n-a\n+b\n"
+
+
+@pytest.mark.parametrize(
+    "diff",
+    [
+        pytest.param(_CUDA_DIFF, id="compiled_closure"),
+        pytest.param("", id="fetch_failed"),
+    ],
+)
+async def test_an_unlocalizable_change_is_skipped(_executor, monkeypatch, diff):
+    import hyperloom.agents.framework.sources.github as gh
+
+    monkeypatch.setattr(gh, "pr_patches", lambda slug, num: diff)
+    attempt = _attempt()
+    await _executor._stage_localize_source(attempt, _params())
+    assert attempt.localization_patches == []
+    assert attempt.localization_action is None
+
+
+async def test_only_the_files_under_the_package_are_localized(_executor, monkeypatch):
+    import hyperloom.agents.framework.sources.github as gh
+
+    monkeypatch.setattr(gh, "pr_patches", lambda slug, num: _PY_DIFF + _OUT_OF_PACKAGE_DIFF)
+    attempt = _attempt()
+    await _executor._stage_localize_source(attempt, _params())
+    assert attempt.localization_touched == ["vllm/model/deepseek_v4.py"]
+    assert "tests/test_x.py" not in attempt.localization_patches[0].read_text()
+
+
+# ---------------------------------------------------------------------------
+# admission against the tree the round runs on
 # ---------------------------------------------------------------------------
 
 
-async def test_compiled_closure_defers_rung5(_executor, monkeypatch):
-    import hyperloom.agents.framework.sources.github as gh
+def _repo_with_model(tmp_path):
+    root = tmp_path / "tree"
+    (root / "vllm" / "model").mkdir(parents=True)
+    (root / "vllm" / "model" / "deepseek_v4.py").write_text("old\n")
+    for cmd in (
+        ["init", "-q"],
+        ["config", "user.name", "t"],
+        ["config", "user.email", "t@t"],
+        ["add", "-A"],
+        ["commit", "-qm", "base"],
+    ):
+        subprocess.run(["git", "-C", str(root), *cmd], check=True)
+    return root
 
-    monkeypatch.setattr(gh, "pr_patches", lambda slug, num: _CUDA_DIFF)
+
+def _localized(attempt, tmp_path, diff):
+    patch = tmp_path / "loc.patch"
+    patch.write_text(diff)
+    attempt.localization_patches = [patch]
+    attempt.localization_touched = ["vllm/model/deepseek_v4.py"]
+    attempt.localization_action = object()
+    attempt.pending = {"patches": ["round.patch"]}
+    return patch
+
+
+def test_a_localization_that_applies_goes_ahead_of_the_rounds_patches(tmp_path):
+    root = _repo_with_model(tmp_path)
     attempt = _attempt()
-    out = await _executor._stage_localize_source(attempt, _params(), "t-1")
-    assert out is not None
-    assert out["status"] == "reverted"
-    assert out["error_class"] == "localization_rung5_deferred"
-    assert attempt.localization_patches == []
+    loc = _localized(attempt, tmp_path, _PY_DIFF)
+    own = tmp_path / "round.patch"
+
+    out = ip.IntegratePatchExecutor._admit_localization(attempt, root, [own])
+
+    assert out == [loc, own]
+    assert attempt.pending["patches"] == [str(loc), str(own)]
+    assert attempt.localization_action is not None
 
 
-async def test_fetch_failure_reverts(_executor, monkeypatch):
-    import hyperloom.agents.framework.sources.github as gh
-
-    monkeypatch.setattr(gh, "pr_patches", lambda slug, num: "")
+def test_a_localization_that_does_not_apply_is_dropped_and_the_rounds_patches_stand(tmp_path):
+    root = _repo_with_model(tmp_path)
+    (root / "vllm" / "model" / "deepseek_v4.py").write_text("drifted\n")
+    subprocess.run(["git", "-C", str(root), "commit", "-qam", "drift"], check=True)
     attempt = _attempt()
-    out = await _executor._stage_localize_source(attempt, _params(), "t-1")
-    assert out is not None
-    assert out["status"] == "reverted"
-    assert out["error_class"] == "localization_fetch_failed"
+    _localized(attempt, tmp_path, _PY_DIFF)
+    own = tmp_path / "round.patch"
+
+    out = ip.IntegratePatchExecutor._admit_localization(attempt, root, [own])
+
+    assert out == [own]
+    assert attempt.pending["patches"] == ["round.patch"]
+    assert attempt.localization_action is None
+    assert attempt.localization_touched == []

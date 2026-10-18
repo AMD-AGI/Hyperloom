@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from kernelforge.loop import task_preparer
+from kernelforge.loop import task_preparer_prompts
+from kernelforge.loop import task_preflight
 
 
 def _workspace(tmp_path):
@@ -20,7 +22,7 @@ def _workspace(tmp_path):
 
 
 def _failing_preflight(reason="driver missing"):
-    return task_preparer.PreflightResult(ok=False, correctness_ok=False, bench_ok=False, reasons=[reason])
+    return task_preflight.PreflightResult(ok=False, correctness_ok=False, bench_ok=False, reasons=[reason])
 
 
 def _patch_git(monkeypatch):
@@ -127,7 +129,7 @@ def test_audit_records_whether_the_driver_was_edited(tmp_path, monkeypatch):
 
 def test_system_prompt_orders_writing_before_further_reading():
     """48% of observed attempts burned their whole budget without writing."""
-    prompt = task_preparer._SYSTEM_PROMPT
+    prompt = task_preparer_prompts._SYSTEM_PROMPT
 
     assert "Working order" in prompt
     assert "WRITE a complete first draft" in prompt
@@ -139,7 +141,7 @@ def test_system_prompt_orders_writing_before_further_reading():
 
 def test_reference_template_covers_the_full_contract():
     """The template the agent reads must demonstrate the COMPLETE contract."""
-    tmpl = task_preparer.REFERENCE_DRIVER_TEMPLATE
+    tmpl = task_preparer_prompts.REFERENCE_DRIVER_TEMPLATE
 
     assert "case_ms:" in tmpl
     assert "--profile-run" in tmpl
@@ -150,11 +152,11 @@ def test_reference_template_covers_the_full_contract():
 
 def test_template_verify_uses_snr_not_allclose():
     """The verify callback must use SNR, not allclose."""
-    tmpl = task_preparer.REFERENCE_DRIVER_TEMPLATE
+    tmpl = task_preparer_prompts.REFERENCE_DRIVER_TEMPLATE
     assert "_snr_db" in tmpl
     assert "allclose" not in tmpl.split("_run_bench")[1].split("def ")[0]
 
-    prompt_text = task_preparer._build_prompt(
+    prompt_text = task_preparer_prompts._build_prompt(
         evidence="## Task metadata",
         driver_rel=".forge_driver_x.py",
         reference_note="",
@@ -164,7 +166,7 @@ def test_template_verify_uses_snr_not_allclose():
 
 
 def test_user_prompt_does_not_tell_the_agent_to_read_everything_first():
-    prompt = task_preparer._build_prompt(
+    prompt = task_preparer_prompts._build_prompt(
         evidence="## Task metadata",
         driver_rel=".forge_driver_x.py",
         reference_note="",
@@ -200,7 +202,7 @@ def test_compile_only_driver_is_detected_and_flagged_in_evidence(tmp_path):
         program_md="",
         target_functions=[],
         source_files=[],
-        preflight=task_preparer.PreflightResult(
+        preflight=task_preflight.PreflightResult(
             ok=False,
             correctness_ok=False,
             bench_ok=False,
@@ -265,7 +267,7 @@ def test_regular_driver_keeps_non_conforming_heading(tmp_path):
 
 def test_all_failures_are_timeouts_property():
     """Timeout-only preflight failures get a JIT hint, crashes don't."""
-    timeout_only = task_preparer.PreflightResult(
+    timeout_only = task_preflight.PreflightResult(
         ok=False,
         correctness_ok=False,
         bench_ok=False,
@@ -277,7 +279,7 @@ def test_all_failures_are_timeouts_property():
     )
     assert timeout_only.all_failures_are_timeouts is True
 
-    crash_only = task_preparer.PreflightResult(
+    crash_only = task_preflight.PreflightResult(
         ok=False,
         correctness_ok=False,
         bench_ok=False,
@@ -288,7 +290,7 @@ def test_all_failures_are_timeouts_property():
     )
     assert crash_only.all_failures_are_timeouts is False
 
-    mixed = task_preparer.PreflightResult(
+    mixed = task_preflight.PreflightResult(
         ok=False,
         correctness_ok=False,
         bench_ok=False,
@@ -299,14 +301,14 @@ def test_all_failures_are_timeouts_property():
     )
     assert mixed.all_failures_are_timeouts is False
 
-    passing = task_preparer.PreflightResult(
+    passing = task_preflight.PreflightResult(
         ok=True,
         correctness_ok=True,
         bench_ok=True,
     )
     assert passing.all_failures_are_timeouts is False
 
-    graph_probe_timeout = task_preparer.PreflightResult(
+    graph_probe_timeout = task_preflight.PreflightResult(
         ok=False,
         correctness_ok=True,
         bench_ok=True,
@@ -316,7 +318,7 @@ def test_all_failures_are_timeouts_property():
     )
     assert graph_probe_timeout.all_failures_are_timeouts is True
 
-    graph_probe_failed_not_timeout = task_preparer.PreflightResult(
+    graph_probe_failed_not_timeout = task_preflight.PreflightResult(
         ok=False,
         correctness_ok=True,
         bench_ok=True,
@@ -367,7 +369,7 @@ def test_jit_timeout_retry_tells_agent_not_to_rewrite(tmp_path, monkeypatch):
         raise asyncio.TimeoutError
 
     async def timeout_preflight(*_a, **_k):
-        return task_preparer.PreflightResult(
+        return task_preflight.PreflightResult(
             ok=False,
             correctness_ok=False,
             bench_ok=False,
@@ -409,7 +411,7 @@ def test_external_driver_prepare_publishes_on_success(tmp_path, monkeypatch):
         return "done"
 
     async def passing_preflight(*_a, **_k):
-        return task_preparer.PreflightResult(
+        return task_preflight.PreflightResult(
             ok=True,
             correctness_ok=True,
             bench_ok=True,

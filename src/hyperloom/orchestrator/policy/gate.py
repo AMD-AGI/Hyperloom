@@ -47,6 +47,8 @@ from ..specialists.domains import (
     get_domain,
     normalize_dispatch_tags,
 )
+from .custom_specialist import deny_custom_specialist_delegate, deny_search_under_custom_only
+from .denial import PolicyDenied
 from ..specialists.profile import (
     SCOPE_DOMAIN as SPECIALIST_SCOPE_DOMAIN,
     SCOPE_DOMAINS as SPECIALIST_SCOPE_DOMAINS,
@@ -61,33 +63,6 @@ if TYPE_CHECKING:  # pragma: no cover — type-only
 
 
 log = logging.getLogger(__name__)
-
-
-class PolicyDenied(RuntimeError):
-    """Intent rejected by PolicyGate.
-
-    Attributes:
-        rule: short identifier of the rule that fired.
-        hint: optional one-line agent-actionable suggestion.
-    """
-
-    def __init__(self, reason: str, *, rule: str | None = None, hint: str | None = None):
-        """Initialise the denial with a human-readable reason and metadata.
-
-        Args:
-            reason (str): human-readable explanation passed to the base
-                ``RuntimeError``; surfaced in logs and the policy_denied
-                observation event.
-            rule (str | None): short identifier of the rule that fired,
-                used by the Coordinator to classify the denial. Defaults
-                to ``None``.
-            hint (str | None): optional one-line, agent-actionable
-                suggestion describing the canonical fix. Defaults to
-                ``None``.
-        """
-        super().__init__(reason)
-        self.rule = rule
-        self.hint = hint
 
 
 # Specialist dispatch action name.
@@ -471,8 +446,14 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("delegate intent missing action_name", rule="payload")
+        if check_source:
+            deny_search_under_custom_only(getattr(self, "shared_state", None), action_name)
         # ``specialist`` bypasses the catalogue; ``_validate_specialist_dispatch`` owns its contract.
         if action_name == SPECIALIST_ACTION_NAME:
+            params = payload.get("params")
+            # Ingress only: the Coordinator's own custom task row is replayed here at dispatch.
+            if check_source and isinstance(params, dict):
+                deny_custom_specialist_delegate(params)
             self._validate_specialist_dispatch(role, payload)
             return
         # ``integrate_patch`` requires a non-reject Critic verdict.
@@ -515,6 +496,7 @@ class PolicyGate:
         action_name = str(payload.get("action_name", "")).strip()
         if not action_name:
             raise PolicyDenied("propose_action missing action_name", rule="payload")
+        deny_search_under_custom_only(getattr(self, "shared_state", None), action_name)
         self._validate_coordinator_managed_action(action_name, intent_kind="propose_action")
         self._validate_baseline_not_mid_round(action_name)
         self._validate_gemm_tuning_action(action_name, intent_kind="propose_action")

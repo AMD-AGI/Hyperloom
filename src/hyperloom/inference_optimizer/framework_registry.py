@@ -82,6 +82,15 @@ FRAMEWORKS: dict[str, FrameworkSpec] = {
 
 DEFAULT_FRAMEWORK = "sglang"
 
+# Server option that turns on expert parallelism: (flag to write, every
+# argparse alias of it, whether it takes the EP size). vLLM and ATOM take a
+# switch and derive the size from TP x DP. Frameworks absent here have none.
+EXPERT_PARALLEL_FLAGS: dict[str, tuple[str, tuple[str, ...], bool]] = {
+    "sglang": ("--ep-size", ("--ep-size", "--expert-parallel-size", "--ep"), True),
+    "vllm": ("--enable-expert-parallel", ("--enable-expert-parallel", "-ep"), False),
+    "atom": ("--enable-expert-parallel", ("--enable-expert-parallel",), False),
+}
+
 
 def names() -> tuple[str, ...]:
     """Return the canonical tuple of supported framework names."""
@@ -150,6 +159,15 @@ def server_args_env_name(framework: str | None) -> str:
     return extra_args_env(DEFAULT_FRAMEWORK)
 
 
+def expert_parallel_flag(framework: str | None) -> tuple[str, tuple[str, ...], bool] | None:
+    """Return the :data:`EXPERT_PARALLEL_FLAGS` row for the server reading ``framework``'s server args."""
+    env_name = server_args_env_name(framework)
+    return next(
+        (row for name, row in EXPERT_PARALLEL_FLAGS.items() if FRAMEWORKS[name].extra_args_env == env_name),
+        None,
+    )
+
+
 def throughput_unit(framework: str | None) -> str:
     """Return the throughput unit string for ``framework``."""
     return _spec_or_default(framework).throughput_unit
@@ -157,26 +175,21 @@ def throughput_unit(framework: str | None) -> str:
 
 def primary_metric_unit(framework: str | None) -> str:
     """Return the human-readable unit for a session's primary display metric."""
-    return "ms" if is_scriptable(framework) else "tok/s/GPU"
+    return "ms" if is_scriptable(framework) else throughput_unit(framework)
 
 
-def primary_metric_name(framework: str | None) -> str:
-    """Return the state field name holding a session's primary result metric."""
-    return "e2el_mean_ms" if is_scriptable(framework) else "throughput_tok_s_per_gpu"
-
-
-def primary_metric_value(framework: str | None, tput_per_gpu: float | int | None) -> float | None:
-    """Convert stored per-GPU throughput into the value shown for ``framework``."""
-    tput = float(tput_per_gpu or 0.0)
+def primary_metric_value(framework: str | None, tput: float | int | None) -> float | None:
+    """Convert a session's stored throughput (the server aggregate, not per GPU) into the value shown."""
+    tput = float(tput or 0.0)
     if is_scriptable(framework):
         return (1000.0 / tput) if tput > 0 else None
     return tput
 
 
-def format_primary_metric(framework: str | None, tput_per_gpu: float | int | None, *, precision: int = 1) -> str:
+def format_primary_metric(framework: str | None, tput: float | int | None, *, precision: int = 1) -> str:
     """Format a session's primary performance metric for human-readable display."""
     unit = primary_metric_unit(framework)
-    value = primary_metric_value(framework, tput_per_gpu)
+    value = primary_metric_value(framework, tput)
     if value is None:
         return f"n/a {unit}"
     return f"{value:.{precision}f} {unit}"

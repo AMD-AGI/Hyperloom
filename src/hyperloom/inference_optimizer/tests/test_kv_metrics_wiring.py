@@ -410,7 +410,7 @@ def test_recorder_is_closed_on_the_normal_return_path():
     sk._communicate_with_watchdog(
         _DoneProc(),
         hard_timeout=5,
-        kv_recorder=rec,
+        recorders=sk._RecorderFanout([rec]),
     )
 
     assert rec.closed_aborted is False
@@ -425,7 +425,7 @@ def test_no_scraping_before_the_server_is_up():
     sk._communicate_with_watchdog(
         _DoneProc(),
         hard_timeout=5,
-        kv_recorder=rec,
+        recorders=sk._RecorderFanout([rec]),
     )
 
     assert rec.ticks == 0
@@ -443,7 +443,7 @@ def test_warm_reuse_rounds_scrape_immediately_and_are_tagged_measured():
         _DoneProc(),
         hard_timeout=5,
         server_already_ready=True,
-        kv_recorder=rec,
+        recorders=sk._RecorderFanout([rec]),
     )
 
     assert rec.ticks >= 1
@@ -516,7 +516,7 @@ def test_recorder_is_closed_as_aborted_when_a_gate_raises():
         sk._communicate_with_watchdog(
             _HangingProc(),
             hard_timeout=0.01,
-            kv_recorder=rec,
+            recorders=sk._RecorderFanout([rec]),
         )
 
     assert rec.closed_aborted is True
@@ -535,7 +535,6 @@ def test_phase_transitions_reach_the_recorder(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(sk, "_scan_logs_increment", lambda *_a, **_k: next(scans, sk._LogScan(*([False] * 7))))
     monkeypatch.setattr(sk, "stamp_server_ready", lambda *_a, **_k: None)
-    monkeypatch.setattr(sk, "_server_log_shows_death", lambda *_a, **_k: None)
     log_path = tmp_path / "server.log"
     log_path.write_text("x\n", encoding="utf-8")
 
@@ -556,7 +555,7 @@ def test_phase_transitions_reach_the_recorder(tmp_path, monkeypatch):
         _SlowProc(),
         hard_timeout=60,
         server_log_path=str(log_path),
-        kv_recorder=rec,
+        recorders=sk._RecorderFanout([rec]),
     )
 
     assert rec.phases == ["measured", "warmup", "measured", "eval"]
@@ -564,10 +563,35 @@ def test_phase_transitions_reach_the_recorder(tmp_path, monkeypatch):
 
 
 def test_no_recorder_leaves_the_loop_unchanged():
-    """The default must be a strict no-op: this is a production watchdog."""
+    """An empty fanout must be a strict no-op: this is a production watchdog."""
     out = sk._communicate_with_watchdog(
         _DoneProc(),
         hard_timeout=5,
+        recorders=sk._RecorderFanout([]),
+    )
+    assert out == ("out", "err")
+
+
+def test_a_lone_failing_recorder_does_not_fail_the_round(monkeypatch, tmp_path):
+    """Telemetry stays observational past construction, even when it is the round's only recorder."""
+
+    class _Exploding:
+        def note_phase(self, phase, mono):
+            raise RuntimeError("boom")
+
+        def tick(self, mono):
+            raise RuntimeError("boom")
+
+        def close(self, *, aborted=False):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(sk, "_build_kv_recorder", lambda *a: _Exploding())
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._gpu_power.build_gpu_power_recorder", lambda *a: None)
+    out = sk._communicate_with_watchdog(
+        _DoneProc(),
+        hard_timeout=5,
+        server_already_ready=True,
+        recorders=sk._build_round_recorders(str(tmp_path / "server.log"), {}),
     )
     assert out == ("out", "err")
 
@@ -728,7 +752,6 @@ def test_a_round_that_nobody_reached_is_still_unavailable(tmp_path):
 def test_aiperf_aggregate_json_timeslices_are_adopted(tmp_path):
     from hyperloom.orchestrator.actions.executors._kv_metrics import (
         aggregate_series,
-        find_server_metrics_export,
         read_aiperf_server_metrics,
     )
 
@@ -822,7 +845,6 @@ def test_aiperf_aggregate_json_timeslices_are_adopted(tmp_path):
         encoding="utf-8",
     )
 
-    assert find_server_metrics_export(tmp_path) == unusable
     rows = read_aiperf_server_metrics(path)
     assert [phase for _sample, _timing, phase in rows] == ["warmup", "warmup", "measured", "measured"]
     assert [sample.active_pool_usage for sample, _timing, _phase in rows] == [None, 0.25, None, 0.5]

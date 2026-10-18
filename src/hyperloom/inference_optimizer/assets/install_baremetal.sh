@@ -28,7 +28,7 @@ DOTENV="${REPO_ROOT}/.env"
 HYPERLOOM_SKILL_PATH="${HYPERLOOM_SKILL_PATH:-${REPO_ROOT}/src/hyperloom/inference_optimizer/SKILL.md}"
 
 HYPERLOOM_WHEEL_REPO="${HYPERLOOM_WHEEL_REPO:-AMD-AGI/Hyperloom}"
-HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.1.3}"
+HYPERLOOM_WHEEL_TAG="${HYPERLOOM_WHEEL_TAG:-v1.1.4}"
 ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR="${ROCM_PROFILER_HOTFIX_TARGET_LIB_DIR:-/opt/rocm/lib}"
 ROCM_PROFILER_HOTFIX_ASSET="${ROCM_PROFILER_HOTFIX_ASSET:-rocm-profiler-hotfix-libs.tar.gz}"
 # Installed name must outrank the vendor library in ldconfig's ordering.
@@ -1324,13 +1324,15 @@ actual = "|".join((os.path.realpath(torch.__file__), torch.__version__, torch.ve
 if actual != sys.argv[1]:
     raise SystemExit(f"overlay torch differs from host torch: {actual} != {sys.argv[1]}")
 import vllm._rocm_C  # noqa: F401
+# The overlay inherits host site-packages, so `pip check` reports the host image's own conflicts; importing
+# what `vllm serve` imports is the check that matters.
+import vllm.entrypoints.openai.api_server  # noqa: F401
 from vllm.platforms import current_platform
 checker = getattr(current_platform, "is_rocm", None)
 if not ((callable(checker) and checker()) or "rocm" in repr(current_platform).lower()):
     raise SystemExit("vLLM source overlay did not select ROCm")
 torch.empty(1, device="cuda")
 PY
-  "$py" -m pip check
 }
 
 install_vllm_from_source() {

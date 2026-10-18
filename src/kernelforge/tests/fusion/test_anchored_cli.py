@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 from click.testing import CliRunner
 
+from kernelforge.fusion import agent_selection
 from kernelforge.fusion import command as cli_module
 from kernelforge.fusion.command import run as main
 from kernelforge.fusion.models import Diagnosis
@@ -157,8 +158,8 @@ class TestUsage:
         hz = Harness(tmp_path)
         seen: dict = {}
 
-        def spy(**kwargs):
-            seen.update(kwargs)
+        def spy(target, report, **kwargs):
+            seen.update(kwargs, target=target, report=report)
             return []
 
         monkeypatch.setattr(cli_module, "discover_anchored_recipes", spy)
@@ -187,7 +188,7 @@ class TestDiscovery:
         )
         captured: dict = {}
 
-        def fake_agent(_backend, **_kwargs):
+        def fake_agent(_backend, *_args):
             def _fn(prompt):
                 captured["prompt"] = prompt
                 return payload
@@ -232,8 +233,8 @@ def test_the_campaign_is_handed_a_concrete_agent_provider(tmp_path, monkeypatch)
     hz = Harness(tmp_path)
     seen: dict = {}
 
-    def spy(*_args, **kwargs):
-        seen.update(kwargs)
+    def spy(recipes, run, plan, campaign, publish=None):
+        seen["campaign"] = campaign
         raise cli_module.FusionAbort("stop after the call is made")
 
     monkeypatch.setattr(
@@ -245,13 +246,13 @@ def test_the_campaign_is_handed_a_concrete_agent_provider(tmp_path, monkeypatch)
     monkeypatch.setattr(
         cli_module, "resolve_framework_source_file", lambda *a, **k: (str(hz.source), "path convention")
     )
-    monkeypatch.setattr(cli_module, "_resolve_agent_choice", lambda backend, model: ("claude", "m"))
+    monkeypatch.setattr(agent_selection, "_resolve_agent_choice", lambda backend, model: ("claude", "m"))
     monkeypatch.setattr(cli_module, "_run_fusion_autoloop", spy)
     monkeypatch.setattr(cli_module, "build_recipes", lambda *a, **k: [_recipe(hz)])
 
     hz.run("--discover", "patterns")
 
-    assert seen.get("agent_backend") == "claude", "the campaign must be handed a provider forge-loop accepts"
+    assert seen["campaign"].agent_backend == "claude", "the campaign must be handed a provider forge-loop accepts"
 
 
 def _recipe(hz):

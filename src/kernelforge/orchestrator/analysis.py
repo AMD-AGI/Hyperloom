@@ -53,6 +53,18 @@ PROFILING_METHODOLOGY_FILES = (
     "measure_protocol.md",
 )
 
+# Artifacts every analysis bundle carries at its root, whatever its status.
+_REQUIRED_BUNDLE_FILES = (
+    "request.json",
+    "workflow.json",
+    "workflow_events.jsonl",
+    "artifact_catalog.json",
+    "source_map.md",
+    "case_inventory.json",
+    "progress.json",
+    "commands.jsonl",
+)
+
 log = logging.getLogger(__name__)
 _WRITE_TOOLS = frozenset({"Edit", "Write", "MultiEdit", "NotebookEdit"})
 _BASH_WRITE_MARKERS = (
@@ -730,6 +742,130 @@ class AnalysisAgentService:
             },
         )
 
+    def _exhausted_upgrade_bundle(
+        self,
+        cached: AnalysisBundle,
+        context: OrchestrationContext,
+        *,
+        requested_tier: str,
+        available_tier: str,
+        attempts: int,
+        parent_reuse_commit: str,
+    ) -> AnalysisBundle:
+        """The cached bundle, marked as one no further session will upgrade."""
+        return AnalysisBundle(
+            analysis_commit=cached.analysis_commit,
+            root=cached.root,
+            manifest={**cached.manifest, "upgrade_exhausted": True},
+            cases=cached.cases,
+            outcome=self._build_outcome(
+                analysis_commit=context.analysis_commit,
+                requested_tier=requested_tier,
+                available_tier=available_tier,
+                attempt=attempts,
+                checkpoint_level="published",
+                artifact_path=str(cached.root),
+                failure_type="upgrade_exhausted",
+                upgrade_exhausted=True,
+                parent_reuse_commit=parent_reuse_commit,
+            ),
+        )
+
+    @staticmethod
+    def _work_root_attempts(work_root: Path, analysis_commit: str) -> int:
+        """Attempts already spent in the work root, or the limit when it cannot be read.
+
+        An unreadable journal counts as exhausted: another session would resume
+        from a checkpoint nothing can say anything about.
+        """
+        try:
+            work_flow = _parse_workflow_payload(
+                json.loads((work_root / "workflow.json").read_text()),
+                analysis_commit=analysis_commit,
+            )
+            return int(work_flow.get("session", {}).get("attempts", 0))
+        except (OSError, TypeError, ValueError, json.JSONDecodeError, AnalysisBundleError):
+            return MAX_ANALYSIS_SESSION_ATTEMPTS
+
+    def _bundle_from_published_checkpoint(
+        self,
+        published_root: Path,
+        work_root: Path,
+        context: OrchestrationContext,
+        cases: tuple[AnalysisCase, ...],
+        *,
+        driver_digest: str,
+        source_digest: str,
+        requested_tier: str,
+        parent_reuse_commit: str,
+    ) -> AnalysisBundle | None:
+        """The bundle a published checkpoint already answers with, or None to run a session.
+
+        Returning None also seeds ``work_root`` from the checkpoint, so the
+        retry resumes from it rather than from nothing.
+        """
+        try:
+            request_payload = _parse_request_payload(
+                json.loads((published_root / "request.json").read_text()),
+                analysis_commit=context.analysis_commit,
+            )
+            workflow_payload = _parse_workflow_payload(
+                json.loads((published_root / "workflow.json").read_text()),
+                analysis_commit=context.analysis_commit,
+            )
+        except (OSError, json.JSONDecodeError) as error:
+            raise AnalysisBundleError(f"published analysis checkpoint is malformed: {error}") from error
+        cached = self._validate_bundle(
+            published_root,
+            context,
+            cases,
+            driver_digest=driver_digest,
+            source_digest=source_digest,
+        )
+        attempts = int(workflow_payload["session"].get("attempts", 0))
+        cached_profiled = request_payload["analysis_profiling_enabled"] is True
+        tier_satisfied = cached_profiled or not self.profiling_enabled
+        status_satisfied = cached.manifest["status"] == "READY" if self.profiling_enabled else True
+        available_tier = self._tier_label(
+            profiling_enabled=self.profiling_enabled,
+            profiled=cached_profiled and bool(cached.manifest.get("completed_case_ids")),
+        )
+        exhausted_kwargs = {
+            "requested_tier": requested_tier,
+            "available_tier": available_tier,
+            "parent_reuse_commit": parent_reuse_commit,
+        }
+        if tier_satisfied and (status_satisfied or attempts >= MAX_ANALYSIS_SESSION_ATTEMPTS):
+            if not status_satisfied and attempts >= MAX_ANALYSIS_SESSION_ATTEMPTS:
+                return self._exhausted_upgrade_bundle(cached, context, attempts=attempts, **exhausted_kwargs)
+            return AnalysisBundle(
+                analysis_commit=cached.analysis_commit,
+                root=cached.root,
+                manifest=dict(cached.manifest),
+                cases=cached.cases,
+                outcome=self._build_outcome(
+                    analysis_commit=context.analysis_commit,
+                    requested_tier=requested_tier,
+                    available_tier=available_tier,
+                    attempt=attempts,
+                    checkpoint_level="published",
+                    artifact_path=str(cached.root),
+                    failure_type=None,
+                    upgrade_exhausted=False,
+                    parent_reuse_commit=parent_reuse_commit,
+                ),
+            )
+        if attempts >= MAX_ANALYSIS_SESSION_ATTEMPTS:
+            return self._exhausted_upgrade_bundle(cached, context, attempts=attempts, **exhausted_kwargs)
+        if work_root.is_dir():
+            work_attempts = self._work_root_attempts(work_root, context.analysis_commit)
+            if work_attempts >= MAX_ANALYSIS_SESSION_ATTEMPTS:
+                return self._exhausted_upgrade_bundle(cached, context, attempts=work_attempts, **exhausted_kwargs)
+        if not work_root.exists():
+            work_root.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(published_root, work_root)
+        return None
+
     async def ensure_bundle(
         self,
         context: OrchestrationContext,
@@ -765,119 +901,23 @@ class AnalysisAgentService:
         driver_digest = _sha256(driver_path)
         source_digest = _source_digest(resolved_sources)
         work_root = analysis_root / "work" / context.analysis_commit
-        retry_published_bundle = False
         requested_tier = "profiled" if self.profiling_enabled else "static"
         parent_reuse_commit = incremental.parent_commit if incremental is not None else ""
         published_root = self._published_generation_root(final_root) if final_root.is_dir() else None
+        retry_published_bundle = False
         if published_root is not None:
-            try:
-                request_payload = _parse_request_payload(
-                    json.loads((published_root / "request.json").read_text()),
-                    analysis_commit=context.analysis_commit,
-                )
-                workflow_payload = _parse_workflow_payload(
-                    json.loads((published_root / "workflow.json").read_text()),
-                    analysis_commit=context.analysis_commit,
-                )
-            except (OSError, json.JSONDecodeError) as error:
-                raise AnalysisBundleError(f"published analysis checkpoint is malformed: {error}") from error
-            cached = self._validate_bundle(
+            reused = self._bundle_from_published_checkpoint(
                 published_root,
+                work_root,
                 context,
                 cases,
                 driver_digest=driver_digest,
                 source_digest=source_digest,
+                requested_tier=requested_tier,
+                parent_reuse_commit=parent_reuse_commit,
             )
-            attempts = int(workflow_payload["session"].get("attempts", 0))
-            cached_profiled = request_payload["analysis_profiling_enabled"] is True
-            tier_satisfied = cached_profiled or not self.profiling_enabled
-            status_satisfied = cached.manifest["status"] == "READY" if self.profiling_enabled else True
-            available_tier = self._tier_label(
-                profiling_enabled=self.profiling_enabled,
-                profiled=cached_profiled and bool(cached.manifest.get("completed_case_ids")),
-            )
-            if tier_satisfied and (status_satisfied or attempts >= MAX_ANALYSIS_SESSION_ATTEMPTS):
-                upgrade_exhausted = not status_satisfied and attempts >= MAX_ANALYSIS_SESSION_ATTEMPTS
-                return AnalysisBundle(
-                    analysis_commit=cached.analysis_commit,
-                    root=cached.root,
-                    manifest={
-                        **cached.manifest,
-                        **({"upgrade_exhausted": True} if upgrade_exhausted else {}),
-                    },
-                    cases=cached.cases,
-                    outcome=self._build_outcome(
-                        analysis_commit=context.analysis_commit,
-                        requested_tier=requested_tier,
-                        available_tier=available_tier,
-                        attempt=attempts,
-                        checkpoint_level="published",
-                        artifact_path=str(cached.root),
-                        failure_type=("upgrade_exhausted" if upgrade_exhausted else None),
-                        upgrade_exhausted=upgrade_exhausted,
-                        parent_reuse_commit=parent_reuse_commit,
-                    ),
-                )
-            if attempts >= MAX_ANALYSIS_SESSION_ATTEMPTS:
-                return AnalysisBundle(
-                    analysis_commit=cached.analysis_commit,
-                    root=cached.root,
-                    manifest={
-                        **cached.manifest,
-                        "upgrade_exhausted": True,
-                    },
-                    cases=cached.cases,
-                    outcome=self._build_outcome(
-                        analysis_commit=context.analysis_commit,
-                        requested_tier=requested_tier,
-                        available_tier=available_tier,
-                        attempt=attempts,
-                        checkpoint_level="published",
-                        artifact_path=str(cached.root),
-                        failure_type="upgrade_exhausted",
-                        upgrade_exhausted=True,
-                        parent_reuse_commit=parent_reuse_commit,
-                    ),
-                )
-            if work_root.is_dir():
-                try:
-                    work_flow = _parse_workflow_payload(
-                        json.loads((work_root / "workflow.json").read_text()),
-                        analysis_commit=context.analysis_commit,
-                    )
-                    work_attempts = int(work_flow.get("session", {}).get("attempts", 0))
-                except (
-                    OSError,
-                    TypeError,
-                    ValueError,
-                    json.JSONDecodeError,
-                    AnalysisBundleError,
-                ):
-                    work_attempts = MAX_ANALYSIS_SESSION_ATTEMPTS
-                if work_attempts >= MAX_ANALYSIS_SESSION_ATTEMPTS:
-                    return AnalysisBundle(
-                        analysis_commit=cached.analysis_commit,
-                        root=cached.root,
-                        manifest={
-                            **cached.manifest,
-                            "upgrade_exhausted": True,
-                        },
-                        cases=cached.cases,
-                        outcome=self._build_outcome(
-                            analysis_commit=context.analysis_commit,
-                            requested_tier=requested_tier,
-                            available_tier=available_tier,
-                            attempt=work_attempts,
-                            checkpoint_level="published",
-                            artifact_path=str(cached.root),
-                            failure_type="upgrade_exhausted",
-                            upgrade_exhausted=True,
-                            parent_reuse_commit=parent_reuse_commit,
-                        ),
-                    )
-            if not work_root.exists():
-                work_root.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(published_root, work_root)
+            if reused is not None:
+                return reused
             retry_published_bundle = True
 
         session_deadline_unix = min(
@@ -1823,9 +1863,53 @@ Update analysis incrementally:
         driver_digest: str,
         source_digest: str,
     ) -> AnalysisBundle:
-        manifest_path = root / "manifest.json"
+        manifest, statuses = AnalysisAgentService._validated_manifest(
+            root,
+            context,
+            cases,
+            driver_digest=driver_digest,
+            source_digest=source_digest,
+        )
+        request_payload = AnalysisAgentService._validated_session_metadata(
+            root,
+            context,
+            manifest,
+            completed=statuses["completed"],
+        )
+        profiling_enabled = bool(request_payload["analysis_profiling_enabled"])
+        completed_set = set(statuses["completed"])
+        skipped_set = set(statuses["skipped"])
+        normalized_cases = [
+            AnalysisAgentService._case_evidence(
+                case,
+                original,
+                root=root,
+                request_payload=request_payload,
+                profiling_enabled=profiling_enabled,
+                completed=case.case_id in completed_set,
+                skipped=case.case_id in skipped_set,
+            )
+            for case, original in zip(cases, context.cases)
+        ]
+        return AnalysisBundle(
+            analysis_commit=context.analysis_commit,
+            root=root,
+            manifest=manifest,
+            cases=tuple(normalized_cases),
+        )
+
+    @staticmethod
+    def _validated_manifest(
+        root: Path,
+        context: OrchestrationContext,
+        cases: tuple[AnalysisCase, ...],
+        *,
+        driver_digest: str,
+        source_digest: str,
+    ) -> tuple[dict, dict[str, list]]:
+        """The bundle's manifest and its per-case status lists, or the reason it is not one."""
         try:
-            manifest = json.loads(manifest_path.read_text())
+            manifest = json.loads((root / "manifest.json").read_text())
         except Exception as error:
             raise AnalysisBundleError(f"invalid manifest.json: {error}") from error
         if not isinstance(manifest, dict):
@@ -1848,11 +1932,20 @@ Update analysis incrementally:
             raise AnalysisBundleError("analysis manifest case statuses are invalid")
         if sorted(completed + failed + skipped) != sorted(expected):
             raise AnalysisBundleError("analysis manifest does not account for every case")
+        return manifest, {"completed": completed, "failed": failed, "skipped": skipped}
 
-        request_path = root / "request.json"
+    @staticmethod
+    def _validated_session_metadata(
+        root: Path,
+        context: OrchestrationContext,
+        manifest: dict,
+        *,
+        completed: list,
+    ) -> dict:
+        """The bundle's request payload, once its session metadata and root artifacts check out."""
         try:
             request_payload = _parse_request_payload(
-                json.loads(request_path.read_text()),
+                json.loads((root / "request.json").read_text()),
                 analysis_commit=context.analysis_commit,
             )
             _parse_workflow_payload(
@@ -1867,128 +1960,127 @@ Update analysis incrementally:
             raise AnalysisBundleError(f"invalid Analysis session metadata: {error}") from error
         except AnalysisBundleError as error:
             raise AnalysisBundleError(f"malformed analysis checkpoint: {error}") from error
-        profiling_enabled = bool(request_payload["analysis_profiling_enabled"])
-        if not profiling_enabled and completed:
-            raise AnalysisBundleError("static-only analysis cannot report profiled COMPLETE cases")
-        if not profiling_enabled and manifest.get("status") != "PARTIAL":
-            raise AnalysisBundleError("static-only analysis manifest status must be PARTIAL")
-        required_root_files = (
-            "request.json",
-            "workflow.json",
-            "workflow_events.jsonl",
-            "artifact_catalog.json",
-            "source_map.md",
-            "case_inventory.json",
-            "progress.json",
-            "commands.jsonl",
-        )
-        missing_root = [name for name in required_root_files if not (root / name).is_file()]
+        if not bool(request_payload["analysis_profiling_enabled"]):
+            if completed:
+                raise AnalysisBundleError("static-only analysis cannot report profiled COMPLETE cases")
+            if manifest.get("status") != "PARTIAL":
+                raise AnalysisBundleError("static-only analysis manifest status must be PARTIAL")
+        missing_root = [name for name in _REQUIRED_BUNDLE_FILES if not (root / name).is_file()]
         if missing_root:
             raise AnalysisBundleError("analysis bundle missing root artifacts: " + ", ".join(missing_root))
         if not AnalysisAgentService._nonempty_file(root / "report.md"):
             raise AnalysisBundleError("analysis bundle has no report.md")
+        return request_payload
 
-        normalized_cases = []
-        completed_set = set(completed)
-        skipped_set = set(skipped)
-        for case, original in zip(cases, context.cases):
-            case_root = root / "cases" / case.directory
-            if not case_root.is_dir():
-                raise AnalysisBundleError(f"missing case directory for {case.case_id}")
-            try:
-                case_payload = json.loads((case_root / "case.json").read_text())
-            except (OSError, json.JSONDecodeError) as error:
-                raise AnalysisBundleError(f"invalid case.json for {case.case_id}: {error}") from error
-            if not isinstance(case_payload, dict) or case_payload.get("case_id") != case.case_id:
-                raise AnalysisBundleError(f"case.json identity mismatch for {case.case_id}")
-            if case.case_id in completed_set:
-                analysis_path = case_root / "analysis.md"
-                if not AnalysisAgentService._nonempty_file(analysis_path):
-                    raise AnalysisBundleError(f"completed case {case.case_id} has no analysis.md")
-                if profiling_enabled and not AnalysisAgentService._has_valid_profile_evidence(
-                    root,
-                    case,
-                ):
-                    raise AnalysisBundleError(f"completed case {case.case_id} has no validated profile evidence")
-                bottleneck = {}
-                bottleneck_path = case_root / "bottleneck.json"
-                if bottleneck_path.is_file():
-                    try:
-                        loaded = json.loads(bottleneck_path.read_text())
-                        if isinstance(loaded, dict):
-                            bottleneck = loaded
-                    except (OSError, json.JSONDecodeError):
-                        bottleneck = {}
-                profile_flag = "analysis_profiled"
-                if request_payload["analysis_trigger"] == "post_keep_incremental":
-                    profile_flag = "analysis_profile_incremental"
-                normalized_cases.append(
-                    CaseEvidence(
-                        case_id=case.case_id,
-                        shape=original.shape,
-                        dtype=original.dtype,
-                        latency_ms=original.latency_ms,
-                        bottleneck=str(bottleneck.get("classification") or original.bottleneck),
-                        profile_summary_path=str(analysis_path),
-                        flags=tuple(
-                            dict.fromkeys(
-                                [
-                                    *(str(item) for item in (bottleneck.get("flags") or [])),
-                                    profile_flag,
-                                ]
-                            )
-                        ),
-                    )
-                )
-            elif case.case_id in skipped_set:
-                analysis_path = case_root / "analysis.md"
-                has_analysis = AnalysisAgentService._nonempty_file(analysis_path)
-                normalized_cases.append(
-                    CaseEvidence(
-                        case_id=original.case_id,
-                        shape=original.shape,
-                        dtype=original.dtype,
-                        latency_ms=original.latency_ms,
-                        bottleneck=original.bottleneck,
-                        profile_summary_path=(str(analysis_path) if has_analysis else original.profile_summary_path),
-                        flags=tuple(
-                            dict.fromkeys(
-                                [
-                                    *original.flags,
-                                    (
-                                        "analysis_static_only"
-                                        if not profiling_enabled
-                                        else (
-                                            "analysis_interpretation_only"
-                                            if has_analysis
-                                            else "analysis_profile_skipped"
-                                        )
-                                    ),
-                                ]
-                            )
-                        ),
-                    )
-                )
-            else:
-                if not (AnalysisAgentService._nonempty_file(case_root / "failure.md")):
-                    raise AnalysisBundleError(f"failed case {case.case_id} has no failure record")
-                normalized_cases.append(
-                    CaseEvidence(
-                        case_id=original.case_id,
-                        shape=original.shape,
-                        dtype=original.dtype,
-                        latency_ms=original.latency_ms,
-                        bottleneck=original.bottleneck,
-                        profile_summary_path=(original.profile_summary_path),
-                        flags=tuple(dict.fromkeys([*original.flags, "analysis_case_failed"])),
-                    )
-                )
-        return AnalysisBundle(
-            analysis_commit=context.analysis_commit,
-            root=root,
-            manifest=manifest,
-            cases=tuple(normalized_cases),
+    @staticmethod
+    def _case_evidence(
+        case: AnalysisCase,
+        original,
+        *,
+        root: Path,
+        request_payload: dict,
+        profiling_enabled: bool,
+        completed: bool,
+        skipped: bool,
+    ) -> CaseEvidence:
+        """One case's evidence, checked against the artifacts its manifest status promises."""
+        case_root = root / "cases" / case.directory
+        if not case_root.is_dir():
+            raise AnalysisBundleError(f"missing case directory for {case.case_id}")
+        try:
+            case_payload = json.loads((case_root / "case.json").read_text())
+        except (OSError, json.JSONDecodeError) as error:
+            raise AnalysisBundleError(f"invalid case.json for {case.case_id}: {error}") from error
+        if not isinstance(case_payload, dict) or case_payload.get("case_id") != case.case_id:
+            raise AnalysisBundleError(f"case.json identity mismatch for {case.case_id}")
+        if completed:
+            return AnalysisAgentService._completed_case_evidence(
+                case,
+                original,
+                root=root,
+                case_root=case_root,
+                request_payload=request_payload,
+                profiling_enabled=profiling_enabled,
+            )
+        if skipped:
+            return AnalysisAgentService._skipped_case_evidence(
+                original,
+                case_root=case_root,
+                profiling_enabled=profiling_enabled,
+            )
+        if not AnalysisAgentService._nonempty_file(case_root / "failure.md"):
+            raise AnalysisBundleError(f"failed case {case.case_id} has no failure record")
+        return CaseEvidence(
+            case_id=original.case_id,
+            shape=original.shape,
+            dtype=original.dtype,
+            latency_ms=original.latency_ms,
+            bottleneck=original.bottleneck,
+            profile_summary_path=original.profile_summary_path,
+            flags=tuple(dict.fromkeys([*original.flags, "analysis_case_failed"])),
         )
+
+    @staticmethod
+    def _completed_case_evidence(
+        case: AnalysisCase,
+        original,
+        *,
+        root: Path,
+        case_root: Path,
+        request_payload: dict,
+        profiling_enabled: bool,
+    ) -> CaseEvidence:
+        """A COMPLETE case's evidence, which must carry the analysis the status claims."""
+        analysis_path = case_root / "analysis.md"
+        if not AnalysisAgentService._nonempty_file(analysis_path):
+            raise AnalysisBundleError(f"completed case {case.case_id} has no analysis.md")
+        if profiling_enabled and not AnalysisAgentService._has_valid_profile_evidence(root, case):
+            raise AnalysisBundleError(f"completed case {case.case_id} has no validated profile evidence")
+        bottleneck = AnalysisAgentService._case_bottleneck(case_root / "bottleneck.json")
+        profile_flag = (
+            "analysis_profile_incremental"
+            if request_payload["analysis_trigger"] == "post_keep_incremental"
+            else "analysis_profiled"
+        )
+        return CaseEvidence(
+            case_id=case.case_id,
+            shape=original.shape,
+            dtype=original.dtype,
+            latency_ms=original.latency_ms,
+            bottleneck=str(bottleneck.get("classification") or original.bottleneck),
+            profile_summary_path=str(analysis_path),
+            flags=tuple(dict.fromkeys([*(str(item) for item in (bottleneck.get("flags") or [])), profile_flag])),
+        )
+
+    @staticmethod
+    def _skipped_case_evidence(original, *, case_root: Path, profiling_enabled: bool) -> CaseEvidence:
+        """A SKIPPED case's evidence, flagged by how far the session got with it."""
+        analysis_path = case_root / "analysis.md"
+        has_analysis = AnalysisAgentService._nonempty_file(analysis_path)
+        if not profiling_enabled:
+            reason = "analysis_static_only"
+        else:
+            reason = "analysis_interpretation_only" if has_analysis else "analysis_profile_skipped"
+        return CaseEvidence(
+            case_id=original.case_id,
+            shape=original.shape,
+            dtype=original.dtype,
+            latency_ms=original.latency_ms,
+            bottleneck=original.bottleneck,
+            profile_summary_path=(str(analysis_path) if has_analysis else original.profile_summary_path),
+            flags=tuple(dict.fromkeys([*original.flags, reason])),
+        )
+
+    @staticmethod
+    def _case_bottleneck(bottleneck_path: Path) -> dict:
+        """The case's recorded bottleneck, or an empty one when it was not written or is unreadable."""
+        if not bottleneck_path.is_file():
+            return {}
+        try:
+            loaded = json.loads(bottleneck_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
 
     @staticmethod
     def _published_generation_root(commit_root: Path) -> Path | None:

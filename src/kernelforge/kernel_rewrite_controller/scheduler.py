@@ -13,9 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from kernelforge.kernel_rewrite_controller.contracts import (
-    TASK_STATUS_FAILED,
     TASK_STATUS_SKIPPED,
-    TASK_STATUS_SUCCEEDED,
     KernelRewriteTask,
 )
 from kernelforge.kernel_rewrite_controller.dispatcher import (
@@ -48,14 +46,6 @@ class ScheduleResult:
     #: repository root. Reported so the campaign's baselines are auditable
     #: without reading every task.
     repository_pins: dict[str, str] = field(default_factory=dict)
-
-    @property
-    def succeeded_count(self) -> int:
-        return sum(result.status == TASK_STATUS_SUCCEEDED for result in self.results)
-
-    @property
-    def failed_count(self) -> int:
-        return sum(result.status == TASK_STATUS_FAILED for result in self.results)
 
     @property
     def skipped_count(self) -> int:

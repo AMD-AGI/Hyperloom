@@ -44,16 +44,16 @@ def coord(tmp_path: Path):
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState(session_id="decouple-test")
-    state.max_minutes = 30
+    # Room for a patch specialist's 60-minute admission floor.
+    state.max_minutes = 120
     state.save(tmp_path)
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
-    coord = Coordinator(
+    return Coordinator(
         session_dir=tmp_path,
         backends={name: MockBackend(idle) for name in ("orchestration", "critic")},
         role_registry=default_role_registry(),
         knowledge_plane=None,
     )
-    return coord
 
 
 async def _enqueue(coord, kind: str, key: str, lanes: list[str] | None = None, params: dict | None = None):

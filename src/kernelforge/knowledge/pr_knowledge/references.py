@@ -22,6 +22,7 @@ from kernelforge.knowledge.pr_knowledge.client import (
 from kernelforge.knowledge.pr_knowledge.search import (
     HIT_FILE_PATH,
     HIT_SEARCH,
+    PRLifecycle,
     PRReference,
     components_of_interest,
     discover,
@@ -91,10 +92,16 @@ def byte_len(text: str) -> int:
     return len(text.encode("utf-8"))
 
 
+def _state_label(lifecycle: PRLifecycle) -> str:
+    """The state as a reader sees it: ``unknown`` when the service did not report one, a draft marked."""
+    label = "unknown" if lifecycle.state is None else lifecycle.state.value
+    return f"{label}, draft" if lifecycle.draft else label
+
+
 def render_entry(reference: PRReference) -> str:
     """Render every populated field within one shared byte budget."""
     worth = "unknown" if reference.worth_trying is None else f"{reference.worth_trying:.2f}"
-    state = "merged" if reference.is_merged else "open"
+    state = _state_label(reference.lifecycle)
     header = (
         f"- {reference.repo}#{reference.number} ({state}, worth {worth}, "
         f"via {'+'.join(reference.hit_via) or 'unknown'}, {reference.n_files} files)"
@@ -200,7 +207,7 @@ def reference_to_entry(reference: PRReference) -> dict[str, Any]:
         "number": reference.number,
         "title": reference.title,
         "hit_via": list(reference.hit_via),
-        "is_merged": reference.is_merged,
+        **reference.lifecycle.to_record(),
         "worth_trying": reference.worth_trying,
         "components": list(reference.components),
         "mechanisms": list(reference.mechanisms),
@@ -233,7 +240,7 @@ def entry_to_reference(entry: dict[str, Any]) -> PRReference | None:
         number=number,
         title=str(entry.get("title") or ""),
         hit_via=tuple(entry.get("hit_via") or ()),
-        is_merged=bool(entry.get("is_merged")),
+        lifecycle=PRLifecycle.from_record(entry),
         worth_trying=float(worth) if isinstance(worth, (int, float)) else None,
         components=tuple(entry.get("components") or ()),
         mechanisms=tuple(entry.get("mechanisms") or ()),
@@ -314,18 +321,18 @@ def render_index(snapshot: Snapshot) -> str:
         "",
         f"entries: {len(snapshot.entries)}   empty queries cached: {len(snapshot.empty_queries)}",
         "",
-        "| PR | worth | merged | files | hit_via | head | fetched |",
+        "| PR | worth | state | files | hit_via | head | fetched |",
         "| --- | --- | --- | --- | --- | --- | --- |",
     ]
     for key in sorted(snapshot.entries):
         entry = snapshot.entries[key]
         worth = entry.get("worth_trying")
         lines.append(
-            "| {repo}#{number} | {worth} | {merged} | {files} | {via} | {head} | {at} |".format(
+            "| {repo}#{number} | {worth} | {state} | {files} | {via} | {head} | {at} |".format(
                 repo=entry.get("repo", ""),
                 number=entry.get("number", ""),
                 worth="unknown" if worth is None else f"{float(worth):.2f}",
-                merged="yes" if entry.get("is_merged") else "no",
+                state=_state_label(PRLifecycle.from_record(entry)),
                 files=entry.get("n_files", 0),
                 via="+".join(entry.get("hit_via") or []),
                 head=str(entry.get("head_sha") or "")[:12],

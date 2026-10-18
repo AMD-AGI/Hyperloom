@@ -589,18 +589,6 @@ class WeightedQueryPlan:
         )
 
 
-def _declared_fields(declaration: ExperienceDeclaration) -> set[str]:
-    return {
-        "schema_ref",
-        "objective",
-        "status",
-        "outcome.decision",
-        *{f"identity.{item.name}" for item in declaration.identity},
-        *{f"baseline_identity.{item.name}" for item in declaration.baseline_identity},
-        *{f"change.identity.{item.name}" for item in declaration.change_identity},
-    }
-
-
 def _validate_query_plan(
     plan: WeightedQueryPlan,
     request: ReadRequest,
@@ -609,7 +597,7 @@ def _validate_query_plan(
     """Validate one Planner result against its request and exact Schema."""
     if plan.schema_ref != declaration.schema_ref:
         raise QueryPlanValidationError("QueryPlan schema differs from declaration")
-    declared = _declared_fields(declaration)
+    declared = declaration.lookup_fields()
     for signal in plan.signals:
         source_value = _source_value(request, signal.source_path)
         if signal.is_structured and signal.field not in declared:
@@ -672,7 +660,7 @@ class LLMQueryPlanner:
         payload = _canonical(
             {
                 "request": request.to_dict(),
-                "allowed_structured_fields": sorted(_declared_fields(declaration)),
+                "allowed_structured_fields": sorted(declaration.lookup_fields()),
             }
         )
         if len(payload) > self.configuration.max_input_chars:
@@ -1072,8 +1060,6 @@ class ReadResult:
 @dataclass(frozen=True)
 class ReadTrace:
     request: ReadRequest
-    query_plan: WeightedQueryPlan
-    retrieval_configuration_id: str
     execution: WeightedQueryExecution
 
 
@@ -1088,22 +1074,18 @@ class KnowledgeReadService:
         *,
         planner: LLMQueryPlanner | None = None,
         trace_sink: Callable[[ReadTrace], None] | None = None,
-        enabled: bool = True,
     ) -> None:
         self._declaration = declaration
         self._executor = executor
         self._configuration = configuration
         self._planner = planner
         self._trace_sink = trace_sink
-        self._enabled = enabled
 
     def read(
         self,
         decision: str,
         context: Mapping[str, JsonValue],
     ) -> ReadResult:
-        if not self._enabled:
-            return _empty_read(ReadStatus.DISABLED)
         if self._planner is None or self._executor is None or self._configuration is None:
             return _empty_read(
                 ReadStatus.UNAVAILABLE,
@@ -1122,14 +1104,7 @@ class KnowledgeReadService:
                 lease=lease,
             )
             if self._trace_sink is not None:
-                self._trace_sink(
-                    ReadTrace(
-                        request,
-                        plan,
-                        self._configuration.configuration_id,
-                        execution,
-                    )
-                )
+                self._trace_sink(ReadTrace(request, execution))
         except (RuntimeError, ValueError) as exc:
             return _empty_read(
                 ReadStatus.FAILED,

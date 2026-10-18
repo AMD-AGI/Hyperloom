@@ -13,7 +13,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_json
+from hyperloom.common.io import WriteOptions, atomic_write_json
 from hyperloom.inference_optimizer.breakdown.recorder import record_metadata_langfuse
 from hyperloom.inference_optimizer.session.session_paths import (
     decision_trace_path,
@@ -383,7 +383,7 @@ class LangfuseEmitter:
             )
             return False
         try:
-            from langfuse import get_client  # type: ignore
+            from langfuse import get_client  # type: ignore[import-not-found]
         except Exception as exc:  # noqa: BLE001
             self._disabled_reason = "sdk_missing"
             log.warning(
@@ -1093,11 +1093,7 @@ class LangfuseEmitter:
             atomic_write_json(
                 _receipt_path(self.session_dir),
                 _stamp_receipt_hash(receipt),
-                indent=2,
-                sort_keys=True,
-                make_parents=True,
-                fsync=True,
-                fsync_dir=True,
+                options=WriteOptions(make_parents=True, fsync=True, fsync_dir=True),
             )
         except Exception:
             log.debug("langfuse: receipt write failed", exc_info=True)

@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.llm_config import ANTHROPIC_SYNTHESIZABLE_KEY_ENVS
+
 
 PKG_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -618,3 +620,14 @@ def test_credential_only_recipe_keeps_the_callers_key(tmp_path: Path) -> None:
     assert kept["OPENAI_API_KEY"] == "key-from-caller"
     filled = _run_recipe(fragment, tmp_path, {})
     assert filled["OPENAI_API_KEY"] == "key-from-dotenv"
+
+
+def test_setup_skill_offers_the_claude_subscription_token_path() -> None:
+    """A subscription user is told how to get the token, where it goes, and what would shadow it."""
+    setup = SETUP_DOC.read_text(encoding="utf-8")
+    assert "`Claude subscription (Pro/Max)`" in setup
+    assert "claude setup-token" in setup
+    assert "CLAUDE_CODE_OAUTH_TOKEN=<PLEASE_FILL_IN>" in setup
+    assert "`ANTHROPIC_BASE_URL=https://api.anthropic.com`" in setup
+    for shadowing in ANTHROPIC_SYNTHESIZABLE_KEY_ENVS:
+        assert f"`{shadowing}`" in setup, f"setup skill does not warn that {shadowing} outranks the subscription token"

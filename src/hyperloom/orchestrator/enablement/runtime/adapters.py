@@ -9,37 +9,24 @@ import json
 import logging
 import os
 import subprocess
-import sys
-from pathlib import Path
+from dataclasses import replace
+from pathlib import Path, PurePosixPath
 from typing import Callable
 
-from hyperloom.common.failure_signature import (
-    MISSING_MODEL_ARCH,
-    NOT_IMPLEMENTED,
-    SERVE_FLAG,
-    TOKENIZER_ERROR,
-    UNSUPPORTED_DTYPE,
-    CapabilityGap,
-)
+from hyperloom.agents.framework.isolation import checkout_ref, create_venv
+from hyperloom.common.failure_signature import CapabilityGap
+from hyperloom.inference_optimizer import framework_registry
 
-from .stack_actions import EnablementStackAction, FrameworkRuntime, ProvisionResult
+from .build_actions import resolve_build_ref
+from .build_utils import ROCM_CONSTRAINTS_FILE, write_rocm_constraints
+from .stack_actions import EnablementStackAction, FrameworkRuntime, ProvisionResult, RuntimeRequest
 
 
 log = logging.getLogger(__name__)
 
 
-# Operator-configured allowlists (comma-separated).
-_VLLM_ROCM_INDEX_ENV = "HYPERLOOM_VLLM_ROCM_INDEX_URL"
-_INDEX_ALLOWLIST_ENV = "HYPERLOOM_ENABLEMENT_INDEX_ALLOWLIST"
-_ORIGIN_ALLOWLIST_ENV = "HYPERLOOM_ENABLEMENT_ORIGIN_ALLOWLIST"
-
 # Per-provision hard timeout: wheel/editable install must fit inside the integrate lane TTL.
 _PROVISION_TIMEOUT_SEC = 1800
-
-# Gaps that a runtime candidate might repair.
-_RUNTIME_ACQUIRABLE_KINDS: frozenset[str] = frozenset(
-    {MISSING_MODEL_ARCH, UNSUPPORTED_DTYPE, NOT_IMPLEMENTED, TOKENIZER_ERROR, SERVE_FLAG}
-)
 
 
 # Injectable subprocess shim: (argv, env, cwd) -> CompletedProcess.
@@ -57,20 +44,6 @@ def _default_run(argv: list[str], env: dict[str, str], cwd: str | None) -> subpr
         timeout=_PROVISION_TIMEOUT_SEC,
         check=False,
     )
-
-
-def _allowlist(env_key: str) -> tuple[str, ...]:
-    """Return the comma-separated allowlist prefixes for ``env_key`` (may be empty)."""
-    raw = os.environ.get(env_key, "") or ""
-    return tuple(p.strip() for p in raw.split(",") if p.strip())
-
-
-def _is_allowlisted(value: str, prefixes: tuple[str, ...]) -> bool:
-    """True when ``value`` starts with one of ``prefixes`` (empty prefixes => reject)."""
-    v = (value or "").strip()
-    if not v or not prefixes:
-        return False
-    return any(v.startswith(p) for p in prefixes)
 
 
 # ROCm safety checks (injectable Python)
@@ -193,22 +166,15 @@ class BaseAdapter:
     """Base enablement adapter."""
 
     framework: str = ""
+    # The importable package's directory in the upstream repo; localization keeps only files under it.
+    package_path: str = ""
 
     def __init__(self, run: RunFn = _default_run) -> None:
         """Store the injectable subprocess shim (default: real subprocess)."""
         self._run = run
 
-    def supports(self, gap: CapabilityGap) -> bool:
-        """Whether this adapter can attempt to repair ``gap``."""
-        return False
-
-    def build_stack_action(
-        self,
-        gap: CapabilityGap,
-        *,
-        gpu_type: str = "",
-    ) -> EnablementStackAction | None:
-        """Build a candidate stack action, or None when unsupported/no-evidence."""
+    def build_stack_action(self, request: RuntimeRequest) -> EnablementStackAction | None:
+        """Turn a specialist's runtime request into a stack action, or None when this framework cannot acquire it."""
         return None
 
     def provision(self, action: EnablementStackAction, attempt_dir: Path) -> ProvisionResult:
@@ -230,15 +196,11 @@ class BaseAdapter:
         candidate_ref: str,
         repo_url: str,
     ) -> EnablementStackAction | None:
-        """Build a pr_backport localization from a merged-PR ref (origin-allowlisted), or None."""
-        if not self.supports(gap):
+        """Build a pr_backport localization from a PR ref, or None when this framework has no package to localize into."""
+        if not self.package_path:
             return None
         pr_number = _pr_number_from_ref(candidate_ref)
         if pr_number <= 0:
-            return None
-        origin_allow = _allowlist(_ORIGIN_ALLOWLIST_ENV)
-        if origin_allow and not _is_allowlisted(repo_url, origin_allow):
-            log.warning("%s: repo_url %r not in origin allowlist", type(self).__name__, repo_url)
             return None
         return EnablementStackAction(
             kind="pr_backport",
@@ -252,8 +214,15 @@ class BaseAdapter:
         )
 
     def source_import_root(self, framework_root: str) -> str:
-        """Return the import root relative to a source snapshot's ``files/`` dir."""
-        return ""
+        """Return the import root relative to a source snapshot's ``files/`` dir.
+
+        The directory above the package when the checkout holds it, so a
+        ``python/sglang`` layout gives ``python`` and a top-level package none.
+        """
+        if not framework_root or not (Path(framework_root) / self.package_path).is_dir():
+            return ""
+        parent = PurePosixPath(self.package_path).parent.as_posix()
+        return "" if parent == "." else parent
 
 
 def _pr_number_from_ref(candidate_ref: str) -> int:
@@ -273,38 +242,80 @@ def _pr_number_from_ref(candidate_ref: str) -> int:
 
 
 class NullAdapter(BaseAdapter):
-    """Adapter for unknown / unsupported frameworks: never supports, never raises."""
+    """Adapter for unknown / unsupported frameworks: acquires nothing, never raises."""
 
     framework = ""
 
 
 class _VenvProvisionMixin(BaseAdapter):
-    """Shared attempt-venv creation + pip-install plumbing for real adapters."""
+    """Attempt-venv acquisition shared by the adapters that provision a runtime."""
 
-    def supports(self, gap: CapabilityGap) -> bool:
-        """True for the gaps a runtime candidate might repair."""
-        return gap.kind in _RUNTIME_ACQUIRABLE_KINDS
+    def build_stack_action(self, request: RuntimeRequest) -> EnablementStackAction | None:
+        """An editable checkout of ``request.ref`` with its packages beside it, or the packages alone."""
+        capability = request.capability or "runtime"
+        action = EnablementStackAction(
+            kind="runtime_candidate",
+            framework=self.framework,
+            gap_id=f"gap.enablement.{capability}",
+            capability=capability,
+            reason=request.reason or f"{self.framework} runtime with {', '.join(request.packages)}",
+            acquisition_method="wheel",
+            index_url=request.index_url,
+            packages=request.packages,
+        )
+        if not request.ref:
+            return action
+        repo_url, ref, _ = resolve_build_ref(
+            request.ref, request.repo_url or framework_registry.repo_url(self.framework)
+        )
+        if not repo_url or not ref:
+            log.warning("%s: runtime ref %r names no checkout", type(self).__name__, request.ref)
+            return None
+        return replace(
+            action,
+            acquisition_method="editable_ref",
+            repo_url=repo_url,
+            ref=ref,
+            reason=request.reason or f"{self.framework} editable checkout {repo_url}@{ref}",
+        )
+
+    def _source_root_in(self, purelib: str) -> str:
+        """``purelib`` when the install put the framework there, else no tree: it is still imported from the shared one.
+
+        A runtime's source root is where its patches land, so it must be the
+        tree the server executes.
+        """
+        return purelib if (Path(purelib) / PurePosixPath(self.package_path).name).is_dir() else ""
 
     def _create_venv(self, attempt_dir: Path) -> tuple[Path, Path]:
-        """Create ``attempt_dir/venv`` with system-site-packages; return (bin, python)."""
+        """Create ``attempt_dir/venv`` over this interpreter's packages; return (bin, python)."""
         venv_root = attempt_dir / "venv"
-        argv = [sys.executable, "-m", "venv", "--system-site-packages", str(venv_root)]
-        cp = self._run(argv, dict(os.environ), None)
-        if getattr(cp, "returncode", 1) != 0:
-            raise RuntimeError(f"venv creation failed: {getattr(cp, 'stderr', '') or ''}")
+        create_venv(venv_root)
         bin_dir = venv_root / "bin"
         return bin_dir, bin_dir / "python"
+
+    def _write_rocm_constraints(self, python_path: Path, attempt_dir: Path) -> Path:
+        """Write the pip constraints that hold the attempt's ROCm stack in place."""
+        constraints = attempt_dir / ROCM_CONSTRAINTS_FILE
+        write_rocm_constraints(
+            str(python_path),
+            constraints,
+            replacing=self.framework,
+            run=lambda argv, **_kwargs: self._run(argv, dict(os.environ), None),
+        )
+        return constraints
 
     def _pip_install(
         self,
         python_path: Path,
         specs: list[str],
         *,
+        constraints: Path,
         index_url: str = "",
         editable: str = "",
     ) -> subprocess.CompletedProcess:
-        """Run one ``pip install`` into the attempt venv."""
-        argv = [str(python_path), "-m", "pip", "install", "--upgrade"]
+        """Run one ``pip install`` into the attempt venv, held to ``constraints``."""
+        argv = [str(python_path), "-m", "pip", "install", "--constraint", str(constraints)]
         if index_url:
             argv += ["--extra-index-url", index_url]
         if editable:
@@ -312,47 +323,39 @@ class _VenvProvisionMixin(BaseAdapter):
         argv += list(specs)
         return self._run(argv, dict(os.environ), None)
 
+    def _checkout(self, repo_url: str, ref: str, dest: Path) -> subprocess.CompletedProcess:
+        """Shallow-fetch ``ref`` of ``repo_url`` into ``dest`` and detach on it; returns the first failing step."""
+        dest.mkdir(parents=True, exist_ok=True)
+        git = ["git", "-C", str(dest)]
+        steps = (
+            ["init", "-q"],
+            ["fetch", "-q", "--depth", "1", repo_url, checkout_ref(ref)],
+            ["checkout", "-q", "--detach", "FETCH_HEAD"],
+        )
+        for step in steps:
+            cp = self._run([*git, *step], dict(os.environ), None)
+            if getattr(cp, "returncode", 1) != 0:
+                break
+        return cp
+
 
 class VllmRocmAdapter(_VenvProvisionMixin):
-    """vLLM ROCm adapter: wheel install from a host-allowlisted ROCm index only."""
+    """vLLM ROCm adapter: package installs over the image's ROCm vLLM."""
 
     framework = "vllm"
+    package_path = "vllm"
 
-    def build_stack_action(
-        self,
-        gap: CapabilityGap,
-        *,
-        gpu_type: str = "",
-    ) -> EnablementStackAction | None:
-        """Build a vLLM ROCm wheel candidate; None when no ROCm index is configured."""
-        if not self.supports(gap):
+    def build_stack_action(self, request: RuntimeRequest) -> EnablementStackAction | None:
+        """Packages only: a vLLM checkout compiles, which is a targeted build."""
+        if request.ref:
+            log.warning(
+                "VllmRocmAdapter: runtime ref %r refused; a vLLM checkout needs needs_targeted_build", request.ref
+            )
             return None
-        index_url = os.environ.get(_VLLM_ROCM_INDEX_ENV, "").strip()
-        if not index_url:
-            log.info("VllmRocmAdapter: no %s configured; refusing PyPI CUDA fallback", _VLLM_ROCM_INDEX_ENV)
-            return None
-        # An explicit index allowlist, when set, must match; without one the operator-set ROCm index is trusted by
-        # construction.
-        allow = _allowlist(_INDEX_ALLOWLIST_ENV)
-        if allow and not _is_allowlisted(index_url, allow):
-            log.warning("VllmRocmAdapter: index_url %r not in allowlist", index_url)
-            return None
-        capability = gap.kind
-        return EnablementStackAction(
-            kind="runtime_candidate",
-            framework="vllm",
-            gap_id=f"gap.enablement.{gap.kind}",
-            capability=capability,
-            reason=f"vLLM ROCm wheel candidate for {capability} on {gpu_type or 'rocm'}",
-            acquisition_method="wheel",
-            index_url=index_url,
-            packages=("vllm",),
-            expected_symbols=(),
-            expected_files=(),
-        )
+        return super().build_stack_action(request)
 
     def provision(self, action: EnablementStackAction, attempt_dir: Path) -> ProvisionResult:
-        """Create an attempt venv, pip-install the vLLM wheel, verify ROCm.
+        """Create an attempt venv, pip-install the requested packages, verify ROCm.
 
         Blocking (venv/pip, 1800s cap); call via ``asyncio.to_thread``.
         """
@@ -360,13 +363,14 @@ class VllmRocmAdapter(_VenvProvisionMixin):
         try:
             attempt_dir.mkdir(parents=True, exist_ok=True)
             bin_dir, python_path = self._create_venv(attempt_dir)
+            constraints = self._write_rocm_constraints(python_path, attempt_dir)
         except Exception as exc:  # noqa: BLE001
             return ProvisionResult(ok=False, log_path=log_path, error=f"venv setup failed: {exc!r}")
 
-        if action.acquisition_method != "wheel" or not action.index_url:
-            return ProvisionResult(ok=False, log_path=log_path, error="vLLM adapter requires a ROCm wheel index")
+        if action.acquisition_method != "wheel":
+            return ProvisionResult(ok=False, log_path=log_path, error=f"unsupported method {action.acquisition_method}")
 
-        cp = self._pip_install(python_path, list(action.packages) or ["vllm"], index_url=action.index_url)
+        cp = self._pip_install(python_path, list(action.packages), constraints=constraints, index_url=action.index_url)
         if getattr(cp, "returncode", 1) != 0:
             return ProvisionResult(
                 ok=False, log_path=log_path, error=f"pip install failed: {(getattr(cp, 'stderr', '') or '')[:400]}"
@@ -377,22 +381,22 @@ class VllmRocmAdapter(_VenvProvisionMixin):
             return ProvisionResult(ok=False, log_path=log_path, error="attempt torch is not a ROCm build")
         if not verify_vllm_rocm(str(python_path), run=self._run):
             return ProvisionResult(ok=False, log_path=log_path, error="vLLM did not report a ROCm platform")
-        source_root = _site_packages(str(python_path), run=self._run)
-        if not source_root:
+        purelib = _site_packages(str(python_path), run=self._run)
+        if not purelib:
             return ProvisionResult(ok=False, log_path=log_path, error="attempt interpreter reports no site-packages")
 
         versions = {
             "vllm": _installed_version(str(python_path), "vllm", run=self._run),
             "torch": _installed_version(str(python_path), "torch", run=self._run),
         }
-        resolved_packages = _resolved_packages(str(python_path), list(action.packages) or ["vllm"], run=self._run)
+        resolved_packages = _resolved_packages(str(python_path), list(action.packages), run=self._run)
         runtime = FrameworkRuntime(
             bin_path=str(bin_dir),
             python_path=str(python_path),
             venv_root=str(attempt_dir / "venv"),
             server_args=action.server_args,
             envs=dict(action.envs),
-            source_root=source_root,
+            source_root=self._source_root_in(purelib),
         )
         return ProvisionResult(
             ok=True,
@@ -415,62 +419,13 @@ class VllmRocmAdapter(_VenvProvisionMixin):
 
 
 class SglangAdapter(_VenvProvisionMixin):
-    """SGLang adapter: editable checkout at a ref, or wheel install."""
+    """SGLang adapter: editable checkout at a ref, package installs, or both."""
 
     framework = "sglang"
-
-    def source_import_root(self, framework_root: str) -> str:
-        """Return ``"python"`` for a sglang checkout (``python/sglang/...``), else ``""``."""
-        if not framework_root:
-            return ""
-        root = Path(framework_root)
-        return "python" if (root / "python" / "sglang").is_dir() else ""
-
-    def build_stack_action(
-        self,
-        gap: CapabilityGap,
-        *,
-        gpu_type: str = "",
-    ) -> EnablementStackAction | None:
-        """Prefer an editable source ref (origin-allowlisted); else a wheel index."""
-        if not self.supports(gap):
-            return None
-        repo_url = os.environ.get("HYPERLOOM_SGLANG_REPO_URL", "").strip()
-        ref = os.environ.get("HYPERLOOM_SGLANG_REF", "").strip()
-        origin_allow = _allowlist(_ORIGIN_ALLOWLIST_ENV)
-        if repo_url and ref:
-            if origin_allow and not _is_allowlisted(repo_url, origin_allow):
-                log.warning("SglangAdapter: repo_url %r not in origin allowlist", repo_url)
-                return None
-            return EnablementStackAction(
-                kind="runtime_candidate",
-                framework="sglang",
-                gap_id=f"gap.enablement.{gap.kind}",
-                capability=gap.kind,
-                reason=f"SGLang editable checkout {repo_url}@{ref} for {gap.kind}",
-                acquisition_method="editable_ref",
-                repo_url=repo_url,
-                ref=ref,
-            )
-        index_url = os.environ.get("HYPERLOOM_SGLANG_INDEX_URL", "").strip()
-        if not index_url:
-            return None
-        index_allow = _allowlist(_INDEX_ALLOWLIST_ENV)
-        if index_allow and not _is_allowlisted(index_url, index_allow):
-            return None
-        return EnablementStackAction(
-            kind="runtime_candidate",
-            framework="sglang",
-            gap_id=f"gap.enablement.{gap.kind}",
-            capability=gap.kind,
-            reason=f"SGLang wheel candidate for {gap.kind}",
-            acquisition_method="wheel",
-            index_url=index_url,
-            packages=("sglang",),
-        )
+    package_path = "python/sglang"
 
     def provision(self, action: EnablementStackAction, attempt_dir: Path) -> ProvisionResult:
-        """Create an attempt venv, install SGLang (editable ref or wheel).
+        """Create an attempt venv, install SGLang from a checkout and/or the requested packages.
 
         Blocking (venv/pip, 1800s cap); call via ``asyncio.to_thread``.
         """
@@ -478,36 +433,41 @@ class SglangAdapter(_VenvProvisionMixin):
         try:
             attempt_dir.mkdir(parents=True, exist_ok=True)
             bin_dir, python_path = self._create_venv(attempt_dir)
+            constraints = self._write_rocm_constraints(python_path, attempt_dir)
         except Exception as exc:  # noqa: BLE001
             return ProvisionResult(ok=False, log_path=log_path, error=f"venv setup failed: {exc!r}")
 
         pythonpath_prefix = ""
-        source_root = ""
         resolved_ref = ""
-        resolved_packages: dict[str, dict[str, str]] = {}
         if action.acquisition_method == "editable_ref":
             if not action.repo_url or not action.ref:
                 return ProvisionResult(ok=False, log_path=log_path, error="editable_ref requires repo_url and ref")
             checkout = attempt_dir / "src"
-            clone = self._run(
-                ["git", "clone", "--depth", "1", "--branch", action.ref, action.repo_url, str(checkout)],
-                dict(os.environ),
-                None,
-            )
-            if getattr(clone, "returncode", 1) != 0:
+            fetched = self._checkout(action.repo_url, action.ref, checkout)
+            if getattr(fetched, "returncode", 1) != 0:
                 return ProvisionResult(
-                    ok=False, log_path=log_path, error=f"git clone failed: {(getattr(clone, 'stderr', '') or '')[:400]}"
+                    ok=False,
+                    log_path=log_path,
+                    error=f"git checkout of {action.ref} failed: {(getattr(fetched, 'stderr', '') or '')[:400]}",
                 )
-            cp = self._pip_install(python_path, [], editable=str(checkout / "python"))
+            cp = self._pip_install(
+                python_path, list(action.packages), constraints=constraints, editable=str(checkout / "python")
+            )
             pythonpath_prefix = str(checkout / "python")
             # The editable install imports straight out of the clone, and its
             # diffs are cut against the repo root that holds ``python/sglang``.
             source_root = str(checkout)
             resolved_ref = _resolved_clone_ref(str(checkout), run=self._run)
         elif action.acquisition_method == "wheel":
-            cp = self._pip_install(python_path, list(action.packages) or ["sglang"], index_url=action.index_url)
-            source_root = _site_packages(str(python_path), run=self._run)
-            resolved_packages = _resolved_packages(str(python_path), list(action.packages) or ["sglang"], run=self._run)
+            cp = self._pip_install(
+                python_path, list(action.packages), constraints=constraints, index_url=action.index_url
+            )
+            purelib = _site_packages(str(python_path), run=self._run)
+            if not purelib:
+                return ProvisionResult(
+                    ok=False, log_path=log_path, error="attempt interpreter reports no site-packages"
+                )
+            source_root = self._source_root_in(purelib)
         else:
             return ProvisionResult(ok=False, log_path=log_path, error=f"unsupported method {action.acquisition_method}")
 
@@ -517,8 +477,7 @@ class SglangAdapter(_VenvProvisionMixin):
             )
         if not verify_torch_is_rocm(str(python_path), run=self._run):
             return ProvisionResult(ok=False, log_path=log_path, error="attempt torch is not a ROCm build")
-        if not source_root:
-            return ProvisionResult(ok=False, log_path=log_path, error="attempt interpreter reports no site-packages")
+        resolved_packages = _resolved_packages(str(python_path), list(action.packages), run=self._run)
 
         versions = {"sglang": _installed_version(str(python_path), "sglang", run=self._run)}
         runtime = FrameworkRuntime(
@@ -544,10 +503,7 @@ class AtomAdapter(BaseAdapter):
     """Atom adapter: no runtime acquisition, but Python localization."""
 
     framework = "atom"
-
-    def supports(self, gap: CapabilityGap) -> bool:
-        """Localize any code gap; the backport is applied via no-git."""
-        return True
+    package_path = "atom"
 
 
 class XditAdapter(BaseAdapter):

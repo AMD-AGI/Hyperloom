@@ -224,3 +224,50 @@ def test_a_non_mapping_bundle_is_refused() -> None:
 
 def test_bundle_ids_are_compared_after_stripping() -> None:
     assert pl.bundle_belongs_to(_bundle(" id-1 "), "id-1") is True
+
+
+# --- IntegratedStack: which tasks a landed stack already retired -------------
+
+
+def test_covers_matches_on_the_source_file_alone() -> None:
+    """A whole-file overwrite retires every queued patch on that file, whoever owns them."""
+    stack = pl.IntegratedStack.of([{"action": "integrate", "kernel_id": "k9", "target_file": "/repo/a.py"}])
+
+    assert stack.covers(kernel_ids=("k1",), task_group_key="g1", source_file="/repo/a.py") is True
+
+
+def test_covers_reads_a_source_path_the_way_a_record_spells_it() -> None:
+    stack = pl.IntegratedStack.of([{"action": "integrate", "source_file": "  /repo/a.py "}])
+
+    assert stack.covers(kernel_ids=(), task_group_key="", source_file="/repo/a.py") is True
+
+
+def test_a_fusion_row_covers_like_an_integrate_row() -> None:
+    stack = pl.IntegratedStack.of([{"action": "fusion", "kernel_id": "k2"}])
+
+    assert stack.covers(kernel_ids=("k1", "k2"), task_group_key="", source_file="") is True
+
+
+def test_a_non_integrating_row_covers_nothing() -> None:
+    stack = pl.IntegratedStack.of([None, {"action": "benchmark", "kernel_id": "k1", "target_file": "/repo/a.py"}])
+
+    assert stack.covers(kernel_ids=("k1",), task_group_key="", source_file="/repo/a.py") is False
+
+
+def test_covers_is_false_without_members_and_without_a_source_match() -> None:
+    stack = pl.IntegratedStack.of([{"action": "integrate", "kernel_id": "k9", "target_file": "/repo/a.py"}])
+
+    assert stack.covers(kernel_ids=(), task_group_key="g1", source_file="/repo/b.py") is False
+
+
+def test_covers_honours_a_task_group_alias() -> None:
+    """A task renamed mid-run is still the task the stack already landed."""
+    stack = pl.IntegratedStack.of([{"action": "integrate", "task_group_key": "old"}])
+
+    assert stack.covers(kernel_ids=("k1",), task_group_key="new", source_file="", task_group_aliases={"old"}) is True
+
+
+def test_covers_refuses_an_unrelated_task_group_key() -> None:
+    stack = pl.IntegratedStack.of([{"action": "integrate", "task_group_key": "other"}])
+
+    assert stack.covers(kernel_ids=("k1",), task_group_key="g1", source_file="") is False

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import gzip
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -646,7 +645,6 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
         framework="sglang",
         target_platform="MI300X",
         analysis_mode="inference",
-        runtime_env="local",
         dry_run=False,
     )
 
@@ -671,7 +669,6 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
     assert enriched["env_vars"] == {}
     assert enriched["kernel_params"] == {}
     assert enriched["runtime_flags"]["analysis_mode"] == "inference"
-    assert enriched["runtime_flags"]["runtime_env"] == "local"
     assert enriched["runtime_flags"]["target_platform"] == "MI300X"
     assert enriched["runtime_flags"]["is_multigpu"] is False
     assert enriched["runtime_flags"]["num_gpus_recommended"] == 1
@@ -783,7 +780,6 @@ def test_write_reports_enriches_head_size_from_model_config(tmp_path):
         framework="sglang",
         target_platform="MI300X",
         analysis_mode="inference",
-        runtime_env="local",
         dry_run=False,
     )
 
@@ -810,7 +806,6 @@ def _make_write_reports_args(trace_path):
         framework="sglang",
         target_platform="MI300X",
         analysis_mode="inference",
-        runtime_env="local",
         dry_run=False,
     )
 
@@ -1554,15 +1549,15 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
 
     assert len(calls) == 1
     call = calls[0]
-    assert call["model"] == "gpt-5.5"
+    assert call["config"].model == "gpt-5.5"
     # The session works out of the TraceLens root so the skill's command-prefix cache and relative paths resolve as
     # they do on the Claude path.
-    assert call["cwd"] == tmp_path
+    assert call["config"].cwd == tmp_path
     # The output dir is the only extra writable root: nothing else is mutable.
-    assert call["writable_roots"] == (output_dir,)
-    assert call["timeout_sec"] == 30 * 60.0
+    assert call["config"].writable_roots == (output_dir,)
+    assert call["request"].timeout_sec == 30 * 60.0
     assert "TraceLens analysis runner" in call["developer_instructions"]
-    assert str(tmp_path / "skill.md") in call["prompt"]
+    assert str(tmp_path / "skill.md") in call["request"].prompt
 
 
 def test_run_tracelens_skill_codex_grants_the_capture_folder_write_access(tmp_path, monkeypatch):
@@ -1606,7 +1601,7 @@ def test_run_tracelens_skill_codex_grants_the_capture_folder_write_access(tmp_pa
         )
     )
 
-    assert calls[0]["writable_roots"] == (output_dir, capture_folder)
+    assert calls[0]["config"].writable_roots == (output_dir, capture_folder)
 
 
 def test_run_tracelens_skill_codex_floors_the_turn_timeout(tmp_path, monkeypatch):
@@ -1641,7 +1636,7 @@ def test_run_tracelens_skill_codex_floors_the_turn_timeout(tmp_path, monkeypatch
         )
     )
 
-    assert calls[0]["timeout_sec"] == 60.0
+    assert calls[0]["request"].timeout_sec == 60.0
 
 
 def test_run_tracelens_skill_codex_raises_when_report_missing(tmp_path, monkeypatch):
@@ -2121,6 +2116,7 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
         "--no-llm-orchestrator",
         "--capture-folder",
         str(capture),
+        "--split-llm-inference",
         "--split-conc",
         "8",
         "--split-osl",
@@ -2224,6 +2220,7 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, t
         "--no-llm-orchestrator",
         "--capture-folder",
         str(capture),
+        "--split-llm-inference",
         *extra_argv,
     ]
 
@@ -2547,39 +2544,6 @@ def test_unpatched_sglang_capture_sorts_behind_the_workload_trace(tmp_path):
 
     _kind, traces = tla.discover_trace_inputs(trace_dir)
     assert traces[0] == real
-
-
-def test_skip_split_route_analyses_the_promoted_candidate(tmp_path):
-    """The promotion must hold on the route xDiT actually takes."""
-    from unittest.mock import patch
-
-    trace_dir = tmp_path / "torch_trace"
-    trace_dir.mkdir()
-    empty = _rank_trace(trace_dir / "rank_0.trace.json.gz", kernels=0, cpu_events=400)
-    populated = _rank_trace(trace_dir / "rank_1.trace.json.gz", kernels=12)
-
-    # The skill runs in-process, so the analysed trace never reaches a subprocess argv the way the splitter's does --
-    # the skill's own arguments are the only place the promotion is observable.
-    class _StopAfterSkillDispatch(Exception):
-        """Ends the run once the skill's input trace has been recorded."""
-
-    seen: list[Path] = []
-
-    async def fake_skill(*, trace_path, **_kw):
-        seen.append(trace_path)
-        raise _StopAfterSkillDispatch(trace_path.name)
-
-    with patch.object(tla, "run_tracelens_skill", fake_skill):
-        captured = _drive_main_over_capture_dir(
-            tmp_path,
-            trace_dir,
-            extra_argv=["--skip-split", "--use-llm-orchestrator"],
-        )
-
-    assert _find_splitter_cmd(captured) is None, "--skip-split must skip the splitter"
-    assert seen, "the TraceLens skill was never reached"
-    assert seen[0] == populated, f"analysed {seen[0].name}, expected {populated.name}"
-    assert empty not in seen
 
 
 def test_capture_under_an_ancestor_named_trace_split_still_orders_correctly(tmp_path):
@@ -3025,208 +2989,6 @@ def test_parse_launcher_path_returns_none_for_empty_and_garbage():
 def test_parse_launcher_path_swallows_deep_dict_repr():
     payload = "{'entry_point': " + "(" * 9000 + "'a.py(1): f'" + ")" * 9000 + "}"
     assert tlr._parse_launcher_path(payload) == ("", None, None)
-
-
-# _resolve_launcher_to_abs_source — TraceLens launcher path → absolute file.
-
-
-def _seed_pkg(tmp_path, pkg: str, relpath: str, funcs: tuple[str, ...] = ()) -> Path:
-    """Create ``<tmp_path>/<pkg>/<relpath>`` (with optional top-level ``def`` names) and return the absolute file."""
-    target = tmp_path / pkg / relpath
-    target.parent.mkdir(parents=True, exist_ok=True)
-    body = ["# stub for resolver tests\n"]
-    for fn in funcs:
-        body.append(f"def {fn}(*args, **kwargs):\n    pass\n")
-    target.write_text("".join(body), encoding="utf-8")
-    return target
-
-
-def test_resolve_launcher_via_env_override(tmp_path, monkeypatch):
-    """``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` is the highest-priority resolver source (no import needed)."""
-    target = _seed_pkg(
-        tmp_path,
-        "aiter",
-        "ops/rmsnorm.py",
-        funcs=("rmsnorm2d_fwd",),
-    )
-    monkeypatch.setenv(
-        tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
-        f"aiter={tmp_path}",
-    )
-
-    resolved = tlr._resolve_launcher_to_abs_source(
-        "aiter/ops/rmsnorm.py(62): rmsnorm2d_fwd",
-    )
-    assert resolved is not None
-    abs_path, line, func = resolved
-    assert abs_path == str(target)
-    assert line == 62
-    assert func == "rmsnorm2d_fwd"
-
-
-def test_resolve_launcher_via_importlib_spec(monkeypatch):
-    """With no env override, ``find_spec`` resolves the absolute origin (tested via stdlib ``unittest/case.py``)."""
-    monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
-    resolved = tlr._resolve_launcher_to_abs_source(
-        "unittest/case.py(1): expectedFailure",
-    )
-    assert resolved is not None
-    abs_path, line, func = resolved
-    assert os.path.isabs(abs_path) and abs_path.endswith("unittest/case.py")
-    assert line == 1
-    assert func == "expectedFailure"
-
-
-def test_resolve_launcher_via_hardcoded_fallback(tmp_path, monkeypatch):
-    """When the package isn't importable but a hardcoded fallback root holds the file, the resolver still succeeds."""
-    monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
-
-    # Seed a fake aiter checkout and point the fallback table at it (package not importable).
-    _seed_pkg(
-        tmp_path,
-        "aiter_pinned_xfx",
-        "ops/rmsnorm.py",
-        funcs=("rmsnorm2d_fwd_with_add",),
-    )
-    monkeypatch.setattr(
-        tlr,
-        "_FRAMEWORK_PKG_FALLBACK_ROOTS",
-        {"aiter_pinned_xfx": (str(tmp_path),)},
-    )
-    # Force find_spec to miss so the fallback table is exercised.
-    monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
-
-    resolved = tlr._resolve_launcher_to_abs_source(
-        "aiter_pinned_xfx/ops/rmsnorm.py(76): rmsnorm2d_fwd_with_add",
-    )
-    assert resolved is not None
-    abs_path, line, func = resolved
-    assert abs_path == str(tmp_path / "aiter_pinned_xfx" / "ops" / "rmsnorm.py")
-    assert line == 76
-    assert func == "rmsnorm2d_fwd_with_add"
-
-
-def test_resolve_launcher_splits_an_absolute_annotated_path():
-    """Absolute launchers keep their path while separating line and function."""
-    assert tlr._resolve_launcher_to_abs_source(
-        "/sgl-workspace/aiter/aiter/ops/rmsnorm.py(62): fn",
-    ) == (
-        "/sgl-workspace/aiter/aiter/ops/rmsnorm.py",
-        62,
-        "fn",
-    )
-
-
-def test_resolve_launcher_returns_none_for_placeholders_and_misses():
-    """Placeholders, empty strings, and unresolvable packages collapse to None (no fabricated path)."""
-    assert tlr._resolve_launcher_to_abs_source("") is None
-    assert tlr._resolve_launcher_to_abs_source("—") is None
-    # Unresolvable package → None; caller falls back to the verbatim string.
-    assert (
-        tlr._resolve_launcher_to_abs_source(
-            "definitely_not_a_real_pkg_8x9z/foo.py(1): fn",
-        )
-        is None
-    )
-
-
-def test_resolve_launcher_rejects_when_function_not_in_file(tmp_path, monkeypatch):
-    """AST guard: when the resolved ``.py`` exists but lacks the launcher's function, the resolver refuses it."""
-    # Seed a .py file that does NOT define rmsnorm2d_fwd.
-    target = tmp_path / "aiter_shadowed_xyz" / "ops" / "rmsnorm.py"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(
-        "def some_other_function():\n    pass\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv(
-        tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
-        f"aiter_shadowed_xyz={tmp_path}",
-    )
-    # No fallback paths so the bad-symbol path is rejected outright.
-    monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
-    monkeypatch.setattr(tlr, "_FRAMEWORK_PKG_FALLBACK_ROOTS", {})
-
-    assert (
-        tlr._resolve_launcher_to_abs_source(
-            "aiter_shadowed_xyz/ops/rmsnorm.py(62): rmsnorm2d_fwd",
-        )
-        is None
-    )
-
-
-def test_resolve_launcher_ast_check_falls_through_to_next_root(tmp_path, monkeypatch):
-    """When the first candidate root holds a stub that fails AST validation, the resolver MUST keep walking the candidate list instead of short-circuiting — otherwise a single bad spec (shadowed pkg / stale wheel) permanently masks the real source on the fallback path."""
-    bad_root = tmp_path / "bad"
-    good_root = tmp_path / "good"
-    bad_target = bad_root / "aiter_pinned_qrs" / "ops" / "rmsnorm.py"
-    bad_target.parent.mkdir(parents=True, exist_ok=True)
-    bad_target.write_text("def not_it():\n    pass\n", encoding="utf-8")
-    good_target = good_root / "aiter_pinned_qrs" / "ops" / "rmsnorm.py"
-    good_target.parent.mkdir(parents=True, exist_ok=True)
-    good_target.write_text(
-        "def rmsnorm2d_fwd(x):\n    return x\n",
-        encoding="utf-8",
-    )
-
-    monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
-    monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
-    monkeypatch.setattr(
-        tlr,
-        "_FRAMEWORK_PKG_FALLBACK_ROOTS",
-        {"aiter_pinned_qrs": (str(bad_root), str(good_root))},
-    )
-
-    resolved = tlr._resolve_launcher_to_abs_source(
-        "aiter_pinned_qrs/ops/rmsnorm.py(76): rmsnorm2d_fwd",
-    )
-    assert resolved is not None
-    abs_path, line, func = resolved
-    assert abs_path == str(good_target)
-    assert line == 76
-    assert func == "rmsnorm2d_fwd"
-
-
-def test_resolve_launcher_skips_ast_check_for_non_py_sources(tmp_path, monkeypatch):
-    """AST validation only applies to Python sources; HIP/CUDA refs pass existence-only validation."""
-    target = tmp_path / "aiter_hipxyz" / "csrc" / "rms_hip.cu"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("// device code\n", encoding="utf-8")
-    monkeypatch.setenv(
-        tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
-        f"aiter_hipxyz={tmp_path}",
-    )
-
-    resolved = tlr._resolve_launcher_to_abs_source(
-        "aiter_hipxyz/csrc/rms_hip.cu#L42",
-    )
-    assert resolved is not None
-    abs_path, line, func = resolved
-    assert abs_path == str(target)
-    assert line == 42
-    assert func is None
-
-
-def test_resolve_launcher_skips_unparseable_env_entries(tmp_path, monkeypatch):
-    """Malformed env entries are silently skipped; the one valid entry still wins."""
-    target = _seed_pkg(
-        tmp_path,
-        "vllm",
-        "model_executor/models/qwen.py",
-        funcs=("forward",),
-    )
-    monkeypatch.setenv(
-        tlr._FRAMEWORK_SOURCE_ROOTS_ENV,
-        # First two entries are malformed (skipped); the third is the valid one.
-        f"junk_without_equals,=/just/value,vllm={tmp_path}",
-    )
-
-    resolved = tlr._resolve_launcher_to_abs_source(
-        "vllm/model_executor/models/qwen.py(10): forward",
-    )
-    assert resolved is not None
-    abs_path, _, _ = resolved
-    assert abs_path == str(target)
 
 
 def test_function_line_from_ast_finds_def_lineno(tmp_path):
@@ -4179,45 +3941,6 @@ def test_infer_analysis_mode_unknown_framework_stays_default():
     assert tlr.infer_analysis_mode("", "") == "default"
 
 
-# atom entries present in _FRAMEWORK_PKG_FALLBACK_ROOTS
-def test_framework_pkg_fallback_roots_has_atom_entry():
-    """The atom fallback roots must include ``/app/ATOM`` plus a site-packages variant."""
-    table = tlr._FRAMEWORK_PKG_FALLBACK_ROOTS
-    assert "atom" in table, "atom missing from _FRAMEWORK_PKG_FALLBACK_ROOTS"
-    roots = table["atom"]
-    assert "/app/ATOM" in roots
-    assert any("site-packages" in r or "dist-packages" in r for r in roots), (
-        f"atom fallback roots lack a site-packages entry: {roots!r}"
-    )
-
-
-def test_resolve_launcher_via_atom_fallback_root(tmp_path, monkeypatch):
-    """End-to-end: a relative atom path resolves against the atom fallback root when import atom doesn't fire."""
-    monkeypatch.delenv(tlr._FRAMEWORK_SOURCE_ROOTS_ENV, raising=False)
-    _seed_pkg(
-        tmp_path,
-        "atom",
-        "model_engine/model_runner.py",
-        funcs=("forward",),
-    )
-    monkeypatch.setattr(
-        tlr,
-        "_FRAMEWORK_PKG_FALLBACK_ROOTS",
-        {"atom": (str(tmp_path),)},
-    )
-    # Force find_spec to miss so the test exercises the fallback path.
-    monkeypatch.setattr(tlr, "_package_root_parent", lambda pkg: None)
-
-    resolved = tlr._resolve_launcher_to_abs_source(
-        "atom/model_engine/model_runner.py(125): forward",
-    )
-    assert resolved is not None
-    abs_path, line, func = resolved
-    assert abs_path == str(tmp_path / "atom" / "model_engine" / "model_runner.py")
-    assert line == 125
-    assert func == "forward"
-
-
 # The wrapper that merely *launches* the kernel — must never be the source.
 
 
@@ -4357,417 +4080,3 @@ def test_graph_coverage_from_raw_trace_never_raises():
     # Missing/unreadable trace must degrade to {} (fall back to the plain gate).
     assert tla._graph_coverage_from_raw_trace(None) == {}
     assert tla._graph_coverage_from_raw_trace("/no/such/trace.json") == {}
-
-
-# --- pretrim_startup_transient (#profiler-start transient) -------------------
-
-
-def _write_trace(
-    path: Path,
-    step_durs,
-    *,
-    step_us_gap=0.0,
-    host_lead_us=30_000.0,
-    phases=None,
-    unique_names=True,
-    omit_host_steps=(),
-    omit_device_steps=(),
-    extra_events=None,
-):
-    """Build a minimal torch-profiler trace with GPU step annotations."""
-    # torch stamps metadata with the profiler-open ts, i.e. always before any cut point -- reproduce that, it is what
-    # made a naive ts filter drop it.
-    events = [
-        {"ph": "M", "name": "process_name", "ts": 999_999.0, "pid": 1, "args": {"name": "python"}},
-        {"ph": "M", "name": "thread_name", "ts": 999_999.0, "pid": 1, "tid": 7, "args": {"name": "t"}},
-    ]
-    ts = 1_000_000.0
-    for i, dur in enumerate(step_durs):
-        phase = (phases or ["DECODE"] * len(step_durs))[i]
-        name = f"step[{phase} bs=64 g_sk={i}]" if unique_names else f"step[{phase} bs=64]"
-        # The host runs a step ahead: step N's launches are issued while step N-1 still owns the GPU, so the lead is
-        # bounded by the *previous* step's duration.
-        host_ts = ts - min(host_lead_us, step_durs[i - 1]) if i else ts - 1.0
-        if i not in omit_host_steps:
-            events.append(
-                {"ph": "X", "cat": "user_annotation", "name": name, "pid": 1, "tid": 1, "ts": host_ts, "dur": 3.0}
-            )
-        events.append(
-            {"ph": "X", "cat": "cpu_op", "name": f"launch_{i}", "pid": 1, "tid": 1, "ts": host_ts + 0.1, "dur": 1.0}
-        )
-        if i not in omit_device_steps:
-            events.append(
-                {
-                    "ph": "X",
-                    "cat": "gpu_user_annotation",
-                    "name": name,
-                    "pid": 5,
-                    "tid": 7,
-                    "ts": ts,
-                    "dur": dur,
-                }
-            )
-        events.append(
-            {
-                "ph": "X",
-                "cat": "kernel",
-                "name": f"some_kernel_{i}",
-                "pid": 5,
-                "tid": 7,
-                "ts": ts + 1.0,
-                "dur": max(1.0, dur / 2),
-            }
-        )
-        ts += dur + step_us_gap
-    events.extend(extra_events or [])
-    payload = {"schemaVersion": 1, "baseTimeNanoseconds": 12345, "traceEvents": events}
-    with gzip.open(path, "wt", encoding="utf-8") as fh:
-        json.dump(payload, fh)
-    return path
-
-
-def test_pretrim_drops_leading_barrier_step(tmp_path):
-    """A 479x leading step is cut; the steady tail and metadata survive."""
-    src = _write_trace(tmp_path / "r.trace.json.gz", [15_781_320.0] + [32_944.0] * 127)
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is True
-    assert report["reason"] == "trimmed"
-    assert report["dropped_steps"] == 1
-    assert report["remaining_steps"] == 127
-    assert report["outlier_ratio"] > 400
-
-    out = tla.open_json(dst)
-    spans = tla._step_annotation_spans(out["traceEvents"])
-    assert len(spans) == 127
-    assert max(dur for _, dur, _ in spans) < 40_000.0  # the barrier step is gone
-    # ph:"M" metadata has no ts and must be preserved, else the chunk loses its process/thread names and TraceLens
-    # can't attribute anything.
-    assert sum(1 for ev in out["traceEvents"] if ev.get("ph") == "M") == 2
-    assert out["baseTimeNanoseconds"] == 12345
-
-
-def test_pretrim_noop_on_clean_trace(tmp_path):
-    """Uniform steps are left alone and no output file is written."""
-    src = _write_trace(tmp_path / "r.trace.json.gz", [32_900.0, 33_100.0] * 32)
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is False
-    assert report["reason"] == "no_leading_outlier"
-    assert not dst.exists()
-
-
-def test_pretrim_keeps_midstream_outlier(tmp_path):
-    """Only a *leading* run is cut; a slow step in the middle is real behaviour."""
-    durs = [32_944.0] * 10 + [5_000_000.0] + [32_944.0] * 10
-    src = _write_trace(tmp_path / "r.trace.json.gz", durs)
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is False
-    assert report["reason"] == "no_leading_outlier"
-
-
-def test_pretrim_refuses_when_too_many_leading_outliers(tmp_path):
-    """A run that never reaches steady state is surfaced, not trimmed away."""
-    durs = [5_000_000.0] * 6 + [32_944.0] * 20
-    src = _write_trace(tmp_path / "r.trace.json.gz", durs)
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is False
-    assert report["reason"] == "too_many_leading_outliers"
-    assert report["leading_outliers"] == 6
-    assert not dst.exists()
-
-
-def test_pretrim_skips_short_traces(tmp_path):
-    """Below the step floor the median is not worth trusting."""
-    src = _write_trace(tmp_path / "r.trace.json.gz", [9_000_000.0] + [32_944.0] * 3)
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is False
-    assert report["reason"] == "too_few_steps"
-
-
-def test_pretrim_degrades_on_unreadable_trace(tmp_path):
-    """An unreadable trace must fall through to the raw path, not raise."""
-    bad = tmp_path / "bad.trace.json.gz"
-    bad.write_bytes(b"not a gzip")
-
-    trimmed, report = tla.pretrim_startup_transient(bad, tmp_path / "out.trace.json.gz")
-
-    assert trimmed is False
-    assert report["reason"] == "unreadable_trace"
-
-
-def test_pretrim_ignores_traces_without_step_annotations(tmp_path):
-    """No step annotations -> nothing to measure against."""
-    payload = {"traceEvents": [{"ph": "X", "cat": "kernel", "name": "k", "ts": 1.0, "dur": 5.0} for _ in range(50)]}
-    src = tmp_path / "r.trace.json.gz"
-    with gzip.open(src, "wt", encoding="utf-8") as fh:
-        json.dump(payload, fh)
-
-    trimmed, report = tla.pretrim_startup_transient(src, tmp_path / "out.trace.json.gz")
-
-    assert trimmed is False
-    assert report["reason"] == "too_few_steps"
-    assert report["steps"] == 0
-
-
-def test_pretrim_threshold_is_the_module_default(tmp_path):
-    """A step under the default multiple is left alone; over it is cut."""
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-    # ~6x the median -- real jitter can reach this, so it must survive.
-    under = _write_trace(tmp_path / "under.trace.json.gz", [200_000.0] + [32_944.0] * 20)
-    assert tla.pretrim_startup_transient(under, dst)[0] is False
-    # ~15x -- past the default, and nowhere near the 479x the real barrier hits.
-    over = _write_trace(tmp_path / "over.trace.json.gz", [500_000.0] + [32_944.0] * 20)
-    trimmed, report = tla.pretrim_startup_transient(over, dst)
-    assert trimmed is True
-    assert report["dropped_steps"] == 1
-    assert report["outlier_factor"] == tla._PRETRIM_OUTLIER_FACTOR
-
-
-def test_pretrim_keeps_host_side_of_first_surviving_step(tmp_path):
-    """The kept step's host ops survive even though they start inside the dropped step's device span."""
-    src = _write_trace(
-        tmp_path / "r.trace.json.gz",
-        [15_781_320.0] + [32_944.0] * 40,
-        host_lead_us=839_000.0,
-    )
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-    assert trimmed is True
-    # Two cuts, host earlier -- and by the full lead, not a value clamped down to the kept step's own duration.
-    assert report["gpu_cut_ts"] - report["cpu_cut_ts"] == pytest.approx(839_000.0)
-
-    ev = tla.open_json(dst)["traceEvents"]
-    kept_host = {e["name"] for e in ev if e.get("cat") == "user_annotation"}
-    kept_dev = {n for _, _, n in tla._step_annotation_spans(ev)}
-    # Same set on both timelines: no step is half-present.
-    assert kept_host == kept_dev
-    assert "step[DECODE bs=64 g_sk=0]" not in kept_host  # dropped step, both sides
-    assert "step[DECODE bs=64 g_sk=1]" in kept_host  # kept step, host side survived
-    assert len(kept_host) == 40
-
-
-def test_pretrim_drops_dropped_step_device_work_after_the_host_cut(tmp_path):
-    """Kernels belonging to the dropped step do not leak past the host cut."""
-    src = _write_trace(
-        tmp_path / "r.trace.json.gz",
-        [15_781_320.0] + [32_944.0] * 40,
-        host_lead_us=839_000.0,
-    )
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-    tla.pretrim_startup_transient(src, dst)
-
-    ev = tla.open_json(dst)["traceEvents"]
-    kernels = {e["name"] for e in ev if e.get("cat") == "kernel"}
-    assert "some_kernel_0" not in kernels
-    assert "some_kernel_1" in kernels
-    assert len(kernels) == 40
-
-
-def test_pretrim_leaves_enough_steps_for_the_splitter(tmp_path):
-    """Step count downstream is set by --num-steps, and the trim keeps well clear of it: the splitter still gets its full window, only shifted."""
-    src = _write_trace(tmp_path / "r.trace.json.gz", [15_781_320.0] + [32_944.0] * 127)
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    _, report = tla.pretrim_startup_transient(src, dst)
-
-    assert report["remaining_steps"] == 127
-    assert report["remaining_steps"] >= 32  # the default --split-num-steps
-
-
-def test_pretrim_pairs_timelines_by_position_not_by_name(tmp_path):
-    """Repeated step names must still cut both timelines at the right place."""
-    src = _write_trace(
-        tmp_path / "r.trace.json.gz",
-        [15_781_320.0] + [32_944.0] * 40,
-        host_lead_us=839_000.0,
-        unique_names=False,
-    )
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-    assert trimmed is True
-    assert report["gpu_cut_ts"] - report["cpu_cut_ts"] == pytest.approx(839_000.0)
-
-    ev = tla.open_json(dst)["traceEvents"]
-    # One host annotation per surviving device step, and no more: the dropped step's host side went with its device
-    # side.
-    assert len(tla._step_annotation_spans(ev)) == 40
-    assert sum(1 for e in ev if e.get("cat") == "user_annotation") == 40
-    # launch_0 is the dropped step's host op; it must not survive on the strength of a name it shares with every other
-    # step.
-    launches = {e["name"] for e in ev if e.get("cat") == "cpu_op"}
-    assert "launch_0" not in launches
-    assert "launch_1" in launches
-
-
-def test_pretrim_refuses_when_the_timelines_hold_different_step_counts(tmp_path):
-    """Unequal step counts make positional pairing meaningless, either way round."""
-    src = _write_trace(
-        tmp_path / "fewer_host.trace.json.gz",
-        [15_781_320.0] + [32_944.0] * 20,
-        omit_host_steps=(1, 2),
-    )
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is False
-    assert report["reason"] == "timeline_step_count_mismatch"
-    assert (report["steps"], report["host_steps"]) == (21, 19)
-    assert not dst.exists()
-
-
-def test_pretrim_refuses_when_device_step_annotations_are_missing(tmp_path):
-    """More host steps than device steps is the shape real captures arrive in."""
-    src = _write_trace(
-        tmp_path / "fewer_device.trace.json.gz",
-        [15_781_320.0] + [32_944.0] * 20,
-        omit_device_steps=(5, 9, 13),
-    )
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is False
-    assert report["reason"] == "timeline_step_count_mismatch"
-    assert (report["steps"], report["host_steps"]) == (18, 21)
-    assert not dst.exists()
-
-
-def test_pretrim_keeps_leading_prefill_steps(tmp_path):
-    """Prefill steps are not transients just because decode dominates the trace."""
-    durs = [1_200_000.0, 880_000.0, 1_530_000.0] + [32_944.0] * 30
-    phases = ["EXTEND"] * 3 + ["DECODE"] * 30
-    src = _write_trace(tmp_path / "r.trace.json.gz", durs, phases=phases)
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is False
-    assert report["reason"] == "no_leading_outlier"
-    # Each phase gets its own baseline rather than one median for the trace.
-    assert set(report["phase_medians_ms"]) == {"EXTEND", "DECODE"}
-    assert report["first_step_phase"] == "EXTEND"
-    assert report["first_step_ratio"] < tla._PRETRIM_OUTLIER_FACTOR
-    assert not dst.exists()
-
-
-def test_pretrim_drops_a_prefill_transient_against_its_own_phase(tmp_path):
-    """The guard still fires when the transient lands on a prefill step."""
-    durs = [15_781_320.0, 1_200_000.0, 1_150_000.0, 1_180_000.0] + [32_944.0] * 30
-    phases = ["EXTEND"] * 4 + ["DECODE"] * 30
-    src = _write_trace(tmp_path / "r.trace.json.gz", durs, phases=phases)
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is True
-    assert report["dropped_steps"] == 1
-    assert report["dropped_phase"] == "EXTEND"
-    # Measured against EXTEND's 1.2 s median (13x) rather than decode's 33 ms, which would have made it 479x and swept
-    # the healthy prefill steps with it.
-    assert report["outlier_ratio"] == pytest.approx(15_781_320.0 / 1_200_000.0, rel=1e-3)
-    assert report["phase_medians_ms"]["EXTEND"] == pytest.approx(1_200.0)
-    assert report["remaining_steps"] == 33
-
-
-def test_pretrim_leaves_a_phase_without_a_baseline_alone(tmp_path):
-    """A leading step whose phase is too rare to have a median is not dropped."""
-    durs = [9_000_000.0] + [32_944.0] * 30
-    phases = ["EXTEND"] + ["DECODE"] * 30
-    src = _write_trace(tmp_path / "r.trace.json.gz", durs, phases=phases)
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is False
-    assert report["reason"] == "no_leading_outlier"
-    assert "EXTEND" not in report["phase_medians_ms"]
-    assert report["first_step_ratio"] is None
-
-
-def test_pretrim_reports_the_worst_ratio_across_dropped_steps(tmp_path):
-    """``outlier_ratio`` covers the whole dropped run, not just its first step."""
-    durs = [500_000.0, 5_000_000.0] + [32_944.0] * 20
-    src = _write_trace(tmp_path / "r.trace.json.gz", durs)
-    dst = tmp_path / "r.pretrimmed.trace.json.gz"
-
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is True
-    assert report["dropped_steps"] == 2
-    assert report["outlier_ratio"] == pytest.approx(5_000_000.0 / 32_944.0, rel=1e-3)
-
-
-def test_pretrim_write_failure_is_reported_as_a_failure(tmp_path, monkeypatch):
-    """A failed write must not be reported with the ``trimmed`` reason."""
-    src = _write_trace(tmp_path / "r.trace.json.gz", [15_781_320.0] + [32_944.0] * 40)
-    dst = tmp_path / "out" / "r.pretrimmed.trace.json.gz"
-
-    def _boom(*_args, **_kwargs):
-        raise OSError("No space left on device")
-
-    # Fails after the output file is opened, so a partial one is on disk.
-    monkeypatch.setattr(tla.json, "dump", _boom)
-    trimmed, report = tla.pretrim_startup_transient(src, dst)
-
-    assert trimmed is False
-    assert report["reason"] == "write_failed"
-    assert "No space left on device" in report["error"]
-    # The step accounting is kept for diagnosis, but no partial file is left behind for a later step to mistake for a
-    # usable trace.
-    assert report["dropped_steps"] == 1
-    assert not dst.exists()
-
-
-def test_pretrim_redirects_only_the_splitter_input(tmp_path):
-    """The splitter reads the trimmed copy; nothing else is repointed at it."""
-    captured, trace = _drive_main_capturing_subprocess(
-        tmp_path,
-        [],
-        trace_factory=lambda root: _write_trace(root / "trace.trace.json.gz", [15_781_320.0] + [32_944.0] * 40),
-    )
-
-    splitter_cmd = _find_splitter_cmd(captured)
-    assert splitter_cmd is not None, f"splitter never invoked; cmds={captured}"
-    positional = splitter_cmd[3]
-    assert positional.endswith(".pretrimmed.trace.json.gz"), splitter_cmd
-    assert str(trace) not in splitter_cmd, splitter_cmd
-
-    # The trim ran, and the raw capture is still on disk and unmodified.
-    pretrim_files = list((tmp_path / "ws").rglob("pretrim.json"))
-    assert len(pretrim_files) == 1, pretrim_files
-    pretrim = json.loads(pretrim_files[0].read_text())
-    assert pretrim["applied"] is True
-    assert pretrim["source"] == str(trace)
-    assert len(tla._step_annotation_spans(tla.open_json(trace)["traceEvents"])) == 41
-
-
-def test_capture_folder_is_not_discoverable_from_the_split_directory(tmp_path):
-    """Why the splitter's input has to stay separate from the analysed path."""
-    capture_dir = tmp_path / "torch_trace"
-    (capture_dir / "graph_capture_profile").mkdir(parents=True)
-    raw = capture_dir / "r.trace.json.gz"
-    raw.write_bytes(b"")
-    split_dir = tmp_path / "tracelens" / "trace_split"
-    split_dir.mkdir(parents=True)
-    trimmed = split_dir / "r.pretrimmed.trace.json.gz"
-    trimmed.write_bytes(b"")
-
-    assert tlr.discover_capture_folder(raw, [raw]) == capture_dir / "graph_capture_profile"
-    assert tlr.discover_capture_folder(raw, [trimmed]) is None

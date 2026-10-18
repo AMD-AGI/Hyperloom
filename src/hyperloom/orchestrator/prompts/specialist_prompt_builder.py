@@ -25,6 +25,13 @@ from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.prompt_safety import defang_prompt_structure
 from hyperloom.inference_optimizer.framework_registry import python_package
 from .agentx_context import corpus_lines, grading_lines
+from .proposal_schemas import (
+    EXPLORE_VARIANT_CONTRACT,
+    EXPLORE_VARIANT_EXAMPLE,
+    UPSTREAM_CANDIDATE_CONTRACT,
+    UPSTREAM_CANDIDATE_EXAMPLE,
+)
+from ..measurement.runtime_findings import CORRECTNESS_FIX_MAX_DROP_PCT, CORRECTNESS_FIX_RULES
 
 from ..specialists.domains import (
     DEFAULT_SPECIALIST_MAX_TURNS,
@@ -170,7 +177,7 @@ def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
         "- `sglang/python/sglang/srt/scheduler/` and `sglang/python/sglang/srt/managers/`.",
         "- KB anchor `framework.*` (cuda_graph / batching / chunked_prefill / kv_cache).",
         "",
-        "**Config levers (cheap, try first — these are env/flag changes)**",
+        "**Config levers (cheap to validate — these are env/flag changes)**",
         "- `--enable-chunked-prefill` + matched `--max-num-batched-tokens`.",
         "- `--enforce-eager=false` + cuda graph capture for stable batch sizes.",
         "- `--kv-cache-dtype fp8_e4m3` when the gap is HBM-bound (gate accuracy!).",
@@ -179,12 +186,7 @@ def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
         "  `VLLM_ROCM_USE_AITER_RMSNORM=0` / `...PAGED_ATTN=1` are **NEVER_TOUCH**",
         "  (crash / dead var). Do NOT propose flags in the NEVER_TOUCH set.",
         "",
-        "**Source-patch playbook (the high-ceiling work — author real code)**",
-        "Config tuning has a low ceiling. When the gap persists after the cheap",
-        "levers (or the orchestrator escalates you for a code patch), modify the",
-        "framework **source** and write a unified diff into your worktree",
-        "`patches/` dir (see the patch protocol section). Map the profile gap to",
-        "the module:",
+        "**Source-patch targets — map the profile gap to the module**",
         "- **Scheduler / batch composition gap** (low batch occupancy, decode",
         "  starvation) → `scheduler.py` batch policy: prefill/decode interleave,",
         "  `max_num_batched_tokens` chunk split, waiting-queue admission order.",
@@ -195,9 +197,9 @@ def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
         "  capture-size set, inductor graph partition, eager-fallback conditions.",
         "- **Chunked-prefill granularity** → split-size heuristic in the",
         "  scheduler, not just the flag.",
-        "Keep patches small (target ≤5 files); preserve upstream call-order",
-        "contracts (e.g. vLLM `scheduler.add_seq_group` ordering) or you will",
-        "break chunked-prefill / spec-decode interactions.",
+        "Preserve upstream call-order contracts (e.g. vLLM",
+        "`scheduler.add_seq_group` ordering) or you will break",
+        "chunked-prefill / spec-decode interactions.",
         "",
         "**Pitfalls (historical REVERTs)**",
         "- Raising `--max-num-seqs` past 512 on MI300X → OOM on 671B MoE models.",
@@ -462,8 +464,8 @@ def _focus_candidate_discovery_specialist(inp: SpecialistPromptInputs) -> list[s
         "     when either is missing.",
         "",
         "**What to return**",
-        "- ``proposal_set`` entries carrying (repo, number, title, diff_url,",
-        "  head_sha, files touched, verdict, route, and the reason for each).",
+        "- ``proposal_set`` entries in the upstream-candidate schema of",
+        "  Section 8, one per candidate, each with its verdict and route.",
         "  Orchestration reads these and proposes ``integrate_patch`` for the",
         "  ones it wants benched; you do not apply or benchmark anything.",
         "",
@@ -685,8 +687,8 @@ def _focus_enablement_specialist(
         "meeting the accuracy floor — not throughput.",
         "",
         "Your deliverable is the smallest **runnable delta** that advances the",
-        "boot (or the accuracy) — which may be a serve flag, an in-tree source patch, an",
-        "attempt-scoped runtime, or a ``needs_targeted_build`` request. Do NOT",
+        "boot (or the accuracy) — which may be a serve flag, an in-tree source patch, a",
+        "``needs_runtime`` request for another version, or a ``needs_targeted_build`` request. Do NOT",
         "stop at a token registration / two-line alias when the diagnosis says the",
         "architecture is genuinely new: advancing one boot step counts, and a",
         "compiled or from-source need should be requested, not faked. Follow the",
@@ -821,6 +823,12 @@ def _focus_framework_rewrite_specialist(
     ]
 
 
+def _focus_custom_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the operator-supplied focus verbatim; empty when not configured."""
+    text = inp.custom_specialist_prompt.strip()
+    return text.splitlines() if text else []
+
+
 _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]]"] = {
     "serving_specialist": _focus_serving_specialist,
     "framework_rewrite_specialist": _focus_framework_rewrite_specialist,
@@ -832,6 +840,7 @@ _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]
     "research_scout_specialist": _focus_research_scout_specialist,
     "static_recon_specialist": _focus_static_recon_specialist,
     "enablement_specialist": _focus_enablement_specialist,
+    "custom_specialist": _focus_custom_specialist,
 }
 
 
@@ -895,6 +904,8 @@ class SpecialistPromptInputs:
     # Roofline / TraceLens evidence from ``SharedState.last_trace_analyze``;
     # empty dict renders a placeholder.
     roofline_evidence: dict[str, Any] = field(default_factory=dict)
+    # Rendered runtime findings of the current best's server log; empty omits the section.
+    runtime_findings: str = ""
 
     # Recipe summary from the T0 warm-start recipe search
     # (``recipe_kb_t0._cascade_warm_start_search``)
@@ -903,9 +914,6 @@ class SpecialistPromptInputs:
     # T0 lessons — positive priors from prior KEEPs; rendered in the lessons section.
     warm_start_lessons: list[dict[str, Any]] = field(default_factory=list)
     pr_monitor_available: bool = True
-
-    # Generic sub_kind passthrough so ``_focus_*`` helpers can specialise.
-    sub_kind: str = ""
 
     # Extra knowledge-domain tags; each contributes a focus block to Section 1.
     extra_focus_tags: tuple[str, ...] = ()
@@ -974,6 +982,9 @@ class SpecialistPromptInputs:
     prior_attempts: list[dict[str, Any]] = field(default_factory=list)
     pr_lead: dict[str, Any] = field(default_factory=dict)
 
+    # Operator-defined specialist focus, rendered verbatim; empty when not configured.
+    custom_specialist_prompt: str = ""
+
 
 # Section 1 — Identity & autonomy
 def _authors_patches(inp: SpecialistPromptInputs) -> bool:
@@ -981,11 +992,66 @@ def _authors_patches(inp: SpecialistPromptInputs) -> bool:
     return inp.mode == MODE_PATCH
 
 
+#: Throughput domains whose focus block offers flags first, so the coda has
+#: something to raise the sights from. ``enablement_specialist`` is absent
+#: because its ladder book says climb only as far as runnability needs;
+#: ``framework_rewrite_specialist`` because it authors source rewrites and
+#: nothing else, and already carries its own "Where the wins are" taxonomy.
+_THROUGHPUT_AUTHORING_DOMAINS = frozenset(
+    {
+        "serving_specialist",
+        "kernel_switch_specialist",
+        "comm_specialist",
+        "compiler_specialist",
+        "system_specialist",
+    }
+)
+
+
+def _source_patch_altitude_block(inp: SpecialistPromptInputs) -> list[str]:
+    """Where the durable wins are, for a throughput dispatch that may author code."""
+    if not (_authors_patches(inp) and inp.domain.key in _THROUGHPUT_AUTHORING_DOMAINS):
+        return []
+    return [
+        "",
+        "### Altitude — where the durable wins are",
+        "",
+        "The flags above are cheap to validate and their ceiling is fixed by",
+        "whoever wired them up; a source change moves that ceiling and keeps",
+        "paying in later rounds. When the cheap levers do not close the gap, stop",
+        "permuting them and read the source for:",
+        "- **An un-bridged capability switch** — a `*_supported()` / `*_enabled()`",
+        "  / `is_*()` predicate that takes this model / GPU / precision off a",
+        "  faster path. Bridging it creates a lever nobody had.",
+        "- **A faster path already present** — reached never, or with arguments",
+        "  that disqualify it.",
+        "- **A real bug** — a wrong bound, a stale cache key, a fallback that",
+        "  fires when it should not. Fixing it is a KEEP like any other.",
+        "- **Component usage this architecture argues against** — the order,",
+        "  granularity or fusion of the pieces, not their settings.",
+        "Deliver a unified diff in your worktree `patches/` dir, small (target ≤5",
+        "files) and grounded: a patch you cannot point at a profile line or a",
+        "source predicate is budget spent for nothing.",
+    ]
+
+
+def _domain_focus_blocks(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the focus block of the active domain, then of each extra tag on a multi-tag dispatch, closing on the altitude coda that spans them."""
+    body: list[str] = []
+    rendered: set[str] = set()
+    for key in (inp.domain.key, *(getattr(domain_for_tag(t), "key", "") for t in inp.extra_focus_tags)):
+        focus = _DOMAIN_FOCUS_TEMPLATES.get(key) if key and key not in rendered else None
+        lines = focus(inp) if focus is not None else []
+        if not lines:
+            continue
+        body.extend(["", f"### Domain focus — {key}", "", *lines])
+        rendered.add(key)
+    body.extend(_source_patch_altitude_block(inp))
+    return body
+
+
 def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 1 (identity & autonomy) of the specialist prompt.
-
-    Appends the per-domain focus block from :data:`_DOMAIN_FOCUS_TEMPLATES`
-    when one is registered for the active domain.
 
     Args:
         inp (SpecialistPromptInputs): The assembled prompt inputs.
@@ -1044,27 +1110,7 @@ def _section_identity(inp: SpecialistPromptInputs) -> list[str]:
         "",
         fanout_line,
     ]
-    rendered_focus_keys: set[str] = set()
-    focus = _DOMAIN_FOCUS_TEMPLATES.get(inp.domain.key)
-    if focus is not None:
-        body.append("")
-        body.append(f"### Domain focus — {inp.domain.key}")
-        body.append("")
-        body.extend(focus(inp))
-        rendered_focus_keys.add(inp.domain.key)
-    # Append each extra tag's focus block (multi-tag dispatch).
-    for tag in inp.extra_focus_tags:
-        tag_domain = domain_for_tag(tag)
-        if tag_domain is None or tag_domain.key in rendered_focus_keys:
-            continue
-        tag_focus = _DOMAIN_FOCUS_TEMPLATES.get(tag_domain.key)
-        if tag_focus is None:
-            continue
-        body.append("")
-        body.append(f"### Domain focus — {tag_domain.key}")
-        body.append("")
-        body.extend(tag_focus(inp))
-        rendered_focus_keys.add(tag_domain.key)
+    body.extend(_domain_focus_blocks(inp))
     if inp.scope == "domains":
         body.extend(_cross_domain_block(inp))
     elif inp.scope == "freeform":
@@ -1665,6 +1711,22 @@ def _vendor_substitution_directive(hot_kernels: Any) -> list[str]:
     return rows
 
 
+def _section_runtime_findings(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the scanned runtime findings; omitted when none were injected."""
+    if not inp.runtime_findings:
+        return []
+    return [
+        "## 4c. RUNTIME FINDINGS (current best server.log, already scanned)",
+        "",
+        "Do not re-read the server log for these. A disabled or falling-back hot "
+        "path is restored first; do not optimize the fallback implementation.",
+        "",
+        "```text",
+        inp.runtime_findings,
+        "```",
+    ]
+
+
 def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     """Render the ROOFLINE EVIDENCE section from ``inp.roofline_evidence``;
     empty evidence renders a heading + ``(none)`` placeholder.
@@ -1698,6 +1760,7 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
             ("Compute %", "compute_pct"),
             ("Idle %", "idle_pct"),
             ("Exposed Comm %", "comm_pct"),
+            ("Exposed memcpy %", "memcpy_pct"),
             ("Top bottleneck", "top_bottleneck"),
         ):
             val = summary.get(key)
@@ -2117,6 +2180,10 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 8 (output protocol) of the specialist prompt."""
     workspace = inp.workspace_path or "<workspace>"
     authors_patches = _authors_patches(inp)
+    if inp.domain.key == "candidate_discovery_specialist":
+        proposal_example, proposal_contract = UPSTREAM_CANDIDATE_EXAMPLE, UPSTREAM_CANDIDATE_CONTRACT
+    else:
+        proposal_example, proposal_contract = EXPLORE_VARIANT_EXAMPLE, EXPLORE_VARIANT_CONTRACT
 
     exit_lines = [
         "**Exit — file write:** write the ``specialist_done`` payload (schema below) to",
@@ -2146,6 +2213,12 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
             "  runs the same E2E gate, and restores the backup on REVERT. A non-diff",
             "  tuned artifact is a FULL result — keep ``proposal_set`` non-empty or",
             "  list the artifact in ``artifacts_written``.",
+            "- ``resolves_finding`` (optional string ``rule_id:subject``): set it only",
+            f"  when the patch fixes a ``{'`` / ``'.join(sorted(CORRECTNESS_FIX_RULES))}`` entry from section 4c,",
+            "  copied verbatim. The gate then verifies the entry is gone from the new log and",
+            f"  accuracy passes, and may KEEP a drop of up to {CORRECTNESS_FIX_MAX_DROP_PCT:.0f}% on the graded axis",
+            "  (throughput, or p50 interactivity with the other interactivity guards still held)",
+            "  within the latency budget.",
         ]
         no_output = "  AND no ``patches_written``/``artifacts_written``; in that case"
     else:
@@ -2195,22 +2268,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
                 "payload": {
                     "gap_canonical_id": inp.gap_canonical_id or "<echo from dispatch>",
                     "domain": inp.domain.key,
-                    "proposal_set": [
-                        {
-                            "name": "<unique-in-round>",
-                            "extra_args": "--example-flag value",
-                            "extra_envs": {"EXAMPLE_ENV": "1"},
-                            "remove_args": ["--harmful-base-flag"],
-                            "unset_envs": ["HARMFUL_BASE_ENV"],
-                            "args_mode": "append",
-                            "reason": "why this might help the gap",
-                            "atomic": False,
-                            "kb_evidence": [],
-                            "pr_evidence": [],
-                            "source_evidence": [],
-                            "experience_citations": [],
-                        }
-                    ],
+                    "proposal_set": [proposal_example],
                     **({"patches_written": [], "experience_citations": []} if authors_patches else {}),
                     "summary": "≤ 500 char overview of what you tried this round",
                     "confidence": 0.6,
@@ -2225,28 +2283,7 @@ def _section_output_protocol(inp: SpecialistPromptInputs) -> list[str]:
         "",
         "Field contract:",
         "",
-        (
-            "- ``proposal_set`` items reuse the explore variant schema: "
-            "``extra_args`` / ``extra_envs`` add or override knobs, "
-            "``remove_args`` removes inherited server flags before appending, "
-            "``unset_envs`` removes inherited env vars before applying "
-            "``extra_envs``, and ``args_mode='replace'`` runs without "
-            "inherited server args. Use removal fields when a user/base "
-            "knob may be harmful; do not simulate deletion by adding an "
-            "unrelated flag."
-        ),
-        (
-            "- ``atomic`` (bool, default false): set ``true`` when this "
-            "proposal's ``extra_args`` / ``extra_envs`` are a **coupled set "
-            "that only works together** and MUST be benched as one variant "
-            "(e.g. enabling MTP/speculative decoding REQUIRES a paired "
-            "``--gpu-memory-utilization`` reduction so the draft model has "
-            "headroom — split them and each half OOMs or shows no gain). "
-            "Orchestration is instructed to dispatch an ``atomic`` proposal "
-            "verbatim, without splitting, dropping, or re-deriving its flags. "
-            "Put every co-required flag in THIS one entry; do not scatter a "
-            "coupling across several proposals."
-        ),
+        *proposal_contract,
         (
             "- ``proposal_set``: **2 entries is the norm, 4 the hard cap.** You "
             "are a curator, not a brainstormer: rank by expected gain x "
@@ -2491,6 +2528,19 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
             _section_pr_feed(inp),
             _section_source_hint(inp),
         ]
+    elif inp.domain.key == "custom_specialist":
+        # The operator focus is the mandate; perf context is left to the operator text.
+        # Experience KB stays: the warmup records its block as shown to every FRAMEWORK_AGENT specialist.
+        user_sections = [
+            _section_mandate(inp),
+            _section_hardware(inp),
+            _section_pd_disaggregation(inp),
+            _section_execution_budget(inp),
+            _section_gap(inp),
+            _section_experience_kb(inp),
+        ]
+        if _authors_patches(inp):
+            user_sections.append(_section_source_hint(inp))
     else:
         user_sections = [
             _section_mandate(inp),
@@ -2501,6 +2551,7 @@ def build_specialist_prompts(inp: SpecialistPromptInputs) -> tuple[str, str]:
             _section_kb_subgraph(inp),
             _section_roofline_evidence(inp),
             _section_experience_kb(inp),
+            _section_runtime_findings(inp),
             _section_recipe(inp),
             _section_lessons(inp),
             _section_pitfalls(inp),

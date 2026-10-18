@@ -1000,6 +1000,119 @@ def _try_apply_candidate(
     )
 
 
+def _resume_warmstart_result(workspace_dir) -> dict:
+    """The warm-start verdict for a resumed run, which re-reads nothing.
+
+    The field was measured and adopted in the run being resumed; all that is
+    owed is the pointer to the references it left behind.
+    """
+    result = {
+        "candidate": False,
+        "skipped": "resume",
+        "read_reason": "resume",
+        "read_error": "",
+    }
+    pointer = kb_reference_program_md(workspace_dir)
+    if pointer:
+        result["program_md_addition"] = pointer
+        result["reference_program_md_addition"] = pointer
+    return result
+
+
+@dataclass(frozen=True)
+class _MeasuredField:
+    """What measuring the warm-start field established, in rank order."""
+
+    measurements: list[dict]
+    writebacks: list[dict]
+    reject_reason: str
+
+
+def _measure_warmstart_field(
+    sols: list[dict],
+    statuses: list[str],
+    *,
+    config,
+    kernel,
+    driver,
+    workspace_dir,
+    snr_threshold,
+    source_files,
+    pristine_bench,
+    allowed_paths,
+    bench_repeat,
+) -> _MeasuredField:
+    """Measure candidates in rank order until one confirms its rank or the budget is spent.
+
+    ``statuses`` is the per-candidate ledger and is filled in place. Every trial
+    starts from the pristine tree, so a measured candidate is put back before
+    the next one is tried; the winner is re-applied from its own patch later.
+
+    ``top_k()`` caps the field, but a count does not bound wall time: one
+    candidate is a compile plus a correctness suite plus a benchmark, minutes on
+    the heaviest kernels. On expiry the field closes and the best already
+    measured is adopted by the caller.
+    """
+    measurements: list[dict] = []
+    writebacks: list[dict] = []
+    reject_reason = ""
+    search_deadline = time.monotonic() + warmstart_policy.budget_sec()
+    for idx, sol in enumerate(sols):
+        if time.monotonic() >= search_deadline:
+            for later_index in range(idx, len(statuses)):
+                statuses[later_index] = "not_attempted_search_budget"
+            print(
+                f"  [kb] warm-start search budget spent after {len(measurements)} measured candidate(s); "
+                "adopting the best of them",
+                flush=True,
+            )
+            break
+        pre_untracked = _untracked_files(workspace_dir)
+        trial = _try_apply_candidate(
+            sol,
+            kernel=kernel,
+            driver=driver,
+            workspace_dir=workspace_dir,
+            snr_threshold=snr_threshold,
+            source_files=source_files,
+            pristine_bench=pristine_bench,
+            allowed_paths=allowed_paths,
+            pre_untracked=pre_untracked,
+            bench_repeat=bench_repeat,
+        )
+        # One write-back per measured candidate, adopted or not.
+        writeback = None
+        if trial.measured_mean_case_speedup is not None:
+            writeback = _record_measured_speedup(config, sol, trial.measured_mean_case_speedup, rank=idx + 1)
+            writebacks.append(writeback)
+        if trial.reject_reason:
+            statuses[idx] = _rejected_reference_status(trial.reject_reason, writeback)
+            reject_reason = trial.reject_reason
+            continue
+        _git_discard_worktree(workspace_dir, pre_untracked=pre_untracked)
+        measurements.append(
+            {
+                "index": idx,
+                "ms": float(trial.adoptable_ms),
+                "mean_case_speedup": float(trial.adoptable_mean_case_speedup),
+                "bench": dict(trial.adoptable_bench or {}),
+            }
+        )
+        ranked = _ranked_speedup(sol)
+        ranked_txt = f"{ranked:.6f}x" if ranked is not None else "unrecorded"
+        print(
+            f"  [kb] warm-start rank {idx + 1} {sol.get('solution_slug')} measured "
+            f"{float(trial.adoptable_mean_case_speedup):.6f}x against a ranked {ranked_txt}",
+            flush=True,
+        )
+        measured_now = float(trial.adoptable_mean_case_speedup)
+        if _measurement_confirms_rank(sol, measured_now) and _outranks_remaining(measured_now, sols[idx + 1 :]):
+            for later_index in range(idx + 1, len(statuses)):
+                statuses[later_index] = "not_attempted_after_apply"
+            break
+    return _MeasuredField(measurements, writebacks, reject_reason)
+
+
 def kb_warmstart(
     *,
     config,
@@ -1021,17 +1134,7 @@ def kb_warmstart(
     evidence this consumer can reproduce it. ``warmstart_policy`` bounds that search and is read at call time.
     """
     if resume:
-        pointer = kb_reference_program_md(workspace_dir)
-        result = {
-            "candidate": False,
-            "skipped": "resume",
-            "read_reason": "resume",
-            "read_error": "",
-        }
-        if pointer:
-            result["program_md_addition"] = pointer
-            result["reference_program_md_addition"] = pointer
-        return result
+        return _resume_warmstart_result(workspace_dir)
     try:
         from kernelforge.knowledge.kb_store.reader import read_top_solutions
 
@@ -1117,8 +1220,6 @@ def kb_warmstart(
         applied_bench: dict = {}
         reference_reason = ""
         applied_commit = ""
-        # One entry per candidate that reached a measurement, in rank order.
-        measurements: list[dict] = []
         measured_writebacks: list[dict] = []
         pristine_runs = [_bench_once(driver, bench_repeat) for _ in range(KEEP_MEASUREMENT_COUNT)]
         pristine_bench = aggregate_benchmark_measurements(pristine_runs)
@@ -1146,81 +1247,23 @@ def kb_warmstart(
                 source_files,
                 driver,
             )
-            # ``top_k()`` caps the field, but a count does not bound wall time: one candidate is a compile plus a
-            # correctness suite plus a benchmark, minutes on the heaviest kernels. On expiry the field closes and the
-            # best already measured is adopted below.
-            search_deadline = time.monotonic() + warmstart_policy.budget_sec()
-            for idx, sol in enumerate(sols):
-                if time.monotonic() >= search_deadline:
-                    for later_index in range(idx, len(statuses)):
-                        statuses[later_index] = "not_attempted_search_budget"
-                    print(
-                        "  [kb] warm-start search budget spent after "
-                        f"{len(measurements)} measured candidate(s); "
-                        "adopting the best of them",
-                        flush=True,
-                    )
-                    break
-                pre_untracked = _untracked_files(workspace_dir)
-                trial = _try_apply_candidate(
-                    sol,
-                    kernel=kernel,
-                    driver=driver,
-                    workspace_dir=workspace_dir,
-                    snr_threshold=snr_threshold,
-                    source_files=source_files,
-                    pristine_bench=pristine_bench,
-                    allowed_paths=allowed_paths,
-                    pre_untracked=pre_untracked,
-                    bench_repeat=bench_repeat,
-                )
-                # One write-back per measured candidate, adopted or not.
-                writeback = None
-                if trial.measured_mean_case_speedup is not None:
-                    writeback = _record_measured_speedup(
-                        config,
-                        sol,
-                        trial.measured_mean_case_speedup,
-                        rank=idx + 1,
-                    )
-                    measured_writebacks.append(writeback)
-                if trial.reject_reason:
-                    statuses[idx] = _rejected_reference_status(
-                        trial.reject_reason,
-                        writeback,
-                    )
-                    reference_reason = trial.reject_reason
-                    continue
-                # Every trial starts from the pristine tree, so a measured candidate is put back before the next one
-                # is tried; the candidate that wins the field is re-applied from its own patch.
-                _git_discard_worktree(
-                    workspace_dir,
-                    pre_untracked=pre_untracked,
-                )
-                measurements.append(
-                    {
-                        "index": idx,
-                        "ms": float(trial.adoptable_ms),
-                        "mean_case_speedup": float(trial.adoptable_mean_case_speedup),
-                        "bench": dict(trial.adoptable_bench or {}),
-                    }
-                )
-                ranked = _ranked_speedup(sol)
-                ranked_txt = f"{ranked:.6f}x" if ranked is not None else "unrecorded"
-                print(
-                    f"  [kb] warm-start rank {idx + 1} "
-                    f"{sol.get('solution_slug')} measured "
-                    f"{float(trial.adoptable_mean_case_speedup):.6f}x "
-                    f"against a ranked {ranked_txt}",
-                    flush=True,
-                )
-                measured_now = float(trial.adoptable_mean_case_speedup)
-                if _measurement_confirms_rank(sol, measured_now) and (
-                    _outranks_remaining(measured_now, sols[idx + 1 :])
-                ):
-                    for later_index in range(idx + 1, len(statuses)):
-                        statuses[later_index] = "not_attempted_after_apply"
-                    break
+            field = _measure_warmstart_field(
+                sols,
+                statuses,
+                config=config,
+                kernel=kernel,
+                driver=driver,
+                workspace_dir=workspace_dir,
+                snr_threshold=snr_threshold,
+                source_files=source_files,
+                pristine_bench=pristine_bench,
+                allowed_paths=allowed_paths,
+                bench_repeat=bench_repeat,
+            )
+            # One entry per candidate that reached a measurement, in rank order.
+            measurements = field.measurements
+            measured_writebacks = field.writebacks
+            reference_reason = field.reject_reason
 
             for measurement in sorted(
                 measurements,
@@ -1351,8 +1394,6 @@ def write_experience_to_kb(
     framework="",
     experience_id="",
     operator_name="",
-    implementation_signature_value="",
-    implementation_identity_value=None,
     llm_summary=True,
     incremental_summary=None,
     snr_db_override=None,
@@ -1396,8 +1437,8 @@ def write_experience_to_kb(
             kernel_source = Path(kernel).read_text(errors="replace")
 
         summary_override = None if llm_summary else incremental_summary or _cheap_summary(archive)
-        pristine_signature = implementation_signature_value or getattr(loop_runner.ic, "implementation_signature", "")
-        pristine_identity = implementation_identity_value or getattr(loop_runner.ic, "implementation_identity", None)
+        pristine_signature = getattr(loop_runner.ic, "implementation_signature", "")
+        pristine_identity = getattr(loop_runner.ic, "implementation_identity", None)
 
         status = write_run_experience(
             config=config,

@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from hyperloom.inference_optimizer.grid_server_args import remove_server_args
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
 from hyperloom.orchestrator.actions.executors import _benchmark_interpreter as bi
 
@@ -337,6 +338,28 @@ def test_build_variant_yaml_prepends_legit_overlay(tmp_path: Path) -> None:
     assert envs.get("PYTHONPATH", "").startswith(str(overlay))
 
 
+@pytest.mark.parametrize(
+    ("config_envs", "tail"),
+    [({}, ["/inh/a", "/inh/b"]), ({"PYTHONPATH": "/cfg"}, ["/cfg"])],
+    ids=["inherited", "config-authoritative"],
+)
+def test_build_variant_yaml_overlay_builds_on_the_launch_pythonpath(tmp_path, monkeypatch, config_envs, tail) -> None:
+    # The launch overlays benchmark.envs on os.environ, so a config without PYTHONPATH carries the inherited one.
+    # The overlay is relative so the path carries no drive colon on any host.
+    import os
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(["/inh/a", "/inh/b"]))
+    (tmp_path / "overlay").mkdir()
+    base = tmp_path / "base.yaml"
+    base.write_text(yaml.safe_dump({"benchmark": {"framework": "sglang", "envs": config_envs}}), encoding="utf-8")
+    variant = _variant("v1")
+    variant.overlay_pythonpath = "overlay"  # type: ignore[attr-defined]
+    out = gr._build_variant_yaml(base, "", variant, output_subdir=tmp_path / "v1")
+    envs = yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]
+    assert envs["PYTHONPATH"] == os.pathsep.join(["overlay", *tail])
+
+
 def test_build_variant_yaml_drops_unsafe_overlay(tmp_path: Path) -> None:
     # SWSPLAT-42358: a ``:``-joined / traversal / non-existent overlay is dropped (would otherwise smuggle extra
     # PYTHONPATH entries or escape).
@@ -394,29 +417,37 @@ def test_compose_server_args_replace_still_applies_remove_args() -> None:
     assert out == "--also-bad 2 --keep 4"
 
 
-def test_compose_server_args_strips_denylisted_harness_flag_from_every_layer() -> None:
+def test_compose_server_args_launches_with_the_harness_flags_the_baseline_ran_with() -> None:
     out = gr.compose_server_args(
         inherited_args="--no-enable-prefix-caching --block-size 128",
         base_extra_args="--no-enable-prefix-caching",
         variant_extra_args="--kv-cache-dtype fp8 --no-enable-prefix-caching",
     )
-    assert "--no-enable-prefix-caching" not in out
+    assert "--no-enable-prefix-caching" in out
     assert "--block-size 128" in out
     assert "--kv-cache-dtype fp8" in out
 
 
-def test_compose_server_args_strips_denylisted_flag_in_replace_mode() -> None:
+def test_compose_server_args_keeps_the_harness_flag_in_replace_mode() -> None:
     out = gr.compose_server_args(
         inherited_args="--ignored",
         base_extra_args="--no-enable-prefix-caching --max-num-seqs 256",
         variant_extra_args="--kv-cache-dtype fp8",
         args_mode="replace",
     )
-    assert out == "--max-num-seqs 256 --kv-cache-dtype fp8"
+    assert out == "--no-enable-prefix-caching --max-num-seqs 256 --kv-cache-dtype fp8"
+
+
+def test_launch_keeps_what_the_persisted_recipe_strips() -> None:
+    from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
+
+    launched = gr.compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 256")
+    assert "--no-enable-prefix-caching" in launched
+    assert strip_benchmark_harness_flags(launched) == "--max-num-seqs 256"
 
 
 def test_remove_server_args_accepts_multi_flag_string() -> None:
-    out = gr.remove_server_args(
+    out = remove_server_args(
         "--flag-a --flag-b --flag-c 3 --keep 4",
         "--flag-a --flag-b --flag-c",
     )
@@ -430,7 +461,7 @@ def test_remove_server_args_keeps_a_sibling_json_value_parseable() -> None:
         '"exclude_layer":["*.mlp.gate","*expert*"]} '
         "--no-enable-prefix-caching --tp 8"
     )
-    out = gr.remove_server_args(args, ["--no-enable-prefix-caching"])
+    out = remove_server_args(args, ["--no-enable-prefix-caching"])
     tokens = out.split(" ")
     assert tokens[0] == "--online_quant_config"
     assert json.loads(tokens[1]) == {
@@ -442,5 +473,5 @@ def test_remove_server_args_keeps_a_sibling_json_value_parseable() -> None:
 
 def test_remove_server_args_unbalanced_brace_drops_only_its_own_flag() -> None:
     """A stray ``}`` is not a JSON blob and must not take the tail with it."""
-    out = gr.remove_server_args("--foo a} --tp 8 --max-num-seqs 64", ["--foo"])
+    out = remove_server_args("--foo a} --tp 8 --max-num-seqs 64", ["--foo"])
     assert out == "--tp 8 --max-num-seqs 64"

@@ -7,24 +7,19 @@ import os
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import TypeAlias
 
 from hyperloom_kb.config import PACKAGED_DECLARATION, load_declaration
 from hyperloom_kb.knowledge_read import ReadResult, ReadStatus
 from hyperloom_kb.remote import (
+    ExperienceStart,
     RemoteClient,
     RemoteClientError,
     RemoteConfig,
     RemoteExperienceKB,
+    SessionValue,
 )
-from hyperloom_kb.schema import (
-    Alternative,
-    Change,
-    ExperienceDeclaration,
-    JsonValue,
-    Outcome,
-    RenderedRef,
-)
+from hyperloom_kb.schema import ExperienceDeclaration, JsonValue, RenderedRef
 
 log = logging.getLogger(__name__)
 
@@ -39,9 +34,8 @@ class NoOpExperienceSession:
     def decide(
         self,
         *,
-        reasoning: str,
-        change: Change,
-        alternatives: tuple[Alternative, ...] = (),
+        change: Mapping[str, SessionValue],
+        rationale: Mapping[str, SessionValue] | None = None,
         rendered_refs: tuple[RenderedRef, ...] = (),
     ) -> None:
         return None
@@ -49,9 +43,11 @@ class NoOpExperienceSession:
     def complete(
         self,
         *,
-        outcome: Outcome,
-        reflection: str,
+        outcome: Mapping[str, SessionValue],
+        reflection: Mapping[str, SessionValue] | None = None,
         completed_at: datetime | None = None,
+        notes: Mapping[str, str] | None = None,
+        raw_logs: tuple[SessionValue, ...] | list[SessionValue] | None = None,
     ) -> None:
         return None
 
@@ -69,7 +65,7 @@ class NoOpExperienceKB:
         self.reason = reason
         self.degraded = degraded
 
-    def begin(self, **_kwargs: Any) -> NoOpExperienceSession:
+    def begin(self, _start: ExperienceStart) -> NoOpExperienceSession:
         return NoOpExperienceSession()
 
     def read(

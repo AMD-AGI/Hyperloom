@@ -4,10 +4,12 @@
 """Auto-import shim of the profile run's processes.
 
 It drops ``ROCPROFILER_REGISTER_LIBRARY``, imports the ``sitecustomize`` it shadows, then
-installs the host-side evidence probe when the run arms it. The ROCm runtime sets that
-variable in any process that initializes the GPU; a child spawned afterwards (vLLM's
-EngineCore) inherits it, and that child's torch profiler then records no ``kernel`` or
-``cuda_runtime`` events. It must be gone before torch loads the HIP runtime.
+installs the host-side evidence probe when the run arms it. On ROCm 10.0.0 (pip SDK),
+torch 2.12.0+rocm10.0.0 and vLLM 0.27.1 on gfx1201, the parent has that variable set once
+it has initialized the GPU; the EngineCore child spawned afterwards inherits it, and that
+child's torch profiler then records no ``kernel`` or ``cuda_runtime`` events. It was not
+reproduced on ROCm 7.2 with torch 2.9.1, whose profiler uses the ROCTracer backend. It must
+be gone before torch loads the HIP runtime; elsewhere dropping it is a no-op.
 """
 
 from __future__ import annotations

@@ -47,8 +47,6 @@ def test_replay_real_trace_contract_and_ranking(tmp_path, capsys, monkeypatch):
             "MI300X",
             "--model-name",
             "NousResearch-Llama-2-7b-hf",
-            "--top-k",
-            "12",
         ]
     )
     assert rc == 0

@@ -13,7 +13,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_text
+from hyperloom.common.io import WriteOptions, atomic_write_text
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.timeutil import now_iso
 
@@ -212,7 +212,7 @@ class Journal:
 
         entries_raw = blob.get("entries") or []
         entries = [JournalEntry.from_dict(e) for e in entries_raw if isinstance(e, dict)]
-        journal = cls(
+        return cls(
             session_id=str(blob.get("session_id") or session_id),
             model=str(blob.get("model") or model),
             hardware=str(blob.get("hardware") or hardware),
@@ -224,7 +224,6 @@ class Journal:
             entries=entries,
             path=path,
         )
-        return journal
 
     @staticmethod
     def _journal_path(session_dir: Path) -> Path:
@@ -273,7 +272,7 @@ class Journal:
             atomic_write_text(
                 self.path,
                 json.dumps(self.to_dict(), indent=2, sort_keys=False) + "\n",
-                make_parents=True,
+                options=WriteOptions(make_parents=True),
             )
         except OSError as exc:
             log.warning("optimization_journal flush failed (%s): %s", self.path, exc)

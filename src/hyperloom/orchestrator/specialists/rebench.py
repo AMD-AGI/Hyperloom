@@ -4,6 +4,8 @@
 """Optional gate-comparable rebench helper for GPU specialists."""
 
 from __future__ import annotations
+from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
+
 
 import argparse
 import asyncio
@@ -14,10 +16,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.perf_metric import constraint_fields
 from ..actions.executors._grid_runner import GridVariant, run_grid
 from ..actions.executors._workload_envs import (
     default_baseline_config,
-    materialize_config_with_envs,
 )
 
 
@@ -57,7 +59,7 @@ async def run_specialist_rebench(
     resolved_port = _resolve_port(port)
 
     base_config = Path(config_path) if config_path else Path(default_baseline_config())
-    materialized = materialize_config_with_envs(
+    materialized = prepare_grid_benchmark_config(
         base_config,
         out_root,
         model_path=model_path or None,
@@ -123,8 +125,8 @@ async def run_specialist_rebench(
         # ``itl_ms`` for the collectors.
         "ttft_ms": rb.ttft_mean_ms,
         "itl_ms": rb.tpot_mean_ms,
-        # Canonical name: the latency budget fails closed, so a lane that does not carry this refuses every KEEP.
-        "e2el_mean_ms": rb.e2el_mean_ms,
+        # The session's constraints fail closed, so a lane that drops these refuses every KEEP.
+        **constraint_fields(rb),
         "workspace": str(getattr(rb, "workspace", "") or ""),
         "port": resolved_port,
         "gpu_ids": gpu_ids,

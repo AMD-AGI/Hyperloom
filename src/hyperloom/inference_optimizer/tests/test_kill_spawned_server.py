@@ -26,7 +26,6 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
     SESSION_TIME_EXHAUSTED_RETURNCODE,
     _scan_logs_increment,
     _scan_server_log_increment,
-    _server_log_shows_death,
     kill_my_spawned_server,
     new_session_kwargs,
     run_with_session_kill,
@@ -171,6 +170,7 @@ def test_watchdog_clock_boundaries(monkeypatch, tmp_path, reused, ready, log, no
             silence_timeout_sec=600,
             server_log_path=str(tmp_path / "server.log") if log else None,
             server_already_ready=reused,
+            recorders=sk._RecorderFanout([]),
         )
     assert now[0] == expected
     assert 599.0 in waited
@@ -214,7 +214,7 @@ def test_unobserved_reuse_keeps_other_stop_gates_and_telemetry(monkeypatch, tmp_
             server_already_ready=True,
             session_deadline_sec=3 if gate == "session" else None,
             cancel_scope=scope,
-            kv_recorder=recorder,
+            recorders=sk._RecorderFanout([recorder]),
         )
     assert now[0] == {"hard": 10, "session": 3, "cancel": 4}[gate]
     recorder.note_phase.assert_called_once_with("measured", 0)
@@ -231,7 +231,10 @@ def test_exited_process_wins_over_expired_gates(monkeypatch):
         def communicate(self):
             return "finished", ""
 
-    assert sk._communicate_with_watchdog(Proc(), hard_timeout=0, session_deadline_sec=-1) == ("finished", "")
+    out = sk._communicate_with_watchdog(
+        Proc(), hard_timeout=0, session_deadline_sec=-1, recorders=sk._RecorderFanout([])
+    )
+    assert out == ("finished", "")
 
 
 def test_log_rotation_and_truncation_do_not_invent_activity(tmp_path):
@@ -738,7 +741,7 @@ def _sentinel_returncodes() -> dict[int, set[str]]:
         for name, value in vars(module).items():
             if not isinstance(value, int) or isinstance(value, bool):
                 continue
-            if not (name.endswith("_RETURNCODE") or name.endswith("_RC")):
+            if not (name.endswith(("_RETURNCODE", "_RC"))):
                 continue
             assigned.setdefault(value, set()).add(f"{short}.{name}")
     return assigned
@@ -942,50 +945,6 @@ def test_run_with_session_kill_legacy_timeout_still_raises():
 
 
 # Server-liveness watchdog
-def test_server_log_shows_death_detects_marker(tmp_path):
-    """A ``server.log`` containing a terminal-init marker reads as dead;
-    a healthy / missing log reads as alive."""
-    log_path = tmp_path / "server.log"
-    assert _server_log_shows_death(str(log_path)) is None  # missing → alive
-    log_path.write_text("INFO loading shards 50%\nINFO graph capture\n")
-    assert _server_log_shows_death(str(log_path)) is None  # healthy → alive
-    log_path.write_text(
-        "ERROR core.py Exception: WorkerProc initialization failed due to an exception in a background process.\n"
-    )
-    # dead → returns the matched marker (truthy) rather than a bare bool
-    assert _server_log_shows_death(str(log_path)) is not None
-
-
-def test_server_log_shows_death_detects_vllm_engine_core(tmp_path):
-    """The vLLM v1 engine-core bootstrap tail must read as dead."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text(
-        "(APIServer pid=16160)   File '.../vllm/v1/engine/utils.py', line 1057, "
-        "in wait_for_engine_startup\n"
-        "(APIServer pid=16160) RuntimeError: Engine core initialization failed. "
-        "See root cause above. Failed core proc(s): {}\n"
-    )
-    assert _server_log_shows_death(str(log_path)) is not None
-
-
-def test_server_log_shows_death_detects_nested_benchmark_log(tmp_path):
-    """Magpie wrappers that ignore ``$SERVER_LOG`` write the real server log to a
-    nested ``benchmark_<fw>_<ts>/server.log``. The watchdog must still detect the
-    crash via that nested file even when the watched ``output_dir/server.log`` is absent."""
-    watched = tmp_path / "server.log"  # never written by the wrapper
-    nested_dir = tmp_path / "benchmark_vllm_20260625_003729"
-    nested_dir.mkdir()
-    nested_log = nested_dir / "server.log"
-    assert _server_log_shows_death(str(watched)) is None  # nothing yet → alive
-    nested_log.write_text("INFO loading shards 50%\nINFO graph capture\n")
-    assert _server_log_shows_death(str(watched)) is None  # healthy nested → alive
-    nested_log.write_text(
-        "(EngineCore pid=2581809) RuntimeError: Engine core initialization "
-        "failed. See root cause above. Failed core proc(s): {}\n"
-    )
-    assert _server_log_shows_death(str(watched)) is not None
-
-
 def test_server_log_death_excerpt_surfaces_nested_root_cause(tmp_path):
     """The excerpt helper also falls back to a nested ``benchmark_*/server.log``
     so the failure classifier still surfaces the real server fault."""

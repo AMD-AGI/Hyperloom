@@ -14,6 +14,47 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+RECOVER_HELP = (
+    "Rebuild + push the session_breakdown for a session that exited abnormally (crash / SIGKILL) so its breakdown "
+    "lands on Langfuse; or, with --confirm-scope-gone / --confirm-stopped, record the cleanup confirmation a refused "
+    "--resume-from asks for."
+)
+RECOVER_DESCRIPTION = (
+    "Without a confirmation option, rebuild and push the session_breakdown of a session that exited abnormally. "
+    "With --confirm-scope-gone OWNER_SCOPE (an execution environment that no longer exists) or --confirm-stopped "
+    "TASK_ID (one blocked task that names no owner scope), plus --confirmation-reason, instead record the cleanup "
+    "confirmation a refused --resume-from asks for; nothing is rebuilt. Exit codes: 0 success, 1 breakdown rebuild "
+    "failed, 2 invalid arguments or a refused confirmation."
+)
+
+
+def add_cleanup_confirmation_arguments(rec: argparse.ArgumentParser) -> None:
+    """Register the operator cleanup confirmations on the ``recover`` subcommand."""
+    rec.add_argument(
+        "--confirm-stopped",
+        metavar="TASK_ID",
+        help="Attest that one task's complete process tree, remote workers and Ray actor have stopped, "
+        "then cancel unfinished work and release only its unattributed execution/GPU ownership records. Requires POSIX session locking "
+        "and --confirmation-reason; rejects recorded nonempty owner scopes. Does not stop processes, "
+        "accept old results, rebuild reports or resume execution.",
+    )
+    rec.add_argument(
+        "--confirm-scope-gone",
+        metavar="OWNER_SCOPE",
+        help="Attest that the whole execution environment recorded as OWNER_SCOPE (a boot, PID namespace and container start, "
+        "as printed by a blocked resume) no longer exists, e.g. its machine or container was lost. Cancels the "
+        "unfinished tasks recorded under it so they are redone rather than counted, releases their execution/GPU "
+        "ownership records and appends the confirmation to runtime/pod_history.jsonl. Refuses the current "
+        "environment's scope and refuses while another scope holds an unexpired lease. Requires POSIX session "
+        "locking and --confirmation-reason. Does not stop processes or resume execution.",
+    )
+    rec.add_argument(
+        "--confirmation-reason",
+        metavar="TEXT",
+        help="Required audit reason for --confirm-stopped or --confirm-scope-gone. Exactly one of those options "
+        "and this reason must be provided together, and they cannot be combined with --force.",
+    )
+
 
 def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
     """Inspect on-disk artifacts to judge whether a session finished cleanly."""
@@ -47,6 +88,54 @@ def _session_recovery_status(session_dir: Path) -> dict[str, Any]:
     }
 
 
+def _run_cleanup_confirmation(
+    session_dir: Path, args: argparse.Namespace, *, task_id: str | None, scope: str | None, reason: str | None
+) -> int:
+    """Record one operator cleanup confirmation: a stopped task, or a vanished owner scope."""
+    target = task_id if scope is None else scope
+    if (task_id is None) == (scope is None) or not target or not target.strip() or not reason or not reason.strip():
+        print(
+            "ERROR: exactly one of --confirm-stopped / --confirm-scope-gone and a nonempty --confirmation-reason "
+            "are required together.",
+            file=sys.stderr,
+        )
+        return 2
+    if getattr(args, "force", False):
+        print("ERROR: cleanup confirmation cannot be combined with --force.", file=sys.stderr)
+        return 2
+    from ..session.resume_guard import CleanupConfirmationError, confirm_scope_gone, confirm_task_stopped
+
+    try:
+        if scope is None:
+            result = confirm_task_stopped(session_dir, task_id=task_id, reason=reason)
+        else:
+            from hyperloom.common.owner_scope import local_owner_scope
+
+            result = confirm_scope_gone(
+                session_dir, owner_scope=scope, reason=reason, current_scope=local_owner_scope()
+            )
+    except CleanupConfirmationError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    if scope is None:
+        print(
+            f"cleanup confirmation: task={ascii(task_id[:80])} status={result['status']} "
+            f"released_leases={result['released_leases']} released_gpu_leases={result['released_gpu_leases']}"
+        )
+        return 0
+    cancelled = result["cancelled_tasks"]
+    print(
+        f"cleanup confirmation: owner_scope={ascii(scope[:80])} status={result['status']} "
+        f"cancelled_tasks={len(cancelled)} released_leases={result['released_leases']} "
+        f"released_gpu_leases={result['released_gpu_leases']}"
+    )
+    for cancelled_task in cancelled:
+        print(f"  cancelled task={ascii(cancelled_task[:80])}")
+    if not result["ledger_recorded"]:
+        print("WARNING: the owner ledger runtime/pod_history.jsonl could not be appended.", file=sys.stderr)
+    return 0
+
+
 def _run_recover_session(args: argparse.Namespace) -> int:
     """Offline recovery for a session that exited abnormally."""
     session_dir = args.session_dir.resolve()
@@ -55,28 +144,10 @@ def _run_recover_session(args: argparse.Namespace) -> int:
         return 2
 
     task_id = getattr(args, "confirm_stopped", None)
+    scope = getattr(args, "confirm_scope_gone", None)
     reason = getattr(args, "confirmation_reason", None)
-    if task_id is not None or reason is not None:
-        if not task_id or not task_id.strip() or not reason or not reason.strip():
-            print(
-                "ERROR: --confirm-stopped and a nonempty --confirmation-reason are required together.", file=sys.stderr
-            )
-            return 2
-        if getattr(args, "force", False):
-            print("ERROR: cleanup confirmation cannot be combined with --force.", file=sys.stderr)
-            return 2
-        from ..session.resume_guard import CleanupConfirmationError, confirm_task_stopped
-
-        try:
-            result = confirm_task_stopped(session_dir, task_id=task_id, reason=reason)
-        except CleanupConfirmationError as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            return 2
-        print(
-            f"cleanup confirmation: task={ascii(task_id[:80])} status={result['status']} "
-            f"released_leases={result['released_leases']} released_gpu_leases={result['released_gpu_leases']}"
-        )
-        return 0
+    if task_id is not None or scope is not None or reason is not None:
+        return _run_cleanup_confirmation(session_dir, args, task_id=task_id, scope=scope, reason=reason)
 
     status = _session_recovery_status(session_dir)
     print(

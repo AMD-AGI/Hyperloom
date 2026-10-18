@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -39,8 +40,14 @@ from hyperloom.orchestrator.actions.executors.explore import (
     filter_baseline_noop_variants,
     observed_launch_from_state,
 )
+from hyperloom.orchestrator.actions.executors._launch_restatement import (
+    config_launch_restated_by,
+    restates_the_baseline,
+)
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.common.env import is_truthy
+from hyperloom.common.perf_metric import perf_snapshot_from_mapping
+from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.bus.resource_lock import (
     ResourceLockManager,
     SqliteLeaseBackend,
@@ -48,6 +55,8 @@ from hyperloom.orchestrator.bus.resource_lock import (
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 from hyperloom.orchestrator.bus.storage import SqliteConnection
+
+from .conftest import make_coordinator
 
 
 def _eval_off(value: object) -> bool:
@@ -375,6 +384,114 @@ def test_a_setting_the_engine_rewrote_is_not_already_in_effect(tmp_path):
         assert [name for name, _ in dropped] == [_CANDIDATE]
 
 
+# The operator baseline's own argv, as a vLLM stack carries it: both flags a
+# restating variant names are already set here.
+_VLLM_BASE_ARGV = "--kv-cache-dtype fp8 --enable-prefix-caching --max-num-seqs 64"
+
+
+def _vllm_noop_filter_kwargs(tmp_path: Path) -> dict:
+    base_yaml = tmp_path / "vllm_base.yaml"
+    base_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "vllm",
+                    "envs": {"VLLM_ROCM_USE_AITER": "1", "EXTRA_VLLM_ARGS": _VLLM_BASE_ARGV},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return _noop_filter_kwargs(
+        tmp_path,
+        framework="vllm",
+        base_yaml_path=base_yaml,
+        observed_server_config={"kv_cache_dtype": "fp8", "enable_prefix_caching": True, "max_num_seqs": 64},
+        observed_server_env={"VLLM_ROCM_USE_AITER": "1"},
+    )
+
+
+def test_a_variant_that_only_restates_the_baseline_launch_is_dropped(tmp_path):
+    """A variant naming flags the baseline already sets launches the baseline again, and costs a full measurement.
+
+    Its merged launch has no delta from the baseline, which is also what a change
+    the merged config cannot express looks like; the variant's own request is
+    what tells the two apart.
+    """
+    grid = [
+        GridVariant("kv-cache-fp8", extra_server_args="--kv-cache-dtype fp8"),
+        GridVariant("maxseqs-64", extra_server_args="--max-num-seqs=64"),
+        GridVariant("aiter-on", extra_envs={"VLLM_ROCM_USE_AITER": "1"}),
+        GridVariant("maxseqs-128", extra_server_args="--max-num-seqs 128"),
+        GridVariant("restates-one-changes-one", extra_server_args="--kv-cache-dtype fp8 --block-size 128"),
+    ]
+    kept, dropped = filter_baseline_noop_variants(grid, **_vllm_noop_filter_kwargs(tmp_path))
+
+    assert [name for name, _ in dropped] == ["kv-cache-fp8", "maxseqs-64", "aiter-on"]
+    assert all("baseline noop" in reason for _, reason in dropped)
+    assert [gv.name for gv in kept] == ["maxseqs-128", "restates-one-changes-one"]
+
+
+def test_a_replacing_variant_is_not_a_restatement(tmp_path):
+    """``args_mode=replace`` drops every baseline arg it does not name, which the merged-delta probe cannot show."""
+    variant = GridVariant("replace-with-a-subset", extra_server_args="--kv-cache-dtype fp8", args_mode="replace")
+    kept, dropped = filter_baseline_noop_variants([variant], **_vllm_noop_filter_kwargs(tmp_path))
+    assert [gv.name for gv in kept] == ["replace-with-a-subset"]
+    assert dropped == []
+
+
+def test_restated_args_with_a_kernel_overlay_are_not_a_restatement(tmp_path):
+    """The overlay changes the code launched; only the merged config shows it, so the variant runs."""
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    variant = GridVariant("kv-cache-fp8-with-kernel", extra_server_args="--kv-cache-dtype fp8")
+    variant.overlay_pythonpath = str(overlay)  # type: ignore[attr-defined]
+    kept, dropped = filter_baseline_noop_variants([variant], **_vllm_noop_filter_kwargs(tmp_path))
+    assert [gv.name for gv in kept] == ["kv-cache-fp8-with-kernel"]
+    assert dropped == []
+
+
+def test_a_null_baseline_env_is_unset_not_the_string_none(tmp_path):
+    """The launch leaves a null env unset, so a request for the string ``None`` sets something new."""
+    config = tmp_path / "baseline.yaml"
+    config.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "vllm", "envs": {"FOO": None, "EXTRA_VLLM_ARGS": _VLLM_BASE_ARGV}}}),
+        encoding="utf-8",
+    )
+    assert config_launch_restated_by(str(config), "", {"FOO": "None"}, "vllm") is False
+    assert config_launch_restated_by(str(config), "--kv-cache-dtype fp8", {}, "vllm") is True
+    assert config_launch_restated_by(str(tmp_path / "missing.yaml"), "--kv-cache-dtype fp8", {}, "vllm") is False
+
+
+@pytest.mark.parametrize(
+    ("argv", "envs", "base_argv", "expected"),
+    [
+        pytest.param("--kv-cache-dtype fp8", {}, _VLLM_BASE_ARGV, True, id="restated_flag"),
+        pytest.param("--enable-prefix-caching", {}, _VLLM_BASE_ARGV, True, id="restated_bare_flag"),
+        pytest.param("", {"VLLM_ROCM_USE_AITER": "1"}, _VLLM_BASE_ARGV, True, id="restated_env"),
+        pytest.param("", {}, _VLLM_BASE_ARGV, False, id="empty_request"),
+        pytest.param("--kv-cache-dtype auto", {}, _VLLM_BASE_ARGV, False, id="different_value"),
+        pytest.param("--block-size 128", {}, _VLLM_BASE_ARGV, False, id="setting_the_baseline_lacks"),
+        pytest.param("", {"VLLM_ROCM_USE_AITER": "0"}, _VLLM_BASE_ARGV, False, id="different_env"),
+        pytest.param("", {"NEW_ENV": "1"}, _VLLM_BASE_ARGV, False, id="env_the_baseline_lacks"),
+        pytest.param("fp8 --kv-cache-dtype fp8", {}, _VLLM_BASE_ARGV, False, id="positional_token"),
+        pytest.param("--kv-cache-dtype 'fp8", {}, _VLLM_BASE_ARGV, False, id="unparsable"),
+        pytest.param(
+            "--enable-prefix-caching",
+            {},
+            "--enable-prefix-caching --no-enable-prefix-caching",
+            False,
+            id="negated_spelling_in_the_baseline",
+        ),
+        pytest.param("--cuda-graph-bs 1 2 4", {}, "--cuda-graph-bs 1 2 4", True, id="list_restated_in_full"),
+        pytest.param("--cuda-graph-bs 1 2", {}, "--cuda-graph-bs 1 2 4", False, id="list_restated_in_part"),
+    ],
+)
+def test_restates_the_baseline(argv, envs, base_argv, expected):
+    """Only a request every part of which the baseline already sets is a restatement; anything unreadable is not."""
+    assert restates_the_baseline(argv, envs, base_argv, {"VLLM_ROCM_USE_AITER": "1"}, "vllm") is expected
+
+
 def test_record_explore_accepted_dedup_by_fingerprint():
     state = SharedState()
     variant = {
@@ -629,7 +746,7 @@ async def test_actual_explore_axis_rejection_cannot_be_revived_by_geak_fallback(
     with patch("hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill", side_effect=fake_measure):
         produced = (await sub.run_task(task)).result
     rejection = produced["per_variant_outcomes"][0]
-    assert rejection["reason"].startswith("median_or_guard_failed")
+    assert rejection["reason"].startswith("p50_gain_below_threshold,p90_regressed (")
     assert any(gate["gate"] == "graded_axes" and gate["passed"] is False for gate in rejection["gates"])
     await coord.writeback.promote_to_shared_state("explore", produced, task=task)
     assert state.current_best["tput"] == 110.0
@@ -735,6 +852,80 @@ async def test_explore_missing_axes_fails_closed(
     assert any(gate["gate"] == "graded_axes" and gate["passed"] is False for gate in tested["gates"])
     assert state.baseline_perf == baseline_before
     assert state.current_best == best_before
+    # A variant that could not be graded on its axes is the one row the ledger may still call unmeasured.
+    assert tested["graded_gain_pct"] is None
+    assert "no_meas" in SharedState._format_variant_line(tested)
+
+
+@pytest.mark.asyncio
+async def test_explore_guard_revert_row_reads_as_measured(sub_agent_runner, tmp_path, monkeypatch):
+    """A variant the tail guard refuses keeps its graded movement and the gate's reason on its ledger row.
+
+    The median here clears the KEEP bar by a wide margin and the slow tail halves, so the verdict is REVERT on a
+    fully measured variant. The prompt ledger must say so rather than render the row as never measured.
+    """
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", benchmark_mode="agentx")
+    state.baseline_tput = 200.0
+    state.baseline_perf = {
+        "output_throughput": 200.0,
+        "total_token_throughput": 20000.0,
+        "e2e_norm_intvty_p90": 100.0,
+        "e2e_norm_intvty_p50": 100.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
+    }
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(
+            slot,
+            tput=200.0,
+            perf_axes={
+                "total_token_throughput": 20000.0,
+                "e2e_norm_intvty_p90": 50.0,
+                "e2e_norm_intvty_p50": 110.0,
+                "duration_seconds": 25.0,
+                "request_error_rate": 0.0,
+            },
+        )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-guard-revert"),
+            "base_tput": 200.0,
+            "grid": [{"name": "v_tail_regress", "extra_args": "--tail-flag"}],
+        },
+        idempotency_key="ex-guard-revert",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    tested = res.result["explore_search_update"]["tested"][canonical_fingerprint("--tail-flag", {})]
+    assert tested["outcome"] == "REVERT"
+    assert tested["graded_objective"] == "e2e_norm_intvty_p50"
+    # A refused variant still contributes no gain anywhere a gain is summed or ranked.
+    assert tested["gain_pct"] is None
+    assert tested["graded_gain_pct"] == pytest.approx(10.0)
+    assert tested["e2e_norm_intvty_p50"] == pytest.approx(110.0)
+    assert tested["reason"].startswith("p90_regressed (")
+    line = SharedState._format_variant_line(tested)
+    assert "no_meas" not in line
+    assert "+10.00%" in line
+    assert "p90_regressed" in line
 
 
 @pytest.mark.asyncio
@@ -842,6 +1033,91 @@ async def test_explore_missing_axes_preserves_running_grading_anchor(
     assert [row["name"] for row in out["winners"]] == expected_winners
     assert [row["variant_name"] for row in out["explore_search_update"]["winners_history"]] == expected_winners
     assert out["running_base_tput"] == (220.0 if intvty_outcome == "KEEP" else 210.0)
+    # Promotion re-grades a winner from its record alone; a record thinner than the measurement reads as
+    # candidate_axes_missing (or as an incomparable round) and the KEEP is dropped.
+    for row in (*out["winners"], tested["v_good"]):
+        snapshot = perf_snapshot_from_mapping(row)
+        assert snapshot is not None
+        assert snapshot["duration_seconds"] == 25.0
+        assert snapshot["request_error_rate"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_an_agentx_explore_keep_is_promoted_by_writeback(sub_agent_runner, session_dir, tmp_path, monkeypatch):
+    """The winner explore writes is the record writeback re-grades, so the KEEP must survive the hand-off.
+
+    Each side was only ever exercised against hand-built dicts; a winner record thinner than the measurement that
+    graded it dropped every AgentX explore KEEP at promotion from #1652 until #1790.
+    """
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    baseline_axes = {
+        "output_throughput": 200.0,
+        "total_token_throughput": 20000.0,
+        "e2e_norm_intvty_p90": 300.0,
+        "e2e_norm_intvty_p50": 300.0,
+        "duration_seconds": 25.0,
+        "request_error_rate": 0.0,
+    }
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", benchmark_mode="agentx")
+    state.baseline_tput = 200.0
+    state.baseline_perf = dict(baseline_axes)
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        _fake_workspace(
+            slot,
+            tput=210.0,
+            perf_axes={
+                "input_throughput": 21790.0,
+                "total_token_throughput": 22000.0,
+                "e2e_norm_intvty_p90": 330.0,
+                "e2e_norm_intvty_p50": 330.0,
+                "duration_seconds": 25.0,
+                "request_error_rate": 0.0,
+            },
+        )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-promote"),
+            "base_tput": 200.0,
+            "grid": [{"name": "v_good", "extra_args": "--good-flag"}],
+        },
+        idempotency_key="ex-promote",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+    [winner] = res.result["winners"]
+
+    with session_scope(session_dir):
+        coord = make_coordinator(session_dir)
+        coord.shared_state.benchmark_mode = "agentx"
+        coord.shared_state.baseline_tput = 200.0
+        coord.shared_state.baseline_perf = dict(baseline_axes)
+        coord.shared_state.current_best = {
+            "action": "baseline",
+            "tput": 200.0,
+            **baseline_axes,
+            "extra_server_args": "",
+            "extra_envs": {},
+        }
+
+        assert coord.writeback.lift_to_current_best("explore", float(winner["tput"]), dict(winner)) is True
+        assert coord.shared_state.current_best["variant_name"] == "v_good"
+        assert coord.shared_state.current_best["e2e_norm_intvty_p50"] == 330.0
 
 
 @pytest.mark.asyncio
@@ -1538,6 +1814,11 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         bench_calls.append(str(slot))
+        if "warmup_round" in str(slot):
+            (slot / "server.log").write_text(
+                "[aiter] shape is M:1, N:2, K:3, not found tuned config in /tmp/a.csv, will use default config!\n",
+                encoding="utf-8",
+            )
         _fake_workspace(slot, tput=920.0)  # +15% vs 800 — KEEP and stable
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
 
@@ -1572,6 +1853,13 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
     assert len(bench_calls) == 2, bench_calls
     assert sum("warmup_round" in c for c in bench_calls) == 1
     assert {w["name"] for w in out["winners"]} == {"warm_keep"}
+    warm_log = next(Path(c) for c in bench_calls if "warmup_round" in c) / "server.log"
+    decision_slot = next(Path(c) for c in bench_calls if "warmup_round" not in c)
+    report = json.loads((decision_slot / "runtime_findings.json").read_text(encoding="utf-8"))
+    assert report["log_path"] == str(warm_log)
+    assert [(f["rule_id"], f["status"]) for f in report["findings"] if f["status"] != "not_detected"] == [
+        ("aiter.tuned_miss", "detected")
+    ]
 
 
 def _run_eval_of(cmd: list[str]) -> str:
@@ -2025,6 +2313,81 @@ async def test_explore_skips_a_variant_the_budget_cannot_fit(
     # Untested variants stay out of the ledger so a resume can retry them.
     assert res.result["losers"] == []
     assert res.result["explore_search_update"]["tested"] == {}
+
+
+async def _explore_under_phase_budget(sub_agent_runner, tmp_path, *, phase_left_sec: list[float], variants: int):
+    """Run a cold explore of ``variants`` 20s variants while the phase reads ``phase_left_sec`` before each one."""
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    started: list[int] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        if "--output-dir" not in cmd:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+        started.append(int(kwargs["timeout"]))
+        _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]), tput=840.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    grid = [
+        {"name": f"v{i}", "extra_args": f"--max-num-seqs {64 << i}", "extra_envs": {}, "provenance": "default_grid"}
+        for i in range(variants)
+    ]
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-phase"),
+            "base_tput": 800.0,
+            "grid": grid,
+            "baseline_runtime_sec": 20.0,
+        },
+        idempotency_key=f"ex-phase-{variants}",
+    )
+    remaining = iter(phase_left_sec)
+    phase_deadline = SimpleNamespace(remaining=lambda: next(remaining))
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task, extra_context={"phase_deadline": phase_deadline})
+    return res.result, started
+
+
+@pytest.mark.asyncio
+async def test_explore_finishes_the_variant_in_flight_and_starts_none_the_phase_cannot_fit(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """The phase budget is judged before a variant starts, never against the one being measured."""
+    _force_cold_decision(monkeypatch)
+    result, started = await _explore_under_phase_budget(
+        sub_agent_runner, tmp_path, phase_left_sec=[25.0, 10.0], variants=2
+    )
+
+    assert len(started) == 1
+    assert result["status"] == "succeeded"
+    assert result["session_budget_untested"] == 1
+
+
+@pytest.mark.asyncio
+async def test_explore_that_the_phase_cannot_fit_is_attributed_to_the_phase(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """A round the phase budget left unmeasured must not read as variants failing, nor as the session running out."""
+    _force_cold_decision(monkeypatch)
+    result, started = await _explore_under_phase_budget(sub_agent_runner, tmp_path, phase_left_sec=[10.0], variants=1)
+
+    assert started == []
+    assert result["error_class"] == "phase_time_exhausted"
+    assert result["losers"] == []
 
 
 @pytest.mark.asyncio
@@ -3031,3 +3394,81 @@ async def test_explore_mlperf_reverts_when_turns_went_unscored(sub_agent_runner,
     accuracy = {gate["gate"]: gate for gate in tested["gates"]}["accuracy"]
     assert accuracy["reason"] == "accuracy_drop"
     assert accuracy["observed"] == 0.0, "an unscored turn scores the run 0.0 rather than skipping the gate"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("power_w", "expected_outcome"),
+    [pytest.param(812.0, "REVERT", id="over-budget"), pytest.param(650.0, "KEEP", id="in-budget")],
+)
+async def test_explore_grades_the_rounds_own_gpu_power_against_the_budget(
+    sub_agent_runner, tmp_path, monkeypatch, power_w, expected_outcome
+):
+    """Power comes from the round's own gpu_power.json through the real extraction; the total of the serving cards
+    is graded against the budget, and a KEEP reaches current_best."""
+
+    from hyperloom.orchestrator.loop import writeback as wb
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", model_path="/models/m", gpu_type="mi355x")
+    state.baseline_tput = 200.0
+    state.power_budget_w = 700.0
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        workspace = _fake_workspace(slot, tput=20000.0)
+        report_path = workspace / "benchmark_report.json"
+        assert report_path.exists()
+        half = power_w / 2
+        (workspace / "gpu_power.json").write_text(
+            json.dumps(
+                {
+                    "started_unix": time.time(),
+                    "serving_gpus": [4, 5],
+                    "avg_power_w": half,
+                    "per_gpu": {"4": {"avg_power_w": half}, "5": {"avg_power_w": half}},
+                }
+            )
+        )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-power"),
+            "base_tput": 200.0,
+            "grid": [{"name": "v_power", "extra_args": "--power-lever"}],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-power",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    tested = out["explore_search_update"]["tested"][canonical_fingerprint("--power-lever", {})]
+    assert tested["outcome"] == expected_outcome
+    if expected_outcome == "REVERT":
+        assert out["losers"][0]["reason"] == "power_budget_exceeded"
+        gates = {g["gate"]: g for g in tested["gates"]}
+        assert gates["power_budget"]["passed"] is False
+        assert "latency_budget" not in gates
+        return
+    assert out["winners"][0]["gpu_power_by_gpu_w"] == {"4": pytest.approx(power_w / 2), "5": pytest.approx(power_w / 2)}
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = state
+    await coord.writeback._promote_explore(out, None, wb._PromoteOutcome(verdict=wb.Verdict.RECORDED))
+    assert state.current_best["variant_name"] == "v_power"

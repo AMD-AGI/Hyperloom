@@ -31,7 +31,6 @@ _TAGGED_ENTRY_POINTS = frozenset(
         "CodexSession",
         "inject_env",
         "run_codex_turn",
-        "stream_chat_completion_text",
     }
 )
 

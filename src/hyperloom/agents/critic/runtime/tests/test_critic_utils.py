@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.agents.critic.runtime.category_mapping import filter_supported_categories, map_category_to_kind
+from hyperloom.agents.critic.runtime.category_mapping import map_category_to_kind
 from hyperloom.agents.critic.runtime.errors import (
     IntentEnvelopeValidationError,
     RuntimeAdapterError,
@@ -32,13 +32,7 @@ def test_map_category_to_kind() -> None:
         map_category_to_kind("no_such_category")
 
 
-def test_filter_supported_categories() -> None:
-    supported, rejected = filter_supported_categories(["pitfall", "bogus", "server_params"])
-    assert supported == ["pitfall", "server_params"]
-    assert rejected == ["bogus"]
-
-
-# importance_mapping
+# importance_mapping tests
 def test_importance_for_verdict() -> None:
     assert importance_for_verdict(verdict="advise") == 0.4
     assert importance_for_verdict(verdict="approve", confidence="high", has_measurement=True) == 0.7

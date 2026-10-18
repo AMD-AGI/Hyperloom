@@ -96,17 +96,6 @@ def _write_git_guard(directory: Path) -> dict[str, str]:
     return env
 
 
-def resolve_codex_cli(explicit: str = "") -> str:
-    """Resolve an optional SDK runtime override from generic configuration."""
-    selected = explicit.strip() or os.environ.get("FORGE_AGENT_CLI", "").strip()
-    if selected:
-        path = Path(selected).expanduser()
-        if path.is_file() and os.access(path, os.X_OK):
-            return str(path)
-        return ""
-    return ""
-
-
 def resolve_codex_model(explicit: str = "") -> str:
     """Resolve a Codex model from generic runtime input or built-in default."""
     model = explicit.strip() or DEFAULT_CODEX_MODEL
@@ -567,7 +556,7 @@ class CodexBackend:
         """Map the generic runtime sandbox into a Codex SDK preset."""
         if self.runtime.sandbox_mode == "bypass" or self.bypass_sandbox:
             return sdk.Sandbox.full_access
-        elif spec.writable and self.runtime.sandbox_mode != "read-only":
+        if spec.writable and self.runtime.sandbox_mode != "read-only":
             return sdk.Sandbox.workspace_write
         return sdk.Sandbox.read_only
 
@@ -864,7 +853,6 @@ __all__ = [
     "CodexBackendError",
     "CodexExecutionError",
     "CodexUnavailableError",
-    "resolve_codex_cli",
     "resolve_codex_gateway",
     "resolve_codex_model",
     "resolve_codex_reasoning_effort",
