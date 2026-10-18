@@ -20,7 +20,6 @@ from hyperloom.common.gain_math import conc_pair_comparison
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.perf_metric import GRADED_INTVTY, GRADED_OUTPUT, is_agentx_mode
 from hyperloom.common.timeutil import now_iso, utc_now_compact
-from hyperloom.inference_optimizer.breakdown.recorder import conc_sweep_event
 from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     GRID_MODE_DEFAULT,
     GRID_REQUESTED,
@@ -31,6 +30,12 @@ from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     STAGE_SERVER_RESTART,
     STRATEGY_SERVER_RESTART,
     STRATEGY_SINGLE_SERVER,
+    ArmStrategy,
+    SweepAnchor,
+    SweepBudget,
+    SweepEnvironment,
+    SweepPlan,
+    SweepRung,
 )
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
@@ -536,18 +541,20 @@ class _SweepRun:
         if self.recorder is None:
             return
         point = _point_from_variant(result, arm=arm_name)
-        rung = conc_sweep_event.SweepRung(
-            stage=stage,
-            conc=point.get("conc"),
-            point=point,
-            committed=committed,
-            num_prompts=(result.extra_envs or {}).get("NUM_PROMPTS"),
-            start_time=start_time,
-            wall_duration_sec=wall_duration_sec,
-            granted_cap_sec=self.benchmark_timeout_sec,
-            budget_remaining_sec=budget_remaining_sec,
+        self.recorder.record_variant(
+            arm_name,
+            SweepRung(
+                stage=stage,
+                conc=point.get("conc"),
+                point=point,
+                committed=committed,
+                num_prompts=(result.extra_envs or {}).get("NUM_PROMPTS"),
+                start_time=start_time,
+                wall_duration_sec=wall_duration_sec,
+                granted_cap_sec=self.benchmark_timeout_sec,
+                budget_remaining_sec=budget_remaining_sec,
+            ),
         )
-        self.recorder.record_variant(arm_name, rung)
 
     def commit_failed_boots(self, arm_name: str, boots: list[VariantResult]) -> None:
         """Publish the boot attempts a lower rung's outcome has settled as part of the curve."""
@@ -764,7 +771,7 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
         port = 8888
         framework = ""
 
-    arm_strategy = conc_sweep_event.ArmStrategy(
+    arm_strategy = ArmStrategy(
         strategy=STRATEGY_SINGLE_SERVER if lc_eligible else STRATEGY_SERVER_RESTART,
         reason=None if lc_eligible else "framework_not_lifecycle_eligible",
         lifecycle_eligible=lc_eligible,
@@ -1269,7 +1276,7 @@ async def run_conc_sweep(
             benchmark_mode=getattr(state, "benchmark_mode", ""),
         )
         recorder.record_anchor(
-            conc_sweep_event.SweepAnchor(
+            SweepAnchor(
                 baseline_tput=baseline_tput,
                 anchor_tput=cb.get("tput"),
                 tp=getattr(state, "tp", 0),
@@ -1280,7 +1287,7 @@ async def run_conc_sweep(
             )
         )
         recorder.record_environment(
-            conc_sweep_event.SweepEnvironment(
+            SweepEnvironment(
                 sweep_task_id=task_id,
                 workspace=workspace.as_posix(),
                 model_path=resolved_model,
@@ -1307,10 +1314,11 @@ async def run_conc_sweep(
 
     if recorder is not None:
         recorder.record_budget(
-            conc_sweep_event.SweepBudget(
+            SweepBudget(
                 declared_total_sec=total_budget_sec,
                 granted_total_sec=total_budget_sec,
                 rung_cost_sec=variant_expected_sec,
+                raised=False,
                 gate_active=total_budget_sec is not None,
                 deadline=started_at + total_budget_sec if total_budget_sec is not None else None,
             )
@@ -1350,7 +1358,7 @@ async def run_conc_sweep(
     arms_order = [run.optimized, run.baseline]
     if recorder is not None:
         recorder.record_plan(
-            conc_sweep_event.SweepPlan(
+            SweepPlan(
                 concs_requested=concs,
                 concs_ordered=run.concs_desc,
                 grid_source=grid_source,
