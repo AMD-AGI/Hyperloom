@@ -34,8 +34,10 @@ __all__ = [
     "SOURCE_KERNEL_REWRITE",
     "FusionRun",
     "GemmTuningRun",
+    "IntegrateVerdict",
     "KernelRewriteRun",
     "LaneRunFields",
+    "TraceAnalyzeRun",
 ]
 
 
@@ -178,3 +180,87 @@ class GemmTuningRun:
             "graded_objective": _text(self.graded_objective),
             "tuner": _text(self.tuner),
         }
+
+
+@dataclass(frozen=True)
+class IntegrateVerdict:
+    """The end-to-end integrate gate's verdict on one patch.
+
+    ``macro_cycle`` is the cycle the gate settled in, which is the cycle that
+    ran the gate rather than necessarily the one that produced the patch.
+
+    Attributes:
+        decision: The gate's verdict (``KEEP`` / ``REVERT``).
+        fault_count: How many attempts never measured the patch fairly.
+        rejected_reason: Why the patch was rejected outright, when it was -- an
+            exhausted budget rather than a verdict on the code.
+        basis: Throughput basis the gain was measured on (``hot`` / ``cold``);
+            a gain is meaningless without the baseline behind it.
+        gain_attributed: Whether the measured gain is this one kernel's. A
+            rebench carrying several kernels measured all of them together, so
+            the gain is real but unattributable.
+    """
+
+    macro_cycle: Any
+    integration_id: str
+    kernel_id: str
+    decision: str = ""
+    status: str = ""
+    attempt_count: Any = None
+    fault_count: Any = None
+    gain_pct: Any = None
+    accuracy_pass: Any = None
+    validation_tier: str = ""
+    patch_path: str = ""
+    target_file: str = ""
+    error_class: str = ""
+    rejected_reason: str = ""
+    retryable: bool = False
+    settled_at: str = ""
+    extra_server_args: str = ""
+    basis: str = ""
+    alignment_status: str = ""
+    gain_attributed: Any = None
+
+    def row(self) -> dict[str, Any]:
+        """The integrate row this verdict persists as."""
+        return {
+            "integration_id": str(self.integration_id),
+            "kernel_id": str(self.kernel_id or ""),
+            "decision": _text(self.decision),
+            "status": _text(self.status),
+            "attempt_count": _int_or_none(self.attempt_count),
+            "fault_count": _int_or_none(self.fault_count),
+            "gain_pct": _float_or_none(self.gain_pct),
+            "accuracy_pass": self.accuracy_pass if isinstance(self.accuracy_pass, bool) else None,
+            "validation_tier": _text(self.validation_tier),
+            "patch_path": _text(self.patch_path),
+            "target_file": _text(self.target_file),
+            "error_class": _text(self.error_class),
+            "rejected_reason": _text(self.rejected_reason),
+            "retryable": bool(self.retryable),
+            "settled_at": _text(self.settled_at),
+            "settled_in_macro_cycle": _int_or_none(self.macro_cycle),
+            "extra_server_args": _text(self.extra_server_args),
+            "basis": _text(self.basis),
+            "alignment_status": _text(self.alignment_status),
+            "gain_attributed": self.gain_attributed if isinstance(self.gain_attributed, bool) else None,
+        }
+
+
+@dataclass(frozen=True)
+class TraceAnalyzeRun:
+    """One analysis run, as asked for and as it came back.
+
+    ``status`` is ``ok`` or ``failed``.
+    """
+
+    run_id: str
+    status: str
+    result: Any
+    requested_by: str = ""
+    request_msg_id: str = ""
+    trace_input: str = ""
+    top_k: Any = None
+    snapshot: dict[str, Any] | None = None
+    cache_hit: bool = False

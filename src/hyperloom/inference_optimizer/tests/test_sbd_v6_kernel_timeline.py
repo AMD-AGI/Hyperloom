@@ -29,6 +29,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     record_trace_analyze_request,
     reject_geak_attempts,
 )
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import IntegrateVerdict, TraceAnalyzeRun
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import FusionRun, KernelRewriteRun, LaneRunFields
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
@@ -173,15 +174,17 @@ def test_a_bus_requested_analysis_accounts_for_the_snapshot_it_advanced(tmp_path
         )
     )
     record_trace_analyze_request(
-        macro_cycle=3,
-        run_id="msg-42",
-        status="ok",
-        result={"hot_kernels": [{"name": "fused_moe", "gpu_pct": 31.5}]},
-        requested_by="kernel_agent",
-        request_msg_id="msg-42",
-        trace_input="traces/rank0.pt.trace.json",
-        top_k=15,
-        snapshot={"roofline_snapshot_id": 4, "analysis_md_path": "reports/analysis.md"},
+        3,
+        TraceAnalyzeRun(
+            run_id="msg-42",
+            status="ok",
+            result={"hot_kernels": [{"name": "fused_moe", "gpu_pct": 31.5}]},
+            requested_by="kernel_agent",
+            request_msg_id="msg-42",
+            trace_input="traces/rank0.pt.trace.json",
+            top_k=15,
+            snapshot={"roofline_snapshot_id": 4, "analysis_md_path": "reports/analysis.md"},
+        ),
     )
     recorder.finish(tput_after=1000.0)
 
@@ -199,11 +202,7 @@ def test_a_bus_requested_analysis_after_the_visit_closed_still_lands(tmp_path):
     recorder.finish(tput_after=1000.0)
 
     record_trace_analyze_request(
-        macro_cycle=3,
-        run_id="msg-42",
-        status="ok",
-        result={},
-        snapshot={"roofline_snapshot_id": 4},
+        3, TraceAnalyzeRun(run_id="msg-42", status="ok", result={}, snapshot={"roofline_snapshot_id": 4})
     )
 
     runs = _kernel_events(tmp_path)[0]["ext"]["forge"]["trace_analyze_runs"]
@@ -212,11 +211,7 @@ def test_a_bus_requested_analysis_after_the_visit_closed_still_lands(tmp_path):
 
 def test_a_bus_request_with_no_visit_running_mints_no_event(tmp_path):
     record_trace_analyze_request(
-        macro_cycle=3,
-        run_id="msg-42",
-        status="ok",
-        result={},
-        snapshot={"roofline_snapshot_id": 4},
+        3, TraceAnalyzeRun(run_id="msg-42", status="ok", result={}, snapshot={"roofline_snapshot_id": 4})
     )
 
     assert _kernel_events(tmp_path) == []
@@ -225,15 +220,17 @@ def test_a_bus_request_with_no_visit_running_mints_no_event(tmp_path):
 def test_a_bus_requested_analysis_carries_the_kernel_table_it_produced(tmp_path):
     recorder = _forge_recorder()
     record_trace_analyze_request(
-        macro_cycle=3,
-        run_id="msg-42",
-        status="ok",
-        result={},
-        snapshot={
-            "roofline_snapshot_id": 4,
-            "reusable_native_kernel_ids": ["k001"],
-            "hot_kernels_top15": [{"kernel_id": "k001", "name": "fused_moe", "gpu_pct": 31.5}],
-        },
+        3,
+        TraceAnalyzeRun(
+            run_id="msg-42",
+            status="ok",
+            result={},
+            snapshot={
+                "roofline_snapshot_id": 4,
+                "reusable_native_kernel_ids": ["k001"],
+                "hot_kernels_top15": [{"kernel_id": "k001", "name": "fused_moe", "gpu_pct": 31.5}],
+            },
+        ),
     )
     recorder.finish(tput_after=1000.0)
 
@@ -250,14 +247,16 @@ def test_an_adoption_states_the_basis_its_gain_was_measured_on(tmp_path):
         )
     )
     record_integrate_verdict(
-        macro_cycle=3,
-        integration_id="geak-k001",
-        kernel_id="k001",
-        decision="KEEP",
-        gain_pct=6.0,
-        basis="hot",
-        alignment_status="aligned",
-        gain_attributed=False,
+        IntegrateVerdict(
+            macro_cycle=3,
+            integration_id="geak-k001",
+            kernel_id="k001",
+            decision="KEEP",
+            gain_pct=6.0,
+            basis="hot",
+            alignment_status="aligned",
+            gain_attributed=False,
+        )
     )
     recorder.finish(tput_after=1060.0)
 
@@ -275,7 +274,9 @@ def test_the_integrate_gate_is_what_settles_a_forge_candidate(tmp_path):
             kernel_id="k001",
         )
     )
-    record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="KEEP", gain_pct=6.0)
+    record_integrate_verdict(
+        IntegrateVerdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="KEEP", gain_pct=6.0)
+    )
     recorder.finish(tput_after=1060.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
@@ -322,7 +323,9 @@ def test_a_reverted_kernel_is_rejected_by_the_gate_not_left_pending(tmp_path):
             kernel_id="k001",
         )
     )
-    record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="REVERT")
+    record_integrate_verdict(
+        IntegrateVerdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="REVERT")
+    )
     recorder.finish(tput_after=1000.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
@@ -340,19 +343,19 @@ def test_a_kernel_gated_twice_is_settled_by_the_verdict_that_stands(tmp_path):
         )
     )
     record_integrate_verdict(
-        macro_cycle=3,
-        integration_id="int-1",
-        kernel_id="k001",
-        decision="REVERT",
-        settled_at="2026-09-02T00:01:00",
+        IntegrateVerdict(
+            macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="REVERT", settled_at="2026-09-02T00:01:00"
+        )
     )
     record_integrate_verdict(
-        macro_cycle=3,
-        integration_id="int-2",
-        kernel_id="k001",
-        decision="KEEP",
-        gain_pct=4.0,
-        settled_at="2026-09-02T00:09:00",
+        IntegrateVerdict(
+            macro_cycle=3,
+            integration_id="int-2",
+            kernel_id="k001",
+            decision="KEEP",
+            gain_pct=4.0,
+            settled_at="2026-09-02T00:09:00",
+        )
     )
     recorder.finish(tput_after=1000.0)
 
@@ -372,11 +375,7 @@ def test_an_adopted_rewrite_states_the_backend_that_produced_it(tmp_path):
         )
     )
     record_integrate_verdict(
-        macro_cycle=3,
-        integration_id="int-1",
-        kernel_id="k001",
-        decision="KEEP",
-        gain_pct=6.0,
+        IntegrateVerdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="KEEP", gain_pct=6.0)
     )
     recorder.finish(tput_after=1060.0)
 
@@ -399,18 +398,20 @@ def test_an_integrate_verdict_lands_after_the_visit_has_closed(tmp_path):
     assert _kernel_events(tmp_path)[0]["ext"]["integrate"] == []
 
     record_integrate_verdict(
-        macro_cycle=3,
-        integration_id="int-1",
-        kernel_id="k001",
-        decision="KEEP",
-        status="succeeded",
-        attempt_count=2,
-        fault_count=1,
-        gain_pct=4.5,
-        accuracy_pass=True,
-        patch_path="patches/k001.diff",
-        target_file="vllm/attention.py",
-        settled_at="2026-09-02T00:20:00",
+        IntegrateVerdict(
+            macro_cycle=3,
+            integration_id="int-1",
+            kernel_id="k001",
+            decision="KEEP",
+            status="succeeded",
+            attempt_count=2,
+            fault_count=1,
+            gain_pct=4.5,
+            accuracy_pass=True,
+            patch_path="patches/k001.diff",
+            target_file="vllm/attention.py",
+            settled_at="2026-09-02T00:20:00",
+        )
     )
 
     ext = _kernel_events(tmp_path)[0]["ext"]
@@ -459,21 +460,25 @@ def test_a_later_unrelated_integration_cannot_rewrite_an_exact_attempt(tmp_path)
     recorder.finish(tput_after=1000.0)
 
     record_integrate_verdict(
-        macro_cycle=3,
-        integration_id="int-1",
-        kernel_id="k001",
-        decision="KEEP",
-        gain_pct=6.0,
-        settled_at="2026-09-02T00:10:00",
+        IntegrateVerdict(
+            macro_cycle=3,
+            integration_id="int-1",
+            kernel_id="k001",
+            decision="KEEP",
+            gain_pct=6.0,
+            settled_at="2026-09-02T00:10:00",
+        )
     )
     record_integrate_verdict(
-        macro_cycle=3,
-        integration_id="int-2",
-        kernel_id="k001",
-        decision="REVERT",
-        gain_pct=None,
-        rejected_reason="fault_attempts_exhausted_2",
-        settled_at="2026-09-02T00:30:00",
+        IntegrateVerdict(
+            macro_cycle=3,
+            integration_id="int-2",
+            kernel_id="k001",
+            decision="REVERT",
+            gain_pct=None,
+            rejected_reason="fault_attempts_exhausted_2",
+            settled_at="2026-09-02T00:30:00",
+        )
     )
 
     ext = _kernel_events(tmp_path)[0]["ext"]
@@ -501,7 +506,9 @@ def test_same_kernel_name_without_integration_ref_does_not_claim_a_gate(tmp_path
             lane=LaneRunFields(run_id="attempt-7", status="success", micro_decision="keep"), kernel_id="k001"
         )
     )
-    record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="REVERT")
+    record_integrate_verdict(
+        IntegrateVerdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", decision="REVERT")
+    )
     recorder.finish(tput_after=1000.0)
 
     assert _kernel_events(tmp_path)[0]["ext"]["attempts"][0]["e2e"] is None
@@ -511,7 +518,7 @@ def test_a_verdict_with_no_event_to_belong_to_is_dropped(tmp_path):
     recorder = _forge_recorder()
     recorder.finish(tput_after=1000.0)
 
-    record_integrate_verdict(macro_cycle=9, integration_id="int-1", kernel_id="k001", decision="KEEP")
+    record_integrate_verdict(IntegrateVerdict(macro_cycle=9, integration_id="int-1", kernel_id="k001", decision="KEEP"))
 
     assert [event["id"] for event in _kernel_events(tmp_path)] == [kernel_event_id(3)]
 
@@ -530,10 +537,7 @@ def test_a_fusion_is_settled_by_the_integration_it_queued(tmp_path):
         )
     )
     record_integrate_verdict(
-        macro_cycle=3,
-        integration_id="int-fusion-1",
-        kernel_id="",
-        decision="REVERT",
+        IntegrateVerdict(macro_cycle=3, integration_id="int-fusion-1", kernel_id="", decision="REVERT")
     )
     recorder.finish(tput_after=1000.0)
 
@@ -728,11 +732,9 @@ def test_geak_opaque_ids_survive_acceptance_rebench_integration_and_late_rejecti
     recorder.record_geak_claim({}, specs=[{"kind": "env", "short_name": kernel_id, "e2e_delta_pct": 4.0}])
     _geak_rebench(recorder, "geak:rebench:0", REBENCH_VALIDATED)
     record_integrate_verdict(
-        macro_cycle=0,
-        integration_id=f"geak:{kernel_id}",
-        kernel_id=kernel_id,
-        decision="KEEP",
-        gain_pct=4.0,
+        IntegrateVerdict(
+            macro_cycle=0, integration_id=f"geak:{kernel_id}", kernel_id=kernel_id, decision="KEEP", gain_pct=4.0
+        )
     )
     recorder.finish(tput_after=950.0)
 
@@ -1087,18 +1089,20 @@ def test_an_unfinished_visit_states_no_verdict(tmp_path):
 def test_the_trace_analyze_run_records_the_only_legal_kernel_id_source(tmp_path):
     recorder = _forge_recorder()
     record_trace_analyze_request(
-        macro_cycle=3,
-        run_id="ta-1",
-        status="ok",
-        requested_by="orchestration",
-        trace_input="/s/traces",
-        top_k=10,
-        result={
-            "analysis_meta": {"route": "agent", "tool": "tracelens"},
-            "hot_kernels_top15": [{"name": "aten::mm", "gpu_pct": 10.0}],
-            "candidates_path": "/s/candidates.json",
-        },
-        snapshot={"roofline_snapshot_id": 5, "reusable_native_kernel_ids": ["k001", "k002"]},
+        3,
+        TraceAnalyzeRun(
+            run_id="ta-1",
+            status="ok",
+            requested_by="orchestration",
+            trace_input="/s/traces",
+            top_k=10,
+            result={
+                "analysis_meta": {"route": "agent", "tool": "tracelens"},
+                "hot_kernels_top15": [{"name": "aten::mm", "gpu_pct": 10.0}],
+                "candidates_path": "/s/candidates.json",
+            },
+            snapshot={"roofline_snapshot_id": 5, "reusable_native_kernel_ids": ["k001", "k002"]},
+        ),
     )
     recorder.finish(tput_after=1000.0)
 
@@ -1212,7 +1216,7 @@ def _forge_rewrite_with_gate(recorder, **verdict: Any) -> None:
             kernel_id="k001",
         )
     )
-    record_integrate_verdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", **verdict)
+    record_integrate_verdict(IntegrateVerdict(macro_cycle=3, integration_id="int-1", kernel_id="k001", **verdict))
 
 
 def test_a_gate_concluding_against_the_candidate_still_succeeds_the_entry(tmp_path):
@@ -1413,11 +1417,9 @@ def test_a_measurement_that_lands_after_the_visit_closed_is_still_published(tmp_
     assert guest is not None
     guest.finish({"status": "succeeded", "output_throughput": 1100.0})
     record_integrate_verdict(
-        macro_cycle=3,
-        integration_id="stack-k001+k004",
-        kernel_id="k001+k004",
-        decision="KEEP",
-        status="ok",
+        IntegrateVerdict(
+            macro_cycle=3, integration_id="stack-k001+k004", kernel_id="k001+k004", decision="KEEP", status="ok"
+        )
     )
 
     event = _kernel_events(tmp_path)[0]
@@ -1477,24 +1479,26 @@ def test_discovered_kernels_carry_profiling_fields(tmp_path):
 def test_trace_analyze_run_also_records_discovered_kernels(tmp_path):
     recorder = _forge_recorder()
     record_trace_analyze_request(
-        macro_cycle=3,
-        run_id="ta-2",
-        status="ok",
-        result={"analysis_meta": {"route": "agent", "tool": "tracelens"}},
-        snapshot={
-            "roofline_snapshot_id": 6,
-            "hot_kernels_top15": [
-                {
-                    "kernel_id": "k001",
-                    "name": "aten::mm",
-                    "gpu_pct": 10.0,
-                    "duration_us": 50.0,
-                    "call_count": 8,
-                    "bound_type": "memory",
-                }
-            ],
-            "reusable_native_kernel_ids": ["k001"],
-        },
+        3,
+        TraceAnalyzeRun(
+            run_id="ta-2",
+            status="ok",
+            result={"analysis_meta": {"route": "agent", "tool": "tracelens"}},
+            snapshot={
+                "roofline_snapshot_id": 6,
+                "hot_kernels_top15": [
+                    {
+                        "kernel_id": "k001",
+                        "name": "aten::mm",
+                        "gpu_pct": 10.0,
+                        "duration_us": 50.0,
+                        "call_count": 8,
+                        "bound_type": "memory",
+                    }
+                ],
+                "reusable_native_kernel_ids": ["k001"],
+            },
+        ),
     )
     recorder.finish(tput_after=1000.0)
 
