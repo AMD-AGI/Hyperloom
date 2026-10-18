@@ -14,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import WriteOptions, append_jsonl
+from hyperloom.common.io import append_jsonl
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +63,7 @@ def append_record(backup_root: Path | str, record: Mapping[str, Any]) -> bool:
     """
     target = ledger_path(backup_root)
     try:
-        append_jsonl(target, dict(record), options=WriteOptions(make_parents=True, fsync=True))
+        append_jsonl(target, dict(record), make_parents=True, fsync=True)
     except OSError as exc:
         log.error("delivery: could not append backup ledger %s (%s)", target, exc)
         return False
