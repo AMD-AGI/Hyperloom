@@ -607,13 +607,13 @@ _CONFIRMATION_REASON = "Verified the entire process tree and every Ray actor sto
 
 
 def _confirm_in_sqlite(path, *, task_id="task-1", reason=_CONFIRMATION_REASON):
-    from hyperloom.inference_optimizer.session.resume_guard import _confirm_task_stopped_in_transaction
+    from hyperloom.inference_optimizer.session.resume_guard import _Confirmation, _confirm_task_stopped_in_transaction
 
     with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=rw", uri=True)) as db, db:
         db.row_factory = sqlite3.Row
         db.execute("BEGIN IMMEDIATE")
         return _confirm_task_stopped_in_transaction(
-            db, task_id=task_id, reason=reason, operator="test-operator", confirmed_at=_CONFIRMED_AT
+            db, task_id, _Confirmation(reason=reason, operator="test-operator", confirmed_at=_CONFIRMED_AT)
         )
 
 

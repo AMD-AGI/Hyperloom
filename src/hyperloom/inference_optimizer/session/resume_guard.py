@@ -323,17 +323,44 @@ def _entry_contradicts_confirmation(entry: object, *, index: int, manual_index: 
     return ""
 
 
-def _check_prior_confirmation_still_holds(
-    task: sqlite3.Row, history: list, *, manual_index: int, terminal: bool, leases: list, gpu_leases: list
-) -> None:
+@dataclass(frozen=True)
+class _Confirmation:
+    """Who confirms cleanup, why and when, and the owner scope vouched gone (\"\" for one task's own confirmation)."""
+
+    reason: str
+    operator: str
+    confirmed_at: str
+    owner_scope: str = ""
+
+
+@dataclass(frozen=True)
+class _ConfirmTarget:
+    """The task a confirmation acts on as read in its transaction: row, parsed history and the leases it holds."""
+
+    task_id: str
+    row: sqlite3.Row
+    history: list
+    leases: list
+    gpu_leases: list
+
+    @property
+    def state(self) -> str:
+        return self.row["state"]
+
+    @property
+    def terminal(self) -> bool:
+        return self.state in TERMINAL_TASK_STATES
+
+
+def _check_prior_confirmation_still_holds(target: _ConfirmTarget, *, manual_index: int) -> None:
     """Refuse when anything since the prior confirmation outlived it."""
-    if not terminal or leases or gpu_leases:
+    if not target.terminal or target.leases or target.gpu_leases:
         raise CleanupConfirmationError("new execution or resources exist after the prior operator confirmation")
-    for index, entry in enumerate(history[manual_index:], start=manual_index):
+    for index, entry in enumerate(target.history[manual_index:], start=manual_index):
         complaint = _entry_contradicts_confirmation(entry, index=index, manual_index=manual_index)
         if complaint:
             raise CleanupConfirmationError(complaint)
-    if _terminal_uncertainty(task["state"], task["history"]):
+    if _terminal_uncertainty(target.state, target.row["history"]):
         raise CleanupConfirmationError("prior operator confirmation no longer establishes cleanup")
 
 
@@ -347,38 +374,27 @@ def _round_is_uncertain(db: sqlite3.Connection, tables: set, task: sqlite3.Row, 
     return open_round is not None and bool(_terminal_uncertainty(task["state"], task["history"]))
 
 
-def _confirmation_entry(
-    *,
-    task_id: str,
-    state: str,
-    terminal: bool,
-    reason: str,
-    operator: str,
-    confirmed_at: str,
-    owner_scope: str,
-    leases: list,
-    gpu_leases: list,
-) -> dict:
+def _confirmation_entry(target: _ConfirmTarget, confirmation: _Confirmation) -> dict:
     """The history entry this confirmation records, and the transition it carries."""
     evidence = {
         "reason": "operator_confirmed_stopped",
         "cleanup_confirmed": True,
-        "operator": operator,
-        "confirmation_reason": reason,
-        "released_leases": leases,
-        "released_gpu_leases": gpu_leases,
-        **({"confirmed_scope_gone": owner_scope} if owner_scope else {}),
+        "operator": confirmation.operator,
+        "confirmation_reason": confirmation.reason,
+        "released_leases": target.leases,
+        "released_gpu_leases": target.gpu_leases,
+        **({"confirmed_scope_gone": confirmation.owner_scope} if confirmation.owner_scope else {}),
         "outcome": {
-            "task_id": task_id,
+            "task_id": target.task_id,
             "state": "cancelled",
             "result": {},
             "error": "Operator confirmed the entire task process tree and remote workers/Ray actors stopped.",
             "error_class": "operator_confirmed_stopped",
         },
     }
-    entry = {"ts": confirmed_at, "evidence": evidence}
-    if not terminal:
-        entry.update({"from": state, "to": "cancelled"})
+    entry = {"ts": confirmation.confirmed_at, "evidence": evidence}
+    if not target.terminal:
+        entry.update({"from": target.state, "to": "cancelled"})
     return entry
 
 
@@ -401,18 +417,10 @@ def confirmed_stopped_scope(history: object) -> str | None:
     return None
 
 
-def _write_confirmation(
-    db: sqlite3.Connection,
-    *,
-    task_id: str,
-    history: list,
-    terminal: bool,
-    confirmed_at: str,
-    leases: list,
-    gpu_leases: list,
-) -> None:
+def _write_confirmation(db: sqlite3.Connection, target: _ConfirmTarget, *, confirmed_at: str) -> None:
     """Persist the confirmed history, the cancellation it implies, and release what it freed."""
-    if terminal:
+    task_id, history = target.task_id, target.history
+    if target.terminal:
         db.execute("UPDATE tasks SET history=? WHERE task_id=?", (json.dumps(history), task_id))
     else:
         task_columns = {row[1] for row in db.execute("PRAGMA table_info(tasks)")}
@@ -423,21 +431,13 @@ def _write_confirmation(
             )
         else:
             db.execute("UPDATE tasks SET state='cancelled', history=? WHERE task_id=?", (json.dumps(history), task_id))
-    if leases:
+    if target.leases:
         db.execute("DELETE FROM leases WHERE task_id=? AND lane IS NOT 'bringup_round'", (task_id,))
-    if gpu_leases:
+    if target.gpu_leases:
         db.execute("DELETE FROM gpu_leases WHERE task_id=?", (task_id,))
 
 
-def _confirm_task_stopped_in_transaction(
-    db: sqlite3.Connection,
-    *,
-    task_id: str,
-    reason: str,
-    operator: str,
-    confirmed_at: str,
-    owner_scope: str = "",
-) -> dict:
+def _confirm_task_stopped_in_transaction(db: sqlite3.Connection, task_id: str, confirmation: _Confirmation) -> dict:
     """Update one task using the caller's existing IMMEDIATE transaction and Row factory."""
     tables = _tables(db)
     if "tasks" not in tables:
@@ -445,52 +445,29 @@ def _confirm_task_stopped_in_transaction(
     task = db.execute("SELECT state, history FROM tasks WHERE task_id=?", (task_id,)).fetchone()
     if task is None:
         raise CleanupConfirmationError(f"task={_label(task_id)} does not exist")
-    state = task["state"]
-    terminal = state in TERMINAL_TASK_STATES
     history = _confirmable_history(task)
 
-    leases = _task_leases(db, tables, task_id, owner_scope)
+    leases = _task_leases(db, tables, task_id, confirmation.owner_scope)
     gpu_leases = []
     if "gpu_leases" in tables:
         gpu_leases = [
             dict(row) for row in db.execute("SELECT gpu_id, holder_id FROM gpu_leases WHERE task_id=?", (task_id,))
         ]
+    target = _ConfirmTarget(task_id=task_id, row=task, history=history, leases=leases, gpu_leases=gpu_leases)
 
     result = {"status": "nothing_to_confirm", "task_id": task_id, "released_leases": 0, "released_gpu_leases": 0}
     manual_index = _prior_confirmation_index(history)
     if manual_index is not None:
-        _check_prior_confirmation_still_holds(
-            task, history, manual_index=manual_index, terminal=terminal, leases=leases, gpu_leases=gpu_leases
-        )
+        _check_prior_confirmation_still_holds(target, manual_index=manual_index)
         result["status"] = "already_confirmed"
         return result
 
-    uncertain_round = _round_is_uncertain(db, tables, task, task_id, terminal)
-    if state != "running" and not leases and not gpu_leases and not uncertain_round:
+    uncertain_round = _round_is_uncertain(db, tables, task, task_id, target.terminal)
+    if target.state != "running" and not leases and not gpu_leases and not uncertain_round:
         return result
 
-    history.append(
-        _confirmation_entry(
-            task_id=task_id,
-            state=state,
-            terminal=terminal,
-            reason=reason,
-            operator=operator,
-            confirmed_at=confirmed_at,
-            owner_scope=owner_scope,
-            leases=leases,
-            gpu_leases=gpu_leases,
-        )
-    )
-    _write_confirmation(
-        db,
-        task_id=task_id,
-        history=history,
-        terminal=terminal,
-        confirmed_at=confirmed_at,
-        leases=leases,
-        gpu_leases=gpu_leases,
-    )
+    history.append(_confirmation_entry(target, confirmation))
+    _write_confirmation(db, target, confirmed_at=confirmation.confirmed_at)
     result.update(status=_CONFIRMED, released_leases=len(leases), released_gpu_leases=len(gpu_leases))
     return result
 
@@ -507,13 +484,7 @@ def _lease_is_live(expires_at: object, now: datetime) -> bool:
 
 
 def _confirm_scope_gone_in_transaction(
-    db: sqlite3.Connection,
-    *,
-    owner_scope: str,
-    reason: str,
-    operator: str,
-    confirmed_at: str,
-    check_holders: bool = False,
+    db: sqlite3.Connection, confirmation: _Confirmation, *, check_holders: bool = False
 ) -> dict:
     """Cancel and release every execution recorded under one vanished owner scope.
 
@@ -527,7 +498,8 @@ def _confirm_scope_gone_in_transaction(
     columns = _lease_columns(db) if "leases" in tables else set()
     if "owner_scope" not in columns:
         raise CleanupConfirmationError("the ownership ledger records no owner scopes; use --confirm-stopped")
-    now = datetime.fromisoformat(confirmed_at)
+    owner_scope = confirmation.owner_scope
+    now = datetime.fromisoformat(confirmation.confirmed_at)
     target_tasks: set[str] = set()
     for row in db.execute("SELECT lane, holder_id, task_id, pid, owner_scope, acquired_at, expires_at FROM leases"):
         if row["lane"] == "bringup_round":
@@ -545,17 +517,7 @@ def _confirm_scope_gone_in_transaction(
                 f"{_label(row['owner_scope'])} until {_label(row['expires_at'])}; another execution may be "
                 "writing this session"
             )
-    tasks = [
-        _confirm_task_stopped_in_transaction(
-            db,
-            task_id=task_id,
-            reason=reason,
-            operator=operator,
-            confirmed_at=confirmed_at,
-            owner_scope=owner_scope,
-        )
-        for task_id in sorted(target_tasks)
-    ]
+    tasks = [_confirm_task_stopped_in_transaction(db, task_id, confirmation) for task_id in sorted(target_tasks)]
     cancelled = [task["task_id"] for task in tasks if task["status"] == _CONFIRMED]
     return {
         "status": _CONFIRMED if cancelled else "nothing_to_confirm",
@@ -630,7 +592,7 @@ def confirm_task_stopped(session_dir: Path, *, task_id: str, reason: str) -> dic
     return _in_locked_ledger(
         session_dir,
         lambda db, operator, confirmed_at: _confirm_task_stopped_in_transaction(
-            db, task_id=task_id, reason=reason, operator=operator, confirmed_at=confirmed_at
+            db, task_id, _Confirmation(reason=reason, operator=operator, confirmed_at=confirmed_at)
         ),
     )
 
@@ -659,10 +621,7 @@ def confirm_scope_gone(session_dir: Path, *, owner_scope: str, reason: str, curr
         lambda db, operator, confirmed_at: {
             **_confirm_scope_gone_in_transaction(
                 db,
-                owner_scope=owner_scope,
-                reason=reason,
-                operator=operator,
-                confirmed_at=confirmed_at,
+                _Confirmation(reason=reason, operator=operator, confirmed_at=confirmed_at, owner_scope=owner_scope),
                 check_holders=here,
             ),
             "operator": operator,
