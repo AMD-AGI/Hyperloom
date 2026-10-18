@@ -36,6 +36,7 @@ from hyperloom_kb.observability import (
     JsonLogFormatter,
     Metrics,
     RequestContext,
+    ServedRequest,
     current_request,
     event,
     route_of,
@@ -1324,7 +1325,9 @@ class RequestHandler(BaseHTTPRequestHandler):
             seconds = time.monotonic() - started
             received = int(self.headers.get("Content-Length") or 0) if self.command in (_POST, _PUT) else 0
             metrics.observe_request(
-                method=self.command, route=route, status=status, seconds=seconds, bytes_in=received, bytes_out=sent
+                ServedRequest(
+                    method=self.command, route=route, status=status, seconds=seconds, bytes_in=received, bytes_out=sent
+                )
             )
             if route not in PROBE_ROUTES:
                 event(
