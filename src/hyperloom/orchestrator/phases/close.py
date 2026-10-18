@@ -259,13 +259,15 @@ class ClosePhase(CoordinatorCollaborator):
             snapshots = state.roofline_snapshots if isinstance(state.roofline_snapshots, list) else []
             _close_out.record_roofline_progress(
                 self.session_dir,
-                baseline_tput=state.baseline_tput,
-                baseline_ts=state.start_ts,
-                optimization_stack=state.optimization_stack,
-                latest_snapshot=snapshots[-1] if snapshots else None,
-                current_best_tput=(state.current_best or {}).get("tput"),
-                cumulative_gain_pct=state.cumulative_gain_validated,
-                failure_streak=state.roofline_failure_streak,
+                _close_out.RooflineProgress(
+                    baseline_tput=state.baseline_tput,
+                    baseline_ts=state.start_ts,
+                    optimization_stack=state.optimization_stack,
+                    latest_snapshot=snapshots[-1] if snapshots else None,
+                    current_best_tput=(state.current_best or {}).get("tput"),
+                    cumulative_gain_pct=state.cumulative_gain_validated,
+                    failure_streak=state.roofline_failure_streak,
+                ),
             )
         except Exception:
             log.debug("CLOSE: roofline progress record failed", exc_info=True)
@@ -312,12 +314,14 @@ class ClosePhase(CoordinatorCollaborator):
                 action_path.append(f"{action}:{variant}" if variant else action)
             _close_out.record_final_recipe(
                 self.session_dir,
-                throughput=best.get("tput"),
-                ttft_mean_ms=best.get("ttft_mean_ms"),
-                e2el_mean_ms=best.get("e2el_mean_ms"),
-                action_path=action_path,
-                extra_server_args=config.get("extra_server_args") or "",
-                extra_envs=config.get("extra_envs") or {},
+                _close_out.FinalRecipe(
+                    throughput=best.get("tput"),
+                    ttft_mean_ms=best.get("ttft_mean_ms"),
+                    e2el_mean_ms=best.get("e2el_mean_ms"),
+                    action_path=action_path,
+                    extra_server_args=config.get("extra_server_args") or "",
+                    extra_envs=config.get("extra_envs") or {},
+                ),
             )
         except Exception:
             log.debug("CLOSE: final recipe record failed", exc_info=True)
@@ -791,15 +795,17 @@ class ClosePhase(CoordinatorCollaborator):
         ts = datetime.now(timezone.utc).isoformat()
         _close_out.record_close_step(
             self.session_dir,
-            step=step,
-            status=status,
-            ts=ts,
-            task_id=task_id,
-            detail=detail,
-            optional=step in _OPTIONAL_CLOSE_STEPS,
-            artifact_path=artifact_path,
-            artifact_digest=artifact_digest,
-            error=detail if status == "failed" else "",
+            _close_out.CloseStep(
+                step=step,
+                status=status,
+                ts=ts,
+                task_id=task_id,
+                detail=detail,
+                optional=step in _OPTIONAL_CLOSE_STEPS,
+                artifact_path=artifact_path,
+                artifact_digest=artifact_digest,
+                error=detail if status == "failed" else "",
+            ),
         )
         entry: dict[str, Any] = {
             "step": step,

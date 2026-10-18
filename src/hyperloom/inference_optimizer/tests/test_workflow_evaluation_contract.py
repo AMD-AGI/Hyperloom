@@ -16,6 +16,7 @@ from hyperloom.inference_optimizer.breakdown.exporter import build, patch_breakd
 from hyperloom.inference_optimizer.breakdown.session_package import package_session_artifacts
 from hyperloom.inference_optimizer.breakdown.recorder import phase_event, record_stage_reached, stack_event
 from hyperloom.inference_optimizer.breakdown.recorder.close_out import (
+    CloseStep,
     record_close_opened,
     record_close_safety_net,
     record_close_settled,
@@ -110,7 +111,7 @@ def _writer_fixture(tmp_path, *, denied: bool) -> dict:
         record_close_safety_net(tmp_path)
     else:
         record_close_opened(tmp_path)
-        record_close_step(tmp_path, step="report", status="done", optional=False)
+        record_close_step(tmp_path, CloseStep(step="report", status="done", optional=False))
         record_close_settled(tmp_path)
     return build(tmp_path)
 
@@ -301,12 +302,14 @@ def test_final_close_refresh_matches_rebuilt_package(tmp_path):
     state.set_stop_reason("target_reached")
     state.save(tmp_path)
     record_close_opened(tmp_path)
-    record_close_step(tmp_path, step="session_breakdown", status="done", optional=False)
+    record_close_step(tmp_path, CloseStep(step="session_breakdown", status="done", optional=False))
     sbd_path = write_breakdown_json(tmp_path)
     package = package_session_artifacts(tmp_path, session_id="v2-close", dest_root=tmp_path / "workspace")
     assert package is not None
-    record_close_step(tmp_path, step="artifact_package", status="done", optional=False, artifact_path=str(package))
-    record_close_step(tmp_path, step="done", status="done", optional=False)
+    record_close_step(
+        tmp_path, CloseStep(step="artifact_package", status="done", optional=False, artifact_path=str(package))
+    )
+    record_close_step(tmp_path, CloseStep(step="done", status="done", optional=False))
     record_close_settled(tmp_path)
     record_stage_reached(tmp_path, "close")
     assert patch_breakdown_close(tmp_path)

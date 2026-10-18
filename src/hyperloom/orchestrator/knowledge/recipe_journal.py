@@ -1249,19 +1249,21 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             tput = validated_gain = None
         _close_out.record_write_back_settled(
             self.session_dir,
-            attempt=attempt,
-            source=source,
-            status=str(outcome.get("status") or ""),
-            result_type=result_type,
-            raw_reason=str(outcome.get("reason") or ""),
-            error_class=str(outcome.get("error_class") or ""),
-            backend=str(outcome.get("backend") or ""),
-            canonical_id=str(outcome.get("canonical_id") or ""),
-            session_id=str(outcome.get("session_id") or ""),
-            scope=self._write_back_scope(),
-            optimized_throughput=to_float(tput, None),
-            validated_gain_pct=to_float(validated_gain, None),
-            ts=str(outcome.get("updated_at") or ""),
+            _close_out.WriteBackSettlement(
+                attempt=attempt,
+                source=source,
+                status=str(outcome.get("status") or ""),
+                result_type=result_type,
+                raw_reason=str(outcome.get("reason") or ""),
+                error_class=str(outcome.get("error_class") or ""),
+                backend=str(outcome.get("backend") or ""),
+                canonical_id=str(outcome.get("canonical_id") or ""),
+                session_id=str(outcome.get("session_id") or ""),
+                scope=self._write_back_scope(),
+                optimized_throughput=to_float(tput, None),
+                validated_gain_pct=to_float(validated_gain, None),
+                ts=str(outcome.get("updated_at") or ""),
+            ),
         )
 
     def _write_back_scope(self) -> dict[str, Any]:
