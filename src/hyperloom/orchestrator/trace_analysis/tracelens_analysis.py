@@ -48,7 +48,7 @@ try:
 except ImportError:
     _aiter_jit_core = None
 
-from .tracelens_arch_benchmark import normalize_platform, populate_gpu_arch_json
+from .tracelens_arch_benchmark import internal_extension_arch_json, normalize_platform, populate_gpu_arch_json
 from .tracelens_skill_runner import (
     TraceLensSkillRequest,
     aggregate_by_source_function,
@@ -4397,6 +4397,28 @@ def _trajectory_scope(args: argparse.Namespace) -> contextlib.AbstractContextMan
     )
 
 
+def _gpu_arch_json(
+    args: argparse.Namespace, *, tl_root: Path, tl_internal_root: Path | None, log_path: Path
+) -> Path | None:
+    """The arch JSON roofline reads: the bundled spec under the internal extension, else bundled, measured or fallback."""
+    arch_benchmark_timeout_s = _resolve_arch_benchmark_timeout_s()
+    if tl_internal_root is not None:
+        return internal_extension_arch_json(args.target_platform, log=lambda msg: append_log(log_path, msg))
+    return populate_gpu_arch_json(
+        tracelens_root=tl_root,
+        platform=args.target_platform,
+        log=lambda msg: append_log(log_path, msg),
+        run_command=lambda cmd, *, cwd, timeout_s, env=None: run_command(
+            cmd,
+            cwd=cwd,
+            log_path=log_path,
+            timeout_s=timeout_s,
+            env=env,
+        ),
+        timeout_s=arch_benchmark_timeout_s,
+    )
+
+
 def main() -> int:
     """CLI entry point for the TraceLens analysis tool.
 
@@ -4912,21 +4934,7 @@ def main() -> int:
                 state="running",
                 current_step="populate_gpu_arch_json",
             )
-            arch_benchmark_timeout_s = _resolve_arch_benchmark_timeout_s()
-            gpu_arch_path = populate_gpu_arch_json(
-                tracelens_root=tl_root,
-                platform=args.target_platform,
-                internal_extension_enabled=tl_internal_root is not None,
-                log=lambda msg: append_log(log_path, msg),
-                run_command=lambda cmd, *, cwd, timeout_s, env=None: run_command(
-                    cmd,
-                    cwd=cwd,
-                    log_path=log_path,
-                    timeout_s=timeout_s,
-                    env=env,
-                ),
-                timeout_s=arch_benchmark_timeout_s,
-            )
+            gpu_arch_path = _gpu_arch_json(args, tl_root=tl_root, tl_internal_root=tl_internal_root, log_path=log_path)
             if gpu_arch_path is not None:
                 artifacts["tracelens_gpu_arch_json"] = str(gpu_arch_path)
 

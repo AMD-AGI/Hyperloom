@@ -258,28 +258,25 @@ def _sanitize_measured_arch_spec(
     return False
 
 
+def internal_extension_arch_json(platform: str, *, log: Callable[[str], None]) -> Path | None:
+    """The bundled GPU arch JSON when the internal extension backfills MAF, or ``None`` when none is bundled."""
+    existing = resolve_arch_json_path(platform)
+    if existing is not None and existing.is_file():
+        log(f"gpu_arch_json: internal extension enabled; using bundled spec {existing} (MAF backfilled by extension)")
+        return existing
+    log("gpu_arch_json: internal extension enabled; MAF backfilled by extension, skipping microbenchmark")
+    return None
+
+
 def populate_gpu_arch_json(
     *,
     tracelens_root: Path,
     platform: str,
-    internal_extension_enabled: bool,
     log: Callable[[str], None],
     run_command: Callable[..., int],
     timeout_s: int = 3600,
-    device: int = 0,
-) -> Path | None:
-    """Ensure a GPU arch JSON is available for roofline, returning its path."""
-    if internal_extension_enabled:
-        existing = resolve_arch_json_path(platform)
-        if existing is not None and existing.is_file():
-            log(
-                "gpu_arch_json: internal extension enabled; using bundled spec "
-                f"{existing} (MAF backfilled by extension)"
-            )
-            return existing
-        log("gpu_arch_json: internal extension enabled; MAF backfilled by extension, skipping microbenchmark")
-        return None
-
+) -> Path:
+    """Ensure a GPU arch JSON is available for roofline without the internal extension, returning its path."""
     existing = resolve_arch_json_path(platform)
     if existing is not None and existing.is_file():
         log(f"gpu_arch_json: using bundled spec {existing}")
@@ -306,7 +303,7 @@ def populate_gpu_arch_json(
                 "-m",
                 "TraceLens.PerfModel.benchmarking.microbench",
                 "--device",
-                str(device),
+                "0",
                 "--warmup",
                 str(MICROBENCH_WARMUP),
                 "--rep",
