@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from kernelforge.fusion.models import Diagnosis
-from kernelforge.fusion.report import build_manifest
+from kernelforge.fusion.report import LocatedFusions, ManifestSubject, RunOutcome, build_manifest
 
 
 def _diagnosis() -> Diagnosis:
@@ -22,14 +22,8 @@ def _diagnosis() -> Diagnosis:
     )
 
 
-def _base_kwargs() -> dict:
-    return {
-        "framework": "sglang",
-        "model_path": "/models/zaya",
-        "model_type": "zaya",
-        "diagnosis": _diagnosis(),
-        "recipe": None,
-    }
+def _subject() -> ManifestSubject:
+    return ManifestSubject(framework="sglang", model_path="/models/zaya", model_type="zaya", diagnosis=_diagnosis())
 
 
 def _sibling(name: str, target: str, speedup: float) -> dict:
@@ -47,7 +41,7 @@ def _sibling(name: str, target: str, speedup: float) -> dict:
 
 def test_combine_path_omits_the_nomination_keys():
     """No ``patches`` argument => both keys are null, legacy shape preserved."""
-    manifest = build_manifest(**_base_kwargs())
+    manifest = build_manifest(_subject(), LocatedFusions(recipe=None))
 
     assert manifest["patches"] is None
     assert manifest["nomination"] is None
@@ -60,7 +54,9 @@ def test_multi_patch_carries_every_sibling_in_order():
     ]
     nomination = {"candidates_seen": 3, "resolved": 2, "selected": 2}
 
-    manifest = build_manifest(**_base_kwargs(), patches=patches, nomination=nomination)
+    manifest = build_manifest(
+        _subject(), LocatedFusions(recipe=None), RunOutcome(patches=patches, nomination=nomination)
+    )
 
     assert [p["kernel_name"] for p in manifest["patches"]] == ["fuse_a", "fuse_b"]
     assert [p["target_file"] for p in manifest["patches"]] == ["/fw/a.py", "/fw/b.py"]
@@ -70,9 +66,9 @@ def test_multi_patch_carries_every_sibling_in_order():
 def test_empty_patches_list_is_carried_as_a_kept_nothing_run():
     """An empty list is NOT None: the run ran multi-patch and nominated nobody."""
     manifest = build_manifest(
-        **_base_kwargs(),
-        patches=[],
-        nomination={"candidates_seen": 2, "resolved": 0, "selected": 0},
+        _subject(),
+        LocatedFusions(recipe=None),
+        RunOutcome(patches=[], nomination={"candidates_seen": 2, "resolved": 0, "selected": 0}),
     )
 
     assert manifest["patches"] == []
@@ -83,7 +79,7 @@ def test_empty_patches_list_is_carried_as_a_kept_nothing_run():
 def test_the_manifest_copies_the_envelopes_it_is_handed():
     """Mutating the caller's list after the fact must not rewrite the manifest."""
     patches = [_sibling("fuse_a", "/fw/a.py", 1.4)]
-    manifest = build_manifest(**_base_kwargs(), patches=patches)
+    manifest = build_manifest(_subject(), LocatedFusions(recipe=None), RunOutcome(patches=patches))
 
     patches[0]["kernel_name"] = "mutated"
     patches.append(_sibling("fuse_b", "/fw/b.py", 1.1))

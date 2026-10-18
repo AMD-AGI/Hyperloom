@@ -13,7 +13,7 @@ import pytest
 
 from kernelforge.roofline_ceiling import evidence as evidence_module
 from kernelforge.roofline_ceiling.device_profile import DeviceIdentity
-from kernelforge.roofline_ceiling.evidence import discover_scored_cases, resolve_identity
+from kernelforge.roofline_ceiling.evidence import KnownCases, PerformanceRun, discover_scored_cases, resolve_identity
 
 
 def _ran(code: int, output: str):
@@ -23,16 +23,16 @@ def _ran(code: int, output: str):
     return run
 
 
-async def _no_trace(**_kwargs):
+async def _no_trace(*_args, **_kwargs):
     return {"captured": False, "detail": "stub"}
 
 
-async def _a_trace(**_kwargs):
+async def _a_trace(*_args, **_kwargs):
     return {"captured": True, "tool": "stub"}
 
 
 def _discover(tmp_path, command=("true",)):
-    return asyncio.run(discover_scored_cases(command=list(command), workdir=tmp_path, artifacts_dir=tmp_path))
+    return asyncio.run(discover_scored_cases(PerformanceRun(list(command), tmp_path), tmp_path))
 
 
 def test_the_machine_is_named_so_the_analyst_measures_the_right_one(monkeypatch):
@@ -113,18 +113,16 @@ def test_a_caller_that_already_benched_pays_for_no_discovery_run(tmp_path, monke
         lambda _arch="": DeviceIdentity(arch="gfx950", device_name="AMD Instinct MI355X"),
     )
 
-    bundle, scored = asyncio.run(
+    bundle = asyncio.run(
         evidence_module.collect_evidence(
-            performance_command=["true"],
-            workdir=tmp_path,
-            artifacts_dir=tmp_path / "ev",
-            arch="gfx950",
-            known_case_ids=["a", "b"],
-            known_case_ms={"a": 1.0, "b": 2.0, "stale": 9.0},
+            PerformanceRun(["true"], tmp_path),
+            tmp_path / "ev",
+            "gfx950",
+            KnownCases(["a", "b"], {"a": 1.0, "b": 2.0, "stale": 9.0}),
         )
     )
 
-    assert scored == ["a", "b"]
+    assert bundle.scored_case_ids == ("a", "b")
     assert bundle.observed_ms == {"a": 1.0, "b": 2.0}
     assert bundle.observed_origin == evidence_module.OBSERVED_CAMPAIGN
 
@@ -139,16 +137,11 @@ def test_a_discovered_latency_is_labelled_as_the_single_unprofiled_run_it_is(tmp
         lambda _arch="": DeviceIdentity(arch="gfx950", device_name="AMD Instinct MI355X"),
     )
 
-    bundle, scored = asyncio.run(
-        evidence_module.collect_evidence(
-            performance_command=["true"],
-            workdir=tmp_path,
-            artifacts_dir=tmp_path / "ev",
-            arch="gfx950",
-        )
+    bundle = asyncio.run(
+        evidence_module.collect_evidence(PerformanceRun(["true"], tmp_path), tmp_path / "ev", "gfx950")
     )
 
-    assert scored == ["a"]
+    assert bundle.scored_case_ids == ("a",)
     assert bundle.observed_origin == evidence_module.OBSERVED_SINGLE_RUN
 
 
@@ -160,14 +153,9 @@ def test_the_bundle_carries_no_roofs_because_the_analyst_measures_them(tmp_path,
         lambda _arch="": DeviceIdentity(arch="gfx950", device_name="AMD Instinct MI355X"),
     )
 
-    bundle, _scored = asyncio.run(
+    bundle = asyncio.run(
         evidence_module.collect_evidence(
-            performance_command=["true"],
-            workdir=tmp_path,
-            artifacts_dir=tmp_path / "ev",
-            arch="gfx950",
-            known_case_ids=["a"],
-            known_case_ms={"a": 1.0},
+            PerformanceRun(["true"], tmp_path), tmp_path / "ev", "gfx950", KnownCases(["a"], {"a": 1.0})
         )
     )
 

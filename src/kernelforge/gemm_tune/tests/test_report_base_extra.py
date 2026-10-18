@@ -6,12 +6,18 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
 from kernelforge.gemm_tune.model_analyzer import ModelProfile
 from kernelforge.gemm_tune.report import TuneReport, build_report, write_report
 from kernelforge.gemm_tune.tuners.base import BaseTuner, TuneContext, TuneResult, micro_metrics
+
+
+def _tune_ctx(**fields) -> TuneContext:
+    """A tuning context carrying the run fields a report records; the tuner knobs are placeholders."""
+    return TuneContext(mp=1, output_dir=Path("."), iters=1, warmup=1, min_improvement_pct=0.0, timeout_s=1, **fields)
 
 
 def _profile():
@@ -40,16 +46,18 @@ def test_report_to_dict_omits_empty_optionals():
 
 def test_write_report_creates_json(tmp_path):
     report = build_report(
+        ctx=_tune_ctx(
+            profile=_profile(),
+            framework="sglang",
+            precision="bf16",
+            quant_type="none",
+            gpu_type="mi300x",
+            tp=1,
+            conc=64,
+            tokens=[64],
+        ),
         results=[],
         skipped=[("fmoe_ck", "not MoE")],
-        profile=_profile(),
-        framework="sglang",
-        precision="bf16",
-        quant_type="none",
-        gpu_type="mi300x",
-        tp=1,
-        conc=64,
-        tokens=[64],
         started_at="2026-01-01T00:00:00Z",
         total_elapsed_s=1.0,
     )

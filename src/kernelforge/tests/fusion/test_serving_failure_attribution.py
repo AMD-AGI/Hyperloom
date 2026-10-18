@@ -81,13 +81,7 @@ def _gate_verdict(monkeypatch, tmp_path, server_log: str):
     )
 
     serving_gate.apply_serving_gate(
-        result,
-        framework="vllm",
-        out=tmp_path,
-        gpu="0",
-        model_path="/m",
-        isl=8,
-        osl=8,
+        result, serving_gate.ServingSession(framework="vllm", model_path="/m", gpu="0", isl=8, osl=8), tmp_path
     )
     return result
 

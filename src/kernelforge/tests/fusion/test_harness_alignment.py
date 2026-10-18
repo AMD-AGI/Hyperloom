@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 
 import kernelforge.fusion.harness_authoring as harness_authoring
+from kernelforge.fusion.author import AuthorAgent
 from kernelforge.fusion.models import Recipe
 
 _ANCHOR = "void bf16_to_fp32_copy(int)"
@@ -69,10 +70,10 @@ class _Author:
         self.scripts = list(scripts)
         self.prompts: list[str] = []
 
-    def __call__(self, prompt, *, workdir, log_path, gpu, model, max_turns, backend, timeout_s, target_files, **kw):
+    def __call__(self, prompt, workspace, agent):
         self.prompts.append(prompt)
         script = self.scripts[min(len(self.prompts), len(self.scripts)) - 1]
-        Path(target_files[0]).write_text(script, encoding="utf-8")
+        Path(workspace.target_files[0]).write_text(script, encoding="utf-8")
         return 0
 
 
@@ -88,10 +89,7 @@ def _run(tmp_path: Path, monkeypatch, author: _Author) -> tuple[bool, str]:
         harness_path=str(out / "kernel_harness.py"),
         repo_root=str(repo),
         out=out,
-        gpu="0",
-        llm_model=None,
-        max_turns=10,
-        backend=None,
+        agent=AuthorAgent(backend=None, gpu="0", model=None, max_turns=10),
     )
 
 

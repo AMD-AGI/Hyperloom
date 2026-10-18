@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from kernelforge.fusion.author import _arch_phrase, build_author_prompt, build_multi_author_prompt
+from kernelforge.fusion.author import AuthorBrief, _arch_phrase, build_author_prompt, build_multi_author_prompt
 from kernelforge.fusion.gpu_arch import canon_arch
 
 RECIPE = {
@@ -49,7 +49,7 @@ def test_an_unknown_arch_says_nothing_rather_than_guessing():
 
 
 def test_the_prompt_names_the_arch_it_was_given():
-    prompt = build_author_prompt(RECIPE, framework="vllm", ab_hint="hint", gpu_arch="gfx950")
+    prompt = build_author_prompt(RECIPE, AuthorBrief(framework="vllm", ab_hint="hint", gpu_arch="gfx950"))
     assert "MI355X (gfx950)" in prompt
     # Regression: this used to be hardcoded to another chip.
     assert "gfx942" not in prompt
@@ -58,16 +58,14 @@ def test_the_prompt_names_the_arch_it_was_given():
 def test_the_multi_prompt_names_the_arch_too():
     prompt = build_multi_author_prompt(
         [RECIPE, dict(RECIPE, pattern_id="qk_norm_rope", env_flag="QWEN3_FUSED_QK")],
-        framework="vllm",
-        ab_hint="hint",
-        gpu_arch="gfx950",
+        AuthorBrief(framework="vllm", ab_hint="hint", gpu_arch="gfx950"),
     )
     assert "MI355X (gfx950)" in prompt
     assert "gfx942" not in prompt
 
 
 def test_no_arch_leaves_no_false_target_in_the_prompt():
-    prompt = build_author_prompt(RECIPE, framework="vllm", ab_hint="hint")
+    prompt = build_author_prompt(RECIPE, AuthorBrief(framework="vllm", ab_hint="hint"))
     assert "an AMD ROCm GPU" in prompt
     assert "gfx942" not in prompt
     assert "MI325X" not in prompt
