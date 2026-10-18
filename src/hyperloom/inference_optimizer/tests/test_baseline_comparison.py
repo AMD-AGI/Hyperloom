@@ -220,12 +220,7 @@ def test_analyze_writes_measured_advisory_target(tmp_path: Path, monkeypatch):
     assert ct["per_conc"]
     assert all(row["source"] == summary.source for row in ct["per_conc"])
 
-    gap = research_hints.gap_analysis(
-        ct,
-        our_tput_per_gpu=100.0,
-        our_tpot_ms=50.0,
-        conc=64,
-    )
+    gap = research_hints.gap_analysis(ct, research_hints.AcceptedMetrics(tput_per_gpu=100.0, tpot_ms=50.0), conc=64)
     assert gap is not None
     assert gap["source"] == summary.source
 
@@ -543,10 +538,8 @@ def test_agentx_analysis_joins_p90_before_selecting_one_real_reference(tmp_path,
     assert "interactivity" not in target["per_conc"][0]
     gap = research_hints.gap_analysis(
         target,
+        research_hints.AcceptedMetrics(tput_per_gpu=1000.0, tpot_ms=None, e2e_norm_intvty_p90=20.0),
         benchmark_mode="agentx",
-        our_tput_per_gpu=1000.0,
-        our_tpot_ms=None,
-        our_e2e_norm_intvty_p90=20.0,
         conc=1,
     )
     assert gap["throughput_gap_pct"] == 50.0
