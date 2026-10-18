@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.measurement import Purpose, TestKind
+from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind
 from hyperloom.contracts.recipe import ComponentChange, Recipe, RecipeDelta
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, WorkloadKind
 from hyperloom_multibranch.toolbox.tests.helpers import BAD_DELTA, IMAGE, OTHER_IMAGE, FakeRepo, build, req
@@ -87,6 +87,23 @@ async def test_a_profile_test_that_asks_for_accuracy_is_refused_and_never_queues
     rig = build(tmp_path)
     await _rejected(rig, req(kind=TestKind.PROFILE, purpose=Purpose.PROFILE, accuracy=True), "invalid_request")
     assert not list(rig.toolbox._log.entries())
+
+
+async def test_a_repro_test_that_asks_for_accuracy_is_refused_and_never_queues(tmp_path: Path) -> None:
+    rig = build(tmp_path)
+    case = AttachmentRef("case-1", "dir", "a" * 64)
+    request = req(kind=TestKind.REPRO, purpose=Purpose.REPRO, attachments=(case,), accuracy=True)
+    await _rejected(rig, request, "invalid_request")
+    assert not list(rig.toolbox._log.entries())
+
+
+async def test_a_repro_test_is_accepted_without_accuracy_whatever_the_workload(tmp_path: Path) -> None:
+    rig = build(tmp_path)  # an InferenceX campaign: a repro is not a purpose the gate reads accuracy from
+    case = AttachmentRef("case-1", "dir", "a" * 64)
+    request_id = await rig.toolbox.submit_test(req(kind=TestKind.REPRO, purpose=Purpose.REPRO, attachments=(case,)))
+    await rig.toolbox.drain()
+    ran = next(j for j in rig.executor.jobs if j.request.request_id == request_id)
+    assert ran.request.kind is TestKind.REPRO and ran.request.accuracy is False and ran.request.attachments == (case,)
 
 
 async def test_a_profile_test_is_accepted_without_accuracy_whatever_the_workload(tmp_path: Path) -> None:

@@ -52,6 +52,7 @@ from hyperloom.measure.hosted_log import STATE_FINISHED, STATE_SENT, STATE_SUBMI
 from hyperloom.measure.manifest import ResultManifest
 from hyperloom.measure.points import AcceptedMeasurement
 from hyperloom.measure.profile_traces import PROFILE_DIR, has_traces, is_trace_file
+from hyperloom.measure.repro import REPRO_DIR, VERDICT_FILE, ReproError, read_verdict
 from hyperloom.measure.socket import RoundOutcome, RoundPlan, TestCall, TestMeta, TestOutcome
 from hyperloom.orchestrator.actions.executors.benchmark_result import extract_benchmark_measurement
 from hyperloom_multibranch.contracts.gate import ResultUnverified
@@ -71,8 +72,10 @@ _UNFINISHED = (STATE_SUBMITTED, STATE_SENT)
 _SWEEP = "conc_sweep"
 _ACCURACY = "accuracy"
 _MEASURE = "measure"
-#: A profiled round runs once with no warmup before it: it is not a statistic.
-_PROFILE_ROUNDS = RoundPlan(warmup_rounds=0)
+#: A profiled round, and a repro case's server, run once with no warmup: neither is a statistic.
+_NO_WARMUP = RoundPlan(warmup_rounds=0)
+#: The kinds whose result holds no measured round: a profile names its traces, a repro its verdict.
+_UNMEASURED_KINDS = (TestKind.PROFILE, TestKind.REPRO)
 _REASON_DETAIL_CHARS = 300
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
 
@@ -134,8 +137,9 @@ class HostedExecutor:
             return "manifest_sha256: the record names no bundle"
         recorded = RecordedBundle(result.manifest_sha256, result.signing_key_fingerprint)
         with tempfile.TemporaryDirectory(prefix="reverify-") as scratch:
-            derived = self._backend.reverify(result.request_id, recorded, Path(scratch) / "bundle")
-            return _unlike_bundle(result, derived)
+            landed = Path(scratch) / "bundle"
+            derived = self._backend.reverify(result.request_id, recorded, landed)
+            return _unlike_bundle(result, derived, landed)
 
     async def reverify(self, result: TestResult) -> None:
         """Raise :class:`ResultUnverified` naming why ``result`` does not follow from its archived bundle, or why the
@@ -177,7 +181,7 @@ class HostedExecutor:
             kind=backend_kind(request.kind),  # type: ignore[arg-type]
             prep=_SWEEP if request.kind is TestKind.SWEEP or len(accepted.points) > 1 else "grid",
             accuracy=request.accuracy,
-            rounds=_PROFILE_ROUNDS if request.kind is TestKind.PROFILE else RoundPlan.from_env(),
+            rounds=_NO_WARMUP if request.kind in _UNMEASURED_KINDS else RoundPlan.from_env(),
             meta=TestMeta(
                 purpose=request.purpose.value,
                 priority=job.priority,
@@ -186,6 +190,7 @@ class HostedExecutor:
                 retest_of=request.retest_of,
             ),
             avoid_nodes=tuple(job.avoid_nodes),
+            attachments=request.attachments if request.kind is TestKind.REPRO else (),
         )
 
     # -- the outcome -----------------------------------------------------------------------------------------------
@@ -208,6 +213,7 @@ class HostedExecutor:
         finished = self._clock()
         rounds, accuracy = _measured_values(request, accepted, outcome) if failure is None else ((), ())
         location = self._profile_location(call) if failure is None and request.kind is TestKind.PROFILE else ""
+        verdict = _landed_verdict(call) if failure is None and request.kind is TestKind.REPRO else ""
         gpu_seconds = max(0.0, finished - started) * facts.gpu_count
         return TestResult(
             request_id=request_id,
@@ -222,6 +228,7 @@ class HostedExecutor:
             finished_at=finished,
             gpu_seconds=gpu_seconds,
             profile_location=location,
+            repro_verdict=verdict,
             **audit,
         )
 
@@ -289,7 +296,7 @@ def _one_line(text: str) -> str:
     return _CONTROL_CHARS.sub(" ", text.strip())[:_REASON_DETAIL_CHARS]
 
 
-def _unlike_bundle(result: TestResult, derived: Reverified) -> str | None:
+def _unlike_bundle(result: TestResult, derived: Reverified, landed: Path) -> str | None:
     """The first field of ``result`` that the verified bundle does not support."""
     difference = first_hash_difference(result, derived.manifest)
     if difference or result.validity is not Validity.SUCCEEDED:
@@ -300,6 +307,8 @@ def _unlike_bundle(result: TestResult, derived: Reverified) -> str | None:
         )
     if result.profile_location:
         return _profile_difference(result, derived.manifest)
+    if result.repro_verdict or _lists_verdict(derived.manifest):
+        return _repro_difference(result, derived.manifest, landed)
     values = _round_values_at(derived.rounds, tuple(_concurrency_in(text) for text in derived.point_yaml))
     return first_value_difference(result, values, _scores_of(derived.rounds))
 
@@ -313,6 +322,25 @@ def _profile_difference(result: TestResult, manifest: ResultManifest) -> str | N
         return f"profile_location: recorded {result.profile_location!r}, the bundle's traces are at {expected!r}"
     if not any(f.path.startswith(f"{PROFILE_DIR}/") and is_trace_file(f.path) for f in manifest.files):
         return "profile_location: the bundle lists no trace file"
+    return None
+
+
+def _lists_verdict(manifest: ResultManifest) -> bool:
+    return any(f.path == f"{REPRO_DIR}/{VERDICT_FILE}" for f in manifest.files)
+
+
+def _repro_difference(result: TestResult, manifest: ResultManifest, landed: Path) -> str | None:
+    """A repro result holds no measured value and says what the signed verdict file says, no more and no less."""
+    if result.rounds or result.accuracy:
+        return "rounds: a repro result records no measured value"
+    if not _lists_verdict(manifest):
+        return "repro_verdict: the bundle lists no verdict file"
+    try:
+        signed = read_verdict(landed)
+    except ReproError as exc:
+        return f"repro_verdict: {exc}"
+    if result.repro_verdict != signed:
+        return f"repro_verdict: recorded {result.repro_verdict!r}, the bundle says {signed!r}"
     return None
 
 
@@ -339,15 +367,23 @@ def _measured_values(
     """The rounds and accuracy a successful test reports.
 
     A profile test reports none: its one round ran with the profiler on, so its numbers are not a measurement and the
-    rule gate, which reads measure-phase rounds, finds nothing to compare. Every other kind must hold a readable
-    measured round.
+    rule gate, which reads measure-phase rounds, finds nothing to compare. A repro test measures nothing either: it
+    reports a verdict. Every other kind must hold a readable measured round.
     """
-    if request.kind is TestKind.PROFILE:
+    if request.kind in _UNMEASURED_KINDS:
         return (), ()
     rounds = _round_values(outcome.rounds, accepted.points)
     if not any(r.phase == _MEASURE for r in rounds):
         raise MeasurementRefused("the verified result holds no readable measured round")
     return rounds, _accuracy_values(outcome.rounds, wanted=request.accuracy)
+
+
+def _landed_verdict(call: TestCall) -> str:
+    """The verdict of a repro test, read from the files its verified bundle landed; none is no result."""
+    try:
+        return read_verdict(Path(call.output_dir))
+    except ReproError as exc:
+        raise MeasurementRefused(f"the verified repro result holds no verdict: {exc}") from None
 
 
 def _refuse_unless_measured(outcome: TestOutcome) -> None:
