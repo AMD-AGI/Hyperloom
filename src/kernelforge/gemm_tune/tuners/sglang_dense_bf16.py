@@ -9,6 +9,7 @@ import csv
 import logging
 import math
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -218,6 +219,17 @@ def _parse_tuner_results(
             )
         results.append(entry)
     return results
+
+
+@dataclass(frozen=True)
+class _BatchRun:
+    """The grouped tuning batch: its artifact, how many shapes it was given, its budget and how it exited."""
+
+    tuned_csv: Path
+    n_expected: int
+    batch_timeout: int
+    rc: int
+    not_finished: bool = False
 
 
 class SglangDenseBf16Tuner(BaseTuner):
@@ -492,10 +504,7 @@ class SglangDenseBf16Tuner(BaseTuner):
                 )
                 return self._build_result(
                     salvaged,
-                    n_expected,
-                    tuned_csv,
-                    batch_timeout,
-                    rc=rc,
+                    _BatchRun(tuned_csv, n_expected, batch_timeout, rc),
                     forced_status="partial_output",
                 )
             return TuneResult(
@@ -557,25 +566,18 @@ class SglangDenseBf16Tuner(BaseTuner):
 
         return self._build_result(
             shape_results,
-            n_expected,
-            tuned_csv,
-            batch_timeout,
-            rc=rc,
-            not_finished=not_finished,
+            _BatchRun(tuned_csv, n_expected, batch_timeout, rc, not_finished=not_finished),
         )
 
     def _build_result(
         self,
         shape_results: list[dict[str, Any]],
-        n_expected: int,
-        tuned_csv: Path,
-        batch_timeout: int,
-        *,
-        rc: int,
-        not_finished: bool = False,
+        batch: _BatchRun,
         forced_status: str | None = None,
     ) -> TuneResult:
         """Assemble the TuneResult from the rows that were actually written."""
+        n_expected = batch.n_expected
+        tuned_csv = batch.tuned_csv
         total = len(shape_results)
         improved = [r for r in shape_results if r.get("improved")]
         unverified = [r for r in shape_results if r.get("tuned_unverified")]
@@ -595,9 +597,9 @@ class SglangDenseBf16Tuner(BaseTuner):
                 "%s",
                 produced,
                 n_expected,
-                rc,
-                not_finished,
-                batch_timeout,
+                batch.rc,
+                batch.not_finished,
+                batch.batch_timeout,
                 (
                     f". Separately, {len(dropped)} of those rows were dropped as "
                     f"inaccurate, leaving {total} in the artifact"

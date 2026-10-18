@@ -65,9 +65,7 @@ _TRIAL_OPS = {
 
 
 def max_supported_splitk(
-    m: int,
-    n: int,
-    k: int,
+    mnk: tuple[int, int, int],
     ceiling: int = 6,
     device: str = "cuda",
     op: str = "a8w8_blockscale",
@@ -81,6 +79,7 @@ def max_supported_splitk(
     probe = _TRIAL_OPS.get(op)
     if probe is None:
         return None
+    m, n, k = mnk
     try:
         if not probe(m, n, k, 0, device=device):
             return None
@@ -114,7 +113,7 @@ def make_support_fn(ceiling: int = 6, gpu_ids: str = "", op: str = "a8w8_blocksc
     def _fn(m: int, n: int, k: int):
         key = (m, n, k)
         if key not in cache:
-            cache[key] = max_supported_splitk(m, n, k, ceiling=ceiling, device=device, op=op)
+            cache[key] = max_supported_splitk(key, ceiling=ceiling, device=device, op=op)
         return cache[key]
 
     return _fn
