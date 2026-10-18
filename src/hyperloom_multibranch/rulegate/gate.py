@@ -2,11 +2,14 @@
 # SPDX-License-Identifier: MIT
 
 """The rule gate as the one writer of specialist branches: it lands what a judgement decides in the experiment
-repository and the notebook, and takes fork and repair requests to the scheduler."""
+repository and the notebook, takes fork and repair requests to the scheduler, and lands or records the forks and
+repairs the scheduler reserved a branch for."""
 
 from __future__ import annotations
 
 import asyncio
+import logging
+from dataclasses import dataclass
 from typing import Protocol
 
 from hyperloom.contracts.recipe import apply
@@ -20,13 +23,30 @@ from hyperloom_multibranch.contracts.fork import (
 from hyperloom_multibranch.contracts.gate import ResultUnverified, ResultVerifier
 from hyperloom_multibranch.contracts.intent import Intent
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
-from hyperloom_multibranch.contracts.notebook.interfaces import JudgementSink
+from hyperloom_multibranch.contracts.notebook.interfaces import JudgementSink, LineageSink
 from hyperloom_multibranch.contracts.notebook.peers import TestRequest
-from hyperloom_multibranch.contracts.notebook.records import TestRecord
-from hyperloom_multibranch.contracts.notebook.vocab import Conclusion
+from hyperloom_multibranch.contracts.notebook.records import LineageEvent, TestRecord
+from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind
 from hyperloom_multibranch.contracts.repo import BranchMoved, ExperimentRepo
 from hyperloom_multibranch.rulegate.decision import Action, decide
 from hyperloom_multibranch.rulegate.regression import CaseRegistry, FixProof, register_case
+
+logger = logging.getLogger(__name__)
+
+
+class GateWriter(JudgementSink, LineageSink, CaseRegistry, Protocol):
+    """The gate's handle on the notebook: it writes judgements, the ``SPLIT`` of each fork it lands, and the cases of
+    the fixes it commits."""
+
+
+@dataclass(frozen=True)
+class _Reserved:
+    """A fork or repair the scheduler reserved a branch for; ``reason`` is the fork's, empty for a repair."""
+
+    request: TestRequest
+    judgement: Judgement
+    reason: str
+    fork: bool
 
 
 def _recorded_as(judgement: Judgement) -> Conclusion:
@@ -42,16 +62,16 @@ def _require(judgement: Judgement, *actions: Action) -> None:
         raise ValueError(f"a {judgement.verdict.value} judgement calls for {action.value}")
 
 
-class GateWriter(JudgementSink, CaseRegistry, Protocol):
-    """The gate's handle on the notebook: it writes judgements and registers the cases of the fixes it commits."""
-
-
 class RuleGate:
     """``settle`` lands a commit or a record, or holds a blocked gain as ``DIAGNOSIS_PENDING`` until its specialist
     sends it for repair or declines it; a retest, a diagnosis and a fork are its caller's next step.
 
     A commit, a fork and a repair first re-verify every result behind the judgement with ``verifier``; one that does
     not re-verify is recorded ``UNVERIFIED`` and its :class:`ResultUnverified` raised, with nothing landed or asked.
+
+    As :class:`~hyperloom_multibranch.contracts.fork.ReservedBranches` it keeps, in memory, each fork and repair the
+    scheduler reserved a branch for, until it lands the fork or records the void. Asking, landing and voiding take
+    turns, so a landing never runs before its fork recorded where the candidate stands.
     """
 
     def __init__(
@@ -61,6 +81,8 @@ class RuleGate:
         self._repo = repo
         self._scheduler = scheduler
         self._verifier = verifier
+        self._lock = asyncio.Lock()
+        self._reserved: dict[str, _Reserved] = {}
 
     async def settle(self, request: TestRequest, judgement: Judgement, *, fix: FixProof | None = None) -> Action:
         """The judgement is written against ``request``, the first measurement of the candidate.
@@ -89,26 +111,89 @@ class RuleGate:
         return await self._record(request, judgement)
 
     async def fork(self, request: TestRequest, judgement: Judgement, reason: str) -> ForkAdmission:
-        """Asks for the fork and records where the candidate stands; cutting the branch is not part of this call."""
+        """Asks for the fork and records where the candidate stands; the branch is cut when the scheduler has it
+        landed (:meth:`land_split`)."""
         _require(judgement, Action.REQUEST_FORK)
         await self._reverify(request, judgement)
-        admission = await self._scheduler.admit(ForkRequest(request.branch, request.parent_commit, reason))
-        if admission.status is AdmissionStatus.REJECTED:
-            conclusion = _recorded_as(judgement)
-        elif admission.status is AdmissionStatus.PENDING:
-            conclusion = Conclusion.SPLIT_PENDING
-        else:
-            conclusion = Conclusion.SPLIT_REQUESTED
-        await self._notebook.write_judgement(request.request_id, judgement, conclusion)
+        async with self._lock:
+            admission = await self._scheduler.admit(ForkRequest(request.branch, request.parent_commit, reason))
+            if admission.status is AdmissionStatus.REJECTED:
+                conclusion = _recorded_as(judgement)
+            elif admission.status is AdmissionStatus.PENDING:
+                conclusion = Conclusion.SPLIT_PENDING
+            else:
+                conclusion = Conclusion.SPLIT_REQUESTED
+            self._reserve(admission, _Reserved(request, judgement, reason, fork=True))
+            await self._notebook.write_judgement(request.request_id, judgement, conclusion)
         return admission
 
     async def repair(self, request: TestRequest, judgement: Judgement, intent: Intent, diagnosis: str) -> ForkAdmission:
         await self._reverify(request, judgement)
-        admission = await self._scheduler.admit_repair(RepairRequest(intent, request.delta, judgement, diagnosis))
-        rejected = admission.status is AdmissionStatus.REJECTED
-        conclusion = _recorded_as(judgement) if rejected else Conclusion.REPAIR_REQUESTED
-        await self._notebook.write_judgement(request.request_id, judgement, conclusion)
+        async with self._lock:
+            admission = await self._scheduler.admit_repair(RepairRequest(intent, request.delta, judgement, diagnosis))
+            rejected = admission.status is AdmissionStatus.REJECTED
+            conclusion = _recorded_as(judgement) if rejected else Conclusion.REPAIR_REQUESTED
+            self._reserve(admission, _Reserved(request, judgement, "", fork=False))
+            await self._notebook.write_judgement(request.request_id, judgement, conclusion)
         return admission
+
+    async def land_split(self, branch: str) -> bool:
+        """Cut the fork reserved as ``branch`` at its candidate's parent and commit the fix on it; false when no fork
+        waits on ``branch``. A commit whose judgement cannot be written is taken back, and the error raised."""
+        # The scheduler bounds the landing with a timeout; giving up the wait must not leave a fork half landed.
+        return await asyncio.shield(self._land(branch))
+
+    async def settle_voided(self, branch: str, reason: str) -> None:
+        """Record the candidate of the fork or repair the scheduler voided as ``branch`` as only recorded."""
+        await asyncio.shield(self._void(branch, reason))
+
+    def _reserve(self, admission: ForkAdmission, reserved: _Reserved) -> None:
+        if admission.branch:
+            self._reserved[admission.branch] = reserved
+
+    async def _land(self, branch: str) -> bool:
+        async with self._lock:
+            split = self._reserved.get(branch)
+            if split is None or not split.fork:
+                return False
+            request, parent = split.request, split.request.parent_commit
+            recipe = apply(await self._repo.read_recipe(parent), request.delta)
+            await self._repo.create_branch(branch, parent)
+            message = f"{request.request_id}: split from {request.branch}: {split.reason}"
+            commit = await self._repo.commit(branch, parent, recipe, message)
+            try:
+                await self._notebook.write_judgement(
+                    request.request_id, split.judgement, Conclusion.SPLIT_COMMITTED, commit, recipe.digest()
+                )
+            except Exception:
+                await self._repo.rewind(branch, commit, parent)
+                raise
+            await self._notebook.record_lineage(
+                LineageEvent(
+                    LineageKind.SPLIT,
+                    branch,
+                    commit_id=commit,
+                    from_commit=parent,
+                    from_branch=request.branch,
+                    reason=split.reason,
+                )
+            )
+            await self._register_split_case(split, commit)
+            del self._reserved[branch]
+            return True
+
+    async def _register_split_case(self, split: _Reserved, commit: str) -> None:
+        """Where the landed fix's repro case joins the regression set of ``commit``
+        (``rulegate.regression.register_case``); it registers nothing until a fork carries the proof of its fix."""
+
+    async def _void(self, branch: str, reason: str) -> None:
+        async with self._lock:
+            voided = self._reserved.pop(branch, None)
+            if voided is None:
+                logger.warning("no fork or repair waits on %s: its void (%s) records nothing", branch, reason)
+                return
+            logger.info("the scheduler voided %s (%s): %s is recorded only", branch, reason, voided.request.request_id)
+            await self._record(voided.request, voided.judgement)
 
     async def _commit(self, request: TestRequest, judgement: Judgement, fix: FixProof | None) -> bool:
         # The repository commit comes first: the judgement names the commit it made, and so does the case.

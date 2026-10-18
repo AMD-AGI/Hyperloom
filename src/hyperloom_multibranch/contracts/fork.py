@@ -4,9 +4,10 @@
 """Requests to the scheduler for a new branch, to carry a correctness fix that costs its branch performance or to
 repair the defect that blocked a gain, and the scheduler's answer.
 
-On ``ACCEPTED`` the answer names the new branch; for a fork the gate cuts it and lands the fix on it before the
-scheduler starts the branch's specialist. ``PENDING`` waits for a free branch slot and names the branch id reserved for
-it. The requesting specialist stays on its own branch either way.
+On ``ACCEPTED`` the answer names the new branch. ``PENDING`` waits for a free branch slot and names the branch id
+reserved for it. The requesting specialist stays on its own branch either way. The scheduler cuts a repair branch
+itself; a fork's branch it has the gate land (:class:`ReservedBranches`) before it starts the branch's specialist, and
+a fork or repair it voids it hands back to the gate to record.
 """
 
 from __future__ import annotations
@@ -77,4 +78,25 @@ class ForkAdmissionService(Protocol):
     async def admit_repair(self, request: RepairRequest) -> ForkAdmission: ...
 
 
-__all__ = ["AdmissionStatus", "ForkAdmission", "ForkAdmissionService", "ForkRequest", "RepairRequest"]
+class ReservedBranches(Protocol):
+    """The rule gate's side of the branches the scheduler reserved for its forks and repairs, named by the branch.
+
+    ``land_split`` cuts a fork's branch at the candidate's parent commit, commits the fix on it and records the
+    candidate as ``SPLIT_COMMITTED`` and the branch's ``SPLIT``; true once it has, false for a branch no fork waits
+    on. ``settle_voided`` records a voided fork's or repair's candidate as only recorded, which leaves its intent free
+    for another repair; a branch already landed or never reserved is logged and left alone.
+    """
+
+    async def land_split(self, branch: str) -> bool: ...
+
+    async def settle_voided(self, branch: str, reason: str) -> None: ...
+
+
+__all__ = [
+    "AdmissionStatus",
+    "ForkAdmission",
+    "ForkAdmissionService",
+    "ForkRequest",
+    "RepairRequest",
+    "ReservedBranches",
+]
