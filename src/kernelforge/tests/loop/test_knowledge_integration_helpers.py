@@ -143,8 +143,8 @@ def test_git_discard_removes_symlink_without_touching_target(tmp_path):
 def test_bench_once_returns_complete_suite(monkeypatch):
     import kernelforge.mcp_server.tools.bench as bench
 
-    async def fake(driver_script, driver_args):
-        assert driver_args == []
+    async def fake(run):
+        assert run.driver_args == []
         return {
             "success": True,
             "median_ms": 7.5,
@@ -162,7 +162,7 @@ def test_bench_once_returns_complete_suite(monkeypatch):
 def test_bench_once_rejects_scalar_only_result(monkeypatch):
     import kernelforge.mcp_server.tools.bench as bench
 
-    async def fake(driver_script, driver_args):
+    async def fake(run):
         return {"success": True, "median_ms": 7.5}
 
     monkeypatch.setattr(bench, "bench_wallclock", fake)

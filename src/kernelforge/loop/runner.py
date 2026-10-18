@@ -112,6 +112,7 @@ from kernelforge.mcp_server.tools.bench import (
     CaseCoverageError,
     calculate_mean_case_speedup,
     calculate_measurement_case_speedups,
+    BenchRun,
     measure_wallclock,
 )
 from kernelforge.mcp_server.tools._subprocess import communicate_process_group
@@ -2699,11 +2700,9 @@ class IterationLoop(AnalysisRuntimeMixin):
                 print(f"  Baseline build FAILED: {_build_failure_tail(stdout, stderr, 300)}")
                 return None
         bench_result = await measure_wallclock(
-            driver_script=self.ic.driver_script,
-            driver_args=[],
+            BenchRun(self.ic.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
             measurements=KEEP_MEASUREMENT_COUNT,
             timeout_sec=self.ic.bench_timeout_sec,
-            repeat=self.ic.bench_repeat,
         )
         if not bench_result.get("success"):
             print("  Baseline bench FAILED: " + _bench_failure_detail(bench_result))
@@ -2927,11 +2926,9 @@ class IterationLoop(AnalysisRuntimeMixin):
         while rounds < SIGMA_REMEASURE_MAX_ROUNDS and current.dominant_case is not None:
             remeasure_started = time.time()
             extra = await measure_wallclock(
-                driver_script=self.ic.driver_script,
-                driver_args=[],
+                BenchRun(self.ic.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
                 measurements=SIGMA_REMEASURE_BATCH,
                 timeout_sec=self.ic.bench_timeout_sec,
-                repeat=self.ic.bench_repeat,
             )
             self._observe_measurement(remeasure_started)
             rounds += 1
@@ -4032,11 +4029,9 @@ class IterationLoop(AnalysisRuntimeMixin):
         else:
             print("  [bench] Running three independent benchmark suites...")
             bench_result = await measure_wallclock(
-                driver_script=self.ic.driver_script,
-                driver_args=[],
+                BenchRun(self.ic.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
                 measurements=KEEP_MEASUREMENT_COUNT,
                 timeout_sec=self.ic.bench_timeout_sec,
-                repeat=self.ic.bench_repeat,
             )
         self._observe_measurement(measurement_started)
 

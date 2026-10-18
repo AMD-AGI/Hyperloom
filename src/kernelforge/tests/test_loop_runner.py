@@ -2339,7 +2339,7 @@ def _measurement_loop(monkeypatch, benchmark_result, workspace_dir="."):
     async def fake_validation(**_kwargs):
         return report
 
-    async def fake_benchmark(**kwargs):
+    async def fake_benchmark(_run, **kwargs):
         benchmark_calls.append(kwargs)
         return dict(benchmark_result)
 
@@ -5306,7 +5306,7 @@ def test_run_fails_before_agent_without_baseline_cases(
 def _static_bench(result: dict):
     """A measurement stand-in that always returns ``result``."""
 
-    async def bench(**_kwargs):
+    async def bench(_run, **_kwargs):
         return dict(result)
 
     return bench
@@ -5422,7 +5422,7 @@ def test_baseline_case_coverage_drift_names_the_cases(
     """Coverage that moves between measurements must name what moved."""
     loop, _workspace = _make_loop(tmp_path, monkeypatch)
 
-    async def bench(**_kwargs):
+    async def bench(_run, **_kwargs):
         return {
             "success": False,
             "message": ("MEASUREMENT CASE COVERAGE MISMATCH: expected=['case_001', 'case_002'], got=['case_001']"),
@@ -7791,7 +7791,7 @@ def _stub_measurement(monkeypatch, walls):
     async def fake_validation(**_kwargs):
         return _StubReport()
 
-    async def fake_bench(**_kwargs):
+    async def fake_bench(_run, **_kwargs):
         wall_ms = walls.pop(0) if walls else 1.0
         return {
             "success": True,

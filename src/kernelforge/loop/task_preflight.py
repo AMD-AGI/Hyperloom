@@ -22,7 +22,7 @@ from pathlib import Path
 
 from kernelforge.loop.aiter_cache import cleanup_current_owned_aiter_locks
 from kernelforge.loop.profile_contract import PROFILE_RUN_FLAG
-from kernelforge.mcp_server.tools.bench import bench_wallclock
+from kernelforge.mcp_server.tools.bench import BenchRun, bench_wallclock
 from kernelforge.mcp_server.tools.test import test_correctness
 
 
@@ -651,10 +651,7 @@ async def _preflight_async(
     stage_started = time.monotonic()
     try:
         bres = await bench_wallclock(
-            driver_script=driver,
-            driver_args=[],
-            warmup_iters=warmup,
-            bench_iters=iters,
+            BenchRun(driver, driver_args=[], warmup_iters=warmup, bench_iters=iters),
             timeout_sec=int(_deadline_timeout(deadline_unix, PREFLIGHT_BENCH_TIMEOUT_S)),
         )
         reported_cases = bres.get("case_times") or {}

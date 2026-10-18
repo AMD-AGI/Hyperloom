@@ -35,6 +35,7 @@ from kernelforge.mcp_server.tools.test import test_correctness
 from kernelforge.mcp_server.tools.bench import (
     CaseCoverageError,
     calculate_measurement_case_speedups,
+    BenchRun,
     measure_wallclock,
 )
 
@@ -1184,11 +1185,9 @@ class InSessionGate:
             # 2b) Performance — three independent canonical measurements.
             self.last_bench_result = None
             bench = await measure_wallclock(
-                driver_script=self.driver_script,
-                driver_args=[],
+                BenchRun(self.driver_script, driver_args=[], repeat=self.bench_repeat),
                 measurements=KEEP_MEASUREMENT_COUNT,
                 timeout_sec=self.bench_timeout_sec,
-                repeat=self.bench_repeat,
             )
             wall = bench.get("median_ms")
             if not bench.get("success"):

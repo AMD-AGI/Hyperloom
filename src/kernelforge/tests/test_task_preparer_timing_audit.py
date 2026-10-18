@@ -19,7 +19,7 @@ def test_preflight_records_total_and_per_stage_seconds(monkeypatch, tmp_path):
         await asyncio.sleep(0.05)
         return {"passed": True, "snr_db": 40.0, "message": "PASS"}
 
-    async def fast_bench(**_kwargs):
+    async def fast_bench(_run, **_kwargs):
         return {
             "success": True,
             "median_ms": 1.0,
@@ -49,7 +49,7 @@ def test_stage_timing_is_recorded_even_when_the_stage_fails(monkeypatch, tmp_pat
     async def crashing(**_kwargs):
         return {"passed": False, "message": "DRIVER CRASHED (exit 1)", "output": "boom"}
 
-    async def crashing_bench(**_kwargs):
+    async def crashing_bench(_run, **_kwargs):
         return {"success": False, "message": "BENCH CRASHED (exit 1)", "output": "boom"}
 
     monkeypatch.setattr(task_preflight, "test_correctness", crashing)

@@ -278,11 +278,11 @@ def test_stop_gate_invokes_driver_without_shape_selectors(tmp_path, monkeypatch)
         )
         return {"passed": True, "message": ""}
 
-    async def benchmark(**kwargs):
+    async def benchmark(run, **kwargs):
         calls.append(
             (
                 "benchmark",
-                kwargs["driver_args"],
+                run.driver_args,
                 kwargs["timeout_sec"],
                 kwargs["measurements"],
             )
@@ -322,7 +322,7 @@ def test_stop_hands_validation_timeout_to_outer_loop(tmp_path, monkeypatch):
             "message": "TIMEOUT after 1800s",
         }
 
-    async def benchmark(**_kwargs):
+    async def benchmark(_run, **_kwargs):
         bench_calls["count"] += 1
         return {"median_ms": 0.5}
 

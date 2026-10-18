@@ -428,11 +428,10 @@ def _git_discard_worktree(
 
 def _bench_once(driver: str, bench_repeat: int = 1) -> dict | None:
     """Run the driver's full benchmark suite once."""
-    from kernelforge.mcp_server.tools.bench import bench_wallclock
+    from kernelforge.mcp_server.tools.bench import BenchRun, bench_wallclock
 
     try:
-        repeat_kwargs = {"repeat": bench_repeat} if bench_repeat > 1 else {}
-        res = asyncio.run(bench_wallclock(driver_script=driver, driver_args=[], **repeat_kwargs))
+        res = asyncio.run(bench_wallclock(BenchRun(driver, driver_args=[], repeat=bench_repeat)))
         if not isinstance(res, dict) or not res.get("success") or not res.get("case_times"):
             return None
         return res

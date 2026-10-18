@@ -342,7 +342,7 @@ def test_safe_stop_runs_canonical_validation_and_converges(
     async def _corr(**_kwargs):
         return {"passed": True, "message": ""}
 
-    async def _bench(**_kwargs):
+    async def _bench(_run, **_kwargs):
         return {
             "success": True,
             "median_ms": 0.5,

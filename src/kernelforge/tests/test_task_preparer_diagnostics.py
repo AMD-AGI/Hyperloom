@@ -24,7 +24,7 @@ def _run_preflight(monkeypatch, tmp_path, *, correctness, bench):
     async def _fake_correctness(**kwargs):
         return correctness
 
-    async def _fake_bench(**kwargs):
+    async def _fake_bench(_run, **kwargs):
         return bench
 
     monkeypatch.setattr(task_preflight, "test_correctness", _fake_correctness)

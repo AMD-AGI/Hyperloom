@@ -999,7 +999,7 @@ def _attributed_loop(monkeypatch, baseline, runs, extra_rounds=()):
     loop._best_case_times = dict(baseline)
     rounds = [list(extra) for extra in extra_rounds]
 
-    async def fake_benchmark(**kwargs):
+    async def fake_benchmark(_run, **kwargs):
         calls.append(kwargs)
         if len(calls) == 1:
             return _bench(runs)
@@ -1113,7 +1113,7 @@ def test_a_re_measure_bench_that_failed_is_reported_as_bought_not_as_measured(mo
     loop._best_case_times = dict(GQA_BASELINE)
     loop.best_mean_case_speedup = GQA_NEAR_MISS_INCUMBENT
 
-    async def fake_benchmark(**kwargs):
+    async def fake_benchmark(_run, **kwargs):
         calls.append(kwargs)
         if len(calls) == 1:
             return _bench(runs)
@@ -1144,9 +1144,9 @@ def test_the_extra_benches_are_charged_to_the_round_that_bought_them(monkeypatch
             loop.best_mean_case_speedup = incumbent
         inner = runner_module.measure_wallclock
 
-        async def metered(**kwargs):
+        async def metered(run, **kwargs):
             clock[0] += 100.0
-            return await inner(**kwargs)
+            return await inner(run, **kwargs)
 
         monkeypatch.setattr(runner_module, "measure_wallclock", metered)
         loop._round_started_at = clock[0]
@@ -1514,7 +1514,7 @@ def test_a_larger_sample_can_raise_the_bar_as_well_as_lower_it():
 def _port_bench(case_times: dict[str, float]):
     """Stand in for the loop's own first bench of the kernel it starts from."""
 
-    async def _bench(**_kwargs):
+    async def _bench(_run, **_kwargs):
         return {
             "success": True,
             "case_times": dict(case_times),

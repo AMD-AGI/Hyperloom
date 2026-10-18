@@ -29,7 +29,7 @@ async def test_preflight_requires_complete_profiling_contract(
     async def fake_correctness(**_kwargs):
         return {"passed": True, "snr_db": 60.0, "message": "ok"}
 
-    async def fake_bench(**_kwargs):
+    async def fake_bench(_run, **_kwargs):
         return {
             "success": True,
             "median_ms": 1.0,
@@ -69,7 +69,7 @@ def _passing_stages(monkeypatch, case_times: dict[str, float]):
     async def fake_correctness(**_kwargs):
         return {"passed": True, "snr_db": 60.0, "message": "ok"}
 
-    async def fake_bench(**_kwargs):
+    async def fake_bench(_run, **_kwargs):
         return {
             "success": True,
             "median_ms": 1.0,
