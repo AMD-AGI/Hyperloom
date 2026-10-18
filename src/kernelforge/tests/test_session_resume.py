@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +18,8 @@ from kernelforge.agent_backends.session_resume import (
     is_api_failure,
     is_retryable_api_error,
     resumable_session_id,
+    ResumeClock,
+    ResumePolicy,
     run_session_with_api_resume,
 )
 
@@ -77,10 +80,9 @@ def _spec():
     return AgentRunSpec(system_prompt="s", user_prompt="u", cwd="/tmp")
 
 
-def _run(backend, **kwargs):
-    kwargs.setdefault("sleep", _no_sleep)
-    kwargs.setdefault("rng", lambda: 1.0)
-    return asyncio.run(run_session_with_api_resume(backend, _spec(), **kwargs))
+def _run(backend, policy=ResumePolicy(), monotonic=time.monotonic):
+    clock = ResumeClock(monotonic=monotonic, sleep=_no_sleep, rng=lambda: 1.0)
+    return asyncio.run(run_session_with_api_resume(backend, _spec(), policy=policy, clock=clock))
 
 
 async def _no_sleep(_seconds):
@@ -210,8 +212,7 @@ def test_the_resume_chain_stops_at_its_deadline():
 
     result = _run(
         backend,
-        max_resumes=3,
-        deadline_sec=600.0,
+        ResumePolicy(max_resumes=3, deadline_sec=600.0),
         monotonic=clock,
     )
 
@@ -223,7 +224,7 @@ def test_deadline_zero_lifts_the_bound():
     finished = AgentRunResult(text="done", end_reason="agent_stopped")
     backend = _Backend([_api_failure()], [finished])
 
-    result = _run(backend, deadline_sec=0.0, monotonic=lambda: 10**9)
+    result = _run(backend, ResumePolicy(deadline_sec=0.0), monotonic=lambda: 10**9)
 
     assert backend.resume_calls[0][0] == "sess-1"
     assert result.end_reason == "agent_stopped"
@@ -272,7 +273,7 @@ def test_repeated_api_failures_keep_resuming_within_budget():
         [_api_failure(), _api_failure(), AgentRunResult(end_reason="agent_stopped")],
     )
 
-    result = _run(backend, max_resumes=3)
+    result = _run(backend, ResumePolicy(max_resumes=3))
 
     assert len(backend.resume_calls) == 3
     assert result.end_reason == "agent_stopped"
@@ -284,7 +285,7 @@ def test_a_resume_that_itself_fails_is_retried():
         [ConnectionError("gateway dropped"), AgentRunResult(end_reason="agent_stopped")],
     )
 
-    result = _run(backend, max_resumes=3)
+    result = _run(backend, ResumePolicy(max_resumes=3))
 
     assert len(backend.resume_calls) == 2
     assert result.end_reason == "agent_stopped"
@@ -293,7 +294,7 @@ def test_a_resume_that_itself_fails_is_retried():
 def test_a_resume_that_fails_on_credentials_propagates():
     backend = _Backend([_api_failure()], [RuntimeError("401 unauthorized")])
     with pytest.raises(RuntimeError, match="401"):
-        _run(backend, max_resumes=3)
+        _run(backend, ResumePolicy(max_resumes=3))
 
 
 # ── limits the caller chose are never retried ─────────────────────────────────
@@ -317,7 +318,7 @@ def test_an_exhausted_chain_reports_api_error_not_silence():
     """Downstream reads an empty diff; only this end reason says why it is empty."""
     backend = _Backend([_api_failure()], [_api_failure()])
 
-    result = _run(backend, max_resumes=2)
+    result = _run(backend, ResumePolicy(max_resumes=2))
 
     assert len(backend.resume_calls) == 2
     assert result.end_reason == EXHAUSTED_END_REASON
@@ -356,7 +357,7 @@ def test_a_start_that_never_reached_the_model_is_retried_fresh():
     """No session id exists yet, so a plain re-run loses nothing."""
     backend = _Backend([ConnectionError("gateway down"), AgentRunResult(end_reason="agent_stopped")])
 
-    result = _run(backend, max_resumes=2)
+    result = _run(backend, ResumePolicy(max_resumes=2))
 
     assert backend.run_calls == 2
     assert result.end_reason == "agent_stopped"
@@ -365,14 +366,14 @@ def test_a_start_that_never_reached_the_model_is_retried_fresh():
 def test_a_start_that_keeps_failing_raises():
     backend = _Backend([ConnectionError("gateway down")])
     with pytest.raises(ConnectionError):
-        _run(backend, max_resumes=2)
+        _run(backend, ResumePolicy(max_resumes=2))
     assert backend.run_calls == 3
 
 
 def test_a_start_that_fails_on_credentials_raises_immediately():
     backend = _Backend([RuntimeError("invalid api key")])
     with pytest.raises(RuntimeError, match="invalid api key"):
-        _run(backend, max_resumes=3)
+        _run(backend, ResumePolicy(max_resumes=3))
     assert backend.run_calls == 1
 
 
@@ -400,11 +401,8 @@ def test_backoff_grows_between_resume_attempts():
         run_session_with_api_resume(
             backend,
             _spec(),
-            max_resumes=3,
-            base_delay_sec=5.0,
-            max_delay_sec=120.0,
-            sleep=record,
-            rng=lambda: 1.0,
+            policy=ResumePolicy(max_resumes=3, base_delay_sec=5.0, max_delay_sec=120.0),
+            clock=ResumeClock(sleep=record, rng=lambda: 1.0),
         )
     )
     assert slept == [5.0, 15.0, 45.0]

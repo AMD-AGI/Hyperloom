@@ -29,6 +29,7 @@ from kernelforge.agent_backends.base import (
 from kernelforge.agent_backends.registry import create_registered_backend
 from kernelforge.agent_backends.session_resume import (
     TERMINAL_END_REASONS,
+    ResumePolicy,
     run_session_with_api_resume,
 )
 from kernelforge.config import Config
@@ -588,7 +589,7 @@ class OpportunityAnalysisAgent:
                 self.backend,
                 spec,
                 usage=usage,
-                deadline_sec=self.timeout_sec,
+                policy=ResumePolicy(deadline_sec=self.timeout_sec),
             )
         )
         publications: dict[str, TaskPublicationResult] = {}

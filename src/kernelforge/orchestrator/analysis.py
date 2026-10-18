@@ -28,6 +28,7 @@ from kernelforge.agent_backends import (
 )
 from kernelforge.agent_backends.session_resume import (
     EXHAUSTED_END_REASON,
+    ResumePolicy,
     run_session_with_api_resume,
 )
 from kernelforge.config import Config
@@ -1557,7 +1558,7 @@ class AnalysisAgentService:
                         hooks=hooks,
                     ),
                     usage=usage,
-                    deadline_sec=timeout_sec,
+                    policy=ResumePolicy(deadline_sec=timeout_sec),
                 ),
                 timeout=watchdog_timeout_sec(timeout_sec),
             )
