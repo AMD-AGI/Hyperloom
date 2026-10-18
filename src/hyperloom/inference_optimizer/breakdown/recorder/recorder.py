@@ -13,7 +13,7 @@ import threading
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
-from hyperloom.common.io import atomic_write_text
+from hyperloom.common.io import WriteOptions, atomic_write_text
 from hyperloom.common.timeutil import now_iso
 
 from .sections import slug
@@ -448,7 +448,7 @@ class Recorder:
         traced = trace_enabled()
         existed = target.exists() if traced else False
         try:
-            atomic_write_text(target, data, make_parents=True)
+            atomic_write_text(target, data, options=WriteOptions(make_parents=True))
         except BaseException as exc:
             if traced:
                 self._trace(record, target, payload, operation, previous, existed, len(data), exc)

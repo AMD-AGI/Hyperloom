@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.io import atomic_write_json, atomic_write_text
-from hyperloom.common.jsonio import read_json
+from hyperloom.common.jsonio import read_json, read_json_strict
 
 from . import collectors
 from .recorder.event_finalize import finalize_events
@@ -62,7 +62,7 @@ def _load_session_json(path: Path, label: str, warnings: list[str]) -> dict[str,
         warnings.append(f"{label} missing at {path}")
         return {}
     try:
-        return read_json(path, require_dict=True, strict=True)
+        return read_json_strict(path, require_dict=True)
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"failed to parse {label}: {exc!r}")
         return {}
