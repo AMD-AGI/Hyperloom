@@ -407,11 +407,7 @@ class _HangingProc:
 
 def test_recorder_is_closed_on_the_normal_return_path():
     rec = _Recorder()
-    sk._communicate_with_watchdog(
-        _DoneProc(),
-        hard_timeout=5,
-        recorders=sk._RecorderFanout([rec]),
-    )
+    sk._communicate_with_watchdog(_DoneProc(), sk._WatchedRound(hard_timeout=5), recorders=sk._RecorderFanout([rec]))
 
     assert rec.closed_aborted is False
 
@@ -422,11 +418,7 @@ def test_no_scraping_before_the_server_is_up():
     the ready marker and the death gate most need it responsive. Boot has no
     traffic to measure anyway."""
     rec = _Recorder()
-    sk._communicate_with_watchdog(
-        _DoneProc(),
-        hard_timeout=5,
-        recorders=sk._RecorderFanout([rec]),
-    )
+    sk._communicate_with_watchdog(_DoneProc(), sk._WatchedRound(hard_timeout=5), recorders=sk._RecorderFanout([rec]))
 
     assert rec.ticks == 0
 
@@ -440,10 +432,7 @@ def test_warm_reuse_rounds_scrape_immediately_and_are_tagged_measured():
     """
     rec = _Recorder()
     sk._communicate_with_watchdog(
-        _DoneProc(),
-        hard_timeout=5,
-        server_already_ready=True,
-        recorders=sk._RecorderFanout([rec]),
+        _DoneProc(), sk._WatchedRound(hard_timeout=5, server_already_ready=True), recorders=sk._RecorderFanout([rec])
     )
 
     assert rec.ticks >= 1
@@ -514,9 +503,7 @@ def test_recorder_is_closed_as_aborted_when_a_gate_raises():
     rec = _Recorder()
     with pytest.raises(sk.subprocess.TimeoutExpired):
         sk._communicate_with_watchdog(
-            _HangingProc(),
-            hard_timeout=0.01,
-            recorders=sk._RecorderFanout([rec]),
+            _HangingProc(), sk._WatchedRound(hard_timeout=0.01), recorders=sk._RecorderFanout([rec])
         )
 
     assert rec.closed_aborted is True
@@ -553,8 +540,7 @@ def test_phase_transitions_reach_the_recorder(tmp_path, monkeypatch):
 
     sk._communicate_with_watchdog(
         _SlowProc(),
-        hard_timeout=60,
-        server_log_path=str(log_path),
+        sk._WatchedRound(hard_timeout=60, server_log_path=str(log_path)),
         recorders=sk._RecorderFanout([rec]),
     )
 
@@ -564,11 +550,7 @@ def test_phase_transitions_reach_the_recorder(tmp_path, monkeypatch):
 
 def test_no_recorder_leaves_the_loop_unchanged():
     """An empty fanout must be a strict no-op: this is a production watchdog."""
-    out = sk._communicate_with_watchdog(
-        _DoneProc(),
-        hard_timeout=5,
-        recorders=sk._RecorderFanout([]),
-    )
+    out = sk._communicate_with_watchdog(_DoneProc(), sk._WatchedRound(hard_timeout=5), recorders=sk._RecorderFanout([]))
     assert out == ("out", "err")
 
 
@@ -589,8 +571,7 @@ def test_a_lone_failing_recorder_does_not_fail_the_round(monkeypatch, tmp_path):
     monkeypatch.setattr("hyperloom.orchestrator.actions.executors._gpu_power.build_gpu_power_recorder", lambda *a: None)
     out = sk._communicate_with_watchdog(
         _DoneProc(),
-        hard_timeout=5,
-        server_already_ready=True,
+        sk._WatchedRound(hard_timeout=5, server_already_ready=True),
         recorders=sk._build_round_recorders(str(tmp_path / "server.log"), {}),
     )
     assert out == ("out", "err")
