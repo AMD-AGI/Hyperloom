@@ -30,7 +30,7 @@ from hyperloom_multibranch.scheduling.judge import (
     render_prompt,
 )
 from hyperloom_multibranch.scheduling.forks import PendingBranch
-from hyperloom_multibranch.scheduling.llm import CompletionFailed
+from hyperloom_multibranch.scheduling.llm import CompletionFailed, CompletionReply, CompletionUsage
 from hyperloom_multibranch.scheduling.roster import (
     BranchEntry,
     BranchKind,
@@ -83,6 +83,7 @@ def _view(
     events: tuple[SessionEvent, ...] = (),
     behind: dict[str, float] | None = None,
     profile_running: bool = False,
+    explore_gpu_hours: float | None = None,
 ) -> JudgeView:
     return JudgeView(
         now=NOW,
@@ -115,7 +116,30 @@ def _view(
         events=events,
         behind_integration_pct=behind or {},
         profile_running=profile_running,
+        gpu_hours_used=1.23456,
+        explore_gpu_hours=explore_gpu_hours,
+        scheduler_llm=CompletionUsage(input_tokens=5200, output_tokens=310),
     )
+
+
+def _text(reply: str) -> CompletionReply:
+    return CompletionReply(reply, CompletionUsage())
+
+
+def test_the_prompt_shows_and_explains_the_gpu_hours_and_llm_tokens_used() -> None:
+    assert _state(_view())["spend"] == {
+        "gpu_hours_used": 1.235,
+        "explore_gpu_hours": None,
+        "scheduler_llm_tokens": {"input_tokens": 5200, "output_tokens": 310},
+    }
+    assert _state(_view(explore_gpu_hours=7.08333))["spend"]["explore_gpu_hours"] == 7.083
+    prompt = " ".join(JUDGE_SYSTEM_PROMPT.split())
+    for text in ("gpu_hours_used", "explore_gpu_hours", "scheduler_llm_tokens"):
+        assert text in prompt
+    assert "a test taken back before its result is not in it" in prompt
+    assert "the baseline measured on the root commit included" in prompt
+    assert "the measurements the PRELUDE run that built the root commit made on its own" in prompt
+    assert "the specialists' LLM spend is not in it" in prompt
 
 
 def test_a_branch_row_lists_its_similar_branches_and_the_prompt_says_which_twin_to_stop() -> None:
@@ -403,9 +427,9 @@ def test_the_prompt_shows_and_explains_the_forks_and_repairs_waiting_for_a_slot(
 async def test_decide_returns_the_capped_decision_and_logs_the_exchange(tmp_path: Path) -> None:
     seen: list[tuple[str, str]] = []
 
-    async def completion(system: str, user: str) -> str:
+    async def completion(system: str, user: str) -> CompletionReply:
         seen.append((system, user))
-        return _reply({"open": 3, "branches": [{"branch": "b01", "k": 5}], "stop": [], "stop_session": None})
+        return _text(_reply({"open": 3, "branches": [{"branch": "b01", "k": 5}], "stop": [], "stop_session": None}))
 
     transcript = tmp_path / "MB-judge.jsonl"
     judge = Judge(completion, transcript, Clock(now=lambda: NOW))
@@ -420,7 +444,7 @@ async def test_decide_returns_the_capped_decision_and_logs_the_exchange(tmp_path
 
 
 async def test_decide_keeps_the_status_quo_when_the_call_fails(tmp_path: Path) -> None:
-    async def completion(system: str, user: str) -> str:
+    async def completion(system: str, user: str) -> CompletionReply:
         raise CompletionFailed("judge call failed: RuntimeError: status=529")
 
     transcript = tmp_path / "MB-judge.jsonl"
@@ -435,8 +459,8 @@ async def test_decide_keeps_the_status_quo_when_the_call_fails(tmp_path: Path) -
     ["I would open two branches.", _reply({"open": 0, "stop": [{"branch": "b02"}], "stop_session": None})],
 )
 async def test_decide_keeps_the_status_quo_on_an_unreadable_reply(tmp_path: Path, reply: str) -> None:
-    async def completion(system: str, user: str) -> str:
-        return reply
+    async def completion(system: str, user: str) -> CompletionReply:
+        return _text(reply)
 
     transcript = tmp_path / "MB-judge.jsonl"
 
@@ -446,7 +470,7 @@ async def test_decide_keeps_the_status_quo_on_an_unreadable_reply(tmp_path: Path
 
 
 async def test_an_unexpected_error_is_not_swallowed(tmp_path: Path) -> None:
-    async def completion(system: str, user: str) -> str:
+    async def completion(system: str, user: str) -> CompletionReply:
         raise KeyError("bug")
 
     with pytest.raises(KeyError):

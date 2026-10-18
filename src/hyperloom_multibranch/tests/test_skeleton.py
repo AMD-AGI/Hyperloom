@@ -21,7 +21,7 @@ import json
 import os
 import signal
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +44,7 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.notebook.tests.factories import delta, intent
-from hyperloom_multibranch.scheduling.budget import SessionBudget
+from hyperloom_multibranch.scheduling.budget import MB_SECONDS_PER_HOUR, SessionBudget, explore_gpu_seconds
 from hyperloom_multibranch.scheduling import branches
 from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE
 from hyperloom_multibranch.scheduling.explore import EXPLORE_TICK_SECONDS, FORK_NOT_LANDED, OPEN_CUT_REASON
@@ -53,7 +53,7 @@ from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
 from hyperloom_multibranch.scheduling.lifecycle import CUT_SHORT, Session, SessionHost, SessionOutcome, SessionServices
-from hyperloom_multibranch.scheduling.llm import CompletionFailed
+from hyperloom_multibranch.scheduling.llm import CompletionFailed, CompletionReply, CompletionUsage
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStatus, RosterCaps, StopCause
@@ -92,10 +92,15 @@ from hyperloom_multibranch.specialist.prompts import prompt_versions
 START = 1_700_000_000.0
 CONC = 16
 WORKLOAD = Workload("/models/Llama-3-8B", "sglang", 1, 1024, 1024, CONC, "bf16", "mi355x", KernelOptimizer.FORGE)
-SETTINGS = RunSettings(WORKLOAD, max_hours=0.5, caps=RosterCaps(3, 2, 8), judge_interval_seconds=600.0)
+SETTINGS = RunSettings(
+    WORKLOAD, max_hours=0.5, max_gpu_hours=0.0, caps=RosterCaps(3, 2, 8), judge_interval_seconds=600.0
+)
 STEP_SECONDS = 30.0
 CLAIM_TTL_SECONDS = 1e6
 STOP_REASON = "no gain left"
+#: A GPU-hour budget the baseline on the root alone uses up.
+TINY_GPU_HOURS = 0.01
+JUDGE_USAGE = CompletionUsage(input_tokens=4000, output_tokens=120)
 CONVERGED_REASON = "every branch is flat"
 #: What the scheduler's own tests measure: the root, ``c1`` alone (the integration head once merged) and ``c2``, which
 #: sweeps higher than the integration head but measures the root's value when reproduced; every other recipe measures
@@ -174,7 +179,7 @@ class NoObjectStore(HeldGitRepo):
 class SilentModel(ScriptedCompletion):
     """A judge model that never answers; a failure double, not a placeholder."""
 
-    async def __call__(self, system: str, user: str) -> str:
+    async def __call__(self, system: str, user: str) -> CompletionReply:
         self.calls.append((system, user))
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
@@ -199,6 +204,7 @@ class Stage:
     recipe_kb: OneChampionKB | None = None
     stuck: frozenset[str] = frozenset()
     toolbox_type: type[RecordingToolbox] = RecordingToolbox
+    settings: RunSettings = SETTINGS
     repo_type: type[HeldGitRepo] = HeldGitRepo
     toolbox: RecordingToolbox = field(init=False)
     sessions: RecordedSessions = field(init=False)
@@ -279,7 +285,7 @@ class Stage:
         self.time.hold_threads()
         host = SessionHost(self.layout, self.processes, self.time.clock)
         session = Session(
-            SETTINGS, self.factory, host, SessionServices(self.judge, ScriptedCompletion(), self.recipe_kb)
+            self.settings, self.factory, host, SessionServices(self.judge, ScriptedCompletion(), self.recipe_kb)
         )
         return await session.run()
 
@@ -313,6 +319,7 @@ def _script(stage: Stage, forks: int = len(FIX_REASONS)) -> None:
 
 async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.judge.usage = JUDGE_USAGE
     _script(stage)
 
     outcome = await stage.run()
@@ -406,6 +413,12 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     manifest = json.loads(stage.layout.manifest.read_text())
     assert set(manifest["code_version"]) == {"package", "git_sha"} and manifest["metric"] == GRADED_OUTPUT
     judge_calls = len(stage.layout.judge.read_text().splitlines())
+    spends = [_judge_state(prompt)["spend"] for prompt in _judge_prompts(stage)]
+    assert [spend["scheduler_llm_tokens"] for spend in spends[:2]] == [
+        {"input_tokens": 0, "output_tokens": 0},
+        {"input_tokens": JUDGE_USAGE.input_tokens, "output_tokens": JUDGE_USAGE.output_tokens},
+    ]
+    assert all(spend["explore_gpu_hours"] is None for spend in spends)
     # Each judge call's view and the dashboard rebuild after it read the queue, and so does the stop.
     assert judge_calls >= 2 and stage.toolbox.queue_reads == 2 * judge_calls + 1
     assert await stage.processes.leftovers() == ()
@@ -555,6 +568,42 @@ async def test_a_judge_that_never_answers_gives_up_at_the_explore_deadline_and_o
 
 def _decisions(stage: Stage) -> list[dict[str, object]]:
     return [json.loads(line) for line in stage.layout.decisions.read_text().splitlines()]
+
+
+def _judge_prompts(stage: Stage) -> list[str]:
+    return [json.loads(line)["prompt"] for line in stage.layout.judge.read_text().splitlines()]
+
+
+def _judge_state(prompt: str) -> dict[str, Any]:
+    return json.loads(prompt[prompt.index("{") : prompt.index("\n\n", prompt.index("{"))])
+
+
+async def test_spent_gpu_hours_end_explore_as_a_completed_session_that_still_runs_final(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(SETTINGS, max_gpu_hours=TINY_GPU_HOURS)
+    stage.judge = ScriptedCompletion([OPENING])
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.GPU_HOURS_EXHAUSTED, "", 0)
+    explore_end = SessionBudget.from_hours(SETTINGS.max_hours, START).phases_after_prelude(START).explore_end
+    [final_phase] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "final"]
+    assert float(str(final_phase["at"])) < explore_end
+    assert outcome.final is not None and outcome.final.chosen is not None
+    assert sorted(stage.sessions.stopped) == ["b01", "b02"]
+    [close] = [row for row in _decisions(stage) if row["kind"] == "session_stop"]
+    assert close["reason"] == SessionStopReason.GPU_HOURS_EXHAUSTED.value
+
+    # The opening call comes after PRELUDE and before any branch ran a test: what it was shown is the baseline on the
+    # root, which the PRELUDE child's own measurements never reach.
+    records = (await stage.handle(Role.OBSERVER).snapshot()).records
+    baseline = [record for record in records if record.request.purpose is Purpose.BASELINE]
+    assert baseline and all(record.result is not None for record in baseline)
+    baseline_seconds = sum(record.result.gpu_seconds for record in baseline if record.result is not None)
+    [opening] = _judge_prompts(stage)
+    spend = _judge_state(opening)["spend"]
+    assert spend["gpu_hours_used"] == round(baseline_seconds / MB_SECONDS_PER_HOUR, 3) > 0
+    assert spend["explore_gpu_hours"] == round(explore_gpu_seconds(TINY_GPU_HOURS) / MB_SECONDS_PER_HOUR, 3)
 
 
 async def test_a_judge_soft_stop_ends_explore_early_and_still_runs_final(tmp_path: Path) -> None:

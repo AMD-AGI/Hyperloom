@@ -107,7 +107,7 @@ class LlmPatchResolver:
     async def _rewrite(self, conflict: PatchConflict, merged: Recipe, candidate: str, onto: str) -> str | None:
         prompt = await self._prompt(conflict, merged, candidate, onto)
         try:
-            reply = await self._completion(RESOLVER_SYSTEM_PROMPT, prompt)
+            reply = (await self._completion(RESOLVER_SYSTEM_PROMPT, prompt)).text
         except CompletionFailed as exc:
             logger.warning("patch resolver call for %s failed: %s", conflict.path, exc)
             return None

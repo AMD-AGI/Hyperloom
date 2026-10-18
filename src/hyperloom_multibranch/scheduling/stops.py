@@ -47,6 +47,8 @@ TOOLBOX_CLOSE_SECONDS = 10.0
 
 class SessionStopReason(str, Enum):
     TIME_EXHAUSTED = "time_exhausted"
+    #: The tests used the GPU hours ``--max-gpu-hours`` leaves EXPLORE; FINAL still runs.
+    GPU_HOURS_EXHAUSTED = "gpu_hours_exhausted"
     GLOBAL_CONVERGED = "global_converged"
     SIGNAL = "signal"
     PRELUDE_FAILED = "prelude_baseline_failed"

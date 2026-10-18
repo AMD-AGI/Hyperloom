@@ -35,7 +35,7 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.rsi.session import FRONTIER_LOG, session_frontier
 from hyperloom_multibranch.scheduling.branches import BranchControl
-from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget, budget_seconds
+from hyperloom_multibranch.scheduling.budget import HardStop, SessionBudget, budget_seconds, explore_gpu_seconds
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.close import CloseReport, Closer
 from hyperloom_multibranch.scheduling.context import SchedulerContext
@@ -49,7 +49,7 @@ from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import Integrator, LlmPatchResolver, MergeRecords
 from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, Judge
 from hyperloom_multibranch.scheduling.layout import SessionLayout
-from hyperloom_multibranch.scheduling.llm import Completion
+from hyperloom_multibranch.scheduling.llm import Completion, CompletionMeter
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeerSetup
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
 from hyperloom_multibranch.scheduling.prelude import Prelude, PreludeFailed, PreludeResult
@@ -77,8 +77,11 @@ POLICY_VERSIONS = {
     "judge_prompt": JUDGE_PROMPT_VERSION,
     "scheduling": policy_version(SCHEDULING_POLICY),
 }
-#: Stop reasons a session ends with when it ran its course; any other one, or an error, is a failed session.
-COMPLETED_REASONS = frozenset({SessionStopReason.TIME_EXHAUSTED, SessionStopReason.GLOBAL_CONVERGED})
+#: Stop reasons a session ends with when it ran its course, a budget spent as set included; any other one, or an
+#: error, is a failed session.
+COMPLETED_REASONS = frozenset(
+    {SessionStopReason.TIME_EXHAUSTED, SessionStopReason.GPU_HOURS_EXHAUSTED, SessionStopReason.GLOBAL_CONVERGED}
+)
 #: The distribution this package ships in (pyproject.toml ``[project] name``).
 MB_DISTRIBUTION = "hyperloom-inference_optimizer"
 CUT_SHORT = "CLOSE was cut short after a stop signal"
@@ -160,15 +163,18 @@ class Session:
             self._notebook, PRIMARY_METRIC, budget_seconds=budget, log_path=layout.reports / FRONTIER_LOG
         )
         dashboard = SessionDashboard(self._notebook, progress, peers.toolbox, PRIMARY_METRIC, layout.dashboard)
-        resolver = LlmPatchResolver(services.resolver_completion, peers.repo)
+        llm_usage = CompletionMeter()
+        resolver = LlmPatchResolver(llm_usage.metered(services.resolver_completion), peers.repo)
         self._prelude = Prelude(context, peers.repo, peers.gate, tests, recipe_kb=services.recipe_kb)
         integrator = Integrator(MergeRecords(merger, DecisionLog(layout.merges, clock)), peers.repo, checks, resolver)
-        judge = Judge(services.judge_completion, layout.judge, clock)
+        judge = Judge(llm_usage.metered(services.judge_completion), layout.judge, clock)
         widening = Widening(peers.toolbox, self._roster, progress.policy)
         similarity = BranchSimilarity(peers.repo, self._roster)
         profiler = IntegrationProfiler(peers.toolbox, tests, self._notebook, clock)
         events = SessionEvents(self._notebook, self._decisions, profiler)
-        steering = Steering(judge, settings.judge_interval_seconds, progress, dashboard, widening, similarity, events)
+        steering = Steering(
+            judge, settings.judge_interval_seconds, progress, dashboard, widening, similarity, events, llm_usage
+        )
         self._explorer = Explorer(context, self._branches, integrator, steering, peers.split_landing)
         self._selector = FinalSelector(checks, settings.workload, PRIMARY_METRIC, clock)
         sources = ExportSources(self._notebook, peers.repo, blobs, dashboard)
@@ -267,6 +273,7 @@ class Session:
             deadlines.explore_end,
             budget.deadline,
             budget.total_seconds,
+            explore_gpu_seconds(self._settings.max_gpu_hours),
         )
         reason = await self._explorer.run(window)
         candidates = await self._final_candidates()

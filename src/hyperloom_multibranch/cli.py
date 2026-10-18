@@ -4,8 +4,10 @@
 """``hyperloom-multibranch``: command-line entry for a multi-branch session.
 
 ``run`` takes the fixed InferenceX workload, spelled as ``hyperloom optimize`` spells it, the wall-clock budget and
-the kernel optimizer its recipes are scoped to, and the hard limits the judge works within. Exit codes: 0 when the
-session ran its course, 1 when it failed or was stopped, 2 on a usage error. The environment and the peers a session
+the kernel optimizer its recipes are scoped to, and the hard limits the judge works within. ``--max-gpu-hours`` caps
+the GPU hours the session's tests use: EXPLORE ends with ``gpu_hours_exhausted`` once only FINAL's share is left,
+and FINAL still runs. Exit codes: 0 when the session ran its course, its wall-clock or GPU-hour budget spent
+included, 1 when it failed or was stopped, 2 on a usage error. The environment and the peers a session
 needs are checked before anything is created, so a missing one fails the command without leaving a session directory
 behind: the Recipe KB that PRELUDE reads warm-start leads from and CLOSE writes the final recipe back to is
 configured by ``KB_STORE_URL`` and ``KB_STORE_TOKEN``, both or neither, and is not used without them; the RSI archive
@@ -21,6 +23,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import math
 import os
 import sys
 from collections.abc import MutableMapping
@@ -78,6 +81,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-hours", type=float, default=MB_DEFAULT_MAX_HOURS, help="Wall-clock budget, PRELUDE included; 0 = none."
     )
     run.add_argument(
+        "--max-gpu-hours",
+        type=float,
+        default=0.0,
+        help="GPU hours the session's tests may use; EXPLORE ends when FINAL's share is all that is left; 0 = none.",
+    )
+    run.add_argument(
         "--max-branches", type=int, default=DEFAULT_MAX_BRANCHES, help="Specialist branches not stopped, at most."
     )
     run.add_argument(
@@ -104,6 +113,8 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
     errors = _positive(args, ("tp", "isl", "osl", "conc", "judge_interval_sec"))
     if args.max_hours < 0 or 0 < args.max_hours < MB_MIN_PRELUDE_HOURS:
         errors.append(f"--max-hours must be 0 (no limit) or at least {MB_MIN_PRELUDE_HOURS:.4f} (one minute)")
+    if not math.isfinite(args.max_gpu_hours) or args.max_gpu_hours < 0:
+        errors.append("--max-gpu-hours must be 0 (no limit) or a positive number of hours")
     if errors:
         raise ValueError("; ".join(errors))
     try:
@@ -125,7 +136,7 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
         KernelOptimizer(args.kernel_optimizer),
     )
     caps = RosterCaps(args.max_branches, args.max_k_per_branch, parallel)
-    return RunSettings(workload, args.max_hours, caps, args.judge_interval_sec)
+    return RunSettings(workload, args.max_hours, args.max_gpu_hours, caps, args.judge_interval_sec)
 
 
 def recipe_kb_from_env() -> RemoteRecipeClient | None:

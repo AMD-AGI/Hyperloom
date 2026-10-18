@@ -13,13 +13,15 @@ an event changes what the branches are worth: a merge that moved the integration
 of the profile taken of the integration head after such a merge moving, or a quarantined measurement node. A branch
 the judge opens after the opening batch starts from the integration head, briefed on a focus. The judge reads the
 frontier-scored progress, how similar archived sessions went, which running branches made much the same change, the
-events since its last call, how far each branch lies behind the integration head and whether a profile of the
-integration head runs, and decides what to stop; a judge call that has not answered by the EXPLORE deadline counts as
-failed, and a branch that has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a
-background task of its own, in rounds as wide as the integration branch's K. When EXPLORE ends that task is cancelled
+events since its last call, how far each branch lies behind the integration head, whether a profile of the
+integration head runs, and the GPU hours and scheduler LLM tokens used so far, and decides what to stop; a judge call
+that has not answered by the EXPLORE deadline counts as failed, and a branch that has not opened by then is
+withdrawn, so neither eats into FINAL. The integrator merges in a background task of its own, in rounds as wide as
+the integration branch's K. When EXPLORE ends that task is cancelled
 and the integrator abandons its round, so the integration head the FINAL candidates are read from no longer moves and
 no merge test competes with FINAL's measurements; a profile of the integration head still running is cancelled before
-that, taking its test back.
+that, taking its test back. Under ``--max-gpu-hours`` EXPLORE also ends, at a tick, once the session's tests have used
+the GPU hours FINAL's share leaves it.
 """
 
 from __future__ import annotations
@@ -27,13 +29,15 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Mapping
+import math
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierScoring
 from hyperloom_multibranch.notebook.rsi.session import judge_history
+from hyperloom_multibranch.scheduling.budget import MB_SECONDS_PER_HOUR
 from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS, BatchStart, BranchControl
 from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
@@ -41,6 +45,7 @@ from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
 from hyperloom_multibranch.scheduling.events import SessionEvents, behind_integration_pct
 from hyperloom_multibranch.scheduling.integrator import Integrator
 from hyperloom_multibranch.scheduling.judge import Judge, JudgeDecision, JudgeView
+from hyperloom_multibranch.scheduling.llm import CompletionMeter
 from hyperloom_multibranch.scheduling.mb_fakes import MbFakeSplitLanding
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchOrigin, BranchStop, StopCause
 from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC
@@ -59,14 +64,16 @@ FORK_NOT_LANDED = "the rule gate did not land the fork"
 
 @dataclass(frozen=True)
 class ExploreWindow:
-    """The commit branches start from, the roofline ceiling, the clock times EXPLORE and the budget end at, and the
-    session's whole budget."""
+    """The commit branches start from, the roofline ceiling, the clock times EXPLORE and the budget end at, the
+    session's whole budget, and the GPU seconds the session's tests may use before EXPLORE ends (``math.inf`` for no
+    limit)."""
 
     root_commit: str
     roofline_ceiling: Mapping[str, float]
     explore_end: float
     session_deadline: float
     budget_seconds: float
+    explore_gpu_seconds: float
 
 
 @dataclass(frozen=True)
@@ -74,7 +81,8 @@ class Steering:
     """How the judge steers EXPLORE: the judge, how often it is asked, the frontier-scored progress it reads, against
     the archived sessions that progress holds, the dashboard rebuilt once the opening batch is open and after every
     later judge call, the signals of whether a branch opened now would still pay off, which running branches made
-    much the same change, and the events that have the judge asked at once."""
+    much the same change, the events that have the judge asked at once, and the meter of the judge's and the patch
+    resolver's LLM tokens."""
 
     judge: Judge
     interval_seconds: float
@@ -83,6 +91,14 @@ class Steering:
     widening: Widening
     similarity: BranchSimilarity
     events: SessionEvents
+    llm_usage: CompletionMeter
+
+
+def spent_gpu_seconds(progress: Iterable[BranchProgress]) -> float:
+    """The GPU seconds the session's tests used: every test of every branch that has a result, the integration
+    branch's baseline on the root included; a test withdrawn before its result counts none."""
+
+    return sum(row.gpu_seconds for row in progress)
 
 
 def integration_row(progress: tuple[BranchProgress, ...]) -> BranchProgress | None:
@@ -116,6 +132,7 @@ class Explorer:
         self._widening = steering.widening
         self._similarity = steering.similarity
         self._events = steering.events
+        self._llm_usage = steering.llm_usage
 
     async def run(self, window: ExploreWindow) -> SessionStopReason:
         """Explore until the deadline or the judge's soft stop; the integrator is stopped before this returns.
@@ -149,6 +166,8 @@ class Explorer:
         while (now := self._clock.now()) < window.explore_end:
             if merging.done():
                 merging.result()
+            if await self._gpu_hours_exhausted(window):
+                return SessionStopReason.GPU_HOURS_EXHAUSTED
             overrun = await self._branches.stop_overrun_repairs()
             self._desk.fill_free_slots()
             freed = await self._start_admitted(window.explore_end) or overrun
@@ -162,6 +181,14 @@ class Explorer:
                 await self._dashboard.refresh()
             await self._clock.sleep(min(EXPLORE_TICK_SECONDS, window.explore_end - now))
         return SessionStopReason.TIME_EXHAUSTED
+
+    async def _gpu_hours_exhausted(self, window: ExploreWindow) -> bool:
+        """Whether the tests used the GPU seconds EXPLORE has. Reads the notebook's own progress: a frontier-scored
+        read appends a round to the frontier log."""
+
+        if window.explore_gpu_seconds == math.inf:
+            return False
+        return spent_gpu_seconds(await self._notebook.progress()) >= window.explore_gpu_seconds
 
     async def _merge_forever(self) -> None:
         while True:
@@ -235,6 +262,9 @@ class Explorer:
             events=self._events.hand_over(),
             behind_integration_pct=behind_integration_pct(progress, integration_value, root.values, PRIMARY_METRIC),
             profile_running=self._events.profiling,
+            gpu_hours_used=spent_gpu_seconds(progress) / MB_SECONDS_PER_HOUR,
+            explore_gpu_hours=_hours_or_none(window.explore_gpu_seconds),
+            scheduler_llm=self._llm_usage.used,
         )
         try:
             decision = await self._clock.wait_for(self._judge.decide(view), window.explore_end - now)
@@ -300,6 +330,10 @@ class Explorer:
             logger.error("the judge's stop of %s did not finish cleanly", branch, exc_info=failure)
 
 
+def _hours_or_none(seconds: float) -> float | None:
+    return None if seconds == math.inf else seconds / MB_SECONDS_PER_HOUR
+
+
 __all__ = [
     "EXPLORE_TICK_SECONDS",
     "FORK_NOT_LANDED",
@@ -308,4 +342,5 @@ __all__ = [
     "Explorer",
     "Steering",
     "integration_row",
+    "spent_gpu_seconds",
 ]

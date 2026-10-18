@@ -7,11 +7,13 @@ The baseline-prelude child gets all the remaining time; whatever it leaves, R, i
 out by the main flow's phase shares: FINAL keeps R*5/92, CLOSE keeps R*2/92 and EXPLORE
 runs until both reserves are all that is left. The deadline plus the CLOSE grace is the
 hard stop. The constants are re-declared because their owners are modules this package
-must not import; each names its source.
+must not import; each names its source. A GPU-hour budget keeps FINAL's share the same way:
+EXPLORE ends once the tests have used the rest of it.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -37,6 +39,15 @@ _SHARE_TOTAL = MB_EXPLORE_SHARE + MB_FINAL_SHARE + MB_CLOSE_SHARE
 def budget_seconds(max_hours: float) -> float:
     """``--max-hours`` in seconds; 0 means unlimited, capped like the main flow."""
     return (max_hours or MB_UNLIMITED_HOURS) * MB_SECONDS_PER_HOUR
+
+
+def explore_gpu_seconds(max_gpu_hours: float) -> float:
+    """The GPU seconds the session's tests may use before EXPLORE ends: ``--max-gpu-hours`` less FINAL's share,
+    ``math.inf`` when it is 0. FINAL is not cut when it uses more than its share."""
+
+    if not max_gpu_hours:
+        return math.inf
+    return max_gpu_hours * MB_SECONDS_PER_HOUR * MB_EXPLORE_SHARE / (MB_EXPLORE_SHARE + MB_FINAL_SHARE)
 
 
 class BudgetExhausted(RuntimeError):
@@ -136,4 +147,5 @@ __all__ = [
     "PhaseDeadlines",
     "SessionBudget",
     "budget_seconds",
+    "explore_gpu_seconds",
 ]

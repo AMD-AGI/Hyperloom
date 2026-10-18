@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What one multi-branch run is given: the InferenceX workload, the wall-clock budget and the hard limits."""
+"""What one multi-branch run is given: the InferenceX workload, the wall-clock and GPU-hour budgets and the hard
+limits."""
 
 from __future__ import annotations
 
@@ -49,10 +50,12 @@ class Workload:
 
 @dataclass(frozen=True)
 class RunSettings:
-    """``max_hours`` is the whole session's wall-clock budget, PRELUDE included."""
+    """``max_hours`` is the whole session's wall-clock budget, PRELUDE included, and ``max_gpu_hours`` the GPU hours
+    the session's tests may use; 0 means no limit for either."""
 
     workload: Workload
     max_hours: float
+    max_gpu_hours: float
     caps: RosterCaps
     judge_interval_seconds: float
 

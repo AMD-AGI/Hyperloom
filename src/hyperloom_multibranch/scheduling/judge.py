@@ -6,10 +6,11 @@
 The scheduler hands the judge a :class:`JudgeView` (the roster, each branch's frontier progress, the remaining budget,
 the integration branch's recorded value, how similar archived sessions went, whether a branch opened now would
 still pay off, which running branches made much the same change, the events since its last call, how far each
-branch lies behind the integration head and whether a profile of the integration head runs). The judge answers with
-one JSON object, which :func:`parse_decision` reads and :func:`cap_decision` cuts to the caps and to the branches that
-are still live. A failed call or an unreadable reply gives ``None``, and the scheduler keeps the status quo. The judge
-never calls a peer; the scheduler applies its decision.
+branch lies behind the integration head, whether a profile of the integration head runs, and the GPU hours and LLM
+tokens the session has used). The judge answers with one JSON object, which :func:`parse_decision` reads and
+:func:`cap_decision` cuts to the caps and to the branches that are still live. A failed call or an unreadable reply
+gives ``None``, and the scheduler keeps the status quo. The judge never calls a peer; the scheduler applies its
+decision.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from hyperloom_multibranch.contracts.notebook.records import BranchProgress
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, SessionEvent
 from hyperloom_multibranch.scheduling.forks import PendingBranch
-from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed
+from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed, CompletionUsage
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, RosterCaps
 from hyperloom_multibranch.scheduling.similarity import SimilarBranch
 from hyperloom_multibranch.scheduling.widening import WideningSignals
@@ -88,6 +89,13 @@ explore_remaining_seconds is below min_useful_seconds, a branch opened now is un
 toolbox_headroom is how many more tests the toolbox would start at once: the max_parallel_tests cap less the tests
 running and queued. A branch opened now makes progress only while it is above 0, and runs at its full K only while it
 is at least that K.
+spend is what the session has used so far. gpu_hours_used is the GPU time of every test of this session that has a
+result, a failed one and the baseline measured on the root commit included; a test taken back before its result is
+not in it, and neither are the measurements the PRELUDE run that built the root commit made on its own.
+explore_gpu_hours is the gpu_hours_used at which EXPLORE ends to leave FINAL its share, or null when GPU hours are not
+limited: as gpu_hours_used nears it, a branch opened now has few tests left to run, and the session stops exploring
+there whatever you decide. scheduler_llm_tokens are the tokens your own calls and the patch resolver's have used; the
+specialists' LLM spend is not in it.
 Stop the session only when no branch is expected to gain anything worth the remaining time.
 Answer with exactly ONE JSON object and nothing after it."""
 
@@ -117,6 +125,10 @@ class JudgeView:
     same as its own; a branch similar to none is not in it. ``events`` are the events detected since the last call,
     and ``behind_integration_pct`` maps a running specialist branch to how far its head lies behind the integration
     head, in percent of the root's value. ``profile_running`` is whether a profile of the integration head runs.
+    ``gpu_hours_used`` are the GPU hours of the session's tests that have a result: the root's baseline is among them,
+    a test withdrawn before its result and the PRELUDE child's own measurements are not. ``explore_gpu_hours`` is where
+    EXPLORE ends under ``--max-gpu-hours``, ``None`` without a limit, and ``scheduler_llm`` the tokens the judge and
+    the patch resolver used.
     """
 
     now: float
@@ -137,6 +149,9 @@ class JudgeView:
     events: tuple[SessionEvent, ...]
     behind_integration_pct: Mapping[str, float]
     profile_running: bool
+    gpu_hours_used: float
+    explore_gpu_hours: float | None
+    scheduler_llm: CompletionUsage
 
 
 @dataclass(frozen=True)
@@ -255,6 +270,11 @@ def render_prompt(view: JudgeView) -> str:
             "roofline_ceiling": dict(view.roofline_ceiling),
             "headroom_pct": _headroom_pct(view),
         },
+        "spend": {
+            "gpu_hours_used": round(view.gpu_hours_used, 3),
+            "explore_gpu_hours": None if view.explore_gpu_hours is None else round(view.explore_gpu_hours, 3),
+            "scheduler_llm_tokens": asdict(view.scheduler_llm),
+        },
         "events": [{"event": event.kind.value, "reason": event.reason, **event.detail} for event in view.events],
         _KEY_BRANCHES: [_branch_row(entry, progress.get(entry.branch), view) for entry in view.roster],
     }
@@ -370,7 +390,7 @@ class Judge:
         reply = ""
         decision = None
         try:
-            reply = await self.completion(JUDGE_SYSTEM_PROMPT, prompt)
+            reply = (await self.completion(JUDGE_SYSTEM_PROMPT, prompt)).text
         except CompletionFailed as exc:
             error = str(exc)
         else:

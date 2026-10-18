@@ -66,6 +66,7 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.local_peers import GATE_WRITER
+from hyperloom_multibranch.scheduling.llm import CompletionReply, CompletionUsage
 from hyperloom_multibranch.scheduling.mb_fakes import MbFakeRegressionOutcome
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
 from hyperloom_multibranch.specialist.judging import Judging
@@ -666,7 +667,8 @@ def judged(verdict: Verdict, gain_pct: float, request_id: str, value: float) -> 
 
 @dataclass
 class ScriptedCompletion:
-    """A model for the tests: raises ``error`` when it is set, else the scripted replies in order, then ``fallback``.
+    """A model for the tests: raises ``error`` when it is set, else the scripted replies in order, then ``fallback``,
+    each reply using ``usage``.
 
     Not a placeholder: a test never calls a real model.
     """
@@ -675,12 +677,13 @@ class ScriptedCompletion:
     fallback: str = '{"open": 0, "branches": [], "stop": [], "stop_session": null}'
     error: Exception | None = None
     calls: list[tuple[str, str]] = field(default_factory=list)
+    usage: CompletionUsage = CompletionUsage()
 
-    async def __call__(self, system: str, user: str) -> str:
+    async def __call__(self, system: str, user: str) -> CompletionReply:
         self.calls.append((system, user))
         if self.error is not None:
             raise self.error
-        return self.replies.pop(0) if self.replies else self.fallback
+        return CompletionReply(self.replies.pop(0) if self.replies else self.fallback, self.usage)
 
 
 @dataclass
