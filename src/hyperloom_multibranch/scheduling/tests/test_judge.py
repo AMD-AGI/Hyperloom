@@ -16,6 +16,7 @@ from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, FrontierScore
 from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis
+from hyperloom_multibranch.notebook import STALL_TESTS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, EventKind, SessionEvent
 from hyperloom_multibranch.scheduling.judge import (
@@ -102,6 +103,7 @@ def _view(
                 tests=7,
                 commits=2,
                 gpu_seconds=120.0,
+                judged_since_commit=5,
                 head_value={METRIC: 110.0},
                 frontier=FrontierScore(3.25, {"trend_pct": 2.5, "observing": 1.0}),
             ),
@@ -261,6 +263,15 @@ def test_prompt_shows_frontier_roster_caps_budget_and_headroom() -> None:
     assert state["session_remaining_seconds"] == 4000
     assert state["integration"]["headroom_pct"] == 75.0
     assert '"stop_session"' in prompt and "ONE JSON object" in JUDGE_SYSTEM_PROMPT
+
+
+def test_a_branch_row_shows_its_tests_judged_since_its_last_commit_and_the_prompt_names_the_stall_count() -> None:
+    rows = {row["branch"]: row for row in _state(_view())["branches"]}
+
+    assert rows["b01"]["judged_since_commit"] == 5
+    assert "judged_since_commit" not in rows["b02"]
+    prose = " ".join(JUDGE_SYSTEM_PROMPT.split())
+    assert f"When it reaches {STALL_TESTS}, its specialist is asked to read its brief again" in prose
 
 
 def _state(view: JudgeView) -> dict[str, object]:

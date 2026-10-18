@@ -41,7 +41,7 @@ from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore, CommitQuery
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SpecialistTokens
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.notebook import BriefTriggers, LocalNotebook
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.gate import RuleGate
@@ -215,7 +215,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     rule = workload_rule(workload, gate_notebook)
 
     def runtime_notebook(branch: str) -> LocalNotebook:
-        return LocalNotebook(layout.notebook, Writer(Role.SPECIALIST_RUNTIME, branch, branch))
+        return LocalNotebook(layout.notebook, Writer(Role.SPECIALIST_RUNTIME, branch, branch), briefs=BriefTriggers())
 
     mcp = McpServer(McpServerConfig(host_token=secrets.token_hex(32)), campaign=layout.session_id)
     learnings = mb_fake_learning_recall(RetrievalLog(layout.reports / LEARNINGS_LOG))

@@ -11,7 +11,8 @@ import asyncio
 import json
 import os
 import urllib.request
-from dataclasses import replace
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,10 @@ from hyperloom.measure import compile as compile_module
 from hyperloom.measure.compile import ComponentLayout, LocalBlobStore, PackageBase, UnsupportedComponentError
 from hyperloom.measure.pins import ActiveImage, ToolCommits, pinned_tool_commits
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.contracts.notebook.records import LineageEvent
+from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, InboxKind, LineageKind
+from hyperloom_multibranch.notebook import STALL_TESTS, LocalNotebook
+from hyperloom_multibranch.notebook.tests.factories import intent, judgement, request, result
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule
@@ -32,7 +36,7 @@ from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.forks import ForkDesk
-from hyperloom_multibranch.scheduling.layout import SESSION_PREFIX, create_session
+from hyperloom_multibranch.scheduling.layout import SESSION_PREFIX, SessionLayout, create_session
 from hyperloom_multibranch.scheduling.local_peers import (
     AGENTX_ENV,
     MB_FAKE_IMAGE_REF,
@@ -49,7 +53,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
     _specialist_role,
 )
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
-from hyperloom_multibranch.scheduling.peers import PeerSetup, PeersUnavailable
+from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
@@ -231,9 +235,18 @@ def test_a_machine_that_shows_no_card_fits_no_test(monkeypatch: pytest.MonkeyPat
         machine_parallel_tests(1)
 
 
-async def test_the_real_peers_live_inside_the_session_directory(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+@dataclass(frozen=True)
+class _Built:
+    layout: SessionLayout
+    setup: PeerSetup
+    peers: Peers
+    wiring: SessionWiring
+
+
+@pytest.fixture
+async def built(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Built]:
+    """The real peers of a session in ``tmp_path``, with the wiring their specialist sessions were built on."""
+
     monkeypatch.delenv("HL_MODEL_BASE", raising=False)
     for name in workload_environment(WORKLOAD):
         monkeypatch.setenv(name, "")
@@ -257,41 +270,70 @@ async def test_the_real_peers_live_inside_the_session_directory(
         return ModelSessions(factory, worktrees)
 
     peers = local_peers(HOST, sessions, setup)
+    [wiring] = wired
     try:
-        [wiring] = wired
-        assert (wiring.setup, wiring.repo, wiring.briefs) == (setup, peers.repo, peers.briefs)
-        assert isinstance(peers.lifecycle, SpecialistRuntime) and peers.briefs.warm == ()
-        assert isinstance(peers.toolbox, LocalHostedToolbox) and isinstance(peers.repo, GitExperimentRepo)
-        assert (layout.toolbox / "canonical" / "canonical.yaml").is_file()
-        assert not (layout.toolbox / "measurement-config.json").exists()
-        assert peers.base_image_digest == IMAGE.digest
-        assert peers.mcp.url.startswith("http://127.0.0.1:")
-        assert {name: os.environ[name] for name in workload_environment(WORKLOAD)} == workload_environment(WORKLOAD)
-        root = await peers.repo.init_root(Recipe(IMAGE.digest))
-        assert await peers.repo.head(INTEGRATION_BRANCH) == root
-        patch = await peers.repo.store_patch("sglang", "--- a/x\n+++ b/x\n")
-        assert LocalBlobStore(layout.blobs).get(patch.sha256) == b"--- a/x\n+++ b/x\n"
-        assert isinstance(peers.gate, GateService) and await peers.gate.baseline_test_count() == BASELINE_TESTS
-        await peers.toolbox.start()
-        await peers.toolbox.set_policy(QueuePolicy(per_branch_k=1, global_concurrency=2))
-        state = await peers.toolbox.queue_state()
-        assert (state.queued, state.running) == (0, 0)
-        assert isinstance(wiring.tokens, McpSpecialistTokens)
-        grant = wiring.tokens.issue("b01", frozenset({SCOPE_SPECIALIST}))
-        assert grant.url == peers.mcp.url
-        reply = await asyncio.to_thread(_call_tool, grant, "queue_state")
-        assert reply["result"]["isError"] is False
-        tools = await asyncio.to_thread(_list_tools, grant)
-        served = {
-            "worktree_sync",
-            "worktree_check",
-            "worktree_patch",
-            "notebook_brief",
-            "request_repair",
-            "decline_repair",
-        }
-        assert served <= tools
+        yield _Built(layout, setup, peers, wiring)
     finally:
         peers.mcp.stop()
         await peers.toolbox.close()
+
+
+async def test_the_real_peers_live_inside_the_session_directory(built: _Built) -> None:
+    layout, setup, peers, wiring = built.layout, built.setup, built.peers, built.wiring
+    assert (wiring.setup, wiring.repo, wiring.briefs) == (setup, peers.repo, peers.briefs)
+    assert isinstance(peers.lifecycle, SpecialistRuntime) and peers.briefs.warm == ()
+    assert isinstance(peers.toolbox, LocalHostedToolbox) and isinstance(peers.repo, GitExperimentRepo)
+    assert (layout.toolbox / "canonical" / "canonical.yaml").is_file()
+    assert not (layout.toolbox / "measurement-config.json").exists()
+    assert peers.base_image_digest == IMAGE.digest
+    assert peers.mcp.url.startswith("http://127.0.0.1:")
+    assert {name: os.environ[name] for name in workload_environment(WORKLOAD)} == workload_environment(WORKLOAD)
+    root = await peers.repo.init_root(Recipe(IMAGE.digest))
+    assert await peers.repo.head(INTEGRATION_BRANCH) == root
+    patch = await peers.repo.store_patch("sglang", "--- a/x\n+++ b/x\n")
+    assert LocalBlobStore(layout.blobs).get(patch.sha256) == b"--- a/x\n+++ b/x\n"
+    assert isinstance(peers.gate, GateService) and await peers.gate.baseline_test_count() == BASELINE_TESTS
+    await peers.toolbox.start()
+    await peers.toolbox.set_policy(QueuePolicy(per_branch_k=1, global_concurrency=2))
+    state = await peers.toolbox.queue_state()
+    assert (state.queued, state.running) == (0, 0)
+    assert isinstance(wiring.tokens, McpSpecialistTokens)
+    grant = wiring.tokens.issue("b01", frozenset({SCOPE_SPECIALIST}))
+    assert grant.url == peers.mcp.url
+    reply = await asyncio.to_thread(_call_tool, grant, "queue_state")
+    assert reply["result"]["isError"] is False
+    tools = await asyncio.to_thread(_list_tools, grant)
+    served = {
+        "worktree_sync",
+        "worktree_check",
+        "worktree_patch",
+        "notebook_brief",
+        "request_repair",
+        "decline_repair",
+    }
+    assert served <= tools
     assert all(entry.name.startswith(SESSION_PREFIX) for entry in layout.root.iterdir())
+
+
+async def test_the_specialist_notebook_handle_briefs_a_branch_after_stall_tests_judged_tests_without_a_commit(
+    built: _Built,
+) -> None:
+    root = built.layout.notebook
+    scheduler = LocalNotebook(root, Writer(Role.SCHEDULER, "test-scheduler"))
+    await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id="c0"))
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "b01", from_commit="c0"))
+    toolbox = LocalNotebook(root, Writer(Role.TOOLBOX, "test-toolbox"))
+    gate = LocalNotebook(root, Writer(Role.GATE, "test-gate"))
+    handle = built.wiring.notebooks("b01")
+    assert isinstance(handle, LocalNotebook)
+
+    async def judged(count: int) -> list[str]:
+        for n in range(count):
+            request_id = f"r{n}-{count}"
+            await toolbox.write_request(request(request_id, intent("b01", "c0", target=request_id)))
+            await toolbox.write_result(result(request_id))
+            await gate.write_judgement(request_id, judgement(0.1, (request_id,)), Conclusion.RECORDED_ONLY, None)
+        return [item.summary for item in (await handle.poll("b01")).items if item.kind is InboxKind.BRIEF]
+
+    assert await judged(STALL_TESTS - 1) == []
+    assert [summary.split(":")[0] for summary in await judged(1)] == ["stall"]

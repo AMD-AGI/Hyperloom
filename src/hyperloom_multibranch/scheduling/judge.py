@@ -26,6 +26,7 @@ from hyperloom.common.jsonio import extract_last_json_with_key
 from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress
+from hyperloom_multibranch.notebook import STALL_TESTS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, SessionEvent
 from hyperloom_multibranch.scheduling.forks import PendingBranch
@@ -65,6 +66,9 @@ observing a slow-paying direction is a candidate to stop or to lower K; keep K w
 A branch's basis says what its expected gain rests on: its own trend, a prior from similar past sessions, the floor
 of a direction still being observed, the floor of a branch too new to have a trend, or the roofline headroom that
 capped it; trust a measured trend over a floor.
+A branch's judged_since_commit counts its tests judged since its last commit (since it opened, before any). When it
+reaches {STALL_TESTS}, its specialist is asked to read its brief again and reconsider its direction: a branch whose
+count runs well past that is stalling, a candidate to stop or to lower K unless its frontier still expects a gain.
 A branch's similar_to lists the other running branches whose own change since their start commit is much the same as
 its own, with score the share of the two changes they have in common. identical is true when both heads hold the same
 recipe: two branches marked identical spend twice the budget on one result, so stop the one of the pair with the
@@ -224,6 +228,7 @@ def _progress_row(progress: BranchProgress | None) -> dict[str, object]:
         "head_commit": progress.head_commit,
         "tests": progress.tests,
         "commits": progress.commits,
+        "judged_since_commit": progress.judged_since_commit,
         "gpu_seconds": progress.gpu_seconds,
         "head_value": dict(progress.head_value),
     }
