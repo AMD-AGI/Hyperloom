@@ -6,7 +6,7 @@ from pathlib import Path
 
 import kernelforge.loop.insession_gate as gate_module
 import pytest
-from kernelforge.loop.insession_gate import InSessionGate
+from kernelforge.loop.insession_gate import GateMeasurement, GateScope, InSessionGate
 from kernelforge.llm.git import GitError
 
 
@@ -32,12 +32,10 @@ def _gate(tmp_path: Path) -> tuple[InSessionGate, Path]:
     )
 
     gate = InSessionGate(
-        driver_script=str(workspace / "forge_driver.py"),
-        snr_threshold=30.0,
+        GateMeasurement(driver_script=str(workspace / "forge_driver.py"), snr_threshold=30.0),
+        GateScope(kernel_file=str(kernel), target_files=[str(kernel)]),
         baseline_case_times={"case": 1.0},
         best_mean_case_speedup=1.0,
-        kernel_file=str(kernel),
-        target_files=[str(kernel)],
     )
     return gate, workspace
 
@@ -58,12 +56,10 @@ def test_declared_source_hint_cannot_override_protection(tmp_path: Path):
     driver.write_text("print('driver')\n")
     config.write_text("task: protected\n")
     gate = InSessionGate(
-        driver_script=str(driver),
-        snr_threshold=30.0,
+        GateMeasurement(driver_script=str(driver), snr_threshold=30.0),
+        GateScope(kernel_file=str(workspace / "kernel.py"), target_files=[str(config)]),
         baseline_case_times={"case": 1.0},
         best_mean_case_speedup=1.0,
-        kernel_file=str(workspace / "kernel.py"),
-        target_files=[str(config)],
     )
 
     assert gate._is_protected(str(config))
@@ -78,12 +74,10 @@ def _gate_with_protected_config(tmp_path: Path):
     driver.write_text("print('driver')\n")
     config.write_text("task: protected\n")
     return InSessionGate(
-        driver_script=str(driver),
-        snr_threshold=30.0,
+        GateMeasurement(driver_script=str(driver), snr_threshold=30.0),
+        GateScope(kernel_file=str(workspace / "kernel.py"), target_files=[str(config)]),
         baseline_case_times={"case": 1.0},
         best_mean_case_speedup=1.0,
-        kernel_file=str(workspace / "kernel.py"),
-        target_files=[str(config)],
     )
 
 
@@ -449,12 +443,10 @@ def test_snapshot_covers_driver_and_glob_only_harness(tmp_path: Path):
     harness.write_text("print('harness')\n")
 
     gate = InSessionGate(
-        driver_script=str(driver),
-        snr_threshold=30.0,
+        GateMeasurement(driver_script=str(driver), snr_threshold=30.0),
+        GateScope(kernel_file=str(kernel), target_files=[str(kernel)]),
         baseline_case_times={"case": 1.0},
         best_mean_case_speedup=1.0,
-        kernel_file=str(kernel),
-        target_files=[str(kernel)],
     )
 
     snapshot = gate._protected_snapshot
@@ -476,9 +468,8 @@ def test_snapshot_recurses_nested_globs_and_protected_directories(tmp_path: Path
     # Recreate the gate after protected files exist so they become the baseline.
     kernel = workspace / "aiter" / "csrc" / "kernel.cu"
     gate = InSessionGate(
-        driver_script=str(workspace / "forge_driver.py"),
-        snr_threshold=30.0,
-        kernel_file=str(kernel),
+        GateMeasurement(driver_script=str(workspace / "forge_driver.py"), snr_threshold=30.0),
+        GateScope(kernel_file=str(kernel)),
     )
     nested_glob.write_text("changed\n")
     nested_dir.write_text("changed\n")
@@ -550,9 +541,8 @@ def test_restore_protected_files_restores_nested_and_removes_added(
     nested.write_text("original\n")
     kernel = workspace / "aiter" / "csrc" / "kernel.cu"
     gate = InSessionGate(
-        driver_script=str(workspace / "forge_driver.py"),
-        snr_threshold=30.0,
-        kernel_file=str(kernel),
+        GateMeasurement(driver_script=str(workspace / "forge_driver.py"), snr_threshold=30.0),
+        GateScope(kernel_file=str(kernel)),
     )
     nested.write_text("changed\n")
     added = workspace / "other" / "tests" / "new_oracle.bin"
@@ -592,13 +582,10 @@ def test_driver_outside_the_workspace_does_not_move_the_measured_root(tmp_path: 
 
     def build(**extra):
         return InSessionGate(
-            driver_script=str(driver),
-            snr_threshold=30.0,
+            GateMeasurement(driver_script=str(driver), snr_threshold=30.0),
+            GateScope(kernel_file=str(kernel), target_files=[str(kernel)], **extra),
             baseline_case_times={"case": 1.0},
             best_mean_case_speedup=1.0,
-            kernel_file=str(kernel),
-            target_files=[str(kernel)],
-            **extra,
         )
 
     gate = build(workspace=workspace)

@@ -1710,7 +1710,8 @@ def forge_loop(request: ForgeLoopRequest):
     from kernelforge.loop.runner import IterationLoop
     from kernelforge.loop.runner import IterationConfig
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
-    from kernelforge.orchestrator.agent import make_agent_fn
+    from kernelforge.loop.insession_gate import GateMeasurement
+    from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask, SessionOptions, make_agent_fn
     from kernelforge.roofline_ceiling.command import AnalystAgent
 
     iter_config = IterationConfig(
@@ -1882,29 +1883,35 @@ def forge_loop(request: ForgeLoopRequest):
     pr_task_context, pr_kb_repo = _collect_pr_kb_context(run)
 
     selected_runtime = config.agent_runtime()
-    agent_fn = make_agent_fn(
-        config=config,
-        program_md=program_md,
-        pre_task_context=pr_task_context,
-        pr_kb_repo=pr_kb_repo,
-        kernel_backend_name=kernel_backend,
-        insession_gate=gate_on,
-        driver_script=driver,
-        snr_threshold=snr_threshold,
-        max_blocks=max_blocks,
-        session_timeout_sec=session_timeout_sec,
-        validation_timeout_sec=iter_config.validate_stage_timeout_sec,
-        bench_timeout_sec=iter_config.bench_timeout_sec,
-        bench_repeat=bench_repeat,
-        permission_mode=request.roles.permission_mode,
-        task_type=task_type,
-        source_files=source_files_list,
-        target_functions=target_functions_list,
-        profiling_enabled=profiling_enabled,
-        agent_backend=selected_runtime.provider,
-        commit_new_paths=iter_config.commit_new_paths,
-        usage=usage,
+    implementer_setup = ImplementerSetup(
+        ImplementerTask(
+            program_md=program_md,
+            kernel_backend_name=kernel_backend,
+            pre_task_context=pr_task_context,
+            pr_kb_repo=pr_kb_repo,
+            task_type=task_type,
+            source_files=source_files_list,
+            # Function names, not paths: nothing to rebind onto a lane.
+            target_functions=target_functions_list,
+            profiling_enabled=profiling_enabled,
+            commit_new_paths=iter_config.commit_new_paths,
+        ),
+        GateMeasurement(
+            driver_script=driver,
+            snr_threshold=snr_threshold,
+            max_blocks=max_blocks,
+            stage_timeout_sec=iter_config.validate_stage_timeout_sec,
+            bench_timeout_sec=iter_config.bench_timeout_sec,
+            bench_repeat=bench_repeat,
+        ),
+        SessionOptions(
+            session_timeout_sec=session_timeout_sec,
+            permission_mode=request.roles.permission_mode,
+            agent_backend=selected_runtime.provider,
+            insession_gate=gate_on,
+        ),
     )
+    agent_fn = make_agent_fn(config, implementer_setup, usage=usage)
     effective_implementer = getattr(
         agent_fn,
         "backend_name",
@@ -1926,25 +1933,8 @@ def forge_loop(request: ForgeLoopRequest):
         make_agent=make_agent_fn,
         config=config,
         binding=LaneBinding(iter_config.workspace_dir, driver, source_files_list),
-        session_kwargs={
-            "program_md": program_md,
-            "pre_task_context": pr_task_context,
-            "pr_kb_repo": pr_kb_repo,
-            "kernel_backend_name": kernel_backend,
-            "snr_threshold": snr_threshold,
-            "max_blocks": max_blocks,
-            "session_timeout_sec": session_timeout_sec,
-            "validation_timeout_sec": iter_config.validate_stage_timeout_sec,
-            "bench_timeout_sec": iter_config.bench_timeout_sec,
-            "bench_repeat": bench_repeat,
-            "permission_mode": request.roles.permission_mode,
-            "task_type": task_type,
-            "commit_new_paths": iter_config.commit_new_paths,
-            # Function names, not paths: nothing to rebind onto a lane.
-            "target_functions": target_functions_list,
-            "agent_backend": selected_runtime.provider,
-            "usage": usage,
-        },
+        setup=implementer_setup,
+        usage=usage,
     )
 
     from kernelforge.orchestrator.analysis import make_analysis_agent_service

@@ -7,7 +7,7 @@ import asyncio
 import json
 import pathlib
 
-from kernelforge.loop.insession_gate import InSessionGate
+from kernelforge.loop.insession_gate import GateMeasurement, InSessionGate
 from kernelforge.loop.scoring import (
     keep_score,
     passes_keep_threshold,
@@ -135,11 +135,9 @@ def test_the_published_pristine_score_is_monotonic_across_keeps():
 
 def _gate(**kwargs) -> InSessionGate:
     return InSessionGate(
-        driver_script="/tmp/drv.py",
-        snr_threshold=30.0,
+        GateMeasurement(driver_script="/tmp/drv.py", snr_threshold=30.0, **kwargs),
         baseline_case_times={"case": 1.0},
         best_mean_case_speedup=1.0,
-        **kwargs,
     )
 
 

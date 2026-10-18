@@ -26,6 +26,7 @@ from kernelforge.llm.workspace_policy import (
 from kernelforge.llm.git import git
 from kernelforge.loop.jit_rebuild import JitRebuildUnavailable, force_jit_rebuild_for_changes
 from kernelforge.loop.scoring import (
+    DEFAULT_SNR_THRESHOLD_DB,
     KEEP_MEASUREMENT_COUNT,
     keep_score,
     passes_keep_threshold,
@@ -446,48 +447,63 @@ def _python_write_targets(source: str) -> tuple[set[str], bool, bool]:
     return written.paths, written.ambiguous, written.found_write
 
 
+@dataclass(frozen=True)
+class GateMeasurement:
+    """How the gate judges a candidate: its driver (and any interposed wrapper), threshold, budgets and timeouts."""
+
+    driver_script: str | None = None
+    snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB
+    max_blocks: int = 10
+    stage_timeout_sec: int = 1800
+    bench_timeout_sec: int = 300
+    bench_repeat: int = 1
+    correctness_only: bool = False
+    interposed_driver_path: str | None = None
+    max_stop_blocks: int = _MAX_STOP_BLOCKS
+
+
+@dataclass(frozen=True)
+class GateScope:
+    """What one session works on and what the gate refuses to let it touch beyond the driver."""
+
+    kernel_file: str = ""
+    target_files: list[str] | None = None
+    extra_protected_globs: list[str] | None = None
+    extra_protected_paths: list[str] | None = None
+    workspace: str | Path | None = None
+
+
 class InSessionGate:
     """Per-iteration harness-protection gate driving the Stop hook."""
 
     def __init__(
         self,
-        driver_script: str,
-        snr_threshold: float,
+        measurement: GateMeasurement,
+        scope: GateScope = GateScope(),
+        *,
         baseline_case_times: dict | None = None,
         best_mean_case_speedup: float | None = None,
-        kernel_file: str = "",
-        max_blocks: int = 10,
-        stage_timeout_sec: int = 1800,
-        bench_timeout_sec: int = 300,
-        max_stop_blocks: int = _MAX_STOP_BLOCKS,
-        protected_globs: list[str] | None = None,
-        target_files: list[str] | None = None,
-        extra_protected_globs: list[str] | None = None,
-        extra_protected_paths: list[str] | None = None,
-        correctness_only: bool = False,
-        bench_repeat: int = 1,
-        interposed_driver_path: str | None = None,
-        workspace: str | Path | None = None,
     ):
+        driver_script, kernel_file = measurement.driver_script, scope.kernel_file
         self.driver_script = driver_script
         # The wrapper script this session must reach the driver through, when a caller interposed one.
-        self.interposed_driver_path = interposed_driver_path or ""
-        self.snr_threshold = snr_threshold
-        self.bench_repeat = bench_repeat
+        self.interposed_driver_path = measurement.interposed_driver_path or ""
+        self.snr_threshold = measurement.snr_threshold
+        self.bench_repeat = measurement.bench_repeat
         self.baseline_case_times = dict(baseline_case_times or {})
         self.best_mean_case_speedup = best_mean_case_speedup
         # Correctness-only phase (e.g. PORT): the gate requires ONLY correctness and never runs the perf gate (no
         # benchmark; best score unused).
-        self.correctness_only = correctness_only
+        self.correctness_only = measurement.correctness_only
         # Attempt budget for the correctness/perf self-correction loop.
-        self.max_blocks = max_blocks
-        self.stage_timeout_sec = stage_timeout_sec
-        self.bench_timeout_sec = bench_timeout_sec
+        self.max_blocks = measurement.max_blocks
+        self.stage_timeout_sec = measurement.stage_timeout_sec
+        self.bench_timeout_sec = measurement.bench_timeout_sec
         # Upper bound on Stop-hook blocks for unrestored harness tampering.
-        self.max_stop_blocks = max_stop_blocks
+        self.max_stop_blocks = measurement.max_stop_blocks
 
         # Target file set used to count edits for observability.
-        targets = list(target_files) if target_files else []
+        targets = list(scope.target_files) if scope.target_files else []
         if kernel_file:
             targets.append(kernel_file)
         self.target_abs = {os.path.normpath(os.path.abspath(f)) for f in targets if f}
@@ -521,16 +537,16 @@ class InSessionGate:
         if driver_script:
             self.protected_abs.add(os.path.normpath(os.path.abspath(driver_script)))
         # Additional exact-path measurement files.
-        for p in extra_protected_paths or []:
+        for p in scope.extra_protected_paths or []:
             if p:
                 self.protected_abs.add(os.path.normpath(os.path.abspath(p)))
-        self.workspace_root = self._infer_workspace_root(workspace, driver_script, kernel_file)
+        self.workspace_root = self._infer_workspace_root(scope.workspace, driver_script, kernel_file)
 
-        globs = list(protected_globs) if protected_globs is not None else list(_DEFAULT_PROTECTED_GLOBS)
+        globs = list(_DEFAULT_PROTECTED_GLOBS)
         # Repository tasks ship the reference/test implementation INSIDE the repo tree (e.g. AITER's
         # op_tests/.../test_*.py provides the correctness reference), which the default globs above do not catch.
-        if extra_protected_globs:
-            globs += list(extra_protected_globs)
+        if scope.extra_protected_globs:
+            globs += list(scope.extra_protected_globs)
         self.protected_globs = list(dict.fromkeys(globs))  # dedup, keep order
         (
             self._protected_baseline,

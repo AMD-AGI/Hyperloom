@@ -5,10 +5,14 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import subprocess
 from pathlib import Path
 
-from kernelforge.loop.insession_gate import InSessionGate
+from kernelforge.loop.insession_gate import GateMeasurement, GateScope, InSessionGate
+
+_MEASUREMENT_FIELDS = [field.name for field in dataclasses.fields(GateMeasurement)]
+_SCOPE_FIELDS = [field.name for field in dataclasses.fields(GateScope)]
 
 
 def _run(coro):
@@ -60,7 +64,9 @@ def _gate(tmp_path: Path, **overrides) -> tuple[InSessionGate, Path]:
         target_files=[str(kernel)],
     )
     kwargs.update(overrides)
-    return InSessionGate(**kwargs), workspace
+    measurement = {name: kwargs.pop(name) for name in _MEASUREMENT_FIELDS if name in kwargs}
+    scope = {name: kwargs.pop(name) for name in _SCOPE_FIELDS if name in kwargs}
+    return InSessionGate(GateMeasurement(**measurement), GateScope(**scope), **kwargs), workspace
 
 
 # ── constructor bookkeeping ────────────────────────────────────────────────────

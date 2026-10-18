@@ -56,7 +56,7 @@ def build_agent_fn(monkeypatch):
             config = Config()
             config.agent_runtime = lambda: runtime
             kwargs.setdefault("program_md", "PROGRAM BODY")
-            agent_fn = agent_mod.make_agent_fn(config=config, **kwargs)
+            agent_fn = agent_mod.make_agent_fn(config, agent_mod.ImplementerSetup(agent_mod.ImplementerTask(**kwargs)))
         finally:
             agent_mod.create_registered_backend = original
         return dict(
@@ -149,9 +149,10 @@ def system_prompt_for(monkeypatch):
             config = Config()
             config.agent_runtime = lambda: runtime
             agent_fn = agent_mod.make_agent_fn(
-                config=config,
-                program_md="PROGRAM BODY",
-                pre_task_context=pre_task_context,
+                config,
+                agent_mod.ImplementerSetup(
+                    agent_mod.ImplementerTask(program_md="PROGRAM BODY", pre_task_context=pre_task_context)
+                ),
             )
         finally:
             agent_mod.create_registered_backend = original

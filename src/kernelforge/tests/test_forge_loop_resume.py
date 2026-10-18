@@ -210,8 +210,8 @@ def _install_cli_fakes(monkeypatch, tmp_path):
     monkeypatch.setattr("kernelforge.loop.runner.IterationLoop", FakeLoop)
     monkeypatch.setattr("kernelforge.tracker.ExperimentTracker", FakeTracker)
 
-    def fake_make_agent_fn(**kwargs):
-        captured["agent_fn_kwargs"] = kwargs
+    def fake_make_agent_fn(config, setup, **kwargs):
+        captured["agent_fn_setup"] = setup
         return
 
     monkeypatch.setattr(agent_module, "make_agent_fn", fake_make_agent_fn)
@@ -696,7 +696,7 @@ def test_assembly_cli_prepares_before_optimizer_and_keeps_original_export_base(t
     assert loop.ic.baseline_case_times == {"case": 1.0}
     assert loop.ic.commit_new_paths == []
     assert captured["warmstarts"] == []
-    assert captured["agent_fn_kwargs"]["source_files"] == [str(workspace / "kernel.s")]
+    assert captured["agent_fn_setup"].task.source_files == [str(workspace / "kernel.s")]
 
 
 def _driver_integrity_resume(tmp_path, monkeypatch):
@@ -776,7 +776,7 @@ def test_forge_loop_defaults_to_fresh_and_workspace_campaign_root(tmp_path, monk
     assert captured["run_kwargs"]["orchestration_service"] is captured["orchestration_service"]
     assert captured["run_kwargs"]["analysis_service"] is captured["analysis_service"]
     assert captured["analysis_service_kwargs"]["profiling_enabled"] is False
-    assert captured["agent_fn_kwargs"]["profiling_enabled"] is False
+    assert captured["agent_fn_setup"].task.profiling_enabled is False
     assert captured["orchestration_service_kwargs"]["enable_plan_critic"] is False
     assert captured["lock_held_during_warmstart"] is True
     assert captured["lock_held_during_run"] is True
@@ -816,7 +816,7 @@ def test_short_forge_budget_keeps_profiling_disabled(
     assert captured["run_kwargs"]["analysis_service"] is captured["analysis_service"]
     assert captured["analysis_service_kwargs"]["profiling_enabled"] is False
     assert captured["analysis_service_kwargs"]["timeout_sec"] == 7200
-    assert captured["agent_fn_kwargs"]["profiling_enabled"] is False
+    assert captured["agent_fn_setup"].task.profiling_enabled is False
     assert captured["orchestration_service_kwargs"]["enable_plan_critic"] is False
 
 
@@ -830,7 +830,7 @@ def test_long_forge_budget_enables_analysis_profiling(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert captured["analysis_service_kwargs"]["profiling_enabled"] is True
-    assert captured["agent_fn_kwargs"]["profiling_enabled"] is True
+    assert captured["agent_fn_setup"].task.profiling_enabled is True
     assert captured["orchestration_service_kwargs"]["enable_plan_critic"] is True
 
 
@@ -848,7 +848,7 @@ def test_multi_lane_long_horizon_reports_the_critic_it_enabled(
 
     assert result.exit_code == 0, result.output
     assert captured["analysis_service_kwargs"]["profiling_enabled"] is True
-    assert captured["agent_fn_kwargs"]["profiling_enabled"] is True
+    assert captured["agent_fn_setup"].task.profiling_enabled is True
     assert captured["orchestration_service_kwargs"]["enable_plan_critic"] is True
     assert "Plan Critic: enabled (long-horizon, same backend/model)" in result.output
 
@@ -1492,8 +1492,8 @@ def test_fresh_campaign_contains_no_shape_metadata(tmp_path, monkeypatch):
     assert "shapes" not in campaign.to_dict()
     assert "workload_key" not in campaign.to_dict()
     assert captured["loops"]
-    assert captured["agent_fn_kwargs"]["validation_timeout_sec"] == 1800
-    assert captured["agent_fn_kwargs"]["bench_timeout_sec"] == 300
+    assert captured["agent_fn_setup"].measurement.stage_timeout_sec == 1800
+    assert captured["agent_fn_setup"].measurement.bench_timeout_sec == 300
 
 
 def test_a_retired_iteration_cap_is_rejected(tmp_path, monkeypatch):
