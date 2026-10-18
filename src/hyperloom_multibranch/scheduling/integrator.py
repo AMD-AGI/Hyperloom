@@ -38,6 +38,8 @@ from hyperloom_multibranch.contracts.notebook.records import CommittedCommit, Me
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, MergeOutcome
 from hyperloom_multibranch.contracts.repo import ExperimentRepo, PatchConflict, RepoMerge
 from hyperloom_multibranch.contracts.toolbox import RequestRejected
+from hyperloom_multibranch.rulegate.agentx import P50_BELOW_THRESHOLD
+from hyperloom_multibranch.rulegate.inferencex import GAIN_BELOW_THRESHOLD, GAIN_NOT_CONFIRMED
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed
 from hyperloom_multibranch.scheduling.requests import SessionChecks, integration_test_request
@@ -146,6 +148,9 @@ def _untried(commit: CommittedCommit, head: str) -> bool:
 
 #: The verdicts a foundation fix that passed the accuracy gate merges on: a settled measurement, whatever its gain.
 FOUNDATION_FIX_VERDICTS = frozenset({Verdict.IMPROVED, Verdict.FLAT, Verdict.REGRESSED})
+# A settled verdict refused only for want of a gain; any other refusal (a broken guard, extra failed requests, a pair
+# that did not measure the same work) is a defect a foundation fix may not carry onto the integration branch.
+GAIN_ONLY_REFUSALS = frozenset({GAIN_BELOW_THRESHOLD, GAIN_NOT_CONFIRMED, P50_BELOW_THRESHOLD})
 
 
 def not_stackable_reason(judgement: Judgement, *, foundation_fix: bool) -> str:
@@ -153,11 +158,14 @@ def not_stackable_reason(judgement: Judgement, *, foundation_fix: bool) -> str:
     merged once the regression set passes.
 
     Only a confirmed gain that passed the accuracy gate is ``IMPROVED``. A foundation fix needs no gain: it may be
-    merged on any settled verdict once it passed the accuracy gate.
+    merged on any settled verdict once it passed the accuracy gate, as long as nothing but the missing gain refused it.
     """
 
     if foundation_fix and judgement.accuracy_ok and judgement.verdict in FOUNDATION_FIX_VERDICTS:
-        return ""
+        defects = [reason for reason in judgement.refused_by if reason not in GAIN_ONLY_REFUSALS]
+        if not defects:
+            return ""
+        return f"a foundation fix, {judgement.verdict.value} on the integration head, refused by {', '.join(defects)}"
     if judgement.verdict is not Verdict.IMPROVED:
         return f"{judgement.verdict.value} {judgement.gain_pct:+.2f}% on the integration head"
     return ""
@@ -363,6 +371,7 @@ def _decision(report: MergeReport) -> Decision:
 
 __all__ = [
     "FOUNDATION_FIX_VERDICTS",
+    "GAIN_ONLY_REFUSALS",
     "Integrator",
     "LlmPatchResolver",
     "MergeRecords",

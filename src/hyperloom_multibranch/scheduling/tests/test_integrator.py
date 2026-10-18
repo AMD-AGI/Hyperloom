@@ -23,6 +23,13 @@ from typing import Any
 
 import pytest
 
+from hyperloom.common.perf_metric import (
+    GRADED_DURATION,
+    GRADED_ERROR_RATE,
+    GRADED_INTVTY,
+    GRADED_INTVTY_P50,
+    GRADED_OUTPUT,
+)
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest
 from hyperloom.contracts.recipe import (
     ComponentChange,
@@ -55,6 +62,7 @@ from hyperloom_multibranch.scheduling.integrator import (
     not_stackable_reason,
 )
 from hyperloom_multibranch.scheduling.llm import CompletionFailed
+from hyperloom_multibranch.rulegate import agentx
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS
 from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests, integration_test_request
@@ -395,6 +403,30 @@ def test_a_foundation_fix_without_a_gain_may_be_merged_only_once_it_passed_the_a
     assert not_stackable_reason(judged, foundation_fix=True) == ""
     assert not_stackable_reason(judged, foundation_fix=False) == f"{verdict.value} -2.00% on the integration head"
     assert not_stackable_reason(replace(judged, accuracy_ok=False), foundation_fix=True)
+
+
+AGENTX_PARENT = {
+    GRADED_INTVTY_P50: 100.0,
+    GRADED_INTVTY: 100.0,
+    GRADED_OUTPUT: 1000.0,
+    GRADED_ERROR_RATE: 0.0,
+    GRADED_DURATION: 10.0,
+}
+
+
+def test_an_agentx_foundation_fix_whose_p50_falls_with_its_guards_intact_may_be_merged() -> None:
+    judged = agentx.compare({**AGENTX_PARENT, GRADED_INTVTY_P50: 50.0}, AGENTX_PARENT, "r1")
+
+    assert judged.verdict is Verdict.REGRESSED and judged.accuracy_ok
+    assert not_stackable_reason(judged, foundation_fix=True) == ""
+
+
+def test_an_agentx_foundation_fix_that_breaks_a_guard_is_not_stackable() -> None:
+    judged = agentx.compare({**AGENTX_PARENT, GRADED_OUTPUT: 500.0}, AGENTX_PARENT, "r1")
+
+    assert judged.verdict is Verdict.REGRESSED and judged.accuracy_ok
+    reason = not_stackable_reason(judged, foundation_fix=True)
+    assert reason == "a foundation fix, regressed on the integration head, refused by output_regressed"
 
 
 async def test_a_merge_measuring_no_throughput_is_not_stackable_and_merging_goes_on(
