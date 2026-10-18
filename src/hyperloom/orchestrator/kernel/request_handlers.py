@@ -35,7 +35,7 @@ from hyperloom.common.checkpoint_quant import checkpoint_format
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
 from hyperloom.common.gpu_identity import is_gfx_arch
-from hyperloom.common.io import append_jsonl
+from hyperloom.common.io import WriteOptions, append_jsonl
 from hyperloom.common.unified_diff import PatchOp, repo_relative_manifest
 from ..actions.executors._kernel_agent_tool import (
     HandlerResult,
@@ -3870,7 +3870,7 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
     }
     row = {k: v for k, v in row.items() if v is not None}
     try:
-        append_jsonl(gemm_tuning_steps_path(session_dir), row, make_parents=True, sort_keys=True)
+        append_jsonl(gemm_tuning_steps_path(session_dir), row, sort_keys=True, options=WriteOptions(make_parents=True))
     except OSError:
         log.debug("full-trace: gemm_tuning audit append failed", exc_info=True)
 
