@@ -40,10 +40,10 @@ from kernelforge.rewrite_by_flydsl.kb import (
     write_flydsl_kb_solution,
 )
 from kernelforge.rewrite_by_flydsl.measurement import FlydslMeasurement
-from kernelforge.rewrite_by_flydsl.optimize import OptimizeOptions, OptimizeRequest, run_optimize
+from kernelforge.rewrite_by_flydsl.optimize import OptimizeRequest, run_optimize
 from kernelforge.rewrite_by_flydsl.port_loop import PortRequest, PortResult, run_port_loop
+from kernelforge.rewrite_by_flydsl.request import RewriteRun
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET, RewriteBudgetPolicy
-from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 from kernelforge.tracker import UsageAccumulator, UsageLedgerFile, combine_usage_totals
 
 log = logging.getLogger(__name__)
@@ -379,41 +379,15 @@ def _run_applyback(spec, config: Config, request: ApplybackRequest, usage):
     return applyback
 
 
-def run_rewrite(
-    *,
-    op_name: str,
-    source_kernel: str,
-    driver: str,
-    workspace: str,
-    experiments_dir: str,
-    target_functions: list[str],
-    config: Config,
-    source_entry: str = "",
-    source_language: str = "",
-    shapes: list[dict] | None = None,
-    snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB,
-    flydsl_kernel_name: str = "kernel.py",
-    max_port_attempts: int = 3,
-    optimize_max_hours: float = 1.0,
-    permission_mode: str | None = None,
-    supervisor_backend: str = "codex",
-    profile_timeout_sec: int = 1800,
-    roofline_ceiling: bool = False,
-    optimize_git_branch: str = "forge-rewrite-optimize",
-    result_json: str | None = None,
-    deadline_unix: float | None = None,
-    framework: str = "",
-    prepare_driver: bool = True,
-    invocation_spec_file: str = "",
-    applyback_import_modules: list[str] | tuple[str, ...] = (),
-    max_applyback_attempts: int = 2,
-    applyback_enabled: bool = True,
-    rewrite_kb_enabled: bool = True,
-) -> dict:
+def run_rewrite(request: RewriteRun, config: Config) -> dict:
     """Run the full rewrite pipeline; return (and sentinel-print) the result dict."""
+    subject = request.subject
+    workspace = request.workspace.workspace_dir
+    result_json = request.result_json
+    applyback_enabled = request.applyback.applyback
     # The nested forge-loop runs from the workspace and resolves this path against its own working directory, so a
     # relative one would send the two processes to different directories for the artifacts they share.
-    experiments_dir = str(Path(experiments_dir).resolve())
+    experiments_dir = str(Path(request.workspace.experiments_dir).resolve())
     Path(experiments_dir).mkdir(parents=True, exist_ok=True)
     # Only this process's own stages feed the shared ledger: the nested forge-loop publishes its own share to the same
     # file, so folding the combined total in here would count that share twice.
@@ -423,8 +397,8 @@ def run_rewrite(
     started_at = time.time()
     deadline_unix, rewrite_budget, search_stop_unix = _plan_budget(
         started_at=started_at,
-        deadline_unix=deadline_unix,
-        optimize_max_hours=optimize_max_hours,
+        deadline_unix=request.budget.deadline_unix,
+        optimize_max_hours=request.budget.max_hours,
         applyback_enabled=applyback_enabled,
     )
 
@@ -439,7 +413,7 @@ def run_rewrite(
         print("  [forge-rewrite] apply-back not requested; the standalone kernel is the whole deliverable", flush=True)
 
     # Producer-owned scratch the consumer may reclaim.
-    scope = report.ResultScope(op_name, budget_policy=rewrite_budget)
+    scope = report.ResultScope(subject.op_name, budget_policy=rewrite_budget)
 
     # Emit a clean, scorable failure result (no traceback) on any setup error so the caller can attribute it, instead
     # of the process dying opaquely.
@@ -466,13 +440,13 @@ def run_rewrite(
         export_import_path(attempt)
     except OSError as error:
         return _setup_failed(f"could not create the attempt directory: {error}", ATTEMPT_SETUP_FAILED)
-    scope = report.ResultScope(op_name, attempt.temporary_paths, rewrite_budget)
+    scope = report.ResultScope(subject.op_name, attempt.temporary_paths, rewrite_budget)
     print(f"  [forge-rewrite] attempt workspace {attempt.relative_root}", flush=True)
 
     # (0) The source kernel to port FROM must exist.
-    if not Path(source_kernel).is_file():
-        return _setup_failed(f"source kernel not found: {source_kernel}", SOURCE_KERNEL_MISSING)
-    driver_path = str(Path(driver).resolve())
+    if not Path(subject.source_kernel).is_file():
+        return _setup_failed(f"source kernel not found: {subject.source_kernel}", SOURCE_KERNEL_MISSING)
+    driver_path = str(Path(request.driver.driver).resolve())
     if time.time() >= search_stop_unix:
         return _setup_failed(
             "less than 20 minutes remain; no PORT session may start",
@@ -481,24 +455,11 @@ def run_rewrite(
 
     # (1) Ingest -> normalized spec (auto-discovers the source_entry hint if omitted).
     try:
-        candidate_kernel = attempt.candidate_path(flydsl_kernel_name)
+        candidate_kernel = attempt.candidate_path(request.flydsl_kernel_name)
     except ValueError as error:
         return _setup_failed(str(error), CANDIDATE_NAME_INVALID)
     try:
-        spec = ingest.build_spec(
-            ingest.RewriteSubject(
-                op_name,
-                source_kernel,
-                target_functions,
-                source_entry,
-                source_language,
-                framework,
-                shapes,
-                snr_threshold,
-            ),
-            flydsl_kernel=str(candidate_kernel),
-            workspace=workspace,
-        )
+        spec = ingest.build_spec(subject, flydsl_kernel=str(candidate_kernel), workspace=workspace)
     except Exception as e:  # noqa: BLE001 - any ingest error must still be scorable
         return _setup_failed(f"ingest error: {type(e).__name__}: {e}", INGEST_FAILED)
     driver_contract.export_driver_environment(spec)
@@ -518,10 +479,10 @@ def run_rewrite(
         spec,
         config,
         flydsl_rewrite_driver_preparation.DriverPreparation(
-            driver_path, experiments_dir, search_stop_unix, invocation_spec_file
+            driver_path, experiments_dir, search_stop_unix, request.driver.invocation_spec_file
         ),
         usage=usage,
-        prepare_driver=prepare_driver,
+        prepare_driver=request.driver.prepare_driver,
     )
     if driver_failure is not None:
         return _setup_failed(*driver_failure)
@@ -538,7 +499,7 @@ def run_rewrite(
 
     # (5) KB warm-start / PORT: an exact source+driver match may materialize a prior standalone FlyDSL file, but it
     # must pass today's FlyDSL-only and correctness gates before PORT is skipped.
-    rewrite_kb = _RewriteKb(RewriteKbTarget(spec, driver_path, config), rewrite_kb_enabled)
+    rewrite_kb = _RewriteKb(RewriteKbTarget(spec, driver_path, config), request.rewrite_kb_enabled)
     kb_read = rewrite_kb.read(source_case_ms=source_case_ms, search_stop_unix=search_stop_unix)
     if kb_read.applied:
         port = PortResult(
@@ -556,7 +517,9 @@ def run_rewrite(
                 spec,
                 driver_path,
                 config,
-                PortRequest(max_port_attempts, permission_mode, search_stop_unix, kb_read.reference_context),
+                PortRequest(
+                    request.max_port_attempts, request.permission_mode, search_stop_unix, kb_read.reference_context
+                ),
                 usage=usage,
             )
         )
@@ -592,7 +555,7 @@ def run_rewrite(
         workspace,
         "forge-rewrite: initial correct flydsl port",
         [attempt.relative_root],
-        branch=optimize_git_branch,
+        branch=request.optimize.git_branch,
     )
     port_commit = _git_head(workspace)
 
@@ -684,9 +647,9 @@ def run_rewrite(
             config,
             OptimizeRequest(
                 experiments_dir,
-                OptimizeOptions(optimize_git_branch, supervisor_backend, profile_timeout_sec),
-                roofline_ceiling=roofline_ceiling,
-                permission_mode=permission_mode,
+                request.optimize,
+                roofline_ceiling=request.roofline_ceiling,
+                permission_mode=request.permission_mode,
                 max_hours=remaining_hours,
                 deadline_unix=deadline_unix,
                 stop_at_unix=search_stop_unix,
@@ -694,7 +657,7 @@ def run_rewrite(
                 # final result -- already divides by the kernel this rewrite replaced.
                 source_ms=source_ms,
                 source_case_ms=source_case_ms,
-                on_new_best=_publish_keep if rewrite_kb_enabled else None,
+                on_new_best=_publish_keep if request.rewrite_kb_enabled else None,
             ),
         )
     else:
@@ -731,8 +694,8 @@ def run_rewrite(
                 str(opt.get("best_commit") or ""),
                 FlydslMeasurement(source_ms, opt.get("best_ms"), opt.get("mean_case_speedup"), port.snr_db),
                 deadline_unix,
-                applyback_import_modules,
-                max_applyback_attempts,
+                request.applyback_import_modules,
+                request.applyback.max_applyback_attempts,
             ),
             usage,
         )
