@@ -20,6 +20,7 @@ import asyncio
 import contextlib
 import importlib.metadata
 import logging
+import math
 import os
 from dataclasses import dataclass, replace
 from typing import Any
@@ -80,7 +81,12 @@ POLICY_VERSIONS = {
 #: Stop reasons a session ends with when it ran its course, a budget spent as set included; any other one, or an
 #: error, is a failed session.
 COMPLETED_REASONS = frozenset(
-    {SessionStopReason.TIME_EXHAUSTED, SessionStopReason.GPU_HOURS_EXHAUSTED, SessionStopReason.GLOBAL_CONVERGED}
+    {
+        SessionStopReason.TIME_EXHAUSTED,
+        SessionStopReason.GPU_HOURS_EXHAUSTED,
+        SessionStopReason.LLM_BUDGET_EXHAUSTED,
+        SessionStopReason.GLOBAL_CONVERGED,
+    }
 )
 #: The distribution this package ships in (pyproject.toml ``[project] name``).
 MB_DISTRIBUTION = "hyperloom-inference_optimizer"
@@ -284,6 +290,7 @@ class Session:
             budget.deadline,
             budget.total_seconds,
             explore_gpu_seconds(self._settings.max_gpu_hours),
+            self._settings.max_llm_usd or math.inf,
             prelude.child_gpu_seconds_upper_bound,
         )
         reason = await self._explorer.run(window)

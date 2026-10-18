@@ -37,8 +37,8 @@ from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission,
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import QuarantineEvent, ToolResultPointer
-from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind, QuarantineAction
+from hyperloom_multibranch.contracts.notebook.records import LlmUsage, QuarantineEvent, ToolResultPointer
+from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind, QuarantineAction, UsageSource
 from hyperloom_multibranch.contracts.toolbox import CancelOutcome, MeasurementCapacity
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
@@ -107,13 +107,21 @@ WORKLOAD = Workload(
 #: The same workload as an AgentX trace replay.
 AGENTX = replace(WORKLOAD, inferencex=None)
 SETTINGS = RunSettings(
-    WORKLOAD, max_hours=0.5, max_gpu_hours=0.0, caps=RosterCaps(3, 2, 8), judge_interval_seconds=600.0
+    WORKLOAD,
+    max_hours=0.5,
+    max_gpu_hours=0.0,
+    max_llm_usd=0.0,
+    caps=RosterCaps(3, 2, 8),
+    judge_interval_seconds=600.0,
 )
 STEP_SECONDS = 30.0
 CLAIM_TTL_SECONDS = 1e6
 STOP_REASON = "no gain left"
 #: A GPU-hour budget the baseline on the root alone uses up.
 TINY_GPU_HOURS = 0.01
+#: An LLM budget one specialist launch of :data:`LAUNCH_USD` uses up.
+SMALL_LLM_USD = 2.5
+LAUNCH_USD = 3.0
 JUDGE_USAGE = CompletionUsage(input_tokens=4000, output_tokens=120)
 CONVERGED_REASON = "every branch is flat"
 #: What the scheduler's own tests measure: the root, ``c1`` alone (the integration head once merged) and ``c2``, which
@@ -655,6 +663,33 @@ async def test_spent_gpu_hours_end_explore_as_a_completed_session_that_still_run
     spend = _judge_state(opening)["spend"]
     assert spend["gpu_hours_used"] == round(baseline_seconds / MB_SECONDS_PER_HOUR, 3) > 0
     assert spend["explore_gpu_hours"] == round(explore_gpu_seconds(TINY_GPU_HOURS) / MB_SECONDS_PER_HOUR, 3)
+
+
+async def test_spent_specialist_llm_dollars_end_explore_as_a_completed_session_that_still_runs_final(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(SETTINGS, max_llm_usd=SMALL_LLM_USD)
+    stage.judge = ScriptedCompletion([OPENING])
+
+    async def one_launch(branch: str) -> None:
+        usage = LlmUsage(branch, UsageSource.SPECIALIST, LAUNCH_USD, launch=f"{branch}-launch")
+        await stage.handle(Role.SPECIALIST_RUNTIME, branch).record_llm_usage(usage)
+
+    stage.steps = {"b01": one_launch}
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.LLM_BUDGET_EXHAUSTED, "", 0)
+    explore_end = SessionBudget.from_hours(SETTINGS.max_hours, START).phases_after_prelude(START).explore_end
+    [final_phase] = [row for row in _decisions(stage) if row["kind"] == "phase" and row["reason"] == "final"]
+    assert float(str(final_phase["at"])) < explore_end
+    assert outcome.final is not None and outcome.final.chosen is not None
+    [close] = [row for row in _decisions(stage) if row["kind"] == "session_stop"]
+    assert close["reason"] == SessionStopReason.LLM_BUDGET_EXHAUSTED.value
+    [opening] = _judge_prompts(stage)
+    spend = _judge_state(opening)["spend"]
+    assert (spend["specialist_llm_usd"], spend["max_llm_usd"]) == (0.0, SMALL_LLM_USD)
 
 
 async def test_a_judge_soft_stop_ends_explore_early_and_still_runs_final(tmp_path: Path) -> None:

@@ -49,6 +49,8 @@ class SessionStopReason(str, Enum):
     TIME_EXHAUSTED = "time_exhausted"
     #: The tests used the GPU hours ``--max-gpu-hours`` leaves EXPLORE; FINAL still runs.
     GPU_HOURS_EXHAUSTED = "gpu_hours_exhausted"
+    #: The specialists' recorded LLM spend reached ``--max-llm-usd``; FINAL still runs.
+    LLM_BUDGET_EXHAUSTED = "llm_budget_exhausted"
     GLOBAL_CONVERGED = "global_converged"
     SIGNAL = "signal"
     PRELUDE_FAILED = "prelude_baseline_failed"

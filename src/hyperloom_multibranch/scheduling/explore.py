@@ -8,22 +8,23 @@ and repairs queued on the fork desk onto the free slots, lands each admitted for
 the admitted forks and repairs, and every judge interval asks the judge, applies what it decided and rebuilds the
 dashboard. A slot the judge's stops free goes to the queued requests first and only then to the branches the judge
 opens. The judge is asked at once, not at its next interval, when the scheduler itself frees a slot: a repair branch
-stopped at its time limit, a fork the gate did not land, or an admitted fork or repair that failed to start; and when
-an event changes what the branches are worth: a merge that moved the integration head by a large gain, the bottleneck
-of the profile taken of the integration head after such a merge moving, or a quarantined measurement node. A branch
-the judge opens after the opening batch starts from the integration head, briefed on a focus. The judge reads the
+stopped at its time limit, a fork the gate did not land, or an admitted fork or repair that failed to start; and when an
+event changes what the branches are worth: a merge that moved the integration head by a large gain, the bottleneck of
+the profile taken of the integration head after such a merge moving, or a quarantined measurement node. A branch the
+judge opens after the opening batch starts from the integration head, briefed on a focus. The judge reads the
 frontier-scored progress, how similar archived sessions went, which running branches made much the same change, the
-events since its last call, how far each branch lies behind the integration head, whether a profile of the
-integration head runs, the GPU hours and scheduler LLM tokens used so far, and what is known of each running
-branch's specialist (given up after its crashes, stopped because its judging failed, its heartbeat lost again and
-again), and decides what to stop; a judge call that has not answered by the EXPLORE deadline counts as failed, and a
-branch that has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background
+events since its last call, how far each branch lies behind the integration head, whether a profile of the integration
+head runs, the GPU hours, the specialists' LLM dollars and the scheduler LLM tokens used so far, and what is known of
+each running branch's specialist (given up after its crashes, stopped because its judging failed, its heartbeat lost
+again and again), and decides what to stop; a judge call that has not answered by the EXPLORE deadline counts as failed,
+and a branch that has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background
 task of its own, in rounds as wide as the integration branch's K. When EXPLORE ends that task is cancelled and the
-integrator abandons its round, so the integration head the FINAL candidates are read from no longer moves and
-no merge test competes with FINAL's measurements; a profile of the integration head still running is cancelled before
-that, taking its test back. Under ``--max-gpu-hours`` EXPLORE also ends, at a tick, once the session's tests have used
-the GPU hours FINAL's share leaves it. EXPLORE ends at a tick as well once the toolbox has fewer usable cards than one
-test needs, and the session then skips FINAL.
+integrator abandons its round, so the integration head the FINAL candidates are read from no longer moves and no merge
+test competes with FINAL's measurements; a profile of the integration head still running is cancelled before that,
+taking its test back. Under ``--max-gpu-hours`` EXPLORE also ends, at a tick, once the session's tests have used the GPU
+hours FINAL's share leaves it, and under ``--max-llm-usd`` once the specialists' recorded LLM spend reaches it: FINAL
+runs no specialist, so it gets no share of that cap. EXPLORE ends at a tick as well once the toolbox has fewer usable
+cards than one test needs, and the session then skips FINAL.
 """
 
 from __future__ import annotations
@@ -67,8 +68,9 @@ FORK_NOT_LANDED = "the rule gate did not land the fork"
 @dataclass(frozen=True)
 class ExploreWindow:
     """The commit branches start from, the roofline ceiling, the clock times EXPLORE and the budget end at, the
-    session's whole budget, the GPU seconds the session's tests may use before EXPLORE ends (``math.inf`` for no
-    limit), and the upper bound of the GPU seconds the PRELUDE child used, which no limit counts."""
+    session's whole budget, the GPU seconds the session's tests may use before EXPLORE ends and the dollars the
+    specialists' recorded LLM launches may cost (``math.inf`` for no limit, for either), and the upper bound of the GPU
+    seconds the PRELUDE child used, which no limit counts."""
 
     root_commit: str
     roofline_ceiling: Mapping[str, float]
@@ -76,6 +78,7 @@ class ExploreWindow:
     session_deadline: float
     budget_seconds: float
     explore_gpu_seconds: float
+    max_llm_usd: float
     prelude_gpu_seconds_upper_bound: float
 
 
@@ -103,6 +106,13 @@ def spent_gpu_seconds(progress: Iterable[BranchProgress]) -> float:
     branch's baseline on the root included; a test withdrawn before its result counts none."""
 
     return sum(row.gpu_seconds for row in progress)
+
+
+def spent_llm_usd(progress: Iterable[BranchProgress]) -> float:
+    """The dollars the specialists' LLM launches recorded: a launch counts once it ended and its CLI reported its
+    cost, so this is a lower bound."""
+
+    return sum(row.llm_usd for row in progress)
 
 
 def integration_row(progress: tuple[BranchProgress, ...]) -> BranchProgress | None:
@@ -172,8 +182,8 @@ class Explorer:
         while (now := self._clock.now()) < window.explore_end:
             if merging.done():
                 merging.result()
-            if await self._gpu_hours_exhausted(window):
-                return SessionStopReason.GPU_HOURS_EXHAUSTED
+            if (spent := await self._budget_spent(window)) is not None:
+                return spent
             if await self._events.record_card_shortage():
                 return SessionStopReason.NO_MEASUREMENT_CARDS
             overrun = await self._branches.stop_overrun_repairs()
@@ -190,13 +200,18 @@ class Explorer:
             await self._clock.sleep(min(EXPLORE_TICK_SECONDS, window.explore_end - now))
         return SessionStopReason.TIME_EXHAUSTED
 
-    async def _gpu_hours_exhausted(self, window: ExploreWindow) -> bool:
-        """Whether the tests used the GPU seconds EXPLORE has. Reads the notebook's own progress: a frontier-scored
-        read appends a round to the frontier log."""
+    async def _budget_spent(self, window: ExploreWindow) -> SessionStopReason | None:
+        """The budget the session used up, if any: the GPU seconds EXPLORE has, then the specialists' LLM dollars.
+        Reads the notebook's own progress: a frontier-scored read appends a round to the frontier log."""
 
-        if window.explore_gpu_seconds == math.inf:
-            return False
-        return spent_gpu_seconds(await self._notebook.progress()) >= window.explore_gpu_seconds
+        if window.explore_gpu_seconds == math.inf and window.max_llm_usd == math.inf:
+            return None
+        progress = await self._notebook.progress()
+        if spent_gpu_seconds(progress) >= window.explore_gpu_seconds:
+            return SessionStopReason.GPU_HOURS_EXHAUSTED
+        if spent_llm_usd(progress) >= window.max_llm_usd:
+            return SessionStopReason.LLM_BUDGET_EXHAUSTED
+        return None
 
     async def _merge_forever(self) -> None:
         while True:
@@ -273,6 +288,8 @@ class Explorer:
             gpu_hours_used=spent_gpu_seconds(progress) / MB_SECONDS_PER_HOUR,
             explore_gpu_hours=_hours_or_none(window.explore_gpu_seconds),
             prelude_gpu_hours_upper_bound=window.prelude_gpu_seconds_upper_bound / MB_SECONDS_PER_HOUR,
+            specialist_llm_usd=spent_llm_usd(progress),
+            max_llm_usd=None if window.max_llm_usd == math.inf else window.max_llm_usd,
             scheduler_llm=self._llm_usage.used,
             specialists=await self._specialist_states(),
         )
@@ -365,4 +382,5 @@ __all__ = [
     "Steering",
     "integration_row",
     "spent_gpu_seconds",
+    "spent_llm_usd",
 ]

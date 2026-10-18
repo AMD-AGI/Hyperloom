@@ -80,6 +80,7 @@ def test_run_defaults() -> None:
         ),
         max_hours=MB_DEFAULT_MAX_HOURS,
         max_gpu_hours=0.0,
+        max_llm_usd=0.0,
         caps=RosterCaps(max_branches=4, max_k_per_branch=2, max_parallel_tests=4),
         judge_interval_seconds=600.0,
     )
@@ -87,11 +88,11 @@ def test_run_defaults() -> None:
 
 def test_run_options_override_the_defaults() -> None:
     settings = _settings(
-        "--gpu-type", "mi355x", "--max-hours", "12", "--max-gpu-hours", "40", "--max-branches", "6",
-        "--max-parallel-tests", "3", "--max-k-per-branch", "3", "--judge-interval-sec", "120",
+        "--gpu-type", "mi355x", "--max-hours", "12", "--max-gpu-hours", "40", "--max-llm-usd", "25.5",
+        "--max-branches", "6", "--max-parallel-tests", "3", "--max-k-per-branch", "3", "--judge-interval-sec", "120",
     )  # fmt: skip
     assert settings.workload.gpu_type == "mi355x"
-    assert (settings.max_hours, settings.max_gpu_hours) == (12.0, 40.0)
+    assert (settings.max_hours, settings.max_gpu_hours, settings.max_llm_usd) == (12.0, 40.0, 25.5)
     assert settings.caps == RosterCaps(6, 3, 3)
     assert settings.judge_interval_seconds == 120.0
 
@@ -125,6 +126,9 @@ def test_parallel_tests_default_fills_the_machine() -> None:
         ["run", *WORKLOAD_ARGS, "--max-gpu-hours", "-1"],
         ["run", *WORKLOAD_ARGS, "--max-gpu-hours", "nan"],
         ["run", *WORKLOAD_ARGS, "--max-gpu-hours", "inf"],
+        ["run", *WORKLOAD_ARGS, "--max-llm-usd", "-1"],
+        ["run", *WORKLOAD_ARGS, "--max-llm-usd", "nan"],
+        ["run", *WORKLOAD_ARGS, "--max-llm-usd", "inf"],
         ["run", *WORKLOAD_ARGS, "--max-branches", "0"],
         ["run", *WORKLOAD_ARGS, "--max-parallel-tests", "0"],
         ["run", *WORKLOAD_ARGS, "--judge-interval-sec", "0"],

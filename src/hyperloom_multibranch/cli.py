@@ -8,16 +8,19 @@ optimizer its recipes are scoped to, and the hard limits the judge works within.
 kind: ``inferencex`` takes ``--isl`` and ``--osl``, and ``agentx`` refuses them, as the trace it replays fixes its
 requests; an operator environment whose ``HYPERLOOM_AGENTX`` says otherwise than ``--workload`` is refused.
 ``--max-gpu-hours`` caps the GPU hours the session's tests use: EXPLORE ends with ``gpu_hours_exhausted`` once only
-FINAL's share is left, and FINAL still runs. A session whose toolbox has fewer usable cards left than one test needs
-ends EXPLORE with ``no_measurement_cards`` and skips FINAL. Exit codes: 0 when the session ran its course, its
-wall-clock or GPU-hour budget spent included, 1 when it failed or was stopped, ``no_measurement_cards`` included, 2 on
-a usage error. The environment and the peers a
+FINAL's share is left, and FINAL still runs. ``--max-llm-usd`` caps the dollars the specialists' LLM launches cost:
+EXPLORE ends with ``llm_budget_exhausted`` once their recorded spend reaches it, and FINAL still runs. That spend is a
+lower bound: a launch counts once it ends and its CLI reported its cost, so a launch cut short, lost or stopped, a CLI
+that reports no cost and the scheduler's own judge and resolver are not in it, and the stop can come up to one launch
+late. A session whose toolbox has fewer usable cards left than one test needs ends EXPLORE with ``no_measurement_cards``
+and skips FINAL. Exit codes: 0 when the session ran its course, its wall-clock, GPU-hour or LLM budget spent included, 1
+when it failed or was stopped, ``no_measurement_cards`` included, 2 on a usage error. The environment and the peers a
 session needs are checked before anything is created, so a missing one fails the command without leaving a session
-directory behind: the Recipe KB that PRELUDE reads warm-start leads from and CLOSE writes the final recipe back to
-is configured by ``KB_STORE_URL`` and ``KB_STORE_TOKEN``, both or neither, and is not used without them; the RSI
-archive defaults to :data:`RSI_ARCHIVE_DEFAULT`, set in this process's environment for every reader of it, and must
-be a writable directory; the measurement pins must be readable; the framework's package must be installed in the
-image; and the agent CLI the specialists run must be installed.
+directory behind: the Recipe KB that PRELUDE reads warm-start leads from and CLOSE writes the final recipe back to is
+configured by ``KB_STORE_URL`` and ``KB_STORE_TOKEN``, both or neither, and is not used without them; the RSI archive
+defaults to :data:`RSI_ARCHIVE_DEFAULT`, set in this process's environment for every reader of it, and must be a
+writable directory; the measurement pins must be readable; the framework's package must be installed in the image; and
+the agent CLI the specialists run must be installed.
 A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
 :data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_EXPERIENCE_KB`).
 """
@@ -99,6 +102,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="GPU hours the session's tests may use; EXPLORE ends when FINAL's share is all that is left; 0 = none.",
     )
     run.add_argument(
+        "--max-llm-usd",
+        type=float,
+        default=0.0,
+        help="Dollars the specialists' recorded LLM launches may cost; EXPLORE ends when they reach it; 0 = none.",
+    )
+    run.add_argument(
         "--max-branches", type=int, default=DEFAULT_MAX_BRANCHES, help="Specialist branches not stopped, at most."
     )
     run.add_argument(
@@ -141,6 +150,8 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
         errors.append(f"--max-hours must be 0 (no limit) or at least {MB_MIN_PRELUDE_HOURS:.4f} (one minute)")
     if not math.isfinite(args.max_gpu_hours) or args.max_gpu_hours < 0:
         errors.append("--max-gpu-hours must be 0 (no limit) or a positive number of hours")
+    if not math.isfinite(args.max_llm_usd) or args.max_llm_usd < 0:
+        errors.append("--max-llm-usd must be 0 (no limit) or a positive number of dollars")
     if errors:
         raise ValueError("; ".join(errors))
     try:
@@ -161,7 +172,7 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
         _workload_shape(args),
     )
     caps = RosterCaps(args.max_branches, args.max_k_per_branch, parallel)
-    return RunSettings(workload, args.max_hours, args.max_gpu_hours, caps, args.judge_interval_sec)
+    return RunSettings(workload, args.max_hours, args.max_gpu_hours, args.max_llm_usd, caps, args.judge_interval_sec)
 
 
 def require_workload_switch(workload: Workload, env: Mapping[str, str]) -> None:

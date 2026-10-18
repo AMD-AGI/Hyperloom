@@ -83,12 +83,14 @@ class Workload:
 
 @dataclass(frozen=True)
 class RunSettings:
-    """``max_hours`` is the whole session's wall-clock budget, PRELUDE included, and ``max_gpu_hours`` the GPU hours
-    the session's tests may use; 0 means no limit for either."""
+    """``max_hours`` is the whole session's wall-clock budget, PRELUDE included, ``max_gpu_hours`` the GPU hours
+    the session's tests may use and ``max_llm_usd`` the dollars the specialists' recorded LLM launches may cost; 0
+    means no limit for any of them."""
 
     workload: Workload
     max_hours: float
     max_gpu_hours: float
+    max_llm_usd: float
     caps: RosterCaps
     judge_interval_seconds: float
 

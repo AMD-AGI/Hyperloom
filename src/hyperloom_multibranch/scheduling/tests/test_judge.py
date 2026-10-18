@@ -86,6 +86,7 @@ def _view(
     behind: dict[str, float] | None = None,
     profile_running: bool = False,
     explore_gpu_hours: float | None = None,
+    max_llm_usd: float | None = None,
     specialists: dict[str, SpecialistStatus] | None = None,
 ) -> JudgeView:
     return JudgeView(
@@ -123,6 +124,8 @@ def _view(
         gpu_hours_used=1.23456,
         explore_gpu_hours=explore_gpu_hours,
         prelude_gpu_hours_upper_bound=0.41666,
+        specialist_llm_usd=3.14159,
+        max_llm_usd=max_llm_usd,
         scheduler_llm=CompletionUsage(input_tokens=5200, output_tokens=310),
         specialists=specialists or {},
     )
@@ -132,17 +135,28 @@ def _text(reply: str) -> CompletionReply:
     return CompletionReply(reply, CompletionUsage())
 
 
-def test_the_prompt_shows_and_explains_the_gpu_hours_and_llm_tokens_used() -> None:
+def test_the_prompt_shows_and_explains_the_gpu_hours_llm_dollars_and_llm_tokens_used() -> None:
     assert _state(_view())["spend"] == {
         "gpu_hours_used": 1.235,
         "explore_gpu_hours": None,
         "prelude_gpu_hours_upper_bound": 0.417,
+        "specialist_llm_usd": 3.14,
+        "max_llm_usd": None,
         "scheduler_llm_tokens": {"input_tokens": 5200, "output_tokens": 310},
     }
     assert _state(_view(explore_gpu_hours=7.08333))["spend"]["explore_gpu_hours"] == 7.083
+    assert _state(_view(max_llm_usd=25.0))["spend"]["max_llm_usd"] == 25.0
     prompt = " ".join(JUDGE_SYSTEM_PROMPT.split())
-    for text in ("gpu_hours_used", "explore_gpu_hours", "prelude_gpu_hours_upper_bound", "scheduler_llm_tokens"):
+    for text in (
+        "gpu_hours_used",
+        "explore_gpu_hours",
+        "prelude_gpu_hours_upper_bound",
+        "specialist_llm_usd",
+        "max_llm_usd",
+        "scheduler_llm_tokens",
+    ):
         assert text in prompt
+    assert "so it reads low" in prompt
     assert "a test taken back before its result is not in it" in prompt
     assert "the baseline measured on the root commit included" in prompt
     assert "the measurements the PRELUDE run that built the root commit made on its own" in prompt
