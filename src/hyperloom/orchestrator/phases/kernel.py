@@ -18,7 +18,7 @@ import uuid
 from concurrent.futures import CancelledError as FuturesCancelledError
 from collections.abc import Mapping
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -194,6 +194,21 @@ def _geak_decline_status(decline_reason: Any) -> str:
     """Map a 2b decline reason to the status left on ``geak_pending``."""
     reason = str(decline_reason or "").strip().lower()
     return "overlay_unloadable" if reason == "geak_overlay_unloadable" else "rebench_declined"
+
+
+def _forge_lane(result: Mapping[str, Any], run_id: str) -> LaneRunFields:
+    """The lane fields a settled forge campaign states for itself."""
+    return LaneRunFields(
+        run_id=run_id,
+        status=str(result.get("status") or "unknown"),
+        started_at=str(result.get("started_at") or ""),
+        ended_at=str(result.get("ended_at") or result.get("ts") or ""),
+        duration_sec=result.get("duration_sec"),
+        micro_decision=str(result.get("micro_decision") or result.get("decision") or ""),
+        integrate_ref=str(result.get("integration_id") or ""),
+        failure_reason=str(result.get("error") or result.get("skip_reason") or result.get("error_class") or ""),
+        error_class=str(result.get("error_class") or ""),
+    )
 
 
 def _record_geak_integration(entry: dict[str, Any], *, kernel_id: str, macro_cycle: int) -> None:
@@ -421,16 +436,16 @@ class KernelPhase(CoordinatorCollaborator):
             reason=idempotency_reason, inline_event=recorder.event_id if recorder is not None else ""
         )
         denied = self._coord.dispatcher.time_budget_denial_for_action(task_kind)
+        attempt = ReprofileOutcome(
+            ran=False,
+            task_kind=task_kind,
+            trigger=trigger,
+            idempotency_reason=idempotency_reason,
+            snapshot_id_before=snapshot_id_before,
+        )
         if params is None or denied is not None:
             _note_reprofile(
-                ReprofileOutcome(
-                    ran=False,
-                    task_kind=task_kind,
-                    trigger=trigger,
-                    skipped_reason=denied.rule if denied else analysis_skip_reason(self.shared_state),
-                    idempotency_reason=idempotency_reason,
-                    snapshot_id_before=snapshot_id_before,
-                )
+                replace(attempt, skipped_reason=denied.rule if denied else analysis_skip_reason(self.shared_state))
             )
             return
         # profile_lane conflicts with the benchmark_lane the kernel_agent task holds, so the reprofile is a step of
@@ -440,16 +455,7 @@ class KernelPhase(CoordinatorCollaborator):
             await self.sub.execute_covered(reprofile_task)
         except Exception:
             log.exception("kernel-entry reprofile failed; the phase proceeds on the existing snapshot")
-            _note_reprofile(
-                ReprofileOutcome(
-                    ran=True,
-                    task_kind=task_kind,
-                    trigger=trigger,
-                    skipped_reason="dispatch_failed",
-                    idempotency_reason=idempotency_reason,
-                    snapshot_id_before=snapshot_id_before,
-                )
-            )
+            _note_reprofile(replace(attempt, ran=True, skipped_reason="dispatch_failed"))
             return
         # Advance the anchor only when a new snapshot actually landed.
         after = self._last_measured_roofline_tput()
@@ -468,13 +474,10 @@ class KernelPhase(CoordinatorCollaborator):
         else:
             log.warning("kernel-entry reprofile produced no new snapshot; the phase targets the existing trace")
         _note_reprofile(
-            ReprofileOutcome(
+            replace(
+                attempt,
                 ran=True,
-                task_kind=task_kind,
-                trigger=trigger,
-                idempotency_reason=idempotency_reason,
                 snapshot_landed=bool(snapshot_landed),
-                snapshot_id_before=snapshot_id_before,
                 snapshot_id_after=snapshot_id_after,
                 task_id=str(getattr(reprofile_task, "task_id", "") or ""),
             )
@@ -628,9 +631,9 @@ class KernelPhase(CoordinatorCollaborator):
         # producer on this path ever sets a bare "gain_pct" key.
         campaign_gain_pct = result.get("e2e_gain_pct")
         campaign_graded_objective = str(result.get("graded_objective") or "")
-        campaign_micro_decision = str(result.get("micro_decision") or result.get("decision") or "")
-        campaign_integrate_ref = str(result.get("integration_id") or "")
+        campaign_shapes_total = result.get("shapes_total", shape_capture.get("shape_count"))
         try:
+            campaign_lane = _forge_lane(result, base_run_id)
             if tuner_rows:
                 for row in tuner_rows:
                     tuner_name = str(row.get("tuner") or "")
@@ -639,95 +642,42 @@ class KernelPhase(CoordinatorCollaborator):
                     # belongs on the tuner whose artifact was actually applied, not on every row
                     # this cycle produced.
                     is_applied_tuner = bool(tuned_file) and artifact == tuned_file
-                    self._record_one_gemm_tuner_run(
-                        recorder,
+                    lane = replace(
+                        campaign_lane,
                         run_id=f"{base_run_id}-{tuner_name}" if tuner_name else base_run_id,
                         status=str(row.get("status") or result.get("status") or "unknown"),
-                        shapes_total=row.get(
-                            "total_shapes", result.get("shapes_total", shape_capture.get("shape_count"))
-                        ),
-                        shapes_tuned=row.get("improved_shapes"),
-                        config_path=artifact,
-                        gain_pct=campaign_gain_pct if is_applied_tuner else None,
-                        graded_objective=campaign_graded_objective if is_applied_tuner else "",
-                        tuner=tuner_name,
-                        micro_decision=campaign_micro_decision,
-                        integrate_ref=campaign_integrate_ref,
-                        started_at=str(result.get("started_at") or ""),
-                        ended_at=str(result.get("ended_at") or result.get("ts") or ""),
                         duration_sec=row.get("elapsed_s", result.get("duration_sec")),
-                        error_class=str(row.get("error_class") or ""),
                         failure_reason=str(row.get("error") or row.get("skip_reason") or row.get("error_class") or ""),
+                        error_class=str(row.get("error_class") or ""),
+                    )
+                    recorder.record_gemm_tuning_run(
+                        GemmTuningRun(
+                            lane=lane,
+                            shapes_total=row.get("total_shapes", campaign_shapes_total),
+                            shapes_tuned=row.get("improved_shapes"),
+                            config_path=artifact,
+                            gain_pct=campaign_gain_pct if is_applied_tuner else None,
+                            graded_objective=campaign_graded_objective if is_applied_tuner else "",
+                            tuner=tuner_name,
+                        )
                     )
             else:
-                self._record_one_gemm_tuner_run(
-                    recorder,
-                    run_id=base_run_id,
-                    status=str(result.get("status") or "unknown"),
-                    shapes_total=result.get("shapes_total", shape_capture.get("shape_count")),
-                    shapes_tuned=result.get("shapes_tuned"),
-                    config_path=tuned_file,
-                    gain_pct=campaign_gain_pct,
-                    graded_objective=campaign_graded_objective,
-                    tuner=str(result.get("tuner") or ""),
-                    micro_decision=campaign_micro_decision,
-                    integrate_ref=campaign_integrate_ref,
-                    started_at=str(result.get("started_at") or ""),
-                    ended_at=str(result.get("ended_at") or result.get("ts") or ""),
-                    duration_sec=result.get("duration_sec"),
-                    error_class=str(result.get("error_class") or ""),
-                    failure_reason=str(
-                        result.get("error") or result.get("skip_reason") or result.get("error_class") or ""
-                    ),
+                recorder.record_gemm_tuning_run(
+                    GemmTuningRun(
+                        lane=campaign_lane,
+                        shapes_total=campaign_shapes_total,
+                        shapes_tuned=result.get("shapes_tuned"),
+                        config_path=tuned_file,
+                        gain_pct=campaign_gain_pct,
+                        graded_objective=campaign_graded_objective,
+                        tuner=str(result.get("tuner") or ""),
+                    )
                 )
             backend = str(result.get("backend") or result.get("engine") or "").lower()
             if backend:
                 tool_versions.record_tool_version(self.session_dir, tool=backend)
         except Exception:
             log.debug("kernel timeline: GEMM tuning record failed", exc_info=True)
-
-    def _record_one_gemm_tuner_run(
-        self,
-        recorder: Any,
-        *,
-        run_id: str,
-        status: str,
-        shapes_total: Any,
-        shapes_tuned: Any,
-        config_path: str,
-        gain_pct: Any,
-        graded_objective: str,
-        tuner: str,
-        micro_decision: str,
-        integrate_ref: str,
-        started_at: str,
-        ended_at: str,
-        duration_sec: Any,
-        error_class: str,
-        failure_reason: str,
-    ) -> None:
-        """Write one ``record_gemm_tuning_run`` row for a single tuner's outcome."""
-        recorder.record_gemm_tuning_run(
-            GemmTuningRun(
-                lane=LaneRunFields(
-                    run_id=run_id,
-                    status=status,
-                    started_at=started_at,
-                    ended_at=ended_at,
-                    duration_sec=duration_sec,
-                    micro_decision=micro_decision,
-                    integrate_ref=integrate_ref,
-                    failure_reason=failure_reason,
-                    error_class=error_class,
-                ),
-                shapes_total=shapes_total,
-                shapes_tuned=shapes_tuned,
-                config_path=config_path,
-                gain_pct=gain_pct,
-                graded_objective=graded_objective,
-                tuner=tuner,
-            )
-        )
 
     def _record_fusion_timeline(self, result: dict[str, Any]) -> None:
         """Record a settled fusion campaign in the Forge lane."""
@@ -736,19 +686,7 @@ class KernelPhase(CoordinatorCollaborator):
             return
         recorder.record_fusion_run(
             FusionRun(
-                lane=LaneRunFields(
-                    run_id=str(result.get("fusion_run_id") or ""),
-                    status=str(result.get("status") or "unknown"),
-                    started_at=str(result.get("started_at") or ""),
-                    ended_at=str(result.get("ended_at") or result.get("ts") or ""),
-                    duration_sec=result.get("duration_sec"),
-                    micro_decision=str(result.get("micro_decision") or result.get("decision") or ""),
-                    integrate_ref=str(result.get("integration_id") or ""),
-                    failure_reason=str(
-                        result.get("error") or result.get("skip_reason") or result.get("error_class") or ""
-                    ),
-                    error_class=str(result.get("error_class") or ""),
-                ),
+                lane=_forge_lane(result, str(result.get("fusion_run_id") or "")),
                 pattern=str(result.get("pattern") or result.get("fusion_pattern") or ""),
                 target_module=str(result.get("target_module") or result.get("kernel_name") or ""),
                 applied=bool(result.get("kept")),
@@ -2004,10 +1942,7 @@ class KernelPhase(CoordinatorCollaborator):
         self.shared_state.geak_pending.update(reviewed_product)
         recorder = self.timeline()
         if recorder is not None:
-            recorder.record_geak_claim(
-                self.shared_state.geak_pending,
-                specs=self._geak_acceptance_specs(result),
-            )
+            recorder.record_geak_claim(self.shared_state.geak_pending, specs=self._geak_acceptance_specs(result))
             recorder.record_geak_product(
                 GeakProduct(
                     accepted_flags=accepted_flags,
