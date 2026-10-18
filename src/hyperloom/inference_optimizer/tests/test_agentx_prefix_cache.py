@@ -220,7 +220,7 @@ async def test_writeback_refuses_to_anchor_and_stops_without_opening_enablement(
     from .conftest import make_coordinator
 
     triggers: list[dict[str, Any]] = []
-    monkeypatch.setattr(writeback.enablement_event, "record_trigger", lambda **kw: triggers.append(kw))
+    monkeypatch.setattr(writeback.enablement_event, "record_trigger", lambda trigger: triggers.append(vars(trigger)))
     coord = make_coordinator(
         session_dir,
         shared_state_overrides={"enablement_mode": "all", "benchmark_mode": "agentx", "baseline_tput": anchor_tput},
