@@ -100,6 +100,7 @@ def test_a_session_past_the_champion_writes_its_recipe_files_and_lessons(
     assert knowledge["remaining_gaps"] == ["output_tps: 1041.0 is 69% of the roofline bound 1500.0"]
     provenance = knowledge["provenance"]
     assert (provenance["commit_id"], provenance["recipe_digest"]) == ("i1", final.recipe.digest())
+    assert "warmup_round_seed" not in provenance
     replayed = from_recipe_kb_value(knowledge["value"], base_image_digest=provenance["base_image_digest"])
     assert replayed == final.recipe
     warm = knowledge_to_warm_recipe({"knowledge": knowledge, "session_id": "sess-1"})
@@ -245,6 +246,30 @@ def test_an_agentx_session_without_total_throughput_carries_interactivity_alone_
         "baseline_total_throughput": None,
     }
     assert (outcome.status, outcome.reason, kept.promoted) == ("skipped", "not_better_than_champion", None)
+
+
+@pytest.mark.parametrize(
+    ("notes", "seed"),
+    [
+        (("run_grid_warmup_discarded_first", "warmup_round_seed:1"), "1"),
+        (("warmup_round_seed:1", "run_grid_warmup_seed_unpatched"), "unpatched"),
+    ],
+)
+def test_the_record_names_how_the_warmup_behind_the_final_commit_ran(
+    snapshot: NotebookSnapshot, final: FinalRecipe, notes: tuple[str, ...], seed: str
+) -> None:
+    store = FakeRecipeStore(champion=_champion(1000.0))
+    records = tuple(
+        dataclasses.replace(record, result=dataclasses.replace(record.result, nonfatal_warnings=notes))
+        if record.request_id == "m1" and record.result is not None
+        else record
+        for record in snapshot.records
+    )
+
+    publish_final_recipe(RemoteRecipeClient(store), dataclasses.replace(snapshot, records=records), final)
+
+    assert store.knowledge is not None
+    assert store.knowledge["provenance"]["warmup_round_seed"] == seed
 
 
 def _recorded_with(snapshot: NotebookSnapshot, commit_id: str, digest: str) -> NotebookSnapshot:

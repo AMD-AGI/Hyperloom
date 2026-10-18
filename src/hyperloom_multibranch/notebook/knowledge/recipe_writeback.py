@@ -16,6 +16,10 @@ objective ``agentx_keep``), and carries both interactivities beside it, with bot
 recorded them. When the notebook recorded the final commit's recipe digest, a recipe with another digest is skipped
 (``recipe_digest_mismatch``): CLOSE was handed some other commit's recipe. A recipe that names anything as unexpressed
 does not rebuild what was measured, so it is skipped as well (``incomplete_recipe``).
+
+The provenance names how the warmup of the measurements behind the final commit ran (``warmup_round_seed``): the seed
+run_grid noted, or ``unpatched`` when its patch did not apply. Results from before the warmup had a seed of its own
+note neither, and the key is left out: their warmup replayed the measured prompts, which reads about 3% high (#56).
 """
 
 from __future__ import annotations
@@ -52,6 +56,8 @@ GAIN_METRIC = "validated_e2e_gain"
 OBJECTIVE_SCHEMA = "single_throughput"
 AGENTX_METRIC = "interactivity_gain_pct"
 AGENTX_OBJECTIVE_SCHEMA = "agentx_keep"
+WARMUP_SEED_NOTE = "warmup_round_seed:"
+WARMUP_SEED_UNPATCHED = "run_grid_warmup_seed_unpatched"
 PRODUCER = "hyperloom-multibranch"
 SKIPPED = "skipped"
 AGENTX = "agentx"
@@ -109,6 +115,24 @@ def _metrics(snapshot: NotebookSnapshot, final: FinalRecipe, scope: RecipeScope)
     return metrics
 
 
+def _warmup_seed(snapshot: NotebookSnapshot, commit_id: str) -> dict[str, str]:
+    """The ``warmup_round_seed`` the measurements behind ``commit_id``'s recorded value noted, as provenance."""
+
+    made = next((record for record in snapshot.records if record.commit_id == commit_id), None)
+    if made is not None and made.judgement is not None:
+        request_ids = made.judgement.request_ids
+    else:
+        request_ids = snapshot.baseline.request_ids if snapshot.baseline else ()
+    results = {record.request_id: record.result for record in snapshot.records if record.result is not None}
+    notes = [
+        note for request_id in request_ids if request_id in results for note in results[request_id].nonfatal_warnings
+    ]
+    seeds = sorted({note.removeprefix(WARMUP_SEED_NOTE) for note in notes if note.startswith(WARMUP_SEED_NOTE)})
+    if WARMUP_SEED_UNPATCHED in notes:
+        return {"warmup_round_seed": "unpatched"}
+    return {"warmup_round_seed": ",".join(seeds)} if seeds else {}
+
+
 def knowledge_document(
     snapshot: NotebookSnapshot, profile: SessionProfile, final: FinalRecipe, scope: RecipeScope
 ) -> dict[str, object]:
@@ -138,6 +162,7 @@ def knowledge_document(
                 "base_image_digest": final.recipe.base_image_digest,
                 "runtime_snapshot": final.recipe.runtime_snapshot,
                 "generated_at": datetime.fromtimestamp(snapshot.taken_at, timezone.utc).isoformat(),
+                **_warmup_seed(snapshot, final.commit_id),
             },
         }
     )
