@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Sequence
 
 import click
 
-from kernelforge.cli.lanes import _make_lane_agent_factory, _require_lane_provider_capabilities
+from kernelforge.cli.lanes import LaneBinding, _make_lane_agent_factory, _require_lane_provider_capabilities
 from kernelforge.cli.options import (
     CEILING_ON,
     _agent_runtime_options,
@@ -31,6 +31,7 @@ from kernelforge.cli.options import (
 )
 from kernelforge.cli.pr_references import (
     PR_KB_BUDGET_SEC,
+    PrReferenceQuery,
     _collect_pr_references,
     _git_remote_url,
     _pr_kb_enabled,
@@ -679,13 +680,15 @@ def _collect_pr_kb_context(
         )
     else:
         pr_result = _collect_pr_references(
-            workspace_dir=workspace_dir,
-            kernel_backend=kernel_backend or "",
-            git_remote=_git_remote_url(workspace),
-            source_files=campaign.source_files,
-            operator_name=operator_name or "",
-            target_functions=target_functions_list,
-            budget_sec=min(PR_KB_BUDGET_SEC, remaining(reserve=finalize_reserve_sec)),
+            workspace_dir,
+            PrReferenceQuery(
+                kernel_backend=kernel_backend or "",
+                git_remote=_git_remote_url(workspace),
+                source_files=campaign.source_files,
+                operator_name=operator_name or "",
+                target_functions=target_functions_list,
+            ),
+            min(PR_KB_BUDGET_SEC, remaining(reserve=finalize_reserve_sec)),
         )
         if pr_result is None:
             iter_config.pr_kb_event = _pr_refs_event_fields(
@@ -1920,9 +1923,7 @@ def forge_loop(
     _lane_agent_factory = _make_lane_agent_factory(
         make_agent=make_agent_fn,
         config=config,
-        workspace_dir=iter_config.workspace_dir,
-        driver=driver,
-        source_files=source_files_list,
+        binding=LaneBinding(iter_config.workspace_dir, driver, source_files_list),
         session_kwargs={
             "program_md": program_md,
             "pre_task_context": pr_task_context,
