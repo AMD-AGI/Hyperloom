@@ -40,6 +40,7 @@ def test_the_breakdown_lays_out_the_session_tree_tests_and_measurement(snapshot:
         "s2": 0.5,
     }
     assert breakdown["spend"] == {"gpu_hours": 1.0, "llm_usd": 2.0}
+    assert breakdown["environment_changes"] == []
     assert [row["request"]["request_id"] for row in breakdown["tests"]] == ["r1", "r2", "r3", "r5", "r4", "m1"]
     assert [(row["node"], row["tests"], row["gpu_seconds"]) for row in breakdown["measurement_sandboxes"]] == [
         ("node-1", 5, 3000.0),

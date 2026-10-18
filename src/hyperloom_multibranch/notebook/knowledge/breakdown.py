@@ -13,7 +13,8 @@ export has its own schema version and its own sections:
 * ``branches`` and ``committed``: each branch's progress, and each commit with its gain and merge state.
 * ``tests``: every test record: request, result with its attempts and GPU time, judgement, conclusion, commit, times.
 * ``measurement_sandboxes``: per node, GPU model, backend and image, the tests run there, their GPU time and failed
-  attempts.
+  attempts; ``environment_changes``: where a node's image, GPU model, power cap or partition mode moved between its
+  results.
 * ``close``: the commit final selection chose and its recipe, how the scheduler chose it, and the Recipe KB
   write-back, as the single-lineage export reports it; when the scheduler passes them, what CLOSE's knowledge steps
   did (``knowledge``: the Experiences, the learnings and the archived search tree).
@@ -117,6 +118,7 @@ def build_breakdown(
         "committed": encode(snapshot.committed),
         "tests": encode(snapshot.records),
         "measurement_sandboxes": encode(measurement_usage(snapshot.records)),
+        "environment_changes": encode(snapshot.environment_changes),
         "close": close,
     }
 

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 from hyperloom_multibranch.contracts.notebook.peers import (
@@ -15,6 +15,7 @@ from hyperloom_multibranch.contracts.notebook.peers import (
     Intent,
     IntentLayer,
     Judgement,
+    SandboxFacts,
     TestRequest,
     TestResult,
     Validity,
@@ -39,6 +40,8 @@ CLAIM_TOKEN_LENGTH = 24
 MAX_OP_SHARES = 50
 WHOLE_PCT = 100.0
 SECONDS_PER_HOUR = 3600.0
+#: The facts of a node's measurement environment that change what a test there measures (#63).
+ENVIRONMENT_FIELDS = ("image_digest", "gpu_model", "power_cap_w", "partition_mode")
 
 
 @dataclass(frozen=True)
@@ -516,6 +519,47 @@ class ManifestFingerprint:
 
 
 @dataclass(frozen=True)
+class EnvironmentChange:
+    """``node``'s measurement environment moved under ``request_id``'s result, written at ``at``: ``changed`` holds
+    each :data:`ENVIRONMENT_FIELDS` field that moved, with its last known value on the node and its value now."""
+
+    node: str
+    request_id: str
+    at: float
+    changed: Mapping[str, tuple[str, str]]
+
+
+def _environment_readings(records: Iterable[TestRecord]) -> list[tuple[float, str, SandboxFacts]]:
+    found = []
+    for record in records:
+        result = record.result
+        if result is None or record.measured_at is None or result.sandbox is None or not result.sandbox.node_name:
+            continue
+        found.append((record.measured_at, record.request_id, result.sandbox))
+    return sorted(found, key=lambda reading: reading[0])
+
+
+def _environment_changes(records: Iterable[TestRecord]) -> tuple[EnvironmentChange, ...]:
+    known: dict[str, dict[str, str]] = {}
+    found = []
+    for at, request_id, facts in _environment_readings(records):
+        node = str(facts.node_name)
+        last = known.setdefault(node, {})
+        changed = {}
+        for name in ENVIRONMENT_FIELDS:
+            value = getattr(facts, name)
+            if value is None or value == "":
+                continue
+            now, before = str(value), last.get(name)
+            if before is not None and before != now:
+                changed[name] = (before, now)
+            last[name] = now
+        if changed:
+            found.append(EnvironmentChange(node, request_id, at, changed))
+    return tuple(found)
+
+
+@dataclass(frozen=True)
 class NotebookSnapshot:
     """Everything the notebook held at ``taken_at``, read at once: what the RSI, the dashboard and the exports use."""
 
@@ -552,6 +596,16 @@ class NotebookSnapshot:
 
         return sum(record.usage.cost_usd for record in self.llm_usage)
 
+    @property
+    def environment_changes(self) -> tuple[EnvironmentChange, ...]:
+        """Where a node's measurement environment moved between its results, in the order they were written.
+
+        Each field is compared with its last known value on the same node. An empty value is no reading, so a fact a
+        node could not read neither hides a change nor shows one.
+        """
+
+        return _environment_changes(self.records)
+
     def value_of(self, commit_id: str) -> Mapping[str, float]:
         """The recorded value of a commit: the baseline for the root, else the judgement that made the commit."""
 
@@ -565,6 +619,7 @@ class NotebookSnapshot:
 
 __all__ = [
     "CLAIM_TOKEN_LENGTH",
+    "ENVIRONMENT_FIELDS",
     "MAX_OP_SHARES",
     "BaselineRecord",
     "BranchLogRecord",
@@ -575,6 +630,7 @@ __all__ = [
     "CommitNode",
     "CommittedCommit",
     "DedupAnswer",
+    "EnvironmentChange",
     "FrontierScore",
     "InboxItem",
     "InboxPage",

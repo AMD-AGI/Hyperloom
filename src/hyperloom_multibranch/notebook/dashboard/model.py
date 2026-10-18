@@ -10,6 +10,7 @@
 * ``queue``: the toolbox's queue lengths and latest cold start, when the caller passes ``Toolbox.queue_state()``;
 * ``lineage`` and ``splits``: every commit, every branch, and the branches split off for a correctness fix;
 * ``sandboxes``: per measurement environment, the tests run there and their GPU time;
+* ``environment_changes``: where a node's image, GPU model, power cap or partition mode moved between its results;
 * ``quarantined``: the nodes and GPU sets out of service.
 
 The run entry point decides when to rebuild it; :func:`write_dashboard` writes ``dashboard.json`` and
@@ -97,6 +98,18 @@ def _in_flight(snapshot: NotebookSnapshot) -> dict[str, Any]:
     }
 
 
+def _environment_changes(snapshot: NotebookSnapshot) -> list[dict[str, Any]]:
+    return [
+        {
+            "node": change.node,
+            "request_id": change.request_id,
+            "at": _iso(change.at),
+            "changed": {name: list(values) for name, values in change.changed.items()},
+        }
+        for change in snapshot.environment_changes
+    ]
+
+
 def _queue(queue: QueueState) -> dict[str, Any]:
     # String keys only: dashboard.json must read back equal to what was built.
     return {
@@ -137,6 +150,7 @@ def build_dashboard(
             if node.origin is LineageKind.SPLIT
         ],
         "sandboxes": encode(measurement_usage(snapshot.records)),
+        "environment_changes": _environment_changes(snapshot),
         "quarantined": encode(snapshot.quarantined),
     }
 

@@ -32,6 +32,7 @@ from hyperloom_multibranch.contracts.notebook.peers import (
     Purpose,
     TestKind,
     TestRequest,
+    TestResult,
     Validity,
     Verdict,
 )
@@ -512,6 +513,35 @@ async def test_llm_spend_is_recorded_only_by_whoever_spent_it(
 def test_an_llm_cost_is_a_finite_amount_and_token_counts_are_not_negative(fields: dict[str, float]) -> None:
     with pytest.raises(ValueError):
         LlmUsage(**{"branch": "s1", "source": UsageSource.SPECIALIST, "cost_usd": 1.0, **fields})
+
+
+def _ran_on(request_id: str, node: str, **facts: object) -> TestResult:
+    measured = result(request_id, node=node)
+    return replace(measured, sandbox=replace(measured.sandbox, **facts))
+
+
+async def test_a_node_whose_image_or_power_cap_moves_between_results_shows_an_environment_change(open_as: Open) -> None:
+    toolbox = open_as(Role.TOOLBOX)
+    readings = [
+        ("r1", "node-1", {"image_digest": "sha256:aa", "gpu_model": "MI355X", "power_cap_w": 1000.0}),
+        ("r2", "node-1", {"image_digest": "sha256:bb", "gpu_model": "MI355X"}),
+        ("r3", "node-2", {"image_digest": "sha256:aa", "power_cap_w": 750.0}),
+        ("r4", "node-1", {"image_digest": "sha256:bb", "power_cap_w": 900.0}),
+        ("r5", "node-1", {"image_digest": "sha256:bb", "gpu_model": "MI355X", "power_cap_w": 900.0}),
+    ]
+    for request_id, node, facts in readings:
+        await toolbox.write_request(request(request_id, intent("s1", "c0", target=request_id)))
+        await toolbox.write_result(_ran_on(request_id, node, **facts))
+
+    snapshot = await toolbox.snapshot()
+    changes = snapshot.environment_changes
+
+    assert [(change.node, change.request_id, dict(change.changed)) for change in changes] == [
+        ("node-1", "r2", {"image_digest": ("sha256:aa", "sha256:bb")}),
+        ("node-1", "r4", {"power_cap_w": ("1000.0", "900.0")}),
+    ]
+    measured_at = {record.request_id: record.measured_at for record in snapshot.records}
+    assert [change.at for change in changes] == [measured_at["r2"], measured_at["r4"]]
 
 
 async def test_the_latest_baseline_is_in_force(open_as: Open) -> None:

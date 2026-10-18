@@ -140,6 +140,19 @@ def _infrastructure(dashboard: Mapping[str, Any]) -> str:
             for row in dashboard["sandboxes"]
         ],
     )
+    changes = _table(
+        "Environment changes",
+        (_NODE, _REQUEST, "at", "changed"),
+        [
+            (
+                row["node"],
+                row["request_id"],
+                row["at"],
+                "; ".join(f"{name} {before} → {after}" for name, (before, after) in row["changed"].items()),
+            )
+            for row in dashboard["environment_changes"]
+        ],
+    )
     quarantined = _table(
         "Quarantined",
         (_NODE, "GPUs", "reason"),
@@ -147,7 +160,7 @@ def _infrastructure(dashboard: Mapping[str, Any]) -> str:
     )
     queue = dashboard.get("queue")
     queued = _table("Toolbox queue", ("item", "value"), list(queue.items())) if queue is not None else ""
-    return sandboxes + quarantined + queued
+    return sandboxes + changes + quarantined + queued
 
 
 def render_html(dashboard: Mapping[str, Any]) -> str:

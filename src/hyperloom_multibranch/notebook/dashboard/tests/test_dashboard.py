@@ -24,7 +24,7 @@ from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.dashboard import build_dashboard, render_html, write_dashboard
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, score_progress
-from hyperloom_multibranch.notebook.tests.factories import request
+from hyperloom_multibranch.notebook.tests.factories import request, result
 from hyperloom_multibranch.notebook.tests.sessions import FP8_KV, GEMM_AGAIN, METRIC
 
 HOSTILE = "<script>alert('x')</script>"
@@ -74,6 +74,7 @@ def test_the_dashboard_holds_branches_in_flight_work_lineage_and_infrastructure(
     assert [(claim["branch"], claim["expires_in_s"]) for claim in dashboard["in_flight"]["claims"]] == [("s1", 45.0)]
     assert dashboard["splits"] == [{"branch": "s1-fix", "from_branch": "s1", "start_commit": "c1"}]
     assert [(row["node"], row["tests"]) for row in dashboard["sandboxes"]] == [("node-1", 5), ("node-2", 1)]
+    assert dashboard["environment_changes"] == []
     assert dashboard["quarantined"][0]["node"] == "node-3"
     assert dashboard["queue"] == {
         "queued": 3,
@@ -97,6 +98,31 @@ def test_the_page_is_self_contained_and_escapes_every_value(busy: NotebookSnapsh
     assert "<td>stopped</td>" in page and "<td>node-3</td>" in page
 
 
+def _on_image(request_id: str, digest: str, at: float) -> TestRecord:
+    measured = result(request_id, node="node-9")
+    on_image = dataclasses.replace(measured, sandbox=dataclasses.replace(measured.sandbox, image_digest=digest))
+    return TestRecord(request(request_id, GEMM_AGAIN), result=on_image, requested_at=at, measured_at=at)
+
+
+def test_the_dashboard_lists_where_a_nodes_environment_moved(snapshot: NotebookSnapshot) -> None:
+    at = snapshot.taken_at
+    moved = dataclasses.replace(
+        snapshot,
+        records=(*snapshot.records, _on_image("e1", "sha256:aa", at - 20), _on_image("e2", "sha256:bb", at - 10)),
+    )
+
+    dashboard = build_dashboard(moved, metric=METRIC)
+
+    (change,) = dashboard["environment_changes"]
+    assert (change["node"], change["request_id"], change["changed"]) == (
+        "node-9",
+        "e2",
+        {"image_digest": ["sha256:aa", "sha256:bb"]},
+    )
+    assert json.loads(json.dumps(dashboard)) == dashboard
+    assert "image_digest sha256:aa → sha256:bb" in render_html(dashboard)
+
+
 def test_the_dashboard_is_written_as_json_and_html(busy: NotebookSnapshot, tmp_path: Path) -> None:
     dashboard = build_dashboard(busy, metric=METRIC, queue=QueueState(running_by_branch={"s1": 1}))
 
@@ -113,4 +139,4 @@ async def test_an_empty_notebook_has_an_empty_page(tmp_path: Path) -> None:
     page = render_html(build_dashboard(empty))
 
     assert "<h1>Session without a profile</h1>" in page
-    assert page.count('<p class="empty">none</p>') == 7
+    assert page.count('<p class="empty">none</p>') == 8
