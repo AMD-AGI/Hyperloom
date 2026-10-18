@@ -363,6 +363,18 @@ def _maybe_build_shape_manifest(
         return {"status": msg}
 
 
+def _main_trace_options(args: argparse.Namespace, *, steady_state: bool) -> _reader.TraceAnalysisOptions:
+    """Reader options for the main trace: every device-kernel aggregate and its launches, on the requested rank."""
+    return _reader.TraceAnalysisOptions(
+        top_k=0,
+        steady_state=steady_state,
+        framework=args.framework,
+        emit_launches=True,
+        require_single_rank=args.require_single_rank,
+        tensor_parallel_size=args.tensor_parallel_size or None,
+    )
+
+
 def _build_arg_parser() -> argparse.ArgumentParser:
     """Build the CLI parser mirroring the flags the handler forwards."""
     p = argparse.ArgumentParser(
@@ -483,17 +495,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         try:
             # top_k=0 -> keep all device-kernel aggregates; candidate slicing uses top_k.
-            analyze = _reader.analyze_trace(
-                args.trace_input,
-                _reader.TraceAnalysisOptions(
-                    top_k=0,
-                    steady_state=enable_steady,
-                    framework=args.framework,
-                    emit_launches=True,
-                    require_single_rank=args.require_single_rank,
-                    tensor_parallel_size=args.tensor_parallel_size or None,
-                ),
-            )
+            analyze = _reader.analyze_trace(args.trace_input, _main_trace_options(args, steady_state=enable_steady))
         except Exception as exc:  # noqa: BLE001 — never abort the pipeline
             analyze = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
     run_meta["preflight"].update(

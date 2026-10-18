@@ -616,7 +616,6 @@ def _finalize(
     extid_to_opmeta = buffers.extid_to_opmeta
     graph_launch_corrs = frozenset(buffers.graph_launch_corrs)
     graph_launch_count = len(graph_launch_corrs)
-    corr_to_launch_geom = buffers.corr_to_launch_geom
     # Graph capture health is a WHOLE-TRACE property (activity-buffer overflow drops replays across the run), so the
     # recorded-launch coverage must be computed over the full event stream -- BEFORE any steady-window filter -- to
     # stay scope-consistent with ``graph_launch_count`` (also whole-trace).
@@ -681,7 +680,7 @@ def _finalize(
     graph_corrs = graph_launch_corrs or frozenset()
     graph_kernels = 0
     graph_gpu_us = 0.0
-    geom = corr_to_launch_geom or {}
+    geom = buffers.corr_to_launch_geom or {}
     # Name-keyed shape backfill: accumulate GPU time per (kernel, shape) so the majority capture-time shape wins;
     # multiple distinct shapes mark ambiguous.
     kern_name_backfill_by_sig: dict[str, dict[tuple[tuple[tuple[int, ...], ...], tuple[str, ...]], dict[str, Any]]] = {}
