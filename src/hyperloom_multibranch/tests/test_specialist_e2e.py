@@ -184,7 +184,7 @@ async def test_a_model_backed_specialist_lands_a_source_change_through_the_sessi
     cli.write_text(_STAND_IN.replace("@TARGET@", TARGET).replace("@MECHANISM@", MECHANISM))
     cli.chmod(0o755)
     setup = AgentSetup(
-        command=AgentCommand("claude", str(cli)),
+        command=AgentCommand("claude", str(cli), model="claude-opus-5-5"),
         role=role_prompt("qwen3-8b on vllm, TP 1, ISL 1024, OSL 1024, concurrency 64"),
         env={"PATH": os.environ.get("PATH", "")},
         runner=LocalAgentRunner(

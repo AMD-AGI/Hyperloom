@@ -15,6 +15,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.specialist.agent_session import AgentSession, AgentSetup, BranchPlace, SessionNotebook
 from hyperloom_multibranch.specialist.runtime import SessionFactory, SessionStart
 from hyperloom_multibranch.specialist.tools import WorktreeFor
@@ -39,7 +40,11 @@ def model_sessions(
     notebook_for: Callable[[str], SessionNotebook],
 ) -> ModelSessions:
     """The sessions of one session's specialists; ``setup.role`` is the
-    :func:`~hyperloom_multibranch.specialist.prompts.role_prompt` of the session's workload."""
+    :func:`~hyperloom_multibranch.specialist.prompts.role_prompt` of the session's workload.
+
+    Raises :class:`~hyperloom_multibranch.contracts.llm_prices.UnpricedModel` for a model the price sheet lacks, before
+    anything is built: its spend could not be recorded."""
+    price_of(setup.command.model)
     if not base.path.exists():
         base.build(components)
 

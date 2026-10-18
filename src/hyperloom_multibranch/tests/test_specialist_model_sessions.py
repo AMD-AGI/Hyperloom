@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
+import pytest
+
 from hyperloom.measure.compile import PackageBase
+from hyperloom_multibranch.contracts.llm_prices import UnpricedModel
 from hyperloom_multibranch.specialist.agent_session import AgentCommand, AgentSession, AgentSetup
 from hyperloom_multibranch.specialist.model_sessions import ModelSessions, model_sessions
 from hyperloom_multibranch.specialist.prompts import role_prompt
@@ -15,7 +18,8 @@ def test_a_branch_s_sessions_and_its_worktree_tools_share_one_worktree_on_one_so
     (package / "config.py").write_bytes(b"max_num_seqs = 128\n")
     installed = PackageBase("vllm", package, None, None)
     role = role_prompt("qwen3-8b on vllm, TP 1, concurrency 64")
-    setup = AgentSetup(AgentCommand("claude", "claude"), role, {}, object(), object(), object(), object())
+    command = AgentCommand("claude", "claude", model="claude-opus-5-5")
+    setup = AgentSetup(command, role, {}, object(), object(), object(), object())
 
     def built() -> ModelSessions:
         return model_sessions(
@@ -33,3 +37,17 @@ def test_a_branch_s_sessions_and_its_worktree_tools_share_one_worktree_on_one_so
     assert worktree.path == tmp_path / "MB-branches" / "s1" / "worktree"
     assert (worktree.path / "vllm" / "config.py").read_bytes() == b"max_num_seqs = 128\n"
     assert built().worktrees("s1").path == worktree.path
+
+
+def test_sessions_on_a_model_with_no_price_are_refused_before_anything_is_built(tmp_path):
+    setup = AgentSetup(AgentCommand("claude", "claude", model="claude-opus-9"), "role", {}, *(object(),) * 4)
+
+    with pytest.raises(UnpricedModel, match="'claude-opus-9'"):
+        model_sessions(
+            setup,
+            base=SourceBase(tmp_path / "MB-source"),
+            components=("vllm",),
+            branch_dir=lambda branch: tmp_path / branch,
+            notebook_for=lambda branch: object(),
+        )
+    assert not (tmp_path / "MB-source").exists()
