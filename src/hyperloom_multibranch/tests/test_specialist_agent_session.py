@@ -181,21 +181,25 @@ async def test_a_session_that_ends_as_it_should_is_followed_by_a_fresh_one(rig):
     assert rig.worktree.head() == rig.root
 
 
-async def test_each_launch_records_what_its_cli_reported_it_cost_and_a_killed_one_records_nothing(rig, caplog):
-    session = rig.session()
+async def test_each_launch_records_its_tokens_at_the_gateway_s_rates_however_it_ended(rig, caplog):
+    session = rig.session(command=AgentCommand("claude", "claude", model="claude-opus-5-5"))
     running = asyncio.create_task(session.run())
     await _until(lambda: len(rig.runner.specs) == 1, "the first launch")
-    result = {"type": "result", "total_cost_usd": 2.5, "usage": {"input_tokens": 40, "output_tokens": 7}}
-    (rig.workspace / "process.log").write_text(json.dumps({**result, "session_id": "sess-1"}) + "\n")
+    opus = {"id": "m1", "model": "claude-opus-5-5", "usage": {"input_tokens": 1_000, "output_tokens": 100}}
+    rows = [{"type": "system", "subtype": "init", "session_id": "sess-1"}, {"type": "assistant", "message": opus}]
+    (rig.workspace / "process.log").write_text("".join(json.dumps(row) + "\n" for row in rows))
     rig.runner.end(1, EXITED_WELL, 3600.0)
     await _until(lambda: len(rig.runner.specs) == 2, "a fresh session")
-    (rig.workspace / "process.log").write_text('{"type": "assistant"}\n')
+    odd = {"id": "m2", "model": "claude-unknown-1", "usage": {"input_tokens": 1_000_000}}
+    (rig.workspace / "process.log").write_text(json.dumps({"type": "assistant", "message": odd}) + "\n")
     await session.stop()
     await asyncio.wait_for(running, 1)
 
-    (record,) = (await rig.notebook.snapshot()).llm_usage
-    assert record.usage == LlmUsage(BRANCH, UsageSource.SPECIALIST, 2.5, 40, 7, launch="sess-1")
-    assert "ended without a result event" in caplog.text
+    first, killed = (record.usage for record in (await rig.notebook.snapshot()).llm_usage)
+    assert first == LlmUsage(BRANCH, UsageSource.SPECIALIST, first.cost_usd, 1_000, 100, "sess-1")
+    assert first.cost_usd == pytest.approx((1_000 * 4 + 100 * 20) / 1e6)
+    assert (killed.cost_usd, killed.input_tokens) == (pytest.approx(4.0), 1_000_000)
+    assert "'claude-unknown-1', which has no price" in caplog.text
 
 
 async def test_each_launch_shows_the_brief_rebuilt_at_the_head_it_starts_at(rig):

@@ -1,58 +1,97 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""What one agent CLI launch cost, read from the result event its stream-json log ends with.
+"""What one agent CLI launch used, read from its stream-json log: the tokens of every model call, by model.
 
-Claude Code writes that event when its model finishes its turn. A launch killed at its deadline, lost or stopped
-writes none, and codex reports no cost, so such a launch's spend is not known here (board #66).
+Claude Code logs each assistant message with its model and usage; a message streamed as several events repeats one
+usage under one id, so each id counts once. Codex logs each turn's usage when the turn completes, without the model.
+A launch killed mid-session has every call before the kill in its log, so what it used is known without the result
+event the CLI writes only when its model finishes.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-#: The prompt-token counters of a Claude ``usage``: its ``input_tokens`` is only the uncached share.
-_PROMPT_COUNTERS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
-_RESULT = "result"
+from hyperloom_multibranch.contracts.llm_prices import TokenCounts
+
+#: The model of calls the log does not name (codex turns): the launch's own model.
+UNNAMED = ""
+_CACHE_READ = "cache_read_input_tokens"
+_CACHE_WRITE = "cache_creation_input_tokens"
+_INPUT = "input_tokens"
+_OUTPUT = "output_tokens"
 
 
 @dataclass(frozen=True)
-class LaunchCost:
-    """The CLI's own ``total_cost_usd`` for a launch, its prompt tokens (cached ones included), its output tokens,
-    and the CLI session id it ran under."""
+class LaunchUsage:
+    """The tokens of a launch's model calls by the model the log names (``UNNAMED`` when it names none), and the CLI
+    session or thread id it ran under."""
 
-    cost_usd: float
-    input_tokens: int
-    output_tokens: int
+    tokens: Mapping[str, TokenCounts]
     session_id: str
 
+    @property
+    def total(self) -> TokenCounts:
+        return sum(self.tokens.values(), TokenCounts())
 
-def launch_cost(process_log: Path) -> LaunchCost | None:
-    """The last result event of a Claude stream-json log; ``None`` when the log is missing or has none."""
+
+def launch_usage(process_log: Path) -> LaunchUsage:
+    """Every model call a Claude or codex stream-json log records; none when the log is missing."""
+    messages: dict[str, tuple[str, TokenCounts]] = {}
+    turns = TokenCounts()
+    session_id = ""
+    for row in _rows(process_log):
+        session_id = session_id or str(row.get("session_id") or row.get("thread_id") or "")
+        message, usage = row.get("message"), row.get("usage")
+        if (
+            row.get("type") == "assistant"
+            and isinstance(message, Mapping)
+            and isinstance(message.get("usage"), Mapping)
+        ):
+            key = str(message.get("id") or f"#{len(messages)}")
+            messages[key] = (str(message.get("model") or UNNAMED), _claude_tokens(message["usage"]))
+        elif row.get("type") == "turn.completed" and isinstance(usage, Mapping):
+            turns += _codex_tokens(usage)
+    tokens: dict[str, TokenCounts] = {}
+    for model, counts in messages.values():
+        tokens[model] = tokens.get(model, TokenCounts()) + counts
+    if turns != TokenCounts():
+        tokens[UNNAMED] = tokens.get(UNNAMED, TokenCounts()) + turns
+    return LaunchUsage(tokens, session_id)
+
+
+def _rows(process_log: Path) -> Iterator[Mapping[str, object]]:
     try:
-        lines = process_log.read_text(encoding="utf-8", errors="replace").splitlines()
+        handle = process_log.open(encoding="utf-8", errors="replace")
     except FileNotFoundError:
-        return None
-    for line in reversed(lines):
-        if f'"{_RESULT}"' not in line:
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(row, dict) or row.get("type") != _RESULT:
-            continue
-        cost = row.get("total_cost_usd")
-        if isinstance(cost, bool) or not isinstance(cost, (int, float)):
-            continue
-        usage = row.get("usage")
-        usage = usage if isinstance(usage, Mapping) else {}
-        prompt = sum(_count(usage, key) for key in _PROMPT_COUNTERS)
-        return LaunchCost(float(cost), prompt, _count(usage, "output_tokens"), str(row.get("session_id") or ""))
-    return None
+        return
+    with handle:
+        for line in handle:
+            if '"usage"' not in line and '"session_id"' not in line and '"thread_id"' not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict):
+                yield row
+
+
+def _claude_tokens(usage: Mapping[str, object]) -> TokenCounts:
+    split = usage.get("cache_creation")
+    split = split if isinstance(split, Mapping) else {}
+    hour = _count(split, "ephemeral_1h_input_tokens")
+    written = _count(split, "ephemeral_5m_input_tokens") if split else _count(usage, _CACHE_WRITE)
+    return TokenCounts(_count(usage, _INPUT), _count(usage, _OUTPUT), _count(usage, _CACHE_READ), written, hour)
+
+
+def _codex_tokens(usage: Mapping[str, object]) -> TokenCounts:
+    cached = _count(usage, "cached_input_tokens")
+    return TokenCounts(max(0, _count(usage, _INPUT) - cached), _count(usage, _OUTPUT), cached)
 
 
 def _count(usage: Mapping[str, object], key: str) -> int:
@@ -60,4 +99,4 @@ def _count(usage: Mapping[str, object], key: str) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
 
-__all__ = ["LaunchCost", "launch_cost"]
+__all__ = ["UNNAMED", "LaunchUsage", "launch_usage"]
