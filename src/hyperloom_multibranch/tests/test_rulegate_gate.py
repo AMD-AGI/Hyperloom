@@ -6,20 +6,32 @@ import dataclasses
 
 import pytest
 
+from hyperloom.contracts.measurement import (
+    NOT_REPRODUCED,
+    REPRODUCED,
+    AttachmentRef,
+    Purpose,
+    TestKind,
+    TestResult,
+    Validity,
+)
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, apply
 from hyperloom_multibranch.contracts.fork import AdmissionStatus
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.notebook.records import RegressionCase
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, Conclusion
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import intent, request, result
 from hyperloom_multibranch.rulegate.decision import Action
 from hyperloom_multibranch.rulegate.gate import RuleGate
+from hyperloom_multibranch.rulegate.regression import FixProof, ReproRun
 from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler, RecordingVerifier
 
 BASELINE = Recipe("rocm/vllm@sha256:" + "c" * 64, LaunchConfig(server_args="--max-num-seqs 128"))
 GEMM = intent("s1", "c0")
+OVERFLOW = (AttachmentRef("fp8_overflow", "dir", "b" * 64),)
 
 
 def _judged(verdict: Verdict, *, accuracy_ok: bool = True, fixes_correctness: bool = False) -> Judgement:
@@ -242,6 +254,60 @@ async def test_a_specialist_stopped_mid_commit_still_records_the_commit(setup):
 
     record = await notebook.record("r1")
     assert record.commit_id == await repo.head("s1") != "c0"
+
+
+async def _proven(root) -> FixProof:
+    """The proof of a fix whose clean run ``p1`` the toolbox wrote."""
+
+    toolbox = LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox"))
+    clean = request("p1", GEMM, kind=TestKind.REPRO, purpose=Purpose.REPRO, attachments=OVERFLOW)
+    await toolbox.write_request(clean)
+    await toolbox.write_result(TestResult("p1", Validity.SUCCEEDED, repro_verdict=NOT_REPRODUCED))
+    reproduced = ReproRun("p0", verdict=REPRODUCED)
+    return FixProof(reproduced, ReproRun("p1", verdict=NOT_REPRODUCED), reproduced)
+
+
+@pytest.mark.parametrize(
+    ("judgement", "conclusion"),
+    [
+        (_judged(Verdict.FLAT, fixes_correctness=True), Conclusion.COMMITTED_WITH_REPRO),
+        (_judged(Verdict.IMPROVED), Conclusion.COMMITTED),
+    ],
+)
+async def test_a_proven_fix_lands_with_its_case_in_the_regression_set(setup, tmp_path, judgement, conclusion):
+    notebook, repo, measured = setup
+    gate = RuleGate(notebook, repo, RecordingScheduler(AdmissionStatus.ACCEPTED), RecordingVerifier())
+
+    assert await gate.settle(measured, judgement, fix=await _proven(tmp_path / "notebook")) is Action.COMMIT
+
+    tip = await repo.head("s1")
+    record = await notebook.record("r1")
+    assert (record.conclusion, record.commit_id) == (conclusion, tip)
+    assert await notebook.regression_cases_for(tip) == (RegressionCase("fp8_overflow", tip, "p1"),)
+
+
+async def test_a_correctness_fix_without_its_proof_is_refused(setup):
+    notebook, repo, measured = setup
+    verifier = RecordingVerifier()
+    gate = RuleGate(notebook, repo, RecordingScheduler(AdmissionStatus.ACCEPTED), verifier)
+
+    with pytest.raises(ValueError, match="without the proof of its case"):
+        await gate.settle(measured, _judged(Verdict.FLAT, fixes_correctness=True))
+
+    assert await repo.head("s1") == "c0"
+    assert ((await notebook.record("r1")).judgement, verifier.asked) == (None, [])
+
+
+async def test_a_commit_whose_case_cannot_be_registered_is_taken_back(setup):
+    notebook, repo, measured = setup
+    gate = RuleGate(notebook, repo, RecordingScheduler(AdmissionStatus.ACCEPTED), RecordingVerifier())
+    not_a_case = FixProof(ReproRun("p0", REPRODUCED), ReproRun("r1", NOT_REPRODUCED), ReproRun("p0", REPRODUCED))
+
+    with pytest.raises(ValueError, match="r1 is not a repro test"):
+        await gate.settle(measured, _judged(Verdict.FLAT, fixes_correctness=True), fix=not_a_case)
+
+    assert await repo.head("s1") == "c0"
+    assert (await notebook.record("r1")).judgement is None
 
 
 async def test_the_gate_refuses_a_step_the_table_does_not_call_for(setup):

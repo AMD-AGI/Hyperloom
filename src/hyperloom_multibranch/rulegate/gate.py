@@ -7,6 +7,7 @@ repository and the notebook, and takes fork and repair requests to the scheduler
 from __future__ import annotations
 
 import asyncio
+from typing import Protocol
 
 from hyperloom.contracts.recipe import apply
 from hyperloom_multibranch.contracts.fork import (
@@ -25,6 +26,7 @@ from hyperloom_multibranch.contracts.notebook.records import TestRecord
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion
 from hyperloom_multibranch.contracts.repo import BranchMoved, ExperimentRepo
 from hyperloom_multibranch.rulegate.decision import Action, decide
+from hyperloom_multibranch.rulegate.regression import CaseRegistry, FixProof, register_case
 
 
 def _recorded_as(judgement: Judgement) -> Conclusion:
@@ -40,6 +42,10 @@ def _require(judgement: Judgement, *actions: Action) -> None:
         raise ValueError(f"a {judgement.verdict.value} judgement calls for {action.value}")
 
 
+class GateWriter(JudgementSink, CaseRegistry, Protocol):
+    """The gate's handle on the notebook: it writes judgements and registers the cases of the fixes it commits."""
+
+
 class RuleGate:
     """``settle`` lands a commit or a record, or holds a blocked gain as ``DIAGNOSIS_PENDING`` until its specialist
     sends it for repair or declines it; a retest, a diagnosis and a fork are its caller's next step.
@@ -49,24 +55,27 @@ class RuleGate:
     """
 
     def __init__(
-        self, notebook: JudgementSink, repo: ExperimentRepo, scheduler: ForkAdmissionService, verifier: ResultVerifier
+        self, notebook: GateWriter, repo: ExperimentRepo, scheduler: ForkAdmissionService, verifier: ResultVerifier
     ) -> None:
         self._notebook = notebook
         self._repo = repo
         self._scheduler = scheduler
         self._verifier = verifier
 
-    async def settle(self, request: TestRequest, judgement: Judgement) -> Action:
+    async def settle(self, request: TestRequest, judgement: Judgement, *, fix: FixProof | None = None) -> Action:
         """The judgement is written against ``request``, the first measurement of the candidate.
 
         A commit whose branch has moved past ``request.parent_commit`` is recorded only, and ``RECORD_ONLY`` returned:
-        a gain measured against one parent must not land on another.
+        a gain measured against one parent must not land on another. A commit carrying ``fix`` registers its case as a
+        regression case of the new commit; a correctness fix cannot commit without one (``ValueError``).
         """
         action = decide(judgement)
         if action is Action.COMMIT:
+            if judgement.fixes_correctness and fix is None:
+                raise ValueError(f"{request.request_id} commits a correctness fix without the proof of its case")
             await self._reverify(request, judgement)
             # The scheduler may stop a specialist at any moment; a stop must not split a commit from its judgement.
-            if not await asyncio.shield(self._commit(request, judgement)):
+            if not await asyncio.shield(self._commit(request, judgement, fix)):
                 return Action.RECORD_ONLY
         elif action is Action.RECORD_ONLY:
             await self._record(request, judgement)
@@ -101,8 +110,8 @@ class RuleGate:
         await self._notebook.write_judgement(request.request_id, judgement, conclusion)
         return admission
 
-    async def _commit(self, request: TestRequest, judgement: Judgement) -> bool:
-        # The repository commit comes first: the judgement names the commit it made.
+    async def _commit(self, request: TestRequest, judgement: Judgement, fix: FixProof | None) -> bool:
+        # The repository commit comes first: the judgement names the commit it made, and so does the case.
         recipe = apply(await self._repo.read_recipe(request.parent_commit), request.delta)
         message = f"{request.request_id}: {judgement.verdict.value} {judgement.gain_pct:+.2f}%"
         try:
@@ -112,6 +121,8 @@ class RuleGate:
             return False
         conclusion = Conclusion.COMMITTED_WITH_REPRO if judgement.fixes_correctness else Conclusion.COMMITTED
         try:
+            if fix is not None:
+                await register_case(self._notebook, commit, fix.candidate.request_id)
             await self._notebook.write_judgement(request.request_id, judgement, conclusion, commit, recipe.digest())
         except Exception:
             # Whatever kept the judgement out, a commit no judgement names would block the branch for good.
@@ -131,4 +142,4 @@ class RuleGate:
         return await self._notebook.write_judgement(request.request_id, judgement, _recorded_as(judgement))
 
 
-__all__ = ["RuleGate"]
+__all__ = ["GateWriter", "RuleGate"]
