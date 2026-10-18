@@ -732,6 +732,21 @@ class RemoteExperienceSession:
         return self._client.publish(self._experience, declaration=self._declaration, files=self._files)
 
 
+@dataclass(frozen=True)
+class ExperienceStart:
+    """What a producer states when it opens an Experience: its run and step, objective, origin, and starting point."""
+
+    run_id: str
+    seq: int
+    objective: str
+    provenance: Provenance
+    identity: Mapping[str, FieldValue] | None = None
+    baseline: Mapping[str, SessionValue] | None = None
+    parent_id: str = ""
+    supersedes: str = ""
+    created_at: datetime | None = None
+
+
 class RemoteExperienceKB:
     """Write-SDK-compatible facade backed by the Experience HTTP service."""
 
@@ -762,32 +777,20 @@ class RemoteExperienceKB:
             return None
         return cls(RemoteClient(config), declaration)
 
-    def begin(
-        self,
-        *,
-        run_id: str,
-        seq: int,
-        objective: str,
-        provenance: Provenance,
-        identity: Mapping[str, FieldValue] | None = None,
-        baseline: Mapping[str, SessionValue] | None = None,
-        parent_id: str = "",
-        supersedes: str = "",
-        created_at: datetime | None = None,
-    ) -> RemoteExperienceSession:
+    def begin(self, start: ExperienceStart) -> RemoteExperienceSession:
         files: dict[str, Path] = {}
         experience = Experience(
-            id=derive_experience_id(provenance.producer, run_id, seq),
-            run_id=run_id,
-            seq=seq,
-            created_at=created_at or datetime.now(timezone.utc),
-            objective=objective,
-            provenance=provenance,
+            id=derive_experience_id(start.provenance.producer, start.run_id, start.seq),
+            run_id=start.run_id,
+            seq=start.seq,
+            created_at=start.created_at or datetime.now(timezone.utc),
+            objective=start.objective,
+            provenance=start.provenance,
             schema_ref=self.declaration.schema_ref,
-            identity=dict(identity or {}),
-            baseline=_attached(baseline, files),
-            parent_id=parent_id,
-            supersedes=supersedes,
+            identity=dict(start.identity or {}),
+            baseline=_attached(start.baseline, files),
+            parent_id=start.parent_id,
+            supersedes=start.supersedes,
         )
         self.declaration.validate(experience)
         return RemoteExperienceSession(self.client, self.declaration, experience, files)
@@ -804,6 +807,7 @@ class RemoteExperienceKB:
 
 
 __all__ = [
+    "ExperienceStart",
     "ListPage",
     "LocalFiles",
     "RemoteClient",

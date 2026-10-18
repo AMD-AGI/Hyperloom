@@ -24,6 +24,7 @@ from hyperloom_kb import (
     Experience,
     ExperienceDeclaration,
     ExperienceHTTPService,
+    ExperienceStart,
     ExperienceStatus,
     FieldDeclaration,
     FieldKind,
@@ -340,13 +341,15 @@ def test_a_file_field_is_kept_by_the_kb_and_a_read_renders_the_path_it_is_read_f
     with RunningServer(app) as url:
         client = _client(url, tmp_path)
         session = RemoteExperienceKB(client, schema).begin(
-            run_id="run-file",
-            seq=0,
-            objective="throughput@v1",
-            provenance=Provenance("service-test", "1"),
-            identity={"model": "qwen3", "gpu": "mi325x"},
-            baseline={"config": "default", "value": 100.0},
-            created_at=NOW,
+            ExperienceStart(
+                run_id="run-file",
+                seq=0,
+                objective="throughput@v1",
+                provenance=Provenance("service-test", "1"),
+                identity={"model": "qwen3", "gpu": "mi325x"},
+                baseline={"config": "default", "value": 100.0},
+                created_at=NOW,
+            )
         )
         session.decide(
             change={"knob": "page_size", "summary": "Test page_size.", "artifact": artifact},
@@ -380,13 +383,15 @@ def test_raw_logs_are_kept_by_the_kb_with_their_record_and_a_read_renders_where_
     with RunningServer(app) as url:
         client = _client(url, tmp_path)
         session = RemoteExperienceKB(client, schema).begin(
-            run_id="run-log",
-            seq=0,
-            objective="throughput@v1",
-            provenance=Provenance("service-test", "1"),
-            identity={"model": "qwen3", "gpu": "mi325x"},
-            baseline={"config": "default", "value": 100.0},
-            created_at=NOW,
+            ExperienceStart(
+                run_id="run-log",
+                seq=0,
+                objective="throughput@v1",
+                provenance=Provenance("service-test", "1"),
+                identity={"model": "qwen3", "gpu": "mi325x"},
+                baseline={"config": "default", "value": 100.0},
+                created_at=NOW,
+            )
         )
         session.decide(
             change={"knob": "page_size", "summary": "Test page_size."},
@@ -443,13 +448,15 @@ def test_notes_written_outside_the_schema_are_kept_and_rendered_like_other_text(
     with RunningServer(_app(tmp_path / "service", schema)) as url:
         client = _client(url, tmp_path)
         session = RemoteExperienceKB(client, schema).begin(
-            run_id="run-notes",
-            seq=0,
-            objective="throughput@v1",
-            provenance=Provenance("service-test", "1"),
-            identity={"model": "qwen3", "gpu": "mi325x"},
-            baseline={"config": "default", "value": 100.0},
-            created_at=NOW,
+            ExperienceStart(
+                run_id="run-notes",
+                seq=0,
+                objective="throughput@v1",
+                provenance=Provenance("service-test", "1"),
+                identity={"model": "qwen3", "gpu": "mi325x"},
+                baseline={"config": "default", "value": 100.0},
+                created_at=NOW,
+            )
         )
         session.decide(
             change={"knob": "page_size", "summary": "P."},
@@ -927,21 +934,23 @@ def test_sdk_uses_only_url_and_token_with_packaged_declaration(
         assert isinstance(kb, RemoteExperienceKB)
         assert kb.client.config.spool_root == tmp_path / "home" / ".cache/hyperloom/kb-spool"
         session = kb.begin(
-            run_id="run-remote",
-            seq=0,
-            objective="e2e_throughput@v1",
-            provenance=Provenance("service-test", "1"),
-            identity={
-                "model": "qwen3",
-                "gpu": "mi325x",
-                "framework": "vllm",
-                "model_type": "dense",
-                "architecture": "Qwen3ForCausalLM",
-                "framework_version": "0.10.0",
-                "precision": "bf16",
-            },
-            baseline={"baseline_fingerprint": "baseline-1", "value": 100.0},
-            created_at=NOW,
+            ExperienceStart(
+                run_id="run-remote",
+                seq=0,
+                objective="e2e_throughput@v1",
+                provenance=Provenance("service-test", "1"),
+                identity={
+                    "model": "qwen3",
+                    "gpu": "mi325x",
+                    "framework": "vllm",
+                    "model_type": "dense",
+                    "architecture": "Qwen3ForCausalLM",
+                    "framework_version": "0.10.0",
+                    "precision": "bf16",
+                },
+                baseline={"baseline_fingerprint": "baseline-1", "value": 100.0},
+                created_at=NOW,
+            )
         )
         session.decide(
             change={
