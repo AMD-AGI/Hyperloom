@@ -154,17 +154,18 @@ def _publish_candidate(
     assert patch
     status = sink.write_run_experience(
         config=_run_config(),
-        workspace=str(workspace),
-        kernel_path=str(kernel),
-        kernel_source=optimized_source,
-        kernel_backend="triton",
-        gpu_target="gfx950",
-        experiment_id=f"producer-{name}",
-        baseline_wall_ms=10.0,
-        best_wall_ms=10.0 / claimed_speedup,
-        mean_case_speedup=claimed_speedup,
-        cumulative_diff=patch,
-        digest="deterministic producer result",
+        kernel=sink.LoopKernel(
+            kernel_path=str(kernel), kernel_backend="triton", kernel_source=optimized_source, workspace=str(workspace)
+        ),
+        outcome=sink.RunOutcome(
+            experiment_id=f"producer-{name}",
+            gpu_target="gfx950",
+            baseline_wall_ms=10.0,
+            best_wall_ms=10.0 / claimed_speedup,
+            cumulative_diff=patch,
+            digest="deterministic producer result",
+            mean_case_speedup=claimed_speedup,
+        ),
         summary_override=SUMMARY,
     )
     assert status["written"] is True

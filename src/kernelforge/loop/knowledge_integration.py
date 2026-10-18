@@ -23,6 +23,7 @@ from kernelforge.llm.workspace_policy import (
 )
 from kernelforge.llm.git import git, git_bytes
 from kernelforge.knowledge.kb_store import warmstart_policy
+from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.knowledge.kb_store.identity.implementation import (
     canonical_owner_framework,
 )
@@ -1149,15 +1150,17 @@ def kb_warmstart(
         try:
             sols = read_top_solutions(
                 config=config,
-                kernel_path=kernel,
-                kernel_source=kernel_source,
-                kernel_backend=kernel_backend,
-                target_functions=target_functions,
-                framework=framework,
+                kernel=LoopKernel(
+                    kernel_path=kernel,
+                    kernel_backend=kernel_backend,
+                    kernel_source=kernel_source,
+                    target_functions=target_functions,
+                    source_files=source_files,
+                    framework=framework,
+                    operator_name=operator_name,
+                    workspace=workspace_dir,
+                ),
                 top_k=warmstart_policy.top_k(),
-                source_files=source_files,
-                workspace=workspace_dir,
-                operator_name=operator_name,
                 read_status=read_status,
             )
         except Exception:
@@ -1402,7 +1405,7 @@ def write_experience_to_kb(
 ) -> dict:
     """Gather the run's outcome and mirror the best solution into the KB Store."""
     try:
-        from kernelforge.knowledge.kb_store.writer import write_run_experience
+        from kernelforge.knowledge.kb_store.writer import RunOutcome, write_run_experience
 
         checkpoint_experiment_id = getattr(loop_runner.experiment, "experiment_id", "") or ""
         kb_experience_id = experience_id or checkpoint_experiment_id
@@ -1442,26 +1445,30 @@ def write_experience_to_kb(
 
         status = write_run_experience(
             config=config,
-            workspace=workspace_dir,
-            kernel_path=kernel,
-            kernel_source=kernel_source,
-            kernel_backend=kernel_backend,
-            gpu_target=gpu_target,
-            experiment_id=kb_experience_id,
-            baseline_wall_ms=baseline_ms,
-            best_wall_ms=best_ms,
-            mean_case_speedup=mean_case_speedup,
-            cumulative_diff=cumulative_diff,
-            digest=digest,
-            snr_db=snr_db,
-            source_files=source_files,
-            target_functions=target_functions,
-            operator_name=operator_name,
-            implementation_signature_override=pristine_signature,
-            implementation_identity_override=pristine_identity,
-            framework=framework,
+            kernel=LoopKernel(
+                kernel_path=kernel,
+                kernel_backend=kernel_backend,
+                kernel_source=kernel_source,
+                target_functions=target_functions,
+                source_files=source_files,
+                framework=framework,
+                operator_name=operator_name,
+                workspace=workspace_dir,
+            ),
+            outcome=RunOutcome(
+                experiment_id=kb_experience_id,
+                gpu_target=gpu_target,
+                baseline_wall_ms=baseline_ms,
+                best_wall_ms=best_ms,
+                cumulative_diff=cumulative_diff,
+                digest=digest,
+                mean_case_speedup=mean_case_speedup,
+                snr_db=snr_db,
+                reused_speedup=reused_speedup,
+                implementation_signature=pristine_signature,
+                implementation_identity=pristine_identity,
+            ),
             summary_override=summary_override,
-            reused_speedup=reused_speedup,
             usage=usage,
         )
         if status.get("written"):

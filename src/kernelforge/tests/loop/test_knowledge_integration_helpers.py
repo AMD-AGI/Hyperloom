@@ -311,7 +311,7 @@ def test_write_experience_to_kb_does_not_synthesize_speedup(monkeypatch, tmp_pat
         "written": False,
         "reason": "missing_mean_case_speedup",
     }
-    assert captured["mean_case_speedup"] is None
+    assert captured["outcome"].mean_case_speedup is None
 
 
 def test_kb_warmstart_swallows_reader_error(monkeypatch, tmp_path):

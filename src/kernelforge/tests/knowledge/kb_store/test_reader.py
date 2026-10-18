@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from kernelforge.config import Config
@@ -15,9 +17,11 @@ from kernelforge.knowledge.kb_store.reader import (
     sanitize_read_error,
 )
 from kernelforge.knowledge.kb_store.writer import (
+    RunOutcome,
     hash_implementation_identity,
     write_run_experience,
 )
+from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.knowledge.kb_store.config import KnowledgeConfig, KnowledgeStoreMode
 from kernelforge.knowledge.kb_store.identity import run as run_identity
 from kernelforge.knowledge.kb_store import record_store
@@ -53,9 +57,11 @@ def config(tmp_path, workspace):
     )
 
 
+_LOOP_KERNEL_FIELDS = {field.name for field in dataclasses.fields(LoopKernel)}
+
+
 def _seed(config, workspace, **overrides):
     kwargs = {
-        "config": config,
         "workspace": str(workspace),
         "kernel_path": str(workspace / "kernel.py"),
         "kernel_source": KERNEL_SOURCE,
@@ -69,23 +75,25 @@ def _seed(config, workspace, **overrides):
         "digest": "d",
         "snr_db": 42.0,
         "framework": "standalone",
-        "summary_override": SUMMARY,
     }
     kwargs.update(overrides)
-    return write_run_experience(**kwargs)
+    summary_override = kwargs.pop("summary_override", SUMMARY)
+    kernel = LoopKernel(**{name: kwargs.pop(name) for name in _LOOP_KERNEL_FIELDS if name in kwargs})
+    return write_run_experience(
+        config=config, kernel=kernel, outcome=RunOutcome(**kwargs), summary_override=summary_override
+    )
 
 
 def _read_args(config, workspace, **overrides):
-    args = {
-        "config": config,
+    kernel = {
         "kernel_path": str(workspace / "kernel.py"),
         "kernel_source": KERNEL_SOURCE,
         "kernel_backend": "triton",
         "framework": "standalone",
         "workspace": str(workspace),
     }
-    args.update(overrides)
-    return args
+    kernel.update(overrides)
+    return {"config": config, "kernel": LoopKernel(**kernel)}
 
 
 # --- the paths that yield no candidate ------------------------------------- #
@@ -235,8 +243,8 @@ def test_a_foreign_implementation_stays_reference_only(config, workspace):
     _seed(
         config,
         workspace,
-        implementation_signature_override=hash_implementation_identity(foreign_identity),
-        implementation_identity_override=foreign_identity,
+        implementation_signature=hash_implementation_identity(foreign_identity),
+        implementation_identity=foreign_identity,
     )
 
     best = read_best_solution(**_read_args(config, workspace))
@@ -322,7 +330,7 @@ def test_without_a_workspace_nothing_is_written_beside_the_kernel(config, worksp
     """A kernel usually lives in site-packages; a read may not write there."""
     _seed(config, workspace)
     args = _read_args(config, workspace)
-    args.pop("workspace")
+    args["kernel"] = dataclasses.replace(args["kernel"], workspace="")
 
     solutions = read_top_solutions(**args)
 

@@ -10,7 +10,7 @@ from dataclasses import replace
 import pytest
 
 from kernelforge.knowledge.kb_store.identity.kernel_recipe import kernel_recipe_canonical_id
-from kernelforge.knowledge.kb_store.identity.run import resolve_loop_identity
+from kernelforge.knowledge.kb_store.identity.run import LoopKernel, resolve_loop_identity
 from kernelforge.loop.campaign_config import (
     CampaignConfig,
     CampaignConfigStore,
@@ -132,13 +132,15 @@ def test_the_operator_is_settled_before_the_loop_can_rename_it(tmp_path, monkeyp
 
     def address(source: str) -> str:
         identity, _op, _fw = resolve_loop_identity(
-            kernel_path=str(kernel),
-            kernel_source=source,
-            kernel_backend="triton",
+            LoopKernel(
+                kernel_path=str(kernel),
+                kernel_backend="triton",
+                kernel_source=source,
+                target_functions=list(config.target_functions),
+                framework=config.framework,
+                operator_name=config.operator_name,
+            ),
             gpu_type="mi355x",
-            target_functions=list(config.target_functions),
-            framework=config.framework,
-            operator_name=config.operator_name,
         )
         return kernel_recipe_canonical_id(identity)
 

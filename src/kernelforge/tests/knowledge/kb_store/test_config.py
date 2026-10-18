@@ -9,7 +9,8 @@ from click.testing import CliRunner
 from kernelforge.cli import main
 from kernelforge.config import Config
 from kernelforge.knowledge.kb_store.reader import read_best_solution
-from kernelforge.knowledge.kb_store.writer import write_run_experience
+from kernelforge.knowledge.kb_store.writer import RunOutcome, write_run_experience
+from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.knowledge.kb_store.config import (
     KnowledgeConfig,
     KnowledgeStoreMode,
@@ -116,23 +117,25 @@ def test_sink_reader_end_to_end_local_warm_start(tmp_path):
 
     written = write_run_experience(
         config=producer_config,
-        workspace=str(workspace),
-        kernel_path=str(kernel),
-        kernel_source=source,
-        kernel_backend="triton",
-        gpu_target="gfx950",
-        experiment_id="local-run",
-        baseline_wall_ms=10.0,
-        best_wall_ms=5.0,
-        mean_case_speedup=2.0,
-        cumulative_diff=(
-            "diff --git a/vllm/ops/local_kernel.py b/vllm/ops/local_kernel.py\n"
+        kernel=LoopKernel(
+            kernel_path=str(kernel),
+            kernel_backend="triton",
+            kernel_source=source,
+            framework="vllm",
+            workspace=str(workspace),
+        ),
+        outcome=RunOutcome(
+            experiment_id="local-run",
+            gpu_target="gfx950",
+            baseline_wall_ms=10.0,
+            best_wall_ms=5.0,
+            cumulative_diff="diff --git a/vllm/ops/local_kernel.py b/vllm/ops/local_kernel.py\n"
             "--- a/vllm/ops/local_kernel.py\n"
             "+++ b/vllm/ops/local_kernel.py\n"
-            "@@ -1 +1 @@\n-old\n+new\n"
+            "@@ -1 +1 @@\n-old\n+new\n",
+            digest="local warm start",
+            mean_case_speedup=2.0,
         ),
-        digest="local warm start",
-        framework="vllm",
         summary_override={
             "category": "others",
             "strategy": "use local tiles",
@@ -144,11 +147,13 @@ def test_sink_reader_end_to_end_local_warm_start(tmp_path):
     consumer_config = Config(workspace=str(workspace), knowledge_config=knowledge, gpu_type="mi355x")
     solution = read_best_solution(
         config=consumer_config,
-        workspace=str(workspace),
-        kernel_path=str(kernel),
-        kernel_source=source,
-        kernel_backend="triton",
-        framework="vllm",
+        kernel=LoopKernel(
+            kernel_path=str(kernel),
+            kernel_backend="triton",
+            kernel_source=source,
+            framework="vllm",
+            workspace=str(workspace),
+        ),
     )
 
     assert written["written"] is True

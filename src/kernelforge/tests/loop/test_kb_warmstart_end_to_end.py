@@ -140,18 +140,22 @@ def _publish_producer_solution(
 
     status = sink.write_run_experience(
         config=_run_config(gpu_type),
-        workspace=str(workspace),
-        kernel_path=str(kernel),
-        kernel_source=optimized_source,
-        kernel_backend="triton",
-        gpu_target="gfx950",
-        experiment_id=experiment_id,
-        baseline_wall_ms=10.0,
-        best_wall_ms=5.0,
-        mean_case_speedup=2.0,
-        cumulative_diff=patch,
-        digest="deterministic end-to-end producer result",
-        source_files=source_files,
+        kernel=sink.LoopKernel(
+            kernel_path=str(kernel),
+            kernel_backend="triton",
+            kernel_source=optimized_source,
+            source_files=source_files,
+            workspace=str(workspace),
+        ),
+        outcome=sink.RunOutcome(
+            experiment_id=experiment_id,
+            gpu_target="gfx950",
+            baseline_wall_ms=10.0,
+            best_wall_ms=5.0,
+            cumulative_diff=patch,
+            digest="deterministic end-to-end producer result",
+            mean_case_speedup=2.0,
+        ),
         summary_override=SUMMARY,
     )
     return status, patch

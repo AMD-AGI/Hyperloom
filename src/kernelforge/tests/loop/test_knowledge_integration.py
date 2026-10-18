@@ -1376,18 +1376,18 @@ def test_write_experience_to_kb_extracts_run_context(monkeypatch, tmp_path):
     )
 
     assert status == {"written": True, "solution": "solution", "speedup": 3.0}
-    assert captured["workspace"] == str(tmp_path)
-    assert captured["kernel_path"] == str(kernel)
-    assert captured["kernel_source"] == kernel.read_text()
-    assert captured["kernel_backend"] == "triton"
-    assert captured["gpu_target"] == "gfx942"
-    assert captured["experiment_id"] == "exp123"
-    assert captured["baseline_wall_ms"] == 12.0
-    assert captured["best_wall_ms"] == 4.0
-    assert captured["mean_case_speedup"] == 3.0
-    assert captured["cumulative_diff"] == "diff"
-    assert captured["digest"] == "archive digest"
-    assert captured["snr_db"] == 42.0
+    assert captured["kernel"].workspace == str(tmp_path)
+    assert captured["kernel"].kernel_path == str(kernel)
+    assert captured["kernel"].kernel_source == kernel.read_text()
+    assert captured["kernel"].kernel_backend == "triton"
+    assert captured["outcome"].gpu_target == "gfx942"
+    assert captured["outcome"].experiment_id == "exp123"
+    assert captured["outcome"].baseline_wall_ms == 12.0
+    assert captured["outcome"].best_wall_ms == 4.0
+    assert captured["outcome"].mean_case_speedup == 3.0
+    assert captured["outcome"].cumulative_diff == "diff"
+    assert captured["outcome"].digest == "archive digest"
+    assert captured["outcome"].snr_db == 42.0
     assert "workload_key" not in captured
     assert captured["usage"] is usage
 
@@ -1484,8 +1484,8 @@ def test_write_uses_pristine_campaign_signature_after_helper_is_added(
         framework="vllm",
     )
 
-    assert captured["implementation_signature_override"] == pristine_signature
-    assert captured["implementation_identity_override"] == pristine_identity
+    assert captured["outcome"].implementation_signature == pristine_signature
+    assert captured["outcome"].implementation_identity == pristine_identity
 
 
 # --- the rewrite warm start's persisted read error --------------------------- #
