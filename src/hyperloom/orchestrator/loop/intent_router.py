@@ -284,12 +284,12 @@ def _record_critic_review(
         REVIEWER_CRITIC,
         REVIEWER_CRITIC_UNAVAILABLE,
         STEP_REVIEWED,
-        CriticReview,
     )
 
     fields = payload or {}
     grounded = str(fields.get("source") or REVIEWER_CRITIC) == REVIEWER_CRITIC
-    review = CriticReview(
+    recorder.record_proposal_review(
+        proposal_id,
         verdict=authored or effective,
         effective_verdict=effective,
         held_to_rule=str(fields.get("failure_reason_code") or "") if effective != authored else "",
@@ -300,7 +300,6 @@ def _record_critic_review(
         advisory=advisory,
         variants=variants,
     )
-    recorder.record_proposal_review(proposal_id, review)
     recorder.record_proposal_step(
         proposal_id,
         step=STEP_REVIEWED,

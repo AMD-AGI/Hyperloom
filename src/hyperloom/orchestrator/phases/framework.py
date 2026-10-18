@@ -393,13 +393,11 @@ def _record_review_outcome(
     candidate does not say what let it through. ``verdict`` is only passed on
     the deny path, which is the only one carrying the rationale.
     """
-    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import CriticReview
-
     recorder = _recorder(coord)
     if recorder is None or not proposal_id:
         return
     if verdict:
-        recorder.record_proposal_review(proposal_id, CriticReview(verdict=verdict, reason=reason))
+        recorder.record_proposal_review(proposal_id, verdict=verdict, reason=reason)
         recorder.record_proposal_step(proposal_id, step="reviewed", outcome=verdict, reason=reason)
     recorder.record_proposal_review_outcome(proposal_id, **outcome)
 
