@@ -421,12 +421,12 @@ def test_resume_repairs_publication_after_state_advanced_once(tmp_path, monkeypa
     original_publish = runner_module.BestResultPublisher.publish
     publish_calls = 0
 
-    def interrupt_publication(self, **kwargs):
+    def interrupt_publication(self, *args, **kwargs):
         nonlocal publish_calls
         publish_calls += 1
         if publish_calls == 1:
             raise OSError("simulated publication interruption")
-        return original_publish(self, **kwargs)
+        return original_publish(self, *args, **kwargs)
 
     monkeypatch.setattr(
         runner_module.BestResultPublisher,

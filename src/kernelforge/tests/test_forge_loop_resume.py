@@ -518,8 +518,8 @@ def test_warm_start_post_commit_point_failures_are_degraded(
     if failure_stage == "derived-best-view":
         original_publish = recovery_module.BestResultPublisher.publish
 
-        def fail_after_commit_point(self, **kwargs):
-            original_publish(self, **kwargs)
+        def fail_after_commit_point(self, *args, **kwargs):
+            original_publish(self, *args, **kwargs)
             raise OSError("report unavailable")
 
         monkeypatch.setattr(

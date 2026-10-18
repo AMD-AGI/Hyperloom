@@ -14,6 +14,9 @@ from kernelforge.llm.git import git
 from kernelforge.durable_io import atomic_write_text
 from kernelforge.loop.reporting import (
     BestResultPublisher,
+    KeepBundle,
+    KeepIdentity,
+    KeepScore,
     is_best_manifest,
 )
 from kernelforge.loop.scoring import warm_start_improvement_flags
@@ -145,33 +148,37 @@ def publish_warm_start_recovery(
     solution = str(warm.get("solution_slug") or "warm-start")
     external_id = caller_experiment_id or caller.experience_id or "warm-start"
     publisher = BestResultPublisher(workspace_dir)
-    publish_kwargs = {
-        "campaign_id": f"warm-start:{solution}",
-        "session_index": 0,
-        "experiment_id": external_id,
-        "iteration": 0,
-        "commit_hash": head,
-        "plan": f"apply prior solution {solution}",
-        "baseline_wall_ms": float(baseline_ms),
-        "search_start_ms": float(best_ms),
-        "best_wall_ms": float(best_ms),
-        "mean_case_speedup": float(mean_case_speedup),
-        "search_start_mean_case_speedup": float(mean_case_speedup),
-        "snr_db": None,
-        "validation_text": ("validated KB warm-start passed canonical correctness"),
-        "benchmark": {
+    keep = KeepIdentity(
+        campaign_id=f"warm-start:{solution}",
+        session_index=0,
+        experiment_id=external_id,
+        iteration=0,
+        commit_hash=head,
+        plan=f"apply prior solution {solution}",
+    )
+    score = KeepScore(
+        baseline_wall_ms=float(baseline_ms),
+        best_wall_ms=float(best_ms),
+        mean_case_speedup=float(mean_case_speedup),
+        search_start_mean_case_speedup=float(mean_case_speedup),
+        snr_db=None,
+        search_start_ms=float(best_ms),
+    )
+    bundle = KeepBundle(
+        validation_text=("validated KB warm-start passed canonical correctness"),
+        benchmark={
             "median_ms": float(best_ms),
             "mean_case_speedup": float(mean_case_speedup),
             "case_times": case_times,
             "unscored_cases": unscored_cases,
             "warm_start": True,
         },
-        "changed_files": changed_files,
-        "patch": patch,
-    }
+        changed_files=changed_files,
+        patch=patch,
+    )
     publication_errors: list[str] = []
     try:
-        manifest = publisher.publish(**publish_kwargs)
+        manifest = publisher.publish(keep, score, bundle)
     except Exception as error:
         # A derived view can fail after best_result.json is already durable.
         manifest = _validated_warm_start_result(

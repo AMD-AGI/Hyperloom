@@ -117,7 +117,7 @@ from kernelforge.loop.prompt_view import (
     MAX_RECENT_ATTEMPT_LINES,
     render_long_horizon_header,
 )
-from kernelforge.loop.reporting import BestResultPublisher
+from kernelforge.loop.reporting import BestResultPublisher, KeepBundle, KeepIdentity, KeepScore
 from kernelforge.mcp_server.tools.bench import (
     CaseCoverageError,
     calculate_mean_case_speedup,
@@ -1529,31 +1529,38 @@ class IterationLoop(AnalysisRuntimeMixin):
         benchmark.setdefault("mean_case_speedup", result.mean_case_speedup)
         try:
             self.best_publisher.publish(
-                campaign_id=self.run_state.campaign_id,
-                session_index=int((pending or {}).get("session_index", self.run_state.session_index)),
-                experiment_id=(
-                    str((pending or {}).get("experiment_id") or "")
-                    or (self.experiment.experiment_id if self.experiment else "")
+                KeepIdentity(
+                    campaign_id=self.run_state.campaign_id,
+                    session_index=int((pending or {}).get("session_index", self.run_state.session_index)),
+                    experiment_id=(
+                        str((pending or {}).get("experiment_id") or "")
+                        or (self.experiment.experiment_id if self.experiment else "")
+                    ),
+                    iteration=result.iteration,
+                    commit_hash=result.commit_hash,
+                    plan=plan,
                 ),
-                iteration=result.iteration,
-                commit_hash=result.commit_hash,
-                plan=plan,
-                baseline_wall_ms=baseline,
-                search_start_ms=(self.ic.warm_start_wall_ms or self.ic.baseline_wall_ms),
-                best_wall_ms=result.wall_ms,
-                mean_case_speedup=result.mean_case_speedup,
-                search_start_mean_case_speedup=(
-                    self.ic.warm_start_mean_case_speedup or self.search_start_mean_case_speedup or 1.0
+                KeepScore(
+                    baseline_wall_ms=baseline,
+                    best_wall_ms=result.wall_ms,
+                    mean_case_speedup=result.mean_case_speedup,
+                    search_start_mean_case_speedup=(
+                        self.ic.warm_start_mean_case_speedup or self.search_start_mean_case_speedup or 1.0
+                    ),
+                    snr_db=result.snr_db,
+                    search_start_ms=(self.ic.warm_start_wall_ms or self.ic.baseline_wall_ms),
                 ),
-                snr_db=result.snr_db,
-                validation_text=validation_text,
-                benchmark=benchmark,
-                changed_files=(
-                    list((pending or {}).get("publication_changed_files") or [])
-                    or self._publication_changed_files(result.commit_hash)
-                ),
-                patch=(
-                    str((pending or {}).get("publication_patch") or "") or self._publication_patch(result.commit_hash)
+                KeepBundle(
+                    validation_text=validation_text,
+                    benchmark=benchmark,
+                    changed_files=(
+                        list((pending or {}).get("publication_changed_files") or [])
+                        or self._publication_changed_files(result.commit_hash)
+                    ),
+                    patch=(
+                        str((pending or {}).get("publication_patch") or "")
+                        or self._publication_patch(result.commit_hash)
+                    ),
                 ),
                 round_budget=self._round_budget_summary(),
             )

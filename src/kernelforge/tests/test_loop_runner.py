@@ -28,7 +28,7 @@ from kernelforge.loop import runner as runner_module
 from kernelforge.loop.analysis_refresh_policy import AnalysisRefreshDecision
 from kernelforge.loop.archive import CandidateRecord
 from kernelforge.loop.device_hazard import MAX_BLOCKED_ITERATIONS
-from kernelforge.loop.reporting import _round_budget_lines
+from kernelforge.loop.reporting import KeepBundle, KeepIdentity, KeepScore, _round_budget_lines
 from kernelforge.loop.round_budget import (
     ADMISSION_SESSION_SEC,
     FIRST_ROUND_MEASUREMENT_SEC,
@@ -5508,21 +5508,27 @@ def test_reconcile_skips_republishing_a_best_the_manifest_already_names(
     loop.best_publisher = runner_module.BestResultPublisher(str(workspace))
     head = loop._git("rev-parse", "HEAD").strip()
     loop.best_publisher.publish(
-        campaign_id="campaign",
-        session_index=1,
-        experiment_id="experiment-one",
-        iteration=1,
-        commit_hash=head,
-        plan="prior keep",
-        baseline_wall_ms=1.0,
-        best_wall_ms=0.8,
-        mean_case_speedup=1.4,
-        search_start_mean_case_speedup=1.0,
-        snr_db=None,
-        validation_text="canonical correctness passed",
-        benchmark={"median_ms": 0.8},
-        changed_files=["kernel.py"],
-        patch="prior patch\n",
+        KeepIdentity(
+            campaign_id="campaign",
+            session_index=1,
+            experiment_id="experiment-one",
+            iteration=1,
+            commit_hash=head,
+            plan="prior keep",
+        ),
+        KeepScore(
+            baseline_wall_ms=1.0,
+            best_wall_ms=0.8,
+            mean_case_speedup=1.4,
+            search_start_mean_case_speedup=1.0,
+            snr_db=None,
+        ),
+        KeepBundle(
+            validation_text="canonical correctness passed",
+            benchmark={"median_ms": 0.8},
+            changed_files=["kernel.py"],
+            patch="prior patch\n",
+        ),
     )
     loop.run_state = RunState(campaign_id="campaign", session_index=2)
     # The recomputed identity a resumed session would carry into the republish.
@@ -5539,7 +5545,7 @@ def test_reconcile_skips_republishing_a_best_the_manifest_already_names(
     monkeypatch.setattr(
         loop.best_publisher,
         "publish",
-        lambda **kwargs: republished.append(kwargs),
+        lambda *args, **kwargs: republished.append(args),
     )
 
     loop._reconcile_best_publication()
@@ -5559,21 +5565,27 @@ def test_reconcile_republishes_a_best_a_stale_manifest_does_not_name(
     loop.archive = runner_module.CandidateArchive(str(workspace), loop.ic.kernel_file)
     stale_commit = loop._git("rev-parse", "HEAD").strip()
     loop.best_publisher.publish(
-        campaign_id="campaign",
-        session_index=1,
-        experiment_id="experiment-one",
-        iteration=1,
-        commit_hash=stale_commit,
-        plan="earlier keep",
-        baseline_wall_ms=1.0,
-        best_wall_ms=0.9,
-        mean_case_speedup=1.1,
-        search_start_mean_case_speedup=1.0,
-        snr_db=None,
-        validation_text="canonical correctness passed",
-        benchmark={"median_ms": 0.9},
-        changed_files=["kernel.py"],
-        patch="earlier patch\n",
+        KeepIdentity(
+            campaign_id="campaign",
+            session_index=1,
+            experiment_id="experiment-one",
+            iteration=1,
+            commit_hash=stale_commit,
+            plan="earlier keep",
+        ),
+        KeepScore(
+            baseline_wall_ms=1.0,
+            best_wall_ms=0.9,
+            mean_case_speedup=1.1,
+            search_start_mean_case_speedup=1.0,
+            snr_db=None,
+        ),
+        KeepBundle(
+            validation_text="canonical correctness passed",
+            benchmark={"median_ms": 0.9},
+            changed_files=["kernel.py"],
+            patch="earlier patch\n",
+        ),
     )
     kernel = workspace / "kernel.py"
     kernel.write_text("def kernel():\n    return 3\n")
@@ -5596,16 +5608,16 @@ def test_reconcile_republishes_a_best_a_stale_manifest_does_not_name(
     )
     republished: list[dict] = []
 
-    def _record(**kwargs):
-        republished.append(kwargs)
-        return {"iteration": kwargs["iteration"]}
+    def _record(keep, _score, _bundle, **_kwargs):
+        republished.append(keep)
+        return {"iteration": keep.iteration}
 
     monkeypatch.setattr(loop.best_publisher, "publish", _record)
 
     loop._reconcile_best_publication()
 
     assert len(republished) == 1
-    assert republished[0]["commit_hash"] == head
+    assert republished[0].commit_hash == head
     assert loop.persistence_degraded is False
 
 
@@ -6180,22 +6192,28 @@ def test_validated_warm_start_reuses_cli_prepublication(
     ).stdout
     publisher = runner_module.BestResultPublisher(str(workspace))
     manifest = publisher.publish(
-        campaign_id="warm-start:kernelforge-exp/op/run",
-        session_index=0,
-        experiment_id="caller-run",
-        iteration=0,
-        commit_hash=warm_commit,
-        plan="apply prior solution kernelforge-exp/op/run",
-        baseline_wall_ms=1.0,
-        search_start_ms=0.8,
-        best_wall_ms=0.8,
-        mean_case_speedup=1.25,
-        search_start_mean_case_speedup=1.25,
-        snr_db=None,
-        validation_text="validated KB warm-start passed canonical correctness",
-        benchmark={"median_ms": 0.8, "warm_start": True},
-        changed_files=["kernel.py"],
-        patch=patch,
+        KeepIdentity(
+            campaign_id="warm-start:kernelforge-exp/op/run",
+            session_index=0,
+            experiment_id="caller-run",
+            iteration=0,
+            commit_hash=warm_commit,
+            plan="apply prior solution kernelforge-exp/op/run",
+        ),
+        KeepScore(
+            baseline_wall_ms=1.0,
+            best_wall_ms=0.8,
+            mean_case_speedup=1.25,
+            search_start_mean_case_speedup=1.25,
+            snr_db=None,
+            search_start_ms=0.8,
+        ),
+        KeepBundle(
+            validation_text="validated KB warm-start passed canonical correctness",
+            benchmark={"median_ms": 0.8, "warm_start": True},
+            changed_files=["kernel.py"],
+            patch=patch,
+        ),
     )
 
     loop.ic.campaign_base_commit = base_commit

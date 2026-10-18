@@ -8,7 +8,7 @@ import pytest
 
 from kernelforge.loop import reporting
 from kernelforge.loop.recovery import load_published_best
-from kernelforge.loop.reporting import BestResultPublisher
+from kernelforge.loop.reporting import BestResultPublisher, KeepBundle, KeepIdentity, KeepScore
 
 
 def _publish(
@@ -21,21 +21,27 @@ def _publish(
     mean_case_speedup: float = 2.0,
 ):
     return publisher.publish(
-        campaign_id="campaign-1",
-        session_index=1,
-        experiment_id="experiment-1",
-        iteration=iteration,
-        commit_hash=f"commit-{iteration}",
-        plan=plan,
-        baseline_wall_ms=1.0,
-        best_wall_ms=wall_ms,
-        mean_case_speedup=mean_case_speedup,
-        search_start_mean_case_speedup=1.0,
-        snr_db=40.0,
-        validation_text="canonical correctness passed",
-        benchmark={"median_ms": wall_ms},
-        changed_files=changed_files,
-        patch=f"patch for iteration {iteration}\n",
+        KeepIdentity(
+            campaign_id="campaign-1",
+            session_index=1,
+            experiment_id="experiment-1",
+            iteration=iteration,
+            commit_hash=f"commit-{iteration}",
+            plan=plan,
+        ),
+        KeepScore(
+            baseline_wall_ms=1.0,
+            best_wall_ms=wall_ms,
+            mean_case_speedup=mean_case_speedup,
+            search_start_mean_case_speedup=1.0,
+            snr_db=40.0,
+        ),
+        KeepBundle(
+            validation_text="canonical correctness passed",
+            benchmark={"median_ms": wall_ms},
+            changed_files=changed_files,
+            patch=f"patch for iteration {iteration}\n",
+        ),
     )
 
 
