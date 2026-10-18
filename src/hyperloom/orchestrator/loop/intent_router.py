@@ -218,27 +218,25 @@ def _record_phase_proposal_review(
     if not proposal_id:
         return
     try:
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ProposalReview
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event, phase_records
 
         fields = payload or {}
         advice = advisory or {}
-        phase_event.record_proposal_review(
-            ProposalReview(
-                proposal_msg_id=proposal_id,
-                verdict=authored or effective,
-                effective_verdict=effective,
-                source=str(fields.get("source") or ""),
-                reasoning=reason,
-                confidence=fields.get("confidence"),
-                failure_reason_code=fields.get("failure_reason_code"),
-                required_evidence=advice.get("required_evidence"),
-                risks=advice.get("risks"),
-                advice_text=advice.get("advice_text"),
-                alternative_action=advice.get("alternative_action"),
-                variants=variants,
-            )
+        review = phase_records.ProposalReview(
+            proposal_msg_id=proposal_id,
+            verdict=authored or effective,
+            effective_verdict=effective,
+            source=str(fields.get("source") or ""),
+            reasoning=reason,
+            confidence=fields.get("confidence"),
+            failure_reason_code=fields.get("failure_reason_code"),
+            required_evidence=advice.get("required_evidence"),
+            risks=advice.get("risks"),
+            advice_text=advice.get("advice_text"),
+            alternative_action=advice.get("alternative_action"),
+            variants=variants,
         )
+        phase_event.record_proposal_review(review)
     except Exception:
         log.debug("phase timeline: proposal review row failed for %s", proposal_id, exc_info=True)
 
@@ -291,20 +289,18 @@ def _record_critic_review(
 
     fields = payload or {}
     grounded = str(fields.get("source") or REVIEWER_CRITIC) == REVIEWER_CRITIC
-    recorder.record_proposal_review(
-        proposal_id,
-        CriticReview(
-            verdict=authored or effective,
-            effective_verdict=effective,
-            held_to_rule=str(fields.get("failure_reason_code") or "") if effective != authored else "",
-            reviewer=REVIEWER_CRITIC if grounded else REVIEWER_CRITIC_UNAVAILABLE,
-            reason=reason,
-            confidence=fields.get("confidence"),
-            failure_reason_code=str(fields.get("failure_reason_code") or ""),
-            advisory=advisory,
-            variants=variants,
-        ),
+    review = CriticReview(
+        verdict=authored or effective,
+        effective_verdict=effective,
+        held_to_rule=str(fields.get("failure_reason_code") or "") if effective != authored else "",
+        reviewer=REVIEWER_CRITIC if grounded else REVIEWER_CRITIC_UNAVAILABLE,
+        reason=reason,
+        confidence=fields.get("confidence"),
+        failure_reason_code=str(fields.get("failure_reason_code") or ""),
+        advisory=advisory,
+        variants=variants,
     )
+    recorder.record_proposal_review(proposal_id, review)
     recorder.record_proposal_step(
         proposal_id,
         step=STEP_REVIEWED,
@@ -329,18 +325,16 @@ def _record_phase_proposal_outcome(pending: Any, **outcome: Any) -> None:
     if not proposal_id:
         return
     try:
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ProposalOutcome
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event, phase_records
 
-        phase_event.record_proposal_outcome(
-            ProposalOutcome(
-                proposal_msg_id=proposal_id,
-                materialized=bool(outcome.get("materialized")),
-                denied=bool(outcome.get("denied")),
-                reauthored=bool(outcome.get("reauthored")),
-                patch_verdict_key=outcome.get("patch_verdict_key"),
-            )
+        settled = phase_records.ProposalOutcome(
+            proposal_msg_id=proposal_id,
+            materialized=bool(outcome.get("materialized")),
+            denied=bool(outcome.get("denied")),
+            reauthored=bool(outcome.get("reauthored")),
+            patch_verdict_key=outcome.get("patch_verdict_key"),
         )
+        phase_event.record_proposal_outcome(settled)
     except Exception:
         log.debug("phase timeline: proposal outcome row failed for %s", proposal_id, exc_info=True)
 
@@ -1109,23 +1103,20 @@ class IntentRouter(CoordinatorCollaborator):
         without this the snapshot counter it advanced has nothing on the
         timeline to account for it.
         """
-        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import record_trace_analyze_request
-        from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import TraceAnalyzeRun
+        from hyperloom.inference_optimizer.breakdown.recorder import kernel_event, kernel_records
 
-        record_trace_analyze_request(
-            int(self.shared_state.macro_cycle or 0),
-            TraceAnalyzeRun(
-                run_id=str(getattr(request_msg, "msg_id", "") or ""),
-                status=str(result.get("status") or ""),
-                result=result,
-                requested_by=source,
-                request_msg_id=str(getattr(request_msg, "msg_id", "") or ""),
-                trace_input=str(payload.get("trace_path") or payload.get("trace_input") or ""),
-                top_k=payload.get("top_k"),
-                snapshot=self.shared_state.last_trace_analyze,
-                cache_hit=cache_hit,
-            ),
+        run = kernel_records.TraceAnalyzeRun(
+            run_id=str(getattr(request_msg, "msg_id", "") or ""),
+            status=str(result.get("status") or ""),
+            result=result,
+            requested_by=source,
+            request_msg_id=str(getattr(request_msg, "msg_id", "") or ""),
+            trace_input=str(payload.get("trace_path") or payload.get("trace_input") or ""),
+            top_k=payload.get("top_k"),
+            snapshot=self.shared_state.last_trace_analyze,
+            cache_hit=cache_hit,
         )
+        kernel_event.record_trace_analyze_request(int(self.shared_state.macro_cycle or 0), run)
 
     async def _auto_reject(self, request_msg: Message, result: dict[str, Any]) -> None:
         """Answer a request the Coordinator refuses before any handler runs, and record the failure."""
@@ -1593,20 +1584,18 @@ class IntentRouter(CoordinatorCollaborator):
             tick=int(self.shared_state.tick or 0),
             intent_payload=intent.payload,
         )
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PolicyDenial
+        from hyperloom.inference_optimizer.breakdown.recorder import phase_event, phase_records
 
         payload = intent.payload or {}
         proposal_msg_id = (
             payload.get("proposal_msg_id") or payload.get("target_proposal_msg_id") or payload.get("proposal_id")
         )
-        phase_event.record_denial(
-            PolicyDenial(
-                at=PhaseCycle(str(self.shared_state.phase or ""), int(self.shared_state.macro_cycle or 0)),
-                actor=source,
-                proposal_msg_id=str(proposal_msg_id) if proposal_msg_id else None,
-                action=resolved_action,
-                rule=str(denied.rule or ""),
-                hint=str(denied.hint or ""),
-            )
+        denial = phase_records.PolicyDenial(
+            at=phase_records.PhaseCycle(str(self.shared_state.phase or ""), int(self.shared_state.macro_cycle or 0)),
+            actor=source,
+            proposal_msg_id=str(proposal_msg_id) if proposal_msg_id else None,
+            action=resolved_action,
+            rule=str(denied.rule or ""),
+            hint=str(denied.hint or ""),
         )
+        phase_event.record_denial(denial)
