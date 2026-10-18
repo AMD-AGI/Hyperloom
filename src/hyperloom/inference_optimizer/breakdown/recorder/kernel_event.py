@@ -69,6 +69,16 @@ from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
 from .event_sink import make_sink
 from .event_timeline import EventHeader, finish_event, open_event
+from .kernel_records import (
+    LEDGER_GEAK,
+    SOURCE_FUSION,
+    SOURCE_GEAK_AUTHORED_KERNEL,
+    SOURCE_GEMM_TUNING,
+    SOURCE_KERNEL_REWRITE,
+    FusionRun,
+    GemmTuningRun,
+    KernelRewriteRun,
+)
 from .baseline_event import assemble_baseline_actions
 from .roofline_event import assemble_roofline_action
 
@@ -133,17 +143,7 @@ ROW_INTEGRATE = "integrate"
 ROUTE_GEAK = "geak"
 ROUTE_FORGE = "forge"
 
-# The five candidate producers a KERNEL entry can adopt from.
-SOURCE_KERNEL_REWRITE = "kernel_rewrite"
-SOURCE_FUSION = "fusion"
-SOURCE_GEMM_TUNING = "gemm_tuning"
-SOURCE_GEAK_AUTHORED_KERNEL = "geak_authored_kernel"
 SOURCE_GEAK_ENV_SELECTION = "geak_env_selection"
-
-#: Which route asked for a rebench. Only GEAK runs one: it re-measures a whole
-#: delegated config against a per-cycle attempt ceiling. Forge has no rebench
-#: step at all -- its candidates are settled by the integrate gate.
-LEDGER_GEAK = "geak"
 
 #: What became of one candidate. ``failed`` is distinct from ``rejected``: the
 #: first never produced a candidate to judge, the second produced one that was
@@ -953,44 +953,6 @@ def _discovered_kernel_row(
     }
 
 
-def _lane_row(
-    *,
-    source_kind: str,
-    run_id: str,
-    status: str,
-    started_at: str | None,
-    ended_at: str | None,
-    duration_sec: float | None,
-    micro_decision: str | None,
-    integrate_ref: str | None,
-    failure_reason: str | None,
-    error_class: str | None = None,
-) -> dict[str, Any]:
-    """Build the fields every candidate lane row carries.
-
-    The row states what the lane did, not what became of it. A forge candidate
-    is settled by the integrate gate, whose verdict is a different row written
-    later, so the outcome is resolved at assembly once both halves are on disk.
-
-    ``integrate_ref`` names the queued integration when the lane has one. A
-    rewrite is joined to its verdict by ``kernel_id``, but fusion and GEMM
-    tuning produce no kernel of their own, so without the integration id the
-    gate that ruled on them could never be found.
-    """
-    return {
-        "source_kind": str(source_kind),
-        "run_id": str(run_id or ""),
-        "status": str(status or ""),
-        "started_at": _text(started_at),
-        "ended_at": _text(ended_at),
-        "duration_sec": _float_or_none(duration_sec),
-        "micro_decision": _text(micro_decision),
-        "integrate_ref": _text(integrate_ref),
-        "error_class": _text(error_class),
-        "failure_reason": _text(failure_reason),
-    }
-
-
 def _rebench_row(
     *,
     attempt_id: str,
@@ -1262,160 +1224,17 @@ class KernelEventRecorder:
             natural_ids=(str(row.get("source_kind") or ""), str(row.get("run_id") or "")),
         )
 
-    def record_kernel_rewrite(
-        self,
-        *,
-        run_id: str,
-        kernel_id: str,
-        status: str,
-        kernel_name: str = "",
-        dispatched: bool = True,
-        backends_tried: Any = None,
-        adopted_backend: str = "",
-        skip_reason: str = "",
-        task_group: str = "",
-        speedup: Any = None,
-        baseline_us: Any = None,
-        candidate_us: Any = None,
-        compile_status: str = "",
-        correctness: Any = None,
-        artifact_path: str = "",
-        micro_decision: str = "",
-        integrate_ref: str = "",
-        trace_analyze_ref: str = "",
-        started_at: str = "",
-        ended_at: str = "",
-        duration_sec: Any = None,
-        failure_reason: str = "",
-        error_class: str = "",
-    ) -> None:
-        """Record one forge source-level kernel rewrite.
+    def record_kernel_rewrite(self, run: KernelRewriteRun) -> None:
+        """Record one forge source-level kernel rewrite."""
+        self._record_lane_run(run.row())
 
-        ``adopted_backend`` and ``run_id`` are stated rather than derived. The
-        projection had to guess the backend from a speedup plus an artifact path
-        and to synthesize an identifier from ``kernel_id:backend:sequence``
-        whenever the real attempt id had been lost.
-        """
-        self._record_lane_run(
-            {
-                **_lane_row(
-                    source_kind=SOURCE_KERNEL_REWRITE,
-                    run_id=run_id,
-                    status=status,
-                    started_at=started_at,
-                    ended_at=ended_at,
-                    duration_sec=duration_sec,
-                    micro_decision=micro_decision,
-                    integrate_ref=integrate_ref,
-                    failure_reason=failure_reason,
-                    error_class=error_class,
-                ),
-                "kernel_id": str(kernel_id or ""),
-                "kernel_name": _text(kernel_name),
-                "dispatched": bool(dispatched),
-                "backends_tried": [str(item) for item in _as_list(backends_tried)],
-                "adopted_backend": _text(adopted_backend),
-                "skip_reason": _text(skip_reason),
-                "task_group": _text(task_group),
-                "speedup": _float_or_none(speedup),
-                "baseline_us": _float_or_none(baseline_us),
-                "candidate_us": _float_or_none(candidate_us),
-                "compile_status": _text(compile_status),
-                "correctness": correctness if isinstance(correctness, bool) else None,
-                "artifact_path": _text(artifact_path),
-                "trace_analyze_ref": _text(trace_analyze_ref),
-            }
-        )
-
-    def record_fusion_run(
-        self,
-        *,
-        run_id: str,
-        status: str,
-        pattern: str = "",
-        target_module: str = "",
-        applied: bool = False,
-        gain_pct: Any = None,
-        patch_path: str = "",
-        micro_decision: str = "",
-        integrate_ref: str = "",
-        started_at: str = "",
-        ended_at: str = "",
-        duration_sec: Any = None,
-        failure_reason: str = "",
-        error_class: str = "",
-    ) -> None:
+    def record_fusion_run(self, run: FusionRun) -> None:
         """Record one forge-fusion run."""
-        self._record_lane_run(
-            {
-                **_lane_row(
-                    source_kind=SOURCE_FUSION,
-                    run_id=run_id,
-                    status=status,
-                    started_at=started_at,
-                    ended_at=ended_at,
-                    duration_sec=duration_sec,
-                    micro_decision=micro_decision,
-                    integrate_ref=integrate_ref,
-                    failure_reason=failure_reason,
-                    error_class=error_class,
-                ),
-                "pattern": _text(pattern),
-                "target_module": _text(target_module),
-                "applied": bool(applied),
-                "gain_pct": _float_or_none(gain_pct),
-                "patch_path": _text(patch_path),
-            }
-        )
+        self._record_lane_run(run.row())
 
-    def record_gemm_tuning_run(
-        self,
-        *,
-        run_id: str,
-        status: str,
-        shapes_total: Any = None,
-        shapes_tuned: Any = None,
-        config_path: str = "",
-        gain_pct: Any = None,
-        graded_objective: str = "",
-        tuner: str = "",
-        micro_decision: str = "",
-        integrate_ref: str = "",
-        started_at: str = "",
-        ended_at: str = "",
-        duration_sec: Any = None,
-        failure_reason: str = "",
-        error_class: str = "",
-    ) -> None:
-        """Record one GEMM shape-table tuning run.
-
-        ``graded_objective`` names the axis ``gain_pct`` was measured on, so a
-        run graded on total throughput or interactivity is not later read as an
-        output gain. ``tuner`` names which backend produced the table, which is
-        a separate question from which axis judged it.
-        """
-        self._record_lane_run(
-            {
-                **_lane_row(
-                    source_kind=SOURCE_GEMM_TUNING,
-                    run_id=run_id,
-                    status=status,
-                    started_at=started_at,
-                    ended_at=ended_at,
-                    duration_sec=duration_sec,
-                    micro_decision=micro_decision,
-                    integrate_ref=integrate_ref,
-                    failure_reason=failure_reason,
-                    error_class=error_class,
-                ),
-                "shapes_total": _int_or_none(shapes_total),
-                "shapes_tuned": _int_or_none(shapes_tuned),
-                "config_path": _text(config_path),
-                "gain_pct": _float_or_none(gain_pct),
-                "graded_objective": _text(graded_objective),
-                "tuner": _text(tuner),
-            }
-        )
+    def record_gemm_tuning_run(self, run: GemmTuningRun) -> None:
+        """Record one GEMM shape-table tuning run."""
+        self._record_lane_run(run.row())
 
     # ---- geak ------------------------------------------------------------
 

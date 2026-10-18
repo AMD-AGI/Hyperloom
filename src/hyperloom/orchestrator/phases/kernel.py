@@ -43,6 +43,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     record_geak_attempts,
     reject_geak_attempts,
 )
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import FusionRun, GemmTuningRun, LaneRunFields
 from ..actions.stop_attribution import stopped_by_the_run_class
 from hyperloom.inference_optimizer.session.optimization_journal import (
     KIND_GEMM_TUNING,
@@ -686,21 +687,25 @@ class KernelPhase(CoordinatorCollaborator):
     ) -> None:
         """Write one ``record_gemm_tuning_run`` row for a single tuner's outcome."""
         recorder.record_gemm_tuning_run(
-            run_id=run_id,
-            status=status,
-            shapes_total=shapes_total,
-            shapes_tuned=shapes_tuned,
-            config_path=config_path,
-            gain_pct=gain_pct,
-            graded_objective=graded_objective,
-            tuner=tuner,
-            micro_decision=micro_decision,
-            integrate_ref=integrate_ref,
-            started_at=started_at,
-            ended_at=ended_at,
-            duration_sec=duration_sec,
-            error_class=error_class,
-            failure_reason=failure_reason,
+            GemmTuningRun(
+                lane=LaneRunFields(
+                    run_id=run_id,
+                    status=status,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    duration_sec=duration_sec,
+                    micro_decision=micro_decision,
+                    integrate_ref=integrate_ref,
+                    failure_reason=failure_reason,
+                    error_class=error_class,
+                ),
+                shapes_total=shapes_total,
+                shapes_tuned=shapes_tuned,
+                config_path=config_path,
+                gain_pct=gain_pct,
+                graded_objective=graded_objective,
+                tuner=tuner,
+            )
         )
 
     def _record_fusion_timeline(self, result: dict[str, Any]) -> None:
@@ -709,20 +714,26 @@ class KernelPhase(CoordinatorCollaborator):
         if recorder is None or not isinstance(result, dict):
             return
         recorder.record_fusion_run(
-            run_id=str(result.get("fusion_run_id") or ""),
-            status=str(result.get("status") or "unknown"),
-            pattern=str(result.get("pattern") or result.get("fusion_pattern") or ""),
-            target_module=str(result.get("target_module") or result.get("kernel_name") or ""),
-            applied=bool(result.get("kept")),
-            gain_pct=result.get("gain_pct"),
-            patch_path=str(result.get("patch_path") or result.get("source_patch") or ""),
-            micro_decision=str(result.get("micro_decision") or result.get("decision") or ""),
-            integrate_ref=str(result.get("integration_id") or ""),
-            started_at=str(result.get("started_at") or ""),
-            ended_at=str(result.get("ended_at") or result.get("ts") or ""),
-            duration_sec=result.get("duration_sec"),
-            error_class=str(result.get("error_class") or ""),
-            failure_reason=str(result.get("error") or result.get("skip_reason") or result.get("error_class") or ""),
+            FusionRun(
+                lane=LaneRunFields(
+                    run_id=str(result.get("fusion_run_id") or ""),
+                    status=str(result.get("status") or "unknown"),
+                    started_at=str(result.get("started_at") or ""),
+                    ended_at=str(result.get("ended_at") or result.get("ts") or ""),
+                    duration_sec=result.get("duration_sec"),
+                    micro_decision=str(result.get("micro_decision") or result.get("decision") or ""),
+                    integrate_ref=str(result.get("integration_id") or ""),
+                    failure_reason=str(
+                        result.get("error") or result.get("skip_reason") or result.get("error_class") or ""
+                    ),
+                    error_class=str(result.get("error_class") or ""),
+                ),
+                pattern=str(result.get("pattern") or result.get("fusion_pattern") or ""),
+                target_module=str(result.get("target_module") or result.get("kernel_name") or ""),
+                applied=bool(result.get("kept")),
+                gain_pct=result.get("gain_pct"),
+                patch_path=str(result.get("patch_path") or result.get("source_patch") or ""),
+            )
         )
         tool_versions.record_tool_version(self.session_dir, tool="forge")
         agent_backend = str(result.get("agent_backend") or "").lower()
