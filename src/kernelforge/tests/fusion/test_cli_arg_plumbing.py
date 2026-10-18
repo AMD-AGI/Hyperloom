@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import inspect
 from pathlib import Path
 
@@ -71,12 +72,10 @@ def test_the_check_catches_a_gap_it_is_meant_to_catch() -> None:
 
 def test_the_serving_gate_accepts_the_serving_args() -> None:
     params = inspect.signature(cli_module.apply_serving_gate).parameters
+    session_fields = {field.name for field in dataclasses.fields(cli_module.ServingSession)}
 
-    assert "server_extra" in params
     assert "pristine_dir" in params
-    assert "tp" in params
-    assert "block_size" in params
-    assert "max_model_len" in params
+    assert {"server_extra", "tp", "block_size", "max_model_len"} <= session_fields
 
 
 def test_pristine_snapshot_is_threaded_through_the_autoloop() -> None:

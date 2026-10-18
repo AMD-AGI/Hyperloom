@@ -44,7 +44,7 @@ def spied(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         seen["autoloop_recipes"] = [r.pattern_id for r in recipes]
         return LoopResult(kept=False, best=None, best_recipe=None, termination_reason="faked")
 
-    def _fake_claim(claim, **kwargs):
+    def _fake_claim(claim, *_args):
         seen["claims"].append(claim.pattern_id)
         return CompilePassOutcome(flag=claim.env_flag, kept=False), None
 

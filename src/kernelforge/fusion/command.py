@@ -43,14 +43,14 @@ from .report import (
 from .shapes import load_model_config, resolve_decode_shapes
 from .validate import DEFAULT_TARGET_SPEEDUP, HarnessKernelRunner, validate_recipe
 from .agent_selection import _agent_timeout_sec, _campaign_agent_provider, _create_agent_backend
-from .compile_pass_claim import _run_single_compile_pass_claim
+from .compile_pass_claim import ClaimExport, ClaimGate, ClaimServing, _run_single_compile_pass_claim
 from .harness_authoring import (
     _author_baseline_harness,
     _author_harness_target,
     _finish_author_harness,
     _prepare_author_harness,
 )
-from .serving_gate import _run_serving_smoke, apply_serving_gate
+from .serving_gate import ServingSession, _run_serving_smoke, apply_serving_gate
 from .source_snapshot import _discard_failed_attempt, _needs_discard, _snapshot_fusion_source
 
 log = logging.getLogger("forge_fusion")
@@ -960,17 +960,9 @@ def run(
         elif top_recipe.candidate_kind == "compile_pass":
             compile_pass_outcome, artifacts = _run_single_compile_pass_claim(
                 top_recipe,
-                framework=framework,
-                framework_root=framework_root,
-                model_path=model_path,
-                gpu=gpu,
-                validate=validate,
-                out=out,
-                isl=ab_isl,
-                osl=ab_osl,
-                target_speedup=target_speedup,
-                repo_root=repo_root,
-                pristine_dir=pristine_dir,
+                ClaimServing(framework, framework_root, model_path, gpu, ab_isl, ab_osl),
+                ClaimGate(validate=validate, target_speedup=target_speedup),
+                ClaimExport(out, repo_root, pristine_dir),
             )
             exported_ok = compile_pass_outcome.kept
         elif validate:
@@ -1249,18 +1241,9 @@ def _run_multi_patch_nomination(
     for claim in claims:
         outcome, arts = _run_single_compile_pass_claim(
             claim,
-            framework=framework,
-            framework_root=framework_root,
-            model_path=model_path,
-            gpu=gpu,
-            validate=True,
-            out=out,
-            isl=ab_isl,
-            osl=ab_osl,
-            target_speedup=target_speedup,
-            repo_root=repo_root,
-            pristine_dir=pristine_dir,
-            patch_name=f"fusion_{_safe_artifact_id(claim.pattern_id)}.patch",
+            ClaimServing(framework, framework_root, model_path, gpu, ab_isl, ab_osl),
+            ClaimGate(validate=True, target_speedup=target_speedup),
+            ClaimExport(out, repo_root, pristine_dir, f"fusion_{_safe_artifact_id(claim.pattern_id)}.patch"),
         )
         if outcome.kept and arts is not None and arts.patch:
             env = _compile_pass_envelope(claim, outcome, arts, repo_root=repo_root)
@@ -1459,6 +1442,17 @@ def _run_fusion_autoloop(
     publish=None,
 ):
     """Try each ranked recipe as one forge-loop campaign."""
+    session = ServingSession(
+        framework,
+        model_path,
+        gpu,
+        ab_isl,
+        ab_osl,
+        server_extra=server_extra,
+        tp=tp,
+        block_size=block_size,
+        max_model_len=max_model_len,
+    )
     originals = {r.pattern_id: r for r in recipes}
     loop_recipes = [_combined_recipe(recipes)] if (combine and len(recipes) > 1) else recipes
     # Every file any recipe edits: the shadow index has to admit all of them up front, because it is built once and
@@ -1563,20 +1557,7 @@ def _run_fusion_autoloop(
             return None
         # Serving smoke EACH keeper, not just the strongest: a sibling that boots and crashes real decode only reveals
         # it on a full server boot, and Hyperloom's integrate lane is serial at ~25 min per patch.
-        disposition, note, _termination = _run_serving_smoke(
-            recipe,
-            base_note=vr.note or "",
-            framework=framework,
-            out=out,
-            gpu=gpu,
-            model_path=model_path,
-            isl=ab_isl,
-            osl=ab_osl,
-            server_extra=server_extra,
-            tp=tp,
-            block_size=block_size,
-            max_model_len=max_model_len,
-        )
+        disposition, note, _termination = _run_serving_smoke(recipe, vr.note or "", session, out)
         vr.note = note
         if disposition in ("not_wired", "serving_crash"):
             _reject_fusion_sibling(recipe, vr, arts, disposition)
@@ -1613,21 +1594,7 @@ def _run_fusion_autoloop(
         if multi_patch and shadow is not None:
             shadow.reset_to_base()
         elif not multi_patch and result.kept and result.best_recipe is not None:
-            apply_serving_gate(
-                result,
-                framework=framework,
-                out=out,
-                gpu=gpu,
-                model_path=model_path,
-                isl=ab_isl,
-                osl=ab_osl,
-                server_extra=server_extra,
-                repo_root=repo_root,
-                pristine_dir=pristine_dir,
-                tp=tp,
-                block_size=block_size,
-                max_model_len=max_model_len,
-            )
+            apply_serving_gate(result, session, out, repo_root=repo_root, pristine_dir=pristine_dir)
     except FusionAbort as exc:
         log.error("fusion run aborted (infrastructure failure): %s", exc)
         result = LoopResult(
