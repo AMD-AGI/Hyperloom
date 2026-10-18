@@ -1325,18 +1325,33 @@ def _partition_fanout_supported(framework: str | None) -> tuple[bool, str]:
     )
 
 
+@dataclass(frozen=True)
+class PartitionRequest:
+    """The compute-partition flags an operator passed: an asserted mode and the streams each partition runs."""
+
+    declared_mode: str | None = None
+    streams_per_partition: int | None = None
+
+
+@dataclass(frozen=True)
+class PartitionModel:
+    """The model a partition shape must fit: its path and precision, and the session state holding its identity."""
+
+    model_path: str | None = None
+    precision: str | None = None
+    shared_state: Any = None
+
+
 def _export_partition_shape(
+    request: PartitionRequest,
     *,
-    declared_mode: str | None,
-    streams_per_partition: int | None,
     framework: str | None = None,
     gpu_type: str | None = None,
     nodes: int = 1,
-    model_path: str | None = None,
-    precision: str | None = None,
-    shared_state: Any = None,
+    model: PartitionModel = PartitionModel(),
 ) -> dict[str, Any]:
     """Validate the session's compute-partition shape and publish it."""
+    declared_mode, streams_per_partition = request.declared_mode, request.streams_per_partition
     from hyperloom.common.gpu_partition import PartitionError, parse_mode
     from hyperloom.orchestrator.actions.executors._partition_shape import (
         DEFAULT_STREAMS_PER_PARTITION,
@@ -1407,10 +1422,10 @@ def _export_partition_shape(
         streams=streams,
         gpu_type=gpu_type,
         params={
-            "model_path": str(model_path or ""),
-            "precision": str(precision or ""),
+            "model_path": str(model.model_path or ""),
+            "precision": str(model.precision or ""),
         },
-        shared_state=shared_state,
+        shared_state=model.shared_state,
         # The footprint refusal is arithmetic about streams sharing a partition.
         fanout_expected=fanout or bool(mode) or streams_named,
     )
@@ -1703,17 +1718,18 @@ def _restore_platform_state(args: argparse.Namespace, state: SharedState, sessio
     _publish_gpu_power_settings(gpu_power)
     state.gpu_power_settings = gpu_power
     state.compute_partition = _export_partition_shape(
-        declared_mode=getattr(args, "compute_partition_mode", None),
-        streams_per_partition=getattr(args, "streams_per_partition", None),
+        PartitionRequest(getattr(args, "compute_partition_mode", None), getattr(args, "streams_per_partition", None)),
         framework=state.framework or getattr(args, "framework", None),
         gpu_type=os.environ.get("GPU_TYPE") or state.gpu_type,
         # A resume must re-pass --nodes, so the persisted count is the one that says whether this session was ever
         # multi-node.
         nodes=max(int(getattr(args, "nodes", 1) or 1), int(getattr(state, "nodes", 1) or 1)),
-        model_path=state.model_path or str(getattr(args, "model", "") or ""),
-        precision=state.precision or getattr(args, "precision", None),
         # Passed for the persisted model identity.
-        shared_state=state,
+        model=PartitionModel(
+            state.model_path or str(getattr(args, "model", "") or ""),
+            state.precision or getattr(args, "precision", None),
+            shared_state=state,
+        ),
     )
     if state.compute_partition.get("mode"):
         print(f"  re-exported partition shape: {state.compute_partition['mode']}")
@@ -2219,13 +2235,11 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
     # --quantize rewrites to the exported checkpoint -- sizing partitions against the source model would weigh the
     # wrong weights.
     compute_partition = _export_partition_shape(
-        declared_mode=getattr(args, "compute_partition_mode", None),
-        streams_per_partition=getattr(args, "streams_per_partition", None),
+        PartitionRequest(getattr(args, "compute_partition_mode", None), getattr(args, "streams_per_partition", None)),
         framework=framework,
         gpu_type=args.gpu_type,
         nodes=nodes_resolved,
-        model_path=str(args.model or os.environ.get("MODEL_PATH") or ""),
-        precision=getattr(args, "precision", None),
+        model=PartitionModel(str(args.model or os.environ.get("MODEL_PATH") or ""), getattr(args, "precision", None)),
     )
     gpu_power = resolve_launch_gpu_power(args, nodes=nodes_resolved)
     _publish_gpu_power_settings(gpu_power)
