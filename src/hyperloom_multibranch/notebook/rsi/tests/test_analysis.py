@@ -15,15 +15,20 @@ from hyperloom_multibranch.notebook.rsi.analysis import (
     FailedTest,
     FailureTier,
     direction_occupancy,
-    failure_set,
+    failures_at,
     hypothesis_ledger,
     repeated_failures,
 )
 from hyperloom_multibranch.notebook.tests.sessions import FP8_KV, GEMM
 
 
+def _failures(snapshot: NotebookSnapshot, branch: str) -> tuple[FailedTest, ...]:
+    head = next((node.head_commit for node in snapshot.lineage.branches if node.branch == branch), "")
+    return failures_at(snapshot, head)
+
+
 def _tiers(snapshot: NotebookSnapshot, branch: str) -> list[tuple[str, FailureTier]]:
-    return [(item.request_id, item.tier) for item in failure_set(snapshot, branch)]
+    return [(item.request_id, item.tier) for item in _failures(snapshot, branch)]
 
 
 def test_failures_are_tiered_by_how_close_their_state_is_to_the_branch_head(snapshot: NotebookSnapshot) -> None:
@@ -40,7 +45,7 @@ def test_failures_are_tiered_by_how_close_their_state_is_to_the_branch_head(snap
         ("r4", FailureTier.ELSEWHERE),
     ]
     assert {tier for _, tier in _tiers(snapshot, "unknown")} == {FailureTier.ELSEWHERE}
-    (flat, *_) = failure_set(snapshot, "s1")
+    (flat, *_) = _failures(snapshot, "s1")
     assert flat.render() == "- [same_state] moe gemm / tuned kernel on c1: flat at +0.30% (r4)"
 
 

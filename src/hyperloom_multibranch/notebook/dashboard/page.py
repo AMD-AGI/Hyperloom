@@ -106,6 +106,34 @@ def _in_flight(in_flight: Mapping[str, Any]) -> str:
     return tests + claims
 
 
+def _exploration(dashboard: Mapping[str, Any]) -> str:
+    directions = _table(
+        "Directions",
+        ("target", "mechanism", "layer", "states tried", "best gain", "on the heads of", "claimed by"),
+        [
+            (
+                row["target"],
+                row["mechanism"],
+                row["layer"],
+                len(row["tried_on"]),
+                _pct(row["best_gain_pct"]),
+                row["committed_on"],
+                row["claimed_by"],
+            )
+            for row in dashboard["directions"]
+        ],
+    )
+    hypotheses = _table(
+        "Hypotheses",
+        (_BRANCH, "status", "hypothesis", "evidence", "updated"),
+        [
+            (row["branch"], row["status"], row["statement"], row["evidence"], row["updated_at"])
+            for row in dashboard["hypotheses"]
+        ],
+    )
+    return directions + hypotheses
+
+
 def _lineage(dashboard: Mapping[str, Any]) -> str:
     commits = _table(
         "Commits",
@@ -181,6 +209,7 @@ def render_html(dashboard: Mapping[str, Any]) -> str:
             f'<p class="meta">{escape(task)}; {spent}; generated {escape(str(dashboard["generated_at_utc"]))}</p>',
             _branches(dashboard["branches"]),
             _in_flight(dashboard["in_flight"]),
+            _exploration(dashboard),
             _lineage(dashboard),
             _infrastructure(dashboard),
         )

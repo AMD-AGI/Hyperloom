@@ -98,6 +98,22 @@ def test_the_page_is_self_contained_and_escapes_every_value(busy: NotebookSnapsh
     assert "<td>stopped</td>" in page and "<td>node-3</td>" in page
 
 
+def test_the_dashboard_shows_who_covers_each_direction_and_every_hypothesis(busy: NotebookSnapshot) -> None:
+    dashboard = build_dashboard(busy, metric=METRIC)
+
+    directions = {f"{row['target']} / {row['mechanism']}": row for row in dashboard["directions"]}
+    gemm = directions["moe gemm / tuned kernel"]
+    assert (gemm["layer"], gemm["tried_on"], gemm["best_gain_pct"]) == ("kernel", ["c0", "c1"], 4.0)
+    assert gemm["committed_on"] == [INTEGRATION_BRANCH, "s1"]
+    assert [(row["branch"], row["status"]) for row in dashboard["hypotheses"]] == [
+        ("s1", "confirmed"),
+        ("s2", "falsified"),
+    ]
+    assert json.loads(json.dumps(dashboard)) == dashboard
+    page = render_html(dashboard)
+    assert "<h2>Directions</h2>" in page and "<h2>Hypotheses</h2>" in page and "<td>falsified</td>" in page
+
+
 def _on_image(request_id: str, digest: str, at: float) -> TestRecord:
     measured = result(request_id, node="node-9")
     on_image = dataclasses.replace(measured, sandbox=dataclasses.replace(measured.sandbox, image_digest=digest))
@@ -139,4 +155,4 @@ async def test_an_empty_notebook_has_an_empty_page(tmp_path: Path) -> None:
     page = render_html(build_dashboard(empty))
 
     assert "<h1>Session without a profile</h1>" in page
-    assert page.count('<p class="empty">none</p>') == 8
+    assert page.count('<p class="empty">none</p>') == 10

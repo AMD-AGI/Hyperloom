@@ -7,6 +7,9 @@
   rows carry one (pass :class:`FrontierScoring`'s rows to show them);
 * ``spend``: the session's GPU hours and LLM dollars so far, its specialists', judge's and resolver's together;
 * ``in_flight``: tests requested and neither measured nor withdrawn yet, and the claims held now;
+* ``directions``: every direction an intent named, the states it was tried on, its best gain, the running branches
+  whose head carries one of its commits and the branches holding a claim on it;
+* ``hypotheses``: every hypothesis a specialist logged, at its latest version;
 * ``queue``: the toolbox's queue lengths and latest cold start, when the caller passes ``Toolbox.queue_state()``;
 * ``lineage`` and ``splits``: every commit, every branch, and the branches split off for a correctness fix;
 * ``sandboxes``: per measurement environment, the tests run there and their GPU time;
@@ -32,6 +35,7 @@ from hyperloom_multibranch.contracts.toolbox import QueueState
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.dashboard.page import render_html
 from hyperloom_multibranch.notebook.knowledge.breakdown import measurement_usage
+from hyperloom_multibranch.notebook.rsi.analysis import direction_occupancy, hypothesis_ledger
 
 SCHEMA_VERSION = "multibranch-dashboard-1"
 DASHBOARD_JSON = "dashboard.json"
@@ -98,6 +102,36 @@ def _in_flight(snapshot: NotebookSnapshot) -> dict[str, Any]:
     }
 
 
+def _directions(snapshot: NotebookSnapshot) -> list[dict[str, Any]]:
+    return [
+        {
+            "target": item.target,
+            "mechanism": item.mechanism,
+            "layer": item.layer.value,
+            "tried_on": list(item.tried_on),
+            "outcomes": list(item.outcomes),
+            "best_gain_pct": item.best_gain_pct,
+            "committed_on": list(item.committed_on),
+            "claimed_by": list(item.claimed_by),
+        }
+        for item in direction_occupancy(snapshot)
+    ]
+
+
+def _hypotheses(snapshot: NotebookSnapshot) -> list[dict[str, Any]]:
+    return [
+        {
+            "branch": row.branch,
+            "status": row.status.value,
+            "statement": row.statement,
+            "evidence": list(row.evidence),
+            "updated_at": _iso(row.updated_at),
+            "entry_id": row.latest_entry,
+        }
+        for row in hypothesis_ledger(snapshot)
+    ]
+
+
 def _environment_changes(snapshot: NotebookSnapshot) -> list[dict[str, Any]]:
     return [
         {
@@ -142,6 +176,8 @@ def build_dashboard(
         "branches": _branches(snapshot, rows, metric),
         "spend": {"gpu_hours": snapshot.gpu_hours, "llm_usd": snapshot.llm_usd},
         "in_flight": _in_flight(snapshot),
+        "directions": _directions(snapshot),
+        "hypotheses": _hypotheses(snapshot),
         "queue": _queue(queue) if queue is not None else None,
         "lineage": encode(snapshot.lineage),
         "splits": [

@@ -52,17 +52,6 @@ class FailedTest:
         return f"- [{self.tier.value}] {self.direction} on {self.parent_commit}: {self.outcome} ({self.request_id})"
 
 
-def _head(snapshot: NotebookSnapshot, branch: str) -> str:
-    node = next((node for node in snapshot.lineage.branches if node.branch == branch), None)
-    return node.head_commit if node is not None else ""
-
-
-def failure_set(snapshot: NotebookSnapshot, branch: str) -> tuple[FailedTest, ...]:
-    """Every failed test no commit redeemed, tiered by how close the state it was tried on is to ``branch``'s head."""
-
-    return failures_at(snapshot, _head(snapshot, branch))
-
-
 def failures_at(snapshot: NotebookSnapshot, head: str) -> tuple[FailedTest, ...]:
     """Every failed test no commit redeemed, tiered by how close the state it was tried on is to ``head``."""
 
@@ -222,7 +211,6 @@ __all__ = [
     "FailureTier",
     "HypothesisRow",
     "direction_occupancy",
-    "failure_set",
     "failures_at",
     "hypothesis_ledger",
     "repeated_failures",
