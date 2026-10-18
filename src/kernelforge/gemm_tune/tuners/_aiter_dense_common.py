@@ -997,16 +997,20 @@ def _shape_results_for_run(
     return shape_results
 
 
-def run_aiter_dense_tuner(
-    *,
-    tuner_name: str,
-    script_key: str,
-    env_var: str,
-    ctx: TuneContext,
-    work_dir: Path,
-    extra_args: list[str] | None = None,
-) -> TuneResult:
+@dataclass(frozen=True)
+class DenseTunerSpec:
+    """One aiter dense tuner: its name, tuning script, deployment env var and extra script flags."""
+
+    tuner_name: str
+    script_key: str
+    env_var: str
+    extra_args: tuple[str, ...] = ()
+
+
+def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path) -> TuneResult:
     """Run an aiter dense GEMM tuner subprocess."""
+    tuner_name = spec.tuner_name
+    script_key = spec.script_key
     script = find_tuner_script(script_key)
     if script is None:
         return TuneResult(
@@ -1049,8 +1053,8 @@ def run_aiter_dense_tuner(
         str(ctx.min_improvement_pct),
         "-v",
     ]
-    if extra_args:
-        base_args.extend(extra_args)
+    if spec.extra_args:
+        base_args.extend(spec.extra_args)
 
     # Check the script's argparse surface before spending minutes on it.
     filtered = filter_args(base_args, probe_script(script))
@@ -1147,7 +1151,7 @@ def run_aiter_dense_tuner(
         tuner_name=tuner_name,
         status=summary["status"],
         artifact_path=artifact,
-        env_var=env_var,
+        env_var=spec.env_var,
         env_value=artifact,
         total_shapes=summary["total"],
         improved_shapes=summary["n_improved"],
