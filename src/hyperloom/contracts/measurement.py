@@ -33,6 +33,10 @@ _E = TypeVar("_E", bound=Enum)
 
 _ACCURACY = "accuracy"
 _FAILURE_CLASS = "failure_class"
+#: The verdicts of a ``repro`` test: the case's failure is still there, or the case ran clean.
+REPRODUCED = "reproduced"
+NOT_REPRODUCED = "not_reproduced"
+REPRO_VERDICTS = (REPRODUCED, NOT_REPRODUCED)
 
 
 class MeasurementError(ValueError):
@@ -535,6 +539,8 @@ class TestResult:
 
     ``output_dir`` is relative to the session directory. The four fingerprints come from the signed result manifest.
     The timing, cost and profile fields are what the notebook asks of the toolbox beyond the measurement itself.
+    ``repro_verdict`` is the one outcome of a ``repro`` test: ``""`` for any other test, ``"reproduced"`` or
+    ``"not_reproduced"`` for a repro test that ran its case to the end (``SUCCEEDED`` only).
     """
 
     __test__ = False
@@ -557,6 +563,7 @@ class TestResult:
     finished_at: float | None = None
     gpu_seconds: float = 0.0
     profile_location: str = ""
+    repro_verdict: str = ""
 
     def __post_init__(self) -> None:
         _text(self.request_id, "request_id")
@@ -575,6 +582,13 @@ class TestResult:
         for value, what in ((self.queued_at, "queued_at"), (self.started_at, "started_at")):
             _optional_number(value, what)
         _optional_number(self.finished_at, "finished_at")
+        self._check_repro_verdict()
+
+    def _check_repro_verdict(self) -> None:
+        if self.repro_verdict not in ("", *REPRO_VERDICTS):
+            raise MeasurementError(f"repro_verdict must be '' or one of {REPRO_VERDICTS}, got {self.repro_verdict!r}")
+        if self.repro_verdict and self.validity is not Validity.SUCCEEDED:
+            raise MeasurementError("only a succeeded test has a repro_verdict: a case that did not run has no verdict")
 
     def _check_validity(self) -> None:
         if self.validity is Validity.SUCCEEDED:
@@ -614,6 +628,7 @@ class TestResult:
             "finished_at": self.finished_at,
             "gpu_seconds": self.gpu_seconds,
             "profile_location": self.profile_location,
+            "repro_verdict": self.repro_verdict,
         }
 
     @classmethod
@@ -639,12 +654,16 @@ class TestResult:
             finished_at=f.get("finished_at"),
             gpu_seconds=f.get("gpu_seconds", 0.0),
             profile_location=f.get("profile_location", ""),
+            repro_verdict=f.get("repro_verdict", ""),
         )
 
 
 __all__ = [
+    "NOT_REPRODUCED",
     "PRIORITY_HIGHEST",
     "PRIORITY_LOWEST",
+    "REPRODUCED",
+    "REPRO_VERDICTS",
     "AccuracyValue",
     "AttachmentRef",
     "Attempt",

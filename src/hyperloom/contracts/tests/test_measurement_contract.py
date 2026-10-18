@@ -14,7 +14,9 @@ from hyperloom.contracts.measurement import (
     Attempt,
     FailureClass,
     MeasurementError,
+    NOT_REPRODUCED,
     Purpose,
+    REPRODUCED,
     RoundValue,
     SandboxFacts,
     TestKind,
@@ -262,6 +264,36 @@ def test_result_document_with_unknown_values_is_refused() -> None:
         TestResult.from_document({**document, "failure_class": "flaky"})
     with pytest.raises(MeasurementError, match="a round phase"):
         TestResult.from_document({**document, "rounds": [{"phase": "cooldown"}]})
+
+
+@pytest.mark.parametrize("verdict", ["", REPRODUCED, NOT_REPRODUCED])
+def test_a_repro_verdict_round_trips(verdict: str) -> None:
+    assert _roundtrip(_result(repro_verdict=verdict)).repro_verdict == verdict
+
+
+def test_a_document_written_before_the_repro_verdict_loads_with_none() -> None:
+    document = _result().to_document()
+    del document["repro_verdict"]
+    assert TestResult.from_document(document).repro_verdict == ""
+
+
+def test_a_repro_verdict_is_one_of_the_two_verdicts() -> None:
+    with pytest.raises(MeasurementError, match="repro_verdict must be"):
+        _result(repro_verdict="fixed")
+    with pytest.raises(MeasurementError, match="repro_verdict must be"):
+        TestResult.from_document({**_result().to_document(), "repro_verdict": "maybe"})
+
+
+@pytest.mark.parametrize(
+    ("validity", "failure_class"),
+    [
+        (Validity.CANDIDATE_FAILED, FailureClass.CANDIDATE),
+        (Validity.MEASUREMENT_FAILED, FailureClass.INFRA),
+    ],
+)
+def test_only_a_succeeded_result_has_a_repro_verdict(validity: Validity, failure_class: FailureClass) -> None:
+    with pytest.raises(MeasurementError, match="only a succeeded test has a repro_verdict"):
+        _result(validity=validity, failure_class=failure_class, repro_verdict=REPRODUCED)
 
 
 def test_a_succeeded_result_has_no_failure_class() -> None:
