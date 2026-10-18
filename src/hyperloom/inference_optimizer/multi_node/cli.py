@@ -13,7 +13,7 @@ import shlex
 import tempfile
 import time
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -715,24 +715,28 @@ def _kernel_patch_pod_files() -> str:
     )
 
 
-def _build_multinode_apply_patch_entrypoint(
-    target_path: str,
-    patch_b64: str,
-    backup_dir: str,
-    kernel_id: str,
-    timeout_sec: int,
-    jit_build_dir: str = "",
-) -> str:
+@dataclass(frozen=True)
+class KernelPatchApply:
+    """One kernel patch to apply on every pod: the target file, the base64 patch, and where backups and JIT builds go."""
+
+    target_path: str
+    patch_b64: str
+    backup_dir: str
+    kernel_id: str
+    jit_build_dir: str = ""
+
+
+def _build_multinode_apply_patch_entrypoint(patch: KernelPatchApply, timeout_sec: int) -> str:
     """Compose the head-pod entrypoint that fans out a kernel patch to every pod via heredoc-embedded kernel_patch_multinode.py."""
     return (
         f"{_MN_ENTRYPOINT_PREAMBLE}"
         f"{_kernel_patch_pod_files()}"
         f'python3 "$WORK_DIR/kernel_patch_multinode.py" apply '
-        f"--target-path {shlex.quote(str(target_path))} "
-        f"--patch-b64 {shlex.quote(str(patch_b64))} "
-        f"--backup-dir {shlex.quote(str(backup_dir))} "
-        f"--kernel-id {shlex.quote(str(kernel_id))} "
-        f"--jit-build-dir {shlex.quote(str(jit_build_dir))} "
+        f"--target-path {shlex.quote(str(patch.target_path))} "
+        f"--patch-b64 {shlex.quote(str(patch.patch_b64))} "
+        f"--backup-dir {shlex.quote(str(patch.backup_dir))} "
+        f"--kernel-id {shlex.quote(str(patch.kernel_id))} "
+        f"--jit-build-dir {shlex.quote(str(patch.jit_build_dir))} "
         f"--timeout-sec {int(timeout_sec)}"
     )
 
@@ -880,12 +884,10 @@ def _submit_and_collect_pod_json(
     label: str,
     poll_interval: int,
     poll_timeout: int,
-    runtime_env: dict | None = None,
-    success_statuses: frozenset[str] | None = None,
 ) -> tuple[int, dict | None, str]:
     """Submit ``entrypoint``, poll to terminal, parse the per-pod JSON, and return ``(returncode, parsed_or_None, logs)``."""
     with _ray_dashboard_client(state) as ray:
-        sub_id = ray.submit_job(entrypoint, runtime_env=runtime_env)
+        sub_id = ray.submit_job(entrypoint)
         info(f"{label} submission_id={sub_id}")
 
         def _fetch():
@@ -909,9 +911,8 @@ def _submit_and_collect_pod_json(
         # Dashboard SUCCEEDED; the sub-script's own ``status`` says if the fan-out worked.
         if parsed is None:
             return EXIT_TRANSIENT, None, logs
-        ok_statuses = success_statuses or frozenset({"ok"})
         sub_status = str(parsed.get("status", "")).lower()
-        return (EXIT_OK if sub_status in ok_statuses else EXIT_TRANSIENT), parsed, logs
+        return (EXIT_OK if sub_status == "ok" else EXIT_TRANSIENT), parsed, logs
 
 
 # Subcommand: apply-patch / revert-patch (multi-node only) Cohesive rayjob/infera clusters live in
@@ -953,14 +954,14 @@ def cmd_apply_patch(args: argparse.Namespace) -> int:
         f"backup_dir={args.backup_dir} bytes={len(patch_bytes)}"
     )
 
-    entrypoint = _build_multinode_apply_patch_entrypoint(
-        args.target_path,
-        patch_b64,
-        args.backup_dir,
-        args.kernel_id,
-        args.timeout_sec,
-        str(args.jit_build_dir or ""),
+    patch = KernelPatchApply(
+        target_path=args.target_path,
+        patch_b64=patch_b64,
+        backup_dir=args.backup_dir,
+        kernel_id=args.kernel_id,
+        jit_build_dir=str(args.jit_build_dir or ""),
     )
+    entrypoint = _build_multinode_apply_patch_entrypoint(patch, args.timeout_sec)
     rc, parsed, logs = _submit_and_collect_pod_json(
         state,
         entrypoint,
@@ -1270,28 +1271,30 @@ def _start_pd_router(
     return router_sub, router_state, 0
 
 
-def _persist_multinode_restart(
-    state: dict,
-    args: argparse.Namespace,
-    *,
-    pid_dir: str,
-    log_dir: str,
-    kill_sub: str,
-    launch_sub: str,
-    topology,
-    router_sub: str,
-    router_state: dict,
-) -> None:
+@dataclass(frozen=True)
+class _MultinodeLaunch:
+    """What one multi-node restart launched: its PID/log dirs, Ray submissions, topology and PD router endpoints."""
+
+    pid_dir: str
+    log_dir: str
+    kill_sub: str
+    launch_sub: str
+    topology: dict[str, Any]
+    router_sub: str
+    router_state: dict
+
+
+def _persist_multinode_restart(state: dict, args: argparse.Namespace, launch: _MultinodeLaunch) -> None:
     """Record what this restart launched, so a later invocation can resume or fall back to it."""
-    state["last_server_pid_dir"] = pid_dir
-    state["last_server_log_dir"] = log_dir
-    state["last_kill_submission_id"] = kill_sub
-    state["last_restart_submission_id"] = launch_sub
+    state["last_server_pid_dir"] = launch.pid_dir
+    state["last_server_log_dir"] = launch.log_dir
+    state["last_kill_submission_id"] = launch.kill_sub
+    state["last_restart_submission_id"] = launch.launch_sub
     state["last_restart_framework"] = args.framework
     state["last_restart_model"] = args.model
     state["last_restart_tp"] = args.tp
     state["last_restart_ep"] = int(getattr(args, "ep", 1) or 1)
-    state["last_restart_topology"] = topology
+    state["last_restart_topology"] = launch.topology
     # Persist PD state so later invocations can fall back when a flag is omitted.
     pd_mode = (getattr(args, "pd_mode", "") or "aggregated").lower()
     state["last_restart_pd_mode"] = pd_mode
@@ -1302,9 +1305,9 @@ def _persist_multinode_restart(
         state["last_restart_pd_decode_tp"] = int(getattr(args, "pd_decode_tp", 0) or 0)
         state["last_restart_pd_transfer_backend"] = getattr(args, "pd_transfer_backend", "") or ""
         state["last_restart_pd_ib_device"] = getattr(args, "pd_ib_device", "") or ""
-        state["last_router_submission_id"] = router_sub
-        state["pd_prefill_url"] = router_state.get("pd_prefill_url", "")
-        state["pd_decode_url"] = router_state.get("pd_decode_url", "")
+        state["last_router_submission_id"] = launch.router_sub
+        state["pd_prefill_url"] = launch.router_state.get("pd_prefill_url", "")
+        state["pd_decode_url"] = launch.router_state.get("pd_decode_url", "")
     _save_state(state)
 
 
@@ -1407,13 +1410,15 @@ def _restart_multinode(args: argparse.Namespace, state: dict, nnodes: int) -> in
     _persist_multinode_restart(
         state,
         args,
-        pid_dir=pid_dir,
-        log_dir=log_dir,
-        kill_sub=kill_sub,
-        launch_sub=launch_sub,
-        topology=topology,
-        router_sub=router_sub,
-        router_state=router_state,
+        _MultinodeLaunch(
+            pid_dir=pid_dir,
+            log_dir=log_dir,
+            kill_sub=kill_sub,
+            launch_sub=launch_sub,
+            topology=topology,
+            router_sub=router_sub,
+            router_state=router_state,
+        ),
     )
     info("multi-node servers launched; benchmarks should target $service_url")
     return 0

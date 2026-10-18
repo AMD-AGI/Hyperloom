@@ -1304,7 +1304,7 @@ def test_multinode_entrypoint_shlex_quotes_malicious_value():
     from hyperloom.inference_optimizer.multi_node import cli as mn_cli
 
     evil = "k'; touch /tmp/pwned #"
-    ep = mn_cli._build_multinode_apply_patch_entrypoint("/t/x", "QUJD", "/bak", evil, 60)
+    ep = mn_cli._build_multinode_apply_patch_entrypoint(mn_cli.KernelPatchApply("/t/x", "QUJD", "/bak", evil), 60)
     # The value is carried, but only as a single shlex-quoted token.
     assert shlex.quote(evil) in ep
     # The raw ``--kernel-id k'; touch ...`` (unquoted) form must NOT appear.
@@ -1637,7 +1637,7 @@ def test_ray_patch_siblings_reach_isolated_actor_through_runtime_env(tmp_path, a
     )
     encoded = base64.b64encode(b"value = 2\n").decode()
     entrypoint = mn_cli._build_multinode_apply_patch_entrypoint(
-        str(target), encoded, str(backup), "gemm", 20, str(jit / "build")
+        mn_cli.KernelPatchApply(str(target), encoded, str(backup), "gemm", str(jit / "build")), 20
     )
     script = _stage_ray_patch_entrypoint(entrypoint, tmp_path / "shipped")
     applied, log = _run_isolated_pod(
