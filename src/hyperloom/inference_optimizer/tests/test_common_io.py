@@ -6,10 +6,9 @@ from __future__ import annotations
 import json
 import stat
 
-import pytest
-
 from hyperloom.common.io import (
     JsonFormat,
+    JsonLineFormat,
     WriteOptions,
     append_jsonl,
     atomic_write_bytes,
@@ -83,17 +82,15 @@ class TestAppendJsonl:
 
     def test_make_parents(self, tmp_path):
         p = tmp_path / "deep" / "log.jsonl"
-        append_jsonl(p, {"x": 1}, options=WriteOptions(make_parents=True))
+        append_jsonl(p, {"x": 1}, make_parents=True)
         assert p.exists()
 
     def test_fsync(self, tmp_path):
         p = tmp_path / "log.jsonl"
-        append_jsonl(p, [1, 2], options=WriteOptions(fsync=True))
+        append_jsonl(p, [1, 2], fsync=True)
         assert p.read_text() == "[1, 2]\n"
 
-    @pytest.mark.parametrize("options", [WriteOptions(fsync_dir=True), WriteOptions(mode=0o600)])
-    def test_rejects_replace_only_options(self, tmp_path, options):
+    def test_line_format(self, tmp_path):
         p = tmp_path / "log.jsonl"
-        with pytest.raises(ValueError, match="make_parents and fsync"):
-            append_jsonl(p, {"x": 1}, options=options)
-        assert not p.exists()
+        append_jsonl(p, {"b": 1, "a": "café"}, fmt=JsonLineFormat(ensure_ascii=False, sort_keys=True))
+        assert p.read_text(encoding="utf-8") == '{"a": "café", "b": 1}\n'

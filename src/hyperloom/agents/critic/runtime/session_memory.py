@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from hyperloom.common.io import JsonFormat, WriteOptions
+from hyperloom.common.io import JsonFormat, JsonLineFormat, WriteOptions
 from hyperloom.common.io import append_jsonl as _common_append_jsonl
 from hyperloom.common.io import atomic_write_json as _common_atomic_write_json
 from hyperloom.common.jsonio import read_json_strict as _common_read_json_strict
@@ -187,7 +187,7 @@ class SessionMemory:
             "ts": now_iso(timespec="microseconds"),
             "decision_review": decision_review,
         }
-        _common_append_jsonl(self._decisions_path(session_id), record, ensure_ascii=False)
+        _common_append_jsonl(self._decisions_path(session_id), record, fmt=JsonLineFormat(ensure_ascii=False))
 
     # KB priors cache (per-scope+topic)
     def get_cached_priors(

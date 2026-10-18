@@ -36,7 +36,7 @@ def _best_effort_fsync_dir(directory: Path) -> None:
 
 @dataclass(frozen=True)
 class WriteOptions:
-    """How a file write treats parent directories, durability and permission bits.
+    """How an atomic replace treats parent directories, durability and permission bits.
 
     A new file is owner-only (``0o600``). ``mode`` is applied with group/other bits
     stripped; ``preserve_mode`` instead keeps an existing file's permission bits and
@@ -58,6 +58,14 @@ class JsonFormat:
     sort_keys: bool = True
     ensure_ascii: bool = True
     trailing_newline: bool = False
+
+
+@dataclass(frozen=True)
+class JsonLineFormat:
+    """How :func:`append_jsonl` serializes one row onto its line."""
+
+    ensure_ascii: bool = True
+    sort_keys: bool = False
 
 
 _JSON_WRITE = WriteOptions(make_parents=True)
@@ -113,23 +121,18 @@ def append_jsonl(
     path: Path,
     row: Any,
     *,
-    ensure_ascii: bool = True,
-    sort_keys: bool = False,
-    options: WriteOptions = WriteOptions(),
+    make_parents: bool = False,
+    fsync: bool = False,
+    fmt: JsonLineFormat = JsonLineFormat(),
 ) -> None:
-    """Append one JSON object as a line to a JSONL file.
-
-    Only ``make_parents`` and ``fsync`` apply: the file is extended in place, never replaced.
-    """
-    if options.fsync_dir or options.mode is not None:
-        raise ValueError("append_jsonl supports only the make_parents and fsync write options")
+    """Append one JSON object as a line to a JSONL file."""
     path = Path(path)
-    if options.make_parents:
+    if make_parents:
         path.parent.mkdir(parents=True, exist_ok=True)
-    line = _json.dumps(row, ensure_ascii=ensure_ascii, sort_keys=sort_keys)
+    line = _json.dumps(row, ensure_ascii=fmt.ensure_ascii, sort_keys=fmt.sort_keys)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(line + "\n")
-        if options.fsync:
+        if fsync:
             _best_effort_fsync(fh)
 
 
@@ -143,6 +146,7 @@ def safe_mtime(path: Path) -> float:
 
 __all__ = [
     "JsonFormat",
+    "JsonLineFormat",
     "WriteOptions",
     "atomic_write_bytes",
     "atomic_write_text",
