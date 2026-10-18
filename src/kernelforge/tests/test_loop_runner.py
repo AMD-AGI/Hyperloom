@@ -36,6 +36,10 @@ from kernelforge.loop.round_budget import (
     admit_round,
 )
 from kernelforge.loop.run_state import (
+    IterationVerdict,
+    LoopStanding,
+    RoundCost,
+    StallPolicy,
     ORCHESTRATION_CIRCUIT_CLOSED,
     ORCHESTRATION_CIRCUIT_OPEN,
     PHASE_STALLED,
@@ -926,10 +930,7 @@ def _seed_round_costs(workspace, *, planning_sec, lanes=3, rounds=2):
     for iteration in range(1, rounds + 1):
         apply_round_cost(
             state,
-            iteration=iteration,
-            lanes=lanes,
-            planning_sec=planning_sec,
-            total_sec=planning_sec + 2400.0,
+            RoundCost(iteration=iteration, lanes=lanes, planning_sec=planning_sec, total_sec=planning_sec + 2400.0),
             campaign_sec=iteration * (planning_sec + 2400.0),
         )
     LoopStateStore(str(workspace)).save(state)
@@ -3645,15 +3646,16 @@ def test_a_supervisor_intervention_no_longer_erases_the_stall_it_answers(
     for iteration in (1, 2, 3):
         apply_iteration(
             loop.run_state,
-            iteration=iteration,
-            decision="REVERT_PERF",
-            kept=False,
-            wall_ms=1.1,
-            commit_hash="",
-            plan="another pass over the same loop body",
-            baseline_wall_ms=1.0,
-            best_wall_ms=1.0,
-            stall_threshold=3,
+            IterationVerdict(
+                iteration=iteration,
+                decision="REVERT_PERF",
+                kept=False,
+                wall_ms=1.1,
+                commit_hash="",
+                plan="another pass over the same loop body",
+            ),
+            LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
+            StallPolicy(stall_threshold=3),
         )
         loop.monitor.record(kept=False)
 

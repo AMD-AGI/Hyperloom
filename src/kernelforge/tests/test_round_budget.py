@@ -457,11 +457,7 @@ def test_recorded_round_costs_drive_the_next_admission():
     state = RunState()
     apply_round_cost(
         state,
-        iteration=1,
-        lanes=3,
-        planning_sec=2400.0,
-        total_sec=5000.0,
-        measurement_sec=90.0,
+        RoundCost(iteration=1, lanes=3, planning_sec=2400.0, total_sec=5000.0, measurement_sec=90.0),
         campaign_sec=6000.0,
     )
 
@@ -483,10 +479,7 @@ def test_round_history_keeps_only_the_recent_window():
     for iteration in range(1, ROUND_COST_WINDOW + 4):
         apply_round_cost(
             state,
-            iteration=iteration,
-            lanes=2,
-            planning_sec=100.0 * iteration,
-            total_sec=1000.0 * iteration,
+            RoundCost(iteration=iteration, lanes=2, planning_sec=100.0 * iteration, total_sec=1000.0 * iteration),
             campaign_sec=2000.0 * iteration,
         )
 
@@ -498,14 +491,7 @@ def test_a_round_that_did_not_plan_records_nothing():
     state = RunState()
 
     with pytest.raises(ValueError):
-        apply_round_cost(
-            state,
-            iteration=1,
-            lanes=1,
-            planning_sec=0.0,
-            total_sec=900.0,
-            campaign_sec=900.0,
-        )
+        apply_round_cost(state, RoundCost(iteration=1, lanes=1, planning_sec=0.0, total_sec=900.0), campaign_sec=900.0)
 
     assert state.round_costs.rounds == 0
 
@@ -518,13 +504,7 @@ def test_planning_cannot_be_charged_without_advancing_the_span_it_is_in():
     state = RunState()
 
     with pytest.raises(TypeError):
-        apply_round_cost(
-            state,
-            iteration=1,
-            lanes=1,
-            planning_sec=600.0,
-            total_sec=900.0,
-        )
+        apply_round_cost(state, RoundCost(iteration=1, lanes=1, planning_sec=600.0, total_sec=900.0))
 
     assert state.round_costs.rounds == 0
 
@@ -533,14 +513,7 @@ def test_the_campaign_span_is_never_left_behind_the_planning_inside_it():
     """A clock passed short of the planning charged to it is raised, not kept."""
     state = RunState()
 
-    apply_round_cost(
-        state,
-        iteration=1,
-        lanes=1,
-        planning_sec=2400.0,
-        total_sec=3000.0,
-        campaign_sec=5.0,
-    )
+    apply_round_cost(state, RoundCost(iteration=1, lanes=1, planning_sec=2400.0, total_sec=3000.0), campaign_sec=5.0)
 
     assert state.round_costs.planning_total_sec == pytest.approx(2400.0)
     assert state.round_costs.campaign_sec == pytest.approx(2400.0)
@@ -553,10 +526,7 @@ def test_the_campaign_span_only_moves_forward():
     for iteration, campaign_sec in ((1, 6000.0), (2, 100.0)):
         apply_round_cost(
             state,
-            iteration=iteration,
-            lanes=1,
-            planning_sec=1200.0,
-            total_sec=1500.0,
+            RoundCost(iteration=iteration, lanes=1, planning_sec=1200.0, total_sec=1500.0),
             campaign_sec=campaign_sec,
         )
 

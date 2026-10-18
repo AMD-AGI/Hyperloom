@@ -24,8 +24,8 @@ from kernelforge.loop.baseline_reference import (
     check_baseline_against_reference,
     load_reference_case_times,
 )
-from kernelforge.loop.recovery import publish_warm_start_recovery
-from kernelforge.loop.run_state import LoopStateStore, RunState, apply_iteration
+from kernelforge.loop.recovery import CallerRecovery, publish_warm_start_recovery
+from kernelforge.loop.run_state import IterationVerdict, LoopStanding, LoopStateStore, RunState, apply_iteration
 from kernelforge.loop import runner as runner_module
 from kernelforge.loop.runner import IterationResult, _decision_label
 from kernelforge.loop.scoring import (
@@ -415,15 +415,16 @@ def test_a_candidate_that_was_merely_slow_advances_the_stall_streak():
 
     apply_iteration(
         state,
-        iteration=1,
-        decision="REVERT_PERF",
-        kept=False,
-        commit_hash="",
-        wall_ms=1.0,
-        mean_case_speedup=1.001,
-        plan="a real but insufficient gain",
-        baseline_wall_ms=1.0,
-        best_wall_ms=1.0,
+        IterationVerdict(
+            iteration=1,
+            decision="REVERT_PERF",
+            kept=False,
+            wall_ms=1.0,
+            commit_hash="",
+            plan="a real but insufficient gain",
+            mean_case_speedup=1.001,
+        ),
+        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
     )
 
     assert state.stall.no_improvement_iters == 1
@@ -613,7 +614,7 @@ def test_every_warm_start_artifact_agrees_on_the_aggregate_verdict(tmp_path):
 
     result_json = tmp_path / "caller-result.json"
     result = publish_warm_start_recovery(
-        workspace_dir=workspace,
+        workspace,
         base_commit=base_commit,
         warm={
             "applied": True,
@@ -623,10 +624,10 @@ def test_every_warm_start_artifact_agrees_on_the_aggregate_verdict(tmp_path):
             "case_times": {"cheap": 0.001, "expensive": 0.0576},
             "solution_slug": "prior-solution",
         },
-        caller_experiment_id="consumer-run",
-        experience_id="producer-run",
+        caller=CallerRecovery(
+            caller_experiment_id="consumer-run", experience_id="producer-run", result_json=str(result_json)
+        ),
         tracker=Tracker(),
-        result_json=str(result_json),
     )
 
     manifest = json.loads((Path(workspace) / "forge_experiments" / "best" / "manifest.json").read_text())

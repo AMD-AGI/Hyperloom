@@ -12,16 +12,16 @@ from kernelforge.loop.search_policy import (
     OBJECTIVE_IMMEDIATE_CANONICAL_GAIN,
     SEARCH_MODE_DIVERSIFY,
     SEARCH_MODE_EXPLOIT,
+    RecentProgress,
     SearchPolicyDecision,
     SearchPolicyEngine,
+    SearchState,
 )
 
 
 def test_warm_start_exploits_until_stalled():
     decision = SearchPolicyEngine().decide(
-        best_source="warm_start",
-        no_improvement_iters=0,
-        stall_threshold=3,
+        SearchState(best_source="warm_start", no_improvement_iters=0), stall_threshold=3
     )
 
     assert decision.mode == SEARCH_MODE_EXPLOIT
@@ -30,9 +30,7 @@ def test_warm_start_exploits_until_stalled():
 
 def test_stalled_warm_start_enters_diversify():
     decision = SearchPolicyEngine().decide(
-        best_source="warm_start",
-        no_improvement_iters=3,
-        stall_threshold=3,
+        SearchState(best_source="warm_start", no_improvement_iters=3), stall_threshold=3
     )
 
     assert decision.mode == SEARCH_MODE_DIVERSIFY
@@ -41,9 +39,7 @@ def test_stalled_warm_start_enters_diversify():
 
 def test_fresh_productive_search_exploits():
     decision = SearchPolicyEngine().decide(
-        best_source="iteration",
-        no_improvement_iters=0,
-        stall_threshold=3,
+        SearchState(best_source="iteration", no_improvement_iters=0), stall_threshold=3
     )
 
     assert decision.mode == SEARCH_MODE_EXPLOIT
@@ -51,9 +47,7 @@ def test_fresh_productive_search_exploits():
 
 def test_stall_enters_diversify():
     stalled = SearchPolicyEngine().decide(
-        best_source="iteration",
-        no_improvement_iters=3,
-        stall_threshold=3,
+        SearchState(best_source="iteration", no_improvement_iters=3), stall_threshold=3
     )
 
     assert stalled.mode == SEARCH_MODE_DIVERSIFY
@@ -64,18 +58,22 @@ def test_completed_diversify_cycle_opens_bounded_exploit_window():
     engine = SearchPolicyEngine()
 
     first = engine.decide(
-        best_source="warm_start",
-        no_improvement_iters=1,
+        SearchState(
+            best_source="warm_start",
+            no_improvement_iters=1,
+            current_mode=SEARCH_MODE_DIVERSIFY,
+            diversification_cycle_completed=True,
+        ),
         stall_threshold=3,
-        current_mode=SEARCH_MODE_DIVERSIFY,
-        diversification_cycle_completed=True,
     )
     second = engine.decide(
-        best_source="warm_start",
-        no_improvement_iters=2,
+        SearchState(
+            best_source="warm_start",
+            no_improvement_iters=2,
+            current_mode=first.mode,
+            residence_iterations_remaining=first.residence_iterations_remaining,
+        ),
         stall_threshold=3,
-        current_mode=first.mode,
-        residence_iterations_remaining=(first.residence_iterations_remaining),
     )
 
     assert first.mode == SEARCH_MODE_EXPLOIT
@@ -88,10 +86,8 @@ def test_completed_diversify_cycle_opens_bounded_exploit_window():
 
 def test_incomplete_diversify_cycle_stays_in_diversify():
     decision = SearchPolicyEngine().decide(
-        best_source="iteration",
-        no_improvement_iters=5,
+        SearchState(best_source="iteration", no_improvement_iters=5, current_mode=SEARCH_MODE_DIVERSIFY),
         stall_threshold=3,
-        current_mode=SEARCH_MODE_DIVERSIFY,
     )
 
     assert decision.mode == SEARCH_MODE_DIVERSIFY
@@ -100,10 +96,9 @@ def test_incomplete_diversify_cycle_stays_in_diversify():
 
 def test_repeated_no_changes_diversifies_below_the_stall_threshold():
     decision = SearchPolicyEngine().decide(
-        best_source="iteration",
-        no_improvement_iters=NO_CHANGES_ESCALATION_THRESHOLD,
+        SearchState(best_source="iteration", no_improvement_iters=NO_CHANGES_ESCALATION_THRESHOLD),
         stall_threshold=NO_CHANGES_ESCALATION_THRESHOLD + 1,
-        consecutive_no_changes=NO_CHANGES_ESCALATION_THRESHOLD,
+        recent=RecentProgress(consecutive_no_changes=NO_CHANGES_ESCALATION_THRESHOLD),
     )
 
     assert decision.mode == SEARCH_MODE_DIVERSIFY
@@ -114,10 +109,9 @@ def test_repeated_no_changes_diversifies_below_the_stall_threshold():
 
 def test_first_no_changes_does_not_escalate():
     decision = SearchPolicyEngine().decide(
-        best_source="iteration",
-        no_improvement_iters=1,
+        SearchState(best_source="iteration", no_improvement_iters=1),
         stall_threshold=3,
-        consecutive_no_changes=NO_CHANGES_ESCALATION_THRESHOLD - 1,
+        recent=RecentProgress(consecutive_no_changes=NO_CHANGES_ESCALATION_THRESHOLD - 1),
     )
 
     assert decision.mode == SEARCH_MODE_EXPLOIT
@@ -129,22 +123,26 @@ def test_repeated_no_changes_outranks_mode_residence():
     engine = SearchPolicyEngine()
 
     held = engine.decide(
-        best_source="iteration",
-        no_improvement_iters=0,
+        SearchState(
+            best_source="iteration",
+            no_improvement_iters=0,
+            current_mode=SEARCH_MODE_EXPLOIT,
+            residence_iterations_remaining=2,
+        ),
         stall_threshold=3,
-        current_mode=SEARCH_MODE_EXPLOIT,
-        residence_iterations_remaining=2,
-        consecutive_no_changes=NO_CHANGES_ESCALATION_THRESHOLD,
+        recent=RecentProgress(consecutive_no_changes=NO_CHANGES_ESCALATION_THRESHOLD),
     )
     # Same residence, one empty diff short of the threshold: the only difference is the streak, so residence must
     # still win here or the test above proves nothing about which signal outranks which.
     not_yet = engine.decide(
-        best_source="iteration",
-        no_improvement_iters=0,
+        SearchState(
+            best_source="iteration",
+            no_improvement_iters=0,
+            current_mode=SEARCH_MODE_EXPLOIT,
+            residence_iterations_remaining=2,
+        ),
         stall_threshold=3,
-        current_mode=SEARCH_MODE_EXPLOIT,
-        residence_iterations_remaining=2,
-        consecutive_no_changes=NO_CHANGES_ESCALATION_THRESHOLD - 1,
+        recent=RecentProgress(consecutive_no_changes=NO_CHANGES_ESCALATION_THRESHOLD - 1),
     )
 
     assert held.mode == SEARCH_MODE_DIVERSIFY
@@ -156,10 +154,9 @@ def test_repeated_no_changes_outranks_mode_residence():
 def test_diminishing_returns_diversify_while_the_last_iteration_still_kept():
     """A ladder can flatten without ever stopping, and that is the case here."""
     decision = SearchPolicyEngine().decide(
-        best_source="iteration",
-        no_improvement_iters=0,
+        SearchState(best_source="iteration", no_improvement_iters=0),
         stall_threshold=3,
-        window_gain_ratio=MARGINAL_GAIN_FLOOR / 5,
+        recent=RecentProgress(window_gain_ratio=MARGINAL_GAIN_FLOOR / 5),
     )
 
     assert decision.mode == SEARCH_MODE_DIVERSIFY
@@ -170,10 +167,9 @@ def test_diminishing_returns_diversify_while_the_last_iteration_still_kept():
 
 def test_a_ladder_still_climbing_keeps_its_direction():
     decision = SearchPolicyEngine().decide(
-        best_source="iteration",
-        no_improvement_iters=0,
+        SearchState(best_source="iteration", no_improvement_iters=0),
         stall_threshold=3,
-        window_gain_ratio=MARGINAL_GAIN_FLOOR * 2,
+        recent=RecentProgress(window_gain_ratio=MARGINAL_GAIN_FLOOR * 2),
     )
 
     assert decision.mode == SEARCH_MODE_EXPLOIT
@@ -183,10 +179,9 @@ def test_a_ladder_still_climbing_keeps_its_direction():
 def test_an_unmeasured_window_is_not_a_flat_one():
     """No window yet must not read as a window of zero gain."""
     decision = SearchPolicyEngine().decide(
-        best_source="iteration",
-        no_improvement_iters=0,
+        SearchState(best_source="iteration", no_improvement_iters=0),
         stall_threshold=3,
-        window_gain_ratio=None,
+        recent=RecentProgress(window_gain_ratio=None),
     )
 
     assert decision.mode == SEARCH_MODE_EXPLOIT
@@ -196,10 +191,9 @@ def test_an_unmeasured_window_is_not_a_flat_one():
 def test_diminishing_returns_outrank_a_warm_started_incumbent():
     """A warm start earns exploitation, but not a whole flat window of it."""
     decision = SearchPolicyEngine().decide(
-        best_source="warm_start",
-        no_improvement_iters=0,
+        SearchState(best_source="warm_start", no_improvement_iters=0),
         stall_threshold=3,
-        window_gain_ratio=0.0,
+        recent=RecentProgress(window_gain_ratio=0.0),
     )
 
     assert decision.mode == SEARCH_MODE_DIVERSIFY
@@ -211,20 +205,24 @@ def test_mode_residence_outranks_diminishing_returns():
     engine = SearchPolicyEngine()
 
     completed = engine.decide(
-        best_source="iteration",
-        no_improvement_iters=0,
+        SearchState(
+            best_source="iteration",
+            no_improvement_iters=0,
+            current_mode=SEARCH_MODE_DIVERSIFY,
+            diversification_cycle_completed=True,
+        ),
         stall_threshold=3,
-        current_mode=SEARCH_MODE_DIVERSIFY,
-        diversification_cycle_completed=True,
-        window_gain_ratio=0.0,
+        recent=RecentProgress(window_gain_ratio=0.0),
     )
     held = engine.decide(
-        best_source="iteration",
-        no_improvement_iters=0,
+        SearchState(
+            best_source="iteration",
+            no_improvement_iters=0,
+            current_mode=completed.mode,
+            residence_iterations_remaining=completed.residence_iterations_remaining,
+        ),
         stall_threshold=3,
-        current_mode=completed.mode,
-        residence_iterations_remaining=(completed.residence_iterations_remaining),
-        window_gain_ratio=0.0,
+        recent=RecentProgress(window_gain_ratio=0.0),
     )
 
     assert completed.mode == SEARCH_MODE_EXPLOIT
@@ -236,10 +234,9 @@ def test_mode_residence_outranks_diminishing_returns():
 def test_a_stall_is_still_reported_as_a_stall():
     """A flat window and a stalled one are the same campaign; codes must not swap."""
     decision = SearchPolicyEngine().decide(
-        best_source="iteration",
-        no_improvement_iters=3,
+        SearchState(best_source="iteration", no_improvement_iters=3),
         stall_threshold=3,
-        window_gain_ratio=0.0,
+        recent=RecentProgress(window_gain_ratio=0.0),
     )
 
     assert decision.mode == SEARCH_MODE_DIVERSIFY
@@ -251,10 +248,9 @@ def test_a_gain_ratio_that_is_not_a_number_is_refused(ratio):
     """A non-finite ratio compares false against the floor and reads as healthy."""
     with pytest.raises(ValueError, match="window_gain_ratio"):
         SearchPolicyEngine().decide(
-            best_source="iteration",
-            no_improvement_iters=0,
+            SearchState(best_source="iteration", no_improvement_iters=0),
             stall_threshold=3,
-            window_gain_ratio=ratio,
+            recent=RecentProgress(window_gain_ratio=ratio),
         )
 
 

@@ -40,7 +40,11 @@ from kernelforge.loop.lessons import (
     UNDISPROVEN_CLAIM,
     LessonScope,
     LessonStore,
+    OutcomeMeasurement,
+    SessionEnd,
+    SessionObservations,
     build_fallback_document,
+    build_summary_prompt,
     cases_named_in,
     format_outcome_line,
     format_scope_line,
@@ -62,8 +66,10 @@ from kernelforge.loop.search_policy import (
     MARGINAL_GAIN_WINDOW,
     NO_CHANGES_STREAK_WINDOW,
     SEARCH_MODE_EXPLOIT,
+    RecentProgress,
     SearchPolicyDecision,
     SearchPolicyEngine,
+    SearchState,
 )
 from kernelforge.loop.round_budget import (
     admit_dispatch,
@@ -77,8 +83,12 @@ from kernelforge.loop.run_state import (
     SESSION_PAUSED,
     BestRecord,
     CriticRuling,
+    IterationVerdict,
+    LoopStanding,
     LoopStateStore,
+    RoundCost,
     RunState,
+    StallPolicy,
     pin_iteration,
     apply_iteration,
     apply_round_cost,
@@ -2058,6 +2068,10 @@ class IterationLoop(AnalysisRuntimeMixin):
         ):
             pin_iteration(state, iteration)
 
+    def _stall_policy(self) -> StallPolicy:
+        """The stall and orchestration-error thresholds this campaign was configured with."""
+        return StallPolicy(self.ic.supervise_after, self.ic.max_consecutive_orchestration_errors)
+
     def _apply_replayed_non_keep(self, state: RunState, event: dict) -> None:
         """Reduce one validated non-KEEP event without persisting state."""
         iteration = int(event["iter"])
@@ -2066,18 +2080,21 @@ class IterationLoop(AnalysisRuntimeMixin):
             raise ValueError(f"iteration {iteration} is not a replayable non-KEEP event")
         apply_iteration(
             state,
-            iteration=iteration,
-            decision=decision,
-            kept=False,
-            wall_ms=event.get("wall_ms"),
-            mean_case_speedup=event.get("mean_case_speedup"),
-            commit_hash=str(event.get("commit_hash") or ""),
-            plan=str(event.get("plan") or ""),
-            baseline_wall_ms=state.baseline_wall_ms,
-            best_wall_ms=event.get("best_after_ms"),
-            best_mean_case_speedup=event.get("best_after_mean_case_speedup"),
-            stall_threshold=self.ic.supervise_after,
-            orchestration_error_threshold=(self.ic.max_consecutive_orchestration_errors),
+            IterationVerdict(
+                iteration=iteration,
+                decision=decision,
+                kept=False,
+                wall_ms=event.get("wall_ms"),
+                commit_hash=str(event.get("commit_hash") or ""),
+                plan=str(event.get("plan") or ""),
+                mean_case_speedup=event.get("mean_case_speedup"),
+            ),
+            LoopStanding(
+                baseline_wall_ms=state.baseline_wall_ms,
+                best_wall_ms=event.get("best_after_ms"),
+                best_mean_case_speedup=event.get("best_after_mean_case_speedup"),
+            ),
+            self._stall_policy(),
         )
         state.diversification_cycle_completed = event.get("diversification_cycle_completed") is True
         self._record_direction_verdict(
@@ -2163,18 +2180,21 @@ class IterationLoop(AnalysisRuntimeMixin):
         if not already_applied:
             apply_iteration(
                 planned,
-                iteration=result.iteration,
-                decision="KEEP",
-                kept=True,
-                wall_ms=result.wall_ms,
-                mean_case_speedup=result.mean_case_speedup,
-                commit_hash=result.commit_hash,
-                plan=str(pending.get("plan") or ""),
-                baseline_wall_ms=planned.baseline_wall_ms,
-                best_wall_ms=result.wall_ms,
-                best_mean_case_speedup=result.mean_case_speedup,
-                stall_threshold=self.ic.supervise_after,
-                orchestration_error_threshold=(self.ic.max_consecutive_orchestration_errors),
+                IterationVerdict(
+                    iteration=result.iteration,
+                    decision="KEEP",
+                    kept=True,
+                    wall_ms=result.wall_ms,
+                    commit_hash=result.commit_hash,
+                    plan=str(pending.get("plan") or ""),
+                    mean_case_speedup=result.mean_case_speedup,
+                ),
+                LoopStanding(
+                    baseline_wall_ms=planned.baseline_wall_ms,
+                    best_wall_ms=result.wall_ms,
+                    best_mean_case_speedup=result.mean_case_speedup,
+                ),
+                self._stall_policy(),
             )
             control = pending.get("search_control")
             if isinstance(control, dict):
@@ -2467,11 +2487,13 @@ class IterationLoop(AnalysisRuntimeMixin):
         try:
             apply_round_cost(
                 self.run_state,
-                iteration=self._round_iteration,
-                lanes=self._round_lanes,
-                planning_sec=planning_sec,
-                total_sec=total_sec,
-                measurement_sec=measurement_sec,
+                RoundCost(
+                    iteration=self._round_iteration,
+                    lanes=self._round_lanes,
+                    planning_sec=planning_sec,
+                    total_sec=total_sec,
+                    measurement_sec=measurement_sec,
+                ),
                 campaign_sec=self._advance_campaign_clock(),
             )
             self.state_store.append_event(
@@ -3567,18 +3589,21 @@ class IterationLoop(AnalysisRuntimeMixin):
             if newly_applied:
                 apply_iteration(
                     self.run_state,
-                    iteration=result.iteration,
-                    decision=decision_label,
-                    kept=result.kept,
-                    wall_ms=result.wall_ms,
-                    mean_case_speedup=result.mean_case_speedup,
-                    commit_hash=result.commit_hash,
-                    plan=plan,
-                    baseline_wall_ms=self.ic.baseline_wall_ms,
-                    best_wall_ms=self.best_wall_ms,
-                    best_mean_case_speedup=self.best_mean_case_speedup,
-                    stall_threshold=self.ic.supervise_after,
-                    orchestration_error_threshold=(self.ic.max_consecutive_orchestration_errors),
+                    IterationVerdict(
+                        iteration=result.iteration,
+                        decision=decision_label,
+                        kept=result.kept,
+                        wall_ms=result.wall_ms,
+                        commit_hash=result.commit_hash,
+                        plan=plan,
+                        mean_case_speedup=result.mean_case_speedup,
+                    ),
+                    LoopStanding(
+                        baseline_wall_ms=self.ic.baseline_wall_ms,
+                        best_wall_ms=self.best_wall_ms,
+                        best_mean_case_speedup=self.best_mean_case_speedup,
+                    ),
+                    self._stall_policy(),
                 )
             elif result.kept and (
                 self.run_state.best.iteration != result.iteration
@@ -3855,10 +3880,13 @@ class IterationLoop(AnalysisRuntimeMixin):
                 outcome = await summarize_iteration(
                     store=store,
                     iteration=iteration,
-                    end_reason=result.session_end_reason,
                     summarizer=session_sink.get("summarize"),
-                    pr_references=self.ic.pr_reference_labels,
-                    pr_reference_context=self.ic.pr_reference_context,
+                    prompt=build_summary_prompt(
+                        iteration=iteration,
+                        end_reason=result.session_end_reason,
+                        pr_references=self.ic.pr_reference_labels,
+                        pr_reference_context=self.ic.pr_reference_context,
+                    ),
                 )
                 has_narrative = bool(outcome)
                 agent_narrative = has_narrative
@@ -3880,13 +3908,13 @@ class IterationLoop(AnalysisRuntimeMixin):
             # No session could describe what was explored, but the gate's block reasons are a real record of what the
             # agent ran into.
             fallback = build_fallback_document(
-                diff_summary=diff_summary,
-                findings=session_sink.get("findings", ""),
-                end_reason=result.session_end_reason,
-                summary_failure=summary_failure,
-                turns=result.turns,
-                plan=session_sink.get("plan", ""),
-                progress_log=session_sink.get("progress_log"),
+                SessionObservations(
+                    diff_summary=diff_summary,
+                    findings=session_sink.get("findings", ""),
+                    plan=session_sink.get("plan", ""),
+                    progress_log=session_sink.get("progress_log"),
+                ),
+                SessionEnd(result.session_end_reason, turns=result.turns, summary_failure=summary_failure),
             )
             if fallback and store.write(iteration, fallback) is not None:
                 has_narrative = True
@@ -3940,14 +3968,18 @@ class IterationLoop(AnalysisRuntimeMixin):
             iteration,
             format_outcome_line(
                 decision=decision,
-                wall_ms=result.wall_ms,
-                best_wall_ms=self.best_wall_ms,
-                mean_case_speedup=result.mean_case_speedup,
-                best_mean_case_speedup=self.best_mean_case_speedup,
-                snr_db=result.snr_db,
-                end_reason=result.session_end_reason,
-                turns=result.turns if not has_narrative else None,
-                summary_failure=(summary_failure if not has_narrative else ""),
+                measurement=OutcomeMeasurement(
+                    wall_ms=result.wall_ms,
+                    best_wall_ms=self.best_wall_ms,
+                    snr_db=result.snr_db,
+                    mean_case_speedup=result.mean_case_speedup,
+                    best_mean_case_speedup=self.best_mean_case_speedup,
+                ),
+                session=SessionEnd(
+                    result.session_end_reason,
+                    turns=result.turns if not has_narrative else None,
+                    summary_failure=(summary_failure if not has_narrative else ""),
+                ),
             ),
         )
 
@@ -4166,16 +4198,20 @@ class IterationLoop(AnalysisRuntimeMixin):
             since_iteration=self.run_state.stall.last_supervisor_iter,
         )
         decision = self.search_policy_engine.decide(
-            best_source=self.run_state.best.source,
-            no_improvement_iters=self.run_state.stall.unresolved_stall_iters,
-            stall_threshold=self.ic.supervise_after,
-            current_mode=self.run_state.search_mode,
-            residence_iterations_remaining=(self.run_state.search_mode_residence_remaining),
-            diversification_cycle_completed=(self.run_state.diversification_cycle_completed),
-            consecutive_no_changes=self._consecutive_no_changes(
-                self.state_store.recent_results(NO_CHANGES_STREAK_WINDOW)
+            SearchState(
+                best_source=self.run_state.best.source,
+                no_improvement_iters=self.run_state.stall.unresolved_stall_iters,
+                current_mode=self.run_state.search_mode,
+                residence_iterations_remaining=(self.run_state.search_mode_residence_remaining),
+                diversification_cycle_completed=(self.run_state.diversification_cycle_completed),
             ),
-            window_gain_ratio=window_gain.ratio,
+            stall_threshold=self.ic.supervise_after,
+            recent=RecentProgress(
+                consecutive_no_changes=self._consecutive_no_changes(
+                    self.state_store.recent_results(NO_CHANGES_STREAK_WINDOW)
+                ),
+                window_gain_ratio=window_gain.ratio,
+            ),
         )
         previous_mode = self.run_state.search_mode
         previous_reasons = tuple(self.run_state.search_reason_codes)

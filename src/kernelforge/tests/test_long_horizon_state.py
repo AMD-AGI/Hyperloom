@@ -14,6 +14,9 @@ import pytest
 
 from kernelforge.loop.prompt_view import render_long_horizon_header
 from kernelforge.loop.run_state import (
+    IterationVerdict,
+    LoopStanding,
+    StallPolicy,
     ORCHESTRATION_CIRCUIT_CLOSED,
     ORCHESTRATION_CIRCUIT_HALF_OPEN,
     ORCHESTRATION_CIRCUIT_OPEN,
@@ -58,16 +61,16 @@ def test_save_load_roundtrip_preserves_control_state(tmp_path):
     state = store.load()
     apply_iteration(
         state,
-        iteration=7,
-        decision="KEEP",
-        kept=True,
-        wall_ms=0.5,
-        mean_case_speedup=2.0,
-        commit_hash="abc1234",
-        plan="vectorize global loads",
-        baseline_wall_ms=1.0,
-        best_wall_ms=0.5,
-        best_mean_case_speedup=2.0,
+        IterationVerdict(
+            iteration=7,
+            decision="KEEP",
+            kept=True,
+            wall_ms=0.5,
+            commit_hash="abc1234",
+            plan="vectorize global loads",
+            mean_case_speedup=2.0,
+        ),
+        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=0.5, best_mean_case_speedup=2.0),
     )
     state.analysis.evidence_commit = "abc1234"
     state.analysis.evidence_mean_case_speedup = 2.0
@@ -145,26 +148,18 @@ def test_a_keep_clears_both_stall_counters():
     state = RunState()
     apply_iteration(
         state,
-        iteration=1,
-        decision="REVERT_PERF",
-        kept=False,
-        wall_ms=1.0,
-        commit_hash="",
-        plan="widen the tile",
-        baseline_wall_ms=1.0,
-        best_wall_ms=1.0,
+        IterationVerdict(
+            iteration=1, decision="REVERT_PERF", kept=False, wall_ms=1.0, commit_hash="", plan="widen the tile"
+        ),
+        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
     )
     apply_supervisor_intervention(state, iteration=1, stall_threshold=3)
     apply_iteration(
         state,
-        iteration=2,
-        decision="REVERT_PERF",
-        kept=False,
-        wall_ms=1.0,
-        commit_hash="",
-        plan="widen the tile again",
-        baseline_wall_ms=1.0,
-        best_wall_ms=1.0,
+        IterationVerdict(
+            iteration=2, decision="REVERT_PERF", kept=False, wall_ms=1.0, commit_hash="", plan="widen the tile again"
+        ),
+        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
     )
 
     assert state.stall.no_improvement_iters == 1
@@ -172,16 +167,16 @@ def test_a_keep_clears_both_stall_counters():
 
     apply_iteration(
         state,
-        iteration=3,
-        decision="KEEP",
-        kept=True,
-        wall_ms=0.6,
-        mean_case_speedup=1.6,
-        commit_hash="kept-commit",
-        plan="fuse the epilogue",
-        baseline_wall_ms=1.0,
-        best_wall_ms=0.6,
-        best_mean_case_speedup=1.6,
+        IterationVerdict(
+            iteration=3,
+            decision="KEEP",
+            kept=True,
+            wall_ms=0.6,
+            commit_hash="kept-commit",
+            plan="fuse the epilogue",
+            mean_case_speedup=1.6,
+        ),
+        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=0.6, best_mean_case_speedup=1.6),
     )
 
     assert state.stall.no_improvement_iters == 0
@@ -233,25 +228,17 @@ def test_iteration_reducer_advances_global_cursor_and_counters():
 
     apply_iteration(
         state,
-        iteration=8,
-        decision="KEEP",
-        kept=True,
-        wall_ms=0.7,
-        commit_hash="deadbeef",
-        plan="fuse epilogue",
-        baseline_wall_ms=1.0,
-        best_wall_ms=0.7,
+        IterationVerdict(
+            iteration=8, decision="KEEP", kept=True, wall_ms=0.7, commit_hash="deadbeef", plan="fuse epilogue"
+        ),
+        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=0.7),
     )
     apply_iteration(
         state,
-        iteration=9,
-        decision="REVERT_PERF",
-        kept=False,
-        wall_ms=0.8,
-        commit_hash="",
-        plan="increase tile size",
-        baseline_wall_ms=1.0,
-        best_wall_ms=0.7,
+        IterationVerdict(
+            iteration=9, decision="REVERT_PERF", kept=False, wall_ms=0.8, commit_hash="", plan="increase tile size"
+        ),
+        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=0.7),
     )
 
     assert state.iteration == 9
@@ -263,14 +250,10 @@ def test_iteration_reducer_advances_global_cursor_and_counters():
     with pytest.raises(ValueError, match="iteration 9"):
         apply_iteration(
             state,
-            iteration=9,
-            decision="REVERT_PERF",
-            kept=False,
-            wall_ms=0.8,
-            commit_hash="",
-            plan="duplicate attempt",
-            baseline_wall_ms=1.0,
-            best_wall_ms=0.7,
+            IterationVerdict(
+                iteration=9, decision="REVERT_PERF", kept=False, wall_ms=0.8, commit_hash="", plan="duplicate attempt"
+            ),
+            LoopStanding(baseline_wall_ms=1.0, best_wall_ms=0.7),
         )
 
 
@@ -402,14 +385,10 @@ def test_apply_iteration_keep_updates_best_and_resets_stall():
     state.stall.no_improvement_iters = 4
     apply_iteration(
         state,
-        iteration=10,
-        decision="KEEP",
-        kept=True,
-        wall_ms=0.7,
-        commit_hash="deadbeef",
-        plan="fuse epilogue",
-        baseline_wall_ms=1.0,
-        best_wall_ms=0.7,
+        IterationVerdict(
+            iteration=10, decision="KEEP", kept=True, wall_ms=0.7, commit_hash="deadbeef", plan="fuse epilogue"
+        ),
+        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=0.7),
     )
     assert state.best.iteration == 10
     assert state.best.wall_ms == 0.7
@@ -423,15 +402,9 @@ def test_apply_iteration_non_keep_increments_stall_then_stalled_phase():
     for i in range(1, 6):
         apply_iteration(
             state,
-            iteration=i,
-            decision="REVERT_PERF",
-            kept=False,
-            wall_ms=1.2,
-            commit_hash="",
-            plan="",
-            baseline_wall_ms=1.0,
-            best_wall_ms=1.0,
-            stall_threshold=5,
+            IterationVerdict(iteration=i, decision="REVERT_PERF", kept=False, wall_ms=1.2, commit_hash="", plan=""),
+            LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
+            StallPolicy(stall_threshold=5),
         )
     assert state.stall.no_improvement_iters == 5
     assert state.phase == PHASE_STALLED
@@ -442,28 +415,18 @@ def test_an_api_error_is_not_counted_as_a_revert_and_leaves_the_stall_alone():
     state = RunState()
     apply_iteration(
         state,
-        iteration=1,
-        decision="REVERT_PERF",
-        kept=False,
-        wall_ms=1.2,
-        commit_hash="",
-        plan="bigger tile",
-        baseline_wall_ms=1.0,
-        best_wall_ms=1.0,
-        stall_threshold=3,
+        IterationVerdict(
+            iteration=1, decision="REVERT_PERF", kept=False, wall_ms=1.2, commit_hash="", plan="bigger tile"
+        ),
+        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
+        StallPolicy(stall_threshold=3),
     )
     for i in (2, 3, 4):
         apply_iteration(
             state,
-            iteration=i,
-            decision="API_ERROR",
-            kept=False,
-            wall_ms=None,
-            commit_hash="",
-            plan="",
-            baseline_wall_ms=1.0,
-            best_wall_ms=1.0,
-            stall_threshold=3,
+            IterationVerdict(iteration=i, decision="API_ERROR", kept=False, wall_ms=None, commit_hash="", plan=""),
+            LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
+            StallPolicy(stall_threshold=3),
         )
 
     assert state.cumulative.reverted == 1, "an outage is not a rejected candidate"
@@ -479,15 +442,11 @@ def test_orchestration_circuit_opens_and_half_open_probe_is_single_shot():
     for iteration in (1, 2, 3):
         apply_iteration(
             state,
-            iteration=iteration,
-            decision="ORCHESTRATION_ERROR",
-            kept=False,
-            wall_ms=None,
-            commit_hash="",
-            plan="",
-            baseline_wall_ms=1.0,
-            best_wall_ms=1.0,
-            orchestration_error_threshold=3,
+            IterationVerdict(
+                iteration=iteration, decision="ORCHESTRATION_ERROR", kept=False, wall_ms=None, commit_hash="", plan=""
+            ),
+            LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
+            StallPolicy(orchestration_error_threshold=3),
         )
 
     assert state.orchestration_error_streak == 3
@@ -497,15 +456,11 @@ def test_orchestration_circuit_opens_and_half_open_probe_is_single_shot():
     assert state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_HALF_OPEN
     apply_iteration(
         state,
-        iteration=4,
-        decision="ORCHESTRATION_ERROR",
-        kept=False,
-        wall_ms=None,
-        commit_hash="",
-        plan="",
-        baseline_wall_ms=1.0,
-        best_wall_ms=1.0,
-        orchestration_error_threshold=3,
+        IterationVerdict(
+            iteration=4, decision="ORCHESTRATION_ERROR", kept=False, wall_ms=None, commit_hash="", plan=""
+        ),
+        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
+        StallPolicy(orchestration_error_threshold=3),
     )
 
     assert state.orchestration_error_streak == 4
@@ -530,15 +485,8 @@ def test_apply_iteration_caps_pinned_iterations():
     for i in range(1, 20):
         apply_iteration(
             state,
-            iteration=i,
-            decision="KEEP",
-            kept=True,
-            wall_ms=1.0 / i,
-            commit_hash=f"c{i}",
-            plan="p",
-            baseline_wall_ms=1.0,
-            best_wall_ms=1.0 / i,
-            max_pinned=8,
+            IterationVerdict(iteration=i, decision="KEEP", kept=True, wall_ms=1.0 / i, commit_hash=f"c{i}", plan="p"),
+            LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0 / i),
         )
     assert len(state.pinned_iterations) == 8
     assert state.pinned_iterations[-1] == 19
@@ -556,14 +504,10 @@ def test_header_contains_best_and_retrieval_pointers():
     state = RunState(baseline_wall_ms=1.0)
     apply_iteration(
         state,
-        iteration=3,
-        decision="KEEP",
-        kept=True,
-        wall_ms=0.5,
-        commit_hash="abc",
-        plan="vectorize loads",
-        baseline_wall_ms=1.0,
-        best_wall_ms=0.5,
+        IterationVerdict(
+            iteration=3, decision="KEEP", kept=True, wall_ms=0.5, commit_hash="abc", plan="vectorize loads"
+        ),
+        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=0.5),
     )
     events = [
         make_event("iteration_result", 3, decision="KEEP", plan="vectorize loads", wall_ms=0.5),
@@ -583,14 +527,8 @@ def test_header_bounded_by_max_chars():
     state = RunState(baseline_wall_ms=1.0)
     apply_iteration(
         state,
-        iteration=1,
-        decision="KEEP",
-        kept=True,
-        wall_ms=0.9,
-        commit_hash="c1",
-        plan="p",
-        baseline_wall_ms=1.0,
-        best_wall_ms=0.9,
+        IterationVerdict(iteration=1, decision="KEEP", kept=True, wall_ms=0.9, commit_hash="c1", plan="p"),
+        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=0.9),
     )
     events = [
         make_event(
@@ -611,14 +549,8 @@ def test_header_keeps_retrieval_map_under_tight_budget():
     state = RunState(baseline_wall_ms=1.0)
     apply_iteration(
         state,
-        iteration=1,
-        decision="KEEP",
-        kept=True,
-        wall_ms=0.9,
-        commit_hash="c1",
-        plan="p",
-        baseline_wall_ms=1.0,
-        best_wall_ms=0.9,
+        IterationVerdict(iteration=1, decision="KEEP", kept=True, wall_ms=0.9, commit_hash="c1", plan="p"),
+        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=0.9),
     )
     events = [
         make_event("iteration_result", i, decision="REVERT_PERF", plan="x" * 40, error_sig="y" * 80) for i in range(20)
@@ -634,14 +566,10 @@ def test_header_can_expose_iteration_handoffs():
     state = RunState(baseline_wall_ms=1.0)
     apply_iteration(
         state,
-        iteration=1,
-        decision="REVERT_PERF",
-        kept=False,
-        wall_ms=1.1,
-        commit_hash="",
-        plan="try a new layout",
-        baseline_wall_ms=1.0,
-        best_wall_ms=1.0,
+        IterationVerdict(
+            iteration=1, decision="REVERT_PERF", kept=False, wall_ms=1.1, commit_hash="", plan="try a new layout"
+        ),
+        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
     )
 
     header = render_long_horizon_header(
@@ -657,14 +585,15 @@ def test_header_preserves_retrieval_map_when_budget_is_below_essential_content()
     state = RunState(baseline_wall_ms=1.0)
     apply_iteration(
         state,
-        iteration=1,
-        decision="REVERT_PERF",
-        kept=False,
-        wall_ms=1.1,
-        commit_hash="",
-        plan="test an intentionally tiny rendering budget",
-        baseline_wall_ms=1.0,
-        best_wall_ms=1.0,
+        IterationVerdict(
+            iteration=1,
+            decision="REVERT_PERF",
+            kept=False,
+            wall_ms=1.1,
+            commit_hash="",
+            plan="test an intentionally tiny rendering budget",
+        ),
+        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
     )
 
     header = render_long_horizon_header(state, [], max_chars=80)
@@ -680,14 +609,10 @@ def test_header_shows_baseline_not_iter0_best_before_first_keep():
     state = RunState(baseline_wall_ms=1.0)
     apply_iteration(
         state,
-        iteration=1,
-        decision="REVERT_PERF",
-        kept=False,
-        wall_ms=1.1,
-        commit_hash="",
-        plan="bigger tile",
-        baseline_wall_ms=1.0,
-        best_wall_ms=1.0,
+        IterationVerdict(
+            iteration=1, decision="REVERT_PERF", kept=False, wall_ms=1.1, commit_hash="", plan="bigger tile"
+        ),
+        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
     )
     header = render_long_horizon_header(
         state, [make_event("iteration_result", 1, decision="REVERT_PERF", plan="bigger tile")]
@@ -742,16 +667,16 @@ def _state_with_best_pin_held_against_near_misses() -> RunState:
     state = RunState(baseline_wall_ms=1.0)
     apply_iteration(
         state,
-        iteration=3,
-        decision="KEEP",
-        kept=True,
-        wall_ms=0.5,
-        mean_case_speedup=1.2,
-        commit_hash="kept",
-        plan="vectorize global loads",
-        baseline_wall_ms=1.0,
-        best_wall_ms=0.5,
-        best_mean_case_speedup=1.2,
+        IterationVerdict(
+            iteration=3,
+            decision="KEEP",
+            kept=True,
+            wall_ms=0.5,
+            commit_hash="kept",
+            plan="vectorize global loads",
+            mean_case_speedup=1.2,
+        ),
+        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=0.5, best_mean_case_speedup=1.2),
     )
     for iteration in range(4, 12):
         pin_iteration(state, iteration)
@@ -856,14 +781,8 @@ def test_no_best_recorded_before_first_keep():
     state = RunState()
     apply_iteration(
         state,
-        iteration=1,
-        decision="REVERT_PERF",
-        kept=False,
-        wall_ms=1.1,
-        commit_hash="",
-        plan="x",
-        baseline_wall_ms=1.0,
-        best_wall_ms=1.0,
+        IterationVerdict(iteration=1, decision="REVERT_PERF", kept=False, wall_ms=1.1, commit_hash="", plan="x"),
+        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
     )
     # The baseline must NOT masquerade as a best (best stays iter 0 / wall None).
     assert state.best.iteration == 0
