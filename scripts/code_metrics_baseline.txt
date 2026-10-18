@@ -967,8 +967,8 @@ function-lines src/hyperloom/orchestrator/bringup/ladder.py::classify 105
 function-lines src/hyperloom/orchestrator/bus/resource_lock.py::SqliteLeaseBackend.acquire_many 95
 function-lines src/hyperloom/orchestrator/bus/resource_lock.py::_unverifiable_holders 89
 function-lines src/hyperloom/orchestrator/enablement/build.py::EnablementBuild._enqueue_build_launch_probe 84
-function-lines src/hyperloom/orchestrator/enablement/build.py::EnablementBuild.maybe_enqueue_specialist_requested_build 99
-function-lines src/hyperloom/orchestrator/enablement/build.py::EnablementBuild.maybe_escalate_to_targeted_build 139
+function-lines src/hyperloom/orchestrator/enablement/build.py::EnablementBuild.maybe_enqueue_specialist_requested_build 97
+function-lines src/hyperloom/orchestrator/enablement/build.py::EnablementBuild.maybe_escalate_to_targeted_build 137
 function-lines src/hyperloom/orchestrator/enablement/lane.py::EnablementLane._maybe_enqueue_enablement_specialist 92
 function-lines src/hyperloom/orchestrator/enablement/lane.py::EnablementLane.maybe_rearm_enablement 104
 function-lines src/hyperloom/orchestrator/enablement/params.py::EnablementParams._derive_checkpoint_weight_facts 117

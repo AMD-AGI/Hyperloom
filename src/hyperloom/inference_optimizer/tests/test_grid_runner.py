@@ -892,10 +892,6 @@ def test_apply_runtime_overrides_routes_r9700_vllm_to_gfx12():
     assert bench["benchmark_script"] == "vllm_gfx12.sh"
 
 
-
-
-
-
 def test_apply_runtime_overrides_yaml_tp_wins_over_env_on_resume(monkeypatch):
     """A stale ``state.tp`` re-exported as ``os.environ['TP']`` on resume must not downgrade a YAML-pinned TP."""
     monkeypatch.setenv("TP", "1")

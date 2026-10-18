@@ -57,7 +57,7 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_ISL,
     DEFAULT_OSL,
 )
-from hyperloom.inference_optimizer.gpu_types import _gpu_runner_type
+from hyperloom.inference_optimizer.gpu_types import gpu_runner_type
 from hyperloom.inference_optimizer.session.paths import asset_root
 from hyperloom.inference_optimizer.framework_paths import ENV_FLYDSL_EXTRA_SOURCE_DIRS
 from hyperloom.inference_optimizer.framework_paths import GENERIC_FRAMEWORK_ROOT_ENV
@@ -1333,11 +1333,10 @@ def materialize_config_with_envs(
     if precision:
         bench["precision"] = precision
     if gpu_type:
-        runner_gpu_type = _gpu_runner_type(gpu_type)
-        bench["runner_type"] = runner_gpu_type
+        bench["runner_type"] = gpu_runner_type(gpu_type)
         framework = str(bench.get("framework") or "").lower()
         if framework:
-            bench["benchmark_script"] = f"{framework}_{runner_gpu_type}.sh"
+            bench["benchmark_script"] = f"{framework}_{bench['runner_type']}.sh"
         else:
             bench.pop("benchmark_script", None)
     if benchmark_script:

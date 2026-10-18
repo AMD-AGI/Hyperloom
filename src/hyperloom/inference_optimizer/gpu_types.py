@@ -41,7 +41,7 @@ def _product_tag_matches(tag: str, text: str) -> bool:
     return tag in text
 
 
-def _gpu_runner_type(gpu_type: str) -> str:
+def gpu_runner_type(gpu_type: str) -> str:
     """Return the Magpie runner label for a resolved real GPU type."""
     normalized = str(gpu_type or "").strip().lower()
     if normalized in ("mi325x", "mi308x"):
@@ -53,7 +53,7 @@ def _gpu_runner_type(gpu_type: str) -> str:
 
 def _runner_framework_error(gpu_type: str, framework: str) -> str | None:
     """Return why a constrained runner/framework pair is unavailable."""
-    runner = _gpu_runner_type(gpu_type)
+    runner = gpu_runner_type(gpu_type)
     framework = str(framework or "").strip().lower()
     supported = _RUNNER_SUPPORTED_FRAMEWORKS.get(runner)
     if not framework or not supported or framework in supported:

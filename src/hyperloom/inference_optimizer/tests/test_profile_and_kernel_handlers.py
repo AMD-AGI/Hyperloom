@@ -87,7 +87,7 @@ def test_mi325x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
         ["optimize", "--model", "/models/Qwen3", "--max-hours", "1", "--gpu-type", "mi325x"]
     )
 
-    assert gpu_types._gpu_runner_type("mi325x") == "mi300x"
+    assert gpu_types.gpu_runner_type("mi325x") == "mi300x"
     assert gpu_types._GFX_TO_RUNNER.get("gfx1100") is None
     manifest = build_manifest(tmp_path, args=args, session_id="mi325x-session")
     state = cli_bootstrap._seed_shared_state(
@@ -110,7 +110,7 @@ def test_mi308x_keeps_real_gpu_type_but_uses_mi300x_runner(tmp_path, monkeypatch
         ["optimize", "--model", "/models/Qwen3", "--max-hours", "1", "--gpu-type", "mi308x"]
     )
 
-    assert gpu_types._gpu_runner_type("mi308x") == "mi300x"
+    assert gpu_types.gpu_runner_type("mi308x") == "mi300x"
     manifest = build_manifest(tmp_path, args=args, session_id="mi308x-session")
     state = cli_bootstrap._seed_shared_state(
         tmp_path,

@@ -150,8 +150,6 @@ def test_r9700_materializes_vllm_gfx12_runner(tmp_path):
     assert bench["benchmark_script"] == "vllm_gfx12.sh"
 
 
-
-
 def test_single_node_explicit_tp_overrides_stale_env(monkeypatch):
     """`optimize --tp N` must reach YAML materialization on single-node."""
     monkeypatch.setenv("TP", "8")

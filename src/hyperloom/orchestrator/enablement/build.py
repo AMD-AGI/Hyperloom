@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
@@ -46,6 +47,14 @@ _ROUTING_FIELDS: tuple[str, ...] = ("routed", "probe_task_id")
 _TARGETED_BUILD_UNVALIDATED_GPU_TYPES: frozenset[str] = frozenset({"r9700"})
 
 
+def _targeted_build_disabled(state: Any) -> bool:
+    """The operator switched targeted builds off, or this board's build path is unvalidated."""
+    if os.environ.get("HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD", "").strip() == "1":
+        return True
+    gpu_type = (getattr(state, "gpu_type", "") or "").strip().lower()
+    return gpu_type in _TARGETED_BUILD_UNVALIDATED_GPU_TYPES
+
+
 class EnablementBuild(CoordinatorCollaborator):
     """Escalates to a compiled build and routes the result back into the lane."""
 
@@ -56,9 +65,7 @@ class EnablementBuild(CoordinatorCollaborator):
         attempt: int = 0,
     ) -> None:
         """Enqueue a targeted build row when the residual gap is a compiled miss."""
-        import os as _os
-
-        if _os.environ.get("HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD", "").strip() == "1":
+        if _targeted_build_disabled(self.shared_state):
             return
         from ..actions.executors._multi_node_env import is_multi_node
 
@@ -84,8 +91,6 @@ class EnablementBuild(CoordinatorCollaborator):
             signature = verdict.signature
             framework = (getattr(state, "framework", "") or "").strip().lower()
             gpu_type = (getattr(state, "gpu_type", "") or "").strip().lower()
-            if gpu_type in _TARGETED_BUILD_UNVALIDATED_GPU_TYPES:
-                return
 
             # Two escalation triggers: 1.
             is_compiled_gap = is_targeted_build_candidate(signature, launch_log)
@@ -198,8 +203,6 @@ class EnablementBuild(CoordinatorCollaborator):
         payload: dict[str, Any] | None = None,
     ) -> None:
         """Enqueue a targeted build the enablement specialist explicitly requested."""
-        import os as _os
-
         state = self.shared_state
         marker_task_id = str(state.enablement.last_specialist_task_id or "").strip()
         task_id = str(task_id or marker_task_id).strip()
@@ -211,7 +214,7 @@ class EnablementBuild(CoordinatorCollaborator):
                 state.enablement.last_specialist_task_id = ""
 
         try:
-            if _os.environ.get("HYPERLOOM_ENABLEMENT_DISABLE_TARGETED_BUILD", "").strip() == "1":
+            if _targeted_build_disabled(self.shared_state):
                 _consume_marker()
                 return
             from ..actions.executors._multi_node_env import is_multi_node
@@ -247,9 +250,6 @@ class EnablementBuild(CoordinatorCollaborator):
                 component = "vllm_source"
             framework = (getattr(state, "framework", "") or "").strip().lower() or "vllm"
             gpu_type = (getattr(state, "gpu_type", "") or "").strip().lower()
-            if gpu_type in _TARGETED_BUILD_UNVALIDATED_GPU_TYPES:
-                _consume_marker()
-                return
             repo_url = str(req.get("repo_url") or "").strip()
             ref = str(req.get("ref") or "").strip()
             source_pr_url = ""
