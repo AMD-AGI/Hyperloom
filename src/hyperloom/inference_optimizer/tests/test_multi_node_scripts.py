@@ -678,14 +678,10 @@ def test_pd_decode_dist_init_port_derives_from_prefill():
 
 def test_build_sglang_cmd_head_has_host_port():
     lm = _load_script_module("lm_test_sglang_head", "launch_multinode.py")
-    cmd = lm._build_sglang_cmd(
-        model="/m",
-        tp=2,
-        nnodes=2,
-        node_rank=0,
-        dist_init_addr="10.0.0.1:5000",
-        extra_args=["--x"],
+    group = lm._ServerGroup(
+        framework="sglang", model="/m", tp=2, nnodes=2, head_ip="10.0.0.1", dist_init_port=5000, extra_args=["--x"]
     )
+    cmd = lm._build_sglang_cmd(group, 0)
     assert "--host" in cmd and "--port" in cmd
     assert cmd[cmd.index("--port") + 1] == "8888"
     assert "--x" in cmd
@@ -693,14 +689,10 @@ def test_build_sglang_cmd_head_has_host_port():
 
 def test_build_sglang_cmd_worker_omits_http_bind():
     lm = _load_script_module("lm_test_sglang_worker", "launch_multinode.py")
-    cmd = lm._build_sglang_cmd(
-        model="/m",
-        tp=2,
-        nnodes=2,
-        node_rank=1,
-        dist_init_addr="10.0.0.1:5000",
-        extra_args=[],
+    group = lm._ServerGroup(
+        framework="sglang", model="/m", tp=2, nnodes=2, head_ip="10.0.0.1", dist_init_port=5000, extra_args=[]
     )
+    cmd = lm._build_sglang_cmd(group, 1)
     assert "--host" not in cmd
     assert "--port" not in cmd
 
@@ -725,10 +717,7 @@ def test_build_vllm_cmd_kv_transfer_config_escapes_quotes():
         model="/m",
         tp=8,
         extra_args=[],
-        pd_role="prefill",
-        pd_transfer_backend=connector,
-        pd_kv_rank=0,
-        pd_kv_parallel_size=2,
+        pd=lm._PdRole(role="prefill", transfer_backend=connector, kv_rank=0, kv_parallel_size=2),
     )
     cfg = _kv_transfer_config(cmd)
     assert cfg["kv_connector"] == connector
@@ -747,8 +736,8 @@ def test_build_vllm_cmd_kv_transfer_config_escapes_quotes():
 
 def test_build_vllm_cmd_kv_transfer_config_defaults_and_roles():
     lm = _load_script_module("lm_test_vllm_kv_roles", "launch_multinode.py")
-    prefill = lm._build_vllm_cmd(model="/m", tp=8, extra_args=[], pd_role="prefill")
-    decode = lm._build_vllm_cmd(model="/m", tp=8, extra_args=[], pd_role="decode")
+    prefill = lm._build_vllm_cmd(model="/m", tp=8, extra_args=[], pd=lm._PdRole(role="prefill"))
+    decode = lm._build_vllm_cmd(model="/m", tp=8, extra_args=[], pd=lm._PdRole(role="decode"))
     pcfg = _kv_transfer_config(prefill)
     dcfg = _kv_transfer_config(decode)
     assert pcfg["kv_connector"] == "NixlConnector"
@@ -901,18 +890,10 @@ def test_spawn_remote_vllm_worker_writes_sentinel_pid(tmp_path):
     lm = _load_script_module("lm_test_spawn_vllm", "launch_multinode.py")
     pid_dir = tmp_path / "p"
     log_dir = tmp_path / "l"
-    rc = lm._spawn_remote(
-        framework="vllm",
-        model="/m",
-        tp=8,
-        nnodes=2,
-        node_rank=1,
-        head_ip="127.0.0.1",
-        dist_init_port=5000,
-        pid_dir=str(pid_dir),
-        log_dir=str(log_dir),
-        extra_args=[],
+    group = lm._ServerGroup(
+        framework="vllm", model="/m", tp=8, nnodes=2, head_ip="127.0.0.1", dist_init_port=5000, extra_args=[]
     )
+    rc = lm._spawn_remote(group, 1, lm._LaunchDirs(pid_dir=str(pid_dir), log_dir=str(log_dir)))
     assert rc == 0
     assert (pid_dir / "rank_1.pid").read_text(encoding="utf-8") == "0"
 
