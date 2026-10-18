@@ -619,9 +619,8 @@ def _finalize(
     # Graph capture health is a WHOLE-TRACE property (activity-buffer overflow drops replays across the run), so the
     # recorded-launch coverage must be computed over the full event stream -- BEFORE any steady-window filter -- to
     # stay scope-consistent with ``graph_launch_count`` (also whole-trace).
-    _graph_corrs_full = graph_launch_corrs or frozenset()
     graph_launch_corrs_with_kernels: set[int] = {
-        e[2] for e in k_events if e[2] is not None and e[2] in _graph_corrs_full
+        e[2] for e in k_events if e[2] is not None and e[2] in graph_launch_corrs
     }
 
     ws = we = None
@@ -677,10 +676,8 @@ def _finalize(
     # Graph-internal kernels launched via a captured CUDA/HIP graph: they carry a correlation matching a graph-launch
     # runtime event (which has no External id), so they resolve to no cpu_op but are not a genuine attribution
     # failure.
-    graph_corrs = graph_launch_corrs or frozenset()
     graph_kernels = 0
     graph_gpu_us = 0.0
-    geom = buffers.corr_to_launch_geom or {}
     # Name-keyed shape backfill: accumulate GPU time per (kernel, shape) so the majority capture-time shape wins;
     # multiple distinct shapes mark ambiguous.
     kern_name_backfill_by_sig: dict[str, dict[tuple[tuple[tuple[int, ...], ...], tuple[str, ...]], dict[str, Any]]] = {}
@@ -692,7 +689,7 @@ def _finalize(
         if op_name:
             attributed_us += dur
             attributed_kernels += 1
-        elif corr is not None and corr in graph_corrs:
+        elif corr is not None and corr in graph_launch_corrs:
             op_name = "(graph)"
             graph_kernels += 1
             graph_gpu_us += dur
@@ -722,7 +719,7 @@ def _finalize(
                         else:
                             entry["gpu_us"] += dur
         if name not in kern_name_launch_geom:
-            g = geom.get(corr)
+            g = buffers.corr_to_launch_geom.get(corr)
             if g is not None and (g[0] is not None or g[1] is not None):
                 kern_name_launch_geom[name] = g
 
