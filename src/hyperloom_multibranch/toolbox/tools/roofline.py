@@ -13,7 +13,7 @@ from hyperloom.orchestrator.actions.executors.roofline import make_roofline_exec
 from hyperloom.orchestrator.actions.executors.trace_analyze import trace_analyze_handler
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom_multibranch.toolbox.tools.base import ToolOutput, ToolRequest
-from hyperloom_multibranch.toolbox.tools.executor_tool import ExecutorFn, ExecutorTool, HandlerTool
+from hyperloom_multibranch.toolbox.tools.executor_tool import ExecutorFn, ExecutorTool, ScratchHandlerTool
 from hyperloom_multibranch.toolbox.tools.op_shares import with_op_shares
 
 ROOFLINE_TOOL = "roofline"
@@ -31,7 +31,7 @@ class _RooflineTool(_SharesOps, ExecutorTool):
     pass
 
 
-class _TracelensTool(_SharesOps, HandlerTool):
+class _TracelensTool(_SharesOps, ScratchHandlerTool):
     pass
 
 
@@ -45,7 +45,7 @@ def roofline_tool() -> ExecutorTool:
     return _RooflineTool(ROOFLINE_TOOL, "roofline", _roofline_executor, ok_text="roofline analysed")
 
 
-def tracelens_tool() -> HandlerTool:
+def tracelens_tool() -> ScratchHandlerTool:
     """Analyse a torch trace that already exists. Params: ``trace_input`` (a trace directory or file), optional
     ``framework`` and ``model_name``; ``commit_id`` (the commit the trace was profiled on) and, when the trace came from a
     PROFILE test, ``profile_request_id``, which the pointer carries with the op shares."""
@@ -54,5 +54,4 @@ def tracelens_tool() -> HandlerTool:
         trace_analyze_handler,
         ok_text="trace analysed",
         required=("trace_input",),
-        local_scratch=True,  # TraceLens writes names with ":" that the shared session directory rejects
     )

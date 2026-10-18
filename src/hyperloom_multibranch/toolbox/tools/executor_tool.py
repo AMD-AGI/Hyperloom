@@ -101,6 +101,8 @@ Handler = Callable[..., Awaitable[dict]]
 class HandlerTool(_Reporting):
     """A kernel-request handler ``handler(payload, session_dir=...)`` of the orchestrator, run as one tool."""
 
+    local_scratch = False
+
     def __init__(
         self,
         name: str,
@@ -109,14 +111,12 @@ class HandlerTool(_Reporting):
         ok_text: str,
         summary_keys: tuple[str, ...] = (),
         required: tuple[str, ...] = (),
-        local_scratch: bool = False,
     ) -> None:
         self.name = name
         self._handler = handler
         self._ok_text = ok_text
         self._keys = summary_keys
         self._required = required
-        self._local_scratch = local_scratch
 
     def validate(self, request: ToolRequest) -> None:
         missing = [key for key in self._required if not request.params.get(key)]
@@ -124,7 +124,7 @@ class HandlerTool(_Reporting):
             raise InvalidRequest(f"{self.name} needs {', '.join(missing)}")
 
     async def run(self, request: ToolRequest, workdir: Path) -> ToolOutput:
-        if not self._local_scratch:
+        if not self.local_scratch:
             result = await self._handler(dict(request.params), session_dir=workdir)
             return self.output(result, request)
         scratch = Path(tempfile.mkdtemp(prefix="hl-tool-"))
@@ -174,3 +174,9 @@ def _copy_back(result: Mapping[str, Any], scratch: Path, workdir: Path) -> dict[
         if str(sibling).startswith(str(scratch) + "/"):
             land(str(sibling))
     return out
+
+
+class ScratchHandlerTool(HandlerTool):
+    """A handler run in a local scratch directory, its named results copied back into the job's working directory."""
+
+    local_scratch = True
