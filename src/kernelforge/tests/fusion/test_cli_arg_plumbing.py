@@ -89,7 +89,7 @@ def test_pristine_snapshot_is_threaded_through_the_autoloop() -> None:
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == callee
         ]
 
-    assert any("pristine_dir" in names for names in _call_keywords("_run_fusion_autoloop"))
+    assert any("pristine_dir" in names for names in _call_keywords("_FusionRun"))
     assert any("pristine_dir" in names for names in _call_keywords("apply_serving_gate"))
 
 

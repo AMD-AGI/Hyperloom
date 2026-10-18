@@ -684,19 +684,26 @@ def _autoloop_recipe(source: Path):
 def _autoloop_result(tmp_path, monkeypatch, *, source: Path, author: bool = True):
     """Run ``_run_fusion_autoloop`` end to end and return its LoopResult."""
     monkeypatch.setattr(cli_module, "_author_baseline_harness", lambda *a, **k: (True, ""))
+    return _run_autoloop(tmp_path, source, author=author)
+
+
+def _run_autoloop(tmp_path: Path, source: Path, *, author: bool):
+    """Drive ``_run_fusion_autoloop`` for the one recipe on ``source`` with the defaults a run would pass."""
     return cli_module._run_fusion_autoloop(
         [_autoloop_recipe(source)],
-        framework="vllm",
-        out=tmp_path,
-        repo_root=str(source.parent),
-        author=author,
-        gpu="0",
-        llm_model="m",
-        target_speedup=1.03,
-        ab_isl=512,
-        ab_osl=64,
-        max_turns=1,
-        agent_factory=object,
+        cli_module._FusionRun(
+            out=tmp_path,
+            repo_root=str(source.parent),
+            pristine_dir="",
+            framework_root="",
+            repo_scope=False,
+            session=cli_module.ServingSession("vllm", "", "0", 512, 64),
+            author=cli_module.AuthorAgent(backend=object, gpu="0", model="m", max_turns=1),
+            gpu_arch="",
+            target_speedup=1.03,
+        ),
+        cli_module._LoopPlan(author=author),
+        cli_module.CampaignRuntime(gpu="0", model="m"),
     )
 
 
@@ -821,20 +828,7 @@ def test_autoloop_refuses_to_run_without_the_harness_the_loop_benches(tmp_path, 
     monkeypatch.setattr(cli_module, "run_recipe_campaign", lambda *a, **k: started.append("campaign"))
     monkeypatch.setattr(cli_module, "_author_baseline_harness", lambda *a, **k: (False, "author exited 3"))
 
-    result = cli_module._run_fusion_autoloop(
-        [_autoloop_recipe(source)],
-        framework="vllm",
-        out=tmp_path,
-        repo_root=str(source.parent),
-        author=True,
-        gpu="0",
-        llm_model="m",
-        target_speedup=1.03,
-        ab_isl=512,
-        ab_osl=64,
-        max_turns=1,
-        agent_factory=object,
-    )
+    result = _run_autoloop(tmp_path, source, author=True)
 
     assert started == []
     assert result.kept is False
