@@ -62,14 +62,16 @@ class AnthropicClient:
     def complete(self, *, system: str, user: str) -> str:
         """Issue one single-shot completion and return the reply text."""
         return llm_config.anthropic_completion(
+            request=llm_config.AnthropicCompletionRequest(
+                model=self.model,
+                messages=[{"role": "user", "content": user}],
+                max_tokens=self.max_output_tokens,
+                system=system,
+                timeout=self.timeout,
+                timeout_s=self.timeout_s,
+            ),
             component="breakdown",
             operation="compose_report",
-            model=self.model,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-            max_tokens=self.max_output_tokens,
-            timeout=self.timeout,
-            timeout_s=self.timeout_s,
         ).text
 
 

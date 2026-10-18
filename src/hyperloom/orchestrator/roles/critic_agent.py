@@ -18,6 +18,7 @@ from typing import Any, Callable, Literal
 from hyperloom.common.framework_arm import review_row_id
 from hyperloom.common.llm_config import (
     DEFAULT_CODEX_MODEL,
+    AnthropicCompletionRequest,
     LLMConfigError,
     aanthropic_completion,
     achat_completion,
@@ -1095,16 +1096,15 @@ class CriticAgentBackend:
         connect_timeout_s, rw_timeout_s = self._resolve_llm_timeouts()
         _t0 = time.perf_counter()
         try:
-            result = await aanthropic_completion(
-                component="critic",
-                operation="review",
+            request = AnthropicCompletionRequest(
                 model=self._review_model,
-                system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
                 max_tokens=max_tokens,
+                system=system_prompt,
                 timeout=build_http_timeout(connect=connect_timeout_s, read=rw_timeout_s),
                 timeout_s=rw_timeout_s,
             )
+            result = await aanthropic_completion(request=request, component="critic", operation="review")
         except Exception as exc:
             raise self._llm_call_failed(
                 f"Anthropic completion failed (critic-agent reasoning): {exc!r}",
