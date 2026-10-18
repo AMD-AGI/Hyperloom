@@ -1549,15 +1549,15 @@ def test_run_tracelens_skill_openai_only_uses_codex_tool_runner(tmp_path, monkey
 
     assert len(calls) == 1
     call = calls[0]
-    assert call["model"] == "gpt-5.5"
+    assert call["config"].model == "gpt-5.5"
     # The session works out of the TraceLens root so the skill's command-prefix cache and relative paths resolve as
     # they do on the Claude path.
-    assert call["cwd"] == tmp_path
+    assert call["config"].cwd == tmp_path
     # The output dir is the only extra writable root: nothing else is mutable.
-    assert call["writable_roots"] == (output_dir,)
-    assert call["timeout_sec"] == 30 * 60.0
+    assert call["config"].writable_roots == (output_dir,)
+    assert call["request"].timeout_sec == 30 * 60.0
     assert "TraceLens analysis runner" in call["developer_instructions"]
-    assert str(tmp_path / "skill.md") in call["prompt"]
+    assert str(tmp_path / "skill.md") in call["request"].prompt
 
 
 def test_run_tracelens_skill_codex_grants_the_capture_folder_write_access(tmp_path, monkeypatch):
@@ -1601,7 +1601,7 @@ def test_run_tracelens_skill_codex_grants_the_capture_folder_write_access(tmp_pa
         )
     )
 
-    assert calls[0]["writable_roots"] == (output_dir, capture_folder)
+    assert calls[0]["config"].writable_roots == (output_dir, capture_folder)
 
 
 def test_run_tracelens_skill_codex_floors_the_turn_timeout(tmp_path, monkeypatch):
@@ -1636,7 +1636,7 @@ def test_run_tracelens_skill_codex_floors_the_turn_timeout(tmp_path, monkeypatch
         )
     )
 
-    assert calls[0]["timeout_sec"] == 60.0
+    assert calls[0]["request"].timeout_sec == 60.0
 
 
 def test_run_tracelens_skill_codex_raises_when_report_missing(tmp_path, monkeypatch):

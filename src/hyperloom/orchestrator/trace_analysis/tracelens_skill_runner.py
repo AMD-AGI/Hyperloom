@@ -24,8 +24,10 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
 from hyperloom.common.codex_session import (
+    CodexSessionConfig,
     CodexSessionError,
     CodexSessionResult,
+    CodexTurnRequest,
     run_codex_turn,
 )
 from hyperloom.common.llm_config import claude_sdk_env_options
@@ -670,13 +672,11 @@ async def _run_tracelens_skill_codex(
     codex_error = ""
     result = CodexSessionResult()
     try:
+        roots = (output_dir, capture_folder) if capture_folder else (output_dir,)
         result = await codex_turn_runner(
-            prompt=prompt,
+            config=CodexSessionConfig(cwd=tracelens_root, model=model, writable_roots=roots),
+            request=CodexTurnRequest(prompt, timeout_sec=timeout_sec),
             developer_instructions=_CODEX_DEVELOPER_INSTRUCTIONS,
-            cwd=tracelens_root,
-            model=model,
-            timeout_sec=timeout_sec,
-            writable_roots=(output_dir, capture_folder) if capture_folder else (output_dir,),
         )
     except CodexSessionError as exc:
         # The SDK can fail after the report landed; artifact presence decides.
