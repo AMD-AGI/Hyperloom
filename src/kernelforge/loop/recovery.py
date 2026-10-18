@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 from kernelforge.llm.git import git
@@ -92,17 +93,25 @@ def rollback_unpublished_warm_start(
         Path(result_json).unlink(missing_ok=True)
 
 
+@dataclass(frozen=True)
+class CallerRecovery:
+    """How the external caller finds a killed run again: its experiment record, KB experience id and result file."""
+
+    caller_experiment_id: str
+    experience_id: str
+    result_json: str | None
+
+
 def publish_warm_start_recovery(
-    *,
     workspace_dir: str,
+    *,
     base_commit: str,
     warm: dict,
-    caller_experiment_id: str,
-    experience_id: str,
+    caller: CallerRecovery,
     tracker,
-    result_json: str | None,
 ) -> dict | None:
     """Publish a validated warm-start as a kill-recoverable local best."""
+    caller_experiment_id, result_json = caller.caller_experiment_id, caller.result_json
     if warm.get("applied") is not True:
         return None
     baseline_ms = warm.get("pristine_ms")
@@ -134,7 +143,7 @@ def publish_warm_start_recovery(
 
     root = Path(workspace_dir) / "forge_experiments"
     solution = str(warm.get("solution_slug") or "warm-start")
-    external_id = caller_experiment_id or experience_id or "warm-start"
+    external_id = caller_experiment_id or caller.experience_id or "warm-start"
     publisher = BestResultPublisher(workspace_dir)
     publish_kwargs = {
         "campaign_id": f"warm-start:{solution}",

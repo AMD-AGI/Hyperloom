@@ -60,6 +60,7 @@ from kernelforge.loop.knowledge_integration import (
     write_experience_to_kb,
 )
 from kernelforge.loop.recovery import (
+    CallerRecovery,
     atomic_write_json,
     load_published_best,
     publish_warm_start_recovery,
@@ -783,13 +784,11 @@ def _read_kb_warm_start(run: _ForgeRun, program_md: str, kb_warmstart_enabled: b
             iter_config.publication_baseline_wall_ms = warm.get("pristine_ms")
             try:
                 published = publish_warm_start_recovery(
-                    workspace_dir=workspace_dir,
+                    workspace_dir,
                     base_commit=base_sha,
                     warm=warm,
-                    caller_experiment_id=caller_experiment_id,
-                    experience_id=experience_id,
+                    caller=CallerRecovery(caller_experiment_id, experience_id, result_json),
                     tracker=tracker,
-                    result_json=result_json,
                 )
                 if published:
                     iter_config.warm_start_publication = dict(published)

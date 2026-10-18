@@ -418,7 +418,7 @@ def test_validated_warm_start_publishes_recovery_before_iteration(tmp_path):
 
     result_json = tmp_path / "forge_cli_result.json"
     result = recovery_module.publish_warm_start_recovery(
-        workspace_dir=str(workspace),
+        str(workspace),
         base_commit=base_commit,
         warm={
             "applied": True,
@@ -427,10 +427,10 @@ def test_validated_warm_start_publishes_recovery_before_iteration(tmp_path):
             "mean_case_speedup": 1.25,
             "solution_slug": "prior/solution",
         },
-        caller_experiment_id="hyperloom",
-        experience_id="experience",
+        caller=recovery_module.CallerRecovery(
+            caller_experiment_id="hyperloom", experience_id="experience", result_json=str(result_json)
+        ),
         tracker=Tracker(),
-        result_json=str(result_json),
     )
 
     root = workspace / "forge_experiments"
@@ -541,7 +541,7 @@ def test_warm_start_post_commit_point_failures_are_degraded(
         )
     result_json = tmp_path / "forge_cli_result.json"
     result = recovery_module.publish_warm_start_recovery(
-        workspace_dir=str(workspace),
+        str(workspace),
         base_commit=base_commit,
         warm={
             "applied": True,
@@ -550,10 +550,10 @@ def test_warm_start_post_commit_point_failures_are_degraded(
             "mean_case_speedup": 1.25,
             "solution_slug": "prior/solution",
         },
-        caller_experiment_id="hyperloom",
-        experience_id="experience",
+        caller=recovery_module.CallerRecovery(
+            caller_experiment_id="hyperloom", experience_id="experience", result_json=str(result_json)
+        ),
         tracker=Tracker(),
-        result_json=str(result_json),
     )
 
     assert result is not None
@@ -597,7 +597,7 @@ def test_warm_start_publication_failure_rolls_back_and_continues_reference_only(
 
     monkeypatch.setattr(forge_loop_command, "kb_warmstart", applied_warmstart)
 
-    def fail_publication(**_kwargs):
+    def fail_publication(*_args, **_kwargs):
         raise OSError("manifest failed")
 
     monkeypatch.setattr(

@@ -304,13 +304,13 @@ def test_happy_path_applies_and_publishes_iteration_zero_recovery(
 
     caller_result = tmp_path / "caller-result.json"
     result = recovery.publish_warm_start_recovery(
-        workspace_dir=str(consumer),
+        str(consumer),
         base_commit=consumer_base,
         warm=warm,
-        caller_experiment_id="consumer-run",
-        experience_id="producer-happy",
+        caller=recovery.CallerRecovery(
+            caller_experiment_id="consumer-run", experience_id="producer-happy", result_json=str(caller_result)
+        ),
         tracker=Tracker(),
-        result_json=str(caller_result),
     )
 
     best_result = json.loads((consumer / "forge_experiments" / "best_result.json").read_text())
