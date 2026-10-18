@@ -73,7 +73,7 @@ class RecordingScheduler:
         return self._answer()
 
     def _answer(self) -> ForkAdmission:
-        if self.status is not AdmissionStatus.ACCEPTED:
+        if self.status is AdmissionStatus.REJECTED:
             return ForkAdmission(self.status)
         return ForkAdmission(self.status, branch=f"fork-{len(self.forks) + len(self.repairs)}")
 

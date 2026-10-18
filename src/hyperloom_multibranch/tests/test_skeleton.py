@@ -363,7 +363,7 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert recipe_tags(await stage.repo.read_recipe(queued_fix)) == {"c1", "f2"}
     assert [(admission.status, admission.branch) for admission in stage.forks] == [
         (AdmissionStatus.ACCEPTED, "b03"),
-        (AdmissionStatus.PENDING, ""),
+        (AdmissionStatus.PENDING, "b04"),
     ]
     for fork in ("b03", "b04"):
         assert (branches[fork].origin, branches[fork].start_commit, branches[fork].from_branch) == (
@@ -1044,7 +1044,7 @@ async def _queued_repair_session(stage: Stage, stops: str, failing: str = "") ->
     assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
     assert [(admission.status, admission.branch) for admission in stage.forks] == [
         (AdmissionStatus.ACCEPTED, "b03"),
-        (AdmissionStatus.PENDING, ""),
+        (AdmissionStatus.PENDING, "b04"),
     ]
 
 

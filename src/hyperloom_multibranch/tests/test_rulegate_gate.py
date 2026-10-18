@@ -152,7 +152,7 @@ async def test_a_fix_that_costs_performance_asks_for_a_fork(setup, status, concl
     assert [(fork.from_branch, fork.parent_commit, fork.reason) for fork in scheduler.forks] == [
         ("s1", "c0", "oob at 8k")
     ]
-    assert bool(admission.branch) is (status is AdmissionStatus.ACCEPTED)
+    assert bool(admission.branch) is (status is not AdmissionStatus.REJECTED)
     assert (await notebook.record("r1")).conclusion is conclusion
     assert await repo.head("s1") == "c0"
 

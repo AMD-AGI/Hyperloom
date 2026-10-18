@@ -172,7 +172,7 @@ async def test_a_session_stop_voids_every_fork_queued_for_a_slot(tmp_path: Path,
     else:
         await session.stopper.stop_everything(reason, HARD_STOP)
 
-    assert queued.status is AdmissionStatus.PENDING and session.desk.pending() == ()
+    assert (queued.status, queued.branch) == (AdmissionStatus.PENDING, "b03") and session.desk.pending() == ()
     logged = [json.loads(line) for line in session.decisions_file.read_text(encoding="utf-8").splitlines()]
     assert [row["reason"] for row in logged if row["kind"] == "fork" and row["detail"].get("status") == "voided"] == [
         f"voided: {reason.value}"

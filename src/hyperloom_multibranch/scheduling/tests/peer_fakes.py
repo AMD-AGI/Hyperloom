@@ -448,10 +448,8 @@ class SplittingDesk:
 
     async def admit(self, request: ForkRequest) -> ForkAdmission:
         answer = await self._desk.admit(request)
-        if answer.status is AdmissionStatus.ACCEPTED:
+        if answer.status is not AdmissionStatus.REJECTED:
             self._forks[answer.branch] = request
-        elif answer.status is AdmissionStatus.PENDING:
-            self._forks[self._desk.pending()[-1].branch] = request
         return answer
 
     async def admit_repair(self, request: RepairRequest) -> ForkAdmission:

@@ -310,7 +310,7 @@ async def test_stopping_a_branch_voids_the_forks_and_repairs_it_queued(tmp_path:
     await bench.control.stop_branch("b01", BranchStop(StopCause.JUDGE, "flat", NOW))
     bench.desk.fill_free_slots()
 
-    assert queued.status is AdmissionStatus.PENDING
+    assert (queued.status, queued.branch) == (AdmissionStatus.PENDING, "b04")
     assert bench.desk.pending() == () and bench.desk.waiting() == ()
     logged = [json.loads(line) for line in (tmp_path / "MB-decisions.jsonl").read_text().splitlines()]
     [voided] = [row for row in logged if row["kind"] == "repair" and row["detail"].get("status") == "voided"]

@@ -5,8 +5,8 @@
 repair the defect that blocked a gain, and the scheduler's answer.
 
 On ``ACCEPTED`` the answer names the new branch; for a fork the gate cuts it and lands the fix on it before the
-scheduler starts the branch's specialist. The requesting specialist stays on its own branch either way. ``PENDING``
-waits for a free branch slot.
+scheduler starts the branch's specialist. ``PENDING`` waits for a free branch slot and names the branch id reserved for
+it. The requesting specialist stays on its own branch either way.
 """
 
 from __future__ import annotations
@@ -57,15 +57,16 @@ class AdmissionStatus(str, Enum):
 
 @dataclass(frozen=True)
 class ForkAdmission:
-    """The answer to a fork or a repair request; ``branch`` names the new branch, exactly when it is accepted."""
+    """The answer to a fork or a repair request; ``branch`` names the new or reserved branch, exactly when it is not
+    rejected."""
 
     status: AdmissionStatus
     reason: str = ""
     branch: str = ""
 
     def __post_init__(self) -> None:
-        if (self.status is AdmissionStatus.ACCEPTED) != bool(self.branch):
-            raise ValueError("an accepted request, and only an accepted one, names its new branch")
+        if bool(self.branch) != (self.status in {AdmissionStatus.ACCEPTED, AdmissionStatus.PENDING}):
+            raise ValueError("an accepted or pending request, and only such a one, names its new branch")
 
 
 class ForkAdmissionService(Protocol):

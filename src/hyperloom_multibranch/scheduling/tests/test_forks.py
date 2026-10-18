@@ -107,7 +107,7 @@ async def test_a_request_past_the_cap_waits_and_enters_the_first_freed_slot(tmp_
     pending = await desk.admit(FIX)
     desk.fill_free_slots()
 
-    assert pending == ForkAdmission(AdmissionStatus.PENDING, WAITING)
+    assert pending == ForkAdmission(AdmissionStatus.PENDING, WAITING, "b03")
     assert desk.pending() == (PendingBranch("b03", BranchOrigin.FORK, "b01", "c1", CLOCK.now()),)
     assert [entry.branch for entry in roster.entries()] == ["b01", "b02"] and desk.waiting() == ()
 
@@ -138,7 +138,10 @@ async def test_a_request_arriving_while_others_wait_queues_behind_them_even_on_a
     roster.stop("b02", BranchStop(StopCause.JUDGE, "flat", CLOCK.now()))
     second = await desk.admit_repair(_repair())
 
-    assert [first.status, second.status] == [AdmissionStatus.PENDING, AdmissionStatus.PENDING]
+    assert [(first.status, first.branch), (second.status, second.branch)] == [
+        (AdmissionStatus.PENDING, "b03"),
+        (AdmissionStatus.PENDING, "b04"),
+    ]
     assert [pending.branch for pending in desk.pending()] == ["b03", "b04"]
     desk.fill_free_slots()
     assert [admitted.branch for admitted in desk.waiting()] == ["b03"]
@@ -153,7 +156,7 @@ async def test_a_full_queue_and_a_stopping_session_refuse_a_request(tmp_path: Pa
     roster.close()
     closing = await desk.admit(FIX)
 
-    assert queued.status is AdmissionStatus.PENDING
+    assert (queued.status, queued.branch) == (AdmissionStatus.PENDING, "b02")
     assert (full.status, full.reason) == (AdmissionStatus.REJECTED, QUEUE_FULL)
     assert (closing.status, closing.reason) == (AdmissionStatus.REJECTED, "the session is stopping")
     assert [entry.branch for entry in roster.entries()] == ["b01"]
@@ -169,10 +172,10 @@ async def test_a_queued_repair_of_an_intent_refuses_the_same_intent_until_it_is_
     await desk.void_all("time_exhausted")
     retried = await desk.admit_repair(_repair())
 
-    assert [queued.status, again.status, retried.status] == [
-        AdmissionStatus.PENDING,
-        AdmissionStatus.REJECTED,
-        AdmissionStatus.PENDING,
+    assert [(queued.status, queued.branch), (again.status, again.branch), (retried.status, retried.branch)] == [
+        (AdmissionStatus.PENDING, "b02"),
+        (AdmissionStatus.REJECTED, ""),
+        (AdmissionStatus.PENDING, "b03"),
     ]
     assert "already open or queued" in again.reason
     assert [pending.branch for pending in desk.pending()] == ["b03"]

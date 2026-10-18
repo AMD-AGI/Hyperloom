@@ -69,10 +69,12 @@ def test_only_a_blocked_gain_is_sent_for_repair():
 
 @pytest.mark.parametrize(
     ("status", "branch"),
-    [(AdmissionStatus.ACCEPTED, ""), (AdmissionStatus.PENDING, "s9"), (AdmissionStatus.REJECTED, "s9")],
+    [(AdmissionStatus.ACCEPTED, ""), (AdmissionStatus.PENDING, ""), (AdmissionStatus.REJECTED, "s9")],
 )
-def test_an_admission_names_the_new_branch_exactly_when_it_accepts(status, branch):
+def test_an_admission_names_its_branch_exactly_when_it_is_not_rejected(status, branch):
     assert ForkAdmission(AdmissionStatus.ACCEPTED, branch="s9").branch == "s9"
+    assert ForkAdmission(AdmissionStatus.PENDING, branch="s9").branch == "s9"
+    assert ForkAdmission(AdmissionStatus.REJECTED).branch == ""
     with pytest.raises(ValueError, match="names its new branch"):
         ForkAdmission(status, branch=branch)
 

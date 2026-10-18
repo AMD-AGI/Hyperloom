@@ -3,15 +3,15 @@
 
 """The scheduler's answer to the rule gate's branch requests: a fork for a correctness fix, a repair of a blocked gain.
 
-:class:`ForkDesk` is the scheduler's :class:`~hyperloom_multibranch.contracts.fork.ForkAdmissionService`. A request of
-a branch that is on the roster and not stopped is queued, first in first out, under a reserved branch id; it enters the
-roster when a slot is free and nothing queued before it waits, which for a request that finds the queue empty and a
-slot free is at once, answered ``ACCEPTED`` with its branch. One that has to wait is answered ``PENDING``; its reserved
-branch stays the scheduler's own, in the admission decision, and it enters the roster when the explore loop fills the
-slots freed after it, before the judge's new branches. The queue holds at most ``max_branches`` requests. A request is
-refused when its branch is unknown or stopped, a repair of the same intent on the same commit is open or queued, the
-session is stopping, or the queue is full. A queued request is voided when its branch stops or the session stops; a
-voided request takes no slot and frees its intent for another repair.
+:class:`ForkDesk` is the scheduler's :class:`~hyperloom_multibranch.contracts.fork.ForkAdmissionService`. A request of a
+branch that is on the roster and not stopped is queued, first in first out, under a reserved branch id; it enters the
+roster when a slot is free and nothing queued before it waits, which for a request that finds the queue empty and a slot
+free is at once, answered ``ACCEPTED`` with its branch. One that has to wait is answered ``PENDING`` with its reserved
+branch, which stays off the roster until it enters when the explore loop fills the slots freed after it, before the
+judge's new branches. The queue holds at most ``max_branches`` requests. A request is refused when its branch is unknown
+or stopped, a repair of the same intent on the same commit is open or queued, the session is stopping, or the queue is
+full. A queued request is voided when its branch stops or the session stops; a voided request takes no slot and frees
+its intent for another repair.
 
 A request that enters the roster takes a slot of the branch cap, with the K of the branch that asked, admitted but not
 started, and waits on the desk until the explore loop starts it: a repair at the commit the blocked candidate was
@@ -111,7 +111,7 @@ class ForkDesk:
         pending = replace(pending, branch=self._roster.next_branch_id())
         if waits:
             self._queue.append(pending)
-            answer = ForkAdmission(AdmissionStatus.PENDING, WAITING)
+            answer = ForkAdmission(AdmissionStatus.PENDING, WAITING, pending.branch)
         else:
             self._enter(pending)
             answer = ForkAdmission(AdmissionStatus.ACCEPTED, reason, pending.branch)

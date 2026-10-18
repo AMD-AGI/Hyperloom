@@ -99,7 +99,7 @@ async def rig(tmp_path):
     ("status", "branch", "conclusion"),
     [
         (AdmissionStatus.ACCEPTED, "fork-1", Conclusion.REPAIR_REQUESTED),
-        (AdmissionStatus.PENDING, "", Conclusion.REPAIR_REQUESTED),
+        (AdmissionStatus.PENDING, "fork-1", Conclusion.REPAIR_REQUESTED),
         (AdmissionStatus.REJECTED, "", Conclusion.ACCURACY_FAILED),
     ],
 )
