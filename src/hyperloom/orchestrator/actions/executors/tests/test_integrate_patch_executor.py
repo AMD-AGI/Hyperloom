@@ -1696,18 +1696,18 @@ async def _round_exiting_after_setup(tmp_path: Path, monkeypatch, *, arrange, pa
     init_git_repo(repo)
     _write_specialist_workspace(session_dir, "t-spec-ledger", patch_contents=patch_contents or [_VALID_PATCH])
 
-    def _installed(commands, *, cwd, log_dir, round_task_id, seq_start, on_execution):
+    def _installed(commands, *, cwd, log_dir, ledger):
         cmd, source = commands[0]
         row = build_execution_row(
-            seq=seq_start + 1,
-            round_task_id=round_task_id,
+            seq=ledger.seq_start + 1,
+            round_task_id=ledger.round_task_id,
             cmd_index=0,
             cmd=cmd,
             source=source,
             outcome="applied",
             env={},
         )
-        on_execution(row)
+        ledger.on_execution(row)
         return [cmd]
 
     monkeypatch.setattr(sr_mod, "run_setup_commands", _installed)
@@ -1838,7 +1838,7 @@ async def test_base_sha_is_captured_before_the_setup_commands_run(tmp_path: Path
         ["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
     ).stdout.strip()
 
-    def _installing_commits(commands, *, cwd, log_dir, round_task_id, seq_start, on_execution):
+    def _installing_commits(commands, *, cwd, log_dir, ledger):
         # What an install into the framework checkout does to its HEAD.
         (repo / "installed.py").write_text("x = 1\n", encoding="utf-8")
         git_commit_all(repo, "install")
@@ -1900,7 +1900,7 @@ async def test_base_sha_of_an_explicit_root_predates_the_setup_commands(tmp_path
         ["git", "-C", str(explicit_root), "rev-parse", "HEAD"], capture_output=True, text=True, check=True
     ).stdout.strip()
 
-    def _installing_commits(commands, *, cwd, log_dir, round_task_id, seq_start, on_execution):
+    def _installing_commits(commands, *, cwd, log_dir, ledger):
         (explicit_root / "installed.py").write_text("x = 1\n", encoding="utf-8")
         git_commit_all(explicit_root, "install")
         return [cmd for cmd, _source in commands]
@@ -1981,7 +1981,7 @@ async def test_setup_replay_runs_off_the_event_loop_thread(tmp_path: Path, monke
     seen: dict[str, int] = {}
     loop_ident = threading.get_ident()
 
-    def _spy_run_setup(commands, *, cwd, log_dir, round_task_id, seq_start, on_execution):
+    def _spy_run_setup(commands, *, cwd, log_dir, ledger):
         seen["ident"] = threading.get_ident()
         return []
 
