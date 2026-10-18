@@ -68,7 +68,7 @@ from .event_fields import (
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
 from .event_sink import make_sink
-from .event_timeline import finish_event, open_event
+from .event_timeline import EventHeader, finish_event, open_event
 from .baseline_event import assemble_baseline_actions
 from .roofline_event import assemble_roofline_action
 
@@ -637,10 +637,8 @@ def _republish_closed_event(event: str) -> None:
     from .construct import republish_closed_event
 
     republish_closed_event(
-        event,
+        EventHeader(EVENT_TYPE, event, EVENT_KIND),
         section=SECTION_EVENT,
-        event_type=EVENT_TYPE,
-        kind=EVENT_KIND,
         load_parts=lambda: event_parts(EVENT_SECTIONS, event=event),
         assemble=assemble_kernel_ext,
         end_time=lambda _parts, header: _text(header.get("end_time")),
@@ -1185,12 +1183,9 @@ class KernelEventRecorder:
             },
         )
         self._sequence = open_event(
-            event_type=EVENT_TYPE,
-            event=self._event_id,
+            EventHeader(EVENT_TYPE, self._event_id, EVENT_KIND, self._start_time),
             event_section=SECTION_EVENT,
             producer=PRODUCER,
-            kind=EVENT_KIND,
-            start_time=self._start_time,
             ext={"route": self._route, "in_flight_stage": self._stage},
         )
 
@@ -1706,13 +1701,10 @@ class KernelEventRecorder:
                 event=self._event_id,
             )
             finish_event(
-                event_type=EVENT_TYPE,
-                event=self._event_id,
+                EventHeader(EVENT_TYPE, self._event_id, EVENT_KIND, self._start_time),
                 sequence=self._sequence,
                 status=derived,
                 ext=ext,
-                kind=EVENT_KIND,
-                start_time=self._start_time,
                 end_time=end_time,
             )
         except RECORDING_ERRORS as exc:

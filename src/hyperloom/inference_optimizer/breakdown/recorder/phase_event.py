@@ -39,7 +39,7 @@ from .event_fields import (
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import EventSink, make_sink
-from .event_timeline import finish_event, open_event
+from .event_timeline import EventHeader, finish_event, open_event
 
 # Every section a phase event assembles from. Named from the leaf module the
 # assembler shares, so :func:`_finish` reads its parts without an import cycle.
@@ -134,12 +134,9 @@ def _open(event: str, *, phase: str, macro_cycle: int, start_time: str = "") -> 
     if sink is not None:
         sink.record(SECTION_EVENT, dict(shell))
     return open_event(
-        event_type=EVENT_TYPE,
-        event=event,
+        EventHeader(EVENT_TYPE, event, EVENT_KIND, start_time or _now()),
         event_section=SECTION_EVENT,
         producer=PRODUCER,
-        kind=EVENT_KIND,
-        start_time=start_time or _now(),
         ext=shell,
     )
 
@@ -601,13 +598,10 @@ def _finish(event: str, *, end_time: str) -> None:
         parts = event_parts(PHASE_EVENT_SECTIONS, event=event)
         ext, status = assemble_phase_ext(parts, event=event)
         finish_event(
-            event_type=EVENT_TYPE,
-            event=event,
+            EventHeader(EVENT_TYPE, event, EVENT_KIND, str(ext.get("entered_at") or "")),
             sequence=sequence,
             status=status or STATUS_SUCCEEDED,
             ext=ext,
-            kind=EVENT_KIND,
-            start_time=str(ext.get("entered_at") or ""),
             end_time=end_time,
         )
     except RECORDING_ERRORS as exc:

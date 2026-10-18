@@ -404,17 +404,15 @@ def test_contract_vocabularies_match_runtime_surfaces():
 
 
 def test_process_status_and_business_outcome_remain_separate():
-    from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import build_envelope
+    from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EventHeader, build_envelope
 
     rejected = build_envelope(
-        event_type="warm_replay",
-        event="prelude:0:warm_replay_1",
+        EventHeader("warm_replay", "prelude:0:warm_replay_1"),
         status="rejected",
         ext={"verdict": {"outcome_status": "quality_failed"}},
     )
     no_gain = build_envelope(
-        event_type="kernel",
-        event="kernel_agent:0:kernel_1",
+        EventHeader("kernel", "kernel_agent:0:kernel_1"),
         status="succeeded",
         ext={"outcome": {"verdict": "no_improvement"}},
     )
@@ -426,15 +424,10 @@ def test_process_status_and_business_outcome_remain_separate():
 
 
 def test_malformed_failure_is_preserved_for_schema_rejection(tmp_path):
-    from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import build_envelope
+    from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EventHeader, build_envelope
 
     fixture = _writer_fixture(tmp_path, denied=False)
-    event = build_envelope(
-        event_type="roofline",
-        event="prelude:0:roofline",
-        status="failed",
-        ext={"failure": "boom"},
-    )
+    event = build_envelope(EventHeader("roofline", "prelude:0:roofline"), status="failed", ext={"failure": "boom"})
     fixture["timeline"].append(event)
 
     assert event["failure"] == "boom"
@@ -443,11 +436,10 @@ def test_malformed_failure_is_preserved_for_schema_rejection(tmp_path):
 
 
 def test_unknown_business_outcome_is_preserved_for_schema_rejection():
-    from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import build_envelope
+    from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EventHeader, build_envelope
 
     event = build_envelope(
-        event_type="kernel",
-        event="kernel_agent:0:kernel_1",
+        EventHeader("kernel", "kernel_agent:0:kernel_1"),
         status="succeeded",
         ext={"outcome": {"verdict": "undeclared_new_state"}},
     )

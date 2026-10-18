@@ -38,7 +38,7 @@ from ..round_archive import ROLE_LAUNCH_CONFIG
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import EventSink, make_sink
-from .event_timeline import finish_event, open_event
+from .event_timeline import EventHeader, finish_event, open_event
 from .recorder_warnings import RECORDING_ERRORS, note_failure
 
 # Every section an enablement event assembles from. Named from the leaf module
@@ -150,12 +150,9 @@ def _open(*, mode: str = "", origin: str = "", start_time: str = "") -> int | No
         if sink is not None:
             sink.record(SECTION_EVENT, dict(shell))
     return open_event(
-        event_type=EVENT_TYPE,
-        event=enablement_event_id(),
+        EventHeader(EVENT_TYPE, enablement_event_id(), EVENT_KIND, start_time or _now()),
         event_section=SECTION_EVENT,
         producer=PRODUCER,
-        kind=EVENT_KIND,
-        start_time=start_time or _now(),
         ext=shell,
     )
 
@@ -563,13 +560,10 @@ def finish(
             event=enablement_event_id(),
         )
         finish_event(
-            event_type=EVENT_TYPE,
-            event=enablement_event_id(),
+            EventHeader(EVENT_TYPE, enablement_event_id(), EVENT_KIND, _start_time()),
             sequence=sequence,
             status=derived or _status_for(settled, attempts=0),
             ext=ext,
-            kind=EVENT_KIND,
-            start_time=_start_time(),
             end_time=end_time,
         )
     except RECORDING_ERRORS as exc:
