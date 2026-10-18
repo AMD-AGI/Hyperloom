@@ -817,6 +817,35 @@ class AnthropicMessageResult:
     usage: object | None
 
 
+@dataclass(frozen=True)
+class AnthropicCompletionRequest:
+    """One single-shot Anthropic completion: the Messages body and the time budget it may take.
+
+    ``timeout`` is the HTTP client timeout (``timeout_s`` when unset); the Claude CLI transport uses ``timeout_s``.
+    """
+
+    model: str
+    messages: Sequence[Mapping[str, object]]
+    max_tokens: int
+    system: str | None = None
+    temperature: float | None = None
+    timeout: object | None = None
+    timeout_s: float | None = None
+
+    def http_params(self) -> dict[str, object]:
+        """Assemble the Messages request body, omitting an absent system prompt."""
+        params: dict[str, object] = {
+            "model": self.model,
+            "messages": list(self.messages),
+            "max_tokens": int(self.max_tokens),
+        }
+        if self.system:
+            params["system"] = self.system
+        if self.temperature is not None:
+            params["temperature"] = float(self.temperature)
+        return params
+
+
 def _attribution_tag_kwargs(component: str, operation: str = "") -> dict[str, object]:
     """Build the ``post`` keyword carrying the attribution header, if any."""
     headers = _headers_for(component, operation)
@@ -926,27 +955,6 @@ def anthropic_transport_ready(env: Mapping[str, str] | None = None) -> bool:
     return True
 
 
-def _anthropic_http_params(
-    *,
-    model: str,
-    messages: Sequence[Mapping[str, object]],
-    system: str | None,
-    max_tokens: int,
-    temperature: float | None = None,
-) -> dict[str, object]:
-    """Assemble the Messages request body, omitting an absent system prompt."""
-    params: dict[str, object] = {
-        "model": model,
-        "messages": list(messages),
-        "max_tokens": int(max_tokens),
-    }
-    if system:
-        params["system"] = system
-    if temperature is not None:
-        params["temperature"] = float(temperature)
-    return params
-
-
 def _one_shot_client(
     timeout_s: float | None,
     env: Mapping[str, str] | None,
@@ -968,84 +976,54 @@ def _one_shot_client(
 
 def anthropic_completion(
     *,
-    model: str,
-    messages: Sequence[Mapping[str, object]],
-    max_tokens: int,
-    system: str | None = None,
-    temperature: float | None = None,
+    request: AnthropicCompletionRequest,
     env: Mapping[str, str] | None = None,
-    timeout: object | None = None,
-    timeout_s: float | None = None,
     component: str = "",
     operation: str = "",
 ) -> AnthropicMessageResult:
     """Issue one single-shot Anthropic completion over whichever transport works."""
     transport = anthropic_transport(env)
     if transport == ANTHROPIC_TRANSPORT_SDK:
-        client = _one_shot_client(timeout_s, env, component, operation)
+        client = _one_shot_client(request.timeout_s, env, component, operation)
         return client.messages(  # type: ignore[attr-defined]
-            model=model,
-            messages=messages,
-            system=system,
-            max_tokens=max_tokens,
+            model=request.model,
+            messages=request.messages,
+            system=request.system,
+            max_tokens=request.max_tokens,
         )
     if not transport:
         raise LLMConfigError(_ANTHROPIC_NO_CREDENTIAL)
-    http_client = get_anthropic_client(env=dict(env) if env is not None else None, timeout=timeout or timeout_s)
+    http_client = get_anthropic_client(
+        env=dict(env) if env is not None else None, timeout=request.timeout or request.timeout_s
+    )
     with http_client:  # type: ignore[attr-defined]
-        return anthropic_messages(
-            http_client,
-            component=component,
-            operation=operation,
-            **_anthropic_http_params(
-                model=model,
-                messages=messages,
-                system=system,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            ),
-        )
+        return anthropic_messages(http_client, component=component, operation=operation, **request.http_params())
 
 
 async def aanthropic_completion(
     *,
-    model: str,
-    messages: Sequence[Mapping[str, object]],
-    max_tokens: int,
-    system: str | None = None,
-    temperature: float | None = None,
+    request: AnthropicCompletionRequest,
     env: Mapping[str, str] | None = None,
-    timeout: object | None = None,
-    timeout_s: float | None = None,
     component: str = "",
     operation: str = "",
 ) -> AnthropicMessageResult:
     """Async twin of :func:`anthropic_completion`; see it for the full contract."""
     transport = anthropic_transport(env)
     if transport == ANTHROPIC_TRANSPORT_SDK:
-        client = _one_shot_client(timeout_s, env, component, operation)
+        client = _one_shot_client(request.timeout_s, env, component, operation)
         return await client.amessages(  # type: ignore[attr-defined]
-            model=model,
-            messages=messages,
-            system=system,
-            max_tokens=max_tokens,
+            model=request.model,
+            messages=request.messages,
+            system=request.system,
+            max_tokens=request.max_tokens,
         )
     if not transport:
         raise LLMConfigError(_ANTHROPIC_NO_CREDENTIAL)
-    http_client = get_async_anthropic_client(env=dict(env) if env is not None else None, timeout=timeout or timeout_s)
+    http_client = get_async_anthropic_client(
+        env=dict(env) if env is not None else None, timeout=request.timeout or request.timeout_s
+    )
     async with http_client:  # type: ignore[attr-defined]
-        return await aanthropic_messages(
-            http_client,
-            component=component,
-            operation=operation,
-            **_anthropic_http_params(
-                model=model,
-                messages=messages,
-                system=system,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            ),
-        )
+        return await aanthropic_messages(http_client, component=component, operation=operation, **request.http_params())
 
 
 async def astream_chat_completion_text(
@@ -1101,6 +1079,7 @@ __all__ = [
     "ANTHROPIC_SYNTHESIZABLE_KEY_ENVS",
     "ANTHROPIC_TRANSPORT_HTTP",
     "ANTHROPIC_TRANSPORT_SDK",
+    "AnthropicCompletionRequest",
     "AnthropicMessageResult",
     "CLAUDE_GATEWAY_SIGNAL_KEYS",
     "CLAUDE_OAUTH_TOKEN_ENV",

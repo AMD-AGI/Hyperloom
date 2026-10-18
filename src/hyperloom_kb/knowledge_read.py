@@ -1074,22 +1074,18 @@ class KnowledgeReadService:
         *,
         planner: LLMQueryPlanner | None = None,
         trace_sink: Callable[[ReadTrace], None] | None = None,
-        enabled: bool = True,
     ) -> None:
         self._declaration = declaration
         self._executor = executor
         self._configuration = configuration
         self._planner = planner
         self._trace_sink = trace_sink
-        self._enabled = enabled
 
     def read(
         self,
         decision: str,
         context: Mapping[str, JsonValue],
     ) -> ReadResult:
-        if not self._enabled:
-            return _empty_read(ReadStatus.DISABLED)
         if self._planner is None or self._executor is None or self._configuration is None:
             return _empty_read(
                 ReadStatus.UNAVAILABLE,

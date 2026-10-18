@@ -157,9 +157,8 @@ def _run_pr_monitor(request: CandidateSearchRequest) -> list[Candidate]:
     if not keywords:
         prs = list_perf_prs(
             request.repo_url,
-            base_url=cfg.base_url,
+            monitor=cfg,
             limit=requested,
-            timeout_sec=cfg.timeout_sec,
             **list_state_kwargs,
         )
         return [_pr_to_candidate(pr, request.repo_url, "pr_monitor") for pr in prs]
@@ -169,19 +168,17 @@ def _run_pr_monitor(request: CandidateSearchRequest) -> list[Candidate]:
     try:
         prs = search_perf_prs_via_pr_monitor_search(
             request.repo_url,
-            base_url=cfg.base_url,
+            monitor=cfg,
             query=query,
             limit=over_fetch,
             state=search_state,
-            timeout_sec=cfg.timeout_sec,
         )
     except PRMonitorError:
         # Service may not implement /v1/search/prs; fall back to the plain listing.
         prs = list_perf_prs(
             request.repo_url,
-            base_url=cfg.base_url,
+            monitor=cfg,
             limit=over_fetch,
-            timeout_sec=cfg.timeout_sec,
             **list_state_kwargs,
         )
 
@@ -190,9 +187,8 @@ def _run_pr_monitor(request: CandidateSearchRequest) -> list[Candidate]:
     if not prs:
         prs = list_perf_prs(
             request.repo_url,
-            base_url=cfg.base_url,
+            monitor=cfg,
             limit=over_fetch,
-            timeout_sec=cfg.timeout_sec,
             **list_state_kwargs,
         )
 

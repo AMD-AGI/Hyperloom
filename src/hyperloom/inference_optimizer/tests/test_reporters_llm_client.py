@@ -108,11 +108,12 @@ def test_anthropic_client_delegates_to_the_single_shot_entry_point(monkeypatch: 
 
     client = AnthropicClient(model="m", max_output_tokens=8, timeout_s=12.0)
     assert client.complete(system="sys", user="user") == "narrative"
-    assert calls[0]["model"] == "m"
-    assert calls[0]["system"] == "sys"
-    assert calls[0]["messages"] == [{"role": "user", "content": "user"}]
-    assert calls[0]["max_tokens"] == 8
-    assert calls[0]["timeout_s"] == 12.0
+    request = calls[0]["request"]
+    assert request.model == "m"
+    assert request.system == "sys"
+    assert request.messages == [{"role": "user", "content": "user"}]
+    assert request.max_tokens == 8
+    assert request.timeout_s == 12.0
 
 
 def test_provider_transport_errors_propagate_to_the_caller(monkeypatch: pytest.MonkeyPatch) -> None:

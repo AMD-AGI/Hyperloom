@@ -26,7 +26,7 @@ from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from .kernel_round_budget import controller_round_stop, integrate_within_phase, measurement_round_sec
 from hyperloom.common.env import env_bool, env_float, env_int
-from hyperloom.common.io import atomic_write_json
+from hyperloom.common.io import WriteOptions, atomic_write_json
 from hyperloom.common.launch_log_evidence import recipe_server_launch
 from hyperloom.common.perf_metric import axis_of, graded_axes_of
 from hyperloom.orchestrator.lever import (
@@ -3222,7 +3222,7 @@ class KernelPhase(CoordinatorCollaborator):
         try:
             if not path.parent.is_dir():
                 return
-            atomic_write_json(path, entry, make_parents=False)
+            atomic_write_json(path, entry, options=WriteOptions())
         except (OSError, TypeError, ValueError):
             log.warning("gemm result.json writeback failed for %s", path, exc_info=True)
 

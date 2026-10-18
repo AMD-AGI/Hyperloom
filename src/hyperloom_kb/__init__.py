@@ -61,9 +61,11 @@ from hyperloom_kb.query_view import (
     repeat_group_key,
 )
 from hyperloom_kb.remote import (
+    ExperienceStart,
     ExportPage,
     ListPage,
     LocalFiles,
+    ReadQuery,
     RemoteClient,
     RemoteClientError,
     RemoteConfig,
@@ -181,6 +183,7 @@ __all__ = [
     "ExperienceRenderer",
     "ExperienceStatus",
     "ExperienceStore",
+    "ExperienceStart",
     "ExportPage",
     "FieldDeclaration",
     "FieldKind",
@@ -238,6 +241,7 @@ __all__ = [
     "RETRIEVAL_POLICY_VERSION",
     "ReadLease",
     "ReadLeaseManager",
+    "ReadQuery",
     "ReadRequest",
     "ReadResult",
     "ReadStatus",

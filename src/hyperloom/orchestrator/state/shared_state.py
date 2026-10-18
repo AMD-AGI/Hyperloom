@@ -23,7 +23,7 @@ from hyperloom.common.env import env_bool
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.timeutil import now_iso
-from hyperloom.common.jsonio import read_json
+from hyperloom.common.jsonio import read_json_strict
 from hyperloom.common.profile_args import sanitize_profile_server_args
 
 if TYPE_CHECKING:  # import cycle: perf_metric is imported lazily at call time
@@ -1049,7 +1049,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         if not path.exists():
             inst = cls()
         else:
-            inst = cls.from_dict(read_json(path, require_dict=True, strict=True))
+            inst = cls.from_dict(read_json_strict(path, require_dict=True))
         # Remember the session dir for breakdown instrumentation (not serialized).
         inst._session_dir = Path(session_dir)
         return inst
@@ -1190,7 +1190,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         # so current_best carries the primary latency metric. Best-effort.
         self._backfill_scriptable_latency()
         path = self.state_path(session_dir)
-        atomic_write_json(path, self.to_dict(), indent=2, sort_keys=True)
+        atomic_write_json(path, self.to_dict())
         # Author-time breakdown capture: snapshot state-owned sections into the recorder spool right after persisting.
         self._session_dir = Path(session_dir)
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
@@ -1907,7 +1907,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             from hyperloom.inference_optimizer.session.session_paths import failure_evidence_path
 
             try:
-                atomic_write_json(failure_evidence_path(session_dir, fid), fe, make_parents=True)
+                atomic_write_json(failure_evidence_path(session_dir, fid), fe)
             except OSError:
                 log.debug("failure evidence mirror failed for %s", fid, exc_info=True)
 

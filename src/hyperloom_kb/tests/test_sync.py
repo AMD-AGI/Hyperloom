@@ -30,6 +30,7 @@ from hyperloom_kb import (
     HTTPServiceConfig,
     ObjectiveDeclaration,
     Provenance,
+    ReadQuery,
     RemoteClient,
     RemoteClientError,
     RemoteConfig,
@@ -448,8 +449,8 @@ def test_reads_search_the_schema_they_name(tmp_path: Path) -> None:
     with _serving(_service(tmp_path / "local", _declaration(), LOCAL_TOKEN)) as local_url:
         local = _client(local_url, LOCAL_TOKEN, tmp_path)
         local.write(_experience(other, 0), declaration=other)
-        default = local.read("Pick a knob.", {})
-        named = local.read("Pick a knob.", {}, schema_ref=other.schema_ref)
+        default = local.read(ReadQuery("Pick a knob.", {}))
+        named = local.read(ReadQuery("Pick a knob.", {}, schema_ref=other.schema_ref))
 
     # The default schema holds nothing; the named one holds an Experience, and reads plan through a planner.
     assert (default.status, default.warnings) == ("completed", ())

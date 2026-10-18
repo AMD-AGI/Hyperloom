@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from hyperloom.common.io import append_jsonl
+from hyperloom.common.io import JsonLineFormat, append_jsonl
 from hyperloom.orchestrator.knowledge.recipe_kb_t0 import run_t0_anchor
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -54,7 +54,7 @@ def _attach_recipe_audit_hook(kb: Any, session_dir: Path | None) -> None:
                 "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 **event,
             }
-            append_jsonl(audit_path, row, make_parents=True, sort_keys=True)
+            append_jsonl(audit_path, row, make_parents=True, fmt=JsonLineFormat(sort_keys=True))
         except Exception:
             log.debug("recipe_snapshot audit append failed", exc_info=True)
         # The same hook feeds the warm_start event, which claims only the reads

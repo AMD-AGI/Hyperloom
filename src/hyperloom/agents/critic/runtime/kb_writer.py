@@ -25,7 +25,7 @@ from .importance_mapping import (
     importance_for_kb_draft,
     importance_for_verdict,
 )
-from .kb_client import KBClient
+from .kb_client import KBClient, KBListQuery
 from .scope_builder import build_scope, scope_cache_key
 from .session_memory import SessionMemory
 from .slugify import slugify, slugify_safe
@@ -159,11 +159,7 @@ class KBWriter:
             }
 
         try:
-            response = self.client.list(
-                scope_filter=scope,
-                kind=kind,
-                limit=limit,
-            )
+            response = self.client.list(KBListQuery(scope_filter=scope, kind=kind, limit=limit))
         except KBTransportError as exc:
             self._record_kb_failure()
             return {

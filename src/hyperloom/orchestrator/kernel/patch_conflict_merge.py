@@ -380,6 +380,7 @@ def _anthropic_resolver() -> ConflictResolver:
         intent: str,
     ) -> str | None:
         from hyperloom.common.llm_config import (
+            AnthropicCompletionRequest,
             aanthropic_completion,
             build_http_timeout,
             resolve_forge_llm_model,
@@ -395,17 +396,16 @@ def _anthropic_resolver() -> ConflictResolver:
             intent=intent,
         )
         result = await aanthropic_completion(
+            request=AnthropicCompletionRequest(
+                model=resolve_forge_llm_model("claude"),
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=_LLM_MAX_TOKENS,
+                system=_RESOLVER_SYSTEM,
+                timeout=build_http_timeout(connect=_LLM_CONNECT_TIMEOUT_S, read=_LLM_TIMEOUT_S),
+                timeout_s=_LLM_TIMEOUT_S,
+            ),
             component="forge",
             operation="patch_conflict_merge",
-            model=resolve_forge_llm_model("claude"),
-            system=_RESOLVER_SYSTEM,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=_LLM_MAX_TOKENS,
-            # Both transports: the HTTP client reads ``timeout`` and would
-            # otherwise fall back to httpx's five-second default, which no
-            # generation of this size finishes inside.
-            timeout=build_http_timeout(connect=_LLM_CONNECT_TIMEOUT_S, read=_LLM_TIMEOUT_S),
-            timeout_s=_LLM_TIMEOUT_S,
         )
         return _strip_code_fence(result.text or "")
 

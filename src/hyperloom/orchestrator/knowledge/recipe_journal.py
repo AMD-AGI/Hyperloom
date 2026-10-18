@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Collection, Mapping
 
 from hyperloom.common.coerce import to_float, to_int
-from hyperloom.common.io import append_jsonl
+from hyperloom.common.io import JsonLineFormat, append_jsonl
 from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version
 from hyperloom.inference_optimizer.session.optimization_journal import (
@@ -1169,7 +1169,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 recipe_snapshot_audit_jsonl(self.session_dir),
                 row,
                 make_parents=True,
-                sort_keys=True,
+                fmt=JsonLineFormat(sort_keys=True),
             )
         except Exception:
             log.debug("Remote Recipe KB audit append failed", exc_info=True)
