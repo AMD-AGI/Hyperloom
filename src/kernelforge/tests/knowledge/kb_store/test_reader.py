@@ -17,14 +17,13 @@ from kernelforge.knowledge.kb_store.reader import (
     sanitize_read_error,
 )
 from kernelforge.knowledge.kb_store.writer import (
-    RunOutcome,
     hash_implementation_identity,
-    write_run_experience,
 )
 from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.knowledge.kb_store.config import KnowledgeConfig, KnowledgeStoreMode
 from kernelforge.knowledge.kb_store.identity import run as run_identity
 from kernelforge.knowledge.kb_store import record_store
+from kernelforge.tests.knowledge.kb_store.test_writer import write_flat_experience
 from kernelforge.tests.test_rewrite_by_flydsl_kb import InMemoryKBStore
 
 DIFF = "diff --git a/kernel.py b/kernel.py\n--- a/kernel.py\n+++ b/kernel.py\n@@ -1 +1 @@\n-old\n+new\n"
@@ -57,9 +56,6 @@ def config(tmp_path, workspace):
     )
 
 
-_LOOP_KERNEL_FIELDS = {field.name for field in dataclasses.fields(LoopKernel)}
-
-
 def _seed(config, workspace, **overrides):
     kwargs = {
         "workspace": str(workspace),
@@ -77,11 +73,7 @@ def _seed(config, workspace, **overrides):
         "framework": "standalone",
     }
     kwargs.update(overrides)
-    summary_override = kwargs.pop("summary_override", SUMMARY)
-    kernel = LoopKernel(**{name: kwargs.pop(name) for name in _LOOP_KERNEL_FIELDS if name in kwargs})
-    return write_run_experience(
-        config=config, kernel=kernel, outcome=RunOutcome(**kwargs), summary_override=summary_override
-    )
+    return write_flat_experience(config, {"summary_override": SUMMARY, **kwargs})
 
 
 def _read_args(config, workspace, **overrides):

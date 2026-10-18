@@ -57,6 +57,15 @@ OUTSIDE_PATCH = """diff --git a/helper.py b/helper.py
 """
 
 
+def _warmstart(repo):
+    """Warm-start the repository's kernel.py through the standard test driver."""
+    return integ.kb_warmstart(
+        config=object(),
+        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
+        harness=WarmStartHarness(driver="driver.py"),
+    )
+
+
 def _run(cmd: list[str], cwd: Path) -> str:
     result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, check=True)
     return result.stdout.strip()
@@ -299,11 +308,7 @@ def test_kb_warmstart_cold_starts_without_candidate(monkeypatch, tmp_path):
         lambda **_kwargs: [],
     )
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
-        harness=WarmStartHarness(driver="driver.py"),
-    )
+    warm = _warmstart(repo)
 
     assert warm == {
         "candidate": False,
@@ -329,11 +334,7 @@ def test_kb_warmstart_propagates_reader_no_hit_status(monkeypatch, tmp_path):
         no_hit,
     )
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
-        harness=WarmStartHarness(driver="driver.py"),
-    )
+    warm = _warmstart(repo)
 
     assert warm == {
         "candidate": False,
@@ -366,11 +367,7 @@ def test_fresh_kb_lookup_clears_stale_references(
         "kernelforge.knowledge.kb_store.reader.read_top_solutions",
         lookup,
     )
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
-        harness=WarmStartHarness(driver="driver.py"),
-    )
+    warm = _warmstart(repo)
 
     if lookup_mode == "error":
         assert warm["read_reason"] == "warm_start_error"
@@ -415,11 +412,7 @@ def test_kb_warmstart_applies_ranked_solution_when_safe(monkeypatch, tmp_path):
     monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
     monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
-        harness=WarmStartHarness(driver="driver.py"),
-    )
+    warm = _warmstart(repo)
 
     assert warm["candidate"] is True
     assert warm["applied"] is True
@@ -443,11 +436,7 @@ def test_kb_warmstart_tries_next_candidate_when_first_ranked_fails(
     monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
     monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
-        harness=WarmStartHarness(driver="driver.py"),
-    )
+    warm = _warmstart(repo)
 
     assert warm["applied"] is True
     assert warm["solution_slug"] == "kernelforge-exp/kernel/second"
@@ -473,11 +462,7 @@ def test_kb_warmstart_persists_all_available_references_without_truncation(
     )
     monkeypatch.setattr(integ, "_bench_once", lambda *_args: None)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
-        harness=WarmStartHarness(driver="driver.py"),
-    )
+    warm = _warmstart(repo)
 
     root = repo / "forge_experiments" / "kb_references"
     assert warm["num_references"] == 2
@@ -635,11 +620,7 @@ def test_kb_warmstart_applies_benches_and_commits(monkeypatch, tmp_path):
     monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
     monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
-        harness=WarmStartHarness(driver="driver.py"),
-    )
+    warm = _warmstart(repo)
 
     assert warm["candidate"] is True
     assert warm["applied"] is True
@@ -742,11 +723,7 @@ def test_kb_warmstart_uses_three_measurement_medians(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(integ, "_correctness_once", lambda *_args: True)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
-        harness=WarmStartHarness(driver="driver.py"),
-    )
+    warm = _warmstart(repo)
 
     assert warm["applied"] is True
     assert warm["pristine_ms"] == 10.0
@@ -820,11 +797,7 @@ def test_kb_warmstart_matches_mean_only_keep_policy(
     )
     monkeypatch.setattr(integ, "_correctness_once", lambda *_args: True)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
-        harness=WarmStartHarness(driver="driver.py"),
-    )
+    warm = _warmstart(repo)
 
     assert warm["applied"] is expected_applied
     assert warm["reference_reason"] == expected_reason
@@ -842,11 +815,7 @@ def test_kb_warmstart_is_reference_only_without_pristine_baseline(
         raise AssertionError("warm-start must not apply without a pristine baseline")
 
     monkeypatch.setattr(integ, "_git_apply", fail_apply)
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
-        harness=WarmStartHarness(driver="driver.py"),
-    )
+    warm = _warmstart(repo)
 
     assert warm["applied"] is False
     assert warm["pristine_ms"] is None
@@ -948,11 +917,7 @@ def test_kb_warmstart_mismatched_candidate_falls_back_when_patch_does_not_apply(
     )
     monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: _bench(10.0))
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
-        harness=WarmStartHarness(driver="driver.py"),
-    )
+    warm = _warmstart(repo)
 
     assert warm["candidate"] is True
     assert warm["applied"] is False
@@ -974,11 +939,7 @@ def test_kb_warmstart_rolls_back_when_applied_kernel_fails_bench(monkeypatch, tm
     monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
     monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
-        harness=WarmStartHarness(driver="driver.py"),
-    )
+    warm = _warmstart(repo)
 
     assert warm["candidate"] is True
     assert warm["applied"] is False
@@ -996,11 +957,7 @@ def test_kb_warmstart_rolls_back_when_applied_kernel_fails_correctness(monkeypat
     monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
     monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: False)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
-        harness=WarmStartHarness(driver="driver.py"),
-    )
+    warm = _warmstart(repo)
 
     assert warm["candidate"] is True
     assert warm["applied"] is False
@@ -1036,11 +993,7 @@ def test_rejected_warmstart_removes_only_new_untracked_probe_artifacts(
 
     monkeypatch.setattr(integ, "_correctness_once", fail_correctness)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
-        harness=WarmStartHarness(driver="driver.py"),
-    )
+    warm = _warmstart(repo)
 
     assert warm["applied"] is False
     assert preserved.read_text() == "keep\n"
@@ -1059,11 +1012,7 @@ def test_kb_warmstart_rolls_back_when_applied_kernel_is_slower(monkeypatch, tmp_
     monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
     monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
-        harness=WarmStartHarness(driver="driver.py"),
-    )
+    warm = _warmstart(repo)
 
     assert warm["candidate"] is True
     assert warm["applied"] is False
@@ -1132,11 +1081,7 @@ def test_kb_warmstart_attempts_candidate_on_implementation_mismatch(
     )
     monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
-        harness=WarmStartHarness(driver="driver.py"),
-    )
+    warm = _warmstart(repo)
 
     assert warm["applied"] is True
     assert warm["reference_reason"] == ""
@@ -1152,11 +1097,7 @@ def test_kb_warmstart_reference_only_when_pristine_baseline_unavailable(
     _patch_read_solution(monkeypatch, APPLICABLE_PATCH)
     monkeypatch.setattr(integ, "_bench_once", lambda *_args: None)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
-        harness=WarmStartHarness(driver="driver.py"),
-    )
+    warm = _warmstart(repo)
 
     assert warm["applied"] is False
     assert warm["reference_reason"] == "baseline_unavailable"
@@ -1247,11 +1188,7 @@ def test_kb_warmstart_rejects_and_restores_on_commit_failure(
 
     monkeypatch.setattr(integ, "git", fail_commit)
 
-    warm = integ.kb_warmstart(
-        config=object(),
-        kernel=LoopKernel(kernel_path=str(repo / "kernel.py"), kernel_backend="triton", workspace=str(repo)),
-        harness=WarmStartHarness(driver="driver.py"),
-    )
+    warm = _warmstart(repo)
 
     assert warm["applied"] is False
     assert warm["reference_reason"] == "commit_failed"
