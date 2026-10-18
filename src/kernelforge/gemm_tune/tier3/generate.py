@@ -90,7 +90,7 @@ def generate_tuner(
     script_path = work_dir / "tuner.py"
 
     try:
-        from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy
+        from kernelforge.agent_backends.base import AgentRunSpec, AgentRuntimeSettings, AgentToolPolicy
         from kernelforge.agent_backends.registry import (
             create_registered_backend,
             resolve_agent_runtime,
@@ -114,8 +114,7 @@ def generate_tuner(
             # The model variable is per-provider, so it is only readable once
             # the provider is settled.
             model=model or resolve_agent_model(chosen.name),
-            timeout_sec=timeout_s,
-            reasoning_effort=resolve_agent_reasoning_effort(),
+            settings=AgentRuntimeSettings(timeout_sec=timeout_s, reasoning_effort=resolve_agent_reasoning_effort()),
         )
         backend = create_registered_backend(runtime)
     except Exception as exc:  # noqa: BLE001 - provider setup must not fail tuning
