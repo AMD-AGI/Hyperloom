@@ -9,11 +9,14 @@ context from a tool request, so the executor's own implementation is the one tha
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
 from hyperloom_multibranch.toolbox.tools.base import InvalidRequest, ToolOutput, ToolRequest
 
@@ -106,12 +109,14 @@ class HandlerTool(_Reporting):
         ok_text: str,
         summary_keys: tuple[str, ...] = (),
         required: tuple[str, ...] = (),
+        local_scratch: bool = False,
     ) -> None:
         self.name = name
         self._handler = handler
         self._ok_text = ok_text
         self._keys = summary_keys
         self._required = required
+        self._local_scratch = local_scratch
 
     def validate(self, request: ToolRequest) -> None:
         missing = [key for key in self._required if not request.params.get(key)]
@@ -119,5 +124,46 @@ class HandlerTool(_Reporting):
             raise InvalidRequest(f"{self.name} needs {', '.join(missing)}")
 
     async def run(self, request: ToolRequest, workdir: Path) -> ToolOutput:
-        result = await self._handler(dict(request.params), session_dir=workdir)
-        return self.output(result, request)
+        if not self._local_scratch:
+            result = await self._handler(dict(request.params), session_dir=workdir)
+            return self.output(result, request)
+        scratch = Path(tempfile.mkdtemp(prefix="hl-tool-"))
+        try:
+            state = SharedState.state_path(workdir)
+            if state.is_file():
+                shutil.copy2(state, SharedState.state_path(scratch))
+            result = await self._handler(dict(request.params), session_dir=scratch)
+            return self.output(_copy_back(result, scratch, workdir), request)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _copy_back(result: Mapping[str, Any], scratch: Path, workdir: Path) -> dict[str, Any]:
+    """Copy the files ``result`` names (and the ``analysis.json`` beside a report) from ``scratch`` into ``workdir``.
+
+    The handler ran on local disk because shared storage rejects the ``:`` in the names TraceLens' splitter writes;
+    such files are never copied. Paths in the result are rewritten to the copies.
+    """
+    moved: dict[str, str] = {}
+
+    def land(text: Any) -> Any:
+        if not isinstance(text, str) or not text.startswith(str(scratch) + "/"):
+            return text
+        source = Path(text)
+        if text not in moved:
+            moved[text] = text
+            if source.is_file() and ":" not in source.name:
+                target = workdir / source.relative_to(scratch)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+                moved[text] = str(target)
+        return moved[text]
+
+    out = {k: land(v) for k, v in result.items()}
+    if isinstance(out.get("artifact_paths"), Mapping):
+        out["artifact_paths"] = {k: land(v) for k, v in out["artifact_paths"].items()}
+    for key in ("trace_report_path", "analysis_md_path"):
+        sibling = Path(str(result.get(key) or "")).parent / "analysis.json"
+        if str(sibling).startswith(str(scratch) + "/"):
+            land(str(sibling))
+    return out

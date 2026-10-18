@@ -78,7 +78,8 @@ async def test_a_handler_tool_gets_its_payload_and_the_job_directory(tmp_path: P
     runner = ToolJobs([tool], sink, tmp_path, push_delay_seconds=0)
     job_id = runner.submit(ToolRequest("tracelens", "s3", {"trace_input": "/t"}), job_id="j9")
     assert await runner.wait(job_id) is JobStatus.SUCCEEDED
-    assert seen == [({"trace_input": "/t"}, tmp_path / "j9")]
+    assert [p for p, _ in seen] == [{"trace_input": "/t"}]
+    assert seen[0][1] != tmp_path / "j9"  # run on local scratch, not the (possibly shared) job directory
     assert sink.pointers[0].summary == "succeeded: trace analysed"
 
 

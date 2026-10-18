@@ -54,4 +54,5 @@ def tracelens_tool() -> HandlerTool:
         trace_analyze_handler,
         ok_text="trace analysed",
         required=("trace_input",),
+        local_scratch=True,  # TraceLens writes names with ":" that the shared session directory rejects
     )

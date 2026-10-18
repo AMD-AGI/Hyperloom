@@ -157,3 +157,33 @@ async def test_another_tool_keeps_the_pointer_defaults_even_beside_a_table(tmp_p
     await jobs.wait(jobs.submit(ToolRequest("build", "b1", dict(_IDS))))
     pointer = sink.pointers[0]
     assert (pointer.commit_id, pointer.profile_request_id, dict(pointer.op_shares)) == ("", "", {})
+
+
+async def test_tracelens_runs_on_local_disk_and_copies_back_only_what_is_read(tmp_path: Path) -> None:
+    seen: dict[str, Path] = {}
+
+    async def handler(payload: dict, *, session_dir: Path) -> dict:
+        seen["dir"] = session_dir
+        out = session_dir / "run"
+        out.mkdir()
+        (out / "merged.trace_iteration_0:4.json.gz").write_text("x", encoding="utf-8")
+        report = _report(out, [_task("gemm", 60.0)])
+        return {
+            "status": "ok",
+            "trace_report_path": str(report),
+            "split": str(out / "merged.trace_iteration_0:4.json.gz"),
+        }
+
+    tool = tracelens_tool()
+    tool._handler = handler
+    sink = RecordingSink()
+    jobs = ToolJobs([tool], sink, tmp_path / "jobs", push_delay_seconds=0)
+    job = jobs.submit(ToolRequest("tracelens", "b1", {"trace_input": "/t", "commit_id": "c9"}), job_id="j1")
+    assert await jobs.wait(job) is JobStatus.SUCCEEDED
+    workdir = tmp_path / "jobs" / "j1"
+    assert not seen["dir"].is_relative_to(tmp_path)
+    assert not seen["dir"].exists()
+    assert (workdir / "run" / "analysis.md").is_file() and (workdir / "run" / "analysis.json").is_file()
+    assert not [p for p in workdir.rglob("*") if ":" in p.name]
+    pointer = sink.pointers[0]
+    assert pointer.op_shares == {"gemm": 60.0}
