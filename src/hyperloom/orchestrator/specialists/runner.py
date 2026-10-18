@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common import io as _common_io
+from hyperloom.common.io import JsonFormat, WriteOptions, atomic_write_json
 from hyperloom.common.deadline import Deadline, seconds_until
 from hyperloom.common.env_safety import BENCHMARK_SECRET_ENV_NAMES, redact_secret_values
 from hyperloom.common.timeutil import now_iso
@@ -1486,7 +1486,7 @@ class SpecialistRunner:
             "max_turns": max_turns,
             "status": status,
         }
-        _common_io.atomic_write_json(path, payload, indent=None, sort_keys=True, make_parents=False)
+        atomic_write_json(path, payload, fmt=JsonFormat(indent=None), options=WriteOptions())
 
     def _write_specialist_done(
         self,
@@ -1505,7 +1505,7 @@ class SpecialistRunner:
         path = self._done_path(workspace)
         if path is None:
             return
-        _common_io.atomic_write_json(path, {"ts": now_iso(), **payload}, make_parents=False)
+        atomic_write_json(path, {"ts": now_iso(), **payload}, options=WriteOptions())
 
 
 __all__ = [

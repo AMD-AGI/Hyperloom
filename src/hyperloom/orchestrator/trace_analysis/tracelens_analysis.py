@@ -29,7 +29,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_json
+from hyperloom.common.io import JsonFormat, atomic_write_json
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer import framework_registry
 from hyperloom.inference_optimizer.framework_paths import (
@@ -573,7 +573,7 @@ def update_status(
             payload["duration_seconds"] = None
     if error:
         payload["error"] = error
-    atomic_write_json(status_path, payload, trailing_newline=True)
+    atomic_write_json(status_path, payload, fmt=JsonFormat(trailing_newline=True))
 
 
 def open_json(path: Path) -> dict[str, Any]:
@@ -3085,7 +3085,7 @@ def write_source_resolution_artifact(
             )
             return None
         path = Path(out_path)
-        atomic_write_json(path, doc, trailing_newline=True)
+        atomic_write_json(path, doc, fmt=JsonFormat(trailing_newline=True))
         summary = _KSC.summarize_resolution(doc.get("entries") or [])
         line = f"source resolution: {summary['located']}/{summary['total']} kernel(s) located -> {path.name}"
         # A count alone cannot say whether the unlocated kernels were worth
@@ -3957,8 +3957,8 @@ def write_reports(
         "source": "tracelens_analysis",
         "dry_run": args.dry_run,
     }
-    atomic_write_json(run_dir / "trace_input_manifest.json", manifest, trailing_newline=True)
-    atomic_write_json(tracelens_dir / "tracelens_report.json", report, trailing_newline=True)
+    atomic_write_json(run_dir / "trace_input_manifest.json", manifest, fmt=JsonFormat(trailing_newline=True))
+    atomic_write_json(tracelens_dir / "tracelens_report.json", report, fmt=JsonFormat(trailing_newline=True))
     kernel_candidates_path = run_dir / "kernel_candidates.json"
     # ``hot_kernels`` is always the full ranked set; the reusable dispatch subset
     # is exposed as ``routable_kernels`` and non-routable dicts as ``skipped_kernels``.
@@ -3972,7 +3972,7 @@ def write_reports(
             task_groups,
             is_routable=lambda c: c.get("reusable_native_kernel") is True,
         ),
-        trailing_newline=True,
+        fmt=JsonFormat(trailing_newline=True),
     )
 
     # Per-run audit sidecar (tasks routed vs skipped w/ reason).
@@ -3985,7 +3985,7 @@ def write_reports(
         trace_health_warnings=trace_health_warnings,
     )
     summary_path = tracelens_dir / "summary.json"
-    atomic_write_json(summary_path, summary, trailing_newline=True)
+    atomic_write_json(summary_path, summary, fmt=JsonFormat(trailing_newline=True))
 
     missing_trace_report = existing_report_path is None or not existing_report_path.exists()
     trace_quality_blocked = any(
@@ -4023,7 +4023,7 @@ def write_reports(
         kernel_candidates_path=str(kernel_candidates_path),
         candidates=candidates,
     )
-    atomic_write_json(kernel_roofline_path, kernel_roofline_payload, trailing_newline=True)
+    atomic_write_json(kernel_roofline_path, kernel_roofline_payload, fmt=JsonFormat(trailing_newline=True))
 
     # Diffusion / scriptable workload-level roofline: aggregate the per-kernel
     # roofline into an end-to-end workload roofline. Best-effort sidecar; never
@@ -4080,7 +4080,7 @@ def write_reports(
                 except Exception as _exc:  # noqa: BLE001 — analytic ceiling is best-effort
                     _diff_report["analytic_ceiling_error"] = f"{type(_exc).__name__}: {_exc}"
             out = run_dir / "diffusion_roofline.json"
-            atomic_write_json(out, _diff_report, trailing_newline=True)
+            atomic_write_json(out, _diff_report, fmt=JsonFormat(trailing_newline=True))
             diffusion_roofline_path = str(out)
             print(
                 "[diffusion_roofline] "
@@ -5298,7 +5298,7 @@ def main() -> int:
                 "model_name": args.model_name,
                 "framework": args.framework,
             },
-            trailing_newline=True,
+            fmt=JsonFormat(trailing_newline=True),
         )
         update_status(
             status_path,
