@@ -157,7 +157,7 @@ def _record_config_attempts(
     recorder = coord._coord.phase_framework.timeline()
     if recorder is None:
         return
-    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_CONFIG, GateVerdict
 
     task_id = str(getattr(task, "task_id", "") or "")
     params = getattr(task, "params", None) or {}
@@ -259,11 +259,13 @@ def _record_config_attempts(
                 continue
             recorder.record_attempt_gate(
                 attempt_id,
-                str(gate.get("gate")),
-                passed=gate.get("passed"),
-                reason=str(gate.get("reason") or ""),
-                observed=gate.get("observed"),
-                threshold=gate.get("threshold"),
+                GateVerdict(
+                    gate=str(gate.get("gate")),
+                    passed=gate.get("passed"),
+                    reason=str(gate.get("reason") or ""),
+                    observed=gate.get("observed"),
+                    threshold=gate.get("threshold"),
+                ),
             )
         recorded += 1
     proposal_ref = str(params.get("proposal_msg_id") or "")
@@ -1249,19 +1251,21 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             tput = validated_gain = None
         _close_out.record_write_back_settled(
             self.session_dir,
-            attempt=attempt,
-            source=source,
-            status=str(outcome.get("status") or ""),
-            result_type=result_type,
-            raw_reason=str(outcome.get("reason") or ""),
-            error_class=str(outcome.get("error_class") or ""),
-            backend=str(outcome.get("backend") or ""),
-            canonical_id=str(outcome.get("canonical_id") or ""),
-            session_id=str(outcome.get("session_id") or ""),
-            scope=self._write_back_scope(),
-            optimized_throughput=to_float(tput, None),
-            validated_gain_pct=to_float(validated_gain, None),
-            ts=str(outcome.get("updated_at") or ""),
+            _close_out.WriteBackSettlement(
+                attempt=attempt,
+                source=source,
+                status=str(outcome.get("status") or ""),
+                result_type=result_type,
+                raw_reason=str(outcome.get("reason") or ""),
+                error_class=str(outcome.get("error_class") or ""),
+                backend=str(outcome.get("backend") or ""),
+                canonical_id=str(outcome.get("canonical_id") or ""),
+                session_id=str(outcome.get("session_id") or ""),
+                scope=self._write_back_scope(),
+                optimized_throughput=to_float(tput, None),
+                validated_gain_pct=to_float(validated_gain, None),
+                ts=str(outcome.get("updated_at") or ""),
+            ),
         )
 
     def _write_back_scope(self) -> dict[str, Any]:

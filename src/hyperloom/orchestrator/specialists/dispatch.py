@@ -827,18 +827,19 @@ class SpecialistDispatchCollaborator(CoordinatorCollaborator):
             return
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+            from hyperloom.inference_optimizer.breakdown.recorder.phase_records import SpecialistRound
 
             phase_event.record_specialist_round(
-                task_id=str(task.task_id or ""),
-                phase=source_phase or str(self.shared_state.phase or ""),
-                macro_cycle=int(self.shared_state.macro_cycle or 0),
-                round_id=str(round_entry.get("round_id") or ""),
-                domain=round_entry.get("domain") or "",
-                gap_canonical_id=round_entry.get("gap_canonical_id") or "",
-                reason=round_entry.get("reason") or "",
-                source=round_entry.get("source") or "",
-                tags=round_entry.get("tags") or [],
-                **product,
+                SpecialistRound(
+                    task_id=str(task.task_id or ""),
+                    round_id=str(round_entry.get("round_id") or ""),
+                    domain=round_entry.get("domain") or "",
+                    gap_canonical_id=round_entry.get("gap_canonical_id") or "",
+                    reason=round_entry.get("reason") or "",
+                    source=round_entry.get("source") or "",
+                    tags=round_entry.get("tags") or [],
+                    **product,
+                )
             )
         except Exception:
             log.debug("specialist bookkeeping: phase round product record failed", exc_info=True)

@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_outcome
+from hyperloom.inference_optimizer.breakdown.collectors.v6 import OutcomeSources, collect_v6_outcome
 
 
 class TestFinalRecipeCarriesLatency:
@@ -23,19 +23,21 @@ class TestFinalRecipeCarriesLatency:
     def _final(self, current_best: dict) -> dict:
         """``outcome.final`` for a session whose close settled ``current_best``."""
         outcome = collect_v6_outcome(
-            session={"stop_reason": "target_reached"},
-            close={
-                "final_recipe": {
-                    "throughput": current_best.get("tput"),
-                    "ttft_mean_ms": current_best.get("ttft_mean_ms"),
-                    "e2el_mean_ms": current_best.get("e2el_mean_ms"),
-                    "action_path": [str(current_best.get("action") or "")],
-                    "extra_server_args": "",
-                    "extra_envs": {},
-                }
-            },
-            state={},
-            timeline=[],
+            OutcomeSources(
+                session={"stop_reason": "target_reached"},
+                close={
+                    "final_recipe": {
+                        "throughput": current_best.get("tput"),
+                        "ttft_mean_ms": current_best.get("ttft_mean_ms"),
+                        "e2el_mean_ms": current_best.get("e2el_mean_ms"),
+                        "action_path": [str(current_best.get("action") or "")],
+                        "extra_server_args": "",
+                        "extra_envs": {},
+                    }
+                },
+                state={},
+                timeline=[],
+            )
         )
         return outcome["final"]
 

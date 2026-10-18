@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_metadata
+from hyperloom.inference_optimizer.breakdown.collectors.v6 import MetadataSources, collect_v6_metadata
 from hyperloom.inference_optimizer.breakdown.recorder import (
     SECTION_SHAPES,
     assemble_parts,
@@ -305,7 +305,8 @@ def _collect(recorded=None, **overrides):
         recorded=recorded,
     )
     kwargs.update(overrides)
-    return collect_v6_metadata(**kwargs)
+    exported_at_utc, warnings = kwargs.pop("exported_at_utc"), kwargs.pop("warnings")
+    return collect_v6_metadata(MetadataSources(**kwargs), exported_at_utc=exported_at_utc, warnings=warnings)
 
 
 def test_a_recorded_leaf_beats_the_projection(tmp_path):

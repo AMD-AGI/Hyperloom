@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import threading
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
@@ -17,7 +18,7 @@ from hyperloom.common.io import WriteOptions, atomic_write_text
 from hyperloom.common.timeutil import now_iso
 
 from .sections import slug
-from .trace import trace_enabled, trace_write
+from .trace import WriteTrace, trace_enabled, trace_write
 
 SectionShape = Literal["item", "singleton"]
 
@@ -196,6 +197,15 @@ def _merge_lists(current: list[Any], update: list[Any]) -> list[Any]:
     return merged
 
 
+@dataclass(frozen=True)
+class FragmentSlot:
+    """Where one fragment lives: its section, shape and file name."""
+
+    section: str
+    kind: str
+    filename: str
+
+
 class Recorder:
     """Per-(session, producer) writer of breakdown record fragments."""
 
@@ -244,7 +254,7 @@ class Recorder:
         try:
             self._check_shape(section, "singleton")
             filename = f"{_slug(section)}__{self._producer}.json"
-            return self._write(section, "singleton", payload, filename=filename)
+            return self._write(FragmentSlot(section, "singleton", filename), payload)
         except RECORDING_ERRORS as exc:
             self._park_spool_failure(section, exc)
             return None
@@ -274,12 +284,7 @@ class Recorder:
                 except (OSError, ValueError, TypeError):
                     merged = dict(payload)
                 return self._write(
-                    section,
-                    "singleton",
-                    merged,
-                    filename=filename,
-                    operation="upsert",
-                    previous=previous,
+                    FragmentSlot(section, "singleton", filename), merged, operation="upsert", previous=previous
                 )
         except RECORDING_ERRORS as exc:
             self._park_spool_failure(section, exc)
@@ -310,7 +315,7 @@ class Recorder:
                 # One number serves both filename and envelope, so ``seq=N`` in a trace line locates the file that write produced.
                 seq = self._next_seq()
                 filename = f"{_slug(section)}__{self._producer}__{os.getpid()}-{seq:06d}.json"
-            return self._write(section, "item", payload, filename=filename, seq=seq)
+            return self._write(FragmentSlot(section, "item", filename), payload, seq=seq)
         except RECORDING_ERRORS as exc:
             self._park_spool_failure(section, exc)
             return None
@@ -378,12 +383,7 @@ class Recorder:
                 except (OSError, ValueError, TypeError):
                     merged = dict(payload)
                 return self._write(
-                    section,
-                    "item",
-                    merged,
-                    filename=filename,
-                    operation="upsert",
-                    previous=previous,
+                    FragmentSlot(section, "item", filename), merged, operation="upsert", previous=previous
                 )
         except RECORDING_ERRORS as exc:
             self._park_spool_failure(section, exc)
@@ -411,16 +411,14 @@ class Recorder:
 
     def _write(
         self,
-        section: str,
-        kind: str,
+        slot: FragmentSlot,
         payload: Mapping[str, Any],
         *,
-        filename: str,
         operation: str = "write",
         previous: Mapping[str, Any] | None = None,
         seq: int | None = None,
     ) -> Path:
-        """Atomically write one fragment record to ``filename`` in the spool dir.
+        """Atomically write one fragment record to ``slot`` in the spool dir.
 
         Wraps ``payload`` in the fragment envelope (section / kind / seq / ts /
         producer) and writes it via a temp file plus ``os.replace``, so readers
@@ -435,54 +433,42 @@ class Recorder:
         is re-raised after the temp file is removed.
         """
         record = {
-            "section": section,
-            "kind": kind,
+            "section": slot.section,
+            "kind": slot.kind,
             "seq": self._next_seq() if seq is None else seq,
             "ts": now_iso(timespec="microseconds"),
             "producer": self._producer,
             "payload": dict(payload) if isinstance(payload, Mapping) else payload,
         }
         data = json.dumps(record, ensure_ascii=False, sort_keys=True, default=str)
-        target = self._dir / filename
+        target = self._dir / slot.filename
         # Only knowable before the write, and it is the difference between recording a new fact and replacing one.
-        traced = trace_enabled()
-        existed = target.exists() if traced else False
+        trace = (
+            WriteTrace(
+                section=slot.section,
+                kind=slot.kind,
+                operation=operation,
+                target=target,
+                payload=payload if isinstance(payload, Mapping) else {},
+                producer=self._producer,
+                seq=record["seq"],
+                ts=record["ts"],
+                size=len(data),
+                existed=target.exists(),
+                previous=previous,
+            )
+            if trace_enabled()
+            else None
+        )
         try:
             atomic_write_text(target, data, options=WriteOptions(make_parents=True))
         except BaseException as exc:
-            if traced:
-                self._trace(record, target, payload, operation, previous, existed, len(data), exc)
+            if trace is not None:
+                trace_write(replace(trace, error=exc))
             raise
-        if traced:
-            self._trace(record, target, payload, operation, previous, existed, len(data), None)
+        if trace is not None:
+            trace_write(trace)
         return target
-
-    def _trace(
-        self,
-        record: Mapping[str, Any],
-        target: Path,
-        payload: Mapping[str, Any],
-        operation: str,
-        previous: Mapping[str, Any] | None,
-        existed: bool,
-        size: int,
-        error: BaseException | None,
-    ) -> None:
-        """Emit one write-trace line for a fragment this recorder just wrote."""
-        trace_write(
-            section=str(record.get("section") or ""),
-            kind=str(record.get("kind") or ""),
-            operation=operation,
-            target=target,
-            payload=payload if isinstance(payload, Mapping) else {},
-            producer=self._producer,
-            seq=int(record.get("seq") or 0),
-            ts=str(record.get("ts") or ""),
-            size=size,
-            existed=existed,
-            previous=previous,
-            error=error,
-        )
 
 
 _RECORDERS: dict[tuple[str, str], Recorder] = {}

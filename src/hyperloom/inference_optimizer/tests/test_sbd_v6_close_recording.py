@@ -20,6 +20,10 @@ import pytest
 from hyperloom.inference_optimizer.breakdown.collectors.v6_close import collect_v6_close
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts
 from hyperloom.inference_optimizer.breakdown.recorder.close_out import (
+    CloseStep,
+    FinalRecipe,
+    RooflineProgress,
+    WriteBackSettlement,
     RESULT_AGENTX_BLOCKED,
     RESULT_TRANSPORT_FAILED,
     RESULT_WRITTEN,
@@ -58,15 +62,15 @@ def _run_sequence(session_dir: Path, *, fail: str = "") -> None:
         status = "running" if step == "sequencer_started" else "done"
         if step == fail:
             status = "failed"
-        record_close_step(session_dir, step=step, status=status)
+        record_close_step(session_dir, CloseStep(step=step, status=status))
 
 
 def test_mid_sequence_reports_running_not_degraded(sd: Path) -> None:
     record_close_opened(sd)
-    record_close_step(sd, step="sequencer_started", status="running")
-    record_close_step(sd, step="fact_finalize", status="done")
-    record_close_step(sd, step="report", status="done")
-    record_close_step(sd, step="session_breakdown", status="done")
+    record_close_step(sd, CloseStep(step="sequencer_started", status="running"))
+    record_close_step(sd, CloseStep(step="fact_finalize", status="done"))
+    record_close_step(sd, CloseStep(step="report", status="done"))
+    record_close_step(sd, CloseStep(step="session_breakdown", status="done"))
 
     close = _close(sd)
     assert close["status"] == "running"
@@ -149,12 +153,14 @@ def test_step_row_carries_task_id_and_detail(sd: Path) -> None:
     record_close_opened(sd)
     record_close_step(
         sd,
-        step="report",
-        status="failed",
-        task_id="t-42",
-        detail="task_state='failed'",
-        optional=False,
-        error="task_state='failed'",
+        CloseStep(
+            step="report",
+            status="failed",
+            task_id="t-42",
+            detail="task_state='failed'",
+            optional=False,
+            error="task_state='failed'",
+        ),
     )
 
     row = _close(sd)["steps"][0]
@@ -173,7 +179,7 @@ def test_step_substream_does_not_leak_into_the_envelope(sd: Path) -> None:
 
 def test_unknown_step_name_is_passed_through_and_warned(sd: Path) -> None:
     record_close_opened(sd)
-    record_close_step(sd, step="brand_new_step", status="done")
+    record_close_step(sd, CloseStep(step="brand_new_step", status="done"))
 
     warnings: list[str] = []
     close = _close(sd, warnings=warnings)
@@ -192,16 +198,18 @@ def test_published_recipe_reports_its_identity_and_verdict(sd: Path) -> None:
     record_write_back_opened(sd, attempt=1, source="close")
     record_write_back_settled(
         sd,
-        attempt=1,
-        source="close",
-        status="written",
-        result_type=RESULT_WRITTEN,
-        backend="local",
-        canonical_id="cid-1",
-        session_id="sid-1",
-        scope={"kernel_optimizer": "geak", "tp": 8, "conc": 64, "isl": 128, "osl": 128},
-        optimized_throughput=1234.5,
-        validated_gain_pct=12.5,
+        WriteBackSettlement(
+            attempt=1,
+            source="close",
+            status="written",
+            result_type=RESULT_WRITTEN,
+            backend="local",
+            canonical_id="cid-1",
+            session_id="sid-1",
+            scope={"kernel_optimizer": "geak", "tp": 8, "conc": 64, "isl": 128, "osl": 128},
+            optimized_throughput=1234.5,
+            validated_gain_pct=12.5,
+        ),
     )
 
     write_back = _close(sd)["kb_write_back"]
@@ -234,23 +242,27 @@ def test_t4_fallback_retry_appends_a_second_attempt(sd: Path) -> None:
     record_write_back_opened(sd, attempt=1, source="close")
     record_write_back_settled(
         sd,
-        attempt=1,
-        source="close",
-        status="error",
-        result_type=RESULT_TRANSPORT_FAILED,
-        raw_reason="ConnectionError",
-        error_class="ConnectionError",
-        backend="kb-store",
+        WriteBackSettlement(
+            attempt=1,
+            source="close",
+            status="error",
+            result_type=RESULT_TRANSPORT_FAILED,
+            raw_reason="ConnectionError",
+            error_class="ConnectionError",
+            backend="kb-store",
+        ),
     )
     record_write_back_opened(sd, attempt=2, source="t4_fallback")
     record_write_back_settled(
         sd,
-        attempt=2,
-        source="t4_fallback",
-        status="written",
-        result_type=RESULT_WRITTEN,
-        backend="kb-store",
-        canonical_id="cid-2",
+        WriteBackSettlement(
+            attempt=2,
+            source="t4_fallback",
+            status="written",
+            result_type=RESULT_WRITTEN,
+            backend="kb-store",
+            canonical_id="cid-2",
+        ),
     )
 
     write_back = _close(sd)["kb_write_back"]
@@ -268,13 +280,15 @@ def test_failure_keeps_the_error_class_apart_from_the_reason(sd: Path) -> None:
     record_write_back_opened(sd, attempt=1, source="close")
     record_write_back_settled(
         sd,
-        attempt=1,
-        source="close",
-        status="error",
-        result_type=RESULT_TRANSPORT_FAILED,
-        raw_reason="upload rejected by store",
-        error_class="RemoteRecipeUploadError",
-        backend="kb-store",
+        WriteBackSettlement(
+            attempt=1,
+            source="close",
+            status="error",
+            result_type=RESULT_TRANSPORT_FAILED,
+            raw_reason="upload rejected by store",
+            error_class="RemoteRecipeUploadError",
+            backend="kb-store",
+        ),
     )
 
     write_back = _close(sd)["kb_write_back"]
@@ -291,12 +305,14 @@ def test_skip_reason_is_a_recorded_code_not_a_matched_substring(sd: Path) -> Non
     record_write_back_opened(sd, attempt=1, source="close")
     record_write_back_settled(
         sd,
-        attempt=1,
-        source="close",
-        status="skipped",
-        result_type=RESULT_AGENTX_BLOCKED,
-        raw_reason="agentx",
-        backend="local",
+        WriteBackSettlement(
+            attempt=1,
+            source="close",
+            status="skipped",
+            result_type=RESULT_AGENTX_BLOCKED,
+            raw_reason="agentx",
+            backend="local",
+        ),
     )
 
     write_back = _close(sd)["kb_write_back"]
@@ -312,7 +328,9 @@ def test_queue_depth_is_snapshotted_when_the_attempt_settles(sd: Path) -> None:
 
     record_close_opened(sd)
     record_write_back_opened(sd, attempt=1, source="close")
-    record_write_back_settled(sd, attempt=1, source="close", status="written", result_type=RESULT_WRITTEN)
+    record_write_back_settled(
+        sd, WriteBackSettlement(attempt=1, source="close", status="written", result_type=RESULT_WRITTEN)
+    )
     # Moves after the settlement; the recorded depth must not follow it.
     dead_letter.write_text("", encoding="utf-8")
 
@@ -328,7 +346,7 @@ def test_second_pass_appends_rather_than_replacing(sd: Path) -> None:
 
     record_close_opened(sd)
     assert _close(sd)["status"] == "running", "re-entering CLOSE reopens the section"
-    record_close_step(sd, step="done", status="done")
+    record_close_step(sd, CloseStep(step="done", status="done"))
 
     close = _close(sd)
     assert [row["step"] for row in close["steps"]].count("done") == 2
@@ -340,16 +358,18 @@ def test_roofline_progress_is_snapshotted_at_the_close(sd: Path) -> None:
     record_close_opened(sd)
     record_roofline_progress(
         sd,
-        baseline_tput=1000.0,
-        baseline_ts="2026-09-06T09:00:00Z",
-        optimization_stack=[
-            {"ts": "2026-09-06T10:00:00Z", "tput": 1100.0, "action": "env_tune", "variant_name": "chunked"},
-            {"ts": "2026-09-06T11:00:00Z", "tput": 1250.0, "action": "kernel_opt", "variant_name": "fused_rms"},
-        ],
-        latest_snapshot={"snapshot_id": 4, "theoretical_peak_tok_per_sec": 4000.0},
-        current_best_tput=1250.0,
-        cumulative_gain_pct=25.0,
-        failure_streak=1,
+        RooflineProgress(
+            baseline_tput=1000.0,
+            baseline_ts="2026-09-06T09:00:00Z",
+            optimization_stack=[
+                {"ts": "2026-09-06T10:00:00Z", "tput": 1100.0, "action": "env_tune", "variant_name": "chunked"},
+                {"ts": "2026-09-06T11:00:00Z", "tput": 1250.0, "action": "kernel_opt", "variant_name": "fused_rms"},
+            ],
+            latest_snapshot={"snapshot_id": 4, "theoretical_peak_tok_per_sec": 4000.0},
+            current_best_tput=1250.0,
+            cumulative_gain_pct=25.0,
+            failure_streak=1,
+        ),
     )
 
     progress = _close(sd)["roofline_progress"]
@@ -372,11 +392,13 @@ def test_progress_reports_the_latency_domain_when_there_is_no_token_ceiling(sd: 
     record_close_opened(sd)
     record_roofline_progress(
         sd,
-        baseline_tput=0.4,
-        baseline_ts="2026-09-06T09:00:00Z",
-        optimization_stack=[],
-        latest_snapshot={"snapshot_id": 2, "roofline_ideal_ms": 800.0, "e2e_mean_ms": 2000.0},
-        current_best_tput=0.4,
+        RooflineProgress(
+            baseline_tput=0.4,
+            baseline_ts="2026-09-06T09:00:00Z",
+            optimization_stack=[],
+            latest_snapshot={"snapshot_id": 2, "roofline_ideal_ms": 800.0, "e2e_mean_ms": 2000.0},
+            current_best_tput=0.4,
+        ),
     )
 
     progress = _close(sd)["roofline_progress"]
@@ -392,10 +414,12 @@ def test_progress_says_so_when_the_curve_misses_a_promotion(sd: Path) -> None:
     record_close_opened(sd)
     record_roofline_progress(
         sd,
-        baseline_tput=1000.0,
-        optimization_stack=[{"ts": "2026-09-06T10:00:00Z", "tput": 1100.0, "action": "env_tune"}],
-        latest_snapshot={"snapshot_id": 1, "theoretical_peak_tok_per_sec": 4000.0},
-        current_best_tput=1400.0,
+        RooflineProgress(
+            baseline_tput=1000.0,
+            optimization_stack=[{"ts": "2026-09-06T10:00:00Z", "tput": 1100.0, "action": "env_tune"}],
+            latest_snapshot={"snapshot_id": 1, "theoretical_peak_tok_per_sec": 4000.0},
+            current_best_tput=1400.0,
+        ),
     )
 
     progress = _close(sd)["roofline_progress"]
@@ -406,7 +430,7 @@ def test_progress_says_so_when_the_curve_misses_a_promotion(sd: Path) -> None:
 
 def test_a_session_that_never_analyzed_reports_no_ceiling_rather_than_zero(sd: Path) -> None:
     record_close_opened(sd)
-    record_roofline_progress(sd, baseline_tput=1000.0, optimization_stack=[], latest_snapshot=None)
+    record_roofline_progress(sd, RooflineProgress(baseline_tput=1000.0, optimization_stack=[], latest_snapshot=None))
 
     progress = _close(sd)["roofline_progress"]
     assert progress["ceiling_kind"] == "none"
@@ -449,12 +473,14 @@ def test_the_recipe_that_shipped_is_snapshotted_at_the_close(sd: Path) -> None:
     record_close_opened(sd)
     record_final_recipe(
         sd,
-        throughput=142.5,
-        ttft_mean_ms=31.2,
-        e2el_mean_ms=980.0,
-        action_path=["baseline", "explore:cuda_graph"],
-        extra_server_args="--enable-torch-compile",
-        extra_envs={"HSA_ENABLE": 1},
+        FinalRecipe(
+            throughput=142.5,
+            ttft_mean_ms=31.2,
+            e2el_mean_ms=980.0,
+            action_path=["baseline", "explore:cuda_graph"],
+            extra_server_args="--enable-torch-compile",
+            extra_envs={"HSA_ENABLE": 1},
+        ),
     )
 
     recipe = _close(sd)["final_recipe"]

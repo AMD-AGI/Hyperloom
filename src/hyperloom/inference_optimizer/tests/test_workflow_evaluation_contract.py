@@ -16,12 +16,20 @@ from hyperloom.inference_optimizer.breakdown.exporter import build, patch_breakd
 from hyperloom.inference_optimizer.breakdown.session_package import package_session_artifacts
 from hyperloom.inference_optimizer.breakdown.recorder import phase_event, record_stage_reached, stack_event
 from hyperloom.inference_optimizer.breakdown.recorder.close_out import (
+    CloseStep,
     record_close_opened,
     record_close_safety_net,
     record_close_settled,
     record_close_step,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_FORGE, make_kernel_recorder
+from hyperloom.inference_optimizer.breakdown.recorder.phase_records import (
+    ActionDispatch,
+    ActionSettlement,
+    PhaseCycle,
+    PhaseEntry,
+    PhaseExit,
+)
 from hyperloom.inference_optimizer.breakdown.recorder.warm_start_event import MATCH_MISS, make_warm_start_recorder
 from hyperloom.inference_optimizer.breakdown.workflow_contract import (
     workflow_contract,
@@ -57,25 +65,24 @@ def _writer_fixture(tmp_path, *, denied: bool) -> dict:
     )
     with session_scope(tmp_path):
         phase_event.record_entry(
-            phase="PRELUDE",
-            macro_cycle=0,
-            sequence=1,
-            reason="session_start",
-            entered_unix=1.0,
+            PhaseEntry(at=PhaseCycle("PRELUDE", 0), sequence=1, reason="session_start", entered_unix=1.0)
         )
         phase_event.record_dispatch(
-            action="baseline",
-            task_id="task-1",
-            phase="PRELUDE",
-            macro_cycle=0,
-            dispatch_class="llm",
-            dispatched_unix=2.0,
+            ActionDispatch(
+                at=PhaseCycle("PRELUDE", 0),
+                action="baseline",
+                task_id="task-1",
+                dispatch_class="llm",
+                dispatched_unix=2.0,
+            )
         )
         phase_event.record_settle(
-            task_id="task-1",
-            status="failed" if denied else "succeeded",
-            decision="rejected" if denied else "accepted",
-            settled_unix=3.0,
+            ActionSettlement(
+                task_id="task-1",
+                status="failed" if denied else "succeeded",
+                decision="rejected" if denied else "accepted",
+                settled_unix=3.0,
+            )
         )
         if denied:
             phase_event.record_denial(
@@ -88,19 +95,20 @@ def _writer_fixture(tmp_path, *, denied: bool) -> dict:
                 hint="use an allowed PRELUDE action",
             )
         phase_event.record_exit(
-            phase="PRELUDE",
-            macro_cycle=0,
-            to_phase="CLOSE",
-            reason="baseline_failed" if denied else "target_reached",
-            evidence={"predicate_inputs": predicate_inputs},
-            exited_unix=4.0,
+            PhaseExit(
+                at=PhaseCycle("PRELUDE", 0),
+                to_phase="CLOSE",
+                reason="baseline_failed" if denied else "target_reached",
+                evidence={"predicate_inputs": predicate_inputs},
+                exited_unix=4.0,
+            )
         )
     record_stage_reached(tmp_path, "close" if not denied else "prelude")
     if denied:
         record_close_safety_net(tmp_path)
     else:
         record_close_opened(tmp_path)
-        record_close_step(tmp_path, step="report", status="done", optional=False)
+        record_close_step(tmp_path, CloseStep(step="report", status="done", optional=False))
         record_close_settled(tmp_path)
     return build(tmp_path)
 
@@ -231,7 +239,9 @@ def test_authored_milestones_survive_sbd_export(tmp_path):
         warm_start.finish(match_status=MATCH_MISS)
         assert build(tmp_path)["outcome"]["stage_reached_recorded"] == "warm_start"
 
-        assert phase_event.record_dispatch(action="profile", task_id="profile-1", phase="PRELUDE", macro_cycle=0)
+        assert phase_event.record_dispatch(
+            ActionDispatch(at=PhaseCycle("PRELUDE", 0), action="profile", task_id="profile-1")
+        )
         assert build(tmp_path)["outcome"]["stage_reached_recorded"] == "profile"
 
         record_phase_transition(state, to_phase="KERNEL_AGENT", reason="phase_entered")
@@ -248,14 +258,15 @@ def test_v2_budget_and_stack_ids_come_from_writers(tmp_path):
     state.save(tmp_path)
     inputs = workflow_predicate_inputs(state, now_unix=1.0)
     with session_scope(tmp_path):
-        phase_event.record_entry(phase="FRAMEWORK_AGENT", macro_cycle=0, sequence=1, entered_unix=1.0)
+        phase_event.record_entry(PhaseEntry(at=PhaseCycle("FRAMEWORK_AGENT", 0), sequence=1, entered_unix=1.0))
         phase_event.record_exit(
-            phase="FRAMEWORK_AGENT",
-            macro_cycle=0,
-            to_phase="CLOSE",
-            reason="target_reached",
-            evidence={"predicate_inputs": inputs},
-            exited_unix=2.0,
+            PhaseExit(
+                at=PhaseCycle("FRAMEWORK_AGENT", 0),
+                to_phase="CLOSE",
+                reason="target_reached",
+                evidence={"predicate_inputs": inputs},
+                exited_unix=2.0,
+            )
         )
         stack_event.record_adoption(
             stack_index=0,
@@ -288,12 +299,14 @@ def test_final_close_refresh_matches_rebuilt_package(tmp_path):
     state.set_stop_reason("target_reached")
     state.save(tmp_path)
     record_close_opened(tmp_path)
-    record_close_step(tmp_path, step="session_breakdown", status="done", optional=False)
+    record_close_step(tmp_path, CloseStep(step="session_breakdown", status="done", optional=False))
     sbd_path = write_breakdown_json(tmp_path)
     package = package_session_artifacts(tmp_path, session_id="v2-close", dest_root=tmp_path / "workspace")
     assert package is not None
-    record_close_step(tmp_path, step="artifact_package", status="done", optional=False, artifact_path=str(package))
-    record_close_step(tmp_path, step="done", status="done", optional=False)
+    record_close_step(
+        tmp_path, CloseStep(step="artifact_package", status="done", optional=False, artifact_path=str(package))
+    )
+    record_close_step(tmp_path, CloseStep(step="done", status="done", optional=False))
     record_close_settled(tmp_path)
     record_stage_reached(tmp_path, "close")
     assert patch_breakdown_close(tmp_path)
@@ -404,17 +417,15 @@ def test_contract_vocabularies_match_runtime_surfaces():
 
 
 def test_process_status_and_business_outcome_remain_separate():
-    from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import build_envelope
+    from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EventHeader, build_envelope
 
     rejected = build_envelope(
-        event_type="warm_replay",
-        event="prelude:0:warm_replay_1",
+        EventHeader("warm_replay", "prelude:0:warm_replay_1"),
         status="rejected",
         ext={"verdict": {"outcome_status": "quality_failed"}},
     )
     no_gain = build_envelope(
-        event_type="kernel",
-        event="kernel_agent:0:kernel_1",
+        EventHeader("kernel", "kernel_agent:0:kernel_1"),
         status="succeeded",
         ext={"outcome": {"verdict": "no_improvement"}},
     )
@@ -426,15 +437,10 @@ def test_process_status_and_business_outcome_remain_separate():
 
 
 def test_malformed_failure_is_preserved_for_schema_rejection(tmp_path):
-    from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import build_envelope
+    from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EventHeader, build_envelope
 
     fixture = _writer_fixture(tmp_path, denied=False)
-    event = build_envelope(
-        event_type="roofline",
-        event="prelude:0:roofline",
-        status="failed",
-        ext={"failure": "boom"},
-    )
+    event = build_envelope(EventHeader("roofline", "prelude:0:roofline"), status="failed", ext={"failure": "boom"})
     fixture["timeline"].append(event)
 
     assert event["failure"] == "boom"
@@ -443,11 +449,10 @@ def test_malformed_failure_is_preserved_for_schema_rejection(tmp_path):
 
 
 def test_unknown_business_outcome_is_preserved_for_schema_rejection():
-    from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import build_envelope
+    from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EventHeader, build_envelope
 
     event = build_envelope(
-        event_type="kernel",
-        event="kernel_agent:0:kernel_1",
+        EventHeader("kernel", "kernel_agent:0:kernel_1"),
         status="succeeded",
         ext={"outcome": {"verdict": "undeclared_new_state"}},
     )

@@ -868,21 +868,23 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # Fresh tasks carry the phase coordinates frozen when their row was
         # authored. Legacy rows have no record and remain legacy on resume.
         from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ActionDispatch, PhaseCycle
         from hyperloom.orchestrator.state.task_registry import task_dispatch_record
 
         dispatch_record = task_dispatch_record(task)
         if dispatch_record is not None:
             try:
                 recorded = phase_event.record_dispatch(
-                    action=str(task.kind or ""),
-                    task_id=str(task.task_id or ""),
-                    phase=str(dispatch_record["phase"]),
-                    macro_cycle=int(dispatch_record["macro_cycle"]),
-                    tick=int(dispatch_record["tick"]),
-                    dispatch_class=str(dispatch_record["dispatch_class"]),
-                    allowed=bool(dispatch_record["allowed"]),
-                    denial_rule=dispatch_record["denial_rule"],
-                    dispatched_unix=time.time(),
+                    ActionDispatch(
+                        at=PhaseCycle(str(dispatch_record["phase"]), int(dispatch_record["macro_cycle"])),
+                        action=str(task.kind or ""),
+                        task_id=str(task.task_id or ""),
+                        tick=int(dispatch_record["tick"]),
+                        dispatch_class=str(dispatch_record["dispatch_class"]),
+                        allowed=bool(dispatch_record["allowed"]),
+                        denial_rule=dispatch_record["denial_rule"],
+                        dispatched_unix=time.time(),
+                    )
                 )
                 if not recorded:
                     raise RuntimeError("dispatch evidence was not durably recorded")
@@ -1227,17 +1229,17 @@ class DispatcherCollaborator(CoordinatorCollaborator):
         # Settle the dispatch row on the phase that ordered it, whichever way
         # the promotion above ended.
         from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ActionSettlement
 
         phase_event.record_settle(
-            task_id=str(task.task_id or ""),
-            status=str(result.state or ""),
-            decision=verdict.value,
-            error_class=result_payload.get("error_class") or result.error_class,
-            workspace=result_payload.get("workspace"),
-            settled_unix=time.time(),
-            phase=str(self.shared_state.phase or ""),
-            macro_cycle=int(self.shared_state.macro_cycle or 0),
-            action=str(task.kind or ""),
+            ActionSettlement(
+                task_id=str(task.task_id or ""),
+                status=str(result.state or ""),
+                decision=verdict.value,
+                error_class=result_payload.get("error_class") or result.error_class,
+                workspace=result_payload.get("workspace"),
+                settled_unix=time.time(),
+            )
         )
         if task.kind in ("explore", "integrate_patch"):
             self._coord.writeback.record_intervention_for_task(task, result.result, verdict)

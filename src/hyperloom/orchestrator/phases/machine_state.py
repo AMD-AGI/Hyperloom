@@ -2014,6 +2014,7 @@ def record_phase_transition(
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import phase_event, record_stage_reached
         from hyperloom.inference_optimizer.breakdown.recorder.outcome_stage import PHASE_STAGES
+        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseEntry, PhaseExit
         from hyperloom.inference_optimizer.session.session_binding import bound_session
 
         # The phase itself, as a timeline event: close the span being left on
@@ -2023,23 +2024,25 @@ def record_phase_transition(
         # row at all to close the segment the session ended in.
         if from_phase and from_phase != str(row.get("to_phase") or ""):
             phase_event.record_exit(
-                phase=from_phase,
-                macro_cycle=prev_cycle,
-                to_phase=str(row.get("to_phase") or ""),
-                reason=str(row.get("reason") or ""),
-                evidence=dict(row.get("evidence") or {}),
-                exited_at=str(row.get("ts") or ""),
-                exited_unix=now_unix,
+                PhaseExit(
+                    at=PhaseCycle(from_phase, prev_cycle),
+                    to_phase=str(row.get("to_phase") or ""),
+                    reason=str(row.get("reason") or ""),
+                    evidence=dict(row.get("evidence") or {}),
+                    exited_at=str(row.get("ts") or ""),
+                    exited_unix=now_unix,
+                )
             )
         phase_event.record_entry(
-            phase=str(row.get("to_phase") or ""),
-            macro_cycle=entry_cycle,
-            sequence=len(history),
-            from_phase=from_phase,
-            reason=str(row.get("reason") or ""),
-            evidence=dict(row.get("evidence") or {}),
-            entered_at=str(row.get("ts") or ""),
-            entered_unix=now_unix,
+            PhaseEntry(
+                at=PhaseCycle(str(row.get("to_phase") or ""), entry_cycle),
+                sequence=len(history),
+                from_phase=from_phase,
+                reason=str(row.get("reason") or ""),
+                evidence=dict(row.get("evidence") or {}),
+                entered_at=str(row.get("ts") or ""),
+                entered_unix=now_unix,
+            )
         )
         stage = PHASE_STAGES.get(str(row.get("to_phase") or ""))
         if stage:
@@ -2080,14 +2083,16 @@ def append_phase_history_event(
     state.phase_history = history
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseMarker
 
         phase_event.record_marker(
-            phase=phase,
-            macro_cycle=state.macro_cycle,
-            sequence=len(history),
-            reason=str(row.get("reason") or ""),
-            evidence=dict(row.get("evidence") or {}),
-            ts=str(row.get("ts") or ""),
+            PhaseMarker(
+                at=PhaseCycle(phase, state.macro_cycle),
+                sequence=len(history),
+                reason=str(row.get("reason") or ""),
+                evidence=dict(row.get("evidence") or {}),
+                ts=str(row.get("ts") or ""),
+            )
         )
     except Exception:  # noqa: BLE001 -- telemetry must never block the marker
         pass
