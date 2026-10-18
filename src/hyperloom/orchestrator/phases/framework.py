@@ -18,7 +18,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer import framework_registry
 
 from . import machine_state as _phase_state
-from ..state.attempt_ledger import record_patch_attempt
+from ..state.attempt_ledger import AttemptRow, record_attempt_row
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
 from ..state.task_registry import TaskNotFound
 from ..state.shared_state import resolve_grading_anchor_tput, inject_stack_base_params
@@ -40,6 +40,7 @@ from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX
 from hyperloom.orchestrator.lever import (
     LEVER_SOURCE_PATCH,
     LEVER_UPSTREAM_PR,
+    patch_lever_kind,
     patch_owner_phase,
 )
 from .proposal_bench import CUSTOM_PROPOSAL_DOMAIN, ProposalBench, kb_exposure_of
@@ -2427,19 +2428,22 @@ class FrameworkPhase(ProposalBench):
         )
         if not recorded:
             return
-        record_patch_attempt(
+        # The deliverable names the lever when the dispatch did not, but a dispatch that named one outranks it.
+        evidence = {**res, **params}
+        record_attempt_row(
             self.shared_state,
-            task_id=str(getattr(task, "task_id", "") or ""),
-            specialist_task_id=spec_tid,
-            outcome=status,
-            adopted=adopted,
-            gain_pct=delta_pct,
-            before_tput=res.get("base_tput") if res.get("base_tput") is not None else params.get("base_tput"),
-            after_tput=new_tput,
-            error_class=str(res.get("error_class") or ""),
-            # The deliverable names the lever when the dispatch did not,
-            # but a dispatch that named one outranks it.
-            evidence={**res, **params},
+            AttemptRow(
+                lever_kind=patch_lever_kind(evidence),
+                task_id=str(getattr(task, "task_id", "") or ""),
+                candidate_id=str(evidence.get("framework_agent_candidate_id") or ""),
+                specialist_task_id=spec_tid,
+                outcome=status,
+                adopted=adopted,
+                gain_pct=delta_pct,
+                before_tput=res.get("base_tput") if res.get("base_tput") is not None else params.get("base_tput"),
+                after_tput=new_tput,
+                error_class=str(res.get("error_class") or ""),
+            ),
         )
         _record_source_attempt(
             self,

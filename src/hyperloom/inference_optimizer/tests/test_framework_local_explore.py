@@ -509,22 +509,25 @@ def test_the_arms_deliverable_decides_its_lever():
     from hyperloom.orchestrator.lever import (
         LEVER_CONFIG,
         LEVER_SOURCE_PATCH,
+        patch_lever_kind,
     )
-    from hyperloom.orchestrator.state.attempt_ledger import record_patch_attempt
+    from hyperloom.orchestrator.state.attempt_ledger import AttemptRow, record_attempt_row
 
     def _lever(**deliverable: Any) -> str:
         state = SharedState()
-        record_patch_attempt(
+        evidence = {"framework_agent_candidate_id": "local_explore:0", **deliverable}
+        record_attempt_row(
             state,
-            task_id="t-1",
-            specialist_task_id="spec-1",
-            outcome="reverted",
-            adopted=False,
-            gain_pct=None,
-            before_tput=5000.0,
-            after_tput=4900.0,
-            error_class="",
-            evidence={"framework_agent_candidate_id": "local_explore:0", **deliverable},
+            AttemptRow(
+                lever_kind=patch_lever_kind(evidence),
+                task_id="t-1",
+                specialist_task_id="spec-1",
+                outcome="reverted",
+                adopted=False,
+                gain_pct=None,
+                before_tput=5000.0,
+                after_tput=4900.0,
+            ),
         )
         return str(state.attempts[0]["lever_kind"])
 

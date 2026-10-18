@@ -25,10 +25,10 @@ from hyperloom.inference_optimizer.session.optimization_journal import (
 )
 from hyperloom.orchestrator.knowledge.recipe_kb import recipe_canonical_id
 from hyperloom.orchestrator.knowledge.workload_tags import workload_shape_tags
-from hyperloom.orchestrator.lever import lever_kind_for_task
+from hyperloom.orchestrator.lever import LEVER_CONFIG, lever_kind_for_task
 
 from ..collaborator import CoordinatorCollaborator
-from ..state.attempt_ledger import record_config_attempt
+from ..state.attempt_ledger import AttemptRow, record_attempt_row
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
 
 if TYPE_CHECKING:
@@ -390,19 +390,22 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 outcome = str(vo.get("outcome") or "") if isinstance(vo, dict) else ""
                 if outcome and outcome not in _NON_ATTEMPT_OUTCOMES:
                     metrics = vo.get("metrics") if isinstance(vo.get("metrics"), dict) else {}
-                    record_config_attempt(
+                    record_attempt_row(
                         self.shared_state,
-                        task_id=str(task.task_id or ""),
-                        round_id=round_id,
-                        fingerprint=str(vo.get("fingerprint") or ""),
-                        variant_name=str(vo.get("variant_name") or ""),
-                        outcome=outcome,
-                        adopted=adopted,
-                        gain_pct=metrics.get("gain_pct"),
-                        before_tput=metrics.get("base_tput"),
-                        after_tput=metrics.get("tput"),
-                        error_class=str(vo.get("error_class") or ""),
-                        provenance=str(vo.get("provenance") or ""),
+                        AttemptRow(
+                            lever_kind=LEVER_CONFIG,
+                            task_id=str(task.task_id or ""),
+                            round_id=round_id,
+                            fingerprint=str(vo.get("fingerprint") or ""),
+                            variant_name=str(vo.get("variant_name") or ""),
+                            outcome=outcome,
+                            adopted=adopted,
+                            gain_pct=metrics.get("gain_pct"),
+                            before_tput=metrics.get("base_tput"),
+                            after_tput=metrics.get("tput"),
+                            error_class=str(vo.get("error_class") or ""),
+                            provenance=str(vo.get("provenance") or ""),
+                        ),
                     )
                 self._record_fact_per_variant(
                     task=task,
