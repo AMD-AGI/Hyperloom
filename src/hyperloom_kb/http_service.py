@@ -420,14 +420,6 @@ class ExperienceHTTPService:
             raise UnknownStateItem(f"Experience {experience_id} is not held here")
         return self._records.read(experience_id, str(row["content_hash"]))
 
-    @property
-    def schema_refs(self) -> tuple[str, ...]:
-        with self._database.transaction() as connection:
-            rows = connection.execute(
-                "SELECT schema_ref FROM schemas WHERE kb_id = %s ORDER BY schema_ref", (self.kb_id,)
-            ).fetchall()
-        return tuple(str(row["schema_ref"]) for row in rows)
-
     def declaration_for(self, schema_ref: str) -> ExperienceDeclaration:
         declaration = self._declarations.get(schema_ref)
         if declaration is not None:

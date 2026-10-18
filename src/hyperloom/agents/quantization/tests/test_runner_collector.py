@@ -129,14 +129,3 @@ def test_resolve_quantized_dir_pyyaml_missing(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setattr(builtins, "__import__", fake_import)
     path, present, err = rc._resolve_quantized_dir(tmp_path)
     assert (path, present, err) == (None, True, "pyyaml_missing")
-
-
-def test_scan_hypothesis_attempts_missing_dir(tmp_path: Path) -> None:
-    # Nonexistent workspace -> empty tuple.
-    assert rc._scan_hypothesis_attempts(tmp_path / "does_not_exist") == ()
-
-
-def test_scan_hypothesis_attempts_sorted(tmp_path: Path) -> None:
-    (tmp_path / "fix_hypothesis_attempt_2.md").write_text("x", encoding="utf-8")
-    (tmp_path / "fix_hypothesis_attempt_1.md").write_text("x", encoding="utf-8")
-    assert rc._scan_hypothesis_attempts(tmp_path) == (1, 2)

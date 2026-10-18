@@ -86,7 +86,6 @@ def test_forge_loop_exposes_the_superset_of_resume_and_orchestration_options():
         "--target-functions",
         "--experience-kb",
         "--no-experience-kb",
-        "--return-after-read-kb",
         "--resume",
     ):
         assert exposed in help_result.output
@@ -434,89 +433,6 @@ def test_validated_warm_start_publishes_recovery_before_iteration(tmp_path):
     assert checkpoints["hyperloom"]["search_start_mean_case_speedup"] == 1.25
 
 
-def test_return_after_read_kb_skips_iteration_for_validated_improvement(
-    tmp_path,
-    monkeypatch,
-):
-    captured = _install_cli_fakes(monkeypatch, tmp_path)
-
-    def applied_warmstart(**kwargs):
-        workspace = Path(kwargs["workspace_dir"])
-        kernel = Path(kwargs["kernel"])
-        kernel.write_text("def kernel():\n    return 2\n")
-        subprocess.run(["git", "add", "-u"], cwd=workspace, check=True)
-        subprocess.run(
-            ["git", "commit", "-m", "kb warm-start: apply prior/solution"],
-            cwd=workspace,
-            check=True,
-            capture_output=True,
-        )
-        head = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=workspace,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        return {
-            "candidate": True,
-            "applied": True,
-            "applied_commit": head,
-            "applied_rank": 1,
-            "pristine_ms": 10.0,
-            "keep_baseline_ms": 8.0,
-            "mean_case_speedup": 1.25,
-            "solution_slug": "prior/solution",
-            "speedup": 1.25,
-            "program_md_addition": "APPLIED WARM START",
-            "reference_program_md_addition": "REFERENCE ONLY",
-        }
-
-    monkeypatch.setattr(forge_loop_command, "kb_warmstart", applied_warmstart)
-    result_json = tmp_path / "return-after-kb.json"
-
-    result, workspace = _invoke_forge_loop(
-        tmp_path,
-        [
-            "--return-after-read-KB",
-            "--result-json",
-            str(result_json),
-        ],
-    )
-
-    assert result.exit_code == 0, result.output
-    assert "run_kwargs" not in captured
-    assert "agent_fn_kwargs" not in captured
-    payload = _result_payload(result.output)
-    assert payload == json.loads(result_json.read_text())
-    assert payload["returned_after_read_kb"] is True
-    assert payload["warm_start"] is True
-    assert payload["iteration_count"] == 0
-    assert payload["baseline_ms"] == 10.0
-    assert payload["best_ms"] == 8.0
-    assert payload["total_speedup"] == 1.25
-    assert payload["incremental_improved"] is False
-    assert payload["kb_experience"]["read"]["applied"] is True
-    assert (workspace / "forge_experiments" / "best_result.json").is_file()
-    assert "returning before iteration 1" in result.output
-
-
-def test_return_after_read_kb_continues_without_applied_improvement(
-    tmp_path,
-    monkeypatch,
-):
-    captured = _install_cli_fakes(monkeypatch, tmp_path)
-
-    result, _workspace = _invoke_forge_loop(
-        tmp_path,
-        ["--return-after-read-kb"],
-    )
-
-    assert result.exit_code == 0, result.output
-    assert "run_kwargs" in captured
-    assert "returned_after_read_kb" not in _result_payload(result.output)
-
-
 def test_a_warm_start_rejected_by_the_task_suite_is_not_returned(
     tmp_path,
     monkeypatch,
@@ -543,16 +459,12 @@ def test_a_warm_start_rejected_by_the_task_suite_is_not_returned(
     result, workspace = _invoke_forge_loop(
         tmp_path,
         [
-            "--return-after-read-KB",
             "--result-json",
             str(result_json),
         ],
     )
 
     assert result.exit_code == 0, result.output
-    payload = _result_payload(result.output)
-    assert "returned_after_read_kb" not in payload
-    assert "returning before iteration 1" not in result.output
     assert not (workspace / "forge_experiments" / "best_result.json").exists()
     # The run searched instead of answering with the rejected kernel.
     assert "run_kwargs" in captured
@@ -949,30 +861,6 @@ def test_forge_loop_can_disable_all_experience_kb_io(tmp_path, monkeypatch):
         "written": False,
         "reason": "disabled",
     }
-
-
-def test_forge_loop_rejects_return_after_read_when_experience_kb_is_disabled(
-    tmp_path,
-):
-    workspace, kernel, driver = _initialize_workspace(tmp_path)
-
-    result = CliRunner().invoke(
-        main,
-        [
-            "forge-loop",
-            "--workspace",
-            str(workspace),
-            "--kernel",
-            str(kernel),
-            "--driver",
-            str(driver),
-            "--no-experience-kb",
-            "--return-after-read-kb",
-        ],
-    )
-
-    assert result.exit_code != 0
-    assert "cannot be used with --no-experience-kb" in result.output
 
 
 def test_forge_loop_falls_back_from_unsupported_kernel_backend(tmp_path, monkeypatch):

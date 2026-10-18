@@ -92,9 +92,6 @@ TABLE_KEY_SCHEMA: dict[str, tuple[str, ...]] = {
 # ``tuned_fmoe.csv`` stays out: this map also identifies dense tables, while
 # MoE has no dense (M, N, K) and carries its own key schema.
 
-# Key columns the log actually exposes, so a demand entry can never claim one it did not observe.
-UNLOGGABLE_KEY_FIELDS = ("q_dtype_w",)
-
 TABLE_TO_TUNER: dict[str, tuple[str, str]] = {
     "bf16_tuned_gemm.csv": ("sglang_dense_bf16", "AITER_CONFIG_GEMM_BF16"),
     "a8w8_tuned_gemm.csv": ("a8w8", "AITER_CONFIG_GEMM_A8W8"),

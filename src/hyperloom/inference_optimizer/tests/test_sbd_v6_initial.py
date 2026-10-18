@@ -15,10 +15,14 @@ from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_tim
 from hyperloom.inference_optimizer.breakdown.critic_reviews import normalize_framework_reviews
 from hyperloom.inference_optimizer.session.sbd_v6 import (
     SCHEMA_VERSION_V6,
-    read_timeline_event,
     read_timeline_events,
     write_timeline_event_at,
 )
+
+
+def read_timeline_event(session_dir: Path, event_type: str) -> dict | None:
+    matching = [event for event in read_timeline_events(session_dir) if event["type"] == event_type]
+    return matching[-1] if matching else None
 
 
 def _write_json(path: Path, payload: dict) -> None:

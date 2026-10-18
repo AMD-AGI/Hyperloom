@@ -24,7 +24,6 @@ from hyperloom.common.llm_config import (
     chat_completion,
     anthropic_messages,
     apply_reasoning_effort,
-    aresponse,
     build_http_timeout,
     claude_sdk_env_options,
     deepseek_compat_env,
@@ -1150,119 +1149,6 @@ def test_chat_completion_does_not_request_a_stream():
     client = _SyncStubClient(types.SimpleNamespace(choices=[choice]))
     chat_completion(client, model="m", messages=[])
     assert "stream" not in client.completions.calls[0]
-
-
-# ---- aresponse ----
-class _StubResponses:
-    def __init__(self, outcome: Any) -> None:
-        self._outcome = outcome
-        self.calls: list[dict[str, Any]] = []
-
-    async def create(self, **params: Any) -> Any:
-        self.calls.append(params)
-        if isinstance(self._outcome, BaseException):
-            raise self._outcome
-        return self._outcome
-
-
-class _StubResponsesClient:
-    def __init__(self, outcome: Any) -> None:
-        self.responses = _StubResponses(outcome)
-
-
-def _message_item(text: str, *, citations: list[str] | None = None) -> dict[str, Any]:
-    annotations = [{"type": "url_citation", "url": u} for u in (citations or [])]
-    return {
-        "type": "message",
-        "content": [{"type": "output_text", "text": text, "annotations": annotations}],
-    }
-
-
-@pytest.mark.asyncio
-async def test_aresponse_flattens_text_citations_status_and_tokens():
-    resp = {
-        "output": [
-            {"type": "reasoning", "content": []},
-            {"type": "web_search_call", "action": {"query": "x"}},
-            _message_item("the answer", citations=["https://a.example", "https://b.example"]),
-        ],
-        "status": "completed",
-        "usage": {"input_tokens": 11, "output_tokens": 7},
-    }
-    client = _StubResponsesClient(resp)
-    result = await aresponse(client, model="m", input="prompt")
-    assert result.text == "the answer"
-    assert result.citations == ["https://a.example", "https://b.example"]
-    assert result.status == "completed"
-    assert (result.input_tokens, result.output_tokens) == (11, 7)
-    assert client.responses.calls == [{"model": "m", "input": "prompt"}]
-
-
-@pytest.mark.asyncio
-async def test_aresponse_joins_multiple_message_items_with_newlines():
-    resp = {"output": [_message_item("first"), _message_item("second")]}
-    result = await aresponse(_StubResponsesClient(resp), model="m")
-    assert result.text == "first\nsecond"
-
-
-@pytest.mark.asyncio
-async def test_aresponse_skips_non_output_text_content_blocks():
-    resp = {
-        "output": [
-            {
-                "type": "message",
-                "content": [
-                    {"type": "refusal", "text": "ignored"},
-                    {"type": "output_text", "text": "kept", "annotations": []},
-                ],
-            }
-        ]
-    }
-    result = await aresponse(_StubResponsesClient(resp), model="m")
-    assert (result.text, result.citations) == ("kept", [])
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("resp", [{"output": []}, {}])
-async def test_aresponse_tolerates_empty_output_and_missing_usage(resp):
-    result = await aresponse(_StubResponsesClient(resp), model="m")
-    assert result.text == ""
-    assert result.citations == []
-    assert result.status is None
-    assert (result.input_tokens, result.output_tokens) == (0, 0)
-
-
-@pytest.mark.asyncio
-async def test_aresponse_reads_attribute_carrying_sdk_objects():
-    """The real SDK returns pydantic models, not dicts."""
-    block = types.SimpleNamespace(
-        type="output_text",
-        text="from sdk",
-        annotations=[types.SimpleNamespace(type="url_citation", url="https://sdk.example")],
-    )
-    resp = types.SimpleNamespace(
-        output=[types.SimpleNamespace(type="message", content=[block])],
-        status="incomplete",
-        usage=types.SimpleNamespace(input_tokens=3, output_tokens=4),
-    )
-    result = await aresponse(_StubResponsesClient(resp), model="m")
-    assert result.text == "from sdk"
-    assert result.citations == ["https://sdk.example"]
-    assert result.status == "incomplete"
-    assert (result.input_tokens, result.output_tokens) == (3, 4)
-
-
-@pytest.mark.asyncio
-async def test_aresponse_treats_unusable_token_counts_as_zero():
-    resp = {"output": [], "usage": {"input_tokens": "abc", "output_tokens": None}}
-    result = await aresponse(_StubResponsesClient(resp), model="m")
-    assert (result.input_tokens, result.output_tokens) == (0, 0)
-
-
-@pytest.mark.asyncio
-async def test_aresponse_propagates_transport_errors():
-    with pytest.raises(RuntimeError, match="gateway down"):
-        await aresponse(_StubResponsesClient(RuntimeError("gateway down")), model="m")
 
 
 # ---- client-ownership guard ----

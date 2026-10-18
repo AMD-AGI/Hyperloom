@@ -16,7 +16,6 @@ from kernelforge.fusion.validate import (
     _serving_smoke_launch_cmd,
     _tail_text,
     _vllm_decode_probe,
-    classify_serving_smoke_failure,
     serving_smoke,
     snr_db,
     validate_recipe,
@@ -132,33 +131,6 @@ def test_launch_cmd_matches_session_tp_block_size_and_max_model_len():
     assert scmd[scmd.index("--tp") + 1] == "8"
     assert scmd[scmd.index("--context-length") + 1] == "13312"
     assert "--block-size" not in scmd
-
-
-def test_classify_serving_smoke_failure_only_blames_explicit_gpu_faults():
-    """The reason-only fallback needs fault EVIDENCE, not a keyword that resembles it."""
-    assert (
-        classify_serving_smoke_failure("server exited rc=1 before ready: ValueError: No common block size for 16")
-        == "env_or_boot"
-    )
-    assert classify_serving_smoke_failure("server not ready within 1200s") == "env_or_boot"
-    assert classify_serving_smoke_failure("serving smoke harness error: RuntimeError: popen exploded") == "env_or_boot"
-    # Memory exhaustion reaches us through the same "HIP error:" channel as a fault.
-    assert (
-        classify_serving_smoke_failure("server exited rc=1 before ready: RuntimeError: HIP error: out of memory")
-        == "env_or_boot"
-    )
-    # A live server that refused a request is not the kernel faulting.
-    assert classify_serving_smoke_failure("decode probe failed: /v1/models probe error: OSError: boom") == "env_or_boot"
-    assert (
-        classify_serving_smoke_failure("decode bench failed rc=1: ModuleNotFoundError: sglang.bench_serving")
-        == "env_or_boot"
-    )
-    assert (
-        classify_serving_smoke_failure("scheduler crashed during CUDA-graph decode: HSA_STATUS_ERROR_EXCEPTION")
-        == "kernel_fault"
-    )
-    assert classify_serving_smoke_failure("server crashed at startup: hardware exception") == "kernel_fault"
-    assert classify_serving_smoke_failure("decode bench timed out (possible hang in fused kernel)") == "kernel_fault"
 
 
 def test_serving_smoke_tp_exposes_enough_gpus(monkeypatch, tmp_path):

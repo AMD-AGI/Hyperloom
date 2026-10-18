@@ -800,48 +800,6 @@ def _anthropic_usage_counts(usage: object) -> dict[str, int]:
     }
 
 
-@dataclass(frozen=True)
-class ResponsesResult:
-    """One Responses-API result, flattened for Hyperloom callers."""
-
-    text: str
-    citations: list[str]
-    status: str | None
-    input_tokens: int
-    output_tokens: int
-
-
-async def aresponse(
-    client: object,
-    **params: object,
-) -> ResponsesResult:
-    """Async Responses-API call; returns text, citations, status and token counts."""
-    resp = await client.responses.create(**params)  # type: ignore[union-attr]
-    texts: list[str] = []
-    citations: list[str] = []
-    for item in _sdk_field(resp, "output") or []:  # type: ignore[union-attr]
-        if _sdk_field(item, "type") != "message":
-            continue
-        for block in _sdk_field(item, "content") or []:  # type: ignore[union-attr]
-            if _sdk_field(block, "type") != "output_text":
-                continue
-            chunk = _sdk_field(block, "text") or ""
-            if chunk:
-                texts.append(str(chunk))
-            for ann in _sdk_field(block, "annotations") or []:  # type: ignore[union-attr]
-                url = _sdk_field(ann, "url")
-                if isinstance(url, str) and url:
-                    citations.append(url)
-    usage = _sdk_field(resp, "usage")
-    return ResponsesResult(
-        text="\n".join(texts),
-        citations=citations,
-        status=_sdk_field(resp, "status"),  # type: ignore[arg-type]
-        input_tokens=_sdk_token_count(usage, "input_tokens"),
-        output_tokens=_sdk_token_count(usage, "output_tokens"),
-    )
-
-
 def _anthropic_text_from_content(content: object) -> str:
     """Concatenate the ``text`` blocks of an Anthropic Messages ``content`` array."""
     if not isinstance(content, list):
@@ -886,11 +844,6 @@ def _anthropic_body_result(body: Mapping[str, object]) -> AnthropicMessageResult
         stop_reason=body.get("stop_reason"),  # type: ignore[arg-type]
         usage=body.get("usage"),
     )
-
-
-def _anthropic_message_result(resp: object) -> AnthropicMessageResult:
-    """Check one Messages response for failure, then flatten it."""
-    return _anthropic_body_result(_anthropic_message_body(resp))
 
 
 def _observe_anthropic(observation: RequestObservation, resp: object) -> AnthropicMessageResult:
@@ -1095,38 +1048,6 @@ async def aanthropic_completion(
         )
 
 
-def stream_chat_completion_text(
-    client: object,
-    *,
-    component: str = "",
-    operation: str = "",
-    **params: object,
-) -> "tuple[str, object | None]":
-    """Streamed chat completion; returns ``(text, usage)``."""
-    params["stream"] = True
-    params["stream_options"] = {"include_usage": True}
-    parts: list[str] = []
-    usage_obj: object | None = None
-    with observed_request(
-        protocol=PROTOCOL_OPENAI_CHAT,
-        component=component,
-        operation=operation,
-        model=params.get("model"),
-        streamed=True,
-    ) as observation:
-        stream = client.chat.completions.create(**_tag_request(params, component, operation))  # type: ignore[union-attr]
-        for chunk in stream:
-            _observe_stream_chunk(observation, chunk)
-            if getattr(chunk, "usage", None) is not None:
-                usage_obj = chunk.usage
-            if chunk.choices:
-                delta = chunk.choices[0].delta
-                if delta is not None and delta.content:
-                    parts.append(delta.content)
-        observation.update(usage=_openai_usage_counts(usage_obj))
-    return "".join(parts), usage_obj
-
-
 async def astream_chat_completion_text(
     client: object,
     *,
@@ -1191,7 +1112,6 @@ __all__ = [
     "LEGACY_DEEPSEEK_ENV_KEYS",
     "LLMConfigError",
     "OpenAIClientConfig",
-    "ResponsesResult",
     "UNRUNNABLE_AGENT_RANK",
     "aanthropic_completion",
     "aanthropic_messages",
@@ -1204,7 +1124,6 @@ __all__ = [
     "anthropic_transport",
     "anthropic_transport_ready",
     "apply_reasoning_effort",
-    "aresponse",
     "astream_chat_completion_text",
     "build_http_timeout",
     "chat_completion",
@@ -1230,6 +1149,5 @@ __all__ = [
     "provider_model_defaults",
     "resolve_forge_llm_model",
     "resolve_openai_client_config",
-    "stream_chat_completion_text",
     "with_synthesized_anthropic_keys",
 ]

@@ -12,7 +12,6 @@ The sequencer's last act now records the verdict, so an un-settled section says
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -52,28 +51,6 @@ def _close(session_dir: Path, *, warnings: list[str] | None = None) -> dict[str,
     )
 
 
-def _write_findings(session_dir: Path, rows: list[dict[str, Any]], *, name: str = "s1") -> None:
-    """Write findings the way the robustness ladder's sink does."""
-    directory = session_dir / "agents" / "robustness" / "findings"
-    directory.mkdir(parents=True, exist_ok=True)
-    (directory / f"{name}.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
-
-
-def _finding(**overrides: Any) -> dict[str, Any]:
-    row = {
-        "tick_index": 4,
-        "timestamp_unix": 1000.0,
-        "symptom_name": "server_crash_loop",
-        "severity": "high",
-        "summary": "three boots failed in a row",
-        "intents": [{"intent_type": "alert", "payload": {"detail": "noisy"}}],
-        "evidence": {"crashes": 3},
-        "rca_text": "the flag is unsupported on this build",
-    }
-    row.update(overrides)
-    return row
-
-
 def _run_sequence(session_dir: Path, *, fail: str = "") -> None:
     """Record a full close sequence, optionally failing one step."""
     record_close_opened(session_dir)
@@ -105,7 +82,7 @@ def test_mid_sequence_reports_running_not_degraded(sd: Path) -> None:
 
 def test_settled_clean_sequence_succeeds(sd: Path) -> None:
     _run_sequence(sd)
-    record_close_settled(sd, stop_reason="target_reached")
+    record_close_settled(sd)
 
     close = _close(sd)
     assert close["status"] == "succeeded"
@@ -115,7 +92,7 @@ def test_settled_clean_sequence_succeeds(sd: Path) -> None:
 
 def test_failed_step_settles_degraded(sd: Path) -> None:
     _run_sequence(sd, fail="report")
-    record_close_settled(sd, stop_reason="time_exhausted")
+    record_close_settled(sd)
 
     close = _close(sd)
     assert close["status"] == "degraded"
@@ -125,7 +102,7 @@ def test_failed_step_settles_degraded(sd: Path) -> None:
 
 def test_unsettled_step_does_not_count_against_the_verdict(sd: Path) -> None:
     _run_sequence(sd)
-    record_close_settled(sd, stop_reason="target_reached")
+    record_close_settled(sd)
     assert _close(sd)["status"] == "succeeded"
 
 
@@ -156,7 +133,7 @@ def test_artifacts_are_recorded_not_probed(sd: Path) -> None:
     _run_sequence(sd)
     record_close_artifacts(sd, final_json_path=final_json)
     record_close_artifacts(sd, artifact_package_path=package)
-    record_close_settled(sd, stop_reason="target_reached")
+    record_close_settled(sd)
     final_json.unlink()
 
     artifacts = _close(sd)["artifacts"]
@@ -166,47 +143,6 @@ def test_artifacts_are_recorded_not_probed(sd: Path) -> None:
     # Never recorded, so it stays absent rather than being invented.
     assert artifacts["final_md_path"] is None
     assert artifacts["session_breakdown_path"] == "session_breakdown.json"
-
-
-def test_escalation_comes_from_the_recorded_stop_reason(sd: Path) -> None:
-    _run_sequence(sd)
-    record_close_settled(sd, stop_reason="robustness_escalated")
-
-    robustness = _close(sd)["robustness"]
-    assert robustness["escalated"] is True
-    # Recorded alongside the verdict, so the escalation can be checked against its reason.
-    assert robustness["stop_reason"] == "robustness_escalated"
-
-
-def test_ordinary_stop_reason_is_not_an_escalation(sd: Path) -> None:
-    _run_sequence(sd)
-    record_close_settled(sd, stop_reason="target_reached")
-    assert _close(sd)["robustness"]["escalated"] is False
-
-
-def test_close_does_not_fetch_retired_findings(sd: Path) -> None:
-    _write_findings(sd, [_finding()])
-    _run_sequence(sd)
-    record_close_settled(sd, stop_reason="target_reached")
-
-    robustness = _close(sd)["robustness"]
-    assert robustness == {"escalated": False, "stop_reason": "target_reached"}
-
-
-def test_historical_close_findings_remain_readable() -> None:
-    finding = _finding()
-    recorded = {
-        "status": "succeeded",
-        "stop_reason": "robustness_escalated",
-        "robustness": {"escalated": True, "findings": [finding], "findings_total": 60},
-    }
-    robustness = collect_v6_close([], recorded=recorded)["robustness"]
-    assert robustness == {
-        "escalated": True,
-        "stop_reason": "robustness_escalated",
-        "findings": [finding],
-        "findings_total": 60,
-    }
 
 
 def test_step_row_carries_task_id_and_detail(sd: Path) -> None:
@@ -247,7 +183,7 @@ def test_unknown_step_name_is_passed_through_and_warned(sd: Path) -> None:
 
 def test_no_publication_attempt_leaves_no_write_back_key(sd: Path) -> None:
     _run_sequence(sd)
-    record_close_settled(sd, stop_reason="target_reached")
+    record_close_settled(sd)
     assert "kb_write_back" not in _close(sd)
 
 
@@ -387,7 +323,7 @@ def test_queue_depth_is_snapshotted_when_the_attempt_settles(sd: Path) -> None:
 
 def test_second_pass_appends_rather_than_replacing(sd: Path) -> None:
     _run_sequence(sd, fail="report")
-    record_close_settled(sd, stop_reason="time_exhausted")
+    record_close_settled(sd)
     assert _close(sd)["status"] == "degraded"
 
     record_close_opened(sd)
@@ -482,7 +418,7 @@ def test_a_session_that_never_analyzed_reports_no_ceiling_rather_than_zero(sd: P
 
 def test_a_close_that_never_snapshotted_progress_omits_the_key(sd: Path) -> None:
     _run_sequence(sd)
-    record_close_settled(sd, stop_reason="time_exhausted")
+    record_close_settled(sd)
 
     assert "roofline_progress" not in _close(sd)
 
@@ -533,20 +469,20 @@ def test_the_recipe_that_shipped_is_snapshotted_at_the_close(sd: Path) -> None:
 
 def test_a_close_that_never_settled_a_recipe_omits_the_key(sd: Path) -> None:
     _run_sequence(sd)
-    record_close_settled(sd, stop_reason="time_exhausted")
+    record_close_settled(sd)
 
     assert "final_recipe" not in _close(sd)
 
 
 def test_a_close_that_never_snapshotted_the_tally_omits_the_key(sd: Path) -> None:
     _run_sequence(sd)
-    record_close_settled(sd, stop_reason="time_exhausted")
+    record_close_settled(sd)
 
     assert "baseline_progress" not in _close(sd)
 
 
 def test_a_close_that_never_drained_omits_the_candidate(sd: Path) -> None:
     _run_sequence(sd)
-    record_close_settled(sd, stop_reason="time_exhausted")
+    record_close_settled(sd)
 
     assert "geak_candidate" not in _close(sd)

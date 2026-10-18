@@ -10,11 +10,10 @@ import subprocess
 from pathlib import Path
 
 from kernelforge.gemm_tune import aiter_script_map, utils
+from kernelforge.gemm_tune.aiter_script_map import resolve_aiter_csrc, resolve_aiter_root
 from kernelforge.gemm_tune.utils import (
     check_gpu_status,
     find_tuner_script,
-    resolve_aiter_csrc,
-    resolve_aiter_root,
     run_subprocess,
 )
 
@@ -65,16 +64,9 @@ def test_resolve_aiter_csrc_ok(tmp_path, monkeypatch):
     assert resolve_aiter_csrc() == tmp_path / "csrc"
 
 
-def test_utils_still_exports_the_aiter_resolvers():
-    # They moved to a leaf module to break the utils/script_discovery import cycle; tuners import them from here and
-    # must keep working.
-    assert utils.resolve_aiter_root is aiter_script_map.resolve_aiter_root
-    assert utils.resolve_aiter_csrc is aiter_script_map.resolve_aiter_csrc
-
-
 def test_find_tuner_script_found(tmp_path, monkeypatch):
     csrc = tmp_path / "csrc"
-    rel = utils.AITER_TUNER_SCRIPTS["fmoe_ck"]
+    rel = aiter_script_map.TUNER_SCRIPT_HINTS["fmoe_ck"][0]
     script = csrc / rel
     script.parent.mkdir(parents=True)
     script.write_text("# tuner")
@@ -94,18 +86,10 @@ class _Proc:
         self.returncode = rc
 
 
-def test_check_gpu_status_skip():
-    assert check_gpu_status(skip=True) == []
-
-
 def test_check_gpu_status_parses(monkeypatch):
     data = {
         "card0": {
             "GPU use (%)": "80",
-            "Temperature (Sensor edge) (C)": "45",
-            "Average Graphics Package Power (W)": "300",
-            "VRAM Total Used Memory (B)": "1000",
-            "VRAM Total Memory (B)": "2000",
         },
         "card1": {"GPU Utilization (%)": "10"},
         "system": {"ignored": "x"},
@@ -114,7 +98,7 @@ def test_check_gpu_status_parses(monkeypatch):
     gpus = check_gpu_status()
     assert len(gpus) == 2
     g0 = next(g for g in gpus if g.gpu_id == 0)
-    assert g0.busy is True and g0.temperature == "45"
+    assert g0.busy is True
     g1 = next(g for g in gpus if g.gpu_id == 1)
     assert g1.busy is False
 

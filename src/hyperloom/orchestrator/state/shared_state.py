@@ -1078,14 +1078,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         # Filter to known fields; unknown keys dropped, missing keys default.
         known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in raw.items() if k in known}
-        # A state written before per-phase totals existed still records every transition in phase_history, so the
-        # completed segments are reconstructible.
-        if not isinstance(filtered.get("phase_elapsed_totals"), dict):
-            from ..phases.machine_state import phase_elapsed_totals_from_history
-
-            filtered["phase_elapsed_totals"] = phase_elapsed_totals_from_history(
-                filtered.get("phase_history"),
-            )
         # The charge anchor belongs to a live leg, not to the file: only
         # ``begin_leg`` arms it, so ``elapsed_charged_sec`` alone survives a load.
         filtered["leg_anchor_unix"] = 0.0
@@ -1101,13 +1093,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         filtered["explore_search"] = cls._build_explore_search(
             existing=filtered.get("explore_search"),
         )
-
-        # A state written before the budget was charged forward records spend
-        # only as ``start_ts``; carry ``now - start_ts`` across so a resume does
-        # not hand the session its whole budget again.
-        if "elapsed_charged_sec" not in raw:
-            started = to_unix(raw.get("start_ts"))
-            filtered["elapsed_charged_sec"] = max(0.0, time.time() - started) if started else 0.0
 
         if isinstance(filtered.get("enablement"), dict):
             filtered["enablement"] = EnablementRound.from_dict(filtered["enablement"])
@@ -1719,30 +1704,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         _m.record_gemm_tuning(self, result)
 
     # Multi-KEEP integrate queue helpers.
-    def _kernel_ids_with_integrate_attempts(self) -> set[str]:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m._kernel_ids_with_integrate_attempts(self)
-
-    def integrate_attempt_count_for_kernel(self, kernel_id: str) -> int:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.integrate_attempt_count_for_kernel(self, kernel_id)
-
-    def integrate_attempt_count_for_integration(
-        self,
-        integration_id: str,
-    ) -> int:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.integrate_attempt_count_for_integration(
-            self,
-            integration_id,
-        )
-
     def next_pending_keep_kernel_id(self) -> str:
         """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
         from ..kernel import _kernel_decisions as _m
@@ -2010,15 +1971,11 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 try:
                     data = json.loads(sidecar.read_text(encoding="utf-8"))
                     data = data if isinstance(data, dict) else {}
-                    # Priority: full-pipeline analytic ceiling (ms) > DiT-only analytic ceiling (us) > trace-summed
-                    # per-kernel ideal (us).
+                    # Priority: full-pipeline analytic ceiling (ms) > trace-summed per-kernel ideal (us).
                     approach_a = data.get("analytic_ceiling")
-                    analytic = data.get("analytic_dit_ceiling")
                     totals = data.get("totals")
                     if isinstance(approach_a, dict) and float(approach_a.get("ideal_ms") or 0.0) > 0:
                         roofline_ideal_ms = float(approach_a["ideal_ms"])
-                    elif isinstance(analytic, dict) and float(analytic.get("ideal_compute_us") or 0.0) > 0:
-                        roofline_ideal_ms = float(analytic["ideal_compute_us"]) / 1000.0
                     elif isinstance(totals, dict) and float(totals.get("sigma_ideal_roofline_us") or 0.0) > 0:
                         roofline_ideal_ms = float(totals["sigma_ideal_roofline_us"]) / 1000.0
                 except (OSError, ValueError, TypeError, json.JSONDecodeError):

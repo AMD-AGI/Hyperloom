@@ -60,9 +60,6 @@ STATUS_PENDING = "pending"
 #: Named rather than probed: the file is being written as this is assembled.
 SESSION_BREAKDOWN_PATH = "session_breakdown.json"
 
-#: The ``stop_reason`` meaning a robustness critic escalated to the close.
-ESCALATED_STOP_REASON = "robustness_escalated"
-
 #: The share of the theoretical ceiling the session aims at, a roofline
 #: ceiling not being reachable in practice.
 ROOFLINE_TARGET_RATIO = 0.70
@@ -370,7 +367,6 @@ def _trajectory(baseline: float, baseline_ts: str, stack: Any) -> list[dict[str,
 def record_close_settled(
     session_dir: Path | str | None,
     *,
-    stop_reason: str = "",
     ts: str = "",
 ) -> None:
     """Record the sequencer's verdict as its last act.
@@ -380,12 +376,10 @@ def record_close_settled(
     ran to the end, so an un-settled step does not count against the verdict.
     An unreadable spool is also ``degraded``: the sequence finished, but the
     step rows cannot be used to prove it was clean.
-    ``stop_reason`` is recorded so the escalation verdict stays auditable.
     """
     if not session_dir:
         trace_skip(reason="no session_dir", section=SECTION)
         return
-    reason = str(stop_reason or "").strip()
     step_failed = _any_step_failed(session_dir)
     _write(
         session_dir,
@@ -393,10 +387,6 @@ def record_close_settled(
             "status": "succeeded" if step_failed is False else "degraded",
             "end_time": _stamp(ts),
             "close_sequence_done": True,
-            "stop_reason": reason,
-            "robustness": {
-                "escalated": reason.lower() == ESCALATED_STOP_REASON,
-            },
         },
     )
 
@@ -575,7 +565,6 @@ def _rel(path: Path, session_dir: Path) -> str:
 
 
 __all__ = [
-    "ESCALATED_STOP_REASON",
     "RESULT_AGENTX_BLOCKED",
     "RESULT_BUNDLE_BUILD_FAILED",
     "RESULT_CHAMPION_NOT_PROMOTED",

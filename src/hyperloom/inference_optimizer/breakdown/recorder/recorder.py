@@ -40,7 +40,6 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     # Keyed by content rather than by iteration number, which a resume reuses
     # after workdir pruning.
     "critic_iteration": "item",
-    "robustness_turn": "item",
     "kernel_event": "item",
     "kernel_lane_run": "item",
     "kernel_rebench_attempt": "item",
@@ -125,11 +124,6 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "close_write_back": "singleton",
     "close_write_back_attempt": "item",
 }
-
-
-def section_shape(section: str) -> SectionShape | None:
-    """Return the declared shape for ``section``, or ``None`` if unregistered."""
-    return SECTION_SHAPES.get(section)
 
 
 log = logging.getLogger(__name__)
@@ -529,5 +523,4 @@ __all__ = [
     "SectionShape",
     "get_recorder",
     "recorder_for",
-    "section_shape",
 ]

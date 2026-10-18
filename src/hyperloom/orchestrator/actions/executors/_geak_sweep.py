@@ -79,10 +79,6 @@ def _write_benchmark_report(
         log.warning("geak_sweep: could not write %s: %s", out_dir / "benchmark_report.json", exc)
 
 
-def _serving_gpus(tp: int) -> str:
-    return ",".join(str(i) for i in range(max(tp, 1)))
-
-
 def _parse_isl_osl(spec: str) -> tuple[int, int]:
     isl_s, _, osl_s = str(spec).partition(":")
     return int(isl_s or 1024), int(osl_s or 1024)

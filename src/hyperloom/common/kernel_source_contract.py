@@ -6,9 +6,6 @@
 from __future__ import annotations
 
 import math
-import os
-import re
-from pathlib import Path
 from typing import Any
 
 #: Bump the major on any field removal or meaning change; consumers gate on it.
@@ -292,46 +289,3 @@ def validate_document(doc: Any) -> list[str]:
     for index, entry in enumerate(entries):
         problems.extend(_entry_problems(index, entry, seen_ids))
     return problems
-
-
-#: TraceLens reports a call site as "path.py(247): fn_name"; the line and
-#: function ride along in the same string.
-_LINE_SUFFIX_RE = re.compile(r"^(?P<path>.+?)\((?P<line>\d+)\)\s*(?::\s*(?P<function>.*))?$")
-
-
-def split_line_suffix(path: str) -> tuple[str, int | None, str]:
-    """Split a TraceLens call-site string into path, line and function."""
-    text = (path or "").strip()
-    if not text:
-        return "", None, ""
-    match = _LINE_SUFFIX_RE.match(text)
-    if match is None:
-        return text, None, ""
-    return (
-        match.group("path").strip(),
-        int(match.group("line")),
-        str(match.group("function") or "").strip(),
-    )
-
-
-def strip_line_suffix(path: str) -> str:
-    """Return the bare file path from a possibly line-annotated one."""
-    return split_line_suffix(path)[0]
-
-
-def canonical_source_path(path: str, roots: tuple[str, ...]) -> str:
-    """Return the validated canonical target for ``path``, or ``\"\"``."""
-    text = strip_line_suffix(path)
-    if not text or not os.path.isfile(text):
-        return ""
-    real = Path(os.path.realpath(text))
-    for root in roots:
-        if not root:
-            continue
-        resolved_root = Path(os.path.realpath(str(root)))
-        try:
-            real.relative_to(resolved_root)
-            return str(real)
-        except ValueError:
-            continue
-    return ""

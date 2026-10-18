@@ -101,11 +101,9 @@ PLATEAU_PATH_EXIT = "exit"
 #: derived from counters, so a candidate re-authored twice reads as two steps.
 STEP_PROPOSED = "proposed"
 STEP_REVIEWED = "reviewed"
-STEP_AUDITED = "audited"
 STEP_ROUTED = "routed"
 STEP_AUTHORED = "authored"
 STEP_REAUTHORED = "reauthored"
-STEP_APPLY_RETRIED = "apply_retried"
 STEP_ATTEMPTED = "attempted"
 STEP_DROPPED = "dropped"
 
@@ -149,9 +147,7 @@ __all__ = [
     "SECTION_PROPOSAL",
     "SECTION_PROPOSAL_STEP",
     "SECTION_RUN",
-    "STEP_APPLY_RETRIED",
     "STEP_ATTEMPTED",
-    "STEP_AUDITED",
     "STEP_AUTHORED",
     "STEP_DROPPED",
     "STEP_PROPOSED",

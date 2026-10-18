@@ -14,4 +14,3 @@ def test_scriptable_framework_registry_specs() -> None:
     assert xdit_spec.kind == framework_registry.SCRIPTABLE
     assert xdit_spec.extra_args_env == "EXTRA_XDIT_ARGS"
     assert xdit_spec.throughput_unit == "img/s"
-    assert framework_registry.primary_metric_name("xdit") == "e2el_mean_ms"

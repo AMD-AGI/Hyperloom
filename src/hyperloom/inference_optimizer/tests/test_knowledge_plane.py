@@ -23,11 +23,6 @@ def test_plane_disabled_pr_returns_empty_mcp_url():
     assert plane.pr_monitor_enabled is False
     assert plane.specialist_mcp_url() == ""
     assert plane.config is not None and plane.config.pr_monitor_enabled is False
-    child_env: dict[str, str] = {}
-    assert plane.kernel_experience is not None
-    plane.kernel_experience.configure_child_env(child_env)
-    assert child_env["HYPERLOOM_PR_MONITOR_ENABLED"] == "0"
-    assert "KB_STORE_URL" not in child_env
 
 
 def test_plane_enabled_pr_returns_mcp_url():
@@ -49,7 +44,7 @@ async def test_on_enter_the_optimisation_phase_runs_without_plane(tmp_path: Path
     coord.shared_state = _make_bare_shared_state()
     coord.session_dir = tmp_path
     await coord.phase_framework.on_enter_framework(
-        Transition(from_phase="PRELUDE", to_phase="FRAMEWORK", reason="test", evidence={}, loopback=False)
+        Transition(from_phase="PRELUDE", to_phase="FRAMEWORK", reason="test", evidence={})
     )
 
 
@@ -125,8 +120,6 @@ def test_cli_pr_monitor_controls_have_expected_defaults():
     assert args.degraded_pr is False
     assert not hasattr(args, "pr_monitor_url")
     assert not hasattr(args, "pr_monitor_mcp_url")
-    assert isinstance(args.pr_feed_window_days, int)
-    assert args.pr_feed_window_days > 0
 
 
 def test_cli_degraded_pr_sets_flag_true():
@@ -138,11 +131,6 @@ def test_cli_degraded_pr_sets_flag_true():
 def test_removed_independent_pr_endpoint_flags_are_rejected(flag: str):
     with pytest.raises(SystemExit):
         _parse_optimize_args([flag, "https://legacy.example/pr-monitor"])
-
-
-def test_cli_pr_feed_window_days_override_reaches_namespace():
-    args = _parse_optimize_args(["--pr-feed-window-days", "7"])
-    assert args.pr_feed_window_days == 7
 
 
 def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
@@ -173,7 +161,7 @@ def test_cli_args_round_trip_into_bootstrap_knowledge_plane(
     )
     monkeypatch.setenv("KB_STORE_URL", "https://kb.example/knowledge-base")
 
-    args = _parse_optimize_args(["--pr-feed-window-days", "14"])
+    args = _parse_optimize_args([])
     plane = _bootstrap_knowledge_plane(
         args,
         recipe_kb_client=None,

@@ -407,16 +407,6 @@ class SpecialistFailureType(str, enum.Enum):
     UNKNOWN = "unknown"
 
 
-# Transient infra failures a bounded auto-retry may re-dispatch.
-RETRYABLE_SPECIALIST_FAILURES: frozenset[SpecialistFailureType] = frozenset(
-    {
-        SpecialistFailureType.TIMEOUT,
-        SpecialistFailureType.STALE_HEARTBEAT,
-        SpecialistFailureType.CRASH,
-    }
-)
-
-
 def classify_specialist_failure(
     runner_status: str,
     error: str,
@@ -652,7 +642,6 @@ class SpecialistRunner:
                 # Coordinator-populated roofline pre-fetch; empty when not warmed.
                 roofline_evidence=dict(params.get("roofline_evidence") or {}),
                 runtime_findings=str(params.get("runtime_findings") or ""),
-                sub_kind=str(params.get("sub_kind") or ""),
                 extra_focus_tags=_extra_focus_tags(params, domain),
                 warm_start_recipe=dict(params.get("warm_start_recipe") or {}),
                 warm_start_pitfalls=list(params.get("warm_start_pitfalls") or []),
@@ -1521,7 +1510,6 @@ class SpecialistRunner:
 
 __all__ = [
     "NO_GIT_FRAMEWORK_SOURCE_ROOT",
-    "RETRYABLE_SPECIALIST_FAILURES",
     "SPECIALIST_TOOL_DENYLIST",
     "SpecialistFailureType",
     "SpecialistRunResult",

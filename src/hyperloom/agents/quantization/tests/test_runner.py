@@ -245,7 +245,6 @@ async def test_run_one_attempt_aggregates_chunks(tmp_path, fake_sdk, fake_option
         sdk_query_factory=fake_sdk,
         sdk_options_cls=fake_options_cls,
     )
-    assert result.chunks == ["part one", "part two", "part three"]
     assert "part one\npart two\npart three" == result.raw_text
 
 

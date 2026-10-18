@@ -55,12 +55,6 @@ class ExperimentTracker:
                 cb(exp)
         return exp
 
-    def mark_interrupted(self, experiment_id: str) -> Experiment:
-        """Mark an unfinished segment interrupted without rewriting terminal state."""
-        with self._experiment_lock(experiment_id):
-            exp = self._load(experiment_id)
-            return self._mark_interrupted_locked(exp)
-
     def _mark_interrupted_locked(self, exp: Experiment) -> Experiment:
         """Transition a locked experiment to interrupted if it is still running."""
         if exp.status in {EXPERIMENT_COMPLETED, EXPERIMENT_INTERRUPTED}:
