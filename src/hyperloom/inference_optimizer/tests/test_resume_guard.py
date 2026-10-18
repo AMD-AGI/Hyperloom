@@ -324,7 +324,7 @@ async def test_matching_scope_dead_holder_reaches_existing_reaper(tmp_path, monk
 async def test_current_handoff_to_unstarted_holder_remains_resumable(tmp_path):
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
     from hyperloom.orchestrator.bus.storage.schema import ensure_schema
-    from hyperloom.orchestrator.state.round_store import RoundStore
+    from hyperloom.orchestrator.state.round_store import RoundRequest, RoundStore
     from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
     path = db_path_for(tmp_path)
@@ -336,16 +336,17 @@ async def test_current_handoff_to_unstarted_holder_remains_resumable(tmp_path):
         rounds = RoundStore(db)
         for task_id in ("first", "next"):
             await tasks.create(kind="baseline", params={}, idempotency_key=task_id, task_id=task_id)
-        opened = await rounds.open("round-1", holder_task_id="first", lease_sec=1, now_unix=1, request_id="open")
+        opened = await rounds.open(
+            "round-1", RoundRequest(now_unix=1, request_id="open"), holder_task_id="first", lease_sec=1
+        )
         assert opened.ok
         await tasks.transition("first", "running")
         await tasks.transition("first", "succeeded", evidence={"reason": "completed"})
         handed_off = await rounds.handoff(
             await rounds.get("round-1"),
+            RoundRequest(now_unix=2, request_id="handoff"),
             new_holder_task_id="next",
             lease_sec=1,
-            now_unix=2,
-            request_id="handoff",
         )
         assert handed_off.ok
     finally:
@@ -920,7 +921,7 @@ async def test_confirmation_leaves_round_fence_and_events_for_existing_reconcile
     from hyperloom.orchestrator.bringup.reconcile import Reconciler
     from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
-    from hyperloom.orchestrator.state.round_store import EXPIRED_REAPED, RoundStore
+    from hyperloom.orchestrator.state.round_store import EXPIRED_REAPED, RoundRequest, RoundStore
     from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
     path = db_path_for(tmp_path)
@@ -931,7 +932,9 @@ async def test_confirmation_leaves_round_fence_and_events_for_existing_reconcile
         await tasks.create(kind="baseline", params={}, idempotency_key="task-1", task_id="task-1")
         await tasks.transition("task-1", "running")
         await tasks.transition("task-1", "cancelled", evidence={"reason": "cancelled_in_flight"})
-        opened = await rounds.open("round-1", holder_task_id="task-1", lease_sec=1, now_unix=1, request_id="open")
+        opened = await rounds.open(
+            "round-1", RoundRequest(now_unix=1, request_id="open"), holder_task_id="task-1", lease_sec=1
+        )
         assert opened.ok
         reconciler = Reconciler(
             rounds=rounds,

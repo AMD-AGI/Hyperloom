@@ -15,6 +15,7 @@ from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..collaborator import CoordinatorCollaborator
+from ..state.round_store import RoundRequest
 from ..state.task_registry import TerminalTaskReuse, create_in_cursor, task_dispatch_origin
 from .params import _enablement_carrier_params
 
@@ -213,11 +214,9 @@ class EnablementRevalidation(CoordinatorCollaborator):
             try:
                 acquired = await self.rounds.open(
                     f"revalidation-{holder}",
+                    RoundRequest(now_unix=time.time(), request_id=key, evidence={"idempotency_key": key}),
                     holder_task_id=holder,
                     lease_sec=float(lease_ttl_sec),
-                    now_unix=time.time(),
-                    request_id=key,
-                    evidence={"idempotency_key": key},
                     join=_join,
                 )
             except _RowAlreadyLive:

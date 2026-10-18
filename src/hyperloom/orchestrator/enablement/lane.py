@@ -26,7 +26,7 @@ from ..loop.offload import offload
 from .params import ENABLEMENT_PARAMS_BUDGET_SEC, _round_carriers
 from .artifacts import snapshot_round, write_setting_script
 from ..bringup import recorded_verdict, session_root
-from ..state.round_store import ADVANCED, BOOTED, FAILED, Round
+from ..state.round_store import ADVANCED, BOOTED, FAILED, Round, RoundRequest
 from ..state.task_registry import create_in_cursor, task_dispatch_origin
 from .recipe.section import recipe_for
 
@@ -304,10 +304,9 @@ class EnablementLane(CoordinatorCollaborator):
 
         acquired = await self.rounds.open(
             _authoring_round_id(holder),
+            RoundRequest(now_unix=time.time(), request_id=holder),
             holder_task_id=holder,
             lease_sec=float(lease_ttl_sec),
-            now_unix=time.time(),
-            request_id=holder,
             join=_join,
         )
         if not acquired.ok:
@@ -365,9 +364,8 @@ class EnablementLane(CoordinatorCollaborator):
         now = time.time()
         await self.rounds.renew(
             round_row,
+            RoundRequest(now_unix=now, request_id=f"renew:{round_row.round_id}:{round_row.fence}:{now:.0f}"),
             lease_sec=lease,
-            now_unix=now,
-            request_id=f"renew:{round_row.round_id}:{round_row.fence}:{now:.0f}",
         )
 
     async def handoff_enablement_round(self, task: "Task") -> None:
@@ -392,10 +390,9 @@ class EnablementLane(CoordinatorCollaborator):
             lease = max(_MIN_LEASE_SEC, float(round_row.expires_unix) - float(round_row.renewed_unix))
         moved = await self.rounds.handoff(
             round_row,
+            RoundRequest(now_unix=time.time(), request_id=f"handoff:{task.task_id}"),
             new_holder_task_id=task.task_id,
             lease_sec=lease,
-            now_unix=time.time(),
-            request_id=f"handoff:{task.task_id}",
         )
         if not moved.ok:
             log.warning(
@@ -422,10 +419,12 @@ class EnablementLane(CoordinatorCollaborator):
             return
         await self.rounds.settle(
             round_row,
+            RoundRequest(
+                now_unix=time.time(),
+                request_id=f"settle:{round_row.round_id}:{round_row.fence}",
+                evidence={"reason": reason} if reason else {},
+            ),
             outcome=outcome,
-            now_unix=time.time(),
-            request_id=f"settle:{round_row.round_id}:{round_row.fence}",
-            evidence={"reason": reason} if reason else {},
         )
         holder = round_row.holder_task_id
         if await self.tasks.cancel_if_queued(holder, kind="specialist", reason="enablement_round_settled"):

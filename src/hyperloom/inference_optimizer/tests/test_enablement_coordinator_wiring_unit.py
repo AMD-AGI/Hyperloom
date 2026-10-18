@@ -16,6 +16,7 @@ from hyperloom.common.bringup import BootObservation, Excerpt, LadderStage, Term
 from hyperloom.common.failure_signature import FailureSignature
 from hyperloom.orchestrator.bringup import observation_summary
 from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
+from hyperloom.orchestrator.state.round_store import RoundRequest
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import create_in_cursor
 
@@ -260,10 +261,9 @@ async def _hold_round(fake, holder: str, *, holder_state: str = ""):
         await _seed_task(fake, holder, kind="specialist", state=holder_state)
     acquired = await fake.rounds.open(
         f"enablement-{holder}",
+        RoundRequest(now_unix=time.time(), request_id=f"seed:{holder}"),
         holder_task_id=holder,
         lease_sec=3600.0,
-        now_unix=time.time(),
-        request_id=f"seed:{holder}",
     )
     assert acquired.ok, acquired.reason
 
