@@ -30,7 +30,9 @@ def test_preflight_records_total_and_per_stage_seconds(monkeypatch, tmp_path):
     monkeypatch.setattr(task_preflight, "test_correctness", slow_correctness)
     monkeypatch.setattr(task_preflight, "bench_wallclock", fast_bench)
 
-    result = asyncio.run(task_preflight._preflight_async(driver.as_posix(), 30.0, 1, 2))
+    result = asyncio.run(
+        task_preflight._preflight_async(driver.as_posix(), task_preflight.DriverContract(snr_threshold=30.0), 1, 2)
+    )
 
     assert result.ok
     assert result.duration_sec >= 0.05
@@ -55,7 +57,9 @@ def test_stage_timing_is_recorded_even_when_the_stage_fails(monkeypatch, tmp_pat
     monkeypatch.setattr(task_preflight, "test_correctness", crashing)
     monkeypatch.setattr(task_preflight, "bench_wallclock", crashing_bench)
 
-    result = asyncio.run(task_preflight._preflight_async(driver.as_posix(), 30.0, 1, 2))
+    result = asyncio.run(
+        task_preflight._preflight_async(driver.as_posix(), task_preflight.DriverContract(snr_threshold=30.0), 1, 2)
+    )
 
     assert not result.ok
     assert "seconds" in result.details["correctness"]

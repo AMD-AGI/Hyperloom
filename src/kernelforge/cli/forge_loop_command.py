@@ -518,7 +518,6 @@ def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
     driver = run.iter_config.driver_script
     target_functions_list = run.iter_config.target_functions
     source_files_list = run.iter_config.source_files
-    kernel_backend = run.iter_config.kernel_backend
     snr_threshold = run.iter_config.snr_threshold
     nproc_per_node = run.iter_config.nproc_per_node
     program_md_file = run.request.task_context.program_md_file
@@ -527,7 +526,10 @@ def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
     deadline_unix = run.deadline.deadline_unix
     finalize_reserve_sec = run.deadline.finalize_reserve_sec
     usage = run.usage
+    from kernelforge.loop.task_preflight import DriverContract
     from kernelforge.loop.task_preparer import (
+        PreparationBudget,
+        PreparationTask,
         declared_case_ids,
         preflight_task,
         prepare_task_sync,
@@ -551,12 +553,14 @@ def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
         raise click.ClickException(str(exc)) from exc
     pf = preflight_task(
         driver=driver,
-        snr_threshold=snr_threshold,
-        require_graph=True,
-        require_profile=True,
-        require_ranks=max(1, int(nproc_per_node or 1)),
+        contract=DriverContract(
+            snr_threshold=snr_threshold,
+            require_graph=True,
+            require_profile=True,
+            require_ranks=max(1, int(nproc_per_node or 1)),
+            expected_case_ids=expected_case_ids,
+        ),
         deadline_unix=deadline_unix - finalize_reserve_sec,
-        expected_case_ids=expected_case_ids,
     )
     if pf.ok:
         print("  [prepare] task already conforms to the driver contract; skipping")
@@ -578,24 +582,25 @@ def _prepare_measurement_driver(run: _ForgeRun, program_md: str) -> None:
         )
         prep = prepare_task_sync(
             config=config,
-            workspace_dir=workspace_dir,
-            kernel=kernel,
-            driver=driver,
-            program_md=program_md,
-            target_functions=target_functions_list,
-            source_files=source_files_list,
-            kernel_backend=kernel_backend,
-            snr_threshold=snr_threshold,
-            preflight=pf,
-            invocation_spec_file=invocation_spec_file or "",
-            expected_case_ids=expected_case_ids,
+            task=PreparationTask(
+                workspace_dir=workspace_dir,
+                kernel=kernel,
+                driver=driver,
+                program_md=program_md,
+                target_functions=target_functions_list,
+                source_files=source_files_list,
+                snr_threshold=snr_threshold,
+                invocation_spec_file=invocation_spec_file or "",
+                expected_case_ids=expected_case_ids,
+                read_only_files=[path for path in (program_md_file, invocation_spec_file) if path],
+                # A collective task needs a driver that launches its own ranks; the preparer cannot infer that from
+                # the kernel source.
+                nproc_per_node=nproc_per_node,
+            ),
             # Let the default PREPARE_MAX_WALL_SEC (3000s, sized for a cold-JIT preflight) apply; prepare_task
             # clamps it to the per-kernel deadline_unix below.
-            deadline_unix=deadline_unix - finalize_reserve_sec,
-            # A collective task needs a driver that launches its own ranks; the preparer cannot infer that from
-            # the kernel source.
-            nproc_per_node=nproc_per_node,
-            read_only_files=[path for path in (program_md_file, invocation_spec_file) if path],
+            budget=PreparationBudget(deadline_unix=deadline_unix - finalize_reserve_sec),
+            preflight=pf,
             usage=usage,
         )
         if prep.ok:

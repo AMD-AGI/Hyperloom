@@ -1636,7 +1636,7 @@ def test_fresh_campaign_captures_post_prep_driver_digest_and_base(tmp_path, monk
     def fake_prepare(**kwargs):
         # Simulate the prep agent: repair the driver and commit scaffolding into pristine, advancing HEAD and changing
         # the driver digest.
-        Path(kwargs["driver"]).write_text(repaired_body)
+        Path(kwargs["task"].driver).write_text(repaired_body)
         (workspace / "task_helper.py").write_text("# scaffolding\n")
         subprocess.run(
             ["git", "add", "-A", "--", ".", ":(exclude)forge_experiments"],
