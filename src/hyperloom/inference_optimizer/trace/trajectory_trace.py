@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import WriteOptions, append_jsonl
+from hyperloom.common.io import JsonLineFormat, append_jsonl
 from hyperloom.common.llm_request_hooks import LLMRequestRecord, add_llm_request_observer
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import trajectory_dir
@@ -308,7 +308,7 @@ def record_event(
         _validate_row(row)
         dest = trajectory_dir(ctx.session_dir) / f"{row['writer']}.jsonl"
         try:
-            append_jsonl(dest, row, sort_keys=True, options=WriteOptions(make_parents=True))
+            append_jsonl(dest, row, make_parents=True, fmt=JsonLineFormat(sort_keys=True))
         except OSError as exc:
             log.warning("trajectory: append failed for event_type=%s: %r", event_type, exc)
     return span_id

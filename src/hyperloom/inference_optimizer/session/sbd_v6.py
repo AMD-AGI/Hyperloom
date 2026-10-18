@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import JsonFormat, WriteOptions, append_jsonl, atomic_write_json
+from hyperloom.common.io import JsonFormat, JsonLineFormat, append_jsonl, atomic_write_json
 from hyperloom.common.jsonio import read_json_strict, read_jsonl
 from hyperloom.common.timeutil import now_iso
 
@@ -211,9 +211,8 @@ def record_write_warning(
                 "error_class": type(exc).__name__,
                 "message": str(exc) or repr(exc),
             },
-            ensure_ascii=False,
-            sort_keys=True,
-            options=WriteOptions(make_parents=True),
+            make_parents=True,
+            fmt=JsonLineFormat(ensure_ascii=False, sort_keys=True),
         )
     except Exception:  # noqa: BLE001 — warning persistence cannot change runtime behavior
         return False
