@@ -23,6 +23,13 @@ from hyperloom.inference_optimizer.breakdown.recorder.close_out import (
 )
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import ROUTE_FORGE, make_kernel_recorder
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_records import KernelEntryMeasures
+from hyperloom.inference_optimizer.breakdown.recorder.phase_records import (
+    ActionDispatch,
+    ActionSettlement,
+    PhaseCycle,
+    PhaseEntry,
+    PhaseExit,
+)
 from hyperloom.inference_optimizer.breakdown.recorder.warm_start_event import MATCH_MISS, make_warm_start_recorder
 from hyperloom.inference_optimizer.breakdown.workflow_contract import (
     workflow_contract,
@@ -58,25 +65,24 @@ def _writer_fixture(tmp_path, *, denied: bool) -> dict:
     )
     with session_scope(tmp_path):
         phase_event.record_entry(
-            phase="PRELUDE",
-            macro_cycle=0,
-            sequence=1,
-            reason="session_start",
-            entered_unix=1.0,
+            PhaseEntry(at=PhaseCycle("PRELUDE", 0), sequence=1, reason="session_start", entered_unix=1.0)
         )
         phase_event.record_dispatch(
-            action="baseline",
-            task_id="task-1",
-            phase="PRELUDE",
-            macro_cycle=0,
-            dispatch_class="llm",
-            dispatched_unix=2.0,
+            ActionDispatch(
+                at=PhaseCycle("PRELUDE", 0),
+                action="baseline",
+                task_id="task-1",
+                dispatch_class="llm",
+                dispatched_unix=2.0,
+            )
         )
         phase_event.record_settle(
-            task_id="task-1",
-            status="failed" if denied else "succeeded",
-            decision="rejected" if denied else "accepted",
-            settled_unix=3.0,
+            ActionSettlement(
+                task_id="task-1",
+                status="failed" if denied else "succeeded",
+                decision="rejected" if denied else "accepted",
+                settled_unix=3.0,
+            )
         )
         if denied:
             phase_event.record_denial(
@@ -89,12 +95,13 @@ def _writer_fixture(tmp_path, *, denied: bool) -> dict:
                 hint="use an allowed PRELUDE action",
             )
         phase_event.record_exit(
-            phase="PRELUDE",
-            macro_cycle=0,
-            to_phase="CLOSE",
-            reason="baseline_failed" if denied else "target_reached",
-            evidence={"predicate_inputs": predicate_inputs},
-            exited_unix=4.0,
+            PhaseExit(
+                at=PhaseCycle("PRELUDE", 0),
+                to_phase="CLOSE",
+                reason="baseline_failed" if denied else "target_reached",
+                evidence={"predicate_inputs": predicate_inputs},
+                exited_unix=4.0,
+            )
         )
     record_stage_reached(tmp_path, "close" if not denied else "prelude")
     if denied:
@@ -232,7 +239,9 @@ def test_authored_milestones_survive_sbd_export(tmp_path):
         warm_start.finish(match_status=MATCH_MISS)
         assert build(tmp_path)["outcome"]["stage_reached_recorded"] == "warm_start"
 
-        assert phase_event.record_dispatch(action="profile", task_id="profile-1", phase="PRELUDE", macro_cycle=0)
+        assert phase_event.record_dispatch(
+            ActionDispatch(at=PhaseCycle("PRELUDE", 0), action="profile", task_id="profile-1")
+        )
         assert build(tmp_path)["outcome"]["stage_reached_recorded"] == "profile"
 
         record_phase_transition(state, to_phase="KERNEL_AGENT", reason="phase_entered")
@@ -249,14 +258,15 @@ def test_v2_budget_and_stack_ids_come_from_writers(tmp_path):
     state.save(tmp_path)
     inputs = workflow_predicate_inputs(state, now_unix=1.0)
     with session_scope(tmp_path):
-        phase_event.record_entry(phase="FRAMEWORK_AGENT", macro_cycle=0, sequence=1, entered_unix=1.0)
+        phase_event.record_entry(PhaseEntry(at=PhaseCycle("FRAMEWORK_AGENT", 0), sequence=1, entered_unix=1.0))
         phase_event.record_exit(
-            phase="FRAMEWORK_AGENT",
-            macro_cycle=0,
-            to_phase="CLOSE",
-            reason="target_reached",
-            evidence={"predicate_inputs": inputs},
-            exited_unix=2.0,
+            PhaseExit(
+                at=PhaseCycle("FRAMEWORK_AGENT", 0),
+                to_phase="CLOSE",
+                reason="target_reached",
+                evidence={"predicate_inputs": inputs},
+                exited_unix=2.0,
+            )
         )
         stack_event.record_adoption(
             stack_index=0,
