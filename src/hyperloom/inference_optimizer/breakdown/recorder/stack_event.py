@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 from typing import Any
 
 from .event_fields import (
@@ -173,92 +172,99 @@ def _open(*, baseline_tput: Any = None, objective: str = "", start_time: str = "
     )
 
 
-@dataclass(frozen=True)
-class StackAdoption:
-    """One adoption onto the stack, with the throughput figures it was promoted on.
-
-    ``throughput_before`` is the figure the lift refused to accept the winner
-    without beating, which the same promotion then overwrites as the anchor.
-    """
-
-    stack_index: int
-    entry: Mapping[str, Any]
-    throughput_before: Any
-    throughput_after: Any
-    baseline_tput: Any
-    objective: str = ""
-    degrade_reason: str = ""
-
-    def row(self) -> dict[str, Any]:
-        """The adoption row this record persists as."""
-        entry = self.entry
-        before = _float_or_none(self.throughput_before)
-        after = _float_or_none(self.throughput_after)
-        base = _float_or_none(self.baseline_tput)
-        action = str(entry.get("action") or "")
-        return {
-            "stack_entry_id": _text_or_none(entry.get("stack_entry_id")),
-            "stack_index": int(self.stack_index),
-            "recorded_at": _now(),
-            "ts": _text_or_none(entry.get("ts")) or _now(),
-            "action": action,
-            "source": source_for(action),
-            "variant_name": _text_or_none(entry.get("variant_name")),
-            "lever_kind": _text_or_none(entry.get("lever_kind")),
-            "operation_kind": _text_or_none(entry.get("operation_kind")),
-            "scope": _text_or_none(entry.get("scope")),
-            "backend": _text_or_none(entry.get("backend")),
-            "source_phase": _text_or_none(entry.get("source_phase")),
-            "task_id": _text_or_none(entry.get("task_id")),
-            "kernel_id": _text_or_none(entry.get("kernel_id")),
-            "integration_id": _text_or_none(entry.get("integration_id")),
-            "fingerprint": _text_or_none(entry.get("fingerprint")),
-            "provenance": _text_or_none(entry.get("provenance")),
-            "gap_canonical_id": _text_or_none(entry.get("gap_canonical_id")),
-            "objective": str(self.objective or ""),
-            "degrade_reason": str(self.degrade_reason or ""),
-            "throughput_before": before,
-            "throughput_after": after,
-            "baseline_tput": base,
-            # On the session baseline, not ``throughput_before``: one
-            # denominator makes the contributions sum to the chain total
-            # exactly, so the residual is a fact and not an artifact.
-            "contribution_pct": _pct(after, before, base),
-            # The step's own gain over the anchor it beat, which is what the
-            # promotion decision was actually made on.
-            "local_gain_pct": _pct(after, before, before),
-            "cumulative_gain_pct": _pct(after, base, base),
-            "accuracy": _float_or_none(entry.get("accuracy")),
-            "attribution_eligible": (
-                bool(entry.get("attribution_eligible")) if "attribution_eligible" in entry else None
-            ),
-            "keep_reason": _text_or_none(entry.get("keep_reason")),
-            "accepted_kernels": [str(k) for k in _as_list(entry.get("accepted_kernels")) if str(k)],
-        }
-
-
-def record_adoption(adoption: StackAdoption) -> None:
+def record_adoption(
+    *,
+    stack_index: int,
+    entry: Mapping[str, Any],
+    throughput_before: Any,
+    throughput_after: Any,
+    baseline_tput: Any,
+    objective: str = "",
+    degrade_reason: str = "",
+) -> None:
     """Record one adoption at the moment it is accepted onto the stack. Never raises.
 
-    Called from the sole ``optimization_stack`` append, where every fact the
-    row carries is in scope.
+    Called from the sole ``optimization_stack`` append, where every fact below
+    is in scope: ``throughput_before`` in particular is the figure the lift just
+    refused to accept the winner without beating, and this same call overwrites
+    the anchor.
     """
     sink = _sink()
     if sink is None:
         return
-    _open(baseline_tput=adoption.baseline_tput, objective=adoption.objective)
-    row = adoption.row()
+    _open(baseline_tput=baseline_tput, objective=objective)
+    before = _float_or_none(throughput_before)
+    after = _float_or_none(throughput_after)
+    base = _float_or_none(baseline_tput)
+    action = str(entry.get("action") or "")
+    row: dict[str, Any] = {
+        "stack_entry_id": _text_or_none(entry.get("stack_entry_id")),
+        "stack_index": int(stack_index),
+        "recorded_at": _now(),
+        "ts": _text_or_none(entry.get("ts")) or _now(),
+        "action": action,
+        "source": source_for(action),
+        "variant_name": _text_or_none(entry.get("variant_name")),
+        "lever_kind": _text_or_none(entry.get("lever_kind")),
+        "operation_kind": _text_or_none(entry.get("operation_kind")),
+        "scope": _text_or_none(entry.get("scope")),
+        "backend": _text_or_none(entry.get("backend")),
+        "source_phase": _text_or_none(entry.get("source_phase")),
+        "task_id": _text_or_none(entry.get("task_id")),
+        "kernel_id": _text_or_none(entry.get("kernel_id")),
+        "integration_id": _text_or_none(entry.get("integration_id")),
+        "fingerprint": _text_or_none(entry.get("fingerprint")),
+        "provenance": _text_or_none(entry.get("provenance")),
+        "gap_canonical_id": _text_or_none(entry.get("gap_canonical_id")),
+        "objective": str(objective or ""),
+        "degrade_reason": str(degrade_reason or ""),
+        "throughput_before": before,
+        "throughput_after": after,
+        "baseline_tput": base,
+        # On the session baseline, not ``throughput_before``: one
+        # denominator makes the contributions sum to the chain total
+        # exactly, so the residual is a fact and not an artifact.
+        "contribution_pct": _pct(after, before, base),
+        # The step's own gain over the anchor it beat, which is what the
+        # promotion decision was actually made on.
+        "local_gain_pct": _pct(after, before, before),
+        "cumulative_gain_pct": _pct(after, base, base),
+        "accuracy": _float_or_none(entry.get("accuracy")),
+        "attribution_eligible": (bool(entry.get("attribution_eligible")) if "attribution_eligible" in entry else None),
+        "keep_reason": _text_or_none(entry.get("keep_reason")),
+        "accepted_kernels": [str(k) for k in _as_list(entry.get("accepted_kernels")) if str(k)],
+    }
     sink.record(
         SECTION_ADOPTION,
         row,
         row_type="adoption",
-        natural_ids=str(row["stack_entry_id"] or int(adoption.stack_index)),
+        natural_ids=str(row["stack_entry_id"] or int(stack_index)),
     )
 
 
-@dataclass(frozen=True)
-class StackValidation:
-    """One session validation of the stack as a whole.
+def record_validation(
+    *,
+    stack_len: int,
+    baseline_tput: Any,
+    validated_tput: Any,
+    validated_gain_pct: Any,
+    source: str = "",
+    measurement_basis: str = "",
+    graded_objective: str = "",
+    measurement: Mapping[str, Any] | None = None,
+    ts: str = "",
+    ttft_mean_ms: Any = None,
+    e2el_mean_ms: Any = None,
+    ttft_e2el_source: str = "",
+    server_launch_flags: str = "",
+    workspace: Any = None,
+) -> None:
+    """Record one session validation of the stack as a whole. Never raises.
+
+    This is the ledger's only independent check on itself: a figure measured on
+    the whole stack, against which the sum of the parts can be reconciled.
+    Without it the session total is the sum of the very steps it is meant to be
+    checking.
 
     ``stack_len`` keys the row, so a later validation at one length supersedes
     the earlier. ``measurement_basis`` is ``e2e_rebench`` for a full-stack
@@ -274,59 +280,30 @@ class StackValidation:
     carried here because the run that produced ``validated_tput`` resolves them
     and they cannot be recovered afterwards.
     """
-
-    stack_len: int
-    baseline_tput: Any
-    validated_tput: Any
-    validated_gain_pct: Any
-    source: str = ""
-    measurement_basis: str = ""
-    graded_objective: str = ""
-    measurement: Mapping[str, Any] | None = None
-    ts: str = ""
-    ttft_mean_ms: Any = None
-    e2el_mean_ms: Any = None
-    ttft_e2el_source: str = ""
-    server_launch_flags: str = ""
-    workspace: Any = None
-
-    def row(self) -> dict[str, Any]:
-        """The validation row this record persists as."""
-        return {
-            "stack_len": int(self.stack_len or 0),
-            "ts": str(self.ts or "") or _now(),
-            "baseline_tput": _float_or_none(self.baseline_tput),
-            "validated_tput": _float_or_none(self.validated_tput),
-            "validated_gain_pct": _float_or_none(self.validated_gain_pct),
-            "source": str(self.source or ""),
-            "measurement_basis": str(self.measurement_basis or ""),
-            "graded_objective": str(self.graded_objective or ""),
-            "perf": _graded_axes(self.measurement),
-            "ttft_mean_ms": _float_or_none(self.ttft_mean_ms),
-            "e2el_mean_ms": _float_or_none(self.e2el_mean_ms),
-            "ttft_e2el_source": str(self.ttft_e2el_source or ""),
-            "server_launch_flags": str(self.server_launch_flags or ""),
-            "workspace": _text_or_none(self.workspace),
-        }
-
-
-def record_validation(validation: StackValidation) -> None:
-    """Record one session validation of the stack as a whole. Never raises.
-
-    This is the ledger's only independent check on itself: a figure measured on
-    the whole stack, against which the sum of the parts can be reconciled.
-    Without it the session total is the sum of the very steps it is meant to be
-    checking.
-    """
     sink = _sink()
     if sink is None:
         return
-    _open(baseline_tput=validation.baseline_tput)
+    _open(baseline_tput=baseline_tput)
     sink.record(
         SECTION_VALIDATION,
-        validation.row(),
+        {
+            "stack_len": int(stack_len or 0),
+            "ts": str(ts or "") or _now(),
+            "baseline_tput": _float_or_none(baseline_tput),
+            "validated_tput": _float_or_none(validated_tput),
+            "validated_gain_pct": _float_or_none(validated_gain_pct),
+            "source": str(source or ""),
+            "measurement_basis": str(measurement_basis or ""),
+            "graded_objective": str(graded_objective or ""),
+            "perf": _graded_axes(measurement),
+            "ttft_mean_ms": _float_or_none(ttft_mean_ms),
+            "e2el_mean_ms": _float_or_none(e2el_mean_ms),
+            "ttft_e2el_source": str(ttft_e2el_source or ""),
+            "server_launch_flags": str(server_launch_flags or ""),
+            "workspace": _text_or_none(workspace),
+        },
         row_type="validation",
-        natural_ids=str(int(validation.stack_len or 0)),
+        natural_ids=str(int(stack_len or 0)),
     )
 
 
@@ -570,8 +547,6 @@ __all__ = [
     "STATUS_DEGRADED",
     "STATUS_SKIPPED",
     "STATUS_SUCCEEDED",
-    "StackAdoption",
-    "StackValidation",
     "assemble_stack_ext",
     "finish",
     "record_adoption",

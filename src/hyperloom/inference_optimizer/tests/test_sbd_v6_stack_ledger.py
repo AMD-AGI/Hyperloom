@@ -60,14 +60,12 @@ def _adopt(
 ) -> None:
     """Record one adoption the way the lift does."""
     stack_event.record_adoption(
-        stack_event.StackAdoption(
-            stack_index=index,
-            entry={"action": action, "backend": backend, **entry},
-            throughput_before=before,
-            throughput_after=after,
-            baseline_tput=baseline,
-            objective="output_throughput",
-        )
+        stack_index=index,
+        entry={"action": action, "backend": backend, **entry},
+        throughput_before=before,
+        throughput_after=after,
+        baseline_tput=baseline,
+        objective="output_throughput",
     )
 
 
@@ -222,14 +220,12 @@ def test_reconciliation_gap_compares_the_ledger_to_the_measured_whole():
     _adopt(0, "explore", 100.0, 110.0)
     _adopt(1, "explore", 110.0, 120.0)
     stack_event.record_validation(
-        stack_event.StackValidation(
-            stack_len=2,
-            baseline_tput=100.0,
-            validated_tput=118.0,
-            validated_gain_pct=18.0,
-            source="writeback",
-            measurement_basis="e2e_rebench",
-        )
+        stack_len=2,
+        baseline_tput=100.0,
+        validated_tput=118.0,
+        validated_gain_pct=18.0,
+        source="writeback",
+        measurement_basis="e2e_rebench",
     )
 
     ext = _ext()
@@ -243,14 +239,12 @@ def test_a_re_validation_at_one_stack_length_supersedes_the_earlier_figure():
     _adopt(0, "explore", 100.0, 120.0)
     for gain, tput in ((20.0, 120.0), (17.5, 117.5)):
         stack_event.record_validation(
-            stack_event.StackValidation(
-                stack_len=1,
-                baseline_tput=100.0,
-                validated_tput=tput,
-                validated_gain_pct=gain,
-                source="writeback",
-                measurement_basis="e2e_rebench",
-            )
+            stack_len=1,
+            baseline_tput=100.0,
+            validated_tput=tput,
+            validated_gain_pct=gain,
+            source="writeback",
+            measurement_basis="e2e_rebench",
         )
 
     ext = _ext()
@@ -261,7 +255,10 @@ def test_a_re_validation_at_one_stack_length_supersedes_the_earlier_figure():
 def test_a_validation_behind_the_stack_head_is_reported_as_such():
     _adopt(0, "explore", 100.0, 110.0)
     stack_event.record_validation(
-        stack_event.StackValidation(stack_len=1, baseline_tput=100.0, validated_tput=110.0, validated_gain_pct=10.0)
+        stack_len=1,
+        baseline_tput=100.0,
+        validated_tput=110.0,
+        validated_gain_pct=10.0,
     )
     _adopt(1, "explore", 110.0, 130.0)
 
@@ -329,9 +326,7 @@ def test_recording_without_a_bound_session_is_a_no_op(tmp_path, monkeypatch):
 
     monkeypatch.setattr(session_binding, "bound_session_or_none", lambda: None)
     _adopt(0, "explore", 100.0, 120.0)
-    stack_event.record_validation(
-        stack_event.StackValidation(stack_len=1, baseline_tput=100.0, validated_tput=120.0, validated_gain_pct=20.0)
-    )
+    stack_event.record_validation(stack_len=1, baseline_tput=100.0, validated_tput=120.0, validated_gain_pct=20.0)
     stack_event.finish()
 
 
@@ -348,9 +343,7 @@ def _outcome(session_dir) -> dict[str, Any]:
 def test_outcome_validation_reads_the_ledger_rather_than_a_legacy_projection(tmp_path):
     _adopt(0, "replay_warm_recipe", 100.0, 110.0)
     _adopt(1, "integrate", 110.0, 130.0, backend="geak")
-    stack_event.record_validation(
-        stack_event.StackValidation(stack_len=2, baseline_tput=100.0, validated_tput=130.0, validated_gain_pct=30.0)
-    )
+    stack_event.record_validation(stack_len=2, baseline_tput=100.0, validated_tput=130.0, validated_gain_pct=30.0)
 
     validation = _outcome(tmp_path)
     assert validation["attributed_gain_pct"] == 30.0
@@ -387,9 +380,7 @@ def test_outcome_folds_explore_into_framework_agent(tmp_path):
 
 def test_outcome_notes_are_findings_and_empty_when_the_ledger_reconciles(tmp_path):
     _adopt(0, "explore", 100.0, 110.0)
-    stack_event.record_validation(
-        stack_event.StackValidation(stack_len=1, baseline_tput=100.0, validated_tput=110.0, validated_gain_pct=10.0)
-    )
+    stack_event.record_validation(stack_len=1, baseline_tput=100.0, validated_tput=110.0, validated_gain_pct=10.0)
 
     assert _outcome(tmp_path)["notes"] == []
 

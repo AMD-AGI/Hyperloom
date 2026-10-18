@@ -1293,26 +1293,22 @@ async def test_synthetic_controller_keep_updates_state_and_stack_ledger(tmp_path
 
     with session_scope(session_dir):
         stack_event.record_adoption(
-            stack_event.StackAdoption(
-                stack_index=0,
-                entry=state.optimization_stack[0],
-                throughput_before=100.0,
-                throughput_after=110.0,
-                baseline_tput=100.0,
-                objective="output_throughput",
-            )
+            stack_index=0,
+            entry=state.optimization_stack[0],
+            throughput_before=100.0,
+            throughput_after=110.0,
+            baseline_tput=100.0,
+            objective="output_throughput",
         )
         stack_event.record_validation(
-            stack_event.StackValidation(
-                stack_len=1,
-                baseline_tput=100.0,
-                validated_tput=110.0,
-                validated_gain_pct=10.0,
-                source="writeback",
-                measurement_basis="e2e_decision_round",
-                graded_objective="output_throughput",
-                ts=state.cumulative_gain_validated_ts,
-            )
+            stack_len=1,
+            baseline_tput=100.0,
+            validated_tput=110.0,
+            validated_gain_pct=10.0,
+            source="writeback",
+            measurement_basis="e2e_decision_round",
+            graded_objective="output_throughput",
+            ts=state.cumulative_gain_validated_ts,
         )
 
         summary = await integrate_controller_patches(

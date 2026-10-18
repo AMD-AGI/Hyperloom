@@ -754,24 +754,22 @@ class WritebackCollaborator(CoordinatorCollaborator):
             from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 
             stack_event.record_validation(
-                stack_event.StackValidation(
-                    stack_len=self.shared_state.cumulative_gain_validated_stack_len,
-                    baseline_tput=graded.reference,
-                    validated_tput=graded.candidate,
-                    validated_gain_pct=float(validated_gain),
-                    source=source,
-                    measurement_basis=measurement_basis,
-                    graded_objective=graded.objective,
-                    # The figures grading actually read, not the raw measurement: the caller's resolved output
-                    # throughput is stamped into it, so the axes recorded here are the ones the verdict was reached on.
-                    measurement=graded_source,
-                    ts=ts,
-                    ttft_mean_ms=measurement.get("ttft_mean_ms"),
-                    e2el_mean_ms=measurement.get("e2el_mean_ms"),
-                    ttft_e2el_source=str(measurement.get("ttft_e2el_source") or ""),
-                    server_launch_flags=str(measurement.get("resolved_server_launch_flags") or ""),
-                    workspace=measurement.get("workspace"),
-                )
+                stack_len=self.shared_state.cumulative_gain_validated_stack_len,
+                baseline_tput=graded.reference,
+                validated_tput=graded.candidate,
+                validated_gain_pct=float(validated_gain),
+                source=source,
+                measurement_basis=measurement_basis,
+                graded_objective=graded.objective,
+                # The figures grading actually read, not the raw measurement: the caller's resolved output
+                # throughput is stamped into it, so the axes recorded here are the ones the verdict was reached on.
+                measurement=graded_source,
+                ts=ts,
+                ttft_mean_ms=measurement.get("ttft_mean_ms"),
+                e2el_mean_ms=measurement.get("e2el_mean_ms"),
+                ttft_e2el_source=str(measurement.get("ttft_e2el_source") or ""),
+                server_launch_flags=str(measurement.get("resolved_server_launch_flags") or ""),
+                workspace=measurement.get("workspace"),
             )
         except Exception as exc:
             log.debug("stack validation record failed", exc_info=True)
@@ -987,15 +985,13 @@ class WritebackCollaborator(CoordinatorCollaborator):
         if was_validation_pending:
             state.enablement.validation_pending = False
             enablement_event.record_revalidation_outcome(
-                enablement_event.RevalidationOutcome(
-                    generation=int(state.enablement.revalidation_generation or 0),
-                    promoted=False,
-                    task_id=str(state.enablement.revalidation_task_id or ""),
-                    accuracy=result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY),
-                    accuracy_floor=state.enablement.accuracy_floor,
-                    error_class=str(incoming_kind or ""),
-                    reason="revalidation eval failed",
-                )
+                generation=int(state.enablement.revalidation_generation or 0),
+                promoted=False,
+                task_id=str(state.enablement.revalidation_task_id or ""),
+                accuracy=result_payload.get(BASELINE_EVAL_OBSERVED_ACCURACY_KEY),
+                accuracy_floor=state.enablement.accuracy_floor,
+                error_class=str(incoming_kind or ""),
+                reason="revalidation eval failed",
             )
         floor = to_float(result_payload.get(BASELINE_EVAL_ACCURACY_FLOOR_KEY))
         if floor is not None:
@@ -1042,18 +1038,16 @@ class WritebackCollaborator(CoordinatorCollaborator):
         """
         state = self.shared_state
         enablement_event.record_trigger(
-            enablement_event.EnablementTrigger(
-                origin=enablement_event.ORIGIN_EVAL,
-                mode=str(state.enablement_mode or ""),
-                kind=str(state.enablement.baseline_eval_kind or ""),
-                evidence=str(state.enablement.baseline_eval_evidence or ""),
-                observed_accuracy=state.enablement.observed_accuracy,
-                accuracy_floor=state.enablement.accuracy_floor,
-                observed_task=state.enablement.observed_task,
-                observed_metric=state.enablement.observed_metric,
-                eval_contract_fingerprint=state.enablement.eval_contract_fingerprint,
-                probe_config_path=state.enablement.probe_config_path,
-            )
+            origin=enablement_event.ORIGIN_EVAL,
+            mode=str(state.enablement_mode or ""),
+            kind=str(state.enablement.baseline_eval_kind or ""),
+            evidence=str(state.enablement.baseline_eval_evidence or ""),
+            observed_accuracy=state.enablement.observed_accuracy,
+            accuracy_floor=state.enablement.accuracy_floor,
+            observed_task=state.enablement.observed_task,
+            observed_metric=state.enablement.observed_metric,
+            eval_contract_fingerprint=state.enablement.eval_contract_fingerprint,
+            probe_config_path=state.enablement.probe_config_path,
         )
 
     async def _reopen_revalidation_window(self) -> None:
@@ -1111,14 +1105,12 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # A window the run stopped measured nothing, so recording it as a failed
         # revalidation would charge the lane for a clock.
         enablement_event.record_revalidation_outcome(
-            enablement_event.RevalidationOutcome(
-                generation=generation,
-                promoted=False,
-                task_id=str(task.task_id or ""),
-                accuracy_floor=state.enablement.accuracy_floor,
-                error_class="" if stopped_by_the_run else str(err_class or ""),
-                reason="stopped by the run" if stopped_by_the_run else "revalidation baseline failed",
-            )
+            generation=generation,
+            promoted=False,
+            task_id=str(task.task_id or ""),
+            accuracy_floor=state.enablement.accuracy_floor,
+            error_class="" if stopped_by_the_run else str(err_class or ""),
+            reason="stopped by the run" if stopped_by_the_run else "revalidation baseline failed",
         )
         launch_log = _authorable_launch_log(result_payload, err_class=str(err_class or ""))
         if launch_log:
@@ -1359,12 +1351,10 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 # rewrite the reason the lane opened with the gap it is now on.
                 if not str(self.shared_state.enablement.origin or ""):
                     enablement_event.record_trigger(
-                        enablement_event.EnablementTrigger(
-                            origin=enablement_event.ORIGIN_BOOT,
-                            mode=str(self.shared_state.enablement_mode or ""),
-                            kind=str(err_class or ""),
-                            evidence=launch_log,
-                        )
+                        origin=enablement_event.ORIGIN_BOOT,
+                        mode=str(self.shared_state.enablement_mode or ""),
+                        kind=str(err_class or ""),
+                        evidence=launch_log,
                     )
             baseline_event_payload = {
                 "kind": "baseline_not_promoted",
@@ -1678,15 +1668,13 @@ class WritebackCollaborator(CoordinatorCollaborator):
                     from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 
                     stack_event.record_adoption(
-                        stack_event.StackAdoption(
-                            stack_index=len(self.shared_state.optimization_stack) - 1,
-                            entry=stack_entry,
-                            throughput_before=graded.reference,
-                            throughput_after=graded.candidate,
-                            baseline_tput=self.shared_state.baseline_tput,
-                            objective=graded.objective,
-                            degrade_reason=graded.degrade_reason,
-                        )
+                        stack_index=len(self.shared_state.optimization_stack) - 1,
+                        entry=stack_entry,
+                        throughput_before=graded.reference,
+                        throughput_after=graded.candidate,
+                        baseline_tput=self.shared_state.baseline_tput,
+                        objective=graded.objective,
+                        degrade_reason=graded.degrade_reason,
                     )
 
         # Merge envs: start from previous stack top envs so source-layer KEEPs
@@ -1912,13 +1900,11 @@ class WritebackCollaborator(CoordinatorCollaborator):
                         # preceded it was provisional, so the round that landed
                         # it did not close the lane.
                         enablement_event.record_revalidation_outcome(
-                            enablement_event.RevalidationOutcome(
-                                generation=generation,
-                                promoted=True,
-                                task_id=str(promoting_tid or ""),
-                                accuracy=acc,
-                                accuracy_floor=floor,
-                            )
+                            generation=generation,
+                            promoted=True,
+                            task_id=str(promoting_tid or ""),
+                            accuracy=acc,
+                            accuracy_floor=floor,
                         )
                         await self._coord.enablement_lane.close_lane_event(
                             outcome=enablement_event.OUTCOME_SUCCEEDED,
@@ -1938,14 +1924,12 @@ class WritebackCollaborator(CoordinatorCollaborator):
                             FAILED, reason="revalidation_below_floor"
                         )
                         enablement_event.record_revalidation_outcome(
-                            enablement_event.RevalidationOutcome(
-                                generation=generation,
-                                promoted=False,
-                                task_id=str(promoting_tid or ""),
-                                accuracy=acc,
-                                accuracy_floor=floor,
-                                reason="accuracy below floor",
-                            )
+                            generation=generation,
+                            promoted=False,
+                            task_id=str(promoting_tid or ""),
+                            accuracy=acc,
+                            accuracy_floor=floor,
+                            reason="accuracy below floor",
                         )
                 else:
                     # An unrelated baseline promoted while revalidation is pending.

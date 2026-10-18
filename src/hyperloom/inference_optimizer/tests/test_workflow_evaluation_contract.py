@@ -270,13 +270,11 @@ def test_v2_budget_and_stack_ids_come_from_writers(tmp_path):
             )
         )
         stack_event.record_adoption(
-            stack_event.StackAdoption(
-                stack_index=0,
-                entry={"action": "integrate", "stack_entry_id": "entry-1", "integration_id": "int-1"},
-                throughput_before=100.0,
-                throughput_after=110.0,
-                baseline_tput=100.0,
-            )
+            stack_index=0,
+            entry={"action": "integrate", "stack_entry_id": "entry-1", "integration_id": "int-1"},
+            throughput_before=100.0,
+            throughput_after=110.0,
+            baseline_tput=100.0,
         )
     record_stage_reached(tmp_path, "close")
     record_close_opened(tmp_path)
