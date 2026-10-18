@@ -11,7 +11,6 @@ import logging
 import math
 import os
 import time
-import traceback
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import partial
@@ -792,9 +791,7 @@ class Coordinator:
                 tick=int(self.shared_state.tick or 0),
                 stage=stage,
                 agent=agent,
-                exc_type=type(exc).__name__,
-                message=str(exc),
-                traceback_text="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+                exc=exc,
             )
             self.shared_state.increment_crash_count()
             self.shared_state.save(self.session_dir)
