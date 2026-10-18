@@ -18,6 +18,7 @@ from pathlib import Path
 from kernelforge.llm.git import git
 from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.knowledge.kb_store.identity.source_resolution import (
+    KernelSources,
     infer_source_owner_framework,
     resolve_operation,
 )
@@ -493,12 +494,14 @@ def create_campaign_config(
     )
     kernel_absolute = str((workspace / kernel_path).resolve())
     resolved_framework = infer_source_owner_framework(
-        kernel_path=kernel_absolute,
-        kernel_source=pristine_sources.get(kernel_absolute, ""),
+        KernelSources(
+            kernel_absolute,
+            pristine_sources.get(kernel_absolute, ""),
+            raw_source_paths,
+            source_contents=pristine_sources,
+        ),
         target_functions=resolved_targets,
-        source_files=raw_source_paths,
         framework_override=(framework or "").strip(),
-        source_contents=pristine_sources,
     )
     pristine_signature, pristine_identity = implementation_signature(
         workspace=str(workspace),

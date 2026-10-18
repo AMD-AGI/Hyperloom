@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from kernelforge.knowledge.kb_store.identity.source_resolution import (
+    KernelSources,
     detect_backend_language,
     infer_source_owner_framework,
     resolve_operation,
@@ -52,10 +53,8 @@ def resolve_loop_identity(
     operator = normalize_operator_name(operator_name or concrete_op)
     backend = detect_backend_language(kernel_backend)
     resolved_framework = infer_source_owner_framework(
-        kernel_path=kernel_path,
-        kernel_source=kernel_source,
+        KernelSources(kernel_path, kernel_source, source_files),
         target_functions=target_functions,
-        source_files=source_files,
         framework_override=framework,
         concrete_operation=concrete_op,
     )
