@@ -44,7 +44,7 @@ from .discover import DiscoverySession, DiscoveryTarget, discover_recipes, regis
 from .emit import FusionFiles, _git_tracks, export_artifacts, restore_exported_changes
 from .gpu_arch import canon_arch, detect_arch
 from .llm_failure import LlmUnavailableError
-from .locate import build_recipes, resolve_framework_source_file
+from .locate import FrameworkInstall, build_recipes, resolve_framework_source_file
 from .loop import FusionAbort, LoopConfig, LoopResult, RecipePatch, run_fusion_loop
 from .models import CompilePassOutcome, FusionArtifacts, Recipe, ValidationResult
 from .shadow_repo import ensure_git_workspace
@@ -840,8 +840,7 @@ def run(
             build_recipes(
                 diagnosis,
                 model_path=model_path,
-                framework=framework,
-                framework_root=framework_root,
+                install=FrameworkInstall(framework, framework_root),
                 decode_batch=decode_batch,
             )
         )

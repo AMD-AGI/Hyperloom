@@ -13,7 +13,7 @@ import sys
 from kernelforge.fusion.discover import DiscoveryTarget
 from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares
 from kernelforge.fusion.discover import parse_discovered_recipes
-from kernelforge.fusion.locate import build_recipes, vllm_compile_pass_state, vllm_pass_config_flag
+from kernelforge.fusion.locate import FrameworkInstall, build_recipes, vllm_compile_pass_state, vllm_pass_config_flag
 from kernelforge.fusion.vllm_passes import (
     _PROBE_SRC,
     _VLLM_PASS_PROBE_MARKER,
@@ -62,10 +62,12 @@ class TestPatternRoute:
         model, root = _fake_vllm_tree(tmp_path, "qklm", QK_BODY)
         recipes = build_recipes(
             diagnose_from_shares(TraceProfile(QK_SHARES, busy_fraction_of_wall=0.21)),
+            install=FrameworkInstall(
+                framework="vllm",
+                framework_root=root,
+                pass_probe=_fake_probe(enabled=False, config_file="/fw/vllm/config/compilation.py"),
+            ),
             model_path=model,
-            framework="vllm",
-            framework_root=root,
-            pass_probe=_fake_probe(enabled=False, config_file="/fw/vllm/config/compilation.py"),
         )
         cp = [r for r in recipes if r.candidate_kind == "compile_pass"]
         assert len(cp) == 1, f"expected an enable-the-pass recipe, got {[r.pattern_id for r in recipes]}"
@@ -81,10 +83,8 @@ class TestPatternRoute:
         model, root = _fake_vllm_tree(tmp_path, "qklm", QK_BODY)
         recipes = build_recipes(
             diagnose_from_shares(TraceProfile(QK_SHARES, busy_fraction_of_wall=0.21)),
+            install=FrameworkInstall(framework="vllm", framework_root=root, pass_probe=_fake_probe(enabled=True)),
             model_path=model,
-            framework="vllm",
-            framework_root=root,
-            pass_probe=_fake_probe(enabled=True),
         )
         assert all(r.pattern_id != "qk_norm_rope" for r in recipes)
         assert all(r.candidate_kind != "compile_pass" for r in recipes)
@@ -106,10 +106,8 @@ class TestPatternRoute:
             model, root = _fake_vllm_tree(tmp_path / label, "qklm", QK_BODY)
             recipes = build_recipes(
                 diagnose_from_shares(TraceProfile(QK_SHARES, busy_fraction_of_wall=0.21)),
+                install=FrameworkInstall(framework="vllm", framework_root=root, pass_probe=_fake_probe(**kw)),
                 model_path=model,
-                framework="vllm",
-                framework_root=root,
-                pass_probe=_fake_probe(**kw),
             )
             kinds = [r.candidate_kind for r in recipes]
             got_cp = "compile_pass" in kinds
@@ -136,10 +134,8 @@ class TestPatternRoute:
         )
         recipes = build_recipes(
             diagnose_from_shares(TraceProfile(QK_SHARES, busy_fraction_of_wall=0.21)),
+            install=FrameworkInstall(framework="sglang", framework_root=str(tmp_path / "fw"), pass_probe=boom),
             model_path=str(model),
-            framework="sglang",
-            framework_root=str(tmp_path / "fw"),
-            pass_probe=boom,
         )
         assert any(r.pattern_id == "qk_norm_rope" for r in recipes)
 
@@ -164,10 +160,8 @@ class TestRanking:
         model, root = _fake_vllm_tree(tmp_path, "ranklm", self.BODY)
         return build_recipes(
             diagnose_from_shares(TraceProfile(self.SHARES, busy_fraction_of_wall=0.21)),
+            install=FrameworkInstall(framework="vllm", framework_root=root, pass_probe=_fake_probe(enabled=False)),
             model_path=model,
-            framework="vllm",
-            framework_root=root,
-            pass_probe=_fake_probe(enabled=False),
         )
 
     def test_compile_pass_outranks_authoring_despite_lower_share(self, tmp_path):

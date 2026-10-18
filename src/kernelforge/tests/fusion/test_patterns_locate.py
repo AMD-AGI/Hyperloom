@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 
 from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares
-from kernelforge.fusion.locate import build_recipes
+from kernelforge.fusion.locate import FrameworkInstall, build_recipes
 from kernelforge.fusion.patterns import match_patterns
 from kernelforge.fusion.report import build_manifest
 from kernelforge.fusion.shapes import resolve_decode_shapes
@@ -86,7 +86,7 @@ class TestBuildRecipesAndManifest:
             encoding="utf-8",
         )
         d = _candidate_diag({"gemm": 0.45, "add": 0.18, "rmsnorm": 0.12})
-        recipes = build_recipes(d, model_path=str(tmp_path), framework="sglang")
+        recipes = build_recipes(d, install=FrameworkInstall(framework="sglang"), model_path=str(tmp_path))
         assert recipes
         residual = next((r for r in recipes if r.pattern_id == "residual_add_rmsnorm"), None)
         assert residual is not None
@@ -99,7 +99,7 @@ class TestBuildRecipesAndManifest:
             json.dumps({"model_type": "toylm", "hidden_size": 2048, "num_attention_heads": 16}), encoding="utf-8"
         )
         d = _candidate_diag({"gemm": 0.45, "add": 0.18, "rmsnorm": 0.12})
-        recipes = build_recipes(d, model_path=str(tmp_path), framework="sglang")
+        recipes = build_recipes(d, install=FrameworkInstall(framework="sglang"), model_path=str(tmp_path))
         m = build_manifest(
             framework="sglang",
             model_path=str(tmp_path),
@@ -115,7 +115,7 @@ class TestBuildRecipesAndManifest:
     def test_build_recipes_empty_for_non_candidate(self, tmp_path):
         (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3"}), encoding="utf-8")
         d = diagnose_from_shares(TraceProfile({"gemm": 0.8, "attention": 0.15}, busy_fraction_of_wall=0.72))
-        assert build_recipes(d, model_path=str(tmp_path), framework="sglang") == []
+        assert build_recipes(d, install=FrameworkInstall(framework="sglang"), model_path=str(tmp_path)) == []
 
     def test_manifest_verdict_no_opportunity(self, tmp_path):
         d = diagnose_from_shares(TraceProfile({"gemm": 0.8, "attention": 0.15}, busy_fraction_of_wall=0.72))
