@@ -390,28 +390,23 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 outcome = str(vo.get("outcome") or "") if isinstance(vo, dict) else ""
                 if outcome and outcome not in _NON_ATTEMPT_OUTCOMES:
                     metrics = vo.get("metrics") if isinstance(vo.get("metrics"), dict) else {}
-                    record_attempt_row(
-                        self.shared_state,
-                        AttemptRow(
-                            lever_kind=LEVER_CONFIG,
-                            task_id=str(task.task_id or ""),
-                            round_id=round_id,
-                            fingerprint=str(vo.get("fingerprint") or ""),
-                            variant_name=str(vo.get("variant_name") or ""),
-                            outcome=outcome,
-                            adopted=adopted,
-                            gain_pct=metrics.get("gain_pct"),
-                            before_tput=metrics.get("base_tput"),
-                            after_tput=metrics.get("tput"),
-                            error_class=str(vo.get("error_class") or ""),
-                            provenance=str(vo.get("provenance") or ""),
-                        ),
+                    row = AttemptRow(
+                        lever_kind=LEVER_CONFIG,
+                        task_id=str(task.task_id or ""),
+                        round_id=round_id,
+                        fingerprint=str(vo.get("fingerprint") or ""),
+                        variant_name=str(vo.get("variant_name") or ""),
+                        outcome=outcome,
+                        adopted=adopted,
+                        gain_pct=metrics.get("gain_pct"),
+                        before_tput=metrics.get("base_tput"),
+                        after_tput=metrics.get("tput"),
+                        error_class=str(vo.get("error_class") or ""),
+                        provenance=str(vo.get("provenance") or ""),
                     )
+                    record_attempt_row(self.shared_state, row)
                 self._record_fact_per_variant(
-                    task=task,
-                    source_session_id=source_session_id,
-                    variant_outcome=vo,
-                    adopted=adopted,
+                    task=task, source_session_id=source_session_id, variant_outcome=vo, adopted=adopted
                 )
         else:
             self._record_fact_per_task(

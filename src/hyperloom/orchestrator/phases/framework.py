@@ -37,12 +37,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
 from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR
 from ..specialists.profile import is_authoring_specialist
 from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX
-from hyperloom.orchestrator.lever import (
-    LEVER_SOURCE_PATCH,
-    LEVER_UPSTREAM_PR,
-    patch_lever_kind,
-    patch_owner_phase,
-)
+from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, patch_lever_kind, patch_owner_phase
 from .proposal_bench import CUSTOM_PROPOSAL_DOMAIN, ProposalBench, kb_exposure_of
 
 log = _logging.getLogger(__name__)
@@ -2428,23 +2423,20 @@ class FrameworkPhase(ProposalBench):
         )
         if not recorded:
             return
-        # The deliverable names the lever when the dispatch did not, but a dispatch that named one outranks it.
-        evidence = {**res, **params}
-        record_attempt_row(
-            self.shared_state,
-            AttemptRow(
-                lever_kind=patch_lever_kind(evidence),
-                task_id=str(getattr(task, "task_id", "") or ""),
-                candidate_id=str(evidence.get("framework_agent_candidate_id") or ""),
-                specialist_task_id=spec_tid,
-                outcome=status,
-                adopted=adopted,
-                gain_pct=delta_pct,
-                before_tput=res.get("base_tput") if res.get("base_tput") is not None else params.get("base_tput"),
-                after_tput=new_tput,
-                error_class=str(res.get("error_class") or ""),
-            ),
+        evidence = {**res, **params}  # A lever the dispatch named outranks the one the deliverable names.
+        row = AttemptRow(
+            lever_kind=patch_lever_kind(evidence),
+            task_id=str(getattr(task, "task_id", "") or ""),
+            candidate_id=str(evidence.get("framework_agent_candidate_id") or ""),
+            specialist_task_id=spec_tid,
+            outcome=status,
+            adopted=adopted,
+            gain_pct=delta_pct,
+            before_tput=res.get("base_tput") if res.get("base_tput") is not None else params.get("base_tput"),
+            after_tput=new_tput,
+            error_class=str(res.get("error_class") or ""),
         )
+        record_attempt_row(self.shared_state, row)
         _record_source_attempt(
             self,
             task=task,
