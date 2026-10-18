@@ -14,7 +14,7 @@ from hyperloom.contracts.measurement import (
     TestRequest,
     Validity,
 )
-from hyperloom.contracts.recipe import LaunchConfig, Recipe, apply
+from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta, apply
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.judgement import Verdict
 from hyperloom_multibranch.contracts.notebook import Role, Writer
@@ -33,6 +33,7 @@ NAN = (AttachmentRef("nan_logits", "dir", "d" * 64),)
 FIX = delta("--kv-cache-dtype fp8 --clamp-scales")
 GUARD = delta("--guard-nan-logits")
 MERGE = delta("--max-num-seqs 256")
+NO_DELTA = RecipeDelta()
 
 
 class _Rig:
@@ -145,7 +146,7 @@ class _Session(_Rig):
         super().__init__(root, lambda request: self.answers.get(request.attachments[0].id, NOT_REPRODUCED))
         self.scheduler = LocalNotebook(root, Writer(Role.SCHEDULER, "scheduler"))
         self.repo = InMemoryRepo(BASELINE)
-        self.regression = RegressionSet(self.notebook, self.runner)
+        self.regression = RegressionSet(self.notebook, self.runner, self.repo)
 
     async def start(self) -> None:
         await self.scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=ROOT))
@@ -243,6 +244,35 @@ async def test_every_failed_case_is_named(session):
     outcome = await session.regression.check("c1", MERGE, sources=("c2",))
 
     assert outcome.reason == "fp8_overflow: reproduced; nan_logits: withdrawn (the branch was stopped)"
+
+
+@pytest.mark.parametrize("verdict", [NOT_REPRODUCED, REPRODUCED])
+async def test_a_case_s_verdict_on_a_recipe_is_not_asked_for_again(session, verdict):
+    session.answers["fp8_overflow"] = verdict
+    first = await session.regression.check("c1", NO_DELTA, sources=())
+
+    again = await session.regression.check(ROOT, FIX, sources=("c1",))
+
+    assert again == first
+    assert len(session.runs()) == 1
+
+
+async def test_a_case_runs_again_on_another_recipe(session):
+    await session.regression.check("c1", NO_DELTA, sources=())
+
+    await session.regression.check("c1", MERGE, sources=())
+
+    assert [run.delta for run in session.runs()] == [NO_DELTA, MERGE]
+
+
+async def test_a_case_that_ran_to_no_verdict_runs_again(session):
+    session.answers["fp8_overflow"] = None
+    assert not (await session.regression.check("c1", MERGE, sources=())).passed
+    session.answers["fp8_overflow"] = NOT_REPRODUCED
+
+    assert (await session.regression.check("c1", MERGE, sources=())).passed
+
+    assert len(session.runs()) == 2
 
 
 async def test_a_cancelled_check_takes_every_case_back(session):

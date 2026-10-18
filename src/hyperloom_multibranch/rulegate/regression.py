@@ -23,11 +23,12 @@ from hyperloom.contracts.measurement import (
     TestRequest,
     Validity,
 )
-from hyperloom.contracts.recipe import RecipeDelta
+from hyperloom.contracts.recipe import RecipeDelta, apply
 from hyperloom_multibranch.contracts.gate import RegressionOutcome, ResultUnverified, ResultVerifier
 from hyperloom_multibranch.contracts.notebook.interfaces import CommitQuery, RecordSearch
 from hyperloom_multibranch.contracts.notebook.records import RegressionCase, TestRecord
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import Backpressure, RequestRejected, Toolbox
 from hyperloom_multibranch.rulegate.service import Polling
 
@@ -126,17 +127,26 @@ class RegressionNotebook(RecordSearch, CommitQuery, Protocol):
 
 class RegressionSet:
     """The session's :class:`~hyperloom_multibranch.contracts.gate.RegressionCheck`, running each case on the
-    integration branch with ``runner``, with the attachments of the repro test the case was registered from."""
+    integration branch with ``runner``, with the attachments of the repro test the case was registered from.
 
-    def __init__(self, notebook: RegressionNotebook, runner: ReproRunner) -> None:
+    A case's verdict on a recipe is kept, keyed by the digest of the recipe ``repo`` and the delta make, so the same
+    case on the same recipe is not run again; a case that ran to no verdict runs again next time.
+    """
+
+    def __init__(self, notebook: RegressionNotebook, runner: ReproRunner, repo: ExperimentRepo) -> None:
         self._notebook = notebook
         self._runner = runner
+        self._repo = repo
+        self._verdicts: dict[tuple[str, str], str] = {}
 
     async def check(
         self, base_commit: str, candidate_delta: RecipeDelta, *, sources: tuple[str, ...]
     ) -> RegressionOutcome:
         cases = await self._cases((base_commit, *sources))
-        outcomes = await _gathered(self._outcome(case, base_commit, candidate_delta) for case in cases)
+        if not cases:
+            return RegressionOutcome(True)
+        digest = apply(await self._repo.read_recipe(base_commit), candidate_delta).digest()
+        outcomes = await _gathered(self._outcome(case, base_commit, candidate_delta, digest) for case in cases)
         failed = [f"{case.case_ref}: {outcome}" for case, outcome in zip(cases, outcomes) if outcome != NOT_REPRODUCED]
         return RegressionOutcome(not failed, "; ".join(failed))
 
@@ -149,9 +159,14 @@ class RegressionSet:
                 found.setdefault(case.request_id, case)
         return list(found.values())
 
-    async def _outcome(self, case: RegressionCase, commit: str, delta: RecipeDelta) -> str:
+    async def _outcome(self, case: RegressionCase, commit: str, delta: RecipeDelta, digest: str) -> str:
+        key = (case.request_id, digest)
+        if key in self._verdicts:
+            return self._verdicts[key]
         attachments = (await self._notebook.record(case.request_id)).request.attachments
         run = await self._runner.run(commit, delta, attachments, branch=INTEGRATION_BRANCH)
+        if run.verdict:
+            self._verdicts[key] = run.verdict
         return run.outcome
 
 
