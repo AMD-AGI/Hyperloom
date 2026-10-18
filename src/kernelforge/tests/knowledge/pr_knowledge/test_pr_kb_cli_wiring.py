@@ -10,8 +10,8 @@ from click.testing import CliRunner
 
 from hyperloom.common.env import EnvValueError
 from kernelforge.cli import forge_loop
+from kernelforge.knowledge.pr_knowledge.context import PrReferenceQuery
 from kernelforge.cli.pr_references import (
-    PrReferenceQuery,
     _collect_pr_references,
     _git_remote_url,
     _pr_kb_enabled,

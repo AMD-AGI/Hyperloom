@@ -7,6 +7,7 @@ import os
 import pytest
 
 from kernelforge.knowledge.pr_knowledge.context import (
+    PrReferenceQuery,
     KERNEL_BACKEND_REPO_MAP,
     PR_REPOS_EXPECTED,
     PR_REPOS_WISHLIST,
@@ -235,10 +236,10 @@ def test_wishlist_repo_appearing_later_is_not_flagged_as_unexpected():
 
 def test_build_context_assembles_repo_paths_and_keywords():
     context = build_context(
-        kernel_backend="flydsl",
+        PrReferenceQuery(
+            kernel_backend="flydsl", source_files=["kernels/moe/mxfp_moe/gemm2.py"], operator_name="mxfp_moe_gemm"
+        ),
         tracked=TRACKED,
-        source_files=["kernels/moe/mxfp_moe/gemm2.py"],
-        operator_name="mxfp_moe_gemm",
     )
 
     assert context.repo == "ROCm/FlyDSL"
@@ -249,9 +250,7 @@ def test_build_context_assembles_repo_paths_and_keywords():
 
 def test_build_context_caps_file_paths():
     context = build_context(
-        kernel_backend="aiter",
-        tracked=TRACKED,
-        source_files=[f"a/f{i}.py" for i in range(10)],
+        PrReferenceQuery(kernel_backend="aiter", source_files=[f"a/f{i}.py" for i in range(10)]), tracked=TRACKED
     )
 
     assert len(context.file_paths) == 3
@@ -259,10 +258,8 @@ def test_build_context_caps_file_paths():
 
 def test_build_context_drops_unusable_paths_but_keeps_the_repo():
     context = build_context(
-        kernel_backend="aiter",
+        PrReferenceQuery(kernel_backend="aiter", source_files=["../escape.py"], operator_name="rmsnorm"),
         tracked=TRACKED,
-        source_files=["../escape.py"],
-        operator_name="rmsnorm",
     )
 
     assert context.repo == "ROCm/aiter"
@@ -271,7 +268,7 @@ def test_build_context_drops_unusable_paths_but_keeps_the_repo():
 
 
 def test_build_context_without_any_query_source_is_not_usable():
-    context = build_context(kernel_backend="aiter", tracked=TRACKED)
+    context = build_context(PrReferenceQuery(kernel_backend="aiter"), tracked=TRACKED)
 
     assert context.repo == "ROCm/aiter"
     assert not context.usable
@@ -279,9 +276,8 @@ def test_build_context_without_any_query_source_is_not_usable():
 
 def test_build_context_propagates_untracked_reason():
     context = build_context(
-        git_remote="git@github.com:AMD-AGI/Primus-Turbo.git",
+        PrReferenceQuery(git_remote="git@github.com:AMD-AGI/Primus-Turbo.git", operator_name="mxfp8_grouped_gemm"),
         tracked=TRACKED,
-        operator_name="mxfp8_grouped_gemm",
     )
 
     assert context.reason == REASON_REPO_UNTRACKED

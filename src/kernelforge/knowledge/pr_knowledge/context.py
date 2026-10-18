@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Iterable
 
 # Query outcomes.
 REASON_REPO_UNRESOLVED = "repo_unresolved"
@@ -245,29 +245,36 @@ def check_whitelist(repos_payload: list[dict]) -> WhitelistDrift:
     )
 
 
+@dataclass(frozen=True)
+class PrReferenceQuery:
+    """What one upstream PR reference lookup is keyed on."""
+
+    kernel_backend: str = ""
+    git_remote: str = ""
+    source_files: Iterable[str] = ()
+    operator_name: str = ""
+    target_functions: Iterable[str] = ()
+
+
 def build_context(
+    query: PrReferenceQuery,
     *,
-    kernel_backend: str = "",
-    git_remote: str = "",
     tracked: tuple[str, ...] | None = None,
-    source_files: tuple[str, ...] | list[str] = (),
     workspace: str = "",
     exists: Callable[[str], bool] | None = None,
-    operator_name: str = "",
-    target_functions: tuple[str, ...] | list[str] = (),
     bottleneck: str = "",
 ) -> PRQueryContext:
     """Build the repository, path, and keyword query context."""
-    repo, reason = resolve_repo(kernel_backend=kernel_backend, git_remote=git_remote, tracked=tracked)
+    repo, reason = resolve_repo(kernel_backend=query.kernel_backend, git_remote=query.git_remote, tracked=tracked)
     # Preserve paths so an untracked fork can be resolved by source ownership.
     paths = []
-    for raw in source_files:
+    for raw in query.source_files:
         normalized = normalize_file_path(raw, workspace=workspace, exists=exists)
         if normalized and normalized not in paths:
             paths.append(normalized)
     keywords = extract_keywords(
-        operator_name=operator_name,
-        target_functions=target_functions,
+        operator_name=query.operator_name,
+        target_functions=tuple(query.target_functions),
         bottleneck=bottleneck,
     )
     return PRQueryContext(

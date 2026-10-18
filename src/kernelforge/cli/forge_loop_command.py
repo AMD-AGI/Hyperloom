@@ -34,7 +34,6 @@ from kernelforge.cli.options import (
 from kernelforge.option_groups import option_group
 from kernelforge.cli.pr_references import (
     PR_KB_BUDGET_SEC,
-    PrReferenceQuery,
     _collect_pr_references,
     _git_remote_url,
     _pr_kb_enabled,
@@ -50,6 +49,7 @@ from kernelforge.cli.publication import (
 from kernelforge.cli.session_budget import _forge_session_timeout_sec, _is_long_horizon
 from kernelforge.config import Config
 from kernelforge.knowledge.kb_store.config import KnowledgeConfig
+from kernelforge.knowledge.pr_knowledge.context import PrReferenceQuery
 from kernelforge.loop.knowledge_integration import (
     WarmStartRollbackError,
     git_head,

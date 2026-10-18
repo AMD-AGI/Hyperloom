@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from kernelforge.knowledge.pr_knowledge.context import PrReferenceQuery
 from kernelforge.knowledge.pr_knowledge.references import (
     UNTRUSTED_PREFIX,
     collect_references,
@@ -239,9 +240,8 @@ def test_hostile_pr_text_is_neutralized_end_to_end(tmp_path, system_prompt_for):
     """The full path: service payload -> render -> Implementer system prompt."""
     result = collect_references(
         workspace_dir=str(tmp_path),
+        query=PrReferenceQuery(kernel_backend="aiter", operator_name="rmsnorm"),
         client=_HostileClient(),
-        kernel_backend="aiter",
-        operator_name="rmsnorm",
     )
     assert result.injected
     block = result.prompt_context
@@ -261,9 +261,8 @@ def test_hostile_pr_text_is_neutralized_end_to_end(tmp_path, system_prompt_for):
 def test_block_is_bounded_even_for_hostile_input(tmp_path):
     result = collect_references(
         workspace_dir=str(tmp_path),
+        query=PrReferenceQuery(kernel_backend="aiter", operator_name="rmsnorm"),
         client=_HostileClient(),
-        kernel_backend="aiter",
-        operator_name="rmsnorm",
     )
 
     assert len(result.prompt_context.encode("utf-8")) <= 4096
