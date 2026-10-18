@@ -24,7 +24,7 @@ pytest.importorskip("flydsl.compiler")
 from kernelforge.assembly.prepare import AssemblyTask, prepare_assembly
 from kernelforge.config import Config
 from kernelforge.loop.validation import run_validation_pipeline
-from kernelforge.mcp_server.tools.bench import bench_wallclock
+from kernelforge.mcp_server.tools.bench import BenchRun, bench_wallclock
 
 
 def test_flydsl_capture_wrong_result_and_clean_export(tmp_path, monkeypatch):
@@ -83,11 +83,13 @@ def test_flydsl_capture_wrong_result_and_clean_export(tmp_path, monkeypatch):
     assert asyncio.run(run_validation_pipeline(str(replay / "driver.py"))).all_passed
     bench = asyncio.run(
         bench_wallclock(
-            str(replay / "driver.py"),
-            driver_args=["--bench-case", "random"],
-            warmup_iters=2,
-            bench_iters=10,
-            repeat=2,
+            BenchRun(
+                str(replay / "driver.py"),
+                driver_args=["--bench-case", "random"],
+                warmup_iters=2,
+                bench_iters=10,
+                repeat=2,
+            )
         )
     )
     assert bench["success"], bench

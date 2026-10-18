@@ -16,6 +16,7 @@ from kernelforge.loop.scoring import (
 from kernelforge.mcp_server.tools import bench as bench_module
 from kernelforge.resources import resource_path
 from kernelforge.mcp_server.tools.bench import (
+    BenchRun,
     bench_wallclock,
     measure_wallclock,
 )
@@ -32,7 +33,7 @@ def _run_bench(tmp_path, **kwargs) -> list[str]:
     """Run bench_wallclock against the argv-recording driver, return its argv."""
     drv = tmp_path / "drv.py"
     drv.write_text(_ARGV_DRIVER)
-    res = asyncio.run(bench_wallclock(driver_script=str(drv), **kwargs))
+    res = asyncio.run(bench_wallclock(BenchRun(str(drv), **kwargs)))
     assert res["success"], res
     return json.loads(pathlib.Path(str(drv) + ".argv").read_text())
 
@@ -85,14 +86,14 @@ def test_three_measurements_aggregate_diagnostics_by_per_case_median(monkeypatch
     )
     calls = []
 
-    async def fake_bench(**kwargs):
-        calls.append(kwargs)
+    async def fake_bench(run, **kwargs):
+        calls.append((run, kwargs))
         return next(results)
 
     monkeypatch.setattr(bench_module, "bench_wallclock", fake_bench)
     measured = asyncio.run(
         measure_wallclock(
-            driver_script="driver.py",
+            BenchRun("driver.py"),
             measurements=3,
             timeout_sec=45,
         )

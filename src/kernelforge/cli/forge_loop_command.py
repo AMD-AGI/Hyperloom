@@ -120,7 +120,7 @@ def _make_ceiling_estimator(
     """
 
     async def estimate(*, case_ids: Sequence[str], case_ms: dict[str, float]):
-        from kernelforge.mcp_server.tools.bench import bench_command
+        from kernelforge.mcp_server.tools.bench import BenchRun, bench_command
         from kernelforge.roofline_ceiling.analyst import AnalystSession, CeilingTask
         from kernelforge.roofline_ceiling.command import resolve_analyst_backend
         from kernelforge.roofline_ceiling.estimate import estimate_ceiling
@@ -129,7 +129,7 @@ def _make_ceiling_estimator(
         return await estimate_ceiling(
             resolve_analyst_backend(analyst),
             CeilingTask(
-                run=PerformanceRun(bench_command(driver_script), workspace_dir),
+                run=PerformanceRun(bench_command(BenchRun(driver_script)), workspace_dir),
                 kernel_files=[str(path) for path in source_files],
                 driver_script=driver_script,
                 known=KnownCases(list(case_ids), dict(case_ms)),

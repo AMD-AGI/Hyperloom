@@ -24,7 +24,7 @@ from kernelforge.durable_io import atomic_write_text
 from kernelforge.loop.canonical_correctness import accept_candidate
 from kernelforge.loop.numerical import validate_contract, validate_source_independence
 from kernelforge.loop.validation import run_validation_pipeline
-from kernelforge.mcp_server.tools.bench import bench_wallclock, calculate_mean_case_speedup
+from kernelforge.mcp_server.tools.bench import BenchRun, bench_wallclock, calculate_mean_case_speedup
 
 if TYPE_CHECKING:
     from kernelforge.config import Config
@@ -343,7 +343,7 @@ async def _measure_source_baseline(
     )
     if not acceptance.passed:
         raise AssemblyPreparationError(acceptance.detail)
-    source_bench = await bench_wallclock(driver, timeout_sec=_timeout(deadline, 600))
+    source_bench = await bench_wallclock(BenchRun(driver), timeout_sec=_timeout(deadline, 600))
     if not source_bench.get("success") or not source_bench.get("case_times"):
         raise AssemblyPreparationError("original source benchmark failed")
     _assembly_score(source_bench, source_bench)
@@ -416,7 +416,7 @@ async def prepare_assembly(
         )
         if not acceptance.passed:
             raise AssemblyPreparationError(acceptance.detail)
-        initial_bench = await bench_wallclock(driver, timeout_sec=_timeout(deadline, 600))
+        initial_bench = await bench_wallclock(BenchRun(driver), timeout_sec=_timeout(deadline, 600))
         if not initial_bench.get("success") or set(initial_bench.get("case_times", {})) != set(
             source_bench["case_times"]
         ):

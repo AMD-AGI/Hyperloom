@@ -14,6 +14,7 @@ import shutil
 import statistics
 import sys
 import tempfile
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from ._subprocess import kill_process_group
@@ -97,31 +98,35 @@ class CaseCoverageError(ValueError):
     """Raised when a candidate cannot be scored against baseline cases."""
 
 
-def bench_command(
-    driver_script: str,
-    *,
-    warmup_iters: int = 10,
-    bench_iters: int = 30,
-    driver_args: list[str] | None = None,
-    repeat: int = 1,
-) -> list[str]:
-    """The argv that runs one timed benchmark of ``driver_script``.
+@dataclass(frozen=True)
+class BenchRun:
+    """One timed benchmark of a driver: its extra arguments, warmup and timed iterations, and repeats."""
+
+    driver_script: str
+    driver_args: list[str] | None = None
+    warmup_iters: int = 10
+    bench_iters: int = 30
+    repeat: int = 1
+
+
+def bench_command(run: BenchRun) -> list[str]:
+    """The argv that runs one timed benchmark of ``run.driver_script``.
 
     One definition because it is the measurement contract, not a convenience: a
     second caller assembling its own flags eventually times a different region
     than the campaign scores, and a roofline ceiling derived against a different
     timed region is an answer to a question nobody asked.
     """
-    args = (driver_args or []) + [
+    args = (run.driver_args or []) + [
         "--warmup",
-        str(warmup_iters),
+        str(run.warmup_iters),
         "--iters",
-        str(bench_iters),
+        str(run.bench_iters),
         "--bench-mode",
     ]
-    if repeat > 1:
-        args += ["--repeat", str(repeat)]
-    return [sys.executable, driver_script] + args
+    if run.repeat > 1:
+        args += ["--repeat", str(run.repeat)]
+    return [sys.executable, run.driver_script] + args
 
 
 def parse_case_timings(text: str) -> tuple[dict[str, float], list[str], set[str]]:
@@ -248,27 +253,11 @@ def aggregate_benchmark_measurements(measurements: list[dict]) -> dict:
     }
 
 
-async def measure_wallclock(
-    *,
-    driver_script: str,
-    driver_args: list[str] | None = None,
-    measurements: int,
-    warmup_iters: int = 10,
-    bench_iters: int = 30,
-    timeout_sec: int = 300,
-    repeat: int = 1,
-) -> dict:
+async def measure_wallclock(run: BenchRun, *, measurements: int, timeout_sec: int = 300) -> dict:
     """Run independent benchmarks and aggregate their per-case medians."""
     results = []
     for _ in range(measurements):
-        result = await bench_wallclock(
-            driver_script=driver_script,
-            driver_args=driver_args,
-            warmup_iters=warmup_iters,
-            bench_iters=bench_iters,
-            timeout_sec=timeout_sec,
-            repeat=repeat,
-        )
+        result = await bench_wallclock(run, timeout_sec=timeout_sec)
         results.append(result)
         if not result.get("success"):
             break
@@ -349,23 +338,13 @@ def calculate_measurement_case_speedups(
 
 
 async def bench_wallclock(
-    driver_script: str,
-    driver_args: list[str] | None = None,
-    warmup_iters: int = 10,
-    bench_iters: int = 30,
+    run: BenchRun,
+    *,
     timeout_sec: int = 300,
     on_result: Callable[[dict[str, Any]], None] | None = None,
-    *,
-    repeat: int = 1,
 ) -> dict:
     """Run a wall-clock benchmark with GPU synchronization."""
-    cmd = bench_command(
-        driver_script,
-        driver_args=driver_args,
-        warmup_iters=warmup_iters,
-        bench_iters=bench_iters,
-        repeat=repeat,
-    )
+    cmd = bench_command(run)
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
@@ -552,7 +531,7 @@ async def sweep_case(
         return _sweep_failure(str(error).upper())
     described = ", ".join(f"{k}={v}" for k, v in exported.items()) or "no overrides"
 
-    base_cmd = bench_command(driver_script, warmup_iters=warmup_iters, bench_iters=bench_iters)
+    base_cmd = bench_command(BenchRun(driver_script, warmup_iters=warmup_iters, bench_iters=bench_iters))
     memo_key = _case_flag_memo_key(base_cmd)
     rejected_before = _CASE_FLAG_REJECTED.get(memo_key, False)
     carried_flag = not rejected_before
