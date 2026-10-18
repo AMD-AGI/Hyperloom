@@ -333,6 +333,7 @@ hyperloom_kb = [
     "mappings/*.yaml",
 ]
 hyperloom_multibranch = [
+    "contracts/llm_prices.json",
     "notebook/knowledge/declarations/*.yaml",
     "notebook/knowledge/mappings/*.yaml",
 ]
