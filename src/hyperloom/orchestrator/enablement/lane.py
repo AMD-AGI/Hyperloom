@@ -27,7 +27,7 @@ from .params import ENABLEMENT_PARAMS_BUDGET_SEC, _round_carriers
 from .artifacts import snapshot_round, write_setting_script
 from ..bringup import recorded_verdict, session_root
 from ..state.round_store import ADVANCED, BOOTED, FAILED, Round, RoundRequest
-from ..state.task_registry import create_in_cursor, task_dispatch_origin
+from ..state.task_registry import TaskSpec, create_in_cursor, task_dispatch_origin
 from .recipe.section import recipe_for
 
 if TYPE_CHECKING:
@@ -291,15 +291,17 @@ class EnablementLane(CoordinatorCollaborator):
         def _join(cur: sqlite3.Cursor) -> None:
             create_in_cursor(
                 cur,
-                kind="specialist",
-                params=params,
-                idempotency_key=holder,
-                requires_lanes=lanes,
-                side_effects=["writes_results", "writes_patches"],
-                lease_ttl_sec=lease_ttl_sec,
-                task_id=holder,
-                dispatch_class="coordinator",
-                dispatch_origin=task_dispatch_origin(self.shared_state),
+                TaskSpec(
+                    kind="specialist",
+                    params=params,
+                    idempotency_key=holder,
+                    requires_lanes=lanes,
+                    side_effects=["writes_results", "writes_patches"],
+                    lease_ttl_sec=lease_ttl_sec,
+                    task_id=holder,
+                    dispatch_class="coordinator",
+                    dispatch_origin=task_dispatch_origin(self.shared_state),
+                ),
             )
 
         acquired = await self.rounds.open(

@@ -14,6 +14,7 @@ from hyperloom.orchestrator.state.task_registry import (
     _MAX_PROGRESS_NOTES,
     Task,
     TaskRegistry,
+    TaskSpec,
     create_in_cursor,
     task_dispatch_class,
     task_dispatch_evidence,
@@ -206,28 +207,22 @@ async def test_cursor_reuse_validates_dispatch_class(tmp_path):
         async with db.transaction() as cur:
             created, existing = create_in_cursor(
                 cur,
-                kind="specialist",
-                params={},
-                idempotency_key="cursor-key",
-                dispatch_class="coordinator",
-                dispatch_origin=_ORIGIN,
+                TaskSpec(
+                    kind="specialist",
+                    params={},
+                    idempotency_key="cursor-key",
+                    dispatch_class="coordinator",
+                    dispatch_origin=_ORIGIN,
+                ),
             )
         async with db.transaction() as cur:
             reused, was_existing = create_in_cursor(
-                cur,
-                kind="specialist",
-                params={},
-                idempotency_key="cursor-key",
-                dispatch_class="coordinator",
+                cur, TaskSpec(kind="specialist", params={}, idempotency_key="cursor-key", dispatch_class="coordinator")
             )
         with pytest.raises(ValueError, match="dispatch_class mismatch"):
             async with db.transaction() as cur:
                 create_in_cursor(
-                    cur,
-                    kind="specialist",
-                    params={},
-                    idempotency_key="cursor-key",
-                    dispatch_class="inline",
+                    cur, TaskSpec(kind="specialist", params={}, idempotency_key="cursor-key", dispatch_class="inline")
                 )
     finally:
         db.close()
@@ -278,18 +273,12 @@ async def test_legacy_task_reuse_stays_unknown_without_blocking_resume(tmp_path)
         )
         async with registry.db.transaction() as cur:
             cursor_legacy, _ = create_in_cursor(
-                cur,
-                kind="specialist",
-                params={},
-                idempotency_key="legacy-cursor",
+                cur, TaskSpec(kind="specialist", params={}, idempotency_key="legacy-cursor")
             )
         async with registry.db.transaction() as cur:
             cursor_reused, cursor_existing = create_in_cursor(
                 cur,
-                kind="specialist",
-                params={},
-                idempotency_key="legacy-cursor",
-                dispatch_class="coordinator",
+                TaskSpec(kind="specialist", params={}, idempotency_key="legacy-cursor", dispatch_class="coordinator"),
             )
     finally:
         registry.db.close()

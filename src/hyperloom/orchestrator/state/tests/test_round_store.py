@@ -21,7 +21,7 @@ from hyperloom.orchestrator.state.round_store import (
     RoundRequest,
     RoundStore,
 )
-from hyperloom.orchestrator.state.task_registry import TaskRegistry, TerminalTaskReuse, create_in_cursor
+from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec, TerminalTaskReuse, create_in_cursor
 
 _LEASE = 600.0
 
@@ -153,7 +153,7 @@ async def test_the_holder_task_row_commits_with_the_acquire_and_never_adopts_a_f
     tasks = TaskRegistry(store.db)
 
     def _join(cur):
-        create_in_cursor(cur, kind="baseline", params={}, idempotency_key="round-a", task_id="t-1")
+        create_in_cursor(cur, TaskSpec(kind="baseline", params={}, idempotency_key="round-a", task_id="t-1"))
 
     opened = await store.open(
         "round-a",
@@ -168,7 +168,7 @@ async def test_the_holder_task_row_commits_with_the_acquire_and_never_adopts_a_f
     # A loser rolls back whatever its join wrote, so no task row outlives the
     # acquire that failed.
     def _loser(cur):
-        create_in_cursor(cur, kind="baseline", params={}, idempotency_key="round-b", task_id="t-2")
+        create_in_cursor(cur, TaskSpec(kind="baseline", params={}, idempotency_key="round-b", task_id="t-2"))
 
     denied = await store.open(
         "round-b",
