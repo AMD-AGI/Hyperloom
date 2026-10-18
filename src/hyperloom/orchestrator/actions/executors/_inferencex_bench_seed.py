@@ -20,6 +20,7 @@ import yaml
 
 from hyperloom.common.benchmark_config import is_magpie_agentx
 
+from .benchmark_backend import resolve_backend_name
 from ._bench_seed_anchor import BENCH_SEED_ENV, BENCH_SEED_LEGACY, BENCH_SEED_PATCHED, BENCH_SEED_SENTINEL
 from ._inferencex_patcher import _apply_line_replacement_atomic, _ensure_patched, _resolve_benchmark_lib_paths
 from ._patch_sentinel import file_contains_sentinel
@@ -81,6 +82,9 @@ def warmup_seed_warnings(warmup_cfg_path: Path) -> list[str]:
     bench = (yaml.safe_load(warmup_cfg_path.read_text(encoding="utf-8")) or {}).get("benchmark") or {}
     if is_magpie_agentx(bench):
         return []
+    if resolve_backend_name() == "bypass":
+        # The bypass runner builds the client argv itself and never sources benchmark_lib.sh; it forwards the env.
+        return [f"warmup_round_seed:{WARMUP_ROUND_SEED}", "measured_round_seed:client_default"]
     root = str(bench.get("inferencex_path") or "").strip() or None
     # ``ensure`` succeeds when any discovered checkout is patched; the round runs the configured one.
     if not ensure_benchmark_lib_seed_patched(root) or (root and not benchmark_lib_seed_patched_in(root)):

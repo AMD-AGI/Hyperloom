@@ -139,10 +139,11 @@ def build_client_command(
     result_filename: str,
     num_prompts: int | None = None,
     num_warmups: int | None = None,
+    seed: int | None = None,
     profile: bool = False,
     trust_remote_code: bool = False,
 ) -> list[str]:
-    """Build the InferenceX benchmark client argv."""
+    """Build the InferenceX benchmark client argv; ``seed`` is the client's prompt seed, left to its default when None."""
     bench_py = str(Path(inferencex_root) / "utils" / "bench_serving" / "benchmark_serving.py")
     prompts = num_prompts if num_prompts is not None else (conc if profile else conc * 10)
     warmups = num_warmups if num_warmups is not None else 2 * conc
@@ -182,6 +183,8 @@ def build_client_command(
         "--result-filename",
         f"{result_filename}.json",
     ]
+    if seed is not None:
+        cmd += ["--seed", str(seed)]
     if profile:
         cmd.append("--profile")
     if trust_remote_code:

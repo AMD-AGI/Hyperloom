@@ -1262,3 +1262,29 @@ def test_bench_seed_patch_reports_a_missing_anchor_and_writes_nothing(tmp_path):
     assert lib.read_text(encoding="utf-8") == before
     seed_status = next(s for s in _inferencex_patcher.verify_patch_anchors(tmp_path) if s.name == "bench_seed")
     assert (seed_status.ok, seed_status.hits) == (False, 0)
+
+
+def test_warmup_seed_note_under_bypass_does_not_depend_on_benchmark_lib(tmp_path, monkeypatch):
+    """Bypass builds the client argv itself, so an unpatched (or absent) benchmark_lib.sh does not unseed it."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors._inferencex_bench_seed import warmup_seed_warnings
+
+    root = tmp_path / "InferenceX"
+    _write_serving_lib(root)
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(yaml.safe_dump({"benchmark": {"inferencex_path": str(root)}}), encoding="utf-8")
+
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "magpie")
+    assert warmup_seed_warnings(cfg) == ["warmup_round_seed:1", "measured_round_seed:client_default"]
+    assert "INFERENCEX_BENCH_SEED" in (root / "benchmarks" / "benchmark_lib.sh").read_text(encoding="utf-8")
+
+    unpatchable = tmp_path / "Other"
+    _write_serving_lib(
+        unpatchable, _RUN_BENCHMARK_SERVING_UPSTREAM.replace('if [[ -n "$endpoint" ]]; then', "if x; then")
+    )
+    cfg.write_text(yaml.safe_dump({"benchmark": {"inferencex_path": str(unpatchable)}}), encoding="utf-8")
+    assert warmup_seed_warnings(cfg) == ["run_grid_warmup_seed_unpatched"]
+
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_BACKEND", "bypass")
+    assert warmup_seed_warnings(cfg) == ["warmup_round_seed:1", "measured_round_seed:client_default"]

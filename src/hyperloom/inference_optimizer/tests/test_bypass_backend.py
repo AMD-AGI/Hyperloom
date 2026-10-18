@@ -1358,6 +1358,78 @@ def test_num_prompts_warmups_passthrough(tmp_path, monkeypatch):
     assert captured.get("num_warmups") == "3"
 
 
+def _run_bypass_client_argv(tmp_path, monkeypatch, extra_envs):
+    """Run the real bypass runner end to end with the processes stubbed; return the client argv it launched."""
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "utils" / "bench_serving").mkdir(parents=True)
+    (inferencex / "utils" / "bench_serving" / "benchmark_serving.py").write_text("", encoding="utf-8")
+    envs = {"TP": 1, "CONC": 4, "ISL": 128, "OSL": 64, "RUN_EVAL": "false", **extra_envs}
+    cfg = {
+        "benchmark": {
+            "framework": "sglang",
+            "model": "/m",
+            "precision": "bf16",
+            "runner_type": "mi300x",
+            "run_mode": "local",
+            "inferencex_path": str(inferencex),
+            "timeout_seconds": 60,
+            "envs": envs,
+        }
+    }
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    class _FakeServer:
+        pid = 1
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(bypass_runner, "_launch_server", lambda cmd, env, log: _FakeServer())
+    monkeypatch.setattr(bypass_runner, "_terminate_server", lambda proc: None)
+    monkeypatch.setattr(bypass_engine, "wait_for_server_ready", lambda *a, **k: True)
+
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, capture_output=True, text=True, timeout=None, env=None):
+        if "--num-prompts" in cmd:
+            captured.append(list(cmd))
+            rd = Path(cmd[cmd.index("--result-dir") + 1])
+            rd.mkdir(parents=True, exist_ok=True)
+            (rd / "inferencex_result.json").write_text(
+                json.dumps({"output_throughput": 1.0, "completed": 1, "duration": 1.0}), encoding="utf-8"
+            )
+
+        class _P:
+            returncode = 0
+            stdout = "ok"
+            stderr = ""
+
+        return _P()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._subprocess_kill.run_with_session_kill", fake_run)
+    assert bypass_runner.run_benchmark(cfg_path, tmp_path / "out") == 0
+    assert len(captured) == 1
+    return captured[0]
+
+
+def test_bench_seed_env_reaches_the_bypass_client(tmp_path, monkeypatch):
+    """The run_grid warmup seed must reach the client the bypass backend launches; it never sources benchmark_lib.sh."""
+    monkeypatch.delenv("INFERENCEX_BENCH_SEED", raising=False)
+
+    argv = _run_bypass_client_argv(tmp_path, monkeypatch, {"INFERENCEX_BENCH_SEED": "1"})
+
+    assert argv[argv.index("--seed") + 1] == "1"
+    assert argv.count("--seed") == 1
+
+
+def test_bypass_client_keeps_the_default_seed_when_the_env_is_unset(tmp_path, monkeypatch):
+    monkeypatch.delenv("INFERENCEX_BENCH_SEED", raising=False)
+
+    assert "--seed" not in _run_bypass_client_argv(tmp_path, monkeypatch, {})
+
+
 def test_server_env_exports_every_materialized_env(monkeypatch):
     """Dropping these silently reruns the baseline and scores the noise."""
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-benchmark")

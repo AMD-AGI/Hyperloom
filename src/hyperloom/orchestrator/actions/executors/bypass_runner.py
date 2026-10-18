@@ -25,6 +25,7 @@ from . import bypass_analysis
 from . import bypass_engine
 from . import bypass_report
 from . import bypass_scriptable
+from ._bench_seed_anchor import BENCH_SEED_ENV
 
 
 def _as_int(value: Any, default: int) -> int:
@@ -301,6 +302,8 @@ class _Round:
         # back to build_client_command defaults (conc*10 / 2*conc) when unset.
         num_prompts = _as_opt_int(os.environ.get("NUM_PROMPTS") or bench_envs.get("NUM_PROMPTS"))
         num_warmups = _as_opt_int(os.environ.get("NUM_WARMUPS") or bench_envs.get("NUM_WARMUPS"))
+        # This backend launches the client itself, so benchmark_lib.sh never sees the seed; pass it here.
+        seed = _as_opt_int(os.environ.get(BENCH_SEED_ENV) or bench_envs.get(BENCH_SEED_ENV))
         client_cmd = bypass_engine.build_client_command(
             inferencex_root=self.inferencex_root,
             python_exe=sys.executable,
@@ -314,6 +317,7 @@ class _Round:
             result_filename="inferencex_result",
             num_prompts=num_prompts,
             num_warmups=num_warmups,
+            seed=seed,
             profile=self.profile,
             trust_remote_code=True,
         )
