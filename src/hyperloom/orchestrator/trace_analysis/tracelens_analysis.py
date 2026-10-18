@@ -3032,7 +3032,7 @@ def build_source_resolution_entries(candidates: list[dict[str, Any]]) -> list[di
             continue
         method = _candidate_resolution_method(item)
         line = item.get("source_line")
-        entry = _KSC.make_entry(
+        entry = _KSC.SourceResolutionEntry(
             kernel_id=str(item.get("kernel_id") or ""),
             name=str(item.get("name") or ""),
             gpu_pct=float(item.get("gpu_pct") or 0.0),
@@ -3048,7 +3048,7 @@ def build_source_resolution_entries(candidates: list[dict[str, Any]]) -> list[di
                 skip_reason=item.get("skip_reason"),
                 source_file=item.get("source_file"),
             ),
-        )
+        ).to_dict()
         entries.append(entry)
     return entries
 
