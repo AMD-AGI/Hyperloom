@@ -109,16 +109,16 @@ def _bare(experience_id: str) -> dict[str, object]:
 def test_a_summary_without_an_identity_is_sorted_by_the_identity_the_export_holds() -> None:
     export = FakeExport(
         [
-            {"id": "exp-a", "identity": SAME},
-            {"id": "exp-b", "identity": {**SAME, "gpu": "mi300x"}},
-            {"id": "exp-c", "identity": SAME},
+            {"id": "exp-a", "identity": SAME, "objective": THROUGHPUT_OBJECTIVE},
+            {"id": "exp-b", "identity": {**SAME, "gpu": "mi300x"}, "objective": THROUGHPUT_OBJECTIVE},
+            {"id": "exp-c", "identity": SAME, "objective": THROUGHPUT_OBJECTIVE},
         ]
     )
     index = IdentityIndex(export, "schema:sha256:" + "0" * 64)
     reader = FakeExperienceReader(completed_read(_bare("exp-a"), _bare("exp-b")))
 
     first = recall_experiences(reader, profile(), 1000.0, ATTENTION, identities=index)
-    export.records.append({"id": "exp-d", "identity": SAME})
+    export.records.append({"id": "exp-d", "identity": SAME, "objective": THROUGHPUT_OBJECTIVE})
     reader.result = completed_read(_bare("exp-c"), _bare("exp-d"))
     later = recall_experiences(reader, profile(), 1000.0, ATTENTION, identities=index)
 
@@ -169,8 +169,31 @@ def test_an_export_that_fails_leaves_the_experience_one_to_reverify(caplog: pyte
     with caplog.at_level(logging.WARNING, logger="hyperloom_multibranch.notebook.knowledge.recall"):
         (item,) = recall_experiences(reader, profile(), 1000.0, ATTENTION, identities=index).experiences
 
-    assert (item.tier, item.differing) == (RecallTier.REVERIFY, CONDITION_KEYS)
+    assert (item.tier, item.differing) == (RecallTier.REVERIFY, (*CONDITION_KEYS, "objective"))
     assert "unreachable" in caplog.text
+
+
+def test_an_experience_on_another_objective_is_left_out_and_one_found_nowhere_is_to_reverify() -> None:
+    export = FakeExport(
+        [
+            {"id": "exp-throughput", "identity": SAME, "objective": THROUGHPUT_OBJECTIVE},
+            {"id": "exp-interactivity", "identity": SAME, "objective": INTERACTIVITY_OBJECTIVE},
+        ]
+    )
+    names = ("exp-throughput", "exp-interactivity", "exp-elsewhere")
+    reader = FakeExperienceReader(completed_read(*(experience_summary(name, SAME) for name in names)))
+
+    inferencex = recall_experiences(reader, profile(), 1000.0, ATTENTION, identities=IdentityIndex(export))
+    agentx = recall_experiences(reader, profile(isl=None, osl=None), 4.5, ATTENTION, identities=IdentityIndex(export))
+
+    assert [(item.experience_id, item.tier, item.differing) for item in inferencex.experiences] == [
+        ("exp-throughput", RecallTier.PRIOR, ()),
+        ("exp-elsewhere", RecallTier.REVERIFY, ("objective",)),
+    ]
+    assert [(item.experience_id, item.tier) for item in agentx.experiences] == [
+        ("exp-interactivity", RecallTier.PRIOR),
+        ("exp-elsewhere", RecallTier.REVERIFY),
+    ]
 
 
 def test_an_index_is_built_only_on_a_reader_whose_service_exports() -> None:

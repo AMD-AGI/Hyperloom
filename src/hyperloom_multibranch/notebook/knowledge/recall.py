@@ -16,7 +16,10 @@ it from the same export, so a recalled Experience names the layer it changed.
 
 The session's Experiences live under two declarations, the shared ``inference-recipe-v1`` and the notebook's own
 ``multibranch-recipe-v1`` for kernel changes and AgentX sessions; :class:`ExperienceReaders` reads both as one, and an
-AgentX session asks for the interactivity objective only the second declares.
+AgentX session asks for the interactivity objective only the second declares. The second holds Experiences on both
+objectives, and a read may return any of a schema's Experiences, so an AgentX session's gains never stand in for an
+InferenceX session's or the reverse: recall leaves out an Experience the index finds recorded on another objective,
+and one whose objective is found nowhere is one to re-verify, never a prior.
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Protocol, cast
 
@@ -95,6 +98,7 @@ class IdentityIndex:
         self._exports = [_ExportCursor(export, schema_ref)]
         self._known: dict[str, dict[str, Any]] = {}
         self._families: dict[str, str] = {}
+        self._objectives: dict[str, str] = {}
         self._lock = threading.Lock()
 
     @classmethod
@@ -116,17 +120,26 @@ class IdentityIndex:
 
     def identity(self, experience_id: str) -> Mapping[str, Any]:
         with self._lock:
-            if experience_id not in self._known:
-                self._advance()
+            self._find(experience_id)
             return self._known.get(experience_id, {})
 
     def change_family(self, experience_id: str) -> str:
         """The family of the change the Experience recorded, such as ``config_variant``; empty when unknown."""
 
         with self._lock:
-            if experience_id not in self._known:
-                self._advance()
+            self._find(experience_id)
             return self._families.get(experience_id, "")
+
+    def objective(self, experience_id: str) -> str:
+        """The objective the Experience was recorded on, such as ``e2e_throughput@v1``; empty when unknown."""
+
+        with self._lock:
+            self._find(experience_id)
+            return self._objectives.get(experience_id, "")
+
+    def _find(self, experience_id: str) -> None:
+        if experience_id not in self._known:
+            self._advance()
 
     def _advance(self) -> None:
         for cursor in self._exports:
@@ -145,6 +158,9 @@ class IdentityIndex:
                         family = change.get("change_family") if isinstance(change, Mapping) else None
                         if isinstance(family, str) and family:
                             self._families[experience_id] = family
+                        objective = stored.get("objective")
+                        if isinstance(objective, str) and objective:
+                            self._objectives[experience_id] = objective
                 cursor.after = page.next_cursor
                 if not page.has_more:
                     return
@@ -353,7 +369,8 @@ def recall_experiences(
 ) -> Recall:
     """Read the Experiences relevant to ``wanted`` on this session's task; ``reader`` is ``None`` without a KB.
 
-    A summary without an identity is looked up in ``identities``.
+    A summary without an identity is looked up in ``identities``, and so is every Experience's objective: one recorded
+    on another objective than the session's is left out, and one whose objective is not found is one to re-verify.
     """
 
     if reader is None:
@@ -363,13 +380,28 @@ def recall_experiences(
     )
     result = reader.read(DECISION, context, limit=wanted.limit)
     query = recall_conditions(profile, wanted.bottleneck)
+    objective = str(context["objective"]["id"])
+    recalled = (classify(item, query, identities) for item in result.experiences)
     return Recall(
         status=str(result.status),
         read_id=str(result.read_id),
-        experiences=tuple(classify(item, query, identities) for item in result.experiences),
+        experiences=tuple(
+            kept for found in recalled if (kept := _on_objective(found, objective, identities)) is not None
+        ),
         rendered_refs=tuple(ref.id for ref in result.rendered_refs),
         warnings=tuple(str(warning) for warning in result.warnings),
     )
+
+
+def _on_objective(
+    found: RecalledExperience, objective: str, identities: IdentityIndex | None
+) -> RecalledExperience | None:
+    recorded = identities.objective(found.experience_id) if identities is not None else objective
+    if recorded == objective:
+        return found
+    if recorded:
+        return None
+    return replace(found, tier=RecallTier.REVERIFY, differing=(*found.differing, "objective"))
 
 
 __all__ = [

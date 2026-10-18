@@ -24,7 +24,7 @@ from hyperloom_multibranch.contracts.notebook.records import (
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LearningKind, LineageKind
 from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall
 from hyperloom_multibranch.notebook import LocalNotebook
-from hyperloom_multibranch.notebook.knowledge.recall import IdentityIndex
+from hyperloom_multibranch.notebook.knowledge.recall import THROUGHPUT_OBJECTIVE, IdentityIndex
 from hyperloom_multibranch.notebook.knowledge.tests.fakes import (
     FakeExperienceReader,
     FakeExport,
@@ -152,7 +152,7 @@ async def test_a_recalled_summary_without_conditions_is_sorted_by_the_index_the_
 ) -> None:
     notebook = await scripted_session(tmp_path / "notebook", FakeClock())
     bare = {key: value for key, value in _recalled("exp-faster", "keep", 1100.0).items() if key != "identity"}
-    index = IdentityIndex(FakeExport([{"id": "exp-faster", "identity": SAME}]))
+    index = IdentityIndex(FakeExport([{"id": "exp-faster", "identity": SAME, "objective": THROUGHPUT_OBJECTIVE}]))
 
     with_index = CrossSessionBriefing(notebook, experiences=_reader(bare), identities=index)
     without = CrossSessionBriefing(notebook, experiences=_reader(bare))
