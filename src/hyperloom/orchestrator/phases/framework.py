@@ -1594,14 +1594,14 @@ class FrameworkPhase(ProposalBench):
         """Compose the ``(gap, keywords)`` steering the local-exploration arm."""
         state = self.shared_state
         try:
-            from ..actions.executors._framework_gap_composer import compose_gap
+            from ..actions.executors._framework_gap_composer import GapEvidence, compose_gap
 
             return compose_gap(
                 framework=str(state.framework or ""),
                 gpu_type=str(state.gpu_type or ""),
                 model_class=str(state.model_class or ""),
                 precision=str(state.precision or ""),
-                rewrite_evidence_path=state.last_framework_rewrite_evidence or None,
+                evidence=GapEvidence(rewrite_evidence_path=state.last_framework_rewrite_evidence or None),
             )
         except Exception:
             log.debug("FRAMEWORK: local-explore gap compose failed", exc_info=True)

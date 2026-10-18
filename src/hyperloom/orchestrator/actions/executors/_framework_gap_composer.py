@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -146,22 +147,29 @@ def _model_class_to_search_token(model_class: str) -> str:
     return mc
 
 
+@dataclass(frozen=True)
+class GapEvidence:
+    """The profile artifacts a gap's bottleneck tokens are read from; an absent path contributes none."""
+
+    profile_kernel_breakdown_path: str | Path | None = None
+    rewrite_evidence_path: str | Path | None = None
+
+
 def compose_gap(
     *,
     framework: str = "",
     gpu_type: str = "",
     model_class: str = "",
     precision: str = "",
-    profile_kernel_breakdown_path: str | Path | None = None,
-    rewrite_evidence_path: str | Path | None = None,
+    evidence: GapEvidence = GapEvidence(),
 ) -> tuple[str, list[str]]:
     """Build ``(gap_description, keywords)`` for the framework arm."""
     fw = (framework or "").strip().lower()
     gpu = (gpu_type or "").strip().lower()
     arch = _model_class_to_search_token(model_class)
     prec = (precision or "").strip().lower()
-    bottleneck = _extract_bottleneck_from_breakdown(profile_kernel_breakdown_path)
-    host_bottleneck = _extract_bottleneck_from_rewrite_evidence(rewrite_evidence_path)
+    bottleneck = _extract_bottleneck_from_breakdown(evidence.profile_kernel_breakdown_path)
+    host_bottleneck = _extract_bottleneck_from_rewrite_evidence(evidence.rewrite_evidence_path)
 
     # Gap text mirrors the SKILL.md template.
     parts: list[str] = ["improve"]
@@ -189,4 +197,4 @@ def compose_gap(
     return gap, keywords
 
 
-__all__ = ["compose_gap"]
+__all__ = ["GapEvidence", "compose_gap"]
