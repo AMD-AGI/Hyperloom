@@ -171,7 +171,7 @@ def write_setting_script(
     environment can be reproduced on its own; this script runs it and then
     launches with the accepted envs and server args.
     """
-    from hyperloom.inference_optimizer.reference_script import render_reference_script
+    from hyperloom.inference_optimizer.reference_script import LaunchSettings, ServingTarget, render_reference_script
 
     from .setup_script import SETUP_SCRIPT_NAME, write_setup_script
 
@@ -179,13 +179,12 @@ def write_setting_script(
     accepted_cfg = dict(enablement.accepted_config or {})
     text = render_reference_script(
         framework=framework,
-        # The accepted config can carry a harness flag the measurement ran with; an exported recipe must not.
-        server_args=strip_benchmark_harness_flags(str(accepted_cfg.get("extra_server_args") or "").strip()),
-        envs={str(k): str(v) for k, v in (accepted_cfg.get("extra_envs") or {}).items()},
-        model=model,
-        tp=tp,
-        max_model_len=max_model_len,
-        gpu_type=gpu_type,
+        launch=LaunchSettings(
+            # The accepted config can carry a harness flag the measurement ran with; an exported recipe must not.
+            server_args=strip_benchmark_harness_flags(str(accepted_cfg.get("extra_server_args") or "").strip()),
+            envs={str(k): str(v) for k, v in (accepted_cfg.get("extra_envs") or {}).items()},
+        ),
+        target=ServingTarget(model=model, tp=tp, max_model_len=max_model_len, gpu_type=gpu_type),
         setup_script=SETUP_SCRIPT_NAME,
     )
     out = enablement_dir(Path(session_dir)) / "enablement_setting.sh"

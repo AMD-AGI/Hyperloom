@@ -1216,20 +1216,24 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         try:
             cb = self.current_best or {}
             if cb:
-                from hyperloom.inference_optimizer.reference_script import render_reference_script
+                from hyperloom.inference_optimizer import reference_script
 
-                text = render_reference_script(
+                text = reference_script.render_reference_script(
                     framework=str(self.framework or os.environ.get("FRAMEWORK", "sglang")),
-                    server_args=str(cb.get("extra_server_args") or ""),
-                    envs=dict(cb.get("extra_envs") or {}),
-                    overlay_pythonpath=str(cb.get("final_overlay") or ""),
-                    unset_envs=to_str_list(cb.get("unset_envs")),
-                    remove_args=to_str_list(cb.get("remove_args")),
-                    args_mode=str(cb.get("args_mode") or "append"),
-                    model=self.reference_model or os.environ.get("MODEL_PATH"),
-                    tp=int(self.tp or 0) or None,
-                    max_model_len=int(self.max_model_len or 0) or None,
-                    gpu_type=str(self.gpu_type or os.environ.get("GPU_TYPE", "")) or None,
+                    launch=reference_script.LaunchSettings(
+                        server_args=str(cb.get("extra_server_args") or ""),
+                        envs=dict(cb.get("extra_envs") or {}),
+                        overlay_pythonpath=str(cb.get("final_overlay") or ""),
+                        unset_envs=to_str_list(cb.get("unset_envs")),
+                        remove_args=to_str_list(cb.get("remove_args")),
+                        args_mode=str(cb.get("args_mode") or "append"),
+                    ),
+                    target=reference_script.ServingTarget(
+                        model=self.reference_model or os.environ.get("MODEL_PATH"),
+                        tp=int(self.tp or 0) or None,
+                        max_model_len=int(self.max_model_len or 0) or None,
+                        gpu_type=str(self.gpu_type or os.environ.get("GPU_TYPE", "")) or None,
+                    ),
                 )
                 (Path(session_dir) / "current_setting.sh").write_text(
                     text,
