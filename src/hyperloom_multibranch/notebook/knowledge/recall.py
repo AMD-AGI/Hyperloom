@@ -13,6 +13,10 @@ Sorting reads each summary's ``identity``. The service's read summaries carry no
 looks the identity up by id in the service's export. An Experience whose identity is found nowhere matches no
 condition, so it is one to re-verify, never a prior. The summaries carry no change family either; the index keeps
 it from the same export, so a recalled Experience names the layer it changed.
+
+The session's Experiences live under two declarations, the shared ``inference-recipe-v1`` and the notebook's own
+``multibranch-recipe-v1`` for kernel changes and AgentX sessions; :class:`ExperienceReaders` reads both as one, and an
+AgentX session asks for the interactivity objective only the second declares.
 """
 
 from __future__ import annotations
@@ -24,16 +28,27 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol, cast
 
-from hyperloom_kb import ReadStatus, RemoteClientError
+from hyperloom_kb import ReadStatus, RemoteClientError, RemoteExperienceKB, RemoteReadResult
+from hyperloom_kb.collect import load_mapping
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
 from hyperloom_multibranch.contracts.notebook.records import SessionProfile
-from hyperloom_multibranch.notebook.knowledge.experience import experience_identity
+from hyperloom_multibranch.notebook.knowledge.experience import (
+    MAPPING_PATH,
+    MULTIBRANCH_MAPPING_PATH,
+    experience_identity,
+)
 
 log = logging.getLogger(__name__)
 
 CONDITION_KEYS = ("model", "gpu", "framework", "tp", "conc", "bottleneck", "isl", "osl")
-#: The layer each change family of ``inference-recipe-v1`` changes; the schema declares no kernel family.
-LAYER_OF_FAMILY = {"config_variant": IntentLayer.CONFIG, "source_patch": IntentLayer.SOURCE}
+#: The layer each recorded change family changes; ``inference-recipe-v1`` declares the first two.
+LAYER_OF_FAMILY = {
+    "config_variant": IntentLayer.CONFIG,
+    "source_patch": IntentLayer.SOURCE,
+    "kernel_artifact": IntentLayer.KERNEL,
+}
+THROUGHPUT_OBJECTIVE = "e2e_throughput@v1"
+INTERACTIVITY_OBJECTIVE = "e2e_interactivity@v1"
 EXPORT_PAGE = 100
 WORKLOAD_KEYS = frozenset({"tp", "ep", "conc", "isl", "osl", "max_model_len", "compute_partition_mode", "partitions"})
 DECISION = "Choose the next actions for one branch of a multi-branch inference optimization session."
@@ -60,6 +75,13 @@ class ExperienceExport(Protocol):
         """One page of complete records in write order; the page has ``items``, ``next_cursor`` and ``has_more``."""
 
 
+@dataclass
+class _ExportCursor:
+    export: ExperienceExport
+    schema_ref: str | None
+    after: int = 0
+
+
 class IdentityIndex:
     """The conditions each Experience of one schema was measured under, and its change family, by id, read from the
     service's export.
@@ -70,21 +92,27 @@ class IdentityIndex:
     """
 
     def __init__(self, export: ExperienceExport, schema_ref: str | None = None) -> None:
-        self._export = export
-        self._schema_ref = schema_ref
-        self._cursor = 0
+        self._exports = [_ExportCursor(export, schema_ref)]
         self._known: dict[str, dict[str, Any]] = {}
         self._families: dict[str, str] = {}
         self._lock = threading.Lock()
 
     @classmethod
     def of(cls, reader: object) -> IdentityIndex | None:
-        """The index of ``reader``'s schema when its service exports, as a ``RemoteExperienceKB``'s does."""
+        """The index of ``reader``'s schema when its service exports, as a ``RemoteExperienceKB``'s does; of every
+        schema of :class:`ExperienceReaders` whose service exports."""
 
-        client = getattr(reader, "client", None)
-        if not callable(getattr(client, "export_page", None)):
-            return None
-        return cls(cast(ExperienceExport, client), getattr(reader, "schema_ref", None))
+        index: IdentityIndex | None = None
+        for each in reader.readers if isinstance(reader, ExperienceReaders) else (reader,):
+            client = getattr(each, "client", None)
+            if not callable(getattr(client, "export_page", None)):
+                continue
+            export, schema_ref = cast(ExperienceExport, client), getattr(each, "schema_ref", None)
+            if index is None:
+                index = cls(export, schema_ref)
+            else:
+                index._exports.append(_ExportCursor(export, schema_ref))
+        return index
 
     def identity(self, experience_id: str) -> Mapping[str, Any]:
         with self._lock:
@@ -101,9 +129,13 @@ class IdentityIndex:
             return self._families.get(experience_id, "")
 
     def _advance(self) -> None:
+        for cursor in self._exports:
+            self._advance_export(cursor)
+
+    def _advance_export(self, cursor: _ExportCursor) -> None:
         try:
             while True:
-                page = self._export.export_page(after=self._cursor, limit=EXPORT_PAGE, schema_ref=self._schema_ref)
+                page = cursor.export.export_page(after=cursor.after, limit=EXPORT_PAGE, schema_ref=cursor.schema_ref)
                 for item in page.items:
                     stored = item.get("experience")
                     if isinstance(stored, Mapping) and stored.get("id"):
@@ -113,11 +145,58 @@ class IdentityIndex:
                         family = change.get("change_family") if isinstance(change, Mapping) else None
                         if isinstance(family, str) and family:
                             self._families[experience_id] = family
-                self._cursor = page.next_cursor
+                cursor.after = page.next_cursor
                 if not page.has_more:
                     return
         except (RemoteClientError, OSError) as exc:
             log.warning("could not look Experience identities up in the export: %s", exc)
+
+
+@dataclass(frozen=True)
+class ExperienceReaders:
+    """Several Experience KB readers read as one, such as one per declaration the session's Experiences live under.
+
+    A reader whose declaration does not declare the read's objective is not asked. The completed answers are merged
+    in the readers' order, each at most ``limit`` Experiences; the warnings are every answer's. With none completed,
+    the first answer is the result.
+    """
+
+    readers: tuple[ExperienceReader, ...]
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> ExperienceReaders | None:
+        """One reader per declaration on the Experience KB ``HYPERLOOM_KB_URL`` names; ``None`` without one."""
+
+        readers = tuple(
+            reader
+            for path in (MAPPING_PATH, MULTIBRANCH_MAPPING_PATH)
+            if (reader := RemoteExperienceKB.from_env(load_mapping(path).declaration, env)) is not None
+        )
+        return cls(readers) if readers else None
+
+    def read(self, decision: str, context: Mapping[str, Any], *, limit: int | None = None) -> RemoteReadResult:
+        objective = (context.get("objective") or {}).get("id")
+        answers = [
+            reader.read(decision, context, limit=limit) for reader in self.readers if _declares(reader, objective)
+        ]
+        completed = [answer for answer in answers if str(answer.status) == ReadStatus.COMPLETED.value]
+        if not completed:
+            return answers[0] if answers else RemoteReadResult("", ReadStatus.DISABLED.value, "", (), ())
+        return RemoteReadResult(
+            read_id=", ".join(answer.read_id for answer in completed if answer.read_id),
+            status=ReadStatus.COMPLETED.value,
+            prompt_block="\n\n".join(answer.prompt_block for answer in completed if answer.prompt_block),
+            rendered_refs=tuple(ref for answer in completed for ref in answer.rendered_refs),
+            warnings=tuple(str(warning) for answer in answers for warning in answer.warnings),
+            experiences=tuple(item for answer in completed for item in answer.experiences),
+        )
+
+
+def _declares(reader: object, objective: object) -> bool:
+    declaration = getattr(reader, "declaration", None)
+    if declaration is None or not isinstance(objective, str):
+        return True
+    return declaration.objective(objective) is not None
 
 
 @dataclass(frozen=True)
@@ -197,17 +276,25 @@ def recall_conditions(profile: SessionProfile, bottleneck: str) -> dict[str, obj
 def recall_context(
     profile: SessionProfile, baseline_value: float | None, *, bottleneck: str, branch: str = "", intent: str = ""
 ) -> dict[str, Any]:
-    """The read context, in the shape the Framework phase's reads use."""
+    """The read context, in the shape the Framework phase's reads use; an AgentX trace replay, which has no input
+    length, asks for the interactivity objective."""
 
     identity = experience_identity(profile)
     observations = {
         name: text for name, text in (("bottleneck", bottleneck), ("branch", branch), ("intent", intent)) if text
     }
+    replays_traces = profile.isl is None
     return {
         "identity": {key: value for key, value in identity.items() if key not in WORKLOAD_KEYS},
         "workload": {key: value for key, value in identity.items() if key in WORKLOAD_KEYS},
-        "objective": {"id": "e2e_throughput@v1", "direction": "higher_is_better"},
-        "benchmark_baseline": {"throughput": baseline_value, "source": "prelude_baseline"},
+        "objective": {
+            "id": INTERACTIVITY_OBJECTIVE if replays_traces else THROUGHPUT_OBJECTIVE,
+            "direction": "higher_is_better",
+        },
+        "benchmark_baseline": {
+            "interactivity" if replays_traces else "throughput": baseline_value,
+            "source": "prelude_baseline",
+        },
         "observations": observations,
     }
 
@@ -288,9 +375,12 @@ def recall_experiences(
 __all__ = [
     "CONDITION_KEYS",
     "DECISION",
+    "INTERACTIVITY_OBJECTIVE",
     "LAYER_OF_FAMILY",
+    "THROUGHPUT_OBJECTIVE",
     "ExperienceExport",
     "ExperienceReader",
+    "ExperienceReaders",
     "IdentityIndex",
     "Recall",
     "RecallQuery",

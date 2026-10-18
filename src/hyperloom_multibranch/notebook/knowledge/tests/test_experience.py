@@ -35,10 +35,12 @@ from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LearningK
 from hyperloom_multibranch.notebook.knowledge.experience import (
     EXPORT_FORMAT,
     MAPPING_PATH,
+    MULTIBRANCH_MAPPING_PATH,
     candidate_row,
     change_document,
     export_document,
     publish_experiences,
+    publish_multibranch_experiences,
 )
 from hyperloom_multibranch.notebook.knowledge.tests.kb_service import experience_service
 from hyperloom_multibranch.notebook.tests.factories import profile, result
@@ -210,7 +212,59 @@ def test_a_delta_is_a_config_change_a_source_patch_or_a_kernel() -> None:
         "patch/vllm/0001-moe.patch",
     )
     assert change_document(kernel)["family"] == "kernel"
+    assert change_document(kernel)["content"]["add_kernels"][0]["ref"] == "kernel/gemm/moe.json"
     assert change_document(config)["summary"] == "--a 1 X=1 drop --b unset Y"
+
+
+def _with_delta(snapshot: NotebookSnapshot, request_id: str, delta: RecipeDelta) -> NotebookSnapshot:
+    records = tuple(
+        dataclasses.replace(record, request=dataclasses.replace(record.request, delta=delta))
+        if record.request_id == request_id
+        else record
+        for record in snapshot.records
+    )
+    return dataclasses.replace(snapshot, records=records)
+
+
+def test_a_kernel_change_goes_to_the_notebooks_own_declaration_and_the_rest_stays_shared(
+    snapshot: NotebookSnapshot,
+) -> None:
+    artifact = KernelArtifact(KernelKind.GEMM, "moe", "kernel/gemm/moe.json", "d" * 64)
+    kernel = _with_delta(snapshot, "r1", RecipeDelta(add_kernels=(artifact,)))
+
+    shared = publish_experiences(kernel, METRIC, dry_run=True)
+    own = publish_multibranch_experiences(kernel, METRIC, dry_run=True)
+
+    (recorded,) = own.collected
+    assert recorded.unit_id == "r1"
+    assert (recorded.experience.objective, recorded.experience.change["change_family"]) == (
+        "e2e_throughput@v1",
+        "kernel_artifact",
+    )
+    assert "kernel/gemm/moe.json" in recorded.experience.change["content"]
+    assert recorded.experience.schema_ref == load_mapping(MULTIBRANCH_MAPPING_PATH).declaration.schema_ref
+    assert {item.unit_id: item.reason for item in shared.skipped}["r1"] == (
+        "change family is not one inference-recipe-v1 declares"
+    )
+    assert {item.unit_id: item.reason for item in own.skipped}[
+        "r2"
+    ] == "the shared inference-recipe-v1 holds this candidate"
+
+
+def test_an_agentx_session_records_every_change_on_interactivity_in_the_same_repeat_groups(
+    snapshot: NotebookSnapshot,
+) -> None:
+    agentx = dataclasses.replace(snapshot, profile=profile(isl=None, osl=None))
+    shared = {item.unit_id: item.experience for item in publish_experiences(snapshot, METRIC, dry_run=True).collected}
+
+    own = {
+        item.unit_id: item.experience
+        for item in publish_multibranch_experiences(agentx, METRIC, dry_run=True).collected
+    }
+
+    assert sorted(own) == sorted(shared) == ["r1", "r2"]
+    assert {experience.objective for experience in own.values()} == {"e2e_interactivity@v1"}
+    assert [_change_group(own[unit]) for unit in ("r1", "r2")] == [_change_group(shared[unit]) for unit in ("r1", "r2")]
 
 
 def test_a_judgement_waiting_on_its_split_or_its_diagnosis_waits_to_be_published(snapshot: NotebookSnapshot) -> None:

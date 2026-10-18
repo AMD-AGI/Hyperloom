@@ -30,6 +30,7 @@ from hyperloom_multibranch.notebook.rsi.session import (
     FAILED,
     FRONTIER_LOG,
     LEARNING_RECEIPT,
+    MULTIBRANCH_RECEIPT,
     NO_KB,
     NO_PROFILE,
     WRITTEN,
@@ -74,6 +75,7 @@ def test_without_a_kb_or_an_archive_each_step_says_why_and_close_goes_on(snapsho
         experiences=CloseStep(DISABLED, NO_KB),
         learnings=CloseStep(DISABLED, NO_KB),
         archive=CloseStep(SKIPPED, "no_archive_configured"),
+        multibranch_experiences=CloseStep(DISABLED, NO_KB),
     )
 
 
@@ -105,6 +107,27 @@ def test_a_live_kb_and_an_archive_take_the_experiences_the_learnings_and_the_tre
     assert done.archive == CloseStep(ARCHIVED)
     assert [(item.session_id, item.budget_seconds) for item in archive.load()] == [("sess-1", BUDGET)]
     assert (reports / EXPERIENCE_RECEIPT).is_file() and (reports / LEARNING_RECEIPT).is_file()
+    assert done.multibranch_experiences == CloseStep(DISABLED, NO_KB)
+
+
+@pytest.mark.usefixtures("unconfigured")
+def test_an_agentx_sessions_experiences_go_to_the_notebooks_own_declaration(
+    snapshot: NotebookSnapshot, tmp_path: Path
+) -> None:
+    agentx = dataclasses.replace(snapshot, profile=profile(isl=None, osl=None))
+    own = load_mapping(experience.MULTIBRANCH_MAPPING_PATH).declaration
+    reports = tmp_path / "reports"
+    with experience_service(tmp_path, own) as client:
+        done = close_knowledge(
+            agentx, METRIC, targets=CloseTargets(multibranch_kb=RemoteExperienceKB(client, own), receipts=reports)
+        )
+
+    dry = experience.publish_multibranch_experiences(agentx, METRIC, dry_run=True)
+    assert done.multibranch_experiences == CloseStep(
+        WRITTEN, counts={"created": len(dry.collected), "skipped": len(dry.skipped), "errors": 0}
+    )
+    assert dry.collected and (reports / MULTIBRANCH_RECEIPT).is_file()
+    assert done.experiences == CloseStep(DISABLED, NO_KB)
 
 
 @pytest.mark.usefixtures("unconfigured")
@@ -131,6 +154,7 @@ def test_without_a_profile_nothing_is_published_or_archived(snapshot: NotebookSn
         experiences=CloseStep(SKIPPED, NO_PROFILE),
         learnings=CloseStep(SKIPPED, NO_PROFILE),
         archive=CloseStep(SKIPPED, "no_profile_or_baseline"),
+        multibranch_experiences=CloseStep(SKIPPED, NO_PROFILE),
     )
 
 
@@ -161,6 +185,7 @@ def test_the_breakdown_records_the_knowledge_steps_only_when_given(snapshot: Not
 
     assert close["knowledge"] == {
         "experiences": {"status": WRITTEN, "reason": "", "counts": counts},
+        "multibranch_experiences": {"status": DISABLED, "reason": NO_KB, "counts": {}},
         "learnings": {"status": DISABLED, "reason": NO_KB, "counts": {}},
         "archive": {"status": ARCHIVED, "reason": "", "counts": {}},
     }

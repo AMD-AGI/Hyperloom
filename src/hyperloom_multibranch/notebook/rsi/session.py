@@ -4,8 +4,9 @@
 """What the scheduler calls on the notebook's knowledge: once at CLOSE, and every round of EXPLORE.
 
 * :func:`close_knowledge` is CLOSE's one call after the Recipe KB write-back: the session's Experiences and the
-  specialists' learnings go to the Experience KB, and the session's search tree to the archive. A step that cannot be
-  done says why and never stops CLOSE; :meth:`KnowledgeClose.document` is what the breakdown records of the steps
+  specialists' learnings go to the Experience KB, and the session's search tree to the archive. The Experiences the
+  shared declaration cannot hold, kernel changes and an AgentX session's, are a step of their own. A step that cannot
+  be done says why and never stops CLOSE; :meth:`KnowledgeClose.document` is what the breakdown records of the steps
   (``build_breakdown(..., knowledge=...)``).
 * :func:`session_frontier` is one session's frontier scoring: windows sized to its budget, the archived sessions as
   the prior, and the scores log.
@@ -24,12 +25,13 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 
+from hyperloom_kb import NoOpExperienceKB
 from hyperloom_kb.collect import CollectionTarget, CollectReport
 from hyperloom_multibranch.contracts.notebook import NotRecorded
 from hyperloom_multibranch.contracts.notebook.interfaces import SnapshotQuery
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot
 from hyperloom_multibranch.notebook.codec import encode
-from hyperloom_multibranch.notebook.knowledge.experience import publish_experiences
+from hyperloom_multibranch.notebook.knowledge.experience import publish_experiences, publish_multibranch_experiences
 from hyperloom_multibranch.notebook.knowledge.learnings import publish_learnings
 from hyperloom_multibranch.notebook.rsi.archive import SKIPPED, SearchTree, TreeArchive, archive_session
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierPolicy, FrontierScoring
@@ -43,6 +45,7 @@ FAILED = "failed"
 NO_KB = "no_experience_kb_configured"
 NO_PROFILE = "no_session_profile"
 EXPERIENCE_RECEIPT = "experience_kb_experiences.json"
+MULTIBRANCH_RECEIPT = "experience_kb_multibranch_experiences.json"
 LEARNING_RECEIPT = "experience_kb_learnings.json"
 #: The scores log's usual name in the session's reports folder.
 FRONTIER_LOG = "frontier.jsonl"
@@ -65,16 +68,23 @@ class CloseStep:
 
 @dataclass(frozen=True)
 class KnowledgeClose:
-    """CLOSE's knowledge steps: the Experiences, the learnings, and the archived search tree."""
+    """CLOSE's knowledge steps: the Experiences, the learnings, the archived search tree, and the Experiences only the
+    notebook's own declaration holds (``multibranch_experiences``)."""
 
     experiences: CloseStep
     learnings: CloseStep
     archive: CloseStep
+    multibranch_experiences: CloseStep = CloseStep(DISABLED, NO_KB)
 
     def document(self) -> dict[str, object]:
         """The steps as JSON-ready data: the breakdown's ``close.knowledge``."""
 
-        steps = {"experiences": self.experiences, "learnings": self.learnings, "archive": self.archive}
+        steps = {
+            "experiences": self.experiences,
+            "multibranch_experiences": self.multibranch_experiences,
+            "learnings": self.learnings,
+            "archive": self.archive,
+        }
         return {name: encode(step) for name, step in steps.items()}
 
 
@@ -121,16 +131,25 @@ def _archived(
 @dataclass(frozen=True)
 class CloseTargets:
     """Where CLOSE's knowledge goes: ``experience_kb`` takes the Experiences, ``learning_kb`` the learnings and
-    ``archive`` the search tree, each the environment's when ``None``; ``receipts`` is the folder for the two
-    collection receipts, none without it."""
+    ``archive`` the search tree, each the environment's when ``None``; ``receipts`` is the folder for the collection
+    receipts, none without it. ``multibranch_kb`` takes the Experiences under the notebook's own declaration."""
 
     experience_kb: CollectionTarget | None = None
     learning_kb: CollectionTarget | None = None
     archive: TreeArchive | None = None
     receipts: Path | None = None
+    multibranch_kb: CollectionTarget | None = None
 
     def receipt(self, name: str) -> Path | None:
         return self.receipts / name if self.receipts is not None else None
+
+    def multibranch(self) -> CollectionTarget | None:
+        """``multibranch_kb``; else the environment's beside the environment's ``experience_kb``, and nowhere beside
+        an ``experience_kb`` the caller chose, so a caller who chose where Experiences go is never written behind."""
+
+        if self.multibranch_kb is not None or self.experience_kb is None:
+            return self.multibranch_kb
+        return NoOpExperienceKB(NO_KB)
 
 
 def close_knowledge(
@@ -164,6 +183,16 @@ def close_knowledge(
             partial(publish_learnings, snapshot, kb=targets.learning_kb, receipt=targets.receipt(LEARNING_RECEIPT)),
         ),
         archive=_archived(snapshot, metric, targets.archive, budget_seconds=budget_seconds, bottlenecks=bottlenecks),
+        multibranch_experiences=_published(
+            "publish the Experiences under the notebook's own declaration",
+            partial(
+                publish_multibranch_experiences,
+                snapshot,
+                metric,
+                kb=targets.multibranch(),
+                receipt=targets.receipt(MULTIBRANCH_RECEIPT),
+            ),
+        ),
     )
 
 

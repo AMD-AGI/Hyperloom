@@ -21,6 +21,11 @@ the experiment repository commit that pins the exact recipe.
 
 A judged record changes only while its split is pending, so pending splits wait; everything else is published once and
 reads ``unchanged`` afterwards. Merges stack commits already published, so they are not.
+
+The shared ``inference-recipe-v1`` declaration holds an InferenceX session's configuration and source patch changes,
+which the single-lineage flow reads too. What it cannot hold, a change that ships a kernel artifact and every change of
+an AgentX session, graded on interactivity, goes through the ``multibranch-recipe-v1`` mapping to the notebook's own
+declaration of that name (:func:`publish_multibranch_experiences`). Each mapping refuses the other's candidates.
 """
 
 from __future__ import annotations
@@ -44,6 +49,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import COMMITTING, Conclusio
 from hyperloom_multibranch.notebook.knowledge.lessons import direction
 
 MAPPING_PATH = Path(__file__).with_name("mappings") / "multibranch-notebook-v1.yaml"
+MULTIBRANCH_MAPPING_PATH = Path(__file__).with_name("mappings") / "multibranch-recipe-v1.yaml"
 EXPORT_FORMAT = "multibranch.notebook.export.v1"
 THROUGHPUT_OBJECTIVE = "output_throughput"
 SUMMARY_CHARS = 160
@@ -106,6 +112,8 @@ def change_document(delta: RecipeDelta) -> dict[str, object]:
             "unset_envs": list(config.unset_envs),
             "args_mode": config.args_mode.value,
             "patches": patches,
+            "add_kernels": [kernel.to_document() for kernel in delta.add_kernels],
+            "remove_kernels": list(delta.remove_kernels),
         },
     }
 
@@ -251,14 +259,31 @@ def publish_experiences(
     dry_run: bool = False,
     receipt: Path | None = None,
 ) -> CollectReport:
-    """Write the session's Experiences to ``kb``, or to the service ``HYPERLOOM_KB_URL`` names."""
+    """Write the session's Experiences the shared declaration holds to ``kb``, or to the service ``HYPERLOOM_KB_URL``
+    names."""
 
     return collect(MAPPING_PATH, export_document(snapshot, metric), kb=kb, dry_run=dry_run, receipt=receipt)
+
+
+def publish_multibranch_experiences(
+    snapshot: NotebookSnapshot,
+    metric: str,
+    *,
+    kb: CollectionTarget | None = None,
+    dry_run: bool = False,
+    receipt: Path | None = None,
+) -> CollectReport:
+    """Write the session's Experiences the shared declaration cannot hold, kernel changes and an AgentX session's,
+    under ``multibranch-recipe-v1`` to ``kb``, or to the service ``HYPERLOOM_KB_URL`` names."""
+
+    export = export_document(snapshot, metric)
+    return collect(MULTIBRANCH_MAPPING_PATH, export, kb=kb, dry_run=dry_run, receipt=receipt)
 
 
 __all__ = [
     "EXPORT_FORMAT",
     "MAPPING_PATH",
+    "MULTIBRANCH_MAPPING_PATH",
     "THROUGHPUT_OBJECTIVE",
     "branch_notes",
     "candidate_row",
@@ -268,4 +293,5 @@ __all__ = [
     "export_document",
     "intent_conditions",
     "publish_experiences",
+    "publish_multibranch_experiences",
 ]
