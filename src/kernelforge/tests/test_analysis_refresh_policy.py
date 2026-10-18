@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 from kernelforge.loop.analysis_refresh_policy import decide_analysis_refresh
+from kernelforge.loop.run_state import AnalysisRefreshState
+
+_STATE_FIELDS = [field.name for field in dataclasses.fields(AnalysisRefreshState)]
 
 
 def _decide(**overrides):
@@ -19,7 +24,8 @@ def _decide(**overrides):
         "current_iteration": 4,
     }
     values.update(overrides)
-    return decide_analysis_refresh(**values)
+    state = AnalysisRefreshState(**{name: values.pop(name) for name in _STATE_FIELDS})
+    return decide_analysis_refresh(state, **values)
 
 
 def test_initial_analysis_is_required_without_evidence():
