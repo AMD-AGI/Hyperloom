@@ -29,7 +29,6 @@ REWRITE_PRODUCER = "flydsl"
 def resolve_identity(
     spec: RewriteSpec,
     *,
-    framework: str,
     gpu: str,
     source_text: str,
     producer: str = REWRITE_PRODUCER,
@@ -45,7 +44,7 @@ def resolve_identity(
     resolved_framework = infer_source_owner_framework(
         KernelSources(spec.source_kernel, source_text),
         target_functions=spec.target_functions,
-        framework_override=framework,
+        framework_override=spec.framework,
         concrete_operation=concrete_op,
     )
     signature, implementation = implementation_signature(

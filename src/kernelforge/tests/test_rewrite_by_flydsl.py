@@ -69,11 +69,9 @@ def test_build_spec_autodiscovers_entry_when_absent(tmp_path):
     src = tmp_path / "softmax.py"
     src.write_text("def _softmax_kernel(): ...\ndef softmax(x):\n    _softmax_kernel[(1,)](x)\n    return x\n")
     spec = ingest.build_spec(
-        op_name="softmax",
-        source_kernel=str(src),
+        ingest.RewriteSubject(op_name="softmax", source_kernel=str(src), target_functions=["_softmax_kernel"]),
         flydsl_kernel=str(tmp_path / "kernel.py"),
         workspace=str(tmp_path),
-        target_functions=["_softmax_kernel"],
     )
     assert spec.source_entry == "softmax"
 
@@ -83,11 +81,9 @@ def test_build_spec_does_not_raise_on_unresolved_entry(tmp_path):
     src = tmp_path / "mystery.py"
     src.write_text("def unrelated():\n    return 1\n")
     spec = ingest.build_spec(
-        op_name="op",
-        source_kernel=str(src),
+        ingest.RewriteSubject(op_name="op", source_kernel=str(src), target_functions=["nonexistent_kernel"]),
         flydsl_kernel=str(tmp_path / "kernel.py"),
         workspace=str(tmp_path),
-        target_functions=["nonexistent_kernel"],
     )
     assert spec.source_entry == ""  # unresolved, but no exception
 
@@ -99,11 +95,9 @@ def test_candidate_outside_the_workspace_reads_as_its_bare_name(tmp_path):
     src.write_text("def softmax(x):\n    return x\n")
     outside = tmp_path / "elsewhere" / "kernel.py"
     spec = ingest.build_spec(
-        op_name="softmax",
-        source_kernel=str(src),
+        ingest.RewriteSubject(op_name="softmax", source_kernel=str(src), target_functions=["softmax"]),
         flydsl_kernel=str(outside),
         workspace=str(workspace),
-        target_functions=["softmax"],
     )
 
     assert spec.flydsl_kernel_relpath == "kernel.py"
@@ -187,11 +181,9 @@ def test_build_spec_resolves_the_language_and_the_c_like_entry(tmp_path):
     src.write_text(_HIP_SRC)
 
     spec = ingest.build_spec(
-        op_name="attention",
-        source_kernel=str(src),
+        ingest.RewriteSubject(op_name="attention", source_kernel=str(src), target_functions=["attention_kernel"]),
         flydsl_kernel=str(tmp_path / "kernel.py"),
         workspace=str(tmp_path),
-        target_functions=["attention_kernel"],
     )
 
     assert spec.source_language == "hip"

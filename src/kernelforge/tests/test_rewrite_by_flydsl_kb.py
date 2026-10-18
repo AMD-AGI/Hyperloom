@@ -206,6 +206,7 @@ def _spec(tmp_path):
             op_name="softmax",
             source_kernel=str(source),
             target_functions=["softmax_kernel"],
+            framework="vllm",
             flydsl_kernel=str(kernel),
             workspace=str(workspace),
             snr_threshold=30.0,
@@ -306,7 +307,6 @@ def test_rewrite_warmstart_uses_fuzzy_identity_after_exact_miss(
     plan = kb._read_top_candidates(
         spec,
         config,
-        framework="vllm",
         top_k=3,
     )
 
@@ -350,7 +350,6 @@ def test_rewrite_warmstart_keeps_exact_identity_ahead_of_fuzzy_donor(
     plan = kb._read_top_candidates(
         spec,
         config,
-        framework="vllm",
         top_k=3,
     )
 
@@ -371,7 +370,6 @@ def test_a_rewrite_is_filed_under_the_flydsl_producer_identity(tmp_path, monkeyp
         flydsl_best_ms=5.0,
         speedup=2,
         best_commit="a" * 40,
-        framework="vllm",
         snr_db=80.0,
     )
 
@@ -408,7 +406,6 @@ def test_a_namespaced_operator_name_stays_out_of_the_identifiers(
         flydsl_best_ms=5.0,
         speedup=2,
         best_commit="a" * 40,
-        framework="vllm",
         snr_db=80.0,
     )
 
@@ -438,24 +435,10 @@ def test_the_same_port_on_another_gpu_is_a_different_identity(tmp_path, monkeypa
     )
 
     kb.write_flydsl_kb_solution(
-        spec,
-        str(driver),
-        _remote_config(tmp_path),
-        source_ms=10.0,
-        flydsl_best_ms=5.0,
-        speedup=2,
-        best_commit="a" * 40,
-        framework="vllm",
+        spec, str(driver), _remote_config(tmp_path), source_ms=10.0, flydsl_best_ms=5.0, speedup=2, best_commit="a" * 40
     )
     kb.write_flydsl_kb_solution(
-        spec,
-        str(driver),
-        other_gpu,
-        source_ms=10.0,
-        flydsl_best_ms=5.0,
-        speedup=2,
-        best_commit="a" * 40,
-        framework="vllm",
+        spec, str(driver), other_gpu, source_ms=10.0, flydsl_best_ms=5.0, speedup=2, best_commit="a" * 40
     )
 
     assert sorted({identity for identity, _ in store.knowledge}) == [
@@ -482,7 +465,6 @@ def test_gpu_target_does_not_change_the_recipe_identity(tmp_path, monkeypatch):
         flydsl_best_ms=5.0,
         speedup=2,
         best_commit="a" * 40,
-        framework="vllm",
         session_key="a" * 40,
     )
     second = kb.write_flydsl_kb_solution(
@@ -493,7 +475,6 @@ def test_gpu_target_does_not_change_the_recipe_identity(tmp_path, monkeypatch):
         flydsl_best_ms=5.0,
         speedup=2,
         best_commit="b" * 40,
-        framework="vllm",
         session_key="b" * 40,
     )
 
@@ -526,30 +507,14 @@ def test_a_recorded_port_is_materialized_and_revalidated(tmp_path, monkeypatch):
     expected = Path(spec.flydsl_kernel).read_bytes()
 
     written = kb.write_flydsl_kb_solution(
-        spec,
-        str(driver),
-        config,
-        source_ms=10.0,
-        flydsl_best_ms=5.0,
-        speedup=2,
-        best_commit="a" * 40,
-        framework="vllm",
-        snr_db=80.0,
+        spec, str(driver), config, source_ms=10.0, flydsl_best_ms=5.0, speedup=2, best_commit="a" * 40, snr_db=80.0
     )
     assert written["written"] is True
 
     _passing_validation(monkeypatch, best_ms=12.0)
     Path(spec.flydsl_kernel).write_text("def skeleton():\n    pass\n")
 
-    restored = asyncio.run(
-        kb.try_flydsl_kb_warmstart(
-            spec,
-            str(driver),
-            config,
-            source_case_ms={_CASE: 10.0},
-            framework="vllm",
-        )
-    )
+    restored = asyncio.run(kb.try_flydsl_kb_warmstart(spec, str(driver), config, source_case_ms={_CASE: 10.0}))
 
     assert restored.applied is True
     assert restored.best_ms == 12.0
@@ -567,28 +532,13 @@ def test_warmstart_materializes_crlf_bytes_without_newline_conversion(
     artifact = b"import flydsl\r\ndef build_softmax_module(config):\r\n    return lambda inputs: inputs['x']\r\n"
     Path(spec.flydsl_kernel).write_bytes(artifact)
     written = kb.write_flydsl_kb_solution(
-        spec,
-        str(driver),
-        config,
-        source_ms=10.0,
-        flydsl_best_ms=5.0,
-        speedup=2,
-        best_commit="a" * 40,
-        framework="vllm",
+        spec, str(driver), config, source_ms=10.0, flydsl_best_ms=5.0, speedup=2, best_commit="a" * 40
     )
     assert written["written"] is True
     _passing_validation(monkeypatch, best_ms=5.0)
     Path(spec.flydsl_kernel).write_bytes(b"def skeleton():\n    pass\n")
 
-    restored = asyncio.run(
-        kb.try_flydsl_kb_warmstart(
-            spec,
-            str(driver),
-            config,
-            source_case_ms={_CASE: 10.0},
-            framework="vllm",
-        )
-    )
+    restored = asyncio.run(kb.try_flydsl_kb_warmstart(spec, str(driver), config, source_case_ms={_CASE: 10.0}))
 
     assert restored.applied is True
     assert Path(spec.flydsl_kernel).read_bytes() == artifact
@@ -606,14 +556,7 @@ def test_reference_decoding_does_not_change_candidate_or_rollback_bytes(
     )
     Path(spec.flydsl_kernel).write_bytes(artifact)
     written = kb.write_flydsl_kb_solution(
-        spec,
-        str(driver),
-        config,
-        source_ms=10.0,
-        flydsl_best_ms=5.0,
-        speedup=2,
-        best_commit="b" * 40,
-        framework="vllm",
+        spec, str(driver), config, source_ms=10.0, flydsl_best_ms=5.0, speedup=2, best_commit="b" * 40
     )
     assert written["written"] is True
     seed = b"def skeleton():\r\n    pass\r\n"
@@ -626,15 +569,7 @@ def test_reference_decoding_does_not_change_candidate_or_rollback_bytes(
 
     monkeypatch.setattr(kb, "check_flydsl_port", reject_port)
 
-    restored = asyncio.run(
-        kb.try_flydsl_kb_warmstart(
-            spec,
-            str(driver),
-            config,
-            source_case_ms={_CASE: 10.0},
-            framework="vllm",
-        )
-    )
+    restored = asyncio.run(kb.try_flydsl_kb_warmstart(spec, str(driver), config, source_case_ms={_CASE: 10.0}))
 
     assert restored.applied is False
     assert attempted == [artifact]
@@ -648,14 +583,7 @@ def test_the_ported_file_is_an_artifact_not_a_document_field(tmp_path, monkeypat
     expected = Path(spec.flydsl_kernel).read_bytes()
 
     written = kb.write_flydsl_kb_solution(
-        spec,
-        str(driver),
-        _remote_config(tmp_path),
-        source_ms=10.0,
-        flydsl_best_ms=5.0,
-        speedup=2,
-        best_commit="a" * 40,
-        framework="vllm",
+        spec, str(driver), _remote_config(tmp_path), source_ms=10.0, flydsl_best_ms=5.0, speedup=2, best_commit="a" * 40
     )
 
     key = (SOFTMAX_IDENTITY, written["session_id"])
@@ -676,14 +604,7 @@ def test_a_correct_but_slower_port_is_recorded_without_being_promoted(
     config = _remote_config(tmp_path)
 
     written = kb.write_flydsl_kb_solution(
-        spec,
-        str(driver),
-        config,
-        source_ms=5.0,
-        flydsl_best_ms=10.0,
-        speedup=0.5,
-        best_commit="b" * 40,
-        framework="vllm",
+        spec, str(driver), config, source_ms=5.0, flydsl_best_ms=10.0, speedup=0.5, best_commit="b" * 40
     )
 
     assert written["written"] is True
@@ -693,15 +614,7 @@ def test_a_correct_but_slower_port_is_recorded_without_being_promoted(
 
     _passing_validation(monkeypatch, best_ms=10.0, snr_db=None)
     Path(spec.flydsl_kernel).write_text("def skeleton():\n    pass\n")
-    restored = asyncio.run(
-        kb.try_flydsl_kb_warmstart(
-            spec,
-            str(driver),
-            config,
-            source_case_ms={_CASE: 5.0},
-            framework="vllm",
-        )
-    )
+    restored = asyncio.run(kb.try_flydsl_kb_warmstart(spec, str(driver), config, source_case_ms={_CASE: 5.0}))
     assert restored.applied is True
 
 
@@ -711,25 +624,11 @@ def test_a_weaker_later_port_does_not_take_the_champion_pointer(tmp_path, monkey
     config = _remote_config(tmp_path)
 
     strong = kb.write_flydsl_kb_solution(
-        spec,
-        str(driver),
-        config,
-        source_ms=10.0,
-        flydsl_best_ms=2.0,
-        speedup=5,
-        best_commit="1" * 40,
-        framework="vllm",
+        spec, str(driver), config, source_ms=10.0, flydsl_best_ms=2.0, speedup=5, best_commit="1" * 40
     )
     Path(spec.flydsl_kernel).write_text("import flydsl\nRANK = 2\n")
     weak = kb.write_flydsl_kb_solution(
-        spec,
-        str(driver),
-        config,
-        source_ms=10.0,
-        flydsl_best_ms=8.0,
-        speedup=1.25,
-        best_commit="2" * 40,
-        framework="vllm",
+        spec, str(driver), config, source_ms=10.0, flydsl_best_ms=8.0, speedup=1.25, best_commit="2" * 40
     )
 
     assert strong["champion"] is True
@@ -754,15 +653,7 @@ def test_a_port_is_admitted_on_what_it_is_not_on_which_revision_wrote_it(tmp_pat
     spec, driver = _spec(tmp_path)
     config = _remote_config(tmp_path)
     port = Path(spec.flydsl_kernel).read_text()
-    written = kb.write_flydsl_kb_solution(
-        spec,
-        str(driver),
-        config,
-        source_ms=10.0,
-        flydsl_best_ms=5.0,
-        speedup=2,
-        framework="vllm",
-    )
+    written = kb.write_flydsl_kb_solution(spec, str(driver), config, source_ms=10.0, flydsl_best_ms=5.0, speedup=2)
     assert written["written"] is True
 
     Path(spec.flydsl_kernel).write_text("def skeleton():\n    pass\n")
@@ -775,15 +666,7 @@ def test_a_port_is_admitted_on_what_it_is_not_on_which_revision_wrote_it(tmp_pat
         )
     _passing_validation(monkeypatch, best_ms=5.0)
 
-    adopted = asyncio.run(
-        kb.try_flydsl_kb_warmstart(
-            spec,
-            str(driver),
-            config,
-            source_case_ms={_CASE: 10.0},
-            framework="vllm",
-        )
-    )
+    adopted = asyncio.run(kb.try_flydsl_kb_warmstart(spec, str(driver), config, source_case_ms={_CASE: 10.0}))
 
     assert adopted.applied is True
     assert adopted.attempts[-1]["reason"] == "applied"
@@ -797,36 +680,20 @@ def test_a_port_whose_implementation_signature_disagrees_is_measured_not_refused
     config = _remote_config(tmp_path)
     port = Path(spec.flydsl_kernel).read_text()
     assert (
-        kb.write_flydsl_kb_solution(
-            spec,
-            str(driver),
-            config,
-            source_ms=10.0,
-            flydsl_best_ms=5.0,
-            speedup=2,
-            framework="vllm",
-        )["written"]
+        kb.write_flydsl_kb_solution(spec, str(driver), config, source_ms=10.0, flydsl_best_ms=5.0, speedup=2)["written"]
         is True
     )
 
     source = Path(spec.source_kernel)
-    before = kb.resolve_identity(spec, framework="vllm", gpu="mi355x", source_text=source.read_text())[2]
+    before = kb.resolve_identity(spec, gpu="mi355x", source_text=source.read_text())[2]
     source.write_text(source.read_text() + "\n@triton.jit\ndef unrelated_kernel(y):\n    return y\n")
-    after = kb.resolve_identity(spec, framework="vllm", gpu="mi355x", source_text=source.read_text())[2]
+    after = kb.resolve_identity(spec, gpu="mi355x", source_text=source.read_text())[2]
     # Guard the premise: this edit is exactly what used to retire the record.
     assert before != after
     Path(spec.flydsl_kernel).write_text("def skeleton():\n    pass\n")
     _passing_validation(monkeypatch, best_ms=5.0)
 
-    adopted = asyncio.run(
-        kb.try_flydsl_kb_warmstart(
-            spec,
-            str(driver),
-            config,
-            source_case_ms={_CASE: 10.0},
-            framework="vllm",
-        )
-    )
+    adopted = asyncio.run(kb.try_flydsl_kb_warmstart(spec, str(driver), config, source_case_ms={_CASE: 10.0}))
 
     assert adopted.applied is True
     assert Path(spec.flydsl_kernel).read_text() == port
@@ -838,15 +705,7 @@ def test_a_port_that_does_not_expose_the_builder_the_driver_imports_is_refused(t
     spec, driver = _spec(tmp_path)
     config = _remote_config(tmp_path)
     assert (
-        kb.write_flydsl_kb_solution(
-            spec,
-            str(driver),
-            config,
-            source_ms=10.0,
-            flydsl_best_ms=5.0,
-            speedup=2,
-            framework="vllm",
-        )["written"]
+        kb.write_flydsl_kb_solution(spec, str(driver), config, source_ms=10.0, flydsl_best_ms=5.0, speedup=2)["written"]
         is True
     )
 
@@ -856,15 +715,7 @@ def test_a_port_that_does_not_expose_the_builder_the_driver_imports_is_refused(t
     renamed = replace(spec, op_name="softmax_kernel")
     assert renamed.builder_symbol != spec.builder_symbol
 
-    restored = asyncio.run(
-        kb.try_flydsl_kb_warmstart(
-            renamed,
-            str(driver),
-            config,
-            source_case_ms={_CASE: 10.0},
-            framework="vllm",
-        )
-    )
+    restored = asyncio.run(kb.try_flydsl_kb_warmstart(renamed, str(driver), config, source_case_ms={_CASE: 10.0}))
 
     assert restored.applied is False
     assert restored.attempts[-1]["reason"] == "builder_contract_changed"
@@ -888,7 +739,6 @@ def test_top_three_are_tried_and_failures_become_references(tmp_path, monkeypatc
             flydsl_best_ms=best_ms,
             speedup=10.0 / best_ms,
             best_commit=str(rank) * 40,
-            framework="vllm",
         )
         assert written["written"] is True
 
@@ -913,16 +763,7 @@ def test_top_three_are_tried_and_failures_become_references(tmp_path, monkeypatc
     )
     Path(spec.flydsl_kernel).write_text("def skeleton():\n    pass\n")
 
-    restored = asyncio.run(
-        kb.try_flydsl_kb_warmstart(
-            spec,
-            str(driver),
-            config,
-            source_case_ms={_CASE: 10.0},
-            framework="vllm",
-            top_k=3,
-        )
-    )
+    restored = asyncio.run(kb.try_flydsl_kb_warmstart(spec, str(driver), config, source_case_ms={_CASE: 10.0}, top_k=3))
 
     assert restored.applied is True
     assert [attempt["reason"] for attempt in restored.attempts] == [
@@ -948,7 +789,6 @@ def _publish_ranked_candidates(spec, driver, config, ranks):
             flydsl_best_ms=best_ms,
             speedup=source_ms / best_ms,
             best_commit=str(rank) * 40,
-            framework="vllm",
             session_key=str(rank) * 40,
         )
         assert written["written"] is True
@@ -999,15 +839,7 @@ def test_the_fastest_measured_candidate_wins_not_the_first_to_pass(tmp_path, mon
     _time_candidates_by_rank(monkeypatch, spec, {1: 8.0, 2: 4.0, 3: 1.0})
     Path(spec.flydsl_kernel).write_text("def skeleton():\n    pass\n")
 
-    restored = asyncio.run(
-        kb.try_flydsl_kb_warmstart(
-            spec,
-            str(driver),
-            config,
-            source_case_ms={_CASE: 10.0},
-            framework="vllm",
-        )
-    )
+    restored = asyncio.run(kb.try_flydsl_kb_warmstart(spec, str(driver), config, source_case_ms={_CASE: 10.0}))
 
     assert restored.applied is True
     assert restored.best_ms == 1.0
@@ -1059,15 +891,7 @@ def test_the_field_is_ordered_by_the_metric_the_run_is_graded_on(tmp_path, monke
     monkeypatch.setattr(kb.driver_contract, "preflight_candidate", preflight)
     Path(spec.flydsl_kernel).write_text("def skeleton():\n    pass\n")
 
-    restored = asyncio.run(
-        kb.try_flydsl_kb_warmstart(
-            spec,
-            str(driver),
-            config,
-            source_case_ms=baseline,
-            framework="vllm",
-        )
-    )
+    restored = asyncio.run(kb.try_flydsl_kb_warmstart(spec, str(driver), config, source_case_ms=baseline))
 
     assert restored.applied is True
     assert "RANK = 1" in Path(spec.flydsl_kernel).read_text()
@@ -1101,15 +925,7 @@ def test_a_candidate_whose_benchmark_failed_is_not_adopted(tmp_path, monkeypatch
     seed = "def skeleton():\n    pass\n"
     Path(spec.flydsl_kernel).write_text(seed)
 
-    restored = asyncio.run(
-        kb.try_flydsl_kb_warmstart(
-            spec,
-            str(driver),
-            config,
-            source_case_ms={_CASE: 10.0},
-            framework="vllm",
-        )
-    )
+    restored = asyncio.run(kb.try_flydsl_kb_warmstart(spec, str(driver), config, source_case_ms={_CASE: 10.0}))
 
     assert restored.applied is False
     assert Path(spec.flydsl_kernel).read_text() == seed
@@ -1132,15 +948,7 @@ def test_a_candidate_claiming_less_than_the_floor_is_never_tried(tmp_path, monke
     _time_candidates_by_rank(monkeypatch, spec, {1: 5.0})
     Path(spec.flydsl_kernel).write_text("def skeleton():\n    pass\n")
 
-    restored = asyncio.run(
-        kb.try_flydsl_kb_warmstart(
-            spec,
-            str(driver),
-            config,
-            source_case_ms={_CASE: 10.0},
-            framework="vllm",
-        )
-    )
+    restored = asyncio.run(kb.try_flydsl_kb_warmstart(spec, str(driver), config, source_case_ms={_CASE: 10.0}))
 
     assert restored.applied is True
     assert "RANK = 1" in Path(spec.flydsl_kernel).read_text()
@@ -1169,15 +977,7 @@ def test_a_field_entirely_under_the_floor_leaves_the_workspace_alone(tmp_path, m
     seed = "def skeleton():\n    pass\n"
     Path(spec.flydsl_kernel).write_text(seed)
 
-    restored = asyncio.run(
-        kb.try_flydsl_kb_warmstart(
-            spec,
-            str(driver),
-            config,
-            source_case_ms={_CASE: 10.0},
-            framework="vllm",
-        )
-    )
+    restored = asyncio.run(kb.try_flydsl_kb_warmstart(spec, str(driver), config, source_case_ms={_CASE: 10.0}))
 
     assert restored.applied is False
     assert restored.read_reason == "candidates_rejected"
@@ -1216,14 +1016,7 @@ def test_one_trial_cannot_spend_the_whole_search_budget(tmp_path, monkeypatch):
     Path(spec.flydsl_kernel).write_text("def skeleton():\n    pass\n")
 
     asyncio.run(
-        kb.try_flydsl_kb_warmstart(
-            spec,
-            str(driver),
-            config,
-            source_case_ms={_CASE: 10.0},
-            framework="vllm",
-            validation_timeout_sec=1800,
-        )
+        kb.try_flydsl_kb_warmstart(spec, str(driver), config, source_case_ms={_CASE: 10.0}, validation_timeout_sec=1800)
     )
 
     # Its own ceiling is 1800s; what it may actually take is whatever is left of the 60s budget.
@@ -1243,14 +1036,7 @@ def test_local_mode_stores_the_same_record_shape_on_disk(tmp_path, monkeypatch):
     )
 
     written = kb.write_flydsl_kb_solution(
-        spec,
-        str(driver),
-        config,
-        source_ms=10.0,
-        flydsl_best_ms=12.0,
-        speedup=0.833333,
-        best_commit="d" * 40,
-        framework="vllm",
+        spec, str(driver), config, source_ms=10.0, flydsl_best_ms=12.0, speedup=0.833333, best_commit="d" * 40
     )
 
     assert written["written"] is True
@@ -1263,15 +1049,7 @@ def test_local_mode_stores_the_same_record_shape_on_disk(tmp_path, monkeypatch):
 
     _passing_validation(monkeypatch, best_ms=12.0)
     Path(spec.flydsl_kernel).write_text("def skeleton():\n    pass\n")
-    restored = asyncio.run(
-        kb.try_flydsl_kb_warmstart(
-            spec,
-            str(driver),
-            config,
-            source_case_ms={_CASE: 10.0},
-            framework="vllm",
-        )
-    )
+    restored = asyncio.run(kb.try_flydsl_kb_warmstart(spec, str(driver), config, source_case_ms={_CASE: 10.0}))
 
     assert restored.applied is True
     assert Path(spec.flydsl_kernel).read_bytes() == expected
@@ -1297,14 +1075,7 @@ def test_local_mode_never_reaches_for_ambient_credentials(tmp_path, monkeypatch)
     )
 
     written = kb.write_flydsl_kb_solution(
-        spec,
-        str(driver),
-        config,
-        source_ms=10.0,
-        flydsl_best_ms=12.0,
-        speedup=0.833333,
-        best_commit="e" * 40,
-        framework="vllm",
+        spec, str(driver), config, source_ms=10.0, flydsl_best_ms=12.0, speedup=0.833333, best_commit="e" * 40
     )
 
     assert written["written"] is True
@@ -1350,24 +1121,8 @@ def test_missing_gpu_type_skips_rewrite_kb_reads_and_writes(tmp_path, monkeypatc
     config = _remote_config(tmp_path)
     config.gpu_type = ""
 
-    write = kb.write_flydsl_kb_solution(
-        spec,
-        str(driver),
-        config,
-        source_ms=10.0,
-        flydsl_best_ms=5.0,
-        speedup=2,
-        framework="vllm",
-    )
-    read = asyncio.run(
-        kb.try_flydsl_kb_warmstart(
-            spec,
-            str(driver),
-            config,
-            source_case_ms={_CASE: 10.0},
-            framework="vllm",
-        )
-    )
+    write = kb.write_flydsl_kb_solution(spec, str(driver), config, source_ms=10.0, flydsl_best_ms=5.0, speedup=2)
+    read = asyncio.run(kb.try_flydsl_kb_warmstart(spec, str(driver), config, source_case_ms={_CASE: 10.0}))
 
     assert write == {"written": False, "reason": "missing_gpu_type"}
     assert read.read_reason == "missing_gpu_type"
@@ -1414,24 +1169,8 @@ def test_remote_without_kb_store_credentials_reads_as_a_cold_start(tmp_path):
         agent_precheck=False,
     )
 
-    written = kb.write_flydsl_kb_solution(
-        spec,
-        str(driver),
-        config,
-        source_ms=10.0,
-        flydsl_best_ms=5.0,
-        speedup=2,
-        framework="vllm",
-    )
-    read = asyncio.run(
-        kb.try_flydsl_kb_warmstart(
-            spec,
-            str(driver),
-            config,
-            source_case_ms={_CASE: 10.0},
-            framework="vllm",
-        )
-    )
+    written = kb.write_flydsl_kb_solution(spec, str(driver), config, source_ms=10.0, flydsl_best_ms=5.0, speedup=2)
+    read = asyncio.run(kb.try_flydsl_kb_warmstart(spec, str(driver), config, source_case_ms={_CASE: 10.0}))
 
     assert written == {"written": False, "reason": "not_configured"}
     assert read.applied is False

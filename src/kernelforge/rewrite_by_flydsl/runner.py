@@ -265,7 +265,6 @@ def _read_flydsl_kb(
     config: Config,
     *,
     source_case_ms,
-    framework: str,
     search_stop_unix: float,
 ) -> RewriteKbReadResult:
     """What the KB can offer for this source+driver, restoring the seed when the read fails.
@@ -283,7 +282,6 @@ def _read_flydsl_kb(
                 driver_path,
                 config,
                 source_case_ms=source_case_ms,
-                framework=framework,
                 stop_at_unix=search_stop_unix,
             )
         )
@@ -344,7 +342,6 @@ def _publish_port_kb(
     flydsl_best_ms,
     speedup,
     port_commit: str,
-    framework: str,
 ) -> dict:
     """Record the ported kernel in the KB.
 
@@ -364,7 +361,6 @@ def _publish_port_kb(
         flydsl_best_ms=flydsl_best_ms,
         speedup=speedup,
         best_commit=port_commit,
-        framework=framework,
         snr_db=port.snr_db,
         session_key=port_commit,
     )
@@ -383,7 +379,6 @@ def _publish_final_kb(
     rewrite_kb_enabled: bool,
     opt: dict,
     source_ms,
-    framework: str,
     port,
     port_commit: str,
     optimize_session_key: str,
@@ -400,7 +395,6 @@ def _publish_final_kb(
         flydsl_best_ms=opt.get("best_ms"),
         speedup=opt.get("mean_case_speedup"),
         best_commit=final_commit,
-        framework=framework,
         # PORT's reading measures the artifact being recorded only while the run's best is still the ported kernel.
         # Once OPTIMIZE has moved the best off that commit, it describes a kernel this record is not about.
         snr_db=port.snr_db if final_commit == port_commit else None,
@@ -556,15 +550,18 @@ def run_rewrite(
         return _setup_failed(str(error), CANDIDATE_NAME_INVALID)
     try:
         spec = ingest.build_spec(
-            op_name=op_name,
-            source_kernel=source_kernel,
+            ingest.RewriteSubject(
+                op_name,
+                source_kernel,
+                target_functions,
+                source_entry,
+                source_language,
+                framework,
+                shapes,
+                snr_threshold,
+            ),
             flydsl_kernel=str(candidate_kernel),
             workspace=workspace,
-            target_functions=target_functions,
-            source_entry=source_entry,
-            source_language=source_language,
-            shapes=shapes,
-            snr_threshold=snr_threshold,
         )
     except Exception as e:  # noqa: BLE001 - any ingest error must still be scorable
         return _setup_failed(f"ingest error: {type(e).__name__}: {e}", INGEST_FAILED)
@@ -611,7 +608,6 @@ def run_rewrite(
             driver_path,
             config,
             source_case_ms=source_case_ms,
-            framework=framework,
             search_stop_unix=search_stop_unix,
         )
     else:
@@ -693,7 +689,6 @@ def run_rewrite(
         flydsl_best_ms=flydsl_baseline_ms,
         speedup=flydsl_baseline_speedup,
         port_commit=port_commit,
-        framework=framework,
     )
     interim = report.build_result(
         scope,
@@ -753,7 +748,6 @@ def run_rewrite(
             flydsl_best_ms=payload.get("best_ms"),
             speedup=payload.get("mean_case_speedup"),
             best_commit=commit,
-            framework=framework,
             # PORT's SNR belongs to the ported kernel, not to the KEEP that has since been optimized out of it, and
             # forge-loop's result file does not carry the accuracy it measured for this one. Unmeasured, so unclaimed.
             snr_db=None,
@@ -816,7 +810,6 @@ def run_rewrite(
         rewrite_kb_enabled=rewrite_kb_enabled,
         opt=opt,
         source_ms=source_ms,
-        framework=framework,
         port=port,
         port_commit=port_commit,
         optimize_session_key=optimize_session_key,

@@ -111,7 +111,6 @@ def _read_top_candidates(
     spec: RewriteSpec,
     config: Config,
     *,
-    framework: str,
     top_k: int,
 ) -> _ReadPlan:
     store = create_rewrite_record_store(config)
@@ -123,7 +122,6 @@ def _read_top_candidates(
     try:
         identity, canonical_id, _signature, _implementation = resolve_identity(
             spec,
-            framework=framework,
             gpu=gpu_type,
             source_text=_source_text(spec),
         )
@@ -237,7 +235,6 @@ async def try_flydsl_kb_warmstart(
     config: Config,
     *,
     source_case_ms: dict[str, float],
-    framework: str = "",
     top_k: int | None = None,
     validation_timeout_sec: int = 1800,
     stop_at_unix: float | None = None,
@@ -259,7 +256,6 @@ async def try_flydsl_kb_warmstart(
     plan = _read_top_candidates(
         spec,
         config,
-        framework=framework,
         top_k=warmstart_policy.top_k() if top_k is None else top_k,
     )
     result = RewriteKbReadResult(
@@ -414,7 +410,6 @@ def write_flydsl_kb_solution(
     flydsl_best_ms: float | None,
     speedup: float | None,
     best_commit: str = "",
-    framework: str = "",
     snr_db: float | None = None,
     session_key: str = "",
     content_override: bytes | None = None,
@@ -440,7 +435,6 @@ def write_flydsl_kb_solution(
         content = content_override if content_override is not None else Path(spec.flydsl_kernel).read_bytes()
         identity, canonical_id, signature, implementation = resolve_identity(
             spec,
-            framework=framework,
             gpu=gpu_type,
             source_text=_source_text(spec),
         )

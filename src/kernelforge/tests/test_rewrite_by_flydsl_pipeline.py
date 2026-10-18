@@ -807,7 +807,7 @@ def test_run_rewrite_ingest_error_is_scorable(tmp_path, monkeypatch, capsys):
     driver = tmp_path / "driver.py"
     driver.write_text("print('drive')\n")
 
-    def _boom(**kw):
+    def _boom(_subject, **kw):
         raise ValueError("bad shapes")
 
     monkeypatch.setattr(runner.ingest, "build_spec", _boom)
