@@ -43,6 +43,8 @@ _KEY_STOP = "stop"
 _KEY_STOP_SESSION = "stop_session"
 _KEY_BRANCH = "branch"
 _KEY_REASON = "reason"
+#: Decimals the GPU hours in the judge's view are rounded to.
+_GPU_HOURS_DIGITS = 3
 
 JUDGE_SYSTEM_PROMPT = f"""You are the scheduler's judge in a multi-branch LLM inference optimization session.
 Specialist branches explore optimizations in parallel; the integration branch merges their kept commits.
@@ -95,8 +97,10 @@ result, a failed one and the baseline measured on the root commit included; a te
 not in it, and neither are the measurements the PRELUDE run that built the root commit made on its own.
 explore_gpu_hours is the gpu_hours_used at which EXPLORE ends to leave FINAL its share, or null when GPU hours are not
 limited: as gpu_hours_used nears it, a branch opened now has few tests left to run, and the session stops exploring
-there whatever you decide. scheduler_llm_tokens are the tokens your own calls and the patch resolver's have used; the
-specialists' LLM spend is not in it.
+there whatever you decide. prelude_gpu_hours_upper_bound is at most the GPU time the PRELUDE run used on its own: its
+wall time times the cards one test uses, which nothing limits and which gpu_hours_used leaves out.
+scheduler_llm_tokens are the tokens your own calls and the patch resolver's have used; the specialists' LLM spend is
+not in it.
 A specialist branch's specialist, shown only when the specialist runtime reports it, says whether its specialist is
 running, how many times it crashed (crashes) and how many times it was restarted after its heartbeat was lost (lost),
 whether the runtime gave up restarting it after repeated crashes (gave_up), and whether it was stopped because judging
@@ -135,8 +139,8 @@ class JudgeView:
     head, in percent of the root's value. ``profile_running`` is whether a profile of the integration head runs.
     ``gpu_hours_used`` are the GPU hours of the session's tests that have a result: the root's baseline is among them,
     a test withdrawn before its result and the PRELUDE child's own measurements are not. ``explore_gpu_hours`` is where
-    EXPLORE ends under ``--max-gpu-hours``, ``None`` without a limit, and ``scheduler_llm`` the tokens the judge and
-    the patch resolver used. ``specialists`` maps a running specialist branch to what the specialist runtime knows of
+    EXPLORE ends under ``--max-gpu-hours``, ``None`` without a limit, ``prelude_gpu_hours_upper_bound`` the PRELUDE
+    child's wall time times the workload's TP, and ``scheduler_llm`` the tokens the judge and the patch resolver used. ``specialists`` maps a running specialist branch to what the specialist runtime knows of
     its specialist; a branch whose specialist's state is not known is not in it.
     """
 
@@ -160,6 +164,7 @@ class JudgeView:
     profile_running: bool
     gpu_hours_used: float
     explore_gpu_hours: float | None
+    prelude_gpu_hours_upper_bound: float
     scheduler_llm: CompletionUsage
     specialists: Mapping[str, MbFakeSpecialistState]
 
@@ -195,6 +200,10 @@ class JudgeDecision:
 
 class _MalformedReply(ValueError):
     pass
+
+
+def _hours(hours: float | None) -> float | None:
+    return None if hours is None else round(hours, _GPU_HOURS_DIGITS)
 
 
 def _headroom_pct(view: JudgeView) -> float | None:
@@ -284,8 +293,9 @@ def render_prompt(view: JudgeView) -> str:
             "headroom_pct": _headroom_pct(view),
         },
         "spend": {
-            "gpu_hours_used": round(view.gpu_hours_used, 3),
-            "explore_gpu_hours": None if view.explore_gpu_hours is None else round(view.explore_gpu_hours, 3),
+            "gpu_hours_used": round(view.gpu_hours_used, _GPU_HOURS_DIGITS),
+            "explore_gpu_hours": _hours(view.explore_gpu_hours),
+            "prelude_gpu_hours_upper_bound": round(view.prelude_gpu_hours_upper_bound, _GPU_HOURS_DIGITS),
             "scheduler_llm_tokens": asdict(view.scheduler_llm),
         },
         "events": [{"event": event.kind.value, "reason": event.reason, **event.detail} for event in view.events],

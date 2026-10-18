@@ -120,6 +120,7 @@ def _view(
         profile_running=profile_running,
         gpu_hours_used=1.23456,
         explore_gpu_hours=explore_gpu_hours,
+        prelude_gpu_hours_upper_bound=0.41666,
         scheduler_llm=CompletionUsage(input_tokens=5200, output_tokens=310),
         specialists=specialists or {},
     )
@@ -133,16 +134,20 @@ def test_the_prompt_shows_and_explains_the_gpu_hours_and_llm_tokens_used() -> No
     assert _state(_view())["spend"] == {
         "gpu_hours_used": 1.235,
         "explore_gpu_hours": None,
+        "prelude_gpu_hours_upper_bound": 0.417,
         "scheduler_llm_tokens": {"input_tokens": 5200, "output_tokens": 310},
     }
     assert _state(_view(explore_gpu_hours=7.08333))["spend"]["explore_gpu_hours"] == 7.083
     prompt = " ".join(JUDGE_SYSTEM_PROMPT.split())
-    for text in ("gpu_hours_used", "explore_gpu_hours", "scheduler_llm_tokens"):
+    for text in ("gpu_hours_used", "explore_gpu_hours", "prelude_gpu_hours_upper_bound", "scheduler_llm_tokens"):
         assert text in prompt
     assert "a test taken back before its result is not in it" in prompt
     assert "the baseline measured on the root commit included" in prompt
     assert "the measurements the PRELUDE run that built the root commit made on its own" in prompt
     assert "the specialists' LLM spend is not in it" in prompt
+    assert "its wall time times the cards one test uses, which nothing limits and which gpu_hours_used leaves out" in (
+        prompt
+    )
 
 
 def test_a_branch_row_shows_what_is_known_of_its_specialist_and_the_prompt_says_to_stop_one_that_gave_up() -> None:

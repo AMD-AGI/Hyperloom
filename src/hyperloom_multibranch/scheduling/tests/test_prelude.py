@@ -239,6 +239,38 @@ async def test_finished_child_roots_the_session_before_any_baseline_test(tmp_pat
     assert peers.toolbox.requests == {}
 
 
+class MbFakeSlowChildRegistry(MbFakeChildRegistry):
+    """The PRELUDE child stand-in whose run moves the clock in ``times`` on by ``seconds``; deleted together with
+    :class:`MbFakeChildRegistry`."""
+
+    def __init__(self, layout: SessionLayout, session: Path, times: list[float], seconds: float) -> None:
+        super().__init__(layout.pids, _clock(times), session=str(session), exit_code=0, linger=0.0)
+        self._times = times
+        self._seconds = seconds
+
+    async def spawn(self, argv: Sequence[str], *, branch: str, log: Path) -> RegisteredProcess:
+        spawned = await super().spawn(argv, branch=branch, log=log)
+        if LAUNCH_FLAG in argv:
+            self._times[0] += self._seconds
+        return spawned
+
+
+async def test_the_child_gpu_time_is_bounded_by_its_wall_time_times_tp_and_recorded(tmp_path: Path) -> None:
+    layout = _layout(tmp_path)
+    times = [NOW]
+    processes = MbFakeSlowChildRegistry(layout, child_with_patch(tmp_path), times, 1800.0)
+    workload = replace(WORKLOAD, tp=4)
+
+    budget = SessionBudget.from_hours(2.0, NOW)
+    prelude = _prelude(layout, processes, _peers(layout), clock=_clock(times))
+    result = await prelude.root(workload, budget, HardStop(budget, _clock(times)), IMAGE)
+
+    assert result.child_gpu_seconds_upper_bound == 1800.0 * 4
+    logged = [json.loads(line) for line in layout.decisions.read_text().splitlines()]
+    [rooted] = [entry["detail"] for entry in logged if entry["reason"] == "root committed"]
+    assert rooted["child_gpu_seconds_upper_bound"] == 1800.0 * 4
+
+
 async def test_a_patch_off_the_framework_checkout_is_kept_in_the_prelude_dir_and_marks_the_root(
     tmp_path: Path,
 ) -> None:

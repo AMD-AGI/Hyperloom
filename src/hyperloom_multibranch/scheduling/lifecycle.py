@@ -284,6 +284,7 @@ class Session:
             budget.deadline,
             budget.total_seconds,
             explore_gpu_seconds(self._settings.max_gpu_hours),
+            prelude.child_gpu_seconds_upper_bound,
         )
         reason = await self._explorer.run(window)
         if reason is SessionStopReason.NO_MEASUREMENT_CARDS:

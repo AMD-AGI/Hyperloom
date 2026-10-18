@@ -13,6 +13,10 @@ specialists; no Recipe KB, or none of its champions in this session's scope, giv
 is recorded and gives none either. The baseline every recorded value is anchored to is measured through the toolbox in a
 second step, once the caller has put the integration branch on the roster and given the toolbox its K: as many tests
 of the root as the rule gate asks for, from which the gate writes the baseline and its bar.
+
+The child's own measurements never reach the notebook, and nothing records the card time they took, so the session
+keeps an upper bound of it under its own name: the child's wall time from spawn to exit times the workload's TP,
+which counts the child's time off the cards as well.
 """
 
 from __future__ import annotations
@@ -80,12 +84,13 @@ class PreludeFailed(RuntimeError):
 
 @dataclass(frozen=True)
 class PreludeResult:
-    """The root commit the session starts from, the profile it runs on and the Recipe KB's leads for it; the rest is
-    in the notebook and ``MB-prelude/``."""
+    """The root commit the session starts from, the profile it runs on, the Recipe KB's leads for it and the upper
+    bound of the GPU seconds the main-flow child used; the rest is in the notebook and ``MB-prelude/``."""
 
     root_commit: str
     profile: SessionProfile
     warm_leads: tuple[WarmLead, ...]
+    child_gpu_seconds_upper_bound: float
 
 
 def prelude_argv(workload: Workload, max_hours: float, launch_info: Path) -> tuple[str, ...]:
@@ -136,7 +141,9 @@ class Prelude:
         The baseline is measured afterwards, by :meth:`measure_baseline`, once the integration branch has its K.
         """
 
+        spawned = self._clock.now()
         child = await self._run_child(workload, budget, hard_stop)
+        child_gpu_seconds = (self._clock.now() - spawned) * workload.tp
         try:
             artifacts = _succeeded(await asyncio.to_thread(read_prelude, child))
             recipe = await self._root_recipe(artifacts, workload.framework, base_image_digest)
@@ -162,10 +169,11 @@ class Prelude:
                     "unexpressed": list(recipe.unexpressed),
                     "unexpressed_patches": saved,
                     "setup_script": None if artifacts.setup_script is None else str(artifacts.setup_script),
+                    "child_gpu_seconds_upper_bound": child_gpu_seconds,
                 },
             )
         )
-        return PreludeResult(root, profile, await self._warm_start(profile))
+        return PreludeResult(root, profile, await self._warm_start(profile), child_gpu_seconds)
 
     async def _warm_start(self, profile: SessionProfile) -> tuple[WarmLead, ...]:
         """The Recipe KB's leads for ``profile``; the ``PRELUDE`` decision names them, or why the KB was not read."""

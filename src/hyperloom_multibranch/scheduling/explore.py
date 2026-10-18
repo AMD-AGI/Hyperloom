@@ -66,8 +66,8 @@ FORK_NOT_LANDED = "the rule gate did not land the fork"
 @dataclass(frozen=True)
 class ExploreWindow:
     """The commit branches start from, the roofline ceiling, the clock times EXPLORE and the budget end at, the
-    session's whole budget, and the GPU seconds the session's tests may use before EXPLORE ends (``math.inf`` for no
-    limit)."""
+    session's whole budget, the GPU seconds the session's tests may use before EXPLORE ends (``math.inf`` for no
+    limit), and the upper bound of the GPU seconds the PRELUDE child used, which no limit counts."""
 
     root_commit: str
     roofline_ceiling: Mapping[str, float]
@@ -75,6 +75,7 @@ class ExploreWindow:
     session_deadline: float
     budget_seconds: float
     explore_gpu_seconds: float
+    prelude_gpu_seconds_upper_bound: float
 
 
 @dataclass(frozen=True)
@@ -270,6 +271,7 @@ class Explorer:
             profile_running=self._events.profiling,
             gpu_hours_used=spent_gpu_seconds(progress) / MB_SECONDS_PER_HOUR,
             explore_gpu_hours=_hours_or_none(window.explore_gpu_seconds),
+            prelude_gpu_hours_upper_bound=window.prelude_gpu_seconds_upper_bound / MB_SECONDS_PER_HOUR,
             scheduler_llm=self._llm_usage.used,
             specialists=await self._specialist_states(),
         )
