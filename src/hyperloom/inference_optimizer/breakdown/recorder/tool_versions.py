@@ -166,6 +166,7 @@ def record_tool_version(
     *,
     tool: str,
     root: str | None = None,
+    root_env: str | None = None,
     version: str | None = None,
     producer: str = PRODUCER_KERNEL_AGENT,
 ) -> None:
@@ -179,7 +180,7 @@ def record_tool_version(
     if not session_dir or not name:
         trace_skip(reason="no session_dir" if not session_dir else "no tool", section=SECTION)
         return
-    meta = _tool_metadata(name, root=root, version=version)
+    meta = _tool_metadata(name, root=root, root_env=root_env, version=version)
     recorder_for(session_dir, producer=producer).record_item(SECTION, meta, key=name)
 
 
