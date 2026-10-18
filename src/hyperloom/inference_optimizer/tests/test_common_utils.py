@@ -565,11 +565,11 @@ def test_infera_restart_and_kill_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     }
     monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state))
     monkeypatch.setattr(inf._mn_cli, "_save_state", lambda payload: saved.append(dict(payload)))
-    build_calls: list[dict] = []
+    build_calls: list = []
     monkeypatch.setattr(
         inf.infera_support,
         "build_node_launch_args",
-        lambda **kw: build_calls.append(kw) or "launch-args",
+        lambda launch: build_calls.append(launch) or "launch-args",
     )
     fanout_calls: list[tuple[str, list[str]]] = []
     monkeypatch.setattr(
@@ -580,7 +580,7 @@ def test_infera_restart_and_kill_paths(monkeypatch: pytest.MonkeyPatch) -> None:
         ),
     )
     assert inf._infera_restart_server(_restart_args()) == 0
-    assert build_calls[-1]["nnodes"] == 2
+    assert build_calls[-1].nnodes == 2
     assert fanout_calls[-1] == ("restart", ["10.0.1.0", "10.0.1.1"])
     assert saved[-1]["last_restart_pd_mode"] == "aggregated"
 
@@ -622,7 +622,7 @@ def test_infera_restart_and_kill_paths(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(inf, "_infera_require_state", lambda: dict(state | {"last_restart_framework": "vllm"}))
     assert inf._infera_kill_inference(argparse.Namespace(poll_timeout=10, print_logs=False)) == 0
-    assert build_calls[-1]["kill_only"] is True
+    assert fanout_calls[-1] == ("kill", ["10.0.1.0", "10.0.1.1"])
     assert saved[-1]["last_kill_results"] == [{"ok": True}]
 
 

@@ -970,12 +970,9 @@ def test_infera_disagg_flags_and_launch_args():
     assert infera_support.disagg_flags("bogus", "nixl") == ""
 
     la = infera_support.build_node_launch_args(
-        framework="sglang",
-        model="/m",
-        tp=8,
-        nnodes=1,
-        disagg_mode="decode",
-        kv_transfer_backend="nixl",
+        infera_support.NodeLaunch(
+            framework="sglang", model="/m", tp=8, nnodes=1, disagg_mode="decode", kv_transfer_backend="nixl"
+        )
     )
     assert "--extra-args" in la and "decode" in la
 
@@ -987,12 +984,9 @@ def test_infera_build_node_launch_args_sglang_and_kill_only():
     from hyperloom.inference_optimizer.multi_node._internal import infera_support
 
     a = infera_support.build_node_launch_args(
-        framework="sglang",
-        model="/m/x",
-        tp=16,
-        nnodes=2,
-        ep=16,
-        extra_args="--mem-fraction-static 0.7",
+        infera_support.NodeLaunch(
+            framework="sglang", model="/m/x", tp=16, nnodes=2, ep=16, extra_args="--mem-fraction-static 0.7"
+        )
     )
     assert "--framework sglang" in a
     assert "--tp 16" in a and "--nnodes 2" in a and "--ep 16" in a
@@ -1000,13 +994,7 @@ def test_infera_build_node_launch_args_sglang_and_kill_only():
     assert "--node-rank" not in a
     assert "--extra-args" in a and "0.7" in a
 
-    k = infera_support.build_node_launch_args(
-        framework="vllm",
-        model="",
-        tp=0,
-        nnodes=2,
-        kill_only=True,
-    )
+    k = infera_support.build_node_kill_args("vllm")
     assert "--kill-only" in k and "--framework vllm" in k
     assert "--model" not in k
 
@@ -1390,11 +1378,9 @@ def test_infera_build_node_launch_args_neutralizes_malicious_extra_args():
     from hyperloom.inference_optimizer.multi_node._internal import infera_support
 
     la = infera_support.build_node_launch_args(
-        framework="sglang",
-        model="/m",
-        tp=8,
-        nnodes=1,
-        extra_args="--foo 1; touch /tmp/pwned",
+        infera_support.NodeLaunch(
+            framework="sglang", model="/m", tp=8, nnodes=1, extra_args="--foo 1; touch /tmp/pwned"
+        )
     )
     assert "1; touch /tmp/pwned" not in la
     assert "'1;'" in la
@@ -1406,11 +1392,7 @@ def test_infera_build_node_launch_args_rejects_denied_extra_args():
 
     with pytest.raises(ServerArgsRejected, match="denied server flags"):
         infera_support.build_node_launch_args(
-            framework="sglang",
-            model="/m",
-            tp=8,
-            nnodes=1,
-            extra_args="--model-path /evil",
+            infera_support.NodeLaunch(framework="sglang", model="/m", tp=8, nnodes=1, extra_args="--model-path /evil")
         )
 
 

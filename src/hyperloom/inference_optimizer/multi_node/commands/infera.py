@@ -396,15 +396,16 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
             ("decode", decode_targets, dn, dtp, dep, decode_extra),
         ):
             launch_args = infera_support.build_node_launch_args(
-                framework=framework,
-                model=args.model,
-                tp=rtp,
-                nnodes=max(1, rnnodes),
-                ep=rep,
-                extra_args=rextra,
-                health_wait_sec=0,
-                disagg_mode=role,
-                kv_transfer_backend=kv,
+                infera_support.NodeLaunch(
+                    framework=framework,
+                    model=args.model,
+                    tp=rtp,
+                    nnodes=max(1, rnnodes),
+                    ep=rep,
+                    extra_args=rextra,
+                    disagg_mode=role,
+                    kv_transfer_backend=kv,
+                )
             )
             info(
                 f"infera restart-server PD {role}: tp={rtp} ep={rep} "
@@ -429,13 +430,14 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
             default_role="worker",
         )
         launch_args = infera_support.build_node_launch_args(
-            framework=framework,
-            model=args.model,
-            tp=args.tp,
-            nnodes=nnodes,
-            ep=int(getattr(args, "ep", 1) or 1),
-            extra_args=getattr(args, "extra_args", "") or "",
-            health_wait_sec=0,
+            infera_support.NodeLaunch(
+                framework=framework,
+                model=args.model,
+                tp=args.tp,
+                nnodes=nnodes,
+                ep=int(getattr(args, "ep", 1) or 1),
+                extra_args=getattr(args, "extra_args", "") or "",
+            )
         )
         info(
             f"infera restart-server: framework={framework} model={args.model} "
@@ -493,13 +495,7 @@ def _infera_kill_inference(args: argparse.Namespace) -> int:
     state = _infera_require_state()
     framework = (state.get("last_restart_framework") or state.get("framework") or "sglang").lower()
     gpu_targets = _infera_all_gpu_targets(state)
-    launch_args = infera_support.build_node_launch_args(
-        framework=framework,
-        model="",
-        tp=0,
-        nnodes=int(state.get("nodes") or 1),
-        kill_only=True,
-    )
+    launch_args = infera_support.build_node_kill_args(framework)
     info(f"infera kill-inference: framework={framework} pods={len(gpu_targets)}")
     rc, results = _infera_fanout_launch(
         state,
