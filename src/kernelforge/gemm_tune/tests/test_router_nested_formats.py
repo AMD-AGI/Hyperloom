@@ -4,7 +4,7 @@
 """A precision that only names the quantization toolkit routes on what the serving log and the checkpoint say runs."""
 
 from kernelforge.gemm_tune.model_analyzer import ModelProfile
-from kernelforge.gemm_tune.router import select_tuners
+from kernelforge.gemm_tune.router import RoutingTarget, ShapeEvidence, select_tuners
 
 
 _MXFP4 = {"weight": {"dtype": "fp4", "group_size": 32}}
@@ -54,11 +54,8 @@ def _routed(profile, precision, tmp_path, quant_type="auto", log_line="gemm_a8w8
     log.write_text(log_line + "\n")
     return select_tuners(
         profile,
-        framework="sglang",
-        precision=precision,
-        quant_type=quant_type,
-        gpu_type="mi355x",
-        kernel_signature_log=str(log),
+        RoutingTarget(framework="sglang", precision=precision, quant_type=quant_type, gpu_type="mi355x"),
+        ShapeEvidence(kernel_signature_log=str(log)),
     )
 
 

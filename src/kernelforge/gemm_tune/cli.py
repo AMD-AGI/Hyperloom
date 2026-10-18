@@ -546,7 +546,7 @@ def run(
 ):
     """Run GEMM tuning for the specified model and framework."""
     from .model_analyzer import analyze_model
-    from .router import resolve_gpu_type, select_tuners
+    from .router import RoutingTarget, ShapeEvidence, resolve_gpu_type, select_tuners
     from .shapes import compute_token_coverage
     from .utils import emit_result_json
     from .tuners.base import TuneContext
@@ -605,18 +605,17 @@ def run(
     # Select tuners
     tuner_specs = select_tuners(
         profile,
-        framework=framework,
-        precision=precision,
-        quant_type=quant_type,
-        gpu_type=gpu_type,
-        kernel_signature_log=kernel_signature_log or None,
-        has_untuned_csv=bool(untuned_csv),
-        # A demand file is a shape source like the others, and a stronger one: it lists the keys the runtime actually
-        # asked for.
-        has_shapes_json=bool(shapes_json or shapes_manifest or demand_json),
-        has_tunableop_input=bool(tunableop_input),
-        # ...and a stronger *selection* input for the same reason.
-        demand_report=demand_report,
+        RoutingTarget(framework=framework, precision=precision, quant_type=quant_type, gpu_type=gpu_type),
+        ShapeEvidence(
+            kernel_signature_log=kernel_signature_log or None,
+            has_untuned_csv=bool(untuned_csv),
+            # A demand file is a shape source like the others, and a stronger one: it lists the keys the runtime
+            # actually asked for.
+            has_shapes_json=bool(shapes_json or shapes_manifest or demand_json),
+            has_tunableop_input=bool(tunableop_input),
+            # ...and a stronger *selection* input for the same reason.
+            demand_report=demand_report,
+        ),
     )
 
     # What the runtime asked for that nothing selected can write.
@@ -843,7 +842,7 @@ def plan(
     import tempfile
 
     from .model_analyzer import analyze_model
-    from .router import resolve_gpu_type, select_tuners
+    from .router import RoutingTarget, ShapeEvidence, resolve_gpu_type, select_tuners
 
     profile = analyze_model(model_path)
     try:
@@ -859,15 +858,14 @@ def plan(
 
         tuner_specs = select_tuners(
             profile,
-            framework=framework,
-            precision=precision,
-            quant_type=quant_type,
-            gpu_type=gpu_type,
-            kernel_signature_log=kernel_signature_log or None,
-            has_untuned_csv=bool(untuned_csv),
-            has_shapes_json=bool(shapes_json or shapes_manifest or demand_json),
-            has_tunableop_input=bool(tunableop_input),
-            demand_report=_load_demand_report(demand_json),
+            RoutingTarget(framework=framework, precision=precision, quant_type=quant_type, gpu_type=gpu_type),
+            ShapeEvidence(
+                kernel_signature_log=kernel_signature_log or None,
+                has_untuned_csv=bool(untuned_csv),
+                has_shapes_json=bool(shapes_json or shapes_manifest or demand_json),
+                has_tunableop_input=bool(tunableop_input),
+                demand_report=_load_demand_report(demand_json),
+            ),
         )
 
     click.echo(f"Model: {model_path}")
