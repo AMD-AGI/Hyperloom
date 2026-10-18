@@ -204,10 +204,17 @@ def _mirror_backend_attempts_to_kernel_timeline(result: dict[str, Any], recorder
                 )
             )
         return
+    _record_undispatched_rewrite(result, recorder, kid=kid, run_id=run_id, decision=kernel_decision)
+
+
+def _record_undispatched_rewrite(
+    result: dict[str, Any], recorder: "KernelEventRecorder", *, kid: str, run_id: str, decision: str
+) -> None:
+    """Record a kernel that reached no backend, when the agent failed or skipped it."""
+    from .kernel_event import LANE_FAULTED_STATUSES
 
     status = str(result.get("status") or "").lower()
     err_class = str(result.get("error_class") or "")
-    decision = str(proposal.get("decision") or "").upper()
     failed = status in LANE_FAULTED_STATUSES or (decision == "REVERT" and bool(err_class))
     skipped = status == "skipped"
     if not failed and not skipped:
