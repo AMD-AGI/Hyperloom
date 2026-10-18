@@ -351,6 +351,21 @@ def test_forge_loop_defaults_gpu_type(tmp_path, monkeypatch):
     assert captured["config_overrides"][-1]["gpu_type"] == "mi355x"
 
 
+def test_no_estimator_is_built_while_the_ceiling_is_off(tmp_path, monkeypatch):
+    """An estimate costs a profiler pass and an analyst session, so only ``--roofline-ceiling on`` asks for one."""
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+    (tmp_path / "off").mkdir()
+    (tmp_path / "on").mkdir()
+
+    off, _workspace = _invoke_forge_loop(tmp_path / "off", [])
+    assert off.exit_code == 0, off.output
+    assert captured["loops"][-1].ceiling_estimator is None
+
+    on, _workspace = _invoke_forge_loop(tmp_path / "on", ["--roofline-ceiling", "on"])
+    assert on.exit_code == 0, on.output
+    assert callable(captured["loops"][-1].ceiling_estimator)
+
+
 def test_the_ceiling_estimator_gets_the_resolved_session_budget_and_the_deployments_sandbox(tmp_path, monkeypatch):
     """Without ``--session-timeout-sec`` the raw option is ``None``; the analyst must get seconds, in the sandbox."""
     captured = _install_cli_fakes(monkeypatch, tmp_path)
