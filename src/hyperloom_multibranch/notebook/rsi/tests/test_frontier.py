@@ -1,0 +1,209 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""The frontier score of each running specialist branch: trend, spend, headroom, Amdahl ceiling, prior, observation."""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+from pathlib import Path
+
+import pytest
+
+from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
+from hyperloom_multibranch.contracts.notebook.records import LineageEvent, NotebookSnapshot, ToolResultPointer
+from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis, LineageKind
+from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.notebook.rsi.archive import SearchTree
+from hyperloom_multibranch.notebook.rsi.frontier import (
+    FRONTIER_LOG_FORMAT,
+    OBSERVATION_SECONDS,
+    WINDOW_SECONDS,
+    FrontierPolicy,
+    FrontierScoring,
+    remaining_prior,
+    score_progress,
+)
+from hyperloom_multibranch.notebook.rsi.similarity import TaskConditions, task_conditions, task_similarity
+from hyperloom_multibranch.notebook.rsi.tests.trees import branch, tree
+from hyperloom_multibranch.notebook.tests.factories import FakeClock, profile
+from hyperloom_multibranch.notebook.tests.sessions import METRIC, scripted_session
+
+POLICY = FrontierPolicy(METRIC)
+TASK = task_conditions(profile())
+PAYS_LATE = tree(
+    "late", branch("s1", [(600.0, 2.0), (1800.0, 6.0)], test_times=(0.0, 600.0, 1200.0, 1800.0)), task=TASK
+)
+PAYS_SOON = tree("soon", branch("s1", [(1800.0, 3.0)], test_times=(0.0, 900.0, 1800.0)), task=TASK)
+# The same GPU on another framework: 3 of 5 label weights match.
+SAME_GPU = TaskConditions(labels={"gpu": TASK.labels["gpu"], "framework": "sglang"})
+# The same GPU and nothing else: 3 of 7.
+ONLY_THE_GPU = TaskConditions(
+    labels={"gpu": TASK.labels["gpu"], "framework": "sglang", "model": "Qwen/Qwen3-8B", "precision": "bf16"}
+)
+
+
+def _sessions(task: TaskConditions, count: int) -> tuple[SearchTree, ...]:
+    gains = [(1800.0, 3.0)]
+    return tuple(tree(f"t{n}", branch("s1", gains, test_times=(0.0, 900.0, 1800.0)), task=task) for n in range(count))
+
+
+def _scores(snapshot: NotebookSnapshot, *history: object, policy: FrontierPolicy = POLICY) -> dict[str, object]:
+    return {row.branch: row.frontier for row in score_progress(snapshot, tuple(history), policy)}
+
+
+def test_a_running_specialist_branch_is_scored_and_the_others_are_not(snapshot: NotebookSnapshot) -> None:
+    scores = _scores(snapshot)
+
+    s1 = scores["s1"]
+    assert scores["s2"] is None and scores[INTEGRATION_BRANCH] is None
+    assert s1 is not None and s1.expected_gain_pct == pytest.approx(4.0)
+    assert s1.basis is FrontierBasis.TREND
+    assert s1.components["trend_pct"] == pytest.approx(4.0)
+    assert (s1.components["tests"], s1.components["gpu_hours"], s1.components["observing"]) == (2.0, 1200 / 3600, 1.0)
+    assert s1.components["headroom_pct"] == pytest.approx((1500.0 / 1040.0 - 1.0) * 100.0)
+    assert "prior_remaining_pct" not in s1.components
+
+
+def test_the_history_prior_replaces_the_trend_once_enough_similar_sessions_back_it(snapshot: NotebookSnapshot) -> None:
+    backed = _scores(snapshot, PAYS_LATE, PAYS_SOON)["s1"]
+    alone = _scores(snapshot, PAYS_LATE)["s1"]
+
+    assert backed is not None and backed.expected_gain_pct == pytest.approx(3.5)
+    assert backed.basis is FrontierBasis.PRIOR
+    assert backed.components["prior_effective_sessions"] == pytest.approx(2.0)
+    assert alone is not None and alone.expected_gain_pct == pytest.approx(4.0)
+    assert alone.basis is FrontierBasis.TREND
+
+
+def test_a_prior_needs_sessions_at_least_half_similar_that_add_up_to_one_and_a_half(
+    snapshot: NotebookSnapshot,
+) -> None:
+    two, three = remaining_prior(_sessions(SAME_GPU, 2), TASK, 2), remaining_prior(_sessions(SAME_GPU, 3), TASK, 2)
+    short = _scores(snapshot, *_sessions(SAME_GPU, 2))["s1"]
+    backed = _scores(snapshot, *_sessions(SAME_GPU, 3))["s1"]
+
+    assert task_similarity(TASK, SAME_GPU) == pytest.approx(0.6)
+    assert task_similarity(TASK, ONLY_THE_GPU) == pytest.approx(3 / 7)
+    assert remaining_prior(_sessions(ONLY_THE_GPU, 5), TASK, 2) is None
+    assert two is not None and two.effective_sessions == pytest.approx(1.2)
+    assert three is not None and three.effective_sessions == pytest.approx(1.8)
+    assert short is not None and short.basis is FrontierBasis.TREND
+    assert backed is not None and backed.basis is FrontierBasis.PRIOR and backed.expected_gain_pct == pytest.approx(3.0)
+
+
+async def test_a_branch_too_young_for_a_trend_keeps_a_floor_until_a_window_has_passed(tmp_path: Path) -> None:
+    clock = FakeClock()
+    observer = await scripted_session(tmp_path / "notebook", clock)
+    scheduler = LocalNotebook(tmp_path / "notebook", Writer(Role.SCHEDULER, "scheduler"), clock=clock)
+    await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s3", from_commit="c1", reason="fill"))
+
+    fresh = _scores(await observer.snapshot())["s3"]
+    clock.advance(WINDOW_SECONDS)
+    settled = _scores(await observer.snapshot())["s3"]
+
+    assert fresh is not None and fresh.expected_gain_pct == POLICY.new_branch_floor_pct
+    assert fresh.basis is FrontierBasis.NEW and fresh.components["trend_pct"] == 0.0
+    assert settled is not None and settled.expected_gain_pct == 0.0 and settled.basis is FrontierBasis.TREND
+
+
+def test_the_prior_counts_only_branches_that_spent_as_many_tests() -> None:
+    assert remaining_prior((PAYS_LATE, PAYS_SOON), TASK, 4) == remaining_prior((PAYS_LATE,), TASK, 4)
+    assert remaining_prior((PAYS_SOON,), TASK, 4) is None
+    from_the_start = remaining_prior((PAYS_SOON,), TASK, 0)
+    assert from_the_start is not None and from_the_start.remaining_pct == pytest.approx(3.0)
+
+
+def test_the_headroom_caps_the_score_and_observation_keeps_a_floor(snapshot: NotebookSnapshot) -> None:
+    tight = dataclasses.replace(snapshot, profile=profile(roofline_ceiling={METRIC: 1050.0}))
+    capped = _scores(tight)["s1"]
+    stalled = _scores(snapshot, policy=dataclasses.replace(POLICY, window_seconds=0.0))["s1"]
+    unwatched = _scores(snapshot, policy=dataclasses.replace(POLICY, window_seconds=0.0, observation_seconds=0.0))["s1"]
+
+    assert capped is not None and capped.expected_gain_pct == pytest.approx((1050.0 / 1040.0 - 1.0) * 100.0)
+    assert capped.basis is FrontierBasis.HEADROOM
+    assert stalled is not None and stalled.expected_gain_pct == POLICY.observation_floor_pct
+    assert stalled.basis is FrontierBasis.OBSERVING
+    assert unwatched is not None and unwatched.expected_gain_pct == 0.0
+    assert unwatched.basis is FrontierBasis.TREND
+
+
+async def test_the_largest_op_on_the_profiled_head_caps_the_score_at_its_amdahl_ceiling(tmp_path: Path) -> None:
+    clock = FakeClock()
+    observer = await scripted_session(tmp_path / "notebook", clock)
+    toolbox = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"), clock=clock)
+    s1 = next(row for row in (await observer.snapshot()).progress if row.branch == "s1")
+    await toolbox.notify_tool_result(
+        ToolResultPointer("s1", "job-1", "/a", "trace analysed", s1.start_commit, "", {"gemm": 0.5})
+    )
+    unprofiled = _scores(await observer.snapshot())["s1"]
+    await toolbox.notify_tool_result(
+        ToolResultPointer("s1", "job-2", "/a", "trace analysed", s1.head_commit, "", {"gemm": 3.0, "norm": 1.0})
+    )
+
+    capped = _scores(await observer.snapshot())["s1"]
+
+    assert unprofiled is not None and unprofiled.basis is FrontierBasis.TREND
+    assert "amdahl_ceiling_pct" not in unprofiled.components
+    assert capped is not None and capped.basis is FrontierBasis.AMDAHL
+    assert capped.expected_gain_pct == pytest.approx(300.0 / 97.0)
+    assert capped.components["amdahl_ceiling_pct"] == pytest.approx(300.0 / 97.0)
+    assert capped.components["headroom_pct"] > capped.expected_gain_pct
+
+
+def test_a_shorter_session_looks_back_and_observes_for_less_and_a_longer_one_keeps_the_defaults() -> None:
+    two_hours = FrontierPolicy.for_budget(METRIC, 2 * 3600.0)
+    eight_hours = FrontierPolicy.for_budget(METRIC, 8 * 3600.0)
+
+    assert (two_hours.window_seconds, two_hours.observation_seconds) == (900.0, 1800.0)
+    assert (eight_hours.window_seconds, eight_hours.observation_seconds) == (WINDOW_SECONDS, OBSERVATION_SECONDS)
+    assert two_hours.metric == METRIC and two_hours.observation_floor_pct == POLICY.observation_floor_pct
+    with pytest.raises(ValueError, match="positive"):
+        FrontierPolicy.for_budget(METRIC, 0.0)
+
+
+def test_without_a_profile_nothing_is_scored(snapshot: NotebookSnapshot) -> None:
+    unscored = score_progress(dataclasses.replace(snapshot, profile=None), (), POLICY)
+
+    assert all(row.frontier is None for row in unscored)
+
+
+async def test_the_scoring_is_the_notebooks_progress_query(tmp_path: Path) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    scoring = FrontierScoring(notebook, POLICY, (PAYS_LATE, PAYS_SOON))
+
+    rows = {row.branch: row for row in await scoring.progress()}
+
+    assert rows["s1"].frontier is not None and rows["s1"].frontier.expected_gain_pct == pytest.approx(3.5)
+    assert (await scoring.lineage()) == (await notebook.lineage())
+
+
+async def test_with_a_log_every_round_that_scored_a_branch_is_appended(tmp_path: Path) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    path = tmp_path / "session" / "frontier.jsonl"
+    policy = FrontierPolicy.for_budget(METRIC, 2 * 3600.0)
+    scoring = FrontierScoring(notebook, policy, log=path)
+
+    await scoring.progress()
+    await scoring.progress()
+    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    assert len(lines) == 2 and lines[0]["at"] < lines[1]["at"]
+    first = lines[0]
+    assert (first["format"], first["metric"], first["window_seconds"]) == (FRONTIER_LOG_FORMAT, METRIC, 900.0)
+    assert first["t_s"] > 0
+    assert [row["branch"] for row in first["branches"]] == ["s1"]
+    s1 = first["branches"][0]
+    assert (s1["tests"], s1["commits"], s1["head_value"]) == (2, 1, {METRIC: 1040.0})
+    assert s1["frontier"]["expected_gain_pct"] == pytest.approx(4.0) and s1["frontier"]["basis"] == "trend"
+
+
+async def test_a_round_that_scored_nothing_writes_no_line(tmp_path: Path) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    path = tmp_path / "frontier.jsonl"
+    unmeasured = FrontierPolicy("a metric the baseline never recorded")
+
+    await FrontierScoring(notebook, unmeasured, log=path).progress()
+
+    assert not path.exists()

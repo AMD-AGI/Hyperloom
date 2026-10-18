@@ -1,0 +1,178 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""CLOSE: stop everything, export the session, and report.
+
+The stop comes first: from then on no fork is admitted, no test runs and no process the scheduler started is left,
+and the exports (:mod:`~hyperloom_multibranch.scheduling.exports`) read a notebook that no longer changes. Stopping
+and exporting are each bounded by the hard stop. ``MB-report.json`` and ``MB-report.md`` record the outcome whatever
+became of the exports, including what outlived the stop; a CLOSE cut short by a second stop signal is reported by the
+session through :meth:`Closer.write_report`.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass
+
+from hyperloom.common.io import atomic_write_json, atomic_write_text
+from hyperloom.contracts.recipe import RecipeError
+from hyperloom_multibranch.contracts.notebook.interfaces import NotebookError
+from hyperloom_multibranch.notebook.codec import encode
+from hyperloom_multibranch.scheduling.clock import Clock
+from hyperloom_multibranch.scheduling.exports import CloseExports, SessionExports
+from hyperloom_multibranch.scheduling.final import FinalChoice
+from hyperloom_multibranch.scheduling.layout import SessionLayout
+from hyperloom_multibranch.scheduling.stops import SessionStopper, SessionStopReason, StopReport
+
+logger = logging.getLogger(__name__)
+
+#: What an export raises when it cannot finish: a timeout at the hard stop, the disk, a recipe the repository holds,
+#: or the notebook. Anything else is a bug and propagates once the report is written.
+EXPORT_FAILURES: tuple[type[BaseException], ...] = (asyncio.TimeoutError, OSError, RecipeError, NotebookError)
+
+
+@dataclass(frozen=True)
+class CloseReport:
+    """``error`` is what ended the session abnormally, as the caller gave it; ``stop.clean`` says nothing was left.
+
+    ``exports`` is ``None`` when an export failed with one of :data:`EXPORT_FAILURES` or overran the hard stop.
+    """
+
+    stop_reason: SessionStopReason
+    final: FinalChoice | None
+    exports: CloseExports | None
+    stop: StopReport
+    error: str
+
+
+def report_document(report: CloseReport, session_id: str, closed_at: float) -> dict[str, object]:
+    """``MB-report.json``: the session's ending, its final choice, the exports and what outlived the stop."""
+
+    exports = report.exports
+    return {
+        "session_id": session_id,
+        "closed_at": closed_at,
+        "stop_reason": report.stop_reason.value,
+        "error": report.error,
+        "final": encode(report.final),
+        "exports": None
+        if exports is None
+        else {
+            "kb_write_back": encode(exports.kb_write_back),
+            "knowledge": exports.knowledge.document(),
+            "breakdown": str(exports.breakdown),
+            "dashboard": {"json": str(exports.dashboard.json), "html": str(exports.dashboard.html)},
+        },
+        "stop": {
+            "clean": report.stop.clean,
+            "leftovers": encode(report.stop.leftovers),
+            "queue": encode(report.stop.queue),
+            "failures": list(report.stop.failures),
+        },
+    }
+
+
+def _final_lines(final: FinalChoice | None) -> list[str]:
+    if final is None:
+        return ["No final selection ran."]
+    chosen = final.chosen
+    head = f"Chosen: {chosen.label} `{chosen.commit}` on {chosen.branch}" if chosen else "Chosen: none"
+    lines = [head, f"Reason: {final.reason}", "", "| candidate | commit | eligible | degraded concs | error |"]
+    lines.append("|---|---|---|---|---|")
+    for check in final.checks:
+        candidate = check.candidate
+        degraded = ", ".join(str(conc) for conc in check.degraded_concs)
+        lines.append(f"| {candidate.label} | `{candidate.commit}` | {check.eligible} | {degraded} | {check.error} |")
+    return lines
+
+
+def report_markdown(report: CloseReport, session_id: str) -> str:
+    """``MB-report.md``: the same outcome for people."""
+
+    lines = [
+        f"# Multi-branch session {session_id}",
+        "",
+        f"Stop reason: {report.stop_reason.value}",
+        f"Error: {report.error or 'none'}",
+        "",
+        "## Final selection",
+        "",
+        *_final_lines(report.final),
+        "",
+        "## Close",
+        "",
+        *_export_lines(report.exports),
+        *_stop_lines(report.stop),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def _export_lines(exports: CloseExports | None) -> list[str]:
+    if exports is None:
+        return ["Exports: not finished"]
+    kb = exports.kb_write_back
+    knowledge = exports.knowledge
+    steps = {"Experiences": knowledge.experiences, "Learnings": knowledge.learnings, "Archive": knowledge.archive}
+    return [
+        f"Recipe KB write-back: {kb.status} {kb.reason}".rstrip(),
+        *(f"{name}: {step.status} {step.reason}".rstrip() for name, step in steps.items()),
+        f"Breakdown: {exports.breakdown}",
+        f"Dashboard: {exports.dashboard.html}",
+    ]
+
+
+def _stop_lines(stop: StopReport) -> list[str]:
+    queue = stop.queue
+    return [
+        f"Stopped clean: {stop.clean}; processes left: {[record.pid for record in stop.leftovers]}",
+        "Queue after the stop: unknown"
+        if queue is None
+        else f"Queue after the stop: queued {dict(queue.queued_by_branch)}, running {dict(queue.running_by_branch)}",
+        *(f"Stop failure: {failure}" for failure in stop.failures),
+    ]
+
+
+class Closer:
+    """Runs CLOSE once."""
+
+    def __init__(self, layout: SessionLayout, stopper: SessionStopper, exports: SessionExports, clock: Clock) -> None:
+        self._layout = layout
+        self._stopper = stopper
+        self._exports = exports
+        self._clock = clock
+
+    async def close(
+        self, stop_reason: SessionStopReason, final: FinalChoice | None, error: str, hard_stop_at: float
+    ) -> CloseReport:
+        """Stop everything, then export by ``hard_stop_at``; the report is written whatever became of the exports."""
+
+        stop = await self._stopper.stop_everything(stop_reason, hard_stop_at)
+        exports = None
+        try:
+            exports = await self._clock.wait_for(
+                self._exports.export(final, stop.queue), hard_stop_at - self._clock.now()
+            )
+        except EXPORT_FAILURES:
+            logger.exception("the CLOSE exports did not finish")
+        finally:
+            report = CloseReport(stop_reason, final, exports, stop, error)
+            self.write_report(report)
+        return report
+
+    def write_report(self, report: CloseReport) -> None:
+        """Write ``MB-report.json`` and ``MB-report.md``; the session writes a CLOSE it cut short through here."""
+
+        session_id = self._layout.session_id
+        atomic_write_json(
+            self._layout.report,
+            report_document(report, session_id, self._clock.now()),
+            indent=2,
+            sort_keys=True,
+            make_parents=True,
+        )
+        atomic_write_text(self._layout.report_markdown, report_markdown(report, session_id), make_parents=True)
+
+
+__all__ = ["EXPORT_FAILURES", "CloseReport", "Closer", "report_document", "report_markdown"]

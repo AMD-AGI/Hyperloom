@@ -1,0 +1,251 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""The real toolbox with the local-sandbox executor: one call builds it (handover 3.3, MB1 on one machine).
+
+Every test runs in a fresh local sandbox started from the shipped runner (``hyperloom.measure.local_templates``), is
+measured on cards leased from the card pool, and is accepted only as a signed bundle that verified against the key of
+that sandbox. At most ``8 / TP`` tests run at once on one node.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import sys
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass, replace
+from pathlib import Path
+
+from hyperloom.measure.archive import DirResultArchive, ResultArchive
+from hyperloom.measure.hosted import HostedConfig, HostedMeasurementBackend
+from hyperloom.measure.hosted_spec import SpecContext
+from hyperloom.measure.local import SUPPORTED_KINDS
+from hyperloom.measure.local_templates import local_runner_template
+from hyperloom.sandbox.local import LocalSandboxProvider
+from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity
+from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.toolbox.attempts import DEFAULT_MAX_INFRA_RETRIES
+from hyperloom_multibranch.toolbox.hosted_executor import DEFAULT_TEST_TIMEOUT_SEC, HostedExecutor
+from hyperloom_multibranch.toolbox.queue import QueuePolicy
+from hyperloom_multibranch.toolbox.submission_log import SubmissionLog
+from hyperloom_multibranch.toolbox.tools import AsyncTool, ToolJobs, tracelens_tool
+from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup, RealToolbox, ToolboxStores, ToolboxTuning
+
+__all__ = ["LocalHostedToolbox", "LocalOptions", "LocalSession", "MAX_CARDS_PER_NODE", "build_local_toolbox"]
+
+#: One node serves at most eight cards, so at most ``8 / TP`` tests run at once (handover 5, item 7).
+MAX_CARDS_PER_NODE = 8
+_SANDBOXES, _ARCHIVE, _SUBMISSIONS = "sandboxes", "archive", "toolbox/submissions.jsonl"
+_TOOL_RESULTS = "tool-results"
+_POLL_INTERVAL_SEC = 2.0
+LEAKED_CARDS_REASON = "sandbox processes not provably gone"
+logger = logging.getLogger(__name__)
+
+
+class LocalHostedToolbox(RealToolbox):
+    """A :class:`RealToolbox` that also owns its hosted backend and local sandbox provider; ``close`` releases them."""
+
+    backend: HostedMeasurementBackend
+    provider: LocalSandboxProvider
+    _reported_cards: frozenset[int] = frozenset()
+
+    async def measurement_capacity(self) -> MeasurementCapacity:
+        """The provider's card pool, less the cards it lost for good (``provider.quarantined``); node quarantine does
+        not reduce it."""
+
+        total = self.provider.pool.total
+        return MeasurementCapacity(total, total - len(self._leaked()))
+
+    async def start(self) -> None:
+        """Start, after taking back the leaks an earlier run of this host recorded in the notebook."""
+
+        await self._restore_leaked_cards()
+        await super().start()
+
+    async def _restore_leaked_cards(self) -> None:
+        """A card an earlier process lost for good stays lost: its old holder may still run.
+
+        The notebook holds those cards as events of this node with ``gpu_ids``. The provider is fresh and owns every
+        card, so they are leased once here (the pool has no call to take out one card) and never released, exactly as
+        a leak in this process; the others go straight back.
+        """
+
+        node = self.provider.hostname
+        recorded = {gpu for event in await self._quarantine.cards() if event.node == node for gpu in event.gpu_ids}
+        pool = self.provider.pool
+        lost = frozenset(recorded & set(pool.free_cards()))
+        if not lost:
+            return
+        leased = pool.acquire(len(pool.free_cards()), 0.0)
+        pool.release([card for card in leased if card not in lost])
+        self.provider.quarantined.update(lost)
+        self._reported_cards |= lost
+
+    def _leaked(self) -> frozenset[int]:
+        return frozenset(self.provider.quarantined)
+
+    async def _housekeeping(self) -> None:
+        """Tell the notebook about cards the provider lost since last time: one event for all the new ones.
+
+        The provider only grows a plain set; this polls it after each settled test and on every tick, so the sandbox
+        layer knows nothing of the notebook. A refused write is retried at the next poll.
+        """
+
+        new = self._leaked() - self._reported_cards
+        if not new:
+            return
+        try:
+            await self._quarantine.add_cards(self.provider.hostname, new, LEAKED_CARDS_REASON)
+        except Exception:
+            logger.warning("could not record leaked cards in the notebook", exc_info=True)
+            return
+        self._reported_cards |= new
+
+    async def close(self) -> None:
+        await super().close()
+        await asyncio.to_thread(self.backend.close)
+        await asyncio.to_thread(self.provider.close)
+        await self._housekeeping()  # a sandbox that could not be reaped at shutdown has leaked its cards too
+
+
+def max_parallel_tests(cards: int, tp: int) -> int:
+    """How many tests of ``tp`` cards run at once on ``cards`` cards: ``min(cards, 8) // tp``, at least one."""
+    if tp < 1:
+        raise ValueError("tp must be at least 1")
+    if cards < tp:
+        raise ValueError(f"{cards} cards cannot run a test of TP={tp}")
+    return min(cards, MAX_CARDS_PER_NODE) // tp
+
+
+@dataclass(frozen=True)
+class LocalSession:
+    """Where and on what the toolbox runs.
+
+    ``session_dir`` is the session directory. Below it: ``sandboxes/`` (the sandboxes), ``archive/`` (verified
+    bundles, unless an archive is given), ``hosted/`` (the backend's journal; a restart re-attaches from it),
+    ``toolbox/submissions.jsonl`` (the submit log) and ``tests/<request_id>/attempt-<n>`` (landed output).
+    ``run_id`` is the run's id, the first part of every sandbox's idempotency key. ``cards`` is the card pool, for
+    example ``[6, 7]``; at most eight are used for concurrency. ``tp`` is the tensor-parallel size of every test, that
+    is the cards of one runner sandbox. ``hostname`` is the node name the local provider reports; this machine's by
+    default.
+    """
+
+    session_dir: Path
+    run_id: str
+    cards: Iterable[int]
+    tp: int = 1
+    hostname: str | None = None
+
+
+@dataclass(frozen=True)
+class LocalOptions:
+    """What :func:`build_local_toolbox` may be told besides the session, the notebook, acceptance and the spec.
+
+    ``policy`` is the quota and priority policy; its ``global_concurrency`` is lowered to ``8 // tp`` when higher.
+    ``runner_envs`` is the environment the runner template carries (for example ``INFERENCEX_REPO``). ``archive`` is
+    the result archive, a directory archive below ``session_dir`` when omitted. ``python`` is the interpreter the
+    runner and the measurement run with. ``timeout_sec`` is the timeout of one attempt, ``max_infra_retries`` the
+    infrastructure retries per test before it ends as ``measurement_failed`` and ``poll_interval_sec`` how often the
+    backend polls a runner for its result. ``tools`` are the asynchronous tools ``start_analysis`` may reach; ``None``
+    is the local set, TraceLens only: roofline profiles in the host process on host cards outside the card leases, so
+    it is not offered here.
+    """
+
+    policy: QueuePolicy | None = None
+    runner_envs: Mapping[str, str] | None = None
+    archive: ResultArchive | None = None
+    python: str = sys.executable
+    timeout_sec: int = DEFAULT_TEST_TIMEOUT_SEC
+    max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES
+    poll_interval_sec: float = _POLL_INTERVAL_SEC
+    tools: Sequence[AsyncTool] | None = None
+
+
+def _provider(session: LocalSession, cards: tuple[int, ...], options: LocalOptions) -> LocalSandboxProvider:
+    template = local_runner_template(
+        f"runner-{session.tp}", gpus=session.tp, python=options.python, envs=options.runner_envs
+    )
+    return LocalSandboxProvider(
+        [template], gpus=cards, base_dir=Path(session.session_dir) / _SANDBOXES, hostname=session.hostname
+    )
+
+
+def _started(provider: LocalSandboxProvider, config: HostedConfig) -> HostedMeasurementBackend:
+    backend = HostedMeasurementBackend(provider, config)
+    backend.start()
+    return backend
+
+
+def _capped(policy: QueuePolicy | None, parallel: int) -> QueuePolicy:
+    """``policy`` with its global concurrency lowered to what the cards can run in parallel."""
+    base = policy or QueuePolicy()
+    return replace(base, global_concurrency=min(base.global_concurrency, parallel))
+
+
+def _tool_jobs(options: LocalOptions, notebook: LocalNotebook, directory: Path) -> ToolJobs:
+    tools = (tracelens_tool(),) if options.tools is None else options.tools
+    return ToolJobs(tools, notebook, directory / _TOOL_RESULTS)  # type: ignore[arg-type]
+
+
+def _accepting_local_kinds(acceptance: AcceptanceSetup) -> AcceptanceSetup:
+    """``acceptance`` that refuses, before queueing, the kinds the local backend does not run."""
+    return replace(acceptance, supported_kinds=SUPPORTED_KINDS)
+
+
+def build_local_toolbox(
+    session: LocalSession,
+    notebook: LocalNotebook,
+    acceptance: AcceptanceSetup,
+    spec: SpecContext,
+    *,
+    options: LocalOptions = LocalOptions(),
+) -> LocalHostedToolbox:
+    """Build a :class:`RealToolbox` whose tests run in local sandboxes; call ``await toolbox.start()`` before use.
+
+    Args:
+        session: Where and on what the toolbox runs, see :class:`LocalSession`.
+        notebook: The notebook; it takes the requests and results, holds the quarantine list and the claims, and is
+            searched when a restart recovers unfinished tests.
+        acceptance: The repository the parent recipes are read from, the planner (its ``plan`` must return a
+            ``hyperloom.measure.points.AcceptedMeasurement``; ``HostedPlanner`` does), the active framework image
+            and the campaign's workload, see :class:`~hyperloom_multibranch.toolbox.toolbox.AcceptanceSetup`.
+        spec: What the instruction sheet needs besides the call: image, GPU type, commits, blob store.
+        options: Everything else, see :class:`LocalOptions`.
+    """
+
+    directory, cards, tp = Path(session.session_dir), tuple(session.cards), session.tp
+    parallel = max_parallel_tests(len(cards), tp)
+    config = HostedConfig(
+        session_dir=directory,
+        run_id=session.run_id,
+        spec=spec,
+        runner_templates={tp: f"runner-{tp}"},
+        archive=options.archive or DirResultArchive(directory / _ARCHIVE),
+        max_parallel_tests=parallel,
+        poll_interval_sec=options.poll_interval_sec,
+    )
+    provider = _provider(session, cards, options)
+    backend = _started(provider, config)
+    executor = HostedExecutor(
+        backend,
+        directory,
+        timeout_sec=options.timeout_sec,
+        magpie_python=options.python,
+        workload_kind=acceptance.workload_kind,
+    )
+    toolbox = LocalHostedToolbox(
+        ToolboxStores(
+            log=SubmissionLog(directory / _SUBMISSIONS, session.run_id),
+            sink=notebook,  # type: ignore[arg-type]
+            health=notebook,  # type: ignore[arg-type]
+            claims=notebook,  # type: ignore[arg-type]
+            records=notebook,  # type: ignore[arg-type]
+        ),
+        executor,
+        _accepting_local_kinds(acceptance),
+        tools=_tool_jobs(options, notebook, directory),
+        tuning=ToolboxTuning(policy=_capped(options.policy, parallel), max_infra_retries=options.max_infra_retries),
+    )
+    toolbox.backend, toolbox.provider, toolbox.trace_root = backend, provider, directory
+    return toolbox

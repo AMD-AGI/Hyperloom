@@ -1,0 +1,173 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""Attempts and reruns of one test (design 4.5), the code the fake and the real executor share.
+
+An :class:`Executor` runs ONE attempt in a fresh sandbox and returns a ``TestResult`` describing it. This module turns
+attempts into the request's single result:
+
+* ``infra`` failure: another sandbox, away from every node tried, up to ``max_infra_retries`` retries, then
+  ``measurement_failed``; the node is reported for quarantine.
+* ``candidate`` failure (a known failure signature): ``candidate_failed`` at once.
+* ``unclear`` failure: one rerun away from the first node. A second failure is ``candidate_failed``; a success is the
+  result, and the first attempt is re-labelled an infrastructure failure of its node and reported for quarantine.
+* an executor that raises :class:`MeasurementRefused` (a rejected spec, a result that fails verification): no retry,
+  ``measurement_failed``.
+
+A node that was to be avoided but carried the attempt anyway (one node, or Claw could not avoid it) marks the
+attempt ``same_node``.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, replace
+from typing import NamedTuple, Protocol
+
+from hyperloom.contracts.measurement import (
+    Attempt,
+    FailureClass,
+    TestRequest,
+    TestResult,
+    Validity,
+)
+
+DEFAULT_MAX_INFRA_RETRIES = 3
+
+
+class MeasurementRefused(Exception):
+    """The measurement itself is broken (spec rejected, result failed verification): a program error, never retried."""
+
+
+@dataclass(frozen=True)
+class TestJob:
+    """One attempt for an executor: the accepted request, what acceptance compiled, and the nodes to stay away from."""
+
+    __test__ = False
+
+    request: TestRequest
+    attempt: int
+    avoid_nodes: tuple[str, ...]
+    priority: int
+    sandbox_priority: int
+    environment: object = None
+
+
+class Executor(Protocol):
+    """Runs one attempt. Raising :class:`MeasurementRefused` ends the test; ``CancelledError`` is a cancel."""
+
+    async def run(self, job: TestJob) -> TestResult: ...
+
+    async def reverify(self, result: TestResult) -> None:
+        """Check a recorded ``result`` against the evidence of the attempt that made it; raises
+        :class:`~hyperloom_multibranch.contracts.gate.ResultUnverified` when it does not match or cannot be checked."""
+
+
+NodeFailure = Callable[[str, str], Awaitable[None]]
+
+
+def _attempt_of(result: TestResult) -> Attempt:
+    return Attempt(
+        sandbox=result.sandbox,
+        failure_class=result.failure_class,
+        failure_reason=result.failure_reason,
+        started_at=result.started_at,
+        finished_at=result.finished_at,
+    )
+
+
+def _mark_same_node(result: TestResult, avoided: set[str]) -> TestResult:
+    sandbox = result.sandbox
+    if sandbox is None or sandbox.node_name not in avoided or sandbox.same_node:
+        return result
+    return replace(result, sandbox=replace(sandbox, same_node=True))
+
+
+def _facts_nodes(attempts: list[Attempt]) -> list[str]:
+    return [attempt.node for attempt in attempts if attempt.node]
+
+
+class _Ending(NamedTuple):
+    """How a request ends: its validity and, when it failed, the failure class and the reason."""
+
+    validity: Validity
+    failure: FailureClass | None
+    reason: str | None
+
+
+class AttemptRunner:
+    """Runs a request's attempts with ``executor``; ``avoid`` supplies the quarantine list, ``on_node_failure`` hears of
+    a node that failed for an infrastructure reason."""
+
+    def __init__(
+        self,
+        executor: Executor,
+        *,
+        avoid: Callable[[], frozenset[str]],
+        on_node_failure: NodeFailure,
+        max_infra_retries: int = DEFAULT_MAX_INFRA_RETRIES,
+    ) -> None:
+        self._executor = executor
+        self._avoid = avoid
+        self._on_node_failure = on_node_failure
+        self._max_infra_retries = max_infra_retries
+
+    async def run(self, job: TestJob) -> TestResult:
+        attempts: list[Attempt] = []
+        infra_retries, reran = 0, False
+        last: TestResult | None = None
+        while True:
+            avoided = set(job.request.avoid_nodes) | self._avoid() | set(_facts_nodes(attempts))
+            attempt_job = replace(job, attempt=len(attempts) + 1, avoid_nodes=tuple(sorted(avoided)))
+            try:
+                result = await self._executor.run(attempt_job)
+            except MeasurementRefused as error:
+                ending = _Ending(Validity.MEASUREMENT_FAILED, FailureClass.INFRA, f"measurement refused: {error}")
+                return self._final(job, last, attempts, ending)
+            result = _mark_same_node(result, avoided)
+            attempts.append(_attempt_of(result))
+            last = result
+            failure = result.failure_class
+            if result.validity is Validity.SUCCEEDED:
+                return await self._succeeded(job, result, attempts)
+            if failure is FailureClass.CANDIDATE:
+                return self._final(
+                    job, result, attempts, _Ending(Validity.CANDIDATE_FAILED, failure, result.failure_reason)
+                )
+            if failure is FailureClass.UNCLEAR:
+                if reran:
+                    return self._final(
+                        job, result, attempts, _Ending(Validity.CANDIDATE_FAILED, failure, result.failure_reason)
+                    )
+                reran = True
+                continue
+            await self._report(attempts[-1], job, result.failure_reason)
+            if infra_retries >= self._max_infra_retries:
+                reason = f"{infra_retries + 1} attempts failed for infrastructure reasons: {result.failure_reason}"
+                return self._final(
+                    job, result, attempts, _Ending(Validity.MEASUREMENT_FAILED, FailureClass.INFRA, reason)
+                )
+            infra_retries += 1
+
+    async def _succeeded(self, job: TestJob, result: TestResult, attempts: list[Attempt]) -> TestResult:
+        first = attempts[0]
+        if len(attempts) > 1 and first.failure_class is FailureClass.UNCLEAR:
+            reason = f"unclear failure did not reproduce on a rerun: {first.failure_reason or 'no reason given'}"
+            attempts[0] = replace(first, failure_class=FailureClass.INFRA, failure_reason=reason)
+            await self._report(attempts[0], job, reason)
+        return self._final(job, result, attempts, _Ending(result.validity, None, None))
+
+    async def _report(self, attempt: Attempt, job: TestJob, reason: str | None) -> None:
+        if attempt.node:
+            await self._on_node_failure(attempt.node, reason or "infrastructure failure")
+
+    @staticmethod
+    def _final(job: TestJob, result: TestResult | None, attempts: list[Attempt], ending: _Ending) -> TestResult:
+        base = result or TestResult(request_id=job.request.request_id or "", validity=ending.validity)
+        return replace(
+            base,
+            validity=ending.validity,
+            failure_class=ending.failure,
+            failure_reason=ending.reason,
+            attempts=tuple(attempts),
+        )

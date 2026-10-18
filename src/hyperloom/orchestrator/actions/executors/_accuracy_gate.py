@@ -16,22 +16,20 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.accuracy import (
+    ACCURACY_METRICS,
+    ACCURACY_THRESHOLD,
+    AGENTX_ERROR_RATE_THRESHOLD_PCT,
+    DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
+    accuracy_meets_floor,
+    accuracy_passed,
+    finite_score,
+)
 from hyperloom.common.env import env_flag, is_truthy
 from hyperloom.common.io import safe_mtime
 from hyperloom.common.perf_metric import is_agentx_mode
 
 log = logging.getLogger(__name__)
-
-ACCURACY_THRESHOLD = 0.05  # allowed deviation
-
-# Upstream rejects an AgentX submission whose error rate over completed requests exceeds 10% (InferenceX
-# ``validate_agentic_result.py``). A percentage because that is aiperf's unit: ``RequestErrorRateMetric`` is declared
-# PERCENT and derives ``100.0 * errors / total``.
-AGENTX_ERROR_RATE_THRESHOLD_PCT = 10.0
-
-# Shared accuracy floor, used by BOTH the baseline eval-failure trigger and the enablement KEEP gate so the two never
-# diverge.
-DEFAULT_ENABLEMENT_ACCURACY_FLOOR = 0.5
 
 # Enablement admission, selected by the ``--enablement`` CLI flag.
 ENABLEMENT_MODE_OFF = "off"
@@ -134,25 +132,9 @@ def eval_enablement_allowed(shared_state: Any) -> bool:
     return resolve_enablement_mode(shared_state) in (ENABLEMENT_MODE_EVAL, ENABLEMENT_MODE_ALL)
 
 
-def _finite_score(score: Any) -> float | None:
-    """Return ``score`` as a finite float, or ``None`` when unusable."""
-    if isinstance(score, bool) or not isinstance(score, (int, float)):
-        return None
-    val = float(score)
-    return val if math.isfinite(val) else None
-
-
-def accuracy_meets_floor(score: Any, floor: float) -> bool:
-    """True only when ``score`` is finite, strictly positive and ``>= floor``."""
-    val = _finite_score(score)
-    if val is None or val <= 0.0:
-        return False
-    return val >= floor
-
-
 def classify_accuracy_failure(score: Any, floor: float) -> str | None:
     """Classify an accuracy verdict; ``None`` means it passes the floor."""
-    val = _finite_score(score)
+    val = finite_score(score)
     if val is None:
         return EVAL_KIND_ACCURACY_UNAVAILABLE
     if val <= 0.0 or val < floor:
@@ -509,7 +491,7 @@ def parse_eval_results(
 
     results = data.get("results", {})
     for task_name, metrics in results.items():
-        for key in ("exact_match,strict-match", "exact_match,flexible-extract", "exact_match,none", "acc,none"):
+        for key in ACCURACY_METRICS:
             if key in metrics:
                 score = metrics[key]
                 if isinstance(score, (int, float)):
@@ -554,19 +536,6 @@ def eval_probe_summary(probe: dict[str, Any] | None) -> str:
         f"{probe.get('max_completion_tokens_seen', 0)}-token cap; the model never "
         "emitted EOS, so the eval was cut short and scored ~0"
     )
-
-
-def accuracy_passed(
-    baseline_accuracy: float,
-    new_accuracy: float,
-    threshold: float = ACCURACY_THRESHOLD,
-) -> bool:
-    """Return True if accuracy drop is within tolerance."""
-    if baseline_accuracy <= 0:
-        # No baseline recorded; skip gate.
-        return True
-    drop = baseline_accuracy - new_accuracy
-    return drop <= threshold
 
 
 def grade_accuracy(

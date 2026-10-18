@@ -1,0 +1,127 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+import dataclasses
+import statistics
+
+import pytest
+
+from hyperloom.common.accuracy import ACCURACY_METRICS
+from hyperloom.common.perf_metric import (
+    AGENTX_KEEP_P50_THRESHOLD_PCT,
+    GRADED_DURATION,
+    GRADED_ERROR_RATE,
+    GRADED_INTVTY_P50,
+    GRADED_OUTPUT,
+)
+from hyperloom.contracts.measurement import AccuracyValue, Purpose, RoundValue, TestKind, TestRequest
+from hyperloom.contracts.recipe import RecipeDelta
+from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE
+from hyperloom_multibranch.contracts.notebook import Role, Writer
+from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
+from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.notebook.tests.factories import delta, result
+from hyperloom_multibranch.rulegate.accuracy import BaselineAccuracyError
+from hyperloom_multibranch.rulegate.baseline import (
+    read_inferencex_baseline,
+    write_agentx_baseline,
+    write_inferencex_baseline,
+)
+from hyperloom_multibranch.rulegate.readings import UnreadableResult
+
+ROOT = "c0"
+CONC = 64
+STRICT = ACCURACY_METRICS[0]
+AGENTX = {GRADED_INTVTY_P50: 40.0, GRADED_DURATION: 600.0, GRADED_ERROR_RATE: 1.0}
+
+
+class _Session:
+    """The toolbox writes the measured baselines; the gate reads them and writes the baseline record."""
+
+    def __init__(self, root):
+        self.toolbox = LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox"))
+        self.gate = LocalNotebook(root, Writer(Role.GATE, "gate"))
+
+    async def measured(self, request_id, *, metrics, score=None, change=None, parent=ROOT, purpose=Purpose.BASELINE):
+        await self.toolbox.write_request(
+            TestRequest(
+                kind=TestKind.TEST,
+                purpose=purpose,
+                branch_id=INTEGRATION_BRANCH,
+                parent_commit=parent,
+                delta=change or RecipeDelta(),
+                accuracy=score is not None,
+                request_id=request_id,
+            )
+        )
+        rounds = (RoundValue("measure", CONC if score is not None else None, metrics),)
+        accuracy = () if score is None else (AccuracyValue("gsm8k", STRICT, score),)
+        await self.toolbox.write_result(dataclasses.replace(result(request_id), rounds=rounds, accuracy=accuracy))
+        return await self.gate.record(request_id)
+
+    async def inferencex(self, request_id, throughput, score=0.90, **fields):
+        return await self.measured(request_id, metrics={GRADED_OUTPUT: throughput}, score=score, **fields)
+
+
+@pytest.fixture
+def session(tmp_path):
+    return _Session(tmp_path / "notebook")
+
+
+async def _prelude(session, throughputs=(1000.0, 1010.0, 990.0), scores=(0.90, 0.91, 0.89)):
+    baselines = [
+        await session.inferencex(f"b{i}", t, s) for i, (t, s) in enumerate(zip(throughputs, scores, strict=True))
+    ]
+    return await write_inferencex_baseline(session.gate, ROOT, baselines, CONC)
+
+
+async def test_the_prelude_baselines_become_the_record_the_gate_judges_by(session):
+    record = await _prelude(session)
+
+    assert record.values == {GRADED_OUTPUT: 1000.0, ACCURACY_SCORE: pytest.approx(0.90)}
+    assert record.dispersion_pct == {GRADED_OUTPUT: pytest.approx(1.0)}
+    assert record.threshold_pct == {GRADED_OUTPUT: pytest.approx(2.0)}
+    assert record.request_ids == ("b0", "b1", "b2")
+    assert await session.gate.baseline() == record
+    baseline = await read_inferencex_baseline(session.gate)
+    assert baseline.bar_pct == pytest.approx(2.0)
+    assert baseline.accuracy == pytest.approx(0.90)
+
+
+@pytest.mark.parametrize(
+    ("throughputs", "scores", "error"),
+    [((1000.0,), (0.90,), ValueError), ((1000.0, 1010.0), (0.45, 0.46), BaselineAccuracyError)],
+    ids=["one-baseline", "score-below-floor"],
+)
+async def test_prelude_fails_on_too_few_baselines_or_an_eval_score_below_the_floor(session, throughputs, scores, error):
+    with pytest.raises(error):
+        await _prelude(session, throughputs, scores)
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [{"purpose": Purpose.EXPLORE, "change": delta()}, {"purpose": Purpose.HEALTH}, {"parent": "c1"}],
+    ids=["a-candidate", "a-spot-check", "another-commit"],
+)
+async def test_only_a_prelude_baseline_of_the_root_is_a_baseline(session, fields):
+    baselines = [await session.inferencex("b0", 1000.0), await session.inferencex("b1", 1010.0, **fields)]
+    with pytest.raises(ValueError, match="is not a baseline test of the root"):
+        await write_inferencex_baseline(session.gate, ROOT, baselines, CONC)
+
+
+async def test_an_agentx_baseline_averages_every_metric_its_baselines_share(session):
+    first = await session.measured("b0", metrics={**AGENTX, "e2e_norm_intvty_p90": 30.0})
+    second = await session.measured("b1", metrics={**AGENTX, GRADED_INTVTY_P50: 44.0})
+
+    record = await write_agentx_baseline(session.gate, ROOT, [first, second])
+
+    assert record.values == {**AGENTX, GRADED_INTVTY_P50: 42.0}
+    assert record.dispersion_pct == {GRADED_INTVTY_P50: pytest.approx(statistics.stdev((40.0, 44.0)) / 42.0 * 100)}
+    assert record.threshold_pct == {GRADED_INTVTY_P50: AGENTX_KEEP_P50_THRESHOLD_PCT}
+
+
+async def test_an_agentx_baseline_needs_what_every_comparison_reads(session):
+    partial = {key: value for key, value in AGENTX.items() if key != GRADED_DURATION}
+    baselines = [await session.measured("b0", metrics=AGENTX), await session.measured("b1", metrics=partial)]
+    with pytest.raises(UnreadableResult, match=GRADED_DURATION):
+        await write_agentx_baseline(session.gate, ROOT, baselines)

@@ -1,0 +1,123 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+import math
+
+import pytest
+
+from hyperloom.common.perf_metric import GRADED_OUTPUT
+from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, Verdict
+from hyperloom_multibranch.rulegate.inferencex import (
+    FLOOR_PCT,
+    GAIN_BELOW_THRESHOLD,
+    GAIN_NOT_CONFIRMED,
+    DispersionThreshold,
+    InferenceXBaseline,
+    InferenceXReading,
+    compare,
+    confirm,
+)
+
+NORMAL = DispersionThreshold((1000.0, 1010.0, 990.0))
+PARENT = {GRADED_OUTPUT: 1000.0}
+BASELINE = InferenceXBaseline(NORMAL.threshold_pct, 0.90)
+SCORES = {True: 0.88, False: 0.80}
+
+
+def _reading(throughput: float, accuracy_ok: bool = True) -> InferenceXReading:
+    return InferenceXReading(throughput, SCORES[accuracy_ok])
+
+
+@pytest.mark.parametrize(
+    ("baselines", "spread", "bar"),
+    [
+        ((1000.0, 1010.0, 990.0), 1.0, 2.0),
+        ((1000.0, 1002.0, 998.0), 0.2, FLOOR_PCT),
+        ((1000.0, 1050.0, 950.0), 5.0, 10.0),
+    ],
+)
+def test_the_bar_is_twice_the_baseline_spread_above_a_floor(baselines, spread, bar):
+    threshold = DispersionThreshold(baselines)
+    assert threshold.spread_pct == pytest.approx(spread)
+    assert threshold.threshold_pct == pytest.approx(bar)
+
+
+@pytest.mark.parametrize("baselines", [(1000.0,), (1000.0, 0.0), (1000.0, math.nan)])
+def test_the_spread_refuses_too_few_or_unusable_baselines(baselines):
+    with pytest.raises(ValueError):
+        DispersionThreshold(baselines)
+
+
+@pytest.mark.parametrize(
+    ("throughput", "accuracy_ok", "verdict", "refused_by"),
+    [
+        (1030.0, True, Verdict.NEEDS_CONFIRM, ()),
+        (1030.0, False, Verdict.NEEDS_CONFIRM, ()),
+        (1020.0, True, Verdict.FLAT, (GAIN_BELOW_THRESHOLD,)),
+        (1010.0, False, Verdict.FLAT, (GAIN_BELOW_THRESHOLD,)),
+        (970.0, True, Verdict.REGRESSED, (GAIN_BELOW_THRESHOLD,)),
+    ],
+)
+def test_a_first_measurement_against_its_parent(throughput, accuracy_ok, verdict, refused_by):
+    judgement = compare(_reading(throughput, accuracy_ok), BASELINE, PARENT, "r1")
+    assert judgement.verdict is verdict
+    assert judgement.refused_by == refused_by
+    assert judgement.accuracy_ok is accuracy_ok
+    assert judgement.threshold_pct == pytest.approx(2.0)
+    assert judgement.recorded_value == {GRADED_OUTPUT: throughput, ACCURACY_SCORE: SCORES[accuracy_ok]}
+    assert judgement.request_ids == ("r1",)
+
+
+@pytest.mark.parametrize(("baseline_accuracy", "accuracy_ok"), [(0.90, True), (0.96, False)])
+def test_the_eval_score_is_held_to_the_baseline_score(baseline_accuracy, accuracy_ok):
+    judgement = compare(
+        InferenceXReading(1030.0, 0.90), InferenceXBaseline(NORMAL.threshold_pct, baseline_accuracy), PARENT, "r1"
+    )
+    assert judgement.accuracy_ok is accuracy_ok
+
+
+@pytest.mark.parametrize(
+    ("first_ok", "retest", "retest_ok", "verdict", "refused_by"),
+    [
+        (True, 1025.0, True, Verdict.IMPROVED, ()),
+        (False, 1025.0, False, Verdict.BLOCKED, ()),
+        (True, 1025.0, False, Verdict.INCONCLUSIVE, ()),
+        (False, 1025.0, True, Verdict.INCONCLUSIVE, ()),
+        (True, 1015.0, True, Verdict.FLAT, (GAIN_NOT_CONFIRMED,)),
+        (True, 900.0, True, Verdict.REGRESSED, (GAIN_NOT_CONFIRMED,)),
+    ],
+)
+def test_a_retest_settles_the_gain_and_the_accuracy_gate(first_ok, retest, retest_ok, verdict, refused_by):
+    first = compare(_reading(1030.0, first_ok), BASELINE, PARENT, "r1")
+    judgement = confirm(first, _reading(retest, retest_ok), BASELINE, PARENT, "r2")
+    assert judgement.verdict is verdict
+    assert judgement.refused_by == refused_by
+    assert judgement.accuracy_ok is (first_ok and retest_ok)
+    assert judgement.recorded_value == {
+        GRADED_OUTPUT: (1030.0 + retest) / 2,
+        ACCURACY_SCORE: pytest.approx((SCORES[first_ok] + SCORES[retest_ok]) / 2),
+    }
+    assert judgement.request_ids == ("r1", "r2")
+
+
+def test_only_a_provisional_judgement_is_retested():
+    first = compare(_reading(1010.0), BASELINE, PARENT, "r1")
+    with pytest.raises(ValueError, match="provisional"):
+        confirm(first, _reading(1030.0), BASELINE, PARENT, "r2")
+
+
+@pytest.mark.parametrize(("throughput", "accuracy"), [(0.0, 0.9), (math.inf, 0.9), (1000.0, math.nan)])
+def test_a_reading_needs_a_positive_throughput_and_a_finite_score(throughput, accuracy):
+    with pytest.raises(ValueError):
+        InferenceXReading(throughput, accuracy)
+
+
+@pytest.mark.parametrize(("bar", "accuracy"), [(0.0, 0.9), (math.nan, 0.9), (2.0, math.nan)])
+def test_a_baseline_needs_a_positive_bar_and_a_finite_score(bar, accuracy):
+    with pytest.raises(ValueError):
+        InferenceXBaseline(bar, accuracy)
+
+
+def test_a_parent_without_a_usable_record_is_not_compared():
+    with pytest.raises(ValueError, match="cannot compare"):
+        compare(_reading(1000.0), BASELINE, {GRADED_OUTPUT: 0.0}, "r1")

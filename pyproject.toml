@@ -95,8 +95,26 @@ forge-profiling = [
     "textual-fspicker>=0.4.3",
     "tqdm",
 ]
+# Hosted measurement: Ed25519 signing (cryptography), the E2B sandbox SDK and the S3 result archive. Each is
+# imported lazily, only by the hosted-measurement modules.
+hosted = [
+    "cryptography>=42",
+    "e2b>=2.7",
+    "boto3>=1.28",
+]
+# The measurement runner inside a sealed sandbox: it reads the YAML config and signs its result manifest.
+#
+# ``lm_eval[api]`` is the accuracy pass's client, pinned to the ref ``inference_optimizer/cli/preflight.py`` installs
+# (``_LM_EVAL_PINNED_REF``), by archive so that no git binary is needed. ``tenacity`` is what its ``api`` models import.
+runner = [
+    "PyYAML>=6.0",
+    "cryptography>=42",
+    "lm_eval[api] @ https://github.com/EleutherAI/lm-evaluation-harness/archive/ddd67220430a2470529f25fd5c05a576ca1057a0.tar.gz",
+    "tenacity",
+]
 test = [
     "hyperloom-inference_optimizer[runtime]",
+    "hyperloom-inference_optimizer[hosted]",
     "hyperloom-inference_optimizer[ci]",
     # The Experience KB tests run on PostgreSQL too when HYPERLOOM_KB_TEST_DATABASE_URL names a server.
     "hyperloom-inference_optimizer[kb-service]",
@@ -152,6 +170,7 @@ kernelforge = "kernelforge.cli:main"
 hyperloom-kb = "hyperloom_kb.cli:main"
 hyperloom-kb-serve = "hyperloom_kb.http_service:main"
 hyperloom-kb-collect = "hyperloom_kb.collect.cli:main"
+hyperloom-multibranch = "hyperloom_multibranch.cli:main"
 
 [tool.setuptools]
 # setuptools defaults this to true for pyproject-based config, which makes
@@ -237,6 +256,8 @@ exclude = [
 hyperloom = [
     "orchestrator/prompts/*.md",
     "orchestrator/prompts/references/*.md",
+    # JSON Schemas of the hosted-measurement contracts (measurement spec and result manifest).
+    "contracts/*.schema.json",
 ]
 "hyperloom.inference_optimizer" = [
     "SKILL.md",
@@ -312,6 +333,10 @@ hyperloom_kb = [
     "declarations/*.yaml",
     "mappings/*.yaml",
 ]
+hyperloom_multibranch = [
+    "notebook/knowledge/declarations/*.yaml",
+    "notebook/knowledge/mappings/*.yaml",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -340,6 +365,7 @@ source = [
     "src/hyperloom",
     "src/kernelforge",
     "src/hyperloom_kb",
+    "src/hyperloom_multibranch",
     "OOB",  # optional component; not always present in a clone
 ]
 # Omitted: tests / package boilerplate, CLI drivers, subprocess wrappers, and

@@ -1,0 +1,346 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""EXPLORE: open the opening batch, then let the judge steer the branches until the EXPLORE deadline or a soft stop.
+
+The loop wakes every :data:`EXPLORE_TICK_SECONDS`: it stops the repair branches that used up their time, moves the forks
+and repairs queued on the fork desk onto the free slots, lands each admitted fork through the split landing and starts
+the admitted forks and repairs, and every judge interval asks the judge, applies what it decided and rebuilds the
+dashboard. A slot the judge's stops free goes to the queued requests first and only then to the branches the judge
+opens. The judge is asked at once, not at its next interval, when the scheduler itself frees a slot: a repair branch
+stopped at its time limit, a fork the gate did not land, or an admitted fork or repair that failed to start; and when
+an event changes what the branches are worth: a merge that moved the integration head by a large gain, the bottleneck
+of the profile taken of the integration head after such a merge moving, or a quarantined measurement node. A branch
+the judge opens after the opening batch starts from the integration head, briefed on a focus. The judge reads the
+frontier-scored progress, how similar archived sessions went, which running branches made much the same change, the
+events since its last call, how far each branch lies behind the integration head, whether a profile of the
+integration head runs, and the GPU hours and scheduler LLM tokens used so far, and decides what to stop; a judge call
+that has not answered by the EXPLORE deadline counts as failed, and a branch that has not opened by then is
+withdrawn, so neither eats into FINAL. The integrator merges in a background task of its own, in rounds as wide as
+the integration branch's K. When EXPLORE ends that task is cancelled
+and the integrator abandons its round, so the integration head the FINAL candidates are read from no longer moves and
+no merge test competes with FINAL's measurements; a profile of the integration head still running is cancelled before
+that, taking its test back. Under ``--max-gpu-hours`` EXPLORE also ends, at a tick, once the session's tests have used
+the GPU hours FINAL's share leaves it.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import math
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+
+from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
+from hyperloom_multibranch.contracts.notebook.records import BranchProgress
+from hyperloom_multibranch.notebook.rsi.frontier import FrontierScoring
+from hyperloom_multibranch.notebook.rsi.session import judge_history
+from hyperloom_multibranch.scheduling.budget import MB_SECONDS_PER_HOUR
+from hyperloom_multibranch.scheduling.branches import SPECIALIST_START_SECONDS, BatchStart, BranchControl
+from hyperloom_multibranch.scheduling.context import SchedulerContext
+from hyperloom_multibranch.scheduling.dashboard import SessionDashboard
+from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
+from hyperloom_multibranch.scheduling.events import SessionEvents, behind_integration_pct
+from hyperloom_multibranch.scheduling.integrator import Integrator
+from hyperloom_multibranch.scheduling.judge import Judge, JudgeDecision, JudgeView
+from hyperloom_multibranch.scheduling.llm import CompletionMeter
+from hyperloom_multibranch.scheduling.mb_fakes import MbFakeSplitLanding
+from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchOrigin, BranchStop, StopCause
+from hyperloom_multibranch.scheduling.settings import PRIMARY_METRIC
+from hyperloom_multibranch.scheduling.settle import failure_text, settled
+from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
+from hyperloom_multibranch.scheduling.stops import SessionStopReason
+from hyperloom_multibranch.scheduling.widening import Widening, refill_focus
+
+logger = logging.getLogger(__name__)
+
+#: How often the loop starts admitted forks and repairs and checks the deadline; the judge runs on its own, longer interval.
+EXPLORE_TICK_SECONDS = 5.0
+OPEN_CUT_REASON = "branch slots taken"
+FORK_NOT_LANDED = "the rule gate did not land the fork"
+
+
+@dataclass(frozen=True)
+class ExploreWindow:
+    """The commit branches start from, the roofline ceiling, the clock times EXPLORE and the budget end at, the
+    session's whole budget, and the GPU seconds the session's tests may use before EXPLORE ends (``math.inf`` for no
+    limit)."""
+
+    root_commit: str
+    roofline_ceiling: Mapping[str, float]
+    explore_end: float
+    session_deadline: float
+    budget_seconds: float
+    explore_gpu_seconds: float
+
+
+@dataclass(frozen=True)
+class Steering:
+    """How the judge steers EXPLORE: the judge, how often it is asked, the frontier-scored progress it reads, against
+    the archived sessions that progress holds, the dashboard rebuilt once the opening batch is open and after every
+    later judge call, the signals of whether a branch opened now would still pay off, which running branches made
+    much the same change, the events that have the judge asked at once, and the meter of the judge's and the patch
+    resolver's LLM tokens."""
+
+    judge: Judge
+    interval_seconds: float
+    progress: FrontierScoring
+    dashboard: SessionDashboard
+    widening: Widening
+    similarity: BranchSimilarity
+    events: SessionEvents
+    llm_usage: CompletionMeter
+
+
+def spent_gpu_seconds(progress: Iterable[BranchProgress]) -> float:
+    """The GPU seconds the session's tests used: every test of every branch that has a result, the integration
+    branch's baseline on the root included; a test withdrawn before its result counts none."""
+
+    return sum(row.gpu_seconds for row in progress)
+
+
+def integration_row(progress: tuple[BranchProgress, ...]) -> BranchProgress | None:
+    return next((row for row in progress if row.branch == INTEGRATION_BRANCH), None)
+
+
+class Explorer:
+    """Runs EXPLORE once; the scheduler's notebook handle gives the snapshot the judge's digest of the archived
+    sessions compares with them, and ``landing`` lands each fork the fork desk admits."""
+
+    def __init__(
+        self,
+        context: SchedulerContext,
+        branches: BranchControl,
+        integrator: Integrator,
+        steering: Steering,
+        landing: MbFakeSplitLanding,
+    ) -> None:
+        self._roster = context.roster
+        self._branches = branches
+        self._desk = context.desk
+        self._landing = landing
+        self._judge = steering.judge
+        self._integrator = integrator
+        self._progress = steering.progress
+        self._notebook = context.notebook
+        self._dashboard = steering.dashboard
+        self._decisions = context.decisions
+        self._interval = steering.interval_seconds
+        self._clock = context.clock
+        self._widening = steering.widening
+        self._similarity = steering.similarity
+        self._events = steering.events
+        self._llm_usage = steering.llm_usage
+
+    async def run(self, window: ExploreWindow) -> SessionStopReason:
+        """Explore until the deadline or the judge's soft stop; the integrator is stopped before this returns.
+
+        Nothing is opened when the opening judge call asks for the soft stop or answers only once EXPLORE is over.
+        """
+
+        opening = await self._ask(window, opening=True)
+        first_batch = BatchStart(BranchOrigin.FIRST_BATCH, window.root_commit, window.explore_end)
+        if opening is None:
+            await self._open_batch(1, 1, first_batch)
+        elif await self._apply(opening, first_batch):
+            return SessionStopReason.GLOBAL_CONVERGED
+        if self._clock.now() >= window.explore_end:
+            return SessionStopReason.TIME_EXHAUSTED
+        await self._dashboard.refresh()
+        merging = asyncio.ensure_future(self._merge_forever())
+        try:
+            return await self._steer(window, merging)
+        finally:
+            merging.cancel()
+            try:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await merging
+                await self._events.stop_profiling()
+            finally:
+                await self._integrator.abandon()
+
+    async def _steer(self, window: ExploreWindow, merging: asyncio.Future[None]) -> SessionStopReason:
+        next_judge = self._clock.now() + self._interval
+        while (now := self._clock.now()) < window.explore_end:
+            if merging.done():
+                merging.result()
+            if await self._gpu_hours_exhausted(window):
+                return SessionStopReason.GPU_HOURS_EXHAUSTED
+            overrun = await self._branches.stop_overrun_repairs()
+            self._desk.fill_free_slots()
+            freed = await self._start_admitted(window.explore_end) or overrun
+            if await self._events.detect() or freed:
+                next_judge = now
+            if now >= next_judge:
+                next_judge = now + self._interval
+                decision = await self._ask(window, opening=False)
+                if decision is not None and await self._apply(decision, await self._refill(window)):
+                    return SessionStopReason.GLOBAL_CONVERGED
+                await self._dashboard.refresh()
+            await self._clock.sleep(min(EXPLORE_TICK_SECONDS, window.explore_end - now))
+        return SessionStopReason.TIME_EXHAUSTED
+
+    async def _gpu_hours_exhausted(self, window: ExploreWindow) -> bool:
+        """Whether the tests used the GPU seconds EXPLORE has. Reads the notebook's own progress: a frontier-scored
+        read appends a round to the frontier log."""
+
+        if window.explore_gpu_seconds == math.inf:
+            return False
+        return spent_gpu_seconds(await self._notebook.progress()) >= window.explore_gpu_seconds
+
+    async def _merge_forever(self) -> None:
+        while True:
+            width = self._roster.entry(INTEGRATION_BRANCH).k
+            reports = await self._integrator.integrate_next(width)
+            self._events.note_merges(reports)
+            if not reports:
+                await self._clock.sleep(EXPLORE_TICK_SECONDS)
+
+    async def _start_admitted(self, deadline: float) -> bool:
+        """Land the admitted forks and start the forks and repairs the fork desk admitted; true when a fork did not land
+        or a branch failed to start, freeing its slot."""
+
+        freed = False
+        for admitted in self._desk.waiting():
+            self._desk.release(admitted.branch)
+            failure = await self._land(admitted.branch, deadline)
+            if failure:
+                await self._branches.void_admitted(admitted.branch, failure)
+            else:
+                await self._branches.start_admitted(admitted, deadline)
+            stop = self._roster.entry(admitted.branch).stop
+            freed = freed or (stop is not None and stop.cause is StopCause.START_FAILED)
+        return freed
+
+    async def _land(self, branch: str, deadline: float) -> str:
+        """Have the split landing land ``branch`` when it is a live fork; why it did not, or ``""``."""
+
+        entry = self._roster.entry(branch)
+        if entry.origin is not BranchOrigin.FORK or entry.stop is not None:
+            return ""
+        seconds = min(SPECIALIST_START_SECONDS, deadline - self._clock.now())
+        landed = await settled(self._clock.wait_for(self._landing.land_split(branch), seconds))
+        if isinstance(landed, BaseException):
+            logger.error("the fork %s was not landed", branch, exc_info=landed)
+            return failure_text(landed)
+        return "" if landed else FORK_NOT_LANDED
+
+    async def _refill(self, window: ExploreWindow) -> BatchStart:
+        """Where the branches a steering judge call opens start: the integration head, which no judge stop moves."""
+
+        return BatchStart(BranchOrigin.REFILL, await self._branches.integration_head(), window.explore_end)
+
+    async def _ask(self, window: ExploreWindow, *, opening: bool) -> JudgeDecision | None:
+        now = self._clock.now()
+        progress = await self._progress.progress()
+        integration = integration_row(progress)
+        integration_value = dict(integration.head_value) if integration is not None else {}
+        root = await self._notebook.recorded_value(window.root_commit)
+        view = JudgeView(
+            now=now,
+            explore_remaining_seconds=max(window.explore_end - now, 0.0),
+            session_remaining_seconds=max(window.session_deadline - now, 0.0),
+            caps=self._roster.caps,
+            roster=self._roster.entries(),
+            progress=progress,
+            integration_value=integration_value,
+            roofline_ceiling=window.roofline_ceiling,
+            metric=PRIMARY_METRIC,
+            opening=opening,
+            free_slots=self._roster.free_slots(),
+            pending=self._desk.pending(),
+            history=judge_history(
+                await self._notebook.snapshot(),
+                self._progress.history,
+                PRIMARY_METRIC,
+                budget_seconds=window.budget_seconds,
+            ),
+            widening=await self._widening.signals(),
+            similar_to=await self._similarity.similar_to(),
+            events=self._events.hand_over(),
+            behind_integration_pct=behind_integration_pct(progress, integration_value, root.values, PRIMARY_METRIC),
+            profile_running=self._events.profiling,
+            gpu_hours_used=spent_gpu_seconds(progress) / MB_SECONDS_PER_HOUR,
+            explore_gpu_hours=_hours_or_none(window.explore_gpu_seconds),
+            scheduler_llm=self._llm_usage.used,
+        )
+        try:
+            decision = await self._clock.wait_for(self._judge.decide(view), window.explore_end - now)
+        except asyncio.TimeoutError:
+            self._decisions.record(Decision(DecisionKind.JUDGE_FAILED, "no answer by the EXPLORE deadline"))
+            return None
+        if decision is None:
+            self._decisions.record(Decision(DecisionKind.JUDGE_FAILED, "kept the status quo"))
+        return decision
+
+    async def _apply(self, decision: JudgeDecision, start: BatchStart) -> bool:
+        """Apply the stop and K orders, move the queued forks and repairs onto the slots the stops freed, then open the
+        branches the judge asked for as ``start`` says into the slots left; True, and nothing moved or opened, when the
+        judge asked to stop the session."""
+
+        self._decisions.record(
+            Decision(
+                DecisionKind.JUDGE,
+                decision.session_stop or "applied",
+                detail={
+                    "open": decision.open_count,
+                    "open_k": decision.open_k,
+                    "k": {order.branch: order.k for order in decision.k},
+                    "stop": {order.branch: order.reason for order in decision.stop},
+                },
+            )
+        )
+        for order in decision.stop:
+            await self._stop(order.branch, order.reason)
+        if decision.k:
+            await self._branches.apply_k({order.branch: order.k for order in decision.k})
+        if decision.session_stop:
+            return True
+        self._desk.fill_free_slots()
+        focus = await self._focus(decision, start) if start.origin is BranchOrigin.REFILL else ()
+        await self._open_batch(decision.open_count, decision.open_k, start, focus)
+        return False
+
+    async def _focus(self, decision: JudgeDecision, start: BatchStart) -> tuple[str, ...]:
+        shares = await self._notebook.op_shares(start.start_commit)
+        return refill_focus(decision.focus, decision.open_count, shares)
+
+    async def _open_batch(
+        self, count: int, k: int, start: BatchStart, focus: tuple[str, ...] = ()
+    ) -> tuple[BranchEntry, ...]:
+        """Open up to ``count`` branches at K ``k`` as ``start`` says, briefed on ``focus``; none once its deadline has
+        passed. The only place a batch is cut to the free slots: a fork or repair admitted while the batch starts can
+        take the last ones, and the branches that found no slot are recorded as ``open_cut``."""
+
+        if self._clock.now() >= start.deadline:
+            return ()
+        opened = await self._branches.open_branches(count, k, start, focus)
+        if len(opened) < count:
+            detail = {"requested": count, "opened": len(opened), "open_cut": count - len(opened)}
+            self._decisions.record(Decision(DecisionKind.OPEN, OPEN_CUT_REASON, detail=detail))
+        return opened
+
+    async def _stop(self, branch: str, reason: str) -> None:
+        """A judge stop; a step that fails is logged and exploring goes on, as CLOSE kills what the stop left."""
+
+        stop = BranchStop(StopCause.JUDGE, reason, self._clock.now())
+        for failure in await self._branches.stop_branch(branch, stop):
+            logger.error("the judge's stop of %s did not finish cleanly", branch, exc_info=failure)
+
+
+def _hours_or_none(seconds: float) -> float | None:
+    return None if seconds == math.inf else seconds / MB_SECONDS_PER_HOUR
+
+
+__all__ = [
+    "EXPLORE_TICK_SECONDS",
+    "FORK_NOT_LANDED",
+    "OPEN_CUT_REASON",
+    "ExploreWindow",
+    "Explorer",
+    "Steering",
+    "integration_row",
+    "spent_gpu_seconds",
+]
