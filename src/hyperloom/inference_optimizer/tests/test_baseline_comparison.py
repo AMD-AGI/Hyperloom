@@ -11,6 +11,8 @@ from typing import Any
 
 import pytest
 
+from hyperloom.inference_optimizer.baseline_comparison.types import TargetAnalysisRequest
+
 
 def test_shared_helpers_are_exported():
     from hyperloom.inference_optimizer.baseline_comparison import inferencex_client, target_analyzer
@@ -134,12 +136,14 @@ def test_analyze_happy_path_writes_files(tmp_path: Path, monkeypatch):
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="/path/models/MiniMaxAI-MiniMax-M2.5",
-        compare_against_gpu="b300",
-        framework="vllm",
-        precision="fp8",
-        isl=1024,
-        osl=1024,
+        request=TargetAnalysisRequest(
+            model_path="/path/models/MiniMaxAI-MiniMax-M2.5",
+            compare_against_gpu="b300",
+            framework="vllm",
+            precision="fp8",
+            isl=1024,
+            osl=1024,
+        ),
     )
 
     # Only fp8 / b300 / 1024-1024 rows match (mi300x + fp4 rows filtered out).
@@ -187,12 +191,9 @@ def test_analyze_excludes_disagg_and_multinode_from_best(tmp_path: Path, monkeyp
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="MiniMax-M2.5",
-        compare_against_gpu="b300",
-        framework="vllm",
-        precision="fp8",
-        isl=1024,
-        osl=1024,
+        request=TargetAnalysisRequest(
+            model_path="MiniMax-M2.5", compare_against_gpu="b300", framework="vllm", precision="fp8", isl=1024, osl=1024
+        ),
     )
     assert summary.status == "ok"
     assert summary.best is not None
@@ -208,12 +209,9 @@ def test_analyze_writes_measured_advisory_target(tmp_path: Path, monkeypatch):
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="MiniMax-M2.5",
-        compare_against_gpu="b300",
-        framework="vllm",
-        precision="fp8",
-        isl=1024,
-        osl=1024,
+        request=TargetAnalysisRequest(
+            model_path="MiniMax-M2.5", compare_against_gpu="b300", framework="vllm", precision="fp8", isl=1024, osl=1024
+        ),
     )
     assert summary.status == "ok"
 
@@ -239,12 +237,14 @@ def test_analyze_mapping_miss_writes_skipped_summary(tmp_path, monkeypatch):
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="/path/models/MyCorp-Custom-FT-7B",
-        compare_against_gpu="b300",
-        framework="vllm",
-        precision="fp8",
-        isl=1024,
-        osl=1024,
+        request=TargetAnalysisRequest(
+            model_path="/path/models/MyCorp-Custom-FT-7B",
+            compare_against_gpu="b300",
+            framework="vllm",
+            precision="fp8",
+            isl=1024,
+            osl=1024,
+        ),
     )
     assert summary.status == "skipped"
     assert summary.reason == "model_mapping_miss"
@@ -262,8 +262,7 @@ def test_analyze_no_target_gpu_writes_marker(tmp_path):
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="/path/models/MiniMaxAI-MiniMax-M2.5",
-        compare_against_gpu="",
+        request=TargetAnalysisRequest(model_path="/path/models/MiniMaxAI-MiniMax-M2.5", compare_against_gpu=""),
     )
     assert summary.status == "skipped"
     assert summary.reason == "no_target_gpu_configured"
@@ -283,12 +282,14 @@ def test_analyze_unsupported_target_gpu(tmp_path, monkeypatch):
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="MiniMax-M2.5",
-        compare_against_gpu="mi999x",
-        framework="vllm",
-        precision="fp8",
-        isl=1024,
-        osl=1024,
+        request=TargetAnalysisRequest(
+            model_path="MiniMax-M2.5",
+            compare_against_gpu="mi999x",
+            framework="vllm",
+            precision="fp8",
+            isl=1024,
+            osl=1024,
+        ),
     )
     assert summary.status == "no_match"
     assert summary.reason == "unsupported_target_gpu"
@@ -303,12 +304,9 @@ def test_analyze_dimension_mismatch(tmp_path, monkeypatch):
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="MiniMax-M2.5",
-        compare_against_gpu="b300",
-        framework="vllm",
-        precision="fp8",
-        isl=2048,
-        osl=2048,
+        request=TargetAnalysisRequest(
+            model_path="MiniMax-M2.5", compare_against_gpu="b300", framework="vllm", precision="fp8", isl=2048, osl=2048
+        ),
     )
     assert summary.status == "no_match"
     assert summary.reason == "dimension_mismatch"
@@ -325,12 +323,14 @@ def test_analyze_precision_mismatch(tmp_path, monkeypatch):
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="MiniMax-M2.5",
-        compare_against_gpu="b300",
-        framework="vllm",
-        precision="bf16",
-        isl=1024,
-        osl=1024,
+        request=TargetAnalysisRequest(
+            model_path="MiniMax-M2.5",
+            compare_against_gpu="b300",
+            framework="vllm",
+            precision="bf16",
+            isl=1024,
+            osl=1024,
+        ),
     )
     assert summary.status == "no_match"
     assert summary.reason == "precision_mismatch"
@@ -345,12 +345,9 @@ def test_analyze_fetch_error(tmp_path, monkeypatch):
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="MiniMax-M2.5",
-        compare_against_gpu="b300",
-        framework="vllm",
-        precision="fp8",
-        isl=1024,
-        osl=1024,
+        request=TargetAnalysisRequest(
+            model_path="MiniMax-M2.5", compare_against_gpu="b300", framework="vllm", precision="fp8", isl=1024, osl=1024
+        ),
     )
     assert summary.status == "no_match"
     assert summary.reason == "fetch_error"
@@ -381,12 +378,9 @@ def test_analyze_no_match_clears_stale_competitor_target(tmp_path, monkeypatch):
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="MiniMax-M2.5",
-        compare_against_gpu="b300",
-        framework="vllm",
-        precision="fp8",
-        isl=1024,
-        osl=1024,
+        request=TargetAnalysisRequest(
+            model_path="MiniMax-M2.5", compare_against_gpu="b300", framework="vllm", precision="fp8", isl=1024, osl=1024
+        ),
     )
     assert summary.status == "no_match"
     assert not session_paths.competitor_target_json(tmp_path).exists()
@@ -418,12 +412,9 @@ def test_analyze_ok_write_failure_clears_stale_competitor_target(tmp_path, monke
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="MiniMax-M2.5",
-        compare_against_gpu="b300",
-        framework="vllm",
-        precision="fp8",
-        isl=1024,
-        osl=1024,
+        request=TargetAnalysisRequest(
+            model_path="MiniMax-M2.5", compare_against_gpu="b300", framework="vllm", precision="fp8", isl=1024, osl=1024
+        ),
     )
     assert summary.status == "ok"
     assert not session_paths.competitor_target_json(tmp_path).exists()
@@ -438,12 +429,9 @@ def test_analyze_no_inferencex_data(tmp_path, monkeypatch):
 
     summary = analyze(
         session_dir=tmp_path,
-        model_path="MiniMax-M2.5",
-        compare_against_gpu="b300",
-        framework="vllm",
-        precision="fp8",
-        isl=1024,
-        osl=1024,
+        request=TargetAnalysisRequest(
+            model_path="MiniMax-M2.5", compare_against_gpu="b300", framework="vllm", precision="fp8", isl=1024, osl=1024
+        ),
     )
     assert summary.status == "no_match"
     assert summary.reason == "no_inferencex_data"
@@ -489,16 +477,14 @@ def _agentic_row(benchmark_id, *, tput=2643.69293, conc=1, **overrides):
 def _analyze_agentx(tmp_path, **kwargs):
     from hyperloom.inference_optimizer.baseline_comparison import analyze
 
-    return analyze(
-        **{
-            "session_dir": tmp_path,
-            "model_path": "GLM-5.2",
-            "compare_against_gpu": "b300",
-            "precision": "fp4",
-            "benchmark_mode": "agentx",
-            **kwargs,
-        }
-    )
+    request = {
+        "model_path": "GLM-5.2",
+        "compare_against_gpu": "b300",
+        "precision": "fp4",
+        "benchmark_mode": "agentx",
+        **kwargs,
+    }
+    return analyze(session_dir=tmp_path, request=TargetAnalysisRequest(**request))
 
 
 def test_agentx_analysis_joins_p90_before_selecting_one_real_reference(tmp_path, monkeypatch):
@@ -664,7 +650,8 @@ def test_synthetic_analysis_never_fetches_agentic_p90(tmp_path, monkeypatch):
         ta, "fetch_agentic_interactivity", lambda ids: pytest.fail("synthetic must not fetch P90"), raising=False
     )
     summary = ta.analyze(
-        session_dir=tmp_path, model_path="MiniMax-M2.5", compare_against_gpu="b300", isl=1024, osl=1024
+        session_dir=tmp_path,
+        request=TargetAnalysisRequest(model_path="MiniMax-M2.5", compare_against_gpu="b300", isl=1024, osl=1024),
     )
     assert summary.best.tput_per_gpu == 6624.1
     assert summary.best.e2e_norm_intvty_p90 is None
