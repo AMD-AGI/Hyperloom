@@ -10,6 +10,7 @@ import logging
 import math
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -214,18 +215,10 @@ def make_supervisor_fn(
             # re-reading it. Leaving it out ran the supervisor on the registry
             # default no matter what ``CODEX_MODEL``/``CLAUDE_MODEL`` said.
             model=resolve_agent_model(backend),
-            executable="",
-            timeout_sec=config.agent_timeout_sec,
-            reasoning_effort=config.agent_reasoning_effort,
-            sandbox_mode=config.agent_sandbox_mode,
-            precheck=config.agent_precheck,
-            fallback_provider=config.agent_fallback_provider,
-            options={},
+            settings=replace(config.agent_runtime_settings(), executable="", options={}),
         )
     supervisor_model = str(runtime.options.get("supervisor_model") or runtime.model)
     if supervisor_model != runtime.model:
-        from dataclasses import replace
-
         runtime = replace(runtime, model=supervisor_model)
     timeout_sec = int(runtime.options.get("supervisor_timeout_sec") or runtime.timeout_sec)
     selected_backend = None
