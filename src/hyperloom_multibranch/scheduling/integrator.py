@@ -153,6 +153,12 @@ FOUNDATION_FIX_VERDICTS = frozenset({Verdict.IMPROVED, Verdict.FLAT, Verdict.REG
 GAIN_ONLY_REFUSALS = frozenset({GAIN_BELOW_THRESHOLD, GAIN_NOT_CONFIRMED, P50_BELOW_THRESHOLD})
 
 
+def defects_beyond_gain(judgement: Judgement) -> tuple[str, ...]:
+    """The reasons ``judgement`` was refused for other than a missing gain, in the order the rule gate gave them."""
+
+    return tuple(reason for reason in judgement.refused_by if reason not in GAIN_ONLY_REFUSALS)
+
+
 def not_stackable_reason(judgement: Judgement, *, foundation_fix: bool) -> str:
     """Why a merge test judged ``judgement`` keeps its candidate off the integration branch; empty when it may be
     merged once the regression set passes.
@@ -162,7 +168,7 @@ def not_stackable_reason(judgement: Judgement, *, foundation_fix: bool) -> str:
     """
 
     if foundation_fix and judgement.accuracy_ok and judgement.verdict in FOUNDATION_FIX_VERDICTS:
-        defects = [reason for reason in judgement.refused_by if reason not in GAIN_ONLY_REFUSALS]
+        defects = defects_beyond_gain(judgement)
         if not defects:
             return ""
         return f"a foundation fix, {judgement.verdict.value} on the integration head, refused by {', '.join(defects)}"
@@ -376,5 +382,6 @@ __all__ = [
     "LlmPatchResolver",
     "MergeRecords",
     "MergeReport",
+    "defects_beyond_gain",
     "not_stackable_reason",
 ]

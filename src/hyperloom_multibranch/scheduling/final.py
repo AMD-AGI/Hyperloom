@@ -30,7 +30,7 @@ from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress
 from hyperloom_multibranch.contracts.toolbox import RequestRejected, TestWithdrawn
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.integrator import GAIN_ONLY_REFUSALS
+from hyperloom_multibranch.scheduling.integrator import defects_beyond_gain
 from hyperloom_multibranch.scheduling.requests import (
     NO_DELTA,
     SessionChecks,
@@ -262,8 +262,7 @@ class FinalSelector:
 
     async def _judge_reproduction(self, request_id: str) -> _Reproduction:
         judgement = await self._gate.compare(request_id)
-        defects = [reason for reason in judgement.refused_by if reason not in GAIN_ONLY_REFUSALS]
-        reproduced = judgement.verdict is not Verdict.REGRESSED and not defects
+        reproduced = judgement.verdict is not Verdict.REGRESSED and not defects_beyond_gain(judgement)
         return _Reproduction(reproduced, await self._gate.accuracy_passes(request_id))
 
 
