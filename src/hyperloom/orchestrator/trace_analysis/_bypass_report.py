@@ -448,15 +448,13 @@ def build_candidates(
         _roofline_shape = (
             shape_entries[0]["shape"] if shape_entries and shape_provenance in _DISPATCHABLE_SHAPE_PROVENANCE else ""
         )
-        rl = compute_roofline(
-            KernelAggregate(
-                category=kc.category,
-                shape_str=_roofline_shape,
-                gpu_time_us=float(cand["duration_us"] or 0.0),
-                call_count=int(cand["call_count"] or 1),
-            ),
-            gpu_type=target_platform,
+        aggregate = KernelAggregate(
+            category=kc.category,
+            shape_str=_roofline_shape,
+            gpu_time_us=float(cand["duration_us"] or 0.0),
+            call_count=int(cand["call_count"] or 1),
         )
+        rl = compute_roofline(aggregate, gpu_type=target_platform)
         if rl:
             cand.update(rl)
         # A reusable, patchable kernel with a resolved source but only a geometry shape (launch_grid / tile_name) is
@@ -783,7 +781,6 @@ def render_analysis_md(
 ) -> str:
     """Render the human/downstream ``analysis.md`` report (bypass route)."""
     framework = context.framework
-    target_platform = context.target_platform
     throughput_unit = context.throughput_unit
     timeline = analyze_out.get("timeline") or {}
     attribution = analyze_out.get("attribution") or {}
@@ -831,6 +828,9 @@ def render_analysis_md(
     # One P-item per routable candidate (ranked by optimization ROI). %E2E and launcher Kernel Path are not modelled
     # by bypass.
     routable = [c for c in hot if c.get("reusable_native_kernel")]
+    # Auto-dispatchable == resolved source AND a dispatch-grade operand shape; a geometry-only (launch_grid/tile_name)
+    # shape does not satisfy the gate.
+    dispatchable = [c for c in routable if c.get("source_file") and c.get("shape_dispatchable")]
     p_items = []
     for i, c in enumerate(routable, start=1):
         shapes = c.get("input_shapes") or c.get("shapes") or []
@@ -858,13 +858,14 @@ def render_analysis_md(
         )
 
     provenance = (
-        f"framework={framework or 'unknown'}, platform={target_platform or 'unknown'}, "
+        f"framework={framework or 'unknown'}, platform={context.target_platform or 'unknown'}, "
         f"throughput_unit={throughput_unit}, aggregation_scope={scope}. "
         f"Per-kernel roofline (bound/AI/efficiency) is computed analytically from captured "
         f"operand shapes + measured kernel time (roofline_source=analytical)."
     )
 
-    extra = _render_bypass_extra_sections(candidates, analyze_out, context)
+    views = _ReportViews(hot, rollup, attribution, scope, routable, dispatchable)
+    extra = _render_bypass_extra_sections(candidates, analyze_out, context, views)
 
     return render_report(
         AnalysisReport(
@@ -881,25 +882,25 @@ def render_analysis_md(
     )
 
 
+@dataclass(frozen=True)
+class _ReportViews:
+    """The slices of one analysis the bypass report renders: hot, category rollup, attribution, scope and routing."""
+
+    hot: list[dict[str, Any]]
+    rollup: list[dict[str, Any]]
+    attribution: dict[str, Any]
+    scope: str
+    routable: list[dict[str, Any]]
+    dispatchable: list[dict[str, Any]]
+
+
 def _render_bypass_extra_sections(
-    candidates: dict[str, Any],
-    analyze_out: dict[str, Any],
-    context: BypassReportContext,
+    candidates: dict[str, Any], analyze_out: dict[str, Any], context: BypassReportContext, views: _ReportViews
 ) -> str:
     """Render the bypass-only richer sections appended after the shared spine."""
-    framework = context.framework
-    target_platform = context.target_platform
-    throughput_unit = context.throughput_unit
-    metrics_csv_path = context.metrics_csv_path
-    summary_csv_path = context.summary_csv_path
-    hot = candidates.get("hot_kernels") or []
-    rollup = _category_rollup(analyze_out)
-    attribution = analyze_out.get("attribution") or {}
-    scope = candidates.get("aggregation_scope", "full_trace")
-    routable = [c for c in hot if c.get("reusable_native_kernel")]
-    # Auto-dispatchable == resolved source AND a dispatch-grade operand shape; a geometry-only (launch_grid/tile_name)
-    # shape does not satisfy the gate.
-    dispatchable = [c for c in routable if c.get("source_file") and c.get("shape_dispatchable")]
+    metrics_csv_path, summary_csv_path = context.metrics_csv_path, context.summary_csv_path
+    hot, rollup, attribution, scope = views.hot, views.rollup, views.attribution, views.scope
+    routable, dispatchable = views.routable, views.dispatchable
     L: list[str] = []
 
     # Top Operations (category rollup) + analytical bound distribution.
@@ -1068,9 +1069,9 @@ def _render_bypass_extra_sections(
     # Appendix.
     L.append("## Appendix")
     L.append("")
-    L.append(f"- Framework: {framework or 'unknown'}")
-    L.append(f"- Platform: {target_platform or 'unknown'}")
-    L.append(f"- Throughput unit: {throughput_unit}")
+    L.append(f"- Framework: {context.framework or 'unknown'}")
+    L.append(f"- Platform: {context.target_platform or 'unknown'}")
+    L.append(f"- Throughput unit: {context.throughput_unit}")
     L.append(f"- Aggregation scope: {scope}")
     L.append(f"- Events scanned: {analyze_out.get('event_total', 0)}")
     L.append(
