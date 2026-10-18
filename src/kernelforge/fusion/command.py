@@ -25,7 +25,7 @@ from .campaign import LOOP_CAMPAIGN_STATE, _safe_artifact_id, fused_module_path,
 from .anchor import AnchorReport, AnchorResolutionError, KernelAnchor, discover_anchored_recipes, resolve_anchor
 from .diagnose import diagnose_trace
 from .discover import discover_recipes, registered_agent_llm_fn
-from .emit import _git_tracks, export_artifacts, restore_exported_changes
+from .emit import FusionFiles, _git_tracks, export_artifacts, restore_exported_changes
 from .gpu_arch import canon_arch, detect_arch
 from .llm_failure import LlmUnavailableError
 from .locate import build_recipes, resolve_framework_source_file
@@ -489,11 +489,9 @@ def _settle_single_patch_workspace(
     if repo_root and exported_ok:
         artifacts = export_artifacts(
             repo_root,
-            top_recipe.source_file,
-            out,
+            FusionFiles(top_recipe.source_file, extra_files=top_recipe.extra_files, repo_scope=repo_scope),
+            out / "fusion.patch",
             pristine_dir=pristine_dir,
-            extra_files=top_recipe.extra_files,
-            repo_scope=repo_scope,
         )
     # The exported patch is taken back out of the framework.
     if repo_root and artifacts and artifacts.patch:
@@ -1401,13 +1399,14 @@ def _export_recipe_sibling(recipe, *, repo_root: str, out: Path, pristine: str, 
         return None
     arts = export_artifacts(
         repo_root,
-        recipe.source_file,
-        out,
+        FusionFiles(
+            recipe.source_file,
+            extra_files=recipe.extra_files,
+            fused_module=fused_module_path(recipe),
+            repo_scope=repo_scope,
+        ),
+        out / f"fusion_{_safe_artifact_id(recipe.pattern_id)}.patch",
         pristine_dir=pristine,
-        patch_name=f"fusion_{_safe_artifact_id(recipe.pattern_id)}.patch",
-        fused_module=fused_module_path(recipe),
-        extra_files=recipe.extra_files,
-        repo_scope=repo_scope,
     )
     if not (arts and arts.patch):
         log.warning("kept recipe %s produced no patch on export", recipe.pattern_id)

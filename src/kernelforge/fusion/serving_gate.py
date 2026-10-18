@@ -13,7 +13,7 @@ from pathlib import Path
 from hyperloom.common.io import WriteOptions, atomic_write_json
 
 from .campaign import _safe_artifact_id
-from .emit import export_artifacts
+from .emit import FusionFiles, export_artifacts
 from .validate import KERNEL_KEEP_CHECKPOINT, fused_symbol_invocation_evidence, serving_smoke_verdict
 
 log = logging.getLogger("forge_fusion")
@@ -187,8 +187,8 @@ def _export_salvage_patch(
     _clear_kernel_keep_checkpoint(out)
     artifacts = export_artifacts(
         repo_root,
-        source_file,
-        out,
+        FusionFiles(source_file),
+        out / "fusion.patch",
         pristine_dir=pristine_dir or None,
     )
     if not artifacts.patch:

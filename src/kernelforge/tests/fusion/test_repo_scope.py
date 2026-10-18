@@ -19,7 +19,7 @@ from pathlib import Path
 from kernelforge.fusion.anchor import AnchorReport, Slot, build_anchored_discovery_prompt
 from kernelforge.fusion.campaign import build_campaign_program_md, build_forge_loop_command
 from kernelforge.fusion.discover import parse_discovered_recipes, resolve_repo_file
-from kernelforge.fusion.emit import export_artifacts
+from kernelforge.fusion.emit import FusionFiles, export_artifacts
 from kernelforge.fusion.models import Recipe
 from kernelforge.fusion.shadow_repo import ensure_git_workspace
 from kernelforge.fusion.validate import fused_symbol_invocation_evidence
@@ -339,10 +339,9 @@ class TestExport:
 
         artifacts = export_artifacts(
             str(root),
-            str(runtime_file),
-            tmp_path / "out",
+            FusionFiles(str(runtime_file), extra_files=[str(model_file)]),
+            tmp_path / "out" / "fusion.patch",
             pristine_dir=pristine,
-            extra_files=[str(model_file)],
         )
 
         assert artifacts.patch
@@ -360,10 +359,7 @@ class TestExport:
         model_file.write_text(model_file.read_text(encoding="utf-8") + "# wired\n", encoding="utf-8")
 
         artifacts = export_artifacts(
-            str(root),
-            str(runtime_file),
-            tmp_path / "out",
-            repo_scope=True,
+            str(root), FusionFiles(str(runtime_file), repo_scope=True), tmp_path / "out" / "fusion.patch"
         )
 
         patch = Path(artifacts.patch).read_text(encoding="utf-8")
@@ -377,7 +373,7 @@ class TestExport:
         runtime_file.write_text(runtime_file.read_text(encoding="utf-8") + "# fused\n", encoding="utf-8")
         model_file.write_text(model_file.read_text(encoding="utf-8") + "# unrelated\n", encoding="utf-8")
 
-        artifacts = export_artifacts(str(root), str(runtime_file), tmp_path / "out")
+        artifacts = export_artifacts(str(root), FusionFiles(str(runtime_file)), tmp_path / "out" / "fusion.patch")
 
         patch = Path(artifacts.patch).read_text(encoding="utf-8")
         assert "kernels/ops/runtime.py" in patch

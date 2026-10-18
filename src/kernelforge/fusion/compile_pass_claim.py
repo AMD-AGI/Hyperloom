@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from .emit import export_artifacts
+from .emit import FusionFiles, export_artifacts
 from .models import CompilePassOutcome, FusionArtifacts, Recipe
 from .validate import serving_smoke
 from .vllm_passes import TargetRuntime, enable_pass_in_source, resolve_target_runtime, verify_pass_enabled
@@ -60,11 +60,10 @@ def _run_single_compile_pass_claim(
         if repo_root and outcome.kept:
             artifacts = export_artifacts(
                 repo_root,
-                claim.source_file,
-                out,
+                FusionFiles(claim.source_file),
+                out / patch_name,
                 pristine_dir=pristine_dir,
                 snapshot_diff_only=True,
-                patch_name=patch_name,
             )
     outcome.reverted = True  # the context manager just did it
     return outcome, artifacts

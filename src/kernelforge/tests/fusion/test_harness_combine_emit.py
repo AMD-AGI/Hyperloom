@@ -10,7 +10,7 @@ import subprocess
 
 from kernelforge.fusion.author import build_author_prompt, build_multi_author_prompt
 from kernelforge.fusion.command import _combined_recipe, _safe_artifact_id
-from kernelforge.fusion.emit import export_artifacts, restore_exported_changes
+from kernelforge.fusion.emit import FusionFiles, export_artifacts, restore_exported_changes
 from kernelforge.fusion.models import Recipe
 
 
@@ -162,7 +162,7 @@ class TestScopedEmit:
         (repo / "unrelated.py").write_text("# pre-existing\n# dirty\n", encoding="utf-8")
 
         out = tmp_path / "out"
-        arts = export_artifacts(str(repo), str(mdir / "lfm2.py"), out)
+        arts = export_artifacts(str(repo), FusionFiles(str(mdir / "lfm2.py")), out / "fusion.patch")
         paths = {c["path"] for c in arts.changes}
         assert any(p.endswith("models/lfm2.py") for p in paths)
         assert any(p.endswith("models/lfm2_fused.py") for p in paths)

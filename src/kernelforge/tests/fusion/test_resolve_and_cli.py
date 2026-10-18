@@ -36,7 +36,7 @@ from kernelforge.fusion.agent_selection import _create_agent_backend, _resolve_a
 from kernelforge.fusion.command import _framework_repo_root, _package_root
 from kernelforge.fusion.source_snapshot import _reset_fusion_source, _snapshot_fusion_source
 from kernelforge.fusion.command import run as main
-from kernelforge.fusion.emit import export_artifacts
+from kernelforge.fusion.emit import FusionFiles, export_artifacts
 from kernelforge.fusion.llm_failure import AUTH, LlmUnavailableError
 from kernelforge.fusion.locate import resolve_framework_source_file
 
@@ -1160,7 +1160,7 @@ class TestNonGitRepoRoot:
             "import os\nFUSED = os.environ.get('QWEN3_FUSED', '0') == '1'\ndef forward(x):\n    return x\n",
             encoding="utf-8",
         )
-        arts = export_artifacts(str(site), str(src), out, pristine_dir=pdir)
+        arts = export_artifacts(str(site), FusionFiles(str(src)), out / "fusion.patch", pristine_dir=pdir)
         assert arts.patch is not None, "venv-in-git export must still produce a patch"
         rel = "vllm/model_executor/models/qwen3.py"
         patch_text = (out / "fusion.patch").read_text()
