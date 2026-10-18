@@ -94,13 +94,12 @@ def git(
     *args: str,
     cwd: str | Path | None = None,
     check: bool = True,
-    text: bool = True,
     timeout: float | None = DEFAULT_TIMEOUT_SEC,
     input: str | None = None,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     """Run one git command to completion, capturing both streams as text."""
-    process = _spawn(args, cwd, env, stdin=input is not None, text=text)
+    process = _spawn(args, cwd, env, stdin=input is not None, text=True)
     return _communicate(process, input, timeout, check)
 
 
