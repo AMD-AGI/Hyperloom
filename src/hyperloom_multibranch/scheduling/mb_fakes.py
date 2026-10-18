@@ -86,34 +86,6 @@ class MbFakeRegressionCheck(Protocol):
     ) -> MbFakeRegressionOutcome: ...
 
 
-@dataclass(frozen=True)
-class MbFakeSpecialistState:
-    """What the specialist runtime knows of a branch's specialist: whether it ``running``, how often it crashed, how
-    often it was restarted after a lost heartbeat (``lost``), whether the runtime ``gave_up`` restarting it after
-    repeated crashes, and whether it was stopped because judging the branch failed (``judge_failed``).
-
-    Stands in for the ``SpecialistStatus`` proposed on board #64 (request K); replaced by it, together with
-    :class:`MbFakeSpecialistStatus`, once the specialist lifecycle answers the query.
-    """
-
-    running: bool
-    crashes: int
-    lost: int
-    gave_up: bool
-    judge_failed: bool
-
-
-class MbFakeSpecialistStatus(Protocol):
-    """The state of ``branch``'s specialist; ``None`` when it is not known.
-
-    The scheduler asks it for every live specialist branch before each judge call and shows the judge what it
-    answers. Stands in for the status query on ``SpecialistLifecycle`` proposed on board #64 (request K); replaced by
-    that query, and the stand-ins implementing this, once it lands.
-    """
-
-    async def status(self, branch: str) -> MbFakeSpecialistState | None: ...
-
-
 def mb_fake_learning_recall(log: RetrievalLog) -> LearningRecall:
     """The specialists' learnings recall on no Experience KB: this session's learnings only, logged to ``log``.
 
@@ -150,8 +122,6 @@ __all__ = [
     "MB_FAKE_EXPERIENCE_KB",
     "MbFakeRegressionCheck",
     "MbFakeRegressionOutcome",
-    "MbFakeSpecialistState",
-    "MbFakeSpecialistStatus",
     "MbFakeSplitLanding",
     "mb_fake_close_knowledge",
     "mb_fake_learning_recall",

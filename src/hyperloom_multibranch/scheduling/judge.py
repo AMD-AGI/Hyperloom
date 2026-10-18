@@ -23,13 +23,13 @@ from pathlib import Path
 
 from hyperloom.common.io import append_jsonl
 from hyperloom.common.jsonio import extract_last_json_with_key
+from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, SessionEvent
 from hyperloom_multibranch.scheduling.forks import PendingBranch
 from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed, CompletionUsage
-from hyperloom_multibranch.scheduling.mb_fakes import MbFakeSpecialistState
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, RosterCaps
 from hyperloom_multibranch.scheduling.similarity import SimilarBranch
 from hyperloom_multibranch.scheduling.widening import WideningSignals
@@ -105,11 +105,11 @@ scheduler_llm_tokens are the tokens your own calls and the patch resolver's have
 not in it.
 A specialist branch's specialist, shown only when the specialist runtime reports it, says whether its specialist is
 running, how many times it crashed (crashes) and how many times it was restarted after its heartbeat was lost (lost),
-whether the runtime gave up restarting it after repeated crashes (gave_up), and whether it was stopped because judging
-its tests failed (judge_failed). A branch whose specialist gave up or whose judging failed makes no more progress
-but holds its slot until you stop it: stop it, and open a branch in its place if one would still pay off. A
-specialist whose heartbeat is lost again and again is restarted every time and never given up on, each loss costing
-minutes: weigh its lost count against its progress, and stop it when it keeps losing its heartbeat without gaining.
+whether the runtime gave up restarting it after repeated crashes or after several sessions in a row lost their
+heartbeat (gave_up), and whether it was stopped because judging its tests failed (judge_failed). A branch whose
+specialist gave up or whose judging failed makes no more progress but holds its slot until you stop it: stop it, and
+open a branch in its place if one would still pay off. Each lost heartbeat costs minutes: weigh a specialist's lost
+count against its progress, and stop it when it keeps losing its heartbeat without gaining.
 Stop the session only when no branch is expected to gain anything worth the remaining time.
 Answer with exactly ONE JSON object and nothing after it."""
 
@@ -168,7 +168,7 @@ class JudgeView:
     explore_gpu_hours: float | None
     prelude_gpu_hours_upper_bound: float
     scheduler_llm: CompletionUsage
-    specialists: Mapping[str, MbFakeSpecialistState]
+    specialists: Mapping[str, SpecialistStatus]
 
 
 @dataclass(frozen=True)

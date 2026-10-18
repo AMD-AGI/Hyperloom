@@ -72,12 +72,10 @@ from hyperloom_multibranch.scheduling.stops import (
     TOOLBOX_CLOSE_SECONDS,
     SessionStopReason,
 )
-from hyperloom_multibranch.scheduling.mb_fakes import MbFakeSpecialistState
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     MAIN_POINT,
     SPECIALIST_POLL_SECONDS,
     FakeRegressionCheck,
-    FakeSpecialistStatus,
     HeldGitRepo,
     MbFakeHeldRegistry,
     OneChampionKB,
@@ -98,7 +96,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
 from hyperloom_multibranch.scheduling.tests.child_sessions import child_with_patch
 from hyperloom_multibranch.toolbox.tools.base import JobStatus
 from hyperloom_multibranch.specialist.prompts import prompt_versions
-from hyperloom_multibranch.specialist.runtime import MAX_RESTARTS
+from hyperloom_multibranch.specialist.runtime import MAX_LOSS_RESTARTS, SessionCrashed
 
 START = 1_700_000_000.0
 CONC = 16
@@ -227,7 +225,6 @@ class Stage:
     setup: PeerSetup = field(init=False)
     splits: SplittingDesk = field(init=False)
     regression: FakeRegressionCheck = field(default_factory=FakeRegressionCheck)
-    specialist_status: FakeSpecialistStatus = field(default_factory=FakeSpecialistStatus)
     briefs: SessionBriefs = field(init=False)
     forks: list[ForkAdmission] = field(default_factory=list)
     watchers: list[asyncio.Future[None]] = field(default_factory=list)
@@ -263,8 +260,7 @@ class Stage:
         mcp = McpServer(McpServerConfig(host_token="t" * MIN_TOKEN_LENGTH), campaign=setup.layout.session_id)
         gate = session_gate(self.handle(Role.GATE), toolbox, rule)
         digest = toolbox.config.image_digest
-        landing, regression, status = self.splits, self.regression, self.specialist_status
-        return Peers(runtime, toolbox, repo, gate, mcp, self.briefs, digest, landing, regression, status)
+        return Peers(runtime, toolbox, repo, gate, mcp, self.briefs, digest, self.splits, self.regression)
 
     async def root(self) -> str:
         return (await self.handle(Role.OBSERVER).baseline()).root_commit
@@ -879,33 +875,39 @@ async def test_a_judge_stop_on_a_full_roster_frees_a_slot_refilled_at_once_from_
     assert not [row for row in _decisions(stage) if row["kind"] == "open" and not row["branch"]]
 
 
-async def test_specialists_that_gave_up_failed_judging_or_keep_losing_their_heartbeat_are_shown_to_the_judge(
-    tmp_path: Path,
-) -> None:
+async def test_the_judge_sees_each_live_specialist_as_the_runtime_reports_it(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
-    gave_up = MbFakeSpecialistState(False, MAX_RESTARTS + 1, 0, gave_up=True, judge_failed=False)
-    judge_failed = MbFakeSpecialistState(False, 0, 0, gave_up=False, judge_failed=True)
-    hanging = MbFakeSpecialistState(True, 0, 5, gave_up=False, judge_failed=False)
-    stage.specialist_status = FakeSpecialistStatus({"b01": hanging, "b02": gave_up, "b03": judge_failed})
+    _script(stage, forks=1)
+    stage.steps = {**stage.steps, "b02": _loses_its_heartbeat}
+    stage.judge = ScriptedCompletion([OPENING, _refill_steer(1)])
 
-    refill = await _refilled_on_a_full_roster(stage, 1)
+    outcome = await stage.run()
 
-    assert refill == "b04"
+    assert (outcome.stop_reason, outcome.error) == (SessionStopReason.TIME_EXHAUSTED, "")
     [_, steering, *later] = [
         _judged_rows(json.loads(line)["prompt"]) for line in stage.layout.judge.read_text().splitlines()
     ]
+    losses = MAX_LOSS_RESTARTS + 1
     assert steering["b02"]["specialist"] == {
         "running": False,
-        "crashes": MAX_RESTARTS + 1,
-        "lost": 0,
+        "crashes": losses,
+        "lost": losses,
         "gave_up": True,
         "judge_failed": False,
     }
-    assert steering["b03"]["specialist"]["judge_failed"] is True
-    assert steering["b01"]["specialist"]["lost"] == 5
+    assert steering["b01"]["specialist"] == {
+        "running": True,
+        "crashes": 0,
+        "lost": 0,
+        "gave_up": False,
+        "judge_failed": False,
+    }
     assert "specialist" not in steering[INTEGRATION_BRANCH]
-    assert INTEGRATION_BRANCH not in stage.specialist_status.asked
-    assert later and all("specialist" not in rows["b02"] for rows in later)
+    assert later and all("specialist" not in rows.get("b02", {}) for rows in later)
+
+
+async def _loses_its_heartbeat(branch: str) -> None:
+    raise SessionCrashed(f"{branch} lost its heartbeat", lost=True)
 
 
 def _judged_rows(prompt: str) -> dict[str, dict[str, Any]]:

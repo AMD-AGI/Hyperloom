@@ -8,7 +8,7 @@ specialist lifecycle is the specialist runtime itself on scripted sessions (:cla
 :func:`specialist_runtime`). The toolbox is the toolbox module's
 :class:`~hyperloom_multibranch.toolbox.fake.FakeToolbox`, noise-free and noting what the scheduler asked of it; what a
 test measures follows from the recipe it measures (:func:`recipe_effect`). The regression set is scripted per base
-commit (:class:`FakeRegressionCheck`), and the specialists' states per branch (:class:`FakeSpecialistStatus`). The
+commit (:class:`FakeRegressionCheck`). The
 experiment repository and the rule gate are their owners' own; :func:`session_gate` is the gate's session service as
 the session's peers build it.
 """
@@ -68,7 +68,7 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.local_peers import GATE_WRITER
 from hyperloom_multibranch.scheduling.llm import CompletionReply, CompletionUsage
-from hyperloom_multibranch.scheduling.mb_fakes import MbFakeRegressionOutcome, MbFakeSpecialistState
+from hyperloom_multibranch.scheduling.mb_fakes import MbFakeRegressionOutcome
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
 from hyperloom_multibranch.specialist.judging import Judging
 from hyperloom_multibranch.specialist.runtime import RuntimePacing, SessionFactory, SessionStart, SpecialistRuntime
@@ -667,19 +667,6 @@ class FakeRegressionCheck:
         return MbFakeRegressionOutcome(reason is None, reason or "")
 
 
-@dataclass
-class FakeSpecialistStatus:
-    """The specialists' states for the tests: ``states`` names a branch's scripted state, any other branch's is
-    unknown; ``asked`` notes every branch it was asked about."""
-
-    states: Mapping[str, MbFakeSpecialistState] = field(default_factory=dict)
-    asked: list[str] = field(default_factory=list)
-
-    async def status(self, branch: str) -> MbFakeSpecialistState | None:
-        self.asked.append(branch)
-        return self.states.get(branch)
-
-
 def judged(verdict: Verdict, gain_pct: float, request_id: str, value: float) -> Judgement:
     return Judgement(verdict, gain_pct, 1.0, (request_id,), {GRADED_OUTPUT: value}, accuracy_ok=True)
 
@@ -751,7 +738,6 @@ __all__ = [
     "Curves",
     "DownToolbox",
     "FakeRegressionCheck",
-    "FakeSpecialistStatus",
     "HeldGitRepo",
     "MbFakeChildRegistry",
     "MbFakeHeldRegistry",

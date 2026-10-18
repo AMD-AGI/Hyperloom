@@ -24,7 +24,6 @@ from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.mb_fakes import (
     MbFakeRegressionCheck,
-    MbFakeSpecialistStatus,
     MbFakeSplitLanding,
 )
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
@@ -43,8 +42,7 @@ class Peers:
     before PRELUDE has read the warm-start leads, which the session binds to them once it has. ``base_image_digest``
     is the image the toolbox measures on, which every recipe must carry: PRELUDE roots the session on it.
     ``split_landing`` lands each fork the fork desk admits before the scheduler starts it. ``regression`` runs the
-    regression set the integrator asks for before a merge and FINAL for every candidate. ``specialist_status`` says
-    whether a branch's specialist runs, crashed, lost its heartbeat, was given up on or had its judging fail.
+    regression set the integrator asks for before a merge and FINAL for every candidate.
     """
 
     lifecycle: SpecialistLifecycle
@@ -56,7 +54,6 @@ class Peers:
     base_image_digest: str
     split_landing: MbFakeSplitLanding
     regression: MbFakeRegressionCheck
-    specialist_status: MbFakeSpecialistStatus
 
 
 @dataclass(frozen=True)

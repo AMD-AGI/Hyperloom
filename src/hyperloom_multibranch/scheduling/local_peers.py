@@ -50,7 +50,6 @@ from hyperloom_multibranch.rulegate.service import GateService
 from hyperloom_multibranch.scheduling.mb_fakes import (
     MB_FAKE_BASE_IMAGE_DIGEST,
     MbFakeRegressionOutcome,
-    MbFakeSpecialistState,
     mb_fake_learning_recall,
 )
 from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup, PeersUnavailable
@@ -105,20 +104,6 @@ class MbFakePassingRegressionCheck:
     ) -> MbFakeRegressionOutcome:
         del base_commit, candidate_delta, sources
         return MbFakeRegressionOutcome(passed=True)
-
-
-class MbFakeUnknownSpecialistStatus:
-    """The session's :class:`~hyperloom_multibranch.scheduling.mb_fakes.MbFakeSpecialistStatus`: no branch's
-    specialist state is known, so the judge is shown none, as in MB1.
-
-    Stands in for the specialist lifecycle's status query (board #64, request K); replaced by it once it lands. Until
-    then the judge sees a specialist that gave up, whose judging failed or that keeps losing its heartbeat only as a
-    branch that makes no progress.
-    """
-
-    async def status(self, branch: str) -> MbFakeSpecialistState | None:
-        del branch
-        return None
 
 
 @dataclass(frozen=True)
@@ -259,8 +244,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     mcp.start()
     gate_service = GateService(gate_notebook, toolbox, rule, toolbox)
     landing, regression = MbFakeNoSplitLanding(), MbFakePassingRegressionCheck()
-    status = MbFakeUnknownSpecialistStatus()
-    return Peers(runtime, toolbox, repo, gate_service, mcp, briefs, image.digest, landing, regression, status)
+    return Peers(runtime, toolbox, repo, gate_service, mcp, briefs, image.digest, landing, regression)
 
 
 def machine_cards() -> tuple[int, ...]:
@@ -415,7 +399,6 @@ __all__ = [
     "MeasurementHost",
     "MbFakeNoSplitLanding",
     "MbFakePassingRegressionCheck",
-    "MbFakeUnknownSpecialistStatus",
     "SessionWiring",
     "SpecialistSessions",
     "load_peers",

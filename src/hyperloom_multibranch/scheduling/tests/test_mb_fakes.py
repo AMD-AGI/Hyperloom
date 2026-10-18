@@ -22,7 +22,6 @@ from hyperloom_multibranch.scheduling.mb_fakes import (
 from hyperloom_multibranch.scheduling.local_peers import (
     MbFakeNoSplitLanding,
     MbFakePassingRegressionCheck,
-    MbFakeUnknownSpecialistStatus,
 )
 
 
@@ -30,10 +29,6 @@ async def test_every_merge_and_final_candidate_passes_the_regression_set() -> No
     outcome = await MbFakePassingRegressionCheck().check("any-commit", RecipeDelta(), sources=("c2",))
 
     assert (outcome.passed, outcome.reason) == (True, "")
-
-
-async def test_no_specialist_state_is_known() -> None:
-    assert await MbFakeUnknownSpecialistStatus().status("b01") is None
 
 
 async def test_no_fork_is_landed_and_a_void_tells_the_gate_nothing() -> None:

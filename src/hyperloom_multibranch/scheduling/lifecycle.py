@@ -183,7 +183,7 @@ class Session:
             similarity,
             events,
             llm_usage,
-            peers.specialist_status,
+            peers.lifecycle,
         )
         self._explorer = Explorer(context, self._branches, integrator, steering, peers.split_landing)
         self._selector = FinalSelector(checks, settings.workload, clock)

@@ -35,6 +35,7 @@ import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
+from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle, SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress
 from hyperloom_multibranch.notebook.rsi.frontier import FrontierScoring
@@ -48,7 +49,7 @@ from hyperloom_multibranch.scheduling.events import SessionEvents, behind_integr
 from hyperloom_multibranch.scheduling.integrator import Integrator
 from hyperloom_multibranch.scheduling.judge import Judge, JudgeDecision, JudgeView
 from hyperloom_multibranch.scheduling.llm import CompletionMeter
-from hyperloom_multibranch.scheduling.mb_fakes import MbFakeSpecialistState, MbFakeSpecialistStatus, MbFakeSplitLanding
+from hyperloom_multibranch.scheduling.mb_fakes import MbFakeSplitLanding
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, BranchOrigin, BranchStop, StopCause
 from hyperloom_multibranch.scheduling.settle import failure_text, settled
 from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
@@ -84,7 +85,7 @@ class Steering:
     the archived sessions that progress holds, the dashboard rebuilt once the opening batch is open and after every
     later judge call, the signals of whether a branch opened now would still pay off, which running branches made
     much the same change, the events that have the judge asked at once, the meter of the judge's and the patch
-    resolver's LLM tokens, and what is known of each running branch's specialist."""
+    resolver's LLM tokens, and the specialist lifecycle, which reports each running branch's specialist."""
 
     judge: Judge
     interval_seconds: float
@@ -94,7 +95,7 @@ class Steering:
     similarity: BranchSimilarity
     events: SessionEvents
     llm_usage: CompletionMeter
-    specialists: MbFakeSpecialistStatus
+    specialists: SpecialistLifecycle
 
 
 def spent_gpu_seconds(progress: Iterable[BranchProgress]) -> float:
@@ -284,11 +285,11 @@ class Explorer:
             self._decisions.record(Decision(DecisionKind.JUDGE_FAILED, "kept the status quo"))
         return decision
 
-    async def _specialist_states(self) -> dict[str, MbFakeSpecialistState]:
-        """What is known of the specialist of every live specialist branch; a branch whose state is unknown is left
-        out."""
+    async def _specialist_states(self) -> dict[str, SpecialistStatus]:
+        """What the specialist lifecycle reports of the specialist of every live specialist branch; a branch it does
+        not run is left out."""
 
-        states: dict[str, MbFakeSpecialistState] = {}
+        states: dict[str, SpecialistStatus] = {}
         for entry in self._roster.entries():
             if entry.kind is BranchKind.SPECIALIST and entry.stop is None:
                 state = await self._specialists.status(entry.branch)

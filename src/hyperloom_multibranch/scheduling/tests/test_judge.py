@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, FrontierScore
 from hyperloom_multibranch.contracts.notebook.vocab import FrontierBasis
@@ -31,7 +32,6 @@ from hyperloom_multibranch.scheduling.judge import (
 )
 from hyperloom_multibranch.scheduling.forks import PendingBranch
 from hyperloom_multibranch.scheduling.llm import CompletionFailed, CompletionReply, CompletionUsage
-from hyperloom_multibranch.scheduling.mb_fakes import MbFakeSpecialistState
 from hyperloom_multibranch.scheduling.roster import (
     BranchEntry,
     BranchKind,
@@ -85,7 +85,7 @@ def _view(
     behind: dict[str, float] | None = None,
     profile_running: bool = False,
     explore_gpu_hours: float | None = None,
-    specialists: dict[str, MbFakeSpecialistState] | None = None,
+    specialists: dict[str, SpecialistStatus] | None = None,
 ) -> JudgeView:
     return JudgeView(
         now=NOW,
@@ -151,10 +151,12 @@ def test_the_prompt_shows_and_explains_the_gpu_hours_and_llm_tokens_used() -> No
 
 
 def test_a_branch_row_shows_what_is_known_of_its_specialist_and_the_prompt_says_to_stop_one_that_gave_up() -> None:
-    gave_up = MbFakeSpecialistState(running=False, crashes=4, lost=1, gave_up=True, judge_failed=False)
-    hanging = MbFakeSpecialistState(running=True, crashes=0, lost=6, gave_up=False, judge_failed=False)
+    gave_up = SpecialistStatus(running=False, crashes=4, lost=1, gave_up=True, judge_failed=False)
+    judging_failed = SpecialistStatus(running=False, crashes=0, lost=6, gave_up=False, judge_failed=True)
 
-    rows = {row["branch"]: row for row in _state(_view(specialists={"b01": gave_up, "b02": hanging}))["branches"]}
+    rows = {
+        row["branch"]: row for row in _state(_view(specialists={"b01": gave_up, "b02": judging_failed}))["branches"]
+    }
 
     assert rows["b01"]["specialist"] == {
         "running": False,
@@ -163,13 +165,13 @@ def test_a_branch_row_shows_what_is_known_of_its_specialist_and_the_prompt_says_
         "gave_up": True,
         "judge_failed": False,
     }
-    assert rows["b02"]["specialist"]["lost"] == 6
+    assert (rows["b02"]["specialist"]["lost"], rows["b02"]["specialist"]["judge_failed"]) == (6, True)
     assert "specialist" not in rows[INTEGRATION_BRANCH] and "specialist" not in rows["b03"]
     prompt = " ".join(JUDGE_SYSTEM_PROMPT.split())
     for field in ("crashes", "lost", "gave_up", "judge_failed"):
         assert f"({field})" in prompt
     assert "A branch whose specialist gave up or whose judging failed makes no more progress" in prompt
-    assert "weigh its lost count against its progress" in prompt
+    assert "weigh a specialist's lost count against its progress" in prompt
 
 
 def test_a_branch_whose_specialist_is_not_known_shows_none() -> None:
