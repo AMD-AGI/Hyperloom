@@ -15,7 +15,7 @@ from kernelforge.loop.analysis_refresh_policy import (
     decide_analysis_refresh,
 )
 from kernelforge.loop.run_state import make_event
-from kernelforge.orchestrator.analysis import AnalysisConfigurationError
+from kernelforge.orchestrator.analysis import AnalysisConfigurationError, AnalysisSources
 from kernelforge.orchestrator.analysis_session import AnalysisAttemptLimitError
 
 
@@ -141,9 +141,7 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
         try:
             self._analysis_bundle = await analysis_service.ensure_bundle(
                 context,
-                kernel_file=self.ic.kernel_file,
-                driver_script=self.ic.driver_script,
-                source_files=self._target_source_files(),
+                sources=AnalysisSources(self.ic.kernel_file, self.ic.driver_script, self._target_source_files()),
                 usage=self._usage,
                 deadline_unix=self._analysis_deadline_unix(),
                 incremental=incremental,
