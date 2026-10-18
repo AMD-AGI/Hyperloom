@@ -29,6 +29,9 @@ from hyperloom.inference_optimizer.breakdown.recorder.warm_replay_event import (
     SKIP_RECIPE_READ_FAILED,
     SKIP_RESTATES_BASELINE,
     SKIP_WORKLOAD_CONFIG_INCOMPATIBLE,
+    ApplyItem,
+    ReplayMeasurement,
+    WarmReplayRequest,
 )
 
 from . import machine_state as _phase_state
@@ -1889,16 +1892,18 @@ class PreludePhase(CoordinatorCollaborator):
         recorder = make_warm_replay_recorder(
             phase=_WARM_REPLAY_EVENT_PHASE,
             macro_cycle=int(self.shared_state.macro_cycle or 0),
-            task_id=str(getattr(task, "task_id", "") or ""),
-            tier=str(params.get("warm_recipe_tier") or ""),
-            config_source=str(params.get("config_source") or ""),
-            config_donor_tier=str(params.get("config_donor_tier") or ""),
-            donor=self._warm_replay_donor(dict(self.shared_state.warm_replay_outcome or {})) or None,
-            expected_gain_pct=params.get("warm_expected_gain_pct"),
-            confidence=params.get("warm_recipe_conf"),
-            session_baseline_tput=session_baseline_tput,
-            kernel_count=len(list(params.get("warm_kernel_plan") or [])),
-            recipe_suppressed=not str(params.get("config_source") or ""),
+            request=WarmReplayRequest(
+                task_id=str(getattr(task, "task_id", "") or ""),
+                tier=str(params.get("warm_recipe_tier") or ""),
+                config_source=str(params.get("config_source") or ""),
+                config_donor_tier=str(params.get("config_donor_tier") or ""),
+                donor=self._warm_replay_donor(dict(self.shared_state.warm_replay_outcome or {})) or None,
+                expected_gain_pct=params.get("warm_expected_gain_pct"),
+                confidence=params.get("warm_recipe_conf"),
+                session_baseline_tput=session_baseline_tput,
+                kernel_count=len(list(params.get("warm_kernel_plan") or [])),
+                recipe_suppressed=not str(params.get("config_source") or ""),
+            ),
         )
         if recorder is not None:
             self._record_warm_kernel_apply_items(recorder)
@@ -1923,18 +1928,20 @@ class PreludePhase(CoordinatorCollaborator):
             outcome = entry.get("apply_result") if isinstance(entry.get("apply_result"), Mapping) else {}
             sources = entry.get("source_paths") or []
             recorder.record_apply_item(
-                str(entry.get("patch_path") or (sources[0] if sources else "")),
-                kind=APPLY_KERNEL,
-                position=position,
-                applied=str(entry.get("decision") or "") == "PENDING",
-                reason=str(
-                    outcome.get("reason")
-                    or outcome.get("error")
-                    or outcome.get("exception")
-                    or entry.get("resolution_error")
-                    or ""
-                ),
-                target=str(entry.get("apply_root") or ""),
+                ApplyItem(
+                    ref=str(entry.get("patch_path") or (sources[0] if sources else "")),
+                    kind=APPLY_KERNEL,
+                    position=position,
+                    applied=str(entry.get("decision") or "") == "PENDING",
+                    reason=str(
+                        outcome.get("reason")
+                        or outcome.get("error")
+                        or outcome.get("exception")
+                        or entry.get("resolution_error")
+                        or ""
+                    ),
+                    target=str(entry.get("apply_root") or ""),
+                )
             )
 
     def _record_warm_patch_apply_items(self, recorder: Any, result: Mapping[str, Any]) -> None:
@@ -1954,12 +1961,14 @@ class PreludePhase(CoordinatorCollaborator):
             if not isinstance(row, Mapping):
                 continue
             recorder.record_apply_item(
-                str(row.get("patch_ref") or ""),
-                kind=APPLY_PATCH,
-                position=row.get("timeline_index", position),
-                applied=str(row.get("status") or "") != "failed",
-                reason=str(row.get("reason") or row.get("detail") or ""),
-                target=str(row.get("target_repo") or ""),
+                ApplyItem(
+                    ref=str(row.get("patch_ref") or ""),
+                    kind=APPLY_PATCH,
+                    position=row.get("timeline_index", position),
+                    applied=str(row.get("status") or "") != "failed",
+                    reason=str(row.get("reason") or row.get("detail") or ""),
+                    target=str(row.get("target_repo") or ""),
+                )
             )
 
     def _warm_replay_timeline(self, task: "Task | None" = None):
@@ -1977,15 +1986,17 @@ class PreludePhase(CoordinatorCollaborator):
         return make_warm_replay_recorder(
             phase=_WARM_REPLAY_EVENT_PHASE,
             macro_cycle=int(self.shared_state.macro_cycle or 0),
-            task_id=str(getattr(task, "task_id", "") or outcome.get("replay_task_id") or ""),
-            tier=str(params.get("warm_recipe_tier") or outcome.get("warm_recipe_tier") or ""),
-            config_source=str(params.get("config_source") or outcome.get("config_source") or ""),
-            config_donor_tier=str(params.get("config_donor_tier") or outcome.get("config_donor_tier") or ""),
-            donor=self._warm_replay_donor(outcome) or None,
-            expected_gain_pct=params.get("warm_expected_gain_pct", outcome.get("expected_gain_pct")),
-            confidence=params.get("warm_recipe_conf", outcome.get("warm_recipe_conf")),
-            session_baseline_tput=self.shared_state.baseline_tput or None,
-            kernel_count=len(list(params.get("warm_kernel_plan") or [])),
+            request=WarmReplayRequest(
+                task_id=str(getattr(task, "task_id", "") or outcome.get("replay_task_id") or ""),
+                tier=str(params.get("warm_recipe_tier") or outcome.get("warm_recipe_tier") or ""),
+                config_source=str(params.get("config_source") or outcome.get("config_source") or ""),
+                config_donor_tier=str(params.get("config_donor_tier") or outcome.get("config_donor_tier") or ""),
+                donor=self._warm_replay_donor(outcome) or None,
+                expected_gain_pct=params.get("warm_expected_gain_pct", outcome.get("expected_gain_pct")),
+                confidence=params.get("warm_recipe_conf", outcome.get("warm_recipe_conf")),
+                session_baseline_tput=self.shared_state.baseline_tput or None,
+                kernel_count=len(list(params.get("warm_kernel_plan") or [])),
+            ),
             # Rebinding, not opening: the enqueue seam already put this event
             # on the timeline, and opening it twice would restate its start.
             open_event_on_timeline=False,
@@ -2062,12 +2073,14 @@ class PreludePhase(CoordinatorCollaborator):
         recorder = make_warm_replay_recorder(
             phase=_WARM_REPLAY_EVENT_PHASE,
             macro_cycle=int(self.shared_state.macro_cycle or 0),
-            tier=str(outcome.get("warm_recipe_tier") or ""),
-            config_source=str(outcome.get("config_source") or ""),
-            config_donor_tier=str(outcome.get("config_donor_tier") or ""),
-            donor=self._warm_replay_donor(outcome) or None,
-            expected_gain_pct=outcome.get("expected_gain_pct"),
-            confidence=outcome.get("warm_recipe_conf"),
+            request=WarmReplayRequest(
+                tier=str(outcome.get("warm_recipe_tier") or ""),
+                config_source=str(outcome.get("config_source") or ""),
+                config_donor_tier=str(outcome.get("config_donor_tier") or ""),
+                donor=self._warm_replay_donor(outcome) or None,
+                expected_gain_pct=outcome.get("expected_gain_pct"),
+                confidence=outcome.get("warm_recipe_conf"),
+            ),
         )
         if recorder is None:
             return
@@ -2213,11 +2226,13 @@ class PreludePhase(CoordinatorCollaborator):
             # from the gain is exact only until a re-baseline moves the number
             # the replay was never judged against.
             recorder.record_measurement(
-                before_tput=baseline_tput,
-                after_tput=tput,
-                gain_pct=measured_gain,
-                hot_tput=hot_tput,
-                cold_tput=cold_round_tput if cold_round_tput > 0 else None,
+                ReplayMeasurement(
+                    before_tput=baseline_tput,
+                    after_tput=tput,
+                    gain_pct=measured_gain,
+                    hot_tput=hot_tput,
+                    cold_tput=cold_round_tput if cold_round_tput > 0 else None,
+                )
             )
         # warm_replay is an optimization candidate, so it must clear the
         # image-quality gate against the baseline reference before promotion.
@@ -2253,14 +2268,16 @@ class PreludePhase(CoordinatorCollaborator):
             # Restated now that the gate has read the scores onto the outcome,
             # so the score sits beside the reference it was judged against.
             recorder.record_measurement(
-                before_tput=baseline_tput,
-                after_tput=tput,
-                gain_pct=measured_gain,
-                hot_tput=hot_tput,
-                cold_tput=cold_round_tput if cold_round_tput > 0 else None,
-                accuracy=outcome.get("replay_accuracy"),
-                baseline_accuracy=outcome.get("baseline_accuracy"),
-                eval_ran=outcome.get("eval_ran"),
+                ReplayMeasurement(
+                    before_tput=baseline_tput,
+                    after_tput=tput,
+                    gain_pct=measured_gain,
+                    hot_tput=hot_tput,
+                    cold_tput=cold_round_tput if cold_round_tput > 0 else None,
+                    accuracy=outcome.get("replay_accuracy"),
+                    baseline_accuracy=outcome.get("baseline_accuracy"),
+                    eval_ran=outcome.get("eval_ran"),
+                )
             )
         result["combined_gain_pct"] = round(measured_gain, 3)
         decision_params = (task.params if task is not None else {}) or {}
