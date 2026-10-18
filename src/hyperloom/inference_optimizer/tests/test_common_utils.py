@@ -496,8 +496,7 @@ def test_infera_forward_env_and_fanout(monkeypatch: pytest.MonkeyPatch) -> None:
         "--model /m",
         targets,
         label="restart",
-        poll_timeout=5,
-        print_logs=True,
+        options=inf._FanoutOptions(poll_timeout=5, print_logs=True),
     )
     assert rc == 1
     assert [r["podIP"] for r in results] == ["10.0.0.1", "10.0.0.2", "10.0.0.3"]

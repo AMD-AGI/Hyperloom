@@ -11,6 +11,7 @@ import json
 import os
 import shlex
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -127,16 +128,24 @@ def _collect_forward_env() -> dict[str, str]:
     return filter_forward_env(fwd, warn_on_drop=True)
 
 
+@dataclass(frozen=True)
+class _FanoutOptions:
+    """How one infera command runs its SSH fan-outs: the per-pod timeout and whether pod output is echoed."""
+
+    poll_timeout: int
+    print_logs: bool
+
+
 def _infera_fanout_launch(
     state: dict[str, Any],
     launch_args: str,
     targets: list[dict[str, Any]],
     *,
     label: str,
-    poll_timeout: int,
-    print_logs: bool,
+    options: _FanoutOptions,
 ) -> tuple[int, list[dict]]:
     """Ship + run launch_infera_node.py on each GPU pod over SSH."""
+    poll_timeout = options.poll_timeout
     script = _mn_cli._read_bundled_pod_python_script("launch_infera_node.py", _mn_cli._LAUNCHER_DEPS)
     forward_env = _collect_forward_env()
     if forward_env:
@@ -170,7 +179,7 @@ def _infera_fanout_launch(
             rec["stderr"] = (cp.stderr or "")[-1500:]
             rc_total = 1
         results.append(rec)
-        if print_logs:
+        if options.print_logs:
             print(f"--- {ip}:{port} stdout ---\n{cp.stdout}\n--- {ip}:{port} stderr ---\n{cp.stderr}")
     return rc_total, results
 
@@ -318,8 +327,7 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
     # Empty is a valid answer: it leaves the flag off so sglang picks its own default, which is the backend preferred
     # on this fabric anyway.
     kv = getattr(args, "pd_transfer_backend", "") or ""
-    poll_timeout = _mn_cli._poll_timeout_from_args(args)
-    print_logs = getattr(args, "print_logs", False)
+    fanout = _FanoutOptions(_mn_cli._poll_timeout_from_args(args), getattr(args, "print_logs", False))
     rc_total = 0
     all_results: dict[str, Any] = {}
     pd_prefill_nodes = 0
@@ -335,7 +343,7 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
         "off",
     )
     if resume_enabled and _infera_restart_config_matches(state, args, framework, pd_mode, kv):
-        probe_timeout = min(30, max(10, int(poll_timeout)))
+        probe_timeout = min(30, max(10, int(fanout.poll_timeout)))
         if _infera_servers_alive(state, _infera_all_gpu_targets(state), timeout=probe_timeout):
             info(
                 f"infera resume: same config (framework={framework} model={args.model} "
@@ -416,8 +424,7 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
                 launch_args,
                 list(targets),
                 label=f"restart-{role}",
-                poll_timeout=poll_timeout,
-                print_logs=print_logs,
+                options=fanout,
             )
             rc_total = rc_total or rc
             all_results[role] = results
@@ -448,8 +455,7 @@ def _infera_restart_server(args: argparse.Namespace) -> int:
             launch_args,
             list(worker_targets),
             label="restart",
-            poll_timeout=poll_timeout,
-            print_logs=print_logs,
+            options=fanout,
         )
         all_results["worker"] = results
 
@@ -502,8 +508,7 @@ def _infera_kill_inference(args: argparse.Namespace) -> int:
         launch_args,
         gpu_targets,
         label="kill",
-        poll_timeout=_mn_cli._poll_timeout_from_args(args),
-        print_logs=getattr(args, "print_logs", False),
+        options=_FanoutOptions(_mn_cli._poll_timeout_from_args(args), getattr(args, "print_logs", False)),
     )
     state["last_kill_results"] = results
     _mn_cli._save_state(state)
