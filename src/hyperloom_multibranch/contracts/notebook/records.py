@@ -10,6 +10,7 @@ import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
+from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.notebook.peers import (
     BranchLogEntry,
     Intent,
@@ -461,6 +462,27 @@ class TriedDirection:
     change: str = ""
 
 
+#: The tool a specialist replays a warm-start champion with, and the target the replay's intent claims.
+REPLAY_TOOL = "notebook_replay"
+REPLAY_TARGET = "warm start"
+
+
+@dataclass(frozen=True)
+class WarmReplay:
+    """The change that makes a branch's head into a Recipe KB champion's recipe, to test on ``parent_commit``, the head.
+
+    A gain lands only on the head it was measured against, so the change is made for the caller's head, not the root.
+    It replays the whole recipe when ``reason`` is empty, else the launch config only, ``reason`` saying why. ``layer``
+    is the deepest layer the change reaches, the one its intent claims.
+    """
+
+    canonical_id: str
+    parent_commit: str
+    delta: RecipeDelta
+    layer: IntentLayer
+    reason: str = ""
+
+
 @dataclass(frozen=True)
 class StartupBrief:
     """What a fill specialist reads at start; ``leads`` and ``lessons`` come from cross-session recall (MB2).
@@ -650,8 +672,11 @@ __all__ = [
     "RegressionCase",
     "SearchHit",
     "SessionProfile",
+    "REPLAY_TARGET",
+    "REPLAY_TOOL",
     "StartupBrief",
     "TestRecord",
+    "WarmReplay",
     "ToolResultPointer",
     "TriedDirection",
     "Withdrawal",

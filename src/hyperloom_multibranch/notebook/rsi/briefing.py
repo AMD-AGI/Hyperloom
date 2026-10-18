@@ -31,10 +31,17 @@ import threading
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field, replace
 from itertools import zip_longest
+from typing import Protocol
 
+from hyperloom.contracts.recipe import Recipe
 from hyperloom_multibranch.contracts.notebook.interfaces import Notebook, StartupBriefProvider
 from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
-from hyperloom_multibranch.contracts.notebook.records import LearningRecord, NotebookSnapshot, StartupBrief
+from hyperloom_multibranch.contracts.notebook.records import (
+    LearningRecord,
+    NotebookSnapshot,
+    StartupBrief,
+    WarmReplay,
+)
 from hyperloom_multibranch.notebook.knowledge.learning_recall import LearningRecall, PastLearnings
 from hyperloom_multibranch.notebook.knowledge.lessons import MAX_ITEMS, clipped, listed
 from hyperloom_multibranch.notebook.knowledge.recall import (
@@ -61,6 +68,14 @@ DEFAULT_MAX_CHARS = 4000
 KEPT = "keep"
 #: How many learnings of this session, and how many of past sessions, a brief lists at most.
 LEARNINGS = 5
+
+
+class RecipeReads(Protocol):
+    """What a replay reads of the experiment repository, as ``contracts.repo.ExperimentRepo`` gives it."""
+
+    async def head(self, branch: str) -> str: ...
+
+    async def read_recipe(self, commit: str) -> Recipe: ...
 
 
 @dataclass(frozen=True)
@@ -174,10 +189,21 @@ class CrossSessionBriefing(StartupBriefProvider):
     identities: IdentityIndex | None = None
     learnings: LearningRecall | None = None
     recalls: RecallCache | None = None
+    repo: RecipeReads | None = None
 
     def __post_init__(self) -> None:
         if self.identities is None and self.experiences is not None:
             object.__setattr__(self, "identities", IdentityIndex.of(self.experiences))
+
+    async def warm_replay(self, canonical_id: str) -> WarmReplay | None:
+        """The change that replays the champion ``canonical_id`` on this branch's head, a gain landing only on the head
+        it was measured against; ``None`` when PRELUDE prepared no replay of it, or it would change nothing there."""
+
+        prepared = next((lead.replay for lead in self.warm if lead.canonical_id == canonical_id), None)
+        if prepared is None or self.repo is None or not self.branch:
+            return None
+        head = await self.repo.head(self.branch)
+        return prepared.on(await self.repo.read_recipe(head), head)
 
     async def _recall(self, snapshot: NotebookSnapshot) -> Recall | None:
         if self.experiences is None or snapshot.profile is None:
@@ -258,6 +284,7 @@ class SessionBriefs:
     metric: str = ""
     learnings: LearningRecall | None = None
     max_chars: int = DEFAULT_MAX_CHARS
+    repo: RecipeReads | None = None
     _identities: IdentityIndex | None = field(init=False, default=None)
     _recalls: RecallCache = field(init=False, default_factory=RecallCache)
     _focus: dict[str, str] = field(init=False, default_factory=dict)
@@ -281,6 +308,7 @@ class SessionBriefs:
             identities=self._identities,
             learnings=self.learnings,
             recalls=self._recalls,
+            repo=self.repo,
         )
 
     async def text(self, branch: str, commit: str, focus: str | None = None) -> str:
@@ -289,4 +317,4 @@ class SessionBriefs:
         return render_brief(await self.for_branch(branch, focus).startup_brief(commit))
 
 
-__all__ = ["DEFAULT_MAX_CHARS", "CrossSessionBriefing", "RecallCache", "SessionBriefs"]
+__all__ = ["DEFAULT_MAX_CHARS", "CrossSessionBriefing", "RecallCache", "RecipeReads", "SessionBriefs"]

@@ -167,7 +167,7 @@ def test_a_specialist_sees_exactly_the_specialist_tools(rig: Rig) -> None:
     assert names == sorted(
         ["submit_test", "test_result", "cancel_test", "queue_state", "poll_inbox", "start_analysis"]
         + [f"notebook_{name}" for name in ("lookup", "claim", "release", "search", "record", "branch_log")]
-        + ["notebook_append_branch_log", "notebook_learn", "notebook_learnings", "notebook_brief"]
+        + ["notebook_append_branch_log", "notebook_learn", "notebook_learnings", "notebook_brief", "notebook_replay"]
     )
 
 

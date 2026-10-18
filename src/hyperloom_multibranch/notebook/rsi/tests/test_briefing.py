@@ -11,8 +11,9 @@ from pathlib import Path
 
 from hyperloom_kb import RemoteReadResult
 
+from hyperloom.contracts.recipe import ConfigDelta, LaunchConfig, Recipe, RecipeDelta
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
-from hyperloom_multibranch.contracts.notebook.peers import Verdict
+from hyperloom_multibranch.contracts.notebook.peers import IntentLayer, Verdict
 from hyperloom_multibranch.contracts.notebook.records import (
     BaselineRecord,
     Learning,
@@ -35,7 +36,8 @@ from hyperloom_multibranch.notebook.knowledge.tests.fakes import (
     completed_read,
     experience_summary,
 )
-from hyperloom_multibranch.notebook.knowledge.warm_start import WarmLead
+from hyperloom_multibranch.contracts.notebook.records import WarmReplay
+from hyperloom_multibranch.notebook.knowledge.warm_start import PreparedReplay, WarmLead
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
 from hyperloom_multibranch.notebook.rsi.briefing import CrossSessionBriefing, SessionBriefs
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, judgement, profile, request, result
@@ -183,6 +185,49 @@ async def test_an_experience_of_the_other_kind_of_session_is_only_a_lesson_to_re
     assert brief.lessons[-1] == (
         "to re-verify: --block-size 16: keep +12.00% on e2e_interactivity@v1 (objective differ) [exp-agentx]"
     )
+
+
+@dataclasses.dataclass
+class _Repo:
+    """The experiment repository as a replay reads it: each branch's head, and the recipe of each commit."""
+
+    heads: dict[str, str]
+    recipes: dict[str, Recipe]
+
+    async def head(self, branch: str) -> str:
+        return self.heads[branch]
+
+    async def read_recipe(self, commit: str) -> Recipe:
+        return self.recipes[commit]
+
+
+async def test_a_lead_with_a_replay_says_how_to_replay_it_and_the_briefing_replays_it_on_the_branch_head(
+    tmp_path: Path,
+) -> None:
+    notebook = await scripted_session(tmp_path / "notebook", FakeClock())
+    unpacked = "the record holds no patch or kernel files"
+    prepared = PreparedReplay(LEAD.canonical_id, None, LaunchConfig("--enable-expert-parallel"), unpacked)
+    head = Recipe("sha256:" + "a" * 64, LaunchConfig("--max-num-seqs 128"))
+    repo = _Repo({"s3": "c3"}, {"c3": head})
+    warm = (dataclasses.replace(LEAD, replay=prepared),)
+    briefing = CrossSessionBriefing(notebook, warm=warm, branch="s3", repo=repo)
+
+    brief = await briefing.startup_brief("c1")
+    replayed = await briefing.warm_replay(LEAD.canonical_id)
+
+    assert (
+        "recipe: inference:older: +10.00% `--enable-expert-parallel` [older]; "
+        f"replay on your head with notebook_replay: its launch config only, {unpacked}"
+    ) in brief.leads
+    assert replayed == WarmReplay(
+        LEAD.canonical_id,
+        "c3",
+        RecipeDelta(config=ConfigDelta(server_args="--enable-expert-parallel", remove_args=("--max-num-seqs",))),
+        IntentLayer.CONFIG,
+        unpacked,
+    )
+    assert await briefing.warm_replay("inference:none") is None
+    assert await CrossSessionBriefing(notebook, warm=warm, branch="s3").warm_replay(LEAD.canonical_id) is None
 
 
 async def test_recalled_leads_take_turns_by_the_layer_they_change(tmp_path: Path) -> None:

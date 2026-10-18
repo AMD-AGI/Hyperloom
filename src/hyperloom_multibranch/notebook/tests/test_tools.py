@@ -9,14 +9,17 @@ import json
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from hyperloom.contracts.recipe import ConfigDelta, RecipeDelta
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer, intent_fingerprint
 from hyperloom_multibranch.contracts.notebook.peers import Validity
 from hyperloom_multibranch.contracts.notebook.records import NotebookSnapshot, OpShares, StartupBrief, TestRecord
 from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.contracts.notebook.records import REPLAY_TOOL, WarmReplay
 from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog, SessionLearnings
 from hyperloom_multibranch.notebook.tests.factories import FakeClock, intent, request, result
 from hyperloom_multibranch.notebook.tests.sessions import scripted_session
@@ -57,6 +60,25 @@ async def _call(tools: dict[str, NotebookTool], name: str, **arguments: object) 
     return await tools[f"notebook_{name}"].handler(arguments)
 
 
+async def test_the_replay_tool_names_the_intent_to_claim_and_the_change_on_the_branch_head(tools_of: Tools) -> None:
+    delta = RecipeDelta(config=ConfigDelta(server_args="--max-num-seqs 256"))
+    on_head = WarmReplay("inference:older", "c3", delta, IntentLayer.CONFIG)
+
+    async def warm_replay(canonical_id: str) -> WarmReplay | None:
+        return on_head if canonical_id == on_head.canonical_id else None
+
+    tools = tools_of("s1", SimpleNamespace(warm_replay=warm_replay))
+
+    text = await _call(tools, "replay", canonical_id="inference:older")
+
+    _, claim, change = text.splitlines()
+    assert 'target "warm start", mechanism "inference:older" and layer "config"' in claim
+    assert 'parent_commit "c3"' in claim and RecipeDelta.from_document(json.loads(change)) == delta
+    assert REPLAY_TOOL in tools
+    assert (await _call(tools, "replay", canonical_id="inference:none")).startswith(ERROR)
+    assert (await _call(tools_of("s1"), "replay", canonical_id="inference:older")).startswith(ERROR)
+
+
 async def test_every_tool_is_named_for_the_notebook_and_takes_only_its_declared_arguments(tools_of: Tools) -> None:
     tools = tools_of("s1")
 
@@ -73,6 +95,7 @@ async def test_every_tool_is_named_for_the_notebook_and_takes_only_its_declared_
             "learn",
             "learnings",
             "brief",
+            "replay",
         )
     )
     assert all(tool.input_schema["additionalProperties"] is False for tool in tools.values())

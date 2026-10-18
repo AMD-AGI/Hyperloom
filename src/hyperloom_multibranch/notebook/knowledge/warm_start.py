@@ -16,16 +16,25 @@ other scopes, so finding the nearest concurrency and sequence lengths waits unti
 Every record goes through ``knowledge_to_warm_recipe``, so records the single-lineage CLOSE wrote read the same way.
 A lead names the dimensions where it differs from this session. It is a lead, not a starting point: specialists still
 measure it on this session's root.
+
+:func:`replay_leads` gives the first leads a :class:`PreparedReplay`: the champion's recipe, patches and kernel
+artifacts too, their files downloaded from the KB into the session's blob store. A champion built on another image, or
+one whose files the KB does not hold, replays its launch config only. The specialist's ``notebook_replay`` makes the
+change for its own branch head, since a gain lands only on the head it was measured against.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any, Protocol
 
+from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta, RecipeError, delta_between
 from hyperloom.inference_optimizer.recipe_snapshot_constants import F_LABEL_FRAMEWORK_VERSION, canonical_labels
+from hyperloom.measure.compile import LOADABLE_KERNEL_KINDS, BlobError, BlobStore
 from hyperloom.orchestrator.knowledge.remote_recipe.client import KBStoreError
 from hyperloom.orchestrator.knowledge.remote_recipe.models import (
     CONFIG_SECTION,
@@ -33,14 +42,20 @@ from hyperloom.orchestrator.knowledge.remote_recipe.models import (
     RemoteRecipeValidationError,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe.values import knowledge_to_warm_recipe
-from hyperloom_multibranch.contracts.notebook.records import SessionProfile
+from hyperloom_multibranch.contracts.notebook.peers import IntentLayer
+from hyperloom_multibranch.contracts.notebook.records import REPLAY_TOOL, SessionProfile, WarmReplay
 from hyperloom_multibranch.notebook.knowledge.lessons import listed
+from hyperloom_multibranch.notebook.knowledge.recipe_kb import from_recipe_kb_value, overlay_ref
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import recipe_identity
 
 log = logging.getLogger(__name__)
 
 MAX_CANDIDATES = 20
 PAGE_SIZE = 50
+#: How many of the best leads get a replay; each whole one downloads the champion's files.
+REPLAY_LEADS = 3
+_UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+_REPLAY_ERRORS = (KBStoreError, RemoteRecipeValidationError, RecipeError, BlobError, OSError, ValueError)
 
 
 class RecipeReader(Protocol):
@@ -51,12 +66,58 @@ class RecipeReader(Protocol):
         *,
         scheme: str,
         match: dict[str, str],
-        hardware_in: list[str] | None = None,
         offset: int = 0,
         limit: int = 50,
     ) -> dict[str, Any]: ...
 
     def get_view(self, canonical_id: str, scope: RecipeScope) -> dict[str, Any] | None: ...
+
+
+class RecipeDownloader(RecipeReader, Protocol):
+    """What a replay needs of a Recipe KB client besides reading: a champion's verified files, as ``RemoteRecipeClient``
+    downloads them under ``destination/files``."""
+
+    def read(
+        self, canonical_id: str, destination: str | Path, *, scope: RecipeScope, envelope: dict[str, Any] | None = None
+    ) -> dict[str, Any] | None: ...
+
+
+@dataclass(frozen=True)
+class ReplayTarget:
+    """Where a replay is prepared: the session's root recipe, whose image a champion must share for its patches and
+    kernels to apply, the session's blob store, and a directory to download into."""
+
+    root: Recipe
+    blobs: BlobStore
+    workdir: Path
+
+
+@dataclass(frozen=True)
+class PreparedReplay:
+    """A champion's recipe ready to replay on any head of the session.
+
+    ``recipe`` is its whole recipe, its patch and kernel files already in the session's blob store; ``None`` when only
+    its launch config ``launch`` replays, ``reason`` saying why.
+    """
+
+    canonical_id: str
+    recipe: Recipe | None
+    launch: LaunchConfig
+    reason: str = ""
+
+    def on(self, head: Recipe, parent_commit: str) -> WarmReplay | None:
+        """The change that makes ``head``, the recipe of ``parent_commit``, into the champion's; ``None`` when they
+        are alike. Raises ``RecipeError`` for a component the head takes from another upstream repository."""
+
+        wanted = self.recipe if self.recipe is not None else replace(head, launch=self.launch)
+        delta = delta_between(head, wanted)
+        if delta == RecipeDelta():
+            return None
+        return WarmReplay(self.canonical_id, parent_commit, delta, _layer(delta), self.reason)
+
+    def describe(self) -> str:
+        what = "the whole recipe" if self.recipe is not None else f"its launch config only, {self.reason}"
+        return f"replay on your head with {REPLAY_TOOL}: {what}"
 
 
 @dataclass(frozen=True)
@@ -75,12 +136,14 @@ class WarmLead:
     pitfalls: tuple[str, ...] = ()
     what_failed: tuple[str, ...] = ()
     differing: Mapping[str, tuple[str, str]] = field(default_factory=dict)
+    replay: PreparedReplay | None = None
 
     def describe(self) -> str:
         gain = "n/a" if self.gain_pct is None else f"{self.gain_pct:+.2f}%"
         where = "".join(f", {key} {theirs} (here {ours})" for key, (theirs, ours) in self.differing.items())
         args = f" `{self.server_args}`" if self.server_args else ""
-        return f"{self.canonical_id}{where}: {gain}{args} [{self.session_id}]"
+        replay = f"; {self.replay.describe()}" if self.replay is not None else ""
+        return f"{self.canonical_id}{where}: {gain}{args} [{self.session_id}]{replay}"
 
     def render(self) -> str:
         return f"- {self.describe()}"
@@ -194,4 +257,117 @@ def warm_leads(reader: RecipeReader, profile: SessionProfile, *, limit: int = MA
     return tuple(sorted(leads, key=lambda lead: (bool(lead.differing), -(lead.gain_pct or 0.0))))
 
 
-__all__ = ["MAX_CANDIDATES", "RecipeReader", "WarmLead", "candidates", "identity_labels", "lead_of", "warm_leads"]
+def replay(client: RecipeDownloader, lead: WarmLead, scope: RecipeScope, target: ReplayTarget) -> PreparedReplay | None:
+    """``lead``'s champion ready to replay on any head of the session; ``None`` when it changes nothing on the root.
+
+    The whole recipe needs the record's files, a base image and runtime snapshot the same as the root's, kernel
+    artifacts of kinds measurement loads, and components the root takes from the same upstream repositories. Its files
+    go into the session's blob store, each checked against the hash the recipe pins. Otherwise only the launch config
+    replays, and the replay says why.
+    """
+
+    try:
+        launch = LaunchConfig(server_args=lead.server_args, envs=dict(lead.envs))
+    except RecipeError as exc:
+        log.warning("Recipe KB champion %s has no launch config to replay: %s", lead.canonical_id, exc)
+        return None
+    config_only = PreparedReplay(lead.canonical_id, None, launch, "the record holds no patch or kernel files")
+    if lead.replayable:
+        try:
+            whole = PreparedReplay(lead.canonical_id, _champion(client, lead, scope, target), launch)
+            return whole if whole.on(target.root, "") is not None else None
+        except _REPLAY_ERRORS as exc:
+            log.warning("Recipe KB champion %s replays its launch config only: %s", lead.canonical_id, exc)
+            config_only = replace(config_only, reason=str(exc))
+    return config_only if config_only.on(target.root, "") is not None else None
+
+
+def replay_leads(
+    client: RecipeDownloader,
+    profile: SessionProfile,
+    leads: Sequence[WarmLead],
+    target: ReplayTarget,
+    *,
+    limit: int = REPLAY_LEADS,
+) -> tuple[WarmLead, ...]:
+    """``leads`` with the replay of each of the first ``limit``, best first as :func:`warm_leads` orders them."""
+
+    try:
+        _, scope = recipe_identity(profile)
+    except RemoteRecipeValidationError:
+        return tuple(leads)
+    return tuple(
+        replace(lead, replay=replay(client, lead, scope, target)) if index < limit else lead
+        for index, lead in enumerate(leads)
+    )
+
+
+def _champion(client: RecipeDownloader, lead: WarmLead, scope: RecipeScope, target: ReplayTarget) -> Recipe:
+    """The champion's recipe on this session's image, its files put into the session's blob store."""
+
+    envelope = client.get_view(lead.canonical_id, scope)
+    if envelope is None:
+        raise RecipeError("the record is gone")
+    champion = _recorded_recipe(envelope)
+    if (champion.base_image_digest, champion.runtime_snapshot) != (
+        target.root.base_image_digest,
+        target.root.runtime_snapshot,
+    ):
+        log.info("Recipe KB champion %s was built on %s", lead.canonical_id, champion.base_image_digest)
+        raise RecipeError("it was built on another image than this session's")
+    unloadable = sorted({item.kind.value for item in champion.kernels if item.kind not in LOADABLE_KERNEL_KINDS})
+    if unloadable:
+        raise RecipeError(f"measurement loads no {', '.join(unloadable)} kernel artifacts yet")
+    destination = target.workdir / _UNSAFE_NAME.sub("-", lead.canonical_id)
+    client.read(lead.canonical_id, destination, scope=scope, envelope=envelope)
+    files = destination / "files"
+    for stack, component in enumerate(champion.components):
+        for member, patch in enumerate(component.patches):
+            _keep(target.blobs, files / overlay_ref(stack, member, patch.path), patch.sha256)
+    for artifact in champion.kernels:
+        _keep(target.blobs, files / artifact.ref, artifact.sha256)
+    return champion
+
+
+def _recorded_recipe(envelope: Mapping[str, Any]) -> Recipe:
+    knowledge = _object(envelope.get("knowledge"))
+    provenance = _object(knowledge.get("provenance"))
+    image = provenance.get("base_image_digest")
+    if not isinstance(image, str) or not image:
+        raise RecipeError("the record names no base image")
+    return from_recipe_kb_value(
+        _object(knowledge.get("value")), base_image_digest=image, runtime_snapshot=provenance.get("runtime_snapshot")
+    )
+
+
+def _object(value: object) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _keep(blobs: BlobStore, path: Path, sha256: str) -> None:
+    found = blobs.put(path.read_bytes())
+    if found != sha256:
+        raise RecipeError(f"{path.name} has sha256 {found}; the record pins {sha256}")
+
+
+def _layer(delta: RecipeDelta) -> IntentLayer:
+    if delta.add_kernels or delta.remove_kernels:
+        return IntentLayer.KERNEL
+    return IntentLayer.SOURCE if delta.components else IntentLayer.CONFIG
+
+
+__all__ = [
+    "MAX_CANDIDATES",
+    "REPLAY_LEADS",
+    "PreparedReplay",
+    "RecipeDownloader",
+    "RecipeReader",
+    "ReplayTarget",
+    "WarmLead",
+    "candidates",
+    "identity_labels",
+    "lead_of",
+    "replay",
+    "replay_leads",
+    "warm_leads",
+]

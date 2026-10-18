@@ -20,9 +20,10 @@ the tool computes. Output stays small: a line is at most 160 characters, a list 
 
 from __future__ import annotations
 
+import json
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from hyperloom.contracts.recipe import RecipeDelta, RecipeError
 from hyperloom_multibranch.contracts.notebook.interfaces import (
@@ -49,9 +50,11 @@ from hyperloom_multibranch.contracts.notebook.records import (
     DedupAnswer,
     Learning,
     OpShares,
+    REPLAY_TARGET,
     StartupBrief,
     TestRecord,
     TriedDirection,
+    WarmReplay,
     amdahl_ceiling_pct,
 )
 from hyperloom_multibranch.contracts.notebook.vocab import LearningKind
@@ -205,6 +208,28 @@ def render_brief(brief: StartupBrief) -> str:
     return "\n".join(sections)
 
 
+@runtime_checkable
+class WarmReplays(Protocol):
+    """A briefing that replays the champions PRELUDE prepared on its branch's head, as
+    ``rsi.briefing.CrossSessionBriefing`` does."""
+
+    async def warm_replay(self, canonical_id: str) -> WarmReplay | None: ...
+
+
+def render_replay(replay: WarmReplay) -> str:
+    """How to test a champion's replay: the intent to claim, then the change to submit on the branch's head."""
+
+    what = "the whole recipe" if not replay.reason else f"its launch config only: {replay.reason}"
+    return "\n".join(
+        (
+            f"replay of {replay.canonical_id} on your head {replay.parent_commit}, {what}",
+            f'claim with parent_commit "{replay.parent_commit}", target "{REPLAY_TARGET}", mechanism '
+            f'"{replay.canonical_id}" and layer "{replay.layer.value}", then submit this change on that commit:',
+            json.dumps(replay.delta.to_document(), sort_keys=True, separators=(",", ":")),
+        )
+    )
+
+
 def _key(arguments: Arguments) -> ClaimKey:
     layer = IntentLayer(arguments["layer"])
     fingerprint = intent_fingerprint(str(arguments["target"]), str(arguments["mechanism"]), layer)
@@ -308,6 +333,17 @@ class _SpecialistTools:
 
     async def brief(self, arguments: Arguments) -> str:
         return render_brief(await self.briefing.startup_brief(str(arguments["start_commit"])))
+
+    async def replay(self, arguments: Arguments) -> str:
+        canonical_id = str(arguments["canonical_id"])
+        found = await self.briefing.warm_replay(canonical_id) if isinstance(self.briefing, WarmReplays) else None
+        if found is None:
+            return (
+                f"{ERROR} no replay of {canonical_id} on your head: the startup brief's leads name the champions "
+                "that have one, and a champion your head already matches has nothing to replay"
+            )
+        text = render_replay(found)
+        return text if len(text) <= MAX_REPLY_CHARS else f"{ERROR} the replay of {canonical_id} does not fit a reply"
 
 
 def _guarded(handler: Handler) -> Handler:
@@ -441,6 +477,14 @@ _SPECS = (
         "The startup brief from a commit: what was tried on it and the states it builds on, lessons and leads.",
         _schema({"start_commit": _text()}, "start_commit"),
     ),
+    _Spec(
+        "replay",
+        "A Recipe KB champion the startup brief names, replayed on your branch's head: the intent to claim and the "
+        "change to submit there, its patch and kernel files already in the session's blob store.",
+        _schema(
+            {"canonical_id": _text(description="The champion's Recipe KB id, as the brief names it.")}, "canonical_id"
+        ),
+    ),
 )
 
 
@@ -473,6 +517,7 @@ __all__ = [
     "MAX_REPLY_CHARS",
     "TOOL_PREFIX",
     "NotebookTool",
+    "WarmReplays",
     "notebook_tools",
     "outcome",
     "render_answer",
@@ -481,4 +526,5 @@ __all__ = [
     "render_claim",
     "render_log",
     "render_record",
+    "render_replay",
 ]

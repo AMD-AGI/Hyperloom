@@ -22,6 +22,7 @@ from hyperloom.contracts.recipe import (
     RecipeDelta,
     RecipeError,
     apply,
+    delta_between,
     diff,
     with_unexpressed,
 )
@@ -168,6 +169,55 @@ def test_apply_moves_components_stacks_patches_and_swaps_kernels() -> None:
     assert [component.component for component in changed.components] == ["vllm", "aiter", "sglang"]
     assert changed.kernels == (better_gemm,)
     assert original == _recipe()
+
+
+def test_delta_between_makes_one_recipe_into_the_other() -> None:
+    better_gemm = replace(GEMM, ref="kernel/gemm/tuned-v2.csv", sha256="f" * 64)
+    fork = PatchRef("patch/sglang/0001-chunk.patch", "9" * 64)
+    sglang = ComponentPatches("sglang", "https://github.com/sgl-project/sglang", VLLM_AT, (fork,))
+    first = _recipe()
+    second = _recipe(
+        launch=LaunchConfig(server_args="--max-num-seqs 256", envs={"VLLM_USE_V1": "1", "VLLM_ROCM_USE_AITER": "1"}),
+        components=(
+            ComponentPatches("vllm", "https://github.com/vllm-project/vllm", VLLM_NEXT, (MOE_PATCH, ATTN_PATCH)),
+            sglang,
+        ),
+        kernels=(better_gemm,),
+    )
+
+    delta = delta_between(first, second)
+    made = apply(first, delta)
+
+    assert (delta.config.remove_args, delta.config.unset_envs) == (("--enable-chunked-prefill",), ("HIP_FORCE",))
+    assert made.launch == second.launch
+    assert {component.component: component for component in made.components} == {
+        "vllm": second.component("vllm"),
+        "aiter": first.component("aiter"),
+        "sglang": sglang,
+    }
+    assert made.kernels == (better_gemm,)
+    assert delta_between(second, second) == RecipeDelta()
+
+
+def test_delta_between_keeps_the_shared_head_of_a_patch_stack_and_drops_the_patches_the_other_lacks() -> None:
+    reworked = replace(MOE_PATCH, sha256="8" * 64)
+    stacked = _recipe(
+        components=(ComponentPatches("vllm", "https://github.com/vllm-project/vllm", VLLM_AT, (MOE_PATCH, ATTN_PATCH)),)
+    )
+    other = _recipe(
+        components=(ComponentPatches("vllm", "https://github.com/vllm-project/vllm", VLLM_AT, (reworked,)),)
+    )
+    bare = _recipe(components=())
+
+    (change,) = delta_between(stacked, other).components
+    (dropped,) = delta_between(stacked, bare).components
+
+    assert (change.add_patches, change.remove_patches) == ((reworked,), (MOE_PATCH.path, ATTN_PATCH.path))
+    assert apply(stacked, delta_between(stacked, other)).component("vllm").patches == (reworked,)
+    assert apply(stacked, delta_between(stacked, bare)).component("vllm").patches == ()
+    assert dropped.upstream_ref is None
+    with pytest.raises(RecipeError, match="comes from"):
+        delta_between(stacked, _recipe(components=(ComponentPatches("vllm", "https://fork", VLLM_AT),)))
 
 
 def test_apply_removes_patches_and_kernel_artifacts() -> None:

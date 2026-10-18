@@ -28,6 +28,7 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
+from itertools import takewhile
 from pathlib import PurePosixPath
 
 from hyperloom.inference_optimizer.grid_server_args import (
@@ -585,6 +586,60 @@ def _apply_kernels(kernels: tuple[KernelArtifact, ...], delta: RecipeDelta) -> t
     return tuple(slots.values())
 
 
+def delta_between(first: Recipe, second: Recipe) -> RecipeDelta:
+    """The change that makes ``first`` into ``second`` on ``first``'s image.
+
+    ``apply(first, delta)`` launches with ``second``'s server arguments and environment and loads ``second``'s kernel
+    artifacts. Each of ``second``'s components carries ``second``'s upstream commit and patch stack; a component only
+    ``first`` has keeps its upstream commit, without patches. Raises :class:`RecipeError` for a component the two take
+    from different upstream repositories, which no change can move.
+    """
+
+    changes = [_component_delta(first.component(wanted.component), wanted) for wanted in second.components]
+    changes += [
+        ComponentChange(component.component, remove_patches=tuple(patch.path for patch in component.patches))
+        for component in first.components
+        if second.component(component.component) is None and component.patches
+    ]
+    return RecipeDelta(
+        config=_config_delta(first.launch, second.launch),
+        components=tuple(change for change in changes if change is not None),
+        add_kernels=tuple(artifact for artifact in second.kernels if artifact not in first.kernels),
+        remove_kernels=tuple(
+            sorted({artifact.ref for artifact in first.kernels} - {artifact.ref for artifact in second.kernels})
+        ),
+    )
+
+
+def _config_delta(first: LaunchConfig, second: LaunchConfig) -> ConfigDelta:
+    changed_args = first.server_args != second.server_args
+    dropped = set(_flag_values(first.server_args)) - set(_flag_values(second.server_args)) - {""}
+    return ConfigDelta(
+        server_args=second.server_args if changed_args else "",
+        remove_args=tuple(sorted(dropped)) if changed_args else (),
+        envs={name: value for name, value in second.envs.items() if first.envs.get(name) != value},
+        unset_envs=tuple(sorted(set(first.envs) - set(second.envs))),
+    )
+
+
+def _component_delta(current: ComponentPatches | None, wanted: ComponentPatches) -> ComponentChange | None:
+    if current is None:
+        return ComponentChange(wanted.component, wanted.upstream_ref, wanted.upstream_repo, wanted.patches)
+    if current.upstream_repo != wanted.upstream_repo:
+        raise RecipeError(
+            f"{wanted.component} comes from {current.upstream_repo} in one recipe and {wanted.upstream_repo} in the other"
+        )
+    shared = sum(1 for _ in takewhile(lambda pair: pair[0] == pair[1], zip(current.patches, wanted.patches)))
+    if current.upstream_ref == wanted.upstream_ref and shared == len(current.patches) == len(wanted.patches):
+        return None
+    return ComponentChange(
+        wanted.component,
+        upstream_ref=wanted.upstream_ref if wanted.upstream_ref != current.upstream_ref else None,
+        add_patches=wanted.patches[shared:],
+        remove_patches=tuple(patch.path for patch in current.patches[shared:]),
+    )
+
+
 # --- differences -------------------------------------------------------------------------------------------------
 
 
@@ -739,6 +794,7 @@ __all__ = [
     "RefChange",
     "ValueChange",
     "apply",
+    "delta_between",
     "diff",
     "with_unexpressed",
 ]
