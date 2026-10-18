@@ -34,6 +34,7 @@ from hyperloom.contracts.recipe import (
     apply,
 )
 from hyperloom.measure.compile import LocalBlobStore, PackageBase
+from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, LineageKind, MergeOutcome
@@ -44,12 +45,14 @@ from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.integrator import (
+    FOUNDATION_FIX_VERDICTS,
     RESOLVER_SYSTEM_PROMPT,
     SUPERSEDED,
     Integrator,
     LlmPatchResolver,
     MergeRecords,
     MergeReport,
+    not_stackable_reason,
 )
 from hyperloom_multibranch.scheduling.llm import CompletionFailed
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS
@@ -192,8 +195,9 @@ def _change(tag: str, patches: tuple[PatchRef, ...] = ()) -> RecipeDelta:
     return RecipeDelta(config=config, components=components)
 
 
-async def _commit_specialist_work(bench: Bench, invalid: bool) -> None:
-    """``s1`` commits ``c1`` and ``c2``; with ``invalid``, ``c1`` also moves the base image, which no merge carries."""
+async def _commit_specialist_work(bench: Bench, invalid: bool, foundation: bool) -> None:
+    """``s1`` commits ``c1`` and ``c2``; with ``invalid``, ``c1`` also moves the base image, which no merge carries,
+    and with ``foundation`` the gate judged ``c1`` a foundation fix."""
 
     scheduler, toolbox, gate = (bench.handle(role) for role in (Role.SCHEDULER, Role.TOOLBOX, Role.GATE))
     await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, "s1", from_commit=bench.root, reason="first batch"))
@@ -208,7 +212,10 @@ async def _commit_specialist_work(bench: Bench, invalid: bool) -> None:
         await toolbox.write_request(test)
         await toolbox.write_result(result(test.request_id))
         await gate.write_judgement(
-            test.request_id, judgement(GAINS[tag], (test.request_id,)), Conclusion.COMMITTED, commit
+            test.request_id,
+            judgement(GAINS[tag], (test.request_id,), foundation_fix=foundation and tag == "c1"),
+            Conclusion.COMMITTED,
+            commit,
         )
         bench.commits[tag], parent = commit, commit
 
@@ -219,6 +226,7 @@ async def _bench(
     *,
     accuracy: dict[str, float] | None = None,
     invalid: bool = False,
+    foundation: bool = False,
     conflicting: bool = False,
     toolbox_type: type[RecordingToolbox] = RecordingToolbox,
     repo_type: type[GitExperimentRepo] = GitExperimentRepo,
@@ -248,7 +256,7 @@ async def _bench(
     patches = tuple([await repo.store_patch(COMPONENT, text) for text in texts])
     deltas = {"c1": _change("c1", patches), "c2": _change("c2")}
     made = Bench(notebook, clock, repo, root, {}, deltas, toolbox, completion, integrator, decisions, regression)
-    await _commit_specialist_work(made, invalid)
+    await _commit_specialist_work(made, invalid, foundation)
     return made
 
 
@@ -322,6 +330,71 @@ async def test_an_improving_merge_the_regression_set_fails_is_not_stackable(benc
     record = await bench.handle(Role.OBSERVER).record(str(report.request_id))
     assert (record.conclusion, record.commit_id) == (Conclusion.NOT_STACKABLE, None)
     assert [row["reason"] for row in bench.logged()] == [report.reason]
+
+
+@pytest.mark.parametrize(("value", "verdict"), [(1005.0, "flat"), (950.0, "regressed")], ids=["flat", "regressed"])
+async def test_a_foundation_fix_that_passes_the_accuracy_gate_and_the_regression_set_merges_without_a_gain(
+    tmp_path: Path, value: float, verdict: str
+) -> None:
+    bench = await _bench(tmp_path, {**CURVES, frozenset({"c1"}): {MAIN_POINT: value}}, foundation=True)
+
+    report = await _one(bench)
+
+    head = await bench.repo.head(INTEGRATION_BRANCH)
+    assert report is not None and report.outcome is MergeOutcome.MERGED and report.foundation_fix
+    assert (report.candidate, report.merged_commit) == (bench.commits["c1"], head)
+    assert report.reason.startswith(f"a foundation fix, {verdict} ")
+    [test] = bench.merge_tests().values()
+    assert bench.regression.calls == [(bench.root, test.delta)]
+    record = await bench.handle(Role.OBSERVER).record(str(report.request_id))
+    assert (record.conclusion, record.commit_id) == (Conclusion.MERGED, head)
+    assert record.judgement is not None and report.gain_pct == record.judgement.gain_pct
+    [logged] = bench.logged()
+    assert logged["detail"]["foundation_fix"] is True
+    assert (logged["detail"]["gain_pct"], logged["detail"]["threshold_pct"]) == (report.gain_pct, report.threshold_pct)
+
+
+async def test_a_foundation_fix_the_regression_set_fails_is_not_stackable(tmp_path: Path) -> None:
+    bench = await _bench(tmp_path, {**CURVES, frozenset({"c1"}): {MAIN_POINT: 950.0}}, foundation=True)
+    bench.regression.failures = {bench.root: "case kv-overflow reproduced"}
+
+    report = await _one(bench)
+
+    assert report is not None and report.outcome is MergeOutcome.NOT_STACKABLE and report.foundation_fix
+    assert report.reason == "the regression set failed: case kv-overflow reproduced"
+    assert await bench.repo.head(INTEGRATION_BRANCH) == bench.root
+
+
+async def test_a_foundation_fix_the_accuracy_gate_fails_is_not_stackable_and_runs_no_regression_set(
+    tmp_path: Path,
+) -> None:
+    curves = {**CURVES, frozenset({"c1"}): {MAIN_POINT: 950.0}}
+    bench = await _bench(tmp_path, curves)
+    bench = await _bench(tmp_path / "again", curves, accuracy={bench.deltas["c1"].fingerprint(): 0.5}, foundation=True)
+
+    report = await _one(bench)
+
+    assert report is not None and report.outcome is MergeOutcome.NOT_STACKABLE
+    assert report.reason.startswith("regressed")
+    assert bench.regression.calls == []
+    assert await bench.repo.head(INTEGRATION_BRANCH) == bench.root
+
+
+@pytest.mark.parametrize("verdict", [Verdict.NEEDS_CONFIRM, Verdict.BLOCKED, Verdict.INCONCLUSIVE])
+def test_a_foundation_fix_on_an_unsettled_or_refused_verdict_is_not_stackable(verdict: Verdict) -> None:
+    judged = Judgement(verdict, 5.0, 1.0, ("r1",), {}, accuracy_ok=True)
+
+    assert not_stackable_reason(judged, foundation_fix=True) == f"{verdict.value} +5.00% on the integration head"
+
+
+@pytest.mark.parametrize("verdict", [Verdict.FLAT, Verdict.REGRESSED])
+def test_a_foundation_fix_without_a_gain_may_be_merged_only_once_it_passed_the_accuracy_gate(verdict: Verdict) -> None:
+    judged = Judgement(verdict, -2.0, 1.0, ("r1",), {}, accuracy_ok=True)
+
+    assert verdict in FOUNDATION_FIX_VERDICTS
+    assert not_stackable_reason(judged, foundation_fix=True) == ""
+    assert not_stackable_reason(judged, foundation_fix=False) == f"{verdict.value} -2.00% on the integration head"
+    assert not_stackable_reason(replace(judged, accuracy_ok=False), foundation_fix=True)
 
 
 async def test_a_merge_measuring_no_throughput_is_not_stackable_and_merging_goes_on(

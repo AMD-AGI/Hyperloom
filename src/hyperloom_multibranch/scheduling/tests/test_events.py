@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -64,11 +65,22 @@ def test_a_merge_moves_the_integration_head_from_its_gain_in_bars(bars: float, m
             "merged_commit": "c-merged",
             "gain_pct": bars * BAR,
             "threshold_pct": BAR,
+            "foundation_fix": False,
         }
+
+
+@pytest.mark.parametrize("gain_pct", [-1.5, 0.5], ids=["regressed", "below_the_large_gain"])
+def test_a_merged_foundation_fix_moves_the_integration_head_whatever_its_gain(gain_pct: float) -> None:
+    event = integration_moved(replace(_merged(gain_pct), foundation_fix=True))
+
+    assert event is not None and event.kind is EventKind.INTEGRATION_MOVED
+    assert event.reason.startswith("a foundation fix moved the integration head")
+    assert (event.detail["gain_pct"], event.detail["foundation_fix"]) == (gain_pct, True)
 
 
 def test_only_a_merged_report_moves_the_integration_head() -> None:
     assert integration_moved(_merged(10 * BAR, MergeOutcome.NOT_STACKABLE)) is None
+    assert integration_moved(replace(_merged(0.0, MergeOutcome.NOT_STACKABLE), foundation_fix=True)) is None
     assert integration_moved(MergeReport("c1", "c-root", MergeOutcome.MERGED, "", "r1", "c-merged")) is None
 
 

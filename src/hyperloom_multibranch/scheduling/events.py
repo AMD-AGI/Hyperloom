@@ -3,15 +3,16 @@
 
 """Events that change what the running branches are worth, detected on each EXPLORE tick for the judge to weigh.
 
-The integration head moving by a large gain (``integration_moved``) leaves the branches started before it behind it,
-its bottleneck moving (``bottleneck_moved``) leaves the branches attacking the old one with less to gain, and a
-measurement node quarantined (``environment_changed``) may make results on either side of it compare less well. The
-scheduler records each event as a decision, shows it at the judge's next call and asks the judge at once; what to stop
-and what to open is the judge's decision. A quarantine never stops the session: it only widens the nodes the toolbox
-avoids, and on a single node the toolbox still measures there.
+The integration head moving by a large gain or by a foundation fix (``integration_moved``) leaves the branches started
+before it behind it, its bottleneck moving (``bottleneck_moved``) leaves the branches attacking the old one with less to
+gain, and a measurement node quarantined (``environment_changed``) may make results on either side of it compare less
+well. The scheduler records each event as a decision, shows it at the judge's next call and asks the judge at once;
+what to stop and what to open is the judge's decision. A quarantine never stops the session: it only widens the nodes
+the toolbox avoids, and on a single node the toolbox still measures there.
 
 A large gain is read off the merge reports alone, against the bar each merge was judged by, so it follows the bar of
-whatever metric the gate judges. Nothing here scores the frontier, which logs a round every time it is read.
+whatever metric the gate judges. A merged foundation fix moves the head whatever its gain: it changes what every
+branch builds on. Nothing here scores the frontier, which logs a round every time it is read.
 
 After the integration head moved, :class:`IntegrationProfiler` profiles it, one profile at a time, in a task of its own:
 a PROFILE test of the head, then a TraceLens analysis of that test's trace, whose op shares the bottleneck is read from.
@@ -74,18 +75,21 @@ class SessionEvent:
 
 
 def integration_moved(report: MergeReport) -> SessionEvent | None:
-    """The event ``report`` makes when it merged a gain of at least :data:`MB_BIG_GAIN_BARS` bars; else ``None``."""
+    """The event ``report`` makes when it merged a foundation fix or a gain of at least :data:`MB_BIG_GAIN_BARS`
+    bars; else ``None``."""
 
     if report.outcome is not MergeOutcome.MERGED or report.gain_pct is None or report.threshold_pct is None:
         return None
-    if report.gain_pct < MB_BIG_GAIN_BARS * report.threshold_pct:
+    if not report.foundation_fix and report.gain_pct < MB_BIG_GAIN_BARS * report.threshold_pct:
         return None
-    reason = f"the integration head moved {report.gain_pct:+.2f}%, the bar was {report.threshold_pct:.2f}%"
+    moved_by = "a foundation fix moved the integration head" if report.foundation_fix else "the integration head moved"
+    reason = f"{moved_by} {report.gain_pct:+.2f}%, the bar was {report.threshold_pct:.2f}%"
     detail = {
         "candidate": report.candidate,
         "merged_commit": report.merged_commit,
         "gain_pct": report.gain_pct,
         "threshold_pct": report.threshold_pct,
+        "foundation_fix": report.foundation_fix,
     }
     return SessionEvent(EventKind.INTEGRATION_MOVED, reason, detail)
 

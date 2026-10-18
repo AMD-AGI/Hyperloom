@@ -146,6 +146,7 @@ def test_the_prompt_shows_and_explains_the_events_and_how_far_each_branch_lies_b
     for field in ("events", "integration_moved", "environment_changed", "behind_integration_pct"):
         assert field in prompt
     assert f"at least {MB_BIG_GAIN_BARS} times the bar threshold_pct" in prompt
+    assert "or merged a foundation fix (foundation_fix true), which merges whatever its gain" in prompt
 
 
 @pytest.mark.parametrize("running", [True, False])

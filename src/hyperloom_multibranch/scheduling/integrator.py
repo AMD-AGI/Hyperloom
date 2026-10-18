@@ -6,17 +6,18 @@
 Candidates are the notebook's committed specialist commits, in the order it gives them (foundation fixes first, then
 by their own gain), whatever became of the branch that made them. Each is tried once per integration head. A round
 tests up to the integration branch's K candidates at once on the same head; the first of them, in that order, that
-improves it is merged, and every other improvement is superseded: it gets no judgement and is tried again on the new
-head. A merge the experiment repository cannot combine, or whose test the toolbox refuses, is skipped and recorded
+may be merged is merged, and every other one that may is superseded: it gets no judgement and is tried again on the
+new head. A merge the experiment repository cannot combine, or whose test the toolbox refuses, is skipped and recorded
 like an unresolved conflict.
 
 The experiment repository carries the candidate's own change onto the integration head and reports what conflicts:
 where the two set a server argument or environment variable differently the candidate's value wins, and the
 integrator records every overridden value in the decision log; a patch that does not apply where the merge puts it
 goes to :class:`LlmPatchResolver`, and a merge it cannot resolve is skipped and recorded. The merged change is tested
-from the integration head and judged by the rule gate, and an improvement about to be merged runs the regression set,
-before anything is written, so only an improvement that keeps the regression set passing reaches the integration
-branch and nothing on it is ever reverted.
+from the integration head and judged by the rule gate, and a candidate about to be merged runs the regression set,
+before anything is written, so only a candidate that keeps the regression set passing reaches the integration branch
+and nothing on it is ever reverted. That candidate is an improvement, or a foundation fix the accuracy gate passed
+whatever its gain: a fix the other branches build on is worth merging even when it costs throughput.
 """
 
 from __future__ import annotations
@@ -60,7 +61,8 @@ RESOLVER_SYSTEM_PROMPT = (
 class MergeReport:
     """What came of one candidate on integration head ``onto``; ``config_conflicts`` took the candidate's value.
 
-    A merged candidate carries the gain its merge test was judged to make and the bar it was judged against.
+    A merged candidate carries the gain its merge test was judged to make and the bar it was judged against;
+    ``foundation_fix`` says the candidate is a foundation fix, which merges without a gain.
     """
 
     candidate: str
@@ -72,6 +74,7 @@ class MergeReport:
     config_conflicts: tuple[ValueChange, ...] = ()
     gain_pct: float | None = None
     threshold_pct: float | None = None
+    foundation_fix: bool = False
 
 
 class LlmPatchResolver:
@@ -141,13 +144,20 @@ def _untried(commit: CommittedCommit, head: str) -> bool:
     return commit.merged_into is None and (last is None or last.integration_head != head)
 
 
-def not_stackable_reason(judgement: Judgement) -> str:
+#: The verdicts a foundation fix that passed the accuracy gate merges on: a settled measurement, whatever its gain.
+FOUNDATION_FIX_VERDICTS = frozenset({Verdict.IMPROVED, Verdict.FLAT, Verdict.REGRESSED})
+
+
+def not_stackable_reason(judgement: Judgement, *, foundation_fix: bool) -> str:
     """Why a merge test judged ``judgement`` keeps its candidate off the integration branch; empty when it may be
     merged once the regression set passes.
 
-    Only a confirmed gain that passed the accuracy gate is ``IMPROVED``.
+    Only a confirmed gain that passed the accuracy gate is ``IMPROVED``. A foundation fix needs no gain: it may be
+    merged on any settled verdict once it passed the accuracy gate.
     """
 
+    if foundation_fix and judgement.accuracy_ok and judgement.verdict in FOUNDATION_FIX_VERDICTS:
+        return ""
     if judgement.verdict is not Verdict.IMPROVED:
         return f"{judgement.verdict.value} {judgement.gain_pct:+.2f}% on the integration head"
     return ""
@@ -210,7 +220,7 @@ class Integrator:
 
         head = await self._repo.head(INTEGRATION_BRANCH)
         untried = [commit for commit in await self._notebook.committed() if _untried(commit, head)]
-        tested = await asyncio.gather(*(self._test(candidate.commit_id, head) for candidate in untried[:width]))
+        tested = await asyncio.gather(*(self._test(candidate, head) for candidate in untried[:width]))
         reports = []
         merged = False
         for item in tested:
@@ -220,24 +230,35 @@ class Integrator:
             reports.append(report)
         return tuple(reports)
 
-    async def _test(self, candidate: str, head: str) -> MergeReport | _TestedMerge:
+    async def _test(self, commit: CommittedCommit, head: str) -> MergeReport | _TestedMerge:
+        candidate = commit.commit_id
         try:
             merge = await self._repo.merge(candidate, head)
             delta = await self._resolved(merge, candidate)
             request = integration_test_request(TestKind.TEST, Purpose.INTEGRATION, head, delta)
-            return await self._tests.judged(request, partial(self._judge, merge, delta, candidate))
+            return await self._tests.judged(request, partial(self._judge, merge, delta, commit))
         except RecipeError as exc:
-            return await self._skip(candidate, head, f"the merge does not combine: {exc}")
+            return await self._skip(commit, head, f"the merge does not combine: {exc}")
         except RequestRejected as exc:
-            return await self._skip(candidate, head, f"the toolbox refused the merge test: {exc}")
+            return await self._skip(commit, head, f"the toolbox refused the merge test: {exc}")
         except _Skipped as exc:
-            return await self._skip(candidate, head, exc.reason)
+            return await self._skip(commit, head, exc.reason)
 
     async def _judge(
-        self, merge: RepoMerge, delta: RecipeDelta, candidate: str, request_id: str
+        self, merge: RepoMerge, delta: RecipeDelta, commit: CommittedCommit, request_id: str
     ) -> MergeReport | _TestedMerge:
+        candidate = commit.commit_id
         await self._notebook.record_merge_attempt(MergeAttempt((candidate,), merge.onto, request_id))
-        tested = MergeReport(candidate, merge.onto, MergeOutcome.PENDING, "", request_id, None, merge.config_conflicts)
+        tested = MergeReport(
+            candidate,
+            merge.onto,
+            MergeOutcome.PENDING,
+            "",
+            request_id,
+            None,
+            merge.config_conflicts,
+            foundation_fix=commit.foundation_fix,
+        )
         try:
             judgement = await self._gate.compare(request_id)
         except NotMeasured as exc:
@@ -258,16 +279,19 @@ class Integrator:
             raise _Skipped(f"unresolved patch conflict: {conflicts}")
         return delta
 
-    async def _skip(self, candidate: str, head: str, reason: str) -> MergeReport:
-        await self._notebook.record_merge_attempt(MergeAttempt((candidate,), head, skipped_reason=reason))
-        return MergeReport(candidate, head, MergeOutcome.CONFLICT_SKIPPED, reason)
+    async def _skip(self, commit: CommittedCommit, head: str, reason: str) -> MergeReport:
+        await self._notebook.record_merge_attempt(MergeAttempt((commit.commit_id,), head, skipped_reason=reason))
+        return MergeReport(
+            commit.commit_id, head, MergeOutcome.CONFLICT_SKIPPED, reason, foundation_fix=commit.foundation_fix
+        )
 
     async def _conclude(self, tested: _TestedMerge, superseded: bool) -> MergeReport:
-        """A superseded improvement gets no integration judgement and runs no regression set: it stays pending and is
-        tried on the new head. Any other improvement is merged once the regression set passes on the merge."""
+        """A superseded candidate gets no integration judgement and runs no regression set: it stays pending and is
+        tried on the new head. Any other candidate that may be merged is merged once the regression set passes on the
+        merge."""
 
         report, judgement = tested.report, tested.judgement
-        reason = not_stackable_reason(judgement)
+        reason = not_stackable_reason(judgement, foundation_fix=report.foundation_fix)
         if not reason and not superseded:
             reason = await self._regression_failure(report.onto, tested.delta)
         if reason:
@@ -277,7 +301,9 @@ class Integrator:
             return replace(report, reason=SUPERSEDED)
         self._recording = asyncio.ensure_future(self._record_merge(report, tested.delta, judgement))
         merged = await asyncio.shield(self._recording)
-        reason = f"improved {judgement.gain_pct:+.2f}% on the integration head"
+        reason = f"{judgement.verdict.value} {judgement.gain_pct:+.2f}% on the integration head"
+        if report.foundation_fix:
+            reason = f"a foundation fix, {reason}"
         return replace(
             report,
             outcome=MergeOutcome.MERGED,
@@ -325,6 +351,9 @@ def _decision(report: MergeReport) -> Decision:
         "outcome": report.outcome.value,
         "request_id": report.request_id,
         "merged_commit": report.merged_commit,
+        "foundation_fix": report.foundation_fix,
+        "gain_pct": report.gain_pct,
+        "threshold_pct": report.threshold_pct,
         "config_conflicts": [
             {"name": change.name, "before": change.before, "after": change.after} for change in report.config_conflicts
         ],
@@ -332,4 +361,11 @@ def _decision(report: MergeReport) -> Decision:
     return Decision(DecisionKind.MERGE, report.reason, INTEGRATION_BRANCH, detail)
 
 
-__all__ = ["Integrator", "LlmPatchResolver", "MergeRecords", "MergeReport", "not_stackable_reason"]
+__all__ = [
+    "FOUNDATION_FIX_VERDICTS",
+    "Integrator",
+    "LlmPatchResolver",
+    "MergeRecords",
+    "MergeReport",
+    "not_stackable_reason",
+]

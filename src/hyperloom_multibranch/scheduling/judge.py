@@ -67,9 +67,11 @@ recipe: two branches marked identical spend twice the budget on one result, so s
 lower expected_gain_pct. A similar pair that is not identical is yours to weigh.
 events lists what happened since your last call that changes what the running branches are worth; you are asked at
 once when one happens. integration_moved: a merge moved the integration head by gain_pct, at least {MB_BIG_GAIN_BARS}
-times the bar threshold_pct it was judged against. A branch's behind_integration_pct is how far its head's recorded
-value lies below the integration head's, in percent of the root's value: a branch far behind gains little even once
-merged, so it is a candidate to stop, and a branch you open now starts from the new integration head.
+times the bar threshold_pct it was judged against, or merged a foundation fix (foundation_fix true), which merges
+whatever its gain because the other branches build on what it fixes. A branch's behind_integration_pct is how far its
+head's recorded value lies below the integration head's, in percent of the root's value: a branch far behind gains
+little even once merged, so it is a candidate to stop, and a branch you open now starts from the new integration
+head.
 bottleneck_moved: the profile of the integration head taken after it moved found its largest op changed, or that op's
 share fell by more than {MB_BOTTLENECK_SHIFT_PP} percentage points: branches still speeding up the previous largest op
 have less to gain, and a branch you open now is briefed on the new largest op unless you name its focus.
