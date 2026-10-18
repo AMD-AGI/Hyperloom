@@ -8,13 +8,16 @@ The gate judges them as it judges a specialist's candidate, the confirming retes
 a judgement leads to is the caller's.
 
 :class:`ResultVerifier` is the other direction: what the gate asks of the toolbox before a decision rests on a result.
+:class:`RegressionCheck` is the regression set the integrator runs before a merge and FINAL on every candidate.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Protocol
 
+from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.contracts.judgement import Judgement
 from hyperloom_multibranch.contracts.notebook.records import BaselineRecord
 
@@ -60,4 +63,36 @@ class SessionGate(Protocol):
         """Whether the test clears the accuracy gate every commit clears."""
 
 
-__all__ = ["NotMeasured", "ResultUnverified", "ResultVerifier", "SessionGate"]
+@dataclass(frozen=True)
+class RegressionOutcome:
+    """What the regression set found: ``passed``, or why not in ``reason``, naming each failed case and its cause."""
+
+    passed: bool
+    reason: str = ""
+
+
+class RegressionCheck(Protocol):
+    """Runs the reproduction case of every correctness fix ``base_commit`` or a commit in ``sources`` builds on, once
+    each, as a repro test of ``base_commit`` with ``candidate_delta`` applied.
+
+    The integrator names the commit a merge brings in as ``sources``: a fix only that commit's ancestry holds is not in
+    the integration head's. FINAL names none, because the candidate's own commit carries its whole ancestry.
+
+    It passes only when every case ran clean, and passes without a test when there is no case. A case that reproduced,
+    or ended without a verdict for any reason, fails it; a test outcome is never raised. A caller that is cancelled
+    takes the repro tests back.
+    """
+
+    async def check(
+        self, base_commit: str, candidate_delta: RecipeDelta, *, sources: tuple[str, ...]
+    ) -> RegressionOutcome: ...
+
+
+__all__ = [
+    "NotMeasured",
+    "RegressionCheck",
+    "RegressionOutcome",
+    "ResultUnverified",
+    "ResultVerifier",
+    "SessionGate",
+]
