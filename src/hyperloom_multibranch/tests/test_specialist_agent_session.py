@@ -14,8 +14,8 @@ from hyperloom.measure.compile import LocalBlobStore, PackageBase
 from hyperloom.orchestrator.specialists.agent_runner import AgentHandle, AgentStatus, LocalAgentRunner
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
 from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent
-from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, LineageKind
+from hyperloom_multibranch.contracts.notebook.records import LineageEvent, LlmUsage
+from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, LineageKind, UsageSource
 from hyperloom_multibranch.contracts.toolbox import SpecialistGrant
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
@@ -120,6 +120,7 @@ async def rig(tmp_path):
         processes=_Processes(),
         worktree=base.worktree(BRANCH, tmp_path / "s1" / "worktree"),
         workspace=tmp_path / "s1" / "session",
+        notebook=notebook,
     )
 
     def session(command=AgentCommand("claude", "claude"), runner=None, **overrides) -> AgentSession:
@@ -178,6 +179,23 @@ async def test_a_session_that_ends_as_it_should_is_followed_by_a_fresh_one(rig):
     assert (rig.runner.cancelled, rig.runner.collected) == ([3], [1, 2, 3])
     assert (rig.tokens.issued, rig.tokens.revoked) == ([BRANCH], [BRANCH])
     assert rig.worktree.head() == rig.root
+
+
+async def test_each_launch_records_what_its_cli_reported_it_cost_and_a_killed_one_records_nothing(rig, caplog):
+    session = rig.session()
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the first launch")
+    result = {"type": "result", "total_cost_usd": 2.5, "usage": {"input_tokens": 40, "output_tokens": 7}}
+    (rig.workspace / "process.log").write_text(json.dumps({**result, "session_id": "sess-1"}) + "\n")
+    rig.runner.end(1, EXITED_WELL, 3600.0)
+    await _until(lambda: len(rig.runner.specs) == 2, "a fresh session")
+    (rig.workspace / "process.log").write_text('{"type": "assistant"}\n')
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    (record,) = (await rig.notebook.snapshot()).llm_usage
+    assert record.usage == LlmUsage(BRANCH, UsageSource.SPECIALIST, 2.5, 40, 7, launch="sess-1")
+    assert "ended without a result event" in caplog.text
 
 
 async def test_each_launch_shows_the_brief_rebuilt_at_the_head_it_starts_at(rig):

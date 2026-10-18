@@ -8,7 +8,8 @@ Every session starts at the branch head, with the worktree synced to it and a la
 rebuilt at that head when the setup can, and the branch log. A session that ends as a session should, its model's turn done or its deadline reached, is
 followed by a fresh one: a branch runs until the scheduler stops it. One that is lost, exits with an error or ends
 within ``min_session_seconds`` raises, and the runtime decides whether to restart it. The session's process registry
-adopts every process the socket starts, so the session stop kills it even when this stop cannot.
+adopts every process the socket starts, so the session stop kills it even when this stop cannot. Each launch's spend,
+as its CLI reports it, is written to the branch's notebook once the launch is collected.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from typing import Protocol
 from hyperloom.common.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
 from hyperloom.orchestrator.specialists.agent_runner import (
     LONG_RUNNING_SESSION_SEC,
+    PROCESS_LOG,
     STATE_LOST,
     AgentHandle,
     AgentLaunchSpec,
@@ -32,9 +34,12 @@ from hyperloom.orchestrator.specialists.agent_runner import (
     AgentStatus,
     McpEndpoint,
 )
-from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore
+from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore, UsageSink
+from hyperloom_multibranch.contracts.notebook.records import LlmUsage
+from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, SpecialistTokens
+from hyperloom_multibranch.specialist.llm_usage import launch_cost
 from hyperloom_multibranch.specialist.prompts import launch_prompt
 from hyperloom_multibranch.specialist.runtime import SessionCrashed, SessionStart
 from hyperloom_multibranch.specialist.tools import sync_to_head
@@ -134,12 +139,16 @@ class AgentSetup:
     clock: Callable[[], float] = time.time
 
 
+class SessionNotebook(BranchLogStore, UsageSink, Protocol):
+    """A branch's runtime handle as its sessions use it: the branch log, and the spend of each launch."""
+
+
 @dataclass(frozen=True)
 class BranchPlace:
-    """Where one branch's sessions work: its worktree, its log, and the directory a session's files go in."""
+    """Where one branch's sessions work: its worktree, its log and spend, and the directory a session's files go in."""
 
     worktree: BranchWorktree
-    notebook: BranchLogStore
+    notebook: SessionNotebook
     workspace: Path
 
 
@@ -256,6 +265,20 @@ class AgentSession:
         if cancel:
             await self._setup.runner.cancel(handle)
         await self._setup.runner.collect(handle)
+        await self._record_cost()
+
+    async def _record_cost(self) -> None:
+        branch = self._start.branch
+        cost = await asyncio.to_thread(launch_cost, self._place.workspace / PROCESS_LOG)
+        if cost is None:
+            logger.warning(
+                "a launch of the specialist of %s ended without a result event; its LLM spend is not recorded", branch
+            )
+            return
+        usage = LlmUsage(
+            branch, UsageSource.SPECIALIST, cost.cost_usd, cost.input_tokens, cost.output_tokens, cost.session_id
+        )
+        await self._place.notebook.record_llm_usage(usage)
 
 
 def _describe(status: AgentStatus, seconds: float) -> str:
@@ -274,4 +297,5 @@ __all__ = [
     "AgentSetup",
     "BranchPlace",
     "Processes",
+    "SessionNotebook",
 ]

@@ -15,8 +15,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore
-from hyperloom_multibranch.specialist.agent_session import AgentSession, AgentSetup, BranchPlace
+from hyperloom_multibranch.specialist.agent_session import AgentSession, AgentSetup, BranchPlace, SessionNotebook
 from hyperloom_multibranch.specialist.runtime import SessionFactory, SessionStart
 from hyperloom_multibranch.specialist.tools import WorktreeFor
 from hyperloom_multibranch.specialist.worktree import BranchWorktree, SourceBase
@@ -37,7 +36,7 @@ def model_sessions(
     base: SourceBase,
     components: Sequence[str],
     branch_dir: Callable[[str], Path],
-    notebook_for: Callable[[str], BranchLogStore],
+    notebook_for: Callable[[str], SessionNotebook],
 ) -> ModelSessions:
     """The sessions of one session's specialists; ``setup.role`` is the
     :func:`~hyperloom_multibranch.specialist.prompts.role_prompt` of the session's workload."""
