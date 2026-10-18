@@ -103,21 +103,24 @@ def _record_phase_proposal(coord: "Coordinator", pending: PendingProposal) -> No
     the Critic's ruling is filed on.
     """
     from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseProposal
 
     state = coord.shared_state
     if not pending.proposal_msg_id or not state.phase:
         return
     params = pending.payload.get("params") if isinstance(pending.payload.get("params"), dict) else {}
     phase_event.record_proposal(
-        proposal_msg_id=pending.proposal_msg_id,
-        action=pending.action_name,
-        phase=state.phase,
-        macro_cycle=state.macro_cycle,
-        from_agent=pending.from_agent,
-        tick=state.tick,
-        predicted_gain_pct=pending.predicted_gain_pct,
-        candidate_id=pending.payload.get("framework_agent_candidate_id") or params.get("framework_agent_candidate_id"),
-        variant_name=pending.payload.get("variant_name") or params.get("variant_name"),
+        PhaseProposal(
+            at=PhaseCycle(state.phase, state.macro_cycle),
+            proposal_msg_id=pending.proposal_msg_id,
+            action=pending.action_name,
+            from_agent=pending.from_agent,
+            tick=state.tick,
+            predicted_gain_pct=pending.predicted_gain_pct,
+            candidate_id=pending.payload.get("framework_agent_candidate_id")
+            or params.get("framework_agent_candidate_id"),
+            variant_name=pending.payload.get("variant_name") or params.get("variant_name"),
+        )
     )
 
 
@@ -229,11 +232,10 @@ def _record_proposal_materialized(proposal_msg_id: str, task_id: str) -> None:
         return
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import ProposalOutcome
 
         phase_event.record_proposal_outcome(
-            proposal_msg_id=str(proposal_msg_id),
-            materialized=True,
-            task_id=str(task_id),
+            ProposalOutcome(proposal_msg_id=str(proposal_msg_id), materialized=True, task_id=str(task_id))
         )
     except Exception:
         log.debug("phase timeline: proposal task link failed for %s", proposal_msg_id, exc_info=True)

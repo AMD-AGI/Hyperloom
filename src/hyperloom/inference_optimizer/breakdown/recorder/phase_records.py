@@ -11,6 +11,7 @@ from typing import Any
 
 from .event_fields import (
     as_dict as _as_dict,
+    as_list as _as_list,
     clip as _clip,
     float_or_none as _float_or_none,
     int_or_none as _int_or_none,
@@ -29,6 +30,10 @@ __all__ = [
     "PhaseEntry",
     "PhaseExit",
     "PhaseMarker",
+    "PhaseProposal",
+    "PolicyDenial",
+    "ProposalOutcome",
+    "ProposalReview",
     "SpecialistRound",
 ]
 
@@ -233,3 +238,137 @@ class SpecialistRound:
         if self.ensemble_scores:
             row["ensemble_scores"] = _as_dict(self.ensemble_scores)
         return row
+
+
+@dataclass(frozen=True)
+class PolicyDenial:
+    """One PolicyGate denial, including intents that never became proposals."""
+
+    at: PhaseCycle
+    actor: str
+    proposal_msg_id: str | None
+    action: str
+    rule: str
+    hint: str = ""
+    denied_at: str = ""
+
+    def row(self) -> dict[str, Any]:
+        """The denial row this denial persists as."""
+        return {
+            "actor": str(self.actor or ""),
+            "proposal_msg_id": _text_or_none(self.proposal_msg_id),
+            "action": str(self.action or ""),
+            "phase": self.at.label(),
+            "rule": str(self.rule or ""),
+            "hint": str(self.hint or ""),
+            "denied_at": str(self.denied_at or "") or _now(),
+        }
+
+
+@dataclass(frozen=True)
+class PhaseProposal:
+    """A proposal as the phase raised it, written when it is minted rather than when acted on."""
+
+    at: PhaseCycle
+    proposal_msg_id: str
+    action: str
+    from_agent: str = ""
+    tick: int = 0
+    predicted_gain_pct: Any = None
+    candidate_id: Any = None
+    variant_name: Any = None
+    proposed_at: str = ""
+
+    def row(self) -> dict[str, Any]:
+        """The proposal row this proposal persists as."""
+        return {
+            "proposal_msg_id": str(self.proposal_msg_id),
+            "action": str(self.action or ""),
+            "from_agent": str(self.from_agent or ""),
+            "phase": self.at.label(),
+            "macro_cycle": int(self.at.macro_cycle or 0),
+            "tick": int(self.tick or 0),
+            "predicted_gain_pct": _float_or_none(self.predicted_gain_pct),
+            "candidate_id": _text_or_none(self.candidate_id),
+            "variant_name": _text_or_none(self.variant_name),
+            "proposed_at": str(self.proposed_at or "") or _now(),
+        }
+
+
+@dataclass(frozen=True)
+class ProposalReview:
+    """The Critic's ruling on one proposal.
+
+    ``effective_verdict`` is what was committed, which the envelope validator
+    can change.
+    """
+
+    proposal_msg_id: str
+    verdict: str
+    effective_verdict: str = ""
+    source: str = ""
+    reasoning: Any = None
+    confidence: Any = None
+    failure_reason_code: Any = None
+    required_evidence: Any = None
+    risks: Any = None
+    advice_text: Any = None
+    alternative_action: Any = None
+    variants: Any = None
+    reviewed_at: str = ""
+
+    def row(self) -> dict[str, Any]:
+        """The proposal row fields this ruling persists as."""
+        authored = str(self.verdict or "")
+        effective = str(self.effective_verdict or "") or authored
+        return {
+            "proposal_msg_id": str(self.proposal_msg_id),
+            "critic_review": {
+                "verdict": authored,
+                "effective_verdict": effective,
+                # Its own field because the two verdicts alone say that they
+                # differ, not that the envelope validator imposed it.
+                "held_to_rule": effective != authored,
+                "source": str(self.source or ""),
+                "reasoning": _clip(self.reasoning, MAX_REASON_CHARS),
+                "confidence": _float_or_none(self.confidence),
+                "failure_reason_code": _text_or_none(self.failure_reason_code),
+                "required_evidence": [str(item) for item in _as_list(self.required_evidence)],
+                "risks": [dict(risk) for risk in _as_list(self.risks) if isinstance(risk, Mapping)],
+                "advice_text": _text_or_none(self.advice_text),
+                "alternative_action": _text_or_none(self.alternative_action),
+                "variants": [dict(row) for row in _as_list(self.variants) if isinstance(row, Mapping)],
+                "reviewed_at": str(self.reviewed_at or "") or _now(),
+            },
+        }
+
+
+@dataclass(frozen=True)
+class ProposalOutcome:
+    """What the loop did with a proposal.
+
+    ``task_id`` joins the proposal to the dispatch row it became, beside it on
+    the same event.
+    """
+
+    proposal_msg_id: str
+    materialized: bool = False
+    denied: bool = False
+    reauthored: bool = False
+    task_id: Any = None
+    patch_verdict_key: Any = None
+    settled_at: str = ""
+
+    def row(self) -> dict[str, Any]:
+        """The proposal row fields this outcome persists as."""
+        return {
+            "proposal_msg_id": str(self.proposal_msg_id),
+            "outcome": {
+                "materialized": bool(self.materialized),
+                "denied": bool(self.denied),
+                "reauthored": bool(self.reauthored),
+                "task_id": _text_or_none(self.task_id),
+                "patch_verdict_key": _text_or_none(self.patch_verdict_key),
+                "settled_at": str(self.settled_at or "") or _now(),
+            },
+        }

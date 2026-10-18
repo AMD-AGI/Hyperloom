@@ -29,12 +29,9 @@ from typing import Any
 
 from .event_fields import (
     as_dict as _as_dict,
-    as_list as _as_list,
-    clip as _clip,
     float_or_none as _float_or_none,
     int_or_none as _int_or_none,
     now_iso_seconds as _now,
-    text_or_none as _text_or_none,
 )
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
@@ -47,6 +44,10 @@ from .phase_records import (
     PhaseEntry,
     PhaseExit,
     PhaseMarker,
+    PhaseProposal,
+    PolicyDenial,
+    ProposalOutcome,
+    ProposalReview,
     SpecialistRound,
 )
 
@@ -257,161 +258,71 @@ def record_dispatch(dispatch: ActionDispatch) -> bool:
     return opened is not None and recorded is not None
 
 
-def record_denial(
-    *,
-    actor: str,
-    proposal_msg_id: str | None,
-    action: str,
-    phase: str,
-    macro_cycle: int,
-    rule: str,
-    hint: str = "",
-    denied_at: str = "",
-) -> None:
+def record_denial(denial: PolicyDenial) -> None:
     """Record one PolicyGate denial at the point the decision is made."""
-    event = phase_event_id(phase, macro_cycle)
+    event = phase_event_id(denial.at.phase, denial.at.macro_cycle)
     sink = _sink(event)
     if sink is None:
         return
-    _open(event, phase=phase, macro_cycle=macro_cycle)
-    sink.append(
-        SECTION_DENIAL,
-        {
-            "actor": str(actor or ""),
-            "proposal_msg_id": _text_or_none(proposal_msg_id),
-            "action": str(action or ""),
-            "phase": str(phase or "").strip().upper(),
-            "rule": str(rule or ""),
-            "hint": str(hint or ""),
-            "denied_at": str(denied_at or "") or _now(),
-        },
-    )
+    _open(event, phase=denial.at.phase, macro_cycle=denial.at.macro_cycle)
+    sink.append(SECTION_DENIAL, denial.row())
 
 
-def record_proposal(
-    *,
-    proposal_msg_id: str,
-    action: str,
-    phase: str,
-    macro_cycle: int,
-    from_agent: str = "",
-    tick: int = 0,
-    predicted_gain_pct: Any = None,
-    candidate_id: Any = None,
-    variant_name: Any = None,
-    proposed_at: str = "",
-) -> None:
+def record_proposal(proposal: PhaseProposal) -> None:
     """Record a proposal against the phase that raised it. Never raises.
 
     Written when the proposal is minted, not when it is acted on: one refused by
     the Critic or left pending at the phase exit has no dispatch and so no other
     row, and the ruling needs a subject to be filed against.
     """
-    if not str(proposal_msg_id or ""):
+    if not str(proposal.proposal_msg_id or ""):
         return
-    event = phase_event_id(phase, macro_cycle)
+    event = phase_event_id(proposal.at.phase, proposal.at.macro_cycle)
     sink = _sink(event)
     if sink is None:
         return
-    _open(event, phase=phase, macro_cycle=macro_cycle)
+    _open(event, phase=proposal.at.phase, macro_cycle=proposal.at.macro_cycle)
     sink.record(
         SECTION_PROPOSAL,
-        {
-            "proposal_msg_id": str(proposal_msg_id),
-            "action": str(action or ""),
-            "from_agent": str(from_agent or ""),
-            "phase": str(phase or "").strip().upper(),
-            "macro_cycle": int(macro_cycle or 0),
-            "tick": int(tick or 0),
-            "predicted_gain_pct": _float_or_none(predicted_gain_pct),
-            "candidate_id": _text_or_none(candidate_id),
-            "variant_name": _text_or_none(variant_name),
-            "proposed_at": str(proposed_at or "") or _now(),
-        },
+        proposal.row(),
         row_type="proposal",
-        natural_ids=str(proposal_msg_id),
+        natural_ids=str(proposal.proposal_msg_id),
     )
 
 
-def record_proposal_review(
-    *,
-    proposal_msg_id: str,
-    verdict: str,
-    effective_verdict: str = "",
-    source: str = "",
-    reasoning: Any = None,
-    confidence: Any = None,
-    failure_reason_code: Any = None,
-    required_evidence: Any = None,
-    risks: Any = None,
-    advice_text: Any = None,
-    alternative_action: Any = None,
-    variants: Any = None,
-    reviewed_at: str = "",
-) -> None:
+def record_proposal_review(review: ProposalReview) -> None:
     """File the Critic's ruling on the proposal it ruled on. Never raises.
 
     The row is located by reading back which phase event holds the proposal, not
     from the phase in scope: the Critic runs on its own tick and routinely rules
     after the raising phase has exited. A ruling for a proposal with no row is
-    dropped rather than minting one. ``effective_verdict`` is what was
-    committed, which the envelope validator can change.
+    dropped rather than minting one.
     """
-    if not str(proposal_msg_id or ""):
+    if not str(review.proposal_msg_id or ""):
         return
-    event = _proposal_event(str(proposal_msg_id))
+    event = _proposal_event(str(review.proposal_msg_id))
     if event is None:
-        log.debug("phase event: no proposal row for %s to file a ruling on", proposal_msg_id)
+        log.debug("phase event: no proposal row for %s to file a ruling on", review.proposal_msg_id)
         return
     sink = _sink(event)
     if sink is None:
         return
-    authored = str(verdict or "")
-    effective = str(effective_verdict or "") or authored
     sink.record(
         SECTION_PROPOSAL,
-        {
-            "proposal_msg_id": str(proposal_msg_id),
-            "critic_review": {
-                "verdict": authored,
-                "effective_verdict": effective,
-                # Its own field because the two verdicts alone say that they
-                # differ, not that the envelope validator imposed it.
-                "held_to_rule": effective != authored,
-                "source": str(source or ""),
-                "reasoning": _clip(reasoning, MAX_REASON_CHARS),
-                "confidence": _float_or_none(confidence),
-                "failure_reason_code": _text_or_none(failure_reason_code),
-                "required_evidence": [str(item) for item in _as_list(required_evidence)],
-                "risks": [dict(risk) for risk in _as_list(risks) if isinstance(risk, Mapping)],
-                "advice_text": _text_or_none(advice_text),
-                "alternative_action": _text_or_none(alternative_action),
-                "variants": [dict(row) for row in _as_list(variants) if isinstance(row, Mapping)],
-                "reviewed_at": str(reviewed_at or "") or _now(),
-            },
-        },
+        review.row(),
         row_type="proposal",
-        natural_ids=str(proposal_msg_id),
+        natural_ids=str(review.proposal_msg_id),
     )
 
 
-def record_proposal_outcome(
-    *,
-    proposal_msg_id: str,
-    materialized: bool = False,
-    denied: bool = False,
-    reauthored: bool = False,
-    task_id: Any = None,
-    patch_verdict_key: Any = None,
-    settled_at: str = "",
-) -> None:
+def record_proposal_outcome(outcome: ProposalOutcome) -> None:
     """Record what the loop did with a proposal. Never raises.
 
     ``task_id`` joins the proposal to the dispatch row it became, beside it on
     this same event. Located and dropped the same way as the ruling."""
-    if not str(proposal_msg_id or ""):
+    if not str(outcome.proposal_msg_id or ""):
         return
-    event = _proposal_event(str(proposal_msg_id))
+    event = _proposal_event(str(outcome.proposal_msg_id))
     if event is None:
         return
     sink = _sink(event)
@@ -419,19 +330,9 @@ def record_proposal_outcome(
         return
     sink.record(
         SECTION_PROPOSAL,
-        {
-            "proposal_msg_id": str(proposal_msg_id),
-            "outcome": {
-                "materialized": bool(materialized),
-                "denied": bool(denied),
-                "reauthored": bool(reauthored),
-                "task_id": _text_or_none(task_id),
-                "patch_verdict_key": _text_or_none(patch_verdict_key),
-                "settled_at": str(settled_at or "") or _now(),
-            },
-        },
+        outcome.row(),
         row_type="proposal",
-        natural_ids=str(proposal_msg_id),
+        natural_ids=str(outcome.proposal_msg_id),
     )
 
 
