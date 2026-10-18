@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from kernelforge.fusion.diagnose import diagnose_from_shares
+from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares
 from kernelforge.fusion.llm_failure import (
     AGENT_SAFETY_REJECTION_ATTR,
     API_ERROR,
@@ -129,8 +129,9 @@ def test_env_setting_ignores_unparseable_and_negative_overrides(monkeypatch):
 
 def _launch_bound_diagnosis():
     return diagnose_from_shares(
-        {"gemm": 0.4, "add": 0.14, "elementwise": 0.14, "cast": 0.13, "mul": 0.08},
-        busy_fraction_of_wall=0.21,
+        TraceProfile(
+            {"gemm": 0.4, "add": 0.14, "elementwise": 0.14, "cast": 0.13, "mul": 0.08}, busy_fraction_of_wall=0.21
+        )
     )
 
 

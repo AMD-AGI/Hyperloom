@@ -9,7 +9,7 @@ import inspect
 import json
 
 from kernelforge.fusion import discover as discover_module
-from kernelforge.fusion.diagnose import diagnose_from_shares
+from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares
 from kernelforge.fusion.discover import (
     _extract_json_array,
     _salvage_objects,
@@ -21,8 +21,9 @@ from kernelforge.fusion.discover import (
 
 def _candidate_diag():
     return diagnose_from_shares(
-        {"gemm": 0.4, "add": 0.14, "elementwise": 0.14, "cast": 0.13, "mul": 0.08},
-        busy_fraction_of_wall=0.21,
+        TraceProfile(
+            {"gemm": 0.4, "add": 0.14, "elementwise": 0.14, "cast": 0.13, "mul": 0.08}, busy_fraction_of_wall=0.21
+        )
     )
 
 

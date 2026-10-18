@@ -8,15 +8,17 @@ from __future__ import annotations
 import json
 
 from kernelforge.fusion import calibration as cal
-from kernelforge.fusion.diagnose import diagnose_from_shares, load_op_bytes_from_kineto_trace
+from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares, load_op_bytes_from_kineto_trace
 from kernelforge.fusion.discover import parse_discovered_recipes
 from kernelforge.fusion.locate import build_recipes, covered_by_vllm_compile_pass
 from kernelforge.fusion.patterns import PATTERNS, match_patterns
 from kernelforge.fusion.vllm_passes import PassState
 
 
-def _candidate_diag(shares, busy=0.21, **kw):
-    return diagnose_from_shares(shares, busy_fraction_of_wall=busy, **kw)
+def _candidate_diag(shares, busy=0.21, category_bytes_share=None, **kw):
+    return diagnose_from_shares(
+        TraceProfile(shares, busy_fraction_of_wall=busy, category_bytes_share=category_bytes_share), **kw
+    )
 
 
 class TestCalibration:

@@ -10,7 +10,7 @@ import os
 import subprocess
 import sys
 
-from kernelforge.fusion.diagnose import diagnose_from_shares
+from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares
 from kernelforge.fusion.discover import parse_discovered_recipes
 from kernelforge.fusion.locate import build_recipes, vllm_compile_pass_state, vllm_pass_config_flag
 from kernelforge.fusion.vllm_passes import (
@@ -60,7 +60,7 @@ class TestPatternRoute:
         # THE MISS: pass exists but is disabled -> must be proposed, not dropped.
         model, root = _fake_vllm_tree(tmp_path, "qklm", QK_BODY)
         recipes = build_recipes(
-            diagnose_from_shares(QK_SHARES, busy_fraction_of_wall=0.21),
+            diagnose_from_shares(TraceProfile(QK_SHARES, busy_fraction_of_wall=0.21)),
             model_path=model,
             framework="vllm",
             framework_root=root,
@@ -79,7 +79,7 @@ class TestPatternRoute:
         # No regression: an ENABLED pass really does make source-level fusion a no-op.
         model, root = _fake_vllm_tree(tmp_path, "qklm", QK_BODY)
         recipes = build_recipes(
-            diagnose_from_shares(QK_SHARES, busy_fraction_of_wall=0.21),
+            diagnose_from_shares(TraceProfile(QK_SHARES, busy_fraction_of_wall=0.21)),
             model_path=model,
             framework="vllm",
             framework_root=root,
@@ -104,7 +104,7 @@ class TestPatternRoute:
         for label, (kw, want_compile_pass, want_authoring) in cases.items():
             model, root = _fake_vllm_tree(tmp_path / label, "qklm", QK_BODY)
             recipes = build_recipes(
-                diagnose_from_shares(QK_SHARES, busy_fraction_of_wall=0.21),
+                diagnose_from_shares(TraceProfile(QK_SHARES, busy_fraction_of_wall=0.21)),
                 model_path=model,
                 framework="vllm",
                 framework_root=root,
@@ -134,7 +134,7 @@ class TestPatternRoute:
             json.dumps({"model_type": "qklm", "hidden_size": 2048, "num_attention_heads": 16}), encoding="utf-8"
         )
         recipes = build_recipes(
-            diagnose_from_shares(QK_SHARES, busy_fraction_of_wall=0.21),
+            diagnose_from_shares(TraceProfile(QK_SHARES, busy_fraction_of_wall=0.21)),
             model_path=str(model),
             framework="sglang",
             framework_root=str(tmp_path / "fw"),
@@ -162,7 +162,7 @@ class TestRanking:
     def _recipes(self, tmp_path):
         model, root = _fake_vllm_tree(tmp_path, "ranklm", self.BODY)
         return build_recipes(
-            diagnose_from_shares(self.SHARES, busy_fraction_of_wall=0.21),
+            diagnose_from_shares(TraceProfile(self.SHARES, busy_fraction_of_wall=0.21)),
             model_path=model,
             framework="vllm",
             framework_root=root,

@@ -8,7 +8,7 @@ from __future__ import annotations
 import gzip
 import json
 
-from kernelforge.fusion.diagnose import diagnose_from_shares
+from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares
 from kernelforge.fusion.discover import (
     build_discovery_prompt,
     discover_recipes,
@@ -21,7 +21,7 @@ from kernelforge.fusion.discover import (
 
 def _candidate_diag(shares=None, busy=0.21):
     shares = shares or {"gemm": 0.4, "add": 0.14, "elementwise": 0.14, "cast": 0.13, "mul": 0.08}
-    return diagnose_from_shares(shares, busy_fraction_of_wall=busy)
+    return diagnose_from_shares(TraceProfile(shares, busy_fraction_of_wall=busy))
 
 
 def _write_trace(path, events, gz=False):
@@ -661,7 +661,7 @@ class TestDiscoverRecipes:
         assert "identify up to 4 CONTIGUOUS op chains" in run()
 
     def test_non_candidate_skips_llm(self, tmp_path):
-        d = diagnose_from_shares({"gemm": 0.9}, busy_fraction_of_wall=0.8)
+        d = diagnose_from_shares(TraceProfile({"gemm": 0.9}, busy_fraction_of_wall=0.8))
         called = {"n": 0}
 
         def fake_llm(prompt):

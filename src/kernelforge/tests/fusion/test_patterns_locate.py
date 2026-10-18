@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 
-from kernelforge.fusion.diagnose import diagnose_from_shares
+from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares
 from kernelforge.fusion.locate import build_recipes
 from kernelforge.fusion.patterns import match_patterns
 from kernelforge.fusion.report import build_manifest
@@ -15,7 +15,7 @@ from kernelforge.fusion.shapes import resolve_decode_shapes
 
 
 def _candidate_diag(shares, busy=0.21):
-    return diagnose_from_shares(shares, busy_fraction_of_wall=busy)
+    return diagnose_from_shares(TraceProfile(shares, busy_fraction_of_wall=busy))
 
 
 class TestMatchPatterns:
@@ -34,7 +34,9 @@ class TestMatchPatterns:
         assert "qk_norm_rope" in ids
 
     def test_non_candidate_yields_nothing(self):
-        d = diagnose_from_shares({"gemm": 0.8, "attention": 0.15, "add": 0.02}, busy_fraction_of_wall=0.72)
+        d = diagnose_from_shares(
+            TraceProfile({"gemm": 0.8, "attention": 0.15, "add": 0.02}, busy_fraction_of_wall=0.72)
+        )
         assert match_patterns(d, "sglang") == []
 
     def test_framework_filter(self):
@@ -112,11 +114,11 @@ class TestBuildRecipesAndManifest:
 
     def test_build_recipes_empty_for_non_candidate(self, tmp_path):
         (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3"}), encoding="utf-8")
-        d = diagnose_from_shares({"gemm": 0.8, "attention": 0.15}, busy_fraction_of_wall=0.72)
+        d = diagnose_from_shares(TraceProfile({"gemm": 0.8, "attention": 0.15}, busy_fraction_of_wall=0.72))
         assert build_recipes(d, model_path=str(tmp_path), framework="sglang") == []
 
     def test_manifest_verdict_no_opportunity(self, tmp_path):
-        d = diagnose_from_shares({"gemm": 0.8, "attention": 0.15}, busy_fraction_of_wall=0.72)
+        d = diagnose_from_shares(TraceProfile({"gemm": 0.8, "attention": 0.15}, busy_fraction_of_wall=0.72))
         m = build_manifest(framework="sglang", model_path=str(tmp_path), model_type="qwen3", diagnosis=d, recipe=None)
         assert m["verdict"] == "no_opportunity"
         assert m["fusion_candidates"] == []
