@@ -1339,14 +1339,12 @@ def test_attempts_are_ordered_by_when_they_started(tmp_path):
 def _record_inline_reprofile(recorder, *, task_id: str = "rp-1") -> None:
     """Dispatch a re-profile inline, the way the entry hook does."""
     from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
-    from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import make_roofline_recorder
+    from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import RooflineRequest, make_roofline_recorder
 
     recorder.record_reprofile(ReprofileOutcome(ran=True, task_kind="roofline", trigger="gain", task_id=task_id))
     inline = make_roofline_recorder(
         make_sink(recorder.event_id, producer="orchestrator"),
-        task_id=task_id,
-        task_kind="roofline",
-        reason="kernel_entry_reprofile",
+        RooflineRequest(task_id=task_id, task_kind="roofline", reason="kernel_entry_reprofile"),
         owns_event=False,
     )
     assert inline is not None
