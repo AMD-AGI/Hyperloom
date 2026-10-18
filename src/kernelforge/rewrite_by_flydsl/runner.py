@@ -27,7 +27,7 @@ from kernelforge.rewrite_by_flydsl import (
     report,
     seed,
 )
-from kernelforge.rewrite_by_flydsl.applyback import generate_applyback_patch
+from kernelforge.rewrite_by_flydsl.applyback import ApplybackRequest, generate_applyback_patch
 from kernelforge.rewrite_by_flydsl.attempt import (
     create_attempt_workspace,
     export_import_path,
@@ -369,38 +369,9 @@ def _measure_flydsl_baseline(
     return None, None, None
 
 
-def _run_applyback(
-    spec,
-    config: Config,
-    *,
-    rewrite_base_commit: str,
-    experiments_dir: str,
-    framework: str,
-    opt: dict,
-    source_ms,
-    port,
-    deadline_unix: float,
-    import_modules,
-    max_attempts: int,
-    usage,
-):
+def _run_applyback(spec, config: Config, request: ApplybackRequest, usage):
     """Turn the standalone best back into a patch against the caller's framework tree."""
-    applyback = generate_applyback_patch(
-        spec,
-        config,
-        base_commit=rewrite_base_commit,
-        experiments_dir=experiments_dir,
-        framework=framework,
-        best_commit=str(opt.get("best_commit") or ""),
-        source_ms=source_ms,
-        flydsl_best_ms=opt.get("best_ms"),
-        speedup=opt.get("mean_case_speedup"),
-        reference_snr_db=port.snr_db,
-        deadline_unix=deadline_unix,
-        import_modules=import_modules,
-        max_attempts=max_attempts,
-        usage=usage,
-    )
+    applyback = generate_applyback_patch(spec, config, request, usage=usage)
     if applyback.ok:
         print(f"  [forge-rewrite] apply-back patch ready: {applyback.patch_path}", flush=True)
     else:
@@ -754,16 +725,16 @@ def run_rewrite(
         applyback = _run_applyback(
             spec,
             config,
-            rewrite_base_commit=rewrite_base_commit,
-            experiments_dir=experiments_dir,
-            framework=framework,
-            opt=opt,
-            source_ms=source_ms,
-            port=port,
-            deadline_unix=deadline_unix,
-            import_modules=applyback_import_modules,
-            max_attempts=max_applyback_attempts,
-            usage=usage,
+            ApplybackRequest(
+                rewrite_base_commit,
+                experiments_dir,
+                str(opt.get("best_commit") or ""),
+                FlydslMeasurement(source_ms, opt.get("best_ms"), opt.get("mean_case_speedup"), port.snr_db),
+                deadline_unix,
+                applyback_import_modules,
+                max_applyback_attempts,
+            ),
+            usage,
         )
     result = report.build_result(
         scope,

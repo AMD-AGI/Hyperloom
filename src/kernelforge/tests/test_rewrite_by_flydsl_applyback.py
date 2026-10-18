@@ -6,6 +6,7 @@ import asyncio
 import json
 import subprocess
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ import pytest
 import kernelforge.agent_backends.registry as agent_registry
 from kernelforge.config import Config
 from kernelforge.rewrite_by_flydsl import applyback, protocol
+from kernelforge.rewrite_by_flydsl.measurement import FlydslMeasurement
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 
 
@@ -88,7 +90,7 @@ def test_applyback_agent_patch_is_published_in_forge_compatible_bundle(
     repo, base, spec = _repo_spec(tmp_path)
 
     async def fake_agent(**kwargs):
-        worktree = kwargs["worktree"]
+        worktree = kwargs["turn"].worktree
         (worktree / "softmax.py").write_text(
             "from flydsl_softmax import run_softmax\n\ndef softmax(x):\n    return run_softmax(x)\n"
         )
@@ -98,15 +100,14 @@ def test_applyback_agent_patch_is_published_in_forge_compatible_bundle(
     monkeypatch.setattr(applyback, "_run_agent", fake_agent)
     experiments = tmp_path / "experiments"
     result = applyback.generate_applyback_patch(
-        spec,
+        replace(spec, framework=framework),
         Config.from_env(workspace=str(repo), agent_precheck=False),
-        base_commit=base,
-        experiments_dir=str(experiments),
-        framework=framework,
-        best_commit="verified-best",
-        source_ms=2.0,
-        flydsl_best_ms=1.0,
-        reference_snr_db=61.5,
+        applyback.ApplybackRequest(
+            base_commit=base,
+            experiments_dir=str(experiments),
+            best_commit="verified-best",
+            measurement=FlydslMeasurement(2.0, 1.0, None, snr_db=61.5),
+        ),
     )
 
     assert result.ok is True
@@ -159,7 +160,7 @@ def test_framework_is_inferred_from_the_source_path(tmp_path, framework):
         workspace=str(tmp_path),
     )
 
-    assert applyback._infer_framework(spec, "") == framework
+    assert applyback._infer_framework(spec) == framework
 
 
 def _seed_standalone_forge_loop_best(repo) -> dict:
@@ -190,17 +191,16 @@ def test_applyback_publication_leaves_the_standalone_best_intact(
     standalone = _seed_standalone_forge_loop_best(repo)
 
     async def fake_agent(**kwargs):
-        (kwargs["worktree"] / "softmax.py").write_text("def softmax(x):\n    return x * 1\n")
+        (kwargs["turn"].worktree / "softmax.py").write_text("def softmax(x):\n    return x * 1\n")
         return "fake", "fake-model"
 
     monkeypatch.setattr(applyback, "_run_agent", fake_agent)
     result = applyback.generate_applyback_patch(
-        spec,
+        replace(spec, framework="vllm"),
         Config.from_env(workspace=str(repo), agent_precheck=False),
-        base_commit=base,
-        experiments_dir=str(tmp_path / "experiments"),
-        framework="vllm",
-        best_commit="standalone-flydsl-best",
+        applyback.ApplybackRequest(
+            base_commit=base, experiments_dir=str(tmp_path / "experiments"), best_commit="standalone-flydsl-best"
+        ),
     )
 
     assert result.ok is True
@@ -224,12 +224,11 @@ def test_applyback_failure_publishes_no_canonical_result(tmp_path, monkeypatch):
 
     monkeypatch.setattr(applyback, "_run_agent", idle_agent)
     result = applyback.generate_applyback_patch(
-        spec,
+        replace(spec, framework="vllm"),
         Config.from_env(workspace=str(repo), agent_precheck=False),
-        base_commit=base,
-        experiments_dir=str(tmp_path / "experiments"),
-        framework="vllm",
-        best_commit="standalone-flydsl-best",
+        applyback.ApplybackRequest(
+            base_commit=base, experiments_dir=str(tmp_path / "experiments"), best_commit="standalone-flydsl-best"
+        ),
     )
 
     assert result.ok is False
@@ -253,21 +252,18 @@ def test_applyback_retries_from_a_fresh_worktree_with_prior_failure(
     prior_failures: list[str] = []
 
     async def second_attempt_integrates(**kwargs):
-        worktrees.append(kwargs["worktree"])
-        prior_failures.append(kwargs["prior_failure"])
+        worktrees.append(kwargs["turn"].worktree)
+        prior_failures.append(kwargs["turn"].prior_failure)
         if len(worktrees) == 1:
             return "fake", "fake-model"
-        (kwargs["worktree"] / "softmax.py").write_text("def softmax(x):\n    return x * 1\n")
+        (kwargs["turn"].worktree / "softmax.py").write_text("def softmax(x):\n    return x * 1\n")
         return "fake", "fake-model"
 
     monkeypatch.setattr(applyback, "_run_agent", second_attempt_integrates)
     result = applyback.generate_applyback_patch(
-        spec,
+        replace(spec, framework="vllm"),
         Config.from_env(workspace=str(repo), agent_precheck=False),
-        base_commit=base,
-        experiments_dir=str(tmp_path / "experiments"),
-        framework="vllm",
-        max_attempts=2,
+        applyback.ApplybackRequest(base_commit=base, experiments_dir=str(tmp_path / "experiments"), max_attempts=2),
     )
 
     assert result.ok is True
@@ -283,18 +279,17 @@ def test_applyback_publications_increment_within_their_own_namespace(tmp_path):
 
     for index in range(2):
         patch_path, manifest_path, files_root, result_path = applyback._publish_patch(
-            spec=spec,
-            framework="vllm",
-            base_commit=base,
-            applyback_commit=base,
-            flydsl_best_commit="standalone-flydsl-best",
-            commit_ref="refs/forge-rewrite/applyback/softmax-abcdef123456",
-            source_ms=2.0,
-            flydsl_best_ms=1.0,
-            speedup=2.0,
-            reference_snr_db=45.0,
-            patch=f"framework patch {index}\n",
-            changed_files=["softmax.py"],
+            spec,
+            "vllm",
+            "standalone-flydsl-best",
+            FlydslMeasurement(2.0, 1.0, 2.0, snr_db=45.0),
+            applyback.CollectedPatch(
+                base,
+                base,
+                "refs/forge-rewrite/applyback/softmax-abcdef123456",
+                f"framework patch {index}\n",
+                ["softmax.py"],
+            ),
         )
 
     namespace = repo / "forge_experiments" / "rewrite_applyback"
@@ -317,16 +312,14 @@ def test_applyback_pins_the_commit_under_a_slug_derived_ref(tmp_path, monkeypatc
     spec.op_name = "vllm::softmax"
 
     async def integrate(**kwargs):
-        (kwargs["worktree"] / "softmax.py").write_text("def softmax(x):\n    return x + 1\n")
+        (kwargs["turn"].worktree / "softmax.py").write_text("def softmax(x):\n    return x + 1\n")
         return "fake", "fake-model"
 
     monkeypatch.setattr(applyback, "_run_agent", integrate)
     result = applyback.generate_applyback_patch(
-        spec,
+        replace(spec, framework="vllm"),
         Config.from_env(workspace=str(repo), agent_precheck=False),
-        base_commit=base,
-        experiments_dir=str(tmp_path / "experiments"),
-        framework="vllm",
+        applyback.ApplybackRequest(base_commit=base, experiments_dir=str(tmp_path / "experiments")),
     )
 
     assert result.ok is True
@@ -341,8 +334,7 @@ def test_applyback_requires_a_pristine_framework_commit(tmp_path):
     result = applyback.generate_applyback_patch(
         spec,
         Config.from_env(workspace=str(repo), agent_precheck=False),
-        base_commit="",
-        experiments_dir=str(tmp_path / "experiments"),
+        applyback.ApplybackRequest(base_commit="", experiments_dir=str(tmp_path / "experiments")),
     )
     assert result.ok is False
     assert "base commit" in result.error
@@ -361,8 +353,7 @@ def test_applyback_rejects_an_unresolved_framework_before_agent_work(
     result = applyback.generate_applyback_patch(
         spec,
         Config.from_env(workspace=str(repo), agent_precheck=False),
-        base_commit=base,
-        experiments_dir=str(tmp_path / "experiments"),
+        applyback.ApplybackRequest(base_commit=base, experiments_dir=str(tmp_path / "experiments")),
     )
 
     assert result.ok is False
@@ -402,11 +393,9 @@ def test_baseline_import_failure_prevents_the_applyback_agent(
 
     monkeypatch.setattr(applyback, "_run_agent", unexpected_agent)
     result = applyback.generate_applyback_patch(
-        spec,
+        replace(spec, framework="vllm"),
         Config.from_env(workspace=str(repo), agent_precheck=False),
-        base_commit=base,
-        experiments_dir=str(tmp_path / "experiments"),
-        framework="vllm",
+        applyback.ApplybackRequest(base_commit=base, experiments_dir=str(tmp_path / "experiments")),
     )
 
     assert result.ok is False
@@ -421,18 +410,16 @@ def test_patched_import_failure_rejects_a_syntax_valid_patch(
     repo, base, spec = _repo_spec(tmp_path)
 
     async def breaks_import(**kwargs):
-        (kwargs["worktree"] / "softmax.py").write_text(
+        (kwargs["turn"].worktree / "softmax.py").write_text(
             "from dependency_that_is_not_installed import run\n\ndef softmax(x):\n    return run(x)\n"
         )
         return "fake", "fake-model"
 
     monkeypatch.setattr(applyback, "_run_agent", breaks_import)
     result = applyback.generate_applyback_patch(
-        spec,
+        replace(spec, framework="vllm"),
         Config.from_env(workspace=str(repo), agent_precheck=False),
-        base_commit=base,
-        experiments_dir=str(tmp_path / "experiments"),
-        framework="vllm",
+        applyback.ApplybackRequest(base_commit=base, experiments_dir=str(tmp_path / "experiments")),
     )
 
     assert result.ok is False
@@ -447,24 +434,21 @@ def test_applyback_timeout_preserves_non_publishable_diagnostics(
     repo, base, spec = _repo_spec(tmp_path)
 
     async def timing_out_agent(**kwargs):
-        worktree = kwargs["worktree"]
+        worktree = kwargs["turn"].worktree
         (worktree / "softmax.py").write_text("def softmax(x):\n    return x + 1\n")
-        kwargs["progress_log"].append("tool:Bash focused smoke test")
+        kwargs["turn"].progress_log.append("tool:Bash focused smoke test")
         raise asyncio.TimeoutError
 
     monkeypatch.setattr(applyback, "_run_agent", timing_out_agent)
     experiments = tmp_path / "experiments"
     result = applyback.generate_applyback_patch(
-        spec,
+        replace(spec, framework="vllm"),
         Config.from_env(
             workspace=str(repo),
             agent_precheck=False,
             agent_timeout_sec=60,
         ),
-        base_commit=base,
-        experiments_dir=str(experiments),
-        framework="vllm",
-        deadline_unix=10_000_000_000,
+        applyback.ApplybackRequest(base_commit=base, experiments_dir=str(experiments), deadline_unix=10_000_000_000),
     )
 
     assert result.ok is False
@@ -489,18 +473,16 @@ def test_applyback_host_validation_rejects_test_edits(tmp_path, monkeypatch):
     base = _git(repo, "rev-parse", "HEAD")
 
     async def edits_test(**kwargs):
-        worktree = kwargs["worktree"]
+        worktree = kwargs["turn"].worktree
         (worktree / "softmax.py").write_text("def softmax(x):\n    return x + 1\n")
         (worktree / "tests" / "test_softmax.py").write_text("def test_softmax():\n    assert True\n")
         return "fake", "fake-model"
 
     monkeypatch.setattr(applyback, "_run_agent", edits_test)
     result = applyback.generate_applyback_patch(
-        spec,
+        replace(spec, framework="vllm"),
         Config.from_env(workspace=str(repo), agent_precheck=False),
-        base_commit=base,
-        experiments_dir=str(tmp_path / "experiments"),
-        framework="vllm",
+        applyback.ApplybackRequest(base_commit=base, experiments_dir=str(tmp_path / "experiments")),
     )
 
     assert result.ok is False
@@ -511,7 +493,7 @@ def test_applyback_refuses_to_publish_producer_owned_state(tmp_path, monkeypatch
     repo, base, spec = _repo_spec(tmp_path)
 
     async def leaks_forge_state(**kwargs):
-        worktree = kwargs["worktree"]
+        worktree = kwargs["turn"].worktree
         (worktree / "softmax.py").write_text("def softmax(x):\n    return x + 1\n")
         campaign = worktree / "forge_experiments"
         campaign.mkdir()
@@ -520,11 +502,9 @@ def test_applyback_refuses_to_publish_producer_owned_state(tmp_path, monkeypatch
 
     monkeypatch.setattr(applyback, "_run_agent", leaks_forge_state)
     result = applyback.generate_applyback_patch(
-        spec,
+        replace(spec, framework="vllm"),
         Config.from_env(workspace=str(repo), agent_precheck=False),
-        base_commit=base,
-        experiments_dir=str(tmp_path / "experiments"),
-        framework="vllm",
+        applyback.ApplybackRequest(base_commit=base, experiments_dir=str(tmp_path / "experiments")),
     )
 
     assert result.ok is False
@@ -570,14 +550,9 @@ def test_an_abnormal_agent_end_is_not_mistaken_for_a_finished_integration(
     with pytest.raises(RuntimeError, match="did not finish normally"):
         asyncio.run(
             applyback._run_agent(
-                spec=spec,
                 config=Config.from_env(workspace=str(repo), agent_precheck=False),
-                worktree=repo,
-                reference_path=Path(spec.flydsl_kernel),
-                framework="vllm",
-                source_relative="softmax.py",
-                timeout_sec=60,
-                progress_log=[],
+                brief=applyback._IntegrationBrief(spec, "vllm", "softmax.py", Path(spec.flydsl_kernel)),
+                turn=applyback._ApplybackTurn(repo, 60, []),
             )
         )
 
@@ -596,14 +571,9 @@ def test_a_normal_agent_end_reports_the_backend_that_ran(
 
     backend_name, backend_model = asyncio.run(
         applyback._run_agent(
-            spec=spec,
             config=Config.from_env(workspace=str(repo), agent_precheck=False),
-            worktree=repo,
-            reference_path=Path(spec.flydsl_kernel),
-            framework="vllm",
-            source_relative="softmax.py",
-            timeout_sec=60,
-            progress_log=[],
+            brief=applyback._IntegrationBrief(spec, "vllm", "softmax.py", Path(spec.flydsl_kernel)),
+            turn=applyback._ApplybackTurn(repo, 60, []),
         )
     )
 
