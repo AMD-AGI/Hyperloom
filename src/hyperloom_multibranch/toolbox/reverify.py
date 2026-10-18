@@ -16,7 +16,7 @@ from collections.abc import Sequence
 from hyperloom.contracts.measurement import AccuracyValue, RoundValue, TestResult
 from hyperloom.measure.manifest import ResultManifest
 
-__all__ = ["first_hash_difference", "first_value_difference"]
+__all__ = ["first_hash_difference", "first_value_difference", "first_warning_difference"]
 
 _ROUND_FIELDS = ("phase", "concurrency", "completed_requests", "failed_requests")
 _HASH_FIELDS = ("spec_fingerprint", "surface_sha256")
@@ -31,22 +31,16 @@ def first_hash_difference(recorded: TestResult, manifest: ResultManifest) -> str
 
 
 def first_value_difference(
-    recorded: TestResult,
-    rounds: Sequence[RoundValue],
-    accuracy: Sequence[AccuracyValue],
-    warnings: Sequence[str] = (),
+    recorded: TestResult, rounds: Sequence[RoundValue], accuracy: Sequence[AccuracyValue]
 ) -> str | None:
-    """The first round, accuracy or warning field that differs between the record and what the bundle derives."""
-    return (
-        _round_difference(recorded.rounds, tuple(rounds))
-        or _accuracy_difference(recorded.accuracy, tuple(accuracy))
-        or _warning_difference(recorded.nonfatal_warnings, tuple(warnings))
-    )
+    """The first round or accuracy field that differs between the record and the values derived from the bundle."""
+    return _round_difference(recorded.rounds, tuple(rounds)) or _accuracy_difference(recorded.accuracy, tuple(accuracy))
 
 
-def _warning_difference(recorded: tuple[str, ...], derived: tuple[str, ...]) -> str | None:
-    if recorded != derived:
-        return f"nonfatal_warnings: recorded {list(recorded)!r}, the bundle has {list(derived)!r}"
+def first_warning_difference(recorded: TestResult, derived: Sequence[str]) -> str | None:
+    """The warning list of the record when it is not the list derived from the bundle, as the field's name and both."""
+    if recorded.nonfatal_warnings != tuple(derived):
+        return f"nonfatal_warnings: recorded {list(recorded.nonfatal_warnings)!r}, the bundle has {list(derived)!r}"
     return None
 
 

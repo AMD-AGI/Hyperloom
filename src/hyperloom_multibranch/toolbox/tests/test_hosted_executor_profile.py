@@ -140,3 +140,14 @@ async def test_a_profile_record_whose_bundle_lists_no_trace_is_not_verified(tmp_
     with pytest.raises(ResultUnverified, match="lists no trace file"):
         await executor.reverify(forged)
     await executor.reverify(result)  # the genuine one still verifies
+
+
+async def test_a_profile_record_is_held_to_the_warnings_of_its_bundle_like_any_other(tmp_path: Path, rig: Rig) -> None:
+    executor, result = await _profile(tmp_path, rig, fake_trace="true", fake_report="false", fake_warnings='["w:1"]')
+    assert result.nonfatal_warnings == ("w:1",)
+    await executor.reverify(result)
+
+    with pytest.raises(ResultUnverified, match=r"nonfatal_warnings: recorded \[\], the bundle has \['w:1'\]"):
+        await executor.reverify(replace(result, nonfatal_warnings=()))
+    with pytest.raises(ResultUnverified, match=r"nonfatal_warnings: recorded \['w:1', 'x'\]"):
+        await executor.reverify(replace(result, nonfatal_warnings=("w:1", "x")))

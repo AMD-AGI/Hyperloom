@@ -279,3 +279,11 @@ async def test_warnings_added_to_a_run_that_had_none_are_named(tmp_path: Path, r
     assert await _reason(executor, replace(result, nonfatal_warnings=("x",))) == (
         "nonfatal_warnings: recorded ['x'], the bundle has []"
     )
+
+
+async def test_a_failed_result_that_records_warnings_is_named(tmp_path: Path, rig) -> None:
+    executor, result = await _accepted(tmp_path, rig, fake_warnings=WARNINGS)
+    failed = replace(result, validity=Validity.CANDIDATE_FAILED, rounds=(), accuracy=(), nonfatal_warnings=())
+    assert await executor.reverify(failed) is None
+    reason = await _reason(executor, replace(failed, nonfatal_warnings=("invented",)))
+    assert reason == "nonfatal_warnings: recorded ['invented'], the bundle has []"

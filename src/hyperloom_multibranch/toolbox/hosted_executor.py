@@ -59,7 +59,11 @@ from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.toolbox.acceptance import backend_kind
 from hyperloom_multibranch.toolbox.attempts import MeasurementRefused, TestJob
-from hyperloom_multibranch.toolbox.reverify import first_hash_difference, first_value_difference
+from hyperloom_multibranch.toolbox.reverify import (
+    first_hash_difference,
+    first_value_difference,
+    first_warning_difference,
+)
 
 __all__ = ["DEFAULT_TEST_TIMEOUT_SEC", "HostedExecutor", "OUTPUTS_DIR"]
 
@@ -298,7 +302,19 @@ def _one_line(text: str) -> str:
 
 
 def _unlike_bundle(result: TestResult, derived: Reverified, landed: Path) -> str | None:
-    """The first field of ``result`` that the verified bundle does not support."""
+    """The first field of ``result`` that the verified bundle does not support.
+
+    The warnings are checked on every path: a result that did not succeed records none, any other lists those of the
+    bundle's rounds, whatever kind of test it was.
+    """
+    difference = _unlike_values(result, derived, landed)
+    if difference:
+        return difference
+    expected = _warnings_of(derived.rounds) if result.validity is Validity.SUCCEEDED else ()
+    return first_warning_difference(result, expected)
+
+
+def _unlike_values(result: TestResult, derived: Reverified, landed: Path) -> str | None:
     difference = first_hash_difference(result, derived.manifest)
     if difference or result.validity is not Validity.SUCCEEDED:
         return difference or _unmeasured_difference(result)
@@ -311,7 +327,7 @@ def _unlike_bundle(result: TestResult, derived: Reverified, landed: Path) -> str
     if result.repro_verdict or _lists_verdict(derived.manifest):
         return _repro_difference(result, derived.manifest, landed)
     values = _round_values_at(derived.rounds, tuple(_concurrency_in(text) for text in derived.point_yaml))
-    return first_value_difference(result, values, _scores_of(derived.rounds), _warnings_of(derived.rounds))
+    return first_value_difference(result, values, _scores_of(derived.rounds))
 
 
 def _profile_difference(result: TestResult, manifest: ResultManifest) -> str | None:
