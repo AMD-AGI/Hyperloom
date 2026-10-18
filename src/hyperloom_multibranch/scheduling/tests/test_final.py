@@ -319,7 +319,7 @@ async def test_a_candidate_the_regression_set_fails_on_its_own_commit_is_not_eli
 
     assert choice.chosen == bench.candidates().best_branch
     assert [check.regression_passed for check in choice.checks] == [False, True]
-    assert sorted(bench.regression.calls) == sorted((bench.commits[tag], RecipeDelta()) for tag in ("i1", "c7"))
+    assert sorted(bench.regression.calls) == sorted((bench.commits[tag], RecipeDelta(), ()) for tag in ("i1", "c7"))
 
 
 class CrashedSweepTests(SessionTests):

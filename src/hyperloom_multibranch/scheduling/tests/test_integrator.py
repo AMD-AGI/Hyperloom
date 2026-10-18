@@ -333,7 +333,7 @@ async def test_an_improving_merge_the_regression_set_fails_is_not_stackable(benc
     assert report is not None and report.outcome is MergeOutcome.NOT_STACKABLE
     assert report.reason == "the regression set failed: case kv-overflow reproduced"
     [test] = bench.merge_tests().values()
-    assert bench.regression.calls == [(bench.root, test.delta)]
+    assert bench.regression.calls == [(bench.root, test.delta, (bench.commits["c1"],))]
     assert await bench.repo.head(INTEGRATION_BRANCH) == bench.root
     record = await bench.handle(Role.OBSERVER).record(str(report.request_id))
     assert (record.conclusion, record.commit_id) == (Conclusion.NOT_STACKABLE, None)
@@ -353,7 +353,7 @@ async def test_a_foundation_fix_that_passes_the_accuracy_gate_and_the_regression
     assert (report.candidate, report.merged_commit) == (bench.commits["c1"], head)
     assert report.reason.startswith(f"a foundation fix, {verdict} ")
     [test] = bench.merge_tests().values()
-    assert bench.regression.calls == [(bench.root, test.delta)]
+    assert bench.regression.calls == [(bench.root, test.delta, (bench.commits["c1"],))]
     record = await bench.handle(Role.OBSERVER).record(str(report.request_id))
     assert (record.conclusion, record.commit_id) == (Conclusion.MERGED, head)
     assert record.judgement is not None and report.gain_pct == record.judgement.gain_pct
@@ -474,7 +474,7 @@ async def test_a_round_tests_k_candidates_at_once_and_merges_the_first_improveme
     ]
     superseded = await bench.handle(Role.OBSERVER).record(str(first[1].request_id))
     assert superseded.conclusion is None
-    assert [base for base, _ in bench.regression.calls] == [bench.root, merged]
+    assert [(base, sources) for base, _, sources in bench.regression.calls] == [(bench.root, (c1,)), (merged, (c2,))]
     assert [(r.candidate, r.onto, r.outcome) for r in second] == [(c2, merged, MergeOutcome.MERGED)]
     head = await bench.repo.read_recipe(await bench.repo.head(INTEGRATION_BRANCH))
     assert TAG_FLAG + "c1" in head.launch.server_args and TAG_FLAG + "c2" in head.launch.server_args

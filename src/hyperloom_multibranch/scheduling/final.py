@@ -230,7 +230,7 @@ class FinalSelector:
     async def _check(self, candidate: FinalCandidate) -> CandidateCheck:
         sweep = asyncio.ensure_future(self._sweep(candidate.commit))
         repro = asyncio.ensure_future(self._reproduction(candidate.commit))
-        regression = asyncio.ensure_future(self._regression.check(candidate.commit, NO_DELTA))
+        regression = asyncio.ensure_future(self._regression.check(candidate.commit, NO_DELTA, sources=()))
         await together(sweep, repro, regression)
         swept = sweep.result()
         measured = swept.validity is Validity.SUCCEEDED

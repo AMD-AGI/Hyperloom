@@ -654,13 +654,15 @@ class StuckToolbox(RecordingToolbox):
 @dataclass
 class FakeRegressionCheck:
     """The regression set for the tests: fails on a base commit ``failures`` names, with its reason, and passes on
-    any other; ``calls`` notes every ``(base_commit, candidate_delta)`` it was asked about."""
+    any other; ``calls`` notes every ``(base_commit, candidate_delta, sources)`` it was asked about."""
 
     failures: Mapping[str, str] = field(default_factory=dict)
-    calls: list[tuple[str, RecipeDelta]] = field(default_factory=list)
+    calls: list[tuple[str, RecipeDelta, tuple[str, ...]]] = field(default_factory=list)
 
-    async def check(self, base_commit: str, candidate_delta: RecipeDelta) -> MbFakeRegressionOutcome:
-        self.calls.append((base_commit, candidate_delta))
+    async def check(
+        self, base_commit: str, candidate_delta: RecipeDelta, *, sources: tuple[str, ...]
+    ) -> MbFakeRegressionOutcome:
+        self.calls.append((base_commit, candidate_delta, sources))
         reason = self.failures.get(base_commit)
         return MbFakeRegressionOutcome(reason is None, reason or "")
 

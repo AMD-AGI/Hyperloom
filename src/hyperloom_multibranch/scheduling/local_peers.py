@@ -100,8 +100,10 @@ class MbFakePassingRegressionCheck:
     regression case is written in production yet, so the real set would pass everything as well.
     """
 
-    async def check(self, base_commit: str, candidate_delta: RecipeDelta) -> MbFakeRegressionOutcome:
-        del base_commit, candidate_delta
+    async def check(
+        self, base_commit: str, candidate_delta: RecipeDelta, *, sources: tuple[str, ...]
+    ) -> MbFakeRegressionOutcome:
+        del base_commit, candidate_delta, sources
         return MbFakeRegressionOutcome(passed=True)
 
 

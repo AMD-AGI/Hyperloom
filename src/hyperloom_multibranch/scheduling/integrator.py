@@ -301,7 +301,7 @@ class Integrator:
         report, judgement = tested.report, tested.judgement
         reason = not_stackable_reason(judgement, foundation_fix=report.foundation_fix)
         if not reason and not superseded:
-            reason = await self._regression_failure(report.onto, tested.delta)
+            reason = await self._regression_failure(report, tested.delta)
         if reason:
             await self._notebook.write_judgement(str(report.request_id), judgement, Conclusion.NOT_STACKABLE)
             return replace(report, outcome=MergeOutcome.NOT_STACKABLE, reason=reason)
@@ -321,8 +321,8 @@ class Integrator:
             threshold_pct=judgement.threshold_pct,
         )
 
-    async def _regression_failure(self, head: str, delta: RecipeDelta) -> str:
-        outcome = await self._regression.check(head, delta)
+    async def _regression_failure(self, report: MergeReport, delta: RecipeDelta) -> str:
+        outcome = await self._regression.check(report.onto, delta, sources=(report.candidate,))
         return "" if outcome.passed else f"the regression set failed: {outcome.reason}"
 
     async def _record_merge(self, tested: MergeReport, delta: RecipeDelta, judgement: Judgement) -> str:

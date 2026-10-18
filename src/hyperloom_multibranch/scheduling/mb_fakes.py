@@ -71,14 +71,19 @@ class MbFakeRegressionOutcome:
 
 
 class MbFakeRegressionCheck(Protocol):
-    """Runs the regression set of ``base_commit``'s ancestry on ``base_commit`` with ``candidate_delta`` applied.
+    """Runs the regression set of ``base_commit``'s ancestry and of every commit in ``sources`` on ``base_commit``
+    with ``candidate_delta`` applied.
 
-    The integrator asks it before a merge, FINAL for every candidate. Stands in for the rule gate's
+    The integrator asks it before a merge, naming the commit the merge brings in as ``sources``: a fix commit only
+    that commit's ancestry holds is not in the integration head's. FINAL asks it for every candidate with no
+    ``sources``, because the candidate's own commit carries its whole ancestry. Stands in for the rule gate's
     ``RegressionCheck`` proposed on board #61 (request D); replaced by it, and the stand-ins implementing this, once it
     lands.
     """
 
-    async def check(self, base_commit: str, candidate_delta: RecipeDelta) -> MbFakeRegressionOutcome: ...
+    async def check(
+        self, base_commit: str, candidate_delta: RecipeDelta, *, sources: tuple[str, ...]
+    ) -> MbFakeRegressionOutcome: ...
 
 
 @dataclass(frozen=True)

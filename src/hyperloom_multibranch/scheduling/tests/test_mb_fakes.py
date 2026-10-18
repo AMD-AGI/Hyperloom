@@ -27,7 +27,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
 
 
 async def test_every_merge_and_final_candidate_passes_the_regression_set() -> None:
-    outcome = await MbFakePassingRegressionCheck().check("any-commit", RecipeDelta())
+    outcome = await MbFakePassingRegressionCheck().check("any-commit", RecipeDelta(), sources=("c2",))
 
     assert (outcome.passed, outcome.reason) == (True, "")
 
