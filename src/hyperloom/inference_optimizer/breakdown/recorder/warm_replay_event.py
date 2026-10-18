@@ -23,7 +23,6 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import Any
 
 from .event_fields import (
@@ -146,10 +145,7 @@ __all__ = [
     "SKIP_RESTATES_BASELINE",
     "SKIP_WORKLOAD_CONFIG_INCOMPATIBLE",
     "STATUS_BY_OUTCOME",
-    "ApplyItem",
-    "ReplayMeasurement",
     "WarmReplayEventRecorder",
-    "WarmReplayRequest",
     "assemble_warm_replay_ext",
     "make_warm_replay_recorder",
     "warm_replay_event_id",
@@ -179,101 +175,6 @@ def _verdict(settled: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-@dataclass(frozen=True)
-class WarmReplayRequest:
-    """The warm recipe one replay applies.
-
-    A warm recipe has no single id: it takes ``tier``, the record
-    ``config_source`` came from, and that record's ``donor``. Three facts,
-    because a replay can take its config from one place and its kernel section
-    from another, and a low-confidence config is suppressed --
-    ``recipe_suppressed`` -- while the kernel half still runs, which is what
-    makes an empty ``config_source`` a decision. ``config_donor_tier`` is
-    ``self``, the donor's tier, or ``suppressed_low_confidence``.
-    """
-
-    task_id: str = ""
-    tier: str = ""
-    config_source: str = ""
-    config_donor_tier: str = ""
-    donor: Mapping[str, Any] | None = None
-    expected_gain_pct: Any = None
-    confidence: Any = None
-    session_baseline_tput: Any = None
-    kernel_count: Any = None
-    recipe_suppressed: Any = None
-
-    def block(self) -> dict[str, Any]:
-        """The ``request`` block this replay persists as."""
-        task_id = str(self.task_id or "")
-        return {
-            "task_id": task_id,
-            "baseline_action_ref": task_id,
-            "tier": str(self.tier or ""),
-            "config_source": str(self.config_source or ""),
-            "config_donor_tier": str(self.config_donor_tier or ""),
-            "donor": _as_dict(self.donor) or None,
-            "expected_gain_pct": _float_or_none(self.expected_gain_pct),
-            "confidence": _float_or_none(self.confidence),
-            "session_baseline_tput": _float_or_none(self.session_baseline_tput),
-            "kernel_count": None if self.kernel_count is None else int(self.kernel_count),
-            "recipe_suppressed": None if self.recipe_suppressed is None else bool(self.recipe_suppressed),
-        }
-
-
-@dataclass(frozen=True)
-class ReplayMeasurement:
-    """The numbers a replay was judged on.
-
-    ``before_tput`` is the enqueue-time anchor the gain was computed against,
-    recorded here because the phase drops it. ``cold_tput`` is the discarded
-    warmup, kept for audit; ``eval_ran`` separates "scored nothing" from "no
-    score could be read".
-    """
-
-    before_tput: Any
-    after_tput: Any
-    gain_pct: Any
-    hot_tput: Any = None
-    cold_tput: Any = None
-    accuracy: Any = None
-    baseline_accuracy: Any = None
-    eval_ran: Any = None
-
-    def block(self) -> dict[str, Any]:
-        """The ``measurement`` block this record persists as."""
-        return {
-            "before_tput": _float_or_none(self.before_tput),
-            "after_tput": _float_or_none(self.after_tput),
-            "gain_pct": _float_or_none(self.gain_pct),
-            "hot_tput": _float_or_none(self.hot_tput),
-            "cold_tput": _float_or_none(self.cold_tput),
-            "accuracy": _float_or_none(self.accuracy),
-            "baseline_accuracy": _float_or_none(self.baseline_accuracy),
-            "eval_ran": None if self.eval_ran is None else bool(self.eval_ran),
-        }
-
-
-@dataclass(frozen=True)
-class ApplyItem:
-    """What became of one item the replay had to apply.
-
-    ``applied`` is tri-state for the reason a gate's ``passed`` is: an item the
-    sequence stopped short of neither landed nor failed, and ``False`` would
-    read as an apply that was tried and lost. ``position`` is the item's place
-    in the list its own seam applied, which is the order a reader needs and not
-    the recorder's to invent -- the rows arrive from two seams, and one of them
-    runs before the event is even open.
-    """
-
-    ref: str
-    kind: str
-    position: Any
-    applied: bool | None
-    reason: str = ""
-    target: str = ""
-
-
 class WarmReplayEventRecorder:
     """Records one warm replay's facts into its own event.
 
@@ -282,19 +183,54 @@ class WarmReplayEventRecorder:
     from both halves.
     """
 
-    def __init__(self, sink: RecordSink, request: WarmReplayRequest):
-        """Bind a recorder to one replay's event."""
+    def __init__(
+        self,
+        sink: RecordSink,
+        *,
+        task_id: str = "",
+        tier: str = "",
+        config_source: str = "",
+        config_donor_tier: str = "",
+        donor: Mapping[str, Any] | None = None,
+        expected_gain_pct: Any = None,
+        confidence: Any = None,
+        session_baseline_tput: Any = None,
+        kernel_count: Any = None,
+        recipe_suppressed: Any = None,
+    ):
+        """Bind a recorder to one replay's event.
+
+        A warm recipe has no single id: it takes ``tier``, the record
+        ``config_source`` came from, and that record's ``donor``. Three facts,
+        because a replay can take its config from one place and its kernel
+        section from another, and a low-confidence config is suppressed --
+        ``recipe_suppressed`` -- while the kernel half still runs, which is
+        what makes an empty ``config_source`` a decision. ``config_donor_tier``
+        is ``self``, the donor's tier, or ``suppressed_low_confidence``.
+        """
         self._sink = sink
         self._t0 = time.monotonic()
         self._start_time = _now()
         self._sequence: int | None = None
         self._closed = False
-        self._task_id = str(request.task_id or "")
+        self._task_id = str(task_id or "")
         # Gates are stamped at seconds precision and several rule inside one
         # second, so timestamps cannot order the arc. Assigned once per gate,
         # so a gate that re-rules keeps its original place.
         self._gate_ordinals: dict[str, int] = {}
-        self._request = request.block()
+        self._request = {
+            "task_id": self._task_id,
+            "baseline_action_ref": self._task_id,
+            "tier": str(tier or ""),
+            "config_source": str(config_source or ""),
+            "config_donor_tier": str(config_donor_tier or ""),
+            "donor": _as_dict(donor) or None,
+            "expected_gain_pct": _float_or_none(expected_gain_pct),
+            "confidence": _float_or_none(confidence),
+            "session_baseline_tput": _float_or_none(session_baseline_tput),
+            "kernel_count": None if kernel_count is None else int(kernel_count),
+            "recipe_suppressed": None if recipe_suppressed is None else bool(recipe_suppressed),
+        }
         self._sink.record(SECTION_EVENT, {"request": dict(self._request)})
 
     @property
@@ -322,9 +258,40 @@ class WarmReplayEventRecorder:
             ext={"request": dict(self._request)},
         )
 
-    def record_measurement(self, measurement: ReplayMeasurement) -> None:
-        """Record the numbers the replay was judged on, as it is judged."""
-        self._sink.record(SECTION_EVENT, {"measurement": measurement.block()})
+    def record_measurement(
+        self,
+        *,
+        before_tput: Any,
+        after_tput: Any,
+        gain_pct: Any,
+        hot_tput: Any = None,
+        cold_tput: Any = None,
+        accuracy: Any = None,
+        baseline_accuracy: Any = None,
+        eval_ran: Any = None,
+    ) -> None:
+        """Record the numbers the replay was judged on, as it is judged.
+
+        ``before_tput`` is the enqueue-time anchor the gain was computed
+        against, recorded here because the phase drops it. ``cold_tput`` is the
+        discarded warmup, kept for audit; ``eval_ran`` separates "scored
+        nothing" from "no score could be read".
+        """
+        self._sink.record(
+            SECTION_EVENT,
+            {
+                "measurement": {
+                    "before_tput": _float_or_none(before_tput),
+                    "after_tput": _float_or_none(after_tput),
+                    "gain_pct": _float_or_none(gain_pct),
+                    "hot_tput": _float_or_none(hot_tput),
+                    "cold_tput": _float_or_none(cold_tput),
+                    "accuracy": _float_or_none(accuracy),
+                    "baseline_accuracy": _float_or_none(baseline_accuracy),
+                    "eval_ran": None if eval_ran is None else bool(eval_ran),
+                },
+            },
+        )
 
     def record_applied(
         self,
@@ -352,24 +319,39 @@ class WarmReplayEventRecorder:
             return
         self._sink.record(SECTION_EVENT, {"applied": applied})
 
-    def record_apply_item(self, item: ApplyItem) -> None:
+    def record_apply_item(
+        self,
+        ref: str,
+        *,
+        kind: str,
+        position: Any,
+        applied: bool | None,
+        reason: str = "",
+        target: str = "",
+    ) -> None:
         """Record what became of one item the replay had to apply.
 
-        An item the sequence never reached at all writes no row.
+        ``applied`` is tri-state for the reason a gate's ``passed`` is: an item
+        the sequence stopped short of neither landed nor failed, and ``False``
+        would read as an apply that was tried and lost. An item the sequence
+        never reached at all writes no row. ``position`` is the item's place in
+        the list its own seam applied, which is the order a reader needs and
+        not this recorder's to invent -- the rows arrive from two seams, and
+        one of them runs before the event is even open.
         """
         self._sink.record(
             SECTION_APPLY,
             {
-                "ref": str(item.ref or ""),
-                "kind": str(item.kind or ""),
-                "position": None if item.position is None else int(item.position),
-                "applied": None if item.applied is None else bool(item.applied),
-                "reason": str(item.reason or ""),
-                "target": str(item.target or ""),
+                "ref": str(ref or ""),
+                "kind": str(kind or ""),
+                "position": None if position is None else int(position),
+                "applied": None if applied is None else bool(applied),
+                "reason": str(reason or ""),
+                "target": str(target or ""),
                 "ts": _now(),
             },
             row_type=ROW_APPLY,
-            natural_ids=(str(item.kind or ""), str(item.ref or "")),
+            natural_ids=(str(kind or ""), str(ref or "")),
         )
 
     def record_rollback(self, *, ok: Any, errors: Any = None) -> None:
@@ -593,7 +575,16 @@ def make_warm_replay_recorder(
     *,
     phase: str,
     macro_cycle: Any = 0,
-    request: WarmReplayRequest = WarmReplayRequest(),
+    task_id: str = "",
+    tier: str = "",
+    config_source: str = "",
+    config_donor_tier: str = "",
+    donor: Mapping[str, Any] | None = None,
+    expected_gain_pct: Any = None,
+    confidence: Any = None,
+    session_baseline_tput: Any = None,
+    kernel_count: Any = None,
+    recipe_suppressed: Any = None,
     open_event_on_timeline: bool = True,
 ) -> WarmReplayEventRecorder | None:
     """Build a recorder, or ``None`` when no session is bound.
@@ -605,7 +596,19 @@ def make_warm_replay_recorder(
 
     if decline_unbound("warm replay"):
         return None
-    recorder = WarmReplayEventRecorder(make_sink(warm_replay_event_id(phase, macro_cycle), producer=PRODUCER), request)
+    recorder = WarmReplayEventRecorder(
+        make_sink(warm_replay_event_id(phase, macro_cycle), producer=PRODUCER),
+        task_id=task_id,
+        tier=tier,
+        config_source=config_source,
+        config_donor_tier=config_donor_tier,
+        donor=donor,
+        expected_gain_pct=expected_gain_pct,
+        confidence=confidence,
+        session_baseline_tput=session_baseline_tput,
+        kernel_count=kernel_count,
+        recipe_suppressed=recipe_suppressed,
+    )
     if open_event_on_timeline:
         recorder.begin()
     return recorder
