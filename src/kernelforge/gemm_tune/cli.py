@@ -18,7 +18,7 @@ import click
 from . import __version__
 
 if TYPE_CHECKING:
-    from .tuners.base import TuneResult
+    from .tuners.base import TuneContext, TuneResult
 
 log = logging.getLogger("kernelforge.gemm_tune")
 
@@ -137,15 +137,7 @@ def _coverage_gaps(
         return []
 
 
-def _attempt_tier3(
-    gaps: list,
-    demand_json: str,
-    output_dir: Path,
-    *,
-    profile: Any,
-    gpu_type: str,
-    framework: str,
-) -> "TuneResult | None":
+def _attempt_tier3(gaps: list, ctx: "TuneContext") -> "TuneResult | None":
     """Try Tier3 for the strongest otherwise-uncovered gap.
 
     Never raises and returns only referee-verified improvements. Accepting the
@@ -154,11 +146,14 @@ def _attempt_tier3(
     if not gaps:
         return None
     try:
+        profile = ctx.profile
+        output_dir = ctx.output_dir
         model_name = str(getattr(profile, "model_path", "") or getattr(profile, "architecture", "") or "unknown")
         from .evidence import demand_shapes, load_demand
         from .tier3 import attempt_generated_tuner
         from .tier3.dispatch import adapters_for
         from .tier3.gate import should_generate
+        from .tier3.runner import Retiming, Tier3Target
 
         decision = should_generate(gaps)
         if not decision.allowed or decision.gap is None:
@@ -166,7 +161,7 @@ def _attempt_tier3(
             return None
 
         adapter = adapters_for(decision.gap.table)
-        demand = load_demand(demand_json)
+        demand = load_demand(ctx.demand_json)
 
         def shapes_for(gap):
             # ``load_demand`` returns a parsed dict, not an object with ``tables``.
@@ -177,17 +172,15 @@ def _attempt_tier3(
 
         try:
             outcome = attempt_generated_tuner(
-                gaps,
+                decision,
                 shapes_for,
                 output_dir,
-                model_name=model_name,
-                gpu=gpu_type,
-                framework=framework,
-                decision=decision,
-                make_baseline=adapter.make_baseline if adapter else None,
-                make_dispatch=adapter.make_dispatch if adapter else None,
-                make_correctness=adapter.make_correctness if adapter else None,
-                sync=adapter.sync() if adapter else None,
+                target=Tier3Target(model_name=model_name, gpu=ctx.gpu_type, framework=ctx.framework),
+                retiming=(
+                    Retiming(adapter.make_baseline, adapter.make_dispatch, adapter.make_correctness, adapter.sync())
+                    if adapter
+                    else None
+                ),
             )
         finally:
             # An adapter steers the library under test through process-wide state, so the
@@ -737,14 +730,7 @@ def run(
     # produced something, and the recomputed list says which of them did.
     coverage_gap_list = _coverage_gaps(demand_report, tuner_specs, output_path, results)
     if coverage_gap_list and time.time() < global_deadline:
-        generated = _attempt_tier3(
-            coverage_gap_list,
-            demand_json,
-            output_path,
-            profile=profile,
-            gpu_type=gpu_type,
-            framework=framework,
-        )
+        generated = _attempt_tier3(coverage_gap_list, ctx)
         if generated is not None:
             results.append(generated)
 

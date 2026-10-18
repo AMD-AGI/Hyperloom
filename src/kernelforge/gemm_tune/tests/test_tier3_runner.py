@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,7 +16,7 @@ from kernelforge.gemm_tune import utils
 from kernelforge.gemm_tune.tier3 import gate, ledger, sandbox
 from kernelforge.gemm_tune.tier3.coverage import CoverageGap
 from kernelforge.gemm_tune.tier3.referee import CaptureFailed
-from kernelforge.gemm_tune.tier3.runner import attempt_generated_tuner
+from kernelforge.gemm_tune.tier3.runner import Retiming, Tier3Target, attempt_generated_tuner
 
 
 def _gap(table="odd.csv", misses=100, kind="no_tuner", tuner=None):
@@ -479,8 +480,8 @@ class TestShapesComeFromTheDemandDocument:
 
         seen = {}
 
-        def fake_attempt(gaps, shapes_for, *a, **kw):
-            seen["shapes"] = shapes_for(gaps[0])
+        def fake_attempt(decision, shapes_for, *a, **kw):
+            seen["shapes"] = shapes_for(decision.gap)
             raise RuntimeError("stop here; the mandate is not what this asserts")
 
         # ``_attempt_tier3`` imports it inside the function, so the module
@@ -492,11 +493,9 @@ class TestShapesComeFromTheDemandDocument:
         try:
             cli._attempt_tier3(
                 [_gap(table="a8w8_blockscale_tuned_gemm.csv")],
-                str(path),
-                tmp_path,
-                profile=None,
-                gpu_type="MI355X",
-                framework="sglang",
+                SimpleNamespace(
+                    profile=None, output_dir=tmp_path, demand_json=path, gpu_type="MI355X", framework="sglang"
+                ),
             )
         finally:
             tier3.attempt_generated_tuner = original
@@ -592,19 +591,19 @@ class TestTheWholeChain:
                 raise CaptureFailed("graph capture failed: RuntimeError('capture unsupported here')")
             return _call(2e-6)
 
-        kwargs = {}
+        retiming = None
         if with_dispatch:
-            kwargs = {
-                "make_baseline": _baseline,
-                "make_dispatch": lambda shape: lambda c: _call(dispatch_cost),
-                "make_correctness": lambda shape: lambda call: correct,
-            }
+            retiming = Retiming(
+                make_baseline=_baseline,
+                make_dispatch=lambda shape: lambda c: _call(dispatch_cost),
+                make_correctness=lambda shape: lambda call: correct,
+            )
         return attempt_generated_tuner(
-            [_gap()],
+            gate.should_generate([_gap()]),
             lambda g: [{"M": 16, "N": 1536, "K": 7168}],
             tmp_path,
-            model_name="qwen3-8b",
-            **kwargs,
+            target=Tier3Target(model_name="qwen3-8b"),
+            retiming=retiming,
         )
 
     def test_a_genuinely_faster_candidate_passes(self, tmp_path, monkeypatch, open_gate):
@@ -659,7 +658,7 @@ class TestTheWholeChain:
     def test_the_kill_switch_stops_it_before_anything_happens(self, tmp_path, monkeypatch):
         monkeypatch.setenv(gate.DISABLE_ENV, "1")
         out = attempt_generated_tuner(
-            [_gap()],
+            gate.should_generate([_gap()]),
             lambda g: [],
             tmp_path,
         )
