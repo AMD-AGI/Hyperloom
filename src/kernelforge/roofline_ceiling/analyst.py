@@ -342,7 +342,7 @@ async def run_ceiling_analysis(
                 backend,
                 _spec(
                     user_prompt=attempt_prompt,
-                    workdir=str(task.run.workdir),
+                    workdir=str(Path(task.run.workdir)),
                     session=session,
                     writable_dirs=[str(scratch), str(tools)],
                     protected_paths=[*task.kernel_files, task.driver_script],
