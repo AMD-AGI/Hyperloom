@@ -127,7 +127,7 @@ def write_breakdown(directory: Path, breakdown: Mapping[str, object]) -> Path:
     """Write ``breakdown`` atomically as ``directory / FILENAME`` and return the path."""
 
     path = directory / FILENAME
-    atomic_write_json(path, dict(breakdown), indent=2, sort_keys=True, make_parents=True)
+    atomic_write_json(path, dict(breakdown))
     return path
 
 

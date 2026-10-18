@@ -26,6 +26,7 @@ from typing import Protocol
 from hyperloom.common.io import append_jsonl
 from hyperloom_multibranch.contracts.notebook.peers import Intent, Validity
 from hyperloom_multibranch.contracts.notebook.records import Learning, LearningRecord, NotebookSnapshot, TestRecord
+from hyperloom_multibranch.notebook.codec import key_sorted
 
 log = logging.getLogger(__name__)
 
@@ -97,7 +98,7 @@ class RetrievalLog:
         if retrieval.leads:
             line["leads"] = [{"ref": lead.ref, "change": lead.change} for lead in retrieval.leads]
         try:
-            append_jsonl(self.path, line, make_parents=True, sort_keys=True)
+            append_jsonl(self.path, key_sorted(line), make_parents=True)
         except OSError as exc:
             log.warning("could not append the learnings retrieval to %s: %s", self.path, exc)
 

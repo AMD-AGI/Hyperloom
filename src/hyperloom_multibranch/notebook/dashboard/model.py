@@ -165,8 +165,8 @@ def write_dashboard(directory: Path, dashboard: Mapping[str, Any]) -> DashboardF
     """Write the dashboard data and its page into ``directory``, each atomically."""
 
     files = DashboardFiles(directory / DASHBOARD_JSON, directory / DASHBOARD_HTML)
-    atomic_write_json(files.json, dict(dashboard), indent=2, sort_keys=True, make_parents=True)
-    atomic_write_text(files.html, render_html(dashboard), make_parents=True)
+    atomic_write_json(files.json, dict(dashboard))
+    atomic_write_text(files.html, render_html(dashboard))
     return files
 
 

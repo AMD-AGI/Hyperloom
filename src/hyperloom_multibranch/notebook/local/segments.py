@@ -23,6 +23,7 @@ from pathlib import Path
 from hyperloom.common.io import append_jsonl
 from hyperloom.common.jsonio import read_jsonl
 from hyperloom_multibranch.contracts.notebook.vocab import Role
+from hyperloom_multibranch.notebook.codec import key_sorted
 
 log = logging.getLogger(__name__)
 
@@ -135,7 +136,7 @@ class Entry:
 
 def _read_entries(path: Path) -> list[Entry]:
     entries: list[Entry] = []
-    for row in read_jsonl(path, [], require_dict=True, skip_malformed=True, skip_non_dict=True):
+    for row in read_jsonl(path, require_dict=True, skip_malformed=True, skip_non_dict=True):
         try:
             entries.append(Entry.from_dict(row))
         except (KeyError, TypeError, ValueError) as exc:
@@ -157,7 +158,7 @@ class SegmentWriter:
         entry = build(self._last_seq + 1)
         if entry.writer != self.writer or entry.seq != self._last_seq + 1:
             raise ValueError(f"segment {self.writer} expects seq {self._last_seq + 1}, got {entry.entry_id}")
-        append_jsonl(self.path, entry.to_dict(), make_parents=True, sort_keys=True)
+        append_jsonl(self.path, key_sorted(entry.to_dict()), make_parents=True)
         self._last_seq = entry.seq
         return entry
 

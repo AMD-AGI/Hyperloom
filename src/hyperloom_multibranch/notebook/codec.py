@@ -41,6 +41,17 @@ def encode(value: object) -> object:
     return value
 
 
+def key_sorted(document: object) -> object:
+    """``document`` with every object's keys in order, so a writer that keeps insertion order writes the line
+    ``json.dumps(document, sort_keys=True)`` would."""
+
+    if isinstance(document, Mapping):
+        return {key: key_sorted(document[key]) for key in sorted(document)}
+    if isinstance(document, (tuple, list)):
+        return [key_sorted(item) for item in document]
+    return document
+
+
 def decode(kind: type[T], data: object) -> T:
     """Rebuild a ``kind`` from :func:`encode`'s output; raises ``TypeError`` or ``ValueError`` on other data."""
 
@@ -103,4 +114,4 @@ def _object(data: object) -> Mapping[str, object]:
     return data
 
 
-__all__ = ["decode", "encode"]
+__all__ = ["decode", "encode", "key_sorted"]
