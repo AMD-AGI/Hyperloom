@@ -200,12 +200,9 @@ def _with_port_fallbacks(opt: dict, *, best_ms, speedup, port_commit: str) -> di
 
 def _conforming_driver(
     spec,
-    driver_path: str,
-    *,
     config: Config,
-    experiments_dir: str,
-    search_stop_unix: float,
-    invocation_spec_file: str,
+    preparation: flydsl_rewrite_driver_preparation.DriverPreparation,
+    *,
     usage,
     prepare_driver: bool,
 ):
@@ -214,10 +211,11 @@ def _conforming_driver(
     A driver that does not already conform is handed to rewrite driver
     preparation first, unless the caller declined that.
     """
+    driver_path = preparation.driver_path
     preflight = flydsl_rewrite_driver_preparation.preflight_rewrite_driver(
         spec,
         driver_path,
-        deadline_unix=search_stop_unix,
+        deadline_unix=preparation.deadline_unix,
     )
     if not preflight.ok and prepare_driver:
         print(
@@ -228,11 +226,8 @@ def _conforming_driver(
         prepared = asyncio.run(
             flydsl_rewrite_driver_preparation.prepare_rewrite_driver(
                 spec=spec,
-                driver_path=driver_path,
                 config=config,
-                experiments_dir=experiments_dir,
-                deadline_unix=search_stop_unix,
-                invocation_spec_file=invocation_spec_file,
+                preparation=preparation,
                 initial_preflight=preflight,
                 usage=usage,
             )
@@ -588,11 +583,10 @@ def run_rewrite(
     # (3) Validate the rewrite-specific dual-path contract.
     preflight, driver_failure = _conforming_driver(
         spec,
-        driver_path,
-        config=config,
-        experiments_dir=experiments_dir,
-        search_stop_unix=search_stop_unix,
-        invocation_spec_file=invocation_spec_file,
+        config,
+        flydsl_rewrite_driver_preparation.DriverPreparation(
+            driver_path, experiments_dir, search_stop_unix, invocation_spec_file
+        ),
         usage=usage,
         prepare_driver=prepare_driver,
     )

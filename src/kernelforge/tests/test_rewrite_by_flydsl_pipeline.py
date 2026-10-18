@@ -1074,8 +1074,8 @@ def test_run_rewrite_prepares_a_missing_driver_before_port(
 
     assert out["port_ok"] is True
     assert driver.read_text() == "GENERATED = True\n"
-    assert prepared["driver_path"] == str(driver)
-    assert prepared["invocation_spec_file"] == str(invocation)
+    assert prepared["preparation"].driver_path == str(driver)
+    assert prepared["preparation"].invocation_spec_file == str(invocation)
     assert prepared["initial_preflight"].failure_class == driver_contract.DRIVER_MISSING
 
 

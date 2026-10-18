@@ -95,12 +95,14 @@ def test_authoring_spec_does_not_declare_the_driver_protected(tmp_path, monkeypa
         asyncio.run(
             driver_preparation._run_agent(
                 config=_config(tmp_path),
-                stage=stage,
-                stage_driver=stage_driver,
-                evidence_paths=set(),
-                prompt="author it",
-                timeout_sec=30,
-                progress_log=[],
+                turn=driver_preparation._AuthoringTurn(
+                    stage=stage,
+                    stage_driver=stage_driver,
+                    evidence_paths=set(),
+                    prompt="author it",
+                    timeout_sec=30,
+                    progress_log=[],
+                ),
                 usage=usage,
             )
         )
@@ -161,9 +163,9 @@ def test_missing_driver_is_authored_without_modifying_kernel_evidence(
     observed: dict = {}
 
     async def fake_agent(**kwargs):
-        observed["prompt"] = kwargs["prompt"]
-        observed["evidence"] = {path.name: path.read_bytes() for path in kwargs["evidence_paths"]}
-        kwargs["stage_driver"].write_text(
+        observed["prompt"] = kwargs["turn"].prompt
+        observed["evidence"] = {path.name: path.read_bytes() for path in kwargs["turn"].evidence_paths}
+        kwargs["turn"].stage_driver.write_text(
             '"""Generated driver."""\nVALID = True\n',
             encoding="utf-8",
         )
@@ -186,12 +188,14 @@ def test_missing_driver_is_authored_without_modifying_kernel_evidence(
     result = asyncio.run(
         driver_preparation.prepare_rewrite_driver(
             spec=spec,
-            driver_path=str(driver),
             config=_config(tmp_path),
-            experiments_dir=str(tmp_path / "experiments"),
-            deadline_unix=time.time() + 300,
+            preparation=driver_preparation.DriverPreparation(
+                driver_path=str(driver),
+                experiments_dir=str(tmp_path / "experiments"),
+                deadline_unix=time.time() + 300,
+                max_attempts=1,
+            ),
             initial_preflight=_failed_preflight("driver missing"),
-            max_attempts=1,
         )
     )
 
@@ -221,12 +225,12 @@ def test_invocation_spec_is_read_only_evidence_for_the_agent(
     observed: dict = {}
 
     async def fake_agent(**kwargs):
-        evidence = {path.name: path for path in kwargs["evidence_paths"]}
+        evidence = {path.name: path for path in kwargs["turn"].evidence_paths}
         observed["invocation"] = json.loads(
             evidence[driver_preparation._INVOCATION_EVIDENCE].read_text(encoding="utf-8")
         )
-        observed["prompt"] = kwargs["prompt"]
-        kwargs["stage_driver"].write_text("VALID = True\n", encoding="utf-8")
+        observed["prompt"] = kwargs["turn"].prompt
+        kwargs["turn"].stage_driver.write_text("VALID = True\n", encoding="utf-8")
         return "done"
 
     monkeypatch.setattr(driver_preparation, "_run_agent", fake_agent)
@@ -239,13 +243,15 @@ def test_invocation_spec_is_read_only_evidence_for_the_agent(
     result = asyncio.run(
         driver_preparation.prepare_rewrite_driver(
             spec=spec,
-            driver_path=str(driver),
             config=_config(tmp_path),
-            experiments_dir=str(tmp_path / "experiments"),
-            deadline_unix=time.time() + 300,
-            invocation_spec_file=str(invocation),
+            preparation=driver_preparation.DriverPreparation(
+                driver_path=str(driver),
+                experiments_dir=str(tmp_path / "experiments"),
+                deadline_unix=time.time() + 300,
+                invocation_spec_file=str(invocation),
+                max_attempts=1,
+            ),
             initial_preflight=_failed_preflight(),
-            max_attempts=1,
         )
     )
 
@@ -264,8 +270,8 @@ def test_write_boundary_violation_publishes_nothing(
     driver.write_text("ORIGINAL = True\n", encoding="utf-8")
 
     async def violating_agent(**kwargs):
-        kwargs["stage_driver"].write_text("REPLACEMENT = True\n", encoding="utf-8")
-        (kwargs["stage"] / "helper.py").write_text("UNEXPECTED = True\n")
+        kwargs["turn"].stage_driver.write_text("REPLACEMENT = True\n", encoding="utf-8")
+        (kwargs["turn"].stage / "helper.py").write_text("UNEXPECTED = True\n")
         return "created a helper"
 
     def unexpected_preflight(*args, **kwargs):
@@ -281,12 +287,14 @@ def test_write_boundary_violation_publishes_nothing(
     result = asyncio.run(
         driver_preparation.prepare_rewrite_driver(
             spec=spec,
-            driver_path=str(driver),
             config=_config(tmp_path),
-            experiments_dir=str(tmp_path / "experiments"),
-            deadline_unix=time.time() + 300,
+            preparation=driver_preparation.DriverPreparation(
+                driver_path=str(driver),
+                experiments_dir=str(tmp_path / "experiments"),
+                deadline_unix=time.time() + 300,
+                max_attempts=1,
+            ),
             initial_preflight=_failed_preflight(),
-            max_attempts=1,
         )
     )
 
@@ -305,7 +313,7 @@ def test_failed_destination_preflight_restores_the_original_driver(
     driver.write_text("ORIGINAL = True\n", encoding="utf-8")
 
     async def fake_agent(**kwargs):
-        kwargs["stage_driver"].write_text("CANDIDATE = True\n", encoding="utf-8")
+        kwargs["turn"].stage_driver.write_text("CANDIDATE = True\n", encoding="utf-8")
         return "done"
 
     monkeypatch.setattr(driver_preparation, "_run_agent", fake_agent)
@@ -318,12 +326,14 @@ def test_failed_destination_preflight_restores_the_original_driver(
     result = asyncio.run(
         driver_preparation.prepare_rewrite_driver(
             spec=spec,
-            driver_path=str(driver),
             config=_config(tmp_path),
-            experiments_dir=str(tmp_path / "experiments"),
-            deadline_unix=time.time() + 300,
+            preparation=driver_preparation.DriverPreparation(
+                driver_path=str(driver),
+                experiments_dir=str(tmp_path / "experiments"),
+                deadline_unix=time.time() + 300,
+                max_attempts=1,
+            ),
             initial_preflight=_failed_preflight(),
-            max_attempts=1,
         )
     )
 
@@ -348,12 +358,14 @@ def test_invalid_invocation_spec_fails_before_starting_an_agent(
     result = asyncio.run(
         driver_preparation.prepare_rewrite_driver(
             spec=spec,
-            driver_path=str(tmp_path / "driver.py"),
             config=_config(tmp_path),
-            experiments_dir=str(tmp_path / "experiments"),
-            deadline_unix=time.time() + 300,
-            invocation_spec_file=str(invocation),
-            max_attempts=1,
+            preparation=driver_preparation.DriverPreparation(
+                driver_path=str(tmp_path / "driver.py"),
+                experiments_dir=str(tmp_path / "experiments"),
+                deadline_unix=time.time() + 300,
+                invocation_spec_file=str(invocation),
+                max_attempts=1,
+            ),
         )
     )
 
