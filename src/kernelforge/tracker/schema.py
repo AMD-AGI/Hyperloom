@@ -61,6 +61,27 @@ class Iteration:
         return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
 
 
+@dataclass(frozen=True)
+class ExperimentSubject:
+    """What an experiment optimizes: the task, its backends and its timing targets."""
+
+    task_id: str = ""
+    backend: str = ""
+    kernel_backend: str = ""
+    description: str = ""
+    target_wall_ms: float | None = None
+    baseline_wall_ms: float | None = None
+
+
+@dataclass(frozen=True)
+class CampaignSegment:
+    """Where an experiment sits in a campaign; the empty segment is a standalone experiment."""
+
+    campaign_id: str = ""
+    segment_index: int = 0
+    parent_experiment_id: str = ""
+
+
 @dataclass
 class Experiment:
     """A complete development experiment spanning multiple iterations."""

@@ -153,7 +153,7 @@ from kernelforge.loop.merge_candidates import (
     select_merge_pair,
 )
 from kernelforge.mcp_server.tools.registers import check_registers
-from kernelforge.tracker import ExperimentTracker, Experiment
+from kernelforge.tracker import CampaignSegment, ExperimentTracker, Experiment, ExperimentSubject
 
 log = logging.getLogger(__name__)
 
@@ -6189,15 +6189,15 @@ class IterationLoop(AnalysisRuntimeMixin):
         self._stage_validated_warm_start_state()
         start_session(self.run_state)
         self.experiment = self.tracker.create_segment(
-            campaign_id=self.run_state.campaign_id,
-            segment_index=next_segment_index,
-            parent_experiment_id=parent_experiment_id,
-            task_id=Path(self.ic.kernel_file).stem,
-            backend=self.ic.backend,
-            kernel_backend=self.ic.kernel_backend,
-            description=f"Autonomous optimization of {self.ic.kernel_file}",
-            target_wall_ms=self.ic.target_wall_ms,
-            baseline_wall_ms=self.ic.baseline_wall_ms,
+            CampaignSegment(self.run_state.campaign_id, next_segment_index, parent_experiment_id),
+            ExperimentSubject(
+                task_id=Path(self.ic.kernel_file).stem,
+                backend=self.ic.backend,
+                kernel_backend=self.ic.kernel_backend,
+                description=f"Autonomous optimization of {self.ic.kernel_file}",
+                target_wall_ms=self.ic.target_wall_ms,
+                baseline_wall_ms=self.ic.baseline_wall_ms,
+            ),
         )
         self.run_state.last_experiment_id = self.experiment.experiment_id
         self.state_store.append_event(

@@ -66,6 +66,7 @@ from kernelforge.loop.recovery import (
     rollback_unpublished_warm_start,
 )
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB, aggregate_regression_detail
+from kernelforge.tracker.schema import ExperimentSubject
 
 if TYPE_CHECKING:
     from kernelforge.loop.campaign_config import CampaignConfig, CampaignConfigStore
@@ -1030,8 +1031,7 @@ def _ensure_recovery_experiment(tracker, caller_experiment_id: str, *, kernel: s
         tracker.get(caller_experiment_id)
     except FileNotFoundError:
         tracker.create(
-            task_id=Path(kernel).stem,
-            description=f"External recovery channel for {caller_experiment_id}",
+            ExperimentSubject(Path(kernel).stem, description=f"External recovery channel for {caller_experiment_id}"),
             experiment_id=caller_experiment_id,
         )
 
