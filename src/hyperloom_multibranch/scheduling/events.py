@@ -8,7 +8,9 @@ before it behind it, its bottleneck moving (``bottleneck_moved``) leaves the bra
 gain, and a measurement node quarantined (``environment_changed``) may make results on either side of it compare less
 well. The scheduler records each event as a decision, shows it at the judge's next call and asks the judge at once;
 what to stop and what to open is the judge's decision. A quarantine never stops the session: it only widens the nodes
-the toolbox avoids, and on a single node the toolbox still measures there.
+the toolbox avoids, and on a single node the toolbox still measures there. What does stop it is the toolbox having
+fewer usable cards than one test needs (``no_measurement_cards``): cards it lost for good are never leased again, so
+no test, FINAL's included, could run. A toolbox that does not know its cards never stops the session.
 
 A large gain is read off the merge reports alone, against the bar each merge was judged by, so it follows the bar of
 whatever metric the gate judges. A merged foundation fix moves the head whatever its gain: it changes what every
@@ -37,7 +39,7 @@ from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.interfaces import NodeHealth, RecordSearch
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, OpShares, QuarantineEvent
 from hyperloom_multibranch.contracts.notebook.vocab import MergeOutcome
-from hyperloom_multibranch.contracts.toolbox import RequestRejected
+from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, RequestRejected, Toolbox
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind, DecisionLog
 from hyperloom_multibranch.scheduling.integrator import MergeReport
@@ -63,6 +65,7 @@ class EventKind(str, Enum):
     INTEGRATION_MOVED = "integration_moved"
     BOTTLENECK_MOVED = "bottleneck_moved"
     ENVIRONMENT_CHANGED = "environment_changed"
+    NO_MEASUREMENT_CARDS = "no_measurement_cards"
 
 
 @dataclass(frozen=True)
@@ -120,6 +123,24 @@ def environment_changed(quarantine: QuarantineEvent) -> SessionEvent:
 
     detail = {"node": quarantine.node, "gpu_ids": list(quarantine.gpu_ids), "quarantine_reason": quarantine.reason}
     return SessionEvent(EventKind.ENVIRONMENT_CHANGED, f"node {quarantine.node} quarantined", detail)
+
+
+def no_measurement_cards(capacity: MeasurementCapacity, cards_per_test: int) -> SessionEvent | None:
+    """The event of ``capacity`` holding fewer usable cards than the ``cards_per_test`` one test needs; ``None`` while
+    a test fits, or when the toolbox does not know its cards."""
+
+    if not capacity.known or capacity.usable_cards >= cards_per_test:
+        return None
+    reason = (
+        f"the toolbox can measure on {capacity.usable_cards} of its {capacity.total_cards} cards, "
+        f"a test needs {cards_per_test}"
+    )
+    detail = {
+        "usable_cards": capacity.usable_cards,
+        "total_cards": capacity.total_cards,
+        "cards_per_test": cards_per_test,
+    }
+    return SessionEvent(EventKind.NO_MEASUREMENT_CARDS, reason, detail)
 
 
 def behind_integration_pct(
@@ -261,12 +282,23 @@ class SessionEvents:
     The integrator's task hands over each round's merge reports with :meth:`note_merges`; :meth:`detect` turns them,
     the quarantines put in force since the last tick and the profile ``profiler`` finished, into events, and has the
     head a large merge moved to profiled. A quarantine lifted and put in force again is a new event.
+    :meth:`record_card_shortage` reads the cards ``toolbox`` can still measure on against the ``cards_per_test`` one
+    test needs.
     """
 
-    def __init__(self, health: NodeHealth, decisions: DecisionLog, profiler: IntegrationProfiler) -> None:
+    def __init__(
+        self,
+        health: NodeHealth,
+        decisions: DecisionLog,
+        profiler: IntegrationProfiler,
+        toolbox: Toolbox,
+        cards_per_test: int,
+    ) -> None:
         self._health = health
         self._decisions = decisions
         self._profiler = profiler
+        self._toolbox = toolbox
+        self._cards_per_test = cards_per_test
         self._merges: list[MergeReport] = []
         self._quarantined: frozenset[tuple[str, tuple[int, ...]]] = frozenset()
         self._unshown: list[SessionEvent] = []
@@ -293,10 +325,22 @@ class SessionEvents:
         self._merges.clear()
         found = [*moved, *await self._newly_quarantined(), *found]
         for event in found:
-            detail = {"event": event.kind.value, **event.detail}
-            self._decisions.record(Decision(DecisionKind.EVENT, event.reason, detail=detail))
+            self._record(event)
         self._unshown.extend(found)
         return bool(found)
+
+    async def record_card_shortage(self) -> bool:
+        """Whether the toolbox has fewer usable cards than one test needs, recording that as a decision when it has;
+        it is never shown to the judge, because the session stops."""
+
+        event = no_measurement_cards(await self._toolbox.measurement_capacity(), self._cards_per_test)
+        if event is not None:
+            self._record(event)
+        return event is not None
+
+    def _record(self, event: SessionEvent) -> None:
+        detail = {"event": event.kind.value, **event.detail}
+        self._decisions.record(Decision(DecisionKind.EVENT, event.reason, detail=detail))
 
     def hand_over(self) -> tuple[SessionEvent, ...]:
         """The events detected since the last hand-over, for the judge call about to be made."""
@@ -338,4 +382,5 @@ __all__ = [
     "bottleneck_moved",
     "environment_changed",
     "integration_moved",
+    "no_measurement_cards",
 ]

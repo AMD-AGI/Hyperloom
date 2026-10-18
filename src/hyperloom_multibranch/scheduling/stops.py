@@ -52,6 +52,8 @@ class SessionStopReason(str, Enum):
     GLOBAL_CONVERGED = "global_converged"
     SIGNAL = "signal"
     PRELUDE_FAILED = "prelude_baseline_failed"
+    #: The toolbox has fewer usable cards than one test needs; FINAL is skipped and the session failed.
+    NO_MEASUREMENT_CARDS = "no_measurement_cards"
     #: The session raised an error it does not handle; CLOSE still runs before it propagates.
     ABORTED = "aborted"
 

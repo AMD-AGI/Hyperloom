@@ -22,7 +22,8 @@ task of its own, in rounds as wide as the integration branch's K. When EXPLORE e
 integrator abandons its round, so the integration head the FINAL candidates are read from no longer moves and
 no merge test competes with FINAL's measurements; a profile of the integration head still running is cancelled before
 that, taking its test back. Under ``--max-gpu-hours`` EXPLORE also ends, at a tick, once the session's tests have used
-the GPU hours FINAL's share leaves it.
+the GPU hours FINAL's share leaves it. EXPLORE ends at a tick as well once the toolbox has fewer usable cards than one
+test needs, and the session then skips FINAL.
 """
 
 from __future__ import annotations
@@ -171,6 +172,8 @@ class Explorer:
                 merging.result()
             if await self._gpu_hours_exhausted(window):
                 return SessionStopReason.GPU_HOURS_EXHAUSTED
+            if await self._events.record_card_shortage():
+                return SessionStopReason.NO_MEASUREMENT_CARDS
             overrun = await self._branches.stop_overrun_repairs()
             self._desk.fill_free_slots()
             freed = await self._start_admitted(window.explore_end) or overrun

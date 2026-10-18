@@ -19,7 +19,7 @@ from hyperloom.contracts.measurement import Purpose, TestKind
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, OpShares, QuarantineEvent
 from hyperloom_multibranch.contracts.notebook.vocab import MergeOutcome, QuarantineAction
-from hyperloom_multibranch.contracts.toolbox import RequestRejected
+from hyperloom_multibranch.contracts.toolbox import MeasurementCapacity, RequestRejected
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.events import (
@@ -34,6 +34,7 @@ from hyperloom_multibranch.scheduling.events import (
     behind_integration_pct,
     bottleneck_moved,
     integration_moved,
+    no_measurement_cards,
 )
 from hyperloom_multibranch.scheduling.integrator import MergeReport
 from hyperloom_multibranch.scheduling.requests import SessionTests
@@ -147,12 +148,51 @@ class _Shares:
 
 
 def _events(
-    health: _Health, log: Path, toolbox: FakeToolbox | None = None, shares: _Shares | None = None
+    health: _Health,
+    log: Path,
+    toolbox: FakeToolbox | None = None,
+    shares: _Shares | None = None,
+    cards_per_test: int = 1,
 ) -> SessionEvents:
     toolbox = toolbox or FakeToolbox()
     records = shares or _Shares()
     profiler = IntegrationProfiler(toolbox, SessionTests(toolbox, CLOCK), records, CLOCK)  # type: ignore[arg-type]
-    return SessionEvents(health, DecisionLog(log, CLOCK), profiler)
+    return SessionEvents(health, DecisionLog(log, CLOCK), profiler, toolbox, cards_per_test)
+
+
+@pytest.mark.parametrize(
+    ("capacity", "stops"),
+    [
+        (MeasurementCapacity(8, 3), True),
+        (MeasurementCapacity(8, 4), False),
+        (MeasurementCapacity.unknown(), False),
+    ],
+    ids=["fewer_than_a_test_needs", "as_many_as_a_test_needs", "unknown"],
+)
+def test_a_toolbox_runs_out_of_cards_below_what_one_test_needs_and_never_when_it_does_not_know(
+    capacity: MeasurementCapacity, stops: bool
+) -> None:
+    event = no_measurement_cards(capacity, 4)
+
+    assert (event is not None) is stops
+    if event is not None:
+        assert (event.kind, event.reason) == (
+            EventKind.NO_MEASUREMENT_CARDS,
+            "the toolbox can measure on 3 of its 8 cards, a test needs 4",
+        )
+        assert event.detail == {"usable_cards": 3, "total_cards": 8, "cards_per_test": 4}
+
+
+async def test_a_card_shortage_is_recorded_and_never_shown_to_the_judge(log: Path) -> None:
+    toolbox = FakeToolbox()
+    enough = _events(_Health(), log, toolbox, cards_per_test=8)
+    short = _events(_Health(), log, toolbox, cards_per_test=9)
+
+    assert not await enough.record_card_shortage() and _logged(log) == []
+    assert await short.record_card_shortage()
+    assert short.hand_over() == ()
+    [row] = _logged(log)
+    assert (row["kind"], row["detail"]["event"]) == ("event", "no_measurement_cards")
 
 
 async def test_a_whole_node_quarantine_is_shown_once_and_recorded(log: Path) -> None:

@@ -39,7 +39,7 @@ from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import QuarantineEvent, ToolResultPointer
 from hyperloom_multibranch.contracts.notebook.vocab import ClaimStatus, LineageKind, QuarantineAction
-from hyperloom_multibranch.contracts.toolbox import CancelOutcome
+from hyperloom_multibranch.contracts.toolbox import CancelOutcome, MeasurementCapacity
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
@@ -52,7 +52,14 @@ from hyperloom_multibranch.scheduling.final import INTEGRATION_LABEL, PRIMARY_PO
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION
 from hyperloom_multibranch.scheduling.layout import SessionLayout, create_session
-from hyperloom_multibranch.scheduling.lifecycle import CUT_SHORT, Session, SessionHost, SessionOutcome, SessionServices
+from hyperloom_multibranch.scheduling.lifecycle import (
+    CUT_SHORT,
+    NO_CARDS_LEFT,
+    Session,
+    SessionHost,
+    SessionOutcome,
+    SessionServices,
+)
 from hyperloom_multibranch.scheduling.local_peers import workload_rule
 from hyperloom_multibranch.scheduling.llm import CompletionFailed, CompletionReply, CompletionUsage
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
@@ -1156,6 +1163,56 @@ async def test_a_whole_node_quarantine_is_shown_to_the_judge_at_once_and_explore
     calls = [json.loads(line) for line in stage.layout.judge.read_text().splitlines()]
     [shown] = [call for call in calls if '"event": "environment_changed"' in call["prompt"]]
     assert at <= shown["at"] <= at + EXPLORE_TICK_SECONDS and '"node": "node-0"' in shown["prompt"]
+
+
+class CardsLostToolbox(RecordingToolbox):
+    """The recording toolbox that, once ``lost`` is set, reports every card of its pool lost for good; a double for a
+    backend whose cards' processes were not provably gone, not a placeholder."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.lost = False
+
+    async def measurement_capacity(self) -> MeasurementCapacity:
+        capacity = await super().measurement_capacity()
+        return replace(capacity, usable_cards=0) if self.lost else capacity
+
+
+async def test_a_toolbox_without_cards_for_a_test_ends_explore_as_a_failed_session_that_skips_final(
+    tmp_path: Path,
+) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.judge = ScriptedCompletion([_reply({"open": 1, "branches": [], "stop": []})])
+    stage.toolbox_type = CardsLostToolbox
+
+    async def lose_every_card(branch: str) -> None:
+        assert isinstance(stage.toolbox, CardsLostToolbox)
+        stage.toolbox.lost = True
+
+    stage.steps = {"b01": lose_every_card}
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (
+        SessionStopReason.NO_MEASUREMENT_CARDS,
+        NO_CARDS_LEFT,
+        1,
+    )
+    assert outcome.final is None and outcome.close is not None and outcome.close.stop.clean
+    phases = [row["reason"] for row in _decisions(stage) if row["kind"] == "phase"]
+    assert "final" not in phases
+    assert not [request for request in stage.toolbox.requests.values() if request.purpose is Purpose.FINAL]
+    [event] = [row for row in _decisions(stage) if row["kind"] == "event"]
+    assert event["detail"] == {
+        "event": "no_measurement_cards",
+        "usable_cards": 0,
+        "total_cards": 8,
+        "cards_per_test": WORKLOAD.tp,
+    }
+    assert event["reason"] == f"the toolbox can measure on 0 of its 8 cards, a test needs {WORKLOAD.tp}"
+    assert stage.sessions.stopped == ["b01"]
+    report = json.loads(stage.layout.report.read_text())
+    assert report["stop_reason"] == SessionStopReason.NO_MEASUREMENT_CARDS.value
 
 
 class AnalysingToolbox(RecordingToolbox):

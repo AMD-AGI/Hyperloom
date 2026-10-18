@@ -8,8 +8,10 @@ optimizer its recipes are scoped to, and the hard limits the judge works within.
 kind: ``inferencex`` takes ``--isl`` and ``--osl``, and ``agentx`` refuses them, as the trace it replays fixes its
 requests; an operator environment whose ``HYPERLOOM_AGENTX`` says otherwise than ``--workload`` is refused.
 ``--max-gpu-hours`` caps the GPU hours the session's tests use: EXPLORE ends with ``gpu_hours_exhausted`` once only
-FINAL's share is left, and FINAL still runs. Exit codes: 0 when the session ran its course, its wall-clock or
-GPU-hour budget spent included, 1 when it failed or was stopped, 2 on a usage error. The environment and the peers a
+FINAL's share is left, and FINAL still runs. A session whose toolbox has fewer usable cards left than one test needs
+ends EXPLORE with ``no_measurement_cards`` and skips FINAL. Exit codes: 0 when the session ran its course, its
+wall-clock or GPU-hour budget spent included, 1 when it failed or was stopped, ``no_measurement_cards`` included, 2 on
+a usage error. The environment and the peers a
 session needs are checked before anything is created, so a missing one fails the command without leaving a session
 directory behind: the Recipe KB that PRELUDE reads warm-start leads from and CLOSE writes the final recipe back to
 is configured by ``KB_STORE_URL`` and ``KB_STORE_TOKEN``, both or neither, and is not used without them; the RSI

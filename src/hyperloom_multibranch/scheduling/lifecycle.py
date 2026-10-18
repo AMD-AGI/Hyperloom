@@ -5,7 +5,7 @@
 
 PRELUDE gets the whole remaining budget; whatever it leaves is split into the EXPLORE, FINAL and CLOSE windows. The
 FINAL candidates are fixed while every branch still stands, then exploration ends and FINAL validates them. A
-failed PRELUDE, a stop signal, the session deadline or an unhandled error skip straight to CLOSE, which always runs
+failed PRELUDE, an EXPLORE that ran out of cards to measure on, a stop signal, the session deadline or an unhandled error skip straight to CLOSE, which always runs
 and kills every process the session started. The deadline plus the CLOSE grace bounds CLOSE itself; a stop signal
 brings that hard stop forward to the CLOSE grace from the signal, once, and the unwinding of the cancelled phases
 and CLOSE share it. An unhandled error brings it forward the same way when CLOSE starts, and so does a first signal
@@ -85,6 +85,7 @@ COMPLETED_REASONS = frozenset(
 #: The distribution this package ships in (pyproject.toml ``[project] name``).
 MB_DISTRIBUTION = "hyperloom-inference_optimizer"
 CUT_SHORT = "CLOSE was cut short after a stop signal"
+NO_CARDS_LEFT = "the toolbox has fewer usable cards than one test needs, so FINAL could not run"
 
 
 @dataclass(frozen=True)
@@ -172,7 +173,7 @@ class Session:
         widening = Widening(peers.toolbox, self._roster, progress.policy)
         similarity = BranchSimilarity(peers.repo, self._roster)
         profiler = IntegrationProfiler(peers.toolbox, tests, self._notebook, clock)
-        events = SessionEvents(self._notebook, self._decisions, profiler)
+        events = SessionEvents(self._notebook, self._decisions, profiler, peers.toolbox, settings.workload.tp)
         steering = Steering(
             judge,
             settings.judge_interval_seconds,
@@ -285,6 +286,9 @@ class Session:
             explore_gpu_seconds(self._settings.max_gpu_hours),
         )
         reason = await self._explorer.run(window)
+        if reason is SessionStopReason.NO_MEASUREMENT_CARDS:
+            await self._stopper.end_exploration(reason)
+            return SessionOutcome(reason, None, None, NO_CARDS_LEFT)
         candidates = await self._final_candidates()
         await self._stopper.end_exploration(reason)
         self._phase("final", candidates=encode(candidates.each))
@@ -403,6 +407,7 @@ def code_version() -> CodeVersion:
 
 __all__ = [
     "COMPLETED_REASONS",
+    "NO_CARDS_LEFT",
     "CodeVersion",
     "Session",
     "SessionHost",
