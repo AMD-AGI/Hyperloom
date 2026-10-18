@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from hyperloom.contracts.measurement import AccuracyValue, FailureClass, SandboxFacts
+from hyperloom.contracts.measurement import AccuracyValue, AttachmentRef, FailureClass, SandboxFacts
 
 __all__ = [
     "EnvironmentRef",
@@ -126,6 +126,9 @@ class TestCall:
     avoid_nodes: tuple[str, ...] = ()
     session_facts: SessionFacts | None = None
     serving_lease: Any = None
+    #: What the request ships with it (a ``repro`` test's case). The sheet carries them; whoever runs the call has
+    #: unpacked each under ``<cwd>/attach/<id>/`` (a file attachment is the file ``<cwd>/attach/<id>``).
+    attachments: tuple[AttachmentRef, ...] = ()
 
 
 @dataclass(frozen=True)

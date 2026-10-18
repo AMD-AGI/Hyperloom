@@ -16,7 +16,7 @@ import io
 import os
 import re
 import tarfile
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -24,16 +24,19 @@ from typing import Any
 import yaml
 
 from hyperloom.common.env import env_bool
+from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom.common.env_safety import (
     filter_untrusted_env_mapping,
     is_allowed_variant_env_key,
     is_secret_shaped_env_name,
 )
+from hyperloom.measure.compile import BlobError
 from hyperloom.measure.docs import DocumentError, canonical_json
 from hyperloom.measure.spec import DEFAULT_MAX_TOTAL_BYTES, PLATFORM_ENV_NAMES, MeasurementSpec
 from hyperloom.measure.socket import TestCall
 
 __all__ = [
+    "MAX_ATTACHMENT_BYTES",
     "PROCESS_ENV_WHITELIST",
     "SpecContext",
     "SpecRefused",
@@ -53,6 +56,10 @@ PROCESS_ENV_WHITELIST = (
     "INFERENCE_OPTIMIZER_SERVER_ARGS",
     "INFERENCE_OPTIMIZER_EXTRA_ENV",
 )
+#: What a request's attachments may hold in all, as blobs, and what one directory attachment may expand to.
+_MIB = 1024 * 1024
+MAX_ATTACHMENT_BYTES = 64 * _MIB
+_HASH_CHUNK_BYTES = _MIB
 _POINT_UNREADABLE = "point_unreadable"
 _PLACEHOLDER = re.compile(r"\$\{HL_ATTACH:([A-Za-z0-9][A-Za-z0-9._-]{0,63})\}")
 _HEX_COMMIT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
@@ -230,20 +237,61 @@ def _replace_paths(yaml_text: str, found: Mapping[str, Mapping[str, str]]) -> st
     return yaml_text
 
 
-def _environment_attachments(environment: object, ctx: SpecContext) -> list[dict[str, str]]:
+def _member_sha256(tar: tarfile.TarFile, member: tarfile.TarInfo) -> str:
+    digest = hashlib.sha256()
+    source = tar.extractfile(member)
+    while source is not None and (chunk := source.read(_HASH_CHUNK_BYTES)):
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _dir_entries(ref: AttachmentRef, data: bytes) -> list[tuple[str, int, str]]:
+    """``(path, size, sha256)`` of each file of a directory attachment, hashed in chunks; what a request's archive
+    expands to is bounded here, before the sheet is built."""
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+            members = [m for m in tar.getmembers() if m.isfile()]
+            if sum(m.size for m in members) > MAX_ATTACHMENT_BYTES:
+                raise SpecRefused(
+                    "attachment_too_large", f"attachment {ref.id} expands past {MAX_ATTACHMENT_BYTES} bytes"
+                )
+            return [(m.name, m.size, _member_sha256(tar, m)) for m in members]
+    except tarfile.TarError as exc:
+        raise SpecRefused(
+            "attachment_unreadable", f"attachment {ref.id}: not a tar archive ({type(exc).__name__})"
+        ) from None
+
+
+def _attachment_entries(refs: Iterable[AttachmentRef], ctx: SpecContext) -> list[dict[str, str]]:
     result = []
-    for ref in getattr(environment, "attachments", ()) or ():
-        manifest = ref.sha256
-        if ref.kind == "dir":
-            with tarfile.open(fileobj=io.BytesIO(ctx.blobs.get(ref.sha256))) as tar:
-                members = [m for m in tar.getmembers() if m.isfile()]
-                entries = [
-                    (m.name, m.size, hashlib.sha256(tar.extractfile(m).read()).hexdigest())  # type: ignore[union-attr]
-                    for m in members
-                ]
-            manifest = dir_manifest_sha256(entries)
+    for ref in refs:
+        manifest = (
+            dir_manifest_sha256(_dir_entries(ref, ctx.blobs.get(ref.sha256))) if ref.kind == "dir" else ref.sha256
+        )
         result.append({"id": ref.id, "kind": ref.kind, "blob": f"sha256:{ref.sha256}", "manifest_sha256": manifest})
     return result
+
+
+def _environment_attachments(environment: object, ctx: SpecContext) -> list[dict[str, str]]:
+    return _attachment_entries(getattr(environment, "attachments", ()) or (), ctx)
+
+
+def _request_attachments(call: TestCall, ctx: SpecContext) -> list[dict[str, str]]:
+    """The attachments the request ships (a repro case).
+
+    A blob the store does not hold is refused, not sent; so is one that is too large, or a request whose attachments
+    together are: everything listed here is uploaded to the sandbox and unpacked there.
+    """
+    total = 0
+    for ref in call.attachments:
+        try:
+            size = len(ctx.blobs.get(ref.sha256))
+        except (BlobError, KeyError, OSError) as exc:
+            raise SpecRefused("attachment_missing", f"attachment {ref.id}: {exc}") from None
+        total += size
+        if total > MAX_ATTACHMENT_BYTES:
+            raise SpecRefused("attachment_too_large", f"attachment {ref.id}: the request's attachments pass the cap")
+    return _attachment_entries(call.attachments, ctx)
 
 
 def _environment_document(environment: object, ctx: SpecContext) -> dict[str, Any]:
@@ -268,6 +316,10 @@ def build_spec(call: TestCall, *, request_id: str, ctx: SpecContext, deadline_un
         raise SpecRefused("no_points", "a test needs at least one measurement point")
     environment = call.environment
     attachments = {a["id"]: a for a in _environment_attachments(environment, ctx)}
+    shipped = _request_attachments(call, ctx)
+    if any(a["id"] in attachments for a in shipped):
+        raise SpecRefused("attachment_id_taken", "a request attachment has the id of an environment attachment")
+    attachments.update({a["id"]: a for a in shipped})
     configs, first = [], None
     for point in call.points:
         text, document = _load_yaml(point)

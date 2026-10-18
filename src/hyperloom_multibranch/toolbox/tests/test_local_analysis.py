@@ -185,20 +185,6 @@ async def test_the_default_options_serve_tracelens_only(tmp_path: Path) -> None:
         await toolbox.close()
 
 
-async def test_a_kind_the_local_backend_does_not_run_is_refused_before_it_is_queued(tmp_path: Path) -> None:
-    notebook = LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox"))
-    toolbox = _toolbox(tmp_path, notebook, FakeRepo())
-    try:
-        await toolbox.start()
-        with pytest.raises(RequestRejected) as refused:
-            await toolbox.submit_test(req(kind=TestKind.REPRO, purpose=Purpose.REPRO, attachments=(_ATTACHMENT,)))
-        assert refused.value.code == "unsupported_kind" and "unsupported_kind" in REJECTION_CODES
-        assert not list(toolbox._log.entries())
-        assert not toolbox._queue.items()
-    finally:
-        await toolbox.close()
-
-
 async def test_the_fake_toolbox_still_accepts_a_profile_test() -> None:
     fake = FakeToolbox()
     try:
@@ -207,25 +193,20 @@ async def test_the_fake_toolbox_still_accepts_a_profile_test() -> None:
         await fake.close()
 
 
-@pytest.mark.parametrize(
-    ("kind", "refused"),
-    [
-        (TestKind.TEST, False),
-        (TestKind.SWEEP, False),
-        (TestKind.PROFILE, False),
-        (TestKind.ACCURACY, False),
-        (TestKind.REPRO, True),
-    ],
-)
-def test_the_kinds_come_from_the_backend_and_a_sweep_is_a_test(kind: TestKind, refused: bool) -> None:
-    assert sorted(SUPPORTED_KINDS) == ["accuracy", "profile", "test"]
+@pytest.mark.parametrize("kind", list(TestKind))
+def test_the_kinds_come_from_the_backend_and_a_sweep_is_a_test(kind: TestKind) -> None:
+    assert sorted(SUPPORTED_KINDS) == ["accuracy", "profile", "repro", "test"]
     request = req(
         kind=kind, purpose=Purpose.EXPLORE, accuracy=kind is TestKind.ACCURACY, attachments=_attachments_of(kind)
     )
-    if refused:
-        with pytest.raises(RequestRejected) as error:
-            check_kind(request, SUPPORTED_KINDS)
-        assert error.value.code == "unsupported_kind"
-    else:
-        check_kind(request, SUPPORTED_KINDS)
+    check_kind(request, SUPPORTED_KINDS)
     check_kind(request, None)  # a builder that models every kind accepts every kind
+
+
+def test_a_backend_that_runs_fewer_kinds_refuses_the_rest_before_anything_is_queued() -> None:
+    request = req(kind=TestKind.REPRO, purpose=Purpose.REPRO, attachments=(_ATTACHMENT,))
+
+    with pytest.raises(RequestRejected) as error:
+        check_kind(request, ("test", "accuracy", "profile"))
+
+    assert error.value.code == "unsupported_kind" and "unsupported_kind" in REJECTION_CODES

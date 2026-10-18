@@ -15,7 +15,8 @@ list), ``no_manifest`` and ``hang`` (never finishes). ``fake_delay`` seconds pas
 ``fake_throughput`` and ``fake_completed`` set the report. ``fake_accuracy`` adds an accuracy round to the rounds file
 with that score (``none``: a round that holds no score). ``fake_trace: true`` adds the torch-profiler trace a profile
 test leaves (``profile/torch_trace/...``); ``fake_report: false`` leaves out the benchmark report, as a profiled round
-that printed no readable measurement.
+that printed no readable measurement. ``fake_repro: true`` runs the repro case the sheet carries for real (the shipped
+attachment placement and ``run_case``) against no server, and lists the verdict and log it leaves in the manifest.
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ from typing import Any
 import yaml
 
 from hyperloom.measure import signing
+from hyperloom.measure.attachments import place_attachments
+from hyperloom.measure.repro import REPRO_DIR, find_case, run_case
 from hyperloom.measure.manifest import RESULT_SCHEMA, encode_manifest
 from hyperloom.measure.spec import MeasurementSpec, fingerprint, spec_sha256
 
@@ -108,6 +111,22 @@ def _write_files(out: Path, config: dict[str, Any], mode: str) -> dict[str, byte
     return files
 
 
+def _repro_files(spec: MeasurementSpec, root: Path, out: Path) -> dict[str, bytes]:
+    """Place the sheet's attachments, run its case and return what it left below ``<out>/files/repro``."""
+    blobs = root / "in" / "blobs"
+
+    def read_blob(address: str) -> bytes:
+        return (blobs / address.removeprefix("sha256:")).read_bytes()
+
+    attach = root / "work" / "attach"
+    attach.mkdir(parents=True, exist_ok=True)
+    placed = place_attachments(spec.attachments, attach, read_blob)
+    script = find_case(attach, list(placed))
+    run_case(script, base_url="http://127.0.0.1:1", model="fake-model", timeout_sec=30, output_dir=out / "files")
+    directory = out / "files" / REPRO_DIR
+    return {f"{REPRO_DIR}/{p.name}": p.read_bytes() for p in sorted(directory.iterdir())}
+
+
 def _manifest(spec: MeasurementSpec, raw: bytes, key: Any, files: dict[str, bytes], mode: str) -> dict[str, Any]:
     failing = mode in ("fail_test", "fail_unknown", "timed_out")
     document = {
@@ -149,6 +168,8 @@ def _manifest(spec: MeasurementSpec, raw: bytes, key: Any, files: dict[str, byte
 def _publish(out: Path, spec: MeasurementSpec, raw: bytes, config: dict[str, Any], mode: str) -> None:
     key = signing.load_private_key(Path(os.environ["HYPERLOOM_SIGNING_KEY_FILE"]))
     files = _write_files(out, config, mode)
+    if config.get("fake_repro"):
+        files.update(_repro_files(spec, Path(os.environ["HYPERLOOM_SANDBOX_ROOT"]), out))
     manifest = _manifest(spec, raw, key, files, mode)
     manifest_raw = encode_manifest(manifest)
     signer = signing.generate_private_key() if mode == "wrong_key" else key

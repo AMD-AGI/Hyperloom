@@ -17,6 +17,7 @@ from pathlib import Path
 
 import yaml
 
+from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom.measure import signing
 from hyperloom.measure.docs import DocumentError
 from hyperloom.measure.failures import Disposition, classify_test_failure
@@ -157,6 +158,13 @@ def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[
     return points, inferencex, farm
 
 
+def _case_attachments(spec: MeasurementSpec) -> tuple[AttachmentRef, ...]:
+    """The attachments a repro test's case is looked for in, as unpacked under ``attach/<id>/``; no other kind has any."""
+    if spec.kind != "repro":
+        return ()
+    return tuple(AttachmentRef(a.id, a.kind, a.blob.removeprefix("sha256:")) for a in spec.attachments)  # type: ignore[arg-type]
+
+
 def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: Path, progress: Progress) -> TestCall:
     p = spec.procedure
     remaining = p.deadline_unix - time.time() if p.deadline_unix else p.timeout_sec
@@ -183,6 +191,7 @@ def _call(ctx: _Context, spec: MeasurementSpec, points: list[Path], inferencex: 
         env_overrides=dict(spec.process_env),
         unset_envs=spec.unset_envs,
         session_facts=SessionFacts((), str(inferencex), spec.tools.magpie),
+        attachments=_case_attachments(spec),
     )
 
 

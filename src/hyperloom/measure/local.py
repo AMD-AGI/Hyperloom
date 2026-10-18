@@ -24,7 +24,8 @@ import subprocess
 import sys
 import tempfile
 import threading
-from collections.abc import Iterator, Sequence
+import time
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -39,6 +40,8 @@ from hyperloom.measure.accuracy import read_accuracy
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
 from hyperloom.measure.farm import FarmError, build_farm, prepend_pythonpath, verify_farm
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces
+from hyperloom.measure.repro import ReproError, find_case, run_case
+from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC
 from hyperloom.sandbox.node import node_name
 from hyperloom.measure.socket import RoundOutcome, TestCall, TestOutcome
 from hyperloom.measure.spec import Attachment
@@ -74,7 +77,13 @@ _LOG_TAIL_CHARS = 64 * 1024
 _ACCURACY = "accuracy"
 _UTF8 = "utf-8"
 _PROFILE = "profile"
-_SUPPORTED_KINDS = ("test", _ACCURACY, _PROFILE)
+_REPRO = "repro"
+_GRID = "grid"
+#: How long a repro case may run, and the share of what is left of the test's time it may take: a case that hangs must
+#: end as its own failure, with time left to sign the result, not as a timeout of the whole test.
+_CASE_TIMEOUT_SEC = 600.0
+_CASE_TIME_SHARE = 0.8
+_SUPPORTED_KINDS = ("test", _ACCURACY, _PROFILE, _REPRO)
 #: The kinds of ``TestCall`` this backend runs; a toolbox refuses any other at acceptance.
 SUPPORTED_KINDS = _SUPPORTED_KINDS
 
@@ -97,6 +106,8 @@ class _Run:
     results: list[tuple[int, VariantResult]] = field(default_factory=list)
     stopped_rc: int | None = None
     traceless: bool = False
+    case_failed: bool = False
+    started: float = field(default_factory=time.monotonic)
     notes: list[str] = field(default_factory=list)
 
     def add(self, point: int, result: VariantResult) -> bool:
@@ -119,7 +130,7 @@ class LocalMeasurementBackend:
         with _PROCESS_LOCK, _rebuilt_environment(call) as call, _test_environment(call) as unset_envs:
             run = _Run(call, unset_envs)
             with _watch_output(call):
-                asyncio.run(_sweep(run) if call.prep == "conc_sweep" else _single(run))
+                asyncio.run(_runner_of(call)(run))
         _raise_on_timeout(run)
         if call.kind == _PROFILE:
             _gather_traces(run)
@@ -142,12 +153,14 @@ def _validate(call: TestCall) -> None:
         raise TestCallRefused(f"the local backend runs kinds {_SUPPORTED_KINDS}, not {call.kind!r}")
     if not call.points:
         raise TestCallRefused("a test needs at least one measurement point")
-    if call.prep == "grid" and len(call.points) != 1:
+    if call.prep == _GRID and len(call.points) != 1:
         raise TestCallRefused(f"a single-point test has exactly one point, got {len(call.points)}")
     if call.kind == _ACCURACY and not call.accuracy:
         raise TestCallRefused("an accuracy test must ask for accuracy")
     if call.kind == _PROFILE:
         _validate_profile(call)
+    if call.kind == _REPRO:
+        _validate_repro(call)
     _, dropped = filter_untrusted_env_mapping(call.env_overrides, allow_predicate=is_allowed_variant_env_key)
     if dropped:
         raise TestCallRefused(f"env_overrides may not set {sorted(dropped)}")
@@ -162,7 +175,7 @@ def _validate_profile(call: TestCall) -> None:
 
     A point that does not would run a plain round and leave no trace, which the result would then be refused for.
     """
-    if call.prep != "grid":
+    if call.prep != _GRID:
         raise TestCallRefused("a profile test profiles one point; it is not a sweep")
     if call.accuracy:
         raise TestCallRefused("a profile test does not run accuracy")
@@ -171,6 +184,16 @@ def _validate_profile(call: TestCall) -> None:
     torch_profiler = ((config.get("benchmark") or {}).get("profiler") or {}).get("torch_profiler") or {}
     if str(envs.get("PROFILE", "")).strip() != "1" or torch_profiler.get("enabled") is not True:
         raise TestCallRefused(f"{call.points[0]} does not turn the torch profiler on (PROFILE=1 and torch_profiler)")
+
+
+def _validate_repro(call: TestCall) -> None:
+    """A repro test runs a case from its attachments against one server: one point, no accuracy."""
+    if call.prep != _GRID:
+        raise TestCallRefused("a repro test runs one point; it is not a sweep")
+    if call.accuracy:
+        raise TestCallRefused("a repro test does not run accuracy")
+    if not call.attachments:
+        raise TestCallRefused("a repro test needs the reproduction case as an attachment")
 
 
 def _check_run_eval(point: Path, accuracy: bool) -> None:
@@ -337,6 +360,12 @@ async def _single(run: _Run) -> None:
     run.add(0, result)
 
 
+def _runner_of(call: TestCall) -> Callable[[_Run], Awaitable[None]]:
+    if call.kind == _REPRO:
+        return _repro
+    return _sweep if call.prep == "conc_sweep" else _single
+
+
 def _is_failure(result: VariantResult) -> bool:
     return result.status in {"failed", "skipped"}
 
@@ -382,18 +411,23 @@ async def _sweep(run: _Run) -> None:
         lifecycle.teardown()
 
 
+async def _boot_server(run: _Run, lifecycle: _Lifecycle, point: int, name: str) -> VariantResult:
+    """Start the persistent server for the point at index ``point`` and leave it running (no round is measured)."""
+    return await _grid(
+        run,
+        point,
+        name,
+        server_lifecycle=lifecycle.settings(cleanup=False),
+        base_extra_envs={"MAGPIE_RUN_PHASE": "server"},
+        warmup_before_measure=False,
+        lifecycle_boot_only=True,
+    )
+
+
 async def _boot(run: _Run, lifecycle: _Lifecycle, order: list[int]) -> int | None:
     """Boot the server on the first level in ``order`` that boots (stepping down on failure); its position, or None."""
     for position, point in enumerate(order):
-        boot = await _grid(
-            run,
-            point,
-            f"c{_levels(run.call.points)[point]}",
-            server_lifecycle=lifecycle.settings(cleanup=False),
-            base_extra_envs={"MAGPIE_RUN_PHASE": "server"},
-            warmup_before_measure=False,
-            lifecycle_boot_only=True,
-        )
+        boot = await _boot_server(run, lifecycle, point, f"c{_levels(run.call.points)[point]}")
         if not _is_failure(boot):
             return position
         if boot.error_class in _STOP_RETURNCODES:
@@ -425,6 +459,47 @@ async def _sweep_by_restart(run: _Run, order: list[int]) -> None:
         result = await _grid(run, point, f"c{_levels(run.call.points)[point]}", warmup_before_measure=False)
         if not run.add(point, result):
             return
+
+
+async def _repro(run: _Run) -> None:
+    """Boot the server the way a test does, run the case against it, tear the server down.
+
+    No warmup and no measured round: the server only has to be up. A server that does not boot ends the test as a
+    failed test does; a case that cannot run to a verdict ends it as a failure of the measurement, never a verdict.
+    """
+    lifecycle = _Lifecycle(run)
+    if not lifecycle.eligible:
+        _fail_case(run, f"the server cannot be held up for the case ({lifecycle.reason})")
+        return
+    try:
+        boot = await _boot_server(run, lifecycle, 0, "repro")
+        run.add(0, boot)
+        if not _is_failure(boot) and run.stopped_rc is None:
+            await asyncio.to_thread(_run_case, run, lifecycle.port)
+    finally:
+        lifecycle.teardown()
+
+
+def _fail_case(run: _Run, reason: str) -> None:
+    run.case_failed = True
+    run.notes.append(f"repro_case_error: {reason}")
+
+
+def _run_case(run: _Run, port: int) -> None:
+    call = run.call
+    left = call.timeout_sec - (time.monotonic() - run.started)
+    timeout = max(1.0, min(_CASE_TIMEOUT_SEC, left * _CASE_TIME_SHARE))
+    try:
+        script = find_case(Path(call.cwd) / "attach", [attachment.id for attachment in call.attachments])
+        run_case(
+            script,
+            base_url=f"http://127.0.0.1:{port}",
+            model=str((_point_config(call.points[0]).get("benchmark") or {}).get("model") or ""),
+            timeout_sec=timeout,
+            output_dir=Path(call.output_dir),
+        )
+    except ReproError as exc:
+        _fail_case(run, str(exc))
 
 
 def _gather_traces(run: _Run) -> None:
@@ -509,13 +584,18 @@ def _sandbox_facts(call: TestCall) -> SandboxFacts:
     )
 
 
+def _clean_returncode(run: _Run) -> int:
+    """The return code of a test whose rounds all passed: a case that could not run, or a trace-less profile, is not 0."""
+    return HOSTED_INFRA_FAILURE_RC if run.case_failed else int(run.traceless)
+
+
 def _outcome(run: _Run) -> TestOutcome:
     from hyperloom.measure.failures import Disposition, classify_test_failure
 
     call = run.call
     rounds = [r for point, result in run.results for r in _rounds(run, point, result)]
     failed = [r for r in rounds if r.returncode != 0]
-    returncode = failed[0].returncode if failed else int(run.traceless)
+    returncode = failed[0].returncode if failed else _clean_returncode(run)
     stderr = "\n".join([*(result.error for _, result in run.results if result.error), *run.notes])
     logs = [stderr, *(_read_tail(result.server_log_path) for _, result in run.results if _is_failure(result))]
     verdict = classify_test_failure(returncode=returncode, logs=logs)

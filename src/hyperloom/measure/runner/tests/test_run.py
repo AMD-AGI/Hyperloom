@@ -239,3 +239,48 @@ def test_a_symlink_in_the_output_is_refused_and_nothing_is_signed(tmp_path, env,
 
 def test_the_sheet_validates_as_the_writer_produces_it():
     MeasurementSpec.from_document(_sheet())
+
+
+def _repro_sheet(tmp_path, kind: str) -> dict:
+    from hyperloom.measure.tests.repro_fixtures import case_attachment
+
+    class _Blobs:  # the sandbox's /in/blobs
+        def put(self, data: bytes) -> str:
+            import hashlib
+
+            name = hashlib.sha256(data).hexdigest()
+            (tmp_path / "in" / "blobs").mkdir(parents=True, exist_ok=True)
+            (tmp_path / "in" / "blobs" / name).write_bytes(data)
+            return name
+
+    case = case_attachment(_Blobs(), "exit 0\n")
+    attachment = {"id": case.id, "kind": "dir", "blob": f"sha256:{case.sha256}", "manifest_sha256": "1" * 64}
+    return _sheet(kind=kind, attachments=[attachment])
+
+
+def test_a_repro_call_carries_its_attachments_already_unpacked_under_the_work_directory(tmp_path, env, monkeypatch):
+    seen: list[bool] = []
+
+    def observing(call: TestCall) -> TestOutcome:
+        seen.append((tmp_path / "scratch" / "test" / "attach" / "case-1" / "repro.sh").is_file())
+        return _ok(call)
+
+    backend = _Backend(observing)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+    (tmp_path / "in").mkdir()
+
+    _go(tmp_path, env, _repro_sheet(tmp_path, "repro"))
+
+    (call,) = backend.calls
+    assert call.kind == "repro" and [(a.id, a.kind) for a in call.attachments] == [("case-1", "dir")]
+    assert call.cwd == str(tmp_path / "scratch" / "test") and seen == [True]
+
+
+def test_only_a_repro_call_is_told_which_attachments_are_its_case(tmp_path, env, monkeypatch):
+    backend = _Backend(_ok)
+    monkeypatch.setattr(runner, "LocalMeasurementBackend", backend)
+    (tmp_path / "in").mkdir()
+
+    _go(tmp_path, env, _repro_sheet(tmp_path, "test"))
+
+    assert backend.calls[0].attachments == ()

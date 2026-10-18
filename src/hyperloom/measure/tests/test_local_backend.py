@@ -15,9 +15,10 @@ from typing import Any
 import pytest
 import yaml
 
-from hyperloom.contracts.measurement import AccuracyValue
+from hyperloom.contracts.measurement import AccuracyValue, AttachmentRef
 from hyperloom.measure import local
-from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
+from hyperloom.measure.local import SUPPORTED_KINDS, LocalMeasurementBackend, TestCallRefused
+from hyperloom.measure.repro import read_verdict
 from hyperloom.measure.socket import RoundPlan, SessionFacts, TestCall
 from hyperloom.orchestrator.actions.executors import (
     ORCHESTRATOR_CANCELLED_RETURNCODE,
@@ -232,7 +233,7 @@ def test_a_point_whose_run_eval_contradicts_the_call_is_refused(grid, tmp_path, 
     assert grid.calls == []
 
 
-@pytest.mark.parametrize("kind", ["repro"])
+@pytest.mark.parametrize("kind", ["sweep", "bogus"])
 def test_a_kind_the_local_backend_does_not_run_is_refused(grid, tmp_path, kind):
     with pytest.raises(TestCallRefused, match="runs kinds"):
         _run(_call(tmp_path, kind=kind))
@@ -646,3 +647,131 @@ def test_a_plain_test_does_not_gather_traces(grid, tmp_path):
     _run(_call(tmp_path))
 
     assert not (tmp_path / "out" / "profile").exists()
+
+
+# --- repro test ---------------------------------------------------------------------------------------------------
+
+_CASE = AttachmentRef("case", "dir", "a" * 64)
+
+
+class _Case:
+    """A repro case unpacked where the runner leaves it, and the order the server and the case ran in."""
+
+    def __init__(self, tmp_path: Path, monkeypatch, body: str) -> None:
+        script = tmp_path / "attach" / _CASE.id / "repro.sh"
+        script.parent.mkdir(parents=True)
+        script.write_text(f"{body}\n", encoding="utf-8")
+        self.ran = tmp_path / "case-ran"
+        self.events: list[str] = []
+
+        def teardown(**_: Any) -> None:
+            self.events.append("teardown after the case" if self.ran.exists() else "teardown before the case")
+
+        monkeypatch.setattr(local, "teardown_lifecycle_server", teardown)
+
+
+def _repro_point(directory: Path) -> Path:
+    path = directory / "repro-point.yaml"
+    config = {"benchmark": {"framework": "sglang", "model": "/models/m", "envs": {"TP": 1, "RUN_EVAL": "false"}}}
+    path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    return path
+
+
+def _repro_call(tmp_path: Path, **kwargs: Any) -> TestCall:
+    defaults: dict[str, Any] = {"kind": "repro", "attachments": (_CASE,), "timeout_sec": 30}
+    return _call(tmp_path, _repro_point(tmp_path), **{**defaults, **kwargs})
+
+
+def _boot_only(grid: _Grid) -> None:
+    grid.answers["repro"] = grid.result("repro", note="server_lifecycle_boot_only")
+
+
+def test_repro_is_a_kind_the_local_backend_runs():
+    assert "repro" in SUPPORTED_KINDS
+
+
+@pytest.mark.parametrize(("code", "verdict"), [(0, "not_reproduced"), (1, "reproduced")])
+@pytest.mark.usefixtures("server")
+def test_a_repro_test_boots_the_server_runs_the_case_against_it_and_reports_the_verdict(
+    grid, monkeypatch, tmp_path, code, verdict
+):
+    _boot_only(grid)
+    case = _Case(tmp_path, monkeypatch, f'echo "$HL_BASE_URL $HL_MODEL" > {tmp_path}/case-ran\nexit {code}')
+
+    outcome = _run(_repro_call(tmp_path))
+
+    (kwargs,) = grid.calls
+    assert [v.name for v in kwargs["grid"]] == ["repro"]
+    assert kwargs["lifecycle_boot_only"] is True and kwargs["warmup_before_measure"] is False
+    assert kwargs["server_lifecycle"]["cleanup"] is False and kwargs["server_lifecycle"]["port"] == 8123
+    assert (tmp_path / "case-ran").read_text() == "http://127.0.0.1:8123 /models/m\n"
+    assert case.events == ["teardown after the case"], "the server stays up for the case and is reclaimed after it"
+    assert read_verdict(tmp_path / "out") == verdict
+    assert (outcome.returncode, outcome.failure_class, outcome.rounds) == (0, None, ())
+
+
+def test_a_repro_test_runs_no_warmup_even_when_the_call_plans_one(grid, server, monkeypatch, tmp_path):
+    _boot_only(grid)
+    _Case(tmp_path, monkeypatch, "exit 0")
+
+    _run(_repro_call(tmp_path, rounds=RoundPlan(warmup_rounds=1)))
+
+    assert [c["warmup_before_measure"] for c in grid.calls] == [False]
+
+
+@pytest.mark.parametrize(
+    ("body", "reason"),
+    [("exit 2", "exited with 2"), ("sleep 30", "did not finish within"), (None, "no attachment holds repro.sh")],
+)
+@pytest.mark.usefixtures("server")
+def test_a_case_that_cannot_run_to_a_verdict_is_a_failure_of_the_measurement_not_a_verdict(
+    grid, monkeypatch, tmp_path, body, reason
+):
+    _boot_only(grid)
+    case = _Case(tmp_path, monkeypatch, body or "")
+    if body is None:
+        (tmp_path / "attach" / _CASE.id / "repro.sh").unlink()
+
+    outcome = _run(_repro_call(tmp_path, timeout_sec=1))
+
+    assert outcome.failure_class == "infra" and outcome.returncode == local.HOSTED_INFRA_FAILURE_RC
+    assert reason in outcome.stderr and "repro_case_error" in outcome.stderr
+    assert not (tmp_path / "out" / "repro" / "verdict.json").exists()
+    assert len(case.events) == 1, "the server is reclaimed whatever became of the case"
+
+
+def test_a_server_that_does_not_boot_fails_the_test_like_any_test_and_runs_no_case(grid, server, monkeypatch, tmp_path):
+    grid.answers["repro"] = grid.result("repro", status="failed", returncode=1, error="server died")
+    case = _Case(tmp_path, monkeypatch, f"touch {tmp_path}/case-ran\nexit 0")
+
+    outcome = _run(_repro_call(tmp_path))
+
+    assert outcome.returncode == 1 and outcome.failure_class in ("candidate", "unclear")
+    assert not (tmp_path / "case-ran").exists() and not (tmp_path / "out" / "repro").exists()
+    assert case.events == ["teardown before the case"]
+
+
+def test_a_server_that_cannot_be_held_up_is_a_failure_of_the_measurement_and_boots_nothing(grid, monkeypatch, tmp_path):
+    _Server(monkeypatch, eligible=False)
+    _Case(tmp_path, monkeypatch, "exit 0")
+
+    outcome = _run(_repro_call(tmp_path))
+
+    assert (
+        outcome.failure_class == "infra" and "cannot be held up" in outcome.stderr and "not eligible" in outcome.stderr
+    )
+    assert grid.calls == []
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"attachments": ()}, "needs the reproduction case as an attachment"),
+        ({"accuracy": True}, "does not run accuracy"),
+        ({"prep": "conc_sweep"}, "not a sweep"),
+    ],
+)
+def test_a_repro_call_that_is_not_one_case_against_one_server_is_refused(grid, server, tmp_path, kwargs, match):
+    with pytest.raises(TestCallRefused, match=match):
+        _run(_repro_call(tmp_path, **kwargs))
+    assert grid.calls == []
