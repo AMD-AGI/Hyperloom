@@ -443,12 +443,7 @@ def build_orchestrator_prompt(request: TraceLensSkillRequest) -> str:
         str: The fully assembled orchestrator prompt text.
     """
 
-    skill_path = request.skill_path
-    trace_path = request.trace_path
-    output_dir = request.output_dir
-    tracelens_root = request.tracelens_root
     tracelens_internal_root = request.tracelens_internal_root
-    platform = request.platform
     framework = request.framework
     capture_folder = request.capture_folder
     analysis_mode = infer_analysis_mode(framework, request.analysis_mode)
@@ -467,19 +462,19 @@ def build_orchestrator_prompt(request: TraceLensSkillRequest) -> str:
     return f"""You are running TraceLens standalone analysis for Hyperloom.
 
 Read and follow the FULL instructions in this skill file:
-{skill_path}
+{request.skill_path}
 
 All required Step 0 inputs are already provided below. Do not ask the user any
 questions; proceed with the analysis.
 
 Execution context:
 - Environment: local
-- TraceLens root: {tracelens_root}
+- TraceLens root: {request.tracelens_root}
 - TraceLens-internal root: {internal_root_text}
-- Command prefix cache: {output_dir / "cache" / "cmd_prefix.txt"}
-- Trace file path: {trace_path}
-- Output directory: {output_dir}
-- Platform: {platform}
+- Command prefix cache: {request.output_dir / "cache" / "cmd_prefix.txt"}
+- Trace file path: {request.trace_path}
+- Output directory: {request.output_dir}
+- Platform: {request.platform}
 - Framework: {framework or "unknown"}
 - Comparison scope: {comparison_scope}
 - Analysis mode: {analysis_mode}
@@ -495,7 +490,7 @@ Important requirements:
    capture folder to the inference perf-report CLI exactly as the skill says.
 4. Write all TraceLens outputs under the output directory above.
 5. Ensure this file exists before you finish:
-   - {output_dir / "analysis.md"}  (TraceLens final report; REQUIRED)
+   - {request.output_dir / "analysis.md"}  (TraceLens final report; REQUIRED)
 6. Do not run GEAK, kernel optimization, or modify model/framework source.
 
 When complete, respond with a short summary of the artifacts you wrote.
@@ -703,8 +698,6 @@ async def _run_tracelens_skill_codex(
     """
     output_dir = run.request.output_dir
     capture_folder = run.request.capture_folder
-    prefix_path = run.prefix_path
-    log = run.log
     codex_error = ""
     result = CodexSessionResult()
     try:
@@ -717,8 +710,8 @@ async def _run_tracelens_skill_codex(
     except CodexSessionError as exc:
         # The SDK can fail after the report landed; artifact presence decides.
         codex_error = f"{type(exc).__name__}: {exc}"
-        if log:
-            log(f"[codex-sdk] WARNING: {codex_error}")
+        if run.log:
+            run.log(f"[codex-sdk] WARNING: {codex_error}")
     codex_error = codex_error or result.error
 
     report_path = output_dir / "analysis.md"
@@ -729,7 +722,7 @@ async def _run_tracelens_skill_codex(
 
     artifact_paths = {
         "tracelens_agent_report": str(report_path),
-        "tracelens_cmd_prefix": str(prefix_path),
+        "tracelens_cmd_prefix": str(run.prefix_path),
     }
     if codex_error:
         artifact_paths["tracelens_agent_sdk_error"] = codex_error

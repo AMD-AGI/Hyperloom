@@ -3946,9 +3946,7 @@ def write_reports(
         RuntimeError: When the orchestrator did not produce ``analysis.md``
             (rather than fabricating a report).
     """
-    trace_input_type, trace_files = trace_inputs
     existing_report_path = outcome.report_path
-    trace_health_warnings = outcome.health_warnings
     tracelens_dir = run_dir / "tracelens"
     (tracelens_dir / "system_findings").mkdir(parents=True, exist_ok=True)
     (tracelens_dir / "category_findings").mkdir(parents=True, exist_ok=True)
@@ -3956,8 +3954,8 @@ def write_reports(
 
     manifest = {
         "trace_input": str(Path(args.trace_input).resolve()),
-        "trace_input_type": trace_input_type,
-        "trace_files": [str(p) for p in trace_files],
+        "trace_input_type": trace_inputs.input_type,
+        "trace_files": [str(p) for p in trace_inputs.files],
         "created_at": now_iso(timespec="auto"),
     }
     # Aggregate reusable candidates into source-function task groups.
@@ -3967,7 +3965,7 @@ def write_reports(
         "framework": args.framework,
         "target_platform": args.target_platform,
         "analysis_mode": args.analysis_mode,
-        "trace_input_type": trace_input_type,
+        "trace_input_type": trace_inputs.input_type,
         "hot_kernels": candidates,
         "task_groups": task_groups,
         "source": "tracelens_analysis",
@@ -4000,14 +3998,14 @@ def write_reports(
             target_platform=str(args.target_platform or ""),
         ),
         task_groups=task_groups,
-        trace_health_warnings=trace_health_warnings,
+        trace_health_warnings=outcome.health_warnings,
     )
     summary_path = tracelens_dir / "summary.json"
     atomic_write_json(summary_path, summary, fmt=JsonFormat(trailing_newline=True))
 
     missing_trace_report = existing_report_path is None or not existing_report_path.exists()
     trace_quality_blocked = any(
-        isinstance(w, dict) and w.get("code") == "trace_split_no_steady_state" for w in (trace_health_warnings or [])
+        isinstance(w, dict) and w.get("code") == "trace_split_no_steady_state" for w in (outcome.health_warnings or [])
     )
     if missing_trace_report:
         if not getattr(args, "dry_run", False):
@@ -4036,7 +4034,7 @@ def write_reports(
     )
     kernel_roofline_payload = build_kernel_roofline_payload(
         trace_input=str(Path(args.trace_input).resolve()),
-        trace_input_type=trace_input_type,
+        trace_input_type=trace_inputs.input_type,
         analysis_md_path=(str(existing_report_path) if existing_report_path else ""),
         kernel_candidates_path=str(kernel_candidates_path),
         candidates=candidates,
