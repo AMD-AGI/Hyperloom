@@ -650,11 +650,10 @@ def test_write_reports_enriches_candidates_with_runtime_metadata(tmp_path):
 
     artifacts = tla.write_reports(
         tmp_path / "run",
-        trace_input_type="file",
-        trace_files=[trace],
+        tla.TraceInputs(input_type="file", files=[trace]),
         candidates=[candidate],
         args=args,
-        existing_report_path=analysis_md,
+        outcome=tla.OrchestratorOutcome(report_path=analysis_md),
     )
     payload = _json.loads(Path(artifacts["kernel_candidates"]).read_text(encoding="utf-8"))
     enriched = payload["hot_kernels"][0]
@@ -785,11 +784,10 @@ def test_write_reports_enriches_head_size_from_model_config(tmp_path):
 
     artifacts = tla.write_reports(
         tmp_path / "run",
-        trace_input_type="file",
-        trace_files=[trace],
+        tla.TraceInputs(input_type="file", files=[trace]),
         candidates=[candidate],
         args=args,
-        existing_report_path=analysis_md,
+        outcome=tla.OrchestratorOutcome(report_path=analysis_md),
     )
     payload = _json.loads(Path(artifacts["kernel_candidates"]).read_text(encoding="utf-8"))
 
@@ -819,13 +817,7 @@ def test_write_reports_raises_when_analysis_md_missing(tmp_path):
     args = _make_write_reports_args(trace)
 
     with pytest.raises(RuntimeError, match="did not produce analysis.md"):
-        tla.write_reports(
-            tmp_path / "run",
-            trace_input_type="file",
-            trace_files=[trace],
-            candidates=[],
-            args=args,
-        )
+        tla.write_reports(tmp_path / "run", tla.TraceInputs(input_type="file", files=[trace]), candidates=[], args=args)
 
 
 def test_write_reports_raises_when_existing_report_does_not_exist(tmp_path):
@@ -839,11 +831,10 @@ def test_write_reports_raises_when_existing_report_does_not_exist(tmp_path):
     with pytest.raises(RuntimeError, match="did not produce analysis.md"):
         tla.write_reports(
             tmp_path / "run",
-            trace_input_type="file",
-            trace_files=[trace],
+            tla.TraceInputs(input_type="file", files=[trace]),
             candidates=[],
             args=args,
-            existing_report_path=tmp_path / "does-not-exist" / "analysis.md",
+            outcome=tla.OrchestratorOutcome(report_path=tmp_path / "does-not-exist" / "analysis.md"),
         )
 
 
@@ -860,11 +851,10 @@ def test_write_reports_does_not_create_filename_aliases(tmp_path):
 
     artifacts = tla.write_reports(
         run_dir,
-        trace_input_type="file",
-        trace_files=[trace],
+        tla.TraceInputs(input_type="file", files=[trace]),
         candidates=[],
         args=args,
-        existing_report_path=analysis_md,
+        outcome=tla.OrchestratorOutcome(report_path=analysis_md),
     )
 
     # The returned trace_report_path must point at the upstream file, not at a Hyperloom-owned copy.
@@ -888,11 +878,10 @@ def test_write_reports_does_not_mutate_upstream_analysis_md(tmp_path):
 
     tla.write_reports(
         run_dir,
-        trace_input_type="file",
-        trace_files=[trace],
+        tla.TraceInputs(input_type="file", files=[trace]),
         candidates=[],
         args=args,
-        existing_report_path=analysis_md,
+        outcome=tla.OrchestratorOutcome(report_path=analysis_md),
     )
 
     assert analysis_md.read_text(encoding="utf-8") == upstream_body
@@ -942,11 +931,10 @@ def test_write_reports_kernel_candidates_contract_full_hot_with_routable_skipped
 
     artifacts = tla.write_reports(
         tmp_path / "run",
-        trace_input_type="file",
-        trace_files=[trace],
+        tla.TraceInputs(input_type="file", files=[trace]),
         candidates=_contract_candidates(),
         args=args,
-        existing_report_path=analysis_md,
+        outcome=tla.OrchestratorOutcome(report_path=analysis_md),
     )
     payload = json.loads(Path(artifacts["kernel_candidates"]).read_text(encoding="utf-8"))
 
@@ -980,11 +968,10 @@ def test_write_reports_tracelens_report_hot_kernels_is_full_set(tmp_path):
 
     artifacts = tla.write_reports(
         tmp_path / "run",
-        trace_input_type="file",
-        trace_files=[trace],
+        tla.TraceInputs(input_type="file", files=[trace]),
         candidates=_contract_candidates(),
         args=args,
-        existing_report_path=analysis_md,
+        outcome=tla.OrchestratorOutcome(report_path=analysis_md),
     )
     report = json.loads(Path(artifacts["tracelens_report_json"]).read_text(encoding="utf-8"))
     assert [c["kernel_id"] for c in report["hot_kernels"]] == ["k001", "k002", "k003", "k004"]
@@ -2941,9 +2928,7 @@ def test_build_audit_summary_splits_tasks_and_skipped():
     ]
     summary = tla.build_audit_summary(
         finalized,
-        trace_input="/tmp/trace.json.gz",
-        framework="sglang",
-        target_platform="mi300x",
+        subject=tla.AuditSubject(trace_input="/tmp/trace.json.gz", framework="sglang", target_platform="mi300x"),
     )
     assert summary["task_count"] == 1
     assert summary["skipped_count"] == 2
@@ -2965,7 +2950,7 @@ def test_build_audit_summary_splits_tasks_and_skipped():
 
 
 def test_build_audit_summary_handles_empty_input():
-    summary = tla.build_audit_summary([], trace_input="/tmp/x.json.gz")
+    summary = tla.build_audit_summary([], subject=tla.AuditSubject(trace_input="/tmp/x.json.gz"))
     assert summary["task_count"] == 0
     assert summary["skipped_count"] == 0
     assert summary["tasks"] == []
@@ -3733,7 +3718,6 @@ def test_build_task_groups_filters_non_reusable():
 def test_build_audit_summary_includes_task_groups():
     summary = tla.build_audit_summary(
         candidates=[],
-        trace_input="/tmp/x.json.gz",
         task_groups=[
             {
                 "task_group_id": "tg001",
@@ -3748,6 +3732,7 @@ def test_build_audit_summary_includes_task_groups():
                 "aggregate_gpu_pct": 7.5,
             },
         ],
+        subject=tla.AuditSubject(trace_input="/tmp/x.json.gz"),
     )
     assert summary["task_group_count"] == 1
 
@@ -3911,11 +3896,9 @@ def test_build_audit_summary_propagates_trace_health_warnings():
     ]
     summary = tla.build_audit_summary(
         [],
-        trace_input="/tmp/trace.json.gz",
-        framework="sglang",
-        target_platform="MI300X",
         task_groups=[],
         trace_health_warnings=warnings,
+        subject=tla.AuditSubject(trace_input="/tmp/trace.json.gz", framework="sglang", target_platform="MI300X"),
     )
     assert summary["trace_health_warnings"] == warnings
     assert summary["task_count"] == 0
@@ -3926,10 +3909,8 @@ def test_build_audit_summary_defaults_trace_health_warnings_to_empty_list():
     """No findings is the empty list, never ``None`` (consumers iterate without a guard)."""
     summary = tla.build_audit_summary(
         [],
-        trace_input="/tmp/trace.json.gz",
-        framework="sglang",
-        target_platform="MI300X",
         task_groups=[],
+        subject=tla.AuditSubject(trace_input="/tmp/trace.json.gz", framework="sglang", target_platform="MI300X"),
     )
     assert summary["trace_health_warnings"] == []
 

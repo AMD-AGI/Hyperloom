@@ -280,9 +280,7 @@ class TestSplitterE2E:
 
         chunk, meta = tla._run_trace_split(
             args,
-            trace_path,
-            split_dir,
-            tl_root,
+            tla.TraceSplitJob(trace_path, split_dir, tl_root),
             log_path,
             [],
         )
@@ -307,9 +305,7 @@ class TestSplitterE2E:
 
         chunk, meta = tla._run_trace_split(
             args,
-            trace_path,
-            split_dir,
-            tl_root,
+            tla.TraceSplitJob(trace_path, split_dir, tl_root),
             log_path,
             [],
         )
