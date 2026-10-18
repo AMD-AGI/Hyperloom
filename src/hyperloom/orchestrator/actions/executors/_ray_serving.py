@@ -338,6 +338,21 @@ class ManagedServerProcess:
         return True
 
 
+@dataclass(frozen=True)
+class ActorLaunch:
+    """A subprocess a ServingActor launches.
+
+    ``env_mode`` ``merge`` overlays ``env`` on the actor's environment; ``replace`` starts from ``env`` alone.
+    """
+
+    cmd: list[str]
+    env: dict[str, str] | None = None
+    cwd: str | None = None
+    log_path: str | None = None
+    env_mode: str = "merge"
+    stdin_path: str | None = None
+
+
 def _serving_actor_body() -> Any:
     """Build the ServingActor class (imports ray lazily so import is cheap)."""
     import ray
@@ -351,18 +366,10 @@ def _serving_actor_body() -> Any:
             # The cancel scope of the round currently in flight, if any.
             self._round_scope: Any = None
 
-        def start(
-            self,
-            cmd,
-            *,
-            env=None,
-            cwd=None,
-            log_path=None,
-            scrub_benchmark_env=False,
-            env_mode="merge",
-            stdin_path=None,
-        ) -> int:
+        def start(self, launch: ActorLaunch, *, scrub_benchmark_env=False) -> int:
             """Launch the serving subprocess; Ray has set visible devices."""
+            env = launch.env
+            env_mode = launch.env_mode
             if env_mode == "merge":
                 child_env = dict(os.environ)
                 for key, value in (env or {}).items():
@@ -383,25 +390,14 @@ def _serving_actor_body() -> Any:
                 scrub_benchmark_process_env(child_env)
             start_kwargs = {
                 "env": child_env,
-                "cwd": cwd,
-                "log_path": log_path,
+                "cwd": launch.cwd,
+                "log_path": launch.log_path,
             }
-            if stdin_path is not None:
-                start_kwargs["stdin_path"] = stdin_path
-            return self._mgr.start(cmd, **start_kwargs)
+            if launch.stdin_path is not None:
+                start_kwargs["stdin_path"] = launch.stdin_path
+            return self._mgr.start(launch.cmd, **start_kwargs)
 
-        def run_blocking(
-            self,
-            cmd,
-            *,
-            env=None,
-            cwd=None,
-            timeout=None,
-            silence_timeout_sec=None,
-            server_log_path=None,
-            server_already_ready=False,
-            session_remaining_sec=None,
-        ):
+        def run_blocking(self, bench_round):
             """Run one benchmark round to completion; return ``(rc, stdout, stderr)``."""
             import subprocess as _sp
 
@@ -412,16 +408,7 @@ def _serving_actor_body() -> Any:
             self._round_scope = scope
             try:
                 with use_cancel_scope(scope):
-                    return _run_subprocess_worker(
-                        cmd=cmd,
-                        env=env,
-                        cwd=cwd,
-                        timeout_s=timeout,
-                        silence_timeout_sec=silence_timeout_sec,
-                        server_log_path=server_log_path,
-                        server_already_ready=server_already_ready,
-                        session_remaining_sec=session_remaining_sec,
-                    )
+                    return _run_subprocess_worker(bench_round)
             except _sp.TimeoutExpired as exc:
                 return _ACTOR_TIMEOUT_RC, "", f"TimeoutExpired: {exc}"
             finally:
@@ -557,6 +544,7 @@ class ServingLease:
     ) -> tuple[int, str, str]:
         """Run one benchmark round inside the lease's actor; return ``(rc, stdout, stderr)``."""
         from ..cancel_channel import cancel_scope_listener
+        from ._ray_backend import SessionKillRound
 
         if self._quarantined:
             # Reported the way an ensure failure is, rather than raised: callers
@@ -579,14 +567,16 @@ class ServingLease:
         with cancel_scope_listener() as cancel_scope:
             acquire_ref = self._actor.pid.remote()
             ref = self._actor.run_blocking.remote(
-                cmd,
-                env=env,
-                cwd=cwd,
-                timeout=timeout,
-                silence_timeout_sec=silence_timeout_sec,
-                server_log_path=server_log_path,
-                server_already_ready=server_already_ready,
-                session_remaining_sec=session_remaining_sec,
+                SessionKillRound(
+                    cmd,
+                    env=env,
+                    cwd=cwd,
+                    timeout=timeout,
+                    silence_timeout_sec=silence_timeout_sec,
+                    server_log_path=server_log_path,
+                    server_already_ready=server_already_ready,
+                    session_remaining_sec=session_remaining_sec,
+                )
             )
             return self._collect_round(
                 ref,
@@ -969,12 +959,7 @@ class GpuSpecialistLease:
             self._actor = make_gpu_specialist_actor(self._num_gpus, serving_slot=self._serving_slot)
             _note_lease_actor_submitted()
         self._start_ref = self._actor.start.remote(
-            cmd,
-            env=env,
-            cwd=cwd,
-            log_path=log_path,
-            env_mode=env_mode,
-            stdin_path=stdin_path,
+            ActorLaunch(cmd, env=env, cwd=cwd, log_path=log_path, env_mode=env_mode, stdin_path=stdin_path)
         )
 
     def poll_started(self) -> int | None:
@@ -1071,6 +1056,7 @@ def maybe_gpu_specialist_lease(
 
 
 __all__ = [
+    "ActorLaunch",
     "GpuSpecialistLease",
     "ManagedServerProcess",
     "RAY_INFEASIBLE_MARKER",
