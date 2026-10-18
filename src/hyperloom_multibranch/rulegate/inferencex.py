@@ -27,6 +27,10 @@ MIN_BASELINES = 2
 
 GAIN_BELOW_THRESHOLD = "gain_below_threshold"
 GAIN_NOT_CONFIRMED = "gain_not_confirmed"
+# A synthetic benchmark a healthy server completes in full: any request it did not complete is a defect, whatever the
+# parent did, since throughput over the requests that did complete is not the work that was asked for.
+DROPPED_REQUESTS = "dropped_requests"
+_ACCURACY = "accuracy"
 
 
 def _checked(value: float) -> float:
@@ -66,15 +70,23 @@ class DispersionThreshold:
 
 @dataclass(frozen=True)
 class InferenceXReading:
-    """One bench-eval-bench test: its graded throughput and the eval score measured in the same sandbox."""
+    """One bench-eval-bench test: its graded throughput, the eval score measured in the same sandbox, and the requests
+    its graded rounds sent but did not complete."""
 
     throughput: float
     accuracy: float
+    dropped: int = 0
 
     def __post_init__(self) -> None:
         _checked(self.throughput)
         if finite_score(self.accuracy) is None:
             raise ValueError(f"an eval score must be a finite number, got {self.accuracy!r}")
+        if self.dropped < 0:
+            raise ValueError(f"a count of dropped requests is at least 0, got {self.dropped!r}")
+
+    @property
+    def defects(self) -> tuple[str, ...]:
+        return (DROPPED_REQUESTS,) if self.dropped else ()
 
 
 @dataclass(frozen=True)
@@ -96,16 +108,18 @@ def _recorded(throughput: float, accuracy: float) -> dict[str, float]:
 def compare(
     reading: InferenceXReading, baseline: InferenceXBaseline, parent: Mapping[str, float], request_id: str
 ) -> Judgement:
-    """The first measurement against the parent's record: past the bar it waits for a retest whatever its accuracy,
-    since the retest settles both whether the gain holds and whether a failed accuracy gate is real."""
+    """The first measurement against the parent's record: past the bar it waits for a retest whatever its accuracy and
+    dropped requests, since the retest settles both whether the gain holds and whether a defect is real. Below it, a
+    measurement that dropped requests is regressed, so a correctness fix measured on it forks rather than landing."""
     gain = _gain(reading.throughput, parent)
     bar = baseline.bar_pct
     accuracy_ok = inferencex_accuracy_ok(baseline.accuracy, reading.accuracy)
     recorded = _recorded(reading.throughput, reading.accuracy)
     if gain > bar:
-        return Judgement(Verdict.NEEDS_CONFIRM, gain, bar, (request_id,), recorded, accuracy_ok)
-    verdict = Verdict.REGRESSED if gain < -bar else Verdict.FLAT
-    return Judgement(verdict, gain, bar, (request_id,), recorded, accuracy_ok, (GAIN_BELOW_THRESHOLD,))
+        return Judgement(Verdict.NEEDS_CONFIRM, gain, bar, (request_id,), recorded, accuracy_ok, reading.defects)
+    verdict = Verdict.REGRESSED if gain < -bar or reading.defects else Verdict.FLAT
+    refused_by = (*reading.defects, GAIN_BELOW_THRESHOLD)
+    return Judgement(verdict, gain, bar, (request_id,), recorded, accuracy_ok, refused_by)
 
 
 def confirm(
@@ -118,8 +132,9 @@ def confirm(
     """Settles a provisional gain with a retest on another sandbox; the record is the mean of both measurements, their
     eval scores included.
 
-    A gain both measurements cleared is improved when both passed the accuracy gate, blocked when both failed it and
-    inconclusive when they split.
+    A gain both measurements cleared is improved when neither showed a defect (a failed accuracy gate, dropped
+    requests), blocked when both showed the same one, and inconclusive otherwise. A blocked judgement names the
+    performance defects both showed; the accuracy gate is in ``accuracy_ok``.
     """
     if first.verdict is not Verdict.NEEDS_CONFIRM:
         raise ValueError(f"only a provisional judgement is retested, not a {first.verdict.value} one")
@@ -132,19 +147,21 @@ def confirm(
     request_ids = (*first.request_ids, request_id)
     accuracy_ok = inferencex_accuracy_ok(baseline.accuracy, reading.accuracy)
     both_ok = first.accuracy_ok and accuracy_ok
+    seen = tuple(dict.fromkeys((*first.refused_by, *reading.defects)))
     if first.gain_pct > bar and _gain(reading.throughput, parent) > bar:
-        if both_ok:
-            verdict = Verdict.IMPROVED
-        elif first.accuracy_ok or accuracy_ok:
-            verdict = Verdict.INCONCLUSIVE
-        else:
-            verdict = Verdict.BLOCKED
-        return Judgement(verdict, gain, bar, request_ids, recorded, both_ok)
-    verdict = Verdict.REGRESSED if gain < -bar else Verdict.FLAT
-    return Judgement(verdict, gain, bar, request_ids, recorded, both_ok, (GAIN_NOT_CONFIRMED,))
+        before = {*first.refused_by, *(() if first.accuracy_ok else (_ACCURACY,))}
+        after = {*reading.defects, *(() if accuracy_ok else (_ACCURACY,))}
+        if before & after:
+            shared = tuple(defect for defect in seen if defect in after)
+            return Judgement(Verdict.BLOCKED, gain, bar, request_ids, recorded, both_ok, shared)
+        verdict = Verdict.INCONCLUSIVE if before or after else Verdict.IMPROVED
+        return Judgement(verdict, gain, bar, request_ids, recorded, both_ok, seen)
+    verdict = Verdict.REGRESSED if gain < -bar or seen else Verdict.FLAT
+    return Judgement(verdict, gain, bar, request_ids, recorded, both_ok, (*seen, GAIN_NOT_CONFIRMED))
 
 
 __all__ = [
+    "DROPPED_REQUESTS",
     "FLOOR_PCT",
     "GAIN_BELOW_THRESHOLD",
     "GAIN_NOT_CONFIRMED",

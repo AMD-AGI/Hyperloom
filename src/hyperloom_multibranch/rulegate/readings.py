@@ -21,9 +21,7 @@ class UnreadableResult(ValueError):
 
 def inferencex_reading(result: TestResult, concurrency: int) -> InferenceXReading:
     """The mean graded throughput of the measure-phase rounds at ``concurrency``, and the test's eval score."""
-    rounds = [r for r in _measured(result) if r.concurrency == concurrency]
-    if not rounds:
-        raise UnreadableResult(f"{result.request_id} has no measure-phase round at concurrency {concurrency}")
+    rounds = _graded(result, concurrency)
     missing = [r for r in rounds if GRADED_OUTPUT not in r.metrics]
     if missing:
         raise UnreadableResult(f"{result.request_id} reports no {GRADED_OUTPUT} in {len(missing)} of its rounds")
@@ -32,6 +30,19 @@ def inferencex_reading(result: TestResult, concurrency: int) -> InferenceXReadin
         return InferenceXReading(statistics.fmean(r.metrics[GRADED_OUTPUT] for r in rounds), score)
     except ValueError as error:
         raise UnreadableResult(f"{result.request_id}: {error}") from error
+
+
+def dropped_requests(result: TestResult, concurrency: int) -> int:
+    """The requests the measure-phase rounds at ``concurrency`` sent but did not complete; a candidate whose round does
+    not count them is not judged, since its throughput may be over fewer requests than were sent."""
+    rounds = _graded(result, concurrency)
+    counts = [r.failed_requests for r in rounds if r.failed_requests is not None]
+    if len(counts) < len(rounds):
+        uncounted = len(rounds) - len(counts)
+        raise UnreadableResult(
+            f"{result.request_id} does not count the requests it dropped in {uncounted} of its rounds"
+        )
+    return sum(counts)
 
 
 def eval_score(result: TestResult) -> float:
@@ -67,9 +78,16 @@ def _measured(result: TestResult) -> list[RoundValue]:
     return [r for r in result.rounds if r.phase == _MEASURE]
 
 
+def _graded(result: TestResult, concurrency: int) -> list[RoundValue]:
+    rounds = [r for r in _measured(result) if r.concurrency == concurrency]
+    if not rounds:
+        raise UnreadableResult(f"{result.request_id} has no measure-phase round at concurrency {concurrency}")
+    return rounds
+
+
 def _require_measurement(result: TestResult) -> None:
     if result.validity is not Validity.SUCCEEDED:
         raise UnreadableResult(f"{result.request_id} is {result.validity.value}, not a measurement")
 
 
-__all__ = ["UnreadableResult", "agentx_reading", "eval_score", "inferencex_reading"]
+__all__ = ["UnreadableResult", "agentx_reading", "dropped_requests", "eval_score", "inferencex_reading"]

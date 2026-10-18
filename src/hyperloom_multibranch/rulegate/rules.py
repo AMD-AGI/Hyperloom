@@ -10,7 +10,7 @@ a final candidate, so every test is held to the same bar, the same accuracy gate
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from hyperloom.common.perf_metric import GRADED_ERROR_RATE
@@ -25,7 +25,13 @@ from hyperloom_multibranch.rulegate.baseline import (
     write_agentx_baseline,
     write_inferencex_baseline,
 )
-from hyperloom_multibranch.rulegate.readings import UnreadableResult, agentx_reading, eval_score, inferencex_reading
+from hyperloom_multibranch.rulegate.readings import (
+    UnreadableResult,
+    agentx_reading,
+    dropped_requests,
+    eval_score,
+    inferencex_reading,
+)
 
 
 class Rule(Protocol):
@@ -44,7 +50,8 @@ class Rule(Protocol):
 
 @dataclass(frozen=True)
 class InferenceXRule(Rule):
-    """Throughput at the graded concurrency against the PRELUDE bar, the eval score against the baseline's."""
+    """Throughput at the graded concurrency against the PRELUDE bar, the eval score against the baseline's, and no
+    request the graded rounds sent left uncompleted."""
 
     notebook: CommitQuery
     concurrency: int
@@ -54,17 +61,22 @@ class InferenceXRule(Rule):
         return await write_inferencex_baseline(store, root_commit, records, self.concurrency)
 
     async def first(self, record: TestRecord, parent: Mapping[str, float]) -> Judgement:
-        reading = inferencex_reading(_result(record), self.concurrency)
+        reading = self._candidate(record)
         return inferencex.compare(reading, await read_inferencex_baseline(self.notebook), parent, record.request_id)
 
     async def retest(self, first: Judgement, record: TestRecord, parent: Mapping[str, float]) -> Judgement:
-        reading = inferencex_reading(_result(record), self.concurrency)
+        reading = self._candidate(record)
         baseline = await read_inferencex_baseline(self.notebook)
         return inferencex.confirm(first, reading, baseline, parent, record.request_id)
 
     async def accuracy_passes(self, record: TestRecord) -> bool:
         baseline = await read_inferencex_baseline(self.notebook)
         return inferencex_accuracy_ok(baseline.accuracy, eval_score(_result(record)))
+
+    def _candidate(self, record: TestRecord) -> inferencex.InferenceXReading:
+        result = _result(record)
+        dropped = dropped_requests(result, self.concurrency)
+        return replace(inferencex_reading(result, self.concurrency), dropped=dropped)
 
 
 class AgentXRule(Rule):

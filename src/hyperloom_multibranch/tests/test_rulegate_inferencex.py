@@ -8,6 +8,7 @@ import pytest
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, Verdict
 from hyperloom_multibranch.rulegate.inferencex import (
+    DROPPED_REQUESTS,
     FLOOR_PCT,
     GAIN_BELOW_THRESHOLD,
     GAIN_NOT_CONFIRMED,
@@ -100,16 +101,48 @@ def test_a_retest_settles_the_gain_and_the_accuracy_gate(first_ok, retest, retes
     assert judgement.request_ids == ("r1", "r2")
 
 
+@pytest.mark.parametrize(
+    ("throughput", "verdict", "refused_by"),
+    [
+        (1030.0, Verdict.NEEDS_CONFIRM, (DROPPED_REQUESTS,)),
+        (1010.0, Verdict.REGRESSED, (DROPPED_REQUESTS, GAIN_BELOW_THRESHOLD)),
+    ],
+)
+def test_a_measurement_that_dropped_requests_is_a_defect_whatever_the_parent_dropped(throughput, verdict, refused_by):
+    judgement = compare(InferenceXReading(throughput, SCORES[True], dropped=3), BASELINE, PARENT, "r1")
+    assert (judgement.verdict, judgement.refused_by, judgement.accuracy_ok) == (verdict, refused_by, True)
+
+
+@pytest.mark.parametrize(
+    ("first", "retest", "verdict", "refused_by"),
+    [
+        ((True, 3), (True, 1), Verdict.BLOCKED, (DROPPED_REQUESTS,)),
+        ((True, 3), (True, 0), Verdict.INCONCLUSIVE, (DROPPED_REQUESTS,)),
+        ((True, 0), (True, 2), Verdict.INCONCLUSIVE, (DROPPED_REQUESTS,)),
+        ((False, 0), (True, 2), Verdict.INCONCLUSIVE, (DROPPED_REQUESTS,)),
+        ((False, 2), (False, 0), Verdict.BLOCKED, ()),
+    ],
+    ids=["dropped-twice", "dropped-first", "dropped-retest", "two-defects", "accuracy-twice"],
+)
+def test_a_gain_is_blocked_only_by_a_defect_both_measurements_show(first, retest, verdict, refused_by):
+    provisional = compare(InferenceXReading(1030.0, SCORES[first[0]], dropped=first[1]), BASELINE, PARENT, "r1")
+    reading = InferenceXReading(1025.0, SCORES[retest[0]], dropped=retest[1])
+    judgement = confirm(provisional, reading, BASELINE, PARENT, "r2")
+    assert (judgement.verdict, judgement.refused_by) == (verdict, refused_by)
+
+
 def test_only_a_provisional_judgement_is_retested():
     first = compare(_reading(1010.0), BASELINE, PARENT, "r1")
     with pytest.raises(ValueError, match="provisional"):
         confirm(first, _reading(1030.0), BASELINE, PARENT, "r2")
 
 
-@pytest.mark.parametrize(("throughput", "accuracy"), [(0.0, 0.9), (math.inf, 0.9), (1000.0, math.nan)])
-def test_a_reading_needs_a_positive_throughput_and_a_finite_score(throughput, accuracy):
+@pytest.mark.parametrize(
+    ("throughput", "accuracy", "dropped"), [(0.0, 0.9, 0), (math.inf, 0.9, 0), (1000.0, math.nan, 0), (1000.0, 0.9, -1)]
+)
+def test_a_reading_needs_a_positive_throughput_a_finite_score_and_no_negative_drops(throughput, accuracy, dropped):
     with pytest.raises(ValueError):
-        InferenceXReading(throughput, accuracy)
+        InferenceXReading(throughput, accuracy, dropped)
 
 
 @pytest.mark.parametrize(("bar", "accuracy"), [(0.0, 0.9), (math.nan, 0.9), (2.0, math.nan)])

@@ -7,7 +7,12 @@ from hyperloom.common.accuracy import ACCURACY_METRICS
 from hyperloom.common.perf_metric import GRADED_DURATION, GRADED_ERROR_RATE, GRADED_INTVTY_P50, GRADED_OUTPUT
 from hyperloom.contracts.measurement import AccuracyValue, RoundValue, TestResult, Validity
 from hyperloom_multibranch.rulegate.inferencex import InferenceXReading
-from hyperloom_multibranch.rulegate.readings import UnreadableResult, agentx_reading, inferencex_reading
+from hyperloom_multibranch.rulegate.readings import (
+    UnreadableResult,
+    agentx_reading,
+    dropped_requests,
+    inferencex_reading,
+)
 
 STRICT, FLEXIBLE, _, ACC = ACCURACY_METRICS
 GSM8K = "gsm8k"
@@ -67,6 +72,26 @@ def test_the_eval_score_is_picked_as_the_old_flow_picks_it(accuracy, score):
 def test_inferencex_refuses_what_it_cannot_judge(result):
     with pytest.raises(UnreadableResult):
         inferencex_reading(result, CONC)
+
+
+def test_the_dropped_requests_are_those_of_the_measure_rounds_at_the_graded_concurrency():
+    result = _result(
+        RoundValue("warmup", CONC, {GRADED_OUTPUT: 500.0}, completed_requests=90, failed_requests=10),
+        RoundValue(MEASURE, CONC, {GRADED_OUTPUT: 1000.0}, completed_requests=99, failed_requests=1),
+        RoundValue(MEASURE, CONC, {GRADED_OUTPUT: 1020.0}, completed_requests=98, failed_requests=2),
+        RoundValue(MEASURE, 128, {GRADED_OUTPUT: 1800.0}, completed_requests=50, failed_requests=50),
+    )
+    assert dropped_requests(result, CONC) == 3
+
+
+def test_a_graded_round_that_does_not_count_its_requests_leaves_the_drops_unread():
+    result = _result(
+        RoundValue(MEASURE, CONC, {GRADED_OUTPUT: 1000.0}, completed_requests=100, failed_requests=0),
+        RoundValue(MEASURE, CONC, {GRADED_OUTPUT: 1020.0}),
+    )
+    with pytest.raises(UnreadableResult, match="does not count the requests it dropped in 1 of its rounds"):
+        dropped_requests(result, CONC)
+    assert inferencex_reading(result, CONC) == InferenceXReading(1010.0, 0.61)
 
 
 def test_agentx_averages_the_measure_rounds_and_leaves_out_a_metric_one_round_lacks():
