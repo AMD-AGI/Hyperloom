@@ -1010,8 +1010,7 @@ class DenseTunerSpec:
 
 def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path) -> TuneResult:
     """Run an aiter dense GEMM tuner subprocess."""
-    tuner_name = spec.tuner_name
-    script_key = spec.script_key
+    tuner_name, script_key = spec.tuner_name, spec.script_key
     script = find_tuner_script(script_key)
     if script is None:
         return TuneResult(
