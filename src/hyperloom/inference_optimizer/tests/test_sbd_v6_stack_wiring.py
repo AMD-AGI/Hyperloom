@@ -335,11 +335,13 @@ def test_a_real_session_validation_records_the_whole_stack_figure(session_dir):
         coord.shared_state.cumulative_gain_validated = 10.0
         coord.shared_state.cumulative_gain_validated_stack_len = len(coord.shared_state.optimization_stack)
         _se.record_validation(
-            stack_len=coord.shared_state.cumulative_gain_validated_stack_len,
-            baseline_tput=1000.0,
-            validated_tput=1100.0,
-            validated_gain_pct=10.0,
-            source="writeback",
+            _se.StackValidation(
+                stack_len=coord.shared_state.cumulative_gain_validated_stack_len,
+                baseline_tput=1000.0,
+                validated_tput=1100.0,
+                validated_gain_pct=10.0,
+                source="writeback",
+            )
         )
 
         ext, _status = stack_event.assemble_stack_ext(stack_event_parts(), event=stack_event.stack_event_id())
@@ -378,11 +380,13 @@ def test_an_unreadable_spool_on_finish_does_not_raise(session_dir, monkeypatch):
 
     with session_scope(session_dir):
         stack_event.record_adoption(
-            stack_index=0,
-            entry={"action": "explore", "variant_name": "kept"},
-            throughput_before=1000.0,
-            throughput_after=1100.0,
-            baseline_tput=1000.0,
+            stack_event.StackAdoption(
+                stack_index=0,
+                entry={"action": "explore", "variant_name": "kept"},
+                throughput_before=1000.0,
+                throughput_after=1100.0,
+                baseline_tput=1000.0,
+            )
         )
         monkeypatch.setattr(
             "hyperloom.inference_optimizer.breakdown.recorder.assembler.event_parts",
