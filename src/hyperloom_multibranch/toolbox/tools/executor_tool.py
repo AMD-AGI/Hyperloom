@@ -149,19 +149,26 @@ def _copy_back(result: Mapping[str, Any], scratch: Path, workdir: Path) -> dict[
     def land(text: Any) -> Any:
         if not isinstance(text, str) or not text.startswith(str(scratch) + "/"):
             return text
-        source = Path(text)
+        source = Path(text).resolve()
+        if not source.is_relative_to(scratch.resolve()):
+            return text
         if text not in moved:
             moved[text] = text
             if source.is_file() and ":" not in source.name:
-                target = workdir / source.relative_to(scratch)
+                target = workdir / source.relative_to(scratch.resolve())
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, target)
                 moved[text] = str(target)
         return moved[text]
 
-    out = {k: land(v) for k, v in result.items()}
-    if isinstance(out.get("artifact_paths"), Mapping):
-        out["artifact_paths"] = {k: land(v) for k, v in out["artifact_paths"].items()}
+    def walk(value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {k: walk(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [walk(v) for v in value]
+        return land(value)
+
+    out = walk(result)
     for key in ("trace_report_path", "analysis_md_path"):
         sibling = Path(str(result.get(key) or "")).parent / "analysis.json"
         if str(sibling).startswith(str(scratch) + "/"):
