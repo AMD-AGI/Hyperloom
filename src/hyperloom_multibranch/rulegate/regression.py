@@ -26,7 +26,7 @@ from hyperloom.contracts.measurement import (
 )
 from hyperloom.contracts.recipe import RecipeDelta, apply
 from hyperloom_multibranch.contracts.gate import RegressionOutcome, ResultUnverified, ResultVerifier
-from hyperloom_multibranch.contracts.notebook.interfaces import CommitQuery, RecordSearch
+from hyperloom_multibranch.contracts.notebook.interfaces import CommitQuery, GateRecords, RecordSearch
 from hyperloom_multibranch.contracts.notebook.records import RegressionCase, TestRecord
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
@@ -221,6 +221,26 @@ async def prove_fix(
     return proof
 
 
+class CaseRegistry(RecordSearch, GateRecords, Protocol):
+    """Where a fix's case is registered: the rule gate's handle on the notebook."""
+
+
+async def register_case(notebook: CaseRegistry, fix_commit: str, repro_request_id: str) -> RegressionCase:
+    """Register the case of the repro test ``repro_request_id`` as the regression case of ``fix_commit``.
+
+    The test is the fix's candidate run: raises ``ValueError`` unless it is a repro test whose case ran clean.
+    """
+
+    record = await notebook.record(repro_request_id)
+    clean = record.result is not None and record.result.repro_verdict == NOT_REPRODUCED
+    if record.request.kind is not TestKind.REPRO or not clean:
+        raise ValueError(f"{repro_request_id} is not a repro test whose case ran clean")
+    case_ref = ", ".join(attachment.id for attachment in record.request.attachments)
+    case = RegressionCase(case_ref, fix_commit, repro_request_id)
+    await notebook.add_regression_case(case)
+    return case
+
+
 async def _gathered(awaitables: Iterable[Awaitable[T]]) -> list[T]:
     """Await every one concurrently; once one raises, or the caller is cancelled, the others are cancelled and awaited,
     so each takes its test back before this returns."""
@@ -237,6 +257,7 @@ async def _gathered(awaitables: Iterable[Awaitable[T]]) -> list[T]:
 __all__ = [
     "NO_DELTA",
     "RESUBMIT_SECONDS",
+    "CaseRegistry",
     "FixNotProven",
     "FixProof",
     "RegressionNotebook",
@@ -244,4 +265,5 @@ __all__ = [
     "ReproRun",
     "ReproRunner",
     "prove_fix",
+    "register_case",
 ]

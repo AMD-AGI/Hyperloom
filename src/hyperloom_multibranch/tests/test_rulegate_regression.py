@@ -30,6 +30,7 @@ from hyperloom_multibranch.rulegate.regression import (
     ReproRun,
     ReproRunner,
     prove_fix,
+    register_case,
 )
 from hyperloom_multibranch.rulegate.service import Polling
 from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingVerifier, ReproAnswer, ReproToolbox
@@ -384,3 +385,28 @@ async def test_a_fix_its_case_does_not_tell_from_its_parent_is_not_proven(sessio
         await session.prove(ON_C1)
 
     assert raised.value.reason == reason
+
+
+async def test_a_fix_s_clean_run_is_registered_as_the_case_of_its_commit(session):
+    run = await session.runner.run("c1", BOUNDS, OOB, branch="s1")
+
+    case = await register_case(session.notebook, "c2", run.request_id)
+
+    assert case == RegressionCase("oob_8k", "c2", run.request_id)
+    assert case in await session.notebook.regression_cases_for("c2")
+
+
+@pytest.mark.parametrize("answer", [REPRODUCED, None, ""])
+async def test_only_a_repro_test_whose_case_ran_clean_is_registered(session, answer):
+    session.answers["oob_8k"] = answer
+    run = await session.runner.run("c1", BOUNDS, OOB, branch="s1")
+
+    with pytest.raises(ValueError, match="not a repro test whose case ran clean"):
+        await register_case(session.notebook, "c2", run.request_id)
+
+    assert [case.case_ref for case in await session.notebook.regression_cases_for("c2")] == ["nan_logits"]
+
+
+async def test_a_performance_test_is_no_case(session):
+    with pytest.raises(ValueError, match="r-s1 is not a repro test"):
+        await register_case(session.notebook, "c1", "r-s1")
