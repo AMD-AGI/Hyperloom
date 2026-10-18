@@ -8,6 +8,7 @@ from __future__ import annotations
 import gzip
 import json
 
+from kernelforge.fusion.discover import DiscoveryEvidence, DiscoveryPrompting, DiscoveryTarget
 from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares
 from kernelforge.fusion.discover import (
     build_discovery_prompt,
@@ -282,12 +283,9 @@ class TestDiscoveryPrompt:
         d = _candidate_diag()
         hot = [{"name": "vectorized_elementwise mul", "category": "mul", "share": 0.14, "count": 60, "avg_us": 3.2}]
         p = build_discovery_prompt(
-            model_type="zaya",
-            framework="sglang",
-            source_text="class CCA:\n    def _normalize_qk(self, q, k): ...\n",
-            diagnosis=d,
-            hot_kernels=hot,
-            shapes={"hidden_size": 2048},
+            DiscoveryTarget(model_type="zaya", framework="sglang", source_file="", shapes={"hidden_size": 2048}),
+            "class CCA:\n    def _normalize_qk(self, q, k): ...\n",
+            DiscoveryEvidence(diagnosis=d, hot_kernels=hot),
         )
         # Includes the measured profile + the real source.
         assert "launch_bound_share" in p and "vectorized_elementwise mul" in p
@@ -301,28 +299,28 @@ class TestDiscoveryPrompt:
     def test_prompt_includes_ordered_boundaries_and_existing_operator_evidence(self):
         d = _candidate_diag()
         prompt = build_discovery_prompt(
-            model_type="toy",
-            framework="sglang",
-            source_text="def forward(x): return self.mlp(x)\n",
-            diagnosis=d,
-            hot_kernels=[],
-            shapes={"hidden_size": 4096},
-            ordered_boundaries=[
-                {
-                    "signature": "gemm -> activation -> gemm",
-                    "count": 36,
-                    "total_us": 1700.0,
-                    "boundary_kind": "epilogue",
-                    "launches_removed_upper_bound": 1,
-                }
-            ],
-            existing_operator_hints=[
-                {
-                    "operator": "gemm_a16w16_gated",
-                    "path": "knowledge/gemm.md",
-                    "evidence": "Gate/up GEMM with SiLU",
-                }
-            ],
+            DiscoveryTarget(model_type="toy", framework="sglang", source_file="", shapes={"hidden_size": 4096}),
+            "def forward(x): return self.mlp(x)\n",
+            DiscoveryEvidence(
+                diagnosis=d,
+                hot_kernels=[],
+                ordered_boundaries=[
+                    {
+                        "signature": "gemm -> activation -> gemm",
+                        "count": 36,
+                        "total_us": 1700.0,
+                        "boundary_kind": "epilogue",
+                        "launches_removed_upper_bound": 1,
+                    }
+                ],
+                existing_operator_hints=[
+                    {
+                        "operator": "gemm_a16w16_gated",
+                        "path": "knowledge/gemm.md",
+                        "evidence": "Gate/up GEMM with SiLU",
+                    }
+                ],
+            ),
         )
 
         assert "Ordered fusion boundaries" in prompt
@@ -333,23 +331,23 @@ class TestDiscoveryPrompt:
 
     def test_prompt_excludes_terminal_attention_from_the_fusable_span(self):
         prompt = build_discovery_prompt(
-            model_type="toy",
-            framework="sglang",
-            source_text="def forward(x): return x\n",
-            diagnosis=_candidate_diag(),
-            hot_kernels=[],
-            shapes={},
-            ordered_boundaries=[
-                {
-                    "signature": "gemm -> rmsnorm -> rope -> copy -> attention",
-                    "fusable_categories": ["rmsnorm", "rope", "copy"],
-                    "terminal_compute": "attention",
-                    "count": 28,
-                    "total_us": 900.0,
-                    "boundary_kind": "compute_boundary",
-                    "launches_removed_upper_bound": 3,
-                }
-            ],
+            DiscoveryTarget(model_type="toy", framework="sglang", source_file="", shapes={}),
+            "def forward(x): return x\n",
+            DiscoveryEvidence(
+                diagnosis=_candidate_diag(),
+                hot_kernels=[],
+                ordered_boundaries=[
+                    {
+                        "signature": "gemm -> rmsnorm -> rope -> copy -> attention",
+                        "fusable_categories": ["rmsnorm", "rope", "copy"],
+                        "terminal_compute": "attention",
+                        "count": 28,
+                        "total_us": 900.0,
+                        "boundary_kind": "compute_boundary",
+                        "launches_removed_upper_bound": 3,
+                    }
+                ],
+            ),
         )
 
         assert "fusable-span=rmsnorm -> rope -> copy" in prompt
@@ -357,26 +355,26 @@ class TestDiscoveryPrompt:
 
     def test_prompt_shows_recall_scores(self):
         prompt = build_discovery_prompt(
-            model_type="toy",
-            framework="sglang",
-            source_text="def forward(x): return x\n",
-            diagnosis=_candidate_diag(),
-            hot_kernels=[],
-            shapes={},
-            existing_operator_hints=[
-                {
-                    "operator": "gemm_a16w16_gated",
-                    "path": "knowledge/gemm.md",
-                    "evidence": "Gate/up GEMM with SiLU",
-                    "score": 812.5,
-                },
-                {
-                    "operator": "fused_attention_decode",
-                    "path": "knowledge/attn.md",
-                    "evidence": "Paged attention decode",
-                    "score": 30.0,
-                },
-            ],
+            DiscoveryTarget(model_type="toy", framework="sglang", source_file="", shapes={}),
+            "def forward(x): return x\n",
+            DiscoveryEvidence(
+                diagnosis=_candidate_diag(),
+                hot_kernels=[],
+                existing_operator_hints=[
+                    {
+                        "operator": "gemm_a16w16_gated",
+                        "path": "knowledge/gemm.md",
+                        "evidence": "Gate/up GEMM with SiLU",
+                        "score": 812.5,
+                    },
+                    {
+                        "operator": "fused_attention_decode",
+                        "path": "knowledge/attn.md",
+                        "evidence": "Paged attention decode",
+                        "score": 30.0,
+                    },
+                ],
+            ),
         )
 
         assert "score=812.5" in prompt
@@ -403,7 +401,10 @@ class TestParse:
         )
         text = "Here is my analysis.\n```json\n" + payload + "\n```\n"
         recipes = parse_discovered_recipes(
-            text, model_type="zaya", framework="sglang", source_file="/sgl/models/zaya.py", shapes={"hidden_size": 2048}
+            text,
+            DiscoveryTarget(
+                model_type="zaya", framework="sglang", source_file="/sgl/models/zaya.py", shapes={"hidden_size": 2048}
+            ),
         )
         assert len(recipes) == 1
         r = recipes[0]
@@ -415,7 +416,9 @@ class TestParse:
 
     def test_ranks_by_priority(self):
         text = '[{"name":"a","priority":0.3},{"name":"b","priority":0.8}]'
-        rs = parse_discovered_recipes(text, model_type="zaya", framework="sglang", source_file="/x.py", shapes={})
+        rs = parse_discovered_recipes(
+            text, DiscoveryTarget(model_type="zaya", framework="sglang", source_file="/x.py", shapes={})
+        )
         assert [r.pattern_id for r in rs] == ["llm:b", "llm:a"]
 
     def test_preserves_existing_operator_integration_plan(self):
@@ -431,11 +434,7 @@ class TestParse:
         )
 
         recipe = parse_discovered_recipes(
-            text,
-            model_type="toy",
-            framework="sglang",
-            source_file="/x.py",
-            shapes={},
+            text, DiscoveryTarget(model_type="toy", framework="sglang", source_file="/x.py", shapes={})
         )[0]
 
         assert recipe.candidate_kind == "integration"
@@ -456,11 +455,7 @@ class TestParse:
         )
 
         recipe = parse_discovered_recipes(
-            text,
-            model_type="toy",
-            framework="sglang",
-            source_file="/x.py",
-            shapes={},
+            text, DiscoveryTarget(model_type="toy", framework="sglang", source_file="/x.py", shapes={})
         )[0]
 
         assert recipe.candidate_kind == "new_fusion"
@@ -479,11 +474,7 @@ class TestParse:
         )
 
         recipe = parse_discovered_recipes(
-            text,
-            model_type="toy",
-            framework="sglang",
-            source_file="/x.py",
-            shapes={},
+            text, DiscoveryTarget(model_type="toy", framework="sglang", source_file="/x.py", shapes={})
         )[0]
 
         assert recipe.candidate_kind == "integration"
@@ -498,14 +489,16 @@ class TestParse:
             '  {"name": "b", "env_flag": "ZAYA_FUSED_B", "priority": 0.5},\n'
             '  {"name": "c", "env_flag": "ZAYA_FUSED_C", "rationale": "this got cut o'
         )
-        rs = parse_discovered_recipes(text, model_type="zaya", framework="sglang", source_file="/x.py", shapes={})
+        rs = parse_discovered_recipes(
+            text, DiscoveryTarget(model_type="zaya", framework="sglang", source_file="/x.py", shapes={})
+        )
         assert [r.pattern_id for r in rs] == ["llm:a", "llm:b"]  # 2 salvaged, ranked
         assert rs[0].env_flag == "ZAYA_FUSED_A"
 
     def test_no_json_returns_empty(self):
         assert (
             parse_discovered_recipes(
-                "no json here", model_type="zaya", framework="sglang", source_file="/x.py", shapes={}
+                "no json here", DiscoveryTarget(model_type="zaya", framework="sglang", source_file="/x.py", shapes={})
             )
             == []
         )
@@ -513,10 +506,7 @@ class TestParse:
     def test_bare_array_without_fence(self):
         rs = parse_discovered_recipes(
             'prose [{"name":"x","env_flag":"ZAYA_FUSED_X"}] tail',
-            model_type="zaya",
-            framework="sglang",
-            source_file="/x.py",
-            shapes={},
+            DiscoveryTarget(model_type="zaya", framework="sglang", source_file="/x.py", shapes={}),
         )
         assert len(rs) == 1 and rs[0].env_flag == "ZAYA_FUSED_X"
 
@@ -544,10 +534,7 @@ class TestDiscoverRecipes:
 
         recipes = discover_recipes(
             d,
-            model_type="zaya",
-            framework="sglang",
-            source_file=str(src),
-            shapes={"hidden_size": 2048},
+            DiscoveryTarget(model_type="zaya", framework="sglang", source_file=str(src), shapes={"hidden_size": 2048}),
             trace_path=str(trace),
             llm_fn=fake_llm,
         )
@@ -589,13 +576,10 @@ class TestDiscoverRecipes:
 
         recipes = discover_recipes(
             _candidate_diag(),
-            model_type="toy",
-            framework="sglang",
-            source_file=str(src),
-            shapes={},
+            DiscoveryTarget(model_type="toy", framework="sglang", source_file=str(src), shapes={}),
             trace_path=str(trace),
             llm_fn=fake_llm,
-            knowledge_root=knowledge,
+            prompting=DiscoveryPrompting(knowledge_root=knowledge),
         )
 
         assert ordered_fusion_boundaries_from_trace(trace) == []
@@ -617,13 +601,10 @@ class TestDiscoverRecipes:
 
         discover_recipes(
             _candidate_diag(),
-            model_type="toy",
-            framework="sglang",
-            source_file=str(src),
-            shapes={},
+            DiscoveryTarget(model_type="toy", framework="sglang", source_file=str(src), shapes={}),
             trace_path=str(trace),
             llm_fn=fake_llm,
-            max_fusions=3,
+            prompting=DiscoveryPrompting(max_fusions=3),
         )
 
         assert "identify up to 3 CONTIGUOUS op chains" in captured["prompt"]
@@ -642,10 +623,7 @@ class TestDiscoverRecipes:
         def run():
             discover_recipes(
                 _candidate_diag(),
-                model_type="toy",
-                framework="sglang",
-                source_file=str(src),
-                shapes={},
+                DiscoveryTarget(model_type="toy", framework="sglang", source_file=str(src), shapes={}),
                 trace_path=str(trace),
                 llm_fn=fake_llm,
             )
@@ -671,10 +649,7 @@ class TestDiscoverRecipes:
         assert (
             discover_recipes(
                 d,
-                model_type="zaya",
-                framework="sglang",
-                source_file="/x.py",
-                shapes={},
+                DiscoveryTarget(model_type="zaya", framework="sglang", source_file="/x.py", shapes={}),
                 trace_path="/x",
                 llm_fn=fake_llm,
             )

@@ -16,6 +16,7 @@ import os
 import subprocess
 from pathlib import Path
 
+from kernelforge.fusion.discover import DiscoveryTarget
 from kernelforge.fusion.anchor import AnchorReport, Slot, build_anchored_discovery_prompt
 from kernelforge.fusion.campaign import (
     CampaignBrief,
@@ -94,12 +95,14 @@ def _proposal(source_file: str, additional: list[str] | None = None) -> str:
 def _parse(raw: str, *, root: Path, model_file: Path) -> list[Recipe]:
     return parse_discovered_recipes(
         raw,
-        model_type="deepseek_v4",
-        framework="sglang",
-        source_file=str(model_file),
-        shapes={},
-        repo_scope=True,
-        repo_root=str(root),
+        DiscoveryTarget(
+            model_type="deepseek_v4",
+            framework="sglang",
+            source_file=str(model_file),
+            shapes={},
+            repo_scope=True,
+            repo_root=str(root),
+        ),
     )
 
 
@@ -178,13 +181,16 @@ class TestPrompt:
         root, model_file, _runtime = _repo(tmp_path)
 
         prompt = build_anchored_discovery_prompt(
-            model_type="deepseek_v4",
-            framework="sglang",
-            source_files=[str(model_file)],
-            report=_anchor_report(),
-            shapes={},
-            repo_scope=True,
-            repo_root=str(root),
+            DiscoveryTarget(
+                model_type="deepseek_v4",
+                framework="sglang",
+                source_file="",
+                shapes={},
+                repo_scope=True,
+                repo_root=str(root),
+            ),
+            [str(model_file)],
+            _anchor_report(),
         )
 
         assert "```python" not in prompt
@@ -198,11 +204,9 @@ class TestPrompt:
         _root, model_file, _runtime = _repo(tmp_path)
 
         prompt = build_anchored_discovery_prompt(
-            model_type="deepseek_v4",
-            framework="sglang",
-            source_files=[str(model_file)],
-            report=_anchor_report(),
-            shapes={},
+            DiscoveryTarget(model_type="deepseek_v4", framework="sglang", source_file="", shapes={}),
+            [str(model_file)],
+            _anchor_report(),
         )
 
         assert "```python" in prompt

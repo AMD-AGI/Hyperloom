@@ -23,6 +23,7 @@ from kernelforge.agent_backends.base import (
 from kernelforge.agent_backends.registry import get_agent_provider, register_agent_provider
 from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
 
+from kernelforge.fusion.discover import DiscoveryRetry, DiscoverySession
 from kernelforge.fusion import discover as discover_module
 from kernelforge.fusion import author as author_module
 from kernelforge.fusion import agent_selection
@@ -466,10 +467,7 @@ def test_registered_discovery_returns_final_text_without_bare_openai(
 
     fn = discover_module.registered_agent_llm_fn(
         Backend(),
-        model="gpt-test",
-        timeout_s=10,
-        workdir=str(tmp_path),
-        protected_files=[str(source)],
+        DiscoverySession(model="gpt-test", timeout_s=10, workdir=str(tmp_path), protected_files=[str(source)]),
     )
 
     assert fn("DISCOVERY PROMPT") == '[{"name":"fused"}]'
@@ -507,10 +505,7 @@ def test_registered_discovery_rejects_and_restores_source_edits(tmp_path):
 
     fn = discover_module.registered_agent_llm_fn(
         Backend(),
-        model="gpt-test",
-        timeout_s=10,
-        workdir=str(tmp_path),
-        protected_files=[str(source)],
+        DiscoverySession(model="gpt-test", timeout_s=10, workdir=str(tmp_path), protected_files=[str(source)]),
     )
 
     with pytest.raises(discover_module.DiscoverySafetyError, match="modified protected source"):
@@ -534,10 +529,8 @@ def test_registered_discovery_retries_transient_timeout(tmp_path):
 
     fn = discover_module.registered_agent_llm_fn(
         Backend(),
-        timeout_s=10,
-        workdir=str(tmp_path),
-        attempts=2,
-        sleep=lambda _delay: None,
+        DiscoverySession(timeout_s=10, workdir=str(tmp_path)),
+        DiscoveryRetry(attempts=2, sleep=lambda _delay: None),
     )
 
     assert fn("DISCOVERY PROMPT") == "[]"
@@ -558,10 +551,8 @@ def test_registered_discovery_does_not_retry_auth_failure(tmp_path):
 
     fn = discover_module.registered_agent_llm_fn(
         Backend(),
-        timeout_s=10,
-        workdir=str(tmp_path),
-        attempts=3,
-        sleep=lambda _delay: None,
+        DiscoverySession(timeout_s=10, workdir=str(tmp_path)),
+        DiscoveryRetry(attempts=3, sleep=lambda _delay: None),
     )
 
     with pytest.raises(LlmUnavailableError) as exc_info:
@@ -588,10 +579,8 @@ def test_registered_discovery_does_not_retry_safety_violation(tmp_path):
 
     fn = discover_module.registered_agent_llm_fn(
         Backend(),
-        timeout_s=10,
-        workdir=str(tmp_path),
-        attempts=5,
-        sleep=lambda _delay: None,
+        DiscoverySession(timeout_s=10, workdir=str(tmp_path)),
+        DiscoveryRetry(attempts=5, sleep=lambda _delay: None),
     )
 
     with pytest.raises(
@@ -1337,8 +1326,8 @@ class TestCliDryRun:
 
         seen: dict[str, object] = {}
 
-        def spy(diagnosis, **kwargs):
-            seen.update(kwargs)
+        def spy(diagnosis, target, *_args, **_kwargs):
+            seen["target"] = target
             return []
 
         monkeypatch.setattr(cli_module, "discover_recipes", spy)
@@ -1384,14 +1373,14 @@ class TestCliDryRun:
         )
 
         assert res.exit_code == 0, res.output
-        assert seen.get("framework_root") == str(root)
+        assert seen["target"].framework_root == str(root)
 
     def test_unreachable_llm_is_not_written_as_no_opportunity(self, tmp_path, monkeypatch):
         """The incident, end to end: launch-bound trace + a dead gateway."""
         from kernelforge.fusion import command as cli_module
         from kernelforge.fusion.llm_failure import API_ERROR, LlmUnavailableError
 
-        def dead_agent(_backend, **_kwargs):
+        def dead_agent(_backend, *_args):
             def _fn(_prompt):
                 raise LlmUnavailableError(
                     "discovery LLM unreachable after 5 attempts: BadRequestError: Error code: 400",

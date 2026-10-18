@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 
+from kernelforge.fusion.discover import DiscoveryTarget
 from kernelforge.fusion import calibration as cal
 from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares, load_op_bytes_from_kineto_trace
 from kernelforge.fusion.discover import parse_discovered_recipes
@@ -295,9 +296,12 @@ class TestCompilePassGateInRoutes:
         )
         # vLLM route drops the rope+kvcache proposal (fuse_rope_kvcache is enabled).
         rv = parse_discovered_recipes(
-            payload, model_type="m", framework="vllm", source_file="/x.py", shapes={}, pass_probe=_pass_enabled
+            payload,
+            DiscoveryTarget(model_type="m", framework="vllm", source_file="/x.py", shapes={}, pass_probe=_pass_enabled),
         )
         assert [r.pattern_id for r in rv] == ["llm:keep_me"]
         # sglang route keeps both (no compile passes there).
-        rs = parse_discovered_recipes(payload, model_type="m", framework="sglang", source_file="/x.py", shapes={})
+        rs = parse_discovered_recipes(
+            payload, DiscoveryTarget(model_type="m", framework="sglang", source_file="/x.py", shapes={})
+        )
         assert {r.pattern_id for r in rs} == {"llm:rope_kv", "llm:keep_me"}

@@ -158,8 +158,8 @@ class TestUsage:
         hz = Harness(tmp_path)
         seen: dict = {}
 
-        def spy(**kwargs):
-            seen.update(kwargs)
+        def spy(target, report, **kwargs):
+            seen.update(kwargs, target=target, report=report)
             return []
 
         monkeypatch.setattr(cli_module, "discover_anchored_recipes", spy)
@@ -188,7 +188,7 @@ class TestDiscovery:
         )
         captured: dict = {}
 
-        def fake_agent(_backend, **_kwargs):
+        def fake_agent(_backend, *_args):
             def _fn(prompt):
                 captured["prompt"] = prompt
                 return payload

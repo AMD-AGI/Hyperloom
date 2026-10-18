@@ -40,7 +40,7 @@ from .campaign import (
 )
 from .anchor import AnchorReport, AnchorResolutionError, KernelAnchor, discover_anchored_recipes, resolve_anchor
 from .diagnose import diagnose_trace
-from .discover import discover_recipes, registered_agent_llm_fn
+from .discover import DiscoverySession, DiscoveryTarget, discover_recipes, registered_agent_llm_fn
 from .emit import FusionFiles, _git_tracks, export_artifacts, restore_exported_changes
 from .gpu_arch import canon_arch, detect_arch
 from .llm_failure import LlmUnavailableError
@@ -260,25 +260,29 @@ def _discover_anchored(
     try:
         discovery_agent = agent_factory()
         recipes = discover_anchored_recipes(
-            model_type=model_type,
-            framework=framework,
-            source_file=source_file,
-            shapes=shapes,
-            report=anchor_report,
-            framework_root=framework_root,
+            DiscoveryTarget(
+                model_type=model_type,
+                framework=framework,
+                source_file=source_file,
+                shapes=shapes,
+                framework_root=framework_root,
+                repo_scope=repo_scope,
+                repo_root=discovery_root,
+            ),
+            anchor_report,
             category_shares=diagnosis.category_shares,
-            repo_scope=repo_scope,
-            repo_root=discovery_root,
             llm_fn=registered_agent_llm_fn(
                 discovery_agent,
-                model=discovery_agent.runtime.model,
-                workdir=discovery_root,
-                # Discovery is read-only, so the file it is shown is snapshotted
-                # and restored. Under repo scope no file is shown and the whole
-                # tree is off limits, so the session's own read-only spec
-                # carries that instead.
-                protected_files=[source_file] if source_file else [],
-                log_path=str(out / "discovery_llm.txt"),
+                DiscoverySession(
+                    model=discovery_agent.runtime.model,
+                    workdir=discovery_root,
+                    # Discovery is read-only, so the file it is shown is snapshotted
+                    # and restored. Under repo scope no file is shown and the whole
+                    # tree is off limits, so the session's own read-only spec
+                    # carries that instead.
+                    protected_files=[source_file] if source_file else [],
+                    log_path=str(out / "discovery_llm.txt"),
+                ),
             ),
         )
     except LlmUnavailableError as exc:
@@ -319,22 +323,26 @@ def _discover_by_llm(
         discovery_workdir = _discovery_root(source_file, framework_root)
         recipes = discover_recipes(
             diagnosis,
-            model_type=model_type,
-            framework=framework,
-            source_file=source_file,
-            shapes=shapes,
-            trace_path=trace_path,
-            # Forwarded for the same reason build_recipes gets it: each proposal is checked against THIS install's
-            # compile-pass config, and that verdict rewrites the pattern id.
-            framework_root=framework_root,
-            repo_scope=repo_scope,
-            repo_root=discovery_workdir,
+            DiscoveryTarget(
+                model_type=model_type,
+                framework=framework,
+                source_file=source_file,
+                shapes=shapes,
+                # Forwarded for the same reason build_recipes gets it: each proposal is checked against THIS install's
+                # compile-pass config, and that verdict rewrites the pattern id.
+                framework_root=framework_root,
+                repo_scope=repo_scope,
+                repo_root=discovery_workdir,
+            ),
+            trace_path,
             llm_fn=registered_agent_llm_fn(
                 discovery_agent,
-                model=discovery_agent.runtime.model,
-                workdir=discovery_workdir,
-                protected_files=[source_file] if source_file else [],
-                log_path=str(out / "discovery_llm.txt"),
+                DiscoverySession(
+                    model=discovery_agent.runtime.model,
+                    workdir=discovery_workdir,
+                    protected_files=[source_file] if source_file else [],
+                    log_path=str(out / "discovery_llm.txt"),
+                ),
             ),
         )
     except LlmUnavailableError as exc:

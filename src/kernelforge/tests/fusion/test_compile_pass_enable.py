@@ -10,6 +10,7 @@ import os
 import subprocess
 import sys
 
+from kernelforge.fusion.discover import DiscoveryTarget
 from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares
 from kernelforge.fusion.discover import parse_discovered_recipes
 from kernelforge.fusion.locate import build_recipes, vllm_compile_pass_state, vllm_pass_config_flag
@@ -201,11 +202,9 @@ class TestDiscoveryRoute:
     def test_proposes_enabling_the_switch_when_it_is_off(self):
         recipes = parse_discovered_recipes(
             self._payload(),
-            model_type="m",
-            framework="vllm",
-            source_file="/x.py",
-            shapes={},
-            pass_probe=_fake_probe(enabled=False),
+            DiscoveryTarget(
+                model_type="m", framework="vllm", source_file="/x.py", shapes={}, pass_probe=_fake_probe(enabled=False)
+            ),
         )
         assert len(recipes) == 1
         assert recipes[0].candidate_kind == "compile_pass"
@@ -215,11 +214,9 @@ class TestDiscoveryRoute:
     def test_still_drops_when_the_switch_is_already_on(self):
         recipes = parse_discovered_recipes(
             self._payload(),
-            model_type="m",
-            framework="vllm",
-            source_file="/x.py",
-            shapes={},
-            pass_probe=_fake_probe(enabled=True),
+            DiscoveryTarget(
+                model_type="m", framework="vllm", source_file="/x.py", shapes={}, pass_probe=_fake_probe(enabled=True)
+            ),
         )
         assert recipes == []
 
@@ -236,7 +233,10 @@ class TestDiscoveryRoute:
         }
         for label, (kw, want_cp, want_auth) in cases.items():
             recipes = parse_discovered_recipes(
-                payload, model_type="m", framework="vllm", source_file="/x.py", shapes={}, pass_probe=_fake_probe(**kw)
+                payload,
+                DiscoveryTarget(
+                    model_type="m", framework="vllm", source_file="/x.py", shapes={}, pass_probe=_fake_probe(**kw)
+                ),
             )
             kinds = [r.candidate_kind for r in recipes]
             assert ("compile_pass" in kinds) is want_cp, f"{label}: {kinds}"
@@ -259,11 +259,9 @@ class TestDiscoveryRoute:
         )
         recipes = parse_discovered_recipes(
             payload,
-            model_type="m",
-            framework="vllm",
-            source_file="/x.py",
-            shapes={},
-            pass_probe=_fake_probe(enabled=False),
+            DiscoveryTarget(
+                model_type="m", framework="vllm", source_file="/x.py", shapes={}, pass_probe=_fake_probe(enabled=False)
+            ),
         )
         assert [r.candidate_kind for r in recipes] == ["compile_pass", "new_fusion"]
         assert recipes[0].trigger_share < recipes[1].trigger_share
