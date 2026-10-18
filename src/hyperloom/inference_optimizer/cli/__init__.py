@@ -1783,14 +1783,21 @@ def _restore_phase_toggles(args: argparse.Namespace, state, session_dir: Path) -
             )
 
 
+@dataclass(frozen=True)
+class _OperatorLaunchShape:
+    """The operator's server args and extra env a resume re-applies: this resume's flags, else the session's record."""
+
+    server_args: str
+    extra_env: dict
+
+
 def _reexport_session_environment(
     args: argparse.Namespace,
     state,
     *,
     session_dir: Path,
-    manifest: dict,
-    resume_server_args: str,
-    resume_extra_env: dict,
+    session_id: str,
+    launch_shape: _OperatorLaunchShape,
 ) -> None:
     """Put the session's recorded environment back, so a fresh shell resumes what was measured.
 
@@ -1834,14 +1841,14 @@ def _reexport_session_environment(
     info = LaunchInfo(
         pid=os.getpid(),
         session_dir=session_dir,
-        session_id=str(manifest.get("session_id") or ""),
+        session_id=session_id,
         run_log=os.environ.get("INFERENCE_OPTIMIZER_RUN_LOG", ""),
         gpu_type=state.gpu_type or "",
         framework=state.framework or "",
         model=str(state.model_path or ""),
     )
     _emit_launch_info(info, launch_info_file=getattr(args, "launch_info_file", None))
-    _seed_env_from_resumed_state(state, resume_extra_env)
+    _seed_env_from_resumed_state(state, launch_shape.extra_env)
     # The seeding above puts the recorded workload on the environment rung, so it outranks a shell export while an
     # explicit --isl/--conc/... on this resume still wins. The resolved values are then projected back into env so
     # resume sees the same workload contract (not YAML defaults).
@@ -1879,12 +1886,12 @@ def _reexport_session_environment(
         os.environ["FRAMEWORK_VERSION"] = state.framework_version
         print(f"  re-exported FRAMEWORK_VERSION: {state.framework_version}")
     # Operator launch shape: already exported above, ahead of the staleness guard that reads the pins.
-    state.operator_server_args = resume_server_args
-    state.operator_extra_env = resume_extra_env
-    if resume_server_args:
-        print(f"  re-exported server_args   : {resume_server_args}")
-    if resume_extra_env:
-        print(f"  re-exported extra_env     : {','.join(sorted(resume_extra_env))}")
+    state.operator_server_args = launch_shape.server_args
+    state.operator_extra_env = launch_shape.extra_env
+    if launch_shape.server_args:
+        print(f"  re-exported server_args   : {launch_shape.server_args}")
+    if launch_shape.extra_env:
+        print(f"  re-exported extra_env     : {','.join(sorted(launch_shape.extra_env))}")
     _apply_custom_specialist_resume(args, state)
     # Custom-workload paths: an explicit --framework-path / --benchmark-scripts-dir on this resume wins, else the
     # persisted value.
@@ -2003,9 +2010,8 @@ async def _resume_session(args: argparse.Namespace) -> _SessionStart:
         args,
         state,
         session_dir=session_dir,
-        manifest=manifest,
-        resume_server_args=_resume_server_args,
-        resume_extra_env=_resume_extra_env,
+        session_id=str(manifest.get("session_id") or ""),
+        launch_shape=_OperatorLaunchShape(server_args=_resume_server_args, extra_env=_resume_extra_env),
     )
     # After the re-export, not before: both read the GPU_TYPE and the framework it put back.
     _restore_platform_state(args, state, session_lock)
