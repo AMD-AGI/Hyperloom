@@ -10,6 +10,7 @@ import json
 import pytest
 
 from hyperloom.inference_optimizer import framework_registry as fr
+from hyperloom.inference_optimizer.roofline_ceiling import RooflineBreakdown
 from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
 from hyperloom.orchestrator.actions.executors import benchmark_result as br
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
@@ -436,7 +437,11 @@ class TestRooflineSnapshotUnits:
         from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
-            snapshot_id=1, ts="t", analysis_md_path="", achieved_tok_per_sec=0.155, framework="xdit"
+            snapshot_id=1,
+            ts="t",
+            analysis_md_path="",
+            reading=rs.RooflineReading(achieved_tok_per_sec=0.155),
+            framework="xdit",
         )
         assert snap["framework"] == "xdit"
 
@@ -444,7 +449,11 @@ class TestRooflineSnapshotUnits:
         from hyperloom.inference_optimizer import roofline_snapshot as rs
 
         snap = rs.build_roofline_snapshot(
-            snapshot_id=1, ts="t", analysis_md_path="", achieved_tok_per_sec=0.15528, framework="xdit"
+            snapshot_id=1,
+            ts="t",
+            analysis_md_path="",
+            reading=rs.RooflineReading(achieved_tok_per_sec=0.15528),
+            framework="xdit",
         )
         cmp = rs.build_roofline_comparison_from_history([snap])
         table = "\n".join(rs.format_roofline_metrics_table(cmp))
@@ -459,10 +468,8 @@ class TestRooflineSnapshotUnits:
             snapshot_id=1,
             ts="t",
             analysis_md_path="",
-            achieved_tok_per_sec=0.15528,  # img/s
+            reading=rs.RooflineReading(achieved_tok_per_sec=0.15528, e2e_mean_ms=6440.0, roofline_ideal_ms=644.0),
             framework="xdit",
-            e2e_mean_ms=6440.0,
-            roofline_ideal_ms=644.0,
         )
         assert snap["e2e_mean_ms"] == 6440.0
         assert snap["roofline_ideal_ms"] == 644.0
@@ -479,10 +486,8 @@ class TestRooflineSnapshotUnits:
             snapshot_id=1,
             ts="t",
             analysis_md_path="",
-            achieved_tok_per_sec=0.15528,
+            reading=rs.RooflineReading(achieved_tok_per_sec=0.15528, e2e_mean_ms=6440.0, roofline_ideal_ms=644.0),
             framework="xdit",
-            e2e_mean_ms=6440.0,
-            roofline_ideal_ms=644.0,
         )
         cmp = rs.build_roofline_comparison_from_history([snap])
         table = "\n".join(rs.format_roofline_metrics_table(cmp))
@@ -499,8 +504,12 @@ class TestRooflineSnapshotUnits:
             snapshot_id=1,
             ts="t",
             analysis_md_path="",
-            theoretical_peak_tok_per_sec=200.0,
-            achieved_tok_per_sec=150.0,
+            reading=rs.RooflineReading(
+                ceiling=RooflineBreakdown(
+                    mem_tok_per_sec=0.0, cmp_tok_per_sec=0.0, peak_tok_per_sec=200.0, bound_kind="unknown"
+                ),
+                achieved_tok_per_sec=150.0,
+            ),
             framework="vllm",
         )
         assert snap["e2e_mean_ms"] is None
