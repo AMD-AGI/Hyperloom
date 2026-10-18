@@ -1656,8 +1656,8 @@ def test_run_rewrite_publishes_correct_port_before_optimize(
     _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=1.5, source_ms=1.0)
     writes = []
 
-    def capture_write(*args, **kwargs):
-        writes.append(kwargs)
+    def capture_write(_target, measurement, **kwargs):
+        writes.append({**vars(measurement), **kwargs})
         return {"written": True, "solution": "rewrite/solution"}
 
     monkeypatch.setattr(runner, "write_flydsl_kb_solution", capture_write)
@@ -1676,7 +1676,7 @@ def test_run_rewrite_publishes_correct_port_before_optimize(
     assert len(writes) == 2
     # The port is slower than the source it replaces (1.5 ms against 1.0 ms) and is published anyway: correctness is
     # what makes it reusable, and banking it is what lets the next run skip PORT.
-    assert writes[0]["flydsl_best_ms"] == 1.5
+    assert writes[0]["flydsl_ms"] == 1.5
     assert writes[0]["source_ms"] == 1.0
 
 
@@ -1715,8 +1715,8 @@ def test_run_rewrite_publishes_each_keep_from_its_own_commit(tmp_path, monkeypat
     monkeypatch.setattr(runner, "run_optimize", fake_optimize)
     writes = []
 
-    def capture_write(*_args, **kwargs):
-        writes.append(kwargs)
+    def capture_write(_target, measurement, **kwargs):
+        writes.append({**vars(measurement), **kwargs})
         return {"written": True, "solution": "rewrite/solution"}
 
     monkeypatch.setattr(runner, "write_flydsl_kb_solution", capture_write)
@@ -1733,14 +1733,12 @@ def test_run_rewrite_publishes_each_keep_from_its_own_commit(tmp_path, monkeypat
 
     # The PORT publish, then one per KEEP, then the run's final result.
     port, first_keep, second_keep, final = writes
-    assert port["best_commit"] == ""
     # PORT names its record after its own session. With no commit to name it here, the artifact does.
     assert port["session_key"] == ""
 
-    assert [first_keep["best_commit"], second_keep["best_commit"]] == ["c1", "c2"]
     assert first_keep["content_override"] == b"import flydsl\n# kept at c1\n"
     assert second_keep["content_override"] == b"import flydsl\n# kept at c2\n"
-    assert [first_keep["flydsl_best_ms"], second_keep["flydsl_best_ms"]] == [0.9, 0.7]
+    assert [first_keep["flydsl_ms"], second_keep["flydsl_ms"]] == [0.9, 0.7]
 
     # One name for the whole OPTIMIZE session, so each publication replaces the last rather than filing a sibling.
     run_key = hashlib.sha256(b"EXP").hexdigest()
@@ -1779,8 +1777,8 @@ def test_run_rewrite_records_accuracy_only_for_the_artifact_it_measured(
     monkeypatch.setattr(runner, "run_optimize", fake_optimize)
     writes = []
 
-    def capture_write(*_args, **kwargs):
-        writes.append(kwargs)
+    def capture_write(_target, measurement, **kwargs):
+        writes.append({**vars(measurement), **kwargs})
         return {"written": True, "solution": "rewrite/solution"}
 
     monkeypatch.setattr(runner, "write_flydsl_kb_solution", capture_write)
@@ -1819,8 +1817,8 @@ def test_run_rewrite_keeps_the_port_reading_when_optimize_never_moved_the_best(
     _wire_stub_pipeline(monkeypatch, port_ok=True, best_ms=1.5, source_ms=1.0)
     writes = []
 
-    def capture_write(*_args, **kwargs):
-        writes.append(kwargs)
+    def capture_write(_target, measurement, **kwargs):
+        writes.append({**vars(measurement), **kwargs})
         return {"written": True, "solution": "rewrite/solution"}
 
     monkeypatch.setattr(runner, "write_flydsl_kb_solution", capture_write)
@@ -1836,7 +1834,7 @@ def test_run_rewrite_keeps_the_port_reading_when_optimize_never_moved_the_best(
     )
 
     port, final = writes
-    assert final["best_commit"] == port["best_commit"]
+    assert final["session_key"] == port["session_key"]
     assert final["snr_db"] == port["snr_db"] == 143.0
 
 
@@ -1860,8 +1858,8 @@ def test_run_rewrite_skips_a_keep_whose_commit_lacks_the_kernel(tmp_path, monkey
     monkeypatch.setattr(runner, "run_optimize", fake_optimize)
     writes = []
 
-    def capture_write(*_args, **kwargs):
-        writes.append(kwargs)
+    def capture_write(_target, measurement, **kwargs):
+        writes.append({**vars(measurement), **kwargs})
         return {"written": True, "solution": "rewrite/solution"}
 
     monkeypatch.setattr(runner, "write_flydsl_kb_solution", capture_write)
@@ -1954,7 +1952,7 @@ def test_run_rewrite_skips_port_after_validated_kb_warmstart(
     driver = tmp_path / "driver.py"
     driver.write_text("print('drive')\n")
 
-    async def kb_hit(spec, *args, **kwargs):
+    async def kb_hit(_target, *args, **kwargs):
         (tmp_path / "kernel.py").write_text(
             "import flydsl\ndef build_softmax_module(*args):\n    return lambda *launch_args: None\n"
         )

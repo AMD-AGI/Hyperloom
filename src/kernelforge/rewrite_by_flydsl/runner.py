@@ -10,6 +10,7 @@ import hashlib
 import logging
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from kernelforge.llm.git import git
@@ -33,10 +34,12 @@ from kernelforge.rewrite_by_flydsl.attempt import (
 )
 from kernelforge.rewrite_by_flydsl.kb import (
     RewriteKbReadResult,
+    RewriteKbTarget,
     scored_speedup,
     try_flydsl_kb_warmstart,
     write_flydsl_kb_solution,
 )
+from kernelforge.rewrite_by_flydsl.measurement import FlydslMeasurement
 from kernelforge.rewrite_by_flydsl.optimize import OptimizeOptions, OptimizeRequest, run_optimize
 from kernelforge.rewrite_by_flydsl.port_loop import PortRequest, PortResult, run_port_loop
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET, RewriteBudgetPolicy
@@ -259,40 +262,75 @@ def _conforming_driver(
     return preflight, None
 
 
-def _read_flydsl_kb(
-    spec,
-    driver_path: str,
-    config: Config,
-    *,
-    source_case_ms,
-    search_stop_unix: float,
-) -> RewriteKbReadResult:
-    """What the KB can offer for this source+driver, restoring the seed when the read fails.
+@dataclass(frozen=True)
+class _RewriteKb:
+    """This run's rewrite KB traffic: what it reads before PORT and publishes after it, unless the caller declined."""
 
-    The warm start builds a KB Store client from the store URL and bearer token,
-    and the guard here catches whatever its own reader did not: the client is
-    constructed outside that sanitizer's ``try``, so a construction failure of
-    any type other than ``KBStoreError`` arrives here untouched.
-    """
-    kb_seed = Path(spec.flydsl_kernel).read_bytes() if Path(spec.flydsl_kernel).is_file() else None
-    try:
-        return asyncio.run(
-            try_flydsl_kb_warmstart(
-                spec,
-                driver_path,
-                config,
-                source_case_ms=source_case_ms,
-                stop_at_unix=search_stop_unix,
+    target: RewriteKbTarget
+    enabled: bool
+
+    def read(self, *, source_case_ms, search_stop_unix: float) -> RewriteKbReadResult:
+        """What the KB can offer for this source+driver, restoring the seed when the read fails.
+
+        The warm start builds a KB Store client from the store URL and bearer token,
+        and the guard here catches whatever its own reader did not: the client is
+        constructed outside that sanitizer's ``try``, so a construction failure of
+        any type other than ``KBStoreError`` arrives here untouched.
+        """
+        if not self.enabled:
+            return RewriteKbReadResult(read_reason="disabled")
+        spec = self.target.spec
+        kb_seed = Path(spec.flydsl_kernel).read_bytes() if Path(spec.flydsl_kernel).is_file() else None
+        try:
+            return asyncio.run(
+                try_flydsl_kb_warmstart(
+                    self.target,
+                    source_case_ms=source_case_ms,
+                    stop_at_unix=search_stop_unix,
+                )
             )
+        except Exception as error:  # noqa: BLE001 - KB failure must cold-start
+            if kb_seed is None:
+                Path(spec.flydsl_kernel).unlink(missing_ok=True)
+            else:
+                Path(spec.flydsl_kernel).write_bytes(kb_seed)
+            return RewriteKbReadResult(
+                read_reason="read_error",
+                read_error=sanitize_read_error(error, secrets=kb_store_secrets(self.target.config)),
+            )
+
+    def publish_port(self, port, measurement: FlydslMeasurement, port_commit: str) -> dict:
+        """Record the ported kernel in the KB.
+
+        A newly produced correct port is independently reusable even when it is
+        slower than the source; a port that was warm-started from the KB is already
+        there.
+        """
+        if not self.enabled:
+            return {"written": False, "reason": "disabled"}
+        if port.attempts == 0:
+            return {"written": False, "reason": "kb_warmstart_reused"}
+        written = write_flydsl_kb_solution(self.target, measurement, session_key=port_commit)
+        print(
+            f"  [forge-rewrite] PORT KB publish: {written.get('reason') or written.get('solution')}",
+            flush=True,
         )
-    except Exception as error:  # noqa: BLE001 - KB failure must cold-start
-        if kb_seed is None:
-            Path(spec.flydsl_kernel).unlink(missing_ok=True)
-        else:
-            Path(spec.flydsl_kernel).write_bytes(kb_seed)
-        return RewriteKbReadResult(
-            read_reason="read_error",
-            read_error=sanitize_read_error(error, secrets=kb_store_secrets(config)),
+        return written
+
+    def publish_final(self, opt: dict, source_ms, port, port_commit: str, optimize_session_key: str) -> dict:
+        """Record the run's final best in the KB, replacing the record of the session that produced it."""
+        if not self.enabled:
+            return {"written": False, "reason": "disabled"}
+        final_commit = str(opt.get("best_commit") or "")
+        # PORT's reading measures the artifact being recorded only while the run's best is still the ported kernel.
+        # Once OPTIMIZE has moved the best off that commit, it describes a kernel this record is not about.
+        snr_db = port.snr_db if final_commit == port_commit else None
+        return write_flydsl_kb_solution(
+            self.target,
+            FlydslMeasurement(source_ms, opt.get("best_ms"), opt.get("mean_case_speedup"), snr_db),
+            # The run's final result belongs to the OPTIMIZE session when there was one, and to the PORT session
+            # otherwise -- either way it replaces that session's record instead of standing beside it.
+            session_key=optimize_session_key or port_commit,
         )
 
 
@@ -329,79 +367,6 @@ def _measure_flydsl_baseline(
         flush=True,
     )
     return None, None, None
-
-
-def _publish_port_kb(
-    spec,
-    driver_path: str,
-    config: Config,
-    *,
-    rewrite_kb_enabled: bool,
-    port,
-    source_ms,
-    flydsl_best_ms,
-    speedup,
-    port_commit: str,
-) -> dict:
-    """Record the ported kernel in the KB.
-
-    A newly produced correct port is independently reusable even when it is
-    slower than the source; a port that was warm-started from the KB is already
-    there.
-    """
-    if not rewrite_kb_enabled:
-        return {"written": False, "reason": "disabled"}
-    if port.attempts == 0:
-        return {"written": False, "reason": "kb_warmstart_reused"}
-    written = write_flydsl_kb_solution(
-        spec,
-        driver_path,
-        config,
-        source_ms=source_ms,
-        flydsl_best_ms=flydsl_best_ms,
-        speedup=speedup,
-        best_commit=port_commit,
-        snr_db=port.snr_db,
-        session_key=port_commit,
-    )
-    print(
-        f"  [forge-rewrite] PORT KB publish: {written.get('reason') or written.get('solution')}",
-        flush=True,
-    )
-    return written
-
-
-def _publish_final_kb(
-    spec,
-    driver_path: str,
-    config: Config,
-    *,
-    rewrite_kb_enabled: bool,
-    opt: dict,
-    source_ms,
-    port,
-    port_commit: str,
-    optimize_session_key: str,
-) -> dict:
-    """Record the run's final best in the KB, replacing the record of the session that produced it."""
-    if not rewrite_kb_enabled:
-        return {"written": False, "reason": "disabled"}
-    final_commit = str(opt.get("best_commit") or "")
-    return write_flydsl_kb_solution(
-        spec,
-        driver_path,
-        config,
-        source_ms=source_ms,
-        flydsl_best_ms=opt.get("best_ms"),
-        speedup=opt.get("mean_case_speedup"),
-        best_commit=final_commit,
-        # PORT's reading measures the artifact being recorded only while the run's best is still the ported kernel.
-        # Once OPTIMIZE has moved the best off that commit, it describes a kernel this record is not about.
-        snr_db=port.snr_db if final_commit == port_commit else None,
-        # The run's final result belongs to the OPTIMIZE session when there was one, and to the PORT session
-        # otherwise -- either way it replaces that session's record instead of standing beside it.
-        session_key=optimize_session_key or port_commit,
-    )
 
 
 def _run_applyback(
@@ -602,16 +567,8 @@ def run_rewrite(
 
     # (5) KB warm-start / PORT: an exact source+driver match may materialize a prior standalone FlyDSL file, but it
     # must pass today's FlyDSL-only and correctness gates before PORT is skipped.
-    if rewrite_kb_enabled:
-        kb_read = _read_flydsl_kb(
-            spec,
-            driver_path,
-            config,
-            source_case_ms=source_case_ms,
-            search_stop_unix=search_stop_unix,
-        )
-    else:
-        kb_read = RewriteKbReadResult(read_reason="disabled")
+    rewrite_kb = _RewriteKb(RewriteKbTarget(spec, driver_path, config), rewrite_kb_enabled)
+    kb_read = rewrite_kb.read(source_case_ms=source_case_ms, search_stop_unix=search_stop_unix)
     if kb_read.applied:
         port = PortResult(
             ok=True,
@@ -679,16 +636,8 @@ def run_rewrite(
     )
     if bench_failure is not None:
         return _setup_failed(*bench_failure)
-    port_kb_write = _publish_port_kb(
-        spec,
-        driver_path,
-        config,
-        rewrite_kb_enabled=rewrite_kb_enabled,
-        port=port,
-        source_ms=source_ms,
-        flydsl_best_ms=flydsl_baseline_ms,
-        speedup=flydsl_baseline_speedup,
-        port_commit=port_commit,
+    port_kb_write = rewrite_kb.publish_port(
+        port, FlydslMeasurement(source_ms, flydsl_baseline_ms, flydsl_baseline_speedup, port.snr_db), port_commit
     )
     interim = report.build_result(
         scope,
@@ -741,16 +690,10 @@ def run_rewrite(
             return
         optimize_session_key = hashlib.sha256(str(payload.get("experiment_id") or commit).encode()).hexdigest()
         write = write_flydsl_kb_solution(
-            spec,
-            driver_path,
-            config,
-            source_ms=source_ms,
-            flydsl_best_ms=payload.get("best_ms"),
-            speedup=payload.get("mean_case_speedup"),
-            best_commit=commit,
+            rewrite_kb.target,
             # PORT's SNR belongs to the ported kernel, not to the KEEP that has since been optimized out of it, and
             # forge-loop's result file does not carry the accuracy it measured for this one. Unmeasured, so unclaimed.
-            snr_db=None,
+            FlydslMeasurement(source_ms, payload.get("best_ms"), payload.get("mean_case_speedup"), snr_db=None),
             session_key=optimize_session_key,
             content_override=shown.stdout.encode(),
         )
@@ -803,17 +746,7 @@ def run_rewrite(
         port_commit=port_commit,
     )
 
-    kb_write = _publish_final_kb(
-        spec,
-        driver_path,
-        config,
-        rewrite_kb_enabled=rewrite_kb_enabled,
-        opt=opt,
-        source_ms=source_ms,
-        port=port,
-        port_commit=port_commit,
-        optimize_session_key=optimize_session_key,
-    )
+    kb_write = rewrite_kb.publish_final(opt, source_ms, port, port_commit, optimize_session_key)
 
     # The standalone best is now restored in the rewrite workspace.
     applyback = None
