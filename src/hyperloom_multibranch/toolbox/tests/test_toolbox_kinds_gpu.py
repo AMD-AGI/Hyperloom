@@ -227,7 +227,7 @@ async def test_a_patched_recipe_goes_through_the_planner_and_is_measured_on_the_
         await toolbox.close()
 
 
-PROFILE_TRACE = "*.pt.trace.json.gz"
+PROFILE_TRACE = "*.trace.json.gz"  # SGLang writes <ts>-TP-<r>-<DECODE|EXTEND>.trace.json.gz and a merged one
 TRACELENS_JOB_SEC = 1800
 #: The per-op shares come from the ``analysis.json`` of TraceLens' skill route, which runs an agent runtime (needs its
 #: credentials); the ``bypass`` route writes none. ``HL_W13_ANALYSIS_ROUTE=bypass`` therefore shows empty shares.
