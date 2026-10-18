@@ -885,6 +885,7 @@ class _AssemblyPreparation:
 
     preparation: dict | None
     source_files: list[str]
+    kb_warmstart_enabled: bool
     program_md: str
 
 
@@ -905,7 +906,7 @@ def _prepare_assembly_task(run: _ForgeRun, program_md: str) -> _AssemblyPreparat
     deadline_unix = run.deadline.deadline_unix
     finalize_reserve_sec = run.deadline.finalize_reserve_sec
     resume = run.request.resume
-    unchanged = _AssemblyPreparation(None, source_files_list, program_md)
+    unchanged = _AssemblyPreparation(None, source_files_list, run.request.knowledge.kb_warmstart_enabled, program_md)
     if kernel_backend != "assembly":
         return unchanged
     from kernelforge.assembly.prepare import prepare_assembly, seed_source_baseline
@@ -933,6 +934,8 @@ def _prepare_assembly_task(run: _ForgeRun, program_md: str) -> _AssemblyPreparat
     return _AssemblyPreparation(
         preparation=assembly_preparation,
         source_files=source_files_list,
+        # A cached whole-implementation patch could replace the launcher preparation just verified.
+        kb_warmstart_enabled=False,
         program_md=program_md
         + (
             "\n\nAssembly preparation is complete. Optimize only "
@@ -1811,8 +1814,7 @@ def forge_loop(request: ForgeLoopRequest):
     assembly = _prepare_assembly_task(run, program_md)
     assembly_preparation = assembly.preparation
     source_files_list = assembly.source_files
-    # A cached whole-implementation patch could replace the launcher preparation just verified.
-    kb_warmstart_enabled = request.knowledge.kb_warmstart_enabled and assembly_preparation is None
+    kb_warmstart_enabled = assembly.kb_warmstart_enabled
     program_md = assembly.program_md
 
     # Resolved before the loop is built: the ceiling estimator captures it, and the raw option is ``None`` by default.
