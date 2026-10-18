@@ -119,6 +119,21 @@ class RemoteConfig:
 
 
 @dataclass(frozen=True)
+class ReadQuery:
+    """One ``POST /v1/read``: the decision at hand, its context, and how to narrow and size the answer.
+
+    A ``None`` setting is left to the service: its default schema, both outcomes, its default limit, no budget.
+    """
+
+    decision: str
+    context: Mapping[str, JsonValue]
+    outcome: str | None = None
+    limit: int | None = None
+    schema_ref: str | None = None
+    render_budget_chars: int | None = None
+
+
+@dataclass(frozen=True)
 class RemoteReadResult:
     read_id: str
     status: str
@@ -322,25 +337,16 @@ class RemoteClient:
     def health(self) -> dict[str, JsonValue]:
         return self._request(_GET, "/health")
 
-    def read(
-        self,
-        decision: str,
-        context: Mapping[str, JsonValue],
-        *,
-        outcome: str | None = None,
-        limit: int | None = None,
-        schema_ref: str | None = None,
-        render_budget_chars: int | None = None,
-    ) -> RemoteReadResult:
-        body: dict[str, JsonValue] = {"decision": decision, "context": dict(context)}
-        if outcome is not None:
-            body["outcome"] = outcome
-        if limit is not None:
-            body["limit"] = limit
-        if schema_ref is not None:
-            body["schema_ref"] = schema_ref
-        if render_budget_chars is not None:
-            body["render_budget_chars"] = render_budget_chars
+    def read(self, query: ReadQuery) -> RemoteReadResult:
+        body: dict[str, JsonValue] = {"decision": query.decision, "context": dict(query.context)}
+        if query.outcome is not None:
+            body["outcome"] = query.outcome
+        if query.limit is not None:
+            body["limit"] = query.limit
+        if query.schema_ref is not None:
+            body["schema_ref"] = query.schema_ref
+        if query.render_budget_chars is not None:
+            body["render_budget_chars"] = query.render_budget_chars
         try:
             payload = self._request(_POST, "/v1/read", body)
             refs = payload.get("rendered_refs")
@@ -803,13 +809,14 @@ class RemoteExperienceKB:
         outcome: str | None = None,
         limit: int | None = None,
     ) -> RemoteReadResult:
-        return self.client.read(decision, context, outcome=outcome, limit=limit, schema_ref=self.schema_ref)
+        return self.client.read(ReadQuery(decision, context, outcome=outcome, limit=limit, schema_ref=self.schema_ref))
 
 
 __all__ = [
     "ExperienceStart",
     "ListPage",
     "LocalFiles",
+    "ReadQuery",
     "RemoteClient",
     "RemoteClientError",
     "RemoteConfig",

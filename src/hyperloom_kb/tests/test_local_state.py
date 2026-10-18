@@ -24,6 +24,7 @@ from hyperloom_kb import (
     HTTPServiceConfig,
     ObjectiveDeclaration,
     Provenance,
+    ReadQuery,
     RemoteClient,
     RemoteClientError,
     RemoteConfig,
@@ -100,7 +101,7 @@ def _listed(client: RemoteClient, *, include_excluded: bool = False) -> set[str]
 
 
 def _readable(app: ExperienceHTTPService) -> int:
-    return int(app.read(decision="Pick the next change.", context={})["eligible_count"])
+    return int(app.read(ReadQuery(decision="Pick the next change.", context={}))["eligible_count"])
 
 
 def test_a_restore_saves_the_unlabelled_state_and_later_writes_continue_from_the_restored_one(tmp_path: Path) -> None:

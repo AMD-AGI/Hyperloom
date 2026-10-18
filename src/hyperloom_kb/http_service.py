@@ -57,7 +57,7 @@ from hyperloom_kb.query_view import (
     QueryViewBuilder,
     RetrievalCapability,
 )
-from hyperloom_kb.remote import RemoteClient, RemoteConfig
+from hyperloom_kb.remote import ReadQuery, RemoteClient, RemoteConfig
 from hyperloom_kb.retrieval import LocalRetrievalService, render_complete_experience
 from hyperloom_kb.retrieval_policy import (
     LEXICAL_FUZZY_PROVIDER_REF,
@@ -223,6 +223,19 @@ def _bounded_int(value: Any, name: str, *, minimum: int, maximum: int | None = N
         upper = "" if maximum is None else f" and at most {maximum}"
         raise HTTPServiceError(f"{name} must be at least {minimum}{upper}")
     return value
+
+
+def _read_query(body: dict[str, JsonValue]) -> ReadQuery:
+    _reject_unknown(body, _READ_FIELDS)
+    outcome, schema_ref = body.get("outcome"), body.get("schema_ref")
+    return ReadQuery(
+        decision=_required_text(body.get("decision"), "decision"),
+        context=_json_object(body.get("context", {}), "context"),
+        outcome=None if outcome is None else _required_text(outcome, "outcome"),
+        limit=_bounded_int(body.get("limit", DEFAULT_READ_LIMIT), "limit", minimum=1, maximum=MAX_READ_LIMIT),
+        schema_ref=None if schema_ref is None else _required_text(schema_ref, "schema_ref"),
+        render_budget_chars=cast(int | None, body.get("render_budget_chars")),
+    )
 
 
 def _query_int(query: Mapping[str, list[str]], name: str, default: int) -> int:
@@ -654,27 +667,21 @@ class ExperienceHTTPService:
         self._views[schema_ref] = built
         return built
 
-    def read(
-        self,
-        *,
-        decision: str,
-        context: dict[str, JsonValue],
-        outcome: str | None = None,
-        limit: int = DEFAULT_READ_LIMIT,
-        schema_ref: str | None = None,
-        render_budget_chars: int | None = None,
-    ) -> dict[str, JsonValue]:
-        """Search one schema's Experiences, this service's default schema unless ``schema_ref`` names another.
+    def read(self, query: ReadQuery) -> dict[str, JsonValue]:
+        """Search one schema's Experiences, this service's default schema unless ``query.schema_ref`` names another.
 
         Each record renders whole; a file field renders as the path on this host its file is read from. With
-        ``render_budget_chars``, the block carries whole records while they fit and names only those in
+        ``query.render_budget_chars``, the block carries whole records while they fit and names only those in
         ``rendered_refs``.
         """
 
-        decision = _required_text(decision, "decision")
-        declaration = self.declaration_for(schema_ref or self.declaration.schema_ref)
-        selected_outcome = self._outcome(outcome, declaration)
-        limit = _bounded_int(limit, "limit", minimum=1, maximum=MAX_READ_LIMIT)
+        decision = _required_text(query.decision, "decision")
+        declaration = self.declaration_for(query.schema_ref or self.declaration.schema_ref)
+        selected_outcome = self._outcome(query.outcome, declaration)
+        limit = _bounded_int(
+            DEFAULT_READ_LIMIT if query.limit is None else query.limit, "limit", minimum=1, maximum=MAX_READ_LIMIT
+        )
+        render_budget_chars = query.render_budget_chars
         if render_budget_chars is not None:
             render_budget_chars = _bounded_int(render_budget_chars, "render_budget_chars", minimum=1)
         read_view = self._read_view(declaration)
@@ -732,7 +739,7 @@ class ExperienceHTTPService:
             configuration,
             planner=self._planner,
             trace_sink=traces.append,
-        ).read(decision, context)
+        ).read(decision, query.context)
         groups = {
             experience_id: group
             for group in (traces[-1].execution.groups if traces else ())
@@ -1234,26 +1241,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             self._write(HTTPStatus.OK, app.rebind())
             return
         if self.command == _POST and parsed.path == "/v1/read":
-            body = self._body()
-            _reject_unknown(body, _READ_FIELDS)
-            outcome = body.get("outcome")
-            schema_ref = body.get("schema_ref")
-            self._write(
-                HTTPStatus.OK,
-                app.read(
-                    decision=_required_text(body.get("decision"), "decision"),
-                    context=_json_object(body.get("context", {}), "context"),
-                    outcome=None if outcome is None else _required_text(outcome, "outcome"),
-                    limit=_bounded_int(
-                        body.get("limit", DEFAULT_READ_LIMIT),
-                        "limit",
-                        minimum=1,
-                        maximum=MAX_READ_LIMIT,
-                    ),
-                    schema_ref=None if schema_ref is None else _required_text(schema_ref, "schema_ref"),
-                    render_budget_chars=cast(int | None, body.get("render_budget_chars")),
-                ),
-            )
+            self._write(HTTPStatus.OK, app.read(_read_query(self._body())))
             return
         prefix = "/v1/experiences/"
         if self.command == _PUT and parsed.path.startswith(prefix):
