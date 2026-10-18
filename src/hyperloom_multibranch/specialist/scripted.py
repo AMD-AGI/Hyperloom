@@ -11,6 +11,7 @@ the last one stopped instead of measuring a change twice.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -28,13 +29,15 @@ class BranchHeads(Protocol):
 
 @dataclass(frozen=True)
 class ScriptedSetup:
-    """What every scripted specialist of a session shares: the script, and what it submits through and reads."""
+    """What every scripted specialist of a session shares: the script, what it submits through and reads, and how it
+    waits ``poll_seconds`` between two reads."""
 
     script: tuple[RecipeDelta, ...]
     toolbox: Toolbox
     repo: BranchHeads
     notebook: SnapshotQuery
     poll_seconds: float = 5.0
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
 
 
 class ScriptedSession:
@@ -52,7 +55,7 @@ class ScriptedSession:
             if change.fingerprint() in submitted:
                 continue
             while not self._stopped.is_set() and sum(r.in_flight for r in await self._explored()) >= self._k:
-                await asyncio.sleep(self._setup.poll_seconds)
+                await self._setup.sleep(self._setup.poll_seconds)
             if self._stopped.is_set():
                 return
             parent = await self._setup.repo.head(self._branch)

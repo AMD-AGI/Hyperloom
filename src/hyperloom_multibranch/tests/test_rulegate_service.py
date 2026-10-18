@@ -15,7 +15,7 @@ from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, L
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import delta
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
-from hyperloom_multibranch.rulegate.service import GateService
+from hyperloom_multibranch.rulegate.service import GateService, Polling
 from hyperloom_multibranch.tests.fakes import RecordingVerifier
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
 from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig, NoiseModel
@@ -70,7 +70,7 @@ class _Session:
 
     def new_gate(self) -> GateService:
         rule = InferenceXRule(self.notebook, CONC)
-        return GateService(self.notebook, self.toolbox, rule, self.verifier, poll_seconds=0.001)
+        return GateService(self.notebook, self.toolbox, rule, self.verifier, polling=Polling(0.001))
 
     async def record_root(self) -> None:
         event = LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=ROOT, recipe_digest=RECIPE.digest())

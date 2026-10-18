@@ -11,7 +11,7 @@ from the notebook, so a restarted runtime takes each step once.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -60,12 +60,13 @@ class BranchJudge:
         self._notebook = notebook
         self._gate, self._toolbox, self._rule = judging.gate, judging.toolbox, judging.rule
 
-    async def run(self, poll_seconds: float) -> None:
-        """Judge what waits, then again whenever the inbox brings a result, until cancelled."""
+    async def run(self, poll_seconds: float, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
+        """Judge what waits, then again whenever the inbox brings a result, until cancelled; ``sleep`` waits between
+        two polls."""
         cursor = (await self._notebook.poll(self._branch)).cursor
         await self.reconcile()
         while True:
-            await asyncio.sleep(poll_seconds)
+            await sleep(poll_seconds)
             page = await self._notebook.poll(self._branch, cursor)
             cursor = page.cursor
             if any(item.kind is InboxKind.RESULT for item in page.items):

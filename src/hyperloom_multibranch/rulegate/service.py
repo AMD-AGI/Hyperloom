@@ -10,8 +10,9 @@ it asked for before instead of paying for another.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Protocol
 
 from hyperloom.contracts.measurement import Validity
@@ -33,6 +34,14 @@ class GateNotebook(RecordSearch, SnapshotQuery, CommitQuery, GateRecords, Protoc
     """The gate's handle: it writes the baseline and reads every test and recorded value."""
 
 
+@dataclass(frozen=True)
+class Polling:
+    """How the gate waits for a test to end: ``seconds`` between two reads of its record, waited out with ``sleep``."""
+
+    seconds: float = 5.0
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
+
+
 class GateService:
     """The session's :class:`~hyperloom_multibranch.contracts.gate.SessionGate`; ``rule`` judges its workload.
 
@@ -47,13 +56,13 @@ class GateService:
         rule: Rule,
         verifier: ResultVerifier,
         *,
-        poll_seconds: float = 5.0,
+        polling: Polling = Polling(),
     ) -> None:
         self._notebook = notebook
         self._toolbox = toolbox
         self._rule = rule
         self._verifier = verifier
-        self._poll_seconds = poll_seconds
+        self._polling = polling
 
     async def baseline_test_count(self) -> int:
         return BASELINE_TESTS
@@ -107,7 +116,7 @@ class GateService:
 
     async def _ended(self, request_id: str) -> TestRecord:
         while (record := await self._notebook.record(request_id)).in_flight:
-            await asyncio.sleep(self._poll_seconds)
+            await self._polling.sleep(self._polling.seconds)
         return record
 
 
@@ -125,4 +134,4 @@ def _succeeded(record: TestRecord) -> bool:
     return record.result is not None and record.result.validity is Validity.SUCCEEDED
 
 
-__all__ = ["BASELINE_TESTS", "GateNotebook", "GateService"]
+__all__ = ["BASELINE_TESTS", "GateNotebook", "GateService", "Polling"]

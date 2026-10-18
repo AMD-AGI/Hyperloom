@@ -44,6 +44,7 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.notebook.tests.factories import delta, intent
+from hyperloom_multibranch.rulegate.service import Polling
 from hyperloom_multibranch.scheduling.budget import MB_SECONDS_PER_HOUR, SessionBudget, explore_gpu_seconds
 from hyperloom_multibranch.scheduling import branches
 from hyperloom_multibranch.scheduling.events import PROFILE_UNAVAILABLE
@@ -74,7 +75,7 @@ from hyperloom_multibranch.scheduling.stops import (
 )
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
     MAIN_POINT,
-    SPECIALIST_POLL_SECONDS,
+    VIRTUAL_POLL_SECONDS,
     FakeRegressionCheck,
     HeldGitRepo,
     MbFakeHeldRegistry,
@@ -132,8 +133,6 @@ FIXES = {"b03": tagged("f1"), "b04": tagged("f2")}
 FIX_REASONS = (FIX_REASON, "fix f2 regresses")
 #: An agent CLI as the AI work socket starts one: leading a session of its own.
 AGENT_ARGV = ("sleep", "600")
-#: Real seconds a scripted specialist's change gets to be judged and committed while virtual time stands still.
-COMMIT_SECONDS = 30.0
 
 
 def _reply(document: dict[str, object]) -> str:
@@ -240,7 +239,14 @@ class Stage:
         repo = self.repo_type(setup.layout.repo, setup.blobs, self.time)
         rule = workload_rule(setup.workload, self.handle(Role.GATE))
         self.sessions = RecordedSessions(
-            toolbox, repo, self.handle(Role.OBSERVER), scripts=self.scripts, steps=self.steps, hanging=self.hanging
+            toolbox,
+            repo,
+            self.handle(Role.OBSERVER),
+            scripts=self.scripts,
+            steps=self.steps,
+            hanging=self.hanging,
+            sleep=self.time.sleep,
+            poll_seconds=VIRTUAL_POLL_SECONDS,
         )
         assert isinstance(setup.desk, ForkDesk)
         self.splits = SplittingDesk(setup.desk, repo, self.handle(Role.GATE), self.fixes)
@@ -253,12 +259,16 @@ class Stage:
             desk=self.splits,
             runtime=self.runtime_type,
             rule=rule,
+            sleep=self.time.sleep,
+            poll_seconds=VIRTUAL_POLL_SECONDS,
         )
         runtime.refusing = self.refusing
         self.toolbox, self.repo, self.setup = toolbox, repo, setup
         self.briefs = SessionBriefs(self.handle(Role.OBSERVER))
         mcp = McpServer(McpServerConfig(host_token="t" * MIN_TOKEN_LENGTH), campaign=setup.layout.session_id)
-        gate = session_gate(self.handle(Role.GATE), toolbox, rule)
+        gate = session_gate(
+            self.handle(Role.GATE), toolbox, rule, polling=Polling(VIRTUAL_POLL_SECONDS, self.time.sleep)
+        )
         digest = toolbox.config.image_digest
         return Peers(runtime, toolbox, repo, gate, mcp, self.briefs, digest, self.splits, self.regression)
 
@@ -275,26 +285,19 @@ class Stage:
         self.pids.append(agent.pid)
 
     def once_committed(self, then: Callable[[str, str], Awaitable[None]]) -> SessionStep:
-        """A step that stops virtual time until the runtime has committed on the branch, then runs ``then`` with the
-        branch and its new head."""
+        """A step that waits until the runtime has committed on the branch, then runs ``then`` with the branch and its
+        new head."""
 
         async def step(branch: str) -> None:
-            self.time.hold()
             self.watchers.append(asyncio.ensure_future(self._after_commit(branch, then)))
 
         return step
 
     async def _after_commit(self, branch: str, then: Callable[[str, str], Awaitable[None]]) -> None:
-        try:
-            start = await self.repo.head(branch)
-            loop = asyncio.get_running_loop()
-            deadline = loop.time() + COMMIT_SECONDS
-            while (head := await self.repo.head(branch)) == start:
-                assert loop.time() < deadline, f"nothing was committed on {branch}"
-                await asyncio.sleep(SPECIALIST_POLL_SECONDS)
-            await then(branch, head)
-        finally:
-            self.time.release()
+        start = await self.repo.head(branch)
+        while (head := await self.repo.head(branch)) == start:
+            await self.time.sleep(VIRTUAL_POLL_SECONDS)
+        await then(branch, head)
 
     async def run(self) -> SessionOutcome:
         self.time.hold_threads()

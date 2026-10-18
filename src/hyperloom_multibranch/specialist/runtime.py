@@ -18,7 +18,7 @@ import asyncio
 import logging
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -81,11 +81,13 @@ SessionFactory = Callable[[SessionStart], Session]
 @dataclass(frozen=True)
 class RuntimePacing:
     """How often the runtime looks: a judge polls its inbox every ``poll_seconds``, a claim the specialist holds is
-    renewed for ``claim_ttl_seconds`` a third of that apart, and ``clock`` times the restart window."""
+    renewed for ``claim_ttl_seconds`` a third of that apart, ``clock`` times the restart window and ``sleep`` waits
+    out both intervals, on the same time base as ``clock``."""
 
     poll_seconds: float = 5.0
     claim_ttl_seconds: float = 600.0
     clock: Callable[[], float] = time.monotonic
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep
 
 
 @dataclass
@@ -199,7 +201,7 @@ class SpecialistRuntime:
 
     async def _judge(self, state: _Branch, judge: BranchJudge) -> None:
         try:
-            await judge.run(self._pacing.poll_seconds)
+            await judge.run(self._pacing.poll_seconds, self._pacing.sleep)
         except Exception as error:
             logger.exception("judging %s failed", state.name)
             supervisor, _, renewal = state.tasks
@@ -214,7 +216,7 @@ class SpecialistRuntime:
     async def _renew(self, state: _Branch) -> None:
         ttl = self._pacing.claim_ttl_seconds
         while True:
-            await asyncio.sleep(ttl / 3)
+            await self._pacing.sleep(ttl / 3)
             snapshot = await state.notebook.snapshot()
             for claim in snapshot.claims:
                 if claim.holder != state.name or claim.status is not ClaimStatus.HELD or claim.request_id is not None:

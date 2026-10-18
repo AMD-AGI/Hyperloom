@@ -32,7 +32,7 @@ from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
-from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
+from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService, Polling
 from hyperloom_multibranch.scheduling.final import (
     CandidateCheck,
     FinalCandidate,
@@ -302,7 +302,7 @@ async def test_an_unmeasured_test_a_failed_sweep_or_a_failed_accuracy_disqualifi
     bench = await Bench(tmp_path / "again").build({frozenset({"i1"}): {MAIN_POINT: 1040.0, CONC: 1040.0}})
     gate = bench.handle(Role.GATE)
     rule = InferenceXRule(gate, CONC)
-    bench.gate = RefusingAccuracyGate(gate, bench.toolbox, rule, bench.toolbox, poll_seconds=GATE_POLL_SECONDS)
+    bench.gate = RefusingAccuracyGate(gate, bench.toolbox, rule, bench.toolbox, polling=Polling(GATE_POLL_SECONDS))
     alone = await bench.selector().select(bench.candidates(both=False), START + 3600.0)
     assert alone.chosen is None and not alone.checks[0].accuracy_passed and alone.checks[0].reproduced
 
