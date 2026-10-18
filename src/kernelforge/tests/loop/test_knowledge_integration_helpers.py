@@ -78,7 +78,7 @@ def test_git_cumulative_diff_empty_on_exception(monkeypatch, tmp_path):
     def boom(*_a, **_k):
         raise OSError("git missing")
 
-    monkeypatch.setattr(integ, "git", boom)
+    monkeypatch.setattr(integ, "git_bytes", boom)
     assert integ._git_cumulative_diff(str(tmp_path), "base") == ""
 
 

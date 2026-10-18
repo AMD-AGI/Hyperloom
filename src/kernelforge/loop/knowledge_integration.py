@@ -21,7 +21,7 @@ from kernelforge.llm.workspace_policy import (
     is_protected_path,
     tracked_editable_paths,
 )
-from kernelforge.llm.git import git
+from kernelforge.llm.git import git, git_bytes
 from kernelforge.knowledge.kb_store import warmstart_policy
 from kernelforge.knowledge.kb_store.identity.implementation import (
     canonical_owner_framework,
@@ -97,7 +97,7 @@ def _git_cumulative_diff(workspace_dir: str, base_sha: str) -> str:
     if not base_sha:
         return ""
     try:
-        r = git("diff", base_sha, "HEAD", cwd=workspace_dir, check=False, text=False)
+        r = git_bytes("diff", base_sha, "HEAD", cwd=workspace_dir, check=False)
     except OSError:
         return ""
     return "" if r.returncode != 0 else r.stdout.decode("utf-8", errors="replace")
@@ -360,7 +360,7 @@ def _untracked_files(workspace_dir: str) -> set[str]:
         ("ls-files", "--others", "--ignored", "--exclude-standard", "-z"),
     )
     for command in commands:
-        result = git(*command, cwd=workspace_dir, check=False, text=False)
+        result = git_bytes(*command, cwd=workspace_dir, check=False)
         if result.returncode != 0:
             raise WarmStartRestoreError("failed to snapshot pre-existing untracked files")
         paths.update(item.decode(errors="surrogateescape") for item in result.stdout.split(b"\0") if item)

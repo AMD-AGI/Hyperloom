@@ -15,7 +15,7 @@ from pathlib import Path
 
 from hyperloom.common.unified_diff import touched_paths
 
-from kernelforge.llm.git import git
+from kernelforge.llm.git import git_bytes
 from kernelforge.loop.scoring import aggregate_regression_detail
 from kernelforge.durable_io import atomic_write_text, fsync_directory, fsync_tree
 
@@ -144,13 +144,7 @@ class BestResultPublisher:
                     continue
             if ".." in relative.parts:
                 continue
-            result = git(
-                "show",
-                f"{commit_hash}:{relative.as_posix()}",
-                cwd=self.workspace,
-                check=False,
-                text=False,
-            )
+            result = git_bytes("show", f"{commit_hash}:{relative.as_posix()}", cwd=self.workspace, check=False)
             if result.returncode == 0:
                 sources[str(relative)] = result.stdout
         return sources

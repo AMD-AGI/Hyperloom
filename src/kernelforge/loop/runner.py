@@ -30,7 +30,7 @@ from hyperloom.common.unified_diff import touched_paths
 from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON
 from kernelforge.llm.process_reaping import processes_under
 from kernelforge.llm.workspace_policy import is_protected_path
-from kernelforge.llm.git import git
+from kernelforge.llm.git import git, git_bytes
 from kernelforge.config import Config
 from kernelforge.loop.canonical_correctness import accept_candidate
 from kernelforge.loop.validation import run_validation_pipeline
@@ -1094,15 +1094,7 @@ class IterationLoop(AnalysisRuntimeMixin):
 
     def _list_untracked(self) -> list[str]:
         """Every untracked, non-ignored path in the workspace, as git reports it."""
-        listed = git(
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "-z",
-            cwd=self.ic.workspace_dir,
-            check=False,
-            text=False,
-        )
+        listed = git_bytes("ls-files", "--others", "--exclude-standard", "-z", cwd=self.ic.workspace_dir, check=False)
         if listed.returncode != 0:
             detail = (listed.stderr or listed.stdout).decode(
                 errors="surrogateescape"
