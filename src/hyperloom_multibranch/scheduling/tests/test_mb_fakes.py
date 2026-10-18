@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Contract of the MB1 stand-ins for MB2 policies and for the Experience KB: what the scheduler may rely on until they
-are replaced."""
+"""Contract of the session's stand-ins for other owners' interfaces and for the Experience KB: what the scheduler may
+rely on until they are replaced."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_kb import ReadStatus
 from hyperloom_multibranch.notebook.learning_search import RetrievalLog
 from hyperloom_multibranch.notebook.tests.factories import profile
@@ -18,7 +19,6 @@ from hyperloom_multibranch.scheduling.mb_fakes import (
     mb_fake_learning_recall,
     mb_fake_settle_voided,
 )
-from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_multibranch.scheduling.local_peers import (
     MbFakeNoSplitLanding,
     MbFakePassingRegressionCheck,

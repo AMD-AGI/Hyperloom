@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Placeholders the MB1 scheduler runs on where MB2, or another owner, has not delivered the real thing yet.
+"""Placeholders the scheduler runs on where another owner has not delivered the real thing yet.
 
 Every name here carries the ``MB_FAKE_`` / ``mb_fake_`` prefix so ``git grep -nE 'MbFake|mb_fake_|MB_FAKE_'`` lists
 what is left to replace, and each docstring or comment names what it stands in for and what replaces it.
