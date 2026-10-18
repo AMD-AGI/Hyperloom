@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -22,11 +23,13 @@ from kernelforge.agent_backends.registry import (
     resolve_agent_runtime,
     select_default_agent_provider,
 )
+from kernelforge.roofline_ceiling.analyst import AnalystSession, CeilingTask
 from kernelforge.roofline_ceiling.contract import CeilingReport
 from kernelforge.roofline_ceiling.estimate import (
     ESTIMATE_ERRORS,
     estimate_ceiling,
 )
+from kernelforge.roofline_ceiling.evidence import PerformanceRun
 from kernelforge.roofline_ceiling.report import WORKSPACE_SUBDIR
 from kernelforge.config import Config, resolve_agent_model, resolve_agent_reasoning_effort
 
@@ -95,7 +98,17 @@ def _resolve_kernel_files(explicit: Sequence[str], document: dict[str, Any], wor
     return resolved
 
 
-def resolve_analyst_backend(provider: str, model: str, timeout_sec: int, *, sandbox_mode: str):
+@dataclass(frozen=True)
+class AnalystAgent:
+    """The provider, model, session budget and sandbox the ceiling analyst runs with."""
+
+    provider: str
+    model: str
+    timeout_sec: int
+    sandbox_mode: str
+
+
+def resolve_analyst_backend(agent: AnalystAgent):
     """Build the backend the ceiling analyst session runs on.
 
     Follows the same provider/model ladder forge-loop reads, so a campaign that
@@ -107,15 +120,15 @@ def resolve_analyst_backend(provider: str, model: str, timeout_sec: int, *, sand
     sandbox that hides the device nodes leaves the profiler without a GPU, and
     the derivation then has to say its roofs were recalled rather than measured.
     """
-    name = get_agent_provider(provider).name if provider.strip() else select_default_agent_provider().name
+    name = get_agent_provider(agent.provider).name if agent.provider.strip() else select_default_agent_provider().name
     registration = get_agent_provider(name)
-    selected = model.strip() or resolve_agent_model(name) or registration.default_model
+    selected = agent.model.strip() or resolve_agent_model(name) or registration.default_model
     runtime = resolve_agent_runtime(
         name,
         model=selected,
-        timeout_sec=timeout_sec,
+        timeout_sec=agent.timeout_sec,
         reasoning_effort=resolve_agent_reasoning_effort(),
-        sandbox_mode=sandbox_mode,
+        sandbox_mode=agent.sandbox_mode,
         fallback_provider="",
     )
     return create_registered_backend(with_writable_sandbox(runtime))
@@ -204,17 +217,16 @@ def roofline_ceiling_command(
     try:
         outcome = asyncio.run(
             estimate_ceiling(
-                resolve_analyst_backend(agent_provider, agent_model, agent_timeout_sec, sandbox_mode=sandbox_mode),
-                workspace=workspace,
-                performance_command=command,
-                kernel_files=sources,
-                driver_script=driver_script,
-                case_params=document.get("shapes") or document.get("cases") or {},
-                output_dir=Path(output_dir).expanduser() if output_dir.strip() else None,
-                arch=arch,
-                agent_model=agent_model,
-                agent_timeout_sec=agent_timeout_sec,
-                run_timeout_sec=float(run_timeout_sec),
+                resolve_analyst_backend(AnalystAgent(agent_provider, agent_model, agent_timeout_sec, sandbox_mode)),
+                CeilingTask(
+                    run=PerformanceRun(command, workspace, float(run_timeout_sec)),
+                    kernel_files=sources,
+                    driver_script=driver_script,
+                    case_params=document.get("shapes") or document.get("cases") or {},
+                    arch=arch,
+                ),
+                AnalystSession(model=agent_model, timeout_sec=agent_timeout_sec),
+                Path(output_dir).expanduser() if output_dir.strip() else None,
             )
         )
     except ESTIMATE_ERRORS as exc:
@@ -226,4 +238,4 @@ def roofline_ceiling_command(
     _emit(outcome.report, source=outcome.source, report_path=outcome.report_path)
 
 
-__all__ = ["RESULT_SENTINEL", "resolve_analyst_backend", "roofline_ceiling_command"]
+__all__ = ["RESULT_SENTINEL", "AnalystAgent", "resolve_analyst_backend", "roofline_ceiling_command"]

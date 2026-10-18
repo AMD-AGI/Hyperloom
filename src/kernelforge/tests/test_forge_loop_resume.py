@@ -359,13 +359,13 @@ def test_the_ceiling_estimator_gets_the_resolved_session_budget_and_the_deployme
 
     seen = {}
 
-    def fake_backend(provider, model, timeout_sec, *, sandbox_mode):
-        seen["backend_timeout_sec"] = timeout_sec
-        seen["sandbox_mode"] = sandbox_mode
+    def fake_backend(agent):
+        seen["backend_timeout_sec"] = agent.timeout_sec
+        seen["sandbox_mode"] = agent.sandbox_mode
         return SimpleNamespace()
 
-    async def fake_estimate(backend, **kwargs):
-        seen["agent_timeout_sec"] = kwargs["agent_timeout_sec"]
+    async def fake_estimate(backend, task, session):
+        seen["agent_timeout_sec"] = session.timeout_sec
         return "outcome"
 
     monkeypatch.setattr("kernelforge.roofline_ceiling.command.resolve_analyst_backend", fake_backend)

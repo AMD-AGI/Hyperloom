@@ -14,7 +14,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 
 import click
 
@@ -63,6 +63,9 @@ from kernelforge.loop.recovery import (
 )
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB, aggregate_regression_detail
 
+if TYPE_CHECKING:
+    from kernelforge.roofline_ceiling.command import AnalystAgent
+
 
 # A high runaway backstop, not a time bound.
 FORGE_IMPLEMENTER_TURN_BACKSTOP = 2000
@@ -88,16 +91,12 @@ def _persist_declared_spec(invocation_spec_file: str, driver: str) -> None:
 
 def _make_ceiling_estimator(
     *,
-    enabled: bool,
     workspace_dir: str,
     driver_script: str,
     source_files: Sequence[str],
-    agent_provider: str,
-    agent_model: str,
-    session_timeout_sec: int,
-    sandbox_mode: str,
+    analyst: AnalystAgent,
 ):
-    """Build the callable the loop uses to estimate a ceiling, or ``None``.
+    """Build the callable the loop uses to estimate a ceiling.
 
     Only ``--roofline-ceiling on`` asks for one, because an estimate costs a
     profiler pass and an analyst session. Whether it is called is the loop's
@@ -111,24 +110,23 @@ def _make_ceiling_estimator(
     derived against a differently timed region would not be comparable with the
     latencies it is divided by.
     """
-    if not enabled:
-        return None
 
     async def estimate(*, case_ids: Sequence[str], case_ms: dict[str, float]):
         from kernelforge.mcp_server.tools.bench import bench_command
+        from kernelforge.roofline_ceiling.analyst import AnalystSession, CeilingTask
         from kernelforge.roofline_ceiling.command import resolve_analyst_backend
         from kernelforge.roofline_ceiling.estimate import estimate_ceiling
+        from kernelforge.roofline_ceiling.evidence import KnownCases, PerformanceRun
 
         return await estimate_ceiling(
-            resolve_analyst_backend(agent_provider, agent_model, session_timeout_sec, sandbox_mode=sandbox_mode),
-            workspace=workspace_dir,
-            performance_command=bench_command(driver_script),
-            kernel_files=[str(path) for path in source_files],
-            driver_script=driver_script,
-            known_case_ids=list(case_ids),
-            known_case_ms=dict(case_ms),
-            agent_model=agent_model,
-            agent_timeout_sec=session_timeout_sec,
+            resolve_analyst_backend(analyst),
+            CeilingTask(
+                run=PerformanceRun(bench_command(driver_script), workspace_dir),
+                kernel_files=[str(path) for path in source_files],
+                driver_script=driver_script,
+                known=KnownCases(list(case_ids), dict(case_ms)),
+            ),
+            AnalystSession(model=analyst.model, timeout_sec=analyst.timeout_sec),
         )
 
     return estimate
@@ -1645,6 +1643,7 @@ def forge_loop(
     from kernelforge.loop.runner import IterationConfig
     from kernelforge.tracker import ExperimentTracker, UsageAccumulator, UsageLedgerFile
     from kernelforge.orchestrator.agent import make_agent_fn
+    from kernelforge.roofline_ceiling.command import AnalystAgent
 
     iter_config = IterationConfig(
         kernel_file=kernel,
@@ -1789,18 +1788,23 @@ def forge_loop(
         tracker,
         config,
         resume=resume,
-        ceiling_estimator=_make_ceiling_estimator(
-            enabled=roofline_ceiling == CEILING_ON,
-            workspace_dir=workspace_dir,
-            driver_script=iter_config.driver_script,
-            source_files=source_files_list,
-            # The runtime the implementer lanes settle on is resolved further down, after this point, and the analyst
-            # is a different role anyway: it reads the same provider/model ladder the standalone command reads, so
-            # the raw selection is what it needs and an empty one means "take the default".
-            agent_provider=agent_backend or "",
-            agent_model=model or "",
-            session_timeout_sec=session_timeout_sec,
-            sandbox_mode=config.agent_sandbox_mode,
+        ceiling_estimator=(
+            _make_ceiling_estimator(
+                workspace_dir=workspace_dir,
+                driver_script=iter_config.driver_script,
+                source_files=source_files_list,
+                # The runtime the implementer lanes settle on is resolved further down, after this point, and the
+                # analyst is a different role anyway: it reads the same provider/model ladder the standalone command
+                # reads, so the raw selection is what it needs and an empty one means "take the default".
+                analyst=AnalystAgent(
+                    provider=agent_backend or "",
+                    model=model or "",
+                    timeout_sec=session_timeout_sec,
+                    sandbox_mode=config.agent_sandbox_mode,
+                ),
+            )
+            if roofline_ceiling == CEILING_ON
+            else None
         ),
     )
 
