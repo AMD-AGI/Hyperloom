@@ -514,23 +514,23 @@ def run_rewrite(
         print("  [forge-rewrite] apply-back not requested; the standalone kernel is the whole deliverable", flush=True)
 
     # Producer-owned scratch the consumer may reclaim.
-    temporary_paths: list[str] = []
+    scope = report.ResultScope(op_name, budget_policy=rewrite_budget)
 
     # Emit a clean, scorable failure result (no traceback) on any setup error so the caller can attribute it, instead
     # of the process dying opaquely.
     def _setup_failed(reason: str, failure_class: str) -> dict:
         print(f"  [forge-rewrite] SETUP FAILED [{failure_class}]: {reason}", flush=True)
         result = report.build_result(
-            op_name=op_name,
-            port_ok=False,
-            port_attempts=0,
-            source_ms=None,
-            optimize_result={},
-            llm_usage=_run_usage(usage),
-            failure_class=failure_class,
-            failure_detail=reason,
-            temporary_paths=temporary_paths,
-            budget_policy=rewrite_budget,
+            scope,
+            report.RewriteOutcome(
+                port_ok=False,
+                port_attempts=0,
+                source_ms=None,
+                optimize_result={},
+                llm_usage=_run_usage(usage),
+                failure_class=failure_class,
+                failure_detail=reason,
+            ),
         )
         return _emit_final(result, result_json)
 
@@ -541,7 +541,7 @@ def run_rewrite(
         export_import_path(attempt)
     except OSError as error:
         return _setup_failed(f"could not create the attempt directory: {error}", ATTEMPT_SETUP_FAILED)
-    temporary_paths = attempt.temporary_paths
+    scope = report.ResultScope(op_name, attempt.temporary_paths, rewrite_budget)
     print(f"  [forge-rewrite] attempt workspace {attempt.relative_root}", flush=True)
 
     # (0) The source kernel to port FROM must exist.
@@ -648,20 +648,20 @@ def run_rewrite(
     if not port.ok:
         print(f"  [forge-rewrite] PORT FAILED after {port.attempts} attempts", flush=True)
         result = report.build_result(
-            op_name=op_name,
-            port_ok=False,
-            port_attempts=port.attempts,
-            source_ms=source_ms,
-            optimize_result={},
-            llm_usage=_run_usage(usage),
-            kb_experience={
-                "read": kb_read.to_dict(),
-                "write": {"written": False, "reason": "port_failed"},
-            },
-            failure_class=PORT_FAILED,
-            failure_detail=port.error_tail,
-            temporary_paths=temporary_paths,
-            budget_policy=rewrite_budget,
+            scope,
+            report.RewriteOutcome(
+                port_ok=False,
+                port_attempts=port.attempts,
+                source_ms=source_ms,
+                optimize_result={},
+                llm_usage=_run_usage(usage),
+                kb_experience={
+                    "read": kb_read.to_dict(),
+                    "write": {"written": False, "reason": "port_failed"},
+                },
+                failure_class=PORT_FAILED,
+                failure_detail=port.error_tail,
+            ),
         )
         return _emit_final(result, result_json)
     print(f"  [forge-rewrite] PORT OK (attempt {port.attempts}, SNR={port.snr_db})", flush=True)
@@ -705,23 +705,23 @@ def run_rewrite(
         framework=framework,
     )
     interim = report.build_result(
-        op_name=op_name,
-        port_ok=True,
-        port_attempts=port.attempts,
-        source_ms=source_ms,
-        optimize_result={
-            "best_ms": flydsl_baseline_ms,
-            "mean_case_speedup": flydsl_baseline_speedup,
-        },
-        applyback_result={"ok": False, "error": "apply-back pending"} if applyback_enabled else None,
-        applyback_required=applyback_required,
-        llm_usage=_run_usage(usage),
-        kb_experience={
-            "read": kb_read.to_dict(),
-            "write": port_kb_write,
-        },
-        temporary_paths=temporary_paths,
-        budget_policy=rewrite_budget,
+        scope,
+        report.RewriteOutcome(
+            port_ok=True,
+            port_attempts=port.attempts,
+            source_ms=source_ms,
+            optimize_result={
+                "best_ms": flydsl_baseline_ms,
+                "mean_case_speedup": flydsl_baseline_speedup,
+            },
+            applyback_result={"ok": False, "error": "apply-back pending"} if applyback_enabled else None,
+            applyback_required=applyback_required,
+            llm_usage=_run_usage(usage),
+            kb_experience={
+                "read": kb_read.to_dict(),
+                "write": port_kb_write,
+            },
+        ),
     )
     if result_json:
         report.emit_result(interim, result_json)
@@ -849,20 +849,20 @@ def run_rewrite(
             usage=usage,
         )
     result = report.build_result(
-        op_name=op_name,
-        port_ok=True,
-        port_attempts=port.attempts,
-        source_ms=source_ms,
-        optimize_result=opt,
-        applyback_result=applyback.to_dict() if applyback is not None else None,
-        applyback_required=applyback_required,
-        llm_usage=_run_usage(usage, opt, optimize_ran=optimize_ran),
-        kb_experience={
-            "read": kb_read.to_dict(),
-            "write": kb_write,
-        },
-        temporary_paths=temporary_paths,
-        budget_policy=rewrite_budget,
+        scope,
+        report.RewriteOutcome(
+            port_ok=True,
+            port_attempts=port.attempts,
+            source_ms=source_ms,
+            optimize_result=opt,
+            applyback_result=applyback.to_dict() if applyback is not None else None,
+            applyback_required=applyback_required,
+            llm_usage=_run_usage(usage, opt, optimize_ran=optimize_ran),
+            kb_experience={
+                "read": kb_read.to_dict(),
+                "write": kb_write,
+            },
+        ),
     )
     sp = result.speedup
     print(

@@ -59,11 +59,8 @@ def test_retry_agent_budget_is_split_without_consuming_host_reserve(monkeypatch)
 
 def test_result_reports_the_effective_budget_policy():
     result = report.build_result(
-        op_name="softmax",
-        port_ok=False,
-        port_attempts=0,
-        source_ms=None,
-        optimize_result={},
+        report.ResultScope("softmax"),
+        report.RewriteOutcome(port_ok=False, port_attempts=0, source_ms=None, optimize_result={}),
     )
 
     assert result.budget_policy == budget.DEFAULT_REWRITE_BUDGET.to_dict()
