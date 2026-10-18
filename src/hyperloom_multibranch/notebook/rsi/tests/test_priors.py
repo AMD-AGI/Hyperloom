@@ -23,6 +23,7 @@ from hyperloom_multibranch.notebook.rsi.priors import (
     dispersion_prior,
     matching,
 )
+from hyperloom_multibranch.notebook.rsi.similarity import AGENTX, WORKLOAD
 from hyperloom_multibranch.notebook.rsi.tests.test_backfill import _session
 from hyperloom_multibranch.notebook.rsi.tests.trees import TASK, tree
 from hyperloom_multibranch.notebook.tests.sessions import METRIC
@@ -77,6 +78,15 @@ def test_old_noise_bands_stand_in_and_nothing_falls_back_to_the_global_median() 
 
     assert (banded.dispersion_pct, banded.source, banded.sessions) == (2.0, PriorSource.NOISE_BAND, ("old",))
     assert (nothing.dispersion_pct, nothing.samples, nothing.sessions) == (GLOBAL_MEDIAN_PCT, 0, ())
+
+
+def test_a_trace_replay_and_a_fixed_length_workload_each_take_their_own_sessions_prior() -> None:
+    replay_task = dataclasses.replace(TASK, labels={**TASK.labels, WORKLOAD: AGENTX})
+    replay = dataclasses.replace(_measured("replay", 2.0, "hosted"), task=replay_task)
+    history = [_measured("fixed", 0.6, "hosted"), replay]
+
+    assert dispersion_prior(history, PRIOR_TASK).sessions == ("fixed",)
+    assert dispersion_prior(history, DispersionTask(MODEL, 8, GPU, agentx=True)).sessions == ("replay",)
 
 
 def test_both_kinds_of_archived_session_feed_the_prior(snapshot: NotebookSnapshot, tmp_path: Path) -> None:

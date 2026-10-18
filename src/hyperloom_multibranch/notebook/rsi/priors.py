@@ -7,7 +7,8 @@ The archive holds, per past session, its baseline's dispersion over its measurem
 in: multi-branch sessions record the rule gate's baseline dispersion and where they measured (one host, or the
 sandbox backends they used); single-lineage sessions (backfilled) the dispersion of their baseline measurements, the
 noise band they graded under (empty on sessions seeded before it was recorded), and one host. A session matches when
-it ran the same model, TP and GPU.
+it ran the same model, TP and GPU, on the same kind of workload: an AgentX trace replay's dispersion is that of its
+interactivity, a fixed-length InferenceX workload's that of its throughput.
 
 * Sessions that measured in the requested environment give the prior: the median of their dispersions.
 * Single-host measurements are only a floor for hosted measurement: they raise any value below them.
@@ -27,6 +28,7 @@ from enum import Enum
 
 from hyperloom_multibranch.notebook.rsi.archive import SINGLE_HOST, SearchTree
 from hyperloom_multibranch.notebook.rsi.shadow import ShadowNoise
+from hyperloom_multibranch.notebook.rsi.similarity import AGENTX, INFERENCEX, workload_kind
 
 GLOBAL_MEDIAN_PCT = 0.38
 GLOBAL_P90_PCT = 3.30
@@ -71,8 +73,8 @@ def _same(left: str | None, right: str) -> bool:
     return left is not None and left.lower() == right.lower()
 
 
-def matching(history: Sequence[SearchTree], *, model: str, tp: int, gpu: str) -> list[SearchTree]:
-    """The archived sessions that ran ``model`` with ``tp`` on ``gpu``."""
+def matching(history: Sequence[SearchTree], *, model: str, tp: int, gpu: str, agentx: bool = False) -> list[SearchTree]:
+    """The archived sessions that ran ``model`` with ``tp`` on ``gpu``, replaying traces when ``agentx``."""
 
     return [
         tree
@@ -80,6 +82,7 @@ def matching(history: Sequence[SearchTree], *, model: str, tp: int, gpu: str) ->
         if _same(tree.task.labels.get("model"), model)
         and _same(tree.task.labels.get("gpu"), gpu)
         and tree.task.sizes.get("tp") == float(tp)
+        and workload_kind(tree.task) == (AGENTX if agentx else INFERENCEX)
     ]
 
 
@@ -89,11 +92,12 @@ def _environments(tree: SearchTree) -> set[str]:
 
 @dataclass(frozen=True)
 class DispersionTask:
-    """The task a prior is for: ``model`` with ``tp`` on ``gpu``."""
+    """The task a prior is for: ``model`` with ``tp`` on ``gpu``, an AgentX trace replay when ``agentx``."""
 
     model: str
     tp: int
     gpu: str
+    agentx: bool = False
 
 
 def dispersion_prior(
@@ -109,7 +113,7 @@ def dispersion_prior(
     ``shadow`` is the shadow runs' noise for this task (:func:`rsi.shadow.shadow_noise`), none by default.
     """
 
-    matched = matching(history, model=task.model, tp=task.tp, gpu=task.gpu)
+    matched = matching(history, model=task.model, tp=task.tp, gpu=task.gpu, agentx=task.agentx)
     measured = [tree for tree in matched if tree.noise.dispersion_pct is not None]
     here = [tree for tree in measured if environment in _environments(tree)]
     single_host = [tree.noise.dispersion_pct for tree in measured if _environments(tree) == {SINGLE_HOST}]

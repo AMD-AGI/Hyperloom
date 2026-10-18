@@ -15,8 +15,9 @@
   with the island bandit's rows beside it (:mod:`rsi.bandit`);
 * ``branch-cap --archive DIR --like SESSION_ID [--caps 2,3,4]``: the branch cap replay, for sessions like that one;
 * ``learnings --notebook DIR --log learnings.jsonl``: one session's learnings retrieval (:mod:`rsi.learning_eval`);
-* ``dispersion --shadow consistency.jsonl [--labels FILE] [--archive DIR] --model M --tp N --gpu G``: the dispersion
-  prior with the shadow runs' noise (:mod:`rsi.shadow`); ``--labels`` is a JSON object of test id to model, TP, GPU.
+* ``dispersion --shadow consistency.jsonl [--labels FILE] [--archive DIR] --model M --tp N --gpu G [--agentx]``: the
+  dispersion prior with the shadow runs' noise (:mod:`rsi.shadow`); ``--labels`` is a JSON object of test id to model,
+  TP, GPU, and ``--agentx`` asks for an AgentX trace replay's prior.
 """
 
 from __future__ import annotations
@@ -157,7 +158,7 @@ def _dispersion(args: argparse.Namespace) -> Any:
     labels = json.loads(args.labels.read_text(encoding="utf-8")) if args.labels else None
     noise = shadow_noise(read_shadow(args.shadow), labels=labels, model=args.model, tp=args.tp, gpu=args.gpu)
     history = TreeArchive(args.archive).load() if args.archive else []
-    task = DispersionTask(args.model, args.tp, args.gpu)
+    task = DispersionTask(args.model, args.tp, args.gpu, agentx=args.agentx)
     prior = dispersion_prior(history, task, environment=args.environment, shadow=noise)
     return DispersionReport(prior, noise)
 
@@ -192,6 +193,7 @@ def _parser() -> argparse.ArgumentParser:
     noise.add_argument("--tp", type=int, required=True)
     noise.add_argument("--gpu", required=True)
     noise.add_argument("--environment", default=HOSTED)
+    noise.add_argument("--agentx", action="store_true", help="the prior of an AgentX trace replay")
     return parser
 
 

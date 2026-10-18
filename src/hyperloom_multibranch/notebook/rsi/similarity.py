@@ -5,7 +5,9 @@
 
 Labels match or not; sizes (parallelism, concurrency, sequence lengths) fade with their log ratio, so 1024 against 2048
 still counts two thirds; bottleneck profiles compare by cosine. A condition either side lacks is left out rather than
-counted as a mismatch.
+counted as a mismatch, except the workload's kind (the ``workload`` label): an AgentX trace replay is graded on
+interactivity, a fixed-length InferenceX workload on throughput, so the two share nothing whatever else matches.
+Conditions without the label are InferenceX, as every session was before AgentX sessions ran.
 """
 
 from __future__ import annotations
@@ -30,6 +32,9 @@ LABEL_WEIGHTS = {
 }
 SIZE_WEIGHTS = {"tp": 1.0, "conc": 1.0, "isl": 1.0, "osl": 1.0, "ep": MINOR_WEIGHT}
 PROFILE_WEIGHT = 2.0
+WORKLOAD = "workload"
+AGENTX = "agentx"
+INFERENCEX = "inferencex"
 #: Below this, a past session shares too little with this one to teach it anything: one matching GPU is not enough.
 MIN_SIMILARITY = 0.5
 # A size eight times larger or smaller no longer counts as similar.
@@ -52,8 +57,9 @@ def task_conditions(profile: SessionProfile, bottlenecks: Mapping[str, float] | 
     """The conditions of a session with ``profile``."""
 
     identity = experience_identity(profile)
+    kind = AGENTX if profile.isl is None else INFERENCEX
     return TaskConditions(
-        labels={key: str(value) for key, value in identity.items() if key in LABEL_WEIGHTS},
+        labels={**{key: str(value) for key, value in identity.items() if key in LABEL_WEIGHTS}, WORKLOAD: kind},
         sizes={key: float(value) for key, value in identity.items() if key in SIZE_WEIGHTS and value is not None},
         profile=dict(bottlenecks or {}),
     )
@@ -73,9 +79,17 @@ def _cosine(left: Mapping[str, float], right: Mapping[str, float]) -> float:
     return dot / norm if norm else 0.0
 
 
-def task_similarity(first: TaskConditions, second: TaskConditions) -> float:
-    """Similarity in [0, 1]; 0 when the two share no condition."""
+def workload_kind(task: TaskConditions) -> str:
+    """``agentx`` for an AgentX trace replay, ``inferencex`` for a fixed-length InferenceX workload."""
 
+    return task.labels.get(WORKLOAD, INFERENCEX)
+
+
+def task_similarity(first: TaskConditions, second: TaskConditions) -> float:
+    """Similarity in [0, 1]; 0 when the two share no condition, or are workloads of different kinds."""
+
+    if workload_kind(first) != workload_kind(second):
+        return 0.0
     total = matched = 0.0
     for key, weight in LABEL_WEIGHTS.items():
         if key in first.labels and key in second.labels:
@@ -100,12 +114,16 @@ def effective_sessions(weights: Iterable[float]) -> float:
 
 
 __all__ = [
+    "AGENTX",
+    "INFERENCEX",
     "LABEL_WEIGHTS",
     "MIN_SIMILARITY",
     "PROFILE_WEIGHT",
     "SIZE_WEIGHTS",
+    "WORKLOAD",
     "TaskConditions",
     "effective_sessions",
     "task_conditions",
     "task_similarity",
+    "workload_kind",
 ]

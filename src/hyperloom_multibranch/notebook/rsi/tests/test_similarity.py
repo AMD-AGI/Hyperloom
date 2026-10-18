@@ -9,13 +9,17 @@ import dataclasses
 
 import pytest
 
+from hyperloom_multibranch.notebook.rsi.archive import similar_trees
 from hyperloom_multibranch.notebook.rsi.similarity import (
+    AGENTX,
+    INFERENCEX,
     TaskConditions,
     effective_sessions,
     task_conditions,
     task_similarity,
+    workload_kind,
 )
-from hyperloom_multibranch.notebook.rsi.tests.trees import TASK
+from hyperloom_multibranch.notebook.rsi.tests.trees import TASK, tree
 from hyperloom_multibranch.notebook.tests.factories import profile
 
 
@@ -37,6 +41,18 @@ def test_a_profile_gives_the_labels_and_sizes_of_its_conditions() -> None:
     assert conditions.sizes == {"tp": 8.0, "conc": 64.0, "isl": 1024.0, "osl": 1024.0}
     assert dict(conditions.profile) == {"gemm": 60.0}
     assert task_conditions(profile(isl=None, osl=None)).sizes == {"tp": 8.0, "conc": 64.0}
+
+
+def test_a_trace_replay_and_a_fixed_length_workload_share_nothing_however_alike_otherwise() -> None:
+    replay = task_conditions(profile(isl=None, osl=None))
+    fixed = task_conditions(profile())
+
+    assert (workload_kind(replay), workload_kind(fixed), workload_kind(TASK)) == (AGENTX, INFERENCEX, INFERENCEX)
+    assert task_similarity(fixed, replay) == task_similarity(replay, fixed) == 0.0
+    assert task_similarity(replay, replay) == pytest.approx(1.0)
+    assert [item.tree.session_id for item in similar_trees([tree("fixed"), tree("replay", task=replay)], TASK)] == [
+        "fixed"
+    ]
 
 
 def test_effective_sessions_count_equally_similar_sessions() -> None:
