@@ -45,6 +45,10 @@ OUTCOME_FAIL = "fail"
 OUTCOME_TIMEOUT = "timeout"
 OUTCOME_SKIP = "skip"
 
+#: Catch-all bucket of both breakdowns, for a reason or failure mode their
+#: vocabularies do not name.
+_BUCKET_OTHER = "other"
+
 #: ``kernel_opt_task_attempts`` rejection reasons we surface verbatim into
 #: ``rejection_breakdown`` totals (anything else falls into ``other``).
 KNOWN_REJECTION_REASONS = (
@@ -107,7 +111,7 @@ def _rejection_bucket(reason: str) -> str:
         return "max_partial_attempts_without_keep"
     if reason.startswith("max_failures_"):
         return "max_failures_without_keep"
-    return "other"
+    return _BUCKET_OTHER
 
 
 def _synthetic_forge_loop_attempt(stack_entry: dict[str, Any]) -> dict[str, Any]:
@@ -470,7 +474,7 @@ class _KernelTally:
             "in_flight": 0,
         }
         self.rejection_breakdown: dict[str, int] = dict.fromkeys(KNOWN_REJECTION_REASONS, 0)
-        self.rejection_breakdown["other"] = 0
+        self.rejection_breakdown[_BUCKET_OTHER] = 0
 
     def record(self, row: dict[str, Any]) -> None:
         """Keep one attempted kernel's row and fold it into the counters."""
@@ -854,7 +858,7 @@ def _dominant_error_class_bucket(ladder: list[dict[str, Any]]) -> str:
             seen[error_class] = seen.get(error_class, 0) + 1
     if not seen:
         return ""
-    return _ERROR_CLASS_TO_BUCKET.get(max(seen.items(), key=lambda kv: kv[1])[0], "other")
+    return _ERROR_CLASS_TO_BUCKET.get(max(seen.items(), key=lambda kv: kv[1])[0], _BUCKET_OTHER)
 
 
 def _structural_failure_bucket(row: dict[str, Any], ladder: list[dict[str, Any]]) -> str:
@@ -867,14 +871,14 @@ def _structural_failure_bucket(row: dict[str, Any], ladder: list[dict[str, Any]]
         return "correctness_failed"
     if (row.get("last_micro_speedup") or 0.0) > 0.0:
         return "speedup_below_threshold"
-    return "other"
+    return _BUCKET_OTHER
 
 
 def _rejected_kernel_failure_bucket(row: dict[str, Any]) -> str:
     """The ``failure_reason_breakdown`` bucket one rejected kernel belongs in."""
     ladder = row.get("backend_ladder") or []
     if not ladder:
-        return "ladder_unavailable" if row.get("backend_ladder_unavailable_reason") else "other"
+        return "ladder_unavailable" if row.get("backend_ladder_unavailable_reason") else _BUCKET_OTHER
     return _dominant_error_class_bucket(ladder) or _structural_failure_bucket(row, ladder)
 
 
@@ -892,7 +896,7 @@ def _aggregate_failure_reasons(by_kernel: list[dict[str, Any]]) -> dict[str, int
         "compile_failed": 0,
         "correctness_failed": 0,
         "agent_error": 0,
-        "other": 0,
+        _BUCKET_OTHER: 0,
     }
     for row in by_kernel:
         if row.get("category") == CATEGORY_ATTEMPTED_REJECTED:
