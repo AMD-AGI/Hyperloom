@@ -198,3 +198,78 @@ def test_native_vllm_timeout_preserves_a_longer_server_timeout(tmp_path, timeout
     actual = load_benchmark(path)["agentx"]["launch_overrides"]
     assert actual["env"]["VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"] == expected
     assert actual["unset_env"] == ["UNRELATED_ENV"]
+
+
+@pytest.mark.parametrize("detailed", [False, True])
+def test_native_shape_setup_preserves_annotations_without_rewriting_client_body(tmp_path, monkeypatch, detailed):
+    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "sitecustomize")
+    tool_dir = tmp_path / "kernel_shape_tool"
+    tool_dir.mkdir()
+    monkeypatch.setattr(_server_patcher, "kernel_shape_tool_dir", lambda: tool_dir)
+    client_body = json.dumps({"client_option": "retained", "detailed_annotations": not detailed})
+    requested = {"enabled": False, "detailed_annotations": detailed, "num_steps": 21}
+    path = _native_config(
+        tmp_path,
+        "sglang",
+        envs={"CONC": "4", "PROFILE_EXTRA_BODY": client_body},
+        profiler={"torch_profiler": requested},
+    )
+    enable_profile(path)
+    native = load_benchmark(path)
+    assert native["profiler"]["torch_profiler"] == {**requested, "enabled": True}
+    assert native["envs"]["PROFILE_EXTRA_BODY"] == client_body
+    server_env = native["agentx"]["launch_overrides"]["env"]
+    assert server_env["TRACELENS_SHAPE_DISCOVERY"] == "1"
+    assert "PROFILE_EXTRA_BODY" not in server_env
+
+
+def test_fixed_shape_setup_preserves_request_options_and_capture_window(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "sitecustomize")
+    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "9")
+    monkeypatch.setenv("HYPERLOOM_PROFILE_DELAY_ITERS", "2")
+    tool_dir = tmp_path / "kernel_shape_tool"
+    tool_dir.mkdir()
+    monkeypatch.setattr(_server_patcher, "kernel_shape_tool_dir", lambda: tool_dir)
+    envs = {
+        "CONC": 4,
+        "OSL": 512,
+        "PROFILE_EXTRA_BODY": json.dumps(
+            {"shape_discovery": True, "detailed_annotations": False, "client_option": "retained"}
+        ),
+    }
+    prepare_profile({"framework": "sglang", "model": "Qwen/Qwen3-0.6B"}, envs)
+    assert json.loads(envs["PROFILE_EXTRA_BODY"]) == {
+        "detailed_annotations": False,
+        "client_option": "retained",
+        "start_step": 2,
+        "num_steps": 9,
+    }
+    assert envs["TRACELENS_SHAPE_DISCOVERY"] == "1"
+    assert "--enable-shape-discovery-for-cuda-graph-profile" not in envs.get("EXTRA_SGLANG_ARGS", "")
+
+
+@pytest.mark.parametrize("enable_patch,expected_status", [("1", "ok"), ("0", "not_attempted")])
+def test_native_patch_retry_clears_its_stale_failure(tmp_path, monkeypatch, enable_patch, expected_status):
+    path = _native_config(tmp_path, "sglang")
+    monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", lambda: False)
+    enable_profile(path)
+    failed = load_benchmark(path)["envs"]
+    assert failed["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "unavailable"
+    assert failed["HYPERLOOM_PROFILE_DEGRADED_REASON"] == "tracelens_runtime_patch_unavailable"
+    calls = []
+    monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", lambda: calls.append(True) or True)
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", enable_patch)
+    enable_profile(path)
+    retried = load_benchmark(path)["envs"]
+    assert retried["HYPERLOOM_TRACELENS_PATCH_STATUS"] == expected_status
+    assert "HYPERLOOM_PROFILE_DEGRADED_REASON" not in retried
+    assert calls == ([True] if enable_patch == "1" else [])
+
+
+@pytest.mark.parametrize("enable_patch", ["1", "0"])
+def test_native_patch_preparation_preserves_other_degraded_reasons(tmp_path, monkeypatch, enable_patch):
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", enable_patch)
+    reason = "trace_export_unavailable"
+    path = _native_config(tmp_path, "sglang", envs={"HYPERLOOM_PROFILE_DEGRADED_REASON": reason})
+    enable_profile(path)
+    assert load_benchmark(path)["envs"]["HYPERLOOM_PROFILE_DEGRADED_REASON"] == reason

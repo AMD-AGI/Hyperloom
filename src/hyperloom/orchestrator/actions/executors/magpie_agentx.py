@@ -160,15 +160,13 @@ def enable_profile(config_path: Path) -> None:
     launch = bench["agentx"]["launch_overrides"]
     server_env = launch["env"]
     profile_env: dict[str, str] = {}
-    detailed = patch_ok
+    detailed = patch_ok or sitecustomize
     if sitecustomize:
-        shape_env = dict(server_env)
+        if "PYTHONPATH" in server_env:
+            profile_env["PYTHONPATH"] = str(server_env["PYTHONPATH"])
         if "PYTHONPATH" in launch["unset_env"]:
-            shape_env["PYTHONPATH"] = ""
-        detailed = apply_sglang_shape_tool(shape_env, {}, shape_discovery=shape_discovery_enabled(bench))
-        profile_env.update(
-            (name, str(shape_env[name])) for name in ("PYTHONPATH", "TRACELENS_SHAPE_DISCOVERY") if name in shape_env
-        )
+            profile_env["PYTHONPATH"] = ""
+        apply_sglang_shape_tool(profile_env, shape_discovery=shape_discovery_enabled(bench))
     if framework == "vllm":
         name = "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS"
         inherited = "1200" if name in launch["unset_env"] else os.environ.get(name, "1200")

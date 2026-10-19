@@ -342,27 +342,20 @@ def patch_for_profile(envs: dict[str, Any], framework: str) -> tuple[bool, bool]
     is_atom = "atom" in framework
     is_sglang = "sglang" in framework
     sitecustomize = is_sglang and resolve_sglang_shape_mode() == "sitecustomize"
-    patch_attempted = _tracelens_patch_enabled() and not is_atom and not sitecustomize
     envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "not_attempted"
-    if patch_attempted:
-        if "vllm" in framework:
-            patch_ok = ensure_vllm_patched_for_tracelens()
-        else:
-            patch_ok = ensure_sglang_patched_for_tracelens()
-        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "ok" if patch_ok else "unavailable"
-        if not patch_ok:
-            envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
-            log.warning(
-                "TraceLens runtime patch unavailable for framework=%s; "
-                "profile will omit annotation-only flags and roofline "
-                "analysis may be degraded.",
-                framework or "<unset>",
-            )
-        return patch_ok, sitecustomize
-    if sitecustomize and _tracelens_patch_enabled():
+    if envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") == _TRACELENS_PATCH_UNAVAILABLE:
+        envs.pop("HYPERLOOM_PROFILE_DEGRADED_REASON")
+    if is_atom or not _tracelens_patch_enabled():
+        return False, sitecustomize
+    if "vllm" in framework:
+        patch_ok = ensure_vllm_patched_for_tracelens()
+    else:
+        patch_ok = ensure_sglang_patched_for_tracelens()
+    envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "ok" if patch_ok else "unavailable"
+    if sitecustomize:
         # Shapes come from kernel_shape_tool, but the per-batch-size capture trace still needs
         # sglang_gc_patch or it IndexErrors. Only profiling captures traces, so patch only here.
-        if not ensure_sglang_patched_for_tracelens():
+        if not patch_ok:
             log.warning(
                 "SGLang graph-capture patch (sglang_gc_patch) not applied; profiling "
                 "continues on the unpatched server, where per-batch-size CUDA-graph "
@@ -370,7 +363,16 @@ def patch_for_profile(envs: dict[str, Any], framework: str) -> tuple[bool, bool]
                 "It needs TRACELENS_ROOT with an exact "
                 "examples/custom_workflows/inference_analysis/sglang_gc_patch/sglang_<X_Y_Z> dir."
             )
-    return False, sitecustomize
+        return False, sitecustomize
+    if not patch_ok:
+        envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
+        log.warning(
+            "TraceLens runtime patch unavailable for framework=%s; "
+            "profile will omit annotation-only flags and roofline "
+            "analysis may be degraded.",
+            framework or "<unset>",
+        )
+    return patch_ok, sitecustomize
 
 
 def _apply_vllm_profile(
@@ -419,7 +421,11 @@ def _apply_sglang_profile(
     extra_body["num_steps"] = max_iters
     shape_discovery = shape_discovery_enabled(bench)
     if sitecustomize:
-        apply_sglang_shape_tool(envs, extra_body, shape_discovery=shape_discovery)
+        apply_sglang_shape_tool(envs, shape_discovery=shape_discovery)
+        # Unpatched SGLang rejects shape_discovery in the profiling request.
+        extra_body.pop("shape_discovery", None)
+        extra_body.setdefault("detailed_annotations", True)
+        envs["PROFILE_EXTRA_BODY"] = json.dumps(extra_body)
         return
     degraded = envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") == _TRACELENS_PATCH_UNAVAILABLE
     if degraded:
@@ -436,12 +442,10 @@ def _apply_sglang_profile(
             envs["EXTRA_SGLANG_ARGS"] = f"{existing} --enable-shape-discovery-for-cuda-graph-profile".strip()
 
 
-def apply_sglang_shape_tool(envs: dict[str, Any], extra_body: dict[str, Any], *, shape_discovery: bool) -> bool:
-    """Shapes come from kernel_shape_tool. Unpatched SGLang rejects the request flag and the graph arg."""
+def apply_sglang_shape_tool(envs: dict[str, Any], *, shape_discovery: bool) -> None:
+    """Configure the server environment for kernel_shape_tool discovery."""
     from hyperloom.orchestrator.actions.executors._server_patcher import kernel_shape_tool_dir
 
-    extra_body.pop("shape_discovery", None)
-    extra_body.setdefault("detailed_annotations", True)
     tool_dir = kernel_shape_tool_dir()
     if shape_discovery and tool_dir is not None:
         prepend_launch_path(envs, "PYTHONPATH", str(tool_dir))
@@ -454,8 +458,6 @@ def apply_sglang_shape_tool(envs: dict[str, Any], extra_body: dict[str, Any], *,
                 "not found under TRACELENS_ROOT; shapes will be absent "
                 "(set TRACELENS_ROOT to an NFS path visible to the server).",
             )
-    envs["PROFILE_EXTRA_BODY"] = json.dumps(extra_body)
-    return bool(extra_body.get("detailed_annotations"))
 
 
 def shape_discovery_enabled(bench: dict[str, Any]) -> bool:
