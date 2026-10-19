@@ -1413,22 +1413,15 @@ def _pin_sparse_kv_block_size(envs: dict[str, str], workload: _Workload) -> None
     )
 
 
-def _pin_model_derived_envs(envs: dict[str, str], workload: _Workload) -> None:
-    """Pin the client and kernel settings this model's own configuration calls for.
+def _pin_client_model_access(envs: dict[str, str], workload: _Workload) -> None:
+    """Tell the benchmark client how to load this model.
 
     The bench scripts always launch the SERVER with ``--trust-remote-code``, so a
     custom-tokenizer model's CLIENT has to load the same remote code or
     transformers raises mid-warmup -- and that is not enough when transformers
-    cannot map the ``model_type`` at all, so the client is told which loader to
-    use. The last pin is sglang's FP8 fast path: without it a per-channel weight
-    + per-token (dynamic) activation checkpoint takes the slow unfused
-    ``_apply_fallback_scaled_mm`` instead of aiter's CK
-    ``gemm_a8w8_bpreshuffle``; scoped to that exact quant scheme on gfx942, so
-    per-tensor and block-scale FP8 are never touched. Every pin is a setdefault,
-    so an operator opt-out always wins.
+    cannot map the ``model_type`` at all, so the client is also told which loader
+    to use. Both are setdefaults, so an operator opt-out always wins.
     """
-    from hyperloom.inference_optimizer.gpu_types import _resolve_amd_gpu_type
-
     for trust_key in (
         "MAGPIE_TRUST_REMOTE_CODE",  # Magpie sglang remote-direct client
         "BENCH_TRUST_REMOTE_CODE",  # GEAK bench_e2e.sh inferencex client
@@ -1438,6 +1431,20 @@ def _pin_model_derived_envs(envs: dict[str, str], workload: _Workload) -> None:
     tokenizer_mode = _client_tokenizer_mode(workload.model_path or workload.bench.get("model"))
     if tokenizer_mode:
         envs.setdefault("HYPERLOOM_CLIENT_TOKENIZER_MODE", tokenizer_mode)
+
+
+def _pin_fp8_per_token_fast_path(envs: dict[str, str], workload: _Workload) -> None:
+    """Route a per-channel, per-token FP8 checkpoint to aiter's fused GEMM.
+
+    Without this env a dense FP8 checkpoint with per-channel weight and per-token
+    (dynamic) activation scales takes the slow unfused
+    ``_apply_fallback_scaled_mm`` in sglang's ``apply_fp8_linear`` instead of
+    aiter's CK ``gemm_a8w8_bpreshuffle``. Scoped to that exact quant scheme on
+    gfx942, so per-tensor and block-scale FP8 are never touched; setdefault, so
+    an operator-set value wins.
+    """
+    from hyperloom.inference_optimizer.gpu_types import _resolve_amd_gpu_type
+
     if (
         "sglang" in str(workload.bench.get("framework") or "").lower()
         and str(workload.bench.get("precision") or "").strip().lower() == "fp8"
@@ -1470,7 +1477,6 @@ def _apply_framework_envs(
     model_basename = Path(str(workload.model_path or os.environ.get("MODEL_PATH", ""))).name.lower()
     pin_model_launch_workarounds(envs, workload.bench, model_basename)
     _pin_sparse_kv_block_size(envs, workload)
-    _pin_model_derived_envs(envs, workload)
     return model_basename
 
 
@@ -1624,9 +1630,7 @@ def _read_benchmark_config(config_path: Path) -> _BenchmarkConfig:
     """Read the source Magpie YAML and name the benchmark section it renders."""
     with config_path.open(encoding="utf-8") as f:
         document = yaml.safe_load(f) or {}
-    bench = document.setdefault("benchmark", {})
-    bench.setdefault("envs", {})
-    return _BenchmarkConfig(document=document, bench=bench)
+    return _BenchmarkConfig(document=document, bench=document.setdefault("benchmark", {}))
 
 
 def _write_benchmark_config(document: dict[str, Any], materialized: Path) -> Path:
@@ -1664,12 +1668,7 @@ def _pin_inferencex_checkout(bench: dict[str, Any], inferencex_path: str | None)
         bench["inferencex_path"] = checkout
 
 
-def _settle_benchmark_identity(
-    bench: dict[str, Any],
-    envs: dict[str, Any],
-    identity: _LaunchIdentity,
-    agentx: _AgentxChoice,
-) -> None:
+def _settle_benchmark_identity(bench: dict[str, Any], identity: _LaunchIdentity, agentx: _AgentxChoice) -> None:
     """Settle what this run launches: its model, GPU, entrypoint and checkouts.
 
     The process env wins over the YAML defaults, and an explicit
@@ -1683,6 +1682,7 @@ def _settle_benchmark_identity(
     _apply_runner_type(bench, identity.gpu_type)
     if identity.benchmark_script:
         bench["benchmark_script"] = str(identity.benchmark_script)
+    envs = bench.setdefault("envs", {})
     runtime_path = os.environ.get("PATH", "").strip()
     if "PATH" in envs and runtime_path:
         envs["PATH"] = runtime_path
@@ -2103,10 +2103,8 @@ def materialize_config_with_envs(
     """
     config = _read_benchmark_config(config_path)
     bench = config.bench
-    envs = bench["envs"]
     _settle_benchmark_identity(
         bench,
-        envs,
         _LaunchIdentity(
             model_path=model_path,
             gpu_type=gpu_type,
@@ -2115,6 +2113,7 @@ def materialize_config_with_envs(
         ),
         _AgentxChoice(mode=agentx_mode, grading=grading),
     )
+    envs = bench["envs"]
     shape = _resolve_workload_shape(envs, bench)
     profile = _apply_profile_config(envs, bench, shape)
     _pin_request_counts(envs, shape, profile)
@@ -2145,7 +2144,9 @@ def materialize_config_with_envs(
         osl_val=profile.osl_val,
         drop_moe_runner_backend=drop_moe_runner_backend,
     )
+    _pin_client_model_access(envs, workload)
     _apply_eval_envs(envs, workload, model_basename=model_basename, flydsl_source_dirs=flydsl_source_dirs)
+    _pin_fp8_per_token_fast_path(envs, workload)
     _apply_caller_removals(envs, composed)
     _restate_profile_capture(envs, composed, profile)
     _apply_vllm_source_runtime(bench, envs)
