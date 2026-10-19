@@ -1216,20 +1216,24 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         try:
             cb = self.current_best or {}
             if cb:
-                from hyperloom.inference_optimizer.reference_script import render_reference_script
+                from hyperloom.inference_optimizer import reference_script
 
-                text = render_reference_script(
+                text = reference_script.render_reference_script(
                     framework=str(self.framework or os.environ.get("FRAMEWORK", "sglang")),
-                    server_args=str(cb.get("extra_server_args") or ""),
-                    envs=dict(cb.get("extra_envs") or {}),
-                    overlay_pythonpath=str(cb.get("final_overlay") or ""),
-                    unset_envs=to_str_list(cb.get("unset_envs")),
-                    remove_args=to_str_list(cb.get("remove_args")),
-                    args_mode=str(cb.get("args_mode") or "append"),
-                    model=self.reference_model or os.environ.get("MODEL_PATH"),
-                    tp=int(self.tp or 0) or None,
-                    max_model_len=int(self.max_model_len or 0) or None,
-                    gpu_type=str(self.gpu_type or os.environ.get("GPU_TYPE", "")) or None,
+                    launch=reference_script.LaunchSettings(
+                        server_args=str(cb.get("extra_server_args") or ""),
+                        envs=dict(cb.get("extra_envs") or {}),
+                        overlay_pythonpath=str(cb.get("final_overlay") or ""),
+                        unset_envs=to_str_list(cb.get("unset_envs")),
+                        remove_args=to_str_list(cb.get("remove_args")),
+                        args_mode=str(cb.get("args_mode") or "append"),
+                    ),
+                    target=reference_script.ServingTarget(
+                        model=self.reference_model or os.environ.get("MODEL_PATH"),
+                        tp=int(self.tp or 0) or None,
+                        max_model_len=int(self.max_model_len or 0) or None,
+                        gpu_type=str(self.gpu_type or os.environ.get("GPU_TYPE", "")) or None,
+                    ),
                 )
                 (Path(session_dir) / "current_setting.sh").write_text(
                     text,
@@ -2002,6 +2006,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 compute_roofline_breakdown_from_state,
             )
             from hyperloom.inference_optimizer.roofline_snapshot import (
+                RooflineReading,
                 attach_perfmodel_breakdown,
                 build_roofline_snapshot,
             )
@@ -2023,12 +2028,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
             snapshot_id=None,
             ts=ts_iso,
             analysis_md_path="",
-            theoretical_peak_tok_per_sec=peak_tput,
-            achieved_tok_per_sec=achieved,
-            mem_ceiling_tok_per_sec=float(breakdown.mem_tok_per_sec or 0.0),
-            cmp_ceiling_tok_per_sec=float(breakdown.cmp_tok_per_sec or 0.0),
-            bound_kind=breakdown.bound_kind,
-            throughput_unit=self._roofline_throughput_unit(),
+            reading=RooflineReading(breakdown, achieved, self._roofline_throughput_unit()),
             framework=str(getattr(self, "framework", "") or ""),
         )
         # Mark provenance: this is the baseline-arm ceiling backup, not a trace-derived snapshot.
@@ -2275,6 +2275,7 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         # Append compact history for report-side Roofline Comparison; best-effort.
         try:
             from hyperloom.inference_optimizer.roofline_snapshot import (
+                RooflineReading,
                 attach_perfmodel_breakdown,
                 build_roofline_snapshot,
             )
@@ -2314,7 +2315,6 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 self,
                 arm=snapshot_arm,
             )
-            peak_tput = float(breakdown.peak_tok_per_sec or 0.0)
             # Scriptable/diffusion has no tok/s decode ceiling; surface the compute-latency roofline (measured
             # per-image e2e latency vs the ideal floor from the sidecar).
             fw = str(getattr(self, "framework", "") or "")
@@ -2323,15 +2323,14 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
                 snapshot_id=snapshot_id,
                 ts=ts_iso,
                 analysis_md_path=str(analysis_md_path),
-                theoretical_peak_tok_per_sec=peak_tput,
-                achieved_tok_per_sec=achieved_tput,
-                mem_ceiling_tok_per_sec=float(breakdown.mem_tok_per_sec or 0.0),
-                cmp_ceiling_tok_per_sec=float(breakdown.cmp_tok_per_sec or 0.0),
-                bound_kind=breakdown.bound_kind,
-                throughput_unit=self._roofline_throughput_unit(),
+                reading=RooflineReading(
+                    ceiling=breakdown,
+                    achieved_tok_per_sec=achieved_tput,
+                    throughput_unit=self._roofline_throughput_unit(),
+                    e2e_mean_ms=e2e_mean_ms,
+                    roofline_ideal_ms=roofline_ideal_ms,
+                ),
                 framework=fw,
-                e2e_mean_ms=e2e_mean_ms,
-                roofline_ideal_ms=roofline_ideal_ms,
             )
             # Per-op PerfModel breakdown for dashboard visualization.
             attach_perfmodel_breakdown(history_entry, self, arm=snapshot_arm)

@@ -522,7 +522,6 @@ class LangfuseEmitter:
         name: str,
         agent: str,
         output: Any,
-        phase: str = lfmap.UNPHASED,
         metadata: dict[str, Any] | None = None,
         ts: str | None = None,
     ) -> bool:
@@ -531,7 +530,7 @@ class LangfuseEmitter:
             return False
         try:
             start = lfmap.parse_ts(ts)
-            parent = self._ensure_agent_span(phase, agent, start)
+            parent = self._ensure_agent_span(lfmap.UNPHASED, agent, start)
             obs = _start_obs(
                 parent,
                 name=name,

@@ -47,6 +47,29 @@ _SOFTMAX_REFERENCE = "reference_softmax_driver.py"
 _MXFP8_REFERENCE = "reference_mxfp8_grouped_gemm_driver.py"
 
 
+@dataclass(frozen=True)
+class DriverPreparation:
+    """One preparation: the driver to author or repair, where it is audited, its deadline, evidence and attempts."""
+
+    driver_path: str
+    experiments_dir: str
+    deadline_unix: float | None
+    invocation_spec_file: str = ""
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS
+
+
+@dataclass(frozen=True)
+class _AuthoringTurn:
+    """One authoring session: the staging repository, the driver it edits, the evidence it must not touch, its log."""
+
+    stage: Path
+    stage_driver: Path
+    evidence_paths: set[Path]
+    prompt: str
+    timeout_sec: int
+    progress_log: list[str]
+
+
 @dataclass
 class DriverPreflight:
     """One complete pre-PORT check of the rewrite driver contract."""
@@ -314,27 +337,22 @@ def _ensure_agent_git_workspace(stage: Path) -> None:
 async def _run_agent(
     *,
     config: Config,
-    stage: Path,
-    stage_driver: Path,
-    evidence_paths: set[Path],
-    prompt: str,
-    timeout_sec: int,
-    progress_log: list[str],
+    turn: _AuthoringTurn,
     usage: UsageAccumulator | None = None,
 ) -> str:
     runtime = with_writable_sandbox(config.agent_runtime())
     backend = create_registered_backend(runtime)
     run_spec = AgentRunSpec(
         system_prompt=_SYSTEM_PROMPT,
-        user_prompt=prompt,
+        user_prompt=turn.prompt,
         role="flydsl driver preparation",
-        cwd=str(stage),
+        cwd=str(turn.stage),
         writable=True,
-        timeout_sec=timeout_sec,
-        target_files=[str(stage_driver)],
+        timeout_sec=turn.timeout_sec,
+        target_files=[str(turn.stage_driver)],
         # Deliberately no driver_script, for the reason task_preparer records at its own AgentRunSpec: that field
         # declares the measurement surface the guard must defend, so it snapshots the driver as protected.
-        protected_globs=[path.name for path in evidence_paths],
+        protected_globs=[path.name for path in turn.evidence_paths],
         allow_dirty_targets=True,
         allow_untracked=False,
         tool_policy=AgentToolPolicy(
@@ -346,11 +364,11 @@ async def _run_agent(
             permission_mode=os.environ.get("FORGE_PERMISSION_MODE", "acceptEdits"),
             bare=False,
         ),
-        progress_log=progress_log,
+        progress_log=turn.progress_log,
     )
     result = await asyncio.wait_for(
         backend.run(run_spec, usage=usage),
-        timeout=watchdog_timeout_sec(timeout_sec),
+        timeout=watchdog_timeout_sec(turn.timeout_sec),
     )
     return result.text.strip()
 
@@ -500,18 +518,15 @@ inside an isolated staging repository: edit only the requested driver file.
 async def prepare_rewrite_driver(
     *,
     spec: RewriteSpec,
-    driver_path: str,
     config: Config,
-    experiments_dir: str,
-    deadline_unix: float | None,
-    invocation_spec_file: str = "",
+    preparation: DriverPreparation,
     initial_preflight: DriverPreflight | None = None,
-    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     usage: UsageAccumulator | None = None,
 ) -> DriverPreparationResult:
     """Author or repair one driver without exposing the caller's tree to writes."""
 
-    destination = Path(driver_path).resolve()
+    deadline_unix = preparation.deadline_unix
+    destination = Path(preparation.driver_path).resolve()
     if destination in {
         Path(spec.source_kernel).resolve(),
         Path(spec.flydsl_kernel).resolve(),
@@ -528,7 +543,7 @@ async def prepare_rewrite_driver(
             error=("the driver destination is producer-owned experiment state and cannot own the correctness gate"),
         )
     try:
-        invocation_spec = _load_invocation_spec(invocation_spec_file)
+        invocation_spec = _load_invocation_spec(preparation.invocation_spec_file)
     except (OSError, ValueError) as error:
         return DriverPreparationResult(
             ok=False,
@@ -537,7 +552,7 @@ async def prepare_rewrite_driver(
         )
 
     try:
-        audit = _audit_root(experiments_dir, spec.operator_slug)
+        audit = _audit_root(preparation.experiments_dir, spec.operator_slug)
         original = destination.read_bytes() if destination.is_file() else None
         original_mode = destination.stat().st_mode & 0o777 if destination.is_file() else 0o644
     except OSError as error:
@@ -567,7 +582,7 @@ async def prepare_rewrite_driver(
             evidence = _write_evidence(stage, spec, invocation_spec)
             _ensure_agent_git_workspace(stage)
 
-            for attempt in range(1, max(1, max_attempts) + 1):
+            for attempt in range(1, max(1, preparation.max_attempts) + 1):
                 remaining = _remaining(deadline_unix)
                 preflight_reserve = DEFAULT_REWRITE_BUDGET.driver_preflight_reserve_sec
                 if remaining <= preflight_reserve:
@@ -596,12 +611,7 @@ async def prepare_rewrite_driver(
                 try:
                     output = await _run_agent(
                         config=config,
-                        stage=stage,
-                        stage_driver=stage_driver,
-                        evidence_paths=set(evidence),
-                        prompt=prompt,
-                        timeout_sec=timeout_sec,
-                        progress_log=progress_log,
+                        turn=_AuthoringTurn(stage, stage_driver, set(evidence), prompt, timeout_sec, progress_log),
                         usage=usage,
                     )
                     _audit_text(audit, f"{attempt_dir}/agent_output.txt", output)
