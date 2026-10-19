@@ -9,6 +9,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -540,10 +541,15 @@ class TestRestoreGuard:
 
     def test_an_exit_after_applying_restores(self, guard):
         restored: list[bool] = []
-        with pytest.raises(SystemExit):
+
+        def _exit_after_applying():
             with gpu_power_apply.gpu_power_restore_guard():
                 guard.arm(lambda: restored.append(True) or [])
-                raise SystemExit(2)
+                sys.exit(2)
+
+        with pytest.raises(SystemExit) as exited:
+            _exit_after_applying()
+        assert exited.value.code == 2
         assert restored == [True]
 
     def test_a_stop_signal_during_the_restore_cannot_cut_it_short(self, guard):

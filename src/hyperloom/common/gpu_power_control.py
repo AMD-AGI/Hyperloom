@@ -15,6 +15,7 @@ the boot id retires a record written before a reboot, which reset the card.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
@@ -170,14 +171,11 @@ def _ensure_ledger_dir(directory: Path) -> None:
     """Create the record directory and its parent so every account on the host can add its own per-card records,
     and refuse either when another account could have planted records in it."""
     for level in (directory.parent, directory):
-        if not level.exists():
-            try:
-                level.mkdir()
-                # Sticky and world-writable, like /var/tmp itself: any account may create a card's record, and only
-                # its owner may replace or remove it.
-                os.chmod(level, 0o1777)  # nosec B103
-            except FileExistsError:
-                pass
+        with contextlib.suppress(FileExistsError):
+            level.mkdir()
+            # Sticky and world-writable, like /var/tmp itself: any account may create a card's record, and only
+            # its owner may replace or remove it.
+            os.chmod(level, 0o1777)  # nosec B103
         _check_trusted(level, os.lstat(level), directory=True)
         if not stat.S_ISDIR(os.lstat(level).st_mode):
             raise GpuPowerSettingsError(f"{level} is not a directory")
