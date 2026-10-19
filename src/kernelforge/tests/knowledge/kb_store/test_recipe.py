@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -104,27 +105,14 @@ def test_a_run_without_a_configured_store_turns_every_call_into_a_no_op(
     }
 
 
-class _FailingStore:
-    """A record store whose every read raises ``failure``."""
+def _failing_kb(tmp_path, failure: Exception) -> KernelRecipeKB:
+    def fail(*_args, **_kwargs):
+        raise failure
 
-    def __init__(self, failure: Exception) -> None:
-        self._failure = failure
-
-    def candidates(self, *_args, **_kwargs):
-        raise self._failure
-
-    def search_identities(self, *_args, **_kwargs):
-        raise self._failure
-
-    def read_bytes(self, *_args, **_kwargs):
-        raise self._failure
-
-
-def _failing_kb(tmp_path, monkeypatch, failure: Exception) -> KernelRecipeKB:
     spec, _driver = _spec(tmp_path)
     config = _remote_config(tmp_path)
-    identity = _resolved_identity(spec, config)
-    return KernelRecipeKB(_FailingStore(failure), identity, SOFTMAX_IDENTITY, config=config)
+    store = SimpleNamespace(candidates=fail, search_identities=fail, read_bytes=fail)
+    return KernelRecipeKB(store, _resolved_identity(spec, config), SOFTMAX_IDENTITY, config=config)
 
 
 _EXPECTED_STORE_FAILURES = [
@@ -132,43 +120,37 @@ _EXPECTED_STORE_FAILURES = [
     RewriteRecordError("unusable canonical id"),
     OSError("disk gone"),
 ]
+_STORE_READS = {
+    "read_top_n": lambda kb, tmp_path: kb.read_top_n(tmp_path / "top"),
+    "fallback_canonical_ids": lambda kb, tmp_path: kb.fallback_canonical_ids(),
+    "prior_file": lambda kb, tmp_path: kb.prior_file("session", "kernel.py"),
+}
 
 
-_EXPECTED_READ_FAILURES = [*_EXPECTED_STORE_FAILURES, ValueError("bad identity")]
+def _failure_id(failure: Exception) -> str:
+    return type(failure).__name__
 
 
-@pytest.mark.parametrize("failure", _EXPECTED_READ_FAILURES, ids=lambda failure: type(failure).__name__)
-def test_an_expected_store_failure_cold_starts_a_read_and_records_why(tmp_path, monkeypatch, failure):
-    kb = _failing_kb(tmp_path, monkeypatch, failure)
+@pytest.mark.parametrize("read", ["read_top_n", "fallback_canonical_ids"])
+@pytest.mark.parametrize("failure", [*_EXPECTED_STORE_FAILURES, ValueError("bad identity")], ids=_failure_id)
+def test_an_expected_store_failure_cold_starts_a_read_and_records_why(tmp_path, read, failure):
+    kb = _failing_kb(tmp_path, failure)
 
-    assert kb.read_top_n(tmp_path / "top") == []
+    assert _STORE_READS[read](kb, tmp_path) == []
     assert kb.reason == f"{type(failure).__name__}: {failure}"
 
 
-@pytest.mark.parametrize("failure", _EXPECTED_READ_FAILURES, ids=lambda failure: type(failure).__name__)
-def test_an_expected_store_failure_cold_starts_a_fuzzy_search_and_records_why(tmp_path, monkeypatch, failure):
-    kb = _failing_kb(tmp_path, monkeypatch, failure)
-
-    assert kb.fallback_canonical_ids() == []
-    assert kb.reason == f"{type(failure).__name__}: {failure}"
+@pytest.mark.parametrize("failure", _EXPECTED_STORE_FAILURES, ids=_failure_id)
+def test_an_unreadable_artifact_is_a_miss(tmp_path, failure):
+    assert _STORE_READS["prior_file"](_failing_kb(tmp_path, failure), tmp_path) == b""
 
 
-@pytest.mark.parametrize("failure", _EXPECTED_STORE_FAILURES, ids=lambda failure: type(failure).__name__)
-def test_an_unreadable_artifact_is_a_miss(tmp_path, monkeypatch, failure):
-    kb = _failing_kb(tmp_path, monkeypatch, failure)
+@pytest.mark.parametrize("read", _STORE_READS)
+def test_an_unexpected_store_error_propagates_from_every_read(tmp_path, read):
+    kb = _failing_kb(tmp_path, TypeError("store contract drifted"))
 
-    assert kb.prior_file("session", "kernel.py") == b""
-
-
-def test_an_unexpected_store_error_propagates_from_every_read(tmp_path, monkeypatch):
-    kb = _failing_kb(tmp_path, monkeypatch, TypeError("store contract drifted"))
-
-    with pytest.raises(TypeError, match="store contract drifted"):
-        kb.read_top_n(tmp_path / "top")
-    with pytest.raises(TypeError, match="store contract drifted"):
-        kb.fallback_canonical_ids()
-    with pytest.raises(TypeError, match="store contract drifted"):
-        kb.prior_file("session", "kernel.py")
+    with pytest.raises(TypeError, match="^store contract drifted$"):
+        _STORE_READS[read](kb, tmp_path)
 
 
 def test_a_rewrite_is_filed_under_its_producer_owned_identity(tmp_path, monkeypatch):
