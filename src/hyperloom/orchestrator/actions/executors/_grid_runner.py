@@ -319,6 +319,62 @@ def _apply_variant_env(envs, variant, base_extra_envs, base_unset_envs):
     return base_envs
 
 
+def _runnable_moe_backend_args(combined: str, *, args_env: str, model_path: str | None, variant: GridVariant) -> str:
+    """``combined`` with a MoE runner backend this checkpoint cannot run dropped.
+
+    A grid variant never injects one itself, but it inherits one from the baseline recipe it
+    was seeded with or from an explicitly authored variant, and a quant scheme implemented
+    only on the aiter runner crashes on the first forward pass under any other.
+    """
+    if not combined or not _SGLANG_MOE_RUNNER_BACKEND_RE.search(combined):
+        return combined
+    if args_env != "EXTRA_SGLANG_ARGS" or not moe_runner_requires_aiter(combined, model_path):
+        return combined
+    from ._workload_envs import _remove_moe_runner_backend_arg
+
+    log.warning(
+        "grid: dropping inherited --moe-runner-backend for variant %s: "
+        "this checkpoint's MoE quant scheme is only implemented on the "
+        "aiter runner and would crash on the first forward pass.",
+        variant.name,
+    )
+    return _remove_moe_runner_backend_arg(combined)
+
+
+def _importable_overlay_dir(variant: GridVariant) -> str:
+    """This variant's overlay directory, or ``""`` when it names none the server may import.
+
+    A legitimate authored-kernel overlay is a single existing directory: never a
+    ``:``-joined list, a ``..`` traversal, or a path carrying control characters.
+    """
+    overlay = str(getattr(variant, "overlay_pythonpath", "") or "").strip()
+    if not overlay:
+        return ""
+    contained = ":" not in overlay and ".." not in Path(overlay).parts
+    if contained and not any(c in overlay for c in ("\n", "\r", "\x00")) and Path(overlay).is_dir():
+        return overlay
+    log.warning(
+        "grid: dropping unsafe overlay_pythonpath %r (not a single existing directory / contains separator or traversal)",
+        overlay,
+    )
+    return ""
+
+
+def _pin_xdit_tool_path(envs: dict[str, Any], framework: Any) -> None:
+    """Force the xdit wrapper's own tool directories onto ``PATH``.
+
+    It needs both ``/venv/bin`` (the ``xdit`` console script) and ``/opt/rocm/bin``
+    (``hipcc``), and an LLM-supplied PATH must not be able to drop either.
+    """
+    if str(framework or "").strip().lower() != "xdit":
+        return
+    parts = [p for p in str(envs.get("PATH", "") or "").split(":") if p]
+    for essential in ("/opt/rocm/bin", "/venv/bin"):
+        if essential not in parts:
+            parts.insert(0, essential)
+    envs["PATH"] = ":".join(parts)
+
+
 def _build_variant_yaml(
     base_yaml_path: Path,
     base_extra_args: str,
@@ -371,19 +427,7 @@ def _build_variant_yaml(
         remove_args=to_str_list(base_remove) + to_str_list(getattr(variant, "remove_args", [])),
         args_mode=getattr(variant, "args_mode", "append"),
     )
-    # A grid variant never injects a MoE runner backend itself, but it does inherit one -- from the baseline recipe it
-    # was seeded with, or from an explicitly authored variant.
-    if combined and _SGLANG_MOE_RUNNER_BACKEND_RE.search(combined):
-        from ._workload_envs import _remove_moe_runner_backend_arg
-
-        if extra_args_env == "EXTRA_SGLANG_ARGS" and moe_runner_requires_aiter(combined, model_path):
-            log.warning(
-                "grid: dropping inherited --moe-runner-backend for variant %s: "
-                "this checkpoint's MoE quant scheme is only implemented on the "
-                "aiter runner and would crash on the first forward pass.",
-                variant.name,
-            )
-            combined = _remove_moe_runner_backend_arg(combined)
+    combined = _runnable_moe_backend_args(combined, args_env=extra_args_env, model_path=model_path, variant=variant)
     if combined:
         envs[extra_args_env] = _shell_safe_dedupe(combined)
     elif extra_args_env in envs or variant.args_mode == "replace" or base_args_mode == "replace":
@@ -400,25 +444,9 @@ def _build_variant_yaml(
         envs.pop(k, None)
     # The three AgentX bounds took this rung's CONC through ``variant_conc`` above, not through this merge: raising
     # the client's grace alone would make the round wait inside a cap that did not move with it.
-    _overlay = str(getattr(variant, "overlay_pythonpath", "") or "").strip()
+    _overlay = _importable_overlay_dir(variant)
     if _overlay:
-        # Structural containment on the overlay dir before it is prepended to PYTHONPATH: a legitimate authored-kernel
-        # overlay is a single existing directory (never a ``:``-joined list, never a ``..`` traversal or control
-        # char).
-        _overlay_ok = (
-            ":" not in _overlay
-            and ".." not in Path(_overlay).parts
-            and not any(c in _overlay for c in ("\n", "\r", "\x00"))
-            and Path(_overlay).is_dir()
-        )
-        if _overlay_ok:
-            prepend_launch_path(envs, "PYTHONPATH", _overlay)
-        else:
-            log.warning(
-                "grid: dropping unsafe overlay_pythonpath %r (not a single "
-                "existing directory / contains separator or traversal)",
-                _overlay,
-            )
+        prepend_launch_path(envs, "PYTHONPATH", _overlay)
 
     # Attempt runtime override: inject path_prefix/pythonpath_prefix/framework_bin etc. into benchmark.envs so the
     # server subprocess resolves the attempt runtime.
@@ -427,15 +455,7 @@ def _build_variant_yaml(
         apply_runtime_override(envs, _rt_override)
     refuse_unpinned_speculative_change(base_args, base_envs, combined, envs)
 
-    # PATH guard: the xdit wrapper needs both `/venv/bin` (the `xdit` console script) and `/opt/rocm/bin` (`hipcc`);
-    # force-prepend both so an LLM-supplied PATH can't drop one.
-    if str(bench.get("framework", "")).strip().lower() == "xdit":
-        _cur_path = str(envs.get("PATH", "") or "")
-        _parts = [p for p in _cur_path.split(":") if p]
-        for _essential in ("/opt/rocm/bin", "/venv/bin"):
-            if _essential not in _parts:
-                _parts.insert(0, _essential)
-        envs["PATH"] = ":".join(_parts)
+    _pin_xdit_tool_path(envs, bench.get("framework"))
 
     if server_lifecycle is not None:
         from ._server_lifecycle import inject_lifecycle
