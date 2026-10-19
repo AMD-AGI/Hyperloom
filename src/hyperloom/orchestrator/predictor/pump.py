@@ -174,8 +174,7 @@ class PredictorPump:
             session_id=str(state.session_id or ""),
             sites=sites,
             sidecars=sidecars,
-            elapsed_sec=budget.elapsed_sec,
-            keep_threshold_pct=budget.keep_threshold_pct,
+            budget=budget,
         )
         self._inflight = asyncio.create_task(
             asyncio.to_thread(predict, request, endpoint=conf.endpoint, timeout_sec=conf.timeout_sec)
