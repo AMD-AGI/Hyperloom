@@ -404,8 +404,8 @@ def test_validate_emit_intent_input_missing_top_level_key_raises():
 
 
 def test_validate_emit_intent_input_missing_required_payload_field_raises():
-    # send_message requires 'topic'; omit it.
-    with pytest.raises(IntentValidationError, match="missing required fields"):
+    # send_message requires 'topic'; omit it. The message names the field, which is what tells the agent what to fix.
+    with pytest.raises(IntentValidationError, match="topic"):
         mei.validate_emit_intent_input({"intent_type": "send_message", "payload": {}})
 
 
