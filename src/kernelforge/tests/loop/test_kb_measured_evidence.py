@@ -428,36 +428,30 @@ def test_a_refused_measured_write_back_redacts_and_bounds_the_store_error(
     assert len(writeback["reason"]) == 240
 
 
-def test_a_refused_measured_write_back_raises_the_store_error_from_the_facade(tmp_path, monkeypatch):
+def _refusing_write_back_store(monkeypatch, failure: Exception) -> None:
     store = MergingKBStore()
     monkeypatch.setattr(record_store, "KBStoreClient", lambda *a, **k: store)
 
     def refuse(*_args, **_kwargs):
-        raise record_store.KBStoreError("PUT knowledge failed: HTTP 503")
+        raise failure
 
     monkeypatch.setattr(store, "put_knowledge", refuse)
+
+
+def test_a_refused_measured_write_back_raises_the_store_error_from_the_facade(tmp_path, monkeypatch):
+    _refusing_write_back_store(monkeypatch, record_store.KBStoreError("PUT knowledge failed: HTTP 503"))
     kb = KernelRecipeKB.open_canonical_id(CANONICAL_ID, _remote_config(tmp_path))
 
-    with pytest.raises(record_store.KBStoreError, match="HTTP 503"):
+    with pytest.raises(record_store.KBStoreError, match="^PUT knowledge failed: HTTP 503$"):
         kb.record_measured_speedup("kda-attn-session", 5.106)
 
 
 def test_an_unexpected_write_back_error_propagates(tmp_path, monkeypatch):
-    store = MergingKBStore()
-    monkeypatch.setattr(record_store, "KBStoreClient", lambda *a, **k: store)
+    _refusing_write_back_store(monkeypatch, TypeError("put_knowledge signature drifted"))
+    sol = {"solution_slug": f"{CANONICAL_ID}/s", "kernel_slug": CANONICAL_ID, "session_id": "s"}
 
-    def drifted(*_args, **_kwargs):
-        raise TypeError("put_knowledge signature drifted")
-
-    monkeypatch.setattr(store, "put_knowledge", drifted)
-
-    with pytest.raises(TypeError, match="put_knowledge signature drifted"):
-        integration._record_measured_speedup(
-            _remote_config(tmp_path),
-            {"solution_slug": f"{CANONICAL_ID}/s", "kernel_slug": CANONICAL_ID, "session_id": "s"},
-            5.106,
-            rank=1,
-        )
+    with pytest.raises(TypeError, match="^put_knowledge signature drifted$"):
+        integration._record_measured_speedup(_remote_config(tmp_path), sol, 5.106, rank=1)
 
 
 def test_warm_start_adopts_the_best_measured_candidate_not_the_first_applied(

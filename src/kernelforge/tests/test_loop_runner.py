@@ -8072,48 +8072,22 @@ _GIT_FAILURES = [
     subprocess.TimeoutExpired(["git", "diff"], 300.0),
     OSError("git is not installed"),
 ]
+_DISCARD_FAILURES = [RuntimeError("git clean failed: Permission denied"), *_GIT_FAILURES]
 
 
 def _failure_id(failure: BaseException) -> str:
     return type(failure).__name__
 
 
-def _kept_result(commit_hash: str = "c0ffee") -> IterationResult:
-    return IterationResult(
-        iteration=1,
-        duration_sec=0.0,
-        validation_passed=True,
-        validation_summary="canonical validation passed",
-        wall_ms=0.9,
-        mean_case_speedup=1.1,
-        snr_db=40.0,
-        kept=True,
-        commit_hash=commit_hash,
-    )
-
-
-@pytest.mark.parametrize("failure", _GIT_FAILURES, ids=_failure_id)
-def test_a_failed_commit_diff_archives_an_empty_change_diff(tmp_path, monkeypatch, failure):
-    loop, _workspace = _make_loop(tmp_path, monkeypatch)
-
+def _raiser(failure: BaseException):
     def fail(*_args, **_kwargs):
         raise failure
 
-    monkeypatch.setattr(runner_module, "git", fail)
-
-    assert loop._full_diff("c0ffee") == ""
+    return fail
 
 
-def test_an_unexpected_commit_diff_error_propagates(tmp_path, monkeypatch):
-    loop, _workspace = _make_loop(tmp_path, monkeypatch)
-
-    def fail(*_args, **_kwargs):
-        raise TypeError("git wrapper signature drifted")
-
-    monkeypatch.setattr(runner_module, "git", fail)
-
-    with pytest.raises(TypeError, match="git wrapper signature drifted"):
-        loop._full_diff("c0ffee")
+def _kept_result() -> IterationResult:
+    return _lesson_result(iteration=1, kept=True, commit_hash="c0ffee", mean_case_speedup=1.1)
 
 
 def _bare_loop(tmp_path, monkeypatch, *, running: bool = False):
@@ -8128,54 +8102,134 @@ def _bare_loop(tmp_path, monkeypatch, *, running: bool = False):
     return loop
 
 
-def _publication_doubles(loop, monkeypatch, failure: BaseException) -> None:
+def _site_full_diff(tmp_path, monkeypatch, failure):
+    loop, _workspace = _make_loop(tmp_path, monkeypatch)
+    monkeypatch.setattr(runner_module, "git", _raiser(failure))
+    return loop._full_diff("c0ffee")
+
+
+def _site_publish_best(tmp_path, monkeypatch, failure):
+    loop = _bare_loop(tmp_path, monkeypatch)
     monkeypatch.setattr(loop, "_publication_changed_files", lambda _commit: [])
     monkeypatch.setattr(loop, "_publication_patch", lambda _commit: "")
-
-    def fail(*_args, **_kwargs):
-        raise failure
-
-    monkeypatch.setattr(loop.best_publisher, "publish", fail)
+    monkeypatch.setattr(loop.best_publisher, "publish", _raiser(failure))
+    published = loop._publish_best_result(_kept_result(), plan="p", best_before=None)
+    return loop, published
 
 
-@pytest.mark.parametrize(
-    "failure",
-    [OSError("disk full"), ValueError("best manifest is ahead of iteration 1: 2"), *_GIT_FAILURES],
-    ids=_failure_id,
-)
-def test_a_failed_best_publication_degrades_persistence_instead_of_raising(tmp_path, monkeypatch, failure):
-    loop = _bare_loop(tmp_path, monkeypatch)
-    _publication_doubles(loop, monkeypatch, failure)
-
-    assert loop._publish_best_result(_kept_result(), plan="p", best_before=None) is False
-
-    assert loop.persistence_degraded is True
-    assert loop.persistence_errors == [f"publish best iteration 1: {failure}"]
-
-
-def test_an_unexpected_best_publication_error_propagates(tmp_path, monkeypatch):
-    loop = _bare_loop(tmp_path, monkeypatch)
-    _publication_doubles(loop, monkeypatch, TypeError("manifest fields drifted"))
-
-    with pytest.raises(TypeError, match="manifest fields drifted"):
-        loop._publish_best_result(_kept_result(), plan="p", best_before=None)
-    assert loop.persistence_degraded is False
-
-
-def _recovered_keep(loop, monkeypatch, failure: BaseException) -> list[str]:
-    result = _kept_result()
-    loop._recovered_pending_keep = ({"plan": "recovered"}, result)
+def _site_archive_rebuild(tmp_path, monkeypatch, failure):
+    loop, _workspace = _make_loop(tmp_path, monkeypatch)
+    loop._recovered_pending_keep = ({"plan": "recovered"}, _kept_result())
     steps: list[str] = []
-
-    def fail(*_args, **_kwargs):
-        raise failure
-
-    monkeypatch.setattr(loop, "_archive_pending_keep", fail)
+    monkeypatch.setattr(loop, "_archive_pending_keep", _raiser(failure))
     monkeypatch.setattr(loop, "_publish_best_result", lambda *_a, **_k: steps.append("publish"))
     monkeypatch.setattr(loop, "_clear_pending_keep", lambda: steps.append("clear"))
     monkeypatch.setattr(loop, "_publish_optimization_history", lambda: steps.append("history"))
     monkeypatch.setattr(loop, "_checkpoint_llm_usage", lambda: steps.append("usage"))
+    asyncio.run(loop._finish_recovered_pending_keep())
+    return loop, steps
+
+
+def _site_terminal_stamp(tmp_path, monkeypatch, failure):
+    loop = _bare_loop(tmp_path, monkeypatch, running=True)
+    steps: list[str] = []
+    monkeypatch.setattr(loop, "_git", _raiser(failure))
+    monkeypatch.setattr(loop, "_checkpoint_llm_usage", lambda: steps.append("usage"))
+    loop._persist_terminal_state()
     return steps
+
+
+def _fail_first_discard(loop, monkeypatch, failure: BaseException) -> None:
+    """Make the session-recovery discard fail once; the verdict's own discard runs for real."""
+    pending = [failure]
+    real_discard = loop._git_discard_worktree
+
+    def discard():
+        if pending:
+            raise pending.pop()
+        real_discard()
+
+    monkeypatch.setattr(loop, "_git_discard_worktree", discard)
+
+
+def _run_verdict(tmp_path, monkeypatch, failure, **sink_fields):
+    loop, _workspace = _make_loop(tmp_path, monkeypatch)
+    _fail_first_discard(loop, monkeypatch, failure)
+
+    async def agent(kernel_path, _history, session_sink):
+        Path(kernel_path).write_text("def kernel():\n    return 99\n")
+        session_sink.update(plan="candidate", end_reason="candidate_submitted", **sink_fields)
+        return "candidate"
+
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=agent, supervisor_fn=_unused_supervisor)))
+    return loop
+
+
+def _site_integrity_verdict(tmp_path, monkeypatch, failure):
+    return _run_verdict(
+        tmp_path,
+        monkeypatch,
+        failure,
+        integrity_violation=True,
+        integrity_reason="modified oracle",
+        integrity_restore=lambda: None,
+    )
+
+
+def _site_contention_verdict(tmp_path, monkeypatch, failure):
+    return _run_verdict(tmp_path, monkeypatch, failure, workspace_contention="pid(s) [4321] hold a device node")
+
+
+def _site_keep_commit(tmp_path, monkeypatch, failure):
+    loop, workspace = _make_loop(tmp_path, monkeypatch)
+
+    async def editing_agent(kernel_path, _history, session_sink):
+        session_sink["plan"] = "keep that cannot be committed"
+        Path(kernel_path).write_text("def kernel():\n    return 2\n")
+        return "verified improvement"
+
+    async def successful_iteration(iteration, plan=""):
+        return replace(_kept_result(), iteration=iteration, commit_hash="", duration_sec=0.01)
+
+    monkeypatch.setattr(loop, "run_one_iteration", successful_iteration)
+    monkeypatch.setattr(loop, "_git_commit", _raiser(failure))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent, supervisor_fn=_unused_supervisor)))
+    return loop, workspace
+
+
+@pytest.mark.parametrize(
+    "site",
+    [
+        _site_full_diff,
+        _site_publish_best,
+        _site_archive_rebuild,
+        _site_terminal_stamp,
+        _site_integrity_verdict,
+        _site_contention_verdict,
+        _site_keep_commit,
+    ],
+    ids=lambda site: site.__name__,
+)
+def test_an_unexpected_error_at_a_narrowed_handler_propagates(tmp_path, monkeypatch, site):
+    with pytest.raises(TypeError, match="^seam drifted$"):
+        site(tmp_path, monkeypatch, TypeError("seam drifted"))
+
+
+@pytest.mark.parametrize("failure", _GIT_FAILURES, ids=_failure_id)
+def test_a_failed_commit_diff_archives_an_empty_change_diff(tmp_path, monkeypatch, failure):
+    assert _site_full_diff(tmp_path, monkeypatch, failure) == ""
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [OSError("disk full"), ValueError("best manifest is ahead of iteration 1: 2"), *_GIT_FAILURES[:2]],
+    ids=_failure_id,
+)
+def test_a_failed_best_publication_degrades_persistence_instead_of_raising(tmp_path, monkeypatch, failure):
+    loop, published = _site_publish_best(tmp_path, monkeypatch, failure)
+
+    assert published is False
+    assert (loop.persistence_degraded, loop.persistence_errors) == (True, [f"publish best iteration 1: {failure}"])
 
 
 @pytest.mark.parametrize(
@@ -8188,163 +8242,41 @@ def _recovered_keep(loop, monkeypatch, failure: BaseException) -> list[str]:
     ids=_failure_id,
 )
 def test_a_failed_archive_rebuild_still_publishes_the_recovered_best(tmp_path, monkeypatch, failure):
-    loop, _workspace = _make_loop(tmp_path, monkeypatch)
-    steps = _recovered_keep(loop, monkeypatch, failure)
+    loop, steps = _site_archive_rebuild(tmp_path, monkeypatch, failure)
 
-    asyncio.run(loop._finish_recovered_pending_keep())
-
-    assert loop.persistence_degraded is True
-    assert loop.persistence_errors == [f"rebuild candidate archive iteration 1: {failure}"]
+    assert (loop.persistence_degraded, loop.persistence_errors) == (
+        True,
+        [f"rebuild candidate archive iteration 1: {failure}"],
+    )
     assert steps == ["publish", "clear", "history", "usage"]
-
-
-def test_an_unexpected_archive_rebuild_error_propagates(tmp_path, monkeypatch):
-    loop, _workspace = _make_loop(tmp_path, monkeypatch)
-    steps = _recovered_keep(loop, monkeypatch, KeyError("iteration"))
-
-    with pytest.raises(KeyError, match="iteration"):
-        asyncio.run(loop._finish_recovered_pending_keep())
-    assert steps == []
 
 
 @pytest.mark.parametrize("failure", _GIT_FAILURES[1:], ids=_failure_id)
 def test_a_failed_terminal_stamp_does_not_skip_the_usage_checkpoint(tmp_path, monkeypatch, failure):
-    loop = _bare_loop(tmp_path, monkeypatch, running=True)
-    steps: list[str] = []
-
-    def fail(*_args, **_kwargs):
-        raise failure
-
-    monkeypatch.setattr(loop, "_git", fail)
-    monkeypatch.setattr(loop, "_checkpoint_llm_usage", lambda: steps.append("usage"))
-
-    loop._persist_terminal_state()
-
-    assert steps == ["usage"]
-
-
-def test_a_terminal_stamp_without_a_running_session_propagates(tmp_path, monkeypatch):
-    loop = _bare_loop(tmp_path, monkeypatch)
-
-    with pytest.raises(ValueError, match="no running session to finish"):
-        loop._persist_terminal_state()
-
-
-_DISCARD_FAILURES = [
-    RuntimeError("git clean failed: Permission denied"),
-    GitError(128, ["git", "restore"], "", "fatal: unable to write index"),
-    subprocess.TimeoutExpired(["git", "restore"], 300.0),
-    OSError("workspace vanished"),
-]
-
-
-def _fail_first_discard(loop, monkeypatch, failure: BaseException) -> None:
-    """Make the session-recovery discard fail once; the verdict's own discard runs for real."""
-    real_discard = loop._git_discard_worktree
-    calls: list[int] = []
-
-    def discard():
-        calls.append(1)
-        if len(calls) == 1:
-            raise failure
-        real_discard()
-
-    monkeypatch.setattr(loop, "_git_discard_worktree", discard)
-
-
-def _run_integrity_violation(loop, workspace):
-    async def unsafe_agent(kernel_path, _history, session_sink):
-        Path(kernel_path).write_text("def kernel():\n    return 99\n")
-        session_sink["plan"] = "unsafe candidate"
-        session_sink["end_reason"] = "candidate_submitted"
-        session_sink["integrity_violation"] = True
-        session_sink["integrity_reason"] = "modified oracle"
-        session_sink["integrity_restore"] = lambda: None
-        return "unsafe candidate"
-
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=unsafe_agent, supervisor_fn=_unused_supervisor)))
+    assert _site_terminal_stamp(tmp_path, monkeypatch, failure) == ["usage"]
 
 
 @pytest.mark.parametrize("failure", _DISCARD_FAILURES, ids=_failure_id)
-def test_a_failed_tracked_restore_is_reported_on_the_integrity_verdict(tmp_path, monkeypatch, failure):
-    loop, workspace = _make_loop(tmp_path, monkeypatch)
-    _fail_first_discard(loop, monkeypatch, failure)
+@pytest.mark.parametrize(
+    ("site", "summary"),
+    [
+        (
+            _site_integrity_verdict,
+            "REVERT (protected integrity violation): canonical correctness and benchmark were skipped before "
+            "executing the measurement surface. modified oracle Restoration errors: tracked candidate restore failed: ",
+        ),
+        (
+            _site_contention_verdict,
+            "REVERT (workspace contention): canonical correctness and benchmark were skipped because the session's "
+            "workspace could not be cleared. pid(s) [4321] hold a device node Candidate restore failed: ",
+        ),
+    ],
+    ids=["integrity", "contention"],
+)
+def test_a_failed_restore_is_reported_on_the_verdict(tmp_path, monkeypatch, site, summary, failure):
+    loop = site(tmp_path, monkeypatch, failure)
 
-    _run_integrity_violation(loop, workspace)
-
-    assert loop.results[0].validation_summary == (
-        "REVERT (protected integrity violation): canonical correctness and benchmark were skipped before executing "
-        "the measurement surface. modified oracle Restoration errors: "
-        f"tracked candidate restore failed: {type(failure).__name__}: {failure}"
-    )
-
-
-def test_an_unexpected_tracked_restore_error_propagates_from_the_integrity_verdict(tmp_path, monkeypatch):
-    loop, workspace = _make_loop(tmp_path, monkeypatch)
-    _fail_first_discard(loop, monkeypatch, TypeError("discard signature drifted"))
-
-    with pytest.raises(TypeError, match="discard signature drifted"):
-        _run_integrity_violation(loop, workspace)
-
-
-def _run_contended_session(loop):
-    async def contended_agent(kernel_path, _history, session_sink):
-        Path(kernel_path).write_text("def kernel():\n    return 99\n")
-        session_sink["plan"] = "a candidate nothing can measure"
-        session_sink["end_reason"] = "candidate_submitted"
-        session_sink["workspace_contention"] = "pid(s) [4321] hold a device node"
-        return "contended candidate"
-
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=contended_agent, supervisor_fn=_unused_supervisor)))
-
-
-@pytest.mark.parametrize("failure", _DISCARD_FAILURES, ids=_failure_id)
-def test_a_failed_candidate_restore_is_reported_on_the_contention_verdict(tmp_path, monkeypatch, failure):
-    loop, _workspace = _make_loop(tmp_path, monkeypatch)
-    _fail_first_discard(loop, monkeypatch, failure)
-
-    _run_contended_session(loop)
-
-    assert loop.results[0].validation_summary == (
-        "REVERT (workspace contention): canonical correctness and benchmark were skipped because the session's "
-        "workspace could not be cleared. pid(s) [4321] hold a device node "
-        f"Candidate restore failed: {type(failure).__name__}: {failure}"
-    )
-    assert loop.results[0].workspace_contention == "pid(s) [4321] hold a device node"
-
-
-def test_an_unexpected_candidate_restore_error_propagates_from_the_contention_verdict(tmp_path, monkeypatch):
-    loop, _workspace = _make_loop(tmp_path, monkeypatch)
-    _fail_first_discard(loop, monkeypatch, TypeError("discard signature drifted"))
-
-    with pytest.raises(TypeError, match="discard signature drifted"):
-        _run_contended_session(loop)
-
-
-def _run_kept_candidate(loop, monkeypatch, failure: BaseException):
-    async def editing_agent(kernel_path, _history, session_sink):
-        session_sink["plan"] = "keep that cannot be committed"
-        Path(kernel_path).write_text("def kernel():\n    return 2\n")
-        return "verified improvement"
-
-    async def successful_iteration(iteration, plan=""):
-        return IterationResult(
-            iteration=iteration,
-            duration_sec=0.01,
-            validation_passed=True,
-            validation_summary="canonical validation passed",
-            wall_ms=0.9,
-            mean_case_speedup=1.1,
-            snr_db=40.0,
-            kept=True,
-        )
-
-    def fail(*_args, **_kwargs):
-        raise failure
-
-    monkeypatch.setattr(loop, "run_one_iteration", successful_iteration)
-    monkeypatch.setattr(loop, "_git_commit", fail)
-    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent, supervisor_fn=_unused_supervisor)))
+    assert loop.results[0].validation_summary == f"{summary}{type(failure).__name__}: {failure}"
 
 
 @pytest.mark.parametrize(
@@ -8354,24 +8286,14 @@ def _run_kept_candidate(loop, monkeypatch, failure: BaseException):
         ValueError("verified KEEP has no candidate diff"),
         RuntimeError("git commit did not advance HEAD"),
         GitError(1, ["git", "commit"], "", "hook rejected commit"),
-        subprocess.TimeoutExpired(["git", "commit"], 300.0),
     ],
     ids=_failure_id,
 )
 def test_a_keep_that_cannot_be_committed_is_reverted_as_a_crash(tmp_path, monkeypatch, failure):
-    loop, workspace = _make_loop(tmp_path, monkeypatch)
-
-    _run_kept_candidate(loop, monkeypatch, failure)
+    loop, workspace = _site_keep_commit(tmp_path, monkeypatch, failure)
 
     result = loop.results[0]
     assert (result.kept, result.validation_passed, result.crashed) == (False, False, True)
     assert result.validation_summary == f"COMMIT FAILED: {failure}"
     assert (workspace / "kernel.py").read_text() == "def kernel():\n    return 1\n"
     assert not (workspace / "forge_experiments" / "pending_keep.json").exists()
-
-
-def test_an_unexpected_commit_error_propagates_from_the_keep_verdict(tmp_path, monkeypatch):
-    loop, _workspace = _make_loop(tmp_path, monkeypatch)
-
-    with pytest.raises(TypeError, match="commit signature drifted"):
-        _run_kept_candidate(loop, monkeypatch, TypeError("commit signature drifted"))

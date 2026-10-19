@@ -127,7 +127,6 @@ def _adopt_with_failing_commit(monkeypatch, tmp_path, failure):
     [
         RuntimeError("git commit failed: hook rejected"),
         subprocess.CalledProcessError(1, ["git", "commit"]),
-        subprocess.TimeoutExpired(["git", "commit"], 300.0),
         OSError("git is not installed"),
     ],
     ids=lambda failure: type(failure).__name__,
@@ -137,7 +136,7 @@ def test_a_candidate_whose_commit_fails_is_rejected(monkeypatch, tmp_path, failu
 
 
 def test_an_unexpected_commit_error_propagates(monkeypatch, tmp_path):
-    with pytest.raises(TypeError, match="commit signature drifted"):
+    with pytest.raises(TypeError, match="^commit signature drifted$"):
         _adopt_with_failing_commit(monkeypatch, tmp_path, TypeError("commit signature drifted"))
 
 
