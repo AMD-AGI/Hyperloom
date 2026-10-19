@@ -438,6 +438,7 @@ def restart_local_head_with_serving_slot(num_gpus: Optional[int] = None, log_pat
 
 # Env vars safe to forward to Ray workers; excludes *_VISIBLE_DEVICES (Ray-owned; forcing them triggers set_visible_accelerator_ids IndexError on ROCm).
 SAFE_ENV_KEYS = (
+    "HYPERLOOM_BENCHMARK_CONFIG",
     "PATH",
     "HOME",
     "LD_LIBRARY_PATH",

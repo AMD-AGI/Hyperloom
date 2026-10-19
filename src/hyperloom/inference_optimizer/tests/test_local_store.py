@@ -9,12 +9,12 @@ import threading
 
 import pytest
 
+from hyperloom.inference_optimizer.recipe_snapshot_constants import recipe_canonical_id
 from hyperloom.orchestrator.knowledge.recipe_kb import local_store as ls
-from hyperloom.orchestrator.knowledge.recipe_kb.canonical_id import canonical_id_from_components
 
 
 def _cid(model="m", hardware="mi300", framework_name="sglang", framework_version="v1", precision="fp8") -> str:
-    return canonical_id_from_components(
+    return recipe_canonical_id(
         model=model,
         hardware=hardware,
         framework_name=framework_name,
@@ -170,33 +170,6 @@ def test_get_recipe_missing(tmp_path):
     assert store.get_recipe(canonical_id=_cid()) is None
 
 
-def test_empty_cid_raises(tmp_path):
-    store = ls.LocalRecipeStore(root=tmp_path)
-    with pytest.raises(ValueError):
-        store.put_recipe(canonical_id="")
-    with pytest.raises(ValueError):
-        store.get_recipe(canonical_id="")
-
-
-# ---- attempts ----
-
-
-def test_attempts_roundtrip(tmp_path):
-    store = ls.LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    a1 = store.append_attempt(canonical_id=cid, session_id="s1", fitness=1.0, outcome="ok", diff={"x": 1})
-    assert a1["id"] == 1
-    store.append_attempt(canonical_id=cid, session_id="s2", fitness=None)
-    rows = ls._list_jsonl(store._attempts_path(cid))
-    assert [row["id"] for row in rows] == [1, 2]
-
-
-def test_append_attempt_requires_session(tmp_path):
-    store = ls.LocalRecipeStore(root=tmp_path)
-    with pytest.raises(ValueError):
-        store.append_attempt(canonical_id=_cid(), session_id="")
-
-
 # ---- search ----
 
 
@@ -209,21 +182,15 @@ def test_search_filters(tmp_path):
     res = store.search(label_match={"model": "a"})
     assert len(res) == 1
     # metric filter shorthand alias 'throughput'
-    res = store.search(metric_filters={"throughput": {"min": 200.0}})
+    res = store.search(filters=ls.RecipeFilters(metric_filters={"throughput": {"min": 200.0}}))
     assert len(res) == 1
     assert res[0]["model"] == "b"
     # metric scalar shorthand
-    res = store.search(metric_filters={"best_throughput": {"max": 150.0}})
+    res = store.search(filters=ls.RecipeFilters(metric_filters={"best_throughput": {"max": 150.0}}))
     assert len(res) == 1
     # updated_since far future -> none
-    assert store.search(updated_since="9999-01-01T00:00:00") == []
+    assert store.search(filters=ls.RecipeFilters(updated_since="9999-01-01T00:00:00")) == []
     assert len(store.search(limit=10)) == 2
-
-
-def test_search_bad_order_by(tmp_path):
-    store = ls.LocalRecipeStore(root=tmp_path)
-    with pytest.raises(ValueError):
-        store.search(order_by="bogus")
 
 
 # ---- low-level helpers ----
@@ -245,13 +212,6 @@ def test_read_json_bad(tmp_path):
     p.write_text("{bad", encoding="utf-8")
     with pytest.raises(ls.LocalRecipeStoreError):
         ls._read_json(p)
-
-
-def test_list_jsonl_skips_bad(tmp_path):
-    p = tmp_path / "a.ndjson"
-    p.write_text('{"a":1}\n\nnot json\n{"b":2}\n', encoding="utf-8")
-    rows = ls._list_jsonl(p)
-    assert rows == [{"a": 1}, {"b": 2}]
 
 
 def test_coerce_dict_dataclass():

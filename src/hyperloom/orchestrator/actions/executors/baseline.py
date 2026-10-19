@@ -9,7 +9,7 @@ InferenceX eval patching.
 """
 
 from __future__ import annotations
-
+from hyperloom.orchestrator.actions.executors._workload_envs import materialize_benchmark_config
 import asyncio
 import gzip
 import hashlib
@@ -40,12 +40,12 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     ROUND_MEASURE,
     ROUND_SINGLE,
     ROUND_WARMUP,
-    RUN_AFTER_EVAL_FAILURE,
     RUN_AFTER_MOE_RUNNER_FAILURE,
     RUN_INITIAL,
     make_baseline_recorder,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
+from hyperloom.inference_optimizer import inferencex_checkout
 from hyperloom.inference_optimizer.grid_server_args import with_capture_disabled
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
@@ -59,12 +59,7 @@ from ..stop_attribution import (
     StoppedByTheRun,
 )
 from . import _server_lifecycle as _lifecycle
-from ._aiter_jit import (
-    AITER_JIT_PROBE_PATHS,
-    BASELINE_COLD_START_TIMEOUT_SEC,
-    COLD_START_KERNEL_THRESHOLD,
-    is_aiter_jit_registry_mismatch,
-)
+from ._aiter_jit import is_aiter_jit_registry_mismatch
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
 # The grid module is the namespace the helpers both benching arms share ended up in: how a sentinel returncode reads
@@ -92,12 +87,7 @@ from ._subprocess_kill import (
 from ._accuracy_gate import (
     materialized_run_eval_disabled,
 )
-from ._agentx_timeouts import (
-    AGENTX_CANON_WARMUP_GRACE_SEC as AGENTX_CANON_WARMUP_GRACE_SEC,
-    AGENTX_CANON_WARMUP_CONC as AGENTX_CANON_WARMUP_CONC,
-    agentx_warmup_grace_conc as agentx_warmup_grace_conc,
-    agentx_warmup_grace_sec as agentx_warmup_grace_sec,
-)
+
 from ._workload_envs import (
     VLLM_SOURCE_ROOT_ENVS,
     _client_tokenizer_mode,
@@ -105,7 +95,6 @@ from ._workload_envs import (
     FrameworkScriptMismatchError,
     agentx_active,
     default_baseline_config,
-    materialize_config_with_envs,
     prepare_agentx_runtime,
 )
 from ._inferencex_patcher import (
@@ -560,6 +549,13 @@ def _attach_baseline_launch_evidence(
     workspace = Path(str(result.get("workspace") or "")) if result.get("workspace") else None
     actual_log = _measurement_server_log_path(output_dir / "server.log", workspace, slot=output_dir)
     result["server_log_path"] = actual_log or ""
+    if result.get("benchmark_backend") == "magpie_agentx":
+        from hyperloom.inference_optimizer.agentx.report import native_launch_evidence
+
+        evidence = native_launch_evidence(result, config_path, actual_server_log=actual_log)
+        result["launch_evidence"] = evidence
+        result["launch_evidence_path"] = persist_launch_evidence(evidence, slot=output_dir)
+        return
     evidence = build_launch_evidence(
         config_path=config_path,
         actual_server_log=actual_log,
@@ -757,15 +753,6 @@ def nonzero_output_signature(err_class: str, proc_stdout: str | None, proc_stder
     return f"{err_class}|{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
 
 
-# Cold-start settings and probes live in ``_aiter_jit`` and are re-exported above for callers/tests that import them
-# from this module.
-
-
-# Underscore-prefixed aliases re-exported for callers/tests; canonical names live in `_workload_envs`.
-_default_baseline_config = default_baseline_config
-_materialize_config_with_envs = materialize_config_with_envs
-
-
 def _set_materialized_run_eval(config_path: Path, *, enabled: bool) -> None:
     """Set the effective eval mode after lifecycle eligibility is known."""
     cfg = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
@@ -785,6 +772,24 @@ def _resolve_result_dir(output_dir: Path, override_result_dir: str | None) -> Pa
     if result_dir.is_absolute():
         return result_dir
     return (output_dir / result_dir).resolve()
+
+
+def _benchmark_process_env(
+    config_path: Path, output_dir: Path, result_dir: Path, inferencex_path: str
+) -> dict[str, str]:
+    """Build the client environment without overriding Magpie's native checkout selection."""
+    from .magpie_agentx import native_config
+
+    env = scrub_benchmark_process_env(os.environ.copy())
+    env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
+    if inferencex_path and not native_config(config_path):
+        env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
+    env["RESULT_DIR"] = str(result_dir)
+    # InferenceX removes EVAL_RESULT_DIR after processing lm-eval output.
+    env["EVAL_RESULT_DIR"] = str(result_dir / "eval_output")
+    env["SERVER_LOG"] = str(output_dir / "server.log")
+    env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
+    return env
 
 
 def _should_establish_quality_ref(task_kind: str | None, params: dict[str, Any] | None = None) -> bool:
@@ -1653,6 +1658,7 @@ class BenchmarkRunExecutor:
     """One benchmark action: materialize the config, launch the backend, retry, parse the report."""
 
     benchmark_watchdog = False
+    runs_accuracy_eval = True
     session_dir = SessionDirField()
 
     def __init__(
@@ -1720,6 +1726,9 @@ class BenchmarkRunExecutor:
                 exc_info=True,
             )
             return False
+
+    def _measurement_succeeded(self, measurement: dict[str, Any]) -> bool:
+        return measurement.get("valid_measurement") is True
 
     def _resolve_timeout(self, params: dict[str, Any]) -> float:
         """Benchmark rounds share one cap; other executor purposes keep their budgets."""
@@ -1915,21 +1924,15 @@ class BenchmarkRunExecutor:
         return result
 
     async def _run_retrying(self, ctx: RunnerContext, *, recorder: Any = None) -> dict[str, Any]:
-        """Run the Magpie baseline, with a one-shot eval-failure fallback."""
+        """Run the Magpie baseline; an eval-rooted failure fails the round, a MoE-runner failure retries once."""
         result = await self._run_pass(ctx, recorder=recorder, attempt_reason=RUN_INITIAL)
-        params = ctx.task.params or {}
-        # A failed required patch timeline means the donor is incompatible with the current tree.
-        _extra_envs = params.get("extra_envs") or {}
-        _explicit_run_eval = not is_truthy(_extra_envs.get("RUN_EVAL"), default=True)
-        eval_already_off = is_truthy(params.get("disable_run_eval")) or _explicit_run_eval or self._eval_disabled(ctx)
-        eval_disabled_by_fallback = False
         # An eval that never reached a verdict because the server was gone is a broken measurement, not a statement
         # about accuracy or about a missing framework capability. Leaving it in the eval-rooted branch stamps it as an
         # eval-failure contract and hands it to the enablement lane, which then spends rounds looking for a capability
         # gap that the evidence does not support. It stays a failed baseline either way -- nothing is salvaged and the
         # accuracy gate is untouched -- but it is counted as an ordinary baseline failure, so the existing
         # ``_BASELINE_MAX_TOTAL_FAILURES`` backstop ends the run with the cause it actually had.
-        if result.get("status") != "succeeded" and not eval_already_off and self._is_eval_rooted_failure(result):
+        if result.get("status") != "succeeded" and self._is_eval_rooted_failure(result):
             if self._is_server_unreachable_eval_failure(result):
                 log.warning(
                     "baseline_executor: the accuracy eval failed because the server was unreachable, not because "
@@ -1951,41 +1954,22 @@ class BenchmarkRunExecutor:
                         ctx, result, kind=EVAL_KIND_RUNTIME_FAILURE, observed_accuracy=None, evidence=evidence
                     )
                     return result
+                result.setdefault("nonfatal_warnings", [])
+                result["accuracy_source"] = "eval_unavailable"
                 if _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {}):
                     log.error(
-                        "baseline_executor: failure is eval-rooted (InferenceX "
-                        "run_eval aborted the benchmark) on a genuine baseline, "
-                        "whose whole purpose is to establish the accuracy "
-                        "reference. NOT retrying with RUN_EVAL=false: a "
-                        "throughput-only baseline cannot satisfy the accuracy gate, "
-                        "so the retry would burn a second full benchmark and the "
-                        "run would stop anyway. Stopping now — fix the accuracy "
-                        "eval (see the benchmark stdout/stderr for the run_eval "
-                        "error) rather than disabling RUN_EVAL."
+                        "baseline_executor: failure is eval-rooted (InferenceX run_eval aborted the benchmark) on a "
+                        "genuine baseline, whose whole purpose is to establish the accuracy reference. Stopping now "
+                        "-- fix the accuracy eval (see the benchmark stdout/stderr for the run_eval error)."
                     )
-                    result.setdefault("nonfatal_warnings", [])
                     result["nonfatal_warnings"].append("eval_failed_no_fallback_baseline_requires_accuracy")
-                    result["accuracy_source"] = "eval_unavailable"
                     self._request_eval_rooted_baseline_stop(ctx, result)
-                    return result
-                log.warning(
-                    "baseline_executor: failure looks eval-rooted (InferenceX "
-                    "run_eval aborted the benchmark); retrying once with "
-                    "RUN_EVAL=false to salvage the throughput baseline without "
-                    "the accuracy gate."
-                )
-                retry = await self._run_pass(
-                    ctx,
-                    recorder=recorder,
-                    attempt_reason=RUN_AFTER_EVAL_FAILURE,
-                    force_disable_eval=True,
-                )
-                retry.setdefault("nonfatal_warnings", [])
-                retry["nonfatal_warnings"].append("eval_failed_fallback_no_accuracy")
-                if retry.get("status") == "succeeded":
-                    retry["accuracy_source"] = "eval_unavailable"
-                eval_disabled_by_fallback = True
-                result = retry
+                else:
+                    log.error(
+                        "baseline_executor: failure is eval-rooted (InferenceX run_eval aborted the benchmark); "
+                        "the round fails with no throughput-only retry."
+                    )
+                return result
         if result.get("status") != "succeeded" and self._is_moe_runner_rooted_failure(result):
             log.warning(
                 "baseline_executor: the server died on a MoE runner backend "
@@ -1993,30 +1977,17 @@ class BenchmarkRunExecutor:
                 "scheme; retrying once without --moe-runner-backend so the "
                 "framework picks the backend itself."
             )
-            # Carry the eval fallback forward: the eval that broke above must stay off, and its bookkeeping must
-            # survive onto this result.
             retry = await self._run_pass(
                 ctx,
                 recorder=recorder,
                 attempt_reason=RUN_AFTER_MOE_RUNNER_FAILURE,
-                force_disable_eval=eval_disabled_by_fallback,
                 force_drop_moe_runner_backend=True,
             )
             retry.setdefault("nonfatal_warnings", [])
-            if eval_disabled_by_fallback:
-                retry["nonfatal_warnings"].append("eval_failed_fallback_no_accuracy")
-                if retry.get("status") == "succeeded":
-                    retry["accuracy_source"] = "eval_unavailable"
             retry["nonfatal_warnings"].append("moe_runner_backend_fallback_dropped_flag")
             result = retry
         self._maybe_stop_on_missing_baseline_accuracy(ctx, result)
         return result
-
-    def _eval_disabled(self, ctx: RunnerContext) -> bool:
-        """Whether ``--no-eval`` turned the accuracy eval off for this session."""
-        extra = getattr(ctx, "extra", None) or {}
-        state = self._resolve_shared_state(extra.get("shared_state"))
-        return bool(getattr(state, "eval_disabled", False))
 
     @staticmethod
     def _accuracy_stop_death_evidence(result: dict[str, Any]) -> str:
@@ -2138,8 +2109,6 @@ class BenchmarkRunExecutor:
     ) -> None:
         """Halt the run when a genuine baseline produced no accuracy result."""
         if not _should_establish_quality_ref(getattr(ctx.task, "kind", ""), ctx.task.params or {}):
-            return
-        if self._eval_disabled(ctx):
             return
         # A failed status must NOT skip straight past the salvage below.
         if result.get("status") != "succeeded" and not self._is_eval_rooted_failure(result):
@@ -2310,7 +2279,6 @@ class BenchmarkRunExecutor:
         self,
         ctx: RunnerContext,
         *,
-        force_disable_eval: bool = False,
         force_drop_moe_runner_backend: bool = False,
         recorder: Any = None,
         run_index: int = 0,
@@ -2384,19 +2352,13 @@ class BenchmarkRunExecutor:
                 "error": str(exc),
                 "output_dir": str(output_dir),
             }
-        # Accuracy eval (GSM8K) opt-out: ``--no-eval``, the ``disable_run_eval`` param and the eval-failure fallback
-        # force ``RUN_EVAL=false``.
         base_extra_envs = dict(params.get("extra_envs") or {})
-        eval_disabled = self._eval_disabled(ctx)
-        # The staged accuracy round is itself an eval, so ``--no-eval`` cancels it.
-        defer_accuracy_until_after_measure = not eval_disabled and is_truthy(
-            params.get("defer_accuracy_until_after_measure")
-        )
-        if force_disable_eval or is_truthy(params.get("disable_run_eval")) or eval_disabled:
+        if not self.runs_accuracy_eval:
             base_extra_envs["RUN_EVAL"] = "false"
+        defer_accuracy_until_after_measure = is_truthy(params.get("defer_accuracy_until_after_measure"))
         await _prepare_aiter_serving_so(base_extra_envs)
         try:
-            config_path = materialize_config_with_envs(
+            config_path = materialize_benchmark_config(
                 config_path,
                 output_dir,
                 extra_server_args=effective_extra_server_args,
@@ -2424,22 +2386,9 @@ class BenchmarkRunExecutor:
         # Stash for the result so Coordinator can reuse it downstream.
         materialized_config_path = config_path
         effective_inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
-        # Apply runtime_override from params into the materialized YAML so the revalidation baseline boots under the
-        # same framework runtime as the KEEP'd candidate (PATH/PYTHONPATH/framework_bin etc.).
-        _rt_from_params = params.get("runtime_override")
-        if isinstance(_rt_from_params, dict) and _rt_from_params:
-            try:
-                import yaml as _yaml
+        from .magpie_agentx import activate_runtime
 
-                from ._grid_runner import apply_runtime_override
-
-                _cfg_data = _yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-                _cfg_bench = _cfg_data.setdefault("benchmark", {})
-                _cfg_envs = _cfg_bench.setdefault("envs", {})
-                apply_runtime_override(_cfg_envs, _rt_from_params)
-                config_path.write_text(_yaml.safe_dump(_cfg_data), encoding="utf-8")
-            except Exception:
-                log.debug("baseline_executor: runtime_override application failed", exc_info=True)
+        activate_runtime(config_path, params.get("runtime_override") or {})
         # Report the invocation now, with the config final and the server not
         # yet booted. This frame is the only one that knows the args as a fact:
         # the one-shot eager fallback and the MoE-runner drop have both had
@@ -2455,18 +2404,7 @@ class BenchmarkRunExecutor:
                 model_path=resolved_model,
                 args_mode=str(params.get("args_mode") or "append"),
             )
-        # AgentX: deploy the aiperf client into InferenceX benchmarks/ and
-        # capability-preflight aiperf before Magpie runs the materialized config.
-        # Baseline/profile shell out here (not via _run_magpie), so without this the
-        # materialize-time swap to aiperf_client.sh would point at a script that was
-        # never deployed. No-op when HYPERLOOM_AGENTX is off.
-        #
-        # Off-loop: this call can shell out to the installer (the runtime aiperf
-        # repair, bounded at REPAIR_TIMEOUT_SEC) and that installer waits on a
-        # cross-process ``flock`` with no timeout of its own. Run inline it would
-        # freeze the whole orchestrator for as long as that takes -- heartbeats,
-        # cancellation, the wall-clock budget and every bus write stop with it.
-        # ``_grid_runner`` already runs its copy of this through ``to_thread``.
+        # MLPerf prepares its delegated client off-loop; native AgentX is entirely managed by Magpie.
         _agx_err = await asyncio.to_thread(
             prepare_agentx_runtime,
             env=os.environ,
@@ -2754,8 +2692,6 @@ class BenchmarkRunExecutor:
             force_warmup_eval = (
                 str(getattr(ctx.task, "kind", "") or "") == "replay_warm_recipe"
                 and not defer_accuracy_until_after_measure
-                and not force_disable_eval
-                and not eval_disabled
             )
             warmup_cfg = self._write_lifecycle_config(
                 materialized_config_path,
@@ -3276,10 +3212,6 @@ class BenchmarkRunExecutor:
     ) -> dict[str, Any] | None:
         """Ask the installed framework's parser about this round's argv.
 
-        The argv is read out of the rendered YAML and probed in that file's own
-        benchmark envs, which are what the launch reads. A repaired argv is
-        written back through the same seal.
-
         Args:
             config_path: The materialised YAML this round launches.
             framework: Framework the config serves.
@@ -3293,6 +3225,10 @@ class BenchmarkRunExecutor:
             ``None`` when the round may proceed -- including every unavailable
             verdict, which must never cost a round.
         """
+        from .magpie_agentx import native_config
+
+        if native_config(config_path):
+            return None
         from ...bringup import (
             ARGV_INVALID,
             argv_invalid_observation,
@@ -3386,23 +3322,16 @@ class BenchmarkRunExecutor:
         server_already_ready: bool = False,
     ) -> dict[str, Any]:
         """Run one Magpie benchmark subprocess and parse its result."""
+        from .magpie_agentx import bind_source_evidence
+
+        await asyncio.to_thread(bind_source_evidence, config_path, params.get("patches") or [])
         cmd = build_benchmark_command(
             python_exe=self.magpie_python,
             config_path=config_path,
             output_dir=output_dir,
         )
-        env = scrub_benchmark_process_env(os.environ.copy())
-        # Put the venv first in PATH so the benchmark script's `python3` resolves to one with torch+rocm (defense in
-        # depth vs Magpie YAML).
-        env["PATH"] = f"/opt/venv/bin:{env.get('PATH', '')}"
-        # Pin Magpie's InferenceX resolution to the same per-task checkout rendered into benchmark.inferencex_path and
-        # patched by the ``_after_materialize_config`` hook.
-        if inferencex_path:
-            env["MAGPIE_INFERENCEX_PATH"] = inferencex_path
-        # Always-on ``$RESULT_DIR`` default for scripts that respect it; scripts that ignore it are caught by the
-        # salvage pass.
         result_dir = _resolve_result_dir(output_dir, override_result_dir)
-        env["RESULT_DIR"] = str(result_dir)
+        env = _benchmark_process_env(config_path, output_dir, result_dir, inferencex_path)
         # Config/eval-contract facts echoed onto every failure result so an eval-rooted failure can be fingerprinted
         # and re-run by enablement.
         capture_meta = {
@@ -3410,13 +3339,6 @@ class BenchmarkRunExecutor:
             "result_dir": str(result_dir),
             "run_eval_disabled": bool(run_eval_disabled),
         }
-        # InferenceX ``run_lm_eval`` cleans ``$EVAL_RESULT_DIR`` after processing lm-eval output.
-        env["EVAL_RESULT_DIR"] = str(result_dir / "eval_output")
-        # Pin SERVER_LOG / GPU_METRICS_CSV per-task so wrappers write into the task workspace;
-        # ``harvest_leaked_artifacts`` is the defense-in-depth net.
-        env["SERVER_LOG"] = str(output_dir / "server.log")
-        env["GPU_METRICS_CSV"] = str(output_dir / "gpu_metrics.csv")
-
         # The materialized YAML is authoritative for the framework: params and $FRAMEWORK are both optional on a
         # baseline task.
         framework = (
@@ -3453,9 +3375,9 @@ class BenchmarkRunExecutor:
                 # Merge the reference base UNDER the per-task args (last-wins) so a multi-node per-round restart
                 # carries the same reference flags the single-node materialized YAML does.
                 from ._grid_runner import merge_server_args
-                from ._workload_envs import resolve_reference_base
+                from ._workload_envs import resolve_reference_launch
 
-                _mn_ref_args, _mn_ref_envs = resolve_reference_base()
+                _mn_ref_args, _mn_ref_envs, _ = resolve_reference_launch()
                 # Base on effective_extra_server_args (carries the one-shot cuda-graph eager-fallback flag when armed)
                 # so the MN per-round restart keeps that fallback too.
                 _mn_task_args = effective_extra_server_args
@@ -3821,6 +3743,7 @@ class BenchmarkRunExecutor:
 
         measurement = extract_benchmark_measurement(
             report,
+            config_path=config_path,
             workspace=workspace,
             subprocess_started_unix=subprocess_started_unix,
         )
@@ -3828,7 +3751,7 @@ class BenchmarkRunExecutor:
         for leak_src, _ in harvested:
             warnings.append(f"harvested_leaked_artifact:{leak_src}")
 
-        if not measurement.get("valid_measurement"):
+        if not self._measurement_succeeded(measurement):
             if registry_mismatch:
                 error_class = "aiter_jit_registry_mismatch"
                 error = server_init_dead_error if server_init_dead else ((proc_stderr or proc_stdout or "")[-2000:])
@@ -3940,7 +3863,7 @@ class BenchmarkRunExecutor:
         shared_state = (getattr(ctx, "extra", None) or {}).get("shared_state") or self.shared_state
         benchmark_mode = str(getattr(shared_state, "benchmark_mode", "") or "")
         if run_eval_disabled and not eval_scriptable and not is_agentx_mode(benchmark_mode):
-            # Serving RUN_EVAL was off this run (eval-failure fallback or ``disable_run_eval``), so lm-eval did not
+            # Serving RUN_EVAL was off this run (a profile round or a staged warmup round), so lm-eval did not
             # execute and there is no fresh accuracy to read.
             log.info(
                 "baseline_executor: RUN_EVAL disabled this run (serving); skipping accuracy parse (no lm-eval executed)"
@@ -3987,7 +3910,7 @@ class BaselineExecutor(BenchmarkRunExecutor):
 
     def _resolve_default_config(self) -> Path:
         """Resolve the benchmark YAML the round runs when the task names none."""
-        return _default_baseline_config()
+        return default_baseline_config()
 
     @staticmethod
     def _client_script_from_config(config_path: Path) -> str | None:
@@ -4039,16 +3962,17 @@ class BaselineExecutor(BenchmarkRunExecutor):
         output_dir: Path,
     ) -> dict[str, Any] | None:
         """Hook after YAML materialization, before launch."""
+        from .magpie_agentx import native_config
+
+        if native_config(config_path):
+            return None
         ix_root = self._inferencex_root_from_config(config_path)
         if ix_root:
+            if invalid := inferencex_checkout.unusable_reason(ix_root):
+                return {"status": "failed", "error_class": "inferencex_checkout_invalid", "error": invalid}
             ensure_benchmark_lib_eval_dest_patched(Path(ix_root))
             ensure_benchmark_lib_eval_start_patched(Path(ix_root))
-        # Runs for EVERY workload, not just eval ones: this hook fixes the throughput
-        # client, which runs whether or not lm-eval does. Independent of the fail-soft
-        # eval-concurrency result: a missing tokenizer hook is
-        # fatal only for a model whose tokenizer has to be named, and for that model it is
-        # fatal outright -- the client dies in HF AutoConfig before its first request, writes
-        # no throughput result, and the round is graded a boot failure with the server serving.
+        # Required custom tokenizers must reach the throughput client as well as eval.
         tok_mode = _client_tokenizer_mode(self._model_from_config(config_path))
         if tok_mode:
             try:
@@ -4282,14 +4206,7 @@ baseline_executor = BaselineExecutor()
 
 
 __all__ = [
-    "AITER_JIT_PROBE_PATHS",
-    "BASELINE_COLD_START_TIMEOUT_SEC",
-    "AGENTX_CANON_WARMUP_GRACE_SEC",
-    "AGENTX_CANON_WARMUP_CONC",
-    "agentx_warmup_grace_conc",
-    "agentx_warmup_grace_sec",
     "BaselineExecutor",
     "BenchmarkRunExecutor",
-    "COLD_START_KERNEL_THRESHOLD",
     "baseline_executor",
 ]

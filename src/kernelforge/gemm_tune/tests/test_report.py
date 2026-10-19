@@ -3,9 +3,16 @@
 
 """Tests for report module."""
 
+from pathlib import Path
+
 from kernelforge.gemm_tune.model_analyzer import ModelProfile
-from kernelforge.gemm_tune.tuners.base import TuneResult
+from kernelforge.gemm_tune.tuners.base import TuneContext, TuneResult
 from kernelforge.gemm_tune.report import build_report
+
+
+def _tune_ctx(**fields) -> TuneContext:
+    """A tuning context carrying the run fields a report records; the tuner knobs are placeholders."""
+    return TuneContext(mp=1, output_dir=Path("."), iters=1, warmup=1, min_improvement_pct=0.0, timeout_s=1, **fields)
 
 
 def _make_profile():
@@ -15,16 +22,18 @@ def _make_profile():
 class TestBuildReport:
     def test_all_skipped(self):
         report = build_report(
+            ctx=_tune_ctx(
+                profile=_make_profile(),
+                framework="sglang",
+                precision="bf16",
+                quant_type="none",
+                gpu_type="mi300x",
+                tp=1,
+                conc=64,
+                tokens=[64, 128],
+            ),
             results=[],
             skipped=[("fmoe_ck", "not MoE")],
-            profile=_make_profile(),
-            framework="sglang",
-            precision="bf16",
-            quant_type="none",
-            gpu_type="mi300x",
-            tp=1,
-            conc=64,
-            tokens=[64, 128],
             started_at="2026-01-01T00:00:00Z",
             total_elapsed_s=1.0,
         )
@@ -44,16 +53,18 @@ class TestBuildReport:
             avg_micro_speedup=1.08,
         )
         report = build_report(
+            ctx=_tune_ctx(
+                profile=_make_profile(),
+                framework="sglang",
+                precision="bf16",
+                quant_type="none",
+                gpu_type="mi300x",
+                tp=1,
+                conc=256,
+                tokens=[64, 128, 256],
+            ),
             results=[result],
             skipped=[],
-            profile=_make_profile(),
-            framework="sglang",
-            precision="bf16",
-            quant_type="none",
-            gpu_type="mi300x",
-            tp=1,
-            conc=256,
-            tokens=[64, 128, 256],
             started_at="2026-01-01T00:00:00Z",
             total_elapsed_s=70.0,
         )
@@ -77,16 +88,18 @@ class TestBuildReport:
             candidate=True,
         )
         report = build_report(
+            ctx=_tune_ctx(
+                profile=_make_profile(),
+                framework="vllm",
+                precision="bf16",
+                quant_type="none",
+                gpu_type="mi300x",
+                tp=1,
+                conc=64,
+                tokens=[64],
+            ),
             results=[result],
             skipped=[],
-            profile=_make_profile(),
-            framework="vllm",
-            precision="bf16",
-            quant_type="none",
-            gpu_type="mi300x",
-            tp=1,
-            conc=64,
-            tokens=[64],
             started_at="2026-01-01T00:00:00Z",
             total_elapsed_s=80.0,
         )
@@ -115,16 +128,18 @@ class TestBuildReport:
             avg_micro_speedup=1.0,
         )
         report = build_report(
+            ctx=_tune_ctx(
+                profile=_make_profile(),
+                framework="sglang",
+                precision="fp8",
+                quant_type="blockscale",
+                gpu_type="mi300x",
+                tp=1,
+                conc=64,
+                tokens=[64],
+            ),
             results=[result],
             skipped=[],
-            profile=_make_profile(),
-            framework="sglang",
-            precision="fp8",
-            quant_type="blockscale",
-            gpu_type="mi300x",
-            tp=1,
-            conc=64,
-            tokens=[64],
             started_at="2026-01-01T00:00:00Z",
             total_elapsed_s=120.0,
         )
@@ -148,16 +163,18 @@ class TestBuildReport:
             candidate=True,
         )
         report = build_report(
+            ctx=_tune_ctx(
+                profile=_make_profile(),
+                framework="vllm-aiter",
+                precision="fp8",
+                quant_type="blockscale",
+                gpu_type="mi355x",
+                tp=1,
+                conc=64,
+                tokens=[64],
+            ),
             results=[result],
             skipped=[],
-            profile=_make_profile(),
-            framework="vllm-aiter",
-            precision="fp8",
-            quant_type="blockscale",
-            gpu_type="mi355x",
-            tp=1,
-            conc=64,
-            tokens=[64],
             started_at="2026-01-01T00:00:00Z",
             total_elapsed_s=120.0,
         )
@@ -176,16 +193,18 @@ class TestBuildReport:
             avg_micro_speedup=1.0,
         )
         report = build_report(
+            ctx=_tune_ctx(
+                profile=_make_profile(),
+                framework="sglang",
+                precision="bf16",
+                quant_type="none",
+                gpu_type="mi300x",
+                tp=1,
+                conc=64,
+                tokens=[64],
+            ),
             results=[failed, ok],
             skipped=[],
-            profile=_make_profile(),
-            framework="sglang",
-            precision="bf16",
-            quant_type="none",
-            gpu_type="mi300x",
-            tp=1,
-            conc=64,
-            tokens=[64],
             started_at="2026-01-01T00:00:00Z",
             total_elapsed_s=10.0,
         )
@@ -198,16 +217,18 @@ class TestBuildReport:
         failed1 = TuneResult(tuner_name="t1", status="failed", error="err1")
         failed2 = TuneResult(tuner_name="t2", status="failed", error="err2")
         report = build_report(
+            ctx=_tune_ctx(
+                profile=_make_profile(),
+                framework="sglang",
+                precision="bf16",
+                quant_type="none",
+                gpu_type="mi300x",
+                tp=1,
+                conc=64,
+                tokens=[64],
+            ),
             results=[failed1, failed2],
             skipped=[],
-            profile=_make_profile(),
-            framework="sglang",
-            precision="bf16",
-            quant_type="none",
-            gpu_type="mi300x",
-            tp=1,
-            conc=64,
-            tokens=[64],
             started_at="2026-01-01T00:00:00Z",
             total_elapsed_s=5.0,
         )
@@ -228,16 +249,18 @@ class TestBuildReport:
             best_micro_speedup=1.1,
         )
         report = build_report(
+            ctx=_tune_ctx(
+                profile=_make_profile(),
+                framework="sglang",
+                precision="bf16",
+                quant_type="none",
+                gpu_type="mi300x",
+                tp=1,
+                conc=64,
+                tokens=[64],
+            ),
             results=[failed, candidate],
             skipped=[],
-            profile=_make_profile(),
-            framework="sglang",
-            precision="bf16",
-            quant_type="none",
-            gpu_type="mi300x",
-            tp=1,
-            conc=64,
-            tokens=[64],
             started_at="2026-01-01T00:00:00Z",
             total_elapsed_s=80.0,
         )

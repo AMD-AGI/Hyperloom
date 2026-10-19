@@ -22,6 +22,10 @@ from hyperloom.inference_optimizer.session.lock import (
 )
 
 
+def _read_owner(session_dir):
+    return json.loads(session_paths.optimizer_lock_path(session_dir).read_text(encoding="utf-8"))
+
+
 def test_lock_path_under_runtime(tmp_path):
     """The lock lives at ``<session_dir>/runtime/optimizer.lock``."""
     assert session_paths.optimizer_lock_path(tmp_path) == tmp_path / "runtime" / "optimizer.lock"
@@ -32,18 +36,13 @@ def test_acquire_writes_owner_metadata(tmp_path):
     lock = SessionLock(tmp_path)
     lock.acquire()
     try:
-        owner = session_lock.read_owner(tmp_path)
+        owner = _read_owner(tmp_path)
         assert owner is not None
         assert owner["pid"] == os.getpid()
         assert owner["started_at"]
         assert owner["heartbeat_at"]
     finally:
         lock.release()
-
-
-def test_read_owner_missing_is_none(tmp_path):
-    """No lock file yet -> ``read_owner`` returns ``None`` (not an error)."""
-    assert session_lock.read_owner(tmp_path) is None
 
 
 def test_release_allows_reacquire(tmp_path):
@@ -88,7 +87,7 @@ def test_pod_history_failure_does_not_break_acquire(tmp_path):
     lock = SessionLock(tmp_path)
     lock.acquire()  # must not raise
     try:
-        assert session_lock.read_owner(tmp_path) is not None
+        assert _read_owner(tmp_path) is not None
     finally:
         lock.release()
 
@@ -113,7 +112,7 @@ def test_second_holder_rejected(tmp_path):
 def test_context_manager_releases(tmp_path):
     """The context manager acquires on enter and releases on exit."""
     with SessionLock(tmp_path):
-        owner = session_lock.read_owner(tmp_path)
+        owner = _read_owner(tmp_path)
         assert owner is not None and owner["pid"] == os.getpid()
     # Released: a fresh acquire succeeds immediately.
     again = SessionLock(tmp_path)
@@ -152,7 +151,7 @@ def test_pid_fallback_takes_over_dead_owner(tmp_path, monkeypatch):
     lock = SessionLock(tmp_path)
     lock.acquire()  # must not raise — stale owner is taken over
     try:
-        owner = session_lock.read_owner(tmp_path)
+        owner = _read_owner(tmp_path)
         assert owner is not None and owner["pid"] == os.getpid()
     finally:
         lock.release()
@@ -178,21 +177,6 @@ def test_pid_alive_edge_cases(monkeypatch):
 
     monkeypatch.setattr(session_lock.os, "kill", raise_oserror)
     assert _pid_alive(12345) is False
-
-
-def test_read_owner_empty_and_malformed(tmp_path):
-    """read_owner returns None for blank / non-JSON / non-dict bodies."""
-    lock_path = session_paths.optimizer_lock_path(tmp_path)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-
-    lock_path.write_text("   \n", encoding="utf-8")
-    assert session_lock.read_owner(tmp_path) is None
-
-    lock_path.write_text("not json {{{", encoding="utf-8")
-    assert session_lock.read_owner(tmp_path) is None
-
-    lock_path.write_text("[1, 2, 3]", encoding="utf-8")
-    assert session_lock.read_owner(tmp_path) is None
 
 
 def test_read_owner_fd_empty_and_malformed(tmp_path):
@@ -234,9 +218,9 @@ def test_heartbeat_refreshes_body(tmp_path):
     lock.heartbeat()
     lock.acquire()
     try:
-        before = session_lock.read_owner(tmp_path)
+        before = _read_owner(tmp_path)
         lock.heartbeat()
-        after = session_lock.read_owner(tmp_path)
+        after = _read_owner(tmp_path)
         assert before is not None and after is not None
         assert after["pid"] == os.getpid()
     finally:
@@ -265,7 +249,7 @@ def test_acquire_plain_file_still_works(tmp_path):
     lock = SessionLock(tmp_path)
     lock.acquire()
     try:
-        assert session_lock.read_owner(tmp_path) is not None
+        assert _read_owner(tmp_path) is not None
     finally:
         lock.release()
     # Re-acquire on the now-existing regular file also works.

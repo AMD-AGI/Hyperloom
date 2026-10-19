@@ -142,6 +142,20 @@ class ExecutionCleanupUnconfirmed(RuntimeError):
         self.tree_pgid = tree_pgid
 
 
+@dataclass(frozen=True)
+class RunnerLinks:
+    """The live session objects a runner consults.
+
+    Attributes:
+        shared_state: Live session state forwarded to executors via ``ctx.extra``.
+        policy: Optional gate replayed at dispatch time for defense against
+            forged queued task rows.
+    """
+
+    shared_state: object | None = None
+    policy: PolicyGate | None = None
+
+
 class SubAgentRunner:
     """Routes ``delegate`` work to the matching ActionRunner, and releases its lease.
 
@@ -156,8 +170,7 @@ class SubAgentRunner:
         *,
         executor_registry: dict[str, ExecutorFn] | None = None,
         session_dir: Path | None = None,
-        shared_state: object | None = None,
-        policy: PolicyGate | None = None,
+        links: RunnerLinks = RunnerLinks(),
     ):
         """Initialise the runner with its lock manager + task registry.
 
@@ -170,10 +183,7 @@ class SubAgentRunner:
                 initial map of ``task.kind`` to executor function (copied).
             session_dir (Path | None): Session root used to pre-create
                 per-action workspaces; None disables workspace pre-mkdir.
-            shared_state (object | None): Live session state forwarded to
-                executors via ``ctx.extra``.
-            policy (PolicyGate | None): Optional gate replayed at dispatch
-                time for defense against forged queued task rows.
+            links (RunnerLinks): Live session state and the dispatch-time gate.
         """
         self.locks = locks
         self.tasks = tasks
@@ -181,8 +191,8 @@ class SubAgentRunner:
         self.session_dir = Path(session_dir) if session_dir else None
         # Live SharedState threaded into each executor's ctx.extra so gain-computing
         # executors can recover a baseline anchor when params['base_tput'] is absent.
-        self.shared_state = shared_state
-        self.policy = policy
+        self.shared_state = links.shared_state
+        self.policy = links.policy
 
     def register_executor(self, kind: str, fn: ExecutorFn) -> None:
         """Register (or replace) the executor for a task kind.
@@ -280,16 +290,6 @@ class SubAgentRunner:
         evidence: dict[str, Any] = {}
         context = "executor_success"
         try:
-            if task.kind == "recover" and runner is None and task.state == "queued":
-                evidence = {"reason": "unsupported_action"}
-                outcome = SubAgentResult(
-                    task_id=task.task_id,
-                    state="cancelled",
-                    result={"status": "cancelled", "error_class": "unsupported_action"},
-                    error="recover is no longer supported",
-                    error_class="unsupported_action",
-                )
-                return outcome
             if self.policy is not None:
                 try:
                     self.policy.validate_dispatched_task(

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from kernelforge.gemm_tune.model_analyzer import ModelProfile
 from kernelforge.gemm_tune.tuners.base import TuneContext
-from kernelforge.gemm_tune.tuners.sglang_dense_bf16 import SglangDenseBf16Tuner
+from kernelforge.gemm_tune.tuners.sglang_dense_bf16 import SglangDenseBf16Tuner, _BatchRun
 
 
 def _tuner(tmp_path: Path) -> SglangDenseBf16Tuner:
@@ -69,10 +69,7 @@ def _build(tmp_path, *, kept: int, dropped: int, expected: int, improved: bool =
     csv_path.write_text("header\n", encoding="utf-8")
     return t._build_result(
         _rows(kept, improved=improved),
-        expected,
-        csv_path,
-        batch_timeout=900,
-        rc=0,
+        _BatchRun(csv_path, expected, batch_timeout=900, rc=0),
     )
 
 

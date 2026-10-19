@@ -33,6 +33,7 @@ from typing import Any, Mapping, NamedTuple
 import yaml
 
 from hyperloom.common.coerce import to_str_list
+from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
 from hyperloom.common.env import env_bool, env_flag, is_truthy
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.perf_metric import (
@@ -111,7 +112,6 @@ _DEFAULT_PROFILE_MAX_STEPS = 128
 # 113-127 GB each, Ray reported 1012/1024 GB and killed the capture three times.
 # The AgentX client bounds the window by wall clock anyway (~20s of steady
 # state), so the extra steps buy nothing. HYPERLOOM_PROFILE_MAX_ITERS overrides.
-_AGENTX_PROFILE_MAX_ITERS = 8
 # Default profile OSL ceiling when --profile-osl / PROFILE_OSL is unset: the
 # profile reuses min(served OSL, this) so its trace stays light.
 _PROFILE_DEFAULT_OSL = 1024
@@ -257,38 +257,9 @@ def _is_agentx_client_key(key: str, env: "Mapping[str, str]") -> bool:
     """True for a knob :func:`apply_agentx_switch` forwards to the AgentX client."""
     from hyperloom.common.agentx_workload import BACKEND_ENV, is_mlperf_backend
 
-    if key.startswith("AGENTX_") or key in ("AIPERF_BIN", "WEKA_LOADER_OVERRIDE"):
+    if key.startswith("AGENTX_"):
         return True
     return is_mlperf_backend(env) and (key.startswith(("MLPERF_", "AGENTIC_")) or key == BACKEND_ENV)
-
-
-# The 1M-context families that replay the unfiltered corpus; everything else
-# gets the 256k-capped variant. Mirrors ``aiperf_client.sh::_default_loader``,
-# which is the side that actually selects the corpus at runtime -- this one only
-# reports it -- so the two are pinned together by
-# ``test_agentx_corpus_rules_consistency``.
-AGENTX_FULL_CONTEXT_FAMILIES = ("dsv4", "deepseekv4", "glm52", "glm53", "minimaxm3", "kimik3")
-AGENTX_CORPUS_FULL = "semianalysis_cc_traces_weka_062126"
-AGENTX_CORPUS_256K = "semianalysis_cc_traces_weka_062126_256k"
-
-
-def _agentx_model_family(model: str) -> str:
-    """Normalize a model path/name to the family slug ``aiperf_client.sh`` uses.
-
-    Character-for-character the shell's ``${1##*/}`` + lowercase + ``tr -d '._-'``:
-    basename, folded, separators dropped. Stripping every non-alphanumeric instead
-    would be tidier but would disagree with the client on names carrying anything
-    else, and the client is the one that picks the corpus.
-    """
-    name = str(model or "").rsplit("/", 1)[-1].lower()
-    return name.translate(str.maketrans("", "", "._-"))
-
-
-def _agentx_default_corpus(model: str) -> str:
-    """Return the canonical SemiAnalysis corpus for a model family."""
-    if _agentx_model_family(model).startswith(AGENTX_FULL_CONTEXT_FAMILIES):
-        return AGENTX_CORPUS_FULL
-    return AGENTX_CORPUS_256K
 
 
 # GEAK's own names for the axes Hyperloom hands it: ``E2E_METRIC`` selects one
@@ -472,50 +443,7 @@ def build_agentx_workload_spec(
             "isl_osl_placeholder": isl_osl_placeholder,
         }
 
-    model = str(model_path or bench.get("model") or envs.get("MODEL") or proc_env.get("MODEL_PATH", "")).strip()
-    canon = client_knob("AGENTX_CANONICAL_DATASET", _agentx_default_corpus(model)).strip()
-    corpus = str(
-        envs.get("AGENTX_DATASET")
-        or envs.get("WEKA_LOADER_OVERRIDE")
-        or proc_env.get("AGENTX_DATASET")
-        or proc_env.get("WEKA_LOADER_OVERRIDE")
-        or canon
-    ).strip()
-    duration = int(client_knob("AGENTX_DURATION", 3600))
-    num_entries = int(client_knob("AGENTX_NUM_ENTRIES", 393))
-    return {
-        "kind": "agentx_trace_replay",
-        "client": "aiperf",
-        "scenario": "inferencex-agentx-mvp",
-        "corpus": corpus,
-        "canonical_corpus": canon,
-        "num_entries": num_entries,
-        "duration_s": duration,
-        # GEAK's inner A/B loop uses the scenario floor (900s) unless parity/
-        # validation explicitly requests the full canonical window.
-        "geak_loop_duration_s": min(duration, 900),
-        "concurrency": conc,
-        # ``benchmark_mode`` is "agentx" because the caller returned early
-        # otherwise, and it only decides the axis when no ``grading`` reached
-        # here. A session that recorded one already resolved
-        # HYPERLOOM_PERF_METRIC at seed, so honouring the override again here
-        # would let a subprocess that lost the variable -- or gained a different
-        # one -- publish an axis the session never graded on.
-        "metric_basis": metric_basis,
-        "intvty_p90_veto_pct": intvty_p90_veto_pct,
-        # The rule this session's verdict keeps on, so GEAK's "ok" means the same thing.
-        **keep_rule,
-        # Hyperloom's analyzer window is the canonical duration plus grace/drain.
-        "metric_window_s": float(duration) + 40.0,
-        "trajectory_start_ratio": [0.25, 0.75],
-        "warmup_requests_per_lane": int(client_knob("AGENTX_WARMUP_REQUESTS_PER_LANE", 10)),
-        # Reads back the CONC-scaled value apply_agentx_switch wrote into envs,
-        # never the operator's raw AGENTX_WARMUP_GRACE_PERIOD: the client is
-        # bounded by the scaled number, so the handoff must publish that one.
-        "warmup_grace_period_s": int(client_knob("AGENTX_WARMUP_GRACE_PERIOD", 1800)),
-        "failed_request_threshold": float(client_knob("AGENTX_FAILED_REQUEST_THRESHOLD", 0.10)),
-        "isl_osl_placeholder": isl_osl_placeholder,
-    }
+    raise ValueError("Only the MLPerf client uses a Hyperloom workload spec")
 
 
 def pin_mlperf_round_concurrency(envs: dict[str, Any]) -> None:
@@ -542,7 +470,7 @@ def apply_agentx_switch(
     active: bool | None = None,
     grading: Mapping[str, Any] | None = None,
 ) -> None:
-    """Switch serving-framework benchmarks to the AgentX aiperf client.
+    """Switch serving-framework benchmarks to the independent MLPerf client.
 
     ``conc`` is the concurrency this round will run at; the inner benchmark cap,
     the client's warmup grace and the published ``workload_spec.concurrency`` are
@@ -553,9 +481,11 @@ def apply_agentx_switch(
     GEAK; callers that cannot reach the live state leave it ``None`` and the
     spec derives both from the environment as before.
     """
+    from hyperloom.common.agentx_workload import is_mlperf_backend
+
     if active is None:
         active = agentx_enabled()
-    if not active:
+    if not active or not is_mlperf_backend():
         return
     from hyperloom.inference_optimizer import framework_registry
 
@@ -573,18 +503,11 @@ def apply_agentx_switch(
         mlperf_trajectories,
     )
 
-    from ._agentx_timeouts import agentx_warmup_grace_sec
-
     _agentx_env = agentx_env_for_conc(conc)
     bench["benchmark_script"] = agentx_client_script(_agentx_env)
     envs["RUN_EVAL"] = "false"
     envs["MODEL"] = str(model_path or bench.get("model") or os.environ.get("MODEL_PATH", "")).strip()
     envs["FRAMEWORK"] = framework
-    # WEKA_LOADER_OVERRIDE is upstream's own per-recipe corpus pin, so it has no
-    # AGENTX_ prefix and would not survive the loop below. aiperf_client.sh
-    # documents it as a supported knob; without forwarding it only works when
-    # the benchmark process happens to inherit the full parent environment,
-    # which is exactly the kind of silent difference this path exists to remove.
     for key, value in _agentx_env.items():
         if _is_agentx_client_key(key, _agentx_env):
             envs[key] = value
@@ -612,25 +535,6 @@ def apply_agentx_switch(
             f"--served-model-name {MLPERF_SERVED_MODEL}",
             pinned_by=("served-model-name", "served_model_name"),
         )
-    # Preserve the client's own warmup bound; it does not enlarge the benchmark cap.
-    _grace = agentx_warmup_grace_sec(_agentx_env)
-    _raw_grace = (_agentx_env.get("AGENTX_WARMUP_GRACE_PERIOD") or "").strip()
-    envs["AGENTX_WARMUP_GRACE_PERIOD"] = str(_grace)
-    if bench.get("timeout_seconds") is not None:
-        envs["AGENTX_PHASE_WAIT_TIMEOUT_S"] = str(math.ceil(float(bench["timeout_seconds"])))
-    if _raw_grace != str(_grace):
-        log.info(
-            "AgentX: exporting the CONC-scaled warmup grace %ds to the client (operator value %s).",
-            _grace,
-            _raw_grace or "unset",
-        )
-    # Publish LAST, and only now: the spec is what GEAK replays, so every value
-    # in it must be the one this function settled on. ``warmup_grace_period_s``
-    # reads AGENTX_WARMUP_GRACE_PERIOD back off ``envs`` above, so publishing
-    # before the scaling would record the operator's raw value in the handoff
-    # while the client ran with the scaled one. ``_agentx_env`` carries this
-    # round's CONC, so the spec's concurrency is the served concurrency by
-    # construction rather than by later repair.
     bench["workload_spec"] = build_agentx_workload_spec(
         bench,
         envs,
@@ -649,7 +553,11 @@ def prepare_agentx_runtime(
     active: bool | None = None,
 ) -> str | None:
     """Deploy and preflight AgentX assets for baseline/profile runs."""
+    from hyperloom.common.agentx_workload import is_mlperf_backend
+
     runtime_env = env or os.environ
+    if not is_mlperf_backend(runtime_env):
+        return None
     if active is None:
         active = agentx_enabled(runtime_env)
         if not active and config_path:
@@ -794,20 +702,6 @@ def _resolve_framework_repo_path(
     return ""
 
 
-def prepend_launch_path(envs: dict[str, Any], var: str, *entries: str) -> None:
-    """Put ``entries`` first on the path-list env ``var`` the materialized config hands the server launch.
-
-    Magpie and the bypass launcher start the server with ``os.environ`` overlaid by ``benchmark.envs``, so a config
-    value replaces the inherited one. A config without the key therefore builds on the inherited value, or
-    prepending would drop the operator's and the image's entries (import paths, ``PATH``, ``/opt/rocm/lib``); a
-    config with the key stays authoritative. An entry already on the path moves to the front, and empty parts are
-    dropped.
-    """
-    base = envs[var] if var in envs else os.environ.get(var)
-    parts = [*entries, *str(base or "").strip().split(os.pathsep)]
-    envs[var] = os.pathsep.join(dict.fromkeys(part for part in parts if part))
-
-
 #: Source-root envs Hyperloom writes into a vLLM launch; vLLM reports them as unknown.
 VLLM_SOURCE_ROOT_ENVS: tuple[str, ...] = ("FRAMEWORK_REPO_PATH", "VLLM_REPO_PATH", "VLLM_DIR")
 
@@ -854,16 +748,7 @@ def _operator_extra_env() -> dict[str, str]:
     """Return the ``--extra-env`` pins the CLI serialized, or ``{}``."""
     from hyperloom.common.env_safety import operator_extra_env
 
-    return operator_extra_env()
-
-
-def resolve_reference_base() -> tuple[str, dict[str, str]]:
-    """Read the ``--reference-script`` server args / envs from SharedState.
-
-    Returns ``("", {})`` when the run has no reference recipe.
-    """
-    args, envs, _controls = resolve_reference_launch()
-    return args, envs
+    return {key: value for key, value in operator_extra_env().items() if key.strip().upper() != "RUN_EVAL"}
 
 
 def resolve_reference_launch() -> tuple[str, dict[str, str], dict[str, Any]]:
@@ -954,10 +839,6 @@ def apply_scriptable_runtime_defaults(
 def _remove_moe_runner_backend_arg(args: str) -> str:
     """Remove any existing SGLang MoE runner backend flag from an args string."""
     return " ".join(_MOE_RUNNER_BACKEND_RE.sub(" ", str(args or "")).split())
-
-
-# Warn once per process when the accuracy gate is disabled.
-_RUN_EVAL_DISABLED_WARN_EMITTED = False
 
 
 def _model_requires_remote_code(model_path: str | None) -> bool:
@@ -1160,6 +1041,11 @@ def default_baseline_config() -> Path:
     Returns:
         Path: The shipped Magpie YAML config path for the resolved framework.
     """
+    from hyperloom.common.benchmark_config import benchmark_config_path
+
+    source = benchmark_config_path()
+    if source is not None:
+        return source
     fw = os.environ.get("FRAMEWORK") or framework_registry.DEFAULT_FRAMEWORK
     return asset_root() / "assets" / "configs" / framework_registry.shipped_config_name("baseline", fw)
 
@@ -1288,104 +1174,90 @@ def _finalize_framework_server_args(
         envs[framework_env] = resolved_server_args
 
 
-def _profile_steps_cap(policy_env: Mapping[str, Any]) -> tuple[int, bool]:
+def _profile_steps_cap(policy_env: Mapping[str, Any]) -> int:
     raw = str(policy_env.get("HYPERLOOM_PROFILE_MAX_STEPS_CAP") or "").strip()
-    explicit = raw.isdigit() and int(raw) >= 1
     try:
         cap = int(raw or _DEFAULT_PROFILE_MAX_STEPS)
     except ValueError:
         cap = _DEFAULT_PROFILE_MAX_STEPS
-    return (cap if cap > 0 else _DEFAULT_PROFILE_MAX_STEPS), explicit
+    return cap if cap > 0 else _DEFAULT_PROFILE_MAX_STEPS
 
 
 def _profile_capture_window(
-    policy_env: Mapping[str, Any],
-    *,
-    agentx: bool,
-    cap: int,
-    cap_explicit: bool,
-    delay_iters: int = 0,
-    steady_floor: int | None = None,
+    policy_env: Mapping[str, Any], *, cap: int, delay_iters: int = 0, steady_floor: int | None = None
 ) -> tuple[int, int]:
-    """Resolve capture steps and delay without consulting the ambient environment."""
-    max_iters = cap
-    if agentx:
-        delay_iters = 0
-        if max_iters > _AGENTX_PROFILE_MAX_ITERS:
-            if cap_explicit:
-                log.warning(
-                    "AgentX: explicit HYPERLOOM_PROFILE_MAX_STEPS_CAP=%d is "
-                    "being overridden to %d. The cap is calibrated on the "
-                    "synthetic ISL/OSL shape; an agentic step carries orders "
-                    "of magnitude more, and the torch profiler buffers "
-                    "events in host RAM until the OOM killer arrives.",
-                    max_iters,
-                    _AGENTX_PROFILE_MAX_ITERS,
-                )
-            else:
-                log.info(
-                    "AgentX: lowering captured profile steps %d -> %d. The cap is "
-                    "calibrated on the synthetic ISL/OSL shape; an agentic step "
-                    "carries orders of magnitude more, and the torch profiler "
-                    "buffers events in host RAM until the OOM killer arrives.",
-                    max_iters,
-                    _AGENTX_PROFILE_MAX_ITERS,
-                )
-            max_iters = _AGENTX_PROFILE_MAX_ITERS
-            if steady_floor is not None and max_iters < steady_floor:
-                log.warning(
-                    "AgentX: capped profile steps %d is below the steady-state "
-                    "floor of %d; the trace may lack a steady-state window "
-                    "(trace_split_no_steady_state).",
-                    max_iters,
-                    steady_floor,
-                )
+    """Resolve the synthetic workload's capture steps and delay."""
     override = str(policy_env.get("HYPERLOOM_PROFILE_MAX_ITERS") or "").strip()
-    if override.isdigit() and int(override) > 0:
-        max_iters = int(override)
-        delay_override = str(policy_env.get("HYPERLOOM_PROFILE_DELAY_ITERS") or "").strip()
-        if agentx:
-            if delay_override:
-                log.warning(
-                    "ignoring HYPERLOOM_PROFILE_DELAY_ITERS=%s under AgentX: the "
-                    "profiling window is wall-clock, so an iteration delay never elapses "
-                    "inside it and the trace comes back empty",
-                    delay_override,
-                )
-        else:
-            try:
-                delay_iters = max(0, int(delay_override or 8))
-            except ValueError:
-                delay_iters = 8
-        if agentx and max_iters > _AGENTX_PROFILE_MAX_ITERS:
-            log.warning(
-                "HYPERLOOM_PROFILE_MAX_ITERS=%d overrides the AgentX capture "
-                "bound of %d. That bound is a host-RAM limit, not a "
-                "serialization one: an agentic step carries orders of "
-                "magnitude more events than the synthetic shape ``cap`` is "
-                "sized against, and at the stock cap a DeepSeek-V4 profile "
-                "round was OOM-killed mid-capture three times in a row. "
-                "Unset it to restore the bound.",
-                max_iters,
-                _AGENTX_PROFILE_MAX_ITERS,
-            )
-        if steady_floor is not None and max_iters < steady_floor:
-            log.warning(
-                "HYPERLOOM_PROFILE_MAX_ITERS=%d is below the steady-state "
-                "floor of %d; the trace may lack a steady-state window "
-                "(trace_split_no_steady_state).",
-                max_iters,
-                steady_floor,
-            )
-        elif max_iters > cap:
-            log.warning(
-                "HYPERLOOM_PROFILE_MAX_ITERS=%d exceeds the serialization-"
-                "safe cap of %d; the trace may be too large to serialize "
-                "(EngineCore RPC timeout).",
-                max_iters,
-                cap,
-            )
+    if not override.isdigit() or int(override) <= 0:
+        return delay_iters, cap
+    max_iters = int(override)
+    try:
+        delay_iters = max(0, int(policy_env.get("HYPERLOOM_PROFILE_DELAY_ITERS") or 8))
+    except ValueError:
+        delay_iters = 8
+    if steady_floor is not None and max_iters < steady_floor:
+        log.warning("HYPERLOOM_PROFILE_MAX_ITERS=%d is below the steady-state floor of %d", max_iters, steady_floor)
+    elif max_iters > cap:
+        log.warning("HYPERLOOM_PROFILE_MAX_ITERS=%d exceeds the serialization-safe cap of %d", max_iters, cap)
     return delay_iters, max_iters
+
+
+def prepare_grid_benchmark_config(config_path: Path, output_dir: Path, **overrides: Any) -> Path:
+    """Keep the verified native baseline intact until the grid composes its candidate."""
+    from .magpie_agentx import native_config
+
+    if native_config(config_path):
+        return config_path
+    return materialize_config_with_envs(config_path, output_dir, **overrides)
+
+
+def materialize_benchmark_config(config_path: Path, output_dir: Path, **overrides: Any) -> Path:
+    """Resolve the workload owner before applying server candidate changes."""
+    import yaml
+
+    from hyperloom.common.benchmark_config import is_magpie_agentx
+    from hyperloom.common.coerce import to_str_list
+    from .magpie_agentx import LaunchChanges, apply_launch_changes, materialize_agentx, recipe_option_names
+
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if not is_magpie_agentx(config["benchmark"]):
+        return materialize_config_with_envs(config_path, output_dir, **overrides)
+    replacing = overrides.get("args_mode") == "replace"
+    inherited = "" if replacing else os.environ.get("INFERENCE_OPTIMIZER_SERVER_ARGS", "")
+    recipe_options = recipe_option_names(config_path)
+    apply_launch_changes(config["benchmark"], LaunchChanges(args=inherited), recipe_options=recipe_options)
+    from hyperloom.common.env import is_truthy
+
+    unset_envs = to_str_list(overrides.get("unset_envs"))
+    server_env, dropped = filter_untrusted_env_mapping(
+        {
+            key: value
+            for key, value in _operator_extra_env().items()
+            if key not in {"MODEL_PATH", "FRAMEWORK", "PRECISION", "TP", "EP", "CONC"}
+            and key not in unset_envs
+            and not key.startswith(("HYPERLOOM_", "INFERENCE_OPTIMIZER_"))
+        },
+        allow_predicate=is_allowed_variant_env_key,
+    )
+    for key in dropped:
+        log.warning("Dropping extra_envs key %s before AgentX materialization", key)
+    server_env.update(overrides.get("extra_envs") or {})
+    if is_truthy(server_env.pop("RUN_EVAL", False)):
+        raise ValueError("AgentX uses Magpie's replay validity; RUN_EVAL cannot enable GSM8K for this workload")
+    changes = LaunchChanges(
+        overrides.get("extra_server_args", ""),
+        server_env,
+        to_str_list(overrides.get("remove_args")),
+        unset_envs,
+        replacing,
+    )
+    apply_launch_changes(config["benchmark"], changes, recipe_options=recipe_options)
+    return materialize_agentx(
+        config,
+        output_dir / overrides.get("out_name", "baseline_config.with_envs.yaml"),
+        model_path=overrides.get("model_path"),
+        inferencex_path=overrides.get("inferencex_path"),
+    )
 
 
 def materialize_config_with_envs(
@@ -1489,7 +1361,8 @@ def materialize_config_with_envs(
             bench.pop("benchmark_script", None)
     if benchmark_script:
         bench["benchmark_script"] = str(benchmark_script)
-    envs = bench.setdefault("envs", {})
+    agentx_run = agentx_enabled() if agentx_mode is None else agentx_mode
+    envs = bench["envs"] = {k: v for k, v in (bench.get("envs") or {}).items() if agentx_run or k != "RUN_EVAL"}
     runtime_path = os.environ.get("PATH", "").strip()
     if "PATH" in envs and runtime_path:
         envs["PATH"] = runtime_path
@@ -1651,7 +1524,7 @@ def materialize_config_with_envs(
         safe_conc = max(conc_val, 1)
         # Cap captured decode steps at a serialization-safe default so the
         # torch-profiler trace can be written without starving the engine RPC.
-        cap, cap_explicit = _profile_steps_cap(os.environ)
+        cap = _profile_steps_cap(os.environ)
 
         # Resolve the profile-scoped OSL. PROFILE_OSL (via --profile-osl) is
         # honored as-is; otherwise default to min(served OSL,
@@ -1702,9 +1575,7 @@ def materialize_config_with_envs(
 
         delay_iters, max_iters = _profile_capture_window(
             os.environ,
-            agentx=agentx_enabled(),
             cap=cap,
-            cap_explicit=cap_explicit,
             delay_iters=max(0, int(osl_val * (r_val + 1) * 3 - cap / 2)),
             steady_floor=steady_floor,
         )
@@ -2176,12 +2047,9 @@ def materialize_config_with_envs(
             "--trust-remote-code",
             pinned_by=("trust-remote-code",),
         )
-    # Accuracy eval (GSM8K) is ON by default; env / extra_envs may override.
-    # Disabling it removes the per-variant accuracy gate — warn loudly, never
-    # block.
+    # Accuracy eval (GSM8K) is ON unless the round passes ``extra_envs["RUN_EVAL"]`` or the workload is AgentX.
     if "RUN_EVAL" not in envs:
-        env_run_eval = os.environ.get("RUN_EVAL")
-        envs["RUN_EVAL"] = env_run_eval if env_run_eval is not None else "true"
+        envs["RUN_EVAL"] = "true"
     # Persist eval task/limit into the YAML so they become part of the
     # fingerprint-able contract and bypass_runner reads them from a stable source.
     _eval_tasks_env = os.environ.get("MAGPIE_EVAL_TASKS", "").strip()
@@ -2216,15 +2084,6 @@ def materialize_config_with_envs(
             _eval_tok_env = ""
     if _eval_tok_env and "MAGPIE_EVAL_TOKENIZED_REQUESTS" not in envs:
         envs["MAGPIE_EVAL_TOKENIZED_REQUESTS"] = _eval_tok_env
-    if not is_truthy(envs.get("RUN_EVAL", ""), default=True):
-        global _RUN_EVAL_DISABLED_WARN_EMITTED
-        if not _RUN_EVAL_DISABLED_WARN_EMITTED:
-            log.warning(
-                "RUN_EVAL is disabled: no per-variant accuracy gate, so "
-                "accuracy regressions will not be caught. Set RUN_EVAL=true "
-                "to restore the gate. This warning fires once per process."
-            )
-            _RUN_EVAL_DISABLED_WARN_EMITTED = True
     # FlyDSL folds only same-directory helpers into its JIT cache key, so a patched
     # helper one directory over is served from a stale binary. Naming the roots
     # folds their sources into the key. Only the run that applied such a patch has

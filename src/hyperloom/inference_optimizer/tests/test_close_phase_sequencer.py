@@ -30,7 +30,7 @@ from hyperloom.orchestrator.roles.mock_backend import (
     MockTurn,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator, RunOptions
 from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.phases.machine import Transition
 from hyperloom.orchestrator.phases.close import (
@@ -322,9 +322,7 @@ async def test_close_sequencer_still_reports_when_the_first_report_task_was_canc
     )
     coord.shared_state.closing_report_task_id = "wallclock-report"
 
-    await coord.phase_close.on_enter_close(
-        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
-    )
+    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     by_step = {r["step"]: r for r in rows}
@@ -535,9 +533,7 @@ async def test_the_sequencer_records_the_state_a_running_report_ended_in(coord):
     _running_report_row(coord)
     coord.shared_state.closing_report_task_id = "wallclock-report"
 
-    await coord.phase_close.on_enter_close(
-        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
-    )
+    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     report = next(r for r in rows if r["step"] == "report")
@@ -567,9 +563,7 @@ async def test_a_resumed_leg_writes_its_own_report_and_breakdown(coord, tmp_path
         coord.tasks._by_id[row.task_id] = row
     coord.shared_state.resumed_ts = "2026-09-25T09:46:24+00:00"
 
-    await coord.phase_close.on_enter_close(
-        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
-    )
+    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
 
     ran = [(t.kind, t.idempotency_key) for t in coord.sub.run_calls if t.kind in {"report", "session_breakdown"}]
     assert ran == [
@@ -596,9 +590,7 @@ async def test_close_sequencer_runs_all_steps_in_order_happy_path(
     # stop_reason is normally set by the phase machine before CLOSE is entered.
     coord.shared_state.stop_reason = "sweep_done"
 
-    await coord.phase_close.on_enter_close(
-        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
-    )
+    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     steps = [r["step"] for r in rows]
@@ -657,14 +649,11 @@ async def test_close_sequencer_records_its_own_verdict_and_artifacts(
     # stop_reason is normally set by the phase machine before CLOSE is entered.
     coord.shared_state.stop_reason = "sweep_done"
 
-    await coord.phase_close.on_enter_close(
-        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
-    )
+    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
 
     recorded = assemble_parts(tmp_path, warnings=[])["close"]
     assert recorded["status"] == "succeeded"
     assert recorded["close_sequence_done"] is True
-    assert recorded["stop_reason"] == "sweep_done"
     assert [row["step"] for row in recorded["steps"]] == [
         "sequencer_started",
         "stack_revalidation",
@@ -704,9 +693,7 @@ async def test_close_sequencer_records_the_recipe_publication_under_close(
     coord.shared_state.model_name = "model"
     coord.shared_state.gpu_type = "mi300x"
 
-    await coord.phase_close.on_enter_close(
-        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
-    )
+    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
 
     write_back = assemble_parts(tmp_path, warnings=[])["close"]["kb_write_back"]
     assert write_back["status"] == "written"
@@ -740,9 +727,7 @@ async def test_close_sequencer_records_degraded_when_a_step_fails(
 
     coord.sub = _FailingRunner()
 
-    await coord.phase_close.on_enter_close(
-        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
-    )
+    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
 
     recorded = assemble_parts(tmp_path, warnings=[])["close"]
     assert recorded["status"] == "degraded"
@@ -769,9 +754,7 @@ async def test_close_sequencer_surfaces_remote_finalize_failure(
         },
     )
 
-    await coord.phase_close.on_enter_close(
-        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
-    )
+    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     fact = next(row for row in rows if row["step"] == "fact_finalize")
@@ -787,9 +770,7 @@ async def test_close_sequencer_does_not_overwrite_caller_set_stop_reason(
     coord.shared_state.phase_history = [_close_phase_history_row()]
     coord.shared_state.stop_reason = "signal"
 
-    await coord.phase_close.on_enter_close(
-        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
-    )
+    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
 
     assert coord.shared_state.stop_reason == "signal"
 
@@ -843,9 +824,7 @@ async def test_entering_close_keeps_the_stop_reason_already_set(tmp_path: Path, 
 async def test_close_sequencer_report_before_session_breakdown(coord):
     """Report task MUST be enqueued before session_breakdown."""
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    await coord.phase_close.on_enter_close(
-        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
-    )
+    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
     insertion = coord.tasks.insertion_order
     report_idx = insertion.index("internal-report-close_phase_entry")
     bd_idx = insertion.index("internal-session_breakdown-close_phase_entry")
@@ -856,9 +835,7 @@ async def test_close_sequencer_report_before_session_breakdown(coord):
 async def test_close_sequencer_skips_recipe_kb_steps_when_no_recipe_kb(coord):
     """``--degraded-kb`` runs (recipe_kb=None): NDJSON drain recorded 'skipped', not silent."""
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    await coord.phase_close.on_enter_close(
-        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}, loopback=False)
-    )
+    await coord.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={}))
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     drain_row = next(r for r in rows if r["step"] == "ndjson_drain")
     assert drain_row["status"] == "skipped"
@@ -879,7 +856,7 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
     # Seed state at SWEEP boundary.
     coord.shared_state.phase = "SWEEP"
@@ -931,7 +908,7 @@ class TestEveryTerminalReachesAWrittenReport:
             session_dir=session_dir,
             backends={name: MockBackend(idle) for name in ("orchestration", "critic")},
             role_registry=default_role_registry(),
-            knowledge_plane=None,
+            advisory=AdvisoryServices(knowledge_plane=None),
         )
 
     @pytest.mark.asyncio
@@ -943,7 +920,7 @@ class TestEveryTerminalReachesAWrittenReport:
 
         monkeypatch.setattr(coord.phase_machine, "advance_phase_if_needed", _cannot_advance)
         try:
-            reason = await coord.run(max_ticks=1, max_minutes=60, closing_grace_sec=0.0)
+            reason = await coord.run(options=RunOptions(max_minutes=60, max_ticks=1, closing_grace_sec=0.0))
         finally:
             await coord.stop()
 
@@ -1114,7 +1091,7 @@ class TestEveryTerminalReachesAWrittenReport:
         coord.shared_state.elapsed_charged_sec = 120 * 60.0
 
         try:
-            reason = await coord.run(max_minutes=60, closing_grace_sec=0.0, max_ticks=4)
+            reason = await coord.run(options=RunOptions(max_minutes=60, max_ticks=4, closing_grace_sec=0.0))
         finally:
             await coord.stop()
 
@@ -1177,7 +1154,7 @@ async def test_the_sequencer_delivers_the_finished_close_section_in_the_package(
             "critic": MockBackend(idle_plan),
         },
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
     coord.shared_state.phase = "SWEEP"
     coord.shared_state.phase_history = [{"to_phase": "SWEEP", "evidence": {}, "reason": "kernel_no_more_leverage"}]
@@ -1218,7 +1195,7 @@ async def test_recipe_kb_t4_hook_short_circuits_when_sequencer_done(tmp_path: Pa
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=KnowledgePlane(recipe_kb=_StubRecipeKB()),
+        advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(recipe_kb=_StubRecipeKB())),
     )
     coord.shared_state.recipe_kb_session_id = "sid-stop-skip"
     coord.shared_state.close_sequence_done = True
@@ -1242,7 +1219,7 @@ async def test_recipe_kb_t4_hook_still_runs_when_sequencer_not_done(tmp_path: Pa
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=KnowledgePlane(recipe_kb=_StubRecipeKB()),
+        advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(recipe_kb=_StubRecipeKB())),
     )
     coord.shared_state.recipe_kb_session_id = "sid-fallback"
     coord.shared_state.close_sequence_done = False
@@ -1277,7 +1254,7 @@ async def test_recipe_kb_t4_hook_remote_runs_without_recipe_kb_or_sid(
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
     coord.shared_state.recipe_kb_session_id = ""
     coord.shared_state.close_sequence_done = False
@@ -1318,7 +1295,7 @@ async def test_recipe_kb_t4_hook_remote_skips_when_close_sequence_done(tmp_path:
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=KnowledgePlane(config=config),
+        advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(config=config)),
     )
     coord.shared_state.recipe_kb_session_id = ""
     coord.shared_state.close_sequence_done = True
@@ -1359,7 +1336,7 @@ async def test_recipe_kb_t4_hook_retries_failed_finalize_after_close(
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=KnowledgePlane(config=config),
+        advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(config=config)),
     )
     coord.shared_state.close_sequence_done = True
     coord.shared_state.recipe_finalize_status = "failed"
@@ -1396,7 +1373,7 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb(tmp_path: Path):
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=KnowledgePlane(config=config),
+        advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(config=config)),
     )
     coord.shared_state.recipe_kb_session_id = "local-session"
     coord.shared_state.close_sequence_done = False
@@ -1431,7 +1408,7 @@ async def test_recipe_kb_t4_hook_local_skips_without_recipe_kb_sid(tmp_path: Pat
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=KnowledgePlane(config=config, recipe_kb=_StubRecipeKB()),
+        advisory=AdvisoryServices(knowledge_plane=KnowledgePlane(config=config, recipe_kb=_StubRecipeKB())),
     )
     coord.shared_state.recipe_kb_session_id = "  "
     coord.shared_state.close_sequence_done = False

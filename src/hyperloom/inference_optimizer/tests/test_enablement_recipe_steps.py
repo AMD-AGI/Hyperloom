@@ -599,12 +599,14 @@ def test_the_serve_line_hands_the_shell_one_argument_per_token():
     """
     import shlex as _shlex
 
-    from hyperloom.inference_optimizer.reference_script import render_reference_script
+    from hyperloom.inference_optimizer.reference_script import LaunchSettings, ServingTarget, render_reference_script
 
     script = render_reference_script(
         framework="vllm",
-        server_args='--kv-cache-dtype fp8 --compilation-config {"max_cudagraph_capture_size":8,"cudagraph_mode":"NONE"}',
-        model="/m",
+        launch=LaunchSettings(
+            server_args='--kv-cache-dtype fp8 --compilation-config {"max_cudagraph_capture_size":8,"cudagraph_mode":"NONE"}'
+        ),
+        target=ServingTarget(model="/m"),
     )
     serve = [ln for ln in script.splitlines() if ln.startswith("vllm serve")]
     assert serve, script

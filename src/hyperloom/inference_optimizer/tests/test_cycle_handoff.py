@@ -81,9 +81,7 @@ async def test_a_sweep_that_settles_on_entry_hands_off_before_the_machine_leaves
     st.conc_sweep_enabled = False
 
     await coord.phase_sweep.on_enter_sweep(
-        Transition(
-            from_phase=ps.PHASE_FRAMEWORK_AGENT, to_phase=ps.PHASE_SWEEP, reason="test", evidence={}, loopback=False
-        )
+        Transition(from_phase=ps.PHASE_FRAMEWORK_AGENT, to_phase=ps.PHASE_SWEEP, reason="test", evidence={})
     )
 
     assert st.last_conc_sweep["status"] == "skipped"

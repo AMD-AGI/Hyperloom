@@ -19,6 +19,7 @@ from hyperloom.orchestrator.rehearsal import VirtualClock, installed_clock
 from hyperloom.orchestrator.specialists import subprocess_ as subprocess_module
 from hyperloom.orchestrator.specialists.subprocess_ import (
     UNBOUNDED_REAP_CAP_SEC,
+    ReapWatch,
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
 )
@@ -77,13 +78,10 @@ async def _reap(deadline: Deadline | None, clock: VirtualClock, workspace: Path)
 
     dispatcher._kill = _kill  # type: ignore[assignment,method-assign]
     return await dispatcher._reap_loop(
-        proc=proc,
-        workspace=workspace,
-        done_files=(),
-        heartbeat_file=workspace / "heartbeat.json",
+        proc,
+        ReapWatch(workspace=workspace, done_files=(), heartbeat_file=workspace / "heartbeat.json", task_id="t"),
         deadline=deadline,
         started=clock.monotonic(),
-        task_id="t",
     )
 
 
@@ -390,20 +388,3 @@ class TestTheChargeAnchorIsNotPersisted:
         state.save(tmp_path)
 
         assert SharedState.load_or_init(tmp_path).elapsed_charged_sec == pytest.approx(600.0, abs=5.0)
-
-    def test_a_state_written_before_the_elapsed_sum_carries_its_spend_over(self):
-        # The old shape recorded spend only as a stamped deadline; what it had
-        # used was the time since start_ts, and that must survive the upgrade.
-        started = time.time() - 2 * 3600.0
-        state = SharedState.from_dict(
-            {
-                "schema_version": 6,
-                "session_id": "s",
-                "max_minutes": 180,
-                "start_ts": datetime.fromtimestamp(started, tz=timezone.utc).isoformat(),
-                "deadline_unix": started + 180 * 60.0,
-            }
-        )
-
-        assert state.elapsed_charged_sec == pytest.approx(2 * 3600.0, abs=5.0)
-        assert state.remaining_minutes() == pytest.approx(60.0, abs=1.0)

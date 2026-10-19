@@ -90,6 +90,7 @@ def test_format_search_state_puts_keeps_first():
 
 def test_format_search_state():
     assert SharedState._format_search_state(None) == "(none)"
+    assert SharedState._format_search_state({"tested": {}}).strip().startswith("cursor=0")
     search = {
         "cursor": 3,
         "accepted": [{"name": "a", "fingerprint": "f1"}],

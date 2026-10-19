@@ -5,9 +5,7 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from types import SimpleNamespace
 import pytest
 
 from hyperloom.agents.framework.kb import (
@@ -67,37 +65,22 @@ def test_framework_kb_does_not_share_a_root_with_the_recipe_kb(
 ) -> None:
     """The framework KB must not land on a directory a recipe store owns."""
     from hyperloom.agents.framework import kb as fa_kb
-    from hyperloom.inference_optimizer.cli.kb import _legacy_recipe_root, _resolve_local_kb_root
+    from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
 
     for name in (
         "INFERENCE_OPTIMIZER_FA_KB_PATH",
         "FRAMEWORK_AGENT_KB_DIR",
-        "HYPERLOOM_LOCAL_KB_ROOT",
         "KNOWLEDGE_LOCAL_ROOT",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
 
     framework_root = fa_kb.mutable_kb_root()
-    recipe_roots = [
-        _legacy_recipe_root(os.environ),
-        _resolve_local_kb_root(SimpleNamespace(local_kb_root=None)),
-    ]
+    recipe_root = Path(KnowledgeConfig.from_env().local_root)
 
-    for recipe_root in recipe_roots:
-        assert framework_root != recipe_root
-        assert recipe_root not in framework_root.parents
-        assert framework_root not in recipe_root.parents
-
-
-def test_legacy_kb_dirname_agrees_with_the_recipe_side(monkeypatch, tmp_path: Path) -> None:
-    """The framework package hardcodes the legacy root's leaf; it must stay in sync."""
-    from hyperloom.agents.framework import kb as fa_kb
-    from hyperloom.inference_optimizer.cli.kb import _legacy_recipe_root
-
-    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path / "workspace"))
-
-    assert _legacy_recipe_root(os.environ).name == fa_kb._LEGACY_WORKSPACE_KB_DIRNAME
+    assert framework_root != recipe_root
+    assert recipe_root not in framework_root.parents
+    assert framework_root not in recipe_root.parents
 
 
 # models.py

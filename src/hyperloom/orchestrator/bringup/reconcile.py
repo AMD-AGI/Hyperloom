@@ -19,6 +19,7 @@ from ..bus.resource_lock import BRINGUP_ROUND_LANE, ResourceLockManager
 from ..state.round_store import (
     EXPIRED_REAPED,
     Round,
+    RoundRequest,
     RoundStore,
 )
 from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound, TaskRegistry
@@ -73,9 +74,60 @@ _TIMEOUT_DENY_SQL = """
 
 __all__ = [
     "TIMEOUT_VERDICT",
+    "ReconcileLimits",
+    "ReconcileLinks",
     "ReconcileReport",
+    "ReconcileStores",
     "Reconciler",
 ]
+
+
+@dataclass(frozen=True)
+class ReconcileStores:
+    """The durable stores the pass repairs.
+
+    Attributes:
+        rounds: The durable round store.
+        tasks: The task registry.
+        locks: The lease manager; this pass is its only sweeper.
+    """
+
+    rounds: RoundStore
+    tasks: TaskRegistry
+    locks: ResourceLockManager
+
+
+@dataclass(frozen=True)
+class ReconcileLinks:
+    """The running loop's state the pass reads and writes, each optional.
+
+    Attributes:
+        resources: The gate's resource facts; ``None`` skips the update.
+        proposals: Returns the in-memory pending proposals, so a durable
+            timeout deny also reaches the copy the loop consults.
+        session_dir: Where SharedState is saved after a terminal is set.
+        result_pending: Whether a terminal task's result is still to be
+            booked by the dispatcher; ``None`` treats every terminal row
+            as booked.
+    """
+
+    resources: Any = None
+    proposals: Callable[[], Mapping[str, Any]] | None = None
+    session_dir: Any = None
+    result_pending: Callable[[str], bool] | None = None
+
+
+@dataclass(frozen=True)
+class ReconcileLimits:
+    """How long the pass waits before it settles a round or denies a review.
+
+    Attributes:
+        terminal_holder_cap_sec: Cap for a round whose holder went terminal.
+        review_ttl_sec: TTL for an undecided review.
+    """
+
+    terminal_holder_cap_sec: float = TERMINAL_HOLDER_CAP_SEC
+    review_ttl_sec: float = REVIEW_TTL_SEC
 
 
 @dataclass
@@ -126,49 +178,34 @@ class Reconciler:
 
     def __init__(
         self,
-        *,
-        rounds: RoundStore,
-        tasks: TaskRegistry,
-        locks: ResourceLockManager,
+        stores: ReconcileStores,
         shared_state: Any,
-        resources: Any = None,
-        proposals: Callable[[], Mapping[str, Any]] | None = None,
-        session_dir: Any = None,
-        result_pending: Callable[[str], bool] | None = None,
-        terminal_holder_cap_sec: float = TERMINAL_HOLDER_CAP_SEC,
-        review_ttl_sec: float = REVIEW_TTL_SEC,
+        *,
+        links: ReconcileLinks = ReconcileLinks(),
+        limits: ReconcileLimits = ReconcileLimits(),
     ):
         """Initialise the reconciler.
 
         Args:
-            rounds: The durable round store.
-            tasks: The task registry.
-            locks: The lease manager; this pass is its only sweeper.
+            stores: The durable stores the pass repairs.
             shared_state: SharedState, read for the projection and written when
                 an unreaped round stops the session.
-            resources: The gate's resource facts; ``None`` skips the update.
-            proposals: Returns the in-memory pending proposals, so a durable
-                timeout deny also reaches the copy the loop consults.
-            session_dir: Where SharedState is saved after a terminal is set.
-            result_pending: Whether a terminal task's result is still to be
-                booked by the dispatcher; ``None`` treats every terminal row
-                as booked.
-            terminal_holder_cap_sec: Cap for a round whose holder went terminal.
-            review_ttl_sec: TTL for an undecided review.
+            links: The running loop's state the pass reads and writes.
+            limits: How long a round or a review may wait.
         """
-        self._rounds = rounds
+        self._rounds = stores.rounds
         # One connection serves the whole session; a second would have to be
         # arbitrated against this one by the database's busy timeout.
-        self._db = rounds.db
-        self._tasks = tasks
-        self._locks = locks
+        self._db = stores.rounds.db
+        self._tasks = stores.tasks
+        self._locks = stores.locks
         self._shared_state = shared_state
-        self._resources = resources
-        self._proposals = proposals
-        self._session_dir = session_dir
-        self._result_pending = result_pending
-        self.terminal_holder_cap_sec = max(0.0, float(terminal_holder_cap_sec))
-        self.review_ttl_sec = max(0.0, float(review_ttl_sec))
+        self._resources = links.resources
+        self._proposals = links.proposals
+        self._session_dir = links.session_dir
+        self._result_pending = links.result_pending
+        self.terminal_holder_cap_sec = max(0.0, float(limits.terminal_holder_cap_sec))
+        self.review_ttl_sec = max(0.0, float(limits.review_ttl_sec))
         self.last_report = ReconcileReport()
 
     async def run(self, now_unix: float) -> ReconcileReport:
@@ -360,12 +397,14 @@ class Reconciler:
         if successor is not None:
             moved = await self._rounds.handoff(
                 round_row,
+                RoundRequest(
+                    now_unix=now_unix,
+                    request_id=f"reconcile:handoff:{successor.task_id}",
+                    evidence={"reason": "holder_terminal_with_successor"},
+                ),
                 new_holder_task_id=successor.task_id,
                 # A successor that declares no TTL inherits what the round has left.
                 lease_sec=float(successor.lease_ttl_sec) or (round_row.expires_unix - round_row.renewed_unix),
-                now_unix=now_unix,
-                request_id=f"reconcile:handoff:{successor.task_id}",
-                evidence={"reason": "holder_terminal_with_successor"},
             )
             if moved.ok:
                 report.handed_off.append(round_row.round_id)
@@ -381,10 +420,12 @@ class Reconciler:
         outcome = EXPIRED_REAPED
         result = await self._rounds.settle(
             round_row,
+            RoundRequest(
+                now_unix=now_unix,
+                request_id=f"reconcile:{why}:{round_row.round_id}:{round_row.fence}",
+                evidence={"reason": why, "cleanup": "holder_terminal_without_resources"},
+            ),
             outcome=outcome,
-            now_unix=now_unix,
-            request_id=f"reconcile:{why}:{round_row.round_id}:{round_row.fence}",
-            evidence={"reason": why, "cleanup": "holder_terminal_without_resources"},
         )
         if not result.ok:
             return

@@ -46,7 +46,7 @@ def _resolve_runner() -> str:
     )
 
 
-def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200, python_bin: str = "") -> dict:
+def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200) -> dict:
     """Run GEAK e2e once and return the parsed result.json (+ run metadata)."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -55,8 +55,7 @@ def call_geak(handoff: dict, output_dir: Path, *, timeout_s: int = 43200, python
     handoff_path.write_text(json.dumps(handoff, indent=2), encoding="utf-8")
 
     runner = _resolve_runner()
-    py = python_bin or sys.executable
-    cmd = [py, runner, str(handoff_path), str(result_path)]
+    cmd = [sys.executable, runner, str(handoff_path), str(result_path)]
 
     env = dict(os.environ)
     # ``timeout_s`` is authoritative: run_e2e.py reads GEAK_E2E_TIMEOUT_S to self-stop before the outer subprocess

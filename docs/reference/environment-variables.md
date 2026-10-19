@@ -124,8 +124,7 @@ when `--gpu-type` is omitted.
   `--pd-ib-device`.
 - **Phase toggles:** `--enable-roofline` / `--no-enable-roofline`,
   `--enable-conc-sweep` / `--no-enable-conc-sweep`, `--conc-sweep-concs`,
-  `--conc-sweep-total-budget-sec` (whole-sweep budget), `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`,
-  `--no-eval`.
+  `--conc-sweep-total-budget-sec` (whole-sweep budget), `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`.
 - **Agent models:** `--claude-model`, `--codex-model`.
 - **Session / resume:** `--resume-from`, `--force-resume`, `--reset-state`,
   `--extend-hours`.
@@ -157,14 +156,12 @@ In every lane a measured drop beyond the tolerance is a `REVERT`. A missing
 verdict while a positive baseline accuracy is on record drops to
 `NEEDS_REVIEW` — eval should have worked and didn't. No baseline accuracy at
 all degrades to a throughput-only `KEEP` rather than blocking every candidate,
-so eval-less environments still make progress. Pass `--no-eval` to turn the
-eval off for the whole run: the baseline anchors on throughput instead of
-halting on a missing accuracy reference, and every candidate then lands on
-that degraded path.
+so eval-less environments still make progress. The accuracy eval always runs:
+a baseline whose eval fails stops the run instead of falling back to a
+throughput-only measurement.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RUN_EVAL` | `true` | Whether a serving benchmark runs the GSM8K eval. Turning it off removes the per-candidate accuracy signal entirely — accuracy regressions stop being caught. Ignored by scriptable workloads, whose correctness signal is the `quality_gate` in `benchmark_report.json`. |
 | `HYPERLOOM_QUALITY_REF`<br>`HYPERLOOM_QUALITY_REF_WRITE` | Derived under the session dir | The scriptable quality gate's reference artifact: `_WRITE` establishes it on the baseline, the other compares against it on every later candidate. What the artifact holds is the workload's own business — xDiT stores an image, an operator-supplied `custom` workload stores whatever its script compares. Also emitted as `XDIT_QUALITY_REF` / `XDIT_QUALITY_REF_WRITE` for bench scripts written before the rename; either name is read, both are written. |
 | `INFERENCE_OPTIMIZER`<br>`_REQUIRE_KERNEL`<br>`_ACCURACY` | On | Gates the `KEEP` for a kernel patch integrated by the kernel lane. Set to `0` / `false` / `no` / `off` to fall back to a throughput-only `KEEP`. Disable only when the eval lane is known-broken: this gate is what stops a faster-but-wrong kernel from being kept. |
 | `MAGPIE_EVAL_LIMIT` | Unset (full task set) | Caps the number of eval problems (`lm_eval --limit`). Useful for smoke runs; see the noise caveat below before using it on a run whose `KEEP` decisions matter. |
@@ -565,11 +562,6 @@ Infera external mode requires `HYPERLOOM_MN_EXT_SSH_KEY` plus at least one
 `*_IPS` list, or the run fails fast at startup. RayJob external mode ignores
 the SSH / IP vars and uses `HYPERLOOM_MN_EXT_HEAD_IP` for restarts.
 
-Multi-node SSH fanout creates session-scoped keys under the active session
-directory. Treat `mn_id_ed25519` and `mn_id_ed25519.pub` as sensitive session
-artifacts: keep the session directory on an access-controlled filesystem and
-do not publish it unchanged in support bundles.
-
 ---
 
 ## Quantization prelude
@@ -708,7 +700,6 @@ The following variables configure the Critic and knowledge base components.
 |---------------------------------------|------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
 | `KNOWLEDGE_STORE_MODE`                | `local`                | Exclusive Recipe backend: `local` or `remote`. Ambient KB Store or GBrain credentials do not select remote mode. |
 | `KNOWLEDGE_LOCAL_ROOT`                | `$USER_DATA_PATH/knowledge`, otherwise `~/.cache/hyperloom/knowledge` | Local Recipe/KG root. It is not used for Recipe data in remote mode. |
-| `HYPERLOOM_`<br>`LOCAL_KB_ROOT`       | Unset                  | Deprecated explicit local Recipe root compatibility input, overridden by `--local-kb-root`; explicit use skips automatic legacy migration. |
 | `INFERENCE_OPTIMIZER_`<br>`FA_KB_PATH` | `$USER_DATA_PATH/framework-kb`, otherwise `/workspace/hyperloom/framework-kb` | Framework KB root, holding the lessons ledger the FRAMEWORK phase reads and writes. The orchestrator's KB reader and writeback both resolve through it. The withdrawn `FRAMEWORK_AGENT_KB_DIR` is ignored with a warning naming the resolved root. On first start-up an existing partition under the legacy `$USER_DATA_PATH/kb` is copied across once; a copy that fails warns and leaves the phase to cold-start. |
 | `KB_STORE_URL`                        | Local Recipe mode: `https://global.primus-safe.amd.com/knowledge-base`; remote mode: unset | Unified KB Service endpoint. Local Recipe mode uses the default only for co-hosted PR Monitor access; IR-3 disables PR Monitor without disabling local Recipe storage when the endpoint is unreachable. Remote Recipe mode requires an explicit value, selects the current Recipe View, replays its Config, Patch, and Kernel columns, then writes one final session at CLOSE. PR Monitor is available at `${KB_STORE_URL}/pr-monitor/v1` (REST/IR-3/Framework/KernelForge) and `${KB_STORE_URL}/pr-monitor/mcp/` (specialist MCP). |
 | `KB_STORE_TOKEN`                      | Unset                  | KB Store bearer token. Required when `KNOWLEDGE_STORE_MODE=remote`; transport failures during the final write are non-fatal. |
@@ -815,46 +806,10 @@ Primary switch (default **off**) for live Langfuse trace push.
   timestamp (`end == start`), so Langfuse shows no meaningful per-Generation
   duration — counts/usage are accurate, latency is not captured.
 
-### `token_usage` section (in `session_breakdown.json`)
-
-Every breakdown carries a top-level `token_usage` section: a promoted,
-discoverable rollup of LLM token spend derived from the per-call ledger
-(`reports/trace/llm_calls.jsonl` + `ext/*.jsonl`). It is purely derived from
-`decision_trace.token_rollup`, so it always reconciles with that section. No
-env var controls it; it is always present (zeroed on pre-trace sessions).
-
-* `session_total`: whole-session total across every call. Three counter
-  families are kept apart because they are billed and interpreted differently:
-  visible tokens (`total_in` / `total_out`), cache tokens
-  (`total_cache_creation` / `total_cache_read`), and hidden reasoning output
-  (`total_reasoning_out` — reported by reasoning models, absent from the reply
-  text and therefore *not* part of `total_out`). Two convenience figures sit on
-  top: `total_in_out` (visible prompt + completion only) and `grand_total`
-  (visible + all cache tokens + reasoning output — the all-in figure).
-* `by_component`: per-agent breakdown (orchestration / kernel / critic /
-  specialist / proposal_scorer / geak / forge / …), each with the same
-  convenience totals.
-* `by_phase`: per-phase breakdown (PRELUDE / ENABLEMENT / FRAMEWORK_AGENT / KERNEL_AGENT / SWEEP / CLOSE).
-* `attribution`: `attributed_to_decisions` vs `unattributed` split plus
-  `attributed_calls_pct`. Only calls that carry a `task_id` / `dyn_id` joining
-  to a KEEP/REVERT or dynamic_action decision (for example, specialist subprocess
-  turns) are attributed; orchestration / kernel / critic / proposal_scorer
-  turns are LLM-internal and land in `unattributed` (this is expected, not a
-  gap in the data).
-* `timeline`: each `action_timeline` row annotated with the tokens that join
-  to it on `task_id`. Rows whose action has no LLM spend show `tokens: null`
-  (rather than a zero bucket) to make the sparsity explicit.
-
-To get the single "total tokens for this run" number, read
-`token_usage.session_total.grand_total` (all-in: visible + cache + reasoning)
-or `.total_in_out` (visible prompt+completion only). Read
-`.total_reasoning_out` on its own when comparing a reasoning model against a
-non-reasoning one — the latter reports `0` there.
-
 ### Gateway attribution (`HYPERLOOM_LLM_ATTRIBUTION`)
 
-`token_usage` above is Hyperloom's own account of its spend, assembled from
-calls that report themselves to the ledger. The gateway keeps a second account,
+The per-call ledger (`reports/trace/llm_calls.jsonl`) is Hyperloom's own account
+of its spend, assembled from calls that report themselves. The gateway keeps a second account,
 from the calls it actually metered, and the two disagree whenever a component
 spends without a ledger producer. This variable makes the gateway's account
 readable along the same axes, by tagging every outbound call with who made it.
@@ -872,8 +827,8 @@ Each call then carries, on headers that gateway understands:
 |-------|-------|
 | `application` | Always `hyperloom`, to separate this product's spend on a shared gateway. |
 | `session` | `CLAW_SESSION_ID`, the same id `session_breakdown.json` records — this is what joins the two accounts. |
-| `component` | The producer, from the same vocabulary as `token_usage.by_component`. |
-| `phase` | The phase the run had reached, matching `token_usage.by_phase`. |
+| `component` | The producer, e.g. `orchestration`, `kernel`, `critic`, `specialist`. |
+| `phase` | The phase the run had reached. |
 | `type` | The action executing inside that phase, e.g. `kernel_opt`. |
 | `operation` | What the individual call was for, e.g. `generate_candidate`. |
 
@@ -881,7 +836,7 @@ For LiteLLM these arrive as `x-litellm-tags` (a comma-separated list landing in
 the `request_tags` column of `LiteLLM_SpendLogs`) and `x-litellm-trace-id` (the
 session id, which sets the `session_id` column and propagates to nested calls).
 A spend report can then be grouped by component or phase, or reconciled against
-`token_usage` for one session.
+the call ledger for one session.
 
 Fields with per-call cardinality (a task or kernel id) are deliberately not in
 the tag list: one tag per task would give the rollup as many buckets as there
@@ -898,7 +853,8 @@ output tokens per request, so output-only grading optimises about 1% of the
 token budget, and a variant can lift decode tok/s while degrading user-perceived
 latency with no visible cost.
 
-`HYPERLOOM_AGENTX=1` adopts the 2-D grading shape InferenceX uses. Upstream
+`HYPERLOOM_AGENTX=1` (native YAML generated from Hyperloom flags), or an explicit
+Magpie AgentX YAML passed with `--benchmark-config`, adopts the 2-D grading shape InferenceX uses. Upstream
 sweeps a concurrency ladder, keeps TTFT / ITL / TPOT percentiles separately, and
 publishes a **Pareto frontier** with E2E normalised interactivity as the x-axis
 and token throughput per chip as the y-axis. It never collapses the axes into one
@@ -933,16 +889,15 @@ TTFT is included in E2EL, unlike per-user `1/ITL`; on a ~114k-prompt replay TTFT
 is most of what a user waits for so grading on `1/ITL` would miss it.
 
 Default-on for AgentX runs, explicit opt-in via `HYPERLOOM_PERF_METRIC=intvty_v1`
-otherwise. Either AgentX signal turns it on: the ambient `HYPERLOOM_AGENTX=1`, or
+otherwise. Any AgentX signal turns it on: `HYPERLOOM_AGENTX=1`, the bound Magpie YAML, or
 `benchmark_mode=agentx` stamped at seed — so a round in a subprocess that never
 inherited the env var still grades on the agentic axis. Serving frameworks only;
 scriptable frameworks (xDiT, custom) keep output-throughput grading.
 
 | Variable                       | Default                       | Description                                                                                                                                                                                       |
 |--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `HYPERLOOM_PERF_METRIC`        | `intvty_v1` under `HYPERLOOM_AGENTX=1`, else output tput | `intvty_v1` grades E2E normalised interactivity P50 (median) as the primary objective, with the P90 slow tail and output throughput each held as a guard. Reported in the final summary as `grading mode`. |
+| `HYPERLOOM_PERF_METRIC`        | `intvty_v1` for Magpie AgentX, else output tput | `intvty_v1` grades E2E normalised interactivity P50 (median) as the primary objective, with the P90 slow tail and output throughput each held as a guard. Reported in the final summary as `grading mode`. |
 | `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Noise band in percent applied to the guards. A candidate whose slow tail or output throughput sits within this band of the anchor is not considered worse on that axis; the median has its own fixed bar and is not subject to the band. The default is the top of the 1–5% run-to-run noise upstream records for this workload. An unparseable value raises `EnvValueError` naming the variable, rather than grading against a band nobody chose. |
-| `HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION` | Unset (fail closed) | Truthy accepts a measurement whose submission verdict is absent or undetermined (`submission_valid=None`). A measurement the scenario explicitly judged invalid (`submission_valid=False`) is always rejected regardless of this flag. Applies to every measurement the run accepts (baseline, explore, kernel, sweep), not only the baseline — an unverified measurement makes every gain derived from it unverifiable. |
 | `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` | `7200` | Initial server-boot budget written by the persistent-server lifecycle configuration helper. Actual benchmark launches synchronize this field to `INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC`; this variable is not an additional benchmark deadline or a way to extend one. Non-benchmark lifecycle callers that do not perform that synchronization retain their own boot budget. |
 
 ### MLPerf agentic backend
@@ -974,7 +929,7 @@ answering, checks that the listener belongs to the server it booted, and checks
 
 | Variable | Default | Description |
 |---|---|---|
-| `HYPERLOOM_AGENTIC_BACKEND` | `aiperf` | `mlperf` selects the MLPerf agentic client. Any other value is aiperf. Settable by `export` or `--extra-env`; both reach every reader. |
+| `HYPERLOOM_AGENTIC_BACKEND` | — | `mlperf` selects the separate MLPerf client together with `HYPERLOOM_AGENTX=1`. Otherwise `HYPERLOOM_AGENTX=1` selects native Magpie AgentX; an explicit Magpie AgentX YAML also selects it. |
 | `MLPERF_ENDPOINTS_DIR` | `/opt/mlperf-endpoints` | Checkout of `mlcommons/endpoints` holding `utility/run_agentic.sh`. Checked at preflight. |
 | `AGENTIC_DATASET_PATH` | — (required) | Path to `agentic_combined_v6.jsonl`. Checked at preflight; its stem is recorded as the corpus. |
 | `MLPERF_TOKENIZER_DIR` | — (required) | Kimi-K3 fast-tokenizer directory the harness counts tokens with. Checked at preflight. |
@@ -988,21 +943,17 @@ defaults to `trajectories × 26 s × 2 + 1800 s` (26 s per trajectory measured o
 8×MI355X at concurrency 16, doubled for a cold first round, plus boot), and never
 below the stock 7800 s: about 9600 s for smoke and 33,700 s for `full`.
 
-AgentX profiling starts when AIPerf reports its measured phase.
-A capture the server bounds itself (SGLang `num_steps` in the `/start_profile` body, vLLM
-`--profiler-config.max_iterations` above 0) ends when every rank trace is complete, without a `/stop_profile`
-call; if the measured phase ends first, the capture is recorded as failed (`bounded_capture_incomplete`, or
-`trace_files_missing` when no fresh trace file exists). If neither happens within
-`AGENTX_TRACE_FIRST_FILE_TIMEOUT_S` (default 900 s) of `/start_profile`, the client posts `/stop_profile` once,
-waits for the flush within `AGENTX_TRACE_FLUSH_TIMEOUT_S`, and judges the capture by the traces alone; the decision
-records `stop_reason: safety_deadline` and whether the stop was accepted. `AGENTX_PROFILE_WINDOW_S` applies only to captures without
-such a bound: it sets the window before `/stop_profile` and defaults to 20 seconds. Phase waiting is bounded by the
-materialized benchmark timeout. Capture lifecycle status is
-written to a per-invocation `capture-status.json`; the adjacent
-`trace-manifest.json` records the selected primary and per-rank traces.
-Benchmark measurement success and trace-capture success are reported
-independently. AgentX multi-node profiling is currently rejected because its
-legacy fixed-delay capture is not aligned with the AIPerf phase signal.
+With `HYPERLOOM_AGENTX=1`, Hyperloom generates and archives the native Magpie YAML
+from its ordinary workload flags. `--docker-image` supplies an explicit serving
+image identity, required for custom models.
+
+Native AgentX profiling is configured in the Magpie YAML's
+`benchmark.profiler.torch_profiler` mapping: `num_steps`, `num_profiles`,
+`interval_seconds` (default 200), `start_seconds`, and `detailed_annotations`.
+Magpie starts after the replay reaches measurement and owns the capture/flush
+lifecycle. Each time window remains a separate trace input to TraceLens.
+Profile reports are diagnostic only and cannot supply KEEP evidence.
+See [Optimize an AgentX workload](../how-to/optimize.md#optimize-an-agentx-workload).
 
 ---
 

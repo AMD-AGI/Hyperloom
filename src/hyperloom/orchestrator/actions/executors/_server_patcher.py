@@ -1185,17 +1185,32 @@ def _rollback_applied(
 _FUZZ = 2
 
 
+@dataclass(frozen=True)
+class _PatchMode:
+    """One ``patch`` invocation variant: its extra flags, the label its log lines carry, and how failures are logged.
+
+    ``spawn_log`` reports a failure to spawn; ``log_stderr`` also logs a non-zero exit's stderr.
+    """
+
+    flags: tuple[str, ...]
+    label: str
+    spawn_log: Callable[..., None]
+    log_stderr: bool = False
+
+
 def _run_patch(
     patch_bin: str,
     patch_file: Path,
     cwd: Path,
-    *extra_flags: str,
+    mode: _PatchMode,
+    *,
     strip: int = 1,
-    spawn_log: Callable[..., None],
-    log_stderr: bool = False,
-    reverse_label: str = "",
 ) -> bool:
-    """Run ``patch -p<strip> --fuzz=2 <extra_flags>`` with ``patch_file`` on stdin."""
+    """Run ``patch -p<strip> --fuzz=2 <mode.flags>`` with ``patch_file`` on stdin."""
+    extra_flags = mode.flags
+    spawn_log = mode.spawn_log
+    log_stderr = mode.log_stderr
+    reverse_label = mode.label
     try:
         with patch_file.open("rb") as fh:
             result = subprocess.run(
@@ -1237,11 +1252,8 @@ def _patch_dry_run(
         patch_bin,
         patch_file,
         cwd,
-        "--dry-run",
-        "--silent",
+        _PatchMode(("--dry-run", "--silent"), " --dry-run", log.warning),
         strip=strip,
-        spawn_log=log.warning,
-        reverse_label=" --dry-run",
     )
 
 
@@ -1256,12 +1268,8 @@ def _patch_reverse_dry_run(
         patch_bin,
         patch_file,
         cwd,
-        "-R",
-        "--dry-run",
-        "--silent",
+        _PatchMode(("-R", "--dry-run", "--silent"), " -R --dry-run", log.debug),
         strip=strip,
-        spawn_log=log.debug,
-        reverse_label=" -R --dry-run",
     )
 
 
@@ -1279,11 +1287,8 @@ def _patch_apply(
         patch_bin,
         patch_file,
         cwd,
-        *flags,
+        _PatchMode(flags, " --reverse" if reverse else "", log.warning, log_stderr=True),
         strip=strip,
-        spawn_log=log.warning,
-        log_stderr=True,
-        reverse_label=" --reverse" if reverse else "",
     )
 
 

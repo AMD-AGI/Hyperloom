@@ -7,11 +7,12 @@ import os
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import TypeAlias
 
 from hyperloom_kb.config import PACKAGED_DECLARATION, load_declaration
 from hyperloom_kb.knowledge_read import ReadResult, ReadStatus
 from hyperloom_kb.remote import (
+    ExperienceStart,
     RemoteClient,
     RemoteClientError,
     RemoteConfig,
@@ -64,7 +65,7 @@ class NoOpExperienceKB:
         self.reason = reason
         self.degraded = degraded
 
-    def begin(self, **_kwargs: Any) -> NoOpExperienceSession:
+    def begin(self, _start: ExperienceStart) -> NoOpExperienceSession:
         return NoOpExperienceSession()
 
     def read(

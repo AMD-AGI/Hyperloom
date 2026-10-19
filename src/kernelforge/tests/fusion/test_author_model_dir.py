@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from kernelforge.fusion.author import build_author_prompt, build_multi_author_prompt
+from kernelforge.fusion.author import AuthorBrief, build_author_prompt, build_multi_author_prompt
 
 RECIPE = {
     "pattern": "llm:x",
@@ -22,7 +22,7 @@ MODEL_DIR = "/shared_nfs/hyperloom/models/DeepSeek-V4-Flash"
 
 
 def test_single_recipe_prompt_names_the_model_directory() -> None:
-    prompt = build_author_prompt(RECIPE, framework="vllm", ab_hint="", model_path=MODEL_DIR)
+    prompt = build_author_prompt(RECIPE, AuthorBrief(framework="vllm", ab_hint="", model_path=MODEL_DIR))
 
     assert MODEL_DIR in prompt
     assert "find /" in prompt  # the reason it must not be searched for is stated
@@ -30,16 +30,13 @@ def test_single_recipe_prompt_names_the_model_directory() -> None:
 
 def test_multi_recipe_prompt_names_the_model_directory() -> None:
     prompt = build_multi_author_prompt(
-        [RECIPE, dict(RECIPE, pattern="llm:y")],
-        framework="vllm",
-        ab_hint="",
-        model_path=MODEL_DIR,
+        [RECIPE, dict(RECIPE, pattern="llm:y")], AuthorBrief(framework="vllm", ab_hint="", model_path=MODEL_DIR)
     )
 
     assert MODEL_DIR in prompt
 
 
 def test_prompt_is_unchanged_when_the_path_is_unknown() -> None:
-    prompt = build_author_prompt(RECIPE, framework="vllm", ab_hint="")
+    prompt = build_author_prompt(RECIPE, AuthorBrief(framework="vllm", ab_hint=""))
 
     assert "Model directory" not in prompt

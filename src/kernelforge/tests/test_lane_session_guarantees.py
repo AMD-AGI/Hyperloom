@@ -29,6 +29,7 @@ import click
 import pytest
 
 import kernelforge.loop.insession_gate as gate_module
+from kernelforge.loop.gate_settings import GateMeasurement, GateScope
 import kernelforge.orchestrator.agent as agent_module
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
@@ -99,13 +100,15 @@ def _lane_factory(tmp_path: Path):
     return cli_lanes._make_lane_agent_factory(
         make_agent=agent_module.make_agent_fn,
         config=config,
-        workspace_dir=str(workspace),
-        driver=str(workspace / "forge_driver.py"),
-        source_files=[str(workspace / "src" / "kernel.py")],
-        session_kwargs={
-            "program_md": "Optimize VALUE.",
-            "agent_backend": "claude",
-        },
+        binding=cli_lanes.LaneBinding(
+            workspace_dir=str(workspace),
+            driver=str(workspace / "forge_driver.py"),
+            source_files=[str(workspace / "src" / "kernel.py")],
+        ),
+        setup=agent_module.ImplementerSetup(
+            agent_module.ImplementerTask(program_md="Optimize VALUE."),
+            session=agent_module.SessionOptions(agent_backend="claude"),
+        ),
     )
 
 
@@ -375,16 +378,17 @@ def test_the_canonical_session_keeps_its_benchmarking_stop_hook(tmp_path, monkey
     workspace = _tree(tmp_path / "workspace")
 
     agent_fn = agent_module.make_agent_fn(
-        config=Config(
+        Config(
             workspace=str(workspace),
             agent_backend="claude",
             agent_model="claude-test",
             agent_precheck=False,
         ),
-        program_md="Optimize VALUE.",
-        agent_backend="claude",
-        insession_gate=True,
-        driver_script=str(workspace / "forge_driver.py"),
+        agent_module.ImplementerSetup(
+            agent_module.ImplementerTask(program_md="Optimize VALUE."),
+            measurement=agent_module.GateMeasurement(driver_script=str(workspace / "forge_driver.py")),
+            session=agent_module.SessionOptions(agent_backend="claude", insession_gate=True),
+        ),
     )
     asyncio.run(agent_fn(str(workspace / "src" / "kernel.py"), ""))
 
@@ -399,9 +403,8 @@ def test_both_gate_modes_share_one_protected_path_rule(tmp_path, stop_check):
     """Neither mode may re-derive what counts as the measurement surface."""
     workspace = _tree(tmp_path / "workspace")
     gate = gate_module.InSessionGate(
-        driver_script=str(workspace / "forge_driver.py"),
-        snr_threshold=30.0,
-        kernel_file=str(workspace / "src" / "kernel.py"),
+        GateMeasurement(driver_script=str(workspace / "forge_driver.py"), snr_threshold=30.0),
+        GateScope(kernel_file=str(workspace / "src" / "kernel.py")),
     )
 
     hooks = gate.make_agent_hooks(stop_check=stop_check)

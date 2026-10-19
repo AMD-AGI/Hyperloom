@@ -133,6 +133,8 @@ class MessageBus:
         """Append one message and return its assigned sequence id."""
         if msg.topic not in TOPIC_ALLOWLIST:
             raise ValueError(f"unknown topic: {msg.topic!r}")
+        if not isinstance(msg.to_agent, str):
+            raise ValueError(f"to_agent must be a string, got {type(msg.to_agent).__name__}")
         async with self.db.transaction() as cur:
             cur.execute(
                 "INSERT INTO events (msg_id, from_agent, to_agent, topic, "

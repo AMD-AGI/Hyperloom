@@ -12,8 +12,10 @@ from typing import Any, Iterable
 
 from hyperloom.common.codex_session import (
     CodexSession,
+    CodexSessionConfig,
     CodexSessionError,
     CodexSessionUnavailableError,
+    CodexTurnRequest,
 )
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.inference_optimizer.protocol.intent import (
@@ -165,9 +167,7 @@ class CodexBackend:
             """Acquire the session and run one turn under the retry policy."""
             session = await self._session_for(system_prompt)
             return await session.turn(
-                prompt,
-                timeout_sec=self.call_timeout_s,
-                output_schema=output_schema,
+                CodexTurnRequest(prompt, timeout_sec=self.call_timeout_s, output_schema=output_schema)
             )
 
         def _note_retry(attempt: int, exc: BaseException, delay: float) -> None:
@@ -251,13 +251,15 @@ class CodexBackend:
         instructions = self._instructions_for(system_prompt)
         if self._session is None:
             self._session = CodexSession(
-                cwd=self.cwd,
-                model=self.model,
+                CodexSessionConfig(
+                    cwd=self.cwd,
+                    model=self.model,
+                    writable_roots=self.writable_roots,
+                    sandbox_mode=self.sandbox_mode,
+                    codex_bin=self.codex_bin,
+                    env=self.env,
+                ),
                 developer_instructions=instructions,
-                writable_roots=self.writable_roots,
-                sandbox_mode=self.sandbox_mode,
-                codex_bin=self.codex_bin,
-                env=self.env,
                 component="orchestration",
                 operation="orchestrate_turn",
             )

@@ -24,8 +24,9 @@ from kernelforge.loop.baseline_reference import (
     check_baseline_against_reference,
     load_reference_case_times,
 )
-from kernelforge.loop.recovery import publish_warm_start_recovery
-from kernelforge.loop.run_state import LoopStateStore, RunState, apply_iteration
+from kernelforge.knowledge.kb_store.identity.run import LoopKernel
+from kernelforge.loop.recovery import CallerRecovery, publish_warm_start_recovery
+from kernelforge.loop.run_state import IterationVerdict, LoopStanding, LoopStateStore, RunState, apply_iteration
 from kernelforge.loop import runner as runner_module
 from kernelforge.loop.runner import IterationResult, _decision_label
 from kernelforge.loop.scoring import (
@@ -309,18 +310,17 @@ def test_kb_warm_start_adopts_a_high_scoring_prior_solution(
 
     trial = integration._try_apply_candidate(
         {"solution_slug": "prior-solution"},
-        kernel=str(tmp_path / "kernel.py"),
-        driver=str(tmp_path / "driver.py"),
-        workspace_dir=str(tmp_path),
-        snr_threshold=30.0,
-        source_files=None,
-        # A real pristine bench reports both halves of its measurement; the aggregate is dominated by the one
-        # expensive case.
-        pristine_bench={
-            "case_times": pristine,
-            "median_ms": EXPENSIVE_PRISTINE_MS,
-        },
-        allowed_paths=None,
+        integration._CandidateField(
+            LoopKernel(kernel_path=str(tmp_path / "kernel.py"), kernel_backend="", workspace=str(tmp_path)),
+            integration.WarmStartHarness(str(tmp_path / "driver.py"), snr_threshold=30.0),
+            # A real pristine bench reports both halves of its measurement; the aggregate is dominated by the one
+            # expensive case.
+            pristine_bench={
+                "case_times": pristine,
+                "median_ms": EXPENSIVE_PRISTINE_MS,
+            },
+            allowed_paths=None,
+        ),
         pre_untracked=set(),
     )
 
@@ -352,18 +352,17 @@ def test_kb_warm_start_still_adopts_a_modest_prior_solution(
 
     trial = integration._try_apply_candidate(
         {"solution_slug": "prior-solution"},
-        kernel=str(tmp_path / "kernel.py"),
-        driver=str(tmp_path / "driver.py"),
-        workspace_dir=str(tmp_path),
-        snr_threshold=30.0,
-        source_files=None,
-        # Both halves of the pristine measurement, agreeing at 5.72x: the candidate has to beat the aggregate as well
-        # as the per-case mean.
-        pristine_bench={
-            "case_times": pristine,
-            "median_ms": TIMING_FLOOR_MS * MODEST_SPEEDUP,
-        },
-        allowed_paths=None,
+        integration._CandidateField(
+            LoopKernel(kernel_path=str(tmp_path / "kernel.py"), kernel_backend="", workspace=str(tmp_path)),
+            integration.WarmStartHarness(str(tmp_path / "driver.py"), snr_threshold=30.0),
+            # Both halves of the pristine measurement, agreeing at 5.72x: the candidate has to beat the aggregate as well
+            # as the per-case mean.
+            pristine_bench={
+                "case_times": pristine,
+                "median_ms": TIMING_FLOOR_MS * MODEST_SPEEDUP,
+            },
+            allowed_paths=None,
+        ),
         pre_untracked=set(),
     )
 
@@ -400,7 +399,7 @@ def test_a_high_scoring_measurement_reaches_the_event_stream_as_a_keep(
 
     monkeypatch.setattr(loop, "run_one_iteration", fast_iteration)
 
-    asyncio.run(loop.run(agent_fn=fast_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=fast_agent, supervisor_fn=_unused_supervisor)))
 
     events = [
         event for event in LoopStateStore(str(workspace)).read_events() if event.get("type") == "iteration_result"
@@ -415,15 +414,16 @@ def test_a_candidate_that_was_merely_slow_advances_the_stall_streak():
 
     apply_iteration(
         state,
-        iteration=1,
-        decision="REVERT_PERF",
-        kept=False,
-        commit_hash="",
-        wall_ms=1.0,
-        mean_case_speedup=1.001,
-        plan="a real but insufficient gain",
-        baseline_wall_ms=1.0,
-        best_wall_ms=1.0,
+        IterationVerdict(
+            iteration=1,
+            decision="REVERT_PERF",
+            kept=False,
+            wall_ms=1.0,
+            commit_hash="",
+            plan="a real but insufficient gain",
+            mean_case_speedup=1.001,
+        ),
+        LoopStanding(baseline_wall_ms=1.0, best_wall_ms=1.0),
     )
 
     assert state.stall.no_improvement_iters == 1
@@ -543,13 +543,12 @@ def test_a_warm_start_without_a_pristine_aggregate_refuses_to_adopt(
 
     trial = integration._try_apply_candidate(
         {"solution_slug": "prior-solution"},
-        kernel=str(tmp_path / "kernel.py"),
-        driver=str(tmp_path / "driver.py"),
-        workspace_dir=str(tmp_path),
-        snr_threshold=30.0,
-        source_files=None,
-        pristine_bench={"case_times": pristine},
-        allowed_paths=None,
+        integration._CandidateField(
+            LoopKernel(kernel_path=str(tmp_path / "kernel.py"), kernel_backend="", workspace=str(tmp_path)),
+            integration.WarmStartHarness(str(tmp_path / "driver.py"), snr_threshold=30.0),
+            pristine_bench={"case_times": pristine},
+            allowed_paths=None,
+        ),
         pre_untracked=set(),
     )
 
@@ -613,7 +612,7 @@ def test_every_warm_start_artifact_agrees_on_the_aggregate_verdict(tmp_path):
 
     result_json = tmp_path / "caller-result.json"
     result = publish_warm_start_recovery(
-        workspace_dir=workspace,
+        workspace,
         base_commit=base_commit,
         warm={
             "applied": True,
@@ -623,10 +622,10 @@ def test_every_warm_start_artifact_agrees_on_the_aggregate_verdict(tmp_path):
             "case_times": {"cheap": 0.001, "expensive": 0.0576},
             "solution_slug": "prior-solution",
         },
-        caller_experiment_id="consumer-run",
-        experience_id="producer-run",
+        caller=CallerRecovery(
+            caller_experiment_id="consumer-run", experience_id="producer-run", result_json=str(result_json)
+        ),
         tracker=Tracker(),
-        result_json=str(result_json),
     )
 
     manifest = json.loads((Path(workspace) / "forge_experiments" / "best" / "manifest.json").read_text())
@@ -860,14 +859,14 @@ def test_loop_startup_rejects_a_drifted_pristine_baseline(tmp_path, monkeypatch)
     _write_reference(workspace, {"case": 0.25})
 
     with pytest.raises(BaselineReferenceError):
-        asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+        asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
 
 def test_loop_startup_accepts_a_matching_pristine_baseline(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     _write_reference(workspace, {"case": 1.02})
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert [
         event.get("decision")
@@ -884,7 +883,7 @@ def test_loop_startup_says_when_the_anchor_is_unverified(
     """A run against an unverified anchor must not look like a checked one."""
     loop, _workspace = _make_loop(tmp_path, monkeypatch)
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert "the pristine anchor every speedup divides by is unverified" in (capsys.readouterr().out)
 
@@ -899,7 +898,7 @@ def test_loop_startup_reports_how_many_of_its_cases_the_reference_backed(
     loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=measured)
     _write_reference(workspace, {"k001": 1.0})
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert "agrees with the task reference on 1 of 12 measured case(s)" in (capsys.readouterr().out)
 
@@ -913,7 +912,7 @@ def test_loop_startup_names_the_reference_entries_it_could_not_read(
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     _write_partly_readable_reference(workspace, {"case": 1.0}, ["ghost"])
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     assert "could not read 1 of the 2 entries" in capsys.readouterr().out
 
@@ -928,7 +927,7 @@ def test_loop_startup_announces_a_widened_drift_tolerance(
     _write_reference(workspace, {"case": 1.4})
     monkeypatch.setenv(DRIFT_TOLERANCE_ENV, "0.5")
 
-    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)))
 
     output = capsys.readouterr().out
     assert "drift tolerance widened to 50%" in output
@@ -999,7 +998,7 @@ def _attributed_loop(monkeypatch, baseline, runs, extra_rounds=()):
     loop._best_case_times = dict(baseline)
     rounds = [list(extra) for extra in extra_rounds]
 
-    async def fake_benchmark(**kwargs):
+    async def fake_benchmark(_run, **kwargs):
         calls.append(kwargs)
         if len(calls) == 1:
             return _bench(runs)
@@ -1113,7 +1112,7 @@ def test_a_re_measure_bench_that_failed_is_reported_as_bought_not_as_measured(mo
     loop._best_case_times = dict(GQA_BASELINE)
     loop.best_mean_case_speedup = GQA_NEAR_MISS_INCUMBENT
 
-    async def fake_benchmark(**kwargs):
+    async def fake_benchmark(_run, **kwargs):
         calls.append(kwargs)
         if len(calls) == 1:
             return _bench(runs)
@@ -1144,9 +1143,9 @@ def test_the_extra_benches_are_charged_to_the_round_that_bought_them(monkeypatch
             loop.best_mean_case_speedup = incumbent
         inner = runner_module.measure_wallclock
 
-        async def metered(**kwargs):
+        async def metered(run, **kwargs):
             clock[0] += 100.0
-            return await inner(**kwargs)
+            return await inner(run, **kwargs)
 
         monkeypatch.setattr(runner_module, "measure_wallclock", metered)
         loop._round_started_at = clock[0]
@@ -1409,10 +1408,12 @@ def _pin_after(runs: list[dict[str, float]], incumbent: dict[str, float]) -> lis
         state,
         iteration=21,
         decision_label="REVERT_PERF",
-        mean_case_speedup=0.995,
-        best_mean_case_speedup=1.0,
-        bench_detail=_revert_result(21, runs).bench_detail,
-        incumbent_case_times=incumbent,
+        evidence=runner_module.DirectionEvidence(
+            mean_case_speedup=0.995,
+            best_mean_case_speedup=1.0,
+            bench_detail=_revert_result(21, runs).bench_detail,
+            incumbent_case_times=incumbent,
+        ),
     )
     return state.pinned_iterations
 
@@ -1459,8 +1460,7 @@ def test_a_candidate_with_no_per_case_detail_falls_back_to_the_aggregate_test():
         state,
         iteration=21,
         decision_label="REVERT_PERF",
-        mean_case_speedup=0.995,
-        best_mean_case_speedup=1.0,
+        evidence=runner_module.DirectionEvidence(mean_case_speedup=0.995, best_mean_case_speedup=1.0),
     )
 
     assert state.pinned_iterations == []
@@ -1511,10 +1511,15 @@ def test_a_larger_sample_can_raise_the_bar_as_well_as_lower_it():
 # ── a scoring anchor measured outside the loop ───────────────────────────────
 
 
+def _attach_state(loop, workspace):
+    loop.state_store = LoopStateStore(str(workspace))
+    loop.run_state = RunState()
+
+
 def _port_bench(case_times: dict[str, float]):
     """Stand in for the loop's own first bench of the kernel it starts from."""
 
-    async def _bench(**_kwargs):
+    async def _bench(_run, **_kwargs):
         return {
             "success": True,
             "case_times": dict(case_times),
@@ -1526,7 +1531,8 @@ def _port_bench(case_times: dict[str, float]):
 
 def test_the_loop_anchors_on_its_own_first_bench_by_default(tmp_path, monkeypatch):
     """No caller anchor: the kernel the run starts from is the 1.0x it divides by."""
-    loop, _workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={})
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={})
+    _attach_state(loop, workspace)
     loop.ic.baseline_wall_ms = None
     monkeypatch.setattr(runner_module, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
 
@@ -1539,7 +1545,8 @@ def test_the_loop_anchors_on_its_own_first_bench_by_default(tmp_path, monkeypatc
 def test_an_injected_anchor_keeps_the_denominator_the_caller_supplied(tmp_path, monkeypatch):
     """A rewrite anchors the loop on the source its port replaced, not on the port."""
     source_case_ms = {"a": 10.0, "b": 100.0}
-    loop, _workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=source_case_ms)
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=source_case_ms)
+    _attach_state(loop, workspace)
     loop.ic.baseline_wall_ms = None
     monkeypatch.setattr(runner_module, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
 
@@ -1554,7 +1561,8 @@ def test_an_injected_anchor_keeps_the_denominator_the_caller_supplied(tmp_path, 
 
 def test_an_injected_anchor_starts_the_keep_bar_at_the_search_start(tmp_path, monkeypatch):
     """Starting the bar at 1.0x would KEEP a candidate that loses to the kernel the run began with."""
-    loop, _workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={"a": 10.0, "b": 100.0})
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={"a": 10.0, "b": 100.0})
+    _attach_state(loop, workspace)
     loop.ic.baseline_wall_ms = None
     monkeypatch.setattr(runner_module, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
     monkeypatch.setattr(loop, "_seed_and_hydrate_run_state", lambda: None)
@@ -1606,7 +1614,8 @@ def test_a_missing_anchor_file_is_refused(tmp_path):
 
 def test_the_keep_bar_is_read_off_the_incumbent_not_assumed(tmp_path, monkeypatch):
     """The incumbent scores 2.0x against a caller's anchor, so 2.0x is the bar -- not 1.0x."""
-    loop, _workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={"a": 10.0, "b": 100.0})
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times={"a": 10.0, "b": 100.0})
+    _attach_state(loop, workspace)
     loop.ic.baseline_wall_ms = None
     monkeypatch.setattr(runner_module, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
 
@@ -1618,9 +1627,9 @@ def test_the_keep_bar_is_read_off_the_incumbent_not_assumed(tmp_path, monkeypatc
 def test_a_resume_restores_the_bar_a_caller_anchor_put_it_at(tmp_path, monkeypatch):
     """A resume cannot re-bench the kernel the campaign started from, so an assumed 1.0x bar would admit a regression."""
     source_case_ms = {"a": 10.0, "b": 100.0}
-    loop, _workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=source_case_ms)
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=source_case_ms)
+    _attach_state(loop, workspace)
     loop.ic.baseline_wall_ms = None
-    loop.run_state = RunState()
     monkeypatch.setattr(runner_module, "measure_wallclock", _port_bench({"a": 5.0, "b": 50.0}))
 
     asyncio.run(loop._measure_baseline())

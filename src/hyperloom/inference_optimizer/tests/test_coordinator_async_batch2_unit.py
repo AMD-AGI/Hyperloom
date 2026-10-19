@@ -307,7 +307,8 @@ async def test_resume_restores_promoted_inferencex_checkout(
     tmp_path,
 ) -> None:
     active = tmp_path / "active-inferencex"
-    active.mkdir()
+    (active / "benchmarks").mkdir(parents=True)
+    (active / "benchmarks" / "benchmark_lib.sh").write_text("#!/bin/bash\n")
     coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.active_inferencex_path = str(active)
     # setenv, not delenv: delenv of an absent name arms no undo, so the value the resume pass exports below would leak
@@ -317,6 +318,28 @@ async def test_resume_restores_promoted_inferencex_checkout(
     await coord.writeback._resume_consistency_pass()
 
     assert os.environ["INFERENCEX_PATH"] == str(active)
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_export_a_framework_tree_as_the_inferencex_path(
+    coord: Coordinator,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """A state written with a framework tree as the InferenceX path must not redirect every later round to it."""
+    pinned = tmp_path / "InferenceX@pin"
+    framework = tmp_path / "sglang"
+    framework.mkdir()
+    coord.writeback._resumed_from["is_resume"] = True
+    coord.shared_state.active_inferencex_path = str(framework)
+    monkeypatch.setenv("INFERENCEX_PATH", str(pinned))
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert os.environ["INFERENCEX_PATH"] == str(pinned)
+    assert coord.shared_state.active_inferencex_path == ""
+    assert {"kind": "active_inferencex_checkout_invalid", "path": str(framework)} in report["warnings"]
+    assert coord.shared_state.stop_reason != "active_inferencex_checkout_missing"
 
 
 @pytest.fixture
@@ -1868,7 +1891,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
 async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatch) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
 
-    coord.knowledge_plane = KnowledgePlane(recipe_kb=object())  # non-None -> KB amend path
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_FakeRecipeKB())  # non-None -> KB amend path
     coord.shared_state.model_name = "llama"
     coord.shared_state.gpu_type = "mi300x"
     amends: list[dict] = []
@@ -2163,6 +2186,9 @@ class _FakeRecipeKB:
     def __init__(self) -> None:
         self.local = _FakeLocal()
 
+    def get_authoritative_recipe(self, *, canonical_id):
+        return self.local.get_recipe(canonical_id=canonical_id)
+
 
 @pytest.mark.asyncio
 async def test_recipe_kb_finalize_skips_without_model(coord: Coordinator) -> None:
@@ -2255,7 +2281,7 @@ async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypat
     monkeypatch.setattr(
         ps,
         "compute_next_phase",
-        lambda *a, **k: ("FRAMEWORK_AGENT", "robustness_escalated", {"evidence": "llm_escalation"}),
+        lambda *a, **k: ("FRAMEWORK_AGENT", "optimize_no_more_leverage", {"evidence": "llm_escalation"}),
     )
 
     async def _entered(*, from_phase, to_phase, reason="", evidence=None):
@@ -2722,7 +2748,7 @@ async def test_on_enter_close_runs_full_sequence(coord: Coordinator, monkeypatch
 
     coord.shared_state.set_stop_reason("target_reached")
     await coord.phase_close.on_enter_close(
-        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="SWEEP", evidence={}, loopback=False)
+        Transition(from_phase="SWEEP", to_phase="CLOSE", reason="SWEEP", evidence={})
     )
     assert coord.shared_state.close_sequence_done is True
     assert coord.shared_state.stop_reason
@@ -3099,6 +3125,21 @@ async def test_optimization_rounds_inherit_nothing(coord: Coordinator) -> None:
         done_payload={"patches_written": ["kernel.py"], "proposal_set": [{"name": "opt", "extra_args": ""}]},
     )
     assert "extra_server_args" not in _autosubmitted_integrate_params(coord)
+
+
+@pytest.mark.asyncio
+async def test_autosubmit_patch_survives_a_non_dict_first_proposal(coord: Coordinator) -> None:
+    """A malformed proposal entry costs the review its patch name, not the review itself."""
+    from hyperloom.orchestrator.state.task_registry import Task
+
+    sid = "spec-bare-proposal"
+    _make_real_patch(coord, sid)
+    task = Task(task_id=sid, kind="specialist", state="running", params={}, idempotency_key="kv-bare")
+    await coord.phase_framework.maybe_autosubmit_specialist_patches(
+        task=task,
+        done_payload={"patches_written": ["kernel.py"], "proposal_set": ["fuse-moe"]},
+    )
+    assert _autosubmitted_integrate_params(coord)["patch_name"] == ""
 
 
 @pytest.mark.asyncio

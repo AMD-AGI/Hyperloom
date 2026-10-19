@@ -660,14 +660,6 @@ class SqliteLeaseBackend:
         _report_unverifiable(stuck, db_path=str(getattr(self.db, "db_path", "") or ""))
         return stuck
 
-    async def bringup_round_holders(self, now_unix: float) -> set[str]:
-        """Return round ids with a retained ownership row, irrespective of age."""
-        rows = await self.db.fetchall(
-            "SELECT holder_id FROM leases WHERE lane = ?",
-            (BRINGUP_ROUND_LANE,),
-        )
-        return {str(r["holder_id"]) for r in rows}
-
     async def lane_holders(self) -> dict[str, int]:
         """Return ``{lane: holder_count}`` for every retained ownership row."""
         rows = await self.db.fetchall("SELECT lane, COUNT(*) AS n FROM leases GROUP BY lane")
@@ -689,12 +681,7 @@ class SqliteLeaseBackend:
 
     async def lane_capacities(self) -> dict[str, int]:
         """Return ``{lane: capacity}`` for every row in ``lane_capacity``."""
-        try:
-            rows = await self.db.fetchall("SELECT lane, capacity FROM lane_capacity")
-        except sqlite3.OperationalError as exc:
-            # Legacy DB never opened with v0.8 lacks the table; fall back to defaults.
-            log.debug("lane_capacities: lane_capacity table unavailable: %s", exc)
-            return dict(DEFAULT_LANE_CAPACITIES)
+        rows = await self.db.fetchall("SELECT lane, capacity FROM lane_capacity")
         out: dict[str, int] = dict(DEFAULT_LANE_CAPACITIES)
         for r in rows:
             out[r["lane"]] = int(r["capacity"])
@@ -742,17 +729,6 @@ class ResourceLockManager:
     async def cleanup_confirmation_rate(self) -> tuple[int, int]:
         """Unconfirmed-cleanup count and total ended tasks, via the backend."""
         return await self.backend.cleanup_confirmation_rate()
-
-    async def bringup_round_holders(self, now_unix: float) -> set[str]:
-        """Return the ids of rounds still holding their lane, via the backend.
-
-        Args:
-            now_unix: The instant to test.
-
-        Returns:
-            set[str]: Round ids holding :data:`BRINGUP_ROUND_LANE` then.
-        """
-        return await self.backend.bringup_round_holders(now_unix)
 
     async def lane_holders(self) -> dict[str, int]:
         """Return ``{lane: live_holder_count}`` via the backend."""

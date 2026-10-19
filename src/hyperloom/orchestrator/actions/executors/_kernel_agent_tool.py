@@ -136,18 +136,20 @@ def _maybe_apply_kernel_patch(
         repo_root=repo_root,
     )
     return apply_kernel_patch.apply_kernel_patch(
-        patch_path=patch_path,
-        target_file=target_file,
-        backup_root=backup_root,
-        kernel_id=kid,
-        artifact_paths=_artifact_paths_from_payload(payload),
-        rebuild_command=payload.get("rebuild_command"),
-        rebuild_timeout_sec=int(payload.get("rebuild_timeout_sec", 1800)),
-        skip_rebuild=bool(payload.get("skip_rebuild", False)),
-        dry_run=bool(payload.get("dry_run_patch", False)),
-        snapshot_dir=snapshot_dir,
-        repo_root=repo_root,
-        producer_manifest=(str(payload.get("producer_manifest") or "").strip() or None),
+        apply_kernel_patch.KernelPatchRequest(
+            patch_path=patch_path,
+            target_file=target_file,
+            backup_root=backup_root,
+            kernel_id=kid,
+            artifact_paths=_artifact_paths_from_payload(payload),
+            rebuild_command=payload.get("rebuild_command"),
+            rebuild_timeout_sec=int(payload.get("rebuild_timeout_sec", 1800)),
+            skip_rebuild=bool(payload.get("skip_rebuild", False)),
+            dry_run=bool(payload.get("dry_run_patch", False)),
+            snapshot_dir=snapshot_dir,
+            repo_root=repo_root,
+            producer_manifest=str(payload.get("producer_manifest") or "").strip() or None,
+        )
     )
 
 

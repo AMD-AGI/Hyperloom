@@ -61,14 +61,6 @@ class TestBuildSessionId:
 
 
 class TestDescribeDep:
-    def test_unset_env(self, monkeypatch):
-        monkeypatch.delenv("MAGPIE_PATH", raising=False)
-        assert mf._describe_dep("MAGPIE_PATH") == {
-            "path": "",
-            "commit": "",
-            "remote": "",
-        }
-
     def test_missing_dir_yields_path_only(self, tmp_path, monkeypatch):
         monkeypatch.setenv("MAGPIE_PATH", str(tmp_path / "ghost"))
         out = mf._describe_dep("MAGPIE_PATH")

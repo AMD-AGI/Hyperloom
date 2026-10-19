@@ -57,7 +57,7 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
 
 
 def _clear_axis_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
 
 
@@ -72,10 +72,10 @@ def _clear_axis_env(monkeypatch: pytest.MonkeyPatch) -> None:
         ("", "1", ("e2e_norm_intvty_p50", "e2e_norm_intvty_p50")),
     ],
 )
-def test_the_axis_follows_the_grader(monkeypatch, benchmark_mode, agentx_env, expected):
+def test_the_axis_follows_the_grader(native_benchmark, monkeypatch, benchmark_mode, agentx_env, expected):
     _clear_axis_env(monkeypatch)
     if agentx_env is not None:
-        monkeypatch.setenv("HYPERLOOM_AGENTX", agentx_env)
+        monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     assert geak_metric_axis(benchmark_mode=benchmark_mode) == expected
 
 
@@ -96,21 +96,21 @@ def test_the_interactivity_handoff_names_the_objective_not_the_tail_guard(monkey
         (GRADED_OUTPUT, GEAK_METRIC_OUTPUT),
     ],
 )
-def test_a_recorded_objective_is_read_as_a_family_not_one_label(monkeypatch, objective, expected):
+def test_a_recorded_objective_is_read_as_a_family_not_one_label(native_benchmark, monkeypatch, objective, expected):
     """Either interactivity percentile means the session is graded on interactivity.
 
     The env says AgentX throughout, so the output case also shows the recorded objective
     winning over the mode-based derivation.
     """
     _clear_axis_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     assert geak_metric_axis(benchmark_mode="agentx", grading={"objective": objective}) == expected
 
 
-def test_an_explicit_override_wins_in_both_directions(monkeypatch):
+def test_an_explicit_override_wins_in_both_directions(native_benchmark, monkeypatch):
     """An operator who names the metric is not overridden by the workload."""
     _clear_axis_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
     assert geak_metric_axis(benchmark_mode="agentx")[0] == "output"
 
@@ -131,8 +131,7 @@ def test_the_interactivity_handoff_carries_the_rule_the_rebench_keeps_on():
 @pytest.mark.parametrize(
     ("backend_env", "objective", "rule_expected"),
     [
-        ({}, GRADED_INTVTY, True),
-        ({}, GRADED_OUTPUT, False),
+        ({"HYPERLOOM_AGENTIC_BACKEND": "mlperf"}, GRADED_INTVTY, True),
         ({"HYPERLOOM_AGENTIC_BACKEND": "mlperf"}, GRADED_OUTPUT, False),
     ],
 )

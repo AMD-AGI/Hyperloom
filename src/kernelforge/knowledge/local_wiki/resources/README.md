@@ -16,7 +16,7 @@ organized, and how to add/modify knowledge without breaking the conventions the 
 | Folder | What it holds | Has `INDEX.md`? |
 |---|---|---|
 | `framework/<lib>/` | **Operator-library control plane** — which op to call, how it dispatches, how to tune its per-shape DB. One subfolder per library. Currently: **`aiter`, `mori`**. | yes (per lib) |
-| `languages/<lang>/` | **Kernel-authoring knowledge** per language/backend — how to write & optimize kernels. Currently: **`asm`, `ck`, `hip`, `triton`, `gluon`, `flydsl`, `fusion`**. | yes |
+| `languages/<lang>/` | **Kernel-authoring knowledge** per language/backend — how to write & optimize kernels. Currently: **`assembly`, `ck`, `hip`, `triton`, `gluon`, `flydsl`, `fusion`**. | yes |
 | `hardware/` | **Backend-neutral hardware facts** (peaks, LDS, MFMA, cache) — **CDNA4 / gfx950 only**. Flat: one `mi350_*.md` card per subsystem. | yes |
 | `common_methodology/` | **Cross-cutting methodology** independent of any library/arch: `optimization/`, `profiling/`. | yes |
 
@@ -62,7 +62,7 @@ languages/<lang>/
 └── (API_docs/, etc.) # language-specific references where applicable (e.g. flydsl/API_docs/)
 ```
 
-> **Language folders are language-level only — no `operators/`.** `triton`, `ck`, `hip`, `asm` and
+> **Language folders are language-level only; only `gluon/` and `fusion/` carry an `operators/`.** `triton`, `ck`, `hip`, `asm` and
 > `flydsl` used to each carry a full per-operator card set, but `overview`/`tuning`/`numerics`/`fusion`
 > are operator-level facts that don't change with the authoring language: the same card existed 3–5
 > times over. A language folder documents *how to author in that language*, nothing more.
@@ -193,6 +193,6 @@ When the tracked library (e.g. `ROCm/aiter`) is upgraded:
   `overall/` layer (repo scope, launch-config tuning control plane), and one operator folder
   (`ep_dispatch_combine`, the only op with real depth so far — mori's much wider surface, MORI-IO/CCL/IR/
   UMBP, is explicitly out of scope until someone reads that source). No `skills/` yet.
-- All seven `languages/` folders (`asm`, `ck`, `flydsl`, `fusion`, `gluon`, `hip`, `triton`) plus
+- All seven `languages/` folders (`assembly`, `ck`, `flydsl`, `fusion`, `gluon`, `hip`, `triton`) plus
   `hardware/` and `common_methodology/` each have an `INDEX.md`.
 - Each folder's own `INDEX.md` records its specific pinned source and layout — start there.

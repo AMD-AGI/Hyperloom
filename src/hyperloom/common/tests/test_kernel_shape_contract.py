@@ -4,15 +4,10 @@
 """The shape-provenance set the dispatch gate tests membership against."""
 
 from hyperloom.common.kernel_shape_contract import (
-    ALLOWED_SHAPE_PROVENANCE,
     DISPATCHABLE_SHAPE_PROVENANCE,
     MEASURED_SHAPE_PROVENANCE,
     REVIEW_SHAPE_PROVENANCE,
 )
-
-
-def test_dispatchable_and_allowed_match():
-    assert ALLOWED_SHAPE_PROVENANCE == DISPATCHABLE_SHAPE_PROVENANCE
 
 
 def test_capture_backfill_is_dispatchable():

@@ -15,7 +15,6 @@ from .canonical_id import (
     DEFAULT_PRECISION_SLUG,
     InvalidCanonicalIdError,
     canonical_id_for_path,
-    canonical_id_from_components,
     canonical_labels,
     cid_to_path_components,
     detect_framework_version,
@@ -23,19 +22,16 @@ from .canonical_id import (
 )
 from .dispatcher import RecipeKB
 from .local_store import (
-    ATTEMPTS_FILENAME,
     HISTORY_DIRNAME,
     LOCK_FILENAME,
     LocalRecipeStore,
     LocalRecipeStoreError,
     RECIPE_FILENAME,
 )
-from .schema import Attempt, Recipe
+from .schema import Recipe
 
 
 __all__ = [
-    "ATTEMPTS_FILENAME",
-    "Attempt",
     "CANONICAL_ID_DIMENSIONS",
     "CANONICAL_ID_PREFIX",
     "DEFAULT_FRAMEWORK_SLUG",
@@ -52,7 +48,6 @@ __all__ = [
     "Recipe",
     "RecipeKB",
     "canonical_id_for_path",
-    "canonical_id_from_components",
     "canonical_labels",
     "cid_to_path_components",
     "detect_framework_version",

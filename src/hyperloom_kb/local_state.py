@@ -37,6 +37,16 @@ def _digest(members: Collection[str], excluded: Collection[str]) -> str:
 
 
 @dataclass(frozen=True)
+class _HistoryEntry:
+    """One row of ``exclusion_history``: an Experience excluded from or let back into reads."""
+
+    experience_id: str
+    action: str
+    reason: str
+    at: str
+
+
+@dataclass(frozen=True)
 class Label:
     """One saved state of one schema; ``label_id`` identifies it, ``name`` is only for people."""
 
@@ -100,7 +110,7 @@ class LocalState:
             """,
             (self.kb_id, schema_ref, experience_id, reason, at),
         )
-        self._log(connection, schema_ref, experience_id, "exclude", reason, at)
+        self._log(connection, schema_ref, _HistoryEntry(experience_id, "exclude", reason, at))
 
     def include(self, connection: Connection, schema_ref: str, experience_id: str) -> bool:
         """Let reads see an Experience again: lift its exclusion, release what that withheld, and put it back into
@@ -116,7 +126,7 @@ class LocalState:
         ).rowcount
         released = bool(lifted) or experience_id in self.withheld(connection, schema_ref)
         if released:
-            self._log(connection, schema_ref, experience_id, "include", "", utc_now())
+            self._log(connection, schema_ref, _HistoryEntry(experience_id, "include", "", utc_now()))
         return released or bool(brought_in)
 
     def withheld(self, connection: Connection, schema_ref: str) -> frozenset[str]:
@@ -140,15 +150,13 @@ class LocalState:
 
         return _digest(self._outside(connection, schema_ref), self.excluded(connection, schema_ref))
 
-    def _log(
-        self, connection: Connection, schema_ref: str, experience_id: str, action: str, reason: str, at: str
-    ) -> None:
+    def _log(self, connection: Connection, schema_ref: str, entry: _HistoryEntry) -> None:
         connection.execute(
             """
             INSERT INTO exclusion_history(kb_id, schema_ref, experience_id, action, reason, at)
             VALUES (%s, %s, %s, %s, %s, %s)
             """,
-            (self.kb_id, schema_ref, experience_id, action, reason, at),
+            (self.kb_id, schema_ref, entry.experience_id, entry.action, entry.reason, entry.at),
         )
 
     def exclusions(self, connection: Connection, schema_ref: str) -> list[dict[str, JsonValue]]:

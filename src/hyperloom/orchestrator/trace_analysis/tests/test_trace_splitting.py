@@ -280,9 +280,7 @@ class TestSplitterE2E:
 
         chunk, meta = tla._run_trace_split(
             args,
-            trace_path,
-            split_dir,
-            tl_root,
+            tla.TraceSplitJob(trace_path, split_dir, tl_root),
             log_path,
             [],
         )
@@ -307,9 +305,7 @@ class TestSplitterE2E:
 
         chunk, meta = tla._run_trace_split(
             args,
-            trace_path,
-            split_dir,
-            tl_root,
+            tla.TraceSplitJob(trace_path, split_dir, tl_root),
             log_path,
             [],
         )
@@ -332,7 +328,7 @@ def _request_handlers_importable() -> bool:
     reason="hyperloom orchestrator not importable",
 )
 class TestBuildTraceAnalyzeCmd:
-    """Verify request_handlers._build_trace_analyze_cmd sets flags correctly."""
+    """Verify trace_analyze._build_trace_analyze_cmd sets flags correctly."""
 
     def _mock_state(self):
         state = MagicMock()
@@ -340,39 +336,37 @@ class TestBuildTraceAnalyzeCmd:
         return state
 
     def _run(self, *, scriptable: bool, framework: str, **payload_kw):
-        import os
-
-        os.environ.setdefault("HYPERLOOM_KERNEL_AGENT_ROOT", str(Path(__file__).resolve().parent.parent))
         from hyperloom.orchestrator.actions.executors.trace_analyze import (
+            _AnalysisRun,
             _build_trace_analyze_cmd,
         )
 
         cmd, mode = _build_trace_analyze_cmd(
-            payload=payload_kw,
+            payload_kw,
+            _AnalysisRun(
+                trace_input="/tmp/trace",
+                workspace_path="/tmp/test",
+                tracelens_root=Path("/tmp/tl"),
+                is_bypass=False,
+                scriptable=scriptable,
+                model_name="test",
+                framework=framework,
+                target_platform="MI300X",
+                analysis_mode="default",
+            ),
             session_dir=Path("/tmp/test"),
             state=self._mock_state(),
-            workspace_path="/tmp/test",
-            trace_input="/tmp/trace",
-            tracelens_root=Path("/tmp/tl"),
-            is_bypass=False,
-            scriptable=scriptable,
             workload={},
-            model_name="test",
-            framework=framework,
-            target_platform="MI300X",
-            analysis_mode="default",
         )
         return cmd, mode
 
     def test_serving_gets_llm_inference(self):
         cmd, _ = self._run(scriptable=False, framework="vllm")
         assert "--split-llm-inference" in cmd
-        assert "--skip-split" not in cmd
 
     def test_scriptable_gets_generic_mode(self):
         cmd, mode = self._run(scriptable=True, framework="xdit")
         assert "--split-llm-inference" not in cmd
-        assert "--skip-split" not in cmd
         assert cmd.count("--steady-state-mode") == 1
         idx = cmd.index("--steady-state-mode")
         assert cmd[idx + 1] == "generic"

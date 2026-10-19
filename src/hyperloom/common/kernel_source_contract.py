@@ -6,9 +6,7 @@
 from __future__ import annotations
 
 import math
-import os
-import re
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
 #: Bump the major on any field removal or meaning change; consumers gate on it.
@@ -130,51 +128,55 @@ def classify_skip_reason(*, reusable: Any, skip_reason: Any, source_file: Any = 
 REQUIRED_DOCUMENT_KEYS = ("schema_version", "generated_by", "entries")
 
 
-def make_entry(
-    *,
-    kernel_id: str,
-    name: str,
-    gpu_pct: float,
-    source_file: str = "",
-    source_line: int | None = None,
-    source_function: str = "",
-    method: str = METHOD_UNRESOLVED,
-    confidence: float | None = None,
-    reason: str = "",
-    rejected_value: str = "",
-    previous_source_file: str = "",
-    previous_method: str = "",
-    reason_class: str = "",
-) -> dict[str, Any]:
-    """Build one resolution entry with every required key present."""
-    if isinstance(gpu_pct, bool) or not isinstance(gpu_pct, (int, float)) or not math.isfinite(float(gpu_pct)):
-        safe_gpu_pct = 0.0
-    else:
-        safe_gpu_pct = float(gpu_pct)
-    entry = {
-        "kernel_id": str(kernel_id or ""),
-        "name": str(name or ""),
-        "gpu_pct": safe_gpu_pct,
-        "source_file": str(source_file or ""),
-        "source_line": source_line if isinstance(source_line, int) else None,
-        "source_function": str(source_function or ""),
-        "method": str(method or METHOD_UNRESOLVED),
-        "confidence": confidence,
-        "reason": str(reason or ""),
-        "rejected_value": str(rejected_value or ""),
-        # Derived from the caller's verdict when not supplied, so an entry is never written without a class a consumer
-        # can act on.
-        "reason_class": str(reason_class or "")
-        or classify_skip_reason(
-            reusable=bool(source_file),
-            skip_reason=reason,
-            source_file=source_file,
-        ),
-    }
-    if previous_source_file:
-        entry["previous_source_file"] = str(previous_source_file)
-        entry["previous_method"] = str(previous_method or "")
-    return entry
+@dataclass(frozen=True)
+class SourceResolutionEntry:
+    """How one hot kernel's source was resolved, as written to the audit artifact."""
+
+    kernel_id: str
+    name: str
+    gpu_pct: float
+    source_file: str = ""
+    source_line: int | None = None
+    source_function: str = ""
+    method: str = METHOD_UNRESOLVED
+    confidence: float | None = None
+    reason: str = ""
+    rejected_value: str = ""
+    previous_source_file: str = ""
+    previous_method: str = ""
+    reason_class: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        """Build the on-disk entry with every required key present."""
+        gpu_pct = self.gpu_pct
+        if isinstance(gpu_pct, bool) or not isinstance(gpu_pct, (int, float)) or not math.isfinite(float(gpu_pct)):
+            safe_gpu_pct = 0.0
+        else:
+            safe_gpu_pct = float(gpu_pct)
+        entry = {
+            "kernel_id": str(self.kernel_id or ""),
+            "name": str(self.name or ""),
+            "gpu_pct": safe_gpu_pct,
+            "source_file": str(self.source_file or ""),
+            "source_line": self.source_line if isinstance(self.source_line, int) else None,
+            "source_function": str(self.source_function or ""),
+            "method": str(self.method or METHOD_UNRESOLVED),
+            "confidence": self.confidence,
+            "reason": str(self.reason or ""),
+            "rejected_value": str(self.rejected_value or ""),
+            # Derived from the caller's verdict when not supplied, so an entry is never written without a class a
+            # consumer can act on.
+            "reason_class": str(self.reason_class or "")
+            or classify_skip_reason(
+                reusable=bool(self.source_file),
+                skip_reason=self.reason,
+                source_file=self.source_file,
+            ),
+        }
+        if self.previous_source_file:
+            entry["previous_source_file"] = str(self.previous_source_file)
+            entry["previous_method"] = str(self.previous_method or "")
+        return entry
 
 
 def summarize_resolution(entries: list[dict[str, Any]]) -> dict[str, Any]:
@@ -292,46 +294,3 @@ def validate_document(doc: Any) -> list[str]:
     for index, entry in enumerate(entries):
         problems.extend(_entry_problems(index, entry, seen_ids))
     return problems
-
-
-#: TraceLens reports a call site as "path.py(247): fn_name"; the line and
-#: function ride along in the same string.
-_LINE_SUFFIX_RE = re.compile(r"^(?P<path>.+?)\((?P<line>\d+)\)\s*(?::\s*(?P<function>.*))?$")
-
-
-def split_line_suffix(path: str) -> tuple[str, int | None, str]:
-    """Split a TraceLens call-site string into path, line and function."""
-    text = (path or "").strip()
-    if not text:
-        return "", None, ""
-    match = _LINE_SUFFIX_RE.match(text)
-    if match is None:
-        return text, None, ""
-    return (
-        match.group("path").strip(),
-        int(match.group("line")),
-        str(match.group("function") or "").strip(),
-    )
-
-
-def strip_line_suffix(path: str) -> str:
-    """Return the bare file path from a possibly line-annotated one."""
-    return split_line_suffix(path)[0]
-
-
-def canonical_source_path(path: str, roots: tuple[str, ...]) -> str:
-    """Return the validated canonical target for ``path``, or ``\"\"``."""
-    text = strip_line_suffix(path)
-    if not text or not os.path.isfile(text):
-        return ""
-    real = Path(os.path.realpath(text))
-    for root in roots:
-        if not root:
-            continue
-        resolved_root = Path(os.path.realpath(str(root)))
-        try:
-            real.relative_to(resolved_root)
-            return str(real)
-        except ValueError:
-            continue
-    return ""

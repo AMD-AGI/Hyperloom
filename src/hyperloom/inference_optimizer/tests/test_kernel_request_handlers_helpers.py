@@ -143,38 +143,16 @@ def test_gemm_tuning_workspace_timestamp_fallback(tmp_path: Path) -> None:
     assert out.name.startswith("request_")
 
 
-# -- _write_gemm_tuning_benchmark_script ----------------------------------
-def test_gemm_tuning_script_disables_the_eval(tmp_path: Path) -> None:
-    path = krh._write_gemm_tuning_benchmark_script(
-        workspace=tmp_path,
-        model_path="/models/Qwen-Qwen3-8B",
-        framework="sglang",
-        gpu_type="mi355x",
-        tp=1,
-        conc=8,
-        isl=256,
-        osl=256,
-    )
-    script = path.read_text(encoding="utf-8")
-    assert 'export RUN_EVAL="false"' in script
-    assert "RUN_EVAL:-" not in script
-
-
 # -- _optimization_budget_minutes / wrapper timeout ----------------------- -- backend selection
 # -----------------------------------------------------
-def test_backend_order_ignores_payload_forge_without_explicit_env(monkeypatch) -> None:
-    monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    assert krh._raw_kernel_backend_order({"backend_order": "FORGE,foo,unknown"}) == ["geak"]
-
-
 def test_backend_order_exact_env_forge_opt_in(monkeypatch) -> None:
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    assert krh._raw_kernel_backend_order({}) == ["forge"]
+    assert krh._raw_kernel_backend_order() == ["forge"]
 
 
 def test_backend_order_defaults_to_geak_phase_owner(monkeypatch) -> None:
     monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
-    assert krh._raw_kernel_backend_order({}) == ["geak"]
+    assert krh._raw_kernel_backend_order() == ["geak"]
 
 
 def test_removed_per_kernel_ladder_stays_removed(monkeypatch) -> None:
@@ -202,12 +180,7 @@ def test_geak_selected_true_by_default(monkeypatch) -> None:
 
 def test_geak_selected_false_only_for_exact_env_forge(monkeypatch) -> None:
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    assert krh.geak_selected({"backend_order": "geak"}) is False
-
-
-def test_geak_selected_payload_cannot_override_exact_env_forge(monkeypatch) -> None:
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    assert krh.geak_selected({"backend_order": "geak"}) is False
+    assert krh.geak_selected() is False
 
 
 # -- _artifact_paths_from_payload -----------------------------------------
@@ -299,28 +272,6 @@ def test_shape_tool_result_synthesizes_on_empty_stdout() -> None:
     # empty stdout -> _parse_tool_stdout returns {} -> synthesize branch
     out = kernel_agent_tool._shape_tool_result(2, "", "the stderr")
     assert out == {"status": "failed", "returncode": 2, "error": "the stderr"}
-
-
-# -- _in_flight_kernel_ids ------------------------------------------------- -- unattempted_skip_reason /
-# gate-rejected dispatch ----------------------
-def _state_owing_one_attempt():
-    """SharedState whose trace still owes ``k001`` a kernel_opt attempt."""
-    from hyperloom.orchestrator.state.shared_state import SharedState
-
-    state = SharedState(session_id="skip-accounting")
-    state.last_trace_analyze = {
-        "hot_kernels": [
-            {
-                "kernel_id": "k001",
-                "name": "gqa_decode_kernel",
-                "gpu_pct": 8.5,
-                "reusable_native_kernel": True,
-                "source_file": "/pkg/aiter/gqa.py",
-            }
-        ],
-        "task_groups": [],
-    }
-    return state
 
 
 _OP_FANOUT_ROWS = [

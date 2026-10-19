@@ -37,6 +37,7 @@ from kernelforge.knowledge.pr_knowledge.context import (
     REASON_SERVICE_UNREACHABLE,
     REASON_SKIPPED_DEADLINE,
     PRQueryContext,
+    PrReferenceQuery,
     build_context,
     check_whitelist,
 )
@@ -440,14 +441,8 @@ def _filter_cached_empties(context: PRQueryContext, snapshot: Snapshot) -> tuple
 def collect_references(
     *,
     workspace_dir: str,
+    query: PrReferenceQuery,
     client: PRMonitorClient | None = None,
-    kernel_backend: str = "",
-    git_remote: str = "",
-    source_files: Iterable[str] = (),
-    operator_name: str = "",
-    target_functions: Iterable[str] = (),
-    bottleneck: str = "",
-    top_k: int = 0,
     budget_sec: float = 0.0,
     persist: bool = True,
 ) -> PRRefsResult:
@@ -466,21 +461,21 @@ def collect_references(
         return remaining_sec(deadline) <= 0
 
     if expired():
-        return _degraded(snapshot, REASON_SKIPPED_DEADLINE, top_k=top_k)
+        return _degraded(snapshot, REASON_SKIPPED_DEADLINE)
 
     if not client.healthz(timeout_sec=remaining_sec(deadline)):
         reason = REASON_SKIPPED_DEADLINE if expired() else REASON_SERVICE_UNREACHABLE
-        return _degraded(snapshot, reason, top_k=top_k)
+        return _degraded(snapshot, reason)
 
     if expired():
-        return _degraded(snapshot, REASON_SKIPPED_DEADLINE, top_k=top_k)
+        return _degraded(snapshot, REASON_SKIPPED_DEADLINE)
 
     try:
         repos_payload = client.list_repos(timeout_sec=remaining_sec(deadline))
     except PRMonitorError as error:
         log.warning("pr-monitor repository lookup failed: %s", error)
         reason = REASON_SKIPPED_DEADLINE if expired() else REASON_SERVICE_UNREACHABLE
-        return _degraded(snapshot, reason, top_k=top_k)
+        return _degraded(snapshot, reason)
     drift = check_whitelist(repos_payload)
     if not drift.clean:
         log.warning(
@@ -493,21 +488,16 @@ def collect_references(
 
     workspace = Path(workspace_dir).resolve()
     context = build_context(
-        kernel_backend=kernel_backend,
-        git_remote=git_remote,
+        query,
         tracked=tracked,
-        source_files=tuple(source_files),
         workspace=str(workspace),
         exists=lambda rel: (workspace / rel).exists(),
-        operator_name=operator_name,
-        target_functions=tuple(target_functions),
-        bottleneck=bottleneck,
     )
     probes = 0
     probe_reason = ""
     if context.reason == REASON_REPO_UNTRACKED and context.file_paths:
         if expired():
-            return _degraded(snapshot, REASON_SKIPPED_DEADLINE, top_k=top_k)
+            return _degraded(snapshot, REASON_SKIPPED_DEADLINE)
         # Probe source ownership within the shared end-to-end budget.
         identified, probes, probe_reason = identify_repo_by_path(
             client,
@@ -520,7 +510,6 @@ def collect_references(
             return _degraded(
                 snapshot,
                 REASON_SKIPPED_DEADLINE,
-                top_k=top_k,
                 http_calls=probes,
             )
         if identified:
@@ -534,7 +523,6 @@ def collect_references(
             return _degraded(
                 snapshot,
                 probe_reason,
-                top_k=top_k,
                 http_calls=probes,
             )
 
@@ -543,7 +531,6 @@ def collect_references(
             snapshot,
             context.reason,
             repo="" if context.reason == REASON_REPO_UNTRACKED else context.repo,
-            top_k=top_k,
             http_calls=probes,
         )
 
@@ -553,7 +540,7 @@ def collect_references(
     pending: dict[str, Any] = {}
 
     if narrowed.file_paths or narrowed.keywords:
-        outcome = discover(client, narrowed, top_k=top_k, deadline=deadline)
+        outcome = discover(client, narrowed, deadline=deadline)
         stats.update(outcome.stats)
         stats["http_calls"] = stats.get("http_calls", 0) + probes
         reason = outcome.reason
@@ -575,7 +562,7 @@ def collect_references(
         stats["degraded_reason"] = probe_reason
 
     # Re-render cached references so refreshes never retract prior context.
-    shown = _ranked_from_snapshot(snapshot, context, top_k=top_k)
+    shown = _ranked_from_snapshot(snapshot, context)
     prompt_context = render_reference_set(shown)
     injected_entries = prompt_context.count("\n- ")
     shown = shown[:injected_entries]
@@ -604,11 +591,10 @@ def _degraded(
     reason: str,
     *,
     repo: str = "",
-    top_k: int = 0,
     http_calls: int = 0,
 ) -> PRRefsResult:
     """Return an explicit failure while retaining cached references."""
-    shown = _ranked_from_snapshot(snapshot, PRQueryContext(repo=repo), top_k=top_k)
+    shown = _ranked_from_snapshot(snapshot, PRQueryContext(repo=repo))
     if not shown:
         return PRRefsResult(
             reason=reason,
@@ -633,14 +619,14 @@ def _degraded(
     )
 
 
-def _ranked_from_snapshot(snapshot: Snapshot, context: PRQueryContext, *, top_k: int) -> list[PRReference]:
+def _ranked_from_snapshot(snapshot: Snapshot, context: PRQueryContext) -> list[PRReference]:
     """Best TOP_K references the snapshot holds, ranked for this query."""
     references = [
         reference for reference in (entry_to_reference(e) for e in snapshot.entries.values()) if reference is not None
     ]
     if not references:
         return []
-    limit = top_k or int(os.environ.get("PR_KB_TOP_K", "5") or 5)
+    limit = int(os.environ.get("PR_KB_TOP_K", "5") or 5)
     interest = components_of_interest(context)
     relevant = filter_references_by_relevance(references, interest)
     ranked = rank_references(relevant, components_of_interest=interest)

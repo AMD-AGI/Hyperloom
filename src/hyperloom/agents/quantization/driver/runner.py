@@ -6,7 +6,7 @@ import atexit
 import os
 import shutil
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
@@ -31,6 +31,27 @@ _datetime.UTC = _datetime.timezone.utc
 """
 
 
+@dataclass(frozen=True)
+class AttemptContext:
+    """One attempt as the agent is told about it: the request, where it works, and how the last attempt ended."""
+
+    user_prompt: str
+    workspace: Path
+    quark_root: Path
+    attempt_number: int = 1
+    acceptable_eval_gap: float | None = None
+    interactive: bool | None = None
+    previous_outcome: str | None = None
+
+
+@dataclass(frozen=True)
+class ClaudeAgentSdk:
+    """The Claude Agent SDK entry points one attempt drives."""
+
+    query: Callable[..., Any]
+    options_cls: Any
+
+
 @dataclass
 class AttemptResult:
     """Low-level output of one SDK session."""
@@ -38,10 +59,9 @@ class AttemptResult:
     workspace: Path
     sdk_error: str = ""
     raw_text: str = ""
-    chunks: list[str] = field(default_factory=list)
 
 
-def _import_sdk() -> tuple[Any, Any]:
+def _import_sdk() -> ClaudeAgentSdk:
     """Import the Claude Agent SDK and return its query primitives."""
     try:
         import claude_agent_sdk as sdk  # type: ignore[import-not-found]
@@ -49,7 +69,7 @@ def _import_sdk() -> tuple[Any, Any]:
         raise RuntimeError("claude_agent_sdk not installed; run the quantization-agent installer") from exc
     if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):
         raise RuntimeError("claude_agent_sdk missing query / ClaudeAgentOptions")
-    return sdk.query, sdk.ClaudeAgentOptions
+    return ClaudeAgentSdk(query=sdk.query, options_cls=sdk.ClaudeAgentOptions)
 
 
 def _iter_message_text(message: Any) -> Iterable[str]:
@@ -103,20 +123,13 @@ def _quark_py310_compat_env(base_env: dict[str, str] | None = None) -> dict[str,
     return env
 
 
-def build_attempt_prompt(
-    *,
-    user_prompt: str,
-    skill_path: Path,
-    workspace: Path,
-    quark_root: Path,
-    attempt_number: int,
-    acceptable_eval_gap: float | None,
-    interactive: bool | None,
-    previous_outcome: str | None,
-    fix_hypothesis_path: Path | None,
-) -> str:
+def build_attempt_prompt(attempt: AttemptContext, *, skill_path: Path, fix_hypothesis_path: Path | None) -> str:
     """Assemble the prompt handed to the SDK for one attempt."""
 
+    interactive = attempt.interactive
+    acceptable_eval_gap = attempt.acceptable_eval_gap
+    attempt_number = attempt.attempt_number
+    previous_outcome = attempt.previous_outcome
     interactive_str = (
         "auto (use stdin if a tty is attached)"
         if interactive is None
@@ -145,14 +158,14 @@ Read and follow the FULL runtime contract in this skill file:
 {skill_path}
 
 ## Run context (passed in via prompt; SKILL.md tells you what to do with these)
-- Workspace (WRITE only here; quantized_model_dir must resolve inside this path after Path.resolve(); see SKILL.md §1.1): {workspace}
-- Quark project root (READ-ONLY; never edit files under this path): {quark_root}
+- Workspace (WRITE only here; quantized_model_dir must resolve inside this path after Path.resolve(); see SKILL.md §1.1): {attempt.workspace}
+- Quark project root (READ-ONLY; never edit files under this path): {attempt.quark_root}
 - Attempt number: {attempt_number}
 - Acceptable eval gap: {threshold_str}
 - Interactive mode: {interactive_str}{retry_block}
 
 ## User prompt (verbatim)
-{user_prompt}
+{attempt.user_prompt}
 
 Begin the workflow now. Do not ask the user clarifying questions unless the
 SKILL.md retry/checkpoint protocol explicitly requires it.
@@ -160,26 +173,18 @@ SKILL.md retry/checkpoint protocol explicitly requires it.
 
 
 async def run_one_attempt(
+    attempt: AttemptContext,
     *,
-    user_prompt: str,
-    workspace: Path,
-    quark_root: Path,
-    attempt_number: int = 1,
-    acceptable_eval_gap: float | None = None,
-    interactive: bool | None = None,
-    previous_outcome: str | None = None,
     skill_path: Path | None = None,
     model: str | None = None,
-    max_turns: int = DEFAULT_MAX_TURNS,
-    allowed_tools: list[str] | None = None,
-    sdk_query_factory: Callable[..., Any] | None = None,
-    sdk_options_cls: Any | None = None,
+    sdk: ClaudeAgentSdk | None = None,
     log: Callable[[str], None] | None = None,
 ) -> AttemptResult:
     """Run one SDK session driving SKILL.md."""
-    workspace = Path(workspace)
+    workspace = Path(attempt.workspace)
     workspace.mkdir(parents=True, exist_ok=True)
-    quark_root = Path(quark_root)
+    quark_root = Path(attempt.quark_root)
+    attempt_number = attempt.attempt_number
 
     skill_path = skill_path or resolve_skill_path()
     if not skill_path.is_file():
@@ -190,22 +195,9 @@ async def run_one_attempt(
         candidate = workspace / f"fix_hypothesis_attempt_{attempt_number}.md"
         fix_hypothesis_path = candidate if candidate.is_file() else None
 
-    prompt = build_attempt_prompt(
-        user_prompt=user_prompt,
-        skill_path=skill_path,
-        workspace=workspace,
-        quark_root=quark_root,
-        attempt_number=attempt_number,
-        acceptable_eval_gap=acceptable_eval_gap,
-        interactive=interactive,
-        previous_outcome=previous_outcome,
-        fix_hypothesis_path=fix_hypothesis_path,
-    )
+    prompt = build_attempt_prompt(attempt, skill_path=skill_path, fix_hypothesis_path=fix_hypothesis_path)
 
-    if sdk_query_factory is None or sdk_options_cls is None:
-        query, options_cls = _import_sdk()
-        sdk_query_factory = sdk_query_factory or query
-        sdk_options_cls = sdk_options_cls or options_cls
+    sdk = sdk or _import_sdk()
 
     system_prompt = (
         "You are the Hyperloom quantization-agent. Drive the Quark workflow per "
@@ -213,9 +205,9 @@ async def run_one_attempt(
         "in workspace as the source of truth; do not lie about success."
     )
     kwargs: dict[str, Any] = {
-        "max_turns": max_turns,
+        "max_turns": DEFAULT_MAX_TURNS,
         "system_prompt": system_prompt,
-        "allowed_tools": DEFAULT_ALLOWED_TOOLS if allowed_tools is None else allowed_tools,
+        "allowed_tools": DEFAULT_ALLOWED_TOOLS,
         "stderr": (lambda line: log(f"[claude-sdk] {line.rstrip()}")) if log else None,
         "env": _quark_py310_compat_env(),
     }
@@ -225,12 +217,12 @@ async def run_one_attempt(
     kwargs["cwd"] = str(workspace)
 
     try:
-        options = sdk_options_cls(**kwargs)
+        options = sdk.options_cls(**kwargs)
     except TypeError:
         # Older SDK builds may not support cwd; prompt + SKILL.md use absolute paths so retrying without cwd is safe.
         kwargs.pop("cwd", None)
         try:
-            options = sdk_options_cls(**kwargs)
+            options = sdk.options_cls(**kwargs)
         except TypeError as env_exc:
             # The Quark py310 shim must be passed to SDK-spawned tools without mutating process-global os.environ
             # across async awaits.
@@ -247,7 +239,7 @@ async def run_one_attempt(
         log(f"quantization-agent SDK runner: workspace={workspace} quark_root={quark_root} attempt={attempt_number}")
 
     try:
-        async for message in sdk_query_factory(prompt=prompt, options=options):
+        async for message in sdk.query(prompt=prompt, options=options):
             for text in _iter_message_text(message):
                 chunks.append(text)
                 if log:
@@ -262,7 +254,6 @@ async def run_one_attempt(
         workspace=workspace,
         sdk_error=sdk_error,
         raw_text="\n".join(chunks),
-        chunks=chunks,
     )
 
 
@@ -271,7 +262,9 @@ RunOneAttemptFn = Callable[..., Awaitable[AttemptResult]]
 
 
 __all__ = [
+    "AttemptContext",
     "AttemptResult",
+    "ClaudeAgentSdk",
     "DEFAULT_ALLOWED_TOOLS",
     "DEFAULT_MAX_TURNS",
     "DEFAULT_MODEL",

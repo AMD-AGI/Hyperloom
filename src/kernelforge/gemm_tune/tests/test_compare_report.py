@@ -68,12 +68,11 @@ def _prep(tmp_path, monkeypatch, *, compare_dir: Path | None = None):
 
 def _run(tmp_path):
     return ac.run_aiter_dense_tuner(
-        tuner_name="a8w8_blockscale",
-        script_key="a8w8_blockscale",
-        env_var="AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
-        ctx=_ctx(tmp_path),
-        work_dir=tmp_path,
-        extra_args=["--libtype", "all"],
+        ac.DenseTunerSpec(
+            "a8w8_blockscale", "a8w8_blockscale", "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE", ("--libtype", "all")
+        ),
+        _ctx(tmp_path),
+        tmp_path,
     )
 
 

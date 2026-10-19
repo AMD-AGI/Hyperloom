@@ -12,14 +12,8 @@ for _path in (_repo_root, os.path.join(_repo_root, "src")):
     if os.path.isdir(_path):
         sys.path.insert(0, _path)
 
-"""
-html_theme is usually unchanged (rocm_docs_theme).
-flavor defines the site header display, select the flavor for the corresponding portals
-flavor options: rocm, rocm-docs-home, rocm-blogs, rocm-ds, instinct, ai-developer-hub, local, generic
-"""
-
 # Keep in sync with pyproject.toml [project].version.
-version_number = "1.1.3"
+version_number = "1.1.4"
 
 html_theme = "rocm_docs_theme"
 html_theme_options = {
@@ -85,13 +79,6 @@ suppress_warnings = [
     # Autosummary API pages contain toctrees that external-toc warns about.
     "etoc.toctree",
 ]
-
-"""
-Doxygen Settings
-Ensure Doxyfile is located at docs/doxygen.
-If the component does not need doxygen, delete this section for optimal build time
-"""
-# doxygen_root = "doxygen" doxysphinx_enabled = True doxygen_project = { "name": "doxygen", "path": "doxygen/xml", }
 
 # Add more addtional package accordingly
 extensions = [

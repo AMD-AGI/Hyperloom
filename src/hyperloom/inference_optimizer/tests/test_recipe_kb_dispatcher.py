@@ -58,14 +58,6 @@ def test_local_crud_and_authority_read(kb: RecipeKB) -> None:
     assert kb.search(label_match={"model": "m"})[0]["canonical_id"] == cid
 
 
-def test_attempt_api_delegates_locally(kb: RecipeKB) -> None:
-    cid = _cid()
-    kb.append_attempt(canonical_id=cid, session_id="s1", outcome="kept")
-    kb.append_attempt(canonical_id=cid, session_id="s2", outcome="reverted")
-    assert len(kb.list_attempts(canonical_id=cid)) == 2
-    assert [row["outcome"] for row in kb.list_attempts(canonical_id=cid, session_id="s2")] == ["reverted"]
-
-
 def test_audit_is_local_and_best_effort(kb: RecipeKB) -> None:
     events: list[dict] = []
     kb.audit_hook = events.append
@@ -85,3 +77,17 @@ def test_audit_is_local_and_best_effort(kb: RecipeKB) -> None:
 
     kb.audit_hook = lambda _event: (_ for _ in ()).throw(RuntimeError("down"))
     assert kb.get_recipe(canonical_id=_cid()) is not None
+
+
+def test_close_propagates_local_store_close_failure(kb: RecipeKB) -> None:
+    def _boom() -> None:
+        raise OSError("close failed")
+
+    kb.local.close = _boom
+    with pytest.raises(OSError, match="close failed"):
+        kb.close()
+
+
+def test_close_without_local_close_is_a_noop(kb: RecipeKB) -> None:
+    result = kb.close()
+    assert result is None

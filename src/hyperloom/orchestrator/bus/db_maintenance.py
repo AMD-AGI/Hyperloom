@@ -30,21 +30,6 @@ class RetentionResult:
         return self.events_deleted + self.tasks_deleted
 
 
-# A ``proposal`` event is semantically pending until a ``review_verdict`` targets its ``msg_id``; pruning a pending
-# proposal's row would lose the only durable record a post-resume late verdict can attach to.
-_PENDING_PROPOSAL_SEQS_SQL = """
-    SELECT seq FROM events
-    WHERE topic = 'proposal'
-      AND msg_id NOT IN (
-        SELECT json_extract(payload, '$.target_proposal_msg_id')
-        FROM events
-        WHERE topic = 'review_verdict'
-          AND json_extract(payload, '$.target_proposal_msg_id') IS NOT NULL
-          AND json_extract(payload, '$.target_proposal_msg_id') != ''
-      )
-"""
-
-
 async def prune_events(
     db: SqliteConnection,
     *,

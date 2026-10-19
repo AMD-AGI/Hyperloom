@@ -26,23 +26,3 @@ def test_a_session_the_critic_never_reviewed_gets_no_section():
     asm._compose_critic(out)
 
     assert "critic" not in out
-
-
-def test_robustness_turns_fold_in_turn_order():
-    out = {
-        "robustness_turn": [
-            {"turn_idx": 2, "outcome": "intents"},
-            {"turn_idx": 1, "outcome": "no_envelope"},
-        ]
-    }
-    asm._compose_robustness(out)
-
-    assert "robustness_turn" not in out
-    assert [t["turn_idx"] for t in out["robustness"]["turns"]] == [1, 2]
-
-
-def test_a_session_with_no_robustness_turns_gets_no_section():
-    out = {}
-    asm._compose_robustness(out)
-
-    assert "robustness" not in out
