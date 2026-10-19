@@ -18,10 +18,9 @@ sources:
 
 > Scope: dense GEMM with M ≈ 1–256 (decode steps, speculative-decode verify), mostly bf16. Primus-Turbo's FlyDSL
 > GEMMs (the exemplar elsewhere in this package) are built for training shapes and do not target small M.
-> The small-M kernel in use today is FlyDSL's `gemm_a16w16_gfx950`, which aiter ships as its FlyDSL a16w16
-> backend since aiter #5145. That change deleted aiter's older `splitk_hgemm.py` /
-> `small_m_hgemm.py`; `../optimize/flydsl_levers/flydsl_kernel_library.md` and `../optimize/flydsl_levers/flydsl_knob_space.md` still
-> describe that older kernel.
+> aiter's FlyDSL a16w16 backend is FlyDSL's `gemm_a16w16_gfx950` (aiter #5145 onwards). aiter's earlier bf16
+> kernels (`splitk_hgemm.py`, `small_m_hgemm.py`) are what `../optimize/flydsl_levers/flydsl_kernel_library.md`
+> and `../optimize/flydsl_levers/flydsl_knob_space.md` still describe.
 >
 > Numbers marked *(field)* are measured values on aiter's earlier small-M kernel. The mechanisms carry over to
 > the current kernel; the configurations do not. Each technique marked **Not in the current kernel** is a porting

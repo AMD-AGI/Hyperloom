@@ -49,14 +49,20 @@ __shared__ float tile[64][65];   // GOOD: +1 spreads the column across all banks
 float v = tile[k][threadIdx.x];
 ```
 
-What matters is **`(byte_stride / 4) mod 64`**, not the element count — the same trap fires at stride 32
-for a `[32][32]` tile of 8-byte elements.
+What matters is how many banks the stride reaches — a whole-dword stride touches only
+**`64 / gcd(byte_stride / 4, 64)`** banks — not the element count; the same trap fires at stride 32 for a
+`[32][32]` tile of 8-byte elements.
 
 ## What to change, in order
 
 ### 1. Pad the leading dimension
-Choose `PAD` so `((BK+PAD) · sizeof(dtype) / 4) mod 64 != 0`. Commonly `+1` for f32, `+4`/`+8` for
-16-/8-bit — but the second constraint is **keep 16-byte alignment** so `ds_read_b128` still fires. A pad
+Choose `PAD` so the row stride, counted in units of the per-lane read width (4 B for `ds_read_b32`, 8 B
+for `b64`, 16 B for `b128`), is **odd**. Lane `r` reading row `r` starts at bank
+`floor((r · stride_bytes + col_bytes) / 4) mod 64`; with an odd stride the lanes read together never
+share a bank, however the hardware groups them. `stride mod 64 != 0` is not enough: an 80-dword stride
+reaches 4 banks, and fp16 128+1 (64.5 dwords) is 2-way for 2-byte reads. The pad must also keep the read
+aligned, so one extra read-width unit is the usual choice: `+1` for f32 with `b32`, `+8` for bf16 or
+`+16` for fp8 with `ds_read_b128` on a row that is an even number of 16 B units. A pad
 that fixes conflicts and breaks vectorization is a net loss. Cost: a little wasted LDS, which the
 160 KiB budget absorbs easily now.
 

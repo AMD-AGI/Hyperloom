@@ -49,8 +49,12 @@ k<<<grid, block, (BM*BK + BK*BN)*sizeof(__bf16), stream>>>();
 ## Fixing conflicts
 
 **Pad the inner dimension** — `__shared__ float tile[64][64+1];` breaks the stride that maps a column
-onto one bank. Choose the pad so `(byte_stride/4) mod 64 != 0`, **and keep 16-byte alignment** so
-`ds_read_b128` still fires. A pad that fixes conflicts and breaks vectorization is a net loss.
+onto one bank. Choose the pad so the row stride, counted in units of the per-lane read width (4 B for
+`ds_read_b32`, 8 B for `b64`, 16 B for `b128`), is **odd**: lane `r` reading row `r` starts at bank
+`floor((r · stride_bytes + col_bytes) / 4) mod 64`, and an odd stride keeps the lanes read together on
+distinct banks. `stride mod 64 != 0` is not enough (an 80-dword stride reaches 4 banks). **Keep the read
+aligned** so `ds_read_b128` still fires: one extra read-width unit (`+1` f32 for `b32`, `+8` bf16 for
+`b128`) usually does both. A pad that fixes conflicts and breaks vectorization is a net loss.
 
 **XOR-swizzle the column index** for transpose-heavy and MFMA-staging patterns. This is the standard
 GEMM fix, costs no extra LDS, and is **required** when using direct-to-LDS. One IREE study measured
