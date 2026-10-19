@@ -248,7 +248,10 @@ def _restore_operator_supplied_paths_from_state(args: Any, state: SharedState) -
         archived = str(getattr(state, "benchmark_backend", "") or "").strip()
         if archived:
             os.environ[BENCHMARK_BACKEND_ENV] = archived
-    if not str(getattr(args, _XDIT_MODEL_NAME_ATTR, None) or "").strip() and not os.environ.get(_XDIT_MODEL_NAME_ENV, "").strip():
+    if (
+        not str(getattr(args, _XDIT_MODEL_NAME_ATTR, None) or "").strip()
+        and not os.environ.get(_XDIT_MODEL_NAME_ENV, "").strip()
+    ):
         archived = str(getattr(state, _XDIT_MODEL_NAME_ATTR, "") or "").strip()
         if archived:
             os.environ[_XDIT_MODEL_NAME_ENV] = archived
