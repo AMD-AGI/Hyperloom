@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import time
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -111,6 +112,43 @@ def probe_aiter_jit_cache() -> dict[str, Any]:
         return info
 
 
+class _CompilerMatch(Enum):
+    """What one process answered when asked whether a compiler is working on the build trees."""
+
+    WORKING = "working"
+    NOT_A_COMPILER = "not_a_compiler"
+    WITHHELD = "withheld"
+
+
+def _compiler_match(info: dict[str, Any], build_dirs: list[str]) -> _CompilerMatch:
+    """Whether one process is a compiler working under ``build_dirs``, or withheld the fields that would say.
+
+    An empty ``build_dirs`` asks only whether the process is a compiler at all.
+    """
+    name = (info.get("name") or "").strip()
+    cmdline = info.get("cmdline") or []
+    is_compiler = name in COMPILER_PROCESS_NAMES
+    if cmdline:
+        first = os.path.basename(str(cmdline[0]).strip())
+        if first in COMPILER_PROCESS_NAMES:
+            is_compiler = True
+    if not is_compiler:
+        if info.get("name") is None or info.get("cmdline") is None:
+            return _CompilerMatch.WITHHELD
+        return _CompilerMatch.NOT_A_COMPILER
+    if not build_dirs:
+        return _CompilerMatch.WORKING
+    cwd = str(info.get("cwd") or "")
+    command = "\0".join(str(arg) for arg in cmdline)
+    if any(
+        cwd == build_dir or cwd.startswith(f"{build_dir}{os.sep}") or build_dir in command for build_dir in build_dirs
+    ):
+        return _CompilerMatch.WORKING
+    if info.get("cwd") is None or info.get("cmdline") is None:
+        return _CompilerMatch.WITHHELD
+    return _CompilerMatch.NOT_A_COMPILER
+
+
 def _any_live_compiler(
     build_dirs: list[Path] | None = None,
 ) -> bool | None:
@@ -127,27 +165,10 @@ def _any_live_compiler(
                 info = proc.info
                 if info.get("status") == psutil.STATUS_ZOMBIE:
                     continue
-                name = (info.get("name") or "").strip()
-                cmdline = info.get("cmdline") or []
-                is_compiler = name in COMPILER_PROCESS_NAMES
-                if cmdline:
-                    first = os.path.basename(str(cmdline[0]).strip())
-                    if first in COMPILER_PROCESS_NAMES:
-                        is_compiler = True
-                if not is_compiler:
-                    if info.get("name") is None or info.get("cmdline") is None:
-                        unknown = True
-                    continue
-                if not normalized_dirs:
+                match = _compiler_match(info, normalized_dirs)
+                if match is _CompilerMatch.WORKING:
                     return True
-                cwd = str(info.get("cwd") or "")
-                command = "\0".join(str(arg) for arg in cmdline)
-                if any(
-                    cwd == build_dir or cwd.startswith(f"{build_dir}{os.sep}") or build_dir in command
-                    for build_dir in normalized_dirs
-                ):
-                    return True
-                if info.get("cwd") is None or info.get("cmdline") is None:
+                if match is _CompilerMatch.WITHHELD:
                     unknown = True
             except psutil.AccessDenied:
                 unknown = True
