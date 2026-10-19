@@ -337,6 +337,8 @@ def _fill_session_sink(
     """
     # PLAN — one-sentence description of THIS iteration's FINAL modification.
     session_sink["plan"] = _parse_output_tag(run_result.text, "PLAN:", 160, last=True)
+    # The session's whole closing message; a GUIDED batch session reports what it landed in it.
+    session_sink["final_text"] = run_result.text or ""
     session_sink["session_id"] = run_result.session_id
     session_sink["summarize"] = summarize
     session_sink["end_reason"] = ending.end_reason

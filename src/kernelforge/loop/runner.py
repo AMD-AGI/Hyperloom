@@ -65,6 +65,8 @@ from kernelforge.loop.jit_rebuild import (
 from kernelforge.loop.agent_relay import apply_relay_keep, apply_relay_search_outcome
 from kernelforge.loop.analysis_runtime import AnalysisRuntimeMixin
 from kernelforge.loop.relay_runtime import RelayRuntimeMixin
+from kernelforge.knowledge.wiki_tool import KnowledgeWikiTool
+from kernelforge.loop.wiki_guided_rounds import GuidanceSinks, WikiGuidedRounds
 from kernelforge.loop.search_policy import (
     MARGINAL_GAIN_SCAN_WINDOW,
     MARGINAL_GAIN_WINDOW,
@@ -545,6 +547,10 @@ class IterationConfig:
     # Mean per-case speedup over the baseline (the KEEP objective) at which the campaign stops, however much budget
     # remains. Zero disables the gate, which is the default.
     target_mean_case_speedup: float = 0.0
+    # Plan each round as one knowledge base batch (``loop.wiki_guidance``) until the knowledge base and the evidence
+    # support nothing more or a batch brings too little; then plan freely. Needs the knowledge base
+    # (``Config.knowledge_wiki_root``) and is off by default.
+    wiki_guided: bool = False
 
     def __post_init__(self) -> None:
         # Validated here rather than at the CLI boundary alone, so a pattern can never reach the commit/delete sites
@@ -833,6 +839,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         self.search_policy_engine = SearchPolicyEngine()
         self._search_policy_decision: SearchPolicyDecision | None = None
         self._reported_window_gain_faults: set[str] = set()
+        # Knowledge-base-guided planning; None leaves every planning path as it was.
+        self.wiki_rounds: WikiGuidedRounds | None = self._open_wiki_rounds(resume) if self.ic.wiki_guided else None
         self.handoff_store: HandoffStore | None = None
         # A committed KEEP recovered during synchronous resume preflight waits here until the async run can restore
         # its post-KEEP profile/archive.
@@ -2450,6 +2458,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                     checkpoint_metadata=pending,
                 )
             )
+            if self.wiki_rounds is not None:
+                self.wiki_rounds.recover_keep(result.iteration)
         self.state_store.save(self.run_state)
         persisted = self.state_store.load()
         if persisted.to_dict() != self.run_state.to_dict():
@@ -3808,6 +3818,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                         incumbent_case_times=self._scored_incumbent_case_times(),
                     ),
                 )
+                self._record_wiki_outcome(result, decision_label)
             self.state_store.save(self.run_state)
 
             if require_durable:
@@ -3887,6 +3898,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             best_after_mean_case_speedup=(result.mean_case_speedup if result.kept else self.best_mean_case_speedup),
             is_new_best=result.kept,
             diversification_cycle_completed=(self.run_state.diversification_cycle_completed),
+            # The planning phase of a --wiki-guided campaign and the GUIDED batch the iteration implemented.
+            **(self.wiki_rounds.result_fields() if self.wiki_rounds is not None else {}),
         )
 
     def _record_iteration_handoff(
@@ -4452,11 +4465,17 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
             )
         )
         try:
-            result = await orchestration_service.run(
-                context,
-                usage=self._usage,
-                lanes=lanes,
-            )
+            if self.wiki_rounds is not None:
+                planned = await self.wiki_rounds.plan_round(
+                    iteration, orchestration_service, context, usage=self._usage, lanes=lanes
+                )
+                context, result = planned.context, planned.result
+            else:
+                result = await orchestration_service.run(
+                    context,
+                    usage=self._usage,
+                    lanes=lanes,
+                )
         except OrchestrationInfrastructureError as error:
             detail = f"{type(error).__name__}: {error}"
             print(f"  [orchestration] failed ({detail})")
@@ -4483,6 +4502,30 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         if len(self._last_lane_plans) > 1:
             print(f"  [orchestration] {len(self._last_lane_plans)} lane plans published under {plan_path.parent}")
         return plan_path, ""
+
+    def _persistence_failed(self, what: str) -> None:
+        self.persistence_degraded = True
+        self.persistence_errors.append(what)
+        self.persistence_errors = self.persistence_errors[-10:]
+
+    def _open_wiki_rounds(self, resume: bool) -> WikiGuidedRounds:
+        sinks = GuidanceSinks(lambda event: self.state_store.append_event(event), self._persistence_failed)
+        knowledge_wiki = KnowledgeWikiTool.from_config(self.config)
+        return WikiGuidedRounds(self.ic.workspace_dir, knowledge_wiki=knowledge_wiki, resume=resume, sinks=sinks)
+
+    def _with_guidance_note(self, history: str) -> str:
+        """The Implementer's history headed by the guidance phase note, when the campaign is guided."""
+        note = self.wiki_rounds.implementer_note() if self.wiki_rounds is not None else ""
+        return f"{note}\n\n{history}" if note else history
+
+    def _note_batch_report(self, iteration: int, session_sink: dict) -> None:
+        if self.wiki_rounds is not None:
+            final_text = str(session_sink.get("final_text") or "")
+            self.wiki_rounds.note_session_report(iteration, final_text)
+
+    def _record_wiki_outcome(self, result: IterationResult, decision_label: str) -> None:
+        if self.wiki_rounds is not None:
+            self.wiki_rounds.record(result.iteration, decision_label, detail=result.validation_summary)
 
     def _record_probe_hazard(self, iteration: int, result) -> None:
         """Turn a probe the analysis phase could not clear into a live hazard."""
@@ -5847,6 +5890,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
         """
         iteration, session_sink = frame.iteration, frame.session_sink
         optimization_plan_path, optimization_plan_executable = plan.path, plan.executable
+        self._note_batch_report(iteration, session_sink)
         # Either kind of "this candidate exists but must not be measured": protected state was tainted, or the
         # workspace is still busy.
         unmeasured_result: IterationResult | None = None
@@ -6138,6 +6182,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 f"Mode residence remaining after this iteration: {policy.residence_iterations_remaining}"
             )
             history = "\n".join(policy_lines) + "\n\n" + history
+        history = self._with_guidance_note(history)
         # The latest free-form Supervisor Ruling is durable across KEEP and resume.
         if self._supervisor_ruling:
             history = (
@@ -6255,6 +6300,8 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
 
         # Durable per-iteration marker (facts only; detail lives in files).
         self.run_state.iteration = iteration
+        if self.wiki_rounds is not None:
+            self.wiki_rounds.start_iteration()
         self.state_store.append_event(
             make_event(
                 "iteration_started",

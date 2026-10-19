@@ -55,6 +55,18 @@ from kernelforge.orchestrator.structured_output import (
     build_repair_prompt,
     extract_json_object,
 )
+from kernelforge.orchestrator.wiki_batch import (
+    BATCH_PART_SYSTEM_PROMPT,
+    PLAYBOOK_GROUP_ROLE,
+    PLAYBOOK_ROLE,
+    PLAYBOOK_SYSTEM_PROMPT,
+    BatchPart,
+    batch_part_payload,
+    batch_parts,
+    playbook_group_definition,
+    playbook_group_dispatch,
+    playbook_payload,
+)
 
 
 log = logging.getLogger(__name__)
@@ -282,6 +294,16 @@ Do not dispatch specialists again, edit files, run shell commands, alter
 measurement inputs, or present inference as profiler fact. Return only the
 final ordinary Markdown plan.
 """
+
+
+def _is_group_dispatch(dispatch_plan: DispatchPlan) -> bool:
+    """Whether a round's dispatch is a GUIDED batch's, which the dispatch planner is never offered the role to make."""
+    return any(assignment.role_id == PLAYBOOK_GROUP_ROLE for assignment in dispatch_plan.assignments)
+
+
+def _critic_skipped(dispatch_plan: DispatchPlan) -> dict[str, str]:
+    """Why a round with a plan critic ran none: a GUIDED batch has none, any other round had no synthesized plan."""
+    return {"status": "skipped_guided_batch" if _is_group_dispatch(dispatch_plan) else "skipped_synthesis_unavailable"}
 
 
 class OrchestrationInfrastructureError(RuntimeError):
@@ -577,6 +599,11 @@ class OrchestrationAgent:
         usage=None,
     ) -> list[SynthesizedPlan]:
         """Partition the round into plans that do not compete for one another's ground."""
+        parts = batch_parts(context, specialists)
+        if parts:
+            # A batch is implemented in one session on one tree, so it is not divided by code: each group analysis
+            # becomes one part, a batch of one group included.
+            return await self._synthesize_batch_parts(context, specialists, parts, usage=usage)
         analyses = specialists.analyses
         width = max(1, min(int(lanes), len(analyses)))
         if width <= 1:
@@ -669,6 +696,57 @@ class OrchestrationAgent:
         if not plans:
             raise OrchestrationOutputError("orchestration synthesis returned no lane plan")
         return plans
+
+    async def _synthesize_batch_parts(
+        self,
+        context: OrchestrationContext,
+        specialists: SpecialistRound,
+        parts: Sequence[BatchPart],
+        *,
+        usage=None,
+    ) -> list[SynthesizedPlan]:
+        """One plan per batch part, in batch order; a part whose call fails is one part lost and not the round."""
+
+        async def _part(index: int) -> SynthesizedPlan | None:
+            role = f"orchestration batch part {index + 1} synthesis"
+            payload = batch_part_payload(context, specialists, parts, index)
+            turn = _Turn(BATCH_PART_SYSTEM_PROMPT, json.dumps(payload, indent=2, sort_keys=True), role=role)
+            result = await self._run_result(context, turn, usage=usage)
+            text = self._validated_text(result, role=role, allow_empty=True)
+            if not text:
+                return None
+            ground = f"batch part {index + 1} of {len(parts)}: playbook group {parts[index].group_id}"
+            return SynthesizedPlan(text=text, session_id=str(result.session_id or "").strip(), ground=ground)
+
+        with _phase_timer(self.phase_durations_sec, "synthesis"):
+            answers = await asyncio.gather(*(_part(index) for index in range(len(parts))), return_exceptions=True)
+        plans: list[SynthesizedPlan] = []
+        for index, answer in enumerate(answers):
+            if isinstance(answer, BaseException):
+                log.warning(
+                    "batch part %d of %d lost its plan: %s: %s", index + 1, len(parts), type(answer).__name__, answer
+                )
+            elif answer is None:
+                log.warning("batch part %d of %d returned an empty plan", index + 1, len(parts))
+            else:
+                plans.append(answer)
+        self.structured_output_diagnostics["batch"] = {
+            "parts": [part.group_id for part in parts],
+            "planned": len(plans),
+        }
+        if not plans:
+            raise OrchestrationOutputError("orchestration synthesis returned no batch part plan")
+        return plans
+
+    async def build_wiki_playbook(self, context: OrchestrationContext, *, usage=None) -> str:
+        """Turn the knowledge base and the measured evidence into the campaign's batch; the builder's raw answer."""
+        if self.knowledge_wiki is None:
+            raise ValueError("a playbook needs a knowledge base")
+        user_prompt = json.dumps(playbook_payload(context), indent=2, sort_keys=True)
+        result = await self._run_result(
+            context, _Turn(PLAYBOOK_SYSTEM_PROMPT, user_prompt, role=PLAYBOOK_ROLE), usage=usage
+        )
+        return self._validated_text(result, role=PLAYBOOK_ROLE)
 
     @staticmethod
     def _collapsed_grounds(
@@ -1171,6 +1249,34 @@ class OrchestrationService:
         self._definitions = dict(definitions)
         self._plan_critic = plan_critic
 
+    async def build_wiki_playbook(self, context: OrchestrationContext, *, usage=None) -> str:
+        """The playbook builder's raw answer (``loop.wiki_playbook.parse_playbook`` reads it).
+
+        Refused when the pool has no group analyst, since no batch the builder answers with could be analyzed.
+        """
+        if not self._specialist_pool.has_role(PLAYBOOK_GROUP_ROLE):
+            raise ValueError("a playbook needs the playbook group analyst in the specialist pool")
+        return await self._agent.build_wiki_playbook(context, usage=usage)
+
+    async def _dispatch(self, context: OrchestrationContext, *, lanes: int, usage) -> DispatchPlan:
+        """The round's assignments.
+
+        A GUIDED round already knows its steps, one analysis per open batch group, so it skips the dispatch planner
+        and the angle specialists it chooses among. Only a pool built with a knowledge base holds the group analyst.
+        """
+        group_dispatch = (
+            playbook_group_dispatch(context, lanes=lanes)
+            if self._specialist_pool.has_role(PLAYBOOK_GROUP_ROLE)
+            else None
+        )
+        if group_dispatch is None:
+            return await self._agent.plan_dispatch(context, self._definitions, usage=usage)
+        self._agent.structured_output_diagnostics["dispatch"] = {
+            "mode": "playbook_groups",
+            "assignments": [assignment.reason for assignment in group_dispatch.assignments],
+        }
+        return group_dispatch
+
     async def run(
         self,
         context: OrchestrationContext,
@@ -1184,11 +1290,7 @@ class OrchestrationService:
         phase_durations = self._agent.phase_durations_sec
         run_started_at = time.monotonic()
         with _phase_timer(phase_durations, "dispatch"):
-            dispatch_plan = await self._agent.plan_dispatch(
-                context,
-                self._definitions,
-                usage=usage,
-            )
+            dispatch_plan = await self._dispatch(context, lanes=lanes, usage=usage)
         diagnostics = dict(self._agent.structured_output_diagnostics)
 
         with _phase_timer(phase_durations, "specialists"):
@@ -1251,8 +1353,11 @@ class OrchestrationService:
         else:
             plans = [self._render_framework_plan(context, specialists)]
         planned_lanes = len(plans)
-        # Every round a synthesis produced is reviewed, at any width.
-        critic_eligible = bool(self._plan_critic is not None and optimization_plan_executable)
+        # Every round a synthesis produced is reviewed, at any width, except a GUIDED batch: its parts run one after
+        # another in one session rather than as competing lanes, so a lane review would drop a part for depending on
+        # an earlier one.
+        guided_batch = _is_group_dispatch(dispatch_plan)
+        critic_eligible = bool(self._plan_critic is not None and optimization_plan_executable and not guided_batch)
         draft_plan = ""
         critic_outcome = None
         plan_revised = False
@@ -1295,9 +1400,7 @@ class OrchestrationService:
                     optimization_plan_executable = False
                 diagnostics["plan_revision"] = revision_diagnostics
         elif self._plan_critic is not None:
-            diagnostics["plan_critic"] = {
-                "status": "skipped_synthesis_unavailable",
-            }
+            diagnostics["plan_critic"] = _critic_skipped(dispatch_plan)
         diagnostics["lanes"] = {
             "requested": int(lanes),
             "planned": planned_lanes,
@@ -1734,6 +1837,11 @@ def make_orchestration_service(
     )
     specialist_probe = _specialist_probe_config(config)
     knowledge_wiki = KnowledgeWikiTool.from_config(config)
+    # The dispatch planner chooses among ``resolved_definitions`` only; the group analyst is in the pool for the GUIDED
+    # rounds a knowledge base makes possible.
+    pool_definitions = dict(resolved_definitions)
+    if knowledge_wiki is not None:
+        pool_definitions.setdefault(PLAYBOOK_GROUP_ROLE, playbook_group_definition())
     specialist_agents = {
         role_id: SpecialistAgent(
             definition=definition,
@@ -1746,7 +1854,7 @@ def make_orchestration_service(
             max_turns=config.max_turns,
             tools=SpecialistTools(probe=specialist_probe, knowledge_wiki=knowledge_wiki),
         )
-        for role_id, definition in resolved_definitions.items()
+        for role_id, definition in pool_definitions.items()
     }
     return OrchestrationService(
         agent=OrchestrationAgent(

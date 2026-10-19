@@ -249,6 +249,9 @@ class OrchestrationContext:
     last_critic_review: str = ""
     # Present only when the campaign has a roofline ceiling; each case's own figure rides on ``CaseEvidence.roofline``.
     roofline: CampaignRoofline | None = None
+    # Present only for a ``--wiki-guided`` campaign with a playbook (``loop.wiki_guidance.render_for_planning``): the
+    # phase, its instructions, and every playbook item with its ledger status.
+    wiki_guidance: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         _text(self.analysis_commit, "context.analysis_commit")
@@ -326,6 +329,8 @@ class OrchestrationContext:
             raise ValueError("context.cases must have unique case_id values")
         if self.roofline is not None and not isinstance(self.roofline, CampaignRoofline):
             raise ValueError("context.roofline must be a CampaignRoofline or absent")
+        if self.wiki_guidance is not None and not isinstance(self.wiki_guidance, Mapping):
+            raise ValueError("context.wiki_guidance must be a mapping or absent")
 
     @property
     def case_ids(self) -> frozenset[str]:
@@ -384,6 +389,8 @@ class OrchestrationContext:
         # Omitted rather than null, like ``CaseEvidence.roofline``.
         if self.roofline is not None:
             payload["roofline"] = self.roofline.to_dict()
+        if self.wiki_guidance is not None:
+            payload["wiki_guidance"] = dict(self.wiki_guidance)
         return payload
 
 

@@ -73,13 +73,27 @@ class KnowledgeWikiTool:
         }
 
 
+# Checkouts a --wiki-guided campaign stopped offering once its knowledge base round ended. Module state because every
+# role's session is built by a factory the loop never sees; a forge-loop process runs one campaign.
+_WITHDRAWN: set[Path] = set()
+
+
+def withdraw_knowledge_wiki(tool: KnowledgeWikiTool) -> None:
+    """Offer ``tool`` to none of the sessions this process starts from now on."""
+    _WITHDRAWN.add(tool.root)
+
+
+def _offered(tool: KnowledgeWikiTool | None) -> bool:
+    return tool is not None and tool.root not in _WITHDRAWN
+
+
 def wiki_servers(tool: KnowledgeWikiTool | None, role: str) -> dict[str, StdioMcpServer]:
-    """The knowledge base server for one session, or nothing when no knowledge base is configured."""
-    return {} if tool is None else tool.mcp_servers(role)
+    """The knowledge base server for one session, or nothing when none is configured or it was withdrawn."""
+    return tool.mcp_servers(role) if _offered(tool) else {}
 
 
 def wiki_tool_names(tool: KnowledgeWikiTool | None) -> tuple[str, ...]:
-    return () if tool is None else tool.tool_names
+    return tool.tool_names if _offered(tool) else ()
 
 
 def require_mcp_backend(tool: KnowledgeWikiTool | None, backend: AgentBackend | AgentProvider, role: str) -> None:
