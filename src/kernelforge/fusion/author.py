@@ -40,7 +40,7 @@ from .llm_failure import (
 )
 from .harness_contract import harness_contract, trace_kernels_block
 from .validate import DEFAULT_TARGET_SPEEDUP
-from kernelforge.llm.git import git
+from kernelforge.llm.git import git_bytes
 
 log = logging.getLogger("forge_fusion")
 
@@ -321,15 +321,7 @@ def _git_bytes(
 ) -> subprocess.CompletedProcess:
     """Run one bounded Git plumbing command without decoding path bytes."""
     try:
-        result = git(
-            "-C",
-            str(root),
-            *args,
-            input=input_data,
-            check=False,
-            text=False,
-            timeout=60,
-        )
+        result = git_bytes("-C", str(root), *args, input=input_data, check=False, timeout=60)
     except (OSError, subprocess.SubprocessError) as exc:
         # Pure I/O, and ``SubprocessError`` covers ``TimeoutExpired``: a 60s ``git ls-files`` timeout against an NFS
         # worktree under a concurrent serving campaign is weather, not a verdict on what the author did.

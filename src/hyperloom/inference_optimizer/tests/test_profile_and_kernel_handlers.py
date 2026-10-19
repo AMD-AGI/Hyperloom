@@ -1150,6 +1150,7 @@ def test_instrumentation_preflight_names_the_checks_it_dooms(tmp_path, monkeypat
         CHECK_INSTRUMENTATION_PREFLIGHT,
         CHECK_SGLANG_SHAPE_PROFILER,
         CHECK_STEP_ANNOTATIONS,
+        _TraceProbe,
         _build_trace_validate,
         _instrumentation_preflight_row,
     )
@@ -1172,7 +1173,7 @@ def test_instrumentation_preflight_names_the_checks_it_dooms(tmp_path, monkeypat
 
     # It has to lead the list: everything after it is a consequence, not an independent finding.
     validate = _build_trace_validate(
-        {"checks": [{"check_id": "later"}]}, trace_dir=tmp_path, framework="sglang", preflight=row
+        {"checks": [{"check_id": "later"}]}, _TraceProbe(tmp_path, "sglang"), preflight=row
     )
     assert [c["check_id"] for c in validate["checks"]] == [CHECK_INSTRUMENTATION_PREFLIGHT, "later"]
 

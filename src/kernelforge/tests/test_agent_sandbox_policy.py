@@ -104,10 +104,11 @@ def test_prepare_agent_never_downgrades_the_configured_sandbox(
     asyncio.run(
         task_preparer._run_prepare_agent(
             config=config,
-            workspace=tmp_path,
-            system_prompt="Author the driver.",
-            prompt="Write driver.py.",
-            timeout_sec=5,
+            turn=task_preparer._AuthoringTurn(
+                workspace=tmp_path,
+                prompt="Write driver.py.",
+                timeout_sec=5,
+            ),
         )
     )
 

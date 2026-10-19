@@ -19,6 +19,7 @@ from ..bus.resource_lock import BRINGUP_ROUND_LANE, ResourceLockManager
 from ..state.round_store import (
     EXPIRED_REAPED,
     Round,
+    RoundRequest,
     RoundStore,
 )
 from ..state.task_registry import TERMINAL_STATES, Task, TaskNotFound, TaskRegistry
@@ -360,12 +361,14 @@ class Reconciler:
         if successor is not None:
             moved = await self._rounds.handoff(
                 round_row,
+                RoundRequest(
+                    now_unix=now_unix,
+                    request_id=f"reconcile:handoff:{successor.task_id}",
+                    evidence={"reason": "holder_terminal_with_successor"},
+                ),
                 new_holder_task_id=successor.task_id,
                 # A successor that declares no TTL inherits what the round has left.
                 lease_sec=float(successor.lease_ttl_sec) or (round_row.expires_unix - round_row.renewed_unix),
-                now_unix=now_unix,
-                request_id=f"reconcile:handoff:{successor.task_id}",
-                evidence={"reason": "holder_terminal_with_successor"},
             )
             if moved.ok:
                 report.handed_off.append(round_row.round_id)
@@ -381,10 +384,12 @@ class Reconciler:
         outcome = EXPIRED_REAPED
         result = await self._rounds.settle(
             round_row,
+            RoundRequest(
+                now_unix=now_unix,
+                request_id=f"reconcile:{why}:{round_row.round_id}:{round_row.fence}",
+                evidence={"reason": why, "cleanup": "holder_terminal_without_resources"},
+            ),
             outcome=outcome,
-            now_unix=now_unix,
-            request_id=f"reconcile:{why}:{round_row.round_id}:{round_row.fence}",
-            evidence={"reason": why, "cleanup": "holder_terminal_without_resources"},
         )
         if not result.ok:
             return
