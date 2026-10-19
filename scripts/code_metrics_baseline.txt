@@ -982,7 +982,7 @@ module-lines src/hyperloom/orchestrator/phases/framework.py 3139
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4227
 module-lines src/hyperloom/orchestrator/phases/machine_state.py 2189
 module-lines src/hyperloom/orchestrator/phases/prelude.py 2640
-module-lines src/hyperloom/orchestrator/policy/gate.py 1608
+module-lines src/hyperloom/orchestrator/policy/gate.py 1588
 module-lines src/hyperloom/orchestrator/prompts/prompt_builder.py 1205
 module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 2571
 module-lines src/hyperloom/orchestrator/roles/critic_agent.py 1276
