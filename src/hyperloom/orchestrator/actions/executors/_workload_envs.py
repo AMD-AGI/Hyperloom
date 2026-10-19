@@ -1336,7 +1336,8 @@ def materialize_config_with_envs(
             bench.pop("benchmark_script", None)
     if benchmark_script:
         bench["benchmark_script"] = str(benchmark_script)
-    envs = bench["envs"] = {k: v for k, v in (bench.get("envs") or {}).items() if k != "RUN_EVAL"}
+    agentx_run = agentx_enabled() if agentx_mode is None else agentx_mode
+    envs = bench["envs"] = {k: v for k, v in (bench.get("envs") or {}).items() if agentx_run or k != "RUN_EVAL"}
     runtime_path = os.environ.get("PATH", "").strip()
     if "PATH" in envs and runtime_path:
         envs["PATH"] = runtime_path
@@ -2012,8 +2013,7 @@ def materialize_config_with_envs(
             "--trust-remote-code",
             pinned_by=("trust-remote-code",),
         )
-    # Accuracy eval (GSM8K) is ON unless the round itself (staged accuracy, profile, shape capture) passes
-    # ``extra_envs["RUN_EVAL"]``; the YAML template and the operator pins cannot set it.
+    # Accuracy eval (GSM8K) is ON unless the round passes ``extra_envs["RUN_EVAL"]`` or the workload is AgentX.
     if "RUN_EVAL" not in envs:
         envs["RUN_EVAL"] = "true"
     # Persist eval task/limit into the YAML so they become part of the

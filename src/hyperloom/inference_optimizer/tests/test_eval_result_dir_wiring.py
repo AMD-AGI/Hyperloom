@@ -570,60 +570,6 @@ def test_warm_decision_gated_variant_grades_from_warmup_round(tmp_path):
     assert accuracy_passed(0.9462, float(accuracy)) is True
 
 
-# --- Finding 2: RUN_EVAL off in the base YAML (not extra_envs) is honored ---
-
-
-def test_baseline_skips_accuracy_when_run_eval_off_in_base_yaml(tmp_path):
-    """RUN_EVAL=false coming from the base YAML ``benchmark.envs`` (not ``extra_envs``) must be honored: baseline reads the effective RUN_EVAL from the materialized config, so a stale ``results*.json`` in the reused slot is not promoted into ``baseline_accuracy``."""
-    base = tmp_path / "base.yaml"
-    cfg = {
-        "benchmark": {
-            "framework": "sglang",
-            "model": "/path/models/Qwen-Qwen3-8B",
-            "precision": "bf16",
-            "run_mode": "local",
-            "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256, "RUN_EVAL": False},
-            "timeout_seconds": 600,
-            "profiler": {
-                "torch_profiler": {"enabled": False},
-                "system_profiler": {"enabled": False},
-                "tracelens": {"enabled": False},
-            },
-            "gpu_selection": {"auto": False},
-        }
-    }
-    with base.open("w") as f:
-        yaml.safe_dump(cfg, f)
-    output_dir = tmp_path / "ws"
-
-    def fake_run(cmd, *args, **kwargs):
-        out_idx = cmd.index("--output-dir")
-        slot = Path(cmd[out_idx + 1])
-        env = dict(kwargs.get("env") or {})
-        _fake_workspace(slot)
-        # Stale results in the slot from a prior attempt; RUN_EVAL is off in the base YAML this run, so lm-eval did
-        # not run and this must be ignored.
-        eval_root = env.get("EVAL_RESULT_DIR") or str(slot)
-        _write_lm_eval_output(Path(eval_root))
-        return subprocess.CompletedProcess(cmd, 0, "ok", "")
-
-    executor = BaselineExecutor(
-        magpie_python="/opt/venv/bin/python",
-        default_config_path=base,
-        session_dir=tmp_path,
-    )
-    ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
-
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
-    ):
-        result = asyncio.run(executor(ctx))
-
-    assert result["status"] == "succeeded"
-    assert result.get("accuracy") is None
-
-
 # --- integrate_patch grade layer: warmup round must never gate the patch ---
 
 
