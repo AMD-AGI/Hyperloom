@@ -36,6 +36,7 @@ from kernelforge.orchestrator.structured_output import (
 )
 
 
+PLAN_CRITIC_ROLE = "plan critic"
 PLAN_CRITIC_MAX_TURNS = 100
 PLAN_CRITIC_TIMEOUT_SEC = 600
 # One repair pass for a width block the review did not deliver.
@@ -392,7 +393,7 @@ class PlanCriticAgent:
             raise ValueError("timeout_sec must be greater than zero")
         if max_turns <= 0:
             raise ValueError("max_turns must be greater than zero")
-        require_mcp_backend(knowledge_wiki, backend, "plan critic")
+        require_mcp_backend(knowledge_wiki, backend, PLAN_CRITIC_ROLE)
         self.backend = backend
         self.knowledge_wiki = knowledge_wiki
         # Budget for one plan.
@@ -422,7 +423,7 @@ class PlanCriticAgent:
                     AgentRunSpec(
                         system_prompt=system_prompt,
                         user_prompt=user_prompt,
-                        role="plan critic",
+                        role=PLAN_CRITIC_ROLE,
                         cwd=context.workspace,
                         writable=False,
                         timeout_sec=budget_sec,
@@ -435,7 +436,7 @@ class PlanCriticAgent:
                             extra_tools=wiki_tool_names(self.knowledge_wiki),
                         ),
                         protected_globs=["*"],
-                        mcp_servers=wiki_servers(self.knowledge_wiki, "plan critic"),
+                        mcp_servers=wiki_servers(self.knowledge_wiki, PLAN_CRITIC_ROLE),
                     ),
                     usage=usage,
                 ),
@@ -445,7 +446,7 @@ class PlanCriticAgent:
             return self._fail_open(error, started_at=started_at)
 
         try:
-            review = validated_agent_text(result, role="plan critic")
+            review = validated_agent_text(result, role=PLAN_CRITIC_ROLE)
             verdict_explicit = _VERDICT_PATTERN.search(review) is not None
             verdict = parse_plan_critic_verdict(review)
         except (

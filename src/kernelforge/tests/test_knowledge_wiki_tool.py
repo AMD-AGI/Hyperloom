@@ -28,7 +28,7 @@ from kernelforge.orchestrator.contracts import (
 from kernelforge.orchestrator.analysis import AnalysisSources
 from kernelforge.orchestrator.orchestration import OrchestrationAgent, make_orchestration_service
 from kernelforge.orchestrator.plan_critic import PlanCriticAgent
-from kernelforge.orchestrator.specialists import SpecialistAgent
+from kernelforge.orchestrator.specialists import SpecialistAgent, SpecialistTools
 from kernelforge.orchestrator.supervisor import make_supervisor_fn
 from kernelforge.tests import test_analysis_agent as analysis_tests
 
@@ -362,7 +362,7 @@ def _specialist(backend, tool) -> SpecialistAgent:
         backend=backend,
         timeout_sec=60,
         max_turns=5,
-        knowledge_wiki=tool,
+        tools=SpecialistTools(knowledge_wiki=tool),
     )
 
 

@@ -46,6 +46,7 @@ from kernelforge.orchestrator.specialists import (
     SpecialistAgent,
     SpecialistPool,
     SpecialistProbeConfig,
+    SpecialistTools,
 )
 from kernelforge.orchestrator.plan_critic import (
     PLAN_CRITIC_MAX_TURNS,
@@ -1804,8 +1805,7 @@ def make_orchestration_service(
             ),
             timeout_sec=effective_runtime.timeout_sec,
             max_turns=config.max_turns,
-            probe=specialist_probe,
-            knowledge_wiki=knowledge_wiki,
+            tools=SpecialistTools(probe=specialist_probe, knowledge_wiki=knowledge_wiki),
         )
         for role_id, definition in resolved_definitions.items()
     }

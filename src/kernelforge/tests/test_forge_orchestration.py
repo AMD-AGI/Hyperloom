@@ -43,6 +43,7 @@ from kernelforge.orchestrator.specialists import (
     SpecialistAgent,
     SpecialistPool,
     SpecialistProbeConfig,
+    SpecialistTools,
     build_specialist_prompts,
 )
 from kernelforge.orchestrator.plan_critic import PlanCriticAgent
@@ -1527,6 +1528,22 @@ async def test_orchestration_service_dispatches_and_synthesizes() -> None:
     assert len(orchestration_backend.specs) == 2
 
 
+def _probing_memory_pool(tmp_path) -> SpecialistPool:
+    """One memory specialist with the GPU probe on, its scratch under ``tmp_path``."""
+    return SpecialistPool(
+        {
+            "memory": SpecialistAgent(
+                definition=_definitions()["memory"],
+                backend=_StaticBackend("Memory analysis"),
+                timeout_sec=1,
+                max_turns=2,
+                tools=SpecialistTools(probe=SpecialistProbeConfig(scratch_root=str(tmp_path / "probe"))),
+            )
+        },
+        max_parallel=1,
+    )
+
+
 @pytest.mark.asyncio
 async def test_a_leaked_probe_is_reported_to_the_loop_that_must_refuse(tmp_path, monkeypatch) -> None:
     """The round's teardown finding has to leave the analysis phase."""
@@ -1547,18 +1564,7 @@ async def test_a_leaked_probe_is_reported_to_the_loop_that_must_refuse(tmp_path,
             max_turns=2,
             min_assignments=1,
         ),
-        specialist_pool=SpecialistPool(
-            {
-                "memory": SpecialistAgent(
-                    definition=_definitions()["memory"],
-                    backend=_StaticBackend("Memory analysis"),
-                    timeout_sec=1,
-                    max_turns=2,
-                    probe=SpecialistProbeConfig(scratch_root=str(tmp_path / "probe")),
-                )
-            },
-            max_parallel=1,
-        ),
+        specialist_pool=_probing_memory_pool(tmp_path),
         definitions={"memory": _definitions()["memory"]},
     )
 
@@ -1586,18 +1592,7 @@ async def test_a_clean_probe_round_reports_no_hazard(tmp_path, monkeypatch) -> N
             max_turns=2,
             min_assignments=1,
         ),
-        specialist_pool=SpecialistPool(
-            {
-                "memory": SpecialistAgent(
-                    definition=_definitions()["memory"],
-                    backend=_StaticBackend("Memory analysis"),
-                    timeout_sec=1,
-                    max_turns=2,
-                    probe=SpecialistProbeConfig(scratch_root=str(tmp_path / "probe")),
-                )
-            },
-            max_parallel=1,
-        ),
+        specialist_pool=_probing_memory_pool(tmp_path),
         definitions={"memory": _definitions()["memory"]},
     )
 

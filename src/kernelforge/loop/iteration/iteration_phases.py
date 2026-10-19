@@ -21,12 +21,19 @@ from kernelforge.loop.iteration.iteration_types import (
     _RoundPlan,
     _append_finding,
 )
+from kernelforge.loop.fanout import LaneResult
 from kernelforge.loop.merge_candidates import merge_plan
 from kernelforge.loop.run_state import complete_orchestration_probe, make_event
 from kernelforge.orchestrator.orchestration import OrchestrationInfrastructureError
 from kernelforge.tools.process_reaping import processes_under
 
 log = logging.getLogger(__name__)
+
+
+def _lane_rationale(lane: LaneResult) -> str:
+    """The rationale of the iteration that measures a queued lane, with the lane Implementer's own when it gave one."""
+    head = f"lane {lane.lane_id} of a fan-out round"
+    return f"{head}: {lane.rationale}" if lane.rationale else head
 
 
 class IterationPhasesMixin:
@@ -138,9 +145,7 @@ class IterationPhasesMixin:
         elif queued_lane is not None:
             unmeasured_result = None
             commit_hash = ""
-            rationale = f"lane {queued_lane.lane_id} of a fan-out round" + (
-                f": {queued_lane.rationale}" if queued_lane.rationale else ""
-            )
+            rationale = _lane_rationale(queued_lane)
             attempt_source = self._read_kernel_source()
             attempt_diff = self._working_tree_diff()
             reusable_benchmark = None

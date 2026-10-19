@@ -52,6 +52,7 @@ _REPO_TASK_TYPES = {"repository", "image_kernel"}
 # Wall-clock fallback for a session that never sized its own budget (every make_agent_fn caller except the forge-loop,
 # e.g. the PORT loop).
 _DEFAULT_SESSION_TIMEOUT_SEC = 90 * 60
+_IMPLEMENTER_ROLE = "implementer"
 
 # PR KB settings forwarded to the MCP child.
 _PR_KB_CHILD_ENV_VARS = (
@@ -536,7 +537,7 @@ prints the tables). If this environment lacks rocprof-compute's deps the script 
             tools=tuple(f"mcp__pr_monitor__{name}" for name in PR_TOOL_NAMES),
         )
     knowledge_wiki = KnowledgeWikiTool.from_config(config)
-    require_mcp_backend(knowledge_wiki, backend, "implementer")
+    require_mcp_backend(knowledge_wiki, backend, _IMPLEMENTER_ROLE)
 
     base_system_prompt = f"""\
 You are a GPU kernel optimization agent in an autonomous iteration loop.
@@ -798,7 +799,7 @@ Make your change(s) now.
         run_spec = AgentRunSpec(
             system_prompt=system_prompt,
             user_prompt=prompt,
-            role="implementer",
+            role=_IMPLEMENTER_ROLE,
             cwd=run_cwd,
             writable=True,
             timeout_sec=session_deadline_sec,
@@ -822,7 +823,7 @@ Make your change(s) now.
             ignored_untracked_globs=list(TOOL_OWNED_UNTRACKED_GLOBS),
             protected_paths=list(extra_protected_paths),
             hooks=hooks,
-            mcp_servers={**pr_mcp_servers, **wiki_servers(knowledge_wiki, "implementer")},
+            mcp_servers={**pr_mcp_servers, **wiki_servers(knowledge_wiki, _IMPLEMENTER_ROLE)},
             progress_log=progress_log,
         )
 
