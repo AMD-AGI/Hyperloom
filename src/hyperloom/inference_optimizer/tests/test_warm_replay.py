@@ -3093,3 +3093,114 @@ def test_promote_warm_replay_honours_the_power_budget(tmp_path, power_w, expecte
     assert len(coord.shared_state.optimization_stack) == stack_len
     if expected_status == "drift":
         assert outcome["reason"] == "power_budget_exceeded"
+
+
+def test_a_current_remote_recipe_takes_its_kernel_overlay_from_the_replay_payload(tmp_path):
+    """The replay payload, not the preparation result, carries a remote recipe's launch overlay."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+
+    request = coord.phase_prelude._warm_replay_request(
+        {},
+        {"kernel_config": {"extra_envs": {"FROM": "replay"}, "extra_server_args": "--from-replay"}},
+        {
+            "status": "prepared",
+            "pending": [{"column": "attention"}],
+            "extra_envs": {"FROM": "preparation"},
+            "extra_server_args": "--from-preparation",
+        },
+    )
+
+    assert request is not None
+    assert request.overlay.envs == {"FROM": "replay"}
+    assert request.overlay.args == "--from-replay"
+
+
+def test_a_local_recipe_takes_its_kernel_overlay_from_the_preparation(tmp_path):
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+
+    request = coord.phase_prelude._warm_replay_request(
+        {},
+        {},
+        {
+            "status": "prepared",
+            "pending": [{"column": "attention"}],
+            "extra_envs": {"FROM": "preparation"},
+            "extra_server_args": "--from-preparation",
+        },
+    )
+
+    assert request is not None
+    assert request.overlay.envs == {"FROM": "preparation"}
+    assert request.overlay.args == "--from-preparation"
+
+
+def test_a_preparation_that_prepared_nothing_carries_no_overlay(tmp_path):
+    """Without pending kernels there is nothing to launch under, whatever the result says."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+
+    request = coord.phase_prelude._warm_replay_request(
+        _warm_recipe_t1(),
+        {},
+        {
+            "status": "prepared",
+            "pending": [],
+            "extra_envs": {"FROM": "preparation"},
+            "extra_server_args": "--from-preparation",
+        },
+    )
+
+    assert request is not None
+    assert request.overlay.envs == {}
+    assert request.overlay.args == ""
+
+
+def test_a_clean_kernel_preparation_failure_is_not_refused_as_dirty(tmp_path):
+    """Nothing was applied, so there is nothing to unwind and no reason to stop."""
+    coord = _make_coord(tmp_path)
+
+    refused = coord.phase_prelude._refuse_dirty_kernel_preparation({"status": "error", "reason": "geak said no"})
+
+    assert refused is False
+    assert coord.shared_state.stop_reason in (None, "")
+
+
+def test_a_kernel_rollback_that_fails_stops_the_run(tmp_path, monkeypatch):
+    """A tree that is neither the recipe's nor the baseline's cannot be measured on."""
+    coord = _make_coord(tmp_path)
+    coord.shared_state.warm_replay_pending = {
+        "kernel_apply_results": [{"patch": "a"}],
+        "kernel_snapshots": [{"path": "b"}],
+    }
+    monkeypatch.setattr(
+        prelude_mod,
+        "revert_warm_kernel_patches",
+        lambda *_args, **_kwargs: {"ok": False, "errors": ["could not restore kernel.py"]},
+    )
+
+    refused = coord.phase_prelude._refuse_dirty_kernel_preparation(
+        {"status": "rollback_failed", "reason": "apply left a patched tree"}
+    )
+
+    assert refused is True
+    assert coord.shared_state.stop_reason == "warm_replay_rollback_failed"
+    pending = coord.shared_state.warm_replay_pending
+    assert pending["status"] == "rollback_failed"
+    assert pending["rollback_errors"] == ["could not restore kernel.py"]
+
+
+def test_a_kernel_rollback_that_succeeds_refuses_without_stopping_the_run(tmp_path, monkeypatch):
+    """The tree is whole again, so the next round may still run; this replay may not."""
+    coord = _make_coord(tmp_path)
+    coord.shared_state.warm_replay_pending = {
+        "kernel_apply_results": [{"patch": "a"}],
+        "kernel_snapshots": [{"path": "b"}],
+    }
+    monkeypatch.setattr(prelude_mod, "revert_warm_kernel_patches", lambda *_a, **_k: {"ok": True, "errors": []})
+
+    refused = coord.phase_prelude._refuse_dirty_kernel_preparation(
+        {"status": "error", "reason": "apply left a patched tree"}
+    )
+
+    assert refused is True
+    assert coord.shared_state.stop_reason in (None, "")
+    assert coord.shared_state.warm_replay_pending == {}
