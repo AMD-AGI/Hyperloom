@@ -242,7 +242,6 @@ cognitive-complexity src/kernelforge/gemm_tune/cli.py::run 34
 cognitive-complexity src/kernelforge/gemm_tune/tier3/contract.py::validate_output_csv 44
 cognitive-complexity src/kernelforge/gemm_tune/tune_robustness.py::run_isolated 34
 cognitive-complexity src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::_augment_with_config_m_values 33
-cognitive-complexity src/kernelforge/gemm_tune/tuners/vllm_dense_tunableop.py::VllmDenseTunableopTuner._input_from_demand 33
 cognitive-complexity src/kernelforge/kernel_rewrite_controller/opportunity_agent.py::OpportunityAnalysisAgent.run 34
 cognitive-complexity src/kernelforge/knowledge/pr_knowledge/references.py::collect_references 39
 cognitive-complexity src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._apply_last_analysis_evidence 46
@@ -877,9 +876,6 @@ function-lines src/kernelforge/gemm_tune/tune_robustness.py::run_isolated 108
 function-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::_cap_splitk_to_serve_safe 96
 function-lines src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py::run_aiter_dense_tuner 165
 function-lines src/kernelforge/gemm_tune/tuners/fmoe_ck.py::FmoeCKTuner.run 137
-function-lines src/kernelforge/gemm_tune/tuners/sglang_dense_bf16.py::SglangDenseBf16Tuner.run 213
-function-lines src/kernelforge/gemm_tune/tuners/vllm_dense_tunableop.py::VllmDenseTunableopTuner._input_from_demand 88
-function-lines src/kernelforge/gemm_tune/tuners/vllm_dense_tunableop.py::VllmDenseTunableopTuner.run 108
 function-lines src/kernelforge/gemm_tune/tuners/vllm_dense_tunableop.py::_generate_tunableop_script 108
 function-lines src/kernelforge/gemm_tune/tuners/vllm_moe_triton.py::VllmMoeTritonTuner.run 111
 function-lines src/kernelforge/gemm_tune/tuners/vllm_moe_triton.py::_generate_sweep_script 238

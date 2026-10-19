@@ -58,6 +58,34 @@ def tunableop_untuned_line(m: int, n: int, k: int, op: str) -> str:
     return f"{op},tn_{n}_{m}_{k}_ld_{k}_{k}_{n}"
 
 
+def _demand_records(shapes: list[dict[str, Any]], precision: str) -> tuple[list[str], dict[str, int]]:
+    """Untuned records for the demand shapes, up to the budget, and how many shapes each unsupported dtype lost."""
+    # Per-shape dtype first, ``precision`` only as a fallback for shapes the demand parser recorded without one.
+    fallback_op = _TUNABLEOP_OP_BY_PRECISION.get(precision)
+
+    lines = []
+    unsupported: dict[str, int] = {}
+    for shape in shapes:
+        # Budget reached.
+        if len(lines) >= _DEMAND_SHAPE_LIMIT:
+            break
+        try:
+            m, n, k = int(shape["M"]), int(shape["N"]), int(shape["K"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        # The fallback applies only to shapes the demand parser recorded WITHOUT a dtype.
+        raw_dtype = shape.get("dtype") or shape.get("otype")
+        op = _tunableop_op_for_dtype(raw_dtype)
+        if op is None and not str(raw_dtype or "").strip():
+            op = fallback_op
+        if op is None:
+            label = str(raw_dtype or "").strip() or f"precision={precision}"
+            unsupported[label] = unsupported.get(label, 0) + 1
+            continue
+        lines.append(tunableop_untuned_line(m, n, k, op))
+    return lines, unsupported
+
+
 def _is_tunableop_result_line(line: str) -> bool:
     stripped = line.strip()
     if not stripped or stripped.startswith(("#", "Validator")):
@@ -67,6 +95,23 @@ def _is_tunableop_result_line(line: str) -> bool:
 
 def count_tunableop_result_lines(text: str) -> int:
     return sum(1 for line in text.splitlines() if _is_tunableop_result_line(line))
+
+
+def _tuned_shape_count(script_result: dict[str, Any], output_file: Path) -> int:
+    """The tuned-shape count the script reported, else the result lines its output file holds."""
+    tuned_shapes = int(script_result.get("tuned_shapes", 0) or 0)
+    if tuned_shapes == 0 and output_file.is_file():
+        raw_text = output_file.read_text(encoding="utf-8", errors="replace")
+        tuned_shapes = count_tunableop_result_lines(raw_text)
+        if tuned_shapes == 0 and raw_text.strip():
+            log.warning(
+                "TunableOp output %s is non-empty but no result lines matched "
+                "(expected >=3 comma-separated fields); candidate will be skipped. "
+                "First 200 chars: %r",
+                output_file,
+                raw_text[:200],
+            )
+    return tuned_shapes
 
 
 def _generate_candidate_sitecustomize() -> str:
@@ -105,6 +150,22 @@ def _candidate_pythonpath(site_dir: Path) -> str:
     site = str(site_dir)
     existing = os.environ.get("PYTHONPATH", "").strip()
     return site if not existing else os.pathsep.join([site, existing])
+
+
+def _install_candidate_sitecustomize(work_dir: Path, output_file: Path) -> dict[str, str]:
+    """Write the sitecustomize that loads ``output_file`` in candidate mode; return the env that activates it."""
+    site_dir = work_dir / "runtime_sitecustomize"
+    site_dir.mkdir(parents=True, exist_ok=True)
+    (site_dir / "sitecustomize.py").write_text(
+        _generate_candidate_sitecustomize(),
+        encoding="utf-8",
+    )
+    return {
+        "PYTHONPATH": _candidate_pythonpath(site_dir),
+        "HL_TUNABLEOP_MODE": "candidate",
+        "HL_TUNABLEOP_FILE": str(output_file),
+        "PYTORCH_TUNABLEOP_FILENAME": str(output_file),
+    }
 
 
 def _generate_tunableop_script(
@@ -237,7 +298,6 @@ class VllmDenseTunableopTuner(BaseTuner):
         if not path:
             return None
         from ..evidence import (
-            TABLE_KEY_SCHEMA,
             demand_for_tuner,
             demand_shapes,
             load_demand,
@@ -253,48 +313,12 @@ class VllmDenseTunableopTuner(BaseTuner):
         if not shapes:
             # No demand names this tuner, which is the normal case: the runtime logs lookups against aiter's tables,
             # and TunableOp has no table of its own to miss.
-            borrowed: list[dict] = []
-            for other in report.get("demands") or []:
-                table = str(other.get("table") or "")
-                if table not in TABLE_KEY_SCHEMA:
-                    continue  # MoE and anything else that is not a dense GEMM
-                # bucket=False for the same reason as the direct path above: borrowing another table's misses does not
-                # borrow aiter's padded-M retry along with them.
-                borrowed.extend(demand_shapes(other, limit=_DEMAND_FETCH_LIMIT, bucket=False))
-            if borrowed:
-                log.info(
-                    "%s: no demand of its own; taking %d dense shape(s) the runtime missed on other dense tables",
-                    self.name,
-                    len(borrowed[:_DEMAND_FETCH_LIMIT]),
-                )
-            shapes = borrowed[:_DEMAND_FETCH_LIMIT]
+            shapes = self._borrowed_dense_shapes(report)
         if not shapes:
             return None
 
-        # Per-shape dtype first, ctx.precision only as a fallback for shapes the demand parser recorded without one.
         precision = str(getattr(self.ctx, "precision", "") or "bf16").lower()
-        fallback_op = _TUNABLEOP_OP_BY_PRECISION.get(precision)
-
-        lines = []
-        unsupported: dict[str, int] = {}
-        for shape in shapes:
-            # Budget reached.
-            if len(lines) >= _DEMAND_SHAPE_LIMIT:
-                break
-            try:
-                m, n, k = int(shape["M"]), int(shape["N"]), int(shape["K"])
-            except (KeyError, TypeError, ValueError):
-                continue
-            # The fallback applies only to shapes the demand parser recorded WITHOUT a dtype.
-            raw_dtype = shape.get("dtype") or shape.get("otype")
-            op = _tunableop_op_for_dtype(raw_dtype)
-            if op is None and not str(raw_dtype or "").strip():
-                op = fallback_op
-            if op is None:
-                label = str(raw_dtype or "").strip() or f"precision={precision}"
-                unsupported[label] = unsupported.get(label, 0) + 1
-                continue
-            lines.append(tunableop_untuned_line(m, n, k, op))
+        lines, unsupported = _demand_records(shapes, precision)
         if unsupported:
             detail = ", ".join(f"{k} x{v}" for k, v in sorted(unsupported.items()))
             log.warning(
@@ -320,6 +344,26 @@ class VllmDenseTunableopTuner(BaseTuner):
         )
         return out
 
+    def _borrowed_dense_shapes(self, report: dict[str, Any]) -> list[dict[str, Any]]:
+        """The shapes the runtime missed on the other dense tables, for a demand file naming none for this tuner."""
+        from ..evidence import TABLE_KEY_SCHEMA, demand_shapes
+
+        borrowed: list[dict] = []
+        for other in report.get("demands") or []:
+            table = str(other.get("table") or "")
+            if table not in TABLE_KEY_SCHEMA:
+                continue  # MoE and anything else that is not a dense GEMM
+            # bucket=False for the same reason as the direct path above: borrowing another table's misses does not
+            # borrow aiter's padded-M retry along with them.
+            borrowed.extend(demand_shapes(other, limit=_DEMAND_FETCH_LIMIT, bucket=False))
+        if borrowed:
+            log.info(
+                "%s: no demand of its own; taking %d dense shape(s) the runtime missed on other dense tables",
+                self.name,
+                len(borrowed[:_DEMAND_FETCH_LIMIT]),
+            )
+        return borrowed[:_DEMAND_FETCH_LIMIT]
+
     def _resolve_input(self) -> Path | None:
         """Get the TunableOp input file."""
         if self.ctx.tunableop_input and self.ctx.tunableop_input.is_file():
@@ -334,9 +378,9 @@ class VllmDenseTunableopTuner(BaseTuner):
     # for.
     _demand_skip_reason: str = ""
 
-    def run(self) -> TuneResult:
-        input_file = self._resolve_input()
-        if input_file is None and self._demand_skip_reason:
+    def _no_input_result(self) -> TuneResult:
+        """Skip when demand held only dtypes without a TunableOp record type; otherwise fail, naming each source."""
+        if self._demand_skip_reason:
             log.info("%s: skipped -- %s", self.name, self._demand_skip_reason)
             return TuneResult(
                 tuner_name=self.name,
@@ -344,21 +388,25 @@ class VllmDenseTunableopTuner(BaseTuner):
                 error=self._demand_skip_reason,
                 error_class="unsupported_precision",
             )
+        # Say which sources were offered and why none produced a file.
+        offered = {
+            "tunableop_input": str(self.ctx.tunableop_input or ""),
+            "shapes_json": str(self.ctx.shapes_json or ""),
+            "demand_json": str(getattr(self.ctx, "demand_json", "") or ""),
+        }
+        detail = ", ".join(f"{k}={v or '(unset)'}" for k, v in offered.items())
+        log.error("%s: no usable input file. Sources: %s", self.name, detail)
+        return TuneResult(
+            tuner_name=self.name,
+            status="failed",
+            error=f"No valid input file found. Sources: {detail}",
+            error_class="input_missing",
+        )
+
+    def run(self) -> TuneResult:
+        input_file = self._resolve_input()
         if input_file is None:
-            # Say which sources were offered and why none produced a file.
-            offered = {
-                "tunableop_input": str(self.ctx.tunableop_input or ""),
-                "shapes_json": str(self.ctx.shapes_json or ""),
-                "demand_json": str(getattr(self.ctx, "demand_json", "") or ""),
-            }
-            detail = ", ".join(f"{k}={v or '(unset)'}" for k, v in offered.items())
-            log.error("%s: no usable input file. Sources: %s", self.name, detail)
-            return TuneResult(
-                tuner_name=self.name,
-                status="failed",
-                error=f"No valid input file found. Sources: {detail}",
-                error_class="input_missing",
-            )
+            return self._no_input_result()
 
         output_file = self.work_dir / "tunableop_results.csv"
         gpu_id = self.ctx.gpu_ids.split(",")[0] if self.ctx.gpu_ids else "0"
@@ -401,33 +449,11 @@ class VllmDenseTunableopTuner(BaseTuner):
                 error_class=script_result.get("error_class", "subprocess_error"),
             )
 
-        tuned_shapes = int(script_result.get("tuned_shapes", 0) or 0)
-        if tuned_shapes == 0 and output_file.is_file():
-            raw_text = output_file.read_text(encoding="utf-8", errors="replace")
-            tuned_shapes = count_tunableop_result_lines(raw_text)
-            if tuned_shapes == 0 and raw_text.strip():
-                log.warning(
-                    "TunableOp output %s is non-empty but no result lines matched "
-                    "(expected >=3 comma-separated fields); candidate will be skipped. "
-                    "First 200 chars: %r",
-                    output_file,
-                    raw_text[:200],
-                )
+        tuned_shapes = _tuned_shape_count(script_result, output_file)
 
         env_vars: dict[str, str] = {}
         if tuned_shapes > 0:
-            site_dir = self.work_dir / "runtime_sitecustomize"
-            site_dir.mkdir(parents=True, exist_ok=True)
-            (site_dir / "sitecustomize.py").write_text(
-                _generate_candidate_sitecustomize(),
-                encoding="utf-8",
-            )
-            env_vars = {
-                "PYTHONPATH": _candidate_pythonpath(site_dir),
-                "HL_TUNABLEOP_MODE": "candidate",
-                "HL_TUNABLEOP_FILE": str(output_file),
-                "PYTORCH_TUNABLEOP_FILENAME": str(output_file),
-            }
+            env_vars = _install_candidate_sitecustomize(self.work_dir, output_file)
 
         # TunableOp picks the fastest hipBLASLt/rocBLAS solution per shape but never times the untuned dispatch, so
         # there is no baseline to compare against and this tuner has no micro metrics to report at all.
