@@ -108,7 +108,7 @@ def _sdk_available() -> bool:
 
     try:
         return importlib.util.find_spec("langfuse") is not None
-    except Exception:  # noqa: BLE001
+    except ValueError:
         return False
 
 
@@ -375,7 +375,7 @@ class LangfuseEmitter:
             return False
         try:
             from langfuse import get_client  # type: ignore[import-not-found]
-        except Exception as exc:  # noqa: BLE001
+        except ImportError as exc:
             self._disabled_reason = "sdk_missing"
             log.warning(
                 "langfuse: SDK not importable (%s: %s); live push disabled. "
