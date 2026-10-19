@@ -29,10 +29,10 @@ from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.forks import AdmittedBranch, ForkDesk
-from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStop, Roster, RosterCaps, StopCause
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
+    BASE_IMAGE_DIGEST,
     SPECIALIST_POLL_SECONDS,
     DownToolbox,
     RecordedReservations,
@@ -46,7 +46,7 @@ from hyperloom_multibranch.scheduling.tests.peer_fakes import (
 NOW = 1_700_000_000.0
 OPEN_BY = NOW + 3600.0
 CLOCK = Clock(now=lambda: NOW)
-BASELINE = Recipe(MB_FAKE_BASE_IMAGE_DIGEST)
+BASELINE = Recipe(BASE_IMAGE_DIGEST)
 
 
 class BrokenRuntime(RefusingRuntime):

@@ -9,7 +9,8 @@ sandboxes, archive, submit log and measurement points under ``MB-toolbox``, and 
 environment compiler reads, like the repository, from the session's blob store at ``MB-blobs``. The MCP service listens on loopback for the whole session and hands every toolbox call to the loop the peers were built
 on; its learnings tool recalls this session's learnings only, as MB1 runs on no Experience KB
 (:func:`~hyperloom_multibranch.scheduling.mb_fakes.mb_fake_learning_recall`). Every test is measured on a
-:class:`MeasurementHost`: this machine's cards, the image it runs and the tool commits Hyperloom pins. The gate's
+:class:`MeasurementHost`: this machine's cards, the image the launcher names in ``HYPERLOOM_ACTIVE_IMAGE_REF`` and
+``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` and the tool commits Hyperloom pins. The gate's
 session service and the specialist runtime judge on one rule, :func:`workload_rule`; the runtime settles through a
 rule gate that asks the scheduler's fork desk for branches, and the MCP service's ``request_repair`` and
 ``decline_repair`` conclude a blocked candidate through the same gate, which the scheduler has land each fork it
@@ -50,10 +51,7 @@ from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.regression import RegressionSet, ReproRunner
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule, Rule
 from hyperloom_multibranch.rulegate.service import GateService
-from hyperloom_multibranch.scheduling.mb_fakes import (
-    MB_FAKE_BASE_IMAGE_DIGEST,
-    mb_fake_learning_recall,
-)
+from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_learning_recall
 from hyperloom_multibranch.scheduling.peers import PeerFactory, Peers, PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.settings import Workload
 from hyperloom_multibranch.specialist.fix_check import FixChecking
@@ -76,10 +74,6 @@ CLAIM_TTL_SECONDS = 1800.0
 #: The switch the main flow and the measurement renderer read an AgentX workload from
 #: (``hyperloom.common.perf_metric.agentx_enabled``).
 AGENTX_ENV = "HYPERLOOM_AGENTX"
-
-#: Stands in for the reference of the image this machine runs while whoever launches the session names no image;
-#: replaced as :func:`mb_fake_active_image` is.
-MB_FAKE_IMAGE_REF = "local"
 
 
 @dataclass(frozen=True)
@@ -243,30 +237,15 @@ def machine_cards() -> tuple[int, ...]:
     return tuple(range(detect_gpu_count()))
 
 
-def mb_fake_active_image(env: Mapping[str, str]) -> ActiveImage:
-    """The image ``env`` names through ``hyperloom.measure.pins.active_image``, or :data:`MB_FAKE_IMAGE_REF` on
-    :data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_BASE_IMAGE_DIGEST` when it names neither its reference
-    nor its digest; raises ``ImagePinError`` when it names only one, or a digest that is not real.
-
-    Stands in for the pod launcher setting ``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` on
-    every session (board #8); replaced by ``active_image`` alone once it does.
-    """
-
-    from hyperloom.measure.pins import IMAGE_DIGEST_VAR, IMAGE_REF_VAR, ActiveImage, active_image
-
-    if not (env.get(IMAGE_REF_VAR) or env.get(IMAGE_DIGEST_VAR)):
-        return ActiveImage(MB_FAKE_IMAGE_REF, MB_FAKE_BASE_IMAGE_DIGEST)
-    return active_image(env)
-
-
 def measurement_host(env: Mapping[str, str]) -> MeasurementHost:
-    """This machine's cards, the image it runs and the tool commits Hyperloom pins, ``env`` overriding as
-    ``install.sh`` lets it; raises :class:`PeersUnavailable` when the image or a commit cannot be pinned."""
+    """This machine's cards, the image ``env`` names and the tool commits Hyperloom pins, ``env`` overriding as
+    ``install.sh`` lets it; raises :class:`PeersUnavailable` when the image or a commit cannot be pinned, an
+    unnamed image included."""
 
-    from hyperloom.measure.pins import ImagePinError, ToolPinError, pinned_tool_commits
+    from hyperloom.measure.pins import ImagePinError, ToolPinError, active_image, pinned_tool_commits
 
     try:
-        return MeasurementHost(machine_cards(), mb_fake_active_image(env), pinned_tool_commits(env))
+        return MeasurementHost(machine_cards(), active_image(env), pinned_tool_commits(env))
     except (ImagePinError, ToolPinError) as exc:
         raise PeersUnavailable(f"the measurement pins cannot be read: {exc}") from exc
 
@@ -373,7 +352,6 @@ __all__ = [
     "AGENTX_ENV",
     "CLAIM_TTL_SECONDS",
     "GATE_WRITER",
-    "MB_FAKE_IMAGE_REF",
     "MeasurementHost",
     "SessionWiring",
     "SpecialistSessions",
@@ -381,7 +359,6 @@ __all__ = [
     "local_peers",
     "machine_cards",
     "machine_parallel_tests",
-    "mb_fake_active_image",
     "measurement_host",
     "model_backed_sessions",
     "require_framework_package",

@@ -44,11 +44,11 @@ from hyperloom_multibranch.scheduling.final import (
     pick_final,
     sweep_curve,
 )
-from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, BranchOrigin, BranchStop, StopCause
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload, sweep_concs
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests, integration_test_request
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
+    BASE_IMAGE_DIGEST,
     BASELINE_VALUE,
     GATE_POLL_SECONDS,
     MAIN_POINT,
@@ -205,7 +205,7 @@ class Bench:
 
     async def build(self, curves: Curves) -> Bench:
         self.repo = GitExperimentRepo(self.tmp_path / "repo", LocalBlobStore(self.tmp_path / "blobs"))
-        root = await self.repo.init_root(Recipe(MB_FAKE_BASE_IMAGE_DIGEST))
+        root = await self.repo.init_root(Recipe(BASE_IMAGE_DIGEST))
         scheduler = self.handle(Role.SCHEDULER)
         await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=root))
         self.toolbox = RecordingToolbox(self.handle(Role.TOOLBOX), recipe_effect(self.tmp_path / "repo", curves))

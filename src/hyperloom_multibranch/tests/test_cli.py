@@ -27,6 +27,7 @@ from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOpt
 
 #: What the session's launcher sets to name the image the session runs on.
 IMAGE_VARS = ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST")
+IMAGE = ("registry.example/vllm:v1", "sha256:" + "2" * 64)
 WORKLOAD_ARGS = [
     "--model", "/models/Llama-3-8B", "--framework", "vllm", "--tp", "2", "--isl", "1024", "--osl", "512",
     "--conc", "16", "--precision", "fp8", "--workload", "inferencex", "--gpu-type", "mi300x",
@@ -187,11 +188,13 @@ def test_an_agentx_switch_that_contradicts_the_workload_exits_two(
 
 @pytest.fixture
 def ready_environment(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
-    """No Experience KB, no Recipe KB, no image named, the shipped tool pins, a writable RSI archive outside the
-    test's workspace, and the framework's package installed in the image."""
+    """No Experience KB, no Recipe KB, the launcher's image named, the shipped tool pins, a writable RSI archive
+    outside the test's workspace, and the framework's package installed in the image."""
 
-    for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN", *IMAGE_VARS, "MAGPIE_REF", "INFERENCEX_REF"):
+    for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN", "MAGPIE_REF", "INFERENCEX_REF"):
         monkeypatch.delenv(name, raising=False)
+    for name, value in zip(IMAGE_VARS, IMAGE):
+        monkeypatch.setenv(name, value)
     monkeypatch.delenv("KB_STORE_URL", raising=False)
     monkeypatch.delenv("KB_STORE_TOKEN", raising=False)
     monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path_factory.mktemp("rsi-archive")))
@@ -275,6 +278,22 @@ def test_tool_pins_that_cannot_be_read_fail_loudly_before_creating_anything(
 
     captured = capsys.readouterr()
     assert "measurement pins" in captured.err and "MAGPIE_REF" in captured.err
+    assert captured.out == ""
+    assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
+def test_an_unnamed_image_fails_loudly_before_creating_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    for name in IMAGE_VARS:
+        monkeypatch.delenv(name)
+
+    assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
+
+    captured = capsys.readouterr()
+    assert "measurement pins" in captured.err and all(name in captured.err for name in IMAGE_VARS)
     assert captured.out == ""
     assert not any(tmp_path.iterdir())
 

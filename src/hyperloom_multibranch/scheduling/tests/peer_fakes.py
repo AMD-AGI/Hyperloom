@@ -75,6 +75,8 @@ from hyperloom_multibranch.toolbox.queue import QueuePolicy
 
 LAUNCH_FLAG = "--launch-info-file"
 BASELINE_VALUE = DEFAULT_BASELINE[GRADED_OUTPUT]
+#: The digest of the image the tests' recipes are based on.
+BASE_IMAGE_DIGEST = "sha256:" + "b" * 64
 TOOLBOX_DOWN = "toolbox service down"
 #: The server argument a scripted change carries its tag in; :func:`recipe_effect` reads a recipe's tags from it.
 TAG_FLAG = "--mb-tag-"
@@ -714,6 +716,7 @@ class OneChampionKB:
 
 
 __all__ = [
+    "BASE_IMAGE_DIGEST",
     "BASELINE_VALUE",
     "GATE_POLL_SECONDS",
     "CHILD_SCRIPT",

@@ -33,7 +33,6 @@ from hyperloom_multibranch.scheduling.context import SchedulerContext
 from hyperloom_multibranch.scheduling.layout import SessionLayout
 from hyperloom_multibranch.scheduling.decisions import DecisionLog
 from hyperloom_multibranch.scheduling.forks import ForkDesk
-from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import (
     BranchOrigin,
@@ -45,6 +44,7 @@ from hyperloom_multibranch.scheduling.roster import (
 )
 from hyperloom_multibranch.scheduling.stops import STOP_OVERRAN, SessionStopper, SessionStopReason, StopSignals
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
+    BASE_IMAGE_DIGEST,
     SPECIALIST_POLL_SECONDS,
     TOOLBOX_DOWN,
     DownToolbox,
@@ -118,7 +118,7 @@ class Stage:
         self.stopper = SessionStopper(context, self.branches, self.toolbox, self.mcp)
 
     async def opened(self) -> Stage:
-        baseline = Recipe(MB_FAKE_BASE_IMAGE_DIGEST)
+        baseline = Recipe(BASE_IMAGE_DIGEST)
         self.root = await self.repo.init_root(baseline)
         await self.notebook.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=self.root))
         self.roster.add_integration(self.root, k=1)

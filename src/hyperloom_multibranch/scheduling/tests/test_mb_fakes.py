@@ -13,16 +13,7 @@ import pytest
 from hyperloom_kb import ReadStatus
 from hyperloom_multibranch.notebook.learning_search import RetrievalLog
 from hyperloom_multibranch.notebook.tests.factories import profile
-from hyperloom_multibranch.scheduling.mb_fakes import (
-    MB_FAKE_BASE_IMAGE_DIGEST,
-    mb_fake_learning_recall,
-)
-
-
-def test_base_image_digest_has_the_digest_shape() -> None:
-    algorithm, _, digest = MB_FAKE_BASE_IMAGE_DIGEST.partition(":")
-    assert algorithm == "sha256"
-    assert len(digest) == 64
+from hyperloom_multibranch.scheduling.mb_fakes import mb_fake_learning_recall
 
 
 def test_the_specialists_recall_no_past_learnings_whatever_experience_kb_the_environment_names(

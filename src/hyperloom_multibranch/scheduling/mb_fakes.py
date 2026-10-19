@@ -24,10 +24,6 @@ from hyperloom_multibranch.notebook.rsi.session import (
     close_knowledge,
 )
 
-#: Stands in for the image digest of the machine a session runs on while whoever launches the session does not name
-#: it (``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST``, board #8); replaced by
-#: ``hyperloom.measure.pins.active_image`` alone once the pod launcher sets both.
-MB_FAKE_BASE_IMAGE_DIGEST = "sha256:" + "0" * 64
 #: Why CLOSE wrote nothing to the Experience KB and the specialists recall no past session's learnings: MB1 runs on no
 #: Experience KB, by @zgong's decision (board #22). The online Experience KB service replaces it in a later milestone.
 MB_FAKE_EXPERIENCE_KB = "mb_fake_experience_kb"
@@ -65,7 +61,6 @@ def _faked(step: CloseStep) -> CloseStep:
 
 
 __all__ = [
-    "MB_FAKE_BASE_IMAGE_DIGEST",
     "MB_FAKE_EXPERIENCE_KB",
     "mb_fake_close_knowledge",
     "mb_fake_learning_recall",

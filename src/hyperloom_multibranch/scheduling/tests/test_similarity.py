@@ -11,7 +11,6 @@ from pathlib import Path
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, PatchRef, Recipe
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStop, Roster, RosterCaps, StopCause
 from hyperloom_multibranch.scheduling.similarity import (
     MB_SIMILARITY_THRESHOLD,
@@ -19,19 +18,20 @@ from hyperloom_multibranch.scheduling.similarity import (
     SimilarBranch,
     own_change,
 )
+from hyperloom_multibranch.scheduling.tests.peer_fakes import BASE_IMAGE_DIGEST
 
-ROOT = Recipe(MB_FAKE_BASE_IMAGE_DIGEST)
+ROOT = Recipe(BASE_IMAGE_DIGEST)
 UPSTREAM = "0123456789abcdef0123456789abcdef01234567"
 INHERITED = {f"INHERITED_{index}": "1" for index in range(8)}
 
 
 def _config(args: str = "", **envs: str) -> Recipe:
-    return Recipe(MB_FAKE_BASE_IMAGE_DIGEST, LaunchConfig(server_args=args, envs=envs))
+    return Recipe(BASE_IMAGE_DIGEST, LaunchConfig(server_args=args, envs=envs))
 
 
 def _patched(*patches: PatchRef) -> Recipe:
     component = ComponentPatches("vllm", "https://github.com/vllm-project/vllm", UPSTREAM, patches)
-    return Recipe(MB_FAKE_BASE_IMAGE_DIGEST, components=(component,))
+    return Recipe(BASE_IMAGE_DIGEST, components=(component,))
 
 
 class _Repo:

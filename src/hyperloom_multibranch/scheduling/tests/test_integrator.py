@@ -64,9 +64,9 @@ from hyperloom_multibranch.scheduling.integrator import (
 from hyperloom_multibranch.scheduling.llm import CompletionFailed
 from hyperloom_multibranch.rulegate import agentx
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS
-from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.requests import SessionChecks, SessionTests, integration_test_request
 from hyperloom_multibranch.scheduling.tests.peer_fakes import (
+    BASE_IMAGE_DIGEST,
     MAIN_POINT,
     TAG_FLAG,
     Curves,
@@ -193,7 +193,7 @@ async def _one(bench: Bench) -> MergeReport | None:
     return reports[0] if reports else None
 
 
-ROOT_RECIPE = Recipe(MB_FAKE_BASE_IMAGE_DIGEST, LaunchConfig(server_args="--max-num-seqs 64"))
+ROOT_RECIPE = Recipe(BASE_IMAGE_DIGEST, LaunchConfig(server_args="--max-num-seqs 64"))
 
 
 def _change(tag: str, patches: tuple[PatchRef, ...] = ()) -> RecipeDelta:

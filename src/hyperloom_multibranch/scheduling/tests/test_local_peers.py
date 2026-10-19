@@ -45,7 +45,6 @@ from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.layout import SESSION_PREFIX, SessionLayout, create_session
 from hyperloom_multibranch.scheduling.local_peers import (
     AGENTX_ENV,
-    MB_FAKE_IMAGE_REF,
     MeasurementHost,
     SessionWiring,
     local_peers,
@@ -58,7 +57,6 @@ from hyperloom_multibranch.scheduling.local_peers import (
     workload_rule,
     _specialist_role,
 )
-from hyperloom_multibranch.scheduling.mb_fakes import MB_FAKE_BASE_IMAGE_DIGEST
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup, PeersUnavailable
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
@@ -221,16 +219,17 @@ def test_a_framework_whose_source_cannot_be_laid_out_refuses_the_peers(
 
 
 @pytest.mark.usefixtures("four_cards")
-def test_a_session_nobody_names_the_image_of_runs_on_the_placeholder_image() -> None:
-    assert measurement_host({}).image == ActiveImage(MB_FAKE_IMAGE_REF, MB_FAKE_BASE_IMAGE_DIGEST)
+def test_a_session_nobody_names_the_image_of_refuses_the_peers() -> None:
+    with pytest.raises(PeersUnavailable, match=f"{IMAGE_VARS[0]}, {IMAGE_VARS[1]} not set"):
+        measurement_host({})
 
 
 @pytest.mark.parametrize(
     ("env", "named"),
     [
         ({IMAGE_VARS[0]: IMAGE.ref}, IMAGE_VARS[1]),
-        ({IMAGE_VARS[0]: IMAGE.ref, IMAGE_VARS[1]: MB_FAKE_BASE_IMAGE_DIGEST}, "not a real sha256"),
-        ({"MAGPIE_REF": "main"}, "MAGPIE_REF"),
+        ({IMAGE_VARS[0]: IMAGE.ref, IMAGE_VARS[1]: "sha256:" + "0" * 64}, "not a real sha256"),
+        ({IMAGE_VARS[0]: IMAGE.ref, IMAGE_VARS[1]: IMAGE.digest, "MAGPIE_REF": "main"}, "MAGPIE_REF"),
     ],
     ids=["half-named-image", "zero-digest", "moving-tool-ref"],
 )
