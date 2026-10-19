@@ -356,7 +356,7 @@ duplicated-lines src/hyperloom/inference_optimizer/session/manifest.py 19
 duplicated-lines src/hyperloom/inference_optimizer/tests/conftest.py 54
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_apply_tracelens_patch_multinode_gc.py 20
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_baseline_moe_runner_fallback.py 145
-duplicated-lines src/hyperloom/inference_optimizer/tests/test_baseline_param_overrides.py 109
+duplicated-lines src/hyperloom/inference_optimizer/tests/test_baseline_param_overrides.py 97
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_baseline_warmup_double_run.py 204
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_bypass_backend.py 124
 duplicated-lines src/hyperloom/inference_optimizer/tests/test_claude_backend.py 38
@@ -739,7 +739,7 @@ function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborat
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_roofline 89
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._recover_pending_integrate_from_task 84
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._replay_keep_from_result 90
-function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._resume_consistency_pass 129
+function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._resume_consistency_pass 128
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._resume_recover_orphaned_keeps 101
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._resume_recover_pending_warm_replay 85
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator.build_env_spec 107
