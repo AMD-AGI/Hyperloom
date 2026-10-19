@@ -13,12 +13,25 @@ completely is omitted rather than half-filled. See
 from __future__ import annotations
 
 import datetime as _dt
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 from hyperloom.common.coerce import to_float
 from hyperloom.orchestrator.predictor import evidence
 from hyperloom.common.predictor_config import PHASE_LABEL
 from hyperloom.orchestrator.predictor.view import SessionView
+
+
+@dataclass(frozen=True)
+class PhaseBudget:
+    """The FRAMEWORK clock a request is conditioned on, as the phase reads it when the predictor asks."""
+
+    #: Seconds the phase can still spend: the tighter of this entry's budget and the cap across entries.
+    headroom_sec: float | None
+    #: Seconds since this FRAMEWORK entry began.
+    elapsed_sec: float
+    #: Gain a variant needs to KEEP in this macro-cycle.
+    keep_threshold_pct: float
 
 
 REQUEST_SCHEMA = "hyperloom.predictor_request.v1"
@@ -157,15 +170,14 @@ def build_request(
     session_id: str,
     sites: Mapping[str, dict[str, Any]],
     sidecars: Mapping[str, Any] | None = None,
-    elapsed_sec: float,
-    keep_threshold_pct: float,
+    budget: PhaseBudget,
 ) -> dict[str, Any]:
     """Build the request body for the current decision point.
 
     ``sites`` and ``sidecars`` are :func:`~hyperloom.orchestrator.predictor.source_sites.load_source_sites`
     and :func:`~hyperloom.orchestrator.predictor.sidecars.load_sidecars` for the session's analysis
-    run, read by the caller off the event loop. ``elapsed_sec`` and ``keep_threshold_pct`` are the
-    phase's clock and KEEP bar as FRAMEWORK reads them when it asks.
+    run, read by the caller off the event loop. ``budget`` is the phase's clock and KEEP bar as
+    FRAMEWORK reads them when it asks.
     """
     info = state.model_info
     last_transition = state.phase_history[-1] if state.phase_history else {}
@@ -193,7 +205,7 @@ def build_request(
         "phase": {
             "phase": PHASE_LABEL,
             "phase_reason": _text(last_transition.get("reason")),
-            "phase_elapsed_seconds": round(elapsed_sec, 1),
+            "phase_elapsed_seconds": round(budget.elapsed_sec, 1),
         },
         "performance": {
             "baseline_tput": _positive(state.baseline_tput),
@@ -201,7 +213,7 @@ def build_request(
             "current_best_tput": _positive(best.get("tput")),
             "cumulative_gain_validated": to_float(state.cumulative_gain_validated),
             # Decays with the macro-cycle and doubles on multi-node.
-            "keep_threshold_pct": keep_threshold_pct,
+            "keep_threshold_pct": budget.keep_threshold_pct,
             "optimization_stack": _stack(state),
         },
         "evidence": _evidence(state, sites, sidecars or {}),

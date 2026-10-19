@@ -20,6 +20,7 @@ from hyperloom.orchestrator.state.task_registry import TaskNotFound
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from ._optimize_fixtures import optimize_state
 from .conftest import make_coordinator
+from hyperloom.orchestrator.phases.framework import AuthoringRetry
 
 
 def test_the_capped_phases_spend_the_session_on_the_work_phases():
@@ -471,9 +472,13 @@ async def test_an_apply_retry_is_scoped_to_the_cycle_that_queued_it(tmp_path: Pa
     """The gap id and the attempt number both repeat across macro-cycles."""
     stub = _stub(tmp_path, local_explore=True)
 
-    await stub.phase_framework._enqueue_author_specialist(lane="perf_explore", specialist_task_id="t-spec")
+    await stub.phase_framework._enqueue_author_specialist(
+        AuthoringRetry(lane="perf_explore", specialist_task_id="t-spec")
+    )
     stub.shared_state.macro_cycle = 2
-    await stub.phase_framework._enqueue_author_specialist(lane="perf_explore", specialist_task_id="t-spec")
+    await stub.phase_framework._enqueue_author_specialist(
+        AuthoringRetry(lane="perf_explore", specialist_task_id="t-spec")
+    )
 
     keys = [c["idempotency_key"] for c in stub.tasks.created]
     assert len(set(keys)) == 2

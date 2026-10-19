@@ -19,6 +19,7 @@ from hyperloom.orchestrator.knowledge._recipe_attrs import (
     kept_kernel_optimizations,
     workload_kb_tags,
 )
+from hyperloom.orchestrator.loop.dispatcher import HeldLeases
 
 
 def _heartbeat() -> Intent:
@@ -174,10 +175,7 @@ def test_run_dispatched_releases_gpu_lease_on_success(coord: Coordinator) -> Non
     sentinel_lease = object()
     out = asyncio.run(
         coord.dispatcher.run_task_registered(
-            _Task(),
-            prebound_lease=None,
-            extra_context={},
-            gpu_lease=sentinel_lease,
+            _Task(), HeldLeases(prebound_lease=None, gpu_lease=sentinel_lease), extra_context={}
         )
     )
     assert out == "RESULT"
@@ -209,10 +207,7 @@ def test_run_dispatched_releases_gpu_lease_on_exception(coord: Coordinator) -> N
     with pytest.raises(RuntimeError, match="subprocess crashed"):
         asyncio.run(
             coord.dispatcher.run_task_registered(
-                _Task(),
-                prebound_lease=None,
-                extra_context={},
-                gpu_lease=sentinel_lease,
+                _Task(), HeldLeases(prebound_lease=None, gpu_lease=sentinel_lease), extra_context={}
             )
         )
     # lease released via finally even though run_task raised.
@@ -239,12 +234,7 @@ def test_run_dispatched_no_gpu_lease_is_noop(coord: Coordinator) -> None:
     coord.sub.run_task = _fake_run_task
     coord.gpu_specialist_pool.release = _fake_release
     out = asyncio.run(
-        coord.dispatcher.run_task_registered(
-            _Task(),
-            prebound_lease=None,
-            extra_context={},
-            gpu_lease=None,
-        )
+        coord.dispatcher.run_task_registered(_Task(), HeldLeases(prebound_lease=None, gpu_lease=None), extra_context={})
     )
     assert out == "CPU"
     assert called == []  # no GPU lease → release never called

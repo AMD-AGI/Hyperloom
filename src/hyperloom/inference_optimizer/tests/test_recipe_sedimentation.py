@@ -15,7 +15,7 @@ from hyperloom.orchestrator.roles.mock_backend import (
     MockTurn,
     ScriptedPlan,
 )
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
 from hyperloom.orchestrator.knowledge.recipe_kb import LocalRecipeStore, RecipeKB
 from hyperloom.orchestrator.knowledge._recipe_attrs import (
     attempt_provenance,
@@ -38,7 +38,7 @@ def _make_coordinator(tmp_path: Path) -> Coordinator:
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=SimpleNamespace(recipe_kb=kb),
+        advisory=AdvisoryServices(knowledge_plane=SimpleNamespace(recipe_kb=kb)),
     )
 
 

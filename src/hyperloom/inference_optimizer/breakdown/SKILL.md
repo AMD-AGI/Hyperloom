@@ -33,7 +33,7 @@ authoritative.
 | `exported_at_utc`   | When this export was built.                                                                              |
 | `exporter_version`  | Which exporter built it.                                                                                 |
 | `metadata`          | Session identity, launch configuration, `grading` -- the axis this session was configured to rank on -- component versions, Langfuse receipt, and `warnings`, how the export itself went, reported once and only here. |
-| `outcome`           | Terminal status, stage reached, stop reason, the `baseline` and `final` measured results with the graded axes each reported, and the `validation` that reconciles the stack's parts against its total on one axis, named by `graded_on`. |
+| `outcome`           | Terminal status, stage reached, stop reason, the `baseline` and `final` measured results with the graded axes each reported, the `validation` that reconciles the stack's parts against its total on one axis, named by `graded_on`, and `variants`, the framework phase's bench runs counted by how each ended. |
 | `timeline`          | The run itself: one event per stage, oldest first, each carrying its span, status, and an `ext` block of what that kind of stage records. Startup source events live under `reports/sbd_v6/timeline/`. |
 | `close`             | What the session settled at close: the steps the sequencer ran and the artifacts it published. |
 | `critic`            | The critic agent's own run, iteration by iteration: what it was asked about, how its rulings fell (`verdict_counts`), and the four artifacts each pass left behind. Per-proposal verdicts stay with the proposals, on the timeline. |

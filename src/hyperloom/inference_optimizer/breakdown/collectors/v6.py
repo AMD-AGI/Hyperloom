@@ -19,6 +19,7 @@ from ...session.sbd_v6 import read_timeline_events
 from ..recorder.baseline_event import anchoring_eval_from_timeline
 from ..session_facts import architecture_block, grading_block, workload_signature
 from ..stop_reasons import MODEL_GATE_STOP_REASONS, outcome_status as _outcome_status
+from ..variant_funnel import variants_from_timeline
 from ._common import (
     _dict_rows,
     _first,
@@ -707,6 +708,7 @@ def collect_v6_outcome(sources: OutcomeSources, warnings: list[str] | None = Non
             **_measured_final(validation, recipe),
         },
         "validation": validation,
+        "variants": variants_from_timeline(timeline),
     }
     if stage_recorded:
         outcome["stage_reached_recorded"] = stage_recorded

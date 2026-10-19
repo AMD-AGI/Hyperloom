@@ -12,7 +12,7 @@ import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 from hyperloom.common.llm_config import (
     DEFAULT_CLAUDE_MODEL,
@@ -151,6 +151,14 @@ def _normalise_model_scores(
     return out
 
 
+class ScorerCallKeys(NamedTuple):
+    """The task, tick and phase a scoring call is attributed to in the traces."""
+
+    task_id: str | None = None
+    tick: int | None = None
+    phase: str | None = None
+
+
 @dataclass
 class ProposalScorer:
     """Score proposals without ranking or selecting them."""
@@ -238,10 +246,7 @@ class ProposalScorer:
         model: str,
         prompt: str,
         scoring_entries: list[_ScoringProposal],
-        *,
-        task_id: str | None = None,
-        tick: int | None = None,
-        phase: str | None = None,
+        keys: ScorerCallKeys = ScorerCallKeys(),
     ) -> dict[str, dict[str, Any]]:
         """Score every proposal with a single model (raises on failure; caller records the per-model error)."""
         client = self._ensure_client()
@@ -270,51 +275,21 @@ class ProposalScorer:
             )
         except asyncio.TimeoutError as exc:
             error = RuntimeError(f"timed out after {self.call_timeout_s:.0f}s")
-            self._trace_scorer_llm_failure(
-                model,
-                error,
-                latency_ms=int((time.perf_counter() - _t0) * 1000),
-                task_id=task_id,
-                tick=tick,
-                phase=phase,
-            )
+            self._trace_scorer_llm_failure(model, error, keys, latency_ms=int((time.perf_counter() - _t0) * 1000))
             raise error from exc
         except Exception as exc:
             # Anything else out of the stream (transport, proxy 5xx, malformed chunk) is still a model call that
             # produced nothing usable.
-            self._trace_scorer_llm_failure(
-                model,
-                exc,
-                latency_ms=int((time.perf_counter() - _t0) * 1000),
-                task_id=task_id,
-                tick=tick,
-                phase=phase,
-            )
+            self._trace_scorer_llm_failure(model, exc, keys, latency_ms=int((time.perf_counter() - _t0) * 1000))
             raise
         latency_ms = int((time.perf_counter() - _t0) * 1000)
         # One id for both halves of this call, so the emitter pairs them on the call itself instead of on a ts-second
         # bucket shared with the other models being scored concurrently.
         call_id = new_call_id()
         # Record this model's token spend before parsing (best-effort).
-        self._trace_scorer_llm_call(
-            model,
-            usage,
-            latency_ms=latency_ms,
-            task_id=task_id,
-            tick=tick,
-            phase=phase,
-            call_id=call_id,
-        )
+        self._trace_scorer_llm_call(model, usage, keys, latency_ms=latency_ms, call_id=call_id)
         # Persist the full (redacted) prompt + reply alongside the token row.
-        self._record_scorer_conversation(
-            model,
-            full_prompt,
-            text,
-            task_id=task_id,
-            tick=tick,
-            phase=phase,
-            call_id=call_id,
-        )
+        self._record_scorer_conversation(model, full_prompt, text, keys, call_id=call_id)
         parsed = _extract_scores_json(text)
         if parsed is None:
             raise RuntimeError(f"no parseable scores JSON (reply_chars={len(text)})")
@@ -324,11 +299,9 @@ class ProposalScorer:
         self,
         model: str,
         usage: Any,
+        keys: ScorerCallKeys,
         *,
         latency_ms: int | None = None,
-        task_id: str | None = None,
-        tick: int | None = None,
-        phase: str | None = None,
         call_id: str | None = None,
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for a proposal-scoring call."""
@@ -348,9 +321,9 @@ class ProposalScorer:
                 role="proposal_scorer",  # must match the conversation row's role
                 call_id=call_id,
                 model=str(model),
-                task_id=task_id,
-                tick=tick,
-                phase=phase,
+                task_id=keys.task_id,
+                tick=keys.tick,
+                phase=keys.phase,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 # A scoring model with a reasoning split bills it separately; reading it here keeps the ledger
@@ -370,11 +343,9 @@ class ProposalScorer:
         self,
         model: str,
         error: BaseException,
+        keys: ScorerCallKeys,
         *,
         latency_ms: int | None = None,
-        task_id: str | None = None,
-        tick: int | None = None,
-        phase: str | None = None,
     ) -> None:
         """Append one ``status=\"error\"`` row for a scoring call that never returned."""
         if self.session_dir is None:
@@ -384,9 +355,9 @@ class ProposalScorer:
                 session_id=self.session_dir.name,
                 component="proposal_scorer",
                 role="proposal_scorer",
-                task_id=task_id,
-                tick=tick,
-                phase=phase,
+                task_id=keys.task_id,
+                tick=keys.tick,
+                phase=keys.phase,
             )
             record = LLMCallRecord.for_failure(site, error, model=str(model), latency_ms=latency_ms)
             append_llm_call(session_dir=self.session_dir, record=record)
@@ -402,10 +373,8 @@ class ProposalScorer:
         model: str,
         prompt: str,
         response: str,
+        keys: ScorerCallKeys,
         *,
-        task_id: str | None = None,
-        tick: int | None = None,
-        phase: str | None = None,
         call_id: str | None = None,
     ) -> None:
         """Append one ``conversations.jsonl`` row for a proposal-scoring call."""
@@ -418,9 +387,9 @@ class ProposalScorer:
             component="proposal_scorer",
             role="proposal_scorer",
             call_id=call_id,
-            task_id=task_id,
-            tick=tick,
-            phase=phase,
+            task_id=keys.task_id,
+            tick=keys.tick,
+            phase=keys.phase,
             model=str(model),
             prompt=prompt or "",
             response=response or "",
@@ -455,12 +424,7 @@ class ProposalScorer:
         results = await asyncio.gather(
             *(
                 self._score_one_model(
-                    m,
-                    prompt,
-                    scoring_entries,
-                    task_id=task_id,
-                    tick=tick,
-                    phase=phase,
+                    m, prompt, scoring_entries, ScorerCallKeys(task_id=task_id, tick=tick, phase=phase)
                 )
                 for m in self.models
             ),

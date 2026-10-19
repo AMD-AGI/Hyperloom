@@ -15,6 +15,7 @@ open a credential sink the pre-existing ``setup.cmd`` exposure does not cover.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -33,41 +34,53 @@ CMD_SANITIZED_CHARS = 160
 OUTCOMES: tuple[str, ...] = ("applied", "failed")
 
 
-def build_execution_row(
-    *,
-    seq: int,
-    round_task_id: str,
-    cmd_index: int,
-    cmd: str,
-    source: str,
-    outcome: str,
-    env: Mapping[str, str] | None,
-    fs_root: Path | str = "/",
-) -> dict[str, Any]:
-    """Build one durable ledger row for one attempted execution.
+@dataclass(frozen=True)
+class SetupExecution:
+    """One attempted setup command, before it is a ledger row.
 
-    Args:
+    Attributes:
         seq: Monotonic execution identity; a row is never matched by its text.
         round_task_id: The round the execution belongs to.
         cmd_index: Position within the round's resolved command list.
         cmd: The verbatim command, used only for its digest and sanitized form.
         source: ``"proposed"`` (this round's own payload) or ``"inherited"``.
         outcome: One of :data:`OUTCOMES`.
+    """
+
+    seq: int
+    round_task_id: str
+    cmd_index: int
+    cmd: str
+    source: str
+    outcome: str
+
+
+def build_execution_row(
+    execution: SetupExecution,
+    env: Mapping[str, str] | None,
+    fs_root: Path | str = "/",
+) -> dict[str, Any]:
+    """Build one durable ledger row for one attempted execution.
+
+    Args:
+        execution: The attempted command and where it ran in the round.
         env: The environment the command was given, classified by channel name.
         fs_root: Filesystem root the ambient channel locations are probed under.
 
     Raises:
         ValueError: When ``outcome`` is outside the recorded vocabulary.
     """
+    cmd = execution.cmd
+    outcome = execution.outcome
     if outcome not in OUTCOMES:
         raise ValueError(f"outcome must be one of {OUTCOMES}, got {outcome!r}")
     return {
-        "seq": int(seq),
-        "round_task_id": str(round_task_id or ""),
-        "cmd_index": int(cmd_index),
+        "seq": int(execution.seq),
+        "round_task_id": str(execution.round_task_id or ""),
+        "cmd_index": int(execution.cmd_index),
         "cmd_sanitized": sanitize_command_text(cmd, clip=CMD_SANITIZED_CHARS),
         "cmd_digest": command_digest(cmd),
-        "source": str(source),
+        "source": str(execution.source),
         "outcome": outcome,
         "round_disposition": "unreported",
         "at_accepted_round": False,

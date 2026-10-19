@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging as _logging
 from copy import copy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Collection, Mapping, NamedTuple
@@ -114,6 +115,53 @@ _VARIANT_DETAIL_METRICS: tuple[str, ...] = (
     "wall_clock_ratio_vs_baseline",
     "estimated_output_throughput",
 )
+
+
+@dataclass(frozen=True)
+class FactRecord:
+    """One settled outcome to write to the Recipe KB as a lesson or a pitfall.
+
+    Attributes:
+        task: The completed task (provides task_id).
+        source_session_id: Hyperloom-local session id stamped on provenance.
+        is_keep: True when the outcome is a validated KEEP.
+        change: Summarized change string (used in the statement).
+        gain_pct: Measured gain percentage, or ``None``.
+        throughput_after: Measured throughput after the change, or ``None``.
+        best_config_candidate: Pre-extracted best-config dict (differs between
+            per-task and per-variant callers).
+        evidence_refs: Evidence reference strings stamped on the provenance
+            (task-only or task+variant refs).
+        pitfall_severity_dict: The dict passed to ``_pitfall_severity_for``
+            (per-task passes the result dict; per-variant passes a merged
+            metrics + outcome dict).
+        variant_name: Variant name, present only for per-variant calls; added to
+            ``provenance_details`` when non-None.
+    """
+
+    task: "Task"
+    source_session_id: str
+    is_keep: bool
+    change: str
+    gain_pct: float | None
+    throughput_after: float | None
+    best_config_candidate: dict[str, Any] | None
+    evidence_refs: list[str]
+    pitfall_severity_dict: dict[str, Any]
+    variant_name: str | None = None
+
+
+@dataclass(frozen=True)
+class RemoteRecipeAudit:
+    """The outcome of one remote Recipe KB publish attempt, as an audit row records it."""
+
+    status: str
+    canonical_id: str
+    session_id: str
+    primary_metric: str = ""
+    primary_value: float = 0.0
+    reason: str = ""
+    error: Exception | None = None
 
 
 class _FrameworkIdentity(NamedTuple):
@@ -594,20 +642,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         """
         return str(self.shared_state.phase or "").strip().upper() or "UNKNOWN"
 
-    def _record_fact_impl(
-        self,
-        *,
-        task: "Task",
-        source_session_id: str,
-        is_keep: bool,
-        change: str,
-        gain_pct: float | None,
-        throughput_after: float | None,
-        best_config_candidate: dict[str, Any] | None,
-        evidence_refs: list[str],
-        pitfall_severity_dict: dict[str, Any],
-        variant_name: str | None = None,
-    ) -> None:
+    def _record_fact_impl(self, fact: FactRecord) -> None:
         """Shared KB write for _record_fact_per_task and _record_fact_per_variant.
 
         Writes one KB lesson (on KEEP with positive gain) or one KB pitfall
@@ -616,21 +651,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         non-None by the caller.
 
         Args:
-            task: The completed task (provides task_id).
-            source_session_id: Hyperloom-local session id stamped on provenance.
-            is_keep: True when the outcome is a validated KEEP.
-            change: Summarized change string (used in the statement).
-            gain_pct: Measured gain percentage, or ``None``.
-            throughput_after: Measured throughput after the change, or ``None``.
-            best_config_candidate: Pre-extracted best-config dict (differs
-                between per-task and per-variant callers).
-            evidence_refs: List of evidence reference strings to stamp on the
-                provenance (caller builds task-only or task+variant refs).
-            pitfall_severity_dict: The dict passed to ``_pitfall_severity_for``
-                (per-task passes ``result_dict``; per-variant passes a merged
-                metrics + outcome dict).
-            variant_name: Variant name, present only for per-variant calls;
-                added to ``provenance_details`` when non-None.
+            fact: The completed task, its outcome and the evidence to stamp on
+                the provenance.
         """
         models = [str(self.shared_state.model_name or "")] if self.shared_state.model_name else []
         hardware = [str(self.shared_state.gpu_type or "")] if self.shared_state.gpu_type else []
@@ -639,33 +661,33 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
         provenance_base: dict[str, Any] = {
-            "source_session_id": source_session_id,
-            "source_task_id": task.task_id,
-            "evidence": list(evidence_refs or []),
+            "source_session_id": fact.source_session_id,
+            "source_task_id": fact.task.task_id,
+            "evidence": list(fact.evidence_refs or []),
             "applicable_models": list(models or []),
             "applicable_hardware": list(hardware or []),
             "extra": dict(extra or {}),
             "now": now_iso,
         }
-        if variant_name is not None:
-            provenance_base["source_variant_name"] = variant_name
+        if fact.variant_name is not None:
+            provenance_base["source_variant_name"] = fact.variant_name
 
-        if is_keep and gain_pct is not None and gain_pct > 0:
+        if fact.is_keep and fact.gain_pct is not None and fact.gain_pct > 0:
             statement = self._build_statement(
-                change=change,
+                change=fact.change,
                 kind="lesson",
             )
             impact = self._build_measured_impact(
-                gain_pct=gain_pct,
-                throughput_after=throughput_after,
+                gain_pct=fact.gain_pct,
+                throughput_after=fact.throughput_after,
                 stack_depth=len(self.shared_state.optimization_stack or []),
                 measured_at=now_iso,
             )
             live = self.read_local_recipe_row()
             recipe_overrides = self.kb_best_config_overrides_for_keep(
                 live=live,
-                best_config_candidate=best_config_candidate,
-                throughput_after=throughput_after,
+                best_config_candidate=fact.best_config_candidate,
+                throughput_after=fact.throughput_after,
             )
             self.kb_amend_recipe(
                 append_lesson={
@@ -677,10 +699,10 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             )
             return
 
-        severity = self._pitfall_severity_for(pitfall_severity_dict)
+        severity = self._pitfall_severity_for(fact.pitfall_severity_dict)
         if severity is not None:
             description = self._build_statement(
-                change=change,
+                change=fact.change,
                 severity=severity,
                 kind="pitfall",
             )
@@ -755,19 +777,21 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             return
 
         self._record_fact_impl(
-            task=task,
-            source_session_id=source_session_id,
-            is_keep=is_keep,
-            change=change,
-            gain_pct=gain_pct,
-            throughput_after=throughput_after,
-            best_config_candidate=self.extract_kept_best_config(
+            FactRecord(
                 task=task,
-                result_dict=result_dict,
-            ),
-            # evidence_refs (log:task-...) gives traceability since source_session_id lands in attrs.
-            evidence_refs=[f"log:task-{task.task_id}"],
-            pitfall_severity_dict=result_dict,
+                source_session_id=source_session_id,
+                is_keep=is_keep,
+                change=change,
+                gain_pct=gain_pct,
+                throughput_after=throughput_after,
+                best_config_candidate=self.extract_kept_best_config(
+                    task=task,
+                    result_dict=result_dict,
+                ),
+                # evidence_refs (log:task-...) gives traceability since source_session_id lands in attrs.
+                evidence_refs=[f"log:task-{task.task_id}"],
+                pitfall_severity_dict=result_dict,
+            )
         )
 
     def _build_statement(
@@ -890,34 +914,25 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             return
 
         self._record_fact_impl(
-            task=task,
-            source_session_id=source_session_id,
-            is_keep=(outcome == OUTCOME_KEEP),
-            change=change,
-            gain_pct=measurement.gain_pct,
-            throughput_after=measurement.throughput_after,
-            best_config_candidate=self.extract_kept_best_config(
+            FactRecord(
                 task=task,
-                variant_attrs=change_attrs,
-            ),
-            # Workload-shape tags — see _record_fact_per_task.
-            evidence_refs=[f"log:task-{task.task_id}", f"variant:{variant_name}"],
-            pitfall_severity_dict=_variant_pitfall_signals(variant_outcome, metrics),
-            variant_name=variant_name,
+                source_session_id=source_session_id,
+                is_keep=outcome == OUTCOME_KEEP,
+                change=change,
+                gain_pct=measurement.gain_pct,
+                throughput_after=measurement.throughput_after,
+                best_config_candidate=self.extract_kept_best_config(
+                    task=task,
+                    variant_attrs=change_attrs,
+                ),
+                # Workload-shape tags — see _record_fact_per_task.
+                evidence_refs=[f"log:task-{task.task_id}", f"variant:{variant_name}"],
+                pitfall_severity_dict=_variant_pitfall_signals(variant_outcome, metrics),
+                variant_name=variant_name,
+            )
         )
 
-    def _record_remote_recipe_audit(
-        self,
-        *,
-        source: str,
-        status: str,
-        canonical_id: str,
-        session_id: str,
-        primary_metric: str = "",
-        primary_value: float = 0.0,
-        reason: str = "",
-        error: Exception | None = None,
-    ) -> None:
+    def _record_remote_recipe_audit(self, source: str, audit: RemoteRecipeAudit) -> None:
         """Append one best-effort, secret-free KB Store publish audit row."""
         try:
             from .remote_recipe.audit import publish_error_fields
@@ -932,37 +947,37 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 "mode": "remote",
                 "backend": "kb-store",
                 "remote": "kb-store",
-                "resolution": status,
-                "success": status in {"written", "skipped"},
+                "resolution": audit.status,
+                "success": audit.status in {"written", "skipped"},
                 "generator": source,
                 "phase": "CLOSE",
-                "status": status,
-                "reason": reason,
+                "status": audit.status,
+                "reason": audit.reason,
                 "request": {
-                    "canonical_id": canonical_id or None,
-                    "session_id": session_id or None,
+                    "canonical_id": audit.canonical_id or None,
+                    "session_id": audit.session_id or None,
                 },
                 "result": {
-                    "canonical_id": canonical_id,
-                    "session_id": session_id,
-                    "created": status == "written",
+                    "canonical_id": audit.canonical_id,
+                    "session_id": audit.session_id,
+                    "created": audit.status == "written",
                 },
                 "provenance": {
                     "component": "remote_recipe",
                     "source": source,
                 },
             }
-            if primary_metric:
+            if audit.primary_metric:
                 row["result"].update(
                     {
-                        "primary_metric": primary_metric,
-                        "primary_value": primary_value,
+                        "primary_metric": audit.primary_metric,
+                        "primary_value": audit.primary_value,
                     }
                 )
-            if primary_metric == "optimized_throughput":
-                row["result"]["best_throughput"] = primary_value
-            if error is not None:
-                row["error"] = publish_error_fields(error)
+            if audit.primary_metric == "optimized_throughput":
+                row["result"]["best_throughput"] = audit.primary_value
+            if audit.error is not None:
+                row["error"] = publish_error_fields(audit.error)
             append_jsonl(
                 recipe_snapshot_audit_jsonl(self.session_dir),
                 row,
@@ -1175,11 +1190,13 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             written = HyperloomRemoteKB.from_env().write(canonical_id, state, session_id=session_id)
         except Exception as exc:
             self._record_remote_recipe_audit(
-                source=source,
-                status="error",
-                canonical_id=canonical_id,
-                session_id=session_id,
-                error=exc,
+                source,
+                RemoteRecipeAudit(
+                    status="error",
+                    canonical_id=canonical_id,
+                    session_id=session_id,
+                    error=exc,
+                ),
             )
             log.exception("Remote Recipe KB finalize failed (non-fatal)")
             return {
@@ -1200,13 +1217,15 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             written.session_id,
         )
         self._record_remote_recipe_audit(
-            source=source,
-            status=written.status,
-            canonical_id=canonical_id,
-            session_id=written.session_id,
-            primary_metric=written.primary_metric,
-            primary_value=written.primary_value,
-            reason=written.reason,
+            source,
+            RemoteRecipeAudit(
+                status=written.status,
+                canonical_id=canonical_id,
+                session_id=written.session_id,
+                primary_metric=written.primary_metric,
+                primary_value=written.primary_value,
+                reason=written.reason,
+            ),
         )
         return {
             **_finalize_outcome(

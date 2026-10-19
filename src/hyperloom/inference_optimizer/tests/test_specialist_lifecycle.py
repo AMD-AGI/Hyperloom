@@ -289,7 +289,7 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
         MockTurn,
         ScriptedPlan,
     )
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from hyperloom.orchestrator.state.task_registry import Task
 
@@ -323,7 +323,7 @@ async def test_dispatcher_hook_calls_bookkeeping_on_specialist_task(
         session_dir=session_dir,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
     executor = _build_specialist_executor(
         spec_args,

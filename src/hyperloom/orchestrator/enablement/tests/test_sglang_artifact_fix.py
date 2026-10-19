@@ -8,7 +8,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from hyperloom.inference_optimizer.reference_script import LaunchSettings, render_reference_script
+from hyperloom.inference_optimizer.reference_script import LaunchSettings, ServingTarget, render_reference_script
 from hyperloom.orchestrator.enablement.artifacts import write_setting_script
 from hyperloom.orchestrator.specialists import patch_safety as _ps
 from hyperloom.orchestrator.specialists.runner import _sibling_checkouts
@@ -350,7 +350,7 @@ def test_kept_round_keeps_the_envs_earlier_advances_accepted(tmp_path):
     # effective_config comes back holding all of them.
     enablement.accepted_config = {"extra_envs": base_extra_envs, "extra_server_args": ""}
 
-    write_setting_script(tmp_path, enablement, "sglang", model="/models/DeepSeek-V4-Pro", tp=8)
+    write_setting_script(tmp_path, enablement, "sglang", target=ServingTarget(model="/models/DeepSeek-V4-Pro", tp=8))
     text = (tmp_path / "reports" / "enablement" / "enablement_setting.sh").read_text()
     assert "export SGLANG_DSV4_MHC_PREWARM=0" in text
     assert "export SGLANG_MOE_COPY_WEIGHT_VIEWS_BEFORE_H2D=1" in text
@@ -365,7 +365,7 @@ def test_replay_script_is_valid_bash(tmp_path):
     enablement.accepted_config = {"extra_envs": {"SGLANG_USE_AITER": "1"}, "extra_server_args": "--tp 8"}
     enablement.kept_artifacts = [{"target": "/sgl-workspace/sglang/art.py", "source": str(source)}]
 
-    rel = write_setting_script(tmp_path, enablement, "sglang", model="/models/M", tp=8)
+    rel = write_setting_script(tmp_path, enablement, "sglang", target=ServingTarget(model="/models/M", tp=8))
     for script in (tmp_path / rel, tmp_path / "reports" / "enablement" / "enablement_setup.sh"):
         proc = subprocess.run(["bash", "-n", str(script)], capture_output=True)
         assert proc.returncode == 0, proc.stderr.decode()
