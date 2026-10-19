@@ -11,7 +11,7 @@ import json
 import time
 import uuid
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, NamedTuple
 
 from hyperloom.common.framework_arm import is_upstream_pr_prescreen, review_row_id, verdict_subject
 from hyperloom.orchestrator.lever import (
@@ -71,6 +71,15 @@ log = __import__("logging").getLogger(__name__)
 
 #: Reply source marking an answer the Coordinator wrote itself, refusing a request before any handler ran.
 _AUTO_REJECT = "coordinator_auto_reject"
+
+
+class DelegateRequest(NamedTuple):
+    """A delegated action, with the task params being assembled for it."""
+
+    source: str
+    intent: Intent
+    action_name: str
+    params: dict[str, Any]
 
 
 def _relayed_specialist_citations(state: Any) -> dict[str, list[dict[str, str]]]:
@@ -821,6 +830,110 @@ class IntentRouter(CoordinatorCollaborator):
         elif verdict == "needs_review":
             await self._coord.phase_framework.maybe_reauthor_from_critic_feedback(pending, advisory)
 
+    def _seed_grid_params(self, request: DelegateRequest) -> None:
+        """Seed a grid-style delegate with the params an approved proposal would have carried."""
+        if request.action_name not in ("sweep", "explore"):
+            return
+        # Baseline's materialized YAML, which the delegator may override.
+        if self.shared_state.baseline_config_path:
+            request.params.setdefault("config_path", self.shared_state.baseline_config_path)
+        inject_stack_base_params(request.params, self.shared_state, anchor=True)
+        if request.action_name == "explore":
+            self._coord.proposals.inject_explore_runtime_params(request.params)
+            self._coord.proposals.credit_predictor_proposals(request.params)
+
+    async def _prepare_specialist_dispatch(self, request: DelegateRequest, nested_idempotency_key: Any) -> bool:
+        """Warm a specialist delegate's params through the KnowledgePlane.
+
+        False once a patch preflight error pruned the source-patch family instead.
+        """
+        if request.action_name != "specialist":
+            return True
+        await self._coord.specialist_dispatch.warm_specialist_params(request.params)
+        from ..specialists.runner import specialist_patch_preflight_error
+
+        preflight_error = specialist_patch_preflight_error(
+            request.params,
+            framework_repo_path=str(self.shared_state.framework_repo_path or ""),
+        )
+        if not preflight_error:
+            return True
+        if self.shared_state.add_pruned_family("source_patch"):
+            self.shared_state.record_action_failure(
+                action="specialist",
+                task_id=str(request.intent.payload.get("idempotency_key") or nested_idempotency_key or ""),
+                result={"error_class": preflight_error, "error": preflight_error},
+            )
+            try:
+                self.shared_state.save(self.session_dir)
+            except Exception:
+                log.exception("delegate specialist: source-patch prune save failed")
+        return False
+
+    async def _create_delegated_task(self, request: DelegateRequest, raw_key: Any) -> Any | None:
+        """Register the delegate as a task, stepping its idempotency key past terminated twins.
+
+        Returns None once a live twin, or an exhausted retry budget, policy-denied the delegate.
+        """
+        terminal_states = {
+            "succeeded",
+            "failed",
+            "cancelled",
+        }
+        task = None
+        for attempt in range(6):
+            idempotency_key = str(raw_key) if attempt == 0 else f"{raw_key}-retry{attempt}"
+            lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(request.action_name)
+            if request.action_name == "specialist":
+                from ..specialists.profile import requires_gpu, specialist_lanes
+
+                lanes = tuple(specialist_lanes(request.params, list(lanes)))
+                if requires_gpu(request.params):
+                    ttl = self._coord.dispatcher.gpu_lease_ttl_sec(int(ttl or 0), params=request.params)
+            task, was_existing = await self.tasks.create_or_return_existing(
+                kind=request.action_name,
+                params=request.params,
+                idempotency_key=idempotency_key,
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
+                dispatch_class="llm",
+            )
+            if not was_existing:
+                return task
+            if task.state not in terminal_states:
+                hint = (
+                    f"task {task.task_id} is still {task.state!r}; wait for the "
+                    f"delegated_result event instead of re-emitting the same key."
+                )
+                await self.record_policy_denied(
+                    request.source,
+                    request.intent,
+                    PolicyDenied(
+                        f"delegate{{action_name={request.action_name!r}}} duplicate "
+                        f"idempotency_key={idempotency_key!r}",
+                        rule="duplicate_idempotency_key_running",
+                        hint=hint,
+                    ),
+                    action_name=request.action_name,
+                )
+                return None
+        hint = (
+            f"task {task.task_id if task else '?'} terminated and could not "
+            f"allocate a fresh idempotency_key after 5 retries"
+        )
+        await self.record_policy_denied(
+            request.source,
+            request.intent,
+            PolicyDenied(
+                f"delegate{{action_name={request.action_name!r}}} duplicate "
+                f"idempotency_key exhausted retries for {raw_key!r}",
+                rule="duplicate_idempotency_key",
+                hint=hint,
+            ),
+            action_name=request.action_name,
+        )
+        return None
+
     async def handle_delegate(self, source: str, intent: Intent) -> None:
         """Validate and enqueue a delegated action as a TaskRegistry task."""
         action_name = intent.payload["action_name"]
@@ -853,6 +966,7 @@ class IntentRouter(CoordinatorCollaborator):
         payload = dict(intent.payload)
         _stamp_kb_exposure(self, payload, source=source)
         params = dict(payload.get("params") or {})
+        request = DelegateRequest(source, intent, action_name, params)
         if action_name == "integrate_patch":
             if not await self._stamp_integrate_patch_owner(params):
                 await self.bus.record_observation(
@@ -871,15 +985,7 @@ class IntentRouter(CoordinatorCollaborator):
             return
         # idempotency_key is top-level per schema; strip a nested compat alias.
         nested_idempotency_key = params.pop("idempotency_key", None)
-        # Plumb baseline's materialized YAML into grid-style tasks (delegator may override).
-        if action_name in ("sweep", "explore") and self.shared_state.baseline_config_path:
-            params.setdefault("config_path", self.shared_state.baseline_config_path)
-        # Delegates skip materialize_approved_proposal, so seed the same params here.
-        if action_name in ("sweep", "explore"):
-            inject_stack_base_params(params, self.shared_state, anchor=True)
-        if action_name == "explore":
-            self._coord.proposals.inject_explore_runtime_params(params)
-            self._coord.proposals.credit_predictor_proposals(params)
+        self._seed_grid_params(request)
         # Wave sugar: a specialist delegate carrying params.tasks=[...] fans out into N standard freeform specialist
         # tasks, each dispatched through the normal SpecialistRunner + TaskRegistry + lease + reap path.
         if (
@@ -892,27 +998,8 @@ class IntentRouter(CoordinatorCollaborator):
         ):
             await self._coord.specialist_dispatch.fan_out_specialist_wave(source, intent, params)
             return
-        # Specialist pre-dispatch warmup via KnowledgePlane.
-        if action_name == "specialist":
-            await self._coord.specialist_dispatch.warm_specialist_params(params)
-            from ..specialists.runner import specialist_patch_preflight_error
-
-            preflight_error = specialist_patch_preflight_error(
-                params,
-                framework_repo_path=str(self.shared_state.framework_repo_path or ""),
-            )
-            if preflight_error:
-                if self.shared_state.add_pruned_family("source_patch"):
-                    self.shared_state.record_action_failure(
-                        action="specialist",
-                        task_id=str(intent.payload.get("idempotency_key") or nested_idempotency_key or ""),
-                        result={"error_class": preflight_error, "error": preflight_error},
-                    )
-                    try:
-                        self.shared_state.save(self.session_dir)
-                    except Exception:
-                        log.exception("delegate specialist: source-patch prune save failed")
-                return
+        if not await self._prepare_specialist_dispatch(request, nested_idempotency_key):
+            return
         # Idempotency-key chain: top-level -> nested compat alias -> content-fingerprint auto-key.
         raw_key = intent.payload.get("idempotency_key") or nested_idempotency_key
         if not raw_key:
@@ -921,70 +1008,13 @@ class IntentRouter(CoordinatorCollaborator):
                 usedforsecurity=False,
             ).hexdigest()[:10]
             raw_key = f"{source}:{action_name}:t{int(self.shared_state.tick or 0)}:{content_fp}"
-        idempotency_key = str(raw_key)
         # The grid's attempts join its proposal row through this id, as an approved proposal's do. Added after the
         # key is derived, so an identical re-emit still lands on the task already running.
         proposal_id = uuid.uuid4().hex if action_name == "explore" else ""
         if proposal_id:
             params["proposal_msg_id"] = proposal_id
-        terminal_states = {
-            "succeeded",
-            "failed",
-            "cancelled",
-        }
-        task = None
-        was_existing = False
-        for attempt in range(6):
-            idempotency_key = str(raw_key) if attempt == 0 else f"{raw_key}-retry{attempt}"
-            lanes, ttl = self._coord.dispatcher.registry_lanes_ttl(action_name)
-            if action_name == "specialist":
-                from ..specialists.profile import requires_gpu, specialist_lanes
-
-                lanes = tuple(specialist_lanes(params, list(lanes)))
-                if requires_gpu(params):
-                    ttl = self._coord.dispatcher.gpu_lease_ttl_sec(int(ttl or 0), params=params)
-            task, was_existing = await self.tasks.create_or_return_existing(
-                kind=action_name,
-                params=params,
-                idempotency_key=idempotency_key,
-                requires_lanes=lanes,
-                lease_ttl_sec=ttl,
-                dispatch_class="llm",
-            )
-            if not was_existing:
-                break
-            if task.state not in terminal_states:
-                hint = (
-                    f"task {task.task_id} is still {task.state!r}; wait for the "
-                    f"delegated_result event instead of re-emitting the same key."
-                )
-                await self.record_policy_denied(
-                    source,
-                    intent,
-                    PolicyDenied(
-                        f"delegate{{action_name={action_name!r}}} duplicate idempotency_key={idempotency_key!r}",
-                        rule="duplicate_idempotency_key_running",
-                        hint=hint,
-                    ),
-                    action_name=action_name,
-                )
-                return
-        else:
-            hint = (
-                f"task {task.task_id if task else '?'} terminated and could not "
-                f"allocate a fresh idempotency_key after 5 retries"
-            )
-            await self.record_policy_denied(
-                source,
-                intent,
-                PolicyDenied(
-                    f"delegate{{action_name={action_name!r}}} duplicate "
-                    f"idempotency_key exhausted retries for {raw_key!r}",
-                    rule="duplicate_idempotency_key",
-                    hint=hint,
-                ),
-                action_name=action_name,
-            )
+        task = await self._create_delegated_task(request, raw_key)
+        if task is None:
             return
         self.shared_state.reset_policy_denial_streak(action_name)
         # Only once a task exists, so a dispatch that bailed out above leaves the mandate on offer.

@@ -133,8 +133,6 @@ cognitive-complexity src/hyperloom/orchestrator/loop/coordinator.py::Coordinator
 cognitive-complexity src/hyperloom/orchestrator/loop/coordinator.py::_infer_model_class_from_config 52
 cognitive-complexity src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator._spawn_fitting_queued 106
 cognitive-complexity src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator.reap_dispatched_task 42
-cognitive-complexity src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_request 82
-cognitive-complexity src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter.handle_delegate 40
 cognitive-complexity src/hyperloom/orchestrator/loop/sub_agent_runner.py::SubAgentRunner.run_task 50
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._drain_agent_keep_outbox 34
 cognitive-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._keep_patch_sources 42
@@ -319,7 +317,6 @@ cyclomatic-complexity src/hyperloom/orchestrator/loop/coordinator.py::Coordinato
 cyclomatic-complexity src/hyperloom/orchestrator/loop/coordinator.py::_infer_model_class_from_config 21
 cyclomatic-complexity src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator._spawn_fitting_queued 29
 cyclomatic-complexity src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator.reap_dispatched_task 21
-cyclomatic-complexity src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter.handle_delegate 21
 cyclomatic-complexity src/hyperloom/orchestrator/loop/sub_agent_runner.py::SubAgentRunner.run_task 21
 cyclomatic-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_baseline 29
 cyclomatic-complexity src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_explore 48
@@ -798,9 +795,8 @@ function-lines src/hyperloom/orchestrator/loop/coordinator.py::_infer_model_clas
 function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator._spawn_fitting_queued 238
 function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator.reap_dispatched_task 157
 function-lines src/hyperloom/orchestrator/loop/dispatcher.py::DispatcherCollaborator.run_task_registered 109
-function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_request 191
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._handle_single_verdict 111
-function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter.handle_delegate 179
+function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter.handle_delegate 98
 function-lines src/hyperloom/orchestrator/loop/proposals.py::ProposalsCollaborator.materialize_approved_proposal 124
 function-lines src/hyperloom/orchestrator/loop/sub_agent_runner.py::SubAgentRunner.run_task 167
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._promote_baseline 279
@@ -1050,7 +1046,7 @@ module-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py 1318
 module-lines src/hyperloom/orchestrator/knowledge/remote_recipe/values.py 1284
 module-lines src/hyperloom/orchestrator/loop/coordinator.py 1423
 module-lines src/hyperloom/orchestrator/loop/dispatcher.py 1503
-module-lines src/hyperloom/orchestrator/loop/intent_router.py 1548
+module-lines src/hyperloom/orchestrator/loop/intent_router.py 1438
 module-lines src/hyperloom/orchestrator/loop/writeback.py 4748
 module-lines src/hyperloom/orchestrator/phases/framework.py 3139
 module-lines src/hyperloom/orchestrator/phases/kernel.py 4227
