@@ -1,14 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Stdio MCP server that lets a read-only specialist measure one variant."""
+"""Let a read-only specialist measure one variant inside its sandbox, budget and session."""
 
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager
 from dataclasses import dataclass
-import fcntl
 import importlib
 import inspect
 import json
@@ -19,15 +17,10 @@ from pathlib import Path
 import time
 from typing import Any
 
-from kernelforge.mcp_server import stdio_transport
+from kernelforge.tools.file_lock import locked_json_state, release_lock, try_lock_exclusive
 
 log = logging.getLogger(__name__)
 
-#: Re-exported so the two servers stay one import away from the shared wire
-#: format; both spellings name the same objects.
-InvalidParamsError = stdio_transport.InvalidParamsError
-
-SERVER_NAME = "kernelforge-specialist-probe"
 # Agents see these as mcp__specialist_probe__<name>.
 TOOL_NAMES = ("probe_variant",)
 
@@ -41,13 +34,13 @@ ROUND_BUDGET_ENV = "FORGE_PROBE_ROUND_BUDGET"
 # The campaign-wide sentinel a run must flock before it touches the GPU, from
 # ``kernelforge.loop.fanout.campaign_device_lock_path``.
 DEVICE_LOCK_ENV = "FORGE_PROBE_DEVICE_LOCK"
-# Unix timestamp at which the specialist session this server serves is killed.
+# Unix timestamp at which the specialist session this probe serves is killed.
 SESSION_DEADLINE_ENV = "FORGE_PROBE_SESSION_DEADLINE"
 
 PRIMITIVE_MODULE = "kernelforge.evaluation.benchmark.runner"
 PRIMITIVE_ATTR = "sweep_case"
 PRIMITIVE_PATH = f"{PRIMITIVE_MODULE}.{PRIMITIVE_ATTR}"
-# The keywords this server calls the primitive with.
+# The keywords the probe calls the primitive with.
 PRIMITIVE_KEYWORDS = (
     "driver_script",
     "case_id",
@@ -65,7 +58,7 @@ REFUSED = "refused"
 DEVICE_BUSY = "device_busy"
 
 DEFAULT_PROBE_TIMEOUT_SEC = 300
-# Seconds the server waits past a probe's own ceiling before abandoning it, so a primitive that is a moment late is
+# Seconds the caller waits past a probe's own ceiling before abandoning it, so a primitive that is a moment late is
 # reported as late rather than lost.
 PROBE_TOOL_GRACE_SEC = 5
 # One probe's report; a compile log can be arbitrarily long.
@@ -83,7 +76,11 @@ MAX_LEDGER_RECORDS = 200
 
 
 class ProbeSandboxError(RuntimeError):
-    """The scratch sandbox this server was configured with is unusable."""
+    """The scratch sandbox this probe was configured with is unusable."""
+
+
+class ProbeRequestError(ValueError):
+    """Invalid agent-supplied probe arguments."""
 
 
 def wall_clock() -> float:
@@ -141,30 +138,6 @@ def probe_timeout_sec(
     return max(1, int(allowed))
 
 
-@contextmanager
-def _locked_json(path: Path):
-    """Read one small JSON object under an exclusive lock and write it back."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+", encoding="utf-8", errors="replace") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            handle.seek(0)
-            raw = handle.read().strip()
-            try:
-                state = json.loads(raw) if raw else {}
-            except json.JSONDecodeError:
-                state = {}
-            if not isinstance(state, dict):
-                state = {}
-            yield state
-            handle.seek(0)
-            handle.truncate()
-            handle.write(json.dumps(state, sort_keys=True))
-            handle.flush()
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-
 @dataclass
 class ProbeBudget:
     """Track what one ROUND has already spent against its two ceilings."""
@@ -194,7 +167,7 @@ class ProbeBudget:
             self.seconds_used += seconds
             return
         try:
-            with _locked_json(self.path) as state:
+            with locked_json_state(self.path) as state:
                 state["attempts"] = int(state.get("attempts", 0) or 0) + attempts
                 state["seconds_used"] = float(state.get("seconds_used", 0.0) or 0.0) + seconds
                 self.attempts = state["attempts"]
@@ -215,90 +188,6 @@ class ProbeBudget:
             self.shared_error = (
                 f"the round's shared probe budget at {self.path} cannot be reached ({type(error).__name__}: {error})"
             )
-
-
-TOOL_DEFINITIONS: list[dict[str, Any]] = [
-    {
-        "name": "probe_variant",
-        "description": (
-            "Time ONE named case at ONE point in the dispatch-constant space, "
-            "by re-running the workspace driver in a scratch directory of its "
-            "own. Nothing in the canonical workspace is edited. Use it to "
-            "settle a question about a constant that you would otherwise have "
-            "to argue. A result from this tool is exploratory, not an "
-            "acceptance-gate result.\n"
-            "Three numbers come back with every result: how many probes and "
-            "how many seconds of wall clock are left of this ROUND's budget, "
-            "both shared with the other specialists analysing it at the same "
-            "time, and how many seconds are left of YOUR OWN session -- so a "
-            "spent round budget and a session that is nearly over are things "
-            "you can tell apart. No probe may run that would "
-            "leave too little of your session to write the analysis, and a "
-            "refused or unavailable probe costs one of the count just as a "
-            "measured one does. The GPU is measured one run at a time, so a "
-            "probe may spend part of its budget waiting for the device and be "
-            "abandoned if it does not come free. When a result says the budget "
-            "or the session clock is spent, stop probing and report the "
-            "remaining questions as unmeasured."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "label": {
-                    "type": "string",
-                    "description": (
-                        "Short name for the question this probe settles, cited "
-                        "from the analysis, e.g. 'block-1024-vs-256'."
-                    ),
-                },
-                "driver_script": {
-                    "type": "string",
-                    "description": (
-                        "Benchmark driver to run, as a path inside the "
-                        "canonical workspace. A path outside it is refused."
-                    ),
-                },
-                "case_id": {
-                    "type": "string",
-                    "description": "Scored case to time, by name.",
-                },
-                "constants": {
-                    "type": "object",
-                    "description": (
-                        "Declared dispatch constants to vary, upper-case name "
-                        "-> value; they reach the driver as environment "
-                        "variables named FORGE_SWEEP_<NAME>, which only a knob "
-                        "instrumented for forge reads. Empty measures the "
-                        "unmodified source as this probe's own reference."
-                    ),
-                },
-                "prefix_constants": {
-                    "type": "boolean",
-                    "description": (
-                        "Default true. Set false to export each name EXACTLY as "
-                        "written, which is the only way to reach a knob the "
-                        "source already reads under its own name (e.g. "
-                        "GPTOSS_SWIGLU_MXFP4_BF16_BOUND). Such a knob does not "
-                        "print forge's 'sweep_const:' echo, so the result comes "
-                        "back marked unread and unconfirmed: measure a probe "
-                        "with no constants in the same round and compare, or "
-                        "the number says nothing. A name the measurement itself "
-                        "runs on (PATH, HIP_VISIBLE_DEVICES, a cache directory) "
-                        "is refused: those are not knobs of the kernel."
-                    ),
-                },
-                "timeout_sec": {
-                    "type": "integer",
-                    "description": (
-                        "Ceiling for this probe; clamped down to the remaining "
-                        "wall-clock budget and to what your session can spare."
-                    ),
-                },
-            },
-            "required": ["label", "driver_script", "case_id"],
-        },
-    },
-]
 
 
 def resolve_probe_primitive() -> Any:
@@ -346,7 +235,7 @@ def _is_inside(child: Path, parent: Path) -> bool:
 
 
 def load_sandbox(environ: dict[str, str] | None = None) -> ProbeSandbox:
-    """Read the sandbox this server was started for and validate its isolation."""
+    """Read the sandbox this probe was started for and validate its isolation."""
     env = os.environ if environ is None else environ
     scratch_raw = str(env.get(SCRATCH_ENV) or "").strip()
     workspace_raw = str(env.get(WORKSPACE_ENV) or "").strip()
@@ -421,39 +310,17 @@ def append_ledger(sandbox: ProbeSandbox, record: dict[str, Any]) -> None:
     _append_line(sandbox.ledger_path, record)
 
 
-def _try_device_lock(path: Path):
-    """Take the device sentinel without waiting, or return None."""
-    try:
-        handle = path.open("r+", encoding="utf-8")
-    except OSError:
-        return None
-    try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        handle.close()
-        return None
-    return handle
-
-
 async def acquire_device_lock(path: Path, *, timeout_sec: float):
     """Hold the campaign's device sentinel, or give up before the wait costs more."""
     deadline = monotonic_clock() + max(0.0, timeout_sec)
     while True:
-        handle = await asyncio.to_thread(_try_device_lock, path)
+        handle = await asyncio.to_thread(try_lock_exclusive, path)
         if handle is not None:
             return handle
         left = deadline - monotonic_clock()
         if left <= 0:
             return None
         await asyncio.sleep(min(DEVICE_LOCK_POLL_SEC, left))
-
-
-def release_device_lock(handle) -> None:
-    """Drop the device sentinel."""
-    try:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    finally:
-        handle.close()
 
 
 def _detail(text: Any) -> str:
@@ -470,15 +337,15 @@ async def probe_variant(
     label = str(arguments.get("label") or "").strip()
     case_id = str(arguments.get("case_id") or "").strip()
     if not label or not case_id:
-        raise InvalidParamsError("label and case_id must be non-empty strings")
+        raise ProbeRequestError("label and case_id must be non-empty strings")
     constants = arguments.get("constants")
     if constants is None:
         constants = {}
     if not isinstance(constants, dict):
-        raise InvalidParamsError("constants must be an object")
+        raise ProbeRequestError("constants must be an object")
     prefix_constants = arguments.get("prefix_constants", True)
     if not isinstance(prefix_constants, bool):
-        raise InvalidParamsError("prefix_constants must be a boolean")
+        raise ProbeRequestError("prefix_constants must be a boolean")
 
     # What the round's other specialists have spent since the last call.
     budget.refresh()
@@ -560,7 +427,7 @@ async def probe_variant(
 
     driver_raw = str(arguments.get("driver_script") or "").strip()
     if not driver_raw:
-        raise InvalidParamsError("driver_script must be a non-empty string")
+        raise ProbeRequestError("driver_script must be a non-empty string")
     driver = Path(driver_raw)
     if not driver.is_absolute():
         driver = sandbox.workspace / driver
@@ -624,7 +491,7 @@ async def probe_variant(
     budget_remaining -= waited
     session_remaining -= waited
     if session_remaining - ANALYSIS_RESERVE_SEC <= 0 or budget_remaining <= 0:
-        release_device_lock(handle)
+        release_lock(handle)
         return _record(
             sandbox,
             budget,
@@ -682,7 +549,7 @@ async def probe_variant(
                 },
             )
     finally:
-        release_device_lock(handle)
+        release_lock(handle)
 
     payload = result if isinstance(result, dict) else {}
     # The primitive omits every timing field on failure rather than reporting a zero, so a result carrying no
@@ -750,8 +617,8 @@ def refuse_to_ledger(
     return ""
 
 
-class ProbeServer:
-    """Serve the probe tool for one specialist session over stdio."""
+class ProbeSession:
+    """Run the probe for one specialist session: one sandbox, one round budget, counted refusals."""
 
     def __init__(self) -> None:
         self._sandbox: ProbeSandbox | None = None
@@ -767,85 +634,42 @@ class ProbeServer:
                 self._sandbox_error = str(error)
         return self._sandbox
 
-    async def handle_tool_call(
-        self,
-        name: str,
-        arguments: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Invoke the probe tool and wrap its record as MCP content."""
-        if name != "probe_variant":
-            raise InvalidParamsError(f"unknown tool: {name}")
+    async def run(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Run one probe, or refuse it when this session's sandbox is unusable."""
         sandbox = self._resolve_sandbox()
-        if sandbox is None:
-            # A refusal costs a count of its own: there is no sandbox to charge it to, and a free refusal is one the
-            # session can repeat until it ends.
-            self._refusals += 1
-            if self._refusals > MAX_LEDGER_RECORDS:
-                # One last line first, on the call that crosses the cap: a ledger that stops without saying it is full
-                # cannot be told from a session that simply made few calls, which is the whole point of the marker.
-                if self._refusals == MAX_LEDGER_RECORDS + 1:
-                    refuse_to_ledger(
-                        {
-                            "status": REFUSED,
-                            "label": str(arguments.get("label") or ""),
-                            "detail": (f"probe sandbox unusable: {self._sandbox_error}"),
-                        }
-                    )
-                return {
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": json.dumps(
-                                {
-                                    "status": REFUSED,
-                                    "detail": (
-                                        f"this session made {self._refusals} "
-                                        "refused probe calls; the probe is "
-                                        "unusable here, stop calling it"
-                                    ),
-                                }
-                            ),
-                        }
-                    ]
-                }
-            result = {
-                "probe_index": self._refusals,
+        if sandbox is not None:
+            return await probe_variant(arguments, sandbox=sandbox, budget=self._budget)
+        return self._refuse(arguments)
+
+    def _refuse(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        # A refusal costs a count of its own: there is no sandbox to charge it to, and a free refusal is one the
+        # session can repeat until it ends.
+        self._refusals += 1
+        if self._refusals > MAX_LEDGER_RECORDS:
+            # One last line first, on the call that crosses the cap: a ledger that stops without saying it is full
+            # cannot be told from a session that simply made few calls, which is the whole point of the marker.
+            if self._refusals == MAX_LEDGER_RECORDS + 1:
+                refuse_to_ledger(
+                    {
+                        "status": REFUSED,
+                        "label": str(arguments.get("label") or ""),
+                        "detail": (f"probe sandbox unusable: {self._sandbox_error}"),
+                    }
+                )
+            return {
                 "status": REFUSED,
-                "label": str(arguments.get("label") or ""),
-                "case_id": str(arguments.get("case_id") or ""),
-                "detail": f"probe sandbox unusable: {self._sandbox_error}",
+                "detail": (
+                    f"this session made {self._refusals} refused probe calls; the probe is unusable here, stop calling it"
+                ),
             }
-            unrecorded = refuse_to_ledger(result)
-            if unrecorded:
-                result["detail"] = f"{result['detail']}; {unrecorded}"
-        else:
-            result = await probe_variant(
-                arguments,
-                sandbox=sandbox,
-                budget=self._budget,
-            )
-        return {"content": [{"type": "text", "text": json.dumps(result, default=str)}]}
-
-    async def dispatch(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        """Dispatch one supported MCP request and return its result object."""
-        return await stdio_transport.dispatch_envelope(
-            method,
-            params,
-            server_name=SERVER_NAME,
-            tool_definitions=TOOL_DEFINITIONS,
-            handle_tool_call=self.handle_tool_call,
-        )
-
-
-async def _serve() -> None:
-    """Serve JSON-RPC requests until stdin closes or an exit notification arrives."""
-    await stdio_transport.serve(ProbeServer().dispatch)
-
-
-def main() -> None:
-    """Run the specialist probe MCP server over standard input and output."""
-    asyncio.run(_serve())
-
-
-if __name__ == "__main__":
-    main()
+        result = {
+            "probe_index": self._refusals,
+            "status": REFUSED,
+            "label": str(arguments.get("label") or ""),
+            "case_id": str(arguments.get("case_id") or ""),
+            "detail": f"probe sandbox unusable: {self._sandbox_error}",
+        }
+        unrecorded = refuse_to_ledger(result)
+        if unrecorded:
+            result["detail"] = f"{result['detail']}; {unrecorded}"
+        return result

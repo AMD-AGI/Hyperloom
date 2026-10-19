@@ -11,21 +11,19 @@ import json
 import os
 from typing import Any
 
-from kernelforge.knowledge.pr_knowledge.client import (
-    PRContractError,
-    PRMonitorClient,
-)
+from kernelforge.knowledge.pr_knowledge.agent_tools import TOOL_NAMES
+from kernelforge.knowledge.pr_knowledge.client import PRMonitorClient
 from kernelforge.knowledge.pr_knowledge.search import PRLifecycle, discover
 from kernelforge.knowledge.pr_knowledge.context import PRQueryContext
-from kernelforge.mcp_server import stdio_transport
+from kernelforge.tools import mcp_stdio
 
 #: Re-exported so the two servers stay one import away from the shared wire
 #: format; both spellings name the same objects.
-InvalidParamsError = stdio_transport.InvalidParamsError
+InvalidParamsError = mcp_stdio.InvalidParamsError
 
 SERVER_NAME = "kernelforge-pr-monitor"
-# Agents see these as mcp__pr_monitor__<name>.
-TOOL_NAMES = ("pr_find_references", "pr_get_reference", "pr_get_file_patch")
+
+__all__ = ["SERVER_NAME", "TOOL_DEFINITIONS", "TOOL_NAMES", "InvalidParamsError", "handle_tool_call", "main"]
 
 # One file's diff can be enormous; cap what enters the agent's context.
 MAX_PATCH_BYTES = 20_000
@@ -161,29 +159,10 @@ def _get_reference(arguments: dict[str, Any]) -> dict[str, Any]:
         number = int(arguments["number"])
     except (KeyError, TypeError, ValueError) as error:
         raise InvalidParamsError("number must be an integer") from error
-    detail = _client().get_pr(repo, number)
+    detail = _client().get_pr_detail(repo, number)
     if detail is None:
         return {"repo": repo, "number": number, "reason": "not_found"}
-    summary = detail.get("summary")
-    if summary is None:
-        summary = {}
-    if not isinstance(summary, dict):
-        raise PRContractError("PR response field 'summary' must be an object")
-    distill = detail.get("distill")
-    if distill is None:
-        distill = {}
-    if not isinstance(distill, dict):
-        raise PRContractError("PR response field 'distill' must be an object")
-    files = detail.get("files")
-    if files is None:
-        files = []
-    if not isinstance(files, list) or not all(isinstance(item, dict) for item in files):
-        raise PRContractError("PR response field 'files' must be an array of objects")
-    commits = detail.get("commits")
-    if commits is None:
-        commits = []
-    if not isinstance(commits, list):
-        raise PRContractError("PR response field 'commits' must be an array")
+    summary, distill, files, commits = detail.summary, detail.distill, detail.files, detail.commits
     return {
         "repo": repo,
         "number": number,
@@ -238,8 +217,6 @@ def _get_file_patch(arguments: dict[str, Any]) -> dict[str, Any]:
             "file_path": file_path,
             "reason": "absent_at_current_head",
         }
-    if "patch" not in payload:
-        raise PRContractError("file-patch response must contain 'patch'")
     patch = str(payload["patch"] or "")
     encoded = patch.encode("utf-8")
     truncated = len(encoded) > MAX_PATCH_BYTES
@@ -272,7 +249,7 @@ async def handle_tool_call(name: str, arguments: dict[str, Any]) -> dict[str, An
 
 async def _dispatch(method: str, params: dict[str, Any]) -> dict[str, Any]:
     """Dispatch one supported MCP request and return its result object."""
-    return await stdio_transport.dispatch_envelope(
+    return await mcp_stdio.dispatch_envelope(
         method,
         params,
         server_name=SERVER_NAME,
@@ -283,7 +260,7 @@ async def _dispatch(method: str, params: dict[str, Any]) -> dict[str, Any]:
 
 async def _serve() -> None:
     """Serve JSON-RPC requests until stdin closes or an exit notification arrives."""
-    await stdio_transport.serve(_dispatch)
+    await mcp_stdio.serve(_dispatch)
 
 
 def main() -> None:

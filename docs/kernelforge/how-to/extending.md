@@ -2,7 +2,7 @@
 myst:
   html_meta:
     "description": "How to extend KernelForge: add a new kernel backend agent, a new MCP tool, or new knowledge-base entries."
-    "keywords": "KernelForge, extending, add kernel backend, add MCP tool, knowledge base, kernel_backends/base.py, mcp_server"
+    "keywords": "KernelForge, extending, add kernel backend, add MCP tool, knowledge base, kernel_backends/base.py"
 ---
 
 # Add a kernel backend, tool, or knowledge

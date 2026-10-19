@@ -136,7 +136,6 @@ forbidden_modules =
     kernelforge.kernel_rewrite_controller
     kernelforge.knowledge
     kernelforge.loop
-    kernelforge.mcp_server
     kernelforge.orchestrator
     kernelforge.rewrite_by_flydsl
     kernelforge.roofline_ceiling
@@ -162,11 +161,27 @@ forbidden_modules =
     kernelforge.kernel_rewrite_controller
     kernelforge.knowledge
     kernelforge.loop
-    kernelforge.mcp_server
     kernelforge.orchestrator
     kernelforge.rewrite_by_flydsl
     kernelforge.roofline_ceiling
     kernelforge.tracker
+ignore_imports =
+    hyperloom.**.tests.** -> **
+    kernelforge.tests.** -> **
+unmatched_ignore_imports_alerting = none
+
+
+[importlinter:contract:kf-mcp-servers-light]
+name = kernelforge MCP servers start without the agent runtime or the iteration loop
+type = forbidden
+# An agent session waits on each server's startup. A new MCP server module must be added here.
+source_modules =
+    kernelforge.knowledge.pr_knowledge.mcp_server
+    kernelforge.orchestrator.specialist_probe_server
+forbidden_modules =
+    kernelforge.agent_backends
+    kernelforge.cli
+    kernelforge.loop
 ignore_imports =
     hyperloom.**.tests.** -> **
     kernelforge.tests.** -> **

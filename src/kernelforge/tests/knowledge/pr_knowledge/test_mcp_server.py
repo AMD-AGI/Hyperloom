@@ -11,9 +11,10 @@ import sys
 
 import pytest
 
+from kernelforge.knowledge.pr_knowledge.client import PRMonitorClient
 from kernelforge.knowledge.pr_knowledge.search import PRLifecycle, PRReference, PRState, SearchOutcome
-from kernelforge.mcp_server import pr_stdio_server as server
-from kernelforge.mcp_server import stdio_transport
+from kernelforge.knowledge.pr_knowledge import mcp_server as server
+from kernelforge.tools import mcp_stdio
 
 from kernelforge.tests.conftest import SRC_ROOT
 
@@ -207,7 +208,7 @@ def test_find_references_reports_the_lifecycle_the_service_gave(monkeypatch, sum
 def test_get_reference_reports_the_lifecycle_the_service_gave(monkeypatch, summary, expected):
     payload = {"summary": {"title": "T", **summary}, "files": []}
     monkeypatch.setenv("PR_KB_REPO", "ROCm/aiter")
-    monkeypatch.setattr(server, "_client", type("_C", (), {"get_pr": lambda s, r, n: payload}))
+    monkeypatch.setattr(server, "_client", type("_C", (PRMonitorClient,), {"get_pr": lambda s, r, n: payload}))
 
     result = _tool("pr_get_reference", {"number": 7})
 
@@ -232,7 +233,7 @@ def test_find_references_accepts_a_bare_string_keyword(monkeypatch):
 
 def test_get_reference_reports_a_missing_pr(monkeypatch):
     monkeypatch.setenv("PR_KB_REPO", "ROCm/aiter")
-    monkeypatch.setattr(server, "_client", type("_C", (), {"get_pr": lambda s, r, n: None}))
+    monkeypatch.setattr(server, "_client", type("_C", (PRMonitorClient,), {"get_pr": lambda s, r, n: None}))
 
     assert _tool("pr_get_reference", {"number": 7})["reason"] == "not_found"
 
@@ -249,7 +250,7 @@ def test_get_reference_counts_files_from_the_array(monkeypatch):
     monkeypatch.setattr(
         server,
         "_client",
-        type("_C", (), {"get_pr": lambda s, r, n: payload}),
+        type("_C", (PRMonitorClient,), {"get_pr": lambda s, r, n: payload}),
     )
 
     result = _tool("pr_get_reference", {"number": 7})
@@ -278,7 +279,7 @@ def test_file_list_uses_the_file_path_field(monkeypatch):
     monkeypatch.setattr(
         server,
         "_client",
-        type("_C", (), {"get_pr": lambda s, r, n: payload}),
+        type("_C", (PRMonitorClient,), {"get_pr": lambda s, r, n: payload}),
     )
 
     entry = _tool("pr_get_reference", {"number": 959})["files"][0]
@@ -297,7 +298,7 @@ def test_get_reference_caps_the_file_list(monkeypatch):
     monkeypatch.setattr(
         server,
         "_client",
-        type("_C", (), {"get_pr": lambda s, r, n: payload}),
+        type("_C", (PRMonitorClient,), {"get_pr": lambda s, r, n: payload}),
     )
 
     result = _tool("pr_get_reference", {"number": 7})
@@ -305,23 +306,6 @@ def test_get_reference_caps_the_file_list(monkeypatch):
     assert result["n_files"] == 200
     assert len(result["files"]) == server.MAX_FILES_LISTED
     assert result["files_truncated"] is True
-
-
-@pytest.mark.parametrize("files", [{}, "", 0, ["not-an-object"]])
-def test_get_reference_rejects_invalid_file_lists(monkeypatch, files):
-    monkeypatch.setenv("PR_KB_REPO", "ROCm/aiter")
-    monkeypatch.setattr(
-        server,
-        "_client",
-        type(
-            "_C",
-            (),
-            {"get_pr": lambda s, r, n: {"files": files}},
-        ),
-    )
-
-    with pytest.raises(server.PRContractError, match="'files'"):
-        _tool("pr_get_reference", {"number": 7})
 
 
 def test_file_patch_absence_is_explained(monkeypatch):
@@ -371,22 +355,6 @@ def test_small_patch_is_returned_whole(monkeypatch):
     assert result["patch"] == "@@ -1 +1 @@"
 
 
-def test_file_patch_requires_the_documented_field(monkeypatch):
-    monkeypatch.setenv("PR_KB_REPO", "ROCm/aiter")
-    monkeypatch.setattr(
-        server,
-        "_client",
-        type(
-            "_C",
-            (),
-            {"get_file_patch": lambda s, r, n, p: {"diff": "legacy"}},
-        ),
-    )
-
-    with pytest.raises(server.PRContractError, match="must contain 'patch'"):
-        _tool("pr_get_file_patch", {"number": 7, "file_path": "a.py"})
-
-
 def _backend_like_env() -> dict[str, str]:
     """Mimic a backend-spawned stdio server with a minimal PATH."""
     env = os.environ.copy()
@@ -404,7 +372,7 @@ def _feed_stdin(monkeypatch, lines: list[str]) -> None:
 
 
 def test_write_message_emits_one_compact_json_line(capsys):
-    stdio_transport.write_message({"jsonrpc": "2.0", "id": 1, "result": {}})
+    mcp_stdio.write_message({"jsonrpc": "2.0", "id": 1, "result": {}})
 
     out = capsys.readouterr().out
     assert out.count("\n") == 1
@@ -555,15 +523,13 @@ def test_main_runs_the_serve_loop(monkeypatch):
 
 
 def test_client_factory_builds_a_bounded_client():
-    from kernelforge.knowledge.pr_knowledge.client import PRMonitorClient
-
     assert isinstance(server._client(), PRMonitorClient)
 
 
 def test_server_speaks_json_rpc_over_stdio():
     """End-to-end through a real subprocess, the way a backend launches it."""
     proc = subprocess.Popen(
-        [sys.executable, "-m", "kernelforge.mcp_server.pr_stdio_server"],
+        [sys.executable, "-m", "kernelforge.knowledge.pr_knowledge.mcp_server"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -609,7 +575,7 @@ def test_server_speaks_json_rpc_over_stdio():
 def test_notifications_without_an_id_get_no_reply():
     """A JSON-RPC notification must not produce a response line."""
     proc = subprocess.Popen(
-        [sys.executable, "-m", "kernelforge.mcp_server.pr_stdio_server"],
+        [sys.executable, "-m", "kernelforge.knowledge.pr_knowledge.mcp_server"],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

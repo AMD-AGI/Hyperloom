@@ -25,7 +25,7 @@ from kernelforge.agent_backends import (
 )
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.llm.process_reaping import ReapReport, reap_processes_under
-from kernelforge.mcp_server.probe_stdio_server import (
+from kernelforge.orchestrator.specialist_probe import (
     ANALYSIS_RESERVE_SEC,
     BUDGET_EXHAUSTED,
     BUDGET_SEC_ENV,
@@ -235,7 +235,7 @@ class _ProbeSetup:
         return {
             _PROBE_SERVER_KEY: StdioMcpServer(
                 command=sys.executable,
-                args=("-m", "kernelforge.mcp_server.probe_stdio_server"),
+                args=("-m", "kernelforge.orchestrator.specialist_probe_server"),
                 env=self.server_env(),
                 startup_timeout_sec=15,
                 # The ceiling the prompt states, plus the grace the server allows itself past it: a client that timed
