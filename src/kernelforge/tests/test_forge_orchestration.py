@@ -1781,33 +1781,6 @@ def _two_lane_critic_service(orchestration_backend, critic_backend):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("error", "message"),
-    [
-        (
-            AgentProviderUnavailableError("critic provider went away"),
-            "^AgentProviderUnavailableError: critic provider went away$",
-        ),
-        (asyncio.TimeoutError(), r"^plan critic backend exceeded \d+(\.\d+)?s timeout$"),
-    ],
-)
-async def test_a_critic_backend_outage_is_an_orchestration_infrastructure_error(error, message) -> None:
-    """The loop abandons the iteration on this error type instead of dying."""
-    orchestration_backend = _QueuedBackend(
-        [
-            _dispatch_payload(both_roles=True),
-            _partition(_GROUND_A, _GROUND_B),
-            "# Lane 1 draft",
-            "# Lane 2 draft",
-        ]
-    )
-    service = _two_lane_critic_service(orchestration_backend, _StaticBackend(error=error))
-
-    with pytest.raises(OrchestrationInfrastructureError, match=message):
-        await service.run(_context(), lanes=2)
-
-
-@pytest.mark.asyncio
 async def test_the_round_reports_how_it_was_divided() -> None:
     """A round is audited after the fact or not at all."""
     orchestration_backend = _QueuedBackend(

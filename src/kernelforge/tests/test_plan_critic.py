@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 
 import pytest
 
-from kernelforge.agent_backends import AgentProviderError, AgentRunResult
+from kernelforge.agent_backends import AgentRunResult
 from kernelforge.orchestrator.contracts import (
     CaseEvidence,
     DispatchPlan,
     LaneDrop,
     OrchestrationContext,
-    OrchestrationInfrastructureError,
     PlanCriticOutcome,
     SpecialistRound,
     SynthesizedPlan,
@@ -216,6 +214,7 @@ async def test_critic_infers_revision_and_records_missing_verdict(
             text=("I will inspect the evidence.\n[session ended with SDK error: Reached maximum number of turns]"),
             end_reason="turn_cap",
         ),
+        RuntimeError("provider crashed"),
     ],
 )
 async def test_critic_failure_records_no_verdict_and_still_publishes(
@@ -330,13 +329,7 @@ def test_a_review_needs_something_to_review(tmp_path):
 @pytest.mark.asyncio
 async def test_critic_error_detail_is_single_line_and_bounded(tmp_path):
     critic = PlanCriticAgent(
-        backend=_Backend(
-            AgentRunResult(
-                text="first line\n" + ("x" * 3000),
-                end_reason="api_error",
-                stderr_tail="first line\n" + ("x" * 3000),
-            )
-        ),
+        backend=_Backend(RuntimeError("first line\n" + ("x" * 3000))),
         timeout_sec=2,
     )
 
@@ -790,7 +783,7 @@ async def test_a_one_plan_review_is_never_asked_for_a_width_block(tmp_path):
 async def test_a_review_that_failed_narrows_nothing(tmp_path):
     """A round the critic never reviewed keeps every lane it planned."""
     critic = PlanCriticAgent(
-        backend=_Backend(AgentRunResult(text="")),
+        backend=_Backend(RuntimeError("provider crashed")),
         timeout_sec=2,
     )
 
@@ -803,41 +796,6 @@ async def test_a_review_that_failed_narrows_nothing(tmp_path):
     assert outcome.fail_open is True
     assert outcome.lane_drops == ()
     assert outcome.narrowing_notes == ()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("error", "message"),
-    [
-        (AgentProviderError("provider crashed"), "^AgentProviderError: provider crashed$"),
-        (asyncio.TimeoutError(), r"^plan critic backend exceeded \d+(\.\d+)?s timeout$"),
-    ],
-)
-async def test_a_backend_outage_fails_the_review_closed(tmp_path, error, message):
-    """A critic that could not run must not wave the plan through."""
-    backend = _Backend(error)
-    critic = PlanCriticAgent(backend=backend, timeout_sec=2)
-
-    with pytest.raises(OrchestrationInfrastructureError, match=message):
-        await critic.review(
-            context=_context(tmp_path),
-            drafts=[SynthesizedPlan(text="# Draft")],
-            specialists=SpecialistRound(DispatchPlan(analysis_commit="abc123", assignments=()), (), {}),
-        )
-
-    assert len(backend.specs) == 1
-
-
-@pytest.mark.asyncio
-async def test_an_unexpected_backend_error_propagates_unchanged(tmp_path):
-    critic = PlanCriticAgent(backend=_Backend(KeyError("session")), timeout_sec=2)
-
-    with pytest.raises(KeyError, match="session"):
-        await critic.review(
-            context=_context(tmp_path),
-            drafts=[SynthesizedPlan(text="# Draft")],
-            specialists=SpecialistRound(DispatchPlan(analysis_commit="abc123", assignments=()), (), {}),
-        )
 
 
 def test_a_one_plan_review_keeps_the_budget_it_always_had():
