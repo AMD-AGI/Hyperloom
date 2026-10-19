@@ -93,6 +93,9 @@ def _count_substring_occurrences(text: str, substring: str) -> int:
     return text.count(substring)
 
 
+#: What a check reports about the thing it measured.
+_PASSED, _FAILED, _SKIPPED = "passed", "failed", "skipped"
+
 # Structured verdict ids for the post-profile trace validation.
 CHECK_INSTRUMENTATION_PREFLIGHT = "instrumentation_preflight"
 CHECK_CAPTURE_TRACES_PRESENT = "capture_traces_present"
@@ -133,7 +136,7 @@ def _instrumentation_preflight_row(bench: Any, patchers: Mapping[str, Any] | Non
     if not isinstance(envs, dict):
         return _check_row(
             CHECK_INSTRUMENTATION_PREFLIGHT,
-            status="skipped",
+            status=_SKIPPED,
             skip_reason="materialized config carries no benchmark.envs block",
         )
     degraded = str(envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") or "")
@@ -147,7 +150,7 @@ def _instrumentation_preflight_row(bench: Any, patchers: Mapping[str, Any] | Non
     failed_patchers = sorted(name for name, ok in patchers.items() if ok is False)
     return _check_row(
         CHECK_INSTRUMENTATION_PREFLIGHT,
-        status="failed" if (degraded or failed_patchers) else "passed",
+        status=_FAILED if (degraded or failed_patchers) else _PASSED,
         degraded_reason=degraded,
         tracelens_patch_status=str(envs.get("HYPERLOOM_TRACELENS_PATCH_STATUS") or ""),
         detailed_annotations=extra_body.get("detailed_annotations"),
@@ -186,7 +189,7 @@ def _probe_check_rows(certificate: dict[str, Any]) -> list[dict[str, Any]]:
             rows.append(
                 _check_row(
                     CHECK_GRAPH_LAUNCH_COVERAGE,
-                    status="skipped",
+                    status=_SKIPPED,
                     skip_reason="the probe reached no coverage measurement for this rank",
                     **measured,
                 )
@@ -196,7 +199,7 @@ def _probe_check_rows(certificate: dict[str, Any]) -> list[dict[str, Any]]:
             rows.append(
                 _check_row(
                     CHECK_GRAPH_LAUNCH_COVERAGE,
-                    status="skipped",
+                    status=_SKIPPED,
                     skip_reason="capture recorded no CUDA graph launches",
                     **measured,
                 )
@@ -205,7 +208,7 @@ def _probe_check_rows(certificate: dict[str, Any]) -> list[dict[str, Any]]:
             rows.append(
                 _check_row(
                     CHECK_GRAPH_LAUNCH_COVERAGE,
-                    status="failed" if under_recorded else "passed",
+                    status=_FAILED if under_recorded else _PASSED,
                     **measured,
                 )
             )
@@ -223,13 +226,13 @@ def _probe_check_rows(certificate: dict[str, Any]) -> list[dict[str, Any]]:
         rows.append(
             _check_row(
                 CHECK_RANK_SHAPE,
-                status="skipped",
+                status=_SKIPPED,
                 skip_reason="only the resolved rank was certified; the remaining ranks are unmeasured",
                 **shape,
             )
         )
     else:
-        rows.append(_check_row(CHECK_RANK_SHAPE, status="passed", **shape))
+        rows.append(_check_row(CHECK_RANK_SHAPE, status=_PASSED, **shape))
     return rows
 
 
@@ -262,7 +265,7 @@ def _build_trace_validate(
         checks = checks + _probe_check_rows(certificate)
         probe_status = "ok"
     else:
-        probe_status = "failed" if probe.error else "skipped"
+        probe_status = _FAILED if probe.error else _SKIPPED
     return {
         "schema_version": certificate.get("schema_version"),
         "probe_version": certificate.get("probe_version"),
@@ -368,20 +371,20 @@ def _check_capture_traces_present(sample: _TraceSample) -> _TraceCheck:
         return _TraceCheck(
             _check_row(
                 CHECK_CAPTURE_TRACES_PRESENT,
-                status="skipped",
+                status=_SKIPPED,
                 skip_reason="scriptable framework writes a plain torch-profiler trace",
             )
         )
     if sample.capture_dir is None:
         return _TraceCheck(
-            _check_row(CHECK_CAPTURE_TRACES_PRESENT, status="failed", capture_dir_present=False, file_count=0),
+            _check_row(CHECK_CAPTURE_TRACES_PRESENT, status=_FAILED, capture_dir_present=False, file_count=0),
             "[1] graph-capture subdirectory missing — graph capture "
             "didn't fire. Verify EXTRA_VLLM_ARGS / EXTRA_SGLANG_ARGS "
             "include the TraceLens flag and the server-side patch landed.",
         )
     row = _check_row(
         CHECK_CAPTURE_TRACES_PRESENT,
-        status="passed" if sample.capture_files else "failed",
+        status=_PASSED if sample.capture_files else _FAILED,
         capture_dir_present=True,
         capture_dir=str(sample.capture_dir),
         file_count=len(sample.capture_files),
@@ -400,7 +403,7 @@ def _no_cpu_op_verdict(sampled_file: str, input_dims_count: int) -> _TraceCheck:
         # On ROCm/SGLang this is an event-naming difference rather than a capture failure.
         _check_row(
             CHECK_CAPTURE_INPUT_DIMS,
-            status="skipped",
+            status=_SKIPPED,
             skip_reason="no literal cpu_op events to measure the Input Dims fraction against",
             sampled_file=sampled_file,
             cpu_op_count=0,
@@ -422,7 +425,7 @@ def _check_capture_input_dims(sample: _TraceSample) -> _TraceCheck:
     """Verdict on how many of the heaviest capture file's ``cpu_op`` events carry ``Input Dims``."""
     if not sample.capture_files:
         return _TraceCheck(
-            _check_row(CHECK_CAPTURE_INPUT_DIMS, status="skipped", skip_reason="no capture file to sample")
+            _check_row(CHECK_CAPTURE_INPUT_DIMS, status=_SKIPPED, skip_reason="no capture file to sample")
         )
     target = max(sample.capture_files, key=lambda p: p.stat().st_size)
     text = _sample_trace_text(target)
@@ -430,7 +433,7 @@ def _check_capture_input_dims(sample: _TraceSample) -> _TraceCheck:
         return _TraceCheck(
             _check_row(
                 CHECK_CAPTURE_INPUT_DIMS,
-                status="skipped",
+                status=_SKIPPED,
                 skip_reason="capture file could not be sampled",
                 sampled_file=target.name,
             )
@@ -446,7 +449,7 @@ def _check_capture_input_dims(sample: _TraceSample) -> _TraceCheck:
     fraction = input_dims_count / cpu_op_count
     row = _check_row(
         CHECK_CAPTURE_INPUT_DIMS,
-        status="passed" if fraction >= _INPUT_DIMS_FRACTION_FLOOR else "failed",
+        status=_PASSED if fraction >= _INPUT_DIMS_FRACTION_FLOOR else _FAILED,
         sampled_file=target.name,
         cpu_op_count=cpu_op_count,
         input_dims_count=input_dims_count,
@@ -472,7 +475,7 @@ def _check_step_annotations(sample: _TraceSample) -> _TraceCheck:
         return _TraceCheck(
             _check_row(
                 CHECK_STEP_ANNOTATIONS,
-                status="skipped",
+                status=_SKIPPED,
                 skip_reason="no *.trace.json.gz in the trace dir",
             )
         )
@@ -481,7 +484,7 @@ def _check_step_annotations(sample: _TraceSample) -> _TraceCheck:
         return _TraceCheck(
             _check_row(
                 CHECK_STEP_ANNOTATIONS,
-                status="skipped",
+                status=_SKIPPED,
                 skip_reason="main trace could not be sampled",
                 sampled_file=main.name,
             )
@@ -497,7 +500,7 @@ def _check_step_annotations(sample: _TraceSample) -> _TraceCheck:
     )
     row = _check_row(
         CHECK_STEP_ANNOTATIONS,
-        status="failed" if confirmed_absent else "passed",
+        status=_FAILED if confirmed_absent else _PASSED,
         sampled_file=main.name,
         execute_annotation_count=execute_count,
         user_annotation_count=user_ann_count,
@@ -540,7 +543,7 @@ def _check_split_chunk_annotations(sample: _TraceSample) -> _TraceCheck:
         return _TraceCheck(
             _check_row(
                 CHECK_SPLIT_CHUNK_ANNOTATIONS,
-                status="skipped",
+                status=_SKIPPED,
                 skip_reason=_no_split_reason(sample),
             )
         )
@@ -548,7 +551,7 @@ def _check_split_chunk_annotations(sample: _TraceSample) -> _TraceCheck:
     produced_empty_chunks = bool(sample.split_files and empty_splits)
     row = _check_row(
         CHECK_SPLIT_CHUNK_ANNOTATIONS,
-        status="failed" if produced_empty_chunks else "passed",
+        status=_FAILED if produced_empty_chunks else _PASSED,
         split_file_count=len(sample.split_files),
         empty_chunk_count=len(empty_splits),
         empty_chunk_samples=empty_splits[:3],
@@ -573,7 +576,7 @@ def _check_steady_state_split_naming(sample: _TraceSample) -> _TraceCheck:
         return _TraceCheck(
             _check_row(
                 CHECK_STEADY_STATE_SPLIT_NAMING,
-                status="skipped",
+                status=_SKIPPED,
                 skip_reason=_no_split_reason(sample),
             )
         )
@@ -584,7 +587,7 @@ def _check_steady_state_split_naming(sample: _TraceSample) -> _TraceCheck:
     split_by_stage = (has_extend or has_decode) and not has_steady_state
     row = _check_row(
         CHECK_STEADY_STATE_SPLIT_NAMING,
-        status="failed" if split_by_stage else "passed",
+        status=_FAILED if split_by_stage else _PASSED,
         has_extend=has_extend,
         has_decode=has_decode,
         has_steady_state=has_steady_state,
@@ -612,7 +615,7 @@ def _check_trace_has_ops(sample: _TraceSample) -> _TraceCheck:
         return _TraceCheck(
             _check_row(
                 CHECK_TRACE_HAS_OPS,
-                status="skipped",
+                status=_SKIPPED,
                 skip_reason="no *.trace.json.gz in the trace dir",
             )
         )
@@ -620,7 +623,7 @@ def _check_trace_has_ops(sample: _TraceSample) -> _TraceCheck:
     has_ops = _trace_contains(main, '"cat": "cpu_op"') or _trace_contains(main, '"cat": "kernel"')
     row = _check_row(
         CHECK_TRACE_HAS_OPS,
-        status="passed" if has_ops else "failed",
+        status=_PASSED if has_ops else _FAILED,
         sampled_file=main.name,
         has_ops=has_ops,
     )
@@ -643,7 +646,7 @@ def _check_sglang_shape_profiler(sample: _TraceSample) -> _TraceCheck:
         return _TraceCheck(
             _check_row(
                 CHECK_SGLANG_SHAPE_PROFILER,
-                status="skipped",
+                status=_SKIPPED,
                 skip_reason=f"framework is {sample.framework or 'unset'}, not sglang",
             )
         )
@@ -651,7 +654,7 @@ def _check_sglang_shape_profiler(sample: _TraceSample) -> _TraceCheck:
         return _TraceCheck(
             _check_row(
                 CHECK_SGLANG_SHAPE_PROFILER,
-                status="skipped",
+                status=_SKIPPED,
                 skip_reason="main trace could not be sampled",
             )
         )
@@ -660,7 +663,7 @@ def _check_sglang_shape_profiler(sample: _TraceSample) -> _TraceCheck:
     shape_present = any(m in sample.main_text for m in ("sglang_profiler::", "kernel_shape_profiler"))
     row = _check_row(
         CHECK_SGLANG_SHAPE_PROFILER,
-        status="passed" if shape_present else "failed",
+        status=_PASSED if shape_present else _FAILED,
         sampled_file=sample.main_traces[0].name,
         sampled_bytes=_TRACE_INSPECT_BYTES,
     )
@@ -680,7 +683,7 @@ def _check_sglang_shape_profiler(sample: _TraceSample) -> _TraceCheck:
 
 def _check_status(checks: list[dict[str, Any]], check_id: str) -> str:
     """The status recorded for ``check_id``."""
-    return next((row["status"] for row in checks if row["check_id"] == check_id), "skipped")
+    return next((row["status"] for row in checks if row["check_id"] == check_id), _SKIPPED)
 
 
 def _log_trace_issues(issues: list[str]) -> None:
@@ -720,8 +723,8 @@ def _validate_trace_structure(
     _log_trace_issues(issues)
     return {
         "issues": issues,
-        "per_kernel_attribution_degraded": _check_status(checks, CHECK_STEP_ANNOTATIONS) == "failed",
-        "capture_traces_present": _check_status(checks, CHECK_CAPTURE_TRACES_PRESENT) == "passed",
-        "zero_ops": _check_status(checks, CHECK_TRACE_HAS_OPS) == "failed",
+        "per_kernel_attribution_degraded": _check_status(checks, CHECK_STEP_ANNOTATIONS) == _FAILED,
+        "capture_traces_present": _check_status(checks, CHECK_CAPTURE_TRACES_PRESENT) == _PASSED,
+        "zero_ops": _check_status(checks, CHECK_TRACE_HAS_OPS) == _FAILED,
         "checks": checks,
     }
