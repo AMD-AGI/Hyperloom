@@ -8,7 +8,8 @@
   way ``conc_sweep`` does, stepping down a level when the boot fails;
 * accuracy is the ``RUN_EVAL`` switch in the point's own YAML, which must say what the caller asked for.
 
-Nothing in the old flow changes: this file only calls what ``orchestrator.actions.executors`` exports.
+Nothing in the old flow changes: this file only calls what ``orchestrator.actions.executors`` exports, and the pick of a
+free port that its server lifecycle makes (``_server_lifecycle``).
 """
 
 from __future__ import annotations
@@ -57,6 +58,7 @@ from hyperloom.orchestrator.actions.executors import (
     run_grid,
     teardown_lifecycle_server,
 )
+from hyperloom.orchestrator.actions.executors._server_lifecycle import REUSE_PORT_DEFAULT, _assign_free_port
 from hyperloom.orchestrator.actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
     SESSION_TIME_EXHAUSTED_CLASS,
@@ -353,20 +355,44 @@ def _watch_output(call: TestCall) -> Iterator[None]:
 # --- running ------------------------------------------------------------------------------------------------------
 
 
+@contextlib.contextmanager
+def _free_port_for(point: Path, server_lifecycle: dict[str, Any] | None) -> Iterator[Path]:
+    """The point a round runs from: with a free port of its own in ``benchmark.envs.PORT``, unless a lifecycle pins one.
+
+    A round the server lifecycle does not hold (a profile round, a framework that cannot hold a server, a warmup that
+    is not planned) has no port assigned, and its server listens on the default: two of them on one machine collide on
+    it. The InferenceX script and Magpie's AgentX server both read the port from ``benchmark.envs.PORT``, so it goes
+    there, into a copy: the point itself is shared by every test that runs it. The port is picked where the server is
+    launched, by the function the lifecycle picks its own with.
+    """
+    if server_lifecycle is not None:
+        yield point  # ``inject_lifecycle`` pins PORT in every round the lifecycle builds
+        return
+    config = _point_config(point)
+    benchmark = config.get("benchmark") or {}
+    benchmark["envs"] = {**(benchmark.get("envs") or {}), "PORT": _assign_free_port(REUSE_PORT_DEFAULT)}
+    config["benchmark"] = benchmark
+    with tempfile.TemporaryDirectory(prefix="hl-port-") as work:
+        pinned = Path(work) / Path(point).name
+        pinned.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_UTF8)
+        yield pinned
+
+
 async def _grid(run: _Run, point: int, name: str, **kwargs: Any) -> VariantResult:
     """One ``run_grid`` call for the point at index ``point``."""
     call = run.call
-    results = await run_grid(
-        base_yaml_path=call.points[point],
-        base_extra_args="",
-        grid=[GridVariant(name, unset_envs=run.unset_envs)],
-        output_root=Path(call.output_dir),
-        magpie_python=call.magpie_python or None,
-        result_dir=call.result_dir,
-        session_deadline_sec=call.session_deadline_sec,
-        serving_lease=call.serving_lease,
-        **kwargs,
-    )
+    with _free_port_for(call.points[point], kwargs.get("server_lifecycle")) as base_yaml:
+        results = await run_grid(
+            base_yaml_path=base_yaml,
+            base_extra_args="",
+            grid=[GridVariant(name, unset_envs=run.unset_envs)],
+            output_root=Path(call.output_dir),
+            magpie_python=call.magpie_python or None,
+            result_dir=call.result_dir,
+            session_deadline_sec=call.session_deadline_sec,
+            serving_lease=call.serving_lease,
+            **kwargs,
+        )
     return results[0]
 
 

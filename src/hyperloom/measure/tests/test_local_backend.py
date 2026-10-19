@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import threading
 from pathlib import Path
@@ -25,6 +26,7 @@ from hyperloom.orchestrator.actions.executors import (
     SESSION_TIME_EXHAUSTED_RETURNCODE,
     VariantResult,
 )
+from hyperloom.orchestrator.actions.executors._server_lifecycle import REUSE_PORT_DEFAULT
 
 
 def _point(directory: Path, name: str, *, conc: int = 4, run_eval: object = "false") -> Path:
@@ -56,6 +58,7 @@ class _Grid:
         self.calls: list[dict[str, Any]] = []
         self.answers: dict[str, VariantResult] = {}
         self.env_seen: list[dict[str, str | None]] = []
+        self.configs: list[dict[str, Any]] = []  # what each call's point held while it ran: a copy is gone after
 
     def result(self, name: str, **kwargs: Any) -> VariantResult:
         workspace = self.tmp_path / "ws" / name
@@ -72,6 +75,7 @@ class _Grid:
 
     async def __call__(self, **kwargs: Any) -> list[VariantResult]:
         self.calls.append(kwargs)
+        self.configs.append(yaml.safe_load(Path(kwargs["base_yaml_path"]).read_text()))
         self.env_seen.append(
             {
                 key: os.environ.get(key)
@@ -116,6 +120,13 @@ def _run(call: TestCall):
     return LocalMeasurementBackend().run_test(call)
 
 
+def _own_port(config: dict[str, Any]) -> int:
+    """The port a round's point carries, taken out of it: what is left is the point the test was asked to run."""
+    port = int(config["benchmark"]["envs"].pop("PORT"))
+    assert port != REUSE_PORT_DEFAULT, "the default is the port every round without one shares"
+    return port
+
+
 # --- single-point test --------------------------------------------------------------------------------------------
 
 
@@ -125,12 +136,14 @@ def test_a_single_point_test_is_one_run_grid_call_with_one_variant(grid, tmp_pat
     outcome = _run(call)
 
     (kwargs,) = grid.calls
-    assert kwargs["base_yaml_path"] == call.points[0]
     assert [v.name for v in kwargs["grid"]] == ["test"]
     assert kwargs["output_root"] == tmp_path / "out"
     assert (kwargs["result_dir"], kwargs["session_deadline_sec"], kwargs["serving_lease"]) == ("/res", 123.0, "lease")
     assert kwargs["magpie_python"] is None
     assert "server_lifecycle" not in kwargs
+    (config,) = grid.configs
+    _own_port(config)
+    assert config == yaml.safe_load(call.points[0].read_text()), "the point is run as it is, with a port of its own"
     assert [(r.point, r.phase, r.returncode) for r in outcome.rounds] == [(0, "measure", 0)]
     assert (outcome.returncode, outcome.failure_class, outcome.request_id) == (0, None, "t-1")
     assert outcome.sandbox.backend == "local"
@@ -413,6 +426,27 @@ def test_no_call_of_a_sweep_runs_without_the_shared_server(grid, server, tmp_pat
     assert all(_lifecycle(c) is not None for c in grid.calls)
 
 
+def test_a_round_the_lifecycle_holds_runs_from_the_point_itself_on_the_lifecycles_port(grid, server, tmp_path):
+    call = _sweep_call(tmp_path, 8, 4)
+
+    _run(call)
+
+    assert [c["base_yaml_path"] for c in grid.calls] == [call.points[0], call.points[0], call.points[1]]
+    assert all("PORT" not in config["benchmark"]["envs"] for config in grid.configs)
+    assert {_lifecycle(c)["port"] for c in grid.calls} == {8123}
+
+
+def test_a_sweep_that_restarts_per_level_gives_every_level_a_port_of_its_own(monkeypatch, grid, tmp_path):
+    _Server(monkeypatch, eligible=False)
+    call = _sweep_call(tmp_path, 8, 4)
+
+    _run(call)
+
+    ports = [_own_port(config) for config in grid.configs]
+    assert len(ports) == 2 and all(0 < port < 65536 for port in ports)
+    assert all(config == yaml.safe_load(point.read_text()) for config, point in zip(grid.configs, call.points[:2]))
+
+
 def test_a_boot_that_fails_steps_down_one_level_and_that_level_is_measured_on_the_new_server(grid, server, tmp_path):
     grid.answers["c8"] = grid.result(
         "c8", status="failed", returncode=1, error_class="no_benchmark_workspace", error="oom"
@@ -634,7 +668,8 @@ def test_a_test_on_the_image_as_it_is_runs_the_point_unchanged(grid, tmp_path, i
 
     _run(call)
 
-    assert compiled.is_base and grid.calls[0]["base_yaml_path"] == call.points[0]
+    _own_port(grid.configs[0])
+    assert compiled.is_base and grid.configs[0] == yaml.safe_load(call.points[0].read_text())
 
 
 def test_an_environment_that_cannot_be_rebuilt_is_refused_with_the_reason(grid, tmp_path, installed_framework):
@@ -761,7 +796,8 @@ def test_an_agentx_profile_test_is_one_profiled_round_that_turns_the_profiler_on
     outcome = _run(_call(tmp_path, point, kind="profile", rounds=RoundPlan(warmup_rounds=1)))
 
     (kwargs,) = grid.calls
-    assert kwargs["warmup_before_measure"] is False and kwargs["base_yaml_path"] == point
+    _own_port(grid.configs[0])
+    assert kwargs["warmup_before_measure"] is False and grid.configs[0] == yaml.safe_load(point.read_text())
     assert outcome.returncode == 0
     assert (tmp_path / "out" / "profile" / "torch_trace" / capture / "rank0.pt.trace.json.gz").is_file()
 
@@ -780,6 +816,86 @@ def test_a_plain_test_does_not_gather_traces(grid, tmp_path):
     _run(_call(tmp_path))
 
     assert not (tmp_path / "out" / "profile").exists()
+
+
+class _Machine:
+    """One machine's ports: ``run_grid`` as it is for a round whose server is up, listening on the port the round's own
+    config names in ``benchmark.envs.PORT`` (the default when it names none).
+
+    The InferenceX script reads it from the environment it is run with; Magpie's AgentX recipe reads it into the
+    ``--port`` of the server's argv (``agentx_recipe._port``, at the pinned ref) and refuses ``PORT`` in
+    ``launch_overrides.env`` as a protocol variable, so the AgentX server's port can come from nowhere else.
+
+    The listeners stay open to the end of the test, as the servers of tests running at the same time do; a round whose
+    port is taken fails the way the real one did: its server dies.
+    """
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.tmp_path = tmp_path
+        self.ports: list[int] = []
+        self.launches: list[dict[str, Any]] = []
+        self.listeners: list[socket.socket] = []
+
+    async def __call__(self, **kwargs: Any) -> list[VariantResult]:
+        from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+
+        variant = kwargs["grid"][0]
+        slot = self.tmp_path / "slots" / str(len(self.ports))
+        launched = _build_variant_yaml(Path(kwargs["base_yaml_path"]), "", variant, output_subdir=slot)
+        self.launches.append(benchmark := yaml.safe_load(launched.read_text())["benchmark"])
+        self.ports.append(port := int((benchmark.get("envs") or {}).get("PORT", REUSE_PORT_DEFAULT)))
+        workspace = slot / "benchmark_stub"
+        (workspace / "torch_trace").mkdir(parents=True)
+        (workspace / "torch_trace" / "rank0.pt.trace.json.gz").write_bytes(b"trace")
+        listener = socket.socket()
+        try:
+            listener.bind(("0.0.0.0", port))
+            listener.listen()
+        except OSError as exc:
+            listener.close()
+            error = f"Server process died during benchmark: {exc}"
+            return [
+                VariantResult(
+                    variant.name, "", {}, status="failed", returncode=1, workspace=str(workspace), error=error
+                )
+            ]
+        self.listeners.append(listener)
+        return [VariantResult(variant.name, "", {}, status="succeeded", returncode=0, workspace=str(workspace))]
+
+
+@pytest.fixture
+def machine(monkeypatch, tmp_path):
+    fake = _Machine(tmp_path)
+    monkeypatch.setattr(local, "run_grid", fake)
+    yield fake
+    for listener in fake.listeners:
+        listener.close()
+
+
+def _profile_agentx_point(tmp_path: Path, monkeypatch) -> Path:
+    from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile
+
+    point = _agentx_point(tmp_path, monkeypatch)
+    enable_profile(point)
+    return point
+
+
+@pytest.mark.parametrize("make_point", [_profile_point, _profile_agentx_point], ids=["inferencex", "agentx"])
+def test_two_profile_tests_on_one_machine_launch_their_servers_on_ports_of_their_own(
+    machine, tmp_path, monkeypatch, make_point
+):
+    """A profile round is not held by the server lifecycle, so no port was assigned to it: both listened on 8888."""
+    point = make_point(tmp_path) if make_point is _profile_point else make_point(tmp_path, monkeypatch)
+    shared = point.read_text()
+
+    first = _run(_call(tmp_path, point, kind="profile", output_dir=tmp_path / "first"))
+    second = _run(_call(tmp_path, point, kind="profile", output_dir=tmp_path / "second"))
+
+    assert [first.returncode, second.returncode] == [0, 0], "the second server found its port taken"
+    assert len(set(machine.ports)) == 2 and REUSE_PORT_DEFAULT not in machine.ports
+    server_envs = [((b.get("agentx") or {}).get("launch_overrides") or {}).get("env") or {} for b in machine.launches]
+    assert all("PORT" not in env for env in server_envs), "Magpie refuses PORT among an AgentX server's variables"
+    assert point.read_text() == shared, "the point is shared by every test that runs it: it is not written to"
 
 
 # --- repro test ---------------------------------------------------------------------------------------------------
