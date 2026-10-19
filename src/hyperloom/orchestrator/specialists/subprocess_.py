@@ -1,4 +1,4 @@
-﻿# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
 """Subprocess-based specialist dispatcher.
@@ -973,8 +973,8 @@ class SpecialistSpawn:
             the specialist only as advisory prompt text baked into
             ``system_prompt``.
         disallowed_tools: Tool names to deny in the agent CLI subprocess.
-            Passed as ``--disallowedTools`` to the Claude CLI; has no Codex
-            equivalent (Codex containment uses ``--sandbox``).
+            Passed as ``--disallowedTools`` to the Claude CLI; has no Codex or
+            dsh equivalent (Codex containment uses ``--sandbox``).
         gpu_ids: GPU ids to expose to the subprocess.
         deadline: Absolute instant the reaper kills at. ``None`` means the
             caller set no bound and the reaper falls back to

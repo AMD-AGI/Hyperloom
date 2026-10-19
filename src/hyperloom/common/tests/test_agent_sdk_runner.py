@@ -119,7 +119,7 @@ async def test_a_spent_budget_stops_the_continuations(tmp_path: Path, monkeypatc
 
 
 async def test_tracelens_forwards_its_budget_to_the_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from hyperloom.agents.kernel.tools import tracelens_skill_runner
+    from hyperloom.orchestrator.trace_analysis import tracelens_skill_runner
 
     seen: dict[str, Any] = {}
 

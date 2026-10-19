@@ -189,7 +189,7 @@ async def _run(dispatcher: Any, tmp_path: Path, **overrides: Any) -> Any:
         "deadline": Deadline.after(60.0),
     }
     kwargs.update(overrides)
-    return await dispatcher.run(**kwargs)
+    return await dispatcher.run(sp.SpecialistSpawn(**kwargs))
 
 
 def _dispatcher(dsh: Path | str, **config: Any) -> Any:

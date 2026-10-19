@@ -9,7 +9,7 @@ import click
 import pytest
 
 from kernelforge.agent_backends.registry import list_agent_providers
-from kernelforge.fusion.command import main
+from kernelforge.fusion.command import run as main
 
 
 def _agent_backend_option() -> click.Option:
