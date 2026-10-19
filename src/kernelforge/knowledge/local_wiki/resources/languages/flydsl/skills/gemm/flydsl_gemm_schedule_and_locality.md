@@ -137,11 +137,12 @@ Gate any mask change on the ISA's `vgpr_spill_count` before benchmarking. Hint c
 loop in front of you; constants copied from another kernel are worse than none.
 
 **A count mismatch is never reported.** `sched_group_barrier` groups are filled greedily in program
-order. Checked with `llc -mcpu=gfx950` on 4 MFMAs and 4 global loads:
-- with no hints the order was `L L L M M M L M`;
+order. Checked with ROCm 7.2.1 `llc -mcpu=gfx950` on 4 independent MFMAs and 4 global loads:
+- with no hints the order was `L L L L M M M M`;
 - `(mfma 1, vmem 1) × 4` gave `M L M L M L M L`;
 - `(mfma 1, vmem 3) × 4` front-loaded the loads: `M L L L M L M M`;
-- only two groups pinned the head of the body and left the tail free.
+- two groups only gave `M L L M L L M M`: the head was pinned and the tail left free;
+- llc printed no warning in any case.
 Read the scheduled ISA after changing a hint table.
 
 **Kernels with hand-placed waits use none of this.** Turbo's dense kernels contain no

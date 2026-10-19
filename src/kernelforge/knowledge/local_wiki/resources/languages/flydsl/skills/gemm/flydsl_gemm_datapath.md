@@ -89,6 +89,10 @@ phase.
   slot.
 - **Another wave reads what you wrote:** the writer waits `lgkmcnt(0)`, then everyone meets at
   `s_barrier` — which is what `fx.gpu.barrier()` lowers to.
+- **A FLAT (generic-address) access counts in both `vmcnt` and `lgkmcnt`.** Measured with `s_memtime` on
+  gfx950: waiting `lgkmcnt(0)` after a flat load from global took 96 ticks against 56 after a `global_load`,
+  and both took about 250 to `vmcnt(0)`. The lgkm count retires before the data arrives, so `lgkmcnt(0)` alone
+  does not make a flat load's data ready. Keep hot-loop pointers in the buffer or global address space.
 - `lgkmcnt` also counts scalar memory loads, which return out of order. A long stall on
   `s_waitcnt lgkmcnt(0)` may be an `s_load`, not LDS; keep scalar loads out of that window rather than
   "hiding" LDS latency behind them.

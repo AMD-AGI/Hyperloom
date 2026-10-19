@@ -116,8 +116,20 @@ workspaces) must be warmed before a probe starts counting.
 - **Reordering `@fx.struct` fields does not move LDS.** With `SharedAllocator(static=True)` every leaf
   is its own symbol placed by the backend (`expr/gpu.py:157`); an arm that stops using a leaf lets
   the others be re-packed. Read `group_segment_fixed_size` before interpreting an LDS-placement result.
+- **Buffers that must be contiguous go in one field, or use `static=False`.** Checked on flydsl 0.3.2 from the
+  allocated addresses: the default static allocator placed fields by size, largest first, and equal sizes by
+  symbol name (declared `a4k, b16k, c8k, d256, e1k` landed as `b16k, c8k, a4k, e1k, d256`; a Turbo NN
+  kernel's B buffers landed before its A buffers). `SharedAllocator(static=False)` kept declaration order
+  in every case tested. A pool addressed as one base plus immediates must not rely on the static order.
 
 ## 6. Bounds
+
+- **MFMA ignores EXEC.** Checked on MI355X with flydsl 0.3.2: with EXEC set by inline asm to lanes 0–31,
+  32–63, lane 0 only, or none, `v_mfma_f32_16x16x32_bf16` wrote full results in all 64 lanes, while a
+  `v_mov` in the same asm block was masked as expected. A divergent `if tid < 32:` around an MFMA in FlyDSL
+  therefore overwrites the accumulators of the "inactive" lanes; when the operand loads were only used
+  inside the branch, LLVM sank them into it and every lane came out as garbage. Bound ragged tiles through
+  the buffer descriptor (operands read as zero) or select whole tiles; never mask an MFMA with a branch.
 
 - Bound ragged edges in the buffer descriptor (`make_buffer_tensor(..., max_size=False,
   num_records_bytes=...)`, as PS does for A and C at PS:263): out-of-range loads return zero and
