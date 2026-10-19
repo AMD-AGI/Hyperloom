@@ -19,7 +19,6 @@ from typing import Any, NamedTuple
 from hyperloom.inference_optimizer.protocol.action_surfaces import REQUEST_KIND_TO_OWNED_ACTION
 
 from ..bus.message_bus import Message
-from ..phases.machine_state import KERNEL_HEARTBEAT_SEC
 
 log = logging.getLogger(__name__)
 
@@ -133,6 +132,8 @@ def seed_integrate_base_tput(router: Any, request: KernelRequest) -> None:
 @asynccontextmanager
 async def kernel_step_heartbeat(router: Any, kind: str, started: float):
     """Keep orchestration's bus timestamp moving through an inline step."""
+    # Imported here: ``phases`` reaches back into ``loop``, so taking it at module level would close an import cycle.
+    from ..phases.machine_state import KERNEL_HEARTBEAT_SEC
 
     # Re-stamped per beat rather than once at the start, so a stamp that outlives its process expires instead of
     # muting the KERNEL idle guard.
