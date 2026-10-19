@@ -250,11 +250,8 @@ def _finalize(r, tmp_path, payload, params=None):
         ctx=ctx,
         prep=prep,
         specialist_done_payload=payload,
-        turns_used=1,
-        tool_violations=[],
-        backend_error="",
-        extra_notes=[],
-        patches_written=[],
+        outcome=sr.RunOutcome(turns_used=1, tool_violations=[], backend_error=""),
+        harvest=sr.RunHarvest(extra_notes=[], patches_written=[]),
     )
     return result, json.loads((tmp_path / "specialist_done.json").read_text(encoding="utf-8"))
 
@@ -276,12 +273,10 @@ def test_a_harvested_diff_is_the_whole_round_and_the_specialists_copy_of_it_is_n
         ctx=SimpleNamespace(task=SimpleNamespace(task_id="t1", params={}), extra={}),
         prep=sr._PreparedRun(domain=SimpleNamespace(key="serving_specialist"), gap="gap-1", workspace=tmp_path),
         specialist_done_payload={"proposal_set": [], "summary": "s", "patches_written": [str(copy)]},
-        turns_used=1,
-        tool_violations=[],
-        backend_error="",
-        extra_notes=[],
-        patches_written=[str(harvested)],
-        patch_roots={str(harvested): str(tmp_path)},
+        outcome=sr.RunOutcome(turns_used=1, tool_violations=[], backend_error=""),
+        harvest=sr.RunHarvest(
+            extra_notes=[], patches_written=[str(harvested)], patch_roots={str(harvested): str(tmp_path)}
+        ),
     )
 
     assert vetted == [[str(harvested)]]

@@ -18,6 +18,7 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 
 from ._optimize_fixtures import optimize_state
 from .conftest import make_coordinator
+from hyperloom.orchestrator.phases.framework import AuthoringRetry
 
 
 @pytest.fixture(autouse=True)
@@ -929,10 +930,7 @@ async def test_perf_explore_retry_stamps_immutable_explore_owner(
 ) -> None:
     stub = _stub(tmp_path)
 
-    task_id = await stub.phase_framework._enqueue_author_specialist(
-        lane="perf_explore",
-        attempt=1,
-    )
+    task_id = await stub.phase_framework._enqueue_author_specialist(AuthoringRetry(lane="perf_explore", attempt=1))
 
     assert task_id
     params = stub.tasks.created[-1]["params"]

@@ -26,8 +26,7 @@ def build_request(state: SharedState, *, session_id: str) -> dict:
         session_id=session_id,
         sites=load_source_sites(path),
         sidecars=load_sidecars(path),
-        elapsed_sec=budget.elapsed_sec,
-        keep_threshold_pct=budget.keep_threshold_pct,
+        budget=budget,
     )
 
 

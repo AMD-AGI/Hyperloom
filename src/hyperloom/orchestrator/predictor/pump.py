@@ -24,14 +24,13 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Any
 
 from hyperloom.common.timeutil import now_iso
 from hyperloom.common import predictor_config
 from hyperloom.orchestrator.predictor.client import Prediction, predict
 from hyperloom.orchestrator.predictor.mandate import patch_mandate
-from hyperloom.orchestrator.predictor.payload import build_request
+from hyperloom.orchestrator.predictor.payload import PhaseBudget, build_request
 from hyperloom.orchestrator.predictor.rows import PROVENANCE, QUEUE_DOMAIN, QUEUE_PRIORITY, proposal_rows
 from hyperloom.orchestrator.predictor.sidecars import load_sidecars
 from hyperloom.orchestrator.predictor.source_sites import load_source_sites
@@ -49,18 +48,6 @@ MAX_PROFILE_WAIT_SEC = 900.0
 
 #: Longest FRAMEWORK entry waits for the answer before orchestration's first turn.
 MAX_ENTRY_WAIT_SEC = 300.0
-
-
-@dataclass(frozen=True)
-class PhaseBudget:
-    """The FRAMEWORK clock a request is conditioned on, as the phase reads it when the predictor asks."""
-
-    #: Seconds the phase can still spend: the tighter of this entry's budget and the cap across entries.
-    headroom_sec: float | None
-    #: Seconds since this FRAMEWORK entry began.
-    elapsed_sec: float
-    #: Gain a variant needs to KEEP in this macro-cycle.
-    keep_threshold_pct: float
 
 
 def decision_point_key(state: SessionView) -> str:
@@ -174,8 +161,7 @@ class PredictorPump:
             session_id=str(state.session_id or ""),
             sites=sites,
             sidecars=sidecars,
-            elapsed_sec=budget.elapsed_sec,
-            keep_threshold_pct=budget.keep_threshold_pct,
+            budget=budget,
         )
         self._inflight = asyncio.create_task(
             asyncio.to_thread(predict, request, endpoint=conf.endpoint, timeout_sec=conf.timeout_sec)

@@ -45,6 +45,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.baseline_event import (
     make_baseline_recorder,
 )
 from hyperloom.inference_optimizer.breakdown.recorder.event_ids import INLINE_EVENT_PARAM
+from hyperloom.inference_optimizer import inferencex_checkout
 from hyperloom.inference_optimizer.grid_server_args import with_capture_disabled
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...loop.sub_agent_runner import RunnerContext
@@ -3827,6 +3828,8 @@ class BaselineExecutor(BenchmarkRunExecutor):
             return None
         ix_root = self._inferencex_root_from_config(config_path)
         if ix_root:
+            if invalid := inferencex_checkout.unusable_reason(ix_root):
+                return {"status": "failed", "error_class": "inferencex_checkout_invalid", "error": invalid}
             ensure_benchmark_lib_eval_dest_patched(Path(ix_root))
             ensure_benchmark_lib_eval_start_patched(Path(ix_root))
         # Required custom tokenizers must reach the throughput client as well as eval.

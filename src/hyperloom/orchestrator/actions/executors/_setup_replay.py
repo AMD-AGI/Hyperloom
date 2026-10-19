@@ -18,7 +18,7 @@ from hyperloom.inference_optimizer.session.session_paths import runs_dir
 
 from ...enablement.recipe.credentials import sanitize_command_text
 from ...enablement.recipe.setup_allowlist import is_allowlisted_setup_command
-from ...enablement.recipe.setup_ledger import CMD_SANITIZED_CHARS, build_execution_row
+from ...enablement.recipe.setup_ledger import CMD_SANITIZED_CHARS, SetupExecution, build_execution_row
 from ..cancel_channel import cancel_scope_listener, stop_was_asked_for
 
 if TYPE_CHECKING:
@@ -163,12 +163,14 @@ def run_setup_commands(
         # shared venv at all.
         on_execution(
             build_execution_row(
-                seq=seq_start + recorded,
-                round_task_id=round_task_id,
-                cmd_index=index,
-                cmd=cmd,
-                source=source,
-                outcome=outcome,
+                SetupExecution(
+                    seq=seq_start + recorded,
+                    round_task_id=round_task_id,
+                    cmd_index=index,
+                    cmd=cmd,
+                    source=source,
+                    outcome=outcome,
+                ),
                 env=env,
             )
         )

@@ -2323,6 +2323,9 @@ def test_combined_keep_retains_validated_framework_root_without_reapply(
     assert coord.shared_state.warm_replay_outcome["status"] == "reproduced"
     assert coord.shared_state.warm_replay_outcome["active_framework_root"] == str(checkout.resolve())
     assert coord.shared_state.optimization_stack[-1]["framework_source_root"] == str(checkout.resolve())
+    # A framework tree is no InferenceX checkout: resume would export it as INFERENCEX_PATH and no benchmark script
+    # could be sourced from it.
+    assert coord.shared_state.active_inferencex_path == ""
     entry = coord.shared_state.optimization_stack[-1]
     assert entry["recipe_delta"] == {
         "extra_server_args": "--recipe",
@@ -2338,6 +2341,48 @@ def test_combined_keep_retains_validated_framework_root_without_reapply(
     }
     assert coord.shared_state.current_best["extra_envs"]["KERNEL_ONLY"] == "1"
     assert coord.shared_state.warm_replay_pending == {}
+
+
+def test_promotion_records_the_inferencex_tree_among_the_promoted_trees(tmp_path):
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_tput = 600.0
+    coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
+    framework = tmp_path / "sglang"
+    inferencex = tmp_path / "InferenceX"
+    framework.mkdir()
+    (inferencex / "benchmarks").mkdir(parents=True)
+    (inferencex / "benchmarks" / "benchmark_lib.sh").write_text("#!/bin/bash\n")
+    coord.phase_prelude._resolve_promoted_recipe_checkout = (  # type: ignore[method-assign]
+        lambda *_args: (
+            True,
+            {
+                "status": "promoted",
+                "target_repo": str(framework),
+                "target_repos": [str(framework), str(inferencex)],
+            },
+        )
+    )
+    task = _StubTask(
+        params={
+            "baseline_tput_anchor": 600.0,
+            "required_patch_timeline": True,
+            "patches": [{"patch_file": "p.patch", "patch_content": "diff"}],
+            "extra_server_args": "--recipe",
+            "extra_envs": {},
+        }
+    )
+
+    coord.phase_prelude.promote_warm_replay(
+        {
+            "status": "succeeded",
+            "output_throughput": 612.0,
+            "warm_patches_applied": [{"patch_file": "p.patch", "status": "applied"}],
+        },
+        task=task,
+    )
+
+    assert coord.shared_state.warm_replay_outcome["active_framework_root"] == str(framework)
+    assert coord.shared_state.active_inferencex_path == str(inferencex)
 
 
 def test_checkout_promotion_failure_rejects_keep_and_rolls_kernel(tmp_path, monkeypatch):
@@ -2427,7 +2472,7 @@ def test_a_nogit_apply_counts_as_a_replayed_overlay(tmp_path):
     coord.shared_state.warm_replay_outcome = {"expected_gain_pct": 0.0}
     coord.shared_state.warm_replay_pending = {"task_id": "warm"}
     coord.phase_prelude._resolve_promoted_recipe_checkout = (  # type: ignore[method-assign]
-        lambda *_args: (True, {"status": "promoted", "target_repo": "/install"})
+        lambda *_args: (True, {"status": "promoted", "target_repo": "/install", "target_repos": ["/install"]})
     )
     task = _StubTask(
         params={

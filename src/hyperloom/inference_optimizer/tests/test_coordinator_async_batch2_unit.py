@@ -307,7 +307,8 @@ async def test_resume_restores_promoted_inferencex_checkout(
     tmp_path,
 ) -> None:
     active = tmp_path / "active-inferencex"
-    active.mkdir()
+    (active / "benchmarks").mkdir(parents=True)
+    (active / "benchmarks" / "benchmark_lib.sh").write_text("#!/bin/bash\n")
     coord.writeback._resumed_from["is_resume"] = True
     coord.shared_state.active_inferencex_path = str(active)
     # setenv, not delenv: delenv of an absent name arms no undo, so the value the resume pass exports below would leak
@@ -317,6 +318,28 @@ async def test_resume_restores_promoted_inferencex_checkout(
     await coord.writeback._resume_consistency_pass()
 
     assert os.environ["INFERENCEX_PATH"] == str(active)
+
+
+@pytest.mark.asyncio
+async def test_resume_does_not_export_a_framework_tree_as_the_inferencex_path(
+    coord: Coordinator,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """A state written with a framework tree as the InferenceX path must not redirect every later round to it."""
+    pinned = tmp_path / "InferenceX@pin"
+    framework = tmp_path / "sglang"
+    framework.mkdir()
+    coord.writeback._resumed_from["is_resume"] = True
+    coord.shared_state.active_inferencex_path = str(framework)
+    monkeypatch.setenv("INFERENCEX_PATH", str(pinned))
+
+    report = await coord.writeback._resume_consistency_pass()
+
+    assert os.environ["INFERENCEX_PATH"] == str(pinned)
+    assert coord.shared_state.active_inferencex_path == ""
+    assert {"kind": "active_inferencex_checkout_invalid", "path": str(framework)} in report["warnings"]
+    assert coord.shared_state.stop_reason != "active_inferencex_checkout_missing"
 
 
 @pytest.fixture
