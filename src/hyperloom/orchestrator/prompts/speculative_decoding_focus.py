@@ -106,11 +106,13 @@ _CONSTRAINTS: tuple[str, ...] = (
 
 _DRAFTER_STEPS: tuple[str, ...] = (
     "1. **MTP first.** If the target has MTP layers, use MTP and stop here.",
-    "   Check both `num_nextn_predict_layers > 0` in config.json **and** that",
-    "   the weight index actually contains the MTP layer tensors — some",
-    "   quantized or converted checkpoints keep the config field but drop the",
-    "   weights. Fall back to the methods below only when MTP is absent or",
-    "   fails to start on the installed framework.",
+    "   Check both a non-zero MTP layer count in config.json — the field name",
+    "   varies by model family (`num_nextn_predict_layers`,",
+    "   `mtp_num_hidden_layers`, `num_mtp_modules`, ...) — **and** that the",
+    "   weight index actually contains the MTP layer tensors — some quantized",
+    "   or converted checkpoints keep the config field but drop the weights.",
+    "   Fall back to the methods below only when MTP is absent or fails to",
+    "   start on the installed framework.",
     "2. **Drafter-based methods (EAGLE / EAGLE-3, DFlash / DSpark, draft",
     "   model): look locally first.** Search the directories next to the",
     "   target's weights and the Hugging Face cache (`$HF_HUB_CACHE`, else",

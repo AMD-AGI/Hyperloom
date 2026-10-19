@@ -69,6 +69,8 @@ def test_focus_says_where_each_method_fits(method):
 def test_focus_puts_mtp_first_and_checks_its_weights_exist():
     text = _system_prompt()
     assert "**MTP first.**" in text
+    for field in ("num_nextn_predict_layers", "mtp_num_hidden_layers", "num_mtp_modules"):
+        assert field in text
     assert "weight index actually contains the MTP layer tensors" in text
     assert text.index("**MTP first.**") < text.index("look locally first")
 
