@@ -29,6 +29,9 @@ class RewriteSpec:
     # One of ``protocol.SUPPORTED_SOURCE_LANGUAGES``, resolved at ingest.
     source_language: str = ""
 
+    # Framework owning the source kernel, as the caller named it; blank leaves each consumer to infer it from the path.
+    framework: str = ""
+
     # Produced file (this layer only rewrites into FlyDSL).
     flydsl_kernel: str = ""  # e.g. /ws/kernel.py (the file the agent writes)
 
