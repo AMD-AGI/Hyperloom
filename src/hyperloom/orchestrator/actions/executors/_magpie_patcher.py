@@ -510,6 +510,15 @@ def live_eval_concurrency_flag_scripts(
     return hits
 
 
+def ensure_lm_eval_install_once(inferencex_dir: Path | str | None = None) -> bool:
+    """Patch the InferenceX checkout's lm-eval install to run once per environment; whether it now does."""
+    benchmark_lib = _resolve_inferencex_benchmark_lib(inferencex_dir)
+    if benchmark_lib is None:
+        return False
+    with _file_lock(_LOCK_PATH):
+        return _apply_lm_eval_install_once_patch_atomic(benchmark_lib)
+
+
 def ensure_eval_concurrency_compat(
     magpie_dir: Path | str | None = None,
     inferencex_dir: Path | str | None = None,
@@ -841,6 +850,7 @@ __all__ = [
     "atomic_write_text",
     "ensure_client_tokenizer_hook",
     "ensure_eval_concurrency_compat",
+    "ensure_lm_eval_install_once",
     "ensure_client_trust_compat",
     "live_eval_concurrency_flag_scripts",
     "magpie_scripts_patch_status",

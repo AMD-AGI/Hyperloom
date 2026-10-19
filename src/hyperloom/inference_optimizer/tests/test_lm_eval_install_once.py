@@ -11,7 +11,9 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.orchestrator.actions.executors import _inferencex_patcher as inferencex_patcher
 from hyperloom.orchestrator.actions.executors import _magpie_patcher as patcher
+from hyperloom.orchestrator.actions.executors.benchmark_config import prepare_benchmark_runtime
 
 REF = "b315ef3b05176acc9732bb7fdec116abe1ecc476"
 LIB = f"""#!/usr/bin/env bash
@@ -44,6 +46,22 @@ def test_the_install_is_wrapped_once_and_keeps_the_rest_of_the_library(tmp_path:
     assert f"{patcher._LM_EVAL_UNLOCKED_FN}() {{" in patched
     assert f".hyperloom-lm-eval-{REF}" in patched
     assert "before() {" in patched and "after() {" in patched
+
+
+def test_the_benchmark_preparation_patches_the_runner_s_own_inferencex_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checkout = tmp_path / "InferenceX"
+    (checkout / "benchmarks").mkdir(parents=True)
+    _lib(checkout / "benchmarks")
+    config = tmp_path / "point.yaml"
+    config.write_text("benchmark:\n  framework: sglang\n  envs:\n    RUN_EVAL: 'false'\n")
+    monkeypatch.setenv("INFERENCEX_PATH", str(checkout))
+    monkeypatch.setattr(inferencex_patcher, "ensure_eval_probe_patched", lambda root: True)
+
+    assert prepare_benchmark_runtime(config, {}) is None
+
+    assert patcher._LM_EVAL_ONCE_SENTINEL in (checkout / "benchmarks" / "benchmark_lib.sh").read_text()
 
 
 def test_a_library_without_the_install_is_left_alone_and_said_so(
