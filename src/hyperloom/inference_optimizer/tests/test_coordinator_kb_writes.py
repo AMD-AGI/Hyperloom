@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import (
@@ -22,6 +24,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     recipe_canonical_id,
 )
 from hyperloom.orchestrator.knowledge.config import KnowledgeConfig
+from hyperloom.inference_optimizer.breakdown.recorder import close_out as _close_out
 
 
 _MODEL = "qwen3-30b-a3b"
@@ -896,3 +899,82 @@ def test_t0_anchor_does_not_write_under_agentx(native_benchmark, tmp_path, monke
         session_dir=tmp_path,
         save_state=False,
     )
+
+
+def _seed_recipe_with_lesson(coord: Coordinator) -> dict:
+    coord.recipe_kb.put_recipe(
+        canonical_id=_expected_cid(),
+        model=_MODEL,
+        hardware=_HW,
+        framework_name=_FW,
+        framework_version=_FWV,
+        precision=_PREC,
+        lessons=[{"statement": "kept", "measured_impact": "+1%"}],
+    )
+    return coord.recipe_kb.get_recipe(canonical_id=_expected_cid())
+
+
+def _fail_authoritative_read(coord: Coordinator) -> None:
+    def _boom(**_kwargs):
+        raise RuntimeError("authority read down")
+
+    coord.recipe_kb.get_authoritative_recipe = _boom
+
+
+def test_read_local_recipe_row_propagates_read_failure(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    _fail_authoritative_read(coord)
+    with pytest.raises(RuntimeError, match="authority read down"):
+        coord.recipe_journal.read_local_recipe_row()
+
+
+def test_kb_amend_recipe_read_failure_leaves_recipe_untouched(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    before = _seed_recipe_with_lesson(coord)
+    _fail_authoritative_read(coord)
+    with pytest.raises(RuntimeError, match="authority read down"):
+        coord.recipe_journal.kb_amend_recipe(append_lesson={"statement": "new", "measured_impact": "+2%"})
+    assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) == before
+
+
+def test_kb_amend_recipe_propagates_put_failure(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+
+    def _boom(**_kwargs):
+        raise OSError("disk full")
+
+    coord.recipe_kb.put_recipe = _boom
+    with pytest.raises(OSError, match="disk full"):
+        coord.recipe_journal.kb_amend_recipe(append_lesson={"statement": "new", "measured_impact": "+2%"})
+
+
+def test_finalize_reports_error_when_authority_read_fails(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+    before = _seed_recipe_with_lesson(coord)
+    _fail_authoritative_read(coord)
+    out = coord.recipe_journal.finalize_recipe_and_journal()
+    assert out == {
+        "status": "error",
+        "reason": "RuntimeError",
+        "backend": "local",
+        "result_type": _close_out.RESULT_TRANSPORT_FAILED,
+        "error_class": "RuntimeError",
+    }
+    assert coord.recipe_kb.get_recipe(canonical_id=_expected_cid()) == before
+
+
+def test_finalize_reports_error_when_put_recipe_fails(tmp_path: Path) -> None:
+    coord = _make_coordinator(tmp_path)
+
+    def _boom(**_kwargs):
+        raise OSError("disk full")
+
+    coord.recipe_kb.put_recipe = _boom
+    out = coord.recipe_journal.finalize_recipe_and_journal()
+    assert out == {
+        "status": "error",
+        "reason": "OSError",
+        "backend": "local",
+        "result_type": _close_out.RESULT_TRANSPORT_FAILED,
+        "error_class": "OSError",
+    }

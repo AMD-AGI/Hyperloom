@@ -1462,10 +1462,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             if self.recipe_kb is not None:
                 cid = self.workload_canonical_id()
                 # Read exactly the local store's authority row.
-                try:
-                    existing_row = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
-                except Exception as exc:  # noqa: BLE001 - the recipe store may be remote
-                    log.info("recipe read failed (%s); finalize appends the current session only", exc)
+                existing_row = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
                 existing_sessions: list[dict[str, Any]] = []
                 for row in existing_row.get("sessions") or []:
                     if not isinstance(row, dict):
@@ -1577,15 +1574,12 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         cache = self._local_recipe_cache
         if isinstance(cache, tuple) and len(cache) == 2 and cache[0] == tick:
             return cache[1]
-        try:
-            row = (
-                self.recipe_kb.get_authoritative_recipe(
-                    canonical_id=self.workload_canonical_id(),
-                )
-                or {}
+        row = (
+            self.recipe_kb.get_authoritative_recipe(
+                canonical_id=self.workload_canonical_id(),
             )
-        except Exception:  # noqa: BLE001 - the recipe store may be remote
-            row = {}
+            or {}
+        )
         self._local_recipe_cache = (tick, row)
         return row
 
@@ -1663,7 +1657,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         recipe_overrides: dict[str, Any] | None = None,
         provenance_details: dict[str, Any] | None = None,
     ) -> None:
-        """Read-modify-write helper for the recipe-snapshot KB: load live row, append lesson/pitfall, merge recipe_overrides (unset fields preserved), write back. Best-effort; lesson/pitfall appended without dedup."""
+        """Read-modify-write helper for the recipe-snapshot KB: load live row, append lesson/pitfall, merge recipe_overrides (unset fields preserved), write back. Read or write failures propagate; lesson/pitfall appended without dedup."""
         config = getattr(self.knowledge_plane, "config", None)
         if getattr(getattr(config, "mode", None), "value", None) == "remote" or self.recipe_kb is None:
             return
@@ -1681,14 +1675,7 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         precision = str(ss.precision or "")
 
         # Local mode reads the exact authority row before amending it.
-        try:
-            live = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
-        except Exception as exc:  # noqa: BLE001
-            log.info(
-                "kb_amend_recipe: authority get_recipe failed (%s); proceeding with empty live",
-                exc,
-            )
-            live = {}
+        live = self.recipe_kb.get_authoritative_recipe(canonical_id=cid) or {}
 
         lessons = list(live.get("lessons") or [])
         if append_lesson is not None:
@@ -1787,14 +1774,8 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                 "details": dict(provenance_details or {}),
             },
         }
-        try:
-            self.recipe_kb.put_recipe(**put_kwargs)
-            self._local_recipe_cache = None
-        except Exception:
-            log.exception(
-                "kb_amend_recipe: put_recipe failed for cid=%s",
-                cid,
-            )
+        self.recipe_kb.put_recipe(**put_kwargs)
+        self._local_recipe_cache = None
 
 
 __all__ = ["RecipeJournalCollaborator"]
