@@ -11,7 +11,7 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "hyperloom.session_breakdown.v6.0"
+      "const": "hyperloom.session_breakdown.v7.0"
     },
     "metadata": {
       "type": "object",
@@ -36,7 +36,7 @@
               "const": "hyperloom.workflow_evaluation.v2"
             },
             "contract_digest": {
-              "const": "9887b33c30aeada4359b3b3d38b817b9dec1655df84e84a98911e5a1a08871c7"
+              "const": "5f813c9ac7d33de9049a76b69cf82f1246c806bf606184c2638115f9b099629e"
             },
             "run_flags": {
               "type": "object",

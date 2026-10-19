@@ -259,8 +259,12 @@ controlled by the CLI flag `--enable-roofline`, which defaults **on**. Pass
 
 ### Schema compatibility
 
-`session_breakdown.json` emits `hyperloom.session_breakdown.v6.0`. V6 is a
-breaking cutover for the timeline: each action records its own event as it
+`session_breakdown.json` emits `hyperloom.session_breakdown.v7.0`. V7 is a
+breaking cutover for one rename: `throughput_tok_s_per_gpu` in
+`outcome.baseline`, `outcome.final` and the `baseline` event's `measurement` is
+now `output_throughput`; archived V6 documents keep the old key.
+
+V6 was the preceding cutover, for the timeline: each action records its own event as it
 runs, so an event's `start_time` is when the work started rather than when its
 artefacts were written, and the KERNEL and BASELINE projections are no longer
 emitted. Ordering that relied on the old collapsed windows changes as a result.
@@ -268,7 +272,7 @@ emitted. Ordering that relied on the old collapsed windows changes as a result.
 V5 was the preceding cutover, for optimization results: adopted optimizations
 are reported only through `optimizations`, and the `optimization_stack`,
 `attribution`, GEAK invocation, Forge invocation, and GEMM-tuning projections
-are no longer emitted. Consumers reading archived v2 / v3 / v4 / v5 documents
+are no longer emitted. Consumers reading archived v2 / v3 / v4 / v5 / v6 documents
 need a downstream migration, as described in
 [`session_breakdown.json` integration in Hyperloom](session-breakdown.md).
 

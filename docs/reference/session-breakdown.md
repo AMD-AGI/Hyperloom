@@ -34,10 +34,18 @@ The top-level `schema_version` field is a stable string. New exports use the
 recorded-timeline wire shape:
 
 ```json
-"schema_version": "hyperloom.session_breakdown.v6.0"
+"schema_version": "hyperloom.session_breakdown.v7.0"
 ```
 
-V6 is a breaking cutover for the timeline: each action records its own event
+V7 is a breaking cutover for one rename: `throughput_tok_s_per_gpu` in
+`outcome.baseline`, `outcome.final` and the `baseline` event's `measurement` is
+now `output_throughput`. The value is unchanged: the whole-server output
+throughput, not a per-GPU figure. Archived V6 documents carry the old key and
+require a downstream migration before V7 readers consume them. Within V7,
+`perf.output_tput_per_gpu` also carries its value on the `baseline` event and
+on stack validation rows.
+
+V6 was the preceding cutover, for the timeline: each action records its own event
 while it runs, so an event's `start_time` is when the work began rather than
 when its artefacts were written, and the KERNEL and BASELINE projections are no
 longer emitted. Consumers that ordered events around the old collapsed windows
@@ -57,14 +65,14 @@ carried a field a consumer could gate on.
 V5 was the preceding cutover, for optimization results: consumers read only
 `optimizations`; the old `optimization_stack`, attribution, GEAK invocation,
 Forge invocation, and GEMM-tuning result projections are no longer emitted.
-Archived V2/V3/V4/V5 documents require a downstream migration before V6 readers
+Archived V2/V3/V4/V5/V6 documents require a downstream migration before V7 readers
 consume them.
 
 Compatibility rules:
 
 * **Parse the version, do not gate on string equality**. Read the
   `vN[.M]` prefix and compare the major component so a future minor
-  revision of V6 is still accepted.
+  revision of V7 is still accepted.
 * **New optional fields** might appear at any time without bumping
   the major version. Consumers must tolerate unknown keys.
 * **Renamed, removed, or semantically changed** fields of a result section
@@ -89,7 +97,7 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
 
 ```text
 {
-  "schema_version": "hyperloom.session_breakdown.v6.0",
+  "schema_version": "hyperloom.session_breakdown.v7.0",
   "exported_at_utc": "2026-05-17T12:34:56.789Z",
   "exporter_version": "session-breakdown-1.0.0",
 
@@ -118,8 +126,8 @@ earlier shape also carried a top-level `warnings`, taken partway through the
 export; it was a strict subset and so disagreed with `metadata.warnings`
 about the same export.
 
-The V6 surface is identified by
-`metadata.versions.schema_version = "hyperloom.session_breakdown.v6.0"`. Startup
+The V7 surface is identified by
+`metadata.versions.schema_version = "hyperloom.session_breakdown.v7.0"`. Startup
 source events are stored in execution order under `reports/sbd_v6/timeline/`;
 writer failures are reported through `metadata.warnings` rather than being
 indistinguishable from a stage that never ran.
@@ -215,6 +223,8 @@ benchmark config path, attempt history (in case the baseline required
 retries), and the `BenchmarkInvocation` record needed to **replay**
 the exact baseline benchmark.
 
+Disposition: `baseline.throughput_tok_s_per_gpu` (V6) → `baseline.output_throughput` (V7).
+
 `baseline.invocation.framework_args_source` is one of:
 
 * `log_non_default_args`: Most authoritative (parsed from the
@@ -281,8 +291,7 @@ downstream consumers:
 > **Scope of `output_throughput`: whole-server total in `throughput_unit`, not per-GPU.**
 > Do not divide it by a GPU count.
 > `cumulative_gain_pct_validated` is a ratio of two such numbers and is unaffected.
-> This key was `throughput_tok_s_per_gpu` in V6 sessions exported before the rename; the rename was made within V6
-> without a version bump, so a consumer reading archived sessions must accept either key.
+> Disposition: `throughput_tok_s_per_gpu` (V6) → `output_throughput` (V7).
 
 > Consumer best practice: index on
 > `(session.session_id, final.output_throughput,
@@ -363,14 +372,14 @@ The following example shows a complete `session_breakdown.json` for a finished G
 
 ```text
 {
-  "schema_version": "hyperloom.session_breakdown.v6.0",
+  "schema_version": "hyperloom.session_breakdown.v7.0",
   "exported_at_utc": "2026-05-17T14:02:15.001Z",
   "exporter_version": "session-breakdown-1.0.0",
 
   "metadata": {
     "exported_at_utc": "2026-05-17T14:02:15.001Z",
     "versions": {
-      "schema_version": "hyperloom.session_breakdown.v6.0",
+      "schema_version": "hyperloom.session_breakdown.v7.0",
       "hyperloom": "a1b2c3d",
       "framework": "sglang",
       "framework_version": "0.5.21",

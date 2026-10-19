@@ -19,7 +19,8 @@ from .session_paths import (
 )
 
 
-SCHEMA_VERSION_V6 = "hyperloom.session_breakdown.v6.0"
+# Symbol name is historical; the value is the current major version.
+SCHEMA_VERSION_V6 = "hyperloom.session_breakdown.v7.0"
 _PENDING_INSTALL_ATTR = "_sbd_v6_install_event"
 _STORAGE_SEQUENCE_KEY = "__sbd_v6_timeline_sequence"
 # ``roofline``, ``kernel`` and ``baseline`` all recur within one session -- one

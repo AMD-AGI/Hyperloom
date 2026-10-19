@@ -18,7 +18,7 @@ globs:
 
 A single JSON file: **`<session_dir>/session_breakdown.json`**.
 
-- Schema:   `hyperloom.session_breakdown.v6.0` (hardcoded; see `SCHEMA_VERSION` in `breakdown/schema.py`).
+- Schema:   `hyperloom.session_breakdown.v7.0` (hardcoded; see `SCHEMA_VERSION` in `breakdown/schema.py`).
 - Producer: `src/hyperloom/inference_optimizer/breakdown/exporter.py`
 - Filename: `BREAKDOWN_FILENAME` (= `session_breakdown.json`)
 
@@ -154,7 +154,11 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
 - `schema_version` (in `schema.py`) carries the **major** contract
   version; it is bumped ONLY on breaking changes (renamed/removed
   fields, changed semantics).
-- New exports carry `hyperloom.session_breakdown.v6.0`. V6 is a breaking
+- New exports carry `hyperloom.session_breakdown.v7.0`. V7 is a breaking
+  cutover only because `throughput_tok_s_per_gpu` in `outcome.baseline`,
+  `outcome.final` and the `baseline` event measurement is renamed to
+  `output_throughput`; archived V6 documents keep the old key.
+- V6 was a breaking
   cutover for the timeline: the actions record their own events as they run,
   so an event's `start_time` is when the work began rather than when its
   artefacts were written, and the KERNEL and BASELINE projections are gone.
