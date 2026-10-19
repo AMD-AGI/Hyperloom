@@ -748,7 +748,7 @@ def _operator_extra_env() -> dict[str, str]:
     """Return the ``--extra-env`` pins the CLI serialized, or ``{}``."""
     from hyperloom.common.env_safety import operator_extra_env
 
-    return operator_extra_env()
+    return {key: value for key, value in operator_extra_env().items() if key.strip().upper() != "RUN_EVAL"}
 
 
 def resolve_reference_launch() -> tuple[str, dict[str, str], dict[str, Any]]:
@@ -1336,7 +1336,7 @@ def materialize_config_with_envs(
             bench.pop("benchmark_script", None)
     if benchmark_script:
         bench["benchmark_script"] = str(benchmark_script)
-    envs = bench.setdefault("envs", {})
+    envs = bench["envs"] = {k: v for k, v in (bench.get("envs") or {}).items() if k != "RUN_EVAL"}
     runtime_path = os.environ.get("PATH", "").strip()
     if "PATH" in envs and runtime_path:
         envs["PATH"] = runtime_path
@@ -2012,8 +2012,8 @@ def materialize_config_with_envs(
             "--trust-remote-code",
             pinned_by=("trust-remote-code",),
         )
-    # Accuracy eval (GSM8K) is always ON; only an explicit per-round ``extra_envs`` entry (staged accuracy rounds,
-    # profile / shape-capture runs) sets it otherwise.
+    # Accuracy eval (GSM8K) is ON unless the round itself (staged accuracy, profile, shape capture) passes
+    # ``extra_envs["RUN_EVAL"]``; the YAML template and the operator pins cannot set it.
     if "RUN_EVAL" not in envs:
         envs["RUN_EVAL"] = "true"
     # Persist eval task/limit into the YAML so they become part of the
