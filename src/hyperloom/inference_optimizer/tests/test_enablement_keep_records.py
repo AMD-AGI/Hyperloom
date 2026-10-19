@@ -40,6 +40,7 @@ from hyperloom.orchestrator.enablement.recipe.keep_records import (
     levers_without_readers,
 )
 from hyperloom.orchestrator.enablement.recipe.keep_probe import (
+    KeepEvidence,
     graded_framework,
     graded_launch_env,
     keep_assertion_packages,
@@ -533,10 +534,10 @@ def test_a_build_without_provisioning_observes_versions_at_the_keep(tmp_path: Pa
     }
     closure, assertions = probe_keep_environment(
         params,
+        KeepEvidence(
+            build_manifest=_build_manifest({"demo": "1.0"}), specialist_task_id=PROBE_TASK, provision_result=None
+        ),
         framework="vllm",
-        build_manifest=_build_manifest({"demo": "1.0"}),
-        specialist_task_id=PROBE_TASK,
-        provision_result=None,
     )
     assert assertions == {"demo": "2.0"}
     assert closure["distributions"]["demo"] == "2.0"
@@ -552,10 +553,12 @@ def test_a_keep_whose_build_is_another_rounds_observes_nothing(tmp_path: Path):
     }
     _closure, assertions = probe_keep_environment(
         params,
+        KeepEvidence(
+            build_manifest=_build_manifest({"demo": "1.0"}),
+            specialist_task_id="some-other-round",
+            provision_result=None,
+        ),
         framework="vllm",
-        build_manifest=_build_manifest({"demo": "1.0"}),
-        specialist_task_id="some-other-round",
-        provision_result=None,
     )
     assert assertions == {}
 
@@ -581,10 +584,10 @@ def test_an_override_naming_no_interpreter_observes_under_the_backend(
     params = {"runtime_override": {"pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")]}}
     closure, assertions = probe_keep_environment(
         params,
+        KeepEvidence(
+            build_manifest=_build_manifest({"demo": "1.0"}), specialist_task_id=PROBE_TASK, provision_result=None
+        ),
         framework="vllm",
-        build_manifest=_build_manifest({"demo": "1.0"}),
-        specialist_task_id=PROBE_TASK,
-        provision_result=None,
     )
     assert assertions == {"demo": "2.0"} and closure["distributions"]["demo"] == "2.0"
 
@@ -606,10 +609,10 @@ def test_an_in_place_enablement_with_no_override_still_observes(tmp_path: Path, 
     )
     closure, assertions = probe_keep_environment(
         {},
+        KeepEvidence(
+            build_manifest=_build_manifest({"pytest": ""}), specialist_task_id=PROBE_TASK, provision_result=None
+        ),
         framework="vllm",
-        build_manifest=_build_manifest({"pytest": ""}),
-        specialist_task_id=PROBE_TASK,
-        provision_result=None,
     )
     assert closure["distributions"], "the ambient interpreter has a non-empty closure"
     assert assertions.get("pytest"), "a named package is asserted at its observed version"
@@ -624,10 +627,10 @@ def test_the_same_override_under_the_bypass_backend_does_observe(tmp_path: Path,
     params = {"runtime_override": {"pythonpath_prefixes": [_installed_dist(tmp_path, "demo", "2.0")]}}
     closure, assertions = probe_keep_environment(
         params,
+        KeepEvidence(
+            build_manifest=_build_manifest({"demo": "1.0"}), specialist_task_id=PROBE_TASK, provision_result=None
+        ),
         framework="vllm",
-        build_manifest=_build_manifest({"demo": "1.0"}),
-        specialist_task_id=PROBE_TASK,
-        provision_result=None,
     )
     assert assertions == {"demo": "2.0"} and closure["distributions"]["demo"] == "2.0"
 
@@ -653,10 +656,10 @@ def test_the_closure_follows_the_framework_interpreter_not_magpies(tmp_path: Pat
     )
     closure, assertions = probe_keep_environment(
         {},
+        KeepEvidence(
+            build_manifest=_build_manifest({"pytest": ""}), specialist_task_id=PROBE_TASK, provision_result=None
+        ),
         framework="vllm",
-        build_manifest=_build_manifest({"pytest": ""}),
-        specialist_task_id=PROBE_TASK,
-        provision_result=None,
     )
     # The framework resolver named this interpreter, so its closure is the one
     # on record; reaching the backend's resolver at all fails the test above.
@@ -700,7 +703,7 @@ def test_an_override_rewriting_path_selects_that_pythons_closure(tmp_path: Path,
     monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", _record)
     params = {"runtime_override": {"path_prefix": str(graded_bin)}, "framework": "vllm"}
     probe_keep_environment(
-        params, framework="vllm", build_manifest=[], specialist_task_id=PROBE_TASK, provision_result=None
+        params, KeepEvidence(build_manifest=[], specialist_task_id=PROBE_TASK, provision_result=None), framework="vllm"
     )
     assert seen["resolved"] == str(graded_bin / "python"), "the override's PATH, not the ambient one"
 
@@ -747,10 +750,8 @@ def test_the_materialized_configs_envs_decide_the_probed_interpreter(tmp_path: P
     monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", _record)
     probe_keep_environment(
         {},
+        KeepEvidence(build_manifest=[], specialist_task_id=PROBE_TASK, provision_result=None),
         framework=graded_framework({}, str(config)),
-        build_manifest=[],
-        specialist_task_id=PROBE_TASK,
-        provision_result=None,
         materialized_config=str(config),
     )
     assert seen["framework"] == "vllm", "the config's framework outranks $FRAMEWORK"
@@ -776,10 +777,10 @@ def test_a_dist_reachable_only_through_the_configs_pythonpath_is_in_the_closure(
     monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: sys.executable)
     closure, assertions = probe_keep_environment(
         {},
+        KeepEvidence(
+            build_manifest=_build_manifest({"configonly": ""}), specialist_task_id=PROBE_TASK, provision_result=None
+        ),
         framework="vllm",
-        build_manifest=_build_manifest({"configonly": ""}),
-        specialist_task_id=PROBE_TASK,
-        provision_result=None,
         materialized_config=str(config),
     )
     assert closure["distributions"].get("configonly") == "3.1"
@@ -795,7 +796,7 @@ def test_a_keep_with_no_usable_runtime_observes_nothing(tmp_path: Path, monkeypa
     monkeypatch.setattr(benchmark_backend, "resolve_backend_name", lambda: "magpie")
     monkeypatch.setattr(_benchmark_interpreter, "_resolve_probe_python", lambda _framework="vllm", *, env=None: "")
     assert probe_keep_environment(
-        {}, framework="vllm", build_manifest=[], specialist_task_id=PROBE_TASK, provision_result=None
+        {}, KeepEvidence(build_manifest=[], specialist_task_id=PROBE_TASK, provision_result=None), framework="vllm"
     ) == (
         {},
         {},
@@ -941,10 +942,10 @@ def test_a_provisioned_keep_that_installed_nothing_observes_nothing(tmp_path: Pa
     )
     closure, assertions = probe_keep_environment(
         {},
+        KeepEvidence(
+            build_manifest=_build_manifest({"demo": "1.0"}), specialist_task_id=PROBE_TASK, provision_result=provisioned
+        ),
         framework="vllm",
-        build_manifest=_build_manifest({"demo": "1.0"}),
-        specialist_task_id=PROBE_TASK,
-        provision_result=provisioned,
     )
     assert assertions == {}
     assert closure["distributions"]["demo"] == "2.0"
@@ -966,7 +967,9 @@ def test_a_provisioned_keep_reports_the_version_the_setup_replay_left(tmp_path: 
         runtime=SimpleNamespace(to_runtime_override=lambda: dict(override)),
     )
     _closure, assertions = probe_keep_environment(
-        {}, framework="vllm", build_manifest=[], specialist_task_id=PROBE_TASK, provision_result=provisioned
+        {},
+        KeepEvidence(build_manifest=[], specialist_task_id=PROBE_TASK, provision_result=provisioned),
+        framework="vllm",
     )
     assert assertions == {"demo": "2.0"}
 
@@ -2719,10 +2722,6 @@ def test_an_in_place_patch_asserts_the_serving_framework_at_the_keep(tmp_path: P
         }
     }
     _closure, assertions = probe_keep_environment(
-        params,
-        framework="vllm",
-        build_manifest=[],
-        specialist_task_id=PROBE_TASK,
-        provision_result=None,
+        params, KeepEvidence(build_manifest=[], specialist_task_id=PROBE_TASK, provision_result=None), framework="vllm"
     )
     assert assertions == {"vllm": "0.30.0"}

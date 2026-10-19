@@ -66,11 +66,9 @@ async def test_run_specialist_rebench_success(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
 
     res = await sr.run_specialist_rebench(
-        config_path=None,
         output_dir=str(tmp_path / "out"),
-        base_extra_args="--kv-cache-dtype fp8_e4m3",
-        extra_envs={"E": "1"},
-        port=12321,
+        benchmark=sr.RebenchBenchmark(config_path=None),
+        server=sr.RebenchServer(base_extra_args="--kv-cache-dtype fp8_e4m3", extra_envs={"E": "1"}, port=12321),
     )
     assert res["ok"] is True
     assert res["status"] == "succeeded"
@@ -101,8 +99,7 @@ async def test_run_specialist_rebench_failed_status(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(sr, "run_grid", _fake_run_grid)
 
     res = await sr.run_specialist_rebench(
-        config_path=str(tmp_path / "c.yaml"),
-        output_dir=str(tmp_path / "o"),
+        output_dir=str(tmp_path / "o"), benchmark=sr.RebenchBenchmark(config_path=str(tmp_path / "c.yaml"))
     )
     assert res["ok"] is False
     assert any("rebench_failed" in w for w in res["warnings"])
@@ -117,8 +114,7 @@ async def test_run_specialist_rebench_no_result(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(sr, "run_grid", _fake_run_grid)
 
     res = await sr.run_specialist_rebench(
-        config_path=str(tmp_path / "c.yaml"),
-        output_dir=str(tmp_path / "o"),
+        output_dir=str(tmp_path / "o"), benchmark=sr.RebenchBenchmark(config_path=str(tmp_path / "c.yaml"))
     )
     assert res["ok"] is False
     assert "no result" in res["error"]
@@ -133,8 +129,7 @@ async def test_run_specialist_rebench_exception_surfaced(tmp_path, monkeypatch) 
     monkeypatch.setattr(sr, "run_grid", _boom)
 
     res = await sr.run_specialist_rebench(
-        config_path=str(tmp_path / "c.yaml"),
-        output_dir=str(tmp_path / "o"),
+        output_dir=str(tmp_path / "o"), benchmark=sr.RebenchBenchmark(config_path=str(tmp_path / "c.yaml"))
     )
     assert res["ok"] is False
     assert "kaboom" in res["error"]

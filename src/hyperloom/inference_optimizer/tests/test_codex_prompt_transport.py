@@ -23,6 +23,9 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
     TRANSPORT_TOOLS,
     build_orchestration_prompt,
     default_enabled_actions,
+    PromptAssets,
+    PromptCycle,
+    SessionContext,
 )
 from hyperloom.orchestrator.roles.agent_role import _ORCHESTRATION_INTENTS, default_role_registry
 from hyperloom.orchestrator.roles.base import BackendError, LLMCallFailed, RetryPolicy
@@ -50,12 +53,9 @@ def _prompt(transport: str, *, phase: str = "") -> str:
     return build_orchestration_prompt(
         action_registry=ACTION_CATALOGUE,
         enabled_actions=default_enabled_actions(no_kernel=False),
-        framework="sglang",
-        objective_kind="time_only",
-        max_minutes=60,
-        phase=phase,
-        transport=transport,
-        rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
+        session=SessionContext(framework="sglang", objective_kind="time_only", max_minutes=60, transport=transport),
+        cycle=PromptCycle(phase=phase),
+        assets=PromptAssets(rules_fragment_path=asset_system_prompts_dir() / "orchestration.md"),
     )
 
 
@@ -101,10 +101,8 @@ def test_transport_defaults_to_the_tool_surface() -> None:
     assert _prompt(TRANSPORT_TOOLS) == build_orchestration_prompt(
         action_registry=ACTION_CATALOGUE,
         enabled_actions=default_enabled_actions(no_kernel=False),
-        framework="sglang",
-        objective_kind="time_only",
-        max_minutes=60,
-        rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
+        session=SessionContext(framework="sglang", objective_kind="time_only", max_minutes=60),
+        assets=PromptAssets(rules_fragment_path=asset_system_prompts_dir() / "orchestration.md"),
     )
 
 

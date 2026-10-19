@@ -95,10 +95,7 @@ def write_final_remote_recipe(
             canonical_id,
             session_id,
             bundle,
-            scope=profile.scope,
-            primary_metric=profile.primary_metric,
-            primary_value=profile.primary_value,
-            objective_schema=profile.objective_schema,
+            profile,
             files_dir=files_dir,
         )
 
