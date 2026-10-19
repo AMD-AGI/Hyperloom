@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The two arms a conc sweep compares, the CONC ladder each runs, and how a rung that never ran is filed."""
+"""The two arms a conc sweep compares, the CONC ladder each runs, and what one rung is launched and recorded with."""
 
 from __future__ import annotations
 
@@ -85,6 +85,41 @@ def _deadline_skip_result(variant: GridVariant, stopped: StoppedByTheRun) -> Var
         error_class=stopped.error_class,
         note=variant.note,
     )
+
+
+@dataclass(frozen=True)
+class _RungNote:
+    """How one rung came to run and whether it is part of the published curve.
+
+    ``stage`` is a ``STAGE_*`` value, ``committed`` says whether the rung is part
+    of the published curve, and the seconds fields are wall clock.
+    """
+
+    stage: str
+    committed: bool = True
+    start_time: str = ""
+    wall_duration_sec: float | None = None
+    budget_remaining_sec: float | None = None
+
+
+@dataclass(frozen=True)
+class _RungServer:
+    """The serving lease and server lifecycle a rung runs under."""
+
+    serving_lease: Any
+    base_extra_envs: dict[str, str] | None = None
+    server_lifecycle: dict[str, Any] | None = None
+    server_already_ready: bool = False
+    warmup_before_measure: bool | None = None
+    lifecycle_boot_only: bool = False
+
+
+@dataclass(frozen=True)
+class _ArmCurves:
+    """The measured points of both arms of a sweep."""
+
+    baseline: list[dict[str, Any]]
+    optimized: list[dict[str, Any]]
 
 
 def _order_concs_desc(concs: list[int]) -> list[int]:

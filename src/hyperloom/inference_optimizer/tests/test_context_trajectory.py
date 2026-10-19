@@ -10,7 +10,7 @@ import json
 import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.roles.claude_requests import ClaudeRequestTracker
 from hyperloom.inference_optimizer.trace import context_events as ce
@@ -87,7 +87,7 @@ async def test_each_reactor_call_records_its_prompt_snapshot_under_the_call(sess
         backends={"orchestration": MockBackend(silent, name="o"), "critic": MockBackend(silent, name="c")},
     )
     try:
-        assert await c.run(max_ticks=2) == "max_ticks"
+        assert await c.run(options=RunOptions(max_ticks=2)) == "max_ticks"
     finally:
         await c.stop()
 

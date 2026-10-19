@@ -23,7 +23,14 @@ from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     STRATEGY_SINGLE_SERVER,
     ArmStrategy,
 )
-from ._conc_sweep_grid import _Arm, _budget_skip_result, _CANCEL_STOP, _deadline_skip_result
+from ._conc_sweep_grid import (
+    _Arm,
+    _budget_skip_result,
+    _CANCEL_STOP,
+    _deadline_skip_result,
+    _RungNote,
+    _RungServer,
+)
 from ..actions.executors._grid_runner import GridVariant, VariantResult, variant_conc
 from ..actions.executors._subprocess_kill import session_deadline_to_remaining_sec
 from ..actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS, StoppedByTheRun
@@ -204,12 +211,14 @@ class _BootLadder:
         try:
             results = await self.run.run_rung(
                 variant,
-                serving_lease=self.server.lease,
-                base_extra_envs={"MAGPIE_RUN_PHASE": "server"},
-                server_lifecycle=self.server.lifecycle(cleanup=False),
-                server_already_ready=False,
-                warmup_before_measure=False,
-                lifecycle_boot_only=True,
+                _RungServer(
+                    serving_lease=self.server.lease,
+                    base_extra_envs={"MAGPIE_RUN_PHASE": "server"},
+                    server_lifecycle=self.server.lifecycle(cleanup=False),
+                    server_already_ready=False,
+                    warmup_before_measure=False,
+                    lifecycle_boot_only=True,
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             log.warning(
@@ -255,8 +264,7 @@ class _BootLadder:
             self.run.record_rung(
                 self.server.arm_name,
                 stopped,
-                stage=STAGE_BUDGET_SKIP,
-                budget_remaining_sec=self.run.budget.remaining_sec,
+                _RungNote(stage=STAGE_BUDGET_SKIP, budget_remaining_sec=self.run.budget.remaining_sec),
             )
         try:
             self.server.teardown()
@@ -277,10 +285,12 @@ class _BootLadder:
         self.run.record_rung(
             self.server.arm_name,
             failed,
-            stage=STAGE_BOOT_ATTEMPT,
-            committed=False,
-            start_time=attempt.started_iso,
-            wall_duration_sec=attempt.elapsed_sec,
+            _RungNote(
+                stage=STAGE_BOOT_ATTEMPT,
+                committed=False,
+                start_time=attempt.started_iso,
+                wall_duration_sec=attempt.elapsed_sec,
+            ),
         )
 
     def _commit_boot(self, index: int, attempt: _BootAttempt) -> None:
@@ -293,9 +303,7 @@ class _BootLadder:
         self.run.record_rung(
             self.server.arm_name,
             result,
-            stage=STAGE_BOOT,
-            start_time=attempt.started_iso,
-            wall_duration_sec=attempt.elapsed_sec,
+            _RungNote(stage=STAGE_BOOT, start_time=attempt.started_iso, wall_duration_sec=attempt.elapsed_sec),
         )
         if self.run.recorder is not None:
             self.run.recorder.record_arm_boot(
@@ -381,14 +389,14 @@ def _skip_rungs_left(run: _SweepRun, arm_name: str, remaining: list[GridVariant]
         for variant in remaining:
             skipped = _deadline_skip_result(variant, _CANCEL_STOP)
             run.results.append(skipped)
-            run.record_rung(arm_name, skipped, stage=STAGE_BUDGET_SKIP)
+            run.record_rung(arm_name, skipped, _RungNote(stage=STAGE_BUDGET_SKIP))
         return True
     if run.session_closing():
         run.budget.spend_on_session_reserve()
         for variant in remaining:
             skipped = _budget_skip_result(variant)
             run.results.append(skipped)
-            run.record_rung(arm_name, skipped, stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0)
+            run.record_rung(arm_name, skipped, _RungNote(stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0))
         return True
     return False
 
@@ -403,10 +411,12 @@ async def _reuse_rung_results(
     try:
         return await run.run_rung(
             variant,
-            serving_lease=server.lease,
-            server_lifecycle=server_lifecycle,
-            server_already_ready=True,
-            warmup_before_measure=False,
+            _RungServer(
+                serving_lease=server.lease,
+                server_lifecycle=server_lifecycle,
+                server_already_ready=True,
+                warmup_before_measure=False,
+            ),
         )
     except Exception as exc:  # noqa: BLE001
         log.warning(
@@ -436,10 +446,12 @@ async def _run_reuse_rungs(run: _SweepRun, server: _ArmServer, reuse_grid: list[
             run.record_rung(
                 server.arm_name,
                 result,
-                stage=STAGE_BUDGET_SKIP if stopped else STAGE_REUSE,
-                start_time=started_iso,
-                wall_duration_sec=elapsed,
-                budget_remaining_sec=run.budget.remaining_sec if stopped else remaining_sec,
+                _RungNote(
+                    stage=STAGE_BUDGET_SKIP if stopped else STAGE_REUSE,
+                    start_time=started_iso,
+                    wall_duration_sec=elapsed,
+                    budget_remaining_sec=run.budget.remaining_sec if stopped else remaining_sec,
+                ),
             )
         # Incremental flush after each reuse point.
         run.flush_progress()
@@ -533,18 +545,18 @@ async def _sweep_arm_option_b(
         if run.observe_cancel():
             skip_r = _deadline_skip_result(variant, _CANCEL_STOP)
             run.results.append(skip_r)
-            run.record_rung(arm_name, skip_r, stage=STAGE_BUDGET_SKIP)
+            run.record_rung(arm_name, skip_r, _RungNote(stage=STAGE_BUDGET_SKIP))
             continue
         if run.session_closing():
             run.budget.spend_on_session_reserve()
             skip_r = _budget_skip_result(variant)
             run.results.append(skip_r)
-            run.record_rung(arm_name, skip_r, stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0)
+            run.record_rung(arm_name, skip_r, _RungNote(stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0))
             continue
         rung_started_iso = now_iso("seconds")
         rung_started_at = time.time()
         try:
-            sub = await run.run_rung(variant, serving_lease=serving_lease)
+            sub = await run.run_rung(variant, _RungServer(serving_lease=serving_lease))
         except Exception as exc:  # noqa: BLE001
             sub = [_failed_rung_result(variant, f"option_b: {exc}", type(exc).__name__)]
         rung_elapsed = round(time.time() - rung_started_at, 3)
@@ -554,9 +566,11 @@ async def _sweep_arm_option_b(
             run.record_rung(
                 arm_name,
                 r,
-                stage=STAGE_BUDGET_SKIP if stopped else STAGE_SERVER_RESTART,
-                start_time=rung_started_iso,
-                wall_duration_sec=rung_elapsed,
-                budget_remaining_sec=run.budget.remaining_sec if stopped else _ob_rem,
+                _RungNote(
+                    stage=STAGE_BUDGET_SKIP if stopped else STAGE_SERVER_RESTART,
+                    start_time=rung_started_iso,
+                    wall_duration_sec=rung_elapsed,
+                    budget_remaining_sec=run.budget.remaining_sec if stopped else _ob_rem,
+                ),
             )
         run.flush_progress()

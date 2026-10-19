@@ -35,12 +35,15 @@ from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
 from ._conc_sweep_grid import (
     _Arm,
+    _ArmCurves,
     _build_arm_grid,
     _budget_skip_result,
     _CANCEL_STOP,
     _deadline_skip_result,
     _optimized_arm,
     _order_concs_desc,
+    _RungNote,
+    _RungServer,
     _SWEEP_BUDGET_STOP,
 )
 from ._conc_sweep_ladder import _sweep_one_arm_single_server
@@ -198,12 +201,11 @@ def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
 
 def _build_roofline_ceiling(
     state: SharedState,
+    curves: _ArmCurves,
     *,
     concs: list[int],
     isl: int,
     osl: int,
-    baseline_points: list[dict[str, Any]],
-    optimized_points: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
     """Per-conc decode roofline alongside the measured curves."""
     model_path = str(getattr(state, "model_path", "") or "")
@@ -223,8 +225,8 @@ def _build_roofline_ceiling(
         weight_dtype_bytes=meta.weight_dtype_bytes,
     )
 
-    by_conc_b = {p["conc"]: p for p in baseline_points}
-    by_conc_o = {p["conc"]: p for p in optimized_points}
+    by_conc_b = {p["conc"]: p for p in curves.baseline}
+    by_conc_o = {p["conc"]: p for p in curves.optimized}
 
     rows: list[dict[str, Any]] = []
     for c in concs:
@@ -411,24 +413,11 @@ class _SweepRun:
         prefix = f"{arm_name}_"
         return [result for result in self.results if result.name.startswith(prefix)]
 
-    def record_rung(
-        self,
-        arm_name: str,
-        result: VariantResult,
-        *,
-        stage: str,
-        committed: bool = True,
-        start_time: str = "",
-        wall_duration_sec: float | None = None,
-        budget_remaining_sec: float | None = None,
-    ) -> None:
+    def record_rung(self, arm_name: str, result: VariantResult, note: _RungNote) -> None:
         """Record one rung on the sweep's event, if the sweep is being recorded.
 
         The result is flattened into the same point the report writes, so the
-        recorded curve and the written one cannot differ. ``stage`` is a
-        ``STAGE_*`` value naming how the rung came to run, ``committed`` says
-        whether it is part of the published curve, and the seconds fields are
-        wall clock.
+        recorded curve and the written one cannot differ.
         """
         if self.recorder is None:
             return
@@ -436,15 +425,15 @@ class _SweepRun:
         self.recorder.record_variant(
             arm_name,
             SweepRung(
-                stage=stage,
+                stage=note.stage,
                 conc=point.get("conc"),
                 point=point,
-                committed=committed,
+                committed=note.committed,
                 num_prompts=(result.extra_envs or {}).get("NUM_PROMPTS"),
-                start_time=start_time,
-                wall_duration_sec=wall_duration_sec,
+                start_time=note.start_time,
+                wall_duration_sec=note.wall_duration_sec,
                 granted_cap_sec=self.benchmark_timeout_sec,
-                budget_remaining_sec=budget_remaining_sec,
+                budget_remaining_sec=note.budget_remaining_sec,
             ),
         )
 
@@ -475,17 +464,7 @@ class _SweepRun:
         else:
             self.recorder.fail_arm(arm_name, exc)
 
-    async def run_rung(
-        self,
-        variant: GridVariant,
-        *,
-        serving_lease: Any,
-        base_extra_envs: dict[str, str] | None = None,
-        server_lifecycle: dict[str, Any] | None = None,
-        server_already_ready: bool = False,
-        warmup_before_measure: bool | None = None,
-        lifecycle_boot_only: bool = False,
-    ) -> list[VariantResult]:
+    async def run_rung(self, variant: GridVariant, server: _RungServer) -> list[VariantResult]:
         """Run one rung from the sweep's base config; a deadline stop inside it exhausts the sweep's budget."""
         if self.observe_cancel():
             return [_deadline_skip_result(variant, _CANCEL_STOP)]
@@ -499,15 +478,15 @@ class _SweepRun:
             model_path=self.model_path,
             gpu_type=self.gpu_type,
             benchmark_script=self.benchmark_script,
-            server_lifecycle=server_lifecycle,
-            base_extra_envs=base_extra_envs,
-            warmup_before_measure=warmup_before_measure,
-            server_already_ready=server_already_ready,
-            serving_lease=serving_lease,
+            server_lifecycle=server.server_lifecycle,
+            base_extra_envs=server.base_extra_envs,
+            warmup_before_measure=server.warmup_before_measure,
+            server_already_ready=server.server_already_ready,
+            serving_lease=server.serving_lease,
             session_deadline_sec=self.session_deadline_sec,
             variant_expected_sec=self.variant_expected_sec,
             deadline_stop=self.deadline_stop,
-            lifecycle_boot_only=lifecycle_boot_only,
+            lifecycle_boot_only=server.lifecycle_boot_only,
         )
         self.observe_cancel(results)
         if any(result.error_class == self.deadline_stop.error_class for result in results):
@@ -667,7 +646,7 @@ class _SweepRequest(NamedTuple):
     total_budget_sec: int | None
 
     @classmethod
-    def of(cls, state: SharedState, concs: list[int] | None, num_prompts_factor: int, budget_sec: int | None):
+    def of(cls, state: SharedState, concs: list[int] | None, budget_sec: int | None) -> _SweepRequest:
         """Resolve the ladder the sweep runs, keeping whether the caller named it."""
         return cls(
             # ``None`` → default ladder; an explicit empty list is refused below.
@@ -675,7 +654,7 @@ class _SweepRequest(NamedTuple):
             # Whether the ladder was handed to the sweep or picked for the workload -- a distinction only this line
             # can still see, since the two are the same list once resolved.
             grid_source=GRID_REQUESTED if concs is not None else GRID_MODE_DEFAULT,
-            num_prompts_factor=num_prompts_factor,
+            num_prompts_factor=DEFAULT_NUM_PROMPTS_FACTOR,
             total_budget_sec=budget_sec,
         )
 
@@ -1004,11 +983,10 @@ def _sweep_payload_with_ceiling(run: _SweepRun, state: SharedState) -> dict[str,
     payload = run.payload(in_progress=False)
     ceiling = _build_roofline_ceiling(
         state,
+        _ArmCurves(baseline=payload["baseline"]["points"], optimized=payload["optimized"]["points"]),
         concs=run.concs,
         isl=run.isl,
         osl=run.osl,
-        baseline_points=payload["baseline"]["points"],
-        optimized_points=payload["optimized"]["points"],
     )
     if ceiling is not None:
         payload["roofline_ceiling"] = ceiling
@@ -1021,7 +999,6 @@ async def run_conc_sweep(
     *,
     concs: list[int] | None = None,
     total_budget_sec: int | None = DEFAULT_TOTAL_BUDGET_SEC,
-    num_prompts_factor: int = DEFAULT_NUM_PROMPTS_FACTOR,
     recorder: Any = None,
 ) -> dict[str, Any]:
     """Run the full conc-sweep SWEEP-phase action end-to-end (always returns a dict; never raises; no files written when skipped).
@@ -1033,7 +1010,7 @@ async def run_conc_sweep(
     Returns a skip envelope when prerequisites are unmet.
     """
     session_dir = Path(session_dir)
-    request = _SweepRequest.of(state, concs, num_prompts_factor, total_budget_sec)
+    request = _SweepRequest.of(state, concs, total_budget_sec)
     workload = _SweepWorkload.of(state)
     refusal = _sweep_refusal(workload, request)
     if refusal is not None:

@@ -13,7 +13,7 @@ import pytest
 
 from hyperloom.common.token_usage import uncached_input_tokens
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
 from hyperloom.orchestrator.roles import claude as cl
 from hyperloom.orchestrator.roles.claude_requests import (
@@ -187,7 +187,7 @@ async def test_each_reactor_turn_is_an_llm_call_span_under_the_session(session_d
         backends={"orchestration": MockBackend(silent, name="o"), "critic": MockBackend(silent, name="c")},
     )
     try:
-        await c.run(max_ticks=1)
+        await c.run(options=RunOptions(max_ticks=1))
     finally:
         await c.stop()
     rows = tt.load_events(session_dir)
