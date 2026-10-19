@@ -16,7 +16,7 @@ import zipfile
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.session_package import package_session_artifacts
-from hyperloom.inference_optimizer.deployment.export import export_custom_inference
+from hyperloom.orchestrator.deployment.export import export_custom_inference
 from hyperloom.inference_optimizer.reference_script import render_reference_script
 
 
@@ -147,7 +147,7 @@ def test_declared_cache_directory_can_be_absent_from_original_environment(worklo
 
 
 def test_export_command_refreshes_the_session_launcher(workload, monkeypatch, capsys):
-    from hyperloom.inference_optimizer.deployment.export import main
+    from hyperloom.orchestrator.deployment.export import main
 
     session, state, _ = workload
     (session / "state.json").write_text(json.dumps(state))
@@ -170,7 +170,7 @@ def test_export_refuses_package_truncation(workload, monkeypatch):
 
 
 def test_export_refuses_missing_dependency_observation(workload, monkeypatch):
-    from hyperloom.inference_optimizer.deployment import export
+    from hyperloom.orchestrator.deployment import export
 
     session, state, _ = workload
     monkeypatch.setattr(export, "probe_environment_closure", lambda **kwargs: ({}, {}))

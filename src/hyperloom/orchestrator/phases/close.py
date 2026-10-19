@@ -399,7 +399,7 @@ class ClosePhase(CoordinatorCollaborator):
 
     async def _do_inference_export(self) -> None:
         """Export a standalone deployment for custom-workload (framework=="custom") sessions."""
-        from hyperloom.inference_optimizer.deployment.export import export_custom_inference
+        from hyperloom.orchestrator.deployment.export import export_custom_inference
 
         deployment = await asyncio.to_thread(export_custom_inference, self.session_dir, self.shared_state.to_dict())
         await self._record_close_step(

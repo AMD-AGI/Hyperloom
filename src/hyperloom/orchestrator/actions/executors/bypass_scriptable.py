@@ -67,6 +67,21 @@ def resolve_scriptable_script(
     return None
 
 
+def enforce_custom_scope(framework: str) -> None:
+    """Fail a scriptable custom launch when its boundary cannot be enforced.
+
+    The operator-declared single-file scope is verified at launch, where the
+    framework repo path is already exported, so an out-of-boundary campaign
+    fails before spending any work rather than at the first patch apply.
+    """
+    from ...framework.optimization_scope import check_patch_scope, optimization_file
+
+    if str(framework or "").strip().lower() != "custom":
+        return
+    if optimization_file() is not None:
+        check_patch_scope(Path(os.environ.get("FRAMEWORK_REPO_PATH", "")), [])
+
+
 def build_scriptable_env(
     bench: dict[str, Any],
     runner_type: str,

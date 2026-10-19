@@ -983,6 +983,7 @@ def test_confirmation_cli_real_legacy_ledger_then_normal_resume_admission(tmp_pa
     assert entry["evidence"]["operator"] == pwd.getpwuid(os.getuid()).pw_name
     assert datetime.fromisoformat(entry["ts"]).utcoffset() == timedelta(0)
 
+
 # test_explicit_scope_confirmation_requires_exact_match removed: it exercised
 # confirm_task_stopped's old expected_owner_scope kwarg, which main's resume_guard
 # refactor replaced with a dedicated confirm_scope_gone() (confirm_task_stopped is

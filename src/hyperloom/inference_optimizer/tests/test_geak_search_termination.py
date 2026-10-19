@@ -50,7 +50,7 @@ def test_geak_exit_does_not_claim_exhausted_search(status, termination, reason):
     state = _kernel_agent_state(
         kernel_optimizer="geak",
         geak_result={"status": status, "search_termination": termination},
-        untried_hot_reusable_kernels=lambda: [],
+        untried_hot_reusable_kernels=list,
     )
     out = compute_next_phase(state, kernel_enabled=True)
     assert out is not None
@@ -77,7 +77,7 @@ def test_non_geak_exit_does_not_use_old_geak_result():
     state = _kernel_agent_state(
         kernel_optimizer="forge",
         geak_result={"search_termination": {"reason": "dispatch_cutoff"}},
-        untried_hot_reusable_kernels=lambda: [],
+        untried_hot_reusable_kernels=list,
     )
     out = compute_next_phase(state, kernel_enabled=True)
     assert out is not None
