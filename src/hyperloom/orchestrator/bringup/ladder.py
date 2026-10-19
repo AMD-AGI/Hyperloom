@@ -241,7 +241,9 @@ def _classified_streams(streams: BootStreams) -> tuple[tuple[str, str, rules.Fai
     return tuple(out)
 
 
-def _progress_across(streams: Sequence[tuple[str, str, rules.FailureSignature]]) -> tuple[LadderStage | None, dict[str, str]]:
+def _progress_across(
+    streams: Sequence[tuple[str, str, rules.FailureSignature]],
+) -> tuple[LadderStage | None, dict[str, str]]:
     """Return the highest milestone any stream witnessed and the markers proving it.
 
     The first stream to carry a marker owns it: streams arrive in precedence
