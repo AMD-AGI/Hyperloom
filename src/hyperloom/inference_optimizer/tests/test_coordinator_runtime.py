@@ -2763,3 +2763,16 @@ async def test_target_reached_close_still_runs_the_post_opt_roofline(session_dir
         assert ran == ["False"], f"post-opt roofline saw closing_phase={ran}"
     finally:
         await c.stop()
+
+
+def test_a_failing_proposal_outcome_record_propagates(monkeypatch) -> None:
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.orchestrator.loop import proposals
+
+    def _boom(**_kwargs) -> None:
+        raise RuntimeError("proposal outcome bug")
+
+    monkeypatch.setattr(phase_event, "record_proposal_outcome", _boom)
+
+    with pytest.raises(RuntimeError, match="proposal outcome bug"):
+        proposals._record_proposal_materialized("m-1", "t-1")
