@@ -157,7 +157,10 @@ this reference is partial — `breakdown/exporter.py` is authoritative.
 - New exports carry `hyperloom.session_breakdown.v7.0`. V7 is a breaking
   cutover only because `throughput_tok_s_per_gpu` in `outcome.baseline`,
   `outcome.final` and the `baseline` event measurement is renamed to
-  `output_throughput`; archived V6 documents keep the old key.
+  `output_throughput`; archived V6 documents keep the old key. Re-exporting a
+  pre-v7 session directory yields a null `outcome.baseline.output_throughput`,
+  keeps the session's old `contract_digest`, and overwrites the archived file
+  at the default output path.
 - V6 was a breaking
   cutover for the timeline: the actions record their own events as they run,
   so an event's `start_time` is when the work began rather than when its

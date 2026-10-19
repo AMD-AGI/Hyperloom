@@ -263,6 +263,10 @@ controlled by the CLI flag `--enable-roofline`, which defaults **on**. Pass
 breaking cutover for one rename: `throughput_tok_s_per_gpu` in
 `outcome.baseline`, `outcome.final` and the `baseline` event's `measurement` is
 now `output_throughput`; archived V6 documents keep the old key.
+Re-exporting a session directory created before V7 emits a null
+`outcome.baseline.output_throughput` and the `contract_digest` recorded at
+session creation, and the default output overwrites the archived
+`<session_dir>/session_breakdown.json`.
 
 V6 was the preceding cutover, for the timeline: each action records its own event as it
 runs, so an event's `start_time` is when the work started rather than when its

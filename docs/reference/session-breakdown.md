@@ -45,6 +45,13 @@ require a downstream migration before V7 readers consume them. Within V7,
 `perf.output_tput_per_gpu` also carries its value on the `baseline` event and
 on stack validation rows.
 
+Re-exporting a session directory created before V7 reads its old `baseline`
+event, so `outcome.baseline.output_throughput` is null while `outcome.final` and
+the gain keep their values, and `metadata.workflow.contract_digest` keeps the
+digest recorded at session creation rather than the one pinned by the packaged
+workflow-evaluation schema. The default output path overwrites the archived
+`<session_dir>/session_breakdown.json`; pass `--output` to keep it.
+
 V6 was the preceding cutover, for the timeline: each action records its own event
 while it runs, so an event's `start_time` is when the work began rather than
 when its artefacts were written, and the KERNEL and BASELINE projections are no
