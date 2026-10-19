@@ -74,8 +74,11 @@ def test_the_pass_runs_after_the_measured_round_on_a_booted_server_and_leaves_it
         outcome = _run(_decode_call(tmp_path))
 
     assert [c["grid"][0].name for c in grid.calls] == ["test", "decode_server"]
-    boot = grid.calls[1]
+    measured, boot = grid.calls
     assert boot["lifecycle_boot_only"] is True and boot["server_lifecycle"]["cleanup"] is False
+    assert boot["base_extra_envs"] == {"MAGPIE_RUN_PHASE": "server", "RUN_EVAL": "false", "NUM_PROMPTS": "1"}
+    assert "base_extra_envs" not in measured, "the measured round is the one that evaluates, as the call asked"
+    assert grid.configs[0]["benchmark"]["envs"]["RUN_EVAL"] == "true"
     plan = plan_pass(ISL, OSL, 5000)
     record = parse_outputs((tmp_path / "out" / OUTPUTS_PATH).read_text())
     assert record.identity == plan.identity

@@ -29,8 +29,8 @@ from hyperloom.orchestrator.actions.executors import (
 from hyperloom.orchestrator.actions.executors._server_lifecycle import REUSE_PORT_DEFAULT
 
 
-def _point(directory: Path, name: str, *, conc: int = 4, run_eval: object = "false") -> Path:
-    envs: dict[str, object] = {"TP": 1, "CONC": conc}
+def _point(directory: Path, name: str, *, conc: int = 4, run_eval: object = "false", **counts: object) -> Path:
+    envs: dict[str, object] = {"TP": 1, "CONC": conc, **counts}
     if run_eval is not None:
         envs["RUN_EVAL"] = run_eval
     path = directory / f"{name}.yaml"
@@ -402,13 +402,33 @@ def _lifecycle(call: dict[str, Any]) -> dict[str, Any] | None:
     return call.get("server_lifecycle")
 
 
+#: What a boot round adds to the point: the server phase, no evaluation, and one request of the client round Magpie runs
+#: after its server phase whatever the phase says.
+BOOT_ENVS = {"MAGPIE_RUN_PHASE": "server", "RUN_EVAL": "false", "NUM_PROMPTS": "1"}
+
+
+def _envs_handed_to_magpie(tmp_path: Path, call: dict[str, Any]) -> dict[str, Any]:
+    """The ``benchmark.envs`` ``run_grid`` makes of one recorded call: its own layering of the point and ``base_extra_envs``."""
+    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+
+    candidate = _build_variant_yaml(
+        Path(call["base_yaml_path"]),
+        "",
+        call["grid"][0],
+        output_subdir=tmp_path / "candidates" / str(len(list((tmp_path / "candidates").glob("*")))),
+        base_extra_envs=call.get("base_extra_envs"),
+    )
+    return yaml.safe_load(candidate.read_text())["benchmark"]["envs"]
+
+
 def test_a_sweep_boots_the_server_once_and_measures_the_levels_from_high_to_low_on_it(grid, server, tmp_path):
     outcome = _run(_sweep_call(tmp_path, 2, 8, 4))
 
     names = [c["grid"][0].name for c in grid.calls]
     assert names == ["c8", "c8", "c4", "c2"]
     boot, *reuse = grid.calls
-    assert boot["lifecycle_boot_only"] is True and boot["base_extra_envs"] == {"MAGPIE_RUN_PHASE": "server"}
+    assert boot["lifecycle_boot_only"] is True and boot["base_extra_envs"] == BOOT_ENVS
+    assert all("base_extra_envs" not in c for c in reuse), "the rounds that measure carry nothing of the boot"
     assert _lifecycle(boot)["cleanup"] is False
     assert all(c["server_already_ready"] is True for c in reuse)
     assert [_lifecycle(c)["cleanup"] for c in reuse] == [False, False, True]
@@ -418,6 +438,72 @@ def test_a_sweep_boots_the_server_once_and_measures_the_levels_from_high_to_low_
     assert all(c["warmup_before_measure"] is False for c in grid.calls)
     assert [r.point for r in outcome.rounds] == [1, 0 + 2, 0]  # c8, c4, c2 by their positions in the call
     assert len(server.teardowns) == 1
+
+
+def _graded_sweep(tmp_path: Path, *levels: int, run_eval: str = "true") -> TestCall:
+    """A sweep whose points hold the request counts the point generator gives them (an accuracy sweep by default)."""
+    points = [
+        _point(tmp_path, f"g{n}", conc=n, run_eval=run_eval, NUM_PROMPTS=n * 10, NUM_WARMUPS=min(n, 8)) for n in levels
+    ]
+    return _call(tmp_path, *points, prep="conc_sweep", accuracy=run_eval == "true")
+
+
+def test_every_boot_of_a_sweep_arm_does_not_evaluate_and_asks_one_request_and_no_measured_round_changes(
+    grid, server, tmp_path
+):
+    grid.answers["c8"] = grid.result("c8", status="failed", returncode=1, error_class="no_benchmark_workspace")
+    call = _graded_sweep(tmp_path, 8, 4, 2)
+    points = [Path(p).read_text() for p in call.points]
+
+    outcome = _run(call)
+
+    boots = [c for c in grid.calls if c.get("lifecycle_boot_only")]
+    measured = [c for c in grid.calls if not c.get("lifecycle_boot_only")]
+    assert [c["grid"][0].name for c in boots] == ["c8", "c4"], "the failed boot and the one it stepped down to"
+    assert [c["grid"][0].name for c in measured] == ["c4", "c2"]
+    assert all(c["base_extra_envs"] == BOOT_ENVS for c in boots)
+    assert all("base_extra_envs" not in c for c in measured)
+    assert [Path(p).read_text() for p in call.points] == points, "the points are the ones the call was accepted on"
+    for index, boot in enumerate(boots):
+        level = (8, 4)[index]
+        envs = _envs_handed_to_magpie(tmp_path, boot)
+        assert (envs["RUN_EVAL"], envs["NUM_PROMPTS"]) == ("false", "1"), f"the boot at {level}"
+        assert envs["MAGPIE_RUN_PHASE"] == "server" and envs["CONC"] == level
+        assert envs["NUM_WARMUPS"] == min(level, 8), "a variable outside the reuse check is the point's own"
+    for level, round_ in zip((4, 2), measured, strict=True):
+        envs = _envs_handed_to_magpie(tmp_path, round_)
+        assert (envs["RUN_EVAL"], envs["NUM_PROMPTS"], envs["NUM_WARMUPS"]) == ("true", level * 10, min(level, 8))
+        assert "MAGPIE_RUN_PHASE" not in envs
+    assert [r.phase for r in outcome.rounds if r.point == 1] == ["measure", "accuracy"]
+    assert outcome.returncode == 0
+
+
+def test_a_sweep_that_does_not_run_accuracy_boots_the_same_way(grid, server, tmp_path):
+    _run(_graded_sweep(tmp_path, 8, 4, run_eval="false"))
+
+    boot, *measured = grid.calls
+    assert boot["base_extra_envs"] == BOOT_ENVS and all("base_extra_envs" not in c for c in measured)
+
+
+def test_a_boot_does_not_pin_what_the_point_pins_for_a_graded_round(grid, server, tmp_path):
+    """The boot's overrides live in its round's environment; the call's own validation reads the point."""
+    call = _graded_sweep(tmp_path, 8, 4)
+
+    _run(call)  # an accuracy sweep whose points say RUN_EVAL=true is accepted, and its boots run
+
+    assert all(yaml.safe_load(Path(p).read_text())["benchmark"]["envs"]["RUN_EVAL"] == "true" for p in call.points)
+    assert grid.calls[0]["base_yaml_path"] == call.points[0]
+
+
+def test_an_agentx_boot_is_left_as_it_was(grid, server, tmp_path, monkeypatch):
+    """An AgentX point has no evaluation round and no prompt count: its boot round keeps only the server phase."""
+    point = _agentx_point(tmp_path, monkeypatch)
+
+    _run(_call(tmp_path, point, prep="conc_sweep"))
+
+    boot, *measured = grid.calls
+    assert boot["base_extra_envs"] == {"MAGPIE_RUN_PHASE": "server"}
+    assert all("base_extra_envs" not in c for c in measured)
 
 
 def test_no_call_of_a_sweep_runs_without_the_shared_server(grid, server, tmp_path):
@@ -952,6 +1038,7 @@ def test_a_repro_test_boots_the_server_runs_the_case_against_it_and_reports_the_
     (kwargs,) = grid.calls
     assert [v.name for v in kwargs["grid"]] == ["repro"]
     assert kwargs["lifecycle_boot_only"] is True and kwargs["warmup_before_measure"] is False
+    assert kwargs["base_extra_envs"] == BOOT_ENVS, "the repro boot is not an evaluation"
     assert kwargs["server_lifecycle"]["cleanup"] is False and kwargs["server_lifecycle"]["port"] == 8123
     assert (tmp_path / "case-ran").read_text() == "http://127.0.0.1:8123 /models/m\n"
     assert case.events == ["teardown after the case"], "the server stays up for the case and is reclaimed after it"
