@@ -170,7 +170,7 @@ class TestLease:
         try:
             assert orphaned_power_records(ledger) == {}
         finally:
-            os.chmod(tmp_path / "var", 0o755)
+            os.chmod(tmp_path / "var", 0o700)
 
     @pytest.mark.parametrize("mode", [0o777, 0o1777], ids=["world-writable", "sticky"])
     def test_a_directory_other_accounts_can_plant_records_in_is_refused(self, tmp_path, mode):
