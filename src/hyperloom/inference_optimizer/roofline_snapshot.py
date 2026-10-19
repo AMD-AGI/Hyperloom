@@ -9,10 +9,12 @@ import csv
 import logging
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.jsonio import read_json
+from hyperloom.inference_optimizer.roofline_ceiling import RooflineBreakdown
 
 log = logging.getLogger(__name__)
 
@@ -169,6 +171,8 @@ def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str
     """Add ``roofline_provenance`` (+ ``perfmodel_breakdown`` when the PerfModel succeeds) for *arm*."""
     try:
         from .roofline_ceiling import (
+            ComputeTarget,
+            DecodeShape,
             apply_runtime_dtype,
             compute_roofline_from_perfmodel,
             load_model_meta,
@@ -186,12 +190,8 @@ def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str
         compute_precision_tag = rt.compute_precision_tag or runtime.precision or "bf16"
         pm_bd = compute_roofline_from_perfmodel(
             meta=meta,
-            gpu_type=runtime.gpu_type,
-            concurrency=runtime.concurrency,
-            isl=runtime.isl,
-            osl=runtime.osl,
-            num_gpus=runtime.tp,
-            precision_tag=compute_precision_tag,
+            target=ComputeTarget(gpu_type=runtime.gpu_type, num_gpus=runtime.tp, precision_tag=compute_precision_tag),
+            shape=DecodeShape(isl=runtime.isl, osl=runtime.osl, concurrency=runtime.concurrency),
         )
         snapshot["roofline_provenance"] = {
             "formula": "perfmodel" if pm_bd is not None else "legacy",
@@ -234,26 +234,33 @@ def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str
         pass
 
 
+@dataclass(frozen=True)
+class RooflineReading:
+    """One arm's achieved throughput (in ``throughput_unit``) against its modelled ceiling.
+
+    The ms pair is the scriptable/diffusion compute-latency roofline: measured per-item e2e latency vs the ideal floor.
+    """
+
+    ceiling: RooflineBreakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
+    achieved_tok_per_sec: float = 0.0
+    throughput_unit: str = "tok/s"
+    e2e_mean_ms: float = 0.0
+    roofline_ideal_ms: float = 0.0
+
+
 def build_roofline_snapshot(
     *,
     snapshot_id: int | None,
     ts: str,
     analysis_md_path: str,
-    theoretical_peak_tok_per_sec: float = 0.0,
-    achieved_tok_per_sec: float = 0.0,
-    mem_ceiling_tok_per_sec: float = 0.0,
-    cmp_ceiling_tok_per_sec: float = 0.0,
-    bound_kind: str = "unknown",
-    throughput_unit: str = "tok/s",
+    reading: RooflineReading = RooflineReading(),
     framework: str = "",
-    e2e_mean_ms: float = 0.0,
-    roofline_ideal_ms: float = 0.0,
 ) -> dict[str, Any]:
     """Materialise one side (baseline or latest) of the comparison."""
-    within_raw = within_roofline_pct(
-        peak=theoretical_peak_tok_per_sec,
-        achieved=achieved_tok_per_sec,
-    )
+    ceiling = reading.ceiling
+    peak, achieved = ceiling.peak_tok_per_sec, reading.achieved_tok_per_sec
+    e2e_mean_ms, roofline_ideal_ms = reading.e2e_mean_ms, reading.roofline_ideal_ms
+    within_raw = within_roofline_pct(peak=peak, achieved=achieved)
     # Unit-agnostic fallback: with no tok/s ceiling, derive within/gap from the ms pair as within = ideal / measured.
     if within_raw is None and roofline_ideal_ms > 0 and e2e_mean_ms > 0:
         within_raw = round(roofline_ideal_ms / e2e_mean_ms * 100.0, 2)
@@ -272,15 +279,13 @@ def build_roofline_snapshot(
         "top_bottleneck": None,
         "top_kernel": None,
         # Primary decode ceiling plus memory/compute sides; None when unavailable.
-        "theoretical_peak_tok_per_sec": (
-            float(theoretical_peak_tok_per_sec) if theoretical_peak_tok_per_sec > 0 else None
-        ),
-        "roofline_mem_ceiling_tok_per_sec": (float(mem_ceiling_tok_per_sec) if mem_ceiling_tok_per_sec > 0 else None),
-        "roofline_cmp_ceiling_tok_per_sec": (float(cmp_ceiling_tok_per_sec) if cmp_ceiling_tok_per_sec > 0 else None),
-        "roofline_bound_kind": (str(bound_kind) if bound_kind else "unknown"),
+        "theoretical_peak_tok_per_sec": (float(peak) if peak > 0 else None),
+        "roofline_mem_ceiling_tok_per_sec": (float(ceiling.mem_tok_per_sec) if ceiling.mem_tok_per_sec > 0 else None),
+        "roofline_cmp_ceiling_tok_per_sec": (float(ceiling.cmp_tok_per_sec) if ceiling.cmp_tok_per_sec > 0 else None),
+        "roofline_bound_kind": (str(ceiling.bound_kind) if ceiling.bound_kind else "unknown"),
         # Unit for the *_tok_per_sec fields ("tok/s" text-gen, "img/s" xDiT).
-        "throughput_unit": (str(throughput_unit) if throughput_unit else "tok/s"),
-        "achieved_tok_per_sec": (float(achieved_tok_per_sec) if achieved_tok_per_sec > 0 else None),
+        "throughput_unit": (str(reading.throughput_unit) if reading.throughput_unit else "tok/s"),
+        "achieved_tok_per_sec": (float(achieved) if achieved > 0 else None),
         # Scriptable/diffusion siblings (compute-latency roofline); None for serving.
         "e2e_mean_ms": (float(e2e_mean_ms) if e2e_mean_ms > 0 else None),
         "roofline_ideal_ms": (float(roofline_ideal_ms) if roofline_ideal_ms > 0 else None),

@@ -167,6 +167,16 @@ def test_diffusion_memory_ceiling_declines_degenerate_input(over):
     assert rc.compute_diffusion_mem_img_per_sec(**kw) == 0.0
 
 
+def _diffusion_compute_img_per_sec(
+    *, gpu_type, num_gpus, precision_tag, dit_params, latent_tokens, num_layers, hidden_size, num_steps
+):
+    return rc.compute_diffusion_compute_img_per_sec(
+        rc.ComputeTarget(gpu_type=gpu_type, num_gpus=num_gpus, precision_tag=precision_tag),
+        rc.DitGeometry(params=dit_params, latent_tokens=latent_tokens, num_layers=num_layers, hidden_size=hidden_size),
+        num_steps=num_steps,
+    )
+
+
 def test_diffusion_compute_ceiling_sums_linear_and_attention_flops():
     kw = dict(
         gpu_type="mi300x",
@@ -181,7 +191,7 @@ def test_diffusion_compute_ceiling_sums_linear_and_attention_flops():
     linear = 2.0 * kw["dit_params"] * kw["latent_tokens"]
     attn = 4.0 * kw["num_layers"] * kw["latent_tokens"] ** 2 * kw["hidden_size"]
     peak = rc._resolve_achievable_tflops("mi300x", "bf16") * 1e12
-    assert rc.compute_diffusion_compute_img_per_sec(**kw) == pytest.approx(peak / (kw["num_steps"] * (linear + attn)))
+    assert _diffusion_compute_img_per_sec(**kw) == pytest.approx(peak / (kw["num_steps"] * (linear + attn)))
 
 
 def test_diffusion_compute_ceiling_scales_with_the_gpu_count():
@@ -194,8 +204,8 @@ def test_diffusion_compute_ceiling_scales_with_the_gpu_count():
         hidden_size=128,
         num_steps=10,
     )
-    assert rc.compute_diffusion_compute_img_per_sec(num_gpus=8, **kw) == pytest.approx(
-        8 * rc.compute_diffusion_compute_img_per_sec(num_gpus=1, **kw)
+    assert _diffusion_compute_img_per_sec(num_gpus=8, **kw) == pytest.approx(
+        8 * _diffusion_compute_img_per_sec(num_gpus=1, **kw)
     )
 
 
@@ -212,7 +222,7 @@ def test_diffusion_compute_ceiling_declines_degenerate_input(over):
         num_steps=4,
     )
     kw.update(over)
-    assert rc.compute_diffusion_compute_img_per_sec(**kw) == 0.0
+    assert _diffusion_compute_img_per_sec(**kw) == 0.0
 
 
 # ---- state-level diffusion breakdown ----

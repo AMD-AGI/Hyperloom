@@ -77,8 +77,8 @@ def test_infera_probe_parses_product_name(monkeypatch):
         lambda _hosts, dest: dest,
     )
 
-    def _fake_ssh_run(host, command, **_kwargs):
-        assert host == "10.0.0.2"
+    def _fake_ssh_run(target, command, **_kwargs):
+        assert target.host == "10.0.0.2"
         return subprocess.CompletedProcess(args=[command], returncode=0, stdout="GPU[0] : MI325X\n", stderr="")
 
     monkeypatch.setattr(gpu_probe.ssh_client, "ssh_run", _fake_ssh_run)
