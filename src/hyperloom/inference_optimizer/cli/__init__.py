@@ -491,7 +491,7 @@ def _probe_llm_catalog(
                 headers=headers,
                 timeout=_CATALOG_REQUEST_TIMEOUT_SEC,
             )
-        except Exception as exc:  # noqa: BLE001
+        except (httpx.HTTPError, httpx.InvalidURL) as exc:
             last_err = f"{type(exc).__name__}: {exc}"
             print(f"Preflight: catalog probe attempt {i + 1}/{len(delays)} failed: {last_err}")
             continue
