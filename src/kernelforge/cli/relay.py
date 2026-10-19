@@ -10,6 +10,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import Any
 
 from kernelforge.cli.lanes import LaneBinding
@@ -22,7 +23,9 @@ from kernelforge.llm.gateway import (
 from kernelforge.loop.agent_relay import (
     AgentAvailabilitySnapshot,
     AgentProfile,
+    AgentProfileSpec,
     AgentRelayConfig,
+    AgentRelayPolicy,
     ProfileAvailability,
     ProviderAvailability,
     select_start_profile,
@@ -44,8 +47,8 @@ class SearchActorBuildContext:
     critic_enabled: bool
     usage: Any = None
     supervisor_backend: str = ""
-    relay_enabled: bool = False
-    primary_provider: str = ""
+    # This session's relay; ``None`` for a campaign without relay, whose one actor may fall back to another provider.
+    relay: AgentRelayConfig | None = None
 
     def build(self, profile: AgentProfile) -> SearchActorBundle:
         """Build and probe all profile-bound planning and implementation services."""
@@ -57,11 +60,7 @@ class SearchActorBuildContext:
         from kernelforge.orchestrator.orchestration import make_orchestration_service
         from kernelforge.orchestrator.supervisor import make_supervisor_fn
 
-        actor_config = (
-            config_for_profile(self.config, profile, primary_provider=self.primary_provider)
-            if self.relay_enabled
-            else self.config
-        )
+        actor_config = self._profile_config(profile) if self.relay is not None else self.config
         setup = replace(self.setup, session=replace(self.setup.session, agent_backend=profile.provider))
         actor_fn = make_agent_fn(actor_config, setup, usage=self.usage)
         effective_profile = self._resolved_profile(profile, actor_fn)
@@ -79,21 +78,33 @@ class SearchActorBuildContext:
             definitions=self.specialist_definitions,
             enable_plan_critic=self.critic_enabled,
         )
+        supervisor_provider = self.supervisor_backend or profile.provider
         supervisor = make_supervisor_fn(
             program_md=self.program_md,
             gpu_target=actor_config.gpu_target,
-            backend=profile.provider if self.relay_enabled else self.supervisor_backend or profile.provider,
+            backend=supervisor_provider,
             usage=self.usage,
-            config=actor_config,
+            config=self._supervisor_config(supervisor_provider, profile, actor_config),
         )
         return SearchActorBundle(effective_profile, actor_fn, orchestration, lane_factory, supervisor)
+
+    def _profile_config(self, profile: AgentProfile) -> Config:
+        return config_for_profile(self.config, profile, primary_provider=self.relay.primary_profile.provider)
+
+    def _supervisor_config(self, provider: str, profile: AgentProfile, actor_config: Config) -> Config:
+        """The Supervisor shares the actor's line unless ``--supervisor-backend`` names another provider."""
+        if provider == profile.provider:
+            return actor_config
+        members = self.relay.profiles if self.relay is not None else ()
+        member = next((candidate for candidate in members if candidate.provider == provider), None)
+        return self._profile_config(member) if member is not None else self.config
 
     def _resolved_profile(self, profile: AgentProfile, actor_fn: Callable) -> AgentProfile:
         effective = (
             getattr(actor_fn, "backend_name", profile.provider),
             getattr(actor_fn, "backend_model", profile.model),
         )
-        if self.relay_enabled and effective != (profile.provider, profile.model):
+        if self.relay is not None and effective != (profile.provider, profile.model):
             raise ValueError(f"relay profile {profile.profile_id} resolved to {effective[0]}/{effective[1]}")
         if effective == (profile.provider, profile.model):
             return profile
@@ -101,31 +112,49 @@ class SearchActorBuildContext:
         return AgentProfile(profile.profile_id, effective[0], effective[1], profile.reasoning_effort)
 
 
-def resolve_default_relay_config(
+def resolve_relay_policy(
     config: Config,
     *,
     blockage_threshold: int = 3,
-) -> AgentRelayConfig:
-    """Build one profile per registered provider, the selected one first as primary.
-
-    Every model follows the rule the primary already uses: ``--model`` for the primary, else the provider's model
-    variable, else the registry's ``default_model``. A model the gateway does not serve fails the startup probe and
-    leaves that profile unavailable rather than running something else.
-    """
+) -> AgentRelayPolicy:
+    """One relay member per registered provider, the provider this campaign starts on first as primary."""
     from kernelforge.agent_backends.registry import list_agent_providers
 
-    strict_config = replace(config, agent_fallback_provider="")
-    primary = strict_config.agent_runtime()
-    profiles = [AgentProfile(primary.provider, primary.provider, primary.model, primary.reasoning_effort)]
-    for provider in list_agent_providers():
-        if provider == primary.provider:
-            continue
-        runtime = strict_config.agent_runtime_for(provider, resolve_agent_model(provider))
-        profiles.append(AgentProfile(runtime.provider, runtime.provider, runtime.model, runtime.reasoning_effort))
-    return AgentRelayConfig(
-        primary_profile_id=primary.provider,
-        profiles=tuple(profiles),
+    primary = replace(config, agent_fallback_provider="").agent_runtime().provider
+    providers = [primary, *(provider for provider in list_agent_providers() if provider != primary)]
+    return AgentRelayPolicy(
+        primary_profile_id=primary,
+        profiles=tuple(AgentProfileSpec(provider, provider) for provider in providers),
         blockage_threshold=blockage_threshold,
+    )
+
+
+def resolve_session_relay(policy: AgentRelayPolicy | None, config: Config) -> AgentRelayConfig | None:
+    """Resolve every relay member's model and reasoning effort from this session's options.
+
+    The primary takes ``--model``; every member without one takes its provider's model variable, else the registry's
+    ``default_model``. A model the gateway does not serve fails the startup probe and leaves that profile unavailable
+    rather than running something else. Raises ``ValueError`` when the session names a primary provider other than
+    the one the campaign was created with.
+    """
+    if policy is None:
+        return None
+    primary = policy.primary_profile
+    if config.agent_backend not in ("auto", primary.provider):
+        raise ValueError(
+            f"this campaign's model relay starts on {primary.provider}; the agent backend cannot change on resume "
+            f"(got {config.agent_backend} from --agent-backend or FORGE_AGENT_BACKEND)"
+        )
+    strict_config = replace(config, agent_fallback_provider="")
+    profiles = []
+    for member in policy.profiles:
+        model = config.agent_model if member.profile_id == primary.profile_id else ""
+        runtime = strict_config.agent_runtime_for(member.provider, model or resolve_agent_model(member.provider))
+        profiles.append(AgentProfile(member.profile_id, member.provider, runtime.model, runtime.reasoning_effort))
+    return AgentRelayConfig(
+        primary_profile_id=primary.profile_id,
+        profiles=tuple(profiles),
+        blockage_threshold=policy.blockage_threshold,
     )
 
 
@@ -178,62 +207,73 @@ def probe_agent_profiles(
     """Probe every exact provider/model pair before optimization setup begins; ``None`` for a campaign without relay."""
     if relay_config is None:
         return None
+    profile_status = {
+        profile.profile_id: probe_agent_profile(profile, relay_config=relay_config, config=config, workspace=workspace)
+        for profile in relay_config.profiles
+    }
+    provider_status = {
+        status.provider: ProviderAvailability(
+            available=status.provider_available,
+            reason="" if status.provider_available else status.reason,
+        )
+        for status in profile_status.values()
+    }
+    return AgentAvailabilitySnapshot(
+        checked_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        providers=provider_status,
+        profiles=profile_status,
+    )
+
+
+def probe_agent_profile(
+    profile: AgentProfile,
+    *,
+    relay_config: AgentRelayConfig,
+    config: Config,
+    workspace: str,
+) -> ProfileAvailability:
+    """Run one profile's strict provider/model check: at startup, and again after its API retries ran out."""
     from kernelforge.agent_backends.registry import (
         create_registered_backend,
         get_agent_provider,
     )
 
-    provider_status: dict[str, ProviderAvailability] = {}
-    profile_status: dict[str, ProfileAvailability] = {}
-    for profile in relay_config.profiles:
-        registration = get_agent_provider(profile.provider)
-        provider_available, failure = _provider_is_available(registration)
-        model_available = False
-        if provider_available:
-            borrowed = False
-            try:
-                strict_config = config_for_profile(
-                    config,
-                    profile,
-                    primary_provider=relay_config.primary_profile.provider,
-                    precheck=True,
+    provider_available, failure = _provider_is_available(get_agent_provider(profile.provider))
+    model_available = False
+    if provider_available:
+        borrowed = False
+        try:
+            strict_config = config_for_profile(
+                config,
+                profile,
+                primary_provider=relay_config.primary_profile.provider,
+                precheck=True,
+            )
+            borrowed = profile.provider != relay_config.primary_profile.provider and bool(strict_config.agent_options)
+            if borrowed:
+                print(
+                    f"  Agent profile: {profile.profile_id} has no gateway of its own; "
+                    "probing the other configured gateway on its protocol",
+                    file=sys.stderr,
                 )
-                borrowed = profile.provider != relay_config.primary_profile.provider and bool(
-                    strict_config.agent_options
-                )
-                if borrowed:
-                    print(
-                        f"  Agent profile: {profile.profile_id} has no gateway of its own; "
-                        "probing the other configured gateway on its protocol",
-                        file=sys.stderr,
-                    )
-                create_registered_backend(
-                    strict_config.agent_runtime(),
-                    preflight=True,
-                    probe_cwd=workspace,
-                )
-                model_available = True
-                failure = ""
-            except Exception as error:  # noqa: BLE001 - isolate optional profiles
-                failure = f"{type(error).__name__}: {error}"
-                if borrowed:
-                    failure = f"the other configured gateway does not serve this protocol: {failure}"
-        provider_status[profile.provider] = ProviderAvailability(
-            available=provider_available,
-            reason="" if provider_available else failure,
-        )
-        profile_status[profile.profile_id] = ProfileAvailability(
-            provider=profile.provider,
-            model=profile.model,
-            provider_available=provider_available,
-            model_available=model_available,
-            available=provider_available and model_available,
-            reason="" if model_available else failure,
-        )
-    return AgentAvailabilitySnapshot(
-        checked_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        providers=provider_status,
-        profiles=profile_status,
+            create_registered_backend(
+                strict_config.agent_runtime(),
+                preflight=True,
+                probe_cwd=workspace,
+            )
+            model_available = True
+            failure = ""
+        except Exception as error:  # noqa: BLE001 - isolate optional profiles
+            failure = f"{type(error).__name__}: {error}"
+            if borrowed:
+                failure = f"the other configured gateway does not serve this protocol: {failure}"
+    return ProfileAvailability(
+        provider=profile.provider,
+        model=profile.model,
+        provider_available=provider_available,
+        model_available=model_available,
+        available=provider_available and model_available,
+        reason="" if model_available else failure,
     )
 
 
@@ -243,6 +283,7 @@ def build_search_actor_pool(
     bundle_factory: Callable[[AgentProfile], SearchActorBundle],
     availability: AgentAvailabilitySnapshot | None = None,
     fallback_provider: str = "",
+    recheck: Callable[[AgentProfile], ProfileAvailability] | None = None,
 ) -> SearchActorPool:
     """Construct every available profile's search actor and choose the profile this session starts on.
 
@@ -296,6 +337,7 @@ def build_search_actor_pool(
         availability=snapshot,
         bundles=bundles,
         start_profile_id=select_start_profile(relay_config, snapshot, fallback_provider=fallback_provider),
+        recheck=recheck,
     )
 
 
@@ -324,24 +366,29 @@ class SearchActorStartup:
 
 
 def start_search_actors(
-    campaign_relay: AgentRelayConfig | None,
+    session_relay: AgentRelayConfig | None,
     builder: SearchActorBuildContext,
     *,
     availability: AgentAvailabilitySnapshot | None,
+    workspace: str,
 ) -> SearchActorStartup:
     """Build every runnable profile's search actor, choose the start profile, and report both.
 
     A campaign without relay runs the configured provider as its only profile, with provider fallback allowed.
     Raises ``ValueError`` when no profile the session may start on can run.
     """
-    relay_enabled = campaign_relay is not None
-    relay_config = campaign_relay or _single_profile_relay(builder.config)
-    primary_provider = relay_config.primary_profile.provider
+    relay_enabled = session_relay is not None
+    relay_config = session_relay or _single_profile_relay(builder.config)
     pool = build_search_actor_pool(
         relay_config,
-        bundle_factory=replace(builder, relay_enabled=relay_enabled, primary_provider=primary_provider).build,
+        bundle_factory=replace(builder, relay=session_relay).build,
         availability=availability,
         fallback_provider=builder.config.agent_fallback_provider,
+        recheck=(
+            partial(probe_agent_profile, relay_config=relay_config, config=builder.config, workspace=workspace)
+            if relay_enabled
+            else None
+        ),
     )
     _report_search_actors(pool, relay_enabled=relay_enabled)
     return SearchActorStartup(pool, relay_enabled)
@@ -409,8 +456,10 @@ __all__ = [
     "agent_relay_summary",
     "build_search_actor_pool",
     "config_for_profile",
+    "probe_agent_profile",
     "probe_agent_profiles",
     "relay_switch_possible",
-    "resolve_default_relay_config",
+    "resolve_relay_policy",
+    "resolve_session_relay",
     "start_search_actors",
 ]

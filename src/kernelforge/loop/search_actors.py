@@ -12,6 +12,7 @@ from kernelforge.loop.agent_relay import (
     AgentAvailabilitySnapshot,
     AgentProfile,
     AgentRelayConfig,
+    ProfileAvailability,
 )
 
 
@@ -36,9 +37,12 @@ class SearchActorPool:
         availability: AgentAvailabilitySnapshot,
         bundles: Mapping[str, SearchActorBundle],
         start_profile_id: str = "",
+        recheck: Callable[[AgentProfile], ProfileAvailability] | None = None,
     ) -> None:
         self.config = config
         self.availability = availability
+        # Re-runs one profile's startup check; ``None`` when this session cannot check a profile again.
+        self.recheck = recheck
         self._bundles = dict(bundles)
         self.start_profile_id = start_profile_id or config.primary_profile_id
         configured = {profile.profile_id for profile in config.profiles}

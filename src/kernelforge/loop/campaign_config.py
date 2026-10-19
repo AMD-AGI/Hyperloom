@@ -29,7 +29,7 @@ from kernelforge.knowledge.kb_store.identity.implementation import (
 from kernelforge.loop.new_path_allowlist import normalize_commit_new_paths
 from kernelforge.mcp_server.tools.pmc import derive_kernel_names
 from kernelforge.durable_io import atomic_write_text
-from kernelforge.loop.agent_relay import AgentRelayConfig
+from kernelforge.loop.agent_relay import AgentRelayPolicy
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 
@@ -76,7 +76,7 @@ class CampaignConfig:
     # Paths the Implementer may CREATE and still have committed with a KEEP (see
     # ``IterationConfig.commit_new_paths``).
     commit_new_paths: list[str] = field(default_factory=list)
-    agent_relay: AgentRelayConfig | None = None
+    agent_relay: AgentRelayPolicy | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -120,7 +120,7 @@ class CampaignConfig:
             # acted on later.
             commit_new_paths=normalize_commit_new_paths(payload["commit_new_paths"]),
             agent_relay=(
-                AgentRelayConfig.from_dict(payload["agent_relay"]) if payload["agent_relay"] is not None else None
+                AgentRelayPolicy.from_dict(payload["agent_relay"]) if payload["agent_relay"] is not None else None
             ),
         )
         if config.nproc_per_node < 1:
@@ -456,8 +456,8 @@ class CampaignInputs:
     nproc_per_node: int = 1
     bench_repeat: int = 1
     commit_new_paths: tuple[str, ...] = ()
-    # The Agent profiles a blockage may relay between, resolved once when the campaign is created.
-    agent_relay: AgentRelayConfig | None = None
+    # The Agent profiles a blockage may relay between, fixed when the campaign is created.
+    agent_relay: AgentRelayPolicy | None = None
 
 
 def _normalized_sources(workspace: Path, kernel: str, source_files: str) -> list[str]:

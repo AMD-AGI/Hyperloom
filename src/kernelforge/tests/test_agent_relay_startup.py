@@ -1,23 +1,27 @@
-"""Tests for startup-only Agent relay availability checks."""
+"""Tests for Agent relay resolution, startup availability checks and search actor construction."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 import pytest
 
 import kernelforge.agent_backends.registry as registry
-from kernelforge.agent_backends.registry import get_agent_provider
 from kernelforge.cli.relay import (
+    SearchActorBuildContext,
     build_search_actor_pool,
     probe_agent_profiles,
-    resolve_default_relay_config,
+    resolve_relay_policy,
+    resolve_session_relay,
 )
 from kernelforge.config import Config
 from kernelforge.loop.agent_relay import (
     AgentAvailabilitySnapshot,
     AgentProfile,
+    AgentProfileSpec,
     AgentRelayConfig,
+    AgentRelayPolicy,
     ProfileAvailability,
     select_start_profile,
 )
@@ -41,11 +45,49 @@ def _provider(name: str):
     )
 
 
+def _session_relay(config: Config) -> AgentRelayConfig:
+    return resolve_session_relay(resolve_relay_policy(config), config)
+
+
+def test_policy_records_one_member_per_provider_without_models(tmp_path):
+    policy = resolve_relay_policy(Config(workspace=str(tmp_path), agent_backend="codex", agent_model="gpt-6-astra"))
+
+    assert policy == AgentRelayPolicy(
+        primary_profile_id="codex",
+        profiles=(AgentProfileSpec("codex", "codex"), AgentProfileSpec("claude", "claude")),
+        blockage_threshold=3,
+    )
+    assert (
+        AgentRelayPolicy.from_dict(
+            {
+                "primary_profile_id": "codex",
+                "profiles": [
+                    {"profile_id": "codex", "provider": "codex"},
+                    {"profile_id": "claude", "provider": "claude"},
+                ],
+                "blockage_threshold": 3,
+            }
+        )
+        == policy
+    )
+
+
+def test_a_persisted_profile_model_is_refused():
+    with pytest.raises(ValueError, match="unknown fields: model"):
+        AgentRelayPolicy.from_dict(
+            {
+                "primary_profile_id": "claude",
+                "profiles": [{"profile_id": "claude", "provider": "claude", "model": "claude-opus-5"}],
+                "blockage_threshold": 3,
+            }
+        )
+
+
 def test_profiles_read_each_providers_model_variable(monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-5")
     monkeypatch.setenv("CODEX_MODEL", "gpt-6-astra")
 
-    relay_config = resolve_default_relay_config(
+    relay_config = _session_relay(
         Config(
             workspace=str(tmp_path),
             agent_backend="claude",
@@ -65,7 +107,7 @@ def test_primary_keeps_an_explicit_model_over_its_variable(monkeypatch, tmp_path
     monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-5")
     monkeypatch.setenv("CODEX_MODEL", "gpt-6-astra")
 
-    relay_config = resolve_default_relay_config(
+    relay_config = _session_relay(
         Config(
             workspace=str(tmp_path),
             agent_backend="claude",
@@ -81,7 +123,7 @@ def test_unset_model_variables_fall_back_to_registry_defaults(monkeypatch, tmp_p
     monkeypatch.delenv("CLAUDE_MODEL", raising=False)
     monkeypatch.delenv("CODEX_MODEL", raising=False)
 
-    relay_config = resolve_default_relay_config(
+    relay_config = _session_relay(
         Config(
             workspace=str(tmp_path),
             agent_backend="claude",
@@ -90,9 +132,111 @@ def test_unset_model_variables_fall_back_to_registry_defaults(monkeypatch, tmp_p
     )
 
     assert [(profile.profile_id, profile.model) for profile in relay_config.profiles] == [
-        ("claude", get_agent_provider("claude").default_model),
-        ("codex", get_agent_provider("codex").default_model),
+        ("claude", registry.get_agent_provider("claude").default_model),
+        ("codex", registry.get_agent_provider("codex").default_model),
     ]
+
+
+def test_a_resumed_session_runs_the_model_and_effort_it_was_given(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEX_MODEL", "gpt-6-astra")
+    policy = resolve_relay_policy(Config(workspace=str(tmp_path), agent_backend="claude", agent_model="claude-opus-5"))
+
+    relay_config = resolve_session_relay(
+        policy,
+        Config(
+            workspace=str(tmp_path),
+            agent_backend="claude",
+            agent_model="claude-opus-4-8",
+            agent_reasoning_effort="low",
+        ),
+    )
+
+    assert [(profile.profile_id, profile.model, profile.reasoning_effort) for profile in relay_config.profiles] == [
+        ("claude", "claude-opus-4-8", "low"),
+        ("codex", "gpt-6-astra", "low"),
+    ]
+
+
+def test_a_resumed_session_without_a_backend_starts_on_the_campaigns_primary(monkeypatch, tmp_path):
+    monkeypatch.setenv("CODEX_MODEL", "gpt-6-astra")
+    policy = resolve_relay_policy(Config(workspace=str(tmp_path), agent_backend="codex", agent_model="gpt-6-astra"))
+
+    relay_config = resolve_session_relay(policy, Config(workspace=str(tmp_path), agent_backend="auto", agent_model=""))
+
+    assert relay_config.primary_profile == AgentProfile(
+        "codex", "codex", "gpt-6-astra", relay_config.primary_profile.reasoning_effort
+    )
+
+
+def test_a_resumed_session_cannot_change_the_primary_provider(tmp_path):
+    policy = resolve_relay_policy(Config(workspace=str(tmp_path), agent_backend="codex", agent_model="gpt-6-astra"))
+
+    with pytest.raises(ValueError, match="model relay starts on codex; the agent backend cannot change on resume"):
+        resolve_session_relay(policy, Config(workspace=str(tmp_path), agent_backend="claude"))
+
+
+def test_a_campaign_without_relay_has_no_session_relay(tmp_path):
+    assert resolve_session_relay(None, Config(workspace=str(tmp_path), agent_backend="claude")) is None
+
+
+@dataclass(frozen=True)
+class _Session:
+    agent_backend: str = ""
+
+
+@dataclass(frozen=True)
+class _Setup:
+    session: _Session = field(default_factory=_Session)
+
+
+def _capture_supervisor(monkeypatch) -> dict:
+    from kernelforge.cli import lanes
+    from kernelforge.orchestrator import agent, orchestration, supervisor
+
+    captured: dict = {}
+
+    def make_agent_fn(config, setup, **_kwargs):
+        return SimpleNamespace(backend_name=config.agent_backend, backend_model=config.agent_model)
+
+    def make_supervisor_fn(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(agent, "make_agent_fn", make_agent_fn)
+    monkeypatch.setattr(orchestration, "make_orchestration_service", lambda **_kwargs: None)
+    monkeypatch.setattr(supervisor, "make_supervisor_fn", make_supervisor_fn)
+    monkeypatch.setattr(lanes, "_make_lane_agent_factory", lambda **_kwargs: None)
+    monkeypatch.setattr(lanes, "_require_lane_provider_capabilities", lambda *_args: None)
+    return captured
+
+
+@pytest.mark.parametrize(
+    ("relay", "supervisor_backend", "provider", "model"),
+    [
+        (True, "", "claude", "claude-opus-5"),
+        (True, "codex", "codex", "gpt-6-astra"),
+        (False, "codex", "codex", "claude-opus-5"),
+    ],
+    ids=["relay_follows_the_actor", "relay_honours_the_flag", "no_relay_honours_the_flag"],
+)
+def test_supervisor_backend_flag_is_honoured(monkeypatch, tmp_path, relay, supervisor_backend, provider, model):
+    captured = _capture_supervisor(monkeypatch)
+    config = Config(workspace=str(tmp_path), agent_backend="claude", agent_model="claude-opus-5")
+    builder = SearchActorBuildContext(
+        config=config,
+        setup=_Setup(),
+        lane_binding=None,
+        lanes=1,
+        program_md="",
+        specialist_definitions={},
+        critic_enabled=False,
+        supervisor_backend=supervisor_backend,
+        relay=_relay_config() if relay else None,
+    )
+
+    builder.build(AgentProfile("claude", "claude", "claude-opus-5", "max"))
+
+    assert captured["backend"] == provider
+    assert captured["config"].agent_model == model
 
 
 def test_executable_override_stays_with_the_primary_provider(tmp_path):

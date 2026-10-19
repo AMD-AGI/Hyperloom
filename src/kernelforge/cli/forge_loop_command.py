@@ -1300,7 +1300,7 @@ class ForgeLoopRequest:
             default="",
             callback=_validate_optional_agent_provider,
             help="Registered provider for the AVO supervisor. Omit to follow "
-            "the effectively resolved Implementer provider, so one "
+            "the provider of the Agent profile running the search, so one "
             "--agent-backend value controls every local agent.",
         ),
         click.option(
@@ -1596,10 +1596,10 @@ def forge_loop(request: ForgeLoopRequest):
         campaign_store=campaign_store,
         has_run_artifacts=has_run_artifacts,
     )
-    from kernelforge.cli.relay import resolve_default_relay_config
+    from kernelforge.cli.relay import resolve_relay_policy
 
     agent_runtime_overrides = _agent_runtime_overrides(request.agent)
-    requested_relay_config = resolve_default_relay_config(
+    requested_relay_policy = resolve_relay_policy(
         Config.from_env(workspace=str(workspace), knowledge_config=knowledge_config, **agent_runtime_overrides)
     )
 
@@ -1624,7 +1624,7 @@ def forge_loop(request: ForgeLoopRequest):
                 nproc_per_node=request.loop_shape.nproc_per_node,
                 bench_repeat=request.loop_shape.bench_repeat,
                 commit_new_paths=tuple(request.loop_shape.commit_new_paths),
-                agent_relay=requested_relay_config,
+                agent_relay=requested_relay_policy,
             ),
             resume=resume,
             prepare_task=request.prepare_task,
@@ -1683,9 +1683,13 @@ def forge_loop(request: ForgeLoopRequest):
         knowledge_config=knowledge_config,
         **overrides,
     )
-    from kernelforge.cli.relay import probe_agent_profiles
+    from kernelforge.cli.relay import probe_agent_profiles, resolve_session_relay
 
-    startup_availability = probe_agent_profiles(campaign.agent_relay, config=config, workspace=str(workspace))
+    try:
+        session_relay = resolve_session_relay(campaign.agent_relay, config)
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
+    startup_availability = probe_agent_profiles(session_relay, config=config, workspace=str(workspace))
     # Two roots by design: resume artifacts (run_state/candidates/best) always live under
     # <workspace>/forge_experiments (campaign_root); diagnostics and the external-recovery checkpoint go to
     # --experiments-dir when the caller supplies a distinct one (e.g. Hyperloom's output dir), else campaign_root.
@@ -1940,7 +1944,12 @@ def forge_loop(request: ForgeLoopRequest):
         supervisor_backend=request.roles.supervisor_backend,
     )
     try:
-        actors = start_search_actors(campaign.agent_relay, actor_builder, availability=startup_availability)
+        actors = start_search_actors(
+            session_relay,
+            actor_builder,
+            availability=startup_availability,
+            workspace=str(workspace),
+        )
     except (OSError, RuntimeError, ValueError) as error:
         raise click.ClickException(f"Agent startup availability check failed: {error}") from error
     start_bundle = actors.start_bundle

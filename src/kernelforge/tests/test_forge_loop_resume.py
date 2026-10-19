@@ -30,6 +30,8 @@ from kernelforge.loop.campaign_config import (
 from kernelforge.loop.experience import ExperienceLedger
 from kernelforge.loop.agent_relay import (
     AgentAvailabilitySnapshot,
+    AgentProfileSpec,
+    AgentRelayPolicy,
     AgentRelayState,
     ProfileAvailability,
     ProviderAvailability,
@@ -1205,6 +1207,60 @@ def test_forge_loop_resume_routes_new_budget_without_warmstart(tmp_path, monkeyp
     assert payload["kb_experience"]["read"]["read_reason"] == "resume"
     assert payload["kb_experience"]["read"]["read_error"] == ""
     assert captured["kb_experience"][1]["read"] == payload["kb_experience"]["read"]
+
+
+def _resume_relay_campaign(tmp_path, monkeypatch, extra_args):
+    """Resume a campaign created with relay starting on claude, under this session's agent options."""
+    captured = _install_cli_fakes(monkeypatch, tmp_path)
+    fake_from_env = forge_loop_command.Config.from_env
+
+    def from_env(**overrides):
+        config = fake_from_env(**overrides)
+        config.agent_backend = overrides.get("agent_backend", "auto")
+        return config
+
+    monkeypatch.setattr(forge_loop_command.Config, "from_env", staticmethod(from_env))
+    probed = captured.setdefault("probed_relays", [])
+
+    def probe(relay_config, **kwargs):
+        probed.append(relay_config)
+        return captured["fake_probe"](relay_config, **kwargs)
+
+    captured["fake_probe"] = relay_module.probe_agent_profiles
+    monkeypatch.setattr(relay_module, "probe_agent_profiles", probe)
+    workspace, kernel, driver = _initialize_workspace(tmp_path)
+    policy = AgentRelayPolicy(
+        primary_profile_id="claude",
+        profiles=(AgentProfileSpec("claude", "claude"), AgentProfileSpec("codex", "codex")),
+    )
+    CampaignConfigStore(str(workspace)).save(
+        create_campaign_config(
+            str(workspace),
+            CampaignInputs(kernel=str(kernel), driver=str(driver), source_files="", agent_relay=policy),
+        )
+    )
+    campaign_root = workspace / "forge_experiments"
+    campaign_root.mkdir(exist_ok=True)
+    (campaign_root / "run_state.json").write_text("{}")
+    command = ["forge-loop", "--workspace", str(workspace), "--max-hours", "1", "--no-profiling", "--no-prepare-task"]
+    result = CliRunner().invoke(main, [*command, "--resume", *extra_args])
+    return result, probed
+
+
+def test_a_resumed_relay_campaign_runs_the_model_this_session_names(tmp_path, monkeypatch):
+    result, probed = _resume_relay_campaign(tmp_path, monkeypatch, ["--model", "claude-opus-4-8"])
+
+    assert result.exit_code == 0, result.output
+    assert probed[-1].primary_profile.model == "claude-opus-4-8"
+    assert [profile.profile_id for profile in probed[-1].profiles] == ["claude", "codex"]
+
+
+def test_a_resumed_relay_campaign_refuses_a_different_agent_backend(tmp_path, monkeypatch):
+    result, probed = _resume_relay_campaign(tmp_path, monkeypatch, ["--agent-backend", "codex"])
+
+    assert result.exit_code != 0
+    assert "model relay starts on claude; the agent backend cannot change on resume" in result.output
+    assert probed == []
 
 
 def test_forge_loop_resume_adds_existing_kb_reference_pointer(

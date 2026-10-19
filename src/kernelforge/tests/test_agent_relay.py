@@ -15,11 +15,11 @@ from kernelforge.loop.agent_relay import (
     INTERVENTION_SUPERVISOR,
     ProfileAvailability,
     ProviderAvailability,
+    apply_profile_recheck,
     apply_profile_switch,
     apply_relay_keep,
     apply_relay_search_outcome,
     apply_supervisor_fallback,
-    invalidate_profile,
     migrate_run_state_relay_fields,
     relay_blockage_reached,
     select_relay_intervention,
@@ -119,13 +119,14 @@ def test_infrastructure_failures_do_not_advance_the_streak(decision):
     assert state.active_no_improvement_streak == 2
 
 
-def test_outcome_from_another_profile_does_not_change_the_active_streak():
+@pytest.mark.parametrize("producer_profile_id", ["codex_gpt", ""], ids=["another_profile", "no_producer"])
+def test_outcome_the_active_profile_did_not_produce_does_not_change_its_streak(producer_profile_id):
     state = AgentRelayState(active_profile_id="claude_opus")
 
     apply_relay_search_outcome(
         state,
         decision="REVERT_PERF",
-        producer_profile_id="codex_gpt",
+        producer_profile_id=producer_profile_id,
     )
 
     assert state.active_no_improvement_streak == 0
@@ -235,14 +236,27 @@ def test_supervisor_opens_a_new_window_without_switching_profiles():
     assert state.intervention_kind == INTERVENTION_SUPERVISOR
 
 
-def test_runtime_invalidation_updates_only_the_saved_snapshot():
+def test_recheck_replaces_the_profile_and_its_provider_entry():
     snapshot = _snapshot()
+    failed = ProfileAvailability(
+        provider="codex",
+        model="gpt-6-astra",
+        provider_available=True,
+        model_available=False,
+        available=False,
+        reason="credential expired",
+    )
 
-    invalidate_profile(snapshot, "codex_gpt", "credential expired")
+    apply_profile_recheck(snapshot, "codex_gpt", failed)
 
-    assert snapshot.profiles["codex_gpt"].available is False
-    assert snapshot.profiles["codex_gpt"].reason == "credential expired"
+    assert snapshot.profiles["codex_gpt"] is failed
     assert snapshot.providers["codex"].available is True
+    assert snapshot.profiles["claude_opus"].available is True
+
+
+def test_recheck_of_an_unknown_profile_is_refused():
+    with pytest.raises(ValueError, match="unknown Agent profile"):
+        apply_profile_recheck(_snapshot(), "missing", ProfileAvailability(provider="claude"))
 
 
 def test_legacy_migration_adds_both_relay_fields_atomically():
@@ -447,3 +461,96 @@ def test_a_runnable_profile_below_the_threshold_needs_no_intervention(tmp_path):
     assert bundle.profile.profile_id == "claude_opus"
     assert force_supervisor is False
     assert loop.state_store.events == []
+
+
+def _api_error(profile_id: str, iteration: int = 2) -> SimpleNamespace:
+    return SimpleNamespace(kept=False, agent_profile_id=profile_id, iteration=iteration)
+
+
+def _rechecking_pool(*, available: bool, checked: list[str]) -> SearchActorPool:
+    pool = _search_actor_pool()
+
+    def recheck(profile: AgentProfile) -> ProfileAvailability:
+        checked.append(profile.profile_id)
+        return ProfileAvailability(
+            provider=profile.provider,
+            model=profile.model,
+            provider_available=True,
+            model_available=available,
+            available=available,
+            reason="" if available else "gateway still failing",
+        )
+
+    pool.recheck = recheck
+    return pool
+
+
+def test_an_api_error_neither_counts_as_search_nor_invalidates_the_profile_by_itself(tmp_path):
+    loop = _loop_for_boundary(tmp_path, streak=1)
+
+    loop._apply_relay_outcome(_api_error("claude_opus"), "API_ERROR")
+
+    assert loop.run_state.agent_relay.active_no_improvement_streak == 1
+    assert loop.run_state.agent_availability_snapshot.profiles["claude_opus"].available is True
+    assert loop._profiles_to_recheck == frozenset({"claude_opus"})
+    assert loop.state_store.events == []
+
+
+def test_a_profile_that_recovers_from_an_api_error_keeps_the_search(tmp_path):
+    loop = _loop_for_boundary(tmp_path, streak=0)
+    checked: list[str] = []
+    pool = _rechecking_pool(available=True, checked=checked)
+    loop._search_actors = pool
+    loop._apply_relay_outcome(_api_error("claude_opus"), "API_ERROR")
+
+    bundle = loop._prepare_search_actor(3, pool)
+
+    assert checked == ["claude_opus"]
+    assert bundle.profile.profile_id == "claude_opus"
+    assert [event["type"] for event in loop.state_store.events] == ["relay_profile_rechecked"]
+    assert loop.state_store.events[0]["available"] is True
+    assert loop._profiles_to_recheck == frozenset()
+
+
+def test_a_profile_that_fails_its_recheck_is_replaced_at_the_boundary(tmp_path):
+    loop = _loop_for_boundary(tmp_path, streak=0)
+    checked: list[str] = []
+    pool = _rechecking_pool(available=False, checked=checked)
+    loop._search_actors = pool
+    loop._apply_relay_outcome(_api_error("claude_opus"), "API_ERROR")
+
+    bundle = loop._prepare_search_actor(3, pool)
+
+    assert checked == ["claude_opus"]
+    assert bundle.profile.profile_id == "codex_gpt"
+    assert [event["type"] for event in loop.state_store.events] == [
+        "relay_profile_rechecked",
+        "relay_profile_unavailable",
+        "relay_profile_switched",
+    ]
+    assert loop.state_store.events[0]["reason"] == "gateway still failing"
+    assert loop.run_state.agent_availability_snapshot.profiles["claude_opus"].available is False
+
+
+def test_no_profile_is_rechecked_without_an_api_error(tmp_path):
+    loop = _loop_for_boundary(tmp_path, streak=0)
+    checked: list[str] = []
+    pool = _rechecking_pool(available=False, checked=checked)
+    loop._search_actors = pool
+
+    loop._prepare_search_actor(3, pool)
+
+    assert checked == []
+    assert loop.state_store.events == []
+
+
+def test_supervisor_banner_names_the_schedule_that_governs_it(tmp_path):
+    loop = _loop_for_boundary(tmp_path, streak=0)
+    loop.ic = SimpleNamespace(workspace_dir=str(tmp_path), supervise_after=3, supervise_cooldown=2)
+
+    assert "after 3 stalls, cooldown 2" in loop._supervisor_banner()
+
+    loop._search_actors = _search_actor_pool()
+
+    assert "relay blockage" in loop._supervisor_banner()
+    assert "stalls" not in loop._supervisor_banner()

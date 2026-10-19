@@ -12,11 +12,11 @@ from dataclasses import asdict
 from kernelforge.loop.agent_relay import (
     INTERVENTION_SUPERVISOR,
     RelayIntervention,
+    apply_profile_recheck,
     apply_profile_switch,
     apply_relay_keep,
     apply_relay_search_outcome,
     apply_supervisor_fallback,
-    invalidate_profile,
     relay_blockage_reached,
     select_relay_intervention,
     select_replacement_for_unavailable,
@@ -35,6 +35,17 @@ class RelayRuntimeMixin:
 
     #: Every relay profile's search actor for this session; ``None`` when the campaign has no relay.
     _search_actors: SearchActorPool | None = None
+    #: Profiles whose API retries ran out this session, checked again at the next iteration boundary.
+    _profiles_to_recheck: frozenset[str] = frozenset()
+
+    def _supervisor_banner(self) -> str:
+        """How the Supervisor is scheduled this session, in the operator's terms."""
+        if self._search_actors is not None:
+            return "  Supervisor: enabled as the last intervention of a relay blockage, once no untried profile is left"
+        return (
+            f"  Supervisor: enabled (after {self.ic.supervise_after} stalls, "
+            f"cooldown {self.ic.supervise_cooldown}, no intervention cap)"
+        )
 
     def _session_start_bundle(self) -> SearchActorBundle | None:
         """The actor recovery initializes with: the persisted active profile when it can run, else the start one."""
@@ -138,6 +149,7 @@ class RelayRuntimeMixin:
         if not relay.active_profile_id:
             relay.active_profile_id = search_actors.start_profile_id
             self.state_store.save(self.run_state)
+        self._recheck_profiles(iteration, search_actors)
         intervention, event_type = self._select_boundary_intervention(search_actors)
         if intervention is None:
             return search_actors.bundle(relay.active_profile_id)
@@ -158,6 +170,28 @@ class RelayRuntimeMixin:
             return search_actors.bundle(relay.active_profile_id)
         self._switch_search_actor(iteration, intervention)
         return search_actors.bundle(relay.active_profile_id)
+
+    def _recheck_profiles(self, iteration: int, search_actors: SearchActorPool) -> None:
+        """Re-run the startup check of every profile whose API retries ran out, before anything is selected."""
+        pending, self._profiles_to_recheck = self._profiles_to_recheck, frozenset()
+        if search_actors.recheck is None:
+            return
+        by_id = {profile.profile_id: profile for profile in search_actors.profiles}
+        snapshot = self.run_state.agent_availability_snapshot
+        for profile_id in sorted(pending & set(by_id)):
+            status = search_actors.recheck(by_id[profile_id])
+            apply_profile_recheck(snapshot, profile_id, status)
+            self.state_store.append_event(
+                make_event(
+                    "relay_profile_rechecked",
+                    iteration,
+                    agent_profile_id=profile_id,
+                    available=status.available,
+                    reason=status.reason,
+                )
+            )
+        if pending:
+            self.state_store.save(self.run_state)
 
     def _switch_search_actor(self, iteration: int, intervention: RelayIntervention) -> None:
         """Persist the switch before the new profile runs, dropping what the previous profile planned."""
@@ -187,24 +221,14 @@ class RelayRuntimeMixin:
             self.monitor.no_improve_streak = 0
 
     def _apply_relay_outcome(self, result, decision_label: str) -> None:
-        """Reduce attributed search progress and invalidate a profile whose API retries ran out."""
+        """Reduce attributed search progress, and schedule a recheck of a profile whose API retries ran out."""
         relay = self.run_state.agent_relay
         if result.kept:
             apply_relay_keep(relay)
         else:
             apply_relay_search_outcome(relay, decision=decision_label, producer_profile_id=result.agent_profile_id)
-        if decision_label != "API_ERROR" or not result.agent_profile_id:
-            return
-        reason = result.validation_summary or "Agent API retries exhausted"
-        invalidate_profile(self.run_state.agent_availability_snapshot, result.agent_profile_id, reason)
-        self.state_store.append_event(
-            make_event(
-                "relay_profile_invalidated",
-                result.iteration,
-                agent_profile_id=result.agent_profile_id,
-                reason=reason,
-            )
-        )
+        if decision_label == "API_ERROR" and result.agent_profile_id:
+            self._profiles_to_recheck = self._profiles_to_recheck | {result.agent_profile_id}
 
     def _bind_session_producer(self, session_sink: dict, profile_id: str) -> None:
         """Record the producer and the relay window it ran in, before the outcome can reset that window."""

@@ -5117,10 +5117,7 @@ class IterationLoop(RelayRuntimeMixin, AnalysisRuntimeMixin):
                 supervise_after=self.ic.supervise_after,
                 cooldown=self.ic.supervise_cooldown,
             )
-            print(
-                f"  Supervisor: enabled (after {self.ic.supervise_after} stalls, "
-                f"cooldown {self.ic.supervise_cooldown}, no intervention cap)"
-            )
+            print(self._supervisor_banner())
 
         print("Starting autonomous iteration loop")
         print(f"  Kernel: {self.ic.kernel_file}")
