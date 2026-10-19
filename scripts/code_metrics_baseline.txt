@@ -23,10 +23,7 @@ cognitive-complexity src/hyperloom/inference_optimizer/grid_server_args.py::dedu
 cognitive-complexity src/hyperloom/inference_optimizer/grid_server_args.py::remove_server_args 37
 cognitive-complexity src/hyperloom/inference_optimizer/multi_node/commands/infera.py::_infera_restart_server 42
 cognitive-complexity src/hyperloom/inference_optimizer/multi_node/scripts/kill_multinode.py::_gpu_used_mb_for_pgids 32
-cognitive-complexity src/hyperloom/inference_optimizer/multi_node/scripts/launch_infera_node.py::_kill_prior 40
 cognitive-complexity src/hyperloom/inference_optimizer/multi_node/scripts/launch_infera_node.py::_reap_stale_engine_ports 51
-cognitive-complexity src/hyperloom/inference_optimizer/multi_node/scripts/launch_infera_node.py::_reap_stale_engines_by_cmdline 32
-cognitive-complexity src/hyperloom/inference_optimizer/multi_node/scripts/launch_infera_node.py::main 32
 cognitive-complexity src/hyperloom/inference_optimizer/reference_script.py::_extract_server_args 40
 cognitive-complexity src/hyperloom/inference_optimizer/roofline_ceiling.py::compute_roofline_from_perfmodel 40
 cognitive-complexity src/hyperloom/inference_optimizer/roofline_snapshot.py::build_profiler_digest 36
@@ -576,7 +573,6 @@ function-lines src/hyperloom/inference_optimizer/multi_node/scripts/apply_tracel
 function-lines src/hyperloom/inference_optimizer/multi_node/scripts/kernel_patch_multinode.py::_do_apply 98
 function-lines src/hyperloom/inference_optimizer/multi_node/scripts/kernel_patch_multinode.py::_do_revert 102
 function-lines src/hyperloom/inference_optimizer/multi_node/scripts/kill_multinode.py::main 98
-function-lines src/hyperloom/inference_optimizer/multi_node/scripts/launch_infera_node.py::main 126
 function-lines src/hyperloom/inference_optimizer/roofline_ceiling.py::compute_roofline_from_perfmodel 97
 function-lines src/hyperloom/inference_optimizer/roofline_snapshot.py::format_roofline_metrics_table 93
 function-lines src/hyperloom/inference_optimizer/session/manifest.py::build_manifest 105
