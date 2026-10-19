@@ -89,6 +89,15 @@ def test_focus_leaves_the_download_location_open_but_requires_it_to_outlive_the_
     assert "not your\n     worktree or workspace" in text
 
 
+def test_focus_names_no_framework_flags_and_sends_the_specialist_to_the_installed_source():
+    from hyperloom.orchestrator.prompts.speculative_decoding_focus import speculative_decoding_focus
+
+    text = "\n".join(speculative_decoding_focus(model_name="m", model_path="/m"))
+    for version_specific in ("--", "SGLANG_", "VLLM_", "synthetic_acceptance_length", "rejection_sample_method"):
+        assert version_specific not in text
+    assert "from the installed\n  framework's source" in text
+
+
 def test_focus_carries_the_constraints_the_runner_enforces():
     text = _system_prompt()
     assert "**Never propose\n  these on the synthetic benchmark**" in text
