@@ -190,7 +190,9 @@ def lookup(mapping: Any, *names: str) -> Any:
     if not isinstance(mapping, dict):
         return None
     for name in names:
-        if name not in mapping:
+        # Guarded rather than assumed: this is a public helper, and subscripting with a non-string would raise
+        # TypeError on an unhashable argument instead of simply not matching.
+        if not isinstance(name, str) or name not in mapping:
             continue
         value = mapping[name]
         if value is None or (isinstance(value, str) and value.strip().upper() in ("", "N/A")):
