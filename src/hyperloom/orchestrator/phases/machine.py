@@ -115,7 +115,7 @@ class MachinePhase(CoordinatorCollaborator):
             )
         try:
             state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception("Coordinator: save after phase init failed")
 
     def _reopen_a_session_that_was_left_closed(self) -> None:

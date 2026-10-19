@@ -518,7 +518,7 @@ class ClosePhase(CoordinatorCollaborator):
         self.shared_state.close_sequence_done = True
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception(
                 "CLOSE step 5 (close_sequence_done save) failed; cli.finally will still write a safety-net breakdown"
             )
@@ -662,7 +662,7 @@ class ClosePhase(CoordinatorCollaborator):
             self.shared_state.closing_report_task_id = task.task_id
             try:
                 self.shared_state.save(self.session_dir)
-            except Exception:
+            except OSError:
                 log.exception("internal-report: closing_report_task_id save failed")
         return task
 
@@ -820,7 +820,7 @@ class ClosePhase(CoordinatorCollaborator):
             return
         try:
             self.shared_state.save(self.session_dir)
-        except Exception:
+        except OSError:
             log.exception(
                 "close_step save failed for step=%r status=%r",
                 step,

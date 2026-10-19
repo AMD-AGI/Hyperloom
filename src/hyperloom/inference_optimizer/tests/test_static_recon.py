@@ -6,7 +6,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import SimpleNamespace
+
+import pytest
 
 from hyperloom.orchestrator.knowledge import static_recon_checklist as src
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -207,6 +210,100 @@ def test_consume_static_recon_sanitizes_id_into_canonical(tmp_path):
     assert len(cids) == 1
     assert cids[0].startswith("gap.static_recon.")
     assert " " not in cids[0] and "/" not in cids[0]
+
+
+_SEED_PAYLOAD = {
+    "domain": "static_recon_specialist",
+    "recon": {
+        "bridge_candidates": [
+            {
+                "id": "rocm.fp8.cutlass_only_guard",
+                "predicate_file": "vllm/.../fp8.py",
+                "predicate_name": "cutlass_fp8_supported",
+                "why_disabled_here": "CUDA-only; False on ROCm",
+                "consequence": "dense Linear falls back to bf16",
+                "bridge_sketch": "use per-token act + per-channel weight",
+                "domain_hint": "freeform",
+            },
+        ],
+    },
+}
+
+
+def _fail_save(monkeypatch: pytest.MonkeyPatch, state: SharedState, exc: BaseException) -> list[int]:
+    saves: list[int] = []
+
+    def _save(session_dir=None) -> None:
+        saves.append(1)
+        raise exc
+
+    monkeypatch.setattr(state, "save", _save)
+    return saves
+
+
+def test_consume_static_recon_logs_a_failed_save_and_keeps_the_seeded_gaps(tmp_path, monkeypatch, caplog):
+    stub = _stub_coord(tmp_path)
+    err = OSError("disk full")
+    saves = _fail_save(monkeypatch, stub.shared_state, err)
+
+    with caplog.at_level(logging.ERROR, logger="hyperloom.orchestrator.phases.internal"):
+        InternalTasksPhase.consume_static_recon(stub, _SEED_PAYLOAD)
+
+    assert saves == [1]
+    assert [g["canonical_id"] for g in stub.shared_state.gaps] == ["gap.static_recon.rocm.fp8.cutlass_only_guard"]
+    assert [r.exc_info[1] for r in caplog.records if r.exc_info] == [err]
+
+
+def test_consume_static_recon_does_not_swallow_a_serialization_defect(tmp_path, monkeypatch):
+    stub = _stub_coord(tmp_path)
+    _fail_save(monkeypatch, stub.shared_state, TypeError("not JSON serializable"))
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        InternalTasksPhase.consume_static_recon(stub, _SEED_PAYLOAD)
+
+
+def _dispatch_stub(session_dir):
+    """A stand-in carrying what the static-recon enqueue touches, with a task registry that mints a fresh row."""
+
+    async def _warm(params):
+        return None
+
+    async def _create(**kwargs):
+        return SimpleNamespace(task_id="t-recon"), False
+
+    state = SharedState(session_id="t", model_name="m")
+    state.static_recon_enabled = True
+    return SimpleNamespace(
+        shared_state=state,
+        session_dir=session_dir,
+        tasks=SimpleNamespace(create_or_return_existing=_create),
+        _coord=SimpleNamespace(
+            specialist_dispatch=SimpleNamespace(warm_specialist_params=_warm),
+            gpu_lanes=SimpleNamespace(framework_authoring_lanes_ttl=lambda params, base_ttl_sec: ([], base_ttl_sec)),
+        ),
+    )
+
+
+def test_static_recon_enqueue_logs_a_failed_bookkeeping_save_and_returns_the_task(tmp_path, monkeypatch, caplog):
+    stub = _dispatch_stub(tmp_path)
+    err = OSError("disk full")
+    saves = _fail_save(monkeypatch, stub.shared_state, err)
+
+    with caplog.at_level(logging.ERROR, logger="hyperloom.orchestrator.phases.internal"):
+        task = asyncio.run(InternalTasksPhase._enqueue_internal_static_recon_task(stub, reason="r", slug="s"))
+
+    assert task.task_id == "t-recon"
+    assert saves == [1]
+    assert stub.shared_state.static_recon_runs == 1
+    assert [r.exc_info[1] for r in caplog.records if r.exc_info] == [err]
+
+
+def test_static_recon_enqueue_does_not_swallow_a_serialization_defect(tmp_path, monkeypatch):
+    stub = _dispatch_stub(tmp_path)
+    _fail_save(monkeypatch, stub.shared_state, TypeError("not JSON serializable"))
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        asyncio.run(InternalTasksPhase._enqueue_internal_static_recon_task(stub, reason="r", slug="s"))
 
 
 # -- workload precision -----------------------------------------------------

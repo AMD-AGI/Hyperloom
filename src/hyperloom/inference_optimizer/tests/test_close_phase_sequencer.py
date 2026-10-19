@@ -9,6 +9,7 @@ import asyncio
 import json
 import time
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -736,6 +737,98 @@ async def test_close_sequencer_records_degraded_when_a_step_fails(
         "report",
         "session_breakdown",
     ]
+
+
+def _fail_close_save(
+    coord, monkeypatch: pytest.MonkeyPatch, exc: BaseException, *, when: Callable[[SharedState], bool] = lambda s: True
+) -> None:
+    """Make ``coord.shared_state.save`` raise ``exc`` once, on the first call ``when`` accepts."""
+    state = coord.shared_state
+    raised: list[bool] = []
+
+    def _save(session_dir=None) -> None:
+        if not raised and when(state):
+            raised.append(True)
+            raise exc
+
+    monkeypatch.setattr(state, "save", _save)
+
+
+@pytest.mark.asyncio
+async def test_record_close_step_logs_a_failed_save_and_returns(coord, monkeypatch, caplog):
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    err = OSError("disk full")
+    _fail_close_save(coord, monkeypatch, err)
+
+    with caplog.at_level("ERROR", logger="hyperloom.orchestrator.phases.close"):
+        await coord.phase_close._record_close_step("report", status="done")
+
+    assert [r.exc_info[1] for r in caplog.records if r.exc_info] == [err]
+    assert [row["step"] for row in coord.shared_state.phase_history[-1]["evidence"]["close_steps"]] == ["report"]
+
+
+@pytest.mark.asyncio
+async def test_record_close_step_does_not_swallow_a_serialization_defect(coord, monkeypatch):
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    _fail_close_save(coord, monkeypatch, TypeError("not JSON serializable"))
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        await coord.phase_close._record_close_step("report", status="done")
+
+
+@pytest.mark.asyncio
+async def test_enqueue_internal_report_task_logs_a_failed_save_and_returns_the_task(coord, monkeypatch, caplog):
+    err = OSError("disk full")
+    _fail_close_save(coord, monkeypatch, err)
+
+    with caplog.at_level("ERROR", logger="hyperloom.orchestrator.phases.close"):
+        task = await coord.phase_close._enqueue_internal_report_task(reason="close_phase_entry")
+
+    assert coord.shared_state.closing_report_task_id == task.task_id
+    assert [r.exc_info[1] for r in caplog.records if r.exc_info] == [err]
+
+
+@pytest.mark.asyncio
+async def test_enqueue_internal_report_task_does_not_swallow_a_serialization_defect(coord, monkeypatch):
+    _fail_close_save(coord, monkeypatch, TypeError("not JSON serializable"))
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        await coord.phase_close._enqueue_internal_report_task(reason="close_phase_entry")
+
+
+@pytest.mark.asyncio
+async def test_close_sequencer_logs_a_failed_done_flag_save_and_still_records_done(
+    coord, tmp_path, monkeypatch, caplog
+):
+    monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    err = OSError("disk full")
+    _fail_close_save(coord, monkeypatch, err, when=lambda state: state.close_sequence_done)
+
+    with caplog.at_level("ERROR", logger="hyperloom.orchestrator.phases.close"):
+        await coord.phase_close.on_enter_close(
+            Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={})
+        )
+
+    rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
+    assert rows[-1]["step"] == "done"
+    assert [r.exc_info[1] for r in caplog.records if r.exc_info] == [err]
+
+
+@pytest.mark.asyncio
+async def test_close_sequencer_does_not_swallow_a_serialization_defect_saving_the_done_flag(
+    coord, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
+    coord.shared_state.phase_history = [_close_phase_history_row()]
+    _fail_close_save(
+        coord, monkeypatch, TypeError("not JSON serializable"), when=lambda state: state.close_sequence_done
+    )
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        await coord.phase_close.on_enter_close(
+            Transition(from_phase="SWEEP", to_phase="CLOSE", reason="test", evidence={})
+        )
 
 
 _CLOSE_RECORD_STEPS = [
