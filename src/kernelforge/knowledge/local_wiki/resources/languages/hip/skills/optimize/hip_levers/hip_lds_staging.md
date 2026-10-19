@@ -66,9 +66,10 @@ padding hard to use; swizzle instead.
 GEMM fix, costs no extra LDS, and is **required** when using direct-to-LDS. One IREE study measured
 removing it: **201 M bank conflicts, −28% TFLOPS**.
 
-**Use 128-bit LDS access.** A single wave peaks at 64 B/cycle through the 64-byte port a SIMD pair
-shares, a quarter of the LDS's 256 B/clk: 4-byte accesses take 8 cycles for 64 lanes (50% of that
-per-wave peak), 16-byte accesses 20 cycles (80%). **Vectorize.**
+**Use 128-bit LDS access.** The HIP hardware guide, which names no CDNA generation, gives a per-wave LDS
+peak of 64 B/cycle (a 64-byte port per SIMD pair), with 4-byte accesses at 8 cycles per 64 lanes (50%)
+and 16-byte accesses at 20 cycles (80%). Take these as the direction on gfx950, not its numbers.
+**Vectorize.**
 
 ```cpp
 float4 v = *reinterpret_cast<float4*>(&tile[r][c]);   // -> ds_read_b128
