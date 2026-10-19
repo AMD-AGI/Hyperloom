@@ -309,10 +309,10 @@ def test_wait_test_of_another_branch_is_forbidden_as_test_result_is(wait_rig: Ri
 
 
 @pytest.mark.parametrize(
-    ("requested", "expected"), [(None, 240), (-5, 1), (0, 1), (1, 1), (90, 90), (240, 240), (10_000, 240)]
+    ("requested", "expected"), [(None, 45), (-5, 1), (0, 1), (1, 1), (30, 30), (45, 45), (240, 45)]
 )
-def test_wait_seconds_is_held_to_one_to_240(requested: int | None, expected: int) -> None:
-    assert WAIT_TEST_MAX_SECONDS == 240 and wait_budget(requested) == expected
+def test_wait_seconds_is_held_under_the_cli_request_timeout(requested: int | None, expected: int) -> None:
+    assert WAIT_TEST_MAX_SECONDS == 45 and wait_budget(requested) == expected
 
 
 def test_a_wait_of_zero_seconds_waits_one(wait_rig: Rig) -> None:

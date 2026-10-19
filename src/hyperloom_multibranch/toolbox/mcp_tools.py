@@ -70,8 +70,9 @@ _REQUEST_ID: dict[str, Any] = {
     "required": ["request_id"],
     "additionalProperties": False,
 }
-#: The longest one ``wait_test`` call blocks; a specialist waits longer by calling it again.
-WAIT_TEST_MAX_SECONDS = 240
+#: The longest one ``wait_test`` call blocks; a specialist waits longer by calling it again. Claude Code aborts an
+#: HTTP MCP request after 60 s, so a longer block answers nothing.
+WAIT_TEST_MAX_SECONDS = 45
 #: How often ``wait_test`` reads the test's record while it waits.
 WAIT_POLL_SECONDS = 5.0
 _WAIT_TEST: dict[str, Any] = {
