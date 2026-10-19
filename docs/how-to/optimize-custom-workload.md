@@ -443,7 +443,7 @@ To regenerate an export after adding the contract to an existing workload,
 without resuming the campaign, run this in its model runtime:
 
 ```bash
-uv run python -m hyperloom.inference_optimizer.deployment.export /path/to/session
+uv run python -m hyperloom.orchestrator.deployment.export /path/to/session
 ```
 
 This replaces `session/deployment/` and clears previous export validation. It

@@ -167,7 +167,7 @@ DOTENV="$(resolve_env_file)"
 # Only non-empty pre-source values are restored, so the dotenv still fills gaps.
 _DOTENV_PROTECTED_VARS='REPO_ROOT USER_DATA_PATH HYPERLOOM_RUNTIME_DIR KERNEL_AGENT_ENV HYPERLOOM_ROOT
 MAGPIE_PATH INFERENCEX_PATH TRACELENS_ROOT TRACELENS_INTERNAL_ROOT
-GEAK_ROOT GEAK_E2E_RUNNER PYTHONPATH'
+GEAK_ROOT GEAK_E2E_RUNNER GEAK_RUN_MODE PYTHONPATH'
 
 if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
    || [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
@@ -207,7 +207,7 @@ if [ -z "${ANTHROPIC_BASE_URL:-}" ] || [ -z "${ANTHROPIC_API_KEY:-}" ] \
     done
     unset _v _snap_val _cur_val
     unset _snap_anthropic_url _snap_anthropic_key _snap_anthropic_token _snap_claude_oauth _snap_anthropic_headers
-    echo "[kernel-agent] loaded credentials fallback from $DOTENV (env wins)"
+    echo "[kernel-agent] loaded credentials fallback from $DOTENV (env wins)" >&2
   fi
 fi
 # kernel-agent consumes ANTHROPIC_* and nothing else. Translating a retired

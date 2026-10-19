@@ -9,7 +9,7 @@ import ast
 
 import pytest
 
-from hyperloom.inference_optimizer.deployment.settings_prelude import (
+from hyperloom.orchestrator.deployment.settings_prelude import (
     _TORCH_API_TRANSLATIONS,
     SettingsPlan,
     apply_settings_prelude,

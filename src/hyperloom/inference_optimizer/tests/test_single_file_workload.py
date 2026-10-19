@@ -11,7 +11,7 @@ import subprocess
 
 import pytest
 
-from hyperloom.inference_optimizer.deployment.export import export_custom_inference
+from hyperloom.orchestrator.deployment.export import export_custom_inference
 from hyperloom.orchestrator.framework.optimization_scope import check_patch_scope, optimization_file
 
 
