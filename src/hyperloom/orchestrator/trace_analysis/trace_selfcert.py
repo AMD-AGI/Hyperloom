@@ -8,13 +8,15 @@ from __future__ import annotations
 import os
 import re
 from bisect import bisect_left, bisect_right
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import median
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, NamedTuple, Sequence
 
 from ._bypass_trace_reader import (
     _GRAPH_RECORDED_LAUNCH_COVERAGE_MAX,
+    TraceAnalysisOptions,
     _MAX_EVENT_CHARS,
     _MAX_TRACE_PREFIX_CHARS,
     _open_trace_binary,
@@ -341,10 +343,8 @@ def iter_details_from_name(name: str) -> dict[str, Any]:
         kind, bs = m.group(1), int(m.group(2))
         toks = int(m.group(3) or 0)
         if kind == "DECODE":
-            ctx_req, ctx_sum, gen_req, gen_sum, batch = 0, 0, bs, bs, bs
-        else:
-            ctx_req, ctx_sum, gen_req, gen_sum, batch = bs, toks, 0, 0, (toks or bs)
-        return _details(kind, batch, ctx_req, ctx_sum, gen_req, gen_sum)
+            return _details(kind, bs, _RequestCounts(0, 0), _RequestCounts(bs, bs))
+        return _details(kind, toks or bs, _RequestCounts(bs, toks), _RequestCounts(0, 0))
 
     try:
         parts = re.sub(r"[sqk]+", "_", name.replace("(", "_").replace(")", "_")).split("_")
@@ -356,21 +356,28 @@ def iter_details_from_name(name: str) -> dict[str, Any]:
             idx = (3, 5, 11, 13)
         ctx_req, ctx_sum, gen_req, gen_sum = (int(parts[i]) for i in idx)
         kind = "EXTEND" if ctx_req > 0 and gen_req == 0 else ("MIXED" if ctx_req > 0 else "DECODE")
-        return _details(kind, ctx_sum + gen_sum, ctx_req, ctx_sum, gen_req, gen_sum)
+        return _details(kind, ctx_sum + gen_sum, _RequestCounts(ctx_req, ctx_sum), _RequestCounts(gen_req, gen_sum))
     except (ValueError, IndexError):
-        return _details("DECODE", 1, 0, 0, 1, 1)
+        return _details("DECODE", 1, _RequestCounts(0, 0), _RequestCounts(1, 1))
 
 
-def _details(kind: str, batch: int, ctx_req: int, ctx_sum: int, gen_req: int, gen_sum: int) -> dict[str, Any]:
+class _RequestCounts(NamedTuple):
+    """The requests of one iteration phase (context or generation) and their summed length."""
+
+    requests: int
+    total: int
+
+
+def _details(kind: str, batch: int, context: _RequestCounts, generation: _RequestCounts) -> dict[str, Any]:
     return {
         "kind": kind,
         "batch_size": batch,
-        "num_requests": ctx_req + gen_req,
-        "context_requests": ctx_req,
-        "context_sum": ctx_sum,
-        "generation_requests": gen_req,
-        "generation_sum": gen_sum,
-        "is_prefill": ctx_req > 0,
+        "num_requests": context.requests + generation.requests,
+        "context_requests": context.requests,
+        "context_sum": context.total,
+        "generation_requests": generation.requests,
+        "generation_sum": generation.total,
+        "is_prefill": context.requests > 0,
     }
 
 
@@ -480,25 +487,42 @@ def certify_chunks(chunk_files: Iterable[Path], source_kernel_corrs: set[Any]) -
 # verdict
 
 
+@dataclass(frozen=True)
+class TraceHealth:
+    """What the certificate's categorical answers are decided from."""
+
+    parse_ok: bool
+    kernel_count: int
+    capture_fragment: bool
+    attributed_pct: float | None
+    graph_under_recorded: bool | None = None
+
+
+@dataclass(frozen=True)
+class CoverageMeasures:
+    """Coverage ratios reported next to the verdict, never compared in it."""
+
+    graph_launch_coverage: float | None = None
+    op_meta_coverage: float | None = None
+    capture_op_meta_coverage: float | None = None
+
+
 def build_verdict(
+    health: TraceHealth,
     *,
-    parse_ok: bool,
-    kernel_count: int,
-    capture_fragment: bool,
-    attributed_pct: float | None,
-    graph_under_recorded: bool | None = None,
     thresholds: dict[str, Any],
     production_pick: dict[str, Any] | None = None,
-    graph_launch_coverage: float | None = None,
-    op_meta_coverage: float | None = None,
-    capture_op_meta_coverage: float | None = None,
+    coverage: CoverageMeasures = CoverageMeasures(),
 ) -> dict[str, Any]:
     """Answer the two questions separately, per the checklist's hard-requirement table.
 
-    The three coverage arguments feed ``measures`` only. They are reported next to the categorical answer because
+    ``coverage`` feeds ``measures`` only. It is reported next to the categorical answer because
     a boolean cannot distinguish a trace that just missed a gate from one that missed it by an order of
     magnitude, and the two call for different responses -- but choosing the response is not this function's job.
     """
+    kernel_count = health.kernel_count
+    attributed_pct = health.attributed_pct
+    graph_under_recorded = health.graph_under_recorded
     blocking: list[str] = []
     bypass_ok = True
 
@@ -512,13 +536,13 @@ def build_verdict(
         )
         bypass_ok = False
 
-    if not parse_ok:
+    if not health.parse_ok:
         blocking.append("trace did not parse cleanly")
         bypass_ok = False
     if kernel_count <= 0:
         blocking.append("source recorded zero GPU kernels")
         bypass_ok = False
-    if capture_fragment:
+    if health.capture_fragment:
         blocking.append("selected file is a CUDA-graph capture sidecar")
         bypass_ok = False
 
@@ -578,10 +602,10 @@ def build_verdict(
         "measures": {
             "kernel_count": kernel_count,
             "attributed_pct": attributed_pct,
-            "graph_launch_coverage": graph_launch_coverage,
+            "graph_launch_coverage": coverage.graph_launch_coverage,
             "graph_launch_coverage_max": thresholds.get("graph_launch_coverage_max"),
-            "op_meta_coverage": op_meta_coverage,
-            "capture_op_meta_coverage": capture_op_meta_coverage,
+            "op_meta_coverage": coverage.op_meta_coverage,
+            "capture_op_meta_coverage": coverage.capture_op_meta_coverage,
         },
     }
 
@@ -646,11 +670,7 @@ def certify_trace_dir(
             }
         )
         record["verdict"] = build_verdict(
-            parse_ok=False,
-            kernel_count=0,
-            capture_fragment=False,
-            attributed_pct=None,
-            graph_under_recorded=None,
+            TraceHealth(parse_ok=False, kernel_count=0, capture_fragment=False, attributed_pct=None),
             thresholds=thresholds,
         )
         record["verdict"]["blocking_reasons"] = ["no usable trace file in the directory"]
@@ -661,7 +681,7 @@ def certify_trace_dir(
     # When the live resolver would open a different file, measure that file too.
     production_pick = None
     if inv["production_selected_path"] and inv["production_selected_path"] != selected:
-        probe = analyze_trace(inv["production_selected_path"], top_k=1, steady_state=False)
+        probe = analyze_trace(inv["production_selected_path"], TraceAnalysisOptions(top_k=1, steady_state=False))
         # ``analyze_trace`` reports the kernel count inside ``attribution`` and has no ``parse_ok`` key at all --
         # parse health is the emptiness of ``stream_errors``.
         probe_errors = probe.get("stream_errors") or []
@@ -677,7 +697,7 @@ def certify_trace_dir(
         record["trace_dir_level"]["production_pick_probe"] = production_pick
 
     # Pass 1: the shipping reader, whole-trace scope. Groups 1, 3, 4, 5.
-    analysis = analyze_trace(sel, top_k=1, steady_state=False, framework=framework)
+    analysis = analyze_trace(sel, TraceAnalysisOptions(top_k=1, steady_state=False, framework=framework))
     # Pass 2: step structure and subtree attribution. Groups 6, 7, 8.
     sp = StepPass()
     pass2_errors = sp.scan(sel)
@@ -762,15 +782,19 @@ def certify_trace_dir(
     record["chunk_level"] = certify_chunks([Path(c) for c in chunk_files], source_kernel_corrs)
 
     record["verdict"] = build_verdict(
-        parse_ok=not stream_errors,
-        kernel_count=kernel_count,
-        capture_fragment=inv["selected_capture_fragment"],
-        attributed_pct=attribution.get("attributed_pct"),
-        production_pick=production_pick,
-        graph_under_recorded=coverage_block.get("graph_under_recorded"),
+        TraceHealth(
+            parse_ok=not stream_errors,
+            kernel_count=kernel_count,
+            capture_fragment=inv["selected_capture_fragment"],
+            attributed_pct=attribution.get("attributed_pct"),
+            graph_under_recorded=coverage_block.get("graph_under_recorded"),
+        ),
         thresholds=thresholds,
-        graph_launch_coverage=coverage,
-        op_meta_coverage=rank_record["attribution"]["op_meta_coverage"],
-        capture_op_meta_coverage=(record["trace_dir_level"].get("capture_sidecar_probe") or {}).get("op_meta_coverage"),
+        production_pick=production_pick,
+        coverage=CoverageMeasures(
+            coverage,
+            rank_record["attribution"]["op_meta_coverage"],
+            (record["trace_dir_level"].get("capture_sidecar_probe") or {}).get("op_meta_coverage"),
+        ),
     )
     return record

@@ -427,20 +427,27 @@ def _path_terms(path: str) -> list[str]:
     return parts
 
 
+@dataclass(frozen=True)
+class SearchLimits:
+    """How many references discovery returns and how many candidates it enriches; zero reads ``PR_KB_*``."""
+
+    top_k: int = 0
+    candidate_cap: int = 0
+
+
 def discover(
     client: PRMonitorClient,
     context: PRQueryContext,
     *,
-    top_k: int = 0,
-    candidate_cap: int = 0,
+    limits: SearchLimits = SearchLimits(),
     budget_sec: float = 0.0,
     deadline: float | None = None,
 ) -> SearchOutcome:
     """Discover ranked references; zero-valued limits use ``PR_KB_*`` settings."""
     if context.reason:
         return SearchOutcome(reason=context.reason, stats={"http_calls": 0})
-    top_k = top_k or int(os.environ.get("PR_KB_TOP_K", DEFAULT_TOP_K) or DEFAULT_TOP_K)
-    candidate_cap = candidate_cap or int(
+    top_k = limits.top_k or int(os.environ.get("PR_KB_TOP_K", DEFAULT_TOP_K) or DEFAULT_TOP_K)
+    candidate_cap = limits.candidate_cap or int(
         os.environ.get("PR_KB_CANDIDATE_CAP", DEFAULT_CANDIDATE_CAP) or DEFAULT_CANDIDATE_CAP
     )
     if deadline is None:

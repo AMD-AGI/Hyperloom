@@ -221,8 +221,8 @@ def test_explicit_backend_disables_cross_provider_fallback(
     monkeypatch.setattr(agent_selection, "create_registered_backend", lambda runtime: backend)
 
     assert _create_agent_backend("codex", "gpt-explicit") is backend
-    assert captured["fallback_provider"] == ""
-    assert captured["sandbox_mode"] == "workspace-write"
+    assert captured["settings"].fallback_provider == ""
+    assert captured["settings"].sandbox_mode == "workspace-write"
 
 
 @pytest.mark.parametrize("mode", ["workspace-write", "read-only"])
@@ -245,7 +245,7 @@ def test_explicit_secure_sandbox_mode_is_wired(
     monkeypatch.setattr(agent_selection, "create_registered_backend", lambda runtime: backend)
 
     assert _create_agent_backend("codex", "gpt-explicit", mode) is backend
-    assert captured["sandbox_mode"] == mode
+    assert captured["settings"].sandbox_mode == mode
 
 
 def test_bypass_is_wired(clean_agent_env, monkeypatch):
@@ -263,7 +263,7 @@ def test_bypass_is_wired(clean_agent_env, monkeypatch):
     monkeypatch.setattr(agent_selection, "create_registered_backend", lambda runtime: backend)
 
     assert _create_agent_backend("codex", "gpt-explicit", "bypass") is backend
-    assert captured["sandbox_mode"] == "bypass"
+    assert captured["settings"].sandbox_mode == "bypass"
 
 
 def test_bypass_is_wired_without_retired_external_sandbox_env(clean_agent_env, monkeypatch):
@@ -283,7 +283,7 @@ def test_bypass_is_wired_without_retired_external_sandbox_env(clean_agent_env, m
     monkeypatch.setattr(agent_selection, "create_registered_backend", lambda runtime: backend)
 
     assert _create_agent_backend("codex", "gpt-explicit", "bypass") is backend
-    assert captured["sandbox_mode"] == "bypass"
+    assert captured["settings"].sandbox_mode == "bypass"
 
 
 def test_retired_external_sandbox_env_does_not_confirm_bypass(clean_agent_env, monkeypatch):

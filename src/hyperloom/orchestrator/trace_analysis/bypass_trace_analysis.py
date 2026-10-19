@@ -317,33 +317,30 @@ def _maybe_build_shape_manifest(
                 shards = [shards[last]]
             else:
                 shards = [shards[round(i * last / (max_caps - 1))] for i in range(max_caps)]
-        capture_variants: list[tuple[str, dict[str, Any]]] = []
-        capture_hashes: dict[str, str] = {}
-        variant_meta: dict[str, dict[str, Any]] = {}
+        capture_variants: list[_tsm.CaptureShard] = []
         for path, label, mode in shards:
-            shard_an = _reader.analyze_trace(path, top_k=0, steady_state=False, emit_launches=True)
+            shard_an = _reader.analyze_trace(
+                path, _reader.TraceAnalysisOptions(top_k=0, steady_state=False, emit_launches=True)
+            )
             if shard_an.get("status") != "ok" or shard_an.get("truncated"):
                 continue
-            capture_variants.append((label, shard_an))
-            capture_hashes[label] = _sha256_file(path)
             bs_m = re.search(r"bs_(\d+)", label)
-            variant_meta[label] = {
-                "batch_size": bs_m.group(1) if bs_m else None,
-                "mode": mode,
-                "file": path.name,
-            }
+            capture_variants.append(
+                _tsm.CaptureShard(
+                    label=label,
+                    analysis=shard_an,
+                    trace_hash=_sha256_file(path),
+                    meta={"batch_size": bs_m.group(1) if bs_m else None, "mode": mode, "file": path.name},
+                )
+            )
 
         # phase hint from the analysis mode the coordinator forwards.
         phase_hint = (args.analysis_mode or "mixed").lower() or "mixed"
         manifest = _tsm.build_shape_manifest(
-            main_analysis=analyze,
-            capture_variants=capture_variants,
+            analyze,
+            capture_variants,
+            _tsm.ManifestOrigin(main_trace_hash=main_hash, generated_at=generated_at),
             provenance=_build_manifest_provenance(args),
-            main_trace_hash=main_hash,
-            capture_trace_hashes=capture_hashes,
-            variant_meta=variant_meta,
-            analysis_route="bypass",
-            generated_at=generated_at,
             phase_hint=phase_hint,
         )
         out_path = bypass_dir / "trace_shape_manifest.json"
@@ -364,6 +361,18 @@ def _maybe_build_shape_manifest(
         msg = f"error: {type(exc).__name__}: {exc}"
         print(f"[trace_shape_manifest] skipped: {msg}", file=sys.stderr)
         return {"status": msg}
+
+
+def _main_trace_options(args: argparse.Namespace, *, steady_state: bool) -> _reader.TraceAnalysisOptions:
+    """Reader options for the main trace: every device-kernel aggregate and its launches, on the requested rank."""
+    return _reader.TraceAnalysisOptions(
+        top_k=0,
+        steady_state=steady_state,
+        framework=args.framework,
+        emit_launches=True,
+        require_single_rank=args.require_single_rank,
+        tensor_parallel_size=args.tensor_parallel_size or None,
+    )
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
@@ -486,15 +495,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         try:
             # top_k=0 -> keep all device-kernel aggregates; candidate slicing uses top_k.
-            analyze = _reader.analyze_trace(
-                args.trace_input,
-                top_k=0,
-                steady_state=enable_steady,
-                framework=args.framework,
-                emit_launches=True,
-                require_single_rank=args.require_single_rank,
-                tensor_parallel_size=args.tensor_parallel_size or None,
-            )
+            analyze = _reader.analyze_trace(args.trace_input, _main_trace_options(args, steady_state=enable_steady))
         except Exception as exc:  # noqa: BLE001 — never abort the pipeline
             analyze = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
     run_meta["preflight"].update(
@@ -731,12 +732,14 @@ def main(argv: list[str] | None = None) -> int:
         _report.render_analysis_md(
             candidates,
             analyze,
-            model_name=args.model_name,
-            framework=args.framework,
-            target_platform=args.target_platform,
-            throughput_unit=throughput_unit,
-            metrics_csv_path=str(kernel_metrics_csv_path),
-            summary_csv_path=str(kernel_summary_csv_path),
+            _report.BypassReportContext(
+                model_name=args.model_name,
+                framework=args.framework,
+                target_platform=args.target_platform,
+                throughput_unit=throughput_unit,
+                metrics_csv_path=str(kernel_metrics_csv_path),
+                summary_csv_path=str(kernel_summary_csv_path),
+            ),
         ),
     )
     atomic_write_json(candidates_path, candidates, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
@@ -799,7 +802,7 @@ def main(argv: list[str] | None = None) -> int:
     diffusion_roofline_path: str | None = None
     if framework_registry.is_scriptable(args.framework):
         try:
-            from .diffusion_roofline import build_report_from_bypass
+            from .diffusion_roofline import WorkloadTotals, build_report_from_bypass
 
             _diff_steps = resolve_perstep_divisor(
                 requested_steps=requested_denoise_steps,
@@ -813,8 +816,7 @@ def main(argv: list[str] | None = None) -> int:
                 analyze.get("timeline") or {},
                 _diff_steps,
                 top_k,
-                totals=_workload_totals,
-                kernels_aggregated=len(_all_kernels),
+                workload=WorkloadTotals(_workload_totals, kernel_count=len(_all_kernels)),
             )
             _diff_path = run_dir / "diffusion_roofline.json"
             atomic_write_json(_diff_path, _diff_report, fmt=JsonFormat(sort_keys=False, ensure_ascii=False))
