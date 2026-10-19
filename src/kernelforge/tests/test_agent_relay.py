@@ -30,8 +30,8 @@ from kernelforge.loop.search_actors import SearchActorBundle, SearchActorPool
 
 def _profiles() -> tuple[AgentProfile, ...]:
     return (
-        AgentProfile("claude_opus", "claude", "claude-opus-5.5"),
-        AgentProfile("codex_gpt", "codex", "gpt-6"),
+        AgentProfile("claude_opus", "claude", "claude-opus-5"),
+        AgentProfile("codex_gpt", "codex", "gpt-6-astra"),
         AgentProfile("claude_sonnet", "claude", "claude-sonnet-5.5"),
     )
 
@@ -47,14 +47,14 @@ def _snapshot(*, codex: bool = True, sonnet: bool = True) -> AgentAvailabilitySn
         profiles={
             "claude_opus": ProfileAvailability(
                 provider="claude",
-                model="claude-opus-5.5",
+                model="claude-opus-5",
                 provider_available=True,
                 model_available=True,
                 available=True,
             ),
             "codex_gpt": ProfileAvailability(
                 provider="codex",
-                model="gpt-6",
+                model="gpt-6-astra",
                 provider_available=codex,
                 model_available=codex,
                 available=codex,

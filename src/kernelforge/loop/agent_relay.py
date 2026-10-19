@@ -65,6 +65,10 @@ class AgentRelayConfig:
         if self.blockage_threshold < 1:
             raise ValueError("relay blockage threshold must be positive")
 
+    @property
+    def primary_profile(self) -> AgentProfile:
+        return _profile_mapping(self.profiles)[self.primary_profile_id]
+
     @classmethod
     def from_dict(cls, payload: object) -> AgentRelayConfig:
         """Strictly rebuild immutable relay campaign configuration."""

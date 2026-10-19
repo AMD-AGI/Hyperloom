@@ -107,8 +107,8 @@ def test_campaign_persists_immutable_agent_relay_profiles(tmp_path, monkeypatch)
     relay = AgentRelayConfig(
         primary_profile_id="claude",
         profiles=(
-            AgentProfile("claude", "claude", "claude-opus-5.5"),
-            AgentProfile("codex", "codex", "gpt-6"),
+            AgentProfile("claude", "claude", "claude-opus-5"),
+            AgentProfile("codex", "codex", "gpt-6-astra"),
         ),
     )
 

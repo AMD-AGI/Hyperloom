@@ -2040,6 +2040,7 @@ def forge_loop(
         specialist_definitions=specialist_definitions,
         critic_enabled=critic_enabled,
         relay_enabled=campaign.agent_relay is not None,
+        primary_provider=relay_config.primary_profile.provider,
         supervisor_backend=supervisor_backend,
     )
     try:
@@ -2063,7 +2064,11 @@ def forge_loop(
 
     from kernelforge.orchestrator.analysis import make_analysis_agent_service
 
-    analysis_config = config_for_profile(config, primary_bundle.profile)
+    analysis_config = (
+        config_for_profile(config, primary_bundle.profile, primary_provider=primary_bundle.profile.provider)
+        if campaign.agent_relay is not None
+        else config
+    )
     analysis_service = make_analysis_agent_service(
         config=analysis_config,
         usage=usage,

@@ -5,12 +5,13 @@
 
 from __future__ import annotations
 
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
-from kernelforge.config import Config
+from kernelforge.config import Config, resolve_agent_model
 from kernelforge.loop.agent_relay import (
     AgentAvailabilitySnapshot,
     AgentProfile,
@@ -19,11 +20,6 @@ from kernelforge.loop.agent_relay import (
     ProviderAvailability,
 )
 from kernelforge.loop.search_actors import SearchActorBundle, SearchActorPool
-
-DEFAULT_RELAY_MODELS = {
-    "claude": "claude-opus-5.5",
-    "codex": "gpt-6",
-}
 
 
 @dataclass
@@ -54,6 +50,7 @@ class SearchActorBuildContext:
     specialist_definitions: dict
     critic_enabled: bool
     relay_enabled: bool
+    primary_provider: str
     supervisor_backend: str = ""
 
     def build(self, profile: AgentProfile) -> SearchActorBundle:
@@ -66,7 +63,11 @@ class SearchActorBuildContext:
         from kernelforge.orchestrator.orchestration import make_orchestration_service
         from kernelforge.orchestrator.supervisor import make_supervisor_fn
 
-        actor_config = config_for_profile(self.config, profile) if self.relay_enabled else self.config
+        actor_config = (
+            config_for_profile(self.config, profile, primary_provider=self.primary_provider)
+            if self.relay_enabled
+            else self.config
+        )
         actor_fn = make_agent_fn(
             config=actor_config,
             program_md=self.program_md,
@@ -157,47 +158,29 @@ def resolve_default_relay_config(
     *,
     blockage_threshold: int = 3,
 ) -> AgentRelayConfig:
-    """Resolve the primary while always retaining the two target relay profiles."""
-    selected_primary = config.agent_runtime()
-    primary_model = config.agent_model or DEFAULT_RELAY_MODELS.get(selected_primary.provider) or selected_primary.model
+    """Build one profile per provider: the selected primary, plus every provider with a configured model.
+
+    The primary keeps the model the run already resolved (``--model`` or the provider's model variable). Any other
+    registered provider joins only when its own model variable names a model; one without is left out rather than
+    given a guessed default, since a guessed deployment name fails the startup probe or runs an unintended model.
+    """
+    from kernelforge.agent_backends.registry import list_agent_providers
+
     strict_config = replace(config, agent_fallback_provider="")
-    primary_runtime = strict_config.agent_runtime_for(
-        selected_primary.provider,
-        primary_model,
-        executable=config.agent_cli,
-    )
-    target_profiles = (
-        AgentProfile(
-            "claude_opus_5_5",
-            "claude",
-            DEFAULT_RELAY_MODELS["claude"],
-            config.agent_reasoning_effort,
-        ),
-        AgentProfile(
-            "codex_gpt_6",
-            "codex",
-            DEFAULT_RELAY_MODELS["codex"],
-            config.agent_reasoning_effort,
-        ),
-    )
-    matching_target = next(
-        (
-            profile
-            for profile in target_profiles
-            if (profile.provider, profile.model) == (primary_runtime.provider, primary_runtime.model)
-        ),
-        None,
-    )
-    primary_profile = matching_target or AgentProfile(
-        "primary",
-        primary_runtime.provider,
-        primary_runtime.model,
-        primary_runtime.reasoning_effort,
-    )
-    profiles = target_profiles if matching_target is not None else (primary_profile, *target_profiles)
+    primary = strict_config.agent_runtime()
+    profiles = [AgentProfile(primary.provider, primary.provider, primary.model, primary.reasoning_effort)]
+    for provider in list_agent_providers():
+        if provider == primary.provider:
+            continue
+        model = resolve_agent_model(provider)
+        if not model:
+            print(f"  Agent profile: {provider} not configured (no model set for this provider)", file=sys.stderr)
+            continue
+        runtime = strict_config.agent_runtime_for(provider, model)
+        profiles.append(AgentProfile(runtime.provider, runtime.provider, runtime.model, runtime.reasoning_effort))
     return AgentRelayConfig(
-        primary_profile_id=primary_profile.profile_id,
-        profiles=profiles,
+        primary_profile_id=primary.provider,
+        profiles=tuple(profiles),
         blockage_threshold=blockage_threshold,
     )
 
@@ -206,6 +189,7 @@ def config_for_profile(
     config: Config,
     profile: AgentProfile,
     *,
+    primary_provider: str,
     precheck: bool = False,
 ) -> Config:
     """Create a strict Config view for one profile without provider fallback."""
@@ -213,6 +197,8 @@ def config_for_profile(
         config,
         agent_backend=profile.provider,
         agent_model=profile.model,
+        # ``--agent-cli``/``FORGE_AGENT_CLI`` names the primary provider's executable.
+        agent_cli=config.agent_cli if profile.provider == primary_provider else "",
         agent_fallback_provider="",
         agent_precheck=precheck,
     )
@@ -238,7 +224,12 @@ def probe_agent_profiles(
         model_available = False
         if provider_available:
             try:
-                strict_config = config_for_profile(config, profile, precheck=True)
+                strict_config = config_for_profile(
+                    config,
+                    profile,
+                    primary_provider=relay_config.primary_profile.provider,
+                    precheck=True,
+                )
                 create_registered_backend(
                     strict_config.agent_runtime(),
                     preflight=True,

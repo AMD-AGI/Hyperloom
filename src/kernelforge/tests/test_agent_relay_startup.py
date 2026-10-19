@@ -21,8 +21,8 @@ def _relay_config(primary: str = "claude") -> AgentRelayConfig:
     return AgentRelayConfig(
         primary_profile_id=primary,
         profiles=(
-            AgentProfile("claude", "claude", "claude-opus-5.5", "max"),
-            AgentProfile("codex", "codex", "gpt-6", "max"),
+            AgentProfile("claude", "claude", "claude-opus-5", "max"),
+            AgentProfile("codex", "codex", "gpt-6-astra", "max"),
         ),
     )
 
@@ -34,38 +34,67 @@ def _provider(name: str):
     )
 
 
-def test_default_profiles_target_opus_5_5_and_gpt_6(tmp_path):
+def test_profiles_read_each_providers_model_variable(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-5")
+    monkeypatch.setenv("CODEX_MODEL", "gpt-6-astra")
+
     relay_config = resolve_default_relay_config(
         Config(
             workspace=str(tmp_path),
             agent_backend="claude",
-            agent_model="",
+            agent_model="claude-opus-5",
         )
     )
 
-    models = {profile.provider: profile.model for profile in relay_config.profiles}
-    assert models == {
-        "claude": "claude-opus-5.5",
-        "codex": "gpt-6",
-    }
-    assert relay_config.primary_profile_id == "claude_opus_5_5"
+    assert relay_config.primary_profile_id == "claude"
+    assert [(profile.profile_id, profile.provider, profile.model) for profile in relay_config.profiles] == [
+        ("claude", "claude", "claude-opus-5"),
+        ("codex", "codex", "gpt-6-astra"),
+    ]
+    assert all(profile.reasoning_effort for profile in relay_config.profiles)
 
 
-def test_custom_primary_still_probes_both_target_profiles(tmp_path):
+def test_primary_keeps_an_explicit_model_over_its_variable(monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-5")
+    monkeypatch.setenv("CODEX_MODEL", "gpt-6-astra")
+
     relay_config = resolve_default_relay_config(
         Config(
             workspace=str(tmp_path),
             agent_backend="claude",
-            agent_model="claude-custom",
+            agent_model="claude-opus-4-8",
         )
     )
 
-    assert relay_config.primary_profile_id == "primary"
-    assert {(profile.profile_id, profile.model) for profile in relay_config.profiles} == {
-        ("primary", "claude-custom"),
-        ("claude_opus_5_5", "claude-opus-5.5"),
-        ("codex_gpt_6", "gpt-6"),
-    }
+    assert relay_config.primary_profile.model == "claude-opus-4-8"
+    assert [profile.provider for profile in relay_config.profiles] == ["claude", "codex"]
+
+
+def test_provider_without_a_model_variable_is_not_a_relay_profile(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("CLAUDE_MODEL", "claude-opus-5")
+    monkeypatch.delenv("CODEX_MODEL", raising=False)
+
+    relay_config = resolve_default_relay_config(
+        Config(
+            workspace=str(tmp_path),
+            agent_backend="claude",
+            agent_model="claude-opus-5",
+        )
+    )
+
+    assert [profile.profile_id for profile in relay_config.profiles] == ["claude"]
+    assert "codex not configured" in capsys.readouterr().err
+
+
+def test_executable_override_stays_with_the_primary_provider(tmp_path):
+    from kernelforge.cli.relay import config_for_profile
+
+    config = Config(workspace=str(tmp_path), agent_backend="claude", agent_cli="/opt/claude")
+    codex = AgentProfile("codex", "codex", "gpt-6-astra")
+    claude = AgentProfile("claude", "claude", "claude-opus-5")
+
+    assert config_for_profile(config, claude, primary_provider="claude").agent_cli == "/opt/claude"
+    assert config_for_profile(config, codex, primary_provider="claude").agent_cli == ""
 
 
 def test_startup_probe_checks_every_exact_profile(monkeypatch, tmp_path):
@@ -82,15 +111,15 @@ def test_startup_probe_checks_every_exact_profile(monkeypatch, tmp_path):
         config=Config(
             workspace=str(tmp_path),
             agent_backend="claude",
-            agent_model="claude-opus-5.5",
+            agent_model="claude-opus-5",
             agent_reasoning_effort="max",
         ),
         workspace=str(tmp_path),
     )
 
     assert [(provider, model) for provider, model, _fallback, _kwargs in seen] == [
-        ("claude", "claude-opus-5.5"),
-        ("codex", "gpt-6"),
+        ("claude", "claude-opus-5"),
+        ("codex", "gpt-6-astra"),
     ]
     assert all(fallback == "" for _provider, _model, fallback, _kwargs in seen)
     assert all(kwargs["probe_cwd"] == str(tmp_path) for *_prefix, kwargs in seen)
@@ -113,7 +142,7 @@ def test_optional_profile_probe_failure_is_saved_and_skipped(monkeypatch, tmp_pa
         config=Config(
             workspace=str(tmp_path),
             agent_backend="claude",
-            agent_model="claude-opus-5.5",
+            agent_model="claude-opus-5",
             agent_reasoning_effort="max",
         ),
         workspace=str(tmp_path),
@@ -146,7 +175,7 @@ def test_primary_profile_probe_failure_refuses_startup(monkeypatch, tmp_path):
             config=Config(
                 workspace=str(tmp_path),
                 agent_backend="claude",
-                agent_model="claude-opus-5.5",
+                agent_model="claude-opus-5",
                 agent_reasoning_effort="max",
             ),
             workspace=str(tmp_path),
