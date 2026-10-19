@@ -178,30 +178,26 @@ def test_materializes_when_the_snapshot_dir_is_inside_a_git_checkout(repo, patch
     assert set(_writes(resolved)) == {f"{MODELS}/qwen3.py", FUSED_MODULE}
 
 
+_MATERIALIZE = "hyperloom.orchestrator.actions.executors._kernel_agent_tool.materialize_unified_patch_snapshot"
+
+
+def _materialize_raising(monkeypatch, error: Exception) -> None:
+    def _fail(**_kwargs):
+        raise error
+
+    monkeypatch.setattr(_MATERIALIZE, _fail)
+
+
 def test_an_unexpected_materialize_failure_propagates(repo, patch_file, pristine, monkeypatch):
-    """Only the failures materialization can really raise fall back to the caller's snapshot."""
-
-    def _explode(**_kwargs):
-        raise KeyError("bug in materialize")
-
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool.materialize_unified_patch_snapshot", _explode
-    )
+    _materialize_raising(monkeypatch, KeyError("bug in materialize"))
 
     with pytest.raises(KeyError, match="bug in materialize"):
         _final_content_snapshot(patch_path=str(patch_file), snapshot_dir=str(pristine), repo_root=str(repo))
 
 
 def test_a_git_timeout_during_materialize_falls_back_to_the_original(repo, patch_file, pristine, monkeypatch):
-    """A hung ``git`` is an expected failure; apply reports the real error from the original snapshot."""
+    _materialize_raising(monkeypatch, subprocess.TimeoutExpired(cmd="git", timeout=60))
 
-    def _hang(**_kwargs):
-        raise subprocess.TimeoutExpired(cmd="git", timeout=60)
+    result = _final_content_snapshot(patch_path=str(patch_file), snapshot_dir=str(pristine), repo_root=str(repo))
 
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._kernel_agent_tool.materialize_unified_patch_snapshot", _hang
-    )
-
-    assert _final_content_snapshot(patch_path=str(patch_file), snapshot_dir=str(pristine), repo_root=str(repo)) == str(
-        pristine
-    )
+    assert result == str(pristine)

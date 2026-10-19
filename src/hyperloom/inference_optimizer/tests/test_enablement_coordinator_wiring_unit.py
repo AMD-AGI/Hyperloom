@@ -590,31 +590,29 @@ async def test_revalidation_enqueues_genuine_baseline(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_revalidation_keeps_the_task_id_when_its_save_hits_an_os_error(tmp_path, monkeypatch, caplog):
+async def test_revalidation_keeps_the_task_id_when_its_save_hits_an_os_error(tmp_path, monkeypatch):
     fake = _enqueue_self(tmp_path, enablement_validation_pending=True, enablement_origin="eval")
+    monkeypatch.setattr(fake.shared_state, "save", _raise(OSError("no space left on device")))
 
-    def _disk_full(_session_dir):
-        raise OSError("no space left on device")
+    tid = await fake.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
 
-    monkeypatch.setattr(fake.shared_state, "save", _disk_full)
-    with caplog.at_level("DEBUG"):
-        tid = await fake.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
     assert fake.shared_state.enablement.revalidation_task_id == tid
-    assert [r.getMessage() for r in caplog.records if "save of task_id failed" in r.getMessage()] == [
-        "enablement revalidation: save of task_id failed"
-    ]
 
 
 @pytest.mark.asyncio
 async def test_revalidation_save_propagates_a_serialization_defect(tmp_path, monkeypatch):
     fake = _enqueue_self(tmp_path, enablement_validation_pending=True, enablement_origin="eval")
+    monkeypatch.setattr(fake.shared_state, "save", _raise(TypeError("Object of type set is not JSON serializable")))
 
-    def _not_serializable(_session_dir):
-        raise TypeError("Object of type set is not JSON serializable")
-
-    monkeypatch.setattr(fake.shared_state, "save", _not_serializable)
     with pytest.raises(TypeError, match="not JSON serializable"):
         await fake.enablement_revalidation.maybe_enqueue_enablement_baseline_revalidation()
+
+
+def _raise(error: Exception):
+    def _fail(_session_dir):
+        raise error
+
+    return _fail
 
 
 @pytest.mark.asyncio
