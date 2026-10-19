@@ -76,6 +76,22 @@ async def test_claims_made_before_their_change_is_written_meet_only_by_intent(op
     assert other.holder == "s2"
 
 
+async def test_a_test_measured_without_a_change_answers_only_for_its_own_intent(open_as: Open) -> None:
+    no_change = RecipeDelta().fingerprint()
+    tried = intent("s1", "c0")
+    claim = await open_as(Role.SPECIALIST_RUNTIME, "s1").acquire(tried, no_change, ttl_seconds=TTL)
+    toolbox = open_as(Role.TOOLBOX)
+    await toolbox.write_request(request("r1", tried, RecipeDelta()))
+    await toolbox.attach_request(claim.key, "r1", ttl_seconds=TTL)
+    await toolbox.write_result(result("r1"))
+    s2 = open_as(Role.SPECIALIST_RUNTIME, "s2")
+
+    other = await s2.lookup(ClaimKey("c0", intent("s2", "c0", "attention", "fused rope").fingerprint), no_change)
+    same = await s2.lookup(ClaimKey("c0", tried.fingerprint), no_change)
+
+    assert (other.status, same.status) == (DedupStatus.FREE, DedupStatus.SUSPECTED)
+
+
 async def test_a_suspected_duplicate_needs_a_reason_and_the_decision_is_logged_for_q6(open_as: Open) -> None:
     await _measured(open_as, "s1", "c0", "r1", "--max-num-seqs 256")
     s2 = open_as(Role.SPECIALIST_RUNTIME, "s2")
