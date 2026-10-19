@@ -5,12 +5,19 @@
 
 from __future__ import annotations
 
+import os
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
 from kernelforge.config import Config, resolve_agent_model
+from kernelforge.llm.gateway import (
+    anthropic_environment_from_openai,
+    openai_gateway_from_anthropic,
+    resolve_openai_gateway,
+)
 from kernelforge.loop.agent_relay import (
     AgentAvailabilitySnapshot,
     AgentProfile,
@@ -188,15 +195,36 @@ def config_for_profile(
     precheck: bool = False,
 ) -> Config:
     """Create a strict Config view for one profile without provider fallback."""
+    is_primary = profile.provider == primary_provider
     return replace(
         config,
         agent_backend=profile.provider,
         agent_model=profile.model,
-        # ``--agent-cli``/``FORGE_AGENT_CLI`` names the primary provider's executable.
-        agent_cli=config.agent_cli if profile.provider == primary_provider else "",
+        # ``--agent-cli``/``FORGE_AGENT_CLI`` and the provider options belong to the primary provider.
+        agent_cli=config.agent_cli if is_primary else "",
+        agent_options=dict(config.agent_options) if is_primary else _borrowed_line_options(profile.provider),
         agent_fallback_provider="",
         agent_precheck=precheck,
     )
+
+
+def _borrowed_line_options(provider: str) -> dict:
+    """Point a relay provider that has no gateway of its own at the other configured line.
+
+    An explicitly configured line always wins. The borrowed line is only a candidate:
+    the startup probe decides whether the gateway serves this provider's protocol.
+    """
+    from kernelforge.agent_backends.registry import get_agent_provider
+
+    if provider == "codex" and not resolve_openai_gateway().is_complete():
+        gateway = openai_gateway_from_anthropic()
+        if gateway.is_complete():
+            return {"gateway": {"base_url": gateway.base_url, "key_env": gateway.key_env, "headers": gateway.headers}}
+    if provider == "claude" and not get_agent_provider("claude").credentialed(os.environ):
+        environment = anthropic_environment_from_openai()
+        if environment:
+            return {"env": environment}
+    return {}
 
 
 def probe_agent_profiles(
@@ -218,6 +246,7 @@ def probe_agent_profiles(
         provider_available, failure = _provider_is_available(registration)
         model_available = False
         if provider_available:
+            borrowed = False
             try:
                 strict_config = config_for_profile(
                     config,
@@ -225,6 +254,15 @@ def probe_agent_profiles(
                     primary_provider=relay_config.primary_profile.provider,
                     precheck=True,
                 )
+                borrowed = profile.provider != relay_config.primary_profile.provider and bool(
+                    strict_config.agent_options
+                )
+                if borrowed:
+                    print(
+                        f"  Agent profile: {profile.profile_id} has no gateway of its own; "
+                        "probing the other configured gateway on its protocol",
+                        file=sys.stderr,
+                    )
                 create_registered_backend(
                     strict_config.agent_runtime(),
                     preflight=True,
@@ -234,6 +272,8 @@ def probe_agent_profiles(
                 failure = ""
             except Exception as error:  # noqa: BLE001 - isolate optional profiles
                 failure = f"{type(error).__name__}: {error}"
+                if borrowed:
+                    failure = f"the other configured gateway does not serve this protocol: {failure}"
         provider_status[profile.provider] = ProviderAvailability(
             available=provider_available,
             reason="" if provider_available else failure,

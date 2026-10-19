@@ -421,6 +421,8 @@ class ClaudeBackend:
             "1",
             "--no-session-persistence",
         ]
+        # The probe must reach the endpoint the sessions will, and sessions apply ``options["env"]`` over the process.
+        runtime_env = self.runtime.options.get("env") or {}
         try:
             completed = subprocess.run(
                 command,
@@ -429,6 +431,7 @@ class ClaudeBackend:
                 text=True,
                 timeout=timeout,
                 check=False,
+                env={**os.environ, **runtime_env} if runtime_env else None,
             )
         except Exception as error:
             raise ClaudeUnavailableError(f"Claude model probe failed for {selected_model!r}: {error}") from error
