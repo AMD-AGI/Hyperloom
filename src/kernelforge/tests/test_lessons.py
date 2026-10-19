@@ -26,7 +26,6 @@ from kernelforge.loop.lessons import (
     parse_negatives_marker,
     parse_scope_line,
     scan_constant_values,
-    scan_sources_for_constants,
     scan_sources_with_coverage,
     scope_conflicts,
     summarize_iteration,
@@ -639,18 +638,18 @@ def test_a_source_that_cannot_be_parsed_is_not_a_source_that_dropped_it():
 
 def test_a_constant_is_looked_for_in_every_declared_source_file():
     """Tile and dispatch constants move to a sibling file; that is not gone."""
-    found = scan_sources_for_constants(["import config\n", "BLOCK_N = 16\n"], ["BLOCK_N"])
+    found = scan_sources_with_coverage(["import config\n", "BLOCK_N = 16\n"], ["BLOCK_N"])[0]
     assert found == {"BLOCK_N": ("16",)}
 
 
 def test_a_constant_absent_from_every_parsed_file_is_absent():
-    found = scan_sources_for_constants(["import config\n", "num_warps = 8\n"], ["BLOCK_N"])
+    found = scan_sources_with_coverage(["import config\n", "num_warps = 8\n"], ["BLOCK_N"])[0]
     assert found == {}
 
 
 def test_nothing_is_known_when_no_source_file_could_be_parsed():
-    assert scan_sources_for_constants(["def broken(:\n"], ["BLOCK_N"]) is None
-    assert scan_sources_for_constants([], ["BLOCK_N"]) is None
+    assert scan_sources_with_coverage(["def broken(:\n"], ["BLOCK_N"])[0] is None
+    assert scan_sources_with_coverage([], ["BLOCK_N"])[0] is None
 
 
 def test_an_unparsable_source_is_reported_as_unchecked_not_as_moved():

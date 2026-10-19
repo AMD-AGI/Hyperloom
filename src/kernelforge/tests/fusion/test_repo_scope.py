@@ -16,10 +16,17 @@ import os
 import subprocess
 from pathlib import Path
 
+from kernelforge.fusion.locate import FrameworkInstall
+from kernelforge.fusion.discover import DiscoveryTarget
 from kernelforge.fusion.anchor import AnchorReport, Slot, build_anchored_discovery_prompt
-from kernelforge.fusion.campaign import build_campaign_program_md, build_forge_loop_command
+from kernelforge.fusion.campaign import (
+    CampaignBrief,
+    CampaignPaths,
+    build_campaign_program_md,
+    build_forge_loop_command,
+)
 from kernelforge.fusion.discover import parse_discovered_recipes, resolve_repo_file
-from kernelforge.fusion.emit import export_artifacts
+from kernelforge.fusion.emit import FusionFiles, export_artifacts
 from kernelforge.fusion.models import Recipe
 from kernelforge.fusion.shadow_repo import ensure_git_workspace
 from kernelforge.fusion.validate import fused_symbol_invocation_evidence
@@ -89,12 +96,14 @@ def _proposal(source_file: str, additional: list[str] | None = None) -> str:
 def _parse(raw: str, *, root: Path, model_file: Path) -> list[Recipe]:
     return parse_discovered_recipes(
         raw,
-        model_type="deepseek_v4",
-        framework="sglang",
-        source_file=str(model_file),
-        shapes={},
-        repo_scope=True,
-        repo_root=str(root),
+        DiscoveryTarget(
+            model_type="deepseek_v4",
+            install=FrameworkInstall(framework="sglang"),
+            source_file=str(model_file),
+            shapes={},
+            repo_scope=True,
+            repo_root=str(root),
+        ),
     )
 
 
@@ -173,13 +182,16 @@ class TestPrompt:
         root, model_file, _runtime = _repo(tmp_path)
 
         prompt = build_anchored_discovery_prompt(
-            model_type="deepseek_v4",
-            framework="sglang",
-            source_files=[str(model_file)],
-            report=_anchor_report(),
-            shapes={},
-            repo_scope=True,
-            repo_root=str(root),
+            DiscoveryTarget(
+                model_type="deepseek_v4",
+                install=FrameworkInstall(framework="sglang"),
+                source_file="",
+                shapes={},
+                repo_scope=True,
+                repo_root=str(root),
+            ),
+            [str(model_file)],
+            _anchor_report(),
         )
 
         assert "```python" not in prompt
@@ -193,11 +205,11 @@ class TestPrompt:
         _root, model_file, _runtime = _repo(tmp_path)
 
         prompt = build_anchored_discovery_prompt(
-            model_type="deepseek_v4",
-            framework="sglang",
-            source_files=[str(model_file)],
-            report=_anchor_report(),
-            shapes={},
+            DiscoveryTarget(
+                model_type="deepseek_v4", install=FrameworkInstall(framework="sglang"), source_file="", shapes={}
+            ),
+            [str(model_file)],
+            _anchor_report(),
         )
 
         assert "```python" in prompt
@@ -213,11 +225,13 @@ class TestCampaignHandoff:
 
         cmd = build_forge_loop_command(
             recipe,
-            workspace="/fw",
-            driver_path="/out/driver.py",
-            experiments_dir="/out/exp",
-            result_json="/out/result.json",
-            program_md_file="/out/program.md",
+            CampaignPaths(
+                workspace="/fw",
+                driver_path="/out/driver.py",
+                experiments_dir="/out/exp",
+                result_json="/out/result.json",
+                program_md_file="/out/program.md",
+            ),
             fused_module="/fw/fused.py",
         )
 
@@ -232,10 +246,12 @@ class TestCampaignHandoff:
 
         text = build_campaign_program_md(
             recipe,
-            harness_path="/out/harness.py",
-            fused_module="/fw/fused.py",
-            repo_scope=True,
-            tracked_roots=[str(root / "python")],
+            CampaignBrief(
+                harness_path="/out/harness.py",
+                fused_module="/fw/fused.py",
+                repo_scope=True,
+                tracked_roots=[str(root / "python")],
+            ),
         )
 
         assert str(root / "python") in text
@@ -339,10 +355,9 @@ class TestExport:
 
         artifacts = export_artifacts(
             str(root),
-            str(runtime_file),
-            tmp_path / "out",
+            FusionFiles(str(runtime_file), extra_files=[str(model_file)]),
+            tmp_path / "out" / "fusion.patch",
             pristine_dir=pristine,
-            extra_files=[str(model_file)],
         )
 
         assert artifacts.patch
@@ -360,10 +375,7 @@ class TestExport:
         model_file.write_text(model_file.read_text(encoding="utf-8") + "# wired\n", encoding="utf-8")
 
         artifacts = export_artifacts(
-            str(root),
-            str(runtime_file),
-            tmp_path / "out",
-            repo_scope=True,
+            str(root), FusionFiles(str(runtime_file), repo_scope=True), tmp_path / "out" / "fusion.patch"
         )
 
         patch = Path(artifacts.patch).read_text(encoding="utf-8")
@@ -377,7 +389,7 @@ class TestExport:
         runtime_file.write_text(runtime_file.read_text(encoding="utf-8") + "# fused\n", encoding="utf-8")
         model_file.write_text(model_file.read_text(encoding="utf-8") + "# unrelated\n", encoding="utf-8")
 
-        artifacts = export_artifacts(str(root), str(runtime_file), tmp_path / "out")
+        artifacts = export_artifacts(str(root), FusionFiles(str(runtime_file)), tmp_path / "out" / "fusion.patch")
 
         patch = Path(artifacts.patch).read_text(encoding="utf-8")
         assert "kernels/ops/runtime.py" in patch

@@ -72,7 +72,6 @@ __all__ = [
     "canonical_label_key",
     "counter_delta",
     "families_from_aiperf_record",
-    "find_server_metrics_export",
     "parse_prometheus_text",
     "read_aiperf_server_metrics",
     "resolve_metrics_url",
@@ -263,12 +262,6 @@ def _server_metrics_exports(workspace: Any) -> list[Path]:
     except OSError:
         return []
     return found
-
-
-def find_server_metrics_export(workspace: Any) -> Path | None:
-    """Locate the preferred aiperf server-metrics export."""
-    exports = _server_metrics_exports(workspace)
-    return exports[0] if exports else None
 
 
 def _read_aiperf_aggregate_json(path: Path) -> list[tuple[KvSample, dict[str, Any], str | None]]:
@@ -995,7 +988,7 @@ KV_ARTIFACT_NAME = "kv_metrics.json"
 #: them makes every statistic meaningless: ``boot`` has no traffic at all, ``warmup`` runs a deliberately cold cache,
 #: and ``eval`` drives accuracy traffic whose shape has nothing to do with the throughput benchmark. Only ``measured``
 #: may enter a comparison.
-PHASES = ("boot", "warmup", "measured", "eval")
+PHASES = ("boot", "warmup", "measured", "finished", "eval")
 
 #: The one phase whose numbers may be compared against another round's.
 _COMPARABLE_PHASE = "measured"
@@ -1097,8 +1090,6 @@ class KvMetricsRecorder:
         self._capacity_derived = False
         self._capacity_gb: float | None = None
         self._series_count = 0
-        self._prefix_first: dict[str, float] = {}
-        self._prefix_last: dict[str, float] = {}
         self._closed = False
 
     @property

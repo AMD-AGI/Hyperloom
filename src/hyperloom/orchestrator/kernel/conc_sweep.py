@@ -4,13 +4,14 @@
 """Concurrency sweep over the CONC ladder."""
 
 from __future__ import annotations
+from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
 
 import csv
 import json
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -29,6 +30,12 @@ from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     STAGE_SERVER_RESTART,
     STRATEGY_SERVER_RESTART,
     STRATEGY_SINGLE_SERVER,
+    ArmStrategy,
+    SweepAnchor,
+    SweepBudget,
+    SweepEnvironment,
+    SweepPlan,
+    SweepRung,
 )
 from hyperloom.inference_optimizer.grading import resolved_grading
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
@@ -50,7 +57,6 @@ from ..actions.stop_attribution import (
 from ..actions.executors._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
-    materialize_config_with_envs,
 )
 from ..actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
 from hyperloom.inference_optimizer.roofline_ceiling import (
@@ -537,15 +543,17 @@ class _SweepRun:
         point = _point_from_variant(result, arm=arm_name)
         self.recorder.record_variant(
             arm_name,
-            stage=stage,
-            conc=point.get("conc"),
-            point=point,
-            committed=committed,
-            num_prompts=(result.extra_envs or {}).get("NUM_PROMPTS"),
-            start_time=start_time,
-            wall_duration_sec=wall_duration_sec,
-            granted_cap_sec=self.benchmark_timeout_sec,
-            budget_remaining_sec=budget_remaining_sec,
+            SweepRung(
+                stage=stage,
+                conc=point.get("conc"),
+                point=point,
+                committed=committed,
+                num_prompts=(result.extra_envs or {}).get("NUM_PROMPTS"),
+                start_time=start_time,
+                wall_duration_sec=wall_duration_sec,
+                granted_cap_sec=self.benchmark_timeout_sec,
+                budget_remaining_sec=budget_remaining_sec,
+            ),
         )
 
     def commit_failed_boots(self, arm_name: str, boots: list[VariantResult]) -> None:
@@ -763,17 +771,17 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
         port = 8888
         framework = ""
 
+    arm_strategy = ArmStrategy(
+        strategy=STRATEGY_SINGLE_SERVER if lc_eligible else STRATEGY_SERVER_RESTART,
+        reason=None if lc_eligible else "framework_not_lifecycle_eligible",
+        lifecycle_eligible=lc_eligible,
+        lifecycle_reason=lc_reason,
+        port=port,
+        framework=framework,
+        serving_lease_held=arm_lease is not None,
+    )
     if recorder is not None:
-        recorder.record_arm_strategy(
-            arm_name,
-            strategy=STRATEGY_SINGLE_SERVER if lc_eligible else STRATEGY_SERVER_RESTART,
-            reason=None if lc_eligible else "framework_not_lifecycle_eligible",
-            lifecycle_eligible=lc_eligible,
-            lifecycle_reason=lc_reason,
-            port=port,
-            framework=framework,
-            serving_lease_held=arm_lease is not None,
-        )
+        recorder.record_arm_strategy(arm_name, arm_strategy)
 
     async def _sweep_ladder_by_restart() -> None:
         """Run the whole ladder with a server restart per rung.
@@ -955,14 +963,7 @@ async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
             # the boot attempts rather than adding to them -- which is why the
             # attempts above stay uncommitted.
             recorder.record_arm_strategy(
-                arm_name,
-                strategy=STRATEGY_SERVER_RESTART,
-                reason="all_boot_attempts_failed",
-                lifecycle_eligible=lc_eligible,
-                lifecycle_reason=lc_reason,
-                port=port,
-                framework=framework,
-                serving_lease_held=arm_lease is not None,
+                arm_name, replace(arm_strategy, strategy=STRATEGY_SERVER_RESTART, reason="all_boot_attempts_failed")
             )
         await _sweep_ladder_by_restart()
         return
@@ -1208,10 +1209,10 @@ async def run_conc_sweep(
     if optimized is None:
         return _declined(recorder, "no_optimization_to_compare")
     if optimized.overlay:
-        from ..actions.executors._grid_runner import _is_safe_path_entry
-        from ..kernel.geak_config import _geak_overlay_is_loadable
+        from hyperloom.inference_optimizer.runtime_environment import is_safe_path_entry
+        from ..kernel.geak_config import geak_overlay_is_loadable
 
-        if not _is_safe_path_entry(optimized.overlay) or not _geak_overlay_is_loadable(optimized.overlay):
+        if not is_safe_path_entry(optimized.overlay) or not geak_overlay_is_loadable(optimized.overlay):
             return _declined(recorder, "optimized_overlay_unavailable", final_overlay=optimized.overlay)
     if not concs:
         return _declined(recorder, "empty_conc_list")
@@ -1247,7 +1248,7 @@ async def run_conc_sweep(
     )
     benchmark_script = state.accepted_baseline_script()
     try:
-        base_yaml_path = materialize_config_with_envs(
+        base_yaml_path = prepare_grid_benchmark_config(
             base_yaml_path,
             workspace,
             model_path=resolved_model or None,
@@ -1266,7 +1267,7 @@ async def run_conc_sweep(
         )
 
     if recorder is not None:
-        cb = state.current_best if isinstance(getattr(state, "current_best", None), dict) else {}
+        cb = state.current_best
         recorder.record_workload(
             session_id=getattr(state, "session_id", "") or session_dir.name,
             isl=isl,
@@ -1275,22 +1276,26 @@ async def run_conc_sweep(
             benchmark_mode=getattr(state, "benchmark_mode", ""),
         )
         recorder.record_anchor(
-            baseline_tput=baseline_tput,
-            anchor_tput=cb.get("tput"),
-            tp=getattr(state, "tp", 0),
-            variant_id=cb.get("variant_name"),
-            action=cb.get("action"),
-            extra_server_args=optimized.args,
-            extra_envs=optimized.envs,
+            SweepAnchor(
+                baseline_tput=baseline_tput,
+                anchor_tput=cb.get("tput"),
+                tp=getattr(state, "tp", 0),
+                variant_id=cb.get("variant_name"),
+                action=cb.get("action"),
+                extra_server_args=optimized.args,
+                extra_envs=optimized.envs,
+            )
         )
         recorder.record_environment(
-            sweep_task_id=task_id,
-            workspace=workspace.as_posix(),
-            model_path=resolved_model,
-            gpu_type=resolved_gpu,
-            base_config_path=base_yaml_path.as_posix(),
-            report_json_path=(reports_dir(session_dir) / "conc_sweep_summary.json").as_posix(),
-            report_csv_path=(reports_dir(session_dir) / "conc_sweep_raw.csv").as_posix(),
+            SweepEnvironment(
+                sweep_task_id=task_id,
+                workspace=workspace.as_posix(),
+                model_path=resolved_model,
+                gpu_type=resolved_gpu,
+                base_config_path=base_yaml_path.as_posix(),
+                report_json_path=(reports_dir(session_dir) / "conc_sweep_summary.json").as_posix(),
+                report_csv_path=(reports_dir(session_dir) / "conc_sweep_raw.csv").as_posix(),
+            )
         )
 
     started_at = time.time()
@@ -1309,12 +1314,14 @@ async def run_conc_sweep(
 
     if recorder is not None:
         recorder.record_budget(
-            declared_total_sec=total_budget_sec,
-            granted_total_sec=total_budget_sec,
-            rung_cost_sec=variant_expected_sec,
-            raised=False,
-            gate_active=total_budget_sec is not None,
-            deadline=started_at + total_budget_sec if total_budget_sec is not None else None,
+            SweepBudget(
+                declared_total_sec=total_budget_sec,
+                granted_total_sec=total_budget_sec,
+                rung_cost_sec=variant_expected_sec,
+                raised=False,
+                gate_active=total_budget_sec is not None,
+                deadline=started_at + total_budget_sec if total_budget_sec is not None else None,
+            )
         )
 
     run = _SweepRun(
@@ -1351,12 +1358,14 @@ async def run_conc_sweep(
     arms_order = [run.optimized, run.baseline]
     if recorder is not None:
         recorder.record_plan(
-            concs_requested=concs,
-            concs_ordered=run.concs_desc,
-            grid_source=grid_source,
-            num_prompts_factor=num_prompts_factor,
-            variant_timeout_sec=benchmark_timeout_sec,
-            arms_order=[arm.name for arm in arms_order],
+            SweepPlan(
+                concs_requested=concs,
+                concs_ordered=run.concs_desc,
+                grid_source=grid_source,
+                num_prompts_factor=num_prompts_factor,
+                variant_timeout_sec=benchmark_timeout_sec,
+                arms_order=[arm.name for arm in arms_order],
+            )
         )
     for arm in arms_order:
         if run.observe_cancel():

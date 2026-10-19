@@ -784,46 +784,6 @@ def _infera_finalize_patch(args: argparse.Namespace) -> int:
     return 0 if not failures else 1
 
 
-def _infera_kernel_bench(args: argparse.Namespace) -> int:
-    """Infera kernel-bench: run the micro-benchmark on ONE GPU pod over SSH."""
-    state = _infera_require_state()
-    gpu_targets = _infera_all_gpu_targets(state)
-    if not gpu_targets:
-        err("kernel-bench (infera): no GPU pod IPs in state")
-        return EXIT_CONFIG_ERROR
-    target = gpu_targets[0]
-    ip = str(target.get("podIP") or "").strip()
-    port = int(target.get("sshPort") or _mn_cli._infera_default_ssh_port(state))
-    if args.files_b64_json:
-        try:
-            json.loads(args.files_b64_json)
-        except json.JSONDecodeError as exc:
-            err(f"--files-b64-json not valid JSON: {exc}")
-            return EXIT_CONFIG_ERROR
-    op_args = (
-        f"bench --workspace {shlex.quote(str(args.workspace))} "
-        f"--bench-command {shlex.quote(str(args.bench_command))} "
-        f"--files-b64-json {shlex.quote(str(args.files_b64_json or '{}'))} "
-        f"--result-glob {shlex.quote(str(args.result_glob))} "
-        f"--timeout-sec {int(args.timeout_sec)}"
-    )
-    info(f"kernel-bench (infera): ssh -> {ip}:{port}")
-    parsed, tx = _infera_ssh_node_op(
-        state,
-        target,
-        op_args,
-        timeout=args.timeout_sec + 60,
-    )
-    if parsed is None:
-        err(f"kernel-bench (infera): no JSON from pod (ssh rc={tx.get('rc')})")
-        if getattr(args, "print_logs", False):
-            print(tx.get("stderr", ""))
-        return EXIT_TRANSIENT
-    payload = {"command": "bench", "status": "ok" if str(parsed.get("status")) == "ok" else "failed", "result": parsed}
-    print(json.dumps(payload, indent=2, sort_keys=True))
-    return 0 if payload["status"] == "ok" else 1
-
-
 def _resolve_geak_src(explicit: str | None) -> str:
     """Resolve the shared-FS GEAK source dir the sandbox install.sh cloned."""
     if explicit and explicit.strip():

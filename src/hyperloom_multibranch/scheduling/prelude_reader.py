@@ -21,7 +21,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from hyperloom.common.jsonio import read_json
+from hyperloom.common.jsonio import read_json_strict
 from hyperloom.common.perf_metric import GRADED_OUTPUT
 from hyperloom.contracts.recipe import ComponentPatches, LaunchConfig, PatchRef, Recipe, RecipeError, with_unexpressed
 from hyperloom.inference_optimizer.breakdown.stop_reasons import outcome_status
@@ -220,7 +220,7 @@ def root_recipe(
 
 def _json_object(path: Path) -> Mapping[str, object]:
     try:
-        document = read_json(path, strict=True)
+        document = read_json_strict(path)
     except (OSError, json.JSONDecodeError) as exc:
         raise PreludeReadError(f"cannot read {path}: {exc}") from exc
     return _mapping(document, str(path))

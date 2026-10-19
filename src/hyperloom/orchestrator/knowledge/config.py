@@ -9,10 +9,9 @@ import os
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any, Mapping, MutableMapping
+from typing import Mapping
 
 from hyperloom.common.pr_monitor_urls import (
-    PR_MONITOR_ENABLED_ENV,
     kb_store_url as resolve_kb_service_url,
     pr_monitor_enabled as resolve_pr_monitor_enabled,
 )
@@ -32,10 +31,6 @@ def _expanded(value: str) -> str:
 
 
 def _default_local_root(env: Mapping[str, str]) -> str:
-    compatibility_root = str(env.get("HYPERLOOM_LOCAL_KB_ROOT") or "").strip()
-    if compatibility_root:
-        return _expanded(compatibility_root)
-
     user_data_path = str(env.get("USER_DATA_PATH") or "")
     if user_data_path:
         return str(Path(user_data_path).expanduser() / "knowledge")
@@ -95,38 +90,6 @@ class KnowledgeConfig:
         """Stable audit backend label."""
 
         return "kb-store" if self.mode is KnowledgeStoreMode.REMOTE else "local-json"
-
-    def apply_to_child_env(self, env: MutableMapping[str, str]) -> None:
-        """Apply the exact shared contract to a KernelForge child environment."""
-
-        env["KNOWLEDGE_STORE_MODE"] = self.mode.value
-        env["KNOWLEDGE_LOCAL_ROOT"] = self.local_root
-        env[PR_MONITOR_ENABLED_ENV] = "1" if self.pr_monitor_enabled else "0"
-        if self.mode is KnowledgeStoreMode.REMOTE:
-            env["KB_STORE_URL"] = self.kb_store_url
-            env["KB_STORE_TOKEN"] = self.kb_store_token
-        else:
-            if self.kb_store_url and self.pr_monitor_enabled:
-                env["KB_STORE_URL"] = self.kb_store_url
-            else:
-                env.pop("KB_STORE_URL", None)
-            env.pop("KB_STORE_TOKEN", None)
-        # GBrain credentials must never cross into the KernelForge child.
-        env.pop("GBRAIN_BASE_URL", None)
-        env.pop("GBRAIN_TOKEN", None)
-        # Section drafts are owned by the parent inference Recipe publisher.
-        env.pop("KB_DRAFT_DIR", None)
-        env.pop("KB_WARM_START_DIR", None)
-
-    def public_dict(self) -> dict[str, Any]:
-        """Return secret-free configuration suitable for status/audit output."""
-
-        return {
-            "mode": self.mode.value,
-            "backend": self.backend,
-            "local_root": self.local_root,
-            "remote_configured": self.mode is KnowledgeStoreMode.REMOTE,
-        }
 
 
 __all__ = [

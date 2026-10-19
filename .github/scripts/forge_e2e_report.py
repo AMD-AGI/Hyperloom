@@ -9,6 +9,7 @@ import argparse
 import json
 import math
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -101,19 +102,26 @@ def _number(value: Any, digits: int) -> str | None:
     return f"{float(value):.{digits}f}"
 
 
+@dataclass(frozen=True)
+class ForgeE2ERun:
+    """One Forge E2E workload as reported on the PR: outcome, configuration and identity."""
+
+    result_label: str
+    max_hours: str
+    max_iters: str
+    gpus: str
+    head_ref: str
+    head_sha: str
+    session_id: str
+    details_url: str = ""
+    error: str = ""
+
+
 def render_report(
+    run: ForgeE2ERun,
     *,
-    result_label: str,
     detail: dict[str, Any],
     forge_result: dict[str, Any] | None,
-    max_hours: str,
-    max_iters: str,
-    gpus: str,
-    head_ref: str,
-    head_sha: str,
-    session_id: str,
-    details_url: str = "",
-    error: str = "",
     now: datetime | None = None,
 ) -> str:
     """Render the stable PR-comment body for one Forge E2E workload."""
@@ -123,12 +131,12 @@ def render_report(
     terminal = _phase_time(detail, "Succeeded") or _phase_time(detail, "Failed")
     terminal = terminal or now or datetime.now(timezone.utc)
     rows = [
-        ("result", result_label),
-        ("example", f"`triton-softmax-forge-loop` (max_hours={max_hours}, max_iters={max_iters})"),
-        ("resources", f"{gpus}× GPU"),
-        ("PR branch", f"`{head_ref}`"),
-        ("commit", f"`{head_sha}`"),
-        ("session_id", f"`{session_id}`"),
+        ("result", run.result_label),
+        ("example", f"`triton-softmax-forge-loop` (max_hours={run.max_hours}, max_iters={run.max_iters})"),
+        ("resources", f"{run.gpus}× GPU"),
+        ("PR branch", f"`{run.head_ref}`"),
+        ("commit", f"`{run.head_sha}`"),
+        ("session_id", f"`{run.session_id}`"),
         ("queue → dispatch", _duration(queued, dispatched)),
         ("run time", _duration(dispatched, terminal)),
         ("total", _duration(queued, terminal)),
@@ -162,14 +170,14 @@ def render_report(
         if isinstance(best_commit, str) and best_commit:
             rows.append(("best commit", f"`{best_commit}`"))
 
-    if error:
-        rows.append(("reason", error))
+    if run.error:
+        rows.append(("reason", run.error))
 
     table = "\n".join(f"| {_cell(key)} | {_cell(value)} |" for key, value in rows)
-    details = f"\n\n[Actions run]({details_url})" if details_url else ""
+    details = f"\n\n[Actions run]({run.details_url})" if run.details_url else ""
     return (
         "<!-- hyperloom-forge-ci-e2e-report -->\n"
-        f"## Hyperloom Forge E2E — {result_label}\n\n"
+        f"## Hyperloom Forge E2E — {run.result_label}\n\n"
         "| item | value |\n"
         "|---|---|\n"
         f"{table}{details}"
@@ -218,17 +226,19 @@ def main() -> int:
     forge_result = _read_json(args.forge_result_file) or None
     print(
         render_report(
-            result_label=args.result_label,
+            ForgeE2ERun(
+                result_label=args.result_label,
+                max_hours=args.max_hours,
+                max_iters=args.max_iters,
+                gpus=args.gpus,
+                head_ref=args.head_ref,
+                head_sha=args.head_sha,
+                session_id=args.session_id,
+                details_url=args.details_url,
+                error=args.error,
+            ),
             detail=detail if isinstance(detail, dict) else {},
             forge_result=forge_result if isinstance(forge_result, dict) else None,
-            max_hours=args.max_hours,
-            max_iters=args.max_iters,
-            gpus=args.gpus,
-            head_ref=args.head_ref,
-            head_sha=args.head_sha,
-            session_id=args.session_id,
-            details_url=args.details_url,
-            error=args.error,
         )
     )
     return 0

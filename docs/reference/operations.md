@@ -169,7 +169,7 @@ Use the following cron jobs to automate session backup and cleanup.
 # Daily: ship session_breakdown.json + KB to S3
 find "$USER_DATA_PATH" -name session_breakdown.json -mtime -1 \
   -exec aws s3 cp {} s3://my-bucket/hyperloom/sessions/ \;
-KB_ROOT="${KNOWLEDGE_LOCAL_ROOT:-${HYPERLOOM_LOCAL_KB_ROOT:-${USER_DATA_PATH:-$HOME/.cache/hyperloom}/knowledge}}"
+KB_ROOT="${KNOWLEDGE_LOCAL_ROOT:-${USER_DATA_PATH:-$HOME/.cache/hyperloom}/knowledge}"
 aws s3 sync "$KB_ROOT" s3://my-bucket/hyperloom/knowledge/
 
 # Weekly: prune session dirs older than 14 days
@@ -339,7 +339,7 @@ confirmation that lets a refused resume proceed.
 
 1. The session is unrecoverable. Restart from scratch with a fresh
    `--model …` invocation.
-2. KB is unaffected if `HYPERLOOM_LOCAL_KB_ROOT` lives on a different
+2. KB is unaffected if `KNOWLEDGE_LOCAL_ROOT` lives on a different
    volume (recommended). The next run gets the same local recipe store.
 
 ### Scenario C: Gateway 401 after credential or config drift
@@ -355,10 +355,10 @@ confirmation that lets a refused resume proceed.
 
 1. Move the selected local KB root aside before starting a new run:
    ```bash
-   KB_ROOT="${KNOWLEDGE_LOCAL_ROOT:-${HYPERLOOM_LOCAL_KB_ROOT:-${USER_DATA_PATH:-$HOME/.cache/hyperloom}/knowledge}}"
+   KB_ROOT="${KNOWLEDGE_LOCAL_ROOT:-${USER_DATA_PATH:-$HOME/.cache/hyperloom}/knowledge}"
    mv "$KB_ROOT" "$KB_ROOT.corrupt.$(date -u +%Y%m%dT%H%M%SZ)"
    ```
-2. Restart the optimizer with the same `--local-kb-root` (or env default). The
+2. Restart the optimizer with the same `KNOWLEDGE_LOCAL_ROOT` (or default). The
    local store is recreated lazily on first write.
 
 ### Scenario E: Ray won't start (`--num-gpus` rejected)

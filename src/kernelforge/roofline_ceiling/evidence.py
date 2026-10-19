@@ -28,6 +28,7 @@ import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Sequence
 
 from kernelforge.mcp_server.tools._subprocess import communicate_process_group
@@ -57,6 +58,8 @@ class EvidenceBundle:
     #: holds rather than left to assume.
     observed_origin: str = OBSERVED_SINGLE_RUN
     notes: tuple[str, ...] = ()
+    #: The cases the driver scores, in the order it reports them.
+    scored_case_ids: tuple[str, ...] = ()
 
     def artifact_paths(self) -> list[str]:
         """Files the analyst may read, relative to the artifacts directory."""
@@ -65,6 +68,23 @@ class EvidenceBundle:
         return sorted(
             str(path.relative_to(self.artifacts_dir)) for path in self.artifacts_dir.rglob("*") if path.is_file()
         )
+
+
+@dataclass(frozen=True)
+class PerformanceRun:
+    """How the performance command is run: what to run, where, and for how long."""
+
+    command: Sequence[str]
+    workdir: str | Path
+    timeout_sec: float = 1800.0
+
+
+@dataclass(frozen=True)
+class KnownCases:
+    """Scored cases and latencies a caller already measured, so no discovery run is needed."""
+
+    case_ids: Sequence[str]
+    case_ms: Mapping[str, float]
 
 
 async def _run(
@@ -114,14 +134,7 @@ async def _run(
     return code, output
 
 
-async def capture_kernel_trace(
-    *,
-    command: Sequence[str],
-    workdir: str | Path,
-    artifacts_dir: Path,
-    timeout_sec: float = 1800.0,
-    env: dict[str, str] | None = None,
-) -> dict[str, Any]:
+async def capture_kernel_trace(run: PerformanceRun, artifacts_dir: Path) -> dict[str, Any]:
     """Capture a kernel trace so the analyst can count real dispatches.
 
     The trace is what tells the analyst which selector branch a shape entered,
@@ -135,17 +148,26 @@ async def capture_kernel_trace(
     for tool, argv in (
         (
             "rocprofv3",
-            ["rocprofv3", "--kernel-trace", "--stats", "--output-format", "csv", "-d", str(trace_dir), "--", *command],
+            [
+                "rocprofv3",
+                "--kernel-trace",
+                "--stats",
+                "--output-format",
+                "csv",
+                "-d",
+                str(trace_dir),
+                "--",
+                *run.command,
+            ],
         ),
-        ("rocprof", ["rocprof", "--stats", "-o", str(trace_dir / "results.csv"), *command]),
+        ("rocprof", ["rocprof", "--stats", "-o", str(trace_dir / "results.csv"), *run.command]),
     ):
         if not shutil.which(tool):
             continue
         code, _output = await _run(
             argv,
-            cwd=workdir,
-            timeout_sec=timeout_sec,
-            env=env,
+            cwd=run.workdir,
+            timeout_sec=run.timeout_sec,
             log_path=artifacts_dir / f"{tool}.log",
         )
         produced = sorted(path for path in trace_dir.rglob("*") if path.is_file())
@@ -168,12 +190,7 @@ def resolve_identity(arch: str = "") -> DeviceIdentity:
 
 
 async def discover_scored_cases(
-    *,
-    command: Sequence[str],
-    workdir: str | Path,
-    artifacts_dir: Path,
-    timeout_sec: float = 1800.0,
-    env: dict[str, str] | None = None,
+    run: PerformanceRun, artifacts_dir: Path
 ) -> tuple[list[str], dict[str, float], list[str]]:
     """Run the performance command once and read its scored cases off the output.
 
@@ -186,10 +203,9 @@ async def discover_scored_cases(
     from kernelforge.mcp_server.tools.bench import parse_case_timings
 
     code, output = await _run(
-        command,
-        cwd=workdir,
-        timeout_sec=timeout_sec,
-        env=env,
+        run.command,
+        cwd=run.workdir,
+        timeout_sec=run.timeout_sec,
         log_path=artifacts_dir / "performance_run.log",
     )
     case_times, unscored, duplicates = parse_case_timings(output)
@@ -210,67 +226,47 @@ async def discover_scored_cases(
 
 
 async def collect_evidence(
-    *,
-    performance_command: Sequence[str],
-    workdir: str | Path,
+    run: PerformanceRun,
     artifacts_dir: str | Path,
     arch: str = "",
-    run_timeout_sec: float = 1800.0,
-    env: dict[str, str] | None = None,
-    known_case_ids: Sequence[str] | None = None,
-    known_case_ms: dict[str, float] | None = None,
-) -> tuple[EvidenceBundle, list[str]]:
+    known: KnownCases | None = None,
+) -> EvidenceBundle:
     """Settle every deterministic input one ceiling run needs.
 
-    Returns ``(bundle, scored_case_ids)``. The roofs are not among them: the
-    analyst measures those itself and reports them back. What is settled here
-    is what must not vary between runs -- the case set, the machine's identity,
-    and the trace.
+    The roofs are not among them: the analyst measures those itself and
+    reports them back. What is settled here is what must not vary between runs
+    -- the case set, the machine's identity, and the trace.
 
-    ``known_case_ids`` and ``known_case_ms`` let a caller that has already
-    benched the kernel skip the discovery run. A campaign has: it measured its
-    pristine anchor over repeated runs before this is called, which is both a
-    better clock than a single run and one fewer driver execution to pay for.
+    ``known`` lets a caller that has already benched the kernel skip the
+    discovery run. A campaign has: it measured its pristine anchor over
+    repeated runs before this is called, which is both a better clock than a
+    single run and one fewer driver execution to pay for.
     """
     artifacts = Path(artifacts_dir)
     artifacts.mkdir(parents=True, exist_ok=True)
     identity = resolve_identity(arch)
 
-    if known_case_ids:
-        scored = [str(case_id) for case_id in dict.fromkeys(known_case_ids)]
-        observed = {case_id: float(value) for case_id, value in (known_case_ms or {}).items() if case_id in set(scored)}
+    if known is not None and known.case_ids:
+        scored = [str(case_id) for case_id in dict.fromkeys(known.case_ids)]
+        observed = {case_id: float(value) for case_id, value in known.case_ms.items() if case_id in set(scored)}
         observed_origin = OBSERVED_CAMPAIGN
         notes = ["scored case set and latencies supplied by the caller; no discovery run was made"]
     else:
-        scored, observed, notes = await discover_scored_cases(
-            command=performance_command,
-            workdir=workdir,
-            artifacts_dir=artifacts,
-            timeout_sec=run_timeout_sec,
-            env=env,
-        )
+        scored, observed, notes = await discover_scored_cases(run, artifacts)
         observed_origin = OBSERVED_SINGLE_RUN
 
-    trace_provenance = await capture_kernel_trace(
-        command=performance_command,
-        workdir=workdir,
-        artifacts_dir=artifacts,
-        timeout_sec=run_timeout_sec,
-        env=env,
-    )
+    trace_provenance = await capture_kernel_trace(run, artifacts)
     if not trace_provenance.get("captured"):
         notes.append("kernel trace unavailable: " + str(trace_provenance.get("detail") or "unknown"))
     notes.append(f"machine identified as {identity.slug()}; the analyst measures its roofs itself")
 
-    return (
-        EvidenceBundle(
-            identity=identity,
-            artifacts_dir=artifacts,
-            observed_ms=observed,
-            observed_origin=observed_origin,
-            notes=tuple(notes),
-        ),
-        scored,
+    return EvidenceBundle(
+        identity=identity,
+        artifacts_dir=artifacts,
+        observed_ms=observed,
+        observed_origin=observed_origin,
+        notes=tuple(notes),
+        scored_case_ids=tuple(scored),
     )
 
 
@@ -278,6 +274,8 @@ __all__ = [
     "OBSERVED_CAMPAIGN",
     "OBSERVED_SINGLE_RUN",
     "EvidenceBundle",
+    "KnownCases",
+    "PerformanceRun",
     "capture_kernel_trace",
     "collect_evidence",
     "discover_scored_cases",

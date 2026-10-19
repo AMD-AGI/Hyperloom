@@ -4,7 +4,8 @@
 """ExploreExecutor."""
 
 from __future__ import annotations
-
+from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
+from hyperloom.common.benchmark_config import is_magpie_agentx
 import functools
 import logging
 import os
@@ -105,7 +106,6 @@ from ._server_lifecycle import (
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
-    materialize_config_with_envs,
 )
 
 
@@ -128,9 +128,6 @@ _CARRIED_VARIANT_ATTRS: tuple[str, ...] = (
     "scope",
     "overlay_pythonpath",
     "accepted_kernels",
-    "kb_evidence",
-    "pr_evidence",
-    "source_evidence",
     "experience_citations",
 )
 
@@ -201,6 +198,17 @@ def _variant_control_fields(variant: Any) -> dict[str, Any]:
     return out
 
 
+def _keep_uses_effective_args(
+    benchmark: dict[str, Any], base_mode: str, variant_mode: str, remove_args: list[str], unset_envs: list[str]
+) -> bool:
+    """Native KEEP edits remain relative to the verified recipe unless explicitly replaced."""
+    return (
+        base_mode == "replace"
+        or variant_mode == "replace"
+        or (not is_magpie_agentx(benchmark) and bool(remove_args or unset_envs))
+    )
+
+
 def _action_reasoning(raw: dict[str, Any]) -> tuple[str, str]:
     """Return the action-authored rationale and the payload field that supplied it."""
     for field in ("reasoning", "rationale", "reason", "note"):
@@ -227,7 +235,7 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
             unset_envs=fields["unset_envs"],
             args_mode=fields["args_mode"],
         )
-        # Stash extra metadata on the GridVariant so the ledger writer can pull provenance/evidence.
+        # Stash extra metadata on the GridVariant so the ledger writer can pull provenance.
         gv.provenance = str(raw.get("provenance") or "default_grid")  # type: ignore[attr-defined]
         gv.reasoning_origin = reasoning_origin  # type: ignore[attr-defined]
         gv.scope = str(raw.get("scope") or "")  # type: ignore[attr-defined]
@@ -237,9 +245,6 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         gv.accepted_kernels = [  # type: ignore[attr-defined]
             str(k).strip() for k in (raw.get("accepted_kernels") or []) if str(k).strip()
         ]
-        gv.kb_evidence = list(raw.get("kb_evidence") or [])  # type: ignore[attr-defined]
-        gv.pr_evidence = list(raw.get("pr_evidence") or [])  # type: ignore[attr-defined]
-        gv.source_evidence = list(raw.get("source_evidence") or [])  # type: ignore[attr-defined]
         # Validated against what the proposing agent was shown before the grid reached this executor.
         gv.experience_citations = [  # type: ignore[attr-defined]
             dict(item) for item in (raw.get("experience_citations") or []) if isinstance(item, dict)
@@ -797,7 +802,7 @@ class ExploreExecutor:
                 "error": str(exc),
             }
         try:
-            config_path = materialize_config_with_envs(
+            config_path = prepare_grid_benchmark_config(
                 config_path,
                 output_root,
                 model_path=resolved_model or None,
@@ -868,6 +873,7 @@ class ExploreExecutor:
         except (TypeError, ValueError):
             baseline_warm_runtime_sec = 0.0
         # Resolve framework from materialized YAML (for the ledger + the atom seed-grid fallback below).
+        _cfg = {}
         try:
             with config_path.open(encoding="utf-8") as _f:
                 _cfg = yaml.safe_load(_f) or {}
@@ -1236,7 +1242,7 @@ class ExploreExecutor:
                     extra_server_args=gv.extra_server_args,
                     extra_envs=run_extra_envs,
                     note=gv.note,
-                    remove_args=run_remove_args,
+                    remove_args=list(gv.remove_args),
                     unset_envs=run_unset_envs,
                     args_mode=str(getattr(gv, "args_mode", "append") or "append"),
                 )
@@ -1592,45 +1598,30 @@ class ExploreExecutor:
 
                     # ---- KEEP path ----
                     if outcome == "KEEP":
-                        # Layer onto the running stack. For
-                        # removal variants, next_args/next_envs are the
-                        # effective launch config that must persist if the KEEP
-                        # survives; gv.extra_* remain only the candidate delta.
-                        _keep_remove_args = (
-                            to_str_list(getattr(gv, "remove_args", []))
-                            if stack_base_args_mode == "replace"
-                            else list(dict.fromkeys(stack_remove_args + to_str_list(getattr(gv, "remove_args", []))))
-                        )
-                        _keep_unset_envs = list(
-                            dict.fromkeys(stack_unset_envs + to_str_list(getattr(gv, "unset_envs", [])))
-                        )
                         next_effective_args = compose_server_args(
                             inherited_args=_effective_inherited_args,
                             base_extra_args=stack_extra_args,
                             variant_extra_args=gv.extra_server_args,
-                            remove_args=_keep_remove_args,
-                            args_mode="replace"
-                            if stack_base_args_mode == "replace"
-                            else getattr(gv, "args_mode", "append"),
+                            remove_args=run_remove_args,
+                            args_mode="replace" if stack_base_args_mode == "replace" else gv.args_mode,
                         )
                         next_stack_args = compose_server_args(
-                            inherited_args="",
                             base_extra_args=stack_extra_args,
                             variant_extra_args=gv.extra_server_args,
-                            remove_args=to_str_list(getattr(gv, "remove_args", [])),
-                            args_mode=getattr(gv, "args_mode", "append"),
+                            remove_args=gv.remove_args,
+                            args_mode=gv.args_mode,
                         )
-                        next_envs = dict(run_extra_envs)
                         effective_control_fields = dict(control_fields)
-                        if _keep_remove_args:
-                            effective_control_fields["remove_args"] = list(_keep_remove_args)
-                        if _keep_unset_envs:
-                            effective_control_fields["unset_envs"] = list(_keep_unset_envs)
-                        persist_effective_args = bool(
-                            run_remove_args
-                            or run_unset_envs
-                            or str(getattr(gv, "args_mode", "append") or "append").strip().lower() == "replace"
-                            or stack_base_args_mode == "replace"
+                        if run_remove_args:
+                            effective_control_fields["remove_args"] = list(run_remove_args)
+                        if run_unset_envs:
+                            effective_control_fields["unset_envs"] = list(run_unset_envs)
+                        persist_effective_args = _keep_uses_effective_args(
+                            _cfg.get("benchmark") or {},
+                            stack_base_args_mode,
+                            gv.args_mode,
+                            run_remove_args,
+                            run_unset_envs,
                         )
                         if persist_effective_args:
                             effective_control_fields["args_mode"] = "replace"
@@ -1646,7 +1637,7 @@ class ExploreExecutor:
                             },
                             "extra_server_args": next_effective_args if persist_effective_args else next_stack_args,
                             "effective_extra_server_args": next_effective_args,
-                            "extra_envs": dict(next_envs),
+                            "extra_envs": dict(run_extra_envs),
                             **effective_control_fields,
                             **_decision_fields(gv),
                             "provenance": provenance,
@@ -1673,9 +1664,9 @@ class ExploreExecutor:
                         }
                         # The variant KEEPs on the round that graded it.
                         stack_extra_args = next_effective_args if persist_effective_args else next_stack_args
-                        stack_extra_envs = next_envs
-                        stack_remove_args = list(_keep_remove_args)
-                        stack_unset_envs = list(_keep_unset_envs)
+                        stack_extra_envs = dict(run_extra_envs)
+                        stack_remove_args = list(run_remove_args)
+                        stack_unset_envs = list(run_unset_envs)
                         stack_base_args_mode = "replace" if persist_effective_args else "append"
                         if decision_tput and decision_tput > 0:
                             running_base_tput = decision_tput

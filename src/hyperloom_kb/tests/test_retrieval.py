@@ -15,7 +15,6 @@ from hyperloom_kb import (
     CapabilityUnavailable,
     Experience,
     ExperienceDeclaration,
-    ExperienceService,
     ExperienceStatus,
     FieldDeclaration,
     FieldKind,
@@ -23,20 +22,19 @@ from hyperloom_kb import (
     FileRef,
     InMemoryExperienceStore,
     InMemoryQueryViewStore,
-    InMemorySchemaRegistry,
     LeaseExpired,
     LocalRetrievalService,
     ObjectiveDeclaration,
     Provenance,
     QueryView,
     QueryViewBuilder,
-    QueryViewMaintainer,
     ReadLeaseManager,
     RetrievalCapability,
     derive_experience_id,
 )
 from hyperloom_kb.retrieval import render_complete_experience
 from hyperloom_kb.tests.logs import LOG
+from hyperloom_kb.tests.view_fixtures import publish_view, submit_complete
 
 NOW = datetime(2026, 9, 17, tzinfo=timezone.utc)
 TRACE = FileRef("traces/decode.json", "b" * 64, 4096)
@@ -99,21 +97,13 @@ class StaticProvider:
 
 def setup(*, fuzzy_ready: bool = False, semantic_ready: bool = False):
     schema = declaration()
-    schemas = InMemorySchemaRegistry()
     experiences = InMemoryExperienceStore()
     views = InMemoryQueryViewStore()
-    service = ExperienceService(schemas, experiences)
-    service.register_schema(schema)
     first = experience(schema, "run-1", "page_size")
     repeated = experience(schema, "run-2", "page_size")
     other = experience(schema, "run-3", "chunk")
-    for item in (first, repeated, other):
-        service.submit_complete(item)
-    ref = QueryViewMaintainer(schemas, experiences, views).rebuild(
-        schema.schema_ref,
-        fuzzy_ready=fuzzy_ready,
-        semantic_ready=semantic_ready,
-    )
+    submit_complete(schema, experiences, first, repeated, other)
+    ref = publish_view(schema, experiences, views, fuzzy_ready=fuzzy_ready, semantic_ready=semantic_ready)
     return schema, experiences, views, ref, first, repeated, other
 
 
@@ -214,28 +204,13 @@ def test_read_lease_pins_old_view_while_current_advances() -> None:
     lease = read.acquire_view(schema.schema_ref)
     new = experience(schema, "run-4", "new-knob")
     experiences.insert_complete(new)
-    current_ref = QueryViewMaintainer(
-        InMemorySchemaRegistryProxy(schema),
-        experiences,
-        views,
-    ).rebuild(schema.schema_ref)
+    current_ref = publish_view(schema, experiences, views)
 
     old_hits = read.query({}, view=old_ref, lease_id=lease.lease_id)
 
     assert current_ref != old_ref
     assert new.id not in {hit.experience_id for hit in old_hits}
     assert first.id in {hit.experience_id for hit in old_hits}
-
-
-class InMemorySchemaRegistryProxy:
-    def __init__(self, schema: ExperienceDeclaration) -> None:
-        self.schema = schema
-
-    def register_schema(self, declaration: ExperienceDeclaration) -> str:
-        raise AssertionError("not used")
-
-    def get_schema(self, schema_ref: str) -> ExperienceDeclaration | None:
-        return self.schema if schema_ref == self.schema.schema_ref else None
 
 
 def test_expired_or_released_lease_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -299,9 +274,6 @@ def test_complete_renderer_without_budget_keeps_every_knowledge_field_and_no_met
     schema = declaration()
     experiences = InMemoryExperienceStore()
     views = InMemoryQueryViewStore()
-    schemas = InMemorySchemaRegistry()
-    service = ExperienceService(schemas, experiences)
-    service.register_schema(schema)
     long_reasoning = "Measured decode stalls point at page size. " * 400
     record = replace(
         experience(schema, "run-long", "page_size"),
@@ -312,8 +284,8 @@ def test_complete_renderer_without_budget_keeps_every_knowledge_field_and_no_met
         },
         change={"knob": "page_size", "summary": "Change page_size.", "content": "--page-size 32\n--max-num-seqs 256"},
     )
-    service.submit_complete(record)
-    ref = QueryViewMaintainer(schemas, experiences, views).rebuild(schema.schema_ref)
+    submit_complete(schema, experiences, record)
+    ref = publish_view(schema, experiences, views)
     read = LocalRetrievalService(experiences, views, renderer=render_complete_experience)
     lease = read.acquire_view(schema.schema_ref)
 
@@ -368,16 +340,12 @@ def test_raw_logs_render_like_files_and_a_record_without_them_renders_none() -> 
 def test_restricted_view_limits_recall_but_keeps_full_group_annotations() -> None:
     schema = declaration()
     experiences = InMemoryExperienceStore()
-    schemas = InMemorySchemaRegistry()
-    service = ExperienceService(schemas, experiences)
-    service.register_schema(schema)
     kept = experience(schema, "run-1", "page_size")
     reverted = replace(
         experience(schema, "run-2", "page_size"),
         outcome={"decision": "revert", "value": 95.0},
     )
-    for item in (kept, reverted):
-        service.submit_complete(item)
+    submit_complete(schema, experiences, kept, reverted)
     full = QueryViewBuilder().build(schema, experiences.list_experiences(schema.schema_ref))
 
     restricted = QueryViewBuilder().restrict(full, (kept.id,))

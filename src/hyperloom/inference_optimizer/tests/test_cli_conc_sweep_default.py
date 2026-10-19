@@ -133,26 +133,32 @@ class TestTheSweepSwitchFallsBackToTheWorkload:
         monkeypatch.setattr(policy, "detect_gpu_count", lambda: 8)
         monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 16)
 
-    def _seeded(self, tmp_path, monkeypatch: pytest.MonkeyPatch, *, agentx: bool, extra: tuple[str, ...] = ()):
+    def _seeded(
+        self, native_benchmark, tmp_path, monkeypatch: pytest.MonkeyPatch, *, agentx: bool, extra: tuple[str, ...] = ()
+    ):
         from hyperloom.inference_optimizer.cli import bootstrap as cb
 
         if agentx:
-            monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+            monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
         else:
-            monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+            monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
         args = _parse("--model", "/models/m", *extra)
         return cb._seed_shared_state(tmp_path, args, session_id="s")
 
-    def test_synthetic_sweeps_by_default(self, tmp_path, monkeypatch):
-        assert self._seeded(tmp_path, monkeypatch, agentx=False).conc_sweep_enabled is True
+    def test_synthetic_sweeps_by_default(self, native_benchmark, tmp_path, monkeypatch):
+        assert self._seeded(native_benchmark, tmp_path, monkeypatch, agentx=False).conc_sweep_enabled is True
 
-    def test_agentx_does_not_sweep_by_default(self, tmp_path, monkeypatch):
-        assert self._seeded(tmp_path, monkeypatch, agentx=True).conc_sweep_enabled is False
+    def test_agentx_does_not_sweep_by_default(self, native_benchmark, tmp_path, monkeypatch):
+        assert self._seeded(native_benchmark, tmp_path, monkeypatch, agentx=True).conc_sweep_enabled is False
 
-    def test_agentx_sweeps_when_asked(self, tmp_path, monkeypatch):
-        state = self._seeded(tmp_path, monkeypatch, agentx=True, extra=("--enable-conc-sweep",))
-        assert state.conc_sweep_enabled is True
+    def test_native_agentx_rejects_a_concurrency_sweep(self, native_benchmark, monkeypatch):
+        from hyperloom.inference_optimizer.cli.benchmark_config import configure_benchmark
 
-    def test_synthetic_skips_when_told(self, tmp_path, monkeypatch):
-        state = self._seeded(tmp_path, monkeypatch, agentx=False, extra=("--no-enable-conc-sweep",))
+        monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", "")
+        args = _parse("--benchmark-config", str(native_benchmark), "--enable-conc-sweep")
+        with pytest.raises(ValueError, match="concurrency is fixed"):
+            configure_benchmark(args)
+
+    def test_synthetic_skips_when_told(self, native_benchmark, tmp_path, monkeypatch):
+        state = self._seeded(native_benchmark, tmp_path, monkeypatch, agentx=False, extra=("--no-enable-conc-sweep",))
         assert state.conc_sweep_enabled is False

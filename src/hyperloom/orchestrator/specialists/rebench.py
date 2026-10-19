@@ -4,6 +4,8 @@
 """Optional gate-comparable rebench helper for GPU specialists."""
 
 from __future__ import annotations
+from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
+
 
 import argparse
 import asyncio
@@ -18,7 +20,6 @@ from hyperloom.common.perf_metric import constraint_fields
 from ..actions.executors._grid_runner import GridVariant, run_grid
 from ..actions.executors._workload_envs import (
     default_baseline_config,
-    materialize_config_with_envs,
 )
 
 
@@ -58,7 +59,7 @@ async def run_specialist_rebench(
     resolved_port = _resolve_port(port)
 
     base_config = Path(config_path) if config_path else Path(default_baseline_config())
-    materialized = materialize_config_with_envs(
+    materialized = prepare_grid_benchmark_config(
         base_config,
         out_root,
         model_path=model_path or None,

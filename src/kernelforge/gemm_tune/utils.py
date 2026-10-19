@@ -16,8 +16,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .aiter_script_map import TUNER_SCRIPT_HINTS as _TUNER_SCRIPT_HINTS
-
 # Re-exported: callers and tests import them from this module.
 from .aiter_script_map import resolve_aiter_csrc, resolve_aiter_root  # noqa: F401
 
@@ -42,9 +40,6 @@ def sha256_file(path: str | Path | None) -> str:
 RESULT_SENTINEL_BEGIN = "FORGE_GEMM_TUNE_RESULT_BEGIN"
 RESULT_SENTINEL_END = "FORGE_GEMM_TUNE_RESULT_END"
 
-# Preferred relative path per tuner, derived from the discovery hints so there is one source of truth.
-AITER_TUNER_SCRIPTS = {name: rels[0] for name, rels in _TUNER_SCRIPT_HINTS.items() if rels}
-
 # Environment variable names for tuned config outputs
 TUNER_ENV_VARS = {
     "fmoe_ck": "AITER_CONFIG_FMOE",
@@ -66,11 +61,7 @@ class GpuInfo:
     """GPU status from rocm-smi."""
 
     gpu_id: int
-    temperature: str
-    power: str
     utilization: str
-    memory_used: str
-    memory_total: str
     busy: bool
 
 
@@ -81,13 +72,11 @@ def find_tuner_script(tuner_name: str) -> Path | None:
     return discover_tuner_script(tuner_name)
 
 
-def check_gpu_status(skip: bool = False) -> list[GpuInfo]:
-    """Run rocm-smi and return GPU status list. Returns empty if skip=True or rocm-smi unavailable."""
-    if skip:
-        return []
+def check_gpu_status() -> list[GpuInfo]:
+    """Run rocm-smi and return GPU status list. Returns empty if rocm-smi is unavailable."""
     try:
         proc = subprocess.run(
-            ["rocm-smi", "--showuse", "--showmemuse", "--showtemp", "--showpower", "--json"],
+            ["rocm-smi", "--showuse", "--json"],
             capture_output=True,
             text=True,
             timeout=15,
@@ -106,11 +95,7 @@ def check_gpu_status(skip: bool = False) -> list[GpuInfo]:
             gpus.append(
                 GpuInfo(
                     gpu_id=gpu_id,
-                    temperature=str(info.get("Temperature (Sensor edge) (C)", "")),
-                    power=str(info.get("Average Graphics Package Power (W)", "")),
                     utilization=util_str,
-                    memory_used=str(info.get("VRAM Total Used Memory (B)", "")),
-                    memory_total=str(info.get("VRAM Total Memory (B)", "")),
                     busy=util_val > 50.0,
                 )
             )

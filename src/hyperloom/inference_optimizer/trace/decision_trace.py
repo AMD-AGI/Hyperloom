@@ -57,15 +57,6 @@ _STATUS_KEY = "status"
 _STATUS_OK = "ok"
 
 
-_TOKEN_KEYS_ALL: tuple[str, ...] = (
-    _TOKEN_IN_KEY,
-    _TOKEN_OUT_KEY,
-    _TOKEN_CACHE_CREATE_KEY,
-    _TOKEN_CACHE_READ_KEY,
-    _TOKEN_REASONING_KEY,
-)
-
-
 def _coerce_token(value: Any) -> int:
     """Coerce a token counter to int, treating ``None`` / bad as 0."""
     if value is None:
@@ -232,25 +223,6 @@ def _decision_key(task_id: str, dyn_id: str) -> str | None:
 def _decision_id(kind: str, *facts: Any) -> str:
     """Name one decision by the facts its source records once, so the id survives every rewrite of the trace."""
     return hashlib.sha256(json.dumps([kind, *facts]).encode("utf-8")).hexdigest()[:16]
-
-
-def _token_convenience(bucket: dict[str, Any] | None) -> dict[str, Any]:
-    """Copy a token bucket and add ``total_in_out``, ``grand_total`` and ``cache_hit_rate``."""
-    b = dict(bucket or {})
-    ti = int(b.get("total_in", 0) or 0)
-    to = int(b.get("total_out", 0) or 0)
-    cache = (
-        int(b.get("total_cache", 0) or 0)
-        + int(b.get("total_cache_creation", 0) or 0)
-        + int(b.get("total_cache_read", 0) or 0)
-    )
-    reasoning = int(b.get("total_reasoning_out", 0) or 0)
-    b["total_in_out"] = ti + to
-    b["grand_total"] = ti + to + cache + reasoning
-    cc = int(b.get("total_cache_creation", 0) or 0)
-    cr = int(b.get("total_cache_read", 0) or 0)
-    b["cache_hit_rate"] = round(cr / (cc + cr), 4) if (cc + cr) else 0.0
-    return b
 
 
 def _proposal_scores_by_variant(state: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:

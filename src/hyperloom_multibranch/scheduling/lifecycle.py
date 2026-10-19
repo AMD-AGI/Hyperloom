@@ -391,7 +391,7 @@ class Session:
             "metric": self._settings.workload.metric,
             "policy_versions": POLICY_VERSIONS,
         }
-        atomic_write_json(self._layout.manifest, document, indent=2, sort_keys=True)
+        atomic_write_json(self._layout.manifest, document)
 
 
 @dataclass(frozen=True)

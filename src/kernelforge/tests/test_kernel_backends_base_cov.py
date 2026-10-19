@@ -7,7 +7,7 @@ from kernelforge.kernel_backends.base import (
     _is_aiter_operator,
     build_single_kernel_backend_prompt,
 )
-from kernelforge.kernel_backends.constants import KERNEL_BACKENDS, resolve_language_dir
+from kernelforge.kernel_backends.constants import KERNEL_BACKENDS, resolve_language_dirs
 
 
 # ─── _is_aiter_operator ───
@@ -51,18 +51,18 @@ def test_build_single_kernel_backend_prompt_supports_every_registered_backend():
         assert prompt, f"{backend} is registered but has no forge-loop prompt"
 
 
-# ─── resolve_language_dir ───
+# ─── resolve_language_dirs ───
 
 
-def test_resolve_language_dir_matches_backend_named_folders(tmp_path):
+def test_resolve_language_dirs_matches_backend_named_folders(tmp_path):
     (tmp_path / "languages" / "triton").mkdir(parents=True)
-    assert resolve_language_dir("triton", tmp_path) == "triton"
+    assert resolve_language_dirs("triton", tmp_path) == ("triton",)
 
 
-def test_resolve_language_dir_none_without_folder(tmp_path):
+def test_resolve_language_dirs_empty_without_folder(tmp_path):
     (tmp_path / "languages").mkdir()
-    assert resolve_language_dir("hipblaslt", tmp_path) is None
-    assert resolve_language_dir("", tmp_path) is None
+    assert resolve_language_dirs("hipblaslt", tmp_path) == ()
+    assert resolve_language_dirs("", tmp_path) == ()
 
 
 def test_build_single_kernel_backend_prompt_aiter_operator():

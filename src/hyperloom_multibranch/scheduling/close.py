@@ -16,7 +16,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 
-from hyperloom.common.io import atomic_write_json, atomic_write_text
+from hyperloom.common.io import WriteOptions, atomic_write_json, atomic_write_text
 from hyperloom.contracts.recipe import RecipeError
 from hyperloom_multibranch.contracts.notebook.interfaces import NotebookError
 from hyperloom_multibranch.notebook.codec import encode
@@ -165,14 +165,9 @@ class Closer:
         """Write ``MB-report.json`` and ``MB-report.md``; the session writes a CLOSE it cut short through here."""
 
         session_id = self._layout.session_id
-        atomic_write_json(
-            self._layout.report,
-            report_document(report, session_id, self._clock.now()),
-            indent=2,
-            sort_keys=True,
-            make_parents=True,
-        )
-        atomic_write_text(self._layout.report_markdown, report_markdown(report, session_id), make_parents=True)
+        atomic_write_json(self._layout.report, report_document(report, session_id, self._clock.now()))
+        markdown = report_markdown(report, session_id)
+        atomic_write_text(self._layout.report_markdown, markdown, options=WriteOptions(make_parents=True))
 
 
 __all__ = ["EXPORT_FAILURES", "CloseReport", "Closer", "report_document", "report_markdown"]

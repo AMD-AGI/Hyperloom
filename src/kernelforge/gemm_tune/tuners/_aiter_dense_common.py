@@ -620,6 +620,7 @@ def _conform_csv_columns(
 def _derive_input_csv_from_config(ctx: TuneContext, work_dir: Path, needs_q_dtype_w: bool = False) -> Path | None:
     """Synthesize an untuned CSV from the model config when none was supplied."""
     from ..dense_shapes import (
+        DenseGeometry,
         compute_dense_m_values,
         compute_dense_nk_shapes,
         write_mnk_untuned_csv,
@@ -639,19 +640,19 @@ def _derive_input_csv_from_config(ctx: TuneContext, work_dir: Path, needs_q_dtyp
     num_heads = int(getattr(profile, "num_attention_heads", 0) or 0)
     num_kv_heads = int(getattr(profile, "num_key_value_heads", 0) or num_heads or 0)
     nk_shapes = compute_dense_nk_shapes(
-        hidden_size=hidden_size,
-        intermediate_size=intermediate_size,
-        num_heads=num_heads,
-        num_kv_heads=num_kv_heads,
-        tp=ctx.tp,
-        head_dim=int(getattr(profile, "head_dim", 0) or 0),
-        v_head_dim=int(getattr(profile, "v_head_dim", 0) or 0),
-        q_lora_rank=int(getattr(profile, "q_lora_rank", 0) or 0),
-        kv_lora_rank=int(getattr(profile, "kv_lora_rank", 0) or 0),
-        qk_nope_head_dim=int(getattr(profile, "qk_nope_head_dim", 0) or 0),
-        qk_rope_head_dim=int(getattr(profile, "qk_rope_head_dim", 0) or 0),
-        o_lora_rank=int(getattr(profile, "o_lora_rank", 0) or 0),
-        o_groups=int(getattr(profile, "o_groups", 0) or 0),
+        DenseGeometry(
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=int(getattr(profile, "head_dim", 0) or 0),
+            v_head_dim=int(getattr(profile, "v_head_dim", 0) or 0),
+            q_lora_rank=int(getattr(profile, "q_lora_rank", 0) or 0),
+            kv_lora_rank=int(getattr(profile, "kv_lora_rank", 0) or 0),
+            qk_nope_head_dim=int(getattr(profile, "qk_nope_head_dim", 0) or 0),
+            qk_rope_head_dim=int(getattr(profile, "qk_rope_head_dim", 0) or 0),
+        ),
+        ctx.tp,
     )
     if not nk_shapes:
         return None
@@ -855,13 +856,7 @@ def _summarize_shape_results(shape_results: list[dict[str, Any]]) -> dict[str, A
 
 
 def _invoke_tuner(
-    *,
-    script: Path,
-    base_args: list[str],
-    input_csv: Path,
-    tuned_csv: Path,
-    work_dir: Path,
-    aiter_root: Path | None,
+    invocation: _tr.TunerInvocation,
     ctx: TuneContext,
     tuner_name: str,
 ) -> tuple[int, str, str, Path | None]:
@@ -871,9 +866,19 @@ def _invoke_tuner(
     aiter instead of hanging the run.
     """
     if not _tr.is_isolation_enabled():
-        cmd = _tr.with_task_timeout(["python3", str(script), "-i", str(input_csv), "-o", str(tuned_csv), *base_args])
+        cmd = _tr.with_task_timeout(
+            [
+                "python3",
+                str(invocation.script),
+                "-i",
+                str(invocation.input_csv),
+                "-o",
+                str(invocation.tuned_csv),
+                *invocation.base_args,
+            ]
+        )
         rc, stdout, stderr = run_subprocess(
-            cmd, cwd=aiter_root, timeout_s=ctx.timeout_s, log_file=work_dir / "tune.log"
+            cmd, cwd=invocation.aiter_root, timeout_s=ctx.timeout_s, log_file=invocation.work_dir / "tune.log"
         )
         return rc, stdout, stderr, None
     # Per-shape process isolation + provenance-keyed fault blocklist.
@@ -887,16 +892,13 @@ def _invoke_tuner(
         },
     )
     return _tr.run_isolated(
-        script=str(script),
-        base_args=base_args,
-        input_csv=input_csv,
-        tuned_stem=tuned_csv.stem,
-        work_dir=work_dir,
-        aiter_root=aiter_root,
-        outer_timeout_s=ctx.timeout_s,
-        task_timeout_s=_tr.DEFAULT_TASK_TIMEOUT_S,
-        gpu_ids=getattr(ctx, "gpu_ids", "") or "",
-        blocklist=blocklist,
+        invocation,
+        _tr.IsolationGuard(
+            outer_timeout_s=ctx.timeout_s,
+            task_timeout_s=_tr.DEFAULT_TASK_TIMEOUT_S,
+            gpu_ids=getattr(ctx, "gpu_ids", "") or "",
+            blocklist=blocklist,
+        ),
     )
 
 
@@ -996,16 +998,19 @@ def _shape_results_for_run(
     return shape_results
 
 
-def run_aiter_dense_tuner(
-    *,
-    tuner_name: str,
-    script_key: str,
-    env_var: str,
-    ctx: TuneContext,
-    work_dir: Path,
-    extra_args: list[str] | None = None,
-) -> TuneResult:
+@dataclass(frozen=True)
+class DenseTunerSpec:
+    """One aiter dense tuner: its name, tuning script, deployment env var and extra script flags."""
+
+    tuner_name: str
+    script_key: str
+    env_var: str
+    extra_args: tuple[str, ...] = ()
+
+
+def run_aiter_dense_tuner(spec: DenseTunerSpec, ctx: TuneContext, work_dir: Path) -> TuneResult:
     """Run an aiter dense GEMM tuner subprocess."""
+    tuner_name, script_key = spec.tuner_name, spec.script_key
     script = find_tuner_script(script_key)
     if script is None:
         return TuneResult(
@@ -1048,8 +1053,8 @@ def run_aiter_dense_tuner(
         str(ctx.min_improvement_pct),
         "-v",
     ]
-    if extra_args:
-        base_args.extend(extra_args)
+    if spec.extra_args:
+        base_args.extend(spec.extra_args)
 
     # Check the script's argparse surface before spending minutes on it.
     filtered = filter_args(base_args, probe_script(script))
@@ -1072,14 +1077,9 @@ def run_aiter_dense_tuner(
     run_start_time = time.time()
 
     rc, stdout, stderr, iso_candidate = _invoke_tuner(
-        script=script,
-        base_args=base_args,
-        input_csv=input_csv,
-        tuned_csv=tuned_csv,
-        work_dir=work_dir,
-        aiter_root=aiter_root,
-        ctx=ctx,
-        tuner_name=tuner_name,
+        _tr.TunerInvocation(script, base_args, input_csv, tuned_csv, work_dir, aiter_root),
+        ctx,
+        tuner_name,
     )
 
     if rc == 124:
@@ -1151,7 +1151,7 @@ def run_aiter_dense_tuner(
         tuner_name=tuner_name,
         status=summary["status"],
         artifact_path=artifact,
-        env_var=env_var,
+        env_var=spec.env_var,
         env_value=artifact,
         total_shapes=summary["total"],
         improved_shapes=summary["n_improved"],
