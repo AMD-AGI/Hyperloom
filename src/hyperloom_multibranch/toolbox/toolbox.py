@@ -162,7 +162,10 @@ class RealToolbox:
         self._renewer = asyncio.create_task(self._renew_loop())
 
     async def close(self) -> None:
-        """Stop without withdrawing anything: running tests are picked up from the log by the next start."""
+        """Stop without withdrawing anything: running tests are picked up from the log by the next start.
+
+        Tool jobs are not recoverable, so they are cancelled, and their child processes ended, before this returns.
+        """
 
         self._closed = True
         tasks = [*self._tasks.values(), *([self._renewer] if self._renewer else [])]
@@ -171,6 +174,8 @@ class RealToolbox:
         await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
         self._renewer = None
+        if self._tools is not None:
+            await self._tools.close()
 
     async def drain(self) -> None:
         """Wait until nothing is queued or running (for tests and orderly shutdown)."""

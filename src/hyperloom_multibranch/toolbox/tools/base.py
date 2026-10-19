@@ -8,6 +8,10 @@ a job id at once; when the tool ends, whatever way it ends (success, failure, ca
 result file and pushes a :class:`~hyperloom_multibranch.contracts.notebook.records.ToolResultPointer` to the branch
 that asked. A push the sink refuses is retried and, when it still fails, kept for :meth:`ToolJobs.redeliver`, so a
 finished job is never silent.
+
+A job runs in its own cancel scope, the channel the orchestrator's subprocess helpers watch: a tool that hands its work
+to a thread (``run_with_session_kill``) has that thread end the child's process group when the job is cancelled or
+the loop goes away, instead of leaving it for the interpreter to wait on at exit.
 """
 
 from __future__ import annotations
@@ -23,6 +27,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from hyperloom.common.io import atomic_write_json
+from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
+from hyperloom.orchestrator.actions.executors._subprocess_kill import COOPERATIVE_REAP_BUDGET_SEC
 from hyperloom_multibranch.contracts.notebook.records import ToolResultPointer
 
 log = logging.getLogger(__name__)
@@ -30,6 +36,7 @@ log = logging.getLogger(__name__)
 RESULT_FILE = "result.json"
 _SUMMARY_LIMIT = 400
 _JOB_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_REAP_POLL_SECONDS = 0.05
 
 
 class JobStatus(str, Enum):
@@ -97,6 +104,7 @@ class _Job:
     pointer: ToolResultPointer | None = None
     delivered: bool = False
     cancel_requested: bool = False
+    scope: CancelScope = field(default_factory=CancelScope)
     inner: asyncio.Task[ToolOutput] | None = None
     task: asyncio.Task[None] | None = None
 
@@ -134,6 +142,7 @@ class ToolJobs:
         self._attempts = max(1, push_attempts)
         self._delay = push_delay_seconds
         self._jobs: dict[str, _Job] = {}
+        self._closed = False
 
     @property
     def tool_names(self) -> tuple[str, ...]:
@@ -144,6 +153,8 @@ class ToolJobs:
 
         Raises :class:`UnknownTool` or :class:`InvalidRequest`; nothing is started then.
         """
+        if self._closed:
+            raise InvalidRequest("the tool runner is closed")
         if request.tool not in self._tools:
             raise UnknownTool(f"no tool named {request.tool!r}; known: {', '.join(self.tool_names)}")
         if not request.branch:
@@ -173,6 +184,23 @@ class ToolJobs:
         if job.inner is not None:
             job.inner.cancel()
         return True
+
+    async def close(self) -> None:
+        """Cancel every running job, then wait up to one reap budget for the work any job handed to threads to end.
+
+        A job cancelled earlier counts: it may be settled while its thread still reaps the child. Each job's own end
+        (its pointer is pushed, saying cancelled) is awaited too; nothing is started afterwards.
+        """
+        self._closed = True
+        jobs = list(self._jobs.values())
+        for job in jobs:
+            if job.status is JobStatus.RUNNING:
+                self.cancel(job.job_id)
+        await asyncio.gather(*(job.task for job in jobs if job.task is not None), return_exceptions=True)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + COOPERATIVE_REAP_BUDGET_SEC
+        while loop.time() < deadline and any(job.scope.has_listeners for job in jobs):
+            await asyncio.sleep(_REAP_POLL_SECONDS)
 
     async def wait(self, job_id: str) -> JobStatus:
         """Wait until the job ended and its pointer was handed to the sink (or the sink gave up)."""
@@ -229,7 +257,7 @@ class ToolJobs:
     async def _execute(self, job: _Job) -> tuple[ToolOutput | None, str]:
         job.workdir.mkdir(parents=True, exist_ok=True)
         tool = self._tools[job.request.tool]
-        job.inner = asyncio.get_running_loop().create_task(tool.run(job.request, job.workdir))
+        job.inner = asyncio.get_running_loop().create_task(self._in_scope(job, tool))
         try:
             return await job.inner, ""
         except asyncio.CancelledError:
@@ -242,6 +270,16 @@ class ToolJobs:
         except Exception as exc:
             log.exception("tool job %s crashed", job.job_id)
             return None, f"{type(exc).__name__}: {exc}"
+
+    @staticmethod
+    async def _in_scope(job: _Job, tool: AsyncTool) -> ToolOutput:
+        """Run ``tool`` with the job's cancel scope published; the scope fires when the task is cancelled."""
+        with use_cancel_scope(job.scope):
+            try:
+                return await tool.run(job.request, job.workdir)
+            except asyncio.CancelledError:
+                job.scope.cancel(reason="tool_job_cancelled")
+                raise
 
     @staticmethod
     def _settle(job: _Job, output: ToolOutput | None, error: str) -> str:
