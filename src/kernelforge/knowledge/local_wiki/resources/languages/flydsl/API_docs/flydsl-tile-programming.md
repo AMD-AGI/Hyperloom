@@ -364,9 +364,8 @@ def kernel_with_lds(A: fx.Tensor, ...):
 ```
 
 `fx.SharedAllocator` over an `@fx.struct` is the v0.3.2 API (`kernels/gemm/preshuffle_gemm.py` uses it);
-the compiler sizes the static LDS global, so `launch(smem=...)` stays unset. The old
-`SmemAllocator(...).allocate_array(...)` recipe no longer exists — `allocate_array` was removed — and
-`SmemAllocator` itself is legacy.
+the compiler sizes the static LDS global, so `launch(smem=...)` stays unset. `SmemAllocator` is legacy and
+has no `allocate_array`; use `fx.SharedAllocator`.
 
 **gfx950 LDS is 160 KiB per workgroup across 64 banks.** Both numbers matter:
 - 160 KiB means tile sizes that overflowed on CDNA3 now fit — but it also means LDS is rarely the

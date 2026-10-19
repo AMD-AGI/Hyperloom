@@ -7,7 +7,7 @@ description: >
   reviewing, or understanding FlyDSL kernel code.
 allowed-tools: Read Edit Bash Grep Glob Agent
 ---
-<!-- Vendored from ROCm/FlyDSL@dd8373349:.claude/skills/flydsl-kernel-authoring/SKILL.md -->
+<!-- Vendored from ROCm/FlyDSL@dd8373349:.claude/skills/flydsl-kernel-authoring/SKILL.md, with KernelForge corrections -->
 
 # FlyDSL Kernel Authoring Skill
 
@@ -388,7 +388,7 @@ tile_0 = prefetch(0)
 init_state = [acc_init, tile_0_flat_val1, tile_0_flat_val2, ...]
 
 # Runtime loop with loop-carried state
-# Use typed DSL integer bounds (fx.Int64) so the AST rewriter does not treat this as a Python unrolled range.
+# Python-int, fx.Int32 or fx.Int64 bounds all give a runtime scf.for with init=.
 _start = fx.Int64(0)
 _stop = fx.Int64(N - 1)
 _step = fx.Int64(1)
@@ -415,7 +415,7 @@ compute(acc_final, tile_final)
 | `yield [...]` | Feeds values back as next iteration's `state` |
 | `results` | After loop exits, holds the last yielded values |
 
-**Three critical pitfalls (all verified by debugging):**
+**Three critical pitfalls:**
 
 1. **Bounds: Python ints are fine with `init=`; a plain `range()` needs `i32`.** *(Python-int bounds do
    not unroll the loop or drop `init=`: `range(0, 15, 1, init=[acc])` emits

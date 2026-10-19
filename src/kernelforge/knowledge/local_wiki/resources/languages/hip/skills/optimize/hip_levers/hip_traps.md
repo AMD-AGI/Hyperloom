@@ -93,7 +93,7 @@ Also: **TF32 was removed** on CDNA4. → `hardware/mi350_dtypes.md`
 ## Predict occupancy before you measure
 
 ```
-occ_vgpr    = floor(512 / round_up_8(vgpr_used))             # waves/SIMD
+occ_vgpr    = min(8, floor(512 / round_up_8(vgpr_used)))     # waves/SIMD (8-wave cap)
 occ_lds     = floor(163840 / lds_bytes_per_workgroup)        # workgroups/CU
 occ (wg/CU) = min(floor(occ_vgpr * 4 / num_waves), occ_lds)  # 4 SIMD/CU
 ```

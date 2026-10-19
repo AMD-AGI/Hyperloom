@@ -25,7 +25,7 @@ updated: 2026-08-28
 | Bank index | **`(byte_addr / 4) mod 64`** | `mod 32` |
 | Read bandwidth | **256 B/clk** | 128 B/clk |
 | Allocation granule | **320 DWORD** | 128 DWORD |
-| Direct global→LDS | **1/2/4/12/16 DWORD** (up to 128 b/lane) | 1/2/4 (32 b/lane) |
+| Direct global→LDS | **1/2/4/12/16 bytes per lane** (up to 128 b/lane) | 1/2/4 bytes per lane (32 b/lane) |
 | Read-with-transpose `ds` | **yes** | no |
 
 **The 32→64 bank change is the single most likely reason an inherited kernel is slow here.** A padding

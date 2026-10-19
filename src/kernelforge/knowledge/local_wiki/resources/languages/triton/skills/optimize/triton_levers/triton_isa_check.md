@@ -61,7 +61,7 @@ grep "triton_gpu.shared"           dump.txt   # LDS bytes per shared layout (MLI
 ## 3. The occupancy boundary check
 
 1. `grep .vgpr_count` → round up to a multiple of 8.
-2. `max_waves = floor(512 / round_up_8(vgpr))`.
+2. `max_waves = min(8, floor(512 / round_up_8(vgpr)))` (8 waves per SIMD is the hardware cap).
 3. If you are **just over a boundary** (e.g. 176 → 2 waves), set `waves_per_eu = target+1` so
    LLVM shaves VGPRs (176 → ≤168 → 3 waves). Re-dump.
 4. **If that introduced `.private_segment_fixed_size > 0`, you went too far.** Back off — a spill costs

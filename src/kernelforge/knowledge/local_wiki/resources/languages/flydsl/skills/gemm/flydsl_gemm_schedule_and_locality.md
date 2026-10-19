@@ -40,8 +40,8 @@ A workgroup's waves stripe across the CU's 4 SIMDs; with 8 waves, wave `w` and w
 If those two read the same LDS fragment of the heavier operand at the same moment, their LDS requests are
 in phase and neither hides the other's latency.
 
-*(field)* 8-wave, 2-waves-per-SIMD kernel, 2(M)×4(N) wave grid. Writing the same `(wave_m, wave_n)`
-bijection three ways — identical tile split, LDS bytes, instruction counts:
+*(field)* One 8-wave kernel at 2 waves per SIMD with a 2(M)×4(N) wave grid. Writing the same
+`(wave_m, wave_n)` bijection three ways — identical tile split, LDS bytes, instruction counts:
 
 | What the co-resident pair shares | Result |
 |---|---|
@@ -132,12 +132,12 @@ FlyDSL's helpers are thin wrappers over `sched_group_barrier`:
 read/write, `0x080` all DS, `0x100`/`0x200` DS read/write, `0x400` transcendental, `0x800` LDS DMA. A set
 bit means that class **may cross** the fence; `0` pins everything.
 
-**FlyDSL's `hot_loop_scheduler` is the reference use.** `preshuffle_gemm` builds one hint table per tile. In the
-sync-copy pattern FlyDSL's guide describes, a prologue places the first LDS reads, then each step is one VMEM
-load, a group of MFMAs, one LDS read and a second group of MFMAs, with the next tile's LDS writes at the tail so
-they land before the barrier (`../optimize/gemm-optimization.md` §5.3–§5.4). With async copy it spreads the LDS reads and VMEM loads evenly
-over all MFMAs (§5.5); the `preload=(dsrd, dvmem)` argument sets how many go ahead of the first MFMA
-(PS:450-473).
+**FlyDSL's `hot_loop_scheduler` is the reference use.** `preshuffle_gemm` builds one hint table per tile. On
+gfx942 it uses the sync-copy pattern of FlyDSL's guide: a prologue places the first LDS reads, then each step is
+one VMEM load, a group of MFMAs, one LDS read and a second group of MFMAs, with the next tile's LDS writes at the
+tail so they land before the barrier (`../optimize/gemm-optimization.md` §5.3–§5.4). On gfx950 it spreads the
+LDS reads and VMEM loads evenly over all MFMAs for both sync and async copy (§5.5); the sync path also places
+its LDS writes at the tail. `preload=(dsrd, dvmem)` sets how many go ahead of the first MFMA (PS:402-494).
 
 Fences inside a fully unrolled epilogue usually exist to stop the scheduler from hoisting work and
 lengthening live ranges. What must stay pinned is the arithmetic, not only the memory operations:
@@ -169,8 +169,8 @@ waves per SIMD, and `s_nop` issue pads inside whole-loop asm (`flydsl_gemm_mainl
 supported on this GPU" — they belong to later ISAs). Stores in flight count in `vmcnt`, so waiting for a
 load also waits for every earlier store. Consequences:
 - Dripping C stores into the main loop serializes them against the next operand wait.
-- MFMA is the only work that occupies neither `vmcnt` nor `lgkmcnt` — it is the medium to hide a wait
-  under.
+- Non-memory work (MFMA, VALU, SALU) occupies neither counter; in a GEMM loop the MFMAs are the bulk of
+  it, so they are the medium to hide a wait under.
 
 **Write a wait as "what may still be in flight", not as a formula of the block shape.** At a phase
 barrier, leave outstanding only the fills that nothing reads before a later phase, and only the
@@ -204,16 +204,17 @@ changed something else.
 
 ## 6. Epilogue fusion competes with the tile that made the GEMM fast
 
-The tile that wins the GEMM often leaves one wave per SIMD. Then nothing hides a dependent VALU chain in
-the epilogue, and each dependent instruction costs its full latency.
+The tile that wins the GEMM often leaves one wave per SIMD. Then no other wave hides the epilogue's VALU
+work, and every `v_*` instruction the fusion adds shows up in the tile time.
 
-*(field)* In a 1-wave-per-SIMD GEMM's epilogue: one FMA per element +0.5%, ten dependent FMAs +159%, a
-full exact GELU +452%; the same math as a standalone pointwise kernel was ~20× cheaper than in that
-epilogue. Work interleaved into main-loop slots (stores issued inside the loop) cost far less:
-SwiGLU plus two MXFP4 quantizations and packed writes there added 34–38%.
+*(field)* At one wave per SIMD, an exact GELU added to the epilogue cost +70%; rewritten as independent
+vector chains it cost about 1.1× the same math in a separate high-occupancy kernel. The price is set by the
+extra `v_*` instructions per element, the read width of any extra operand, and whether the fusion adds a
+new input stream.
 
-Before planning an epilogue fusion, read the kernel's occupancy. At one wave per SIMD, price every
-element-wise dependency chain by latency, and compare against a separate kernel.
+Before planning an epilogue fusion, read the kernel's occupancy. At one wave per SIMD, write element-wise
+math as independent vector chains, count the added `v_*` per element, and compare against a separate
+kernel.
 
 ## 7. Accumulators, descriptors and large operands
 

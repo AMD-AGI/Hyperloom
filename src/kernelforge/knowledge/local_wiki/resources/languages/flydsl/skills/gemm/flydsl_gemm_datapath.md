@@ -12,6 +12,7 @@ sources:
   - ROCm/FlyDSL@dd8373349:kernels/gemm/gemm_a16w16_gfx950.py:489
   - ROCm/FlyDSL@dd8373349:python/flydsl/expr/gpu.py:157
   - ROCm/FlyDSL@dd8373349:python/flydsl/expr/rocdl/universal.py:59
+  - ROCm/FlyDSL@dd8373349:python/flydsl/expr/rocdl/cdna4.py:42
   - AMD-AGI/Primus-Turbo@7615a5a2:primus_turbo/flydsl/utils/gemm_helper.py
   - AMD-AGI/Primus-Turbo@7615a5a2:primus_turbo/flydsl/utils/prims.py
   - AMD-AGI/Primus-Turbo@7615a5a2:primus_turbo/flydsl/gemm/gemm_mxfp4_kernel.py
@@ -20,10 +21,9 @@ sources:
 # LDS, global feed and prefetch in a FlyDSL GEMM
 
 > Numbers marked *(field)* are measured values. Use them for direction and order of magnitude, not as
-> targets. ISA statements were checked with `llvm-mc` / `llc -mcpu=gfx950`. "PS" is FlyDSL's
-> `kernels/gemm/preshuffle_gemm.py`; "GH", "PR" and "FP4" are Primus-Turbo's `utils/gemm_helper.py`,
-> `utils/prims.py` and `gemm/gemm_mxfp4_kernel.py` under `primus_turbo/flydsl/` at main `7615a5a2`. "A16" is
-> FlyDSL's `kernels/gemm/gemm_a16w16_gfx950.py`.
+> targets. "PS" is FlyDSL's `kernels/gemm/preshuffle_gemm.py`; "GH", "PR" and "FP4" are Primus-Turbo's
+> `utils/gemm_helper.py`, `utils/prims.py` and `gemm/gemm_mxfp4_kernel.py` under `primus_turbo/flydsl/` at
+> main `7615a5a2`. "A16" is FlyDSL's `kernels/gemm/gemm_a16w16_gfx950.py`.
 
 ## Route here when
 - An LDS, bank-conflict, swizzle or `lgkmcnt` question in a GEMM.
@@ -56,18 +56,18 @@ overlays `ab` and `c`). `SmemAllocator` / `SmemPtr` are legacy.
   `fx.make_composed_layout(fx.static(fx.SwizzleType.get(bits, base, bits)), ordered_layout)`, with
   `bits = log2(k_blocks16)` and `base = log2(elements per 16 B)` for 8-bit or DMA-written tiles. The
   writer and the reader then agree by construction — and the DMA path, which computes addresses by
-  hand, applies the same `k ^ ((m % k_blocks16)·elems_per_16b)` (PS:368).
+  hand, applies the same `k ^ ((m % k_blocks16)·elems_per_16b)` (PS:379).
 - The swizzle is per-lane VALU (or folded into the layout), not "one SALU": the row index lives in a
   VGPR.
-- Upstream measured the choice: on the bf16 sync path PS keeps a fixed `Swizzle<3,3,3>` because it
-  ran 1011 TF/s against 417 TF/s for the derived swizzle at `tile_k=256` (comment at PS:288).
-  Re-measure a swizzle change; "derived from the tile width" is not automatically better.
+- PS keeps a fixed `Swizzle<3,3,3>` on the bf16 sync path; its source comment gives 1011 against 417 TF/s
+  for the derived swizzle at `tile_k=256` (PS:284-288). Re-measure a swizzle change; "derived from the tile
+  width" is not automatically better.
 - **One function computes the key for both sides.** Turbo's `lds_row_swizzle(row, chunks) =
   ((row % 16) // 2) & (chunks - 1)` (in 16 B chunks) is called by the G2S writer (`swizzle_128`) and by
   the transpose reader, "so the two cannot drift" (GH:220-231).
 - **Transpose reads need a wave term too.** With a 1024 B per-wave chunk stride, every wave's
   transpose reads hit the same banks. Turbo XORs the chunk index with `W << 1` on both sides (`wswz`,
-  GH:1809-1830, 1863). *(field)* Bank conflicts on that kernel went from 14% to 0%.
+  GH:1809-1830, 1863). *(field)* On one kernel with that stride, bank conflicts went from 14% to 0%.
 
 ## 3. Bank conflicts: compute the floor, then measure
 
@@ -84,9 +84,8 @@ the layout.
 
 gfx950 LDS has 64 banks of 4 bytes; bank = `(byte_addr / 4) mod 64`. For a 32-bit access whose lane
 stride is `s` dwords, the lanes of one issue phase touch `64 / gcd(s, 64)` distinct banks. A 128-byte
-row stride (`s = 32`) lands every lane on two banks — a heavy conflict, not the "2-way" an old note
-claimed. Wider accesses (`ds_read_b64`, `b128`) serve fewer lanes per phase; do the same count per
-phase.
+row stride (`s = 32`) lands every lane on two banks — a heavy conflict. Wider accesses (`ds_read_b64`,
+`b128`) serve fewer lanes per phase; do the same count per phase.
 
 - **Swizzle or pad.** XOR swizzle when the access pattern is regular and LDS headroom is tight; padding when
   a small stride bump removes the conflict and the swizzle arithmetic would clutter the address code.
@@ -133,10 +132,12 @@ phase.
 | `buffer_load_dwordx4 … lds`, `global_load_lds_dwordx4` | yes (16 B/lane) | no |
 | `ds_read_b64_tr_b16` and the other transpose reads | yes | no |
 
-- FlyDSL atoms: `fx.rocdl.BufferCopyLDS128b` (PS's `dma_a_to_lds`; synchronous — the compiler inserts
-  the `vmcnt` wait) and `fx.rocdl.cdna4.BufferLoadAsyncLDS128b` (A16; you close groups with
-  `rocdl.asyncmark()` and wait with `rocdl.wait_asyncmark(n)`). The DMA is a VMEM load that writes LDS:
-  it counts in `vmcnt` like any other load.
+- FlyDSL atoms: `fx.rocdl.BufferCopyLDS128b` (PS's `dma_a_to_lds`, behind PS's `use_async_copy` flag) is
+  compiler-tracked — the compiler inserts the `vmcnt` wait before the staged LDS data is read (§4); FlyDSL's
+  docstring calls it the synchronous form. For `fx.rocdl.cdna4.BufferLoadAsyncLDS128b` (A16) the backend
+  inserts no such wait: you close groups with `rocdl.asyncmark()` and wait with `rocdl.wait_asyncmark(n)`
+  (`expr/rocdl/cdna4.py:42-55`). Either DMA is a VMEM load that writes LDS: it counts in `vmcnt` like any
+  other load.
 - The MUBUF immediate `offset` is 12 bits. `llvm-mc` encodes `offset:4096` as `offset:0` without an
   error (`0x1000` lands outside the field), so a hand-written `offset:4096` silently reads the wrong
   place. *(field)* On gfx950 the LDS-DMA immediate applies to the LDS destination as well as the

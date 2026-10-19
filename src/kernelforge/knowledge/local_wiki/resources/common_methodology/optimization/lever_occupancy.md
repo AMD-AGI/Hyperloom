@@ -84,7 +84,7 @@ Cost is a `v_accvgpr_read_b32` per element in the epilogue (~5%). Not every C-ti
 AGPR-placeable — the matrix calculator's `--detail-instruction` reports ArchVGPR/AccVGPR eligibility.
 
 ### 4. Remove staging registers with 128-bit direct-to-LDS
-`global_load_lds` / `buffer_load ... lds` at **12 or 16 DWORD** moves data global→LDS without passing
+`global_load_lds` / `buffer_load ... lds` at **12 or 16 bytes per lane** moves data global→LDS without passing
 through VGPRs. This is the single biggest occupancy win for tiled GEMM, and gfx950 widened it 4× over
 the previous generation. See `lever_prefetch.md`.
 

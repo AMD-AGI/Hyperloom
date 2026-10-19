@@ -57,7 +57,8 @@ sources:
   read 3.73–6.19 µs, bimodally: an address (L2-set) effect, not noise (§6, XCD placement).
 - **Per-shape noise is large.** *(field)* Per-shape drift of 3–7% while aggregates reproduced to 0.1–1.5%;
   the first arm of a probe read 1–2% slow after warm-up. Adopt a per-shape change only above that shape's
-  measured spread; within one process, order arms as a palindrome.
+  measured spread. Within one process, run two arms as `A B B A` per rep and shuffle the order every rep
+  when there are three or more (`flydsl_gemm_measurement.md` §2).
 - **A memory-side headroom estimate needs a measured streaming ceiling**, e.g. a plain read of the same B
   buffer, not the datasheet bandwidth. *(field)* 5.8–6.0 TB/s for a cold read of a 476 MB weight.
 
@@ -68,9 +69,9 @@ The lessons below flip sign between two regimes. Decide which one a call site is
 
 | | Streaming row | Latency-bound row |
 |---|---|---|
-| Example | o_proj / q_b / qkv projections, B tens of MB, ~100+ N-blocks | MoE router or gate, B ≈ 1.5–3 MB |
+| Example | o_proj / q_b / qkv projections, B tens of MB, ~100+ N-blocks | a narrow-N projection, B ≈ 1.5–3 MB |
 | Bound by | HBM read of B | launch, reduction and memory latency |
-| Split-K, more blocks | lose *(field: +17–19% on an o_proj row already at ~7.7 TB/s with 192 blocks)* | win *(field: router −40%, gate −16% with a 4× larger grid and split-K 8)* |
+| Split-K, more blocks | lose *(field: +17–19% on an o_proj row already at ~7.7 TB/s with 192 blocks)* | win *(field: −40% and −16% on two such rows with a 4× larger grid and split-K 8)* |
 | `nt` on B | wins on a long read-once stream | loses: L2 is reducing latency, not only reusing |
 
 ## 3. Grid size at small M
@@ -88,7 +89,7 @@ The lessons below flip sign between two regimes. Decide which one a call site is
 - **Odd tile widths can be the only way to reach a full round** (for N=6144 at small M, only `tile_n` 48 and 96
   give 256 workgroups), but they lost on other rows in deployment. Race them; do not adopt them by arithmetic.
 - **Wider tiles lose at small M even when they move fewer bytes.** *(field)* A tile chosen as line-cost-optimal
-  by a traffic model was the slowest by 40% on a router row. Do not prune candidates with a traffic model.
+  by a traffic model was the slowest by 40% on a latency-bound row. Do not prune candidates with a traffic model.
 
 ## 4. Split-K
 
@@ -113,8 +114,7 @@ an idle-device tuner (§1).
 - Split-K must divide K. The current policy enumerates divisors of K from 2 to 9
   (`gemm_a16w16_policy.py:221`).
 - **A 256-tile cap refuses split-K on larger grids** (`num_pid_m * num_pid_n > SPLIT_K_SEMAPHORE_MAX_LEN`,
-  `gemm_a16w16_gfx950.py:1385`; `SPLIT_K_SEMAPHORE_MAX_LEN = 256`, `_utils.py:20`). No physical reason for
-  the cap was found in the kernel.
+  `gemm_a16w16_gfx950.py:1385`; `SPLIT_K_SEMAPHORE_MAX_LEN = 256`, `_utils.py:20`).
 - *(field)* bf16 partials exceeded a 0.02 relative-error gate at split-K ≈ 12 (0.0241); f32 partials read 0.
   Gate every deep split-K row on accuracy, not only the first one tuned.
 - Coherence scope of the partials on gfx950: `sc0 sc1` is system scope (past the MALL). *(field)* Using it for

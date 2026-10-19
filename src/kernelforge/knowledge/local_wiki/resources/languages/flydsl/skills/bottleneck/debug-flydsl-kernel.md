@@ -37,11 +37,13 @@ v0.3.2 (`python/flydsl/compiler/jit_function.py`) the key of a `@flyc.jit` call 
 
 - the FlyDSL toolchain — the Python sources of `flydsl.{compiler,expr,extension,runtime,utils}` and the
   native libraries (C++ passes) — plus the `.py` files of every directory in `FLYDSL_EXTRA_SOURCE_DIRS`;
-- the launcher's source, and the source of the functions it names — `@flyc.kernel` / `@flyc.jit`
-  functions always, **plain helper functions only if defined in the same directory**;
+- the launcher's source, and the source of the functions it reaches — `@flyc.kernel` / `@flyc.jit`
+  functions always; plain helpers captured by closure wherever they live; **plain helpers read as module
+  globals only if defined in the same directory**;
 - the methods it calls on the class the launcher is defined on;
 - closure values that are `int`, `float`, `bool`, `str`, `None`, `tuple` or `Enum`, and module globals
   the launcher reads (scalars and builtin containers by value);
+- the GPU target the backend resolved, and the compile hints in effect (`flyc.compile[{...}]`);
 - each argument's signature — for a raw `torch.Tensor`: dtype, rank and which axis has unit stride,
   **not its shape** (raw tensors are wrapped layout-dynamic; `flyc.from_dlpack(t)` makes the shape
   static and part of the key);
@@ -49,20 +51,19 @@ v0.3.2 (`python/flydsl/compiler/jit_function.py`) the key of a `@flyc.jit` call 
   `FLYDSL_COMPILE_LLVM_DIR`, `FLYDSL_DEBUG_ENABLE_DEBUG_INFO`, `FLYDSL_EXTRA_SOURCE_DIRS`.
 
 So these changes do **not** invalidate a compiled kernel: methods of a helper class you instantiate
-inside the kernel, plain helpers in another directory (a kernel in `kernels/gemm/` calling into
-`kernels/common/` is one), functions reached through a module attribute (`buffer_ops.buffer_load`), a
-`dict` / `list` / object captured by closure (or anything inside it), and environment variables your
-own code reads. With one cache directory and two processes, a kernel that
-stores `cfg["v"]` from a closure `dict` returned 1.0 when the second process asked for 2.0 and no new
-cache entry appeared, while the same kernel reading a closure `float` recompiled and returned 2.0; a
-raw-tensor kernel launched at 8, 16 and 24 rows produced one cache entry. Edits there need `FLYDSL_EXTRA_SOURCE_DIRS` pointing at the
-helper directory, `FLYDSL_RUNTIME_ENABLE_CACHE=0` (disables the disk cache; the in-memory cache stays),
-or a clean cache.
+inside the kernel, plain helpers from another directory read as module globals (a kernel in `kernels/gemm/`
+calling into `kernels/common/` is one), functions reached through a module attribute
+(`buffer_ops.buffer_load`), a `dict` / `list` / object captured by closure (or anything inside it), and
+environment variables your own code reads. A kernel that stores `cfg["v"]` from a closure `dict` keeps the
+value it was first compiled with, even in a second process sharing the cache directory, while the same
+kernel reading a closure `float` recompiles; a raw-tensor kernel launched at different row counts reuses one
+cache entry. Edits there need `FLYDSL_EXTRA_SOURCE_DIRS` pointing at the helper directory,
+`FLYDSL_RUNTIME_ENABLE_CACHE=0` (disables the disk cache; the in-memory cache stays), or a clean cache.
 
 A captured `dict` is never in the key: not in one process, not through a second call of the factory, not
-across processes sharing the cache directory. A captured scalar enters the key when the `@flyc.jit` object is
-created: changing it on an existing jit object reuses the old binary, while a new jit object or a new process
-recompiles.
+across processes sharing the cache directory. A captured scalar enters the key on the jit object's first call
+(`_ensure_cache_manager`, `jit_function.py:1238-1242, 1370`): changing it afterwards on the same jit object
+reuses the old binary, while a new jit object or a new process recompiles.
 
 Two more cases:
 - A module global read through `const_expr` is safe when it lives in the kernel's file or directory:
@@ -259,11 +260,11 @@ What each form carries across iterations (`compiler/ast_rewriter.py`):
 | `range(a, b, s)` | `scf.for` on `i32` | **inferred**: every name bound before the loop and reassigned in the body becomes an `iter_arg`, so `data = next_data` is carried | Python `int` or `fx.Int32`; `fx.Int64` raises `TypeError: for-loop start must be i32, got i64` |
 | `range(a, b, s, init=[...])` | `scf.for` on `index` with explicit `iter_args` | only what you `yield`; rebinding a Python name in the body is not carried | Python `int` is fine (becomes an index constant), as is `fx.Int32` / `fx.Int64` |
 
-Older guidance — that Python-int bounds unroll the loop and silently drop `init=`, or that a Python
-rebinding is never a phi — is wrong (it comes from text bundled with FlyDSL's own skills, not from its
-source); a probe with `range(0, 15, 1, init=[acc])`
-emits `scf.for %arg2 = %c0 to %c15 step %c1 iter_args(...)`. A name that is `None` before a runtime
-loop and assigned inside it raises `TypeError`: give it a typed initial value.
+Python-int bounds do not unroll a `range(..., init=...)` loop or drop `init=`:
+`range(0, 15, 1, init=[acc])` emits `scf.for %arg2 = %c0 to %c15 step %c1 iter_args(...)` (`scf_range`,
+`compiler/ast_rewriter.py:982-1003`), and a plain `range` does carry a rebound name as an `iter_arg`. A
+name that is `None` before a runtime loop and assigned inside it raises `TypeError`: give it a typed
+initial value.
 
 ### Runtime versus compile-time conditionals
 Runtime comparisons in a Python `if` are supported — the rewriter lowers dynamic conditions to
@@ -297,10 +298,12 @@ if const_expr(trans_v):
 **Do not write `const_expr(lane == 0)`.** Even with `known_block_size`, `gpu.thread_id("x")`, `lane`,
 and `warp_id` are runtime SSA values — the compiler knows their *range*, not which lane is executing.
 
-**`and` / `or` do not short-circuit in a traced body.** The rewriter turns `A and B` into a call,
-`dsl_and_(A, B)`, so both sides are evaluated first. `if const_expr(S and K % S == 0):` raises
-`ZeroDivisionError` at trace time when `S == 0`, although the same line is fine in plain Python. When the
-right side is only legal if the left is true (modulo, division, indexing, `.shape[i]`), nest two `if`s.
+**`and` / `or` short-circuit only on a Python `bool`.** The rewriter turns `A and B` into
+`A if (isinstance(A, bool) and A == False) else dsl_and_(A, B)` (`or` likewise with `True`;
+`compiler/ast_rewriter.py:541-574`), so with an `int`, `None` or DSL value on the left both sides are
+evaluated first. `if const_expr(S and K % S == 0):` raises `ZeroDivisionError` at trace time when `S == 0`,
+although the same line is fine in plain Python. When the right side is only legal if the left is true (modulo,
+division, indexing, `.shape[i]`), make the guard a `bool` (`S > 0 and K % S == 0`) or nest two `if`s.
 
 **Only `@flyc.kernel` / `@flyc.jit` functions are rewritten.** A plain Python helper the kernel calls
 runs as ordinary Python at trace time, so `if <runtime value>:` inside it raises
@@ -311,7 +314,7 @@ the decorated body. Settle this before planning a refactor that moves code into 
 **An `if` body is rewritten into its own function.** A value assigned inside the branch is not seen by a
 closure that was defined before the `if` and is called inside the branch: the closure reads the old
 value. This holds for a runtime `if` and also for a literal `if True:`. With `if const_expr(...)`, a
-closure defined inside the branch, or the value passed as an argument, the closure saw the new value. A
+closure defined inside the branch, or the value passed as an argument, the closure sees the new value. A
 name first assigned inside the branch raises `NameError` at trace time. Pass values into closures as
 arguments.
 
@@ -319,9 +322,8 @@ arguments.
 Raised by `ASTRewriter.transform`. The rewriter re-reads the kernel's source from disk with
 `inspect.getsource`, using the line numbers recorded when the module was imported; if the file changed
 since (an edit or sync under a long-running server or benchmark process), the lookup lands on whatever
-now sits there — a decorated class, in the case that produced this message. It says nothing about the
-kernel — restart the process, and keep sources
-frozen for the lifetime of a process that compiles lazily.
+now sits there, for example a decorated class. It says nothing about the kernel — restart the process,
+and keep sources frozen for the lifetime of a process that compiles lazily.
 
 ### Loop-carried state typing
 Pass FlyDSL values (`fx.Int32`, `fx.Float32`, `Vector`) straight into `init=` and `yield`: the rewriter

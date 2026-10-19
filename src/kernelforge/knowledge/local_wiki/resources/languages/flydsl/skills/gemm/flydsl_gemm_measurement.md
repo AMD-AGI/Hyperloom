@@ -39,14 +39,18 @@ sources:
 
 ## 2. Arm order
 
-- **Per-process kernel A/B: `A B`, or `A B A B` for more confidence. No palindromes** (`A B B A`):
-  each arm already carries its own warmup and median, so a palindrome only doubles machine time.
-- **In-process multi-arm probes have a position term.** On a power-capped card the slot an arm runs in
-  changes its clock: *(field)* the last slot read +1.3% on three independent processes; reversing the
-  order moved the "gain" onto the unmodified arm. Fixed palindromes pin the term to arm order instead
-  of cancelling it, and cyclic rotation does not help either — it keeps who-follows-whom. **Shuffle
-  the arm order randomly every rep** *(field: an A-vs-A floor fell from 2.2% to 0.94%)*, never park the
-  candidate last by habit, and discard the first pass.
+- **One process per arm (whole-score or kernel A/B): `A B`, or `A B A B` for more confidence. No
+  palindromes** (`A B B A`): each arm already carries its own warmup and median, so a palindrome only
+  doubles machine time.
+- **One process, two module instances interleaved per rep (§1): `A B B A` within each rep.** The
+  palindrome cancels a linear drift inside the rep; take the median of the per-rep ratios
+  (`flydsl_gemm_autotune.md` §2).
+- **One process, three or more arms: shuffle the arm order randomly every rep.** On a power-capped card
+  the slot an arm runs in changes its clock: *(field)* the last slot read +1.3% on three independent
+  processes; reversing the order moved the "gain" onto the unmodified arm. With three or more arms a fixed
+  order — a palindrome or a cyclic rotation — pins that term to arm order instead of cancelling it, because
+  it keeps who-follows-whom. Shuffling *(field: an A-vs-A floor fell from 2.2% to 0.94%)* removes it; never
+  park the candidate last by habit, and discard the first pass.
 - **Add an inert arm** — the candidate switch compiled to the baseline's exact configuration — and report
   every gain as "candidate minus inert". *(field)* An identical pair read +1.11% in the same batch where
   a candidate read +0.78%: the real effect was −0.33%.

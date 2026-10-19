@@ -127,8 +127,8 @@ workspaces) must be warmed before a probe starts counting.
   the others be re-packed. Read `group_segment_fixed_size` before interpreting an LDS-placement result.
 - **Buffers that must be contiguous go in one field, or use `static=False`.** The default static
   allocator places fields by size, largest first, and equal sizes by symbol name (declared
-  `a4k, b16k, c8k, d256, e1k` land as `b16k, c8k, a4k, e1k, d256`). `SharedAllocator(static=False)` kept
-  declaration order in every case tested. A pool addressed as one base plus immediates must not rely on the static order.
+  `a4k, b16k, c8k, d256, e1k` land as `b16k, c8k, a4k, e1k, d256`). `SharedAllocator(static=False)` keeps
+  declaration order. A pool addressed as one base plus immediates must not rely on the static order.
 
 ## 6. Bounds
 
@@ -153,7 +153,10 @@ workspaces) must be warmed before a probe starts counting.
 ## 7. Register classes and inline asm
 
 - **asm that writes an MFMA accumulator into AGPRs hides the hazard from the compiler.** gfx950 needs
-  18 wait states between an MFMA writing an AGPR and a `v_accvgpr_read` of it. *(field)* Two of 64
+  several wait states between an MFMA writing an AGPR and a `v_accvgpr_read` of it, more for MFMAs with
+  more passes. LLVM's gfx950 hazard model inserts 8 for `v_mfma_f32_16x16x32_bf16` and for fp4
+  `v_mfma_scale_f32_16x16x128_f8f6f4`, 12 for its fp8 form, and 20 for fp8 `32x32x64`. Read the count for
+  your instruction from an `llc` probe with the intrinsic. *(field)* Two of 64
   accumulators lost the last K iteration's contribution (SNR still 37–45 dB). Put the wait states in
   the asm string of the tail iteration only.
 - **The reverse too:** asm that *reads* an MFMA destination loses the compiler's `s_nop`. A drop in
