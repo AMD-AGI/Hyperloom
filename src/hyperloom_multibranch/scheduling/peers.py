@@ -17,15 +17,12 @@ from typing import TYPE_CHECKING
 
 from hyperloom.measure.compile import BlobStore
 from hyperloom_multibranch.contracts.fork import ForkAdmissionService
-from hyperloom_multibranch.contracts.gate import SessionGate
+from hyperloom_multibranch.contracts.gate import RegressionCheck, SessionGate
 from hyperloom_multibranch.contracts.lifecycle import SpecialistLifecycle
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.notebook.rsi.briefing import SessionBriefs
 from hyperloom_multibranch.scheduling.layout import SessionLayout
-from hyperloom_multibranch.scheduling.mb_fakes import (
-    MbFakeRegressionCheck,
-    MbFakeSplitLanding,
-)
+from hyperloom_multibranch.scheduling.mb_fakes import MbFakeSplitLanding
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.settings import Workload
 
@@ -53,7 +50,7 @@ class Peers:
     briefs: SessionBriefs
     base_image_digest: str
     split_landing: MbFakeSplitLanding
-    regression: MbFakeRegressionCheck
+    regression: RegressionCheck
 
 
 @dataclass(frozen=True)

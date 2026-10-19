@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.recipe import RecipeDelta
 from hyperloom_kb import ReadStatus
 from hyperloom_multibranch.notebook.learning_search import RetrievalLog
 from hyperloom_multibranch.notebook.tests.factories import profile
@@ -19,16 +18,7 @@ from hyperloom_multibranch.scheduling.mb_fakes import (
     mb_fake_learning_recall,
     mb_fake_settle_voided,
 )
-from hyperloom_multibranch.scheduling.local_peers import (
-    MbFakeNoSplitLanding,
-    MbFakePassingRegressionCheck,
-)
-
-
-async def test_every_merge_and_final_candidate_passes_the_regression_set() -> None:
-    outcome = await MbFakePassingRegressionCheck().check("any-commit", RecipeDelta(), sources=("c2",))
-
-    assert (outcome.passed, outcome.reason) == (True, "")
+from hyperloom_multibranch.scheduling.local_peers import MbFakeNoSplitLanding
 
 
 async def test_no_fork_is_landed_and_a_void_tells_the_gate_nothing() -> None:

@@ -19,11 +19,10 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 from hyperloom.contracts.measurement import Purpose, TestKind, TestRequest, TestResult
 from hyperloom.contracts.recipe import RecipeDelta
-from hyperloom_multibranch.contracts.gate import SessionGate
+from hyperloom_multibranch.contracts.gate import RegressionCheck, SessionGate
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.toolbox import Backpressure
 from hyperloom_multibranch.scheduling.clock import Clock
-from hyperloom_multibranch.scheduling.mb_fakes import MbFakeRegressionCheck
 
 if TYPE_CHECKING:
     from hyperloom_multibranch.toolbox.toolbox import RealToolbox
@@ -123,7 +122,7 @@ class SessionChecks:
 
     tests: SessionTests
     gate: SessionGate
-    regression: MbFakeRegressionCheck
+    regression: RegressionCheck
 
 
 __all__ = [

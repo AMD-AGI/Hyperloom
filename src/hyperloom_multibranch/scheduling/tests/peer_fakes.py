@@ -48,6 +48,7 @@ from hyperloom_multibranch.contracts.fork import (
     ForkRequest,
     RepairRequest,
 )
+from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.interfaces import SnapshotQuery
@@ -68,7 +69,6 @@ from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.local_peers import GATE_WRITER
 from hyperloom_multibranch.scheduling.llm import CompletionReply, CompletionUsage
-from hyperloom_multibranch.scheduling.mb_fakes import MbFakeRegressionOutcome
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
 from hyperloom_multibranch.specialist.judging import Judging
 from hyperloom_multibranch.specialist.runtime import RuntimePacing, SessionFactory, SessionStart, SpecialistRuntime
@@ -668,18 +668,18 @@ class StuckToolbox(RecordingToolbox):
 
 @dataclass
 class FakeRegressionCheck:
-    """The regression set for the tests: fails on a base commit ``failures`` names, with its reason, and passes on
-    any other; ``calls`` notes every ``(base_commit, candidate_delta, sources)`` it was asked about."""
+    """A :class:`~hyperloom_multibranch.contracts.gate.RegressionCheck` for the tests: fails on a base commit
+    ``failures`` names, with its reason, and passes on any other; ``calls`` notes every ``(base_commit, candidate_delta, sources)`` it was asked about."""
 
     failures: Mapping[str, str] = field(default_factory=dict)
     calls: list[tuple[str, RecipeDelta, tuple[str, ...]]] = field(default_factory=list)
 
     async def check(
         self, base_commit: str, candidate_delta: RecipeDelta, *, sources: tuple[str, ...]
-    ) -> MbFakeRegressionOutcome:
+    ) -> RegressionOutcome:
         self.calls.append((base_commit, candidate_delta, sources))
         reason = self.failures.get(base_commit)
-        return MbFakeRegressionOutcome(reason is None, reason or "")
+        return RegressionOutcome(reason is None, reason or "")
 
 
 def judged(verdict: Verdict, gain_pct: float, request_id: str, value: float) -> Judgement:

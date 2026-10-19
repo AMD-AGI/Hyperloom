@@ -17,13 +17,14 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.contracts.recipe import Recipe
+from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 from hyperloom.measure import compile as compile_module
 from hyperloom.measure.compile import ComponentLayout, LocalBlobStore, PackageBase, UnsupportedComponentError
 from hyperloom.measure.pins import ActiveImage, ToolCommits, pinned_tool_commits
+from hyperloom_multibranch.contracts.gate import RegressionOutcome
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import LineageEvent
 from hyperloom_multibranch.contracts.notebook.vocab import Conclusion, InboxKind, LineageKind
@@ -31,6 +32,7 @@ from hyperloom_multibranch.notebook import STALL_TESTS, LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import intent, judgement, request, result
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
+from hyperloom_multibranch.rulegate.regression import RegressionSet
 from hyperloom_multibranch.rulegate.rules import AgentXRule, InferenceXRule
 from hyperloom_multibranch.rulegate.service import BASELINE_TESTS, GateService
 from hyperloom_multibranch.scheduling.clock import Clock
@@ -295,6 +297,12 @@ async def test_the_real_peers_live_inside_the_session_directory(built: _Built) -
     assert isinstance(peers.gate, GateService) and await peers.gate.baseline_test_count() == BASELINE_TESTS
     await peers.toolbox.start()
     await peers.toolbox.set_policy(QueuePolicy(per_branch_k=1, global_concurrency=2))
+    state = await peers.toolbox.queue_state()
+    assert (state.queued, state.running) == (0, 0)
+    assert isinstance(peers.regression, RegressionSet)
+    scheduler = LocalNotebook(layout.notebook, Writer(Role.SCHEDULER, "test-scheduler"))
+    await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=root))
+    assert await peers.regression.check(root, RecipeDelta(), sources=()) == RegressionOutcome(True)
     state = await peers.toolbox.queue_state()
     assert (state.queued, state.running) == (0, 0)
     assert isinstance(wiring.tokens, McpSpecialistTokens)
