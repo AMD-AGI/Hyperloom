@@ -789,7 +789,7 @@ function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::
 function-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py::_section_roofline_evidence 119
 function-lines src/hyperloom/orchestrator/roles/claude.py::ClaudeBackend.run 140
 function-lines src/hyperloom/orchestrator/roles/critic_agent.py::CriticAgentBackend._reason 91
-function-lines src/hyperloom/orchestrator/roles/critic_agent.py::CriticAgentBackend.run 171
+function-lines src/hyperloom/orchestrator/roles/critic_agent.py::CriticAgentBackend.run 168
 function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.build_specialist_round_entry 94
 function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.maybe_auto_retry_specialist 134
 function-lines src/hyperloom/orchestrator/specialists/dispatch.py::SpecialistDispatchCollaborator.maybe_force_stalled_domain_specialist 114
