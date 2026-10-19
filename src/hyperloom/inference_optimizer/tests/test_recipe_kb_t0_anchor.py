@@ -12,9 +12,13 @@ from typing import Any
 
 import pytest
 
+from hyperloom.orchestrator.knowledge._warm_start_match import (
+    _DonorTarget,
+    _SearchIdentity,
+    _donor_is_trustworthy,
+)
 from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
     _cascade_warm_start_search,
-    _donor_is_trustworthy,
     _experience_rows,
     _warm_recipe_source,
     run_t0_anchor,
@@ -42,14 +46,7 @@ def test_agentx_donor_ignores_fixed_length_placeholders() -> None:
         "isl": 2048,
         "osl": 512,
     }
-    assert _donor_is_trustworthy(
-        donor,
-        target_arch_slug="arch",
-        target_model_type="mt",
-        target_conc=64,
-        target_isl=None,
-        target_osl=None,
-    )
+    assert _donor_is_trustworthy(donor, _DonorTarget(arch_slug="arch", model_type="mt", conc=64))
 
 
 # Fake SharedState — only the fields the anchor reads
@@ -537,14 +534,16 @@ def _cascade(kb, cid="CID:target"):
     return _cascade_warm_start_search(
         kb,
         cid=cid,
-        hw="mi300x",
-        framework="sglang",
-        model_type_val="qwen",
-        architectures_val=["Qwen3ForCausalLM"],
-        arch_slug="qwen3forcausallm",
-        fw_version="0.4.5",
-        precision="fp8",
+        identity=_SearchIdentity(
+            hardware="mi300x",
+            framework="sglang",
+            model_type="qwen",
+            arch_slug="qwen3forcausallm",
+            framework_version="0.4.5",
+            precision="fp8",
+        ),
         warm_prefer=None,
+        target=_DonorTarget(arch_slug="qwen3forcausallm", model_type="qwen"),
     )
 
 

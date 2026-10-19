@@ -11,10 +11,10 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     recipe_canonical_id,
 )
 from hyperloom.orchestrator.knowledge.recipe_kb.dispatcher import _prefer_score
+from hyperloom.orchestrator.knowledge._warm_start_match import _recipe_is_actionable
 from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
     _build_warm_prefer,
     _build_warm_start_context,
-    _recipe_is_actionable,
 )
 
 

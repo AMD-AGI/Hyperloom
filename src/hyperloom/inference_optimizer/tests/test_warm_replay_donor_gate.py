@@ -7,11 +7,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from hyperloom.orchestrator.knowledge._warm_start_match import (
+    _DonorTarget,
+    _SearchIdentity,
+    _donor_is_trustworthy,
+    _find_config_donor,
+)
 from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
     _build_warm_start_context,
     _cascade_warm_start_search,
-    _donor_is_trustworthy,
-    _find_config_donor,
 )
 
 
@@ -47,17 +51,17 @@ def _donor(
     return row
 
 
-_TARGET = {
-    "target_arch_slug": "qwen2forcausallm",
-    "target_model_type": "qwen2",
-    "target_conc": 64,
-    "target_isl": 128,
-    "target_osl": 128,
-}
+_TARGET = _DonorTarget(
+    arch_slug="qwen2forcausallm",
+    model_type="qwen2",
+    conc=64,
+    isl=128,
+    osl=128,
+)
 
 
 def test_trustworthy_donor_accepted() -> None:
-    assert _donor_is_trustworthy(_donor(), **_TARGET) is True
+    assert _donor_is_trustworthy(_donor(), _TARGET) is True
 
 
 def test_donor_identity_falls_back_to_canonical_id() -> None:
@@ -65,7 +69,7 @@ def test_donor_identity_falls_back_to_canonical_id() -> None:
     donor.pop("architectures")
     donor.pop("model_type")
 
-    assert _donor_is_trustworthy(donor, **_TARGET) is True
+    assert _donor_is_trustworthy(donor, _TARGET) is True
 
 
 def test_explicit_zero_donor_confidence_is_preserved() -> None:
@@ -109,21 +113,19 @@ class _BatchKB:
         return self._batches.pop(0) if self._batches else []
 
 
-def _find_kwargs(**over: Any) -> dict[str, Any]:
-    base = {
-        "cid": "self-cid",
-        "hardware": "mi300x",
-        "framework": "sglang",
-        "model_type": "qwen2",
-        "arch_slug": "qwen2forcausallm",
-        "framework_version": "v1",
-        "precision": "bf16",
-        "target_conc": 64,
-        "target_isl": 128,
-        "target_osl": 128,
+def _find_kwargs(*, cid: str = "self-cid", hardware: str = "mi300x", framework_version: str = "v1") -> dict[str, Any]:
+    return {
+        "cid": cid,
+        "identity": _SearchIdentity(
+            hardware=hardware,
+            framework="sglang",
+            model_type="qwen2",
+            arch_slug="qwen2forcausallm",
+            framework_version=framework_version,
+            precision="bf16",
+        ),
+        "target": _TARGET,
     }
-    base.update(over)
-    return base
 
 
 def test_find_config_donor_skips_untrustworthy() -> None:
@@ -182,10 +184,7 @@ def test_find_config_donor_uses_framework_version_fallback() -> None:
 
     donor, tier, conf = _find_config_donor(
         kb,
-        **_find_kwargs(
-            hardware="mi300x",
-            framework_version="1.2.5",
-        ),
+        **_find_kwargs(hardware="mi300x", framework_version="1.2.5"),
     )
 
     assert donor is compatible
@@ -245,17 +244,16 @@ def test_remote_cascade_skips_unproven_and_wrong_structure() -> None:
     row, tier, confidence = _cascade_warm_start_search(
         kb,  # type: ignore[arg-type]
         cid="self-cid",
-        hw="mi300x",
-        framework="sglang",
-        model_type_val="qwen2",
-        architectures_val=["Qwen2ForCausalLM"],
-        arch_slug="qwen2forcausallm",
-        fw_version="v1",
-        precision="bf16",
+        identity=_SearchIdentity(
+            hardware="mi300x",
+            framework="sglang",
+            model_type="qwen2",
+            arch_slug="qwen2forcausallm",
+            framework_version="v1",
+            precision="bf16",
+        ),
         warm_prefer=None,
-        target_conc=64,
-        target_isl=128,
-        target_osl=128,
+        target=_TARGET,
     )
 
     assert row["canonical_id"] == "selected"

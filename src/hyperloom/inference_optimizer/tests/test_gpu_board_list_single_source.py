@@ -114,18 +114,18 @@ def test_a_board_never_answers_to_another_boards_arch():
 
 def test_the_t0_recipe_isa_map_is_the_table():
     """T0 warm-start offers a recipe across same-ISA boards, so its map has to be the table's."""
-    from hyperloom.orchestrator.knowledge import recipe_kb_t0
+    from hyperloom.orchestrator.knowledge import _warm_start_match
 
-    assert recipe_kb_t0._GPU_ISA_BY_SKU == {b: a for b, (a, _c) in AMD_GPU_DISPATCH_IDENTITIES.items()}
+    assert _warm_start_match._GPU_ISA_BY_SKU == {b: a for b, (a, _c) in AMD_GPU_DISPATCH_IDENTITIES.items()}
 
 
 def test_every_board_falls_back_to_exactly_its_same_isa_siblings():
-    from hyperloom.orchestrator.knowledge import recipe_kb_t0
+    from hyperloom.orchestrator.knowledge import _warm_start_match
 
     for board, (arch, _cus) in AMD_GPU_DISPATCH_IDENTITIES.items():
         expected = [b for b, (a, _c) in AMD_GPU_DISPATCH_IDENTITIES.items() if a == arch]
-        assert recipe_kb_t0._hardware_fallback_values(board) == expected
-        assert recipe_kb_t0._hardware_fallback_values(f"{board}_ws2_tp8") == [f"{b}_ws2_tp8" for b in expected]
+        assert _warm_start_match._hardware_fallback_values(board) == expected
+        assert _warm_start_match._hardware_fallback_values(f"{board}_ws2_tp8") == [f"{b}_ws2_tp8" for b in expected]
 
 
 def test_the_aiter_per_token_gate_is_every_gfx942_board():

@@ -9,8 +9,9 @@ from typing import Any
 
 import pytest
 
-from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
-    _cascade_warm_start_search,
+from hyperloom.orchestrator.knowledge._warm_start_match import (
+    _DonorTarget,
+    _SearchIdentity,
     _donor_is_trustworthy,
     _framework_version_is_compatible,
     _hardware_fallback_values,
@@ -18,6 +19,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb_t0 import (
     _parse_hardware_topology,
     _rank_warm_candidates,
 )
+from hyperloom.orchestrator.knowledge.recipe_kb_t0 import _cascade_warm_start_search
 from hyperloom.orchestrator.knowledge.recipe_kb.local_store import (
     _matches_labels,
 )
@@ -33,6 +35,21 @@ TARGET = {
     "precision": "bf16",
 }
 TARGET_CID = "inference:" + ":".join(TARGET.values())
+_TARGET_IDENTITY = _SearchIdentity(
+    hardware=TARGET["hardware"],
+    framework=TARGET["framework_name"],
+    model_type=TARGET["model_type"],
+    arch_slug=TARGET["architectures"],
+    framework_version=TARGET["framework_version"],
+    precision=TARGET["precision"],
+)
+_TARGET_SHAPE = _DonorTarget(
+    arch_slug=TARGET["architectures"],
+    model_type=TARGET["model_type"],
+    conc=64,
+    isl=128,
+    osl=128,
+)
 
 
 def _candidate(
@@ -101,17 +118,9 @@ def _cascade(kb: _RemoteKB) -> tuple[dict[str, Any], str, float]:
     return _cascade_warm_start_search(
         kb,  # type: ignore[arg-type]
         cid=TARGET_CID,
-        hw=TARGET["hardware"],
-        framework=TARGET["framework_name"],
-        model_type_val=TARGET["model_type"],
-        architectures_val=["Qwen3ForCausalLM"],
-        arch_slug=TARGET["architectures"],
-        fw_version=TARGET["framework_version"],
-        precision=TARGET["precision"],
+        identity=_TARGET_IDENTITY,
         warm_prefer=None,
-        target_conc=64,
-        target_isl=128,
-        target_osl=128,
+        target=_TARGET_SHAPE,
     )
 
 
@@ -189,23 +198,9 @@ def test_local_framework_name_filter_matches_canonical_rows() -> None:
 
 def test_borrowed_donor_requires_matching_workload_shape() -> None:
     donor = _candidate("shape-donor")
-    assert _donor_is_trustworthy(
-        donor,
-        target_arch_slug=TARGET["architectures"],
-        target_model_type=TARGET["model_type"],
-        target_conc=64,
-        target_isl=128,
-        target_osl=128,
-    )
+    assert _donor_is_trustworthy(donor, _TARGET_SHAPE)
     donor.pop("conc")
-    assert not _donor_is_trustworthy(
-        donor,
-        target_arch_slug=TARGET["architectures"],
-        target_model_type=TARGET["model_type"],
-        target_conc=64,
-        target_isl=128,
-        target_osl=128,
-    )
+    assert not _donor_is_trustworthy(donor, _TARGET_SHAPE)
 
 
 def test_exact_and_each_fallback_confidence_order() -> None:
