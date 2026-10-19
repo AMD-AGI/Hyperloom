@@ -12,7 +12,7 @@ import sys
 import pytest
 
 from kernelforge.llm.process_reaping import install_child_subreaper
-from kernelforge.mcp_server.tools._subprocess import communicate_process_group
+from kernelforge.execution.process_group import communicate_process_group
 
 
 def _cancel_mid_communicate() -> int:

@@ -32,8 +32,8 @@ from kernelforge.evaluation.scoring import (
     passes_keep_threshold,
     required_keep_speedup,
 )
-from kernelforge.mcp_server.tools.test import test_correctness
-from kernelforge.mcp_server.tools.bench import (
+from kernelforge.evaluation.correctness.driver import test_correctness
+from kernelforge.evaluation.benchmark.runner import (
     CaseCoverageError,
     calculate_measurement_case_speedups,
     BenchRun,

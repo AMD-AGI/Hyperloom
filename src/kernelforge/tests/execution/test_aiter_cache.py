@@ -8,7 +8,7 @@ import subprocess
 
 import pytest
 
-from kernelforge.loop import aiter_cache
+from kernelforge.execution import aiter_cache
 
 
 @pytest.fixture(autouse=True)

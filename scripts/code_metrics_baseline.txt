@@ -232,12 +232,12 @@ cognitive-complexity src/kernelforge/knowledge/pr_knowledge/references.py::colle
 cognitive-complexity src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._apply_last_analysis_evidence 46
 cognitive-complexity src/kernelforge/loop/analysis_runtime.py::AnalysisRuntimeMixin._resolve_analysis_context 41
 cognitive-complexity src/kernelforge/loop/archive.py::CandidateArchive._reconcile_storage 32
-cognitive-complexity src/kernelforge/loop/canonical_correctness.py::_run_canonical_suite 31
+cognitive-complexity src/kernelforge/evaluation/correctness/canonical.py::_run_canonical_suite 31
 cognitive-complexity src/kernelforge/loop/external_artifacts.py::ExternalArtifactTransaction._copy_tree 33
 cognitive-complexity src/kernelforge/loop/insession_gate.py::_python_command_payloads 42
 cognitive-complexity src/kernelforge/loop/knowledge_integration.py::kb_warmstart 54
 cognitive-complexity src/kernelforge/loop/lessons.py::parse_scope_line 33
-cognitive-complexity src/kernelforge/loop/numerical.py::judge_evidence 42
+cognitive-complexity src/kernelforge/evaluation/correctness/numerical.py::judge_evidence 42
 cognitive-complexity src/kernelforge/loop/reporting.py::BestResultPublisher.publish 32
 cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop._inspect_pending_keep 33
 cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop._record_iteration_outcome 40
@@ -246,8 +246,8 @@ cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop.run_one_itera
 cognitive-complexity src/kernelforge/loop/task_preflight.py::_preflight_async 41
 cognitive-complexity src/kernelforge/loop/task_preparer.py::prepare_task 37
 cognitive-complexity src/kernelforge/mcp_server/probe_stdio_server.py::probe_variant 34
-cognitive-complexity src/kernelforge/mcp_server/tools/bench.py::aggregate_benchmark_measurements 38
-cognitive-complexity src/kernelforge/mcp_server/tools/bench.py::sweep_case 51
+cognitive-complexity src/kernelforge/evaluation/benchmark/runner.py::aggregate_benchmark_measurements 38
+cognitive-complexity src/kernelforge/evaluation/benchmark/runner.py::sweep_case 51
 cognitive-complexity src/kernelforge/orchestrator/agent.py::make_agent_fn 73
 cognitive-complexity src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._write_artifact_catalog 32
 cognitive-complexity src/kernelforge/orchestrator/analysis.py::AnalysisAgentService.apply_checkpoint 39
@@ -414,7 +414,7 @@ duplicated-lines src/kernelforge/tests/fusion/test_resolve_and_cli.py 36
 duplicated-lines src/kernelforge/tests/knowledge/kb_store/test_reader.py 18
 duplicated-lines src/kernelforge/tests/knowledge/kb_store/test_writer.py 18
 duplicated-lines src/kernelforge/tests/loop/test_knowledge_integration.py 28
-duplicated-lines src/kernelforge/tests/test_aiter_cache.py 77
+duplicated-lines src/kernelforge/tests/execution/test_aiter_cache.py 77
 duplicated-lines src/kernelforge/tests/test_best_reporting.py 44
 duplicated-lines src/kernelforge/tests/test_campaign_cross_process.py 20
 duplicated-lines src/kernelforge/tests/test_claude_resume.py 17
@@ -422,7 +422,7 @@ duplicated-lines src/kernelforge/tests/test_claude_timeout.py 17
 duplicated-lines src/kernelforge/tests/test_forge_loop_resume.py 34
 duplicated-lines src/kernelforge/tests/test_forge_orchestration.py 46
 duplicated-lines src/kernelforge/tests/test_loop_runner.py 52
-duplicated-lines src/kernelforge/tests/test_measurement_guards.py 38
+duplicated-lines src/kernelforge/tests/evaluation/benchmark/test_measurement_guards.py 38
 duplicated-lines src/kernelforge/tests/test_rewrite_by_flydsl_pipeline.py 135
 function-args src/hyperloom/agents/quantization/driver/retry.py::quantize_via_prompt 9
 function-args src/hyperloom/inference_optimizer/breakdown/recorder/baseline_event.py::BaselineEventRecorder.__init__ 10
@@ -518,7 +518,7 @@ function-args src/hyperloom_kb/retrieval.py::LocalRetrievalService.result 6
 function-args src/hyperloom_kb/retrieval_policy.py::RetrievalConfiguration.create 9
 function-args src/kernelforge/gemm_tune/router.py::_select_sglang_dense_tuners 6
 function-args src/kernelforge/gemm_tune/router.py::select_tuners 10
-function-args src/kernelforge/mcp_server/tools/bench.py::sweep_case 7
+function-args src/kernelforge/evaluation/benchmark/runner.py::sweep_case 7
 function-lines scripts/platform_audit_bmc.py::main 131
 function-lines src/hyperloom/agents/critic/runtime/decision_reviewer.py::DecisionReviewer._commit_coordinator_inbox 83
 function-lines src/hyperloom/agents/critic/runtime/decision_reviewer.py::DecisionReviewer.prepare_review 119
@@ -875,7 +875,7 @@ function-lines src/kernelforge/loop/archive.py::CandidateArchive.record 109
 function-lines src/kernelforge/loop/archive.py::CandidateArchive.render_digest 84
 function-lines src/kernelforge/loop/campaign_config.py::create_campaign_config 122
 function-lines src/kernelforge/loop/campaign_setup.py::resolve_campaign 105
-function-lines src/kernelforge/loop/canonical_correctness.py::_run_canonical_suite 95
+function-lines src/kernelforge/evaluation/correctness/canonical.py::_run_canonical_suite 95
 function-lines src/kernelforge/loop/insession_gate.py::InSessionGate.__init__ 84
 function-lines src/kernelforge/loop/insession_gate.py::InSessionGate._on_stop 186
 function-lines src/kernelforge/loop/knowledge_integration.py::_try_apply_candidate 126
@@ -895,9 +895,9 @@ function-lines src/kernelforge/loop/task_preflight.py::_count_graph_replays 85
 function-lines src/kernelforge/loop/task_preflight.py::_preflight_async 195
 function-lines src/kernelforge/loop/task_preparer.py::prepare_task 340
 function-lines src/kernelforge/mcp_server/probe_stdio_server.py::probe_variant 247
-function-lines src/kernelforge/mcp_server/tools/bench.py::aggregate_benchmark_measurements 97
-function-lines src/kernelforge/mcp_server/tools/bench.py::bench_wallclock 110
-function-lines src/kernelforge/mcp_server/tools/bench.py::sweep_case 178
+function-lines src/kernelforge/evaluation/benchmark/runner.py::aggregate_benchmark_measurements 97
+function-lines src/kernelforge/evaluation/benchmark/runner.py::bench_wallclock 110
+function-lines src/kernelforge/evaluation/benchmark/runner.py::sweep_case 178
 function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 319
 function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn.agent_fn 194
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._prompts 227

@@ -18,7 +18,7 @@ import pytest
 
 from kernelforge.cli.forge_loop_command import _load_external_baseline
 from kernelforge.loop import knowledge_integration as integration
-from kernelforge.loop.baseline_reference import (
+from kernelforge.evaluation.benchmark.baseline import (
     BASELINE_DRIFT_TOLERANCE,
     BaselineReferenceError,
     check_baseline_against_reference,

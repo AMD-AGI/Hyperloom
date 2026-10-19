@@ -11,7 +11,7 @@ import textwrap
 import pytest
 import yaml
 
-from kernelforge.loop.canonical_correctness import (
+from kernelforge.evaluation.correctness.canonical import (
     ARENA_DEFAULT_COMPILE_TIMEOUT_SEC,
     ARENA_DEFAULT_CORRECTNESS_TIMEOUT_SEC,
     accept_candidate,

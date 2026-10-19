@@ -416,8 +416,8 @@ omit = [
     "src/kernelforge/fusion/source_snapshot.py",
     # GPU toolchain + profilers: shell out to rocprofv3 / rocprof-compute /
     # ninja / the build system and require real hardware.
-    "src/kernelforge/mcp_server/tools/bench.py",
-    "src/kernelforge/mcp_server/tools/registers.py",
+    "src/kernelforge/evaluation/benchmark/runner.py",
+    "src/kernelforge/evaluation/profiling/registers.py",
     "src/kernelforge/loop/runner.py",
     # Claude Agent SDK transport (spawns the agent CLI, network).
     "src/kernelforge/orchestrator/agent.py",

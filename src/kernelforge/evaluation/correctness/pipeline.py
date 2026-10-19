@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from kernelforge.mcp_server.tools.test import test_correctness
+from kernelforge.evaluation.correctness.driver import test_correctness
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 

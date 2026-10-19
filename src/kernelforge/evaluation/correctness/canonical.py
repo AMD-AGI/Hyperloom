@@ -14,8 +14,8 @@ from typing import Any, ClassVar
 
 import yaml
 
-from kernelforge.mcp_server.tools._subprocess import communicate_process_group
-from kernelforge.loop.numerical import REQUEST_ENV, judge_evidence, validate_contract
+from kernelforge.evaluation.correctness.numerical import REQUEST_ENV, judge_evidence, validate_contract
+from kernelforge.execution.process_group import communicate_process_group
 
 CANONICAL_CONFIG_FILENAME = "config.yaml"
 

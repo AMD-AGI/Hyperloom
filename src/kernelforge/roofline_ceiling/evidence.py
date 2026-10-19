@@ -31,7 +31,7 @@ from pathlib import Path
 from collections.abc import Mapping
 from typing import Any, Sequence
 
-from kernelforge.mcp_server.tools._subprocess import communicate_process_group
+from kernelforge.execution.process_group import communicate_process_group
 from kernelforge.roofline_ceiling.device_profile import DeviceIdentity, describe_device
 
 log = logging.getLogger("kernelforge.roofline_ceiling")
@@ -200,7 +200,7 @@ async def discover_scored_cases(
     what the driver actually times. Cases the driver tags ``unscored`` are
     correctness-only and get no ceiling: the objective never counts them.
     """
-    from kernelforge.mcp_server.tools.bench import parse_case_timings
+    from kernelforge.evaluation.benchmark.runner import parse_case_timings
 
     code, output = await _run(
         run.command,

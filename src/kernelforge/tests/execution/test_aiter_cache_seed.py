@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from kernelforge.loop import aiter_cache
+from kernelforge.execution import aiter_cache
 
 
 def _make_warm(tmp_path, names):

@@ -1,4 +1,4 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""GPU toolchain — test, bench, profile and register-usage helpers."""
+"""MCP stdio servers and shared transport."""

@@ -1,4 +1,4 @@
-"""Coverage tests for the MCP server tool definitions and test/bench tools."""
+"""Coverage tests for correctness and benchmark evaluation tools."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from kernelforge.mcp_server.tools.bench import (
+from kernelforge.evaluation.benchmark.runner import (
     BenchRun,
     CaseCoverageError,
     bench_wallclock,
@@ -15,7 +15,7 @@ from kernelforge.mcp_server.tools.bench import (
 
 # Alias avoids pytest-asyncio (auto mode) collecting the imported coroutine as a test just because its name starts
 # with "test_".
-from kernelforge.mcp_server.tools.test import test_correctness as run_correctness
+from kernelforge.evaluation.correctness.driver import test_correctness as run_correctness
 
 
 def _write_driver(tmp_path, name: str, body: str) -> str:

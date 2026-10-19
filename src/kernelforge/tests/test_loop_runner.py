@@ -2507,7 +2507,7 @@ async def test_a_non_assembly_keep_rests_on_the_driver_not_on_the_task_config(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["missing", "unstable", "valid"])
 async def test_assembly_keep_requires_fresh_source_relative_numerics(tmp_path, monkeypatch, kind):
-    from kernelforge.tests.test_numerical_contract import _task, evidence
+    from kernelforge.tests.evaluation.correctness.test_numerical import _task, evidence
 
     if kind != "missing":
         _task(tmp_path, evidence(candidate_repeat_db=27 if kind == "unstable" else 45))
@@ -2534,7 +2534,7 @@ async def test_snr_pass_with_failing_assembly_acceptance_is_reverted(tmp_path, m
     backend declares rejects it. That candidate must not be kept, and the
     tolerance it broke -- not the dB figure -- has to reach the agent.
     """
-    from kernelforge.tests.test_numerical_contract import _task, evidence
+    from kernelforge.tests.evaluation.correctness.test_numerical import _task, evidence
 
     _task(tmp_path, evidence())
     tmp_path.joinpath("driver.py").write_text("raise AssertionError('normalized max err 0.02468 too high')\n")

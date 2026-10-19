@@ -44,7 +44,7 @@ DEVICE_LOCK_ENV = "FORGE_PROBE_DEVICE_LOCK"
 # Unix timestamp at which the specialist session this server serves is killed.
 SESSION_DEADLINE_ENV = "FORGE_PROBE_SESSION_DEADLINE"
 
-PRIMITIVE_MODULE = "kernelforge.mcp_server.tools.bench"
+PRIMITIVE_MODULE = "kernelforge.evaluation.benchmark.runner"
 PRIMITIVE_ATTR = "sweep_case"
 PRIMITIVE_PATH = f"{PRIMITIVE_MODULE}.{PRIMITIVE_ATTR}"
 # The keywords this server calls the primitive with.

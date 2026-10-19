@@ -124,7 +124,7 @@ def _make_ceiling_estimator(
     """
 
     async def estimate(*, case_ids: Sequence[str], case_ms: dict[str, float]):
-        from kernelforge.mcp_server.tools.bench import BenchRun, bench_command
+        from kernelforge.evaluation.benchmark.runner import BenchRun, bench_command
         from kernelforge.roofline_ceiling.analyst import AnalystSession, CeilingTask
         from kernelforge.roofline_ceiling.command import resolve_analyst_backend
         from kernelforge.roofline_ceiling.estimate import estimate_ceiling
@@ -1683,7 +1683,7 @@ def forge_loop(request: ForgeLoopRequest):
 
     # AITER cache isolation: give this attempt its own runtime-build cache so parallel forge processes never
     # share/evict each other's kernels.
-    from kernelforge.loop.aiter_cache import (
+    from kernelforge.execution.aiter_cache import (
         activate_aiter_cache_for_sources,
         configure_aiter_cache_isolation,
         seed_prebuilt_modules,

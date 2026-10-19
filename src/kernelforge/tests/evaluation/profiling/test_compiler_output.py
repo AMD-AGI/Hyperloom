@@ -1,9 +1,9 @@
-"""Coverage tests for rocprofv3 CSV parser and compiler-output parser."""
+"""Tests for compiler-output register parsing."""
 
 from __future__ import annotations
 
 
-from kernelforge.mcp_server.parsers.compiler_output import (
+from kernelforge.evaluation.profiling.compiler_output import (
     RegisterInfo,
     parse_register_info,
 )

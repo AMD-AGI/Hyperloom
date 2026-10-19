@@ -153,6 +153,34 @@ ignore_imports =
 unmatched_ignore_imports_alerting = none
 
 
+[importlinter:contract:kf-execution-foundation]
+name = kernelforge execution does not depend on evaluation, product or entry layers
+type = forbidden
+source_modules = kernelforge.execution
+forbidden_modules =
+    kernelforge.agent_backends
+    kernelforge.assembly
+    kernelforge.cli
+    kernelforge.evaluation
+    kernelforge.fusion
+    kernelforge.gemm_tune
+    kernelforge.kernel_backends
+    kernelforge.kernel_rewrite_controller
+    kernelforge.knowledge
+    kernelforge.loop
+    kernelforge.mcp_server
+    kernelforge.orchestrator
+    kernelforge.rewrite_by_flydsl
+    kernelforge.roofline_ceiling
+    kernelforge.tracker
+ignore_imports =
+    hyperloom.**.tests.** -> **
+    kernelforge.tests.** -> **
+    kernelforge.**.tests.** -> **
+    kernelforge.conftest -> **
+unmatched_ignore_imports_alerting = none
+
+
 [importlinter:contract:common-is-leaf]
 name = hyperloom.common imports nothing else from the project
 type = forbidden
@@ -374,15 +402,11 @@ ignore_imports =
     hyperloom.orchestrator.state.shared_state -> hyperloom.orchestrator.phases.machine_state
     hyperloom.orchestrator.trace_analysis.tracelens_skill_runner -> hyperloom.orchestrator.roles.claude_requests
     kernelforge.agent_backends.workspace_guard -> kernelforge.loop.new_path_allowlist
-    kernelforge.assembly.prepare -> kernelforge.loop.canonical_correctness
-    kernelforge.assembly.prepare -> kernelforge.loop.numerical
-    kernelforge.assembly.prepare -> kernelforge.loop.validation
     kernelforge.fusion.shadow_repo -> kernelforge.loop.path_ownership
     kernelforge.gemm_tune.dense_shapes -> kernelforge.gemm_tune.tuners._aiter_dense_common
     kernelforge.kernel_backends.fusion.prompts -> kernelforge.fusion.harness_contract
     kernelforge.kernel_backends.fusion.prompts -> kernelforge.fusion.validate
     kernelforge.knowledge.kb_store.recipe -> kernelforge.config
-    kernelforge.mcp_server.tools._subprocess -> kernelforge.loop.aiter_cache
     kernelforge.orchestrator.agent -> kernelforge.loop.insession_gate
     kernelforge.orchestrator.agent -> kernelforge.loop.lessons
     kernelforge.orchestrator.specialists -> kernelforge.loop.fanout

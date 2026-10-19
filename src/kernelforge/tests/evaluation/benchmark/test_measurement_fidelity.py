@@ -14,9 +14,9 @@ from kernelforge.evaluation.scoring import (
     passes_keep_threshold,
     required_keep_speedup,
 )
-from kernelforge.mcp_server.tools import bench as bench_module
+from kernelforge.evaluation.benchmark import runner as bench_module
 from kernelforge.resources import resource_path
-from kernelforge.mcp_server.tools.bench import (
+from kernelforge.evaluation.benchmark.runner import (
     BenchRun,
     bench_wallclock,
     measure_wallclock,

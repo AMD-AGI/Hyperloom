@@ -13,8 +13,13 @@ import sys
 import pytest
 import yaml
 
-from kernelforge.loop.canonical_correctness import accept_candidate
-from kernelforge.loop.numerical import EVIDENCE_PREFIX, judge_evidence, measure_outputs, validate_contract
+from kernelforge.evaluation.correctness.canonical import accept_candidate
+from kernelforge.evaluation.correctness.numerical import (
+    EVIDENCE_PREFIX,
+    judge_evidence,
+    measure_outputs,
+    validate_contract,
+)
 
 
 def contract():

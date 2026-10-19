@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 
-from kernelforge.loop.validation import run_validation_pipeline
+from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
 from kernelforge.loop.runner import IterationConfig
 
 
@@ -24,7 +24,7 @@ def test_validation_runs_driver_full_suite_once(monkeypatch):
         }
 
     monkeypatch.setattr(
-        "kernelforge.loop.validation.test_correctness",
+        "kernelforge.evaluation.correctness.pipeline.test_correctness",
         fake_correctness,
     )
 
@@ -60,7 +60,7 @@ def test_validation_preserves_full_suite_failure(monkeypatch):
         }
 
     monkeypatch.setattr(
-        "kernelforge.loop.validation.test_correctness",
+        "kernelforge.evaluation.correctness.pipeline.test_correctness",
         fake_correctness,
     )
 
@@ -82,7 +82,7 @@ def test_validation_distinguishes_timeout_from_correctness_failure(monkeypatch):
         }
 
     monkeypatch.setattr(
-        "kernelforge.loop.validation.test_correctness",
+        "kernelforge.evaluation.correctness.pipeline.test_correctness",
         fake_correctness,
     )
 

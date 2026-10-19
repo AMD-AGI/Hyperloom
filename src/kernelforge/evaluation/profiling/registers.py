@@ -9,8 +9,8 @@ import asyncio
 import glob
 from pathlib import Path
 
-from kernelforge.mcp_server.parsers.compiler_output import parse_register_info
-from kernelforge.mcp_server.tools._subprocess import communicate_process_group
+from kernelforge.evaluation.profiling.compiler_output import parse_register_info
+from kernelforge.execution.process_group import communicate_process_group
 
 
 async def check_registers(build_dir: str | None = None) -> dict:

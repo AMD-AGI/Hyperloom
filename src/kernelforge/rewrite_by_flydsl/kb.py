@@ -18,8 +18,8 @@ from kernelforge.knowledge.kb_store.config import knowledge_config_from_runtime
 from kernelforge.knowledge.kb_store.errors import sanitize_read_error
 from kernelforge.knowledge.kb_store.identity.warmstart_rank import rank_fallback_identities
 from kernelforge.knowledge.kb_store.recipe import candidate_session_id
-from kernelforge.loop.validation import run_validation_pipeline
-from kernelforge.mcp_server.tools.bench import CaseCoverageError, calculate_mean_case_speedup
+from kernelforge.evaluation.benchmark.runner import CaseCoverageError, calculate_mean_case_speedup
+from kernelforge.evaluation.correctness.pipeline import run_validation_pipeline
 from kernelforge.rewrite_by_flydsl import driver_contract
 from kernelforge.rewrite_by_flydsl.identity import resolve_identity
 from kernelforge.rewrite_by_flydsl.measurement import FlydslMeasurement

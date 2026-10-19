@@ -10,7 +10,7 @@ import types
 import pytest
 
 from kernelforge.loop import task_preparer_prompts
-from kernelforge.mcp_server.tools.bench import (
+from kernelforge.evaluation.benchmark.runner import (
     CaseCoverageError,
     EXPLORATORY_KIND,
     SELECTION_NARROWED,
