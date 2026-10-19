@@ -427,14 +427,14 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         existing = self._journal
         if existing is None:
             ss = self.shared_state
-            self._journal = Journal.load_or_create(
-                self.session_dir,
+            fresh = Journal(
                 session_id=str(ss.recipe_kb_session_id or "") or str(ss.session_id or "") or self.session_dir.name,
                 model=str(ss.model_name or ""),
                 hardware=str(ss.gpu_type or ""),
                 framework=str(ss.framework or ""),
                 baseline_throughput=float(ss.baseline_tput or 0.0),
             )
+            self._journal = Journal.load_or_create(self.session_dir, fresh)
         else:
             # Backfill baseline once the baseline executor finishes.
             existing.update_baseline(float(self.shared_state.baseline_tput or 0.0))
