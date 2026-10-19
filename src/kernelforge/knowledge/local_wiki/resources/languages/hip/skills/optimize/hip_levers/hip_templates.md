@@ -162,8 +162,8 @@ two waves per SIMD, which caps VGPR usage at 256 and keeps occupancy predictable
 micro-tile is what makes the inner loop FMA-bound instead of LDS-bound — without it, every multiply
 waits on a shared-memory read.
 
-> **Do not take `+1` as the padding answer.** gfx950 has **64 banks**, so whether a given stride is
-> conflict-free depends on `(byte_stride / 4) mod 64` for your element type and tile shape. The `+1`
+> **Do not take `+1` as the padding answer.** gfx950 has **64 banks**; a stride is conflict-free when,
+> counted in units of the per-lane read width, it is odd — `stride mod 64 != 0` is not enough. The `+1`
 > here is a placeholder for "some pad goes here." Derive the real one — `hip_lds_staging.md`.
 
 ## 6. Upgrading to the MFMA path

@@ -350,7 +350,7 @@ This works because:
 - **Keep the swap simple**: just unpack from `state`, no computation
 - **Check VGPR budget**: calculate `current_arch_vgpr + prefetch_vgprs <= 256` to avoid spills
 - **Hoist cross-phase loads into barrier regions**: if a kernel has barrier-heavy phases (reduce/sync), issue the next phase's loads before/during those barriers
-- **Unwrap all init values to raw ir.Value**: use `v.ir_value() if hasattr(v, 'ir_value') else v`
+- **Pass FlyDSL values to `init=` directly**: the rewriter converts `init` and `yield` values itself; unwrap only at hard boundaries (pitfall 2)
 
 ### Don't
 - **Don't prefetch if loop body is already memory-bound**: prefetching helps when compute (MFMA) duration >= load latency. If the loop is purely loads with no compute, prefetching won't help.

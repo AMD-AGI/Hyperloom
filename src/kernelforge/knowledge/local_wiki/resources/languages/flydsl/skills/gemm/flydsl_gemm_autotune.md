@@ -38,7 +38,10 @@ For each candidate `(cfg, factory)`:
 2. Run 200 throwaway launches of the first candidate in the list (the one timed first), so the clock is up before anything is timed
    (`_PICK_RAMP_ITERS`, FP8:80).
 3. Time every candidate over forward and reversed passes, three round trips, and keep each candidate's
-   minimum (`_pick_dense_candidate`, FP8:3067).
+   minimum (`_pick_dense_candidate`, FP8:3067). This fixed forward-plus-reversed order keeps the first
+   candidate at both ends of every pass and the last candidate at the turn, twice in a row. With three or
+   more candidates whose times sit within the slot effect, shuffle the order on each pass instead
+   (`flydsl_gemm_measurement.md` §2).
 4. Cache the winner per static shape key. Call `torch.cuda.empty_cache()` to release the race buffers.
 
 **Keep the race; do not replace it with a model.** *(field)* Replacing the TN race with "sort by an

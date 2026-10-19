@@ -228,8 +228,9 @@ read `.agpr_count`, `.vgpr_count` and the waves-per-eu fields from the ISA (`FLY
 
 ## 6. K tails inside the kernel
 
-Turbo's fp8 kernel accepts any K ≥ 129 without a padding copy; its MXFP4 kernel needs K % 64 == 0 and
-MXFP8 K % 128 == 0. FlyDSL's shipped kernels require K to be a multiple of their K tile.
+Turbo's fp8 kernel accepts any K ≥ 129 without a padding copy; its MXFP4 kernel needs K % 64 == 0, and
+its MXFP8 kernel needs K % 128 == 0 and K ≥ 256. FlyDSL's shipped kernels require K to be a multiple of
+their K tile.
 An over-read past K is legal only when every term it contributes has a factor that is exactly zero by
 construction. The three ways to get that zero:
 - **K-contiguous operands** (stored `[·, K]`, as in NT). Run `ceil(K/128)` iterations. A partial last block over-reads into the

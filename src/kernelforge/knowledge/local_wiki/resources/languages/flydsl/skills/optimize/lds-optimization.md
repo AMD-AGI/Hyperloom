@@ -292,26 +292,28 @@ Same as swizzle — stride-aligned accesses cause bank conflicts. Padding adds e
 
 ### The Solution
 
-Add 1 element of padding per row to break the alignment:
+Add 2 elements of padding per row to break the alignment (fp16, one row per lane, 2- or 4-byte reads):
 
 ```python
 # gfx942 (32 banks):
 # Without padding: row stride = HEAD_SIZE (e.g., 128)
 # Bank stride = 128 * 2 / 4 = 64 -> 64 % 32 = 0 -> ALL rows hit same bank column
-# With padding: row stride = HEAD_SIZE + 1 (e.g., 129)
-# Bank stride = 129 * 2 / 4 = 64.5 -> fractional -> conflicts eliminated
+# With padding: row stride = HEAD_SIZE + 2 (e.g., 130)
+# Bank stride = 130 * 2 / 4 = 65 -> odd dword stride -> conflict-free
+# (+1 element gives 64.5 dwords: lanes r and r+1 share a bank -> still 2-way)
 
 # gfx950 (64 banks):
 # Without padding: row stride = HEAD_SIZE (e.g., 128)
 # Bank stride = 128 * 2 / 4 = 64 -> 64 % 64 = 0 -> ALL rows hit same bank column (still conflicts!)
-# With padding: row stride = HEAD_SIZE + 1 (e.g., 129)
-# Bank stride = 129 * 2 / 4 = 64.5 -> fractional -> conflicts eliminated
+# With padding: row stride = HEAD_SIZE + 2 (e.g., 130)
+# Bank stride = 130 * 2 / 4 = 65 -> odd dword stride -> conflict-free
+# (+1 element gives 64.5 dwords -> still 2-way)
 ```
 
 ### FlyDSL Padding Implementation
 
 ```python
-PADDING = 1  # or a small number
+PADDING = 2  # see "Padding Amount" below
 PADDED_HEAD_SIZE = HEAD_SIZE + PADDING
 
 # Allocate with extra column for padding
@@ -334,12 +336,22 @@ def my_kernel(...):
 
 ### Padding Amount
 
-Pick the smallest padding whose row stride is a fractional number of dwords or coprime with the bank
-count: the lanes then touch `NBANKS / gcd(row_stride_dwords, NBANKS)` distinct banks, and a fractional
-stride walks all of them. For 2-byte elements that is **+1 or +2 elements**. Do **not** use
+Pick the padding by computing the bank of each lane, `floor((r · row_stride_bytes + col_bytes) / 4) mod 64`
+for lane `r` reading row `r` with a 2- or 4-byte `ds_read`, not by whether the stride is fractional. A
+whole-dword stride touches `64 / gcd(row_stride_dwords, 64)` banks, so an odd dword stride is
+conflict-free at every column. For 2-byte elements, **+2 elements** is conflict-free on 64- and
+128-element rows. +1 only suits 2-byte reads (it breaks 4-byte alignment), and even then it is 2-way on a
+128-element row (64.5 dwords) and on every odd column of a 64-element row (32.5 dwords). Do **not** use
 `padding = bank_count / element_size_bytes`: for fp16 on gfx950 that gives +32 elements, an 80-dword
-stride, and a 16-way conflict. The cost of padding is extra LDS usage:
-- 1 element padding per row: `KV_BLOCK_SIZE * element_size` extra bytes
+stride that uses only 4 of the 64 banks.
+
+Wider reads follow the same rule in units of the read width: the row stride counted in 8-byte (`b64`) or
+16-byte (`b128`) units must be odd, which is conflict-free however the hardware groups the lanes. They
+also need 8- or 16-byte aligned rows, so for fp16 the pad is a multiple of 4 or 8 elements (on a
+128-element row, +4 for `b64` and +8 for `b128`); an odd-element pad breaks the vector read.
+
+The cost of padding is extra LDS usage:
+- each padding element per row: `KV_BLOCK_SIZE * element_size` extra bytes
 - Must ensure total LDS usage stays within **64 KB** per CU (gfx942) or **160 KB** per CU (gfx950)
 
 ### Swizzle vs Padding Trade-offs

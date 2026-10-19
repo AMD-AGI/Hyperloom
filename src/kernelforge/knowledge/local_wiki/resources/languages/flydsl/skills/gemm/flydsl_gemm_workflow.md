@@ -50,9 +50,9 @@ the closest reference kernel for your dtype, layout and shape from the two maps 
   epilogue (`preshuffle_gemm`), bf16/fp16 in NN/NT/TN/TT with async DMA and split-K (`gemm_a16w16_gfx950`,
   also the small-M kernel), and fp8/MXFP4 NT in 8-wave and 4-wave forms. K must be a multiple of the K tile.
 - **Primus-Turbo's FlyDSL GEMMs**: fp8 NN and TN as well as NT, fp8 at any K ≥ 129 (MXFP4 needs
-  K % 64 == 0, MXFP8 K % 128 == 0), a whole-loop inline-asm design, a per-shape race between designs, and
-  fused GLU/dGLU + MXFP4-quantization epilogues. They target training shapes; for M ≤ 256 use
-  `flydsl_gemm_small_m.md`.
+  K % 64 == 0, MXFP8 needs K % 128 == 0 and K ≥ 256), a whole-loop inline-asm design, a per-shape race
+  between designs, and fused GLU/dGLU + MXFP4-quantization epilogues. They target training shapes; for
+  M ≤ 256 use `flydsl_gemm_small_m.md`.
 
 Both run on FlyDSL v0.3.2. Copy the structure and the reasoning; re-derive the constants (tile and preload
 tables, wait counts, margins, L2 thresholds) for your shape and machine. Those constants were tuned on specific
