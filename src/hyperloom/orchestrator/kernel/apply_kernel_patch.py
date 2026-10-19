@@ -112,22 +112,30 @@ def _is_multi_node() -> bool:
         return False
 
 
-def _dispatch_multinode_apply(
-    *,
-    target_file: Path,
-    patch_path: Path,
-    kernel_id: str,
-    backup_dir_on_pod: str,
-    jit_build_dir: str = "",
-    timeout_sec: int = 180,
-) -> dict[str, Any]:
-    """Fan a patch out to every pod (head + workers).
+@dataclass(frozen=True)
+class PodPatchApply:
+    """One file to patch on every pod.
 
-    Args:
+    Attributes:
         target_file: The file to patch on each pod.
         patch_path: Path to the patch file to apply.
         kernel_id: Identifier of the kernel being patched.
         backup_dir_on_pod: Directory on each pod to store backups.
+        jit_build_dir: JIT build directory to back up on each pod, or ``""``.
+    """
+
+    target_file: Path
+    patch_path: Path
+    kernel_id: str
+    backup_dir_on_pod: str
+    jit_build_dir: str = ""
+
+
+def _dispatch_multinode_apply(apply: PodPatchApply, timeout_sec: int = 180) -> dict[str, Any]:
+    """Fan a patch out to every pod (head + workers).
+
+    Args:
+        apply: The file, its patch and the per-pod backup locations.
         timeout_sec: Subprocess timeout in seconds.
 
     Returns:
@@ -144,15 +152,15 @@ def _dispatch_multinode_apply(
         "multi-node",
         "apply-patch",
         "--patch-file",
-        str(patch_path),
+        str(apply.patch_path),
         "--target-path",
-        str(target_file),
+        str(apply.target_file),
         "--backup-dir",
-        backup_dir_on_pod,
+        apply.backup_dir_on_pod,
         "--kernel-id",
-        kernel_id or "",
+        apply.kernel_id or "",
         "--jit-build-dir",
-        str(jit_build_dir or ""),
+        str(apply.jit_build_dir or ""),
     ]
     proc = subprocess.run(
         cmd,
@@ -1773,21 +1781,48 @@ def _multi_root_strategies(live_paths: Iterable[Path]) -> list[dict[str, Any]]:
     return strategies
 
 
-def apply_kernel_patch(
-    *,
-    patch_path: str | Path,
-    target_file: str | Path,
-    backup_root: str | Path,
-    kernel_id: str = "",
-    artifact_paths: Iterable[str] | None = None,
-    rebuild_command: list[str] | str | None = None,
-    rebuild_timeout_sec: int = 1800,
-    skip_rebuild: bool = False,
-    dry_run: bool = False,
-    snapshot_dir: str | Path | None = None,
-    repo_root: str | Path | None = None,
-    producer_manifest: str | Path | None = None,
-) -> dict[str, Any]:
+@dataclass(frozen=True)
+class KernelPatchRequest:
+    """One kernel patch to land: what to apply, where, and how to rebuild.
+
+    Attributes:
+        patch_path: The replacement source file, or (snapshot mode) the unified
+            diff manifest.
+        target_file: The primary file (drives timing/rebuild root).
+        backup_root: Root directory for backups and the manifest.
+        kernel_id: Identifier for the kernel being patched.
+        artifact_paths: Explicit compiled artifacts to back up in addition to
+            discovered ones.
+        rebuild_command: Override rebuild argv; a string is shlex-split and run
+            argv-only (shell=False), never via ``bash -lc``. Commands using
+            shell control operators, or invoking ``bash``/``sh`` with
+            ``-c``/``-lc``, return ``status='failed'`` with
+            ``error_class='invalid_rebuild_command'``.
+        rebuild_timeout_sec: Rebuild subprocess timeout in seconds.
+        skip_rebuild: When ``True``, skip the rebuild step.
+        dry_run: Prepare backups/manifest only, without applying.
+        snapshot_dir: When set, enables snapshot mode and holds byte-exact final
+            contents mirrored at each write path.
+        repo_root: Root the repo-relative snapshot paths resolve against.
+        producer_manifest: Canonical producer manifest recorded for deployment
+            provenance.
+    """
+
+    patch_path: str | Path
+    target_file: str | Path
+    backup_root: str | Path
+    kernel_id: str = ""
+    artifact_paths: Iterable[str] | None = None
+    rebuild_command: list[str] | str | None = None
+    rebuild_timeout_sec: int = 1800
+    skip_rebuild: bool = False
+    dry_run: bool = False
+    snapshot_dir: str | Path | None = None
+    repo_root: str | Path | None = None
+    producer_manifest: str | Path | None = None
+
+
+def apply_kernel_patch(request: KernelPatchRequest) -> dict[str, Any]:
     """Apply an optimized kernel file with backup, rebuild, and fan-out.
 
     Two modes:
@@ -1805,25 +1840,7 @@ def apply_kernel_patch(
     pods, and revert automatically on rebuild failure.
 
     Args:
-        patch_path (str | Path): The replacement source file, or (snapshot mode)
-            the unified diff manifest.
-        target_file (str | Path): The primary file (drives timing/rebuild root).
-        backup_root (str | Path): Root directory for backups and the manifest.
-        kernel_id (str): Identifier for the kernel being patched.
-        artifact_paths (Iterable[str] | None): Explicit compiled artifacts to
-            back up in addition to discovered ones.
-        rebuild_command (list[str] | str | None): Override rebuild argv; a
-            string is shlex-split and run argv-only (shell=False), never via
-            ``bash -lc``. Commands using shell control operators, or invoking
-            ``bash``/``sh`` with ``-c``/``-lc``, return ``status='failed'``
-            with ``error_class='invalid_rebuild_command'``.
-        rebuild_timeout_sec (int): Rebuild subprocess timeout in seconds.
-        skip_rebuild (bool): When ``True``, skip the rebuild step.
-        dry_run (bool): Prepare backups/manifest only, without applying.
-        snapshot_dir (str | Path | None): When set, enables snapshot mode and
-            holds byte-exact final contents mirrored at each write path.
-        producer_manifest (str | Path | None): Canonical producer manifest
-            recorded for deployment provenance.
+        request (KernelPatchRequest): The patch, its target, and the rebuild options.
 
     Returns:
         dict[str, Any]: A result dict with ``status`` and, on success, the
@@ -1831,22 +1848,8 @@ def apply_kernel_patch(
             cache-clear / rebuild / jit-build records, and an optional
             ``multinode`` block.
     """
-    request = _PatchRequest(
-        patch_path=Path(patch_path).resolve(),
-        target=Path(target_file).resolve(),
-        backup_root=Path(backup_root),
-        kernel_id=kernel_id,
-        artifact_paths=artifact_paths,
-        rebuild_command=rebuild_command,
-        rebuild_timeout_sec=rebuild_timeout_sec,
-        skip_rebuild=skip_rebuild,
-        dry_run=dry_run,
-        snapshot_dir=snapshot_dir,
-        repo_root=repo_root,
-        producer_manifest=producer_manifest,
-    )
     try:
-        if snapshot_dir is not None:
+        if request.snapshot_dir is not None:
             return _apply_kernel_patch_snapshot(request)
         return _apply_whole_file_patch(request)
     except _PatchRefused as refusal:
@@ -1861,37 +1864,16 @@ class _PatchRefused(Exception):
         self.result = result
 
 
-class _PatchRequest(NamedTuple):
-    """One :func:`apply_kernel_patch` call: what to land, where, and how to rebuild it."""
+def _patch_rebuild_argv(request: KernelPatchRequest) -> list[str]:
+    """The argv this call overrides the strategy's rebuild command with.
 
-    patch_path: Path
-    target: Path
-    backup_root: Path
-    kernel_id: str
-    artifact_paths: Iterable[str] | None
-    rebuild_command: list[str] | str | None
-    rebuild_timeout_sec: int
-    skip_rebuild: bool
-    dry_run: bool
-    snapshot_dir: str | Path | None
-    repo_root: str | Path | None
-    producer_manifest: str | Path | None
-
-    def rebuild_argv(self) -> list[str]:
-        """The argv this call overrides the strategy's rebuild command with.
-
-        Returns:
-            list[str]: The validated argv, empty when the call names none.
-
-        Raises:
-            _PatchRefused: When the command relies on shell syntax.
-        """
-        try:
-            return _coerce_rebuild_command(self.rebuild_command) if self.rebuild_command else []
-        except ValueError as exc:
-            raise _PatchRefused(
-                {"status": "failed", "error_class": "invalid_rebuild_command", "error": str(exc)}
-            ) from exc
+    Raises:
+        _PatchRefused: When the command relies on shell syntax.
+    """
+    try:
+        return _coerce_rebuild_command(request.rebuild_command) if request.rebuild_command else []
+    except ValueError as exc:
+        raise _PatchRefused({"status": "failed", "error_class": "invalid_rebuild_command", "error": str(exc)}) from exc
 
 
 @dataclass(frozen=True)
@@ -2151,11 +2133,13 @@ def _finish_apply(deployment: _PatchDeployment, outcome: _ApplyOutcome) -> dict[
 class _WholeFilePreflight(NamedTuple):
     """What a whole-file apply validated before touching anything."""
 
+    patch: Path
+    target: Path
     strategy: dict[str, Any]
     command_override: list[str]
 
 
-def _apply_whole_file_patch(request: _PatchRequest) -> dict[str, Any]:
+def _apply_whole_file_patch(request: KernelPatchRequest) -> dict[str, Any]:
     """Replace one target file with the patch, rebuild its root, and publish it to every pod.
 
     Raises:
@@ -2163,15 +2147,15 @@ def _apply_whole_file_patch(request: _PatchRequest) -> dict[str, Any]:
     """
     preflight = _whole_file_preflight(request)
     strategy = preflight.strategy
-    prepared = _prepare_whole_file_apply(request, strategy)
+    prepared = _prepare_whole_file_apply(request, preflight)
     deployment = prepared.deployment
     if request.dry_run:
         return {"status": "ok", "dry_run": True, "manifest_path": str(deployment.manifest_path)}
 
-    shutil.copy2(request.patch_path, request.target)
+    shutil.copy2(preflight.patch, preflight.target)
     cache_clear = (
-        _clear_python_kernel_caches(request.target)
-        if request.target.suffix.lower() in PYTHON_SOURCE_SUFFIXES
+        _clear_python_kernel_caches(preflight.target)
+        if preflight.target.suffix.lower() in PYTHON_SOURCE_SUFFIXES
         else {"status": "skipped", "reason": "not a python source target"}
     )
     multinode = _fan_whole_file_out_to_pods(request, deployment, preflight) if _is_multi_node() else {}
@@ -2186,7 +2170,7 @@ def _apply_whole_file_patch(request: _PatchRequest) -> dict[str, Any]:
     )
 
 
-def _whole_file_preflight(request: _PatchRequest) -> _WholeFilePreflight:
+def _whole_file_preflight(request: KernelPatchRequest) -> _WholeFilePreflight:
     """Validate the patch, the target and the rebuild command before any file or pod is touched.
 
     Raises:
@@ -2194,28 +2178,32 @@ def _whole_file_preflight(request: _PatchRequest) -> _WholeFilePreflight:
             the rebuild command relies on shell syntax, or the JIT build dir
             this strategy pins cannot be trusted.
     """
-    if not request.patch_path.is_file():
-        raise _PatchRefused({"status": "failed", "error": f"patch_path does not exist: {request.patch_path}"})
-    if not request.target.is_file():
-        raise _PatchRefused({"status": "failed", "error": f"target_file does not exist: {request.target}"})
+    patch = Path(request.patch_path).resolve()
+    target = Path(request.target_file).resolve()
+    if not patch.is_file():
+        raise _PatchRefused({"status": "failed", "error": f"patch_path does not exist: {patch}"})
+    if not target.is_file():
+        raise _PatchRefused({"status": "failed", "error": f"target_file does not exist: {target}"})
     try:
-        strategy = _detect_strategy(request.target)
-        _validate_patch_source(request.patch_path, request.target)
+        strategy = _detect_strategy(target)
+        _validate_patch_source(patch, target)
     except Exception as exc:
         raise _PatchRefused({"status": "failed", "error": str(exc)}) from exc
     # Coerce/validate the rebuild_command BEFORE any file/pod mutation so an
     # invalid (shell-control) command fails all-or-nothing instead of aborting
     # after the patch is already copied onto the live target / fanned out.
-    command_override = request.rebuild_argv()
+    command_override = _patch_rebuild_argv(request)
     if not request.skip_rebuild and not _is_multi_node():
         _refuse_untrusted_jit_strategies([strategy])
-    return _WholeFilePreflight(strategy, command_override)
+    return _WholeFilePreflight(patch, target, strategy, command_override)
 
 
-def _prepare_whole_file_apply(request: _PatchRequest, strategy: dict[str, Any]) -> _PreparedApply:
+def _prepare_whole_file_apply(request: KernelPatchRequest, preflight: _WholeFilePreflight) -> _PreparedApply:
     """Back up the target and its compiled artifacts, and write the ``prepared`` manifest."""
-    backup_dir = _claim_backup_dir(request.backup_root, request.kernel_id, request.target)
-    source_backup = _copy_to_backup(request.target, backup_dir, "source")
+    strategy = preflight.strategy
+    target = preflight.target
+    backup_dir = _claim_backup_dir(Path(request.backup_root), request.kernel_id, target)
+    source_backup = _copy_to_backup(target, backup_dir, "source")
     artifacts: list[dict[str, str]] = []
     if strategy["compiled"]:
         found = _discover_artifacts(strategy["artifact_roots"], request.artifact_paths)
@@ -2223,8 +2211,8 @@ def _prepare_whole_file_apply(request: _PatchRequest, strategy: dict[str, Any]) 
     manifest: dict[str, Any] = {
         "status": "prepared",
         "kernel_id": request.kernel_id,
-        "patch_path": str(request.patch_path),
-        "target_file": str(request.target),
+        "patch_path": str(preflight.patch),
+        "target_file": str(target),
         "source_backup": source_backup,
         "artifacts": artifacts,
         "strategy": {
@@ -2239,13 +2227,13 @@ def _prepare_whole_file_apply(request: _PatchRequest, strategy: dict[str, Any]) 
     if request.producer_manifest:
         manifest["producer_manifest"] = str(Path(request.producer_manifest).resolve())
     backup_dir.mkdir(parents=True, exist_ok=True)
-    deployment = _PatchDeployment(request.target, backup_dir, backup_dir / "manifest.json", manifest)
+    deployment = _PatchDeployment(target, backup_dir, backup_dir / "manifest.json", manifest)
     deployment.persist()
     return _PreparedApply(deployment, len(artifacts))
 
 
 def _fan_whole_file_out_to_pods(
-    request: _PatchRequest,
+    request: KernelPatchRequest,
     deployment: _PatchDeployment,
     preflight: _WholeFilePreflight,
 ) -> dict[str, Any]:
@@ -2262,18 +2250,20 @@ def _fan_whole_file_out_to_pods(
     try:
         fanout.absorb(
             _dispatch_multinode_apply(
-                target_file=request.target,
-                patch_path=request.patch_path,
-                kernel_id=request.kernel_id,
-                backup_dir_on_pod=pod_backup_dir,
-                jit_build_dir=_whole_file_remote_jit_dir(request, preflight.strategy),
+                PodPatchApply(
+                    target_file=preflight.target,
+                    patch_path=preflight.patch,
+                    kernel_id=request.kernel_id,
+                    backup_dir_on_pod=pod_backup_dir,
+                    jit_build_dir=_whole_file_remote_jit_dir(request, preflight.strategy),
+                )
             )
         )
     except Exception as exc:
         # Pod fan-out failed: revert sandbox copy.
         backup_path = deployment.manifest["source_backup"]["backup_path"]
         try:
-            shutil.copy2(backup_path, request.target)
+            shutil.copy2(backup_path, preflight.target)
         except OSError:
             pass
         raise _PatchRefused(
@@ -2284,12 +2274,12 @@ def _fan_whole_file_out_to_pods(
             }
         ) from exc
     # Persist multinode info now so a later rebuild failure reverts pod-side patches too.
-    block = fanout.block("ok", request.target, pod_backup_dir)
+    block = fanout.block("ok", preflight.target, pod_backup_dir)
     deployment.record_fanout(block)
     return block
 
 
-def _whole_file_remote_jit_dir(request: _PatchRequest, strategy: dict[str, Any]) -> str:
+def _whole_file_remote_jit_dir(request: KernelPatchRequest, strategy: dict[str, Any]) -> str:
     """The JIT build dir each pod invalidates, empty when this apply rebuilds nothing."""
     jit_build_dir = str(strategy.get("jit_build_dir") or "").strip()
     if strategy["compiled"] and jit_build_dir and not request.skip_rebuild:
@@ -2298,7 +2288,7 @@ def _whole_file_remote_jit_dir(request: _PatchRequest, strategy: dict[str, Any])
 
 
 def _whole_file_rebuild_plan(
-    request: _PatchRequest,
+    request: KernelPatchRequest,
     preflight: _WholeFilePreflight,
     multinode: dict[str, Any],
 ) -> _RebuildPlan:
@@ -2308,9 +2298,9 @@ def _whole_file_rebuild_plan(
     return _RebuildPlan(
         strategies=[strategy],
         jit_strategy=strategy,
-        jit_target=request.target,
+        jit_target=preflight.target,
         jit_build_dir=Path(jit_build_dir) if jit_build_dir else None,
-        cpp_itfs_target=request.target,
+        cpp_itfs_target=preflight.target,
         command_override=preflight.command_override,
         timeout_sec=request.rebuild_timeout_sec,
         pod_records=multinode.get("records_by_host") if (multinode and jit_build_dir) else None,
@@ -2320,6 +2310,8 @@ def _whole_file_rebuild_plan(
 class _SnapshotPlan(NamedTuple):
     """A validated snapshot apply: what it writes, where, and which roots it rebuilds."""
 
+    patch: Path
+    target: Path
     descriptors: list[PatchTarget]
     repo_root: Path
     deploy_roots: list[Path]
@@ -2329,7 +2321,7 @@ class _SnapshotPlan(NamedTuple):
     command_override: list[str]
 
 
-def _apply_kernel_patch_snapshot(request: _PatchRequest) -> dict[str, Any]:
+def _apply_kernel_patch_snapshot(request: KernelPatchRequest) -> dict[str, Any]:
     """Snapshot-mode apply: land an entire multi-file patch atomically.
 
     See :func:`apply_kernel_patch` for the contract. The diff at
@@ -2364,7 +2356,7 @@ def _apply_kernel_patch_snapshot(request: _PatchRequest) -> dict[str, Any]:
     return result
 
 
-def _snapshot_plan(request: _PatchRequest) -> _SnapshotPlan:
+def _snapshot_plan(request: KernelPatchRequest) -> _SnapshotPlan:
     """Parse the patch manifest, resolve every destination, and pick the roots to rebuild.
 
     Raises:
@@ -2373,19 +2365,21 @@ def _snapshot_plan(request: _PatchRequest) -> _SnapshotPlan:
             destination escapes the deploy roots, the set spans several AITER
             JIT roots, or a pinned JIT build dir cannot be trusted.
     """
-    if not request.patch_path.is_file():
-        raise _PatchRefused({"status": "failed", "error": f"patch_path does not exist: {request.patch_path}"})
+    patch = Path(request.patch_path).resolve()
+    target = Path(request.target_file).resolve()
+    if not patch.is_file():
+        raise _PatchRefused({"status": "failed", "error": f"patch_path does not exist: {patch}"})
     try:
-        descriptors = repo_relative_manifest(request.patch_path.read_text(encoding="utf-8", errors="replace"))
+        descriptors = repo_relative_manifest(patch.read_text(encoding="utf-8", errors="replace"))
     except ValueError as exc:
         raise _PatchRefused({"status": "failed", "error": f"unparseable patch: {exc}"}) from exc
     try:
-        primary_strategy = _detect_strategy(request.target)
+        primary_strategy = _detect_strategy(target)
     except ValueError as exc:
         raise _PatchRefused({"status": "failed", "error": str(exc)}) from exc
     # Coerce/validate rebuild_command BEFORE any file/pod mutation (all-or-nothing).
-    command_override = request.rebuild_argv()
-    repo_root = _snapshot_repo_root(request, primary_strategy)
+    command_override = _patch_rebuild_argv(request)
+    repo_root = _snapshot_repo_root(request, primary_strategy, target)
     # A caller-named repo is a declaration, not the guess rejected above.
     deploy_roots = [Path(path) for path in primary_strategy.get("deploy_roots") or []] or [repo_root]
     write_paths = _snapshot_write_paths(descriptors, repo_root, deploy_roots)
@@ -2400,6 +2394,8 @@ def _snapshot_plan(request: _PatchRequest) -> _SnapshotPlan:
     if not request.skip_rebuild and not _is_multi_node():
         _refuse_untrusted_jit_strategies(jit_strategies)
     return _SnapshotPlan(
+        patch=patch,
+        target=target,
         descriptors=descriptors,
         repo_root=repo_root,
         deploy_roots=deploy_roots,
@@ -2410,7 +2406,7 @@ def _snapshot_plan(request: _PatchRequest) -> _SnapshotPlan:
     )
 
 
-def _snapshot_repo_root(request: _PatchRequest, primary_strategy: dict[str, Any]) -> Path:
+def _snapshot_repo_root(request: KernelPatchRequest, primary_strategy: dict[str, Any], target: Path) -> Path:
     """The root the patch's repo-relative descriptors resolve against.
 
     Resolve against the explicit root, else the strategy root. Never guess
@@ -2426,7 +2422,7 @@ def _snapshot_repo_root(request: _PatchRequest, primary_strategy: dict[str, Any]
                 "status": "failed",
                 "error": (
                     "snapshot mode requires a known repo root (pass repo_root or a "
-                    f"target under a known framework root): {request.target}"
+                    f"target under a known framework root): {target}"
                 ),
             }
         )
@@ -2454,9 +2450,9 @@ def _snapshot_write_paths(
     return write_paths
 
 
-def _prepare_snapshot_apply(request: _PatchRequest, plan: _SnapshotPlan) -> _PreparedApply:
+def _prepare_snapshot_apply(request: KernelPatchRequest, plan: _SnapshotPlan) -> _PreparedApply:
     """Back up the compiled artifacts the patch invalidates and write the ``prepared`` manifest."""
-    backup_dir = _claim_backup_dir(request.backup_root, request.kernel_id, request.target)
+    backup_dir = _claim_backup_dir(Path(request.backup_root), request.kernel_id, plan.target)
     backup_dir.mkdir(parents=True, exist_ok=True)
     artifacts: list[dict[str, str]] = []
     if plan.rebuild_strategies:
@@ -2468,8 +2464,8 @@ def _prepare_snapshot_apply(request: _PatchRequest, plan: _SnapshotPlan) -> _Pre
     manifest: dict[str, Any] = {
         "status": "prepared",
         "kernel_id": request.kernel_id,
-        "patch_path": str(request.patch_path),
-        "target_file": str(request.target),
+        "patch_path": str(plan.patch),
+        "target_file": str(plan.target),
         "mode": "snapshot",
         "descriptors": [asdict(desc) for desc in plan.descriptors],
         "artifacts": artifacts,
@@ -2486,12 +2482,12 @@ def _prepare_snapshot_apply(request: _PatchRequest, plan: _SnapshotPlan) -> _Pre
     }
     if request.producer_manifest:
         manifest["producer_manifest"] = str(Path(request.producer_manifest).resolve())
-    deployment = _PatchDeployment(request.target, backup_dir, backup_dir / "manifest.json", manifest)
+    deployment = _PatchDeployment(plan.target, backup_dir, backup_dir / "manifest.json", manifest)
     deployment.persist()
     return _PreparedApply(deployment, len(artifacts))
 
 
-def _land_snapshot(request: _PatchRequest, deployment: _PatchDeployment, plan: _SnapshotPlan) -> list[str]:
+def _land_snapshot(request: KernelPatchRequest, deployment: _PatchDeployment, plan: _SnapshotPlan) -> list[str]:
     """Write the whole snapshot onto the live tree and prove every path landed byte-exact.
 
     Raises:
@@ -2528,7 +2524,7 @@ def _land_snapshot(request: _PatchRequest, deployment: _PatchDeployment, plan: _
     return applied["touched"]
 
 
-def _snapshot_mismatch(request: _PatchRequest, plan: _SnapshotPlan) -> str:
+def _snapshot_mismatch(request: KernelPatchRequest, plan: _SnapshotPlan) -> str:
     """How the live tree differs from the snapshot it was just given, or ``""``.
 
     Written paths must be byte-identical to the snapshot and deleted paths gone.
@@ -2565,7 +2561,7 @@ def _snapshot_jit_build_dir(plan: _SnapshotPlan) -> str:
 
 
 def _fan_snapshot_out_to_pods(
-    request: _PatchRequest,
+    request: KernelPatchRequest,
     deployment: _PatchDeployment,
     plan: _SnapshotPlan,
 ) -> dict[str, Any]:
@@ -2584,16 +2580,18 @@ def _fan_snapshot_out_to_pods(
             carries_jit = path == jit_dispatch_target and jit_build_dir and not request.skip_rebuild
             fanout.absorb(
                 _dispatch_multinode_apply(
-                    target_file=path,
-                    patch_path=snap / Path(path).relative_to(plan.repo_root),
-                    kernel_id=request.kernel_id,
-                    backup_dir_on_pod=pod_backup_dir,
-                    jit_build_dir=jit_build_dir if carries_jit else "",
+                    PodPatchApply(
+                        target_file=path,
+                        patch_path=snap / Path(path).relative_to(plan.repo_root),
+                        kernel_id=request.kernel_id,
+                        backup_dir_on_pod=pod_backup_dir,
+                        jit_build_dir=jit_build_dir if carries_jit else "",
+                    )
                 )
             )
             # Persist after every file so a later dispatch failure can
             # revert all already-patched files on every pod.
-            deployment.record_fanout(fanout.block("partial", request.target, pod_backup_dir))
+            deployment.record_fanout(fanout.block("partial", plan.target, pod_backup_dir))
     except Exception as exc:
         revert = revert_kernel_patch(deployment.manifest_path)
         raise _PatchRefused(
@@ -2604,22 +2602,22 @@ def _fan_snapshot_out_to_pods(
                 "revert": revert,
             }
         ) from exc
-    block = fanout.block("ok", request.target, pod_backup_dir)
+    block = fanout.block("ok", plan.target, pod_backup_dir)
     deployment.record_fanout(block)
     return block
 
 
 def _snapshot_rebuild_plan(
-    request: _PatchRequest,
+    request: KernelPatchRequest,
     plan: _SnapshotPlan,
     multinode: dict[str, Any],
 ) -> _RebuildPlan:
     """How every compiled root the snapshot touched is rebuilt."""
     jit_build_dir = _snapshot_jit_build_dir(plan)
-    jit_target = next((path for path in plan.write_paths if _target_uses_aiter_jit(path)), request.target)
+    jit_target = next((path for path in plan.write_paths if _target_uses_aiter_jit(path)), plan.target)
     cpp_itfs_target = next(
         (path for path in plan.write_paths if _target_is_in_aiter_cpp_itfs(path)),
-        request.target,
+        plan.target,
     )
     return _RebuildPlan(
         strategies=plan.rebuild_strategies,
