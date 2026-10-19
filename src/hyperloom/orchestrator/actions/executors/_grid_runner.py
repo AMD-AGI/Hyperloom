@@ -84,9 +84,11 @@ from hyperloom.inference_optimizer.grid_server_args import (
 from ._grid_variant_yaml import (
     _build_variant_yaml as _build_variant_yaml,
     variant_conc as variant_conc,
-    _shell_safe_dedupe as _shell_safe_dedupe,
-    _SGLANG_MOE_RUNNER_BACKEND_RE as _SGLANG_MOE_RUNNER_BACKEND_RE,
 )
+
+# The argument-env composer and the MoE-backend pattern, through the module that composes with them.
+from ._grid_variant_yaml import _shell_safe_dedupe as _shell_safe_dedupe
+from ._grid_variant_yaml import _SGLANG_MOE_RUNNER_BACKEND_RE as _SGLANG_MOE_RUNNER_BACKEND_RE
 from ._grid_variant_filter import (
     resolve_skip_spec as resolve_skip_spec,
     _MN_PARAMS_PRIORITY as _MN_PARAMS_PRIORITY,
