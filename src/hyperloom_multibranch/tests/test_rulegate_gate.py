@@ -154,12 +154,13 @@ async def test_a_blocked_gain_with_no_repair_is_recorded(setup):
         (AdmissionStatus.REJECTED, Conclusion.RECORDED_ONLY),
     ],
 )
-async def test_a_fix_that_costs_performance_asks_for_a_fork(setup, status, conclusion):
+async def test_a_fix_that_costs_performance_asks_for_a_fork(setup, tmp_path, status, conclusion):
     notebook, repo, measured = setup
     scheduler = RecordingScheduler(status)
     gate = RuleGate(notebook, repo, scheduler, RecordingVerifier())
+    fix = await _proven(tmp_path / "notebook")
 
-    admission = await gate.fork(measured, _judged(Verdict.REGRESSED, fixes_correctness=True), "oob at 8k")
+    admission = await gate.fork(measured, _judged(Verdict.REGRESSED, fixes_correctness=True), "oob at 8k", fix=fix)
 
     assert [(fork.from_branch, fork.parent_commit, fork.reason) for fork in scheduler.forks] == [
         ("s1", "c0", "oob at 8k")
@@ -181,13 +182,14 @@ async def test_a_gain_whose_retest_does_not_re_verify_is_not_committed(setup):
     assert (record.conclusion, record.commit_id) == (Conclusion.UNVERIFIED, None)
 
 
-async def test_a_fork_or_a_repair_resting_on_an_unverified_result_is_not_asked_for(setup):
+async def test_a_fork_or_a_repair_resting_on_an_unverified_result_is_not_asked_for(setup, tmp_path):
     notebook, repo, measured = setup
     scheduler = RecordingScheduler(AdmissionStatus.ACCEPTED)
     gate = RuleGate(notebook, repo, scheduler, RecordingVerifier({"r1"}))
+    fix = await _proven(tmp_path / "notebook")
 
     with pytest.raises(ResultUnverified):
-        await gate.fork(measured, _judged(Verdict.REGRESSED, fixes_correctness=True), "oob at 8k")
+        await gate.fork(measured, _judged(Verdict.REGRESSED, fixes_correctness=True), "oob at 8k", fix=fix)
     with pytest.raises(ResultUnverified):
         await gate.repair(measured, _judged(Verdict.BLOCKED, accuracy_ok=False), GEMM, "scale per head")
 
@@ -293,6 +295,8 @@ async def test_a_correctness_fix_without_its_proof_is_refused(setup):
 
     with pytest.raises(ValueError, match="without the proof of its case"):
         await gate.settle(measured, _judged(Verdict.FLAT, fixes_correctness=True))
+    with pytest.raises(ValueError, match="without the proof of its case"):
+        await gate.fork(measured, _judged(Verdict.REGRESSED, fixes_correctness=True), "oob at 8k")
 
     assert await repo.head("s1") == "c0"
     assert ((await notebook.record("r1")).judgement, verifier.asked) == (None, [])

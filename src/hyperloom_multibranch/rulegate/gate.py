@@ -41,12 +41,12 @@ class GateWriter(JudgementSink, LineageSink, CaseRegistry, Protocol):
 
 @dataclass(frozen=True)
 class _Reserved:
-    """A fork or repair the scheduler reserved a branch for; ``reason`` is the fork's, empty for a repair."""
+    """A fork or repair the scheduler reserved a branch for; ``reason`` and ``fix`` are a fork's, empty for a repair."""
 
     request: TestRequest
     judgement: Judgement
     reason: str
-    fork: bool
+    fix: FixProof | None = None
 
 
 def _recorded_as(judgement: Judgement) -> Conclusion:
@@ -60,6 +60,11 @@ def _require(judgement: Judgement, *actions: Action) -> None:
     action = decide(judgement)
     if action not in actions:
         raise ValueError(f"a {judgement.verdict.value} judgement calls for {action.value}")
+
+
+def _require_proof(request: TestRequest, judgement: Judgement, fix: FixProof | None) -> None:
+    if judgement.fixes_correctness and fix is None:
+        raise ValueError(f"{request.request_id} lands a correctness fix without the proof of its case")
 
 
 class RuleGate:
@@ -93,8 +98,7 @@ class RuleGate:
         """
         action = decide(judgement)
         if action is Action.COMMIT:
-            if judgement.fixes_correctness and fix is None:
-                raise ValueError(f"{request.request_id} commits a correctness fix without the proof of its case")
+            _require_proof(request, judgement, fix)
             await self._reverify(request, judgement)
             # The scheduler may stop a specialist at any moment; a stop must not split a commit from its judgement.
             if not await asyncio.shield(self._commit(request, judgement, fix)):
@@ -110,10 +114,14 @@ class RuleGate:
         _require(judgement, Action.DIAGNOSE)
         return await self._record(request, judgement)
 
-    async def fork(self, request: TestRequest, judgement: Judgement, reason: str) -> ForkAdmission:
+    async def fork(
+        self, request: TestRequest, judgement: Judgement, reason: str, *, fix: FixProof | None = None
+    ) -> ForkAdmission:
         """Asks for the fork and records where the candidate stands; the branch is cut when the scheduler has it
-        landed (:meth:`land_split`)."""
+        landed (:meth:`land_split`), and ``fix``'s case joins the regression set there. A fork is a correctness fix,
+        so it cannot be asked without its proof (``ValueError``)."""
         _require(judgement, Action.REQUEST_FORK)
+        _require_proof(request, judgement, fix)
         await self._reverify(request, judgement)
         async with self._lock:
             admission = await self._scheduler.admit(ForkRequest(request.branch, request.parent_commit, reason))
@@ -123,7 +131,7 @@ class RuleGate:
                 conclusion = Conclusion.SPLIT_PENDING
             else:
                 conclusion = Conclusion.SPLIT_REQUESTED
-            self._reserve(admission, _Reserved(request, judgement, reason, fork=True))
+            self._reserve(admission, _Reserved(request, judgement, reason, fix))
             await self._notebook.write_judgement(request.request_id, judgement, conclusion)
         return admission
 
@@ -133,7 +141,7 @@ class RuleGate:
             admission = await self._scheduler.admit_repair(RepairRequest(intent, request.delta, judgement, diagnosis))
             rejected = admission.status is AdmissionStatus.REJECTED
             conclusion = _recorded_as(judgement) if rejected else Conclusion.REPAIR_REQUESTED
-            self._reserve(admission, _Reserved(request, judgement, "", fork=False))
+            self._reserve(admission, _Reserved(request, judgement, ""))
             await self._notebook.write_judgement(request.request_id, judgement, conclusion)
         return admission
 
@@ -154,7 +162,7 @@ class RuleGate:
     async def _land(self, branch: str) -> bool:
         async with self._lock:
             split = self._reserved.get(branch)
-            if split is None or not split.fork:
+            if split is None or split.fix is None:
                 return False
             request, parent = split.request, split.request.parent_commit
             recipe = apply(await self._repo.read_recipe(parent), request.delta)
@@ -162,6 +170,7 @@ class RuleGate:
             message = f"{request.request_id}: split from {request.branch}: {split.reason}"
             commit = await self._repo.commit(branch, parent, recipe, message)
             try:
+                await register_case(self._notebook, commit, split.fix.candidate.request_id)
                 await self._notebook.write_judgement(
                     request.request_id, split.judgement, Conclusion.SPLIT_COMMITTED, commit, recipe.digest()
                 )
@@ -178,13 +187,8 @@ class RuleGate:
                     reason=split.reason,
                 )
             )
-            await self._register_split_case(split, commit)
             del self._reserved[branch]
             return True
-
-    async def _register_split_case(self, split: _Reserved, commit: str) -> None:
-        """Where the landed fix's repro case joins the regression set of ``commit``
-        (``rulegate.regression.register_case``); it registers nothing until a fork carries the proof of its fix."""
 
     async def _void(self, branch: str, reason: str) -> None:
         async with self._lock:

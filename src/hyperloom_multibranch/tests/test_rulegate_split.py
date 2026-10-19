@@ -7,15 +7,26 @@ from dataclasses import dataclass
 
 import pytest
 
+from hyperloom.contracts.measurement import (
+    NOT_REPRODUCED,
+    REPRODUCED,
+    AttachmentRef,
+    Purpose,
+    TestKind,
+    TestResult,
+    Validity,
+)
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, apply
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ReservedBranches
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import Role, Writer
-from hyperloom_multibranch.contracts.notebook.records import LineageEvent
+from hyperloom_multibranch.contracts.notebook.records import LineageEvent, RegressionCase
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, Conclusion, LineageKind
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.tests.factories import delta, intent, request, result
+from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID
 from hyperloom_multibranch.rulegate.gate import RuleGate
+from hyperloom_multibranch.rulegate.regression import FixProof, ReproRun
 from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler, RecordingVerifier
 
 BASELINE = Recipe("rocm/vllm@sha256:" + "c" * 64, LaunchConfig(server_args="--max-num-seqs 128"))
@@ -23,6 +34,8 @@ BRANCH, ROOT, FORK = "s1", "c0", "fork-1"
 FIX = Judgement(Verdict.REGRESSED, -2.0, 2.0, ("r1", "r1b"), {"output_throughput": 980.0}, True, fixes_correctness=True)
 BLOCKED = Judgement(Verdict.BLOCKED, 3.0, 2.0, ("r1", "r1b"), {"output_throughput": 1030.0}, False)
 GATE_LOG = "hyperloom_multibranch.rulegate.gate"
+CASE = AttachmentRef(FIX_CASE_ID, "dir", "a" * 64)
+PROOF = FixProof(ReproRun("p0", REPRODUCED), ReproRun("p1", NOT_REPRODUCED), ReproRun("p0", REPRODUCED))
 
 
 class _Stalls:
@@ -40,8 +53,8 @@ class _Stalls:
             await self.release.wait()
         return await self.inner.write_judgement(request_id, judgement, conclusion, *args)
 
-    async def record_lineage(self, event):
-        await self.inner.record_lineage(event)
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
 
 
 @dataclass
@@ -63,6 +76,9 @@ async def _rig(root, status: AdmissionStatus = AdmissionStatus.ACCEPTED, wrap=No
     toolbox = LocalNotebook(root, Writer(Role.TOOLBOX, "toolbox"))
     await toolbox.write_request(request("r1", intent(BRANCH, ROOT), delta("--kv-cache-dtype fp8")))
     await toolbox.write_result(result("r1"))
+    clean = request("p1", intent(BRANCH, ROOT), kind=TestKind.REPRO, purpose=Purpose.REPRO, attachments=(CASE,))
+    await toolbox.write_request(clean)
+    await toolbox.write_result(TestResult("p1", Validity.SUCCEEDED, repro_verdict=NOT_REPRODUCED))
     scheduler = LocalNotebook(root, Writer(Role.SCHEDULER, "scheduler"))
     await scheduler.record_lineage(LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=ROOT))
     await scheduler.record_lineage(LineageEvent(LineageKind.OPEN, BRANCH, from_commit=ROOT))
@@ -76,7 +92,7 @@ async def _rig(root, status: AdmissionStatus = AdmissionStatus.ACCEPTED, wrap=No
 
 async def _fork(rig: _Rig) -> str:
     candidate = (await rig.notebook.record("r1")).request
-    return (await rig.gate.fork(candidate, FIX, "fp8 scales overflow at 8k")).branch
+    return (await rig.gate.fork(candidate, FIX, "fp8 scales overflow at 8k", fix=PROOF)).branch
 
 
 async def _repair(rig: _Rig) -> str:
@@ -105,6 +121,7 @@ async def test_a_landed_fork_carries_the_fix_on_its_own_branch_cut_at_the_parent
         head,
     )
     assert (await rig.scheduler.lineage()).commit(head).branch == branch
+    assert await rig.notebook.regression_cases_for(head) == (RegressionCase(FIX_CASE_ID, head, "p1"),)
     assert not await gate.land_split(branch)
 
 
