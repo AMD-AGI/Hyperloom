@@ -15,6 +15,12 @@ from kernelforge.gemm_tune.script_probe import ScriptSurface
 from kernelforge.gemm_tune.tuners import sglang_dense_bf16 as sd
 from kernelforge.gemm_tune.tuners.base import TuneContext
 
+
+def _tune_ctx(**fields) -> TuneContext:
+    """A tuning context carrying the run fields a report records; the tuner knobs are placeholders."""
+    return TuneContext(mp=1, output_dir=Path("."), iters=1, warmup=1, min_improvement_pct=0.0, timeout_s=1, **fields)
+
+
 # Real header written by csrc/gemm_a16w16/gemm_a16w16_tune.py for both the tuned (-o) and the full-candidate profile
 # (-o2) CSV.
 _HDR = (
@@ -88,7 +94,7 @@ def _prep(tmp_path, monkeypatch, *, tuned_rows, profile_rows=(), rc=1, root=None
     """Wire the tuner so run() executes without aiter, and capture its argv."""
     monkeypatch.setattr(sd, "probe_script", surface or _permissive_surface)
     monkeypatch.setattr(sd, "resolve_aiter_root", lambda: root or _aiter_root(tmp_path))
-    monkeypatch.setattr(sd, "_compute_nk_shapes", lambda **kw: list(_NK))
+    monkeypatch.setattr(sd, "_compute_nk_shapes", lambda geometry, tp: list(_NK))
     monkeypatch.setattr(sd, "_compute_m_values", lambda conc, thorough=False: list(_M))
     captured: dict = {}
 
@@ -339,7 +345,7 @@ class TestStaleArtifactsAreCleared:
 
         monkeypatch.setattr(sd, "probe_script", _permissive_surface)
         monkeypatch.setattr(sd, "resolve_aiter_root", lambda: _aiter_root(tmp_path))
-        monkeypatch.setattr(sd, "_compute_nk_shapes", lambda **kw: list(_NK))
+        monkeypatch.setattr(sd, "_compute_nk_shapes", lambda geometry, tp: list(_NK))
         monkeypatch.setattr(sd, "_compute_m_values", lambda conc, thorough=False: list(_M))
         monkeypatch.setattr(sd, "run_subprocess", _writes_nothing)
 
@@ -464,7 +470,7 @@ class TestDerivedShapesRespectTheBudget:
         nk = [(4096, 4096), (4096, 14336), (14336, 4096), (6144, 4096)]
         ms = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
         cap = _prep(tmp_path, monkeypatch, tuned_rows=[_row(1, 4096, 4096, "hipblaslt", 9.36)])
-        monkeypatch.setattr(sd, "_compute_nk_shapes", lambda **kw: list(nk))
+        monkeypatch.setattr(sd, "_compute_nk_shapes", lambda geometry, tp: list(nk))
         monkeypatch.setattr(sd, "_compute_m_values", lambda conc, thorough=False: list(ms))
 
         _run(tmp_path, timeout_s=1_800, thorough=True)
@@ -484,7 +490,7 @@ class TestDerivedShapesRespectTheBudget:
         nk = [(4096, 4096), (4096, 14336), (14336, 4096), (6144, 4096)]
         ms = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
         cap = _prep(tmp_path, monkeypatch, tuned_rows=[_row(1, 4096, 4096, "hipblaslt", 9.36)])
-        monkeypatch.setattr(sd, "_compute_nk_shapes", lambda **kw: list(nk))
+        monkeypatch.setattr(sd, "_compute_nk_shapes", lambda geometry, tp: list(nk))
         monkeypatch.setattr(sd, "_compute_m_values", lambda conc, thorough=False: list(ms))
 
         _run(tmp_path, timeout_s=1_800, thorough=False)
@@ -537,16 +543,18 @@ class TestRowCountCriterion:
         _prep(tmp_path, monkeypatch, rc=1, tuned_rows=[_row(1, 4096, 4096, "hipblaslt", 9.36)])
         res = _run(tmp_path)
         report = build_report(
+            ctx=_tune_ctx(
+                profile=_ctx(tmp_path).profile,
+                framework="sglang",
+                precision="bf16",
+                quant_type="none",
+                gpu_type="mi355x",
+                tp=1,
+                conc=64,
+                tokens=[1, 512],
+            ),
             results=[res],
             skipped=[],
-            profile=_ctx(tmp_path).profile,
-            framework="sglang",
-            precision="bf16",
-            quant_type="none",
-            gpu_type="mi355x",
-            tp=1,
-            conc=64,
-            tokens=[1, 512],
             started_at="2026-01-01T00:00:00Z",
             total_elapsed_s=1.0,
         )

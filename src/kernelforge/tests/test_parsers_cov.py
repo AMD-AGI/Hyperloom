@@ -5,8 +5,6 @@ from __future__ import annotations
 
 from kernelforge.mcp_server.parsers.compiler_output import (
     RegisterInfo,
-    parse_compiler_errors,
-    parse_compiler_warnings,
     parse_register_info,
 )
 
@@ -69,17 +67,3 @@ def test_parse_register_info_alternative_patterns():
     assert info.sgpr == 48
     assert info.lds_bytes == 8192
     assert info.spill_bytes == 64
-
-
-# ─── errors / warnings ───
-
-
-def test_parse_compiler_warnings():
-    text = "a.cpp:1: warning: unused var\nb.cpp:2: error: boom\n"
-    warnings = parse_compiler_warnings(text)
-    assert len(warnings) == 1
-    assert "unused var" in warnings[0]
-
-
-def test_parse_compiler_errors_empty():
-    assert parse_compiler_errors("all good\n") == []

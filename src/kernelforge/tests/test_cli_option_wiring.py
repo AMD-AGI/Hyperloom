@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
+import typing
 
 import click
 
@@ -20,6 +22,28 @@ def _walk(group: click.Group, prefix: str = ""):
             yield f"{prefix}{name}", cmd
 
 
+def _accepted_names(callback) -> set[str]:
+    """Option names a callback receives: its own parameters plus the leaves of every option-group object."""
+    hints = typing.get_type_hints(callback)
+    names: set[str] = set()
+
+    def leaves(group_type) -> None:
+        for field in dataclasses.fields(group_type):
+            nested = typing.get_type_hints(group_type)[field.name]
+            if dataclasses.is_dataclass(nested):
+                leaves(nested)
+            else:
+                names.add(field.name)
+
+    for pname in inspect.signature(callback).parameters:
+        group_type = hints.get(pname)
+        if dataclasses.is_dataclass(group_type):
+            leaves(group_type)
+        else:
+            names.add(pname)
+    return names
+
+
 def test_every_option_is_accepted_by_its_callback():
     missing: list[str] = []
     for name, cmd in _walk(main):
@@ -29,12 +53,13 @@ def test_every_option_is_accepted_by_its_callback():
         # A **kwargs callback absorbs anything, so nothing can mismatch.
         if any(p.kind is p.VAR_KEYWORD for p in sig.parameters.values()):
             continue
+        accepted = _accepted_names(cmd.callback)
         for param in cmd.params:
             # An expose_value=False option is never passed to the callback, so it needs no parameter there: it is the
             # --help / --version pattern of an eager flag whose own callback does the work and exits.
             if not param.expose_value:
                 continue
-            if param.name not in sig.parameters:
+            if param.name not in accepted:
                 missing.append(f"{name}: --{param.name.replace('_', '-')}")
     assert not missing, "click options with no callback parameter: " + ", ".join(missing)
 
@@ -46,10 +71,8 @@ def test_callbacks_have_no_required_parameter_click_never_supplies():
         if cmd.callback is None:
             continue
         supplied = {p.name for p in cmd.params}
-        for pname, p in inspect.signature(cmd.callback).parameters.items():
-            if p.kind in (p.VAR_KEYWORD, p.VAR_POSITIONAL):
-                continue
-            if p.default is p.empty and pname not in supplied:
+        for pname in _accepted_names(cmd.callback):
+            if pname not in supplied:
                 unfilled.append(f"{name}: {pname}")
     assert not unfilled, "callback parameters click cannot fill: " + ", ".join(unfilled)
 

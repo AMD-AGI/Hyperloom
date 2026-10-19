@@ -12,6 +12,7 @@ import os
 import re
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -155,7 +156,7 @@ class FaultBlocklist:
 
 def gpu_healthy(gpu_ids: str = "") -> bool:
     """Best-effort: rocm-smi responds and the target GPU(s) are not wedged."""
-    gpus = check_gpu_status(skip=False)
+    gpus = check_gpu_status()
     if not gpus:
         return False
     wanted = {g.strip() for g in gpu_ids.split(",") if g.strip()}
@@ -219,22 +220,39 @@ def _rows_to_tune(
     return header, rows, None
 
 
+@dataclass(frozen=True)
+class TunerInvocation:
+    """One aiter tuner script run: the script and its shared flags, the shapes it reads, and where it writes."""
+
+    script: str | Path
+    base_args: list[str]
+    input_csv: str | Path
+    tuned_csv: Path
+    work_dir: Path
+    aiter_root: Path | None
+
+
+@dataclass(frozen=True)
+class IsolationGuard:
+    """How each isolated shape run is bounded, and where a fault is checked and recorded."""
+
+    outer_timeout_s: int
+    task_timeout_s: int
+    gpu_ids: str
+    blocklist: FaultBlocklist | None
+
+
 def run_isolated(
-    *,
-    script: str,
-    base_args: list[str],
-    input_csv: str | Path,
-    tuned_stem: str,
-    work_dir: Path,
-    aiter_root: Path | None,
-    outer_timeout_s: int,
-    task_timeout_s: int,
-    gpu_ids: str,
-    blocklist: FaultBlocklist | None,
+    invocation: TunerInvocation,
+    guard: IsolationGuard,
     env_override: dict[str, str] | None = None,
 ) -> tuple[int, str, str, Path | None]:
     """Run the aiter tuner once per shape (process isolation), merge results."""
-    header, rows, nothing_to_tune = _rows_to_tune(input_csv, blocklist)
+    base_args = invocation.base_args
+    work_dir = invocation.work_dir
+    tuned_stem = invocation.tuned_csv.stem
+    blocklist = guard.blocklist
+    header, rows, nothing_to_tune = _rows_to_tune(invocation.input_csv, blocklist)
     if nothing_to_tune is not None:
         return nothing_to_tune[0], "", nothing_to_tune[1], None
 
@@ -265,14 +283,14 @@ def run_isolated(
         if profile_idx >= 0:
             shape_args[profile_idx + 1] = str(shape_profile)
         cmd = with_task_timeout(
-            ["python3", str(script), "-i", str(shape_csv), "-o", str(shape_out), *shape_args],
-            task_timeout_s,
+            ["python3", str(invocation.script), "-i", str(shape_csv), "-o", str(shape_out), *shape_args],
+            guard.task_timeout_s,
         )
         start = time.time()
         rc, out, err = run_subprocess(
             cmd,
-            cwd=aiter_root,
-            timeout_s=outer_timeout_s,
+            cwd=invocation.aiter_root,
+            timeout_s=guard.outer_timeout_s,
             log_file=work_dir / f"_iso_{tuned_stem}_{idx}.log",
             env_override=env_override,
         )
@@ -290,7 +308,7 @@ def run_isolated(
             log.warning("shape %d/%d faulted (%s); recording to blocklist", idx + 1, len(rows), fault)
             if blocklist is not None:
                 blocklist.record(sig, fault, row)
-            if not gpu_healthy(gpu_ids):
+            if not gpu_healthy(guard.gpu_ids):
                 log.error("GPU unhealthy after fault; aborting remaining shapes")
                 merged_err.append("gpu_unhealthy_abort")
                 break
@@ -356,6 +374,8 @@ __all__ = [
     "read_untuned_csv",
     "shape_signature",
     "FaultBlocklist",
+    "IsolationGuard",
+    "TunerInvocation",
     "gpu_healthy",
     "run_isolated",
 ]

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
 from pathlib import Path
 
 from hyperloom.common.env import env_flag
@@ -68,15 +67,6 @@ def serving_slot_busy() -> bool:
         return float(avail.get("serving_slot", 1.0)) < 1.0
     except Exception:  # noqa: BLE001 — best-effort; never block dispatch
         return False
-
-
-@dataclass
-class SubprocessResult:
-    """Declarative shape for a subprocess executed inside a Ray worker."""
-
-    returncode: int
-    stdout: str
-    stderr: str
 
 
 def align_hip_with_ray_rocr(env: dict[str, str]) -> dict[str, str]:
@@ -165,17 +155,6 @@ def _resolve_head_num_gpus(num_gpus: int | None) -> int | None:
     return int(env_n) if env_n.isdigit() else None
 
 
-def resolve_shared_artifact_root(session_dir: Path | str) -> Path:
-    """Resolve the shared artifact root for per-task artifacts."""
-    session_dir = Path(session_dir)
-    mn_root = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
-    from ._multi_node_env import is_multi_node
-
-    if is_multi_node() and mn_root:
-        return Path(mn_root)
-    return session_dir
-
-
 def strip_visible_devices_from_config(config_path: Path | str) -> Path:
     """Drop ``benchmark.envs.*_VISIBLE_DEVICES`` from a benchmark YAML."""
     import yaml
@@ -231,10 +210,8 @@ def mark_ray_backend_unhealthy() -> None:
 
 __all__ = [
     "RayExecutionBackend",
-    "SubprocessResult",
     "_should_use_ray_backend",
     "get_ray_backend",
     "mark_ray_backend_unhealthy",
-    "resolve_shared_artifact_root",
     "strip_visible_devices_from_config",
 ]

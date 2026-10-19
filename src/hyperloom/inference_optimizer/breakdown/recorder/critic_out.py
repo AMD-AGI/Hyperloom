@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -120,39 +121,43 @@ def _verdict_rollup(counts: Mapping[str, int]) -> str:
     return ", ".join(f"{count} {verdict}" for verdict, count in counts.items())
 
 
-def record_critic_iteration(
-    session_dir: Path | str | None,
-    *,
-    iter_n: int,
-    review: dict[str, Any] | None,
-    emit: dict[str, Any] | None,
-    workdir: Path | str | None,
-    request: dict[str, Any] | None = None,
-    judge_bundle: dict[str, Any] | None = None,
-    kb_priors: dict[str, Any] | None = None,
-    producer: str = PRODUCER,
-) -> None:
-    """Record one critic iteration under a session-unique identity.
+@dataclass(frozen=True)
+class CriticIteration:
+    """One critic iteration: the review, the emitted envelope and the workdir holding its artifacts.
 
     ``request`` and ``judge_bundle`` are read back from ``workdir`` when the
-    caller does not hold them, since the agent has just written both there. A
-    falsy ``session_dir`` is a no-op, and an empty ``kb_priors`` trace is
+    caller does not hold them, since the agent has just written both there.
+    """
+
+    iter_n: int
+    review: dict[str, Any] | None
+    emit: dict[str, Any] | None
+    workdir: Path | str | None
+    request: dict[str, Any] | None = None
+    judge_bundle: dict[str, Any] | None = None
+    kb_priors: dict[str, Any] | None = None
+
+
+def record_critic_iteration(session_dir: Path | str | None, iteration: CriticIteration) -> None:
+    """Record one critic iteration under a session-unique identity.
+
+    A falsy ``session_dir`` is a no-op, and an empty ``kb_priors`` trace is
     omitted from the row rather than recorded blank.
     """
     if not session_dir:
         trace_skip(reason="no session_dir", section=ITERATION_SECTION)
         return
     try:
-        review = _dict(review)
-        emit = _dict(emit)
-        wd = Path(workdir) if workdir else None
-        request = _dict(request) or (read_json(wd / "request.json", default={}) if wd else {})
-        judge_bundle = _dict(judge_bundle) or (read_json(wd / "judge_bundle.json", default={}) if wd else {})
+        review = _dict(iteration.review)
+        emit = _dict(iteration.emit)
+        wd = Path(iteration.workdir) if iteration.workdir else None
+        request = _dict(iteration.request) or (read_json(wd / "request.json", default={}) if wd else {})
+        judge_bundle = _dict(iteration.judge_bundle) or (read_json(wd / "judge_bundle.json", default={}) if wd else {})
 
         topic, body = _spoken_message(emit)
         counts = _verdict_counts(review)
         row: dict[str, Any] = {
-            "iter": int(iter_n),
+            "iter": int(iteration.iter_n),
             # Author time: neither the review nor the emit carries a timestamp,
             # and this runs the moment the review comes back.
             "ts": datetime.now(timezone.utc).isoformat(),
@@ -185,22 +190,22 @@ def record_critic_iteration(
         )
         if framework_reviews:
             row["framework_reviews"] = framework_reviews
-        if _dict(kb_priors):
-            row["kb_priors"] = dict(kb_priors or {})
+        if _dict(iteration.kb_priors):
+            row["kb_priors"] = dict(iteration.kb_priors or {})
 
         # Content only: ``ts`` is author time and ``topic`` is read off the
         # emit, so neither may seed the identity -- a wall clock in the key
         # would make every re-record a new fragment instead of an overwrite.
         row["iteration_id"] = _stable_id(
             "critic-iteration",
-            iter_n,
+            iteration.iter_n,
             [r.get("proposal_msg_id") for r in framework_reviews],
             request,
             judge_bundle,
             review,
             emit,
         )
-        recorder_for(session_dir, producer=producer).record_upsert_item(
+        recorder_for(session_dir, producer=PRODUCER).record_upsert_item(
             ITERATION_SECTION,
             row,
             key=row["iteration_id"],
@@ -209,4 +214,4 @@ def record_critic_iteration(
         note_failure(section=ITERATION_SECTION, error=exc, detail="record_critic_iteration failed")
 
 
-__all__ = ["ITERATION_SECTION", "SECTION", "record_critic_iteration"]
+__all__ = ["ITERATION_SECTION", "SECTION", "CriticIteration", "record_critic_iteration"]

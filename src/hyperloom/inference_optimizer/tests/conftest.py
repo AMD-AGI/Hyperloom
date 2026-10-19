@@ -422,12 +422,6 @@ def build_coord(tmp_path):
     return make_coordinator(tmp_path)
 
 
-@pytest.fixture
-def build_lifecycle(build_coord):
-    """``BuildLifecycleCollaborator`` from the ``build_coord`` coordinator."""
-    return build_coord.build_lifecycle
-
-
 def patch_integrate_patch_roots(monkeypatch, tmp_path: Path) -> None:
     """Register common tmp_path framework repos as integrate_patch search roots."""
     from hyperloom.orchestrator.actions.executors import integrate_patch as ip

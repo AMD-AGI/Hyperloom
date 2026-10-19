@@ -22,7 +22,6 @@ def test_default_mode_is_local_and_root_uses_user_data_path(tmp_path):
 
     assert config.mode is KnowledgeStoreMode.LOCAL
     assert config.local_root == tmp_path / "knowledge"
-    assert config.experience_root == (tmp_path / "knowledge" / "kernelforge" / "experiences")
     assert config.kb_store_url == ""
     assert config.kb_store_token == ""
 

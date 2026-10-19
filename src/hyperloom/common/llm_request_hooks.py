@@ -54,12 +54,6 @@ def add_llm_request_observer(observer: LLMRequestObserver) -> None:
         _OBSERVERS.append(observer)
 
 
-def remove_llm_request_observer(observer: LLMRequestObserver) -> None:
-    """Drop ``observer`` if registered."""
-    if observer in _OBSERVERS:
-        _OBSERVERS.remove(observer)
-
-
 def _notify(record: LLMRequestRecord) -> None:
     for observer in tuple(_OBSERVERS):
         try:
@@ -161,5 +155,4 @@ __all__ = [
     "RequestObservation",
     "add_llm_request_observer",
     "observed_request",
-    "remove_llm_request_observer",
 ]

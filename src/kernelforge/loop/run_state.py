@@ -90,8 +90,6 @@ class CumulativeCounters:
     iterations: int = 0
     kept: int = 0
     reverted: int = 0
-    api_errors: int = 0
-    orchestration_errors: int = 0
 
 
 @dataclass
@@ -425,12 +423,7 @@ def apply_iteration(
     state.cumulative.iterations += 1
     if kept:
         state.cumulative.kept += 1
-    elif infrastructure:
-        if str(decision or "").strip().upper() == "API_ERROR":
-            state.cumulative.api_errors += 1
-        else:
-            state.cumulative.orchestration_errors += 1
-    else:
+    elif not infrastructure:
         state.cumulative.reverted += 1
     if baseline_wall_ms is not None:
         state.baseline_wall_ms = baseline_wall_ms

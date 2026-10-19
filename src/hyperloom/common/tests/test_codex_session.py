@@ -294,7 +294,7 @@ def _install_transient_codex_home_cleanup_race(
 
 def test_provider_overrides_pass_the_key_env_name_not_its_value():
     """The API key must reach Codex by variable NAME only."""
-    overrides = cs.codex_provider_overrides(env=_gateway_env())
+    overrides = cs.resolve_codex_provider_config(env=_gateway_env()).overrides
 
     assert _override_value(overrides, "model_providers.hyperloom.env_key") == '"OPENAI_API_KEY"'
     assert not any(_SECRET in override for override in overrides)
@@ -302,7 +302,7 @@ def test_provider_overrides_pass_the_key_env_name_not_its_value():
 
 def test_provider_overrides_select_the_responses_wire_api():
     """Codex talks to the gateway over the OpenAI Responses protocol."""
-    overrides = cs.codex_provider_overrides(env=_gateway_env())
+    overrides = cs.resolve_codex_provider_config(env=_gateway_env()).overrides
 
     assert _override_value(overrides, "model_provider") == '"hyperloom"'
     assert _override_value(overrides, "model_providers.hyperloom.wire_api") == '"responses"'
@@ -375,7 +375,7 @@ def test_provider_overrides_reject_a_header_codex_cannot_express():
 def test_provider_overrides_require_an_explicit_base_url():
     """Codex needs the gateway endpoint; guessing one would misroute traffic."""
     with pytest.raises(cs.CodexSessionUnavailableError, match="OPENAI_BASE_URL"):
-        cs.codex_provider_overrides(env={"OPENAI_API_KEY": _SECRET})
+        cs.resolve_codex_provider_config(env={"OPENAI_API_KEY": _SECRET})
 
 
 def test_provider_overrides_require_a_credential():
@@ -385,7 +385,7 @@ def test_provider_overrides_require_a_credential():
     uncredentialed rather than as a gateway deployment.
     """
     with pytest.raises(cs.CodexSessionUnavailableError, match="credential is missing"):
-        cs.codex_provider_overrides(
+        cs.resolve_codex_provider_config(
             env={
                 "OPENAI_BASE_URL": "https://gateway.example/Unified/v1",
                 "LLM_GATEWAY_KEY": _SECRET,
@@ -393,22 +393,17 @@ def test_provider_overrides_require_a_credential():
         )
 
 
-def test_api_key_env_name_follows_llm_config_precedence():
+def test_env_key_follows_llm_config_precedence():
     """The caller's preferred variable wins, then OPENAI_API_KEY."""
-    both = {"OPENAI_API_KEY": "a", "LLM_GATEWAY_KEY": "b"}
+    both = _gateway_env(LLM_GATEWAY_KEY="b")
 
-    assert cs.api_key_env_name(env=both) == "OPENAI_API_KEY"
-    assert cs.api_key_env_name(api_key_env="SAFE_API_KEY", env={"SAFE_API_KEY": "c", **both}) == "SAFE_API_KEY"
+    default = cs.resolve_codex_provider_config(env=both).overrides
+    preferred = cs.resolve_codex_provider_config(
+        api_key_env="SAFE_API_KEY", env={"SAFE_API_KEY": "c", **both}
+    ).overrides
 
-
-def test_api_key_env_name_lists_every_candidate_when_none_is_set():
-    """The error must tell the operator which variables were checked."""
-    with pytest.raises(cs.CodexSessionUnavailableError) as excinfo:
-        cs.api_key_env_name(api_key_env="SAFE_API_KEY", env={})
-
-    message = str(excinfo.value)
-    assert "SAFE_API_KEY" in message
-    assert "OPENAI_API_KEY" in message
+    assert _override_value(default, "model_providers.hyperloom.env_key") == '"OPENAI_API_KEY"'
+    assert _override_value(preferred, "model_providers.hyperloom.env_key") == '"SAFE_API_KEY"'
 
 
 # --------------------------------------------------------------------------- # Sandbox and approval selection
@@ -558,13 +553,9 @@ def test_run_codex_turn_defaults_to_workspace_write_for_a_write_scope(tmp_path, 
 
     asyncio.run(
         cs.run_codex_turn(
-            prompt="analyze",
+            request=cs.CodexTurnRequest(prompt="analyze", timeout_sec=5.0),
+            config=cs.CodexSessionConfig(cwd=tmp_path, model="m", writable_roots=(output,), env=_gateway_env()),
             developer_instructions="i",
-            cwd=tmp_path,
-            model="m",
-            timeout_sec=5.0,
-            writable_roots=(output,),
-            env=_gateway_env(),
         )
     )
 
@@ -580,13 +571,11 @@ def test_run_codex_turn_honors_the_sandbox_mode_variable(tmp_path, monkeypatch):
 
     asyncio.run(
         cs.run_codex_turn(
-            prompt="analyze",
+            request=cs.CodexTurnRequest(prompt="analyze", timeout_sec=5.0),
+            config=cs.CodexSessionConfig(
+                cwd=tmp_path, model="m", writable_roots=(output,), env=_gateway_env(**{_SANDBOX_MODE_ENV: "read-only"})
+            ),
             developer_instructions="i",
-            cwd=tmp_path,
-            model="m",
-            timeout_sec=5.0,
-            writable_roots=(output,),
-            env=_gateway_env(**{_SANDBOX_MODE_ENV: "read-only"}),
         )
     )
 
@@ -605,13 +594,11 @@ def test_run_codex_turn_overlays_partial_env_on_the_process_environment(tmp_path
 
     asyncio.run(
         cs.run_codex_turn(
-            prompt="analyze",
+            request=cs.CodexTurnRequest(prompt="analyze", timeout_sec=5.0),
+            config=cs.CodexSessionConfig(
+                cwd=tmp_path, model="m", writable_roots=(output,), env={"CALLER_ONLY": "present"}
+            ),
             developer_instructions="i",
-            cwd=tmp_path,
-            model="m",
-            timeout_sec=5.0,
-            writable_roots=(output,),
-            env={"CALLER_ONLY": "present"},
         )
     )
 
@@ -631,14 +618,15 @@ def test_run_codex_turn_honors_an_explicit_sandbox_mode(tmp_path, monkeypatch):
 
     asyncio.run(
         cs.run_codex_turn(
-            prompt="analyze",
+            request=cs.CodexTurnRequest(prompt="analyze", timeout_sec=5.0),
+            config=cs.CodexSessionConfig(
+                cwd=tmp_path,
+                model="m",
+                writable_roots=(output,),
+                sandbox_mode="read-only",
+                env=_gateway_env(**{_SANDBOX_MODE_ENV: "bypass"}),
+            ),
             developer_instructions="i",
-            cwd=tmp_path,
-            model="m",
-            timeout_sec=5.0,
-            writable_roots=(output,),
-            sandbox_mode="read-only",
-            env=_gateway_env(**{_SANDBOX_MODE_ENV: "bypass"}),
         )
     )
 
@@ -652,12 +640,9 @@ def test_run_codex_turn_uses_full_access_for_bypass_without_write_roots(tmp_path
 
     asyncio.run(
         cs.run_codex_turn(
-            prompt="inspect",
+            request=cs.CodexTurnRequest(prompt="inspect", timeout_sec=5.0),
+            config=cs.CodexSessionConfig(cwd=tmp_path, model="m", env=_gateway_env(**{_SANDBOX_MODE_ENV: "bypass"})),
             developer_instructions="i",
-            cwd=tmp_path,
-            model="m",
-            timeout_sec=5.0,
-            env=_gateway_env(**{_SANDBOX_MODE_ENV: "bypass"}),
         )
     )
 
@@ -672,13 +657,9 @@ def test_run_codex_turn_rejects_bypass_without_operator_mode_opt_in(tmp_path, mo
     with pytest.raises(cs.CodexSessionUnavailableError, match=_SANDBOX_MODE_ENV):
         asyncio.run(
             cs.run_codex_turn(
-                prompt="inspect",
+                request=cs.CodexTurnRequest(prompt="inspect", timeout_sec=5.0),
+                config=cs.CodexSessionConfig(cwd=tmp_path, model="m", sandbox_mode="bypass", env=_gateway_env()),
                 developer_instructions="i",
-                cwd=tmp_path,
-                model="m",
-                timeout_sec=5.0,
-                sandbox_mode="bypass",
-                env=_gateway_env(),
             )
         )
 
@@ -693,12 +674,9 @@ def test_run_codex_turn_does_not_fallback_when_the_bwrap_probe_fails(tmp_path, m
     with pytest.raises(cs.CodexSessionUnavailableError, match="bubblewrap"):
         asyncio.run(
             cs.run_codex_turn(
-                prompt="inspect",
+                request=cs.CodexTurnRequest(prompt="inspect", timeout_sec=5.0),
+                config=cs.CodexSessionConfig(cwd=tmp_path, model="m", env=_gateway_env()),
                 developer_instructions="i",
-                cwd=tmp_path,
-                model="m",
-                timeout_sec=5.0,
-                env=_gateway_env(),
             )
         )
 
@@ -712,12 +690,11 @@ def test_run_codex_turn_rejects_an_unknown_sandbox_mode_before_starting(tmp_path
     with pytest.raises(cs.CodexSessionUnavailableError, match=_SANDBOX_MODE_ENV):
         asyncio.run(
             cs.run_codex_turn(
-                prompt="analyze",
+                request=cs.CodexTurnRequest(prompt="analyze", timeout_sec=5.0),
+                config=cs.CodexSessionConfig(
+                    cwd=tmp_path, model="m", env=_gateway_env(**{_SANDBOX_MODE_ENV: "sandboxed"})
+                ),
                 developer_instructions="i",
-                cwd=tmp_path,
-                model="m",
-                timeout_sec=5.0,
-                env=_gateway_env(**{_SANDBOX_MODE_ENV: "sandboxed"}),
             )
         )
 
@@ -734,14 +711,15 @@ def test_run_codex_turn_denies_approvals_and_scopes_writes(tmp_path, monkeypatch
 
     asyncio.run(
         cs.run_codex_turn(
-            prompt="analyze",
+            request=cs.CodexTurnRequest(prompt="analyze", timeout_sec=30.0),
+            config=cs.CodexSessionConfig(
+                cwd=workspace,
+                model="gpt-5.6-sol",
+                writable_roots=(output,),
+                sandbox_mode="workspace-write",
+                env=_gateway_env(),
+            ),
             developer_instructions="instructions",
-            cwd=workspace,
-            model="gpt-5.6-sol",
-            timeout_sec=30.0,
-            writable_roots=(output,),
-            sandbox_mode="workspace-write",
-            env=_gateway_env(),
         )
     )
 
@@ -772,14 +750,15 @@ def test_run_codex_turn_keeps_literal_headers_only_in_the_child_environment(tmp_
 
     asyncio.run(
         cs.run_codex_turn(
-            prompt="inspect",
-            developer_instructions="instructions",
-            cwd=tmp_path,
-            model="gpt-5.6-sol",
-            timeout_sec=30.0,
-            env=_gateway_env(
-                OPENAI_CUSTOM_HEADERS=f"Ocp-Apim-Subscription-Key: {header_secret}",
+            request=cs.CodexTurnRequest(prompt="inspect", timeout_sec=30.0),
+            config=cs.CodexSessionConfig(
+                cwd=tmp_path,
+                model="gpt-5.6-sol",
+                env=_gateway_env(
+                    OPENAI_CUSTOM_HEADERS=f"Ocp-Apim-Subscription-Key: {header_secret}",
+                ),
             ),
+            developer_instructions="instructions",
         )
     )
 
@@ -801,12 +780,9 @@ def test_run_codex_turn_uses_a_read_only_sandbox_with_no_write_scope(tmp_path, m
 
     asyncio.run(
         cs.run_codex_turn(
-            prompt="inspect",
+            request=cs.CodexTurnRequest(prompt="inspect", timeout_sec=30.0),
+            config=cs.CodexSessionConfig(cwd=tmp_path, model="gpt-5.6-sol", env=_gateway_env()),
             developer_instructions="instructions",
-            cwd=tmp_path,
-            model="gpt-5.6-sol",
-            timeout_sec=30.0,
-            env=_gateway_env(),
         )
     )
 
@@ -829,12 +805,11 @@ def test_run_codex_turn_isolates_codex_home_under_the_runtime_dir(tmp_path, monk
         record = _install_fake_sdk(monkeypatch)
         asyncio.run(
             cs.run_codex_turn(
-                prompt="p",
+                request=cs.CodexTurnRequest(prompt="p", timeout_sec=5.0),
+                config=cs.CodexSessionConfig(
+                    cwd=tmp_path, model="m", env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(runtime_dir))
+                ),
                 developer_instructions="i",
-                cwd=tmp_path,
-                model="m",
-                timeout_sec=5.0,
-                env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(runtime_dir)),
             )
         )
         _capture(record)
@@ -860,12 +835,11 @@ def test_run_codex_turn_retries_busy_cleanup_and_repeated_late_writes(tmp_path, 
 
     session = asyncio.run(
         cs.run_codex_turn(
-            prompt="p",
+            request=cs.CodexTurnRequest(prompt="p", timeout_sec=5.0),
+            config=cs.CodexSessionConfig(
+                cwd=tmp_path, model="m", env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(runtime_dir))
+            ),
             developer_instructions="i",
-            cwd=tmp_path,
-            model="m",
-            timeout_sec=5.0,
-            env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(runtime_dir)),
         )
     )
 
@@ -902,12 +876,11 @@ def test_run_codex_turn_reports_persistent_busy_cleanup_without_leaking_details(
         with pytest.raises(cs.CodexHomeCleanupError) as excinfo:
             asyncio.run(
                 cs.run_codex_turn(
-                    prompt="p",
+                    request=cs.CodexTurnRequest(prompt="p", timeout_sec=5.0),
+                    config=cs.CodexSessionConfig(
+                        cwd=tmp_path, model="m", env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(tmp_path / "runtime"))
+                    ),
                     developer_instructions="i",
-                    cwd=tmp_path,
-                    model="m",
-                    timeout_sec=5.0,
-                    env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(tmp_path / "runtime")),
                 )
             )
 
@@ -933,13 +906,9 @@ def test_run_codex_turn_places_codex_home_under_the_first_writable_root(tmp_path
 
     asyncio.run(
         cs.run_codex_turn(
-            prompt="p",
+            request=cs.CodexTurnRequest(prompt="p", timeout_sec=5.0),
+            config=cs.CodexSessionConfig(cwd=tmp_path, model="m", writable_roots=(output,), env=_gateway_env()),
             developer_instructions="i",
-            cwd=tmp_path,
-            model="m",
-            timeout_sec=5.0,
-            writable_roots=(output,),
-            env=_gateway_env(),
         )
     )
 
@@ -957,12 +926,9 @@ def test_run_codex_turn_uses_cwd_as_the_run_local_codex_home_fallback(tmp_path, 
 
     asyncio.run(
         cs.run_codex_turn(
-            prompt="p",
+            request=cs.CodexTurnRequest(prompt="p", timeout_sec=5.0),
+            config=cs.CodexSessionConfig(cwd=run_dir, model="m", env=_gateway_env()),
             developer_instructions="i",
-            cwd=run_dir,
-            model="m",
-            timeout_sec=5.0,
-            env=_gateway_env(),
         )
     )
 
@@ -982,12 +948,11 @@ def test_run_codex_turn_rejects_a_codex_home_inside_a_source_checkout(tmp_path, 
     with pytest.raises(cs.CodexSessionUnavailableError, match="source checkout"):
         asyncio.run(
             cs.run_codex_turn(
-                prompt="p",
+                request=cs.CodexTurnRequest(prompt="p", timeout_sec=5.0),
+                config=cs.CodexSessionConfig(
+                    cwd=source_root, model="m", env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(source_root / "runtime"))
+                ),
                 developer_instructions="i",
-                cwd=source_root,
-                model="m",
-                timeout_sec=5.0,
-                env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(source_root / "runtime")),
             )
         )
 
@@ -1001,12 +966,9 @@ def test_run_codex_turn_identifies_hyperloom_to_the_app_server(tmp_path, monkeyp
 
     asyncio.run(
         cs.run_codex_turn(
-            prompt="p",
+            request=cs.CodexTurnRequest(prompt="p", timeout_sec=5.0),
+            config=cs.CodexSessionConfig(cwd=tmp_path, model="m", env=_gateway_env()),
             developer_instructions="i",
-            cwd=tmp_path,
-            model="m",
-            timeout_sec=5.0,
-            env=_gateway_env(),
         )
     )
 
@@ -1023,13 +985,9 @@ def test_run_codex_turn_honors_an_explicit_codex_binary(tmp_path, monkeypatch):
 
     asyncio.run(
         cs.run_codex_turn(
-            prompt="p",
+            request=cs.CodexTurnRequest(prompt="p", timeout_sec=5.0),
+            config=cs.CodexSessionConfig(cwd=tmp_path, model="m", codex_bin="/opt/bin/codex", env=_gateway_env()),
             developer_instructions="i",
-            cwd=tmp_path,
-            model="m",
-            timeout_sec=5.0,
-            codex_bin="/opt/bin/codex",
-            env=_gateway_env(),
         )
     )
 
@@ -1047,12 +1005,9 @@ def test_run_codex_turn_interrupts_a_turn_that_outlives_its_timeout(tmp_path, mo
     with pytest.raises(cs.CodexSessionTimeoutError, match=r"timed out after 0\.05s"):
         asyncio.run(
             cs.run_codex_turn(
-                prompt="p",
+                request=cs.CodexTurnRequest(prompt="p", timeout_sec=0.05),
+                config=cs.CodexSessionConfig(cwd=tmp_path, model="m", env=_gateway_env()),
                 developer_instructions="i",
-                cwd=tmp_path,
-                model="m",
-                timeout_sec=0.05,
-                env=_gateway_env(),
             )
         )
 
@@ -1069,12 +1024,9 @@ def test_run_codex_turn_cancels_a_turn_that_ignores_the_interrupt(tmp_path, monk
     with pytest.raises(cs.CodexSessionTimeoutError):
         asyncio.run(
             cs.run_codex_turn(
-                prompt="p",
+                request=cs.CodexTurnRequest(prompt="p", timeout_sec=0.05),
+                config=cs.CodexSessionConfig(cwd=tmp_path, model="m", env=_gateway_env()),
                 developer_instructions="i",
-                cwd=tmp_path,
-                model="m",
-                timeout_sec=0.05,
-                env=_gateway_env(),
             )
         )
 
@@ -1090,12 +1042,9 @@ def test_run_codex_turn_preserves_cancellation_across_a_transient_cleanup_race(t
     async def _cancel_running_turn() -> None:
         task = asyncio.create_task(
             cs.run_codex_turn(
-                prompt="p",
+                request=cs.CodexTurnRequest(prompt="p", timeout_sec=5.0),
+                config=cs.CodexSessionConfig(cwd=tmp_path, model="m", env=_gateway_env()),
                 developer_instructions="i",
-                cwd=tmp_path,
-                model="m",
-                timeout_sec=5.0,
-                env=_gateway_env(),
             )
         )
         while "codex_home_at_enter" not in record:
@@ -1119,12 +1068,9 @@ def test_run_codex_turn_wraps_sdk_failures_with_context(tmp_path, monkeypatch):
     with pytest.raises(cs.CodexSessionError, match="app-server refused the handshake"):
         asyncio.run(
             cs.run_codex_turn(
-                prompt="p",
+                request=cs.CodexTurnRequest(prompt="p", timeout_sec=5.0),
+                config=cs.CodexSessionConfig(cwd=tmp_path, model="m", env=_gateway_env()),
                 developer_instructions="i",
-                cwd=tmp_path,
-                model="m",
-                timeout_sec=5.0,
-                env=_gateway_env(),
             )
         )
 
@@ -1140,12 +1086,9 @@ def test_run_codex_turn_fails_before_starting_when_the_gateway_is_unconfigured(t
     with pytest.raises(cs.CodexSessionUnavailableError):
         asyncio.run(
             cs.run_codex_turn(
-                prompt="p",
+                request=cs.CodexTurnRequest(prompt="p", timeout_sec=5.0),
+                config=cs.CodexSessionConfig(cwd=tmp_path, model="m", env={}),
                 developer_instructions="i",
-                cwd=tmp_path,
-                model="m",
-                timeout_sec=5.0,
-                env={},
             )
         )
 
@@ -1194,12 +1137,9 @@ def test_run_codex_turn_normalizes_usage(tmp_path, monkeypatch):
 
     session = asyncio.run(
         cs.run_codex_turn(
-            prompt="p",
+            request=cs.CodexTurnRequest(prompt="p", timeout_sec=5.0),
+            config=cs.CodexSessionConfig(cwd=tmp_path, model="m", env=_gateway_env()),
             developer_instructions="i",
-            cwd=tmp_path,
-            model="m",
-            timeout_sec=5.0,
-            env=_gateway_env(),
         )
     )
 
@@ -1221,12 +1161,9 @@ def test_run_codex_turn_surfaces_an_in_band_turn_error(tmp_path, monkeypatch):
 
     session = asyncio.run(
         cs.run_codex_turn(
-            prompt="p",
+            request=cs.CodexTurnRequest(prompt="p", timeout_sec=5.0),
+            config=cs.CodexSessionConfig(cwd=tmp_path, model="m", env=_gateway_env()),
             developer_instructions="i",
-            cwd=tmp_path,
-            model="m",
-            timeout_sec=5.0,
-            env=_gateway_env(),
         )
     )
 
@@ -1294,7 +1231,7 @@ def test_normalize_codex_usage_tolerates_missing_and_malformed_counts():
 async def _drain(session: cs.CodexSession, prompts: tuple[str, ...]) -> None:
     """Run each prompt as one turn on an already-started session."""
     for prompt in prompts:
-        await session.turn(prompt, timeout_sec=5.0)
+        await session.turn(cs.CodexTurnRequest(prompt, timeout_sec=5.0))
 
 
 def test_codex_session_reuses_one_thread_across_turns(tmp_path, monkeypatch):
@@ -1303,10 +1240,10 @@ def test_codex_session_reuses_one_thread_across_turns(tmp_path, monkeypatch):
 
     async def _run() -> None:
         async with cs.CodexSession(
-            cwd=tmp_path,
-            model="m",
+            cs.CodexSessionConfig(
+                cwd=tmp_path, model="m", env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(tmp_path / "runtime"))
+            ),
             developer_instructions="i",
-            env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(tmp_path / "runtime")),
         ) as session:
             await _drain(session, ("tick 1", "tick 2", "tick 3"))
 
@@ -1323,10 +1260,10 @@ def test_codex_session_starts_a_new_thread_after_a_reset(tmp_path, monkeypatch):
 
     async def _run() -> None:
         async with cs.CodexSession(
-            cwd=tmp_path,
-            model="m",
+            cs.CodexSessionConfig(
+                cwd=tmp_path, model="m", env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(tmp_path / "runtime"))
+            ),
             developer_instructions="i",
-            env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(tmp_path / "runtime")),
         ) as session:
             await _drain(session, ("before",))
             session.reset_thread()
@@ -1345,15 +1282,15 @@ def test_codex_session_keeps_codex_home_alive_until_close(tmp_path, monkeypatch)
 
     async def _run() -> None:
         session = cs.CodexSession(
-            cwd=tmp_path,
-            model="m",
+            cs.CodexSessionConfig(
+                cwd=tmp_path, model="m", env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(tmp_path / "runtime"))
+            ),
             developer_instructions="i",
-            env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(tmp_path / "runtime")),
         )
         await session.start()
         try:
             for prompt in ("first", "second"):
-                await session.turn(prompt, timeout_sec=5.0)
+                await session.turn(cs.CodexTurnRequest(prompt, timeout_sec=5.0))
                 seen.append(Path(record["codex_home_at_enter"]).is_dir())
         finally:
             await session.aclose()
@@ -1370,9 +1307,9 @@ def test_codex_session_close_is_idempotent(tmp_path, monkeypatch):
 
     async def _run() -> None:
         session = cs.CodexSession(
-            cwd=tmp_path,
-            model="m",
-            env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(tmp_path / "runtime")),
+            cs.CodexSessionConfig(
+                cwd=tmp_path, model="m", env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(tmp_path / "runtime"))
+            )
         )
         await session.start()
         await session.aclose()
@@ -1388,11 +1325,11 @@ def test_codex_session_turn_forwards_the_output_schema(tmp_path, monkeypatch):
 
     async def _run() -> None:
         async with cs.CodexSession(
-            cwd=tmp_path,
-            model="m",
-            env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(tmp_path / "runtime")),
+            cs.CodexSessionConfig(
+                cwd=tmp_path, model="m", env=_gateway_env(HYPERLOOM_RUNTIME_DIR=str(tmp_path / "runtime"))
+            )
         ) as session:
-            await session.turn("p", timeout_sec=5.0, output_schema=schema)
+            await session.turn(cs.CodexTurnRequest("p", timeout_sec=5.0, output_schema=schema))
 
     asyncio.run(_run())
 
@@ -1401,10 +1338,10 @@ def test_codex_session_turn_forwards_the_output_schema(tmp_path, monkeypatch):
 
 def test_codex_session_turn_before_start_is_rejected(tmp_path):
     """A turn on an unstarted session is a caller bug, not a provider failure."""
-    session = cs.CodexSession(cwd=tmp_path, model="m", env=_gateway_env())
+    session = cs.CodexSession(cs.CodexSessionConfig(cwd=tmp_path, model="m", env=_gateway_env()))
 
     with pytest.raises(cs.CodexSessionError, match="not started"):
-        asyncio.run(session.turn("p", timeout_sec=5.0))
+        asyncio.run(session.turn(cs.CodexTurnRequest("p", timeout_sec=5.0)))
 
 
 # --------------------------------------------------------------------------- # Installed-SDK contract

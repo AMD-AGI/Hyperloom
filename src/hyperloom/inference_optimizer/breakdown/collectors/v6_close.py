@@ -16,10 +16,6 @@ rather than at author time: the step vocabulary is checked so a producer that
 starts emitting a new step name surfaces as a warning instead of passing
 unnoticed.
 
-Historical per-turn agent fragments are exported as the top-level
-``robustness`` key; the close block preserves historical close-out findings
-without fetching new findings.
-
 **The section is written twice, and the first pass is deliberately partial.**
 ``session_breakdown`` is itself a step in the middle of the sequence, so when
 the breakdown is written the steps after it have not run yet. The recording
@@ -123,31 +119,6 @@ def collect_v6_close(
     return _unclosed()
 
 
-def _robustness_block(recorded: dict[str, Any]) -> dict[str, Any]:
-    """Assemble the close-out's robustness verdict.
-
-    Args:
-        recorded (dict[str, Any]): The close fragment, holding the escalation
-            verdict and the findings read at close time.
-
-    Returns:
-        dict[str, Any]: The block. ``findings`` is present only when the ladder
-            wrote some, because an empty list would claim a ladder that ran and
-            found nothing.
-    """
-    block = _mapping(recorded.get("robustness"))
-    assembled: dict[str, Any] = {
-        "escalated": bool(block.get("escalated")),
-        # Recorded alongside the verdict so a reader can check the escalation
-        # against the reason it was drawn from.
-        "stop_reason": str(recorded.get("stop_reason") or ""),
-    }
-    if block.get("findings") is not None:
-        assembled["findings"] = _dict_rows(block.get("findings"))
-        assembled["findings_total"] = int(block.get("findings_total") or 0)
-    return assembled
-
-
 def _recorded_close(
     recorded: dict[str, Any],
     *,
@@ -155,7 +126,7 @@ def _recorded_close(
 ) -> dict[str, Any]:
     """Put the recorded close-out on the wire.
 
-    The verdict, the timestamps, the artifact paths and the escalation are all
+    The verdict, the timestamps and the artifact paths are all
     read straight through: each was stated by the step that knew it. Only the
     only the step vocabulary is checked.
     """
@@ -171,7 +142,6 @@ def _recorded_close(
         "end_time": str(recorded.get("end_time") or ""),
         "close_sequence_done": bool(recorded.get("close_sequence_done")),
         "steps": steps,
-        "robustness": _robustness_block(recorded),
         "artifacts": {
             "final_json_path": artifacts.get("final_json_path") or None,
             "final_md_path": artifacts.get("final_md_path") or None,
@@ -243,10 +213,6 @@ def _unclosed() -> dict[str, Any]:
         "end_time": "",
         "close_sequence_done": False,
         "steps": [],
-        "robustness": {
-            "escalated": False,
-            "stop_reason": "",
-        },
         "artifacts": {
             "final_json_path": None,
             "final_md_path": None,

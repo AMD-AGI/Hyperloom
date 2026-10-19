@@ -17,7 +17,8 @@ from kernelforge import cli as cli_module
 from kernelforge.cli.forge_loop_command import _make_ceiling_estimator
 from kernelforge.cli.options import _validate_roofline_target
 from kernelforge.agent_backends.base import AgentProviderUnavailableError
-from kernelforge.roofline_ceiling.analyst import CeilingAnalysisError
+from kernelforge.roofline_ceiling.analyst import AnalystSession, CeilingAnalysisError
+from kernelforge.roofline_ceiling.command import AnalystAgent
 from kernelforge.roofline_ceiling.contract import load_report
 from kernelforge.roofline_ceiling.estimate import estimate_ceiling as real_estimate_ceiling
 from kernelforge.roofline_ceiling.report import REPORT_FILENAME, WORKSPACE_SUBDIR
@@ -299,22 +300,6 @@ def test_a_target_without_a_ceiling_is_refused_rather_than_never_firing():
         _validate_roofline_target(0.86, False)
 
 
-def test_no_estimator_is_built_while_the_ceiling_is_off():
-    assert (
-        _make_ceiling_estimator(
-            enabled=False,
-            workspace_dir=".",
-            driver_script="driver.py",
-            source_files=["kernel.py"],
-            agent_provider="",
-            agent_model="",
-            session_timeout_sec=60,
-            sandbox_mode="bypass",
-        )
-        is None
-    )
-
-
 def test_the_estimator_calls_estimate_ceiling_with_arguments_it_accepts(monkeypatch):
     """The loop's estimator is invoked, not just built.
 
@@ -324,40 +309,33 @@ def test_the_estimator_calls_estimate_ceiling_with_arguments_it_accepts(monkeypa
     """
     seen = {}
 
-    async def _estimate(backend, **kwargs):
-        seen.update(kwargs)
+    async def _estimate(*args, **kwargs):
+        bound = inspect.signature(real_estimate_ceiling).bind(*args, **kwargs).arguments
+        seen["task"] = bound["task"]
+        seen["session"] = bound["session"]
         return "outcome"
 
-    from kernelforge.roofline_ceiling.command import resolve_analyst_backend as real_resolve
-
-    def _resolve(*args, **kwargs):
-        seen["resolver"] = inspect.signature(real_resolve).bind(*args, **kwargs).arguments
+    def _resolve(agent):
+        seen["resolver"] = agent
         return SimpleNamespace()
 
     monkeypatch.setattr("kernelforge.roofline_ceiling.estimate.estimate_ceiling", _estimate)
     monkeypatch.setattr("kernelforge.roofline_ceiling.command.resolve_analyst_backend", _resolve)
 
     estimator = _make_ceiling_estimator(
-        enabled=True,
         workspace_dir=".",
         driver_script="driver.py",
         source_files=["kernel.py"],
-        agent_provider="",
-        agent_model="",
-        session_timeout_sec=60,
-        sandbox_mode="read-only",
+        analyst=AnalystAgent(provider="", model="", timeout_sec=60, sandbox_mode="read-only"),
     )
-    assert estimator is not None
 
     result = asyncio.run(estimator(case_ids=["decode-t1"], case_ms={"decode-t1": 14.0}))
 
-    resolver = seen.pop("resolver")
     assert result == "outcome"
-    assert resolver["sandbox_mode"] == "read-only"
-    assert seen["known_case_ids"] == ["decode-t1"]
-    # Every keyword the estimator sends has to be one the signature declares.
-    accepted = set(inspect.signature(real_estimate_ceiling).parameters)
-    assert set(seen) <= accepted, sorted(set(seen) - accepted)
+    assert seen["resolver"].sandbox_mode == "read-only"
+    assert seen["task"].known.case_ids == ["decode-t1"]
+    assert seen["task"].known.case_ms == {"decode-t1": 14.0}
+    assert seen["session"] == AnalystSession(model="", timeout_sec=60)
 
 
 @pytest.mark.parametrize(("deployment", "analyst"), [("bypass", "bypass"), ("read-only", "workspace-write")])
@@ -368,7 +346,7 @@ def test_the_analyst_runs_in_the_deployments_sandbox_widened_only_to_write(monke
     built = {}
     monkeypatch.setattr(command_module, "create_registered_backend", lambda runtime: built.setdefault("rt", runtime))
 
-    command_module.resolve_analyst_backend("claude", "", 600, sandbox_mode=deployment)
+    command_module.resolve_analyst_backend(command_module.AnalystAgent("claude", "", 600, deployment))
 
     assert built["rt"].provider == "claude"
     assert built["rt"].sandbox_mode == analyst

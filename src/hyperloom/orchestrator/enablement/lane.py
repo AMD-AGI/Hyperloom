@@ -162,13 +162,15 @@ class EnablementLane(CoordinatorCollaborator):
         # kind exists only in the params this dispatch built, and the log the
         # round was pointed at is replaced by the next advance.
         enablement_event.record_dispatch(
-            task_id=spec_tid,
-            attempt=stalled + 1,
-            failure_kind=str(params.get("enablement_failure_kind") or ""),
-            launch_log=launch_log,
-            candidate_refs=params.get("enablement_candidate_refs"),
-            mode=str(state.enablement_mode or ""),
-            origin=state.enablement.origin or enablement_event.ORIGIN_BOOT,
+            enablement_event.AuthoringDispatch(
+                task_id=spec_tid,
+                attempt=stalled + 1,
+                failure_kind=str(params.get("enablement_failure_kind") or ""),
+                launch_log=launch_log,
+                candidate_refs=params.get("enablement_candidate_refs"),
+                mode=str(state.enablement_mode or ""),
+                origin=state.enablement.origin or enablement_event.ORIGIN_BOOT,
+            )
         )
         state.save(self.session_dir)
         log.info(
@@ -749,23 +751,25 @@ def _finish_lane_event(
 ) -> None:
     """Assemble and emit the terminal enablement_event.finish call."""
     enablement_event.finish(
-        outcome=outcome,
-        reason=reason,
-        recipe=recipe_for(
-            lane,
-            session_dir=str(session_dir or ""),
-            mode=str(state.enablement_mode or ""),
-        ),
-        kept_patches=lane.kept_patches,
-        kept_artifacts=lane.kept_artifacts,
-        setup_commands=lane.setup_commands,
-        accepted_config=lane.accepted_config,
-        accepted_config_path=str(lane.accepted_config_path or ""),
-        setting_script=setting_script,
-        active_runtime=lane.active_runtime,
-        attempt_runtimes=lane.attempt_runtimes,
-        framework_root=str(lane.framework_root or ""),
-        stall_streak=stall_streak,
+        enablement_event.LaneTerminal(
+            outcome=outcome,
+            reason=reason,
+            recipe=recipe_for(
+                lane,
+                session_dir=str(session_dir or ""),
+                mode=str(state.enablement_mode or ""),
+            ),
+            kept_patches=lane.kept_patches,
+            kept_artifacts=lane.kept_artifacts,
+            setup_commands=lane.setup_commands,
+            accepted_config=lane.accepted_config,
+            accepted_config_path=str(lane.accepted_config_path or ""),
+            setting_script=setting_script,
+            active_runtime=lane.active_runtime,
+            attempt_runtimes=lane.attempt_runtimes,
+            framework_root=str(lane.framework_root or ""),
+            stall_streak=stall_streak,
+        )
     )
 
 
@@ -833,12 +837,14 @@ def _record_enablement_round(
     lane = state.enablement
     succeeded = bool(lane.succeeded)
     enablement_event.record_round(
-        task_id=_round_task_id(state, res),
-        attempt=int(attempt or 0),
-        result=res,
-        stall_streak=int(stall_streak or 0),
-        succeeded=succeeded,
-        validation_pending=bool(lane.validation_pending),
+        enablement_event.AuthoringRound(
+            task_id=_round_task_id(state, res),
+            attempt=int(attempt or 0),
+            result=res,
+            stall_streak=int(stall_streak or 0),
+            succeeded=succeeded,
+            validation_pending=bool(lane.validation_pending),
+        )
     )
     # A KEEP opens a revalidation window, so succeeded is only set by the
     # promote path, not here. This branch fires only after the stall cap.

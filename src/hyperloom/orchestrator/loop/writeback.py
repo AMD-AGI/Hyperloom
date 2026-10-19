@@ -4937,7 +4937,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
         from hyperloom.orchestrator.phases.machine import Transition
 
         await self._coord.phase_kernel.on_enter_kernel(
-            Transition(from_phase="resume", to_phase="KERNEL_AGENT", reason="resume", evidence={}, loopback=False)
+            Transition(from_phase="resume", to_phase="KERNEL_AGENT", reason="resume", evidence={})
         )
 
     @property

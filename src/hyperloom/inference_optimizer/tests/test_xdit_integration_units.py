@@ -13,6 +13,7 @@ from hyperloom.inference_optimizer import framework_registry as fr
 from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
 from hyperloom.orchestrator.actions.executors import benchmark_result as br
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
+from hyperloom.orchestrator.actions.executors import _grid_variant_filter as vf
 from hyperloom.orchestrator.actions.executors import explore as ex
 
 
@@ -89,20 +90,20 @@ class TestServerArgsEnvName:
 
 class TestXditBlacklist:
     def test_precision_lock_and_quantized_attn(self):
-        assert gr.xdit_blacklist_reason({"XDIT_USE_FP4_GEMMS": "1"}) is not None
-        assert gr.xdit_blacklist_reason({"XDIT_USE_FP8_GEMMS": "1"}) is not None
-        assert gr.xdit_blacklist_reason({"XDIT_ATTENTION_BACKEND": "aiter_fp8"}) is not None
-        assert gr.xdit_blacklist_reason({"RCCL_MSCCL_ENABLE": "1"}) is not None
+        assert vf.xdit_blacklist_reason({"XDIT_USE_FP4_GEMMS": "1"}) is not None
+        assert vf.xdit_blacklist_reason({"XDIT_USE_FP8_GEMMS": "1"}) is not None
+        assert vf.xdit_blacklist_reason({"XDIT_ATTENTION_BACKEND": "aiter_fp8"}) is not None
+        assert vf.xdit_blacklist_reason({"RCCL_MSCCL_ENABLE": "1"}) is not None
 
     def test_combo_crash(self):
-        reason = gr.xdit_blacklist_reason({"AMD_DIRECT_DISPATCH": "1", "AMDGCN_USE_BUFFER_OPS": "1"})
+        reason = vf.xdit_blacklist_reason({"AMD_DIRECT_DISPATCH": "1", "AMDGCN_USE_BUFFER_OPS": "1"})
         assert reason is not None
 
     def test_safe_envs_pass(self):
-        assert gr.xdit_blacklist_reason({"XDIT_ATTENTION_BACKEND": "aiter"}) is None
-        assert gr.xdit_blacklist_reason({"AMDGCN_USE_BUFFER_OPS": "1"}) is None
-        assert gr.xdit_blacklist_reason({"XDIT_USE_FP4_GEMMS": "0"}) is None
-        assert gr.xdit_blacklist_reason({}) is None
+        assert vf.xdit_blacklist_reason({"XDIT_ATTENTION_BACKEND": "aiter"}) is None
+        assert vf.xdit_blacklist_reason({"AMDGCN_USE_BUFFER_OPS": "1"}) is None
+        assert vf.xdit_blacklist_reason({"XDIT_USE_FP4_GEMMS": "0"}) is None
+        assert vf.xdit_blacklist_reason({}) is None
 
     def test_compatibility_filter_drops_blacklisted(self):
         good = gr.GridVariant(name="xdit_ok", extra_server_args="", extra_envs={"XDIT_ATTENTION_BACKEND": "aiter"})
@@ -281,7 +282,7 @@ class TestExploreGrid:
             assert v.note == v.provenance == "default_grid"
             assert v.remove_args == v.unset_envs == []
             assert v.args_mode == "append"
-            assert gr.xdit_blacklist_reason(v.extra_envs) is None
+            assert vf.xdit_blacklist_reason(v.extra_envs) is None
 
     @pytest.mark.parametrize("framework", ["sglang", "vllm", "custom", "unknown", ""])
     def test_other_frameworks_have_no_default_grid(self, framework):
@@ -515,12 +516,10 @@ class TestScriptableLatencyRooflineSidecar:
 
         return SharedState.load_or_init(tmp_path)
 
-    def _write_sidecar(self, session_dir, *, sigma_ideal_us=611192.0, analytic_us=None):
+    def _write_sidecar(self, session_dir, *, sigma_ideal_us=611192.0):
         run_dir = session_dir / "kernel-agent" / "runs" / "20260705T193725Z" / "20260705T200313Z_tl-abc"
         run_dir.mkdir(parents=True, exist_ok=True)
         payload = {"totals": {"sigma_ideal_roofline_us": sigma_ideal_us}}
-        if analytic_us is not None:
-            payload["analytic_dit_ceiling"] = {"ideal_compute_us": analytic_us}
         sidecar = run_dir / "diffusion_roofline.json"
         sidecar.write_text(json.dumps(payload), encoding="utf-8")
         return sidecar
@@ -532,12 +531,6 @@ class TestScriptableLatencyRooflineSidecar:
         e2e_ms, ideal_ms = state._scriptable_latency_roofline("xdit", 0.740741, "")
         assert e2e_ms == pytest.approx(1350.0, abs=1.0)
         assert ideal_ms == pytest.approx(611.192, abs=0.01)
-
-    def test_analytic_ceiling_preferred_over_totals(self, tmp_path):
-        state = self._make_state(tmp_path)
-        self._write_sidecar(tmp_path, sigma_ideal_us=611192.0, analytic_us=644000.0)
-        _e2e, ideal_ms = state._scriptable_latency_roofline("xdit", 0.740741, "")
-        assert ideal_ms == pytest.approx(644.0, abs=0.01)
 
     def test_missing_sidecar_yields_zero_ideal(self, tmp_path):
         state = self._make_state(tmp_path)

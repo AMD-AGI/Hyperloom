@@ -850,29 +850,6 @@ def _build_multinode_apply_tracelens_patch_entrypoint(
     )
 
 
-def _build_multinode_kernel_bench_entrypoint(
-    workspace: str,
-    bench_command: str,
-    files_b64_json: str,
-    result_glob: str,
-    timeout_sec: int,
-) -> str:
-    """Compose the head-pod entrypoint running a kernel micro-benchmark on a single GPU node via heredoc-embedded kernel_bench_multinode.py."""
-    py = _read_pod_script("kernel_bench_multinode.py")
-    return (
-        f"{_MN_ENTRYPOINT_PREAMBLE}"
-        f'cat > "$WORK_DIR/kernel_bench_multinode.py" '
-        f"<<'__MN_KBENCH_PY_EOF__'\n"
-        f"{py}__MN_KBENCH_PY_EOF__\n"
-        f'python3 "$WORK_DIR/kernel_bench_multinode.py" bench '
-        f"--workspace {shlex.quote(str(workspace))} "
-        f"--bench-command {shlex.quote(str(bench_command))} "
-        f"--files-b64-json {shlex.quote(str(files_b64_json))} "
-        f"--result-glob {shlex.quote(str(result_glob))} "
-        f"--timeout-sec {int(timeout_sec)}"
-    )
-
-
 def _extract_pod_json(logs: str) -> dict | None:
     """Parse the last top-level JSON document from an interleaved Ray Dashboard job_logs blob (the in-pod scripts emit one)."""
     if not logs:
@@ -997,7 +974,7 @@ def _submit_and_collect_pod_json(
         return (EXIT_OK if sub_status in ok_statuses else EXIT_TRANSIENT), parsed, logs
 
 
-# Subcommand: apply-patch / revert-patch / kernel-bench (multi-node only) Cohesive rayjob/infera clusters live in
+# Subcommand: apply-patch / revert-patch (multi-node only) Cohesive rayjob/infera clusters live in
 # commands/{rayjob,infera}.py.
 from .commands.infera import (
     _infera_restart_server as _infera_restart_server,
@@ -1006,7 +983,6 @@ from .commands.infera import (
     _infera_apply_patch as _infera_apply_patch,
     _infera_finalize_patch as _infera_finalize_patch,
     _infera_revert_patch as _infera_revert_patch,
-    _infera_kernel_bench as _infera_kernel_bench,
     cmd_install_geak as cmd_install_geak,
 )
 
@@ -1188,49 +1164,6 @@ def cmd_apply_tracelens_patch(args: argparse.Namespace) -> int:
     if parsed.get("status") in ("applied", "skipped"):
         return EXIT_OK
     return EXIT_TRANSIENT
-
-
-def cmd_kernel_bench(args: argparse.Namespace) -> int:
-    """Run a kernel micro-benchmark on a GPU-bearing pod."""
-    if _load_state().get("backend") == "infera":
-        return _infera_kernel_bench(args)
-    state = _load_state()
-    head_ip = (state.get("head_pod_ip") or "").strip()
-    if not head_ip:
-        err("kernel-bench requires head_pod_ip in state file; the platform hands it over via HYPERLOOM_MN_EXT_HEAD_IP")
-        return EXIT_CONFIG_ERROR
-
-    # Validate the optional files-b64 JSON before hitting the dashboard.
-    if args.files_b64_json:
-        try:
-            json.loads(args.files_b64_json)
-        except json.JSONDecodeError as exc:
-            err(f"--files-b64-json is not valid JSON: {exc}")
-            return EXIT_CONFIG_ERROR
-
-    info(f"kernel-bench: workspace={args.workspace} cmd={args.bench_command!r} result_glob={args.result_glob}")
-
-    entrypoint = _build_multinode_kernel_bench_entrypoint(
-        args.workspace,
-        args.bench_command,
-        args.files_b64_json or "{}",
-        args.result_glob,
-        args.timeout_sec,
-    )
-    rc, parsed, logs = _submit_and_collect_pod_json(
-        state,
-        entrypoint,
-        label="kernel-bench",
-        poll_interval=args.poll_interval,
-        poll_timeout=_poll_timeout_from_args(args),
-    )
-    if parsed is None:
-        err("kernel-bench: could not parse pod JSON from dashboard logs")
-        if args.print_logs:
-            print(logs)
-        return EXIT_TRANSIENT
-    print(json.dumps(parsed, indent=2, sort_keys=True))
-    return rc
 
 
 def _resume_probe_timeout_s() -> int:
@@ -1939,28 +1872,6 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--print-logs", action="store_true", help="dump full dashboard job_logs on parse failure")
     _add_common_poll_flags(sp)
     sp.set_defaults(func=cmd_apply_tracelens_patch)
-
-    # kernel-bench (multi-node only)
-    sp = sub.add_parser(
-        "kernel-bench",
-        help="run a kernel micro-benchmark on a GPU-bearing pod; multi-node only",
-    )
-    sp.add_argument("--workspace", required=True, help="absolute dir on pod that will be CWD for the bench")
-    sp.add_argument("--bench-command", required=True, help="shell command to invoke (passed to 'bash -lc')")
-    sp.add_argument(
-        "--files-b64-json",
-        default="{}",
-        help="JSON {rel_path: base64_content} of helper files to stage into workspace before the bench",
-    )
-    sp.add_argument(
-        "--result-glob",
-        default="*.json",
-        help="glob (relative to workspace) of result artifacts to read back after the bench",
-    )
-    sp.add_argument("--timeout-sec", type=int, default=600, help="hard timeout for the bench command (default 600s)")
-    sp.add_argument("--print-logs", action="store_true")
-    _add_common_poll_flags(sp)
-    sp.set_defaults(func=cmd_kernel_bench)
 
     # install-geak (infera only)
     sp = sub.add_parser(

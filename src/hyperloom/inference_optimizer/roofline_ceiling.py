@@ -1103,11 +1103,6 @@ def compute_roofline_breakdown_from_state(
     return legacy
 
 
-def compute_peak_from_state(state: Any, *, arm: str | None = None) -> float:
-    """Convenience scalar wrapper for ``T_peak`` only (kept for backward compat; prefer ``compute_roofline_breakdown_from_state``). ``arm`` pins precision to a specific arm."""
-    return compute_roofline_breakdown_from_state(state, arm=arm).peak_tok_per_sec
-
-
 def read_baseline_server_args(state: Any) -> str:
     """Public accessor for the baseline arm's runtime server args."""
     return _read_baseline_yaml_server_args(state)

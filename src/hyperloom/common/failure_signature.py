@@ -38,27 +38,6 @@ EVAL_GENERATION_PATHOLOGY = "eval_generation_pathology"
 EVAL_RUNTIME_FAILURE = "eval_runtime_failure"
 UNKNOWN = "unknown"
 
-# Ordered most-specific to least-specific.
-FAILURE_KINDS: tuple[str, ...] = (
-    MISSING_MODEL_ARCH,
-    EVAL_GENERATION_PATHOLOGY,
-    ACCURACY_BELOW_FLOOR,
-    KERNEL_RESOURCE_LIMIT,
-    RESOURCE_CONSTRAINT,
-    HIP_KERNEL_MISSING,
-    UNSUPPORTED_DTYPE,
-    SHAPE_MISMATCH,
-    MISSING_WEIGHT,
-    NOT_IMPLEMENTED,
-    CAPABILITY_DISABLED,
-    TOKENIZER_ERROR,
-    SERVE_FLAG,
-    IMPORT_ERROR,
-    EVAL_RUNTIME_FAILURE,
-    UNKNOWN,
-)
-
-
 # --- Result model ----------------------------------------------------------
 
 
@@ -194,7 +173,7 @@ _RULES: tuple[_Rule, ...] = (
         # exactly this text; the resource-constraint rule means the host is too
         # small and marks the gap as needing no code, while this is a launch
         # configuration in the source the enablement is editing. Rules are
-        # evaluated in list order, which ``FAILURE_KINDS`` does not govern.
+        # evaluated in list order.
         kind=KERNEL_RESOURCE_LIMIT,
         bridge_layer="rocm_hip",
         patterns=(
@@ -537,7 +516,6 @@ __all__ = [
     "CAPABILITY_DISABLED",
     "EVAL_GENERATION_PATHOLOGY",
     "EVAL_RUNTIME_FAILURE",
-    "FAILURE_KINDS",
     "HIP_KERNEL_MISSING",
     "IMPORT_ERROR",
     "MISSING_MODEL_ARCH",

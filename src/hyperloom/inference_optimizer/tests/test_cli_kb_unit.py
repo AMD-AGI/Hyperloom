@@ -16,7 +16,6 @@ from hyperloom.inference_optimizer.cli import kb as cli_kb
 
 def _args(**over):
     base = dict(
-        local_kb_root=None,
         degraded_kb=False,
         pr_monitor_enabled=True,
     )
@@ -50,7 +49,7 @@ def test_attach_recipe_audit_hook_noop_without_session_dir(tmp_path) -> None:
 
 
 def test_bootstrap_recipe_kb_degraded_returns_none(tmp_path, monkeypatch, capsys) -> None:
-    monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
+    monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path / "kb"))
     kb = cli_kb._bootstrap_recipe_kb(
         _args(degraded_kb=True),
         session_dir=tmp_path,
@@ -62,7 +61,7 @@ def test_bootstrap_recipe_kb_degraded_returns_none(tmp_path, monkeypatch, capsys
 
 
 def test_bootstrap_recipe_kb_success(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
+    monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path / "kb"))
     calls = []
     monkeypatch.setattr(cli_kb, "run_t0_anchor", lambda *a, **k: calls.append(k))
     kb = cli_kb._bootstrap_recipe_kb(
@@ -76,7 +75,7 @@ def test_bootstrap_recipe_kb_success(tmp_path, monkeypatch) -> None:
 
 
 def test_bootstrap_recipe_kb_t0_failure_continues(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("HYPERLOOM_LOCAL_KB_ROOT", str(tmp_path / "kb"))
+    monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path / "kb"))
 
     def _boom(*a, **k):
         raise RuntimeError("t0 down")
@@ -203,8 +202,6 @@ def test_bootstrap_knowledge_plane_degraded_bypasses_remote_validation(
 
     assert plane.kb_disabled is True
     assert plane.recipe_kb is None
-    assert plane.status["recipe"]["enabled"] is False
-    assert plane.status["recipe"]["disabled_reason"] == "degraded_kb"
 
 
 def test_bootstrap_knowledge_plane_enabled(tmp_path) -> None:

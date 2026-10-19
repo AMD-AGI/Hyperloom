@@ -180,14 +180,7 @@ def test_build_prompt_full_renders_three_groups():
         seq_len=2048,
         acceptable_eval_gap=0.03,
     )
-    p = qs.build_quantization_prompt(
-        cfg,
-        model_path="/path/models/Qwen-Qwen3-32B",
-        gpu_type="mi355x",
-        skill_path="@/shared/quantization_agent/SKILL.md",
-    )
-    assert "Use the skill at @/shared/quantization_agent/SKILL.md" in p
-    assert "on an MI355X target" in p
+    p = qs.build_quantization_prompt(cfg)
     assert "Quantization strategy:" in p
     assert "Apply mxfp4 as the global quantization scheme." in p
     assert "Override the self_attn layers with fp8 and the moe/mlp layers with ptpc_fp8." in p
