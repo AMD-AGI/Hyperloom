@@ -112,8 +112,8 @@ def test_unset_envs_emit_pop_and_never_also_set() -> None:
 
     assert plan.unset_env == ["HL_STALE"]
     assert "HL_STALE" not in plan.applied_env
-    assert '_hl_os.environ.pop(_hl_k, None)' in prelude
-    assert '_hl_os.environ[_hl_k] = _hl_v' not in prelude
+    assert "_hl_os.environ.pop(_hl_k, None)" in prelude
+    assert "_hl_os.environ[_hl_k] = _hl_v" not in prelude
 
 
 def test_prelude_composes_env_and_api_together() -> None:
@@ -140,7 +140,9 @@ def test_apply_prelude_rejects_module_without_hook() -> None:
 
 
 def test_apply_prelude_inserts_after_docstring_and_future_import() -> None:
-    source = b'"""module doc"""\nfrom __future__ import annotations\n\ndef hyperloom_optimize(model):\n    return model\n'
+    source = (
+        b'"""module doc"""\nfrom __future__ import annotations\n\ndef hyperloom_optimize(model):\n    return model\n'
+    )
     result = apply_settings_prelude(source, plan_settings({"HL_FUSE_ATTN": "1"}))
     text = result.decode()
 

@@ -110,7 +110,9 @@ def render_prelude(plan: SettingsPlan) -> str:
     emitted_env_loop = False
     emitted_unset_loop = False
     if plan.applied_env:
-        entries = [_tuple_literal((json.dumps(name), json.dumps(value))) for name, value in sorted(plan.applied_env.items())]
+        entries = [
+            _tuple_literal((json.dumps(name), json.dumps(value))) for name, value in sorted(plan.applied_env.items())
+        ]
         lines.extend(
             [
                 f"for _hl_k, _hl_v in {_tuple_literal(entries)}:",

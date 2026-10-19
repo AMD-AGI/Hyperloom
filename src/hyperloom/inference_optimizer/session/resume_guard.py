@@ -278,6 +278,7 @@ def _confirmable_history(task: sqlite3.Row) -> list:
         raise CleanupConfirmationError("task history must be a list")
     return history
 
+
 def _prior_confirmation_index(history: list) -> int | None:
     """Where an earlier operator confirmation sits in this history, if one does."""
     return next(
