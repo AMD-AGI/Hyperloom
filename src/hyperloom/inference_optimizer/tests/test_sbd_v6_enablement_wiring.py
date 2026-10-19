@@ -701,8 +701,7 @@ def test_an_exception_the_lane_did_not_raise_is_not_named_on_it(_bound_session):
         exc=RuntimeError("boom"),
     )
     enablement_event.finish(
-        outcome=enablement_event.OUTCOME_SUCCEEDED,
-        reason="revalidation promoted",
+        enablement_event.LaneTerminal(outcome=enablement_event.OUTCOME_SUCCEEDED, reason="revalidation promoted")
     )
 
     event = _events(_bound_session)[0]
@@ -748,7 +747,7 @@ async def test_a_raising_pump_is_named_on_the_event(_bound_session):
         record_exception=_record,
     )
     await EnablementLane.pump_enablement_safely(fake)
-    enablement_event.finish(outcome=enablement_event.OUTCOME_SUCCEEDED, reason="kept")
+    enablement_event.finish(enablement_event.LaneTerminal(outcome=enablement_event.OUTCOME_SUCCEEDED, reason="kept"))
 
     event = _events(_bound_session)[0]
     assert event["status"] == "failed"

@@ -2273,8 +2273,7 @@ async def test_integrate_handler_rejects_zero_base_tput(session_dir):
 
 
 def test_integrate_registered_under_two_aliases():
-    assert krh.has_handler("integrate")
-    assert krh.has_handler("apply_patch")
+    assert krh.get_handler("integrate") is not None
     assert krh.get_handler("integrate") is krh.get_handler("apply_patch")
 
 

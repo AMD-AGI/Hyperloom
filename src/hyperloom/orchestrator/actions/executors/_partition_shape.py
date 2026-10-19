@@ -76,9 +76,7 @@ def per_stream_footprint_gib(
     """Resolve the per-stream HBM footprint to size partitions against."""
     measured = (params or {}).get("peak_gib_per_stream")
     if measured is None:
-        best = getattr(shared_state, "current_best", None)
-        if isinstance(best, dict):
-            measured = best.get("peak_gib_per_stream")
+        measured = (getattr(shared_state, "current_best", None) or {}).get("peak_gib_per_stream")
     try:
         if measured is not None and float(measured) > 0:
             return float(measured), "measured"

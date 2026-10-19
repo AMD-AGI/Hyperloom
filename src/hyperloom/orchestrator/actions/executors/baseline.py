@@ -59,12 +59,7 @@ from ..stop_attribution import (
     StoppedByTheRun,
 )
 from . import _server_lifecycle as _lifecycle
-from ._aiter_jit import (
-    AITER_JIT_PROBE_PATHS,
-    BASELINE_COLD_START_TIMEOUT_SEC,
-    COLD_START_KERNEL_THRESHOLD,
-    is_aiter_jit_registry_mismatch,
-)
+from ._aiter_jit import is_aiter_jit_registry_mismatch
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
 # The grid module is the namespace the helpers both benching arms share ended up in: how a sentinel returncode reads
@@ -756,14 +751,6 @@ def nonzero_output_signature(err_class: str, proc_stdout: str | None, proc_stder
         return ""
     text = " ".join(_SIGNATURE_VOLATILE_RE.sub("#", text).split())
     return f"{err_class}|{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
-
-
-# Cold-start settings and probes live in ``_aiter_jit`` and are re-exported above for callers/tests that import them
-# from this module.
-
-
-# Canonical workload configuration defaults live in `_workload_envs`.
-_default_baseline_config = default_baseline_config
 
 
 def _set_materialized_run_eval(config_path: Path, *, enabled: bool) -> None:
@@ -3436,9 +3423,9 @@ class BenchmarkRunExecutor:
                 # Merge the reference base UNDER the per-task args (last-wins) so a multi-node per-round restart
                 # carries the same reference flags the single-node materialized YAML does.
                 from ._grid_runner import merge_server_args
-                from ._workload_envs import resolve_reference_base
+                from ._workload_envs import resolve_reference_launch
 
-                _mn_ref_args, _mn_ref_envs = resolve_reference_base()
+                _mn_ref_args, _mn_ref_envs, _ = resolve_reference_launch()
                 # Base on effective_extra_server_args (carries the one-shot cuda-graph eager-fallback flag when armed)
                 # so the MN per-round restart keeps that fallback too.
                 _mn_task_args = effective_extra_server_args
@@ -3971,7 +3958,7 @@ class BaselineExecutor(BenchmarkRunExecutor):
 
     def _resolve_default_config(self) -> Path:
         """Resolve the benchmark YAML the round runs when the task names none."""
-        return _default_baseline_config()
+        return default_baseline_config()
 
     @staticmethod
     def _client_script_from_config(config_path: Path) -> str | None:
@@ -4265,10 +4252,7 @@ baseline_executor = BaselineExecutor()
 
 
 __all__ = [
-    "AITER_JIT_PROBE_PATHS",
-    "BASELINE_COLD_START_TIMEOUT_SEC",
     "BaselineExecutor",
     "BenchmarkRunExecutor",
-    "COLD_START_KERNEL_THRESHOLD",
     "baseline_executor",
 ]

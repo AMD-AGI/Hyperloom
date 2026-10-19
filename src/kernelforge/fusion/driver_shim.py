@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 _SHIM_TEMPLATE = '''\
@@ -177,56 +178,40 @@ if __name__ == "__main__":
 '''
 
 
-def render_driver(
-    harness_path: str,
-    env_flags: tuple[str, ...] | list[str],
-    *,
-    report_log: str,
-    case_id: str = "decode",
-    timeout_sec: int = 1800,
-    fused_module: str = "",
-    workspace: str = "",
-    git_env: dict[str, str] | None = None,
-) -> str:
+# Wall-clock bound on one harness run inside the driver.
+HARNESS_TIMEOUT_SEC = 1800
+
+
+@dataclass(frozen=True)
+class DriverSpec:
+    """One recipe's driver: the harness it runs, the flags it sets, where it reports, and the tree it guards."""
+
+    harness_path: str
+    env_flags: tuple[str, ...] | list[str]
+    report_log: str
+    case_id: str = "decode"
+    fused_module: str = ""
+    workspace: str = ""
+    git_env: dict[str, str] | None = None
+
+
+def render_driver(spec: DriverSpec) -> str:
     """Render the driver source for one recipe's harness."""
     return _SHIM_TEMPLATE.format(
-        harness=str(harness_path),
-        env_flags=tuple(env_flags),
-        case_id=case_id,
-        timeout=int(timeout_sec),
-        report_log=str(report_log),
-        fused_module=str(fused_module),
-        workspace=str(workspace),
-        git_env=dict(git_env or {}),
+        harness=str(spec.harness_path),
+        env_flags=tuple(spec.env_flags),
+        case_id=spec.case_id,
+        timeout=HARNESS_TIMEOUT_SEC,
+        report_log=str(spec.report_log),
+        fused_module=str(spec.fused_module),
+        workspace=str(spec.workspace),
+        git_env=dict(spec.git_env or {}),
     )
 
 
-def write_driver(
-    destination: str | Path,
-    harness_path: str,
-    env_flags: tuple[str, ...] | list[str],
-    *,
-    report_log: str,
-    case_id: str = "decode",
-    timeout_sec: int = 1800,
-    fused_module: str = "",
-    workspace: str = "",
-    git_env: dict[str, str] | None = None,
-) -> str:
+def write_driver(destination: str | Path, spec: DriverSpec) -> str:
     """Write the driver next to the campaign artifacts and return its path."""
     path = Path(destination)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        render_driver(
-            harness_path,
-            env_flags,
-            report_log=report_log,
-            case_id=case_id,
-            timeout_sec=timeout_sec,
-            fused_module=fused_module,
-            workspace=workspace,
-            git_env=git_env,
-        ),
-        encoding="utf-8",
-    )
+    path.write_text(render_driver(spec), encoding="utf-8")
     return str(path)

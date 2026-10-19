@@ -7,7 +7,6 @@ confirmation, op-fanout de-dup in candidate batching, and umbrella-driven GEAK p
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from hyperloom.orchestrator.kernel import request_handlers as krh
@@ -199,52 +198,3 @@ def test_confirm_sources_matches_single_file_semantics(tmp_path: Path) -> None:
 
     assert overall is krh._confirm_source_imported("my_kernel.py", tmp_path)
     assert overall is False
-
-
-# -- _kernel_result_rank ---------------------------------------------------
-def _needs_review_result() -> dict:
-    return {
-        "status": "ok",
-        "proposal": {"decision": "NEEDS_REVIEW"},
-        "verification": {
-            "correctness_passed": True,
-            "micro_speedup": 1.5,
-        },
-    }
-
-
-# -- C2a op-fanout de-dup in _batch_kernel_candidates ---------------------
-def _write_candidates(tmp_path: Path) -> str:
-    """Two ungrouped reusable rows sharing one source_file (op-fanout)."""
-    data = {
-        "hot_kernels": [
-            {
-                "kernel_id": "k1",
-                "reusable_native_kernel": True,
-                "source_file": "/srcroot/fp8_gemm.py",
-                "gpu_pct": 5.0,
-            },
-            {
-                "kernel_id": "k2",
-                "reusable_native_kernel": True,
-                "source_file": "/srcroot/fp8_gemm.py",
-                "gpu_pct": 4.0,
-            },
-        ],
-        "reusable_native_kernel_ids": ["k1", "k2"],
-    }
-    p = tmp_path / "candidates.json"
-    p.write_text(json.dumps(data), encoding="utf-8")
-    return str(p)
-
-
-# -- high-impact infra-retry cap (the dominant root-cause fix) -------------
-def _infra_entry(failure_count: int, gpu_pct: float) -> dict:
-    """An infra non-finish record (no verdict, status failed) at max_failures."""
-    return {
-        "failure_count": failure_count,
-        "last_decision": "",
-        "last_status": "failed",
-        "rejected_reason": "",
-        "last_gpu_pct": gpu_pct,
-    }

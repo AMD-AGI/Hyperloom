@@ -11,7 +11,7 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import append_jsonl
+from hyperloom.common.io import JsonLineFormat, append_jsonl
 from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
 from ._row_utils import (
     call_key_fields,
@@ -223,7 +223,7 @@ def append_llm_call(
         raise LLMTraceRowError(f"llm_calls row 'status'={status!r} is not one of {sorted(VALID_STATUSES)!r}")
     dest = llm_calls_path(session_dir)
     try:
-        append_jsonl(dest, row, make_parents=True, sort_keys=True)
+        append_jsonl(dest, row, make_parents=True, fmt=JsonLineFormat(sort_keys=True))
     except OSError as exc:
         log.warning(
             "llm_trace: append failed for component=%s session_id=%s: %r",

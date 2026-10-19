@@ -707,11 +707,6 @@ def observed_sglang_server_identity_from_log(path: str) -> dict[str, Any]:
     return observed_server_identity_from_log(path, "sglang")
 
 
-def observed_vllm_server_identity_from_log(path: str) -> dict[str, Any]:
-    """Parse allowlisted identity from vLLM's ``non-default args: {...}`` record."""
-    return observed_server_identity_from_log(path, "vllm")
-
-
 def _read_launch_record(path: str, spec: _LaunchRecord) -> str:
     """The launch record's payload, read under the line and character caps, or "".
 

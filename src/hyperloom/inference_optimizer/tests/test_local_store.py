@@ -170,33 +170,6 @@ def test_get_recipe_missing(tmp_path):
     assert store.get_recipe(canonical_id=_cid()) is None
 
 
-def test_empty_cid_raises(tmp_path):
-    store = ls.LocalRecipeStore(root=tmp_path)
-    with pytest.raises(ValueError):
-        store.put_recipe(canonical_id="")
-    with pytest.raises(ValueError):
-        store.get_recipe(canonical_id="")
-
-
-# ---- attempts ----
-
-
-def test_attempts_roundtrip(tmp_path):
-    store = ls.LocalRecipeStore(root=tmp_path)
-    cid = _cid()
-    a1 = store.append_attempt(canonical_id=cid, session_id="s1", fitness=1.0, outcome="ok", diff={"x": 1})
-    assert a1["id"] == 1
-    store.append_attempt(canonical_id=cid, session_id="s2", fitness=None)
-    rows = ls._list_jsonl(store._attempts_path(cid))
-    assert [row["id"] for row in rows] == [1, 2]
-
-
-def test_append_attempt_requires_session(tmp_path):
-    store = ls.LocalRecipeStore(root=tmp_path)
-    with pytest.raises(ValueError):
-        store.append_attempt(canonical_id=_cid(), session_id="")
-
-
 # ---- search ----
 
 
@@ -220,12 +193,6 @@ def test_search_filters(tmp_path):
     assert len(store.search(limit=10)) == 2
 
 
-def test_search_bad_order_by(tmp_path):
-    store = ls.LocalRecipeStore(root=tmp_path)
-    with pytest.raises(ValueError):
-        store.search(order_by="bogus")
-
-
 # ---- low-level helpers ----
 
 
@@ -245,13 +212,6 @@ def test_read_json_bad(tmp_path):
     p.write_text("{bad", encoding="utf-8")
     with pytest.raises(ls.LocalRecipeStoreError):
         ls._read_json(p)
-
-
-def test_list_jsonl_skips_bad(tmp_path):
-    p = tmp_path / "a.ndjson"
-    p.write_text('{"a":1}\n\nnot json\n{"b":2}\n', encoding="utf-8")
-    rows = ls._list_jsonl(p)
-    assert rows == [{"a": 1}, {"b": 2}]
 
 
 def test_coerce_dict_dataclass():

@@ -21,6 +21,7 @@ from ._kernel_agent_tool import (
     _shape_tool_result,
 )
 from .._recorder_trace import trace_recording_skipped
+from hyperloom.common.coerce import optional_positive_int
 from hyperloom.inference_optimizer.trace.trajectory_trace import inherited_scope_fields
 
 log = logging.getLogger(__name__)
@@ -367,6 +368,15 @@ _TRACELENS_ANALYSIS_MODULE = "hyperloom.orchestrator.trace_analysis.tracelens_an
 _BYPASS_TRACE_ANALYSIS_MODULE = "hyperloom.orchestrator.trace_analysis.bypass_trace_analysis"
 
 
+def _optional_flags(*pairs: tuple[str, Any]) -> list[str]:
+    """The ``flag value`` argv tokens of every pair whose value is set, in order."""
+    tokens: list[str] = []
+    for flag, value in pairs:
+        if value:
+            tokens += [flag, str(value)]
+    return tokens
+
+
 def _build_trace_analyze_cmd(
     payload: dict,
     *,
@@ -405,69 +415,52 @@ def _build_trace_analyze_cmd(
             cmd += [f"--trajectory-{key.replace('_', '-')}", str(value)]
     elif str(getattr(state, "benchmark_mode", "") or "").strip().lower() == "agentx":
         cmd += ["--require-single-rank"]
-        try:
-            state_tp = int(getattr(state, "tp", 0) or 0)
-        except (TypeError, ValueError):
-            state_tp = 0
-        if state_tp > 0:
-            cmd += ["--tensor-parallel-size", str(state_tp)]
-    for flag, val in (
-        ("--model-name", model_name),
-        ("--framework", framework),
-        ("--target-platform", target_platform),
-        ("--analysis-mode", analysis_mode),
-    ):
-        if val:
-            cmd += [flag, str(val)]
+        cmd += _optional_flags(("--tensor-parallel-size", optional_positive_int(getattr(state, "tp", None))))
 
     model_path = str(
         payload.get("model_path") or getattr(state, "model_path", "") or os.environ.get("MODEL_PATH") or ""
     ).strip()
-    if model_path:
-        cmd += ["--model-path", model_path]
     precision = str(
         payload.get("precision") or getattr(state, "precision", "") or workload.get("precision") or ""
     ).strip()
-    if precision:
-        cmd += ["--precision", precision]
+    cmd += _optional_flags(
+        ("--model-name", model_name),
+        ("--framework", framework),
+        ("--target-platform", target_platform),
+        ("--analysis-mode", analysis_mode),
+        ("--model-path", model_path),
+        ("--precision", precision),
+    )
 
     if scriptable:
-        num_denoise = payload.get("num_denoise_steps") or workload.get("num_inference_steps")
-        if num_denoise not in (None, ""):
-            try:
-                if int(num_denoise) > 0:
-                    cmd += ["--num-denoise-steps", str(int(num_denoise))]
-            except (TypeError, ValueError):
-                pass
-
-    if not scriptable and not is_bypass:
+        num_denoise = optional_positive_int(payload.get("num_denoise_steps") or workload.get("num_inference_steps"))
+        cmd += _optional_flags(("--num-denoise-steps", num_denoise))
+    elif not is_bypass:
         cmd += ["--split-llm-inference"]
-        split_conc = payload.get("split_conc") or workload.get("conc")
-        if split_conc not in (None, ""):
-            cmd += ["--split-conc", str(split_conc).strip()]
-        split_osl = payload.get("split_osl") or workload.get("osl")
-        if split_osl not in (None, ""):
-            cmd += ["--split-osl", str(split_osl).strip()]
-        split_r = payload.get("split_r") or workload.get("random_range_ratio")
-        if split_r not in (None, ""):
-            cmd += ["--split-r", str(split_r).strip()]
+        for flag, payload_key, workload_key in (
+            ("--split-conc", "split_conc", "conc"),
+            ("--split-osl", "split_osl", "osl"),
+            ("--split-r", "split_r", "random_range_ratio"),
+        ):
+            hint = payload.get(payload_key) or workload.get(workload_key)
+            if hint not in (None, ""):
+                cmd += [flag, str(hint).strip()]
 
     capture_folder = (
         payload.get("capture_folder") or payload.get("graph_capture_path") or payload.get("capture_folder_path")
     )
-    if capture_folder:
-        cmd += ["--capture-folder", str(capture_folder)]
     if scriptable and not is_bypass:
         steady_state_mode = "generic"
     else:
         steady_state_mode = str(
             payload.get("steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "")
         ).strip()
-    if steady_state_mode:
-        cmd += ["--steady-state-mode", steady_state_mode]
     roofline_output_name = str(payload.get("roofline_output_name") or "").strip()
-    if roofline_output_name:
-        cmd += ["--roofline-output-name", roofline_output_name]
+    cmd += _optional_flags(
+        ("--capture-folder", capture_folder),
+        ("--steady-state-mode", steady_state_mode),
+        ("--roofline-output-name", roofline_output_name),
+    )
     if payload.get("dry_run"):
         cmd += ["--dry-run"]
     return cmd, steady_state_mode

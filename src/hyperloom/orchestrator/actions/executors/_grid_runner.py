@@ -39,7 +39,6 @@ from ..stop_attribution import (
 )
 from ._benchmark_runtime import apply_runtime_benchmark_overrides as apply_runtime_benchmark_overrides
 from ._benchmark_interpreter import (
-    _resolve_magpie_python as _resolve_magpie_python,
     _resolve_probe_python as _resolve_probe_python,
 )
 from ._recipe_script import launcher_overwritten_envs
@@ -79,59 +78,23 @@ from ._spec_decode_pin import SPECULATIVE_DECODING_PINNED, refuse_unpinned_specu
 from ._grid_base import (
     DEFAULT_KEEP_THRESHOLD_PCT as DEFAULT_KEEP_THRESHOLD_PCT,
     GridVariant as GridVariant,
-    coerce_extra_envs as coerce_extra_envs,
     VariantResult as VariantResult,
 )
 from hyperloom.inference_optimizer.grid_server_args import (
     server_args_env_name as server_args_env_name,
     merge_server_args as merge_server_args,
     compose_server_args as compose_server_args,
-    remove_server_args as remove_server_args,
-    compact_json_server_args as compact_json_server_args,
-    _SPACE_VALUE_FLAGS as _SPACE_VALUE_FLAGS,
-    _MULTI_VALUE_FLAGS as _MULTI_VALUE_FLAGS,
-    _VLLM_SINGLE_VALUE_FLAGS as _VLLM_SINGLE_VALUE_FLAGS,
-    dedup_vllm_server_args as dedup_vllm_server_args,
     _shell_safe_dedupe as _shell_safe_dedupe,
-    DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC as DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC,
-    SGLANG_WATCHDOG_TIMEOUT_ENV as SGLANG_WATCHDOG_TIMEOUT_ENV,
-    _SGLANG_WATCHDOG_FLAG as _SGLANG_WATCHDOG_FLAG,
-    _SGLANG_WATCHDOG_RE as _SGLANG_WATCHDOG_RE,
-    resolve_sglang_watchdog_timeout as resolve_sglang_watchdog_timeout,
-    inject_sglang_watchdog_timeout as inject_sglang_watchdog_timeout,
-    DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS as DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS,
-    DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS as DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS,
-    SGLANG_CONTEXT_HEADROOM_ENV as SGLANG_CONTEXT_HEADROOM_ENV,
-    SGLANG_CONTEXT_FLOOR_ENV as SGLANG_CONTEXT_FLOOR_ENV,
-    _SGLANG_CONTEXT_LENGTH_FLAG as _SGLANG_CONTEXT_LENGTH_FLAG,
-    _SGLANG_CONTEXT_LENGTH_RE as _SGLANG_CONTEXT_LENGTH_RE,
-    _SGLANG_ATTN_BACKEND_FLAG as _SGLANG_ATTN_BACKEND_FLAG,
-    _SGLANG_ATTN_BACKEND_RE as _SGLANG_ATTN_BACKEND_RE,
-    _SGLANG_DUAL_CHUNK_BACKEND as _SGLANG_DUAL_CHUNK_BACKEND,
-    _resolve_nonneg_int_env as _resolve_nonneg_int_env,
-    resolve_sglang_context_cap as resolve_sglang_context_cap,
-    inject_sglang_context_length as inject_sglang_context_length,
-    _resolve_dual_chunk_backend as _resolve_dual_chunk_backend,
-    inject_sglang_attention_backend as inject_sglang_attention_backend,
-    _SGLANG_MOE_RUNNER_BACKEND_FLAG as _SGLANG_MOE_RUNNER_BACKEND_FLAG,
     _SGLANG_MOE_RUNNER_BACKEND_RE as _SGLANG_MOE_RUNNER_BACKEND_RE,
     moe_runner_requires_aiter as moe_runner_requires_aiter,
 )
 from ._grid_variant_filter import (
     resolve_skip_spec as resolve_skip_spec,
-    _parse_skip_spec as _parse_skip_spec,
-    _RE_CUDA_GRAPH_MAX_BS as _RE_CUDA_GRAPH_MAX_BS,
     _MN_PARAMS_PRIORITY as _MN_PARAMS_PRIORITY,
     _MN_BACKENDS_PRIORITY as _MN_BACKENDS_PRIORITY,
-    _mn_priority_index as _mn_priority_index,
     reorder_grid_for_multi_node as reorder_grid_for_multi_node,
     apply_multi_node_invalid_variants as apply_multi_node_invalid_variants,
     apply_aiter_moe_pin_filter as apply_aiter_moe_pin_filter,
-    _COMPATIBILITY_FLAG_RULES as _COMPATIBILITY_FLAG_RULES,
-    _XDIT_ENV_BLACKLIST as _XDIT_ENV_BLACKLIST,
-    _XDIT_ENV_COMBO_BLACKLIST as _XDIT_ENV_COMBO_BLACKLIST,
-    xdit_blacklist_reason as xdit_blacklist_reason,
-    _detect_model_class as _detect_model_class,
     apply_compatibility_filter as apply_compatibility_filter,
     apply_user_skip_list as apply_user_skip_list,
 )
@@ -846,9 +809,9 @@ async def run_grid(
 
     _mn_ref_envs: dict[str, str] = {}
     if _mn_is_multi_node():
-        from ._workload_envs import resolve_reference_base
+        from ._workload_envs import resolve_reference_launch
 
-        _, _mn_ref_envs = resolve_reference_base()
+        _, _mn_ref_envs, _ = resolve_reference_launch()
 
     # Reported on entry, not on completion: ``_report_finished_variant`` only runs once a result has been appended, so
     # a first variant that hangs — or a branch that raises before reaching it — would emit nothing at all, which is
@@ -2098,23 +2061,16 @@ def _on_disk_stderr_tail(*dirs: Path, limit: int = 2000) -> str:
 
 
 __all__ = [
-    "DEFAULT_SGLANG_WATCHDOG_TIMEOUT_SEC",
     "GridVariant",
     "ORCHESTRATOR_CANCELLED_CLASS",
     "SESSION_TIME_EXHAUSTED_CLASS",
     "StoppedByTheRun",
-    "SGLANG_WATCHDOG_TIMEOUT_ENV",
     "VariantResult",
     "apply_multi_node_invalid_variants",
     "apply_aiter_moe_pin_filter",
     "apply_runtime_benchmark_overrides",
     "reorder_grid_for_multi_node",
-    "inject_sglang_attention_backend",
-    "inject_sglang_context_length",
-    "inject_sglang_watchdog_timeout",
     "merge_server_args",
-    "remove_server_args",
-    "resolve_sglang_watchdog_timeout",
     "run_grid",
     "sanitize_result_dir",
     "sanitize_script_name",
@@ -2122,42 +2078,12 @@ __all__ = [
     "session_grid_bounds",
     "stopped_by_the_run",
     # Re-exported from the sibling modules to keep the namespace intact.
-    "_resolve_magpie_python",
     "_resolve_probe_python",
-    "coerce_extra_envs",
-    "compact_json_server_args",
-    "_SPACE_VALUE_FLAGS",
-    "_MULTI_VALUE_FLAGS",
-    "_VLLM_SINGLE_VALUE_FLAGS",
-    "dedup_vllm_server_args",
-    "_SGLANG_WATCHDOG_FLAG",
-    "_SGLANG_WATCHDOG_RE",
-    "DEFAULT_SGLANG_CONTEXT_HEADROOM_TOKENS",
-    "DEFAULT_SGLANG_CONTEXT_FLOOR_TOKENS",
-    "SGLANG_CONTEXT_HEADROOM_ENV",
-    "SGLANG_CONTEXT_FLOOR_ENV",
-    "_SGLANG_CONTEXT_LENGTH_FLAG",
-    "_SGLANG_CONTEXT_LENGTH_RE",
-    "_SGLANG_ATTN_BACKEND_FLAG",
-    "_SGLANG_ATTN_BACKEND_RE",
-    "_SGLANG_DUAL_CHUNK_BACKEND",
-    "_resolve_nonneg_int_env",
-    "resolve_sglang_context_cap",
-    "_resolve_dual_chunk_backend",
-    "_SGLANG_MOE_RUNNER_BACKEND_FLAG",
     "_SGLANG_MOE_RUNNER_BACKEND_RE",
     "moe_runner_requires_aiter",
     "resolve_skip_spec",
-    "_parse_skip_spec",
-    "_RE_CUDA_GRAPH_MAX_BS",
     "_MN_PARAMS_PRIORITY",
     "_MN_BACKENDS_PRIORITY",
-    "_mn_priority_index",
-    "_COMPATIBILITY_FLAG_RULES",
-    "_XDIT_ENV_BLACKLIST",
-    "_XDIT_ENV_COMBO_BLACKLIST",
-    "xdit_blacklist_reason",
-    "_detect_model_class",
     "apply_compatibility_filter",
     "apply_user_skip_list",
 ]

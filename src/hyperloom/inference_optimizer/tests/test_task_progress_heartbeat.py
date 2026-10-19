@@ -278,18 +278,6 @@ async def test_direct_cancel_during_cleanup_retains_capacity(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_retired_recover_is_cancelled_without_running(tmp_path, monkeypatch):
-    sub = _runner(tmp_path, monkeypatch)
-    task = await sub.tasks.create(kind="recover", params={}, idempotency_key="legacy-recover")
-    result = await sub.run_task(task)
-    assert result.state == "cancelled"
-    row = await sub.tasks.get(task.task_id)
-    assert row.state == "cancelled"
-    assert row.history[-1]["from"] == "queued"
-    assert row.history[-1]["evidence"]["reason"] == "unsupported_action"
-
-
-@pytest.mark.asyncio
 async def test_a_sink_that_raises_is_swallowed_not_propagated(tmp_path, monkeypatch):
     """The reporter is an observability path; it owns its own failures."""
 

@@ -199,13 +199,6 @@ jobs:
 
       - name: Pylint (errors only)
         continue-on-error: true
-        env:
-          # ``quantization_agent`` and ``ci`` are still flat repo-root
-          # packages (tree-reform.MD P2.6 promotes ``ci``; quantization_agent
-          # itself was promoted into hyperloom.agents but the bare-name
-          # dotted-path below is kept for the pylint invocation).
-          PYTHONPATH: >-
-            ${{ github.workspace }}
         run: |
           # src/kernelforge is deliberately NOT in this list, and the omission
           # is measured rather than inherited: adding it yields ~58 findings,

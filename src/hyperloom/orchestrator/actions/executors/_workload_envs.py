@@ -751,15 +751,6 @@ def _operator_extra_env() -> dict[str, str]:
     return operator_extra_env()
 
 
-def resolve_reference_base() -> tuple[str, dict[str, str]]:
-    """Read the ``--reference-script`` server args / envs from SharedState.
-
-    Returns ``("", {})`` when the run has no reference recipe.
-    """
-    args, envs, _controls = resolve_reference_launch()
-    return args, envs
-
-
 def resolve_reference_launch() -> tuple[str, dict[str, str], dict[str, Any]]:
     """Read the accepted reference recipe and its dedicated launch controls."""
     from hyperloom.inference_optimizer.session.paths import session_dir
@@ -1162,14 +1153,13 @@ def _finalize_framework_server_args(
         envs[framework_env] = resolved_server_args
 
 
-def _profile_steps_cap(policy_env: Mapping[str, Any]) -> tuple[int, bool]:
+def _profile_steps_cap(policy_env: Mapping[str, Any]) -> int:
     raw = str(policy_env.get("HYPERLOOM_PROFILE_MAX_STEPS_CAP") or "").strip()
-    explicit = raw.isdigit() and int(raw) >= 1
     try:
         cap = int(raw or _DEFAULT_PROFILE_MAX_STEPS)
     except ValueError:
         cap = _DEFAULT_PROFILE_MAX_STEPS
-    return (cap if cap > 0 else _DEFAULT_PROFILE_MAX_STEPS), explicit
+    return cap if cap > 0 else _DEFAULT_PROFILE_MAX_STEPS
 
 
 def _profile_capture_window(
@@ -1489,7 +1479,7 @@ def materialize_config_with_envs(
         safe_conc = max(conc_val, 1)
         # Cap captured decode steps at a serialization-safe default so the
         # torch-profiler trace can be written without starving the engine RPC.
-        cap, cap_explicit = _profile_steps_cap(os.environ)
+        cap = _profile_steps_cap(os.environ)
 
         # Resolve the profile-scoped OSL. PROFILE_OSL (via --profile-osl) is
         # honored as-is; otherwise default to min(served OSL,

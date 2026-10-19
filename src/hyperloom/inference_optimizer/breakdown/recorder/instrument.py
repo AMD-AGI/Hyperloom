@@ -25,6 +25,7 @@ from hyperloom.common.coerce import to_float
 from hyperloom.common.timeutil import iso_z
 
 from . import tool_versions
+from .kernel_records import KernelRewriteRun, LaneRunFields
 from .session_metadata import snapshot_metadata
 from .trace import trace_skip
 
@@ -174,25 +175,33 @@ def _mirror_backend_attempts_to_kernel_timeline(result: dict[str, Any], recorder
             optimized = att.get("optimized_path") or att.get("optimized_file")
             artifact_path = str(optimized or (kernel_artifact if is_adopted else "") or "")
             recorder.record_kernel_rewrite(
-                run_id=attempt_id or f"{run_id}-{backend}",
-                kernel_id=kid,
-                kernel_name=str(result.get("kernel_name") or result.get("name") or ""),
-                status=status_lower or "unknown",
-                dispatched=True,
-                backends_tried=all_backends or ([backend] if backend else []),
-                adopted_backend=backend if is_adopted else "",
-                task_group=task_group,
-                speedup=micro_speedup,
-                compile_status="passed" if compile_passed is True else ("failed" if compile_passed is False else ""),
-                correctness=correctness_passed,
-                artifact_path=artifact_path,
-                micro_decision=decision,
-                integrate_ref=str(result.get("integration_id") or "") if is_adopted else "",
-                started_at=str(att.get("started_at") or att.get("created_at") or att.get("ts") or ""),
-                ended_at=str(att.get("ended_at") or ""),
-                duration_sec=to_float(att.get("duration_sec") or att.get("elapsed_sec") or att.get("elapsed_s")),
-                error_class=str(att.get("error_class") or ""),
-                failure_reason=str(att.get("error") or att.get("error_message") or ""),
+                KernelRewriteRun(
+                    lane=LaneRunFields(
+                        run_id=attempt_id or f"{run_id}-{backend}",
+                        status=status_lower or "unknown",
+                        started_at=str(att.get("started_at") or att.get("created_at") or att.get("ts") or ""),
+                        ended_at=str(att.get("ended_at") or ""),
+                        duration_sec=to_float(
+                            att.get("duration_sec") or att.get("elapsed_sec") or att.get("elapsed_s")
+                        ),
+                        micro_decision=decision,
+                        integrate_ref=str(result.get("integration_id") or "") if is_adopted else "",
+                        failure_reason=str(att.get("error") or att.get("error_message") or ""),
+                        error_class=str(att.get("error_class") or ""),
+                    ),
+                    kernel_id=kid,
+                    kernel_name=str(result.get("kernel_name") or result.get("name") or ""),
+                    dispatched=True,
+                    backends_tried=all_backends or ([backend] if backend else []),
+                    adopted_backend=backend if is_adopted else "",
+                    task_group=task_group,
+                    speedup=micro_speedup,
+                    compile_status="passed"
+                    if compile_passed is True
+                    else ("failed" if compile_passed is False else ""),
+                    correctness=correctness_passed,
+                    artifact_path=artifact_path,
+                )
             )
         return
 
@@ -205,22 +214,26 @@ def _mirror_backend_attempts_to_kernel_timeline(result: dict[str, Any], recorder
         return
     backend = str(result.get("backend") or "").lower() or "unknown"
     recorder.record_kernel_rewrite(
-        # ``:`` is the fragment key's own separator, so a synthesized run id
-        # must not contain one or the row is dropped on the way to the event.
-        run_id=run_id or f"{kid}-predispatch",
-        kernel_id=kid,
-        status=status or "failed",
-        dispatched=False,
-        backends_tried=[backend] if backend != "unknown" else [],
-        # ``reason`` first: for an undispatched row it is the only field that
-        # names *which* gate declined -- below the GPU-share floor, merged into
-        # an op-fanout representative, a group already in flight. ``status`` is
-        # "skipped" for all of them, so reading it first collapses the
-        # distinction this row exists to draw.
-        skip_reason=str(result.get("reason") or result.get("skip_reason") or err_class or status or ""),
-        micro_decision=decision or ("SKIPPED" if skipped else "FAILED"),
-        error_class=err_class,
-        failure_reason=str(result.get("error") or err_class or ""),
+        KernelRewriteRun(
+            lane=LaneRunFields(
+                # ``:`` is the fragment key's own separator, so a synthesized run id
+                # must not contain one or the row is dropped on the way to the event.
+                run_id=run_id or f"{kid}-predispatch",
+                status=status or "failed",
+                micro_decision=decision or ("SKIPPED" if skipped else "FAILED"),
+                failure_reason=str(result.get("error") or err_class or ""),
+                error_class=err_class,
+            ),
+            kernel_id=kid,
+            dispatched=False,
+            backends_tried=[backend] if backend != "unknown" else [],
+            # ``reason`` first: for an undispatched row it is the only field that
+            # names *which* gate declined -- below the GPU-share floor, merged into
+            # an op-fanout representative, a group already in flight. ``status`` is
+            # "skipped" for all of them, so reading it first collapses the
+            # distinction this row exists to draw.
+            skip_reason=str(result.get("reason") or result.get("skip_reason") or err_class or status or ""),
+        )
     )
 
 

@@ -619,34 +619,35 @@ def read_measurement(output_dir: Path) -> dict[str, Any]:
     return extract_benchmark_measurement(payload if isinstance(payload, dict) else None, workspace=output_dir)
 
 
-def run_mode(
-    layout: PartitionLayout,
-    devices: Sequence[int],
-    *,
-    template: Sequence[str],
-    output_root: Path,
-    streams_per_partition: int,
-    timeout_s: float,
-    base_env: dict[str, str] | None = None,
-) -> list[PartitionRun]:
+@dataclass(frozen=True)
+class BenchmarkWorkload:
+    """The benchmark every partition of every mode runs, where its output goes and how long it may take."""
+
+    template: Sequence[str]
+    output_root: Path
+    streams_per_partition: int
+    timeout_s: float
+
+
+def run_mode(layout: PartitionLayout, devices: Sequence[int], *, workload: BenchmarkWorkload) -> list[PartitionRun]:
     """Run the benchmark on every partition at once and collect each result."""
-    base = dict(os.environ if base_env is None else base_env)
+    base = dict(os.environ)
     runs: list[PartitionRun] = []
     procs: list[tuple[PartitionRun, subprocess.Popen[str] | None, Any]] = []
 
     for position, device in enumerate(devices):
-        out_dir = output_root / layout.mode.lower() / f"partition{position}"
+        out_dir = workload.output_root / layout.mode.lower() / f"partition{position}"
         out_dir.mkdir(parents=True, exist_ok=True)
         run = PartitionRun(partition_index=position, hsa_device=device, output_dir=out_dir)
         runs.append(run)
         cmd = build_partition_command(
-            template,
+            workload.template,
             device=device,
             output_dir=out_dir,
             layout=layout,
             partition_index=position,
         )
-        env = partition_env(base, layout, device=device, streams_per_partition=streams_per_partition)
+        env = partition_env(base, layout, device=device, streams_per_partition=workload.streams_per_partition)
         log = None
         try:
             log = (out_dir / "benchmark.log").open("w", encoding="utf-8")
@@ -665,7 +666,7 @@ def run_mode(
             continue
         procs.append((run, proc, log))
 
-    deadline = time.monotonic() + max(1.0, timeout_s)
+    deadline = time.monotonic() + max(1.0, workload.timeout_s)
     for run, proc, log in procs:
         if proc is None:
             continue
@@ -675,7 +676,7 @@ def run_mode(
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait(timeout=30)
-            run.error = f"exceeded the {timeout_s:.0f}s budget"
+            run.error = f"exceeded the {workload.timeout_s:.0f}s budget"
             run.returncode = -1
         finally:
             if log is not None:
@@ -943,13 +944,7 @@ def _inspect_card(args: argparse.Namespace) -> _Card:
     return _Card(entry_mode=entry_mode, bus=bus, total_gib=card_gib, modes=tuple(modes))
 
 
-def _sweep_modes(
-    args: argparse.Namespace,
-    card: _Card,
-    *,
-    template: Sequence[str],
-    output_root: Path,
-) -> _Sweep:
+def _sweep_modes(args: argparse.Namespace, card: _Card, *, workload: BenchmarkWorkload) -> _Sweep:
     """Set each mode in turn and benchmark it, then put the card back.
 
     A signal finishes the mode in flight rather than abandoning the card
@@ -976,7 +971,7 @@ def _sweep_modes(
             results.append(result)
             print(f"\n--- {mode} ---")
             try:
-                _benchmark_mode(args, card, result, template=template, output_root=output_root)
+                _benchmark_mode(args, card, result, workload=workload)
             except (SweepError, PartitionError) as exc:
                 result.error = str(exc)
                 print(f"  failed: {exc}")
@@ -993,14 +988,7 @@ def _sweep_modes(
     return _Sweep(results=results, unexpected=unexpected, restore_failed=restore_failed)
 
 
-def _benchmark_mode(
-    args: argparse.Namespace,
-    card: _Card,
-    result: ModeResult,
-    *,
-    template: Sequence[str],
-    output_root: Path,
-) -> None:
+def _benchmark_mode(args: argparse.Namespace, card: _Card, result: ModeResult, *, workload: BenchmarkWorkload) -> None:
     """Set one mode and run the workload once per partition, recording both."""
     set_mode(args.gpu, result.mode, sudo=args.sudo)
     agents = read_hsa_agents()
@@ -1017,14 +1005,7 @@ def _benchmark_mode(
         return
     devices = select_partition_devices(agents, layout, bus=card.bus)
     print(f"  {layout.partitions} partition(s) of {layout.cu_per_partition} CU at HIP devices {list(devices)}")
-    result.runs = run_mode(
-        layout,
-        devices,
-        template=template,
-        output_root=output_root,
-        streams_per_partition=args.streams_per_partition,
-        timeout_s=args.timeout,
-    )
+    result.runs = run_mode(layout, devices, workload=workload)
     ok = sum(1 for r in result.runs if r.ok)
     print(f"  {ok}/{len(result.runs)} partition(s) reported")
     for run in result.runs:
@@ -1094,7 +1075,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     output_root = args.output_dir.expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
-    sweep = _sweep_modes(args, card, template=template, output_root=output_root)
+    workload = BenchmarkWorkload(
+        template=template,
+        output_root=output_root,
+        streams_per_partition=args.streams_per_partition,
+        timeout_s=args.timeout,
+    )
+    sweep = _sweep_modes(args, card, workload=workload)
     unexpected = _write_report(sweep, entry_mode=card.entry_mode, gpu_id=args.gpu, output_root=output_root)
 
     # A card left in the wrong shape outranks everything else: it mislabels whatever runs on the node next, not just
