@@ -18,6 +18,7 @@ from typing import Callable, Sequence
 from hyperloom.common.unified_diff import parse_unified_diff
 
 from ._file_lock import best_effort_file_lock
+from ._git import _git_head_sha
 
 log = logging.getLogger(__name__)
 
@@ -392,26 +393,6 @@ def ensure_xdit_patched_for_tracelens(
     return _ensure_patched(plan)
 
 
-def _detect_xdit_sha(source_root: Path) -> str | None:
-    """Return the HEAD commit SHA for the xDiT checkout, or ``None``."""
-    git = shutil.which("git")
-    if git is None or not (source_root / ".git").exists():
-        return None
-    try:
-        proc = subprocess.run(
-            [git, "-C", str(source_root), "rev-parse", "HEAD"],
-            check=False,
-            text=True,
-            capture_output=True,
-            timeout=_GIT_TIMEOUT_SEC,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if proc.returncode != 0:
-        return None
-    return proc.stdout.strip() or None
-
-
 def _resolve_xdit_patch_file(patches_dir: Path, version: str) -> Path | None:
     """Pick the TraceLens xDiT patch for ``version`` with nearest-lower fallback."""
     exact = patches_dir / f"config_xdit_v{version}.patch"
@@ -449,8 +430,8 @@ def _discover_xdit_plan(arg: Path | str | None) -> _PatchPlan | None:
         log.info("_server_patcher: xDiT source root %s not found; skip patch", source_root)
         return None
 
-    sha = _detect_xdit_sha(source_root)
-    if sha is None:
+    sha = _git_head_sha(source_root)
+    if not sha:
         log.info("_server_patcher: cannot read xDiT HEAD SHA at %s; skip patch", source_root)
         return None
 
