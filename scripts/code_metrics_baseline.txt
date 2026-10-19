@@ -715,7 +715,6 @@ function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter._h
 function-lines src/hyperloom/orchestrator/loop/intent_router.py::IntentRouter.handle_delegate 179
 function-lines src/hyperloom/orchestrator/loop/proposals.py::ProposalsCollaborator.materialize_approved_proposal 124
 function-lines src/hyperloom/orchestrator/loop/sub_agent_runner.py::SubAgentRunner.run_task 167
-function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._resume_consistency_pass 81
 function-lines src/hyperloom/orchestrator/loop/writeback.py::WritebackCollaborator._resume_recover_pending_warm_replay 85
 function-lines src/hyperloom/orchestrator/measurement/apply_verification.py::verify_applied 81
 function-lines src/hyperloom/orchestrator/phases/close.py::ClosePhase.on_enter_close 112
