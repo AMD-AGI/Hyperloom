@@ -15,72 +15,41 @@ from hyperloom.inference_optimizer import multi_node
 from hyperloom.orchestrator.actions.executors import _multi_node_server_lifecycle as life
 
 
-class _Resp:
-    """Minimal httpx-like response."""
-
-    def __init__(self, status: int, payload: object = None) -> None:
-        self.status_code = status
-        self._payload = payload
-
-    def json(self) -> object:
-        return self._payload
-
-
-class _Client:
-    """Async httpx client answering each endpoint from a scripted sequence; the last outcome repeats."""
-
-    def __init__(self, routes: dict[str, list[object]], calls: list[str]) -> None:
-        self._routes = routes
-        self._seen = dict.fromkeys(routes, 0)
-        self.calls = calls
-
-    async def __aenter__(self) -> "_Client":
-        return self
-
-    async def __aexit__(self, *_exc: object) -> bool:
-        return False
-
-    async def _answer(self, url: str) -> _Resp:
-        route = url.rsplit("/", 1)[-1]
-        self.calls.append(route)
-        script = self._routes[route]
-        outcome = script[min(self._seen[route], len(script) - 1)]
-        self._seen[route] += 1
-        if isinstance(outcome, BaseException):
-            raise outcome
-        return outcome  # type: ignore[return-value]
-
-    async def get(self, url: str, **_kwargs: object) -> _Resp:
-        return await self._answer(url)
-
-    async def post(self, url: str, **_kwargs: object) -> _Resp:
-        return await self._answer(url)
-
-
 @pytest.fixture
 def serve(monkeypatch: pytest.MonkeyPatch):
-    """Install a scripted httpx client and return the list of endpoints it was asked for."""
+    """Install a scripted httpx transport and return the list of endpoints it was asked for."""
 
     async def _no_sleep(_seconds: float) -> None:
         return None
 
     monkeypatch.setattr(life.asyncio, "sleep", _no_sleep)
+    real_client = httpx.AsyncClient
 
     def _install(routes: dict[str, list[object]], state: dict[str, object]) -> list[str]:
         calls: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            route = request.url.path.rsplit("/", 1)[-1]
+            script = routes[route]
+            outcome = script[min(calls.count(route), len(script) - 1)]
+            calls.append(route)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
         monkeypatch.setattr(life, "_read_state", lambda: state)
         monkeypatch.setattr(life, "is_multi_node", lambda: True)
-        monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: _Client(routes, calls))
+        monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: real_client(transport=httpx.MockTransport(handler)))
         return calls
 
     return _install
 
 
-_OK = _Resp(200)
+_OK = httpx.Response(200)
 _BASE = {
     "health": [_OK],
-    "models": [_Resp(200, {"data": [{"id": "m"}]})],
-    "completions": [_Resp(200, {"usage": {"completion_tokens": 8}})],
+    "models": [httpx.Response(200, json={"data": [{"id": "m"}]})],
+    "completions": [httpx.Response(200, json={"usage": {"completion_tokens": 8}})],
 }
 _INFERA = {"backend": "infera", "service_url": "http://front:8000"}
 _WORKERS = {"prefill_pods": [{"podIP": "10.0.0.1", "podId": "p0"}]}

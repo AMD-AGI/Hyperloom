@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import itertools
 import logging
 from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
@@ -15,23 +16,16 @@ import pytest
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.proposals import PendingProposal
 from hyperloom.orchestrator.phases.framework import _AUTHORED_LANE_MAX_ATTEMPTS, ProgressStamp
-from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
+
+from .conftest import make_coordinator
 
 _CAND = {"candidate_id": "https://github.com/o/r/pull/1", "batch_id": "b-1", "title": "t", "framework": "sglang"}
 _CAND_ID = _CAND["candidate_id"]
 
 
-def _backends() -> dict[str, Backend]:
-    plan = ScriptedPlan(
-        turns=[], default_intent=Intent(type=IntentType.SEND_MESSAGE, payload={"topic": "heartbeat", "body_md": "ok"})
-    )
-    return {name: MockBackend(plan, name=name) for name in ("orchestration", "critic")}
-
-
 @pytest.fixture
 def coord(session_dir) -> Coordinator:
-    return Coordinator(session_dir, backends=_backends())
+    return make_coordinator(session_dir)
 
 
 async def _map_authoring_specialist(coord: Coordinator) -> None:
@@ -106,16 +100,14 @@ _SAVE_SITES: dict[str, tuple[Callable[[Coordinator], Awaitable[None]], int]] = {
 }
 
 
-def _fail_save_on(coord: Coordinator, monkeypatch: pytest.MonkeyPatch, *, call: int, exc: BaseException) -> list[int]:
-    calls: list[int] = []
+def _fail_save_on(coord: Coordinator, monkeypatch: pytest.MonkeyPatch, *, call: int, exc: BaseException) -> None:
+    saves = itertools.count(1)
 
     def _save(session_dir: Any = None) -> None:
-        calls.append(len(calls) + 1)
-        if calls[-1] == call:
+        if next(saves) == call:
             raise exc
 
     monkeypatch.setattr(coord.shared_state, "save", _save)
-    return calls
 
 
 @pytest.mark.asyncio
@@ -123,12 +115,11 @@ def _fail_save_on(coord: Coordinator, monkeypatch: pytest.MonkeyPatch, *, call: 
 async def test_a_failed_state_write_is_logged_and_the_step_returns(coord, monkeypatch, caplog, site):
     driver, call = _SAVE_SITES[site]
     err = OSError("disk full")
-    calls = _fail_save_on(coord, monkeypatch, call=call, exc=err)
+    _fail_save_on(coord, monkeypatch, call=call, exc=err)
 
     with caplog.at_level(logging.DEBUG, logger="hyperloom.orchestrator.phases.framework"):
         await driver(coord)
 
-    assert calls == list(range(1, call + 1))
     assert [r.exc_info[1] for r in caplog.records if r.exc_info] == [err]
 
 

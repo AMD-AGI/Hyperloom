@@ -9,7 +9,6 @@ import asyncio
 import json
 import time
 import zipfile
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -739,21 +738,6 @@ async def test_close_sequencer_records_degraded_when_a_step_fails(
     ]
 
 
-def _fail_close_save(
-    coord, monkeypatch: pytest.MonkeyPatch, exc: BaseException, *, when: Callable[[SharedState], bool]
-):
-    """Make ``coord.shared_state.save`` raise ``exc`` once, on the first call ``when`` accepts."""
-    state = coord.shared_state
-    raised: list[bool] = []
-
-    def _save(session_dir=None) -> None:
-        if not raised and when(state):
-            raised.append(True)
-            raise exc
-
-    monkeypatch.setattr(state, "save", _save)
-
-
 async def _record_step(coord) -> None:
     await coord.phase_close._record_close_step("report", status="done")
 
@@ -775,13 +759,21 @@ _CLOSE_SAVE_SITES = {
 
 @pytest.fixture
 def fail_close_save(coord, tmp_path, monkeypatch):
-    """Return an async runner that raises ``exc`` from the first matching save inside a close site."""
+    """Return an async runner that makes the first matching ``state.save`` inside a close site raise ``exc``."""
     monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
     coord.shared_state.phase_history = [_close_phase_history_row()]
+    state = coord.shared_state
 
     async def _run(site: str, exc: BaseException) -> None:
         call, when = _CLOSE_SAVE_SITES[site]
-        _fail_close_save(coord, monkeypatch, exc, when=when)
+        raised: list[bool] = []
+
+        def _save(session_dir=None) -> None:
+            if not raised and when(state):
+                raised.append(True)
+                raise exc
+
+        monkeypatch.setattr(state, "save", _save)
         await call(coord)
 
     return _run
@@ -807,41 +799,32 @@ async def test_close_save_serialization_defect_propagates(fail_close_save, site)
         await fail_close_save(site, TypeError("not JSON serializable"))
 
 
+_RECORDER = "hyperloom.inference_optimizer.breakdown.recorder"
 _CLOSE_RECORD_STEPS = [
-    ("roofline_progress", "_record_close_roofline_progress", "close_out.record_roofline_progress"),
-    ("baseline_progress", "_record_close_baseline_progress", "close_out.record_baseline_progress"),
-    ("stack_ledger", "_close_stack_ledger", "stack_event.finish"),
-    ("final_recipe", "_record_close_final_recipe", "close_out.record_final_recipe"),
+    ("roofline_progress", "close_out.record_roofline_progress"),
+    ("baseline_progress", "close_out.record_baseline_progress"),
+    ("stack_ledger", "stack_event.finish"),
+    ("final_recipe", "close_out.record_final_recipe"),
 ]
-_CLOSE_RECORD_TARGETS = {
-    "close_out": "hyperloom.inference_optimizer.breakdown.recorder.close_out",
-    "stack_event": "hyperloom.inference_optimizer.breakdown.recorder.stack_event",
-}
-
-
-def _fail_close_recorder(monkeypatch: pytest.MonkeyPatch, target: str) -> None:
-    module, attr = target.split(".")
-
-    def _boom(*args, **kwargs):
-        raise RuntimeError(f"{attr} boom")
-
-    monkeypatch.setattr(f"{_CLOSE_RECORD_TARGETS[module]}.{attr}", _boom)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("step", "helper", "target"), _CLOSE_RECORD_STEPS)
-async def test_close_sequencer_records_a_failed_record_step_and_carries_on(
-    coord, tmp_path, monkeypatch, step, helper, target
-):
+@pytest.mark.parametrize(("step", "target"), _CLOSE_RECORD_STEPS)
+async def test_close_sequencer_records_a_failed_record_step_and_carries_on(coord, tmp_path, monkeypatch, step, target):
     monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(tmp_path / "session-packages"))
     coord.shared_state.phase_history = [_close_phase_history_row()]
-    _fail_close_recorder(monkeypatch, target)
+    boom = RuntimeError(f"{target} boom")
+
+    def _fail(*_args, **_kwargs):
+        raise boom
+
+    monkeypatch.setattr(f"{_RECORDER}.{target}", _fail)
 
     await _enter_close(coord)
 
     rows = coord.shared_state.phase_history[-1]["evidence"]["close_steps"]
     failed = [(row["step"], row["detail"]) for row in rows if row["status"] == "failed"]
-    assert failed == [(step, repr(RuntimeError(f"{target.split('.')[1]} boom")))]
+    assert failed == [(step, repr(boom))]
     assert rows[-1]["step"] == "done"
     assert coord.shared_state.close_sequence_done is True
 
