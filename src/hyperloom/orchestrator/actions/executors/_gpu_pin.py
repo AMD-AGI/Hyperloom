@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+
 import os
 import shlex
 from collections.abc import Mapping
@@ -374,6 +375,35 @@ def _resolve_handoff_gpu_ids_space(*, gpu_pin: Mapping[str, Any] | None) -> str:
     if pin and int(pin.get("count") or 0) <= 0:
         return "none"
     return "logical" if _pin_renumbers_devices(pin) else "absolute"
+
+
+def _resolve_handoff_physical_gpus(
+    *, gpu_ids: str, gpu_ids_space: str, gpu_pin: Mapping[str, Any] | None
+) -> list[int] | None:
+    """The physical cards, numbered as rocm-smi numbers them, that ``gpu_ids`` puts GEAK's servers on.
+
+    Absolute ids are the cards themselves; logical ids index into the ROCr pin's own numeric ids.
+
+    Args:
+        gpu_ids: The handoff's :func:`_resolve_handoff_gpu_ids` result.
+        gpu_ids_space: Its :func:`_resolve_handoff_gpu_ids_space` result.
+        gpu_pin: The :func:`resolve_gpu_pin` result (``{}``/``None`` = unpinned).
+
+    Returns:
+        The card indices, or ``None`` when they cannot be named: an empty mask, a UUID mask in either space, or a
+        logical id the ROCr pin does not expose.
+    """
+    tokens = effective_mask_tokens(gpu_ids)
+    if gpu_ids_space == "none" or not tokens or not all(tok.isdigit() for tok in tokens):
+        return None
+    ids = [int(tok) for tok in tokens]
+    if gpu_ids_space != "logical":
+        return ids
+    pin = gpu_pin or {}
+    cards = [int(card) for card in pin.get("ids") or []]
+    if len(cards) != int(pin.get("count", len(cards))) or any(i >= len(cards) for i in ids):
+        return None
+    return [cards[i] for i in ids]
 
 
 def coerce_tp(*args: Any, default: int = 1) -> int:

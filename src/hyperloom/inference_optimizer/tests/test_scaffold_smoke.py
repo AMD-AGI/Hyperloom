@@ -17,7 +17,6 @@ from hyperloom.orchestrator.bus.storage import (
     SqliteConnection,
     ensure_schema,
     open_connection,
-    reset_schema,
 )
 
 
@@ -86,26 +85,6 @@ def test_ensure_schema_is_idempotent(tmp_path):
         v1 = ensure_schema(conn)
         v2 = ensure_schema(conn)
         assert v1 == v2 == SCHEMA_VERSION
-    finally:
-        conn.close()
-
-
-def test_reset_schema_drops_and_recreates(tmp_path):
-    db = _new_db(tmp_path)
-    conn = open_connection(db)
-    try:
-        conn.execute(
-            "INSERT INTO leases(lane, holder_id, task_id, action, pid, "
-            "acquired_at, expires_at, heartbeat_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            ("benchmark_lane", "h1", "t1", "bench_runner", 1, "t", "t", "t"),
-        )
-        conn.commit()
-        (n,) = conn.execute("SELECT COUNT(*) FROM leases").fetchone()
-        assert n == 1
-        reset_schema(conn)
-        (n,) = conn.execute("SELECT COUNT(*) FROM leases").fetchone()
-        assert n == 0
     finally:
         conn.close()
 

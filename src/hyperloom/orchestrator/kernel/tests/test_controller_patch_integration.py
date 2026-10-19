@@ -201,6 +201,7 @@ async def _integrate(
     session_dir: Path,
     shared_state: SharedState,
     validator,
+    **options,
 ):
     """Integrate through the production KEEP recorder bound to *shared_state*.
 
@@ -215,6 +216,7 @@ async def _integrate(
         shared_state=shared_state,
         record_keep=coordinator.writeback.record_integrate_keep,
         validator=validator,
+        **options,
     )
 
 
@@ -265,6 +267,48 @@ async def test_multiple_patches_are_kept_and_committed_one_by_one(tmp_path: Path
     assert int(_git(repo, "rev-list", "--count", "HEAD")) == 3
     assert len(state.optimization_stack) == 2
     assert state.current_best["tput"] == 112.0
+
+
+@pytest.mark.asyncio
+async def test_a_patch_whose_round_the_phase_cannot_fit_is_left_unapplied(tmp_path: Path, monkeypatch) -> None:
+    """The Controller's reserve pays for the first round; a later one the KERNEL budget cannot fit never starts."""
+    from hyperloom.orchestrator.phases import machine_state
+    from hyperloom.orchestrator.phases.kernel_round_budget import controller_round_stop
+
+    repo, base = _repo(tmp_path)
+    patches = tmp_path / "cycle" / "result" / "patches"
+    for name, value in (("first", 2), ("second", 3)):
+        _publish(
+            patches,
+            repo,
+            base,
+            kernel_name=name,
+            kernel_path=f"{name}.py",
+            patch=_patch(repo, f"{name}.py", f"VALUE = {value}\n"),
+        )
+    seen: list[str] = []
+
+    async def _validate(publication):
+        seen.append(publication.identity["kernel_name"])
+        return {"decision": "KEEP", "new_tput": 110.0, "gain_pct": 10.0}
+
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    state = _state(session_dir, repo)
+    state.baseline_runtime_sec = 600.0
+    monkeypatch.setattr(machine_state, "phase_budget_remaining_seconds", lambda _state, **_kw: 60.0)
+    summary = await _integrate(
+        patches_root=patches,
+        session_dir=session_dir,
+        shared_state=state,
+        validator=_validate,
+        admit_round=lambda rounds_run: controller_round_stop(state, rounds_run),
+    )
+
+    assert seen == ["first"]
+    assert [result.status for result in summary.results] == ["kept", "phase_time_exhausted"]
+    assert (repo / "second.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert summary.status == "completed"
 
 
 @pytest.mark.asyncio

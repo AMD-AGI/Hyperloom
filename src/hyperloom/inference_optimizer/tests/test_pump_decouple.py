@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from hyperloom.orchestrator.loop.coordinator import RunOptions
 
 
 class _Gated:
@@ -38,20 +39,21 @@ class _Instant(_Gated):
 
 @pytest.fixture
 def coord(tmp_path: Path):
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState(session_id="decouple-test")
-    state.max_minutes = 30
+    # Room for a patch specialist's 60-minute admission floor.
+    state.max_minutes = 120
     state.save(tmp_path)
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
     return Coordinator(
         session_dir=tmp_path,
         backends={name: MockBackend(idle) for name in ("orchestration", "critic")},
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
 
 
@@ -237,7 +239,9 @@ async def test_the_closing_grace_waits_on_a_report_that_outlived_the_close_seque
     coord.phase_close.enter_closing_phase = _enter
     coord.phase_close.ensure_close_sequence = _close_sequence
 
-    await asyncio.wait_for(coord.run(max_minutes=0.001, closing_grace_sec=30.0, tick_interval_sec=0.0), timeout=20)
+    await asyncio.wait_for(
+        coord.run(options=RunOptions(max_minutes=0.001, tick_interval_sec=0.0, closing_grace_sec=30.0)), timeout=20
+    )
 
     assert report.calls
     assert int(coord.shared_state.tick) - closing_tick[0] < 20

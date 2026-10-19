@@ -12,7 +12,7 @@ from typing import Any
 
 from hyperloom.common.env_safety import redact_secret_values
 
-from hyperloom.common.io import append_jsonl
+from hyperloom.common.io import JsonLineFormat, append_jsonl
 from hyperloom.inference_optimizer.session.session_paths import conversations_path
 from ._row_utils import call_key_fields, validate_closed_row
 from .llm_trace import VALID_COMPONENTS
@@ -83,7 +83,7 @@ def append_conversation(
     )
     dest = target if target is not None else conversations_path(session_dir)
     try:
-        append_jsonl(dest, row, make_parents=True, ensure_ascii=False)
+        append_jsonl(dest, row, make_parents=True, fmt=JsonLineFormat(ensure_ascii=False))
     except OSError as exc:
         log.warning(
             "conversation_trace: append failed for component=%s session_id=%s: %r",

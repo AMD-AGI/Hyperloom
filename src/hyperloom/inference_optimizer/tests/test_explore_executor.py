@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -38,6 +39,10 @@ from hyperloom.orchestrator.actions.executors.explore import (
     _default_grid_for_framework,
     filter_baseline_noop_variants,
     observed_launch_from_state,
+)
+from hyperloom.orchestrator.actions.executors._launch_restatement import (
+    config_launch_restated_by,
+    restates_the_baseline,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.common.env import is_truthy
@@ -377,6 +382,114 @@ def test_a_setting_the_engine_rewrote_is_not_already_in_effect(tmp_path):
         # Only the rewritten settings are unknown: a plain restatement still drops.
         _, dropped = filter_baseline_noop_variants([_variant(_RESTATES_ARGV)], **kwargs)
         assert [name for name, _ in dropped] == [_CANDIDATE]
+
+
+# The operator baseline's own argv, as a vLLM stack carries it: both flags a
+# restating variant names are already set here.
+_VLLM_BASE_ARGV = "--kv-cache-dtype fp8 --enable-prefix-caching --max-num-seqs 64"
+
+
+def _vllm_noop_filter_kwargs(tmp_path: Path) -> dict:
+    base_yaml = tmp_path / "vllm_base.yaml"
+    base_yaml.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "vllm",
+                    "envs": {"VLLM_ROCM_USE_AITER": "1", "EXTRA_VLLM_ARGS": _VLLM_BASE_ARGV},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return _noop_filter_kwargs(
+        tmp_path,
+        framework="vllm",
+        base_yaml_path=base_yaml,
+        observed_server_config={"kv_cache_dtype": "fp8", "enable_prefix_caching": True, "max_num_seqs": 64},
+        observed_server_env={"VLLM_ROCM_USE_AITER": "1"},
+    )
+
+
+def test_a_variant_that_only_restates_the_baseline_launch_is_dropped(tmp_path):
+    """A variant naming flags the baseline already sets launches the baseline again, and costs a full measurement.
+
+    Its merged launch has no delta from the baseline, which is also what a change
+    the merged config cannot express looks like; the variant's own request is
+    what tells the two apart.
+    """
+    grid = [
+        GridVariant("kv-cache-fp8", extra_server_args="--kv-cache-dtype fp8"),
+        GridVariant("maxseqs-64", extra_server_args="--max-num-seqs=64"),
+        GridVariant("aiter-on", extra_envs={"VLLM_ROCM_USE_AITER": "1"}),
+        GridVariant("maxseqs-128", extra_server_args="--max-num-seqs 128"),
+        GridVariant("restates-one-changes-one", extra_server_args="--kv-cache-dtype fp8 --block-size 128"),
+    ]
+    kept, dropped = filter_baseline_noop_variants(grid, **_vllm_noop_filter_kwargs(tmp_path))
+
+    assert [name for name, _ in dropped] == ["kv-cache-fp8", "maxseqs-64", "aiter-on"]
+    assert all("baseline noop" in reason for _, reason in dropped)
+    assert [gv.name for gv in kept] == ["maxseqs-128", "restates-one-changes-one"]
+
+
+def test_a_replacing_variant_is_not_a_restatement(tmp_path):
+    """``args_mode=replace`` drops every baseline arg it does not name, which the merged-delta probe cannot show."""
+    variant = GridVariant("replace-with-a-subset", extra_server_args="--kv-cache-dtype fp8", args_mode="replace")
+    kept, dropped = filter_baseline_noop_variants([variant], **_vllm_noop_filter_kwargs(tmp_path))
+    assert [gv.name for gv in kept] == ["replace-with-a-subset"]
+    assert dropped == []
+
+
+def test_restated_args_with_a_kernel_overlay_are_not_a_restatement(tmp_path):
+    """The overlay changes the code launched; only the merged config shows it, so the variant runs."""
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    variant = GridVariant("kv-cache-fp8-with-kernel", extra_server_args="--kv-cache-dtype fp8")
+    variant.overlay_pythonpath = str(overlay)  # type: ignore[attr-defined]
+    kept, dropped = filter_baseline_noop_variants([variant], **_vllm_noop_filter_kwargs(tmp_path))
+    assert [gv.name for gv in kept] == ["kv-cache-fp8-with-kernel"]
+    assert dropped == []
+
+
+def test_a_null_baseline_env_is_unset_not_the_string_none(tmp_path):
+    """The launch leaves a null env unset, so a request for the string ``None`` sets something new."""
+    config = tmp_path / "baseline.yaml"
+    config.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "vllm", "envs": {"FOO": None, "EXTRA_VLLM_ARGS": _VLLM_BASE_ARGV}}}),
+        encoding="utf-8",
+    )
+    assert config_launch_restated_by(str(config), "", {"FOO": "None"}, "vllm") is False
+    assert config_launch_restated_by(str(config), "--kv-cache-dtype fp8", {}, "vllm") is True
+    assert config_launch_restated_by(str(tmp_path / "missing.yaml"), "--kv-cache-dtype fp8", {}, "vllm") is False
+
+
+@pytest.mark.parametrize(
+    ("argv", "envs", "base_argv", "expected"),
+    [
+        pytest.param("--kv-cache-dtype fp8", {}, _VLLM_BASE_ARGV, True, id="restated_flag"),
+        pytest.param("--enable-prefix-caching", {}, _VLLM_BASE_ARGV, True, id="restated_bare_flag"),
+        pytest.param("", {"VLLM_ROCM_USE_AITER": "1"}, _VLLM_BASE_ARGV, True, id="restated_env"),
+        pytest.param("", {}, _VLLM_BASE_ARGV, False, id="empty_request"),
+        pytest.param("--kv-cache-dtype auto", {}, _VLLM_BASE_ARGV, False, id="different_value"),
+        pytest.param("--block-size 128", {}, _VLLM_BASE_ARGV, False, id="setting_the_baseline_lacks"),
+        pytest.param("", {"VLLM_ROCM_USE_AITER": "0"}, _VLLM_BASE_ARGV, False, id="different_env"),
+        pytest.param("", {"NEW_ENV": "1"}, _VLLM_BASE_ARGV, False, id="env_the_baseline_lacks"),
+        pytest.param("fp8 --kv-cache-dtype fp8", {}, _VLLM_BASE_ARGV, False, id="positional_token"),
+        pytest.param("--kv-cache-dtype 'fp8", {}, _VLLM_BASE_ARGV, False, id="unparsable"),
+        pytest.param(
+            "--enable-prefix-caching",
+            {},
+            "--enable-prefix-caching --no-enable-prefix-caching",
+            False,
+            id="negated_spelling_in_the_baseline",
+        ),
+        pytest.param("--cuda-graph-bs 1 2 4", {}, "--cuda-graph-bs 1 2 4", True, id="list_restated_in_full"),
+        pytest.param("--cuda-graph-bs 1 2", {}, "--cuda-graph-bs 1 2 4", False, id="list_restated_in_part"),
+    ],
+)
+def test_restates_the_baseline(argv, envs, base_argv, expected):
+    """Only a request every part of which the baseline already sets is a restatement; anything unreadable is not."""
+    assert restates_the_baseline(argv, envs, base_argv, {"VLLM_ROCM_USE_AITER": "1"}, "vllm") is expected
 
 
 def test_record_explore_accepted_dedup_by_fingerprint():
@@ -2202,6 +2315,81 @@ async def test_explore_skips_a_variant_the_budget_cannot_fit(
     assert res.result["explore_search_update"]["tested"] == {}
 
 
+async def _explore_under_phase_budget(sub_agent_runner, tmp_path, *, phase_left_sec: list[float], variants: int):
+    """Run a cold explore of ``variants`` 20s variants while the phase reads ``phase_left_sec`` before each one."""
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    started: list[int] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        if "--output-dir" not in cmd:
+            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+        started.append(int(kwargs["timeout"]))
+        _fake_workspace(Path(cmd[cmd.index("--output-dir") + 1]), tput=840.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    grid = [
+        {"name": f"v{i}", "extra_args": f"--max-num-seqs {64 << i}", "extra_envs": {}, "provenance": "default_grid"}
+        for i in range(variants)
+    ]
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-phase"),
+            "base_tput": 800.0,
+            "grid": grid,
+            "baseline_runtime_sec": 20.0,
+        },
+        idempotency_key=f"ex-phase-{variants}",
+    )
+    remaining = iter(phase_left_sec)
+    phase_deadline = SimpleNamespace(remaining=lambda: next(remaining))
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task, extra_context={"phase_deadline": phase_deadline})
+    return res.result, started
+
+
+@pytest.mark.asyncio
+async def test_explore_finishes_the_variant_in_flight_and_starts_none_the_phase_cannot_fit(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """The phase budget is judged before a variant starts, never against the one being measured."""
+    _force_cold_decision(monkeypatch)
+    result, started = await _explore_under_phase_budget(
+        sub_agent_runner, tmp_path, phase_left_sec=[25.0, 10.0], variants=2
+    )
+
+    assert len(started) == 1
+    assert result["status"] == "succeeded"
+    assert result["session_budget_untested"] == 1
+
+
+@pytest.mark.asyncio
+async def test_explore_that_the_phase_cannot_fit_is_attributed_to_the_phase(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """A round the phase budget left unmeasured must not read as variants failing, nor as the session running out."""
+    _force_cold_decision(monkeypatch)
+    result, started = await _explore_under_phase_budget(sub_agent_runner, tmp_path, phase_left_sec=[10.0], variants=1)
+
+    assert started == []
+    assert result["error_class"] == "phase_time_exhausted"
+    assert result["losers"] == []
+
+
 @pytest.mark.asyncio
 async def test_explore_leaves_a_variant_the_run_reaped_out_of_the_ledger(
     sub_agent_runner,
@@ -3206,3 +3394,513 @@ async def test_explore_mlperf_reverts_when_turns_went_unscored(sub_agent_runner,
     accuracy = {gate["gate"]: gate for gate in tested["gates"]}["accuracy"]
     assert accuracy["reason"] == "accuracy_drop"
     assert accuracy["observed"] == 0.0, "an unscored turn scores the run 0.0 rather than skipping the gate"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("power_w", "expected_outcome"),
+    [pytest.param(812.0, "REVERT", id="over-budget"), pytest.param(650.0, "KEEP", id="in-budget")],
+)
+async def test_explore_grades_the_rounds_own_gpu_power_against_the_budget(
+    sub_agent_runner, tmp_path, monkeypatch, power_w, expected_outcome
+):
+    """Power comes from the round's own gpu_power.json through the real extraction; the total of the serving cards
+    is graded against the budget, and a KEEP reaches current_best."""
+
+    from hyperloom.orchestrator.loop import writeback as wb
+    from hyperloom.orchestrator.loop.coordinator import Coordinator
+
+    _force_cold_decision(monkeypatch)
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState(framework="sglang", model_path="/models/m", gpu_type="mi355x")
+    state.baseline_tput = 200.0
+    state.power_budget_w = 700.0
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        workspace = _fake_workspace(slot, tput=20000.0)
+        report_path = workspace / "benchmark_report.json"
+        assert report_path.exists()
+        half = power_w / 2
+        (workspace / "gpu_power.json").write_text(
+            json.dumps(
+                {
+                    "started_unix": time.time(),
+                    "serving_gpus": [4, 5],
+                    "avg_power_w": half,
+                    "per_gpu": {"4": {"avg_power_w": half}, "5": {"avg_power_w": half}},
+                }
+            )
+        )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-power"),
+            "base_tput": 200.0,
+            "grid": [{"name": "v_power", "extra_args": "--power-lever"}],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-power",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    tested = out["explore_search_update"]["tested"][canonical_fingerprint("--power-lever", {})]
+    assert tested["outcome"] == expected_outcome
+    if expected_outcome == "REVERT":
+        assert out["losers"][0]["reason"] == "power_budget_exceeded"
+        gates = {g["gate"]: g for g in tested["gates"]}
+        assert gates["power_budget"]["passed"] is False
+        assert "latency_budget" not in gates
+        return
+    assert out["winners"][0]["gpu_power_by_gpu_w"] == {"4": pytest.approx(power_w / 2), "5": pytest.approx(power_w / 2)}
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = state
+    await coord.writeback._promote_explore(out, None, wb._PromoteOutcome(verdict=wb.Verdict.RECORDED))
+    assert state.current_best["variant_name"] == "v_power"
+
+
+async def _run_explore_round(
+    sub,
+    tr,
+    tmp_path,
+    state,
+    *,
+    key: str,
+    grid: list[dict],
+    base_args: str,
+    bench_calls,
+    extra_params=None,
+    keep="",
+    fail="",
+):
+    """Run one explore round on ``state`` and fold its ledger update back, as write-back does.
+
+    Every variant measures within noise of the 800 anchor (REVERT) except the one named ``keep``, which KEEPs, and
+    the one named ``fail``, whose benchmark exits non-zero.
+    """
+
+    def _fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        bench_calls.append(slot.name)
+        if fail and slot.name.endswith(f"_{fail}"):
+            return subprocess.CompletedProcess(args=cmd, returncode=1, stdout="", stderr="boom")
+        _fake_workspace(slot, tput=900.0 if keep and slot.name.endswith(f"_{keep}") else 801.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    base = tmp_path / "base.yaml"
+    if not base.exists():
+        _write_baseline_yaml(base)
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / key),
+            "base_tput": 800.0,
+            "base_extra_args": base_args,
+            "grid": grid,
+            **(extra_params or {}),
+        },
+        idempotency_key=key,
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        out = (await sub.run_task(task)).result
+    state.apply_explore_search_update(out["explore_search_update"])
+    return out
+
+
+@pytest.mark.asyncio
+async def test_a_variant_measured_on_the_same_stack_is_not_measured_again(sub_agent_runner, tmp_path, monkeypatch):
+    """A later round skips a launch an earlier round already gave a verdict on; the new variant still runs."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    first: list[str] = []
+    await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="round-1",
+        grid=[{"name": "max_running_48", "extra_args": "--max-running-requests 48"}],
+        base_args="--base-flag 1",
+        bench_calls=first,
+    )
+    assert len(first) == 1
+
+    second: list[str] = []
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="round-2",
+        grid=[
+            # Same launch under another name.
+            {"name": "mrr_48", "extra_args": "--max-running-requests 48"},
+            {"name": "fresh", "extra_args": "--fresh-flag"},
+        ],
+        base_args="--base-flag 1",
+        bench_calls=second,
+    )
+    assert len(second) == 1
+    assert [v["name"] for v in out["losers"]] == ["fresh"]
+    skipped = {d["name"]: d for d in out["skipped_dup"]}
+    assert skipped["mrr_48"]["reason"] == "already_measured"
+    assert "max_running_48" in skipped["mrr_48"]["detail"]
+    assert out["status"] == "succeeded"
+
+    # A round with nothing left to measure is answered from the ledger, not failed.
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="round-3",
+        grid=[{"name": "mrr_48", "extra_args": "--max-running-requests 48"}],
+        base_args="--base-flag 1",
+        bench_calls=second,
+    )
+    assert len(second) == 1
+    assert out["status"] == "succeeded"
+
+    # A skipped variant does not make a round whose only new variant failed look successful.
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="round-4",
+        grid=[
+            {"name": "mrr_48", "extra_args": "--max-running-requests 48"},
+            {"name": "broken", "extra_args": "--broken-flag"},
+        ],
+        base_args="--base-flag 1",
+        bench_calls=second,
+        fail="broken",
+    )
+    assert out["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_a_budget_stop_after_a_skipped_variant_is_still_reported(sub_agent_runner, tmp_path, monkeypatch):
+    """Skipping a measured variant does not hide that the budget stopped the new one before it ran."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    measured = {"name": "max_running_48", "extra_args": "--max-running-requests 48"}
+    calls: list[str] = []
+    await _run_explore_round(sub, tr, tmp_path, state, key="r1", grid=[measured], base_args="", bench_calls=calls)
+    state.max_minutes = 3.0  # ~60s usable
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r2",
+        grid=[measured, {"name": "fresh", "extra_args": "--fresh-flag"}],
+        base_args="",
+        bench_calls=calls,
+        extra_params={"baseline_runtime_sec": 600.0},
+    )
+    assert len(calls) == 1
+    assert [d["reason"] for d in out["skipped_dup"]] == ["already_measured"]
+    assert out["status"] == "failed"
+    assert out["error_class"] == "session_time_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_a_measured_variant_with_removals_is_not_measured_again(sub_agent_runner, tmp_path, monkeypatch):
+    """A variant's own removals are part of the launch it measured, so the same removal is the same launch."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    grid = [{"name": "drop_base", "extra_args": "--x 1", "remove_args": ["--base-flag"]}]
+    calls: list[str] = []
+    await _run_explore_round(
+        sub, tr, tmp_path, state, key="r1", grid=grid, base_args="--base-flag 1", bench_calls=calls
+    )
+    out = await _run_explore_round(
+        sub, tr, tmp_path, state, key="r2", grid=grid, base_args="--base-flag 1", bench_calls=calls
+    )
+    assert len(calls) == 1
+    assert [d["reason"] for d in out["skipped_dup"]] == ["already_measured"]
+
+
+@pytest.mark.asyncio
+async def test_a_measured_variant_runs_after_a_keep_earlier_in_the_same_round(sub_agent_runner, tmp_path, monkeypatch):
+    """A KEEP advances the stack mid-round, so a variant measured on the round's opening stack is measured again."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    measured = {"name": "max_running_48", "extra_args": "--max-running-requests 48"}
+    calls: list[str] = []
+    await _run_explore_round(sub, tr, tmp_path, state, key="r1", grid=[measured], base_args="", bench_calls=calls)
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r2",
+        grid=[{"name": "winner", "extra_args": "--winner 1"}, measured],
+        base_args="",
+        bench_calls=calls,
+        keep="winner",
+    )
+    assert [v["name"] for v in out["winners"]] == ["winner"]
+    assert [v["name"] for v in out["losers"]] == ["max_running_48"]
+    assert out["skipped_dup"] == []
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_measured_variant_runs_again_once_the_stack_moved(sub_agent_runner, tmp_path, monkeypatch):
+    """The verdict belongs to the stack it was measured on; on a different base launch the variant is measured anew."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    grid = [{"name": "max_running_48", "extra_args": "--max-running-requests 48"}]
+    calls: list[str] = []
+    await _run_explore_round(
+        sub, tr, tmp_path, state, key="r1", grid=grid, base_args="--base-flag 1", bench_calls=calls
+    )
+    out = await _run_explore_round(
+        sub, tr, tmp_path, state, key="r2", grid=grid, base_args="--base-flag 2", bench_calls=calls
+    )
+    assert len(calls) == 2
+    assert out["skipped_dup"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_throughput_revert_is_measured_again_once_the_bar_decays_below_its_gain(
+    sub_agent_runner, tmp_path, monkeypatch
+):
+    """The round's variants measure +0.125%: refused under a 1.0% bar, worth another look under a 0.1% bar."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    grid = [{"name": "max_running_48", "extra_args": "--max-running-requests 48"}]
+    calls: list[str] = []
+    await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r1",
+        grid=grid,
+        base_args="",
+        bench_calls=calls,
+        extra_params={"keep_threshold_pct": 1.0},
+    )
+    (row,) = state.explore_search["tested"].values()
+    assert row["outcome"] == "REVERT" and row["reason"] == "gain_below_threshold"
+    assert row["graded_gain_pct"] == pytest.approx(0.125)
+
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r2",
+        grid=grid,
+        base_args="",
+        bench_calls=calls,
+        extra_params={"keep_threshold_pct": 0.5},
+    )
+    assert len(calls) == 1
+    assert [d["reason"] for d in out["skipped_dup"]] == ["already_measured"]
+
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r3",
+        grid=grid,
+        base_args="",
+        bench_calls=calls,
+        extra_params={"keep_threshold_pct": 0.1},
+    )
+    assert len(calls) == 2
+    assert out["skipped_dup"] == []
+
+
+@pytest.mark.asyncio
+async def test_an_accuracy_revert_stays_answered_when_the_bar_decays(sub_agent_runner, tmp_path, monkeypatch):
+    """Only the throughput gate moves with the bar: a variant refused on accuracy is not re-measured for a lower bar."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    grid = [{"name": "max_running_48", "extra_args": "--max-running-requests 48"}]
+    calls: list[str] = []
+    await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r1",
+        grid=grid,
+        base_args="",
+        bench_calls=calls,
+        extra_params={"keep_threshold_pct": 0.1},
+    )
+    (row,) = state.explore_search["tested"].values()
+    row.update(outcome="REVERT", reason="accuracy_drop", graded_gain_pct=5.0)
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r2",
+        grid=grid,
+        base_args="",
+        bench_calls=calls,
+        extra_params={"keep_threshold_pct": 0.1},
+    )
+    assert len(calls) == 1
+    assert [d["reason"] for d in out["skipped_dup"]] == ["already_measured"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_variant_is_not_treated_as_measured(sub_agent_runner, tmp_path, monkeypatch):
+    """A FAILED row carries no verdict on the launch, so the variant may run again on the same stack."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    grid = [{"name": "max_running_48", "extra_args": "--max-running-requests 48"}]
+    calls: list[str] = []
+    await _run_explore_round(sub, tr, tmp_path, state, key="r1", grid=grid, base_args="", bench_calls=calls)
+    for row in state.explore_search["tested"].values():
+        row["outcome"] = "FAILED"
+    await _run_explore_round(sub, tr, tmp_path, state, key="r2", grid=grid, base_args="", bench_calls=calls)
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_stack_revalidation_measures_again(sub_agent_runner, tmp_path, monkeypatch):
+    """A revalidation exists to re-measure, so a verdict already in the ledger does not skip it."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    grid = [{"name": "max_running_48", "extra_args": "--max-running-requests 48"}]
+    calls: list[str] = []
+    await _run_explore_round(sub, tr, tmp_path, state, key="r1", grid=grid, base_args="", bench_calls=calls)
+    await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r2",
+        grid=grid,
+        base_args="",
+        bench_calls=calls,
+        extra_params={"source": "stack_revalidate"},
+    )
+    assert len(calls) == 2
+
+
+def test_measured_verdict_holds_only_for_the_same_workload_and_stack():
+    from hyperloom.orchestrator.actions.executors.measured_variants import (
+        MeasuredOn,
+        grid_fingerprints,
+        measured_verdict,
+        stack_of,
+    )
+
+    params = {"base_tput": 800.0, "base_extra_args": "--a 1", "grid": [{"name": "v", "extra_args": "--b 2"}]}
+    (fp,) = grid_fingerprints(params)
+    stack = stack_of(params)
+    variant = params["grid"][0]
+    row = {
+        "outcome": "REVERT",
+        "workload_signature": "w1",
+        "extra_server_args": "--b 2",
+        "extra_envs": {},
+        "measured_against": {"throughput": 800.0, "extra_server_args": "--a 1", "extra_envs": {}},
+    }
+    ledger = {"tested": {fp: row}}
+
+    def verdict(ledger=ledger, variant=variant, stack=stack, signature="w1"):
+        return measured_verdict(ledger, fp, variant=variant, now=MeasuredOn(stack, signature, 1.0))
+
+    assert verdict() is not None
+    assert verdict(signature="w2") is None
+    assert verdict(stack=stack_of({**params, "base_extra_envs": {"E": "1"}})) is None
+    assert verdict(ledger={"tested": {fp: {**row, "measured_against": None}}}) is None
+    # The key was fingerprinted against its round's opening controls; a KEEP in that round can move them, so a row
+    # under the same key whose own change differs (here: it removed nothing) does not speak for this variant.
+    assert verdict(variant={**variant, "remove_args": ["--c"]}) is None
+    # The bar decays per macro-cycle: a throughput-gate REVERT stands only while its gain is below the current bar.
+    missed = {**row, "reason": "gain_below_threshold", "graded_gain_pct": 0.7}
+    assert verdict(ledger={"tested": {fp: missed}}) is not None
+    assert verdict(ledger={"tested": {fp: {**missed, "graded_gain_pct": 1.0}}}) is None
+    # Accuracy and tail-guard REVERTs do not depend on the bar, whatever gain they measured.
+    for reason in ("accuracy_drop", "accuracy_unavailable", "p90_regressed"):
+        assert verdict(ledger={"tested": {fp: {**missed, "reason": reason, "graded_gain_pct": 5.0}}}) is not None
+    # An overlay changes the launch without changing args or envs, so it has no comparable identity.
+    assert grid_fingerprints(
+        {**params, "grid": [{"name": "v", "extra_args": "--b 2", "overlay_pythonpath": "/o"}]}
+    ) == [""]
+
+
+@pytest.mark.asyncio
+async def test_a_kernel_overlay_variant_is_not_skipped_by_a_plain_one(sub_agent_runner, tmp_path, monkeypatch):
+    """An overlay changes the launch without changing args or envs, so a measured plain twin does not skip it."""
+    _force_cold_decision(monkeypatch)
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    sub.shared_state = state
+    overlay = tmp_path / "overlay"
+    overlay.mkdir()
+    calls: list[str] = []
+    plain = {"name": "plain", "extra_args": "--max-running-requests 48"}
+    await _run_explore_round(sub, tr, tmp_path, state, key="r1", grid=[plain], base_args="", bench_calls=calls)
+    out = await _run_explore_round(
+        sub,
+        tr,
+        tmp_path,
+        state,
+        key="r2",
+        grid=[{**plain, "name": "with_overlay", "overlay_pythonpath": str(overlay)}],
+        base_args="",
+        bench_calls=calls,
+    )
+    assert len(calls) == 2
+    assert out["skipped_dup"] == []

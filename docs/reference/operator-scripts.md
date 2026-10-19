@@ -190,6 +190,11 @@ incident response or launch validation:
 * `recover`: explicit offline artifact recovery without restarting the
   optimization loop:
   `python -m hyperloom recover --session-dir <SD>`.
+  With `--confirm-scope-gone OWNER_SCOPE --confirmation-reason TEXT` (or
+  `--confirm-stopped TASK_ID` for a blocked task that names no owner scope)
+  it
+  instead records a cleanup confirmation so a refused resume can proceed;
+  see [Disaster recovery](operations.md#scenario-a-pod-was-oom-killed-mid-session).
   To keep optimizing instead, inspect the failed run and explicitly use
   `optimize --resume-from <SD>`.
 

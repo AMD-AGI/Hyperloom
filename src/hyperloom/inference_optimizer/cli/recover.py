@@ -14,6 +14,19 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+RECOVER_HELP = (
+    "Rebuild + push the session_breakdown for a session that exited abnormally (crash / SIGKILL) so its breakdown "
+    "lands on Langfuse; or, with --confirm-scope-gone / --confirm-stopped, record the cleanup confirmation a refused "
+    "--resume-from asks for."
+)
+RECOVER_DESCRIPTION = (
+    "Without a confirmation option, rebuild and push the session_breakdown of a session that exited abnormally. "
+    "With --confirm-scope-gone OWNER_SCOPE (an execution environment that no longer exists) or --confirm-stopped "
+    "TASK_ID (one blocked task that names no owner scope), plus --confirmation-reason, instead record the cleanup "
+    "confirmation a refused --resume-from asks for; nothing is rebuilt. Exit codes: 0 success, 1 breakdown rebuild "
+    "failed, 2 invalid arguments or a refused confirmation."
+)
+
 
 def add_cleanup_confirmation_arguments(rec: argparse.ArgumentParser) -> None:
     """Register the operator cleanup confirmations on the ``recover`` subcommand."""
@@ -28,7 +41,7 @@ def add_cleanup_confirmation_arguments(rec: argparse.ArgumentParser) -> None:
     rec.add_argument(
         "--confirm-scope-gone",
         metavar="OWNER_SCOPE",
-        help="Attest that the whole execution environment recorded as OWNER_SCOPE (a boot and PID namespace, "
+        help="Attest that the whole execution environment recorded as OWNER_SCOPE (a boot, PID namespace and container start, "
         "as printed by a blocked resume) no longer exists, e.g. its machine or container was lost. Cancels the "
         "unfinished tasks recorded under it so they are redone rather than counted, releases their execution/GPU "
         "ownership records and appends the confirmation to runtime/pod_history.jsonl. Refuses the current "

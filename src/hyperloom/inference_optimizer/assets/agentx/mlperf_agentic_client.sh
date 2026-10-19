@@ -7,7 +7,7 @@
 # mlperf_agentic_client.sh — AgentX client that keeps Magpie server lifecycle
 # and drives MLPerf ``utility/run_agentic.sh`` against localhost:30000.
 #
-# MAGPIE_RUN_PHASE=server / client matches aiperf_client.sh. The AgentX switch
+# MAGPIE_RUN_PHASE=server / client selects the delegated MLPerf lifecycle. Hyperloom
 # settles PORT, the served model, the flow, the trajectory count and the
 # concurrency; preflight checks the harness, dataset and tokenizer. This script
 # checks only what it alone can see: who owns the port, and what is served.

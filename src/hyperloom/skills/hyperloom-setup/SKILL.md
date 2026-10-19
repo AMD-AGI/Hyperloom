@@ -68,7 +68,7 @@ directory. Tell the user to open the intended dedicated workspace in the agent
 and install Hyperloom into that current directory:
 
 ```bash
-pip install hyperloom-inference-optimizer==1.1.3 --target .
+pip install hyperloom-inference-optimizer==1.1.4 --target .
 ```
 
 Then stop and ask the user to rerun `/hyperloom-setup` from that workspace.
@@ -81,7 +81,32 @@ custom model id) present two options — `Use default (<value>)` and `Custom` �
 and only when the user picks `Custom` ask a plain-text follow-up for the exact
 value.
 
-1. Ask the Anthropic base URL with the structured UI.
+1. Ask how Hyperloom authenticates to Claude with the structured UI. Present
+   exactly these two option labels in this order:
+   1. `Anthropic API key` — API-credit billing; the official endpoint, the AMD
+      gateway, or a custom gateway.
+   2. `Claude subscription (Pro/Max)` — the user's own Claude plan, through a
+      long-lived token from `claude setup-token`; no API key.
+
+   With `Claude subscription (Pro/Max)`:
+   - Do not ask the base URL: a subscription token is only valid against
+     `https://api.anthropic.com`, so write that value. Never pair it with the AMD
+     gateway or a custom URL.
+   - Tell the user to run `claude setup-token` themselves, in their own
+     terminal. It opens a browser sign-in and prints a token starting with
+     `sk-ant-oat01-`; it waits for that round-trip, so do not run it for them from
+     a non-interactive shell. They paste the token into `.env` (question 2), never
+     into chat.
+   - Write `CLAUDE_CODE_OAUTH_TOKEN=<PLEASE_FILL_IN>` instead of the
+     `ANTHROPIC_API_KEY` placeholder.
+   - An `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`) outranks the subscription
+     token, so the run would bill API credits instead. If `.env` or the shell
+     already holds one, tell the user and ask whether to remove it; do not
+     delete a non-placeholder secret without their answer.
+
+   With `Anthropic API key`, ask the base URL next (below).
+
+   Ask the Anthropic base URL with the structured UI (API-key path only).
    - Present exactly these three option labels in this order:
      - `Use default (https://api.anthropic.com)` — this remains the recommended
        default.
@@ -101,11 +126,14 @@ value.
    options — `Use default (<value>)` and `Custom` — and only ask a plain-text
    follow-up for the exact value when the user picks `Custom`.
 
-   - Write `ANTHROPIC_API_KEY=<PLEASE_FILL_IN>` unless already set to a non-placeholder value.
-   - Ask `ANTHROPIC_BASE_URL` with exactly these option labels in this order:
+   - API-key path: write `ANTHROPIC_API_KEY=<PLEASE_FILL_IN>` unless already set
+     to a non-placeholder value. Subscription path: write
+     `CLAUDE_CODE_OAUTH_TOKEN=<PLEASE_FILL_IN>` unless already set to a
+     non-placeholder value, and no `ANTHROPIC_API_KEY` placeholder.
+   - API-key path only: ask `ANTHROPIC_BASE_URL` with exactly these option labels in this order:
      `Use default (https://api.anthropic.com)` /
      `Use AMD gateway (https://llm-api.amd.com/anthropic)` / `Custom`.
-   - Ask `CLAUDE_MODEL`: options `Use default (claude-opus-5)` / `Custom`.
+   - Ask `CLAUDE_MODEL`: options `Use default (claude-opus-5-5)` / `Custom`.
 4. Explain `USER_DATA_PATH`:
    - It is the writable root for Hyperloom runtime files, dependency checkouts, logs, optimizer runs, and generated env files.
    - Offer `<workspace>/session` (the current workspace directory plus a
@@ -114,7 +142,7 @@ value.
      subdirectory under it.
    - If an existing `USER_DATA_PATH` is visible in the current shell or terminal context, offer that exact value as one option.
      Say that another workspace using the same value shares its Experience KB data home, which only one workspace's
-     service can serve.
+     service can serve, unless `HYPERLOOM_KB_HOME` gives each workspace its own.
    - Always offer a custom path option.
    - Do not auto-select; write `USER_DATA_PATH` only after the user explicitly chooses (they may accept the default).
 
@@ -203,18 +231,6 @@ value.
    language and point the user to Docker mode or a pre-0.28 override — do not
    implement a second version gate here.
 
-9. Ask whether this workspace shares Experiences with a global Experience KB.
-   Runs always read and write the workspace's local service; a global KB only
-   adds push and pull. Skip the question when `HYPERLOOM_GLOBAL_KB_URL` is
-   already set to a non-placeholder value in the shell or `.env`, and confirm
-   that URL instead. Present exactly these two option labels in this order:
-   `No global KB` / `I have a global KB URL and token`.
-   - `No global KB`: write no global keys.
-   - `I have a global KB URL and token`: ask the URL with a plain-text
-     follow-up; the token goes into `.env` as a placeholder the user fills in.
-     Then ask how Experiences reach it, with exactly these labels in this
-     order: `Push when I ask` / `Push after every run`.
-
 ## Step 3: Write `.env`
 
 Create or update `.env` in the current directory.
@@ -239,7 +255,9 @@ Before writing, explicitly tell the user:
 
 Write the Anthropic keys plus the common keys:
 
-- `Anthropic`: `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CLAUDE_MODEL`.
+- `Anthropic`, API-key path: `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `CLAUDE_MODEL`.
+- `Anthropic`, subscription path: `CLAUDE_CODE_OAUTH_TOKEN`,
+  `ANTHROPIC_BASE_URL=https://api.anthropic.com`, `CLAUDE_MODEL`.
 - `Experience KB`: do not write `HYPERLOOM_KB_URL` or `HYPERLOOM_KB_TOKEN` by
   hand. After writing the other keys, run:
 
@@ -252,10 +270,13 @@ Write the Anthropic keys plus the common keys:
   generates `HYPERLOOM_KB_TOKEN`, but only for a key that is missing or
   still `<PLEASE_FILL_IN>`; it keeps every other value. It prints only whether
   each key was `written` or `kept`, never the token.
-- `Global Experience KB` (only when the user has one in Step 2):
-  `HYPERLOOM_GLOBAL_KB_URL` as entered, `HYPERLOOM_GLOBAL_KB_TOKEN` (preserve a
-  non-placeholder value; otherwise write `<PLEASE_FILL_IN>`), and
-  `HYPERLOOM_KB_AUTO_PUSH=1` only for `Push after every run`.
+- `Global Experience KB`: do not ask for one and do not write its keys.
+  `HYPERLOOM_GLOBAL_KB_URL`, `HYPERLOOM_GLOBAL_KB_TOKEN`, and
+  `HYPERLOOM_KB_AUTO_PUSH` are optional and the user's to set; keep any value
+  already in `.env`. Unset, the workspace uses only its local KB. With them
+  set, `python3 -m hyperloom.inference_optimizer.experience_kb_service push`
+  and `python3 -m hyperloom.inference_optimizer.experience_kb_service pull`
+  sync with that global KB; setup runs neither.
 
 Common keys:
 
@@ -299,8 +320,10 @@ Then read `.env` back and confirm:
 - non-secret values are correct;
 - secret values are `set` or `missing`;
 - no secret key still equals `<PLEASE_FILL_IN>`.
+- subscription path: `CLAUDE_CODE_OAUTH_TOKEN` is set, and neither
+  `ANTHROPIC_API_KEY` nor `ANTHROPIC_AUTH_TOKEN` is set in `.env` or the shell
+  (either would take precedence over the subscription).
 - `HYPERLOOM_KB_URL` and `HYPERLOOM_KB_TOKEN` are both set.
-- when `HYPERLOOM_GLOBAL_KB_URL` is set, `HYPERLOOM_GLOBAL_KB_TOKEN` is set too.
 
 If any required secret is missing or still a placeholder, stop and ask the user
 to edit `.env` again.
@@ -436,7 +459,8 @@ the demo skill runs setup inside the container. Read
 ## Experience KB service
 
 The workspace's Experience KB service runs wherever the optimizer runs. Its
-data and `service.log` live under `$USER_DATA_PATH/experience-kb`, and every
+data and `service.log` live under `$HYPERLOOM_KB_HOME` when set, otherwise
+`$USER_DATA_PATH/experience-kb`, and every
 optimize launch starts it again when nothing serves `HYPERLOOM_KB_URL`.
 
 In `docker` mode, skip this step: the service starts inside the container at
@@ -452,32 +476,21 @@ set +a
 PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 -m hyperloom.inference_optimizer.experience_kb_service ensure
 ```
 
-It prints whether the service was started or already running, never the token.
+It prints whether the service was started, restarted, or already running,
+never the token.
 If it fails, report its message; when another process already serves that port
 with a different token, ask the user to set another port in `HYPERLOOM_KB_URL`
 and rerun this step. Do not continue to a demo until it succeeds.
 
-When the `.env` settings the service uses change (the Anthropic gateway, model,
-or global KB), the next run of this step or of an optimize launch restarts it
-with them. Push and pull never restart it, so run this step before them after
-such a change.
+When the `.env` settings the service uses change (the Anthropic gateway or
+model), or Hyperloom is upgraded, the next run of this step or of an optimize
+launch restarts it with them.
 
-### Global Experience KB
-
-Only when `HYPERLOOM_GLOBAL_KB_URL` is set. Push and pull run through the local
-service, in the same environment as the optimizer, with `.env` loaded:
-
-```bash
-PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 -m hyperloom.inference_optimizer.experience_kb_service pull
-PYTHONPATH="$PWD:${PYTHONPATH:-}" python3 -m hyperloom.inference_optimizer.experience_kb_service push
-```
-
-In `baremetal` mode, run `pull` once now so the first run already reads what
-the global KB holds for this workspace's schema. Each command prints one line
-with the global URL and the `created`, `unchanged`, `skipped`, and `rejected`
-counts, and exits 1 when it stopped early or rejected an Experience; report
-that line. A failure here does not block setup: report it and continue. In
-`docker` mode, tell the user the same commands run inside the container.
+The same entry point also runs the `hyperloom-kb` skill's commands on the
+workspace's service, such as
+`python3 -m hyperloom.inference_optimizer.experience_kb_service labels` or
+`restore <label_id>`, defaulting to this workspace's schema. Setup itself
+runs none of them.
 
 ## Step 6: Report Result
 
@@ -492,8 +505,6 @@ Report:
 - Experience KB service: in `baremetal` mode, `ready` with its URL once the
   service step succeeds, or `failed`; in `docker` mode, that it starts inside
   the container at the first optimize launch.
-- Global Experience KB: `not configured`, or its URL, whether it pushes after
-  every run or on request, and the `pull` summary line in `baremetal` mode.
 - The last relevant error lines on failure.
 
 Do not print secret values back to the user.

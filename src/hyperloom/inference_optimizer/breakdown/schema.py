@@ -319,6 +319,27 @@ class V6OutcomeValidation(TypedDict, total=False):
     notes: list[str]
 
 
+class V6OutcomeVariants(TypedDict, total=False):
+    """The framework phase's bench runs, counted by how each ended.
+
+    Read off the ``attempts`` of every ``framework_agent`` event, configuration
+    variants and source patches alike; an attempt that never reached the bench
+    is not counted, and kernel candidates are the kernel lane's own funnel.
+    """
+
+    #: ``kept + reverted + failed``.
+    bench_runs: int
+    #: Distinct changes among the runs, by arm and fingerprint: a change benched
+    #: again on a later stack is one change and two runs.
+    distinct: int
+    kept: int
+    reverted: int
+    #: Runs that produced no measurement: the server failed or the run overran.
+    failed: int
+    #: ``kept`` per bench run; ``None`` when nothing was benched.
+    keep_rate_pct: float | None
+
+
 class V6Outcome(TypedDict, total=False):
     """V6 session result projection for downstream consumers."""
 
@@ -329,6 +350,7 @@ class V6Outcome(TypedDict, total=False):
     anchoring_eval: dict[str, Any] | None
     final: dict[str, Any]
     validation: V6OutcomeValidation
+    variants: V6OutcomeVariants
 
 
 class V6TimelineEvent(TypedDict, total=False):
@@ -1254,18 +1276,6 @@ class V6PhaseMarker(TypedDict, total=False):
     ts: str
 
 
-class V6PhaseDenial(TypedDict, total=False):
-    """One author-time PolicyGate refusal in the phase where it happened."""
-
-    actor: str
-    proposal_msg_id: str | None
-    action: str
-    phase: str
-    rule: str
-    hint: str
-    denied_at: str
-
-
 class V6PhaseProposalReview(TypedDict, total=False):
     """The Critic's ruling on one proposal, filed on the proposal."""
 
@@ -1517,68 +1527,6 @@ class V6Critic(TypedDict, total=False):
     iterations: list[CriticIteration]
 
 
-class V6RobustnessIntent(TypedDict, total=False):
-    """One intent the robustness agent raised on a turn."""
-
-    type: str
-    severity: str
-    topic: str
-    payload: dict[str, Any]
-
-
-class V6RobustnessTurn(TypedDict, total=False):
-    """The robustness agent's account of one turn.
-
-    ``outcome`` distinguishes a turn that produced intents from one the agent
-    could not complete, which is the distinction the section it replaces could
-    not express: a mute agent and a silent session looked identical."""
-
-    turn_idx: int
-    outcome: Literal["intents", "invalid_envelope", "no_envelope"]
-    ts: str
-    tick_index: int
-    intents: list[V6RobustnessIntent]
-    parse_warnings: list[str]
-    workdir: str
-    detail: str
-
-
-class V6Robustness(TypedDict, total=False):
-    """What the robustness agent raised, outside the business timeline.
-
-    The agent watches the session from the side, so its turns belong to no
-    phase or macro cycle and it keeps a fixed top-level place instead. An
-    empty ``turns`` is an answer, not a gap: the agent never completed a turn."""
-
-    turns: list[V6RobustnessTurn]
-
-
-class V6RobustnessFinding(TypedDict, total=False):
-    """One firing of the robustness ladder, as the ladder itself persisted it.
-
-    Read from the ladder's own JSONL log at close time rather than mirrored
-    through a recorder: the log is already durable and complete, so a second
-    copy taken as each finding was raised could only be the same rows or fewer."""
-
-    tick_index: int
-    timestamp_unix: float
-    symptom_name: str
-    severity: str
-    summary: str
-    rca_text: str
-    intents: list[str]
-    evidence: dict[str, Any]
-
-
-class V6CloseRobustness(TypedDict, total=False):
-    """The close sequencer's final robustness verdict."""
-
-    escalated: bool
-    stop_reason: str
-    findings: list[V6RobustnessFinding]
-    findings_total: int
-
-
 class V6FinalRecipe(TypedDict, total=False):
     """The configuration the session ended on, as the close-out settled it."""
 
@@ -1605,15 +1553,6 @@ class V6Close(TypedDict, total=False):
     end_time: str
     close_sequence_done: bool
     steps: list[dict[str, Any]]
-    # The whole robustness account: the close-out's verdict (``escalated`` and
-    # the ``stop_reason`` it was drawn from), the agent's own ``turns``, and
-    # the ``findings`` the ladder persisted. Together because they are one
-    # account of one thing -- the verdict on its own says a session was
-    # escalated without saying what for, and the findings of an un-escalated
-    # session, the ones judged survivable, had nowhere to be read at all.
-    # ``findings`` and ``findings_total`` are absent when the ladder never
-    # wrote anything, because an empty list would claim it ran and found none.
-    robustness: V6CloseRobustness
     artifacts: dict[str, Any]
     # Absent when the session never attempted to publish its Recipe.
     kb_write_back: V6KBWriteBackExt
@@ -2628,7 +2567,6 @@ class SessionBreakdown(TypedDict, total=False):
     timeline: list[V6TimelineEvent]
     close: V6Close
     critic: V6Critic
-    robustness: V6Robustness
 
 
 __all__ = [
@@ -2640,7 +2578,6 @@ __all__ = [
     "V6BaselineExt",
     "V6BaselineProgress",
     "V6Close",
-    "V6CloseRobustness",
     "V6ConcSweepArm",
     "V6ConcSweepArtifacts",
     "V6ConcSweepBoot",
@@ -2738,6 +2675,7 @@ __all__ = [
     "V6OutcomeGainBucket",
     "V6OutcomeKernelAttribution",
     "V6OutcomeValidation",
+    "V6OutcomeVariants",
     "V6PhaseAction",
     "V6PhaseExt",
     "V6PhaseMarker",
@@ -2745,10 +2683,6 @@ __all__ = [
     "V6PhaseProposalOutcome",
     "V6PhaseProposalReview",
     "V6PhaseSegment",
-    "V6Robustness",
-    "V6RobustnessFinding",
-    "V6RobustnessIntent",
-    "V6RobustnessTurn",
     "V6RooflineEventSnapshot",
     "V6RooflineExt",
     "V6RooflineKernel",

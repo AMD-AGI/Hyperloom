@@ -31,6 +31,9 @@ DEFAULT_SCOPE = SCOPE_DOMAIN
 DEFAULT_MODE = MODE_PATCH
 DEFAULT_BENCH = False
 
+# Param marking a dispatch no Orchestration turn will extend: it runs to the wall-budget cap, not its mode's base.
+NO_LEASE_EXTENSION = "no_lease_extension"
+
 
 @dataclass(frozen=True)
 class SpecialistProfile:
@@ -145,6 +148,7 @@ __all__ = [
     "MODE_PATCH",
     "MODE_RESEARCH",
     "MODE_VALUES",
+    "NO_LEASE_EXTENSION",
     "SCOPE_DOMAIN",
     "SCOPE_DOMAINS",
     "SCOPE_FREEFORM",

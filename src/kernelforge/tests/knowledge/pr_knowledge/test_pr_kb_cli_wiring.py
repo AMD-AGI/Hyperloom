@@ -10,6 +10,7 @@ from click.testing import CliRunner
 
 from hyperloom.common.env import EnvValueError
 from kernelforge.cli import forge_loop
+from kernelforge.knowledge.pr_knowledge.context import PrReferenceQuery
 from kernelforge.cli.pr_references import (
     _collect_pr_references,
     _git_remote_url,
@@ -75,7 +76,9 @@ def test_switch_is_independent_of_the_experience_kb_flag():
 def test_pr_context_is_wired_only_to_the_implementer():
     """Keep external PR text out of measured Analysis and planning evidence."""
     source = inspect.getsource(forge_loop.callback)
-    implementer = source[source.index("agent_fn = make_agent_fn(") : source.index("effective_implementer =")]
+    implementer = source[
+        source.index("implementer_setup = ImplementerSetup(") : source.index("effective_implementer =")
+    ]
     analysis = source[source.index("analysis_service = make_analysis_agent_service(") : source.index("analysis_mode =")]
     orchestration = source[
         source.index("orchestration_service = make_orchestration_service(") : source.index(
@@ -157,14 +160,16 @@ def test_position_a_never_writes_events_itself(tmp_path):
     assert not (tmp_path / "forge_experiments" / "events.jsonl").exists()
 
 
-def test_loop_appends_the_event_only_after_the_campaign_guard(tmp_path):
+def test_loop_appends_the_event_only_after_the_campaign_guard():
     """Append the event only after campaign initialization."""
     from kernelforge.loop.runner import IterationConfig, IterationLoop
 
     assert "pr_kb_event" in set(IterationConfig.__dataclass_fields__)
+    assert "already contains a campaign" in inspect.getsource(IterationLoop._restore_or_begin_campaign)
+    assert "pr_refs_refreshed" in inspect.getsource(IterationLoop._persist_pr_knowledge)
     source = inspect.getsource(IterationLoop._run_locked)
-    guard = source.index("already contains a campaign")
-    append = source.index("pr_refs_refreshed")
+    guard = source.index("self._restore_or_begin_campaign(")
+    append = source.index("self._persist_pr_knowledge()")
     assert append > guard, "the event append must follow the fresh-campaign guard"
 
 
@@ -179,13 +184,15 @@ def test_a_failed_lookup_degrades_instead_of_raising(monkeypatch, tmp_path):
 
     assert (
         _collect_pr_references(
-            workspace_dir=str(tmp_path),
-            kernel_backend="aiter",
-            git_remote="",
-            source_files=(),
-            operator_name="moe",
-            target_functions=(),
-            budget_sec=1.0,
+            str(tmp_path),
+            PrReferenceQuery(
+                kernel_backend="aiter",
+                git_remote="",
+                source_files=(),
+                operator_name="moe",
+                target_functions=(),
+            ),
+            1.0,
         )
         is None
     )
@@ -202,13 +209,15 @@ def test_a_service_failure_is_absorbed_like_a_local_one(monkeypatch, tmp_path):
 
     assert (
         _collect_pr_references(
-            workspace_dir=str(tmp_path),
-            kernel_backend="aiter",
-            git_remote="",
-            source_files=(),
-            operator_name="moe",
-            target_functions=(),
-            budget_sec=1.0,
+            str(tmp_path),
+            PrReferenceQuery(
+                kernel_backend="aiter",
+                git_remote="",
+                source_files=(),
+                operator_name="moe",
+                target_functions=(),
+            ),
+            1.0,
         )
         is None
     )
@@ -225,13 +234,15 @@ def test_an_unexpected_failure_is_not_swallowed(monkeypatch, tmp_path):
 
     with pytest.raises(KeyboardInterrupt):
         _collect_pr_references(
-            workspace_dir=str(tmp_path),
-            kernel_backend="aiter",
-            git_remote="",
-            source_files=(),
-            operator_name="moe",
-            target_functions=(),
-            budget_sec=1.0,
+            str(tmp_path),
+            PrReferenceQuery(
+                kernel_backend="aiter",
+                git_remote="",
+                source_files=(),
+                operator_name="moe",
+                target_functions=(),
+            ),
+            1.0,
         )
 
 
@@ -239,7 +250,7 @@ def test_the_event_append_cannot_abort_the_campaign():
     """A failed observability write may only print, never propagate."""
     from kernelforge.loop.runner import IterationLoop
 
-    source = inspect.getsource(IterationLoop._run_locked)
+    source = inspect.getsource(IterationLoop._persist_pr_knowledge)
     append = source.index("pr_refs_refreshed")
     handler = source.index("except (OSError, ValueError)", append)
     following = source.index("self.ic.pr_kb_event = {}", append)

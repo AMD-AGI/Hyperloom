@@ -88,12 +88,17 @@ def gap_actionability_key(gap: dict[str, Any]) -> tuple[int, int, str]:
 
 
 class _PhaseStateMixin:
-    def record_specialist_round(self, entry: dict[str, Any]) -> None:
-        """Append one round summary to ``specialist_rounds``; idempotent on ``round_id`` (re-record overwrites)."""
+    def record_specialist_round(self, entry: dict[str, Any]) -> dict[str, Any] | None:
+        """Append one round summary to ``specialist_rounds``; idempotent on ``round_id`` (re-record overwrites).
+
+        A producer that stamps no ``completed_at`` is stamped now, since the
+        phase counts a round as its work by that time. Returns the stored row.
+        """
         if not isinstance(entry, dict) or not entry:
-            return
+            return None
         entry = dict(entry)
         entry.setdefault("cycle", int(getattr(self, "macro_cycle", 0) or 0))
+        entry.setdefault("completed_at", now_iso())
         round_id = str(entry.get("round_id") or "").strip()
         if not round_id:
             self.specialist_rounds.append(entry)
@@ -108,6 +113,7 @@ class _PhaseStateMixin:
             if not matched:
                 existing.append(entry)
         self._trim_specialist_rounds()
+        return entry
 
     def _trim_specialist_rounds(self) -> None:
         """Bound the specialist-round ledger for multi-day runs (keep most recent)."""
@@ -372,8 +378,6 @@ class _PhaseStateMixin:
         )
         # Preserve accepted bucket from prior runs (record_explore_accepted is its writer).
         merged["accepted"] = list(prior.get("accepted") or [])
-        # Drop so a later load re-runs the legacy union.
-        merged.pop("merged_from_legacy_sig", None)
         self.explore_search = merged
 
     def record_explore_accepted(self, variant: dict[str, Any]) -> None:

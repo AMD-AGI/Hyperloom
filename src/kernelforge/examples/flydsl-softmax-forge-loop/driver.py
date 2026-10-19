@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+from dataclasses import dataclass
 
 import torch
 import flydsl.expr as fx
@@ -27,22 +28,31 @@ _TORCH_DTYPE = {"f16": torch.float16, "bf16": torch.bfloat16, "f32": torch.float
 _MODULE_CACHE: dict[tuple[int, int, str], object] = {}
 
 
-def _case_id(rows: int, cols: int, dtype: str) -> str:
+@dataclass(frozen=True)
+class _Case:
+    """One scored softmax case: the rows x cols of the 2D input and its dtype."""
+
+    rows: int
+    cols: int
+    dtype: str
+
+
+def _case_id(case: _Case) -> str:
     """Return the opaque token emitted by benchmark mode."""
-    return f"M{rows}_N{cols}_{dtype}"
+    return f"M{case.rows}_N{case.cols}_{case.dtype}"
 
 
-def _build(rows: int, cols: int, dtype: str):
-    key = (rows, cols, dtype)
+def _build(case: _Case):
+    key = (case.rows, case.cols, case.dtype)
     if key not in _MODULE_CACHE:
-        _MODULE_CACHE[key] = build_softmax_module(rows, cols, dtype)
+        _MODULE_CACHE[key] = build_softmax_module(case.rows, case.cols, case.dtype)
     return _MODULE_CACHE[key]
 
 
-def _make_input(rows: int, cols: int, dtype: str, device: str) -> torch.Tensor:
+def _make_input(case: _Case, device: str) -> torch.Tensor:
     """Build a standard random softmax input tensor."""
     torch.manual_seed(_SEED)
-    x = torch.randn(rows, cols, device=device, dtype=_TORCH_DTYPE[dtype])
+    x = torch.randn(case.rows, case.cols, device=device, dtype=_TORCH_DTYPE[case.dtype])
     return x
 
 
@@ -70,11 +80,11 @@ def _snr_db(reference: torch.Tensor, test: torch.Tensor) -> float:
     return 10.0 * math.log10(signal_power / noise_power)
 
 
-def _run_correctness(rows: int, cols: int, dtype: str, device: str) -> int:
-    x = _make_input(rows, cols, dtype, device)
+def _run_correctness(case: _Case, device: str) -> int:
+    x = _make_input(case, device)
     out = torch.empty_like(x)
-    launch_fn = _build(rows, cols, dtype)
-    _launch_on_current_stream(launch_fn, x, out, rows)
+    launch_fn = _build(case)
+    _launch_on_current_stream(launch_fn, x, out, case.rows)
     torch.cuda.synchronize()
 
     ref = _reference(x)
@@ -83,16 +93,16 @@ def _run_correctness(rows: int, cols: int, dtype: str, device: str) -> int:
     return 0
 
 
-def _run_bench(rows: int, cols: int, dtype: str, warmup: int, iters: int, device: str) -> int:
+def _run_bench(case: _Case, warmup: int, iters: int, device: str) -> int:
     # Static tensors allocated once; the graph harness replays the op on the same memory so it times GPU execution,
     # not host launch overhead.
-    x = _make_input(rows, cols, dtype, device)
+    x = _make_input(case, device)
     out = torch.empty_like(x)
-    launch_fn = _build(rows, cols, dtype)
+    launch_fn = _build(case)
     ref = _reference(x)
 
     def step():
-        _launch_on_current_stream(launch_fn, x, out, rows)
+        _launch_on_current_stream(launch_fn, x, out, case.rows)
 
     # dirty + verify prove the graph actually captured the kernel (an uncaptured launch would leave `out` at its
     # dirtied value and fail verify, which raises).
@@ -110,27 +120,22 @@ def _run_bench(rows: int, cols: int, dtype: str, warmup: int, iters: int, device
         print(f"wall_ms: {t:.6f}")
     times = sorted(result["times_ms"])
     print(
-        f"case_ms: {_case_id(rows, cols, dtype)} "
+        f"case_ms: {_case_id(case)} "
         f"{times[len(times) // 2]:.6f}"
     )
     return 0
 
 
-def _run_profile(
-    rows: int,
-    cols: int,
-    dtype: str,
-    device: str,
-) -> int:
+def _run_profile(case: _Case, device: str) -> int:
     """Warm the target, then expose only its dispatches to the profiler."""
-    x = _make_input(rows, cols, dtype, device)
+    x = _make_input(case, device)
     out = torch.empty_like(x)
-    launch_fn = _build(rows, cols, dtype)
+    launch_fn = _build(case)
     for _ in range(3):
-        _launch_on_current_stream(launch_fn, x, out, rows)
+        _launch_on_current_stream(launch_fn, x, out, case.rows)
     torch.cuda.synchronize()
     for _ in range(3):
-        _launch_on_current_stream(launch_fn, x, out, rows)
+        _launch_on_current_stream(launch_fn, x, out, case.rows)
     torch.cuda.synchronize()
     return 0
 
@@ -149,24 +154,13 @@ def main() -> int:
         return 1
 
     device = "cuda"
+    case = _Case(_DEFAULT_M, _DEFAULT_N, _DEFAULT_DTYPE)
     if args.profile_run:
-        return _run_profile(_DEFAULT_M, _DEFAULT_N, _DEFAULT_DTYPE, device)
+        return _run_profile(case, device)
 
     if args.bench_mode:
-        return _run_bench(
-            _DEFAULT_M,
-            _DEFAULT_N,
-            _DEFAULT_DTYPE,
-            args.warmup,
-            args.iters,
-            device,
-        )
-    return _run_correctness(
-        _DEFAULT_M,
-        _DEFAULT_N,
-        _DEFAULT_DTYPE,
-        device,
-    )
+        return _run_bench(case, args.warmup, args.iters, device)
+    return _run_correctness(case, device)
 
 
 if __name__ == "__main__":

@@ -216,7 +216,7 @@ in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
   Dashboard REST only, never `import ray` / `ray.init(address=…)` against the
   inference RayJob. (Code running *inside* RayJob pods is exempt.)
 * **Kernel-agent fan-out** — kernel edits in the sandbox do NOT reach the pods
-  (per-pod local fs). Use `apply-patch` / `revert-patch` / `kernel-bench` (route
+  (per-pod local fs). Use `apply-patch` / `revert-patch` (route
   by `state.backend`; on infera GEAK runs on a GPU pod over SSH, installed once
   per cluster via `install-geak`). The integrate path auto-restarts the server
   after `apply-patch` — do not restart manually.

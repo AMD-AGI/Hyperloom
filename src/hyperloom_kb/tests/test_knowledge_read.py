@@ -11,28 +11,24 @@ import pytest
 from hyperloom_kb import (
     LEXICAL_FUZZY_PROVIDER_REF,
     AnthropicPlannerBackend,
-    Change,
     Experience,
     ExperienceDeclaration,
-    ExperienceService,
     ExperienceStatus,
     FieldDeclaration,
+    FieldKind,
+    FieldRole,
     InMemoryExperienceStore,
     InMemoryQueryViewStore,
-    InMemorySchemaRegistry,
     KnowledgeReadService,
     LexicalFuzzyProvider,
     LLMQueryPlanner,
     LocalRetrievalService,
     ObjectiveDeclaration,
-    ObjectiveDirection,
-    Outcome,
     PlannerConfiguration,
     PlannerExecutionError,
     PlannerGatewayConfig,
     Provenance,
     QueryExecutor,
-    QueryViewMaintainer,
     ReadRequest,
     ReadStatus,
     ReadTrace,
@@ -41,26 +37,29 @@ from hyperloom_kb import (
     WeightedQueryPlan,
     derive_experience_id,
 )
+from hyperloom_kb.tests.view_fixtures import publish_view, submit_complete
 
 NOW = datetime(2026, 9, 22, tzinfo=timezone.utc)
 
 
 def _declaration() -> ExperienceDeclaration:
     return ExperienceDeclaration(
+        objectives=(ObjectiveDeclaration("throughput@v1", "Maximize throughput."),),
         identity=(
             FieldDeclaration("model", "Model."),
             FieldDeclaration("gpu", "GPU."),
         ),
-        baseline_identity=(FieldDeclaration("config", "Baseline."),),
-        change_identity=(FieldDeclaration("knob", "Knob."),),
-        objectives=(
-            ObjectiveDeclaration(
-                "throughput@v1",
-                ObjectiveDirection.HIGHER_IS_BETTER,
-                "Throughput.",
-            ),
+        baseline=(FieldDeclaration("config", "Baseline.", group=True),),
+        change=(
+            FieldDeclaration("knob", "Knob.", group=True),
+            FieldDeclaration("summary", "What changed.", role=FieldRole.SUMMARY, search=4),
+            FieldDeclaration("content", "The change.", kind=FieldKind.TEXT),
         ),
-        decisions=("keep", "revert"),
+        outcome=(
+            FieldDeclaration("decision", "Decision.", role=FieldRole.DECISION, values=("keep", "revert")),
+            FieldDeclaration("value", "Throughput.", kind=FieldKind.NUMBER, role=FieldRole.MEASUREMENT),
+        ),
+        reflection=(FieldDeclaration("text", "Reflection.", kind=FieldKind.TEXT),),
     )
 
 
@@ -80,15 +79,14 @@ def _experience(
         completed_at=NOW,
         identity={"model": model, "gpu": "mi300x"},
         objective="throughput@v1",
-        baseline_identity={"config": "default"},
-        baseline_value=100.0,
+        baseline={"config": "default"},
         provenance=Provenance("read-test", "1"),
         schema_ref=schema.schema_ref,
         status=ExperienceStatus.COMPLETE,
-        reasoning=reasoning,
-        change=Change({"knob": knob}, f"Change {knob}.", kind="config"),
-        outcome=Outcome("keep", 110.0),
-        reflection="The measured result improved.",
+        rationale={"reasoning": reasoning},
+        change={"knob": knob, "summary": f"Change {knob}."},
+        outcome={"decision": "keep", "value": 110.0},
+        reflection={"text": "The measured result improved."},
     )
 
 
@@ -144,11 +142,8 @@ def _planner_response() -> str:
 
 def _stack():
     schema = _declaration()
-    schemas = InMemorySchemaRegistry()
     experiences = InMemoryExperienceStore()
     views = InMemoryQueryViewStore()
-    service = ExperienceService(schemas, experiences)
-    service.register_schema(schema)
     target = _experience(
         schema,
         "run-target",
@@ -163,13 +158,9 @@ def _stack():
         knob="fp8_kv",
         reasoning="FP8 KV cache reduces decode KV bandwidth.",
     )
-    for item in (target, other):
-        service.submit_complete(item)
-    fuzzy = LexicalFuzzyProvider(experiences)
-    view = QueryViewMaintainer(schemas, experiences, views).rebuild(
-        schema.schema_ref,
-        fuzzy_ready=True,
-    )
+    submit_complete(schema, experiences, target, other)
+    fuzzy = LexicalFuzzyProvider(experiences, schema)
+    view = publish_view(schema, experiences, views, fuzzy_ready=True)
     retrieval = LocalRetrievalService(experiences, views, providers=(fuzzy,))
     configuration = RetrievalConfiguration.create(
         schema.schema_ref,
@@ -182,10 +173,8 @@ def _stack():
     )
     return (
         schema,
-        schemas,
         experiences,
         views,
-        service,
         view,
         retrieval,
         configuration,
@@ -261,10 +250,11 @@ def test_anthropic_planner_backend_reads_text_response() -> None:
     }
 
 
-def test_planner_rejects_unknown_structured_field() -> None:
+@pytest.mark.parametrize("field", ["identity.not_declared", "change.content", "baseline_identity.config"])
+def test_planner_rejects_a_structured_field_exact_lookup_does_not_index(field: str) -> None:
     schema = _declaration()
     value = json.loads(_planner_response())
-    value["signals"][0]["field"] = "identity.not_declared"
+    value["signals"][0]["field"] = field
     backend = FakePlannerBackend([json.dumps(value)])
     planner = LLMQueryPlanner(
         backend,
@@ -338,8 +328,6 @@ def test_read_service_plans_queries_and_returns_prompt_ready_evidence() -> None:
         _,
         _,
         _,
-        _,
-        _,
         retrieval,
         configuration,
         target,
@@ -380,10 +368,8 @@ def test_read_service_plans_queries_and_returns_prompt_ready_evidence() -> None:
 def test_read_keeps_same_corpus_snapshot_while_planner_runs() -> None:
     (
         schema,
-        schemas,
         experiences,
         views,
-        experience_service,
         view,
         retrieval,
         configuration,
@@ -400,11 +386,8 @@ def test_read_keeps_same_corpus_snapshot_while_planner_runs() -> None:
 
     class PublishingBackend(FakePlannerBackend):
         def complete(self, **kwargs):
-            experience_service.submit_complete(late)
-            QueryViewMaintainer(schemas, experiences, views).rebuild(
-                schema.schema_ref,
-                fuzzy_ready=True,
-            )
+            submit_complete(schema, experiences, late)
+            publish_view(schema, experiences, views, fuzzy_ready=True)
             return super().complete(**kwargs)
 
     backend = PublishingBackend([_planner_response()])
@@ -439,8 +422,6 @@ def test_direct_query_is_replayable_without_planner() -> None:
         schema,
         _,
         _,
-        _,
-        _,
         view,
         retrieval,
         configuration,
@@ -465,20 +446,3 @@ def test_direct_query_is_replayable_without_planner() -> None:
 
     assert first.groups == second.groups
     assert first.groups[0].representative_ids == (target.id,)
-
-
-def test_disabled_read_is_a_no_op() -> None:
-    schema = _declaration()
-    service = KnowledgeReadService(
-        schema,
-        None,
-        None,
-        enabled=False,
-    )
-
-    request = _request(schema)
-    result = service.read(request.decision, request.context)
-
-    assert result.status is ReadStatus.DISABLED
-    assert result.prompt_block == ""
-    assert result.rendered_refs == ()

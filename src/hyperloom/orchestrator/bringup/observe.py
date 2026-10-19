@@ -53,20 +53,18 @@ def observe_bringup(
         selected.
     """
     from hyperloom.common.failure_signature import classify_failure
-
     from hyperloom.orchestrator.bringup.ladder import (
         SERVER_LOG,
         WRAPPER_STDERR,
         WRAPPER_STDOUT,
+        BootStreams,
         classify,
     )
     from hyperloom.orchestrator.bringup.trees import read_trees
 
     observation = classify(
-        server_log=server_log,
+        BootStreams(server_log, wrapper_stderr, wrapper_stdout),
         server_elapsed_sec=server_elapsed_sec,
-        wrapper_stderr=wrapper_stderr,
-        wrapper_stdout=wrapper_stdout,
         trees=read_trees(session_dir) if session_dir is not None else (),
         session_root=str(session_dir) if session_dir is not None else "",
     )

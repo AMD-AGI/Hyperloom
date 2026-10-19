@@ -447,46 +447,25 @@ async def test_route_succeeded_row_probe_carries_config_path(coord, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_route_succeeded_missing_result_json_calls_reverted(coord, tmp_path):
-    """A succeeded build whose result.json is absent routes reverted."""
-    root = tmp_path / "attempt_missing"
+@pytest.mark.parametrize("runtime", [None, FrameworkRuntime()], ids=["no_result_json", "empty_runtime_override"])
+async def test_a_succeeded_build_with_nothing_to_launch_settles_no_round(coord, tmp_path, runtime):
+    """No launchable runtime means no probe, and no rearm that would settle the held round."""
+    root = tmp_path / "attempt_unlaunchable"
     root.mkdir(parents=True, exist_ok=True)
-    # No result.json written.
-
+    if runtime is not None:
+        br = BuildResult(ok=True, attempt_root=str(root), runtime=runtime)
+        (root / "result.json").write_text(json.dumps(br.to_state()), encoding="utf-8")
     action = TargetedBuildAction(
         gap_id="g4", framework="vllm", component="aiter", capability="fp4_moe", ref="v1", attempt_root=str(root)
     )
-    await _enqueue_and_transition(coord, action, "succeeded")
+    task_id = await _enqueue_and_transition(coord, action, "succeeded")
 
     await coord.enablement_build.maybe_route_build_outcomes()
-
-    assert any(r.get("status") == "reverted" for r in coord._rearm_calls)
-    # No probe should be queued.
-    probes = [t for t in await coord.tasks.queued() if t.kind == "integrate_patch"]
-    assert len(probes) == 0
-
-
-@pytest.mark.asyncio
-async def test_route_succeeded_empty_runtime_override_calls_reverted(coord, tmp_path):
-    """A succeeded build with an empty runtime override routes reverted."""
-    root = tmp_path / "attempt_empty"
-    root.mkdir(parents=True, exist_ok=True)
-
-    # FrameworkRuntime with all-default (empty) fields → to_runtime_override() == {}
-    rt = FrameworkRuntime()
-    br = BuildResult(ok=True, attempt_root=str(root), runtime=rt)
-    (root / "result.json").write_text(json.dumps(br.to_state()), encoding="utf-8")
-
-    action = TargetedBuildAction(
-        gap_id="g5", framework="vllm", component="aiter", capability="fp4_moe", ref="v1", attempt_root=str(root)
-    )
-    await _enqueue_and_transition(coord, action, "succeeded")
-
     await coord.enablement_build.maybe_route_build_outcomes()
 
-    assert any(r.get("status") == "reverted" for r in coord._rearm_calls)
-    probes = [t for t in await coord.tasks.queued() if t.kind == "integrate_patch"]
-    assert len(probes) == 0
+    assert coord._rearm_calls == []
+    assert await _queued_probes(coord) == []
+    assert coord.enablement_build._build_routing_record(task_id) is not None
 
 
 @pytest.mark.asyncio
@@ -549,139 +528,18 @@ async def test_a_build_whose_probe_ran_and_failed_is_not_probed_again(coord, tmp
 
 
 @pytest.mark.asyncio
-async def test_route_failed_timeout_calls_advanced(coord):
-    action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter", capability="fp4_moe", ref="v1")
-    await _enqueue_and_transition(coord, action, "failed")
-    # Simulate failure recorded by lifecycle
-    coord.shared_state.enablement.last_build_failure = {
-        "failure_class": "timeout",
-        "failure_summary": "build exceeded budget",
-    }
-    await coord.enablement_build.maybe_route_build_outcomes()
-
-    assert any(r.get("status") == "advanced" for r in coord._rearm_calls)
-
-
-@pytest.mark.asyncio
-async def test_route_failed_compile_error_novel_calls_advanced(coord):
-    """A compile_error not yet in the novelty ledger → advanced (novel attempt)."""
-    action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter", capability="fp4_moe", ref="v1")
-    await _enqueue_and_transition(coord, action, "failed")
-    coord.shared_state.enablement.last_build_failure = {
-        "failure_class": "compile_error",
-        "failure_summary": "hipcc failed",
-    }
-    await coord.enablement_build.maybe_route_build_outcomes()
-
-    assert any(r.get("status") == "advanced" for r in coord._rearm_calls)
-
-
-@pytest.mark.asyncio
-async def test_route_failed_compile_error_repeat_calls_reverted(coord, tmp_path):
-    """A compile_error whose key is already in the novelty ledger → reverted."""
-    from hyperloom.orchestrator.enablement.runtime.build_actions import build_novelty_key
-
-    action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter", capability="fp4_moe", ref="v1")
-    # Pre-seed the ledger with this exact novelty key.
-    key = list(build_novelty_key(action))
-    coord.shared_state.enablement.build_novelty = [key]
-
-    await _enqueue_and_transition(coord, action, "failed")
-    coord.shared_state.enablement.last_build_failure = {
-        "failure_class": "compile_error",
-        "failure_summary": "hipcc failed again",
-    }
-    await coord.enablement_build.maybe_route_build_outcomes()
-
-    assert any(r.get("status") == "reverted" for r in coord._rearm_calls)
-
-
-@pytest.mark.asyncio
-async def test_novelty_ledger_is_appended_and_bounded(coord, tmp_path):
-    """Ledger grows on each novel failure and is capped at 20 entries."""
-    from hyperloom.orchestrator.enablement.runtime.build_actions import build_novelty_key
-
-    action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter", capability="fp4_moe", ref="v1")
-    # Seed ledger with 20 different entries so the cap truncates old ones.
-    coord.shared_state.enablement.build_novelty = [["aiter", f"v{i}", "gfx950", []] for i in range(20)]
-    await _enqueue_and_transition(coord, action, "failed")
-    coord.shared_state.enablement.last_build_failure = {
-        "failure_class": "compile_error",
-        "failure_summary": "overflow",
-    }
-    await coord.enablement_build.maybe_route_build_outcomes()
-
-    ledger = coord.shared_state.enablement.build_novelty
-    assert len(ledger) == 20  # bounded
-    assert list(build_novelty_key(action)) in ledger  # new entry present
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("failure_class", ["compile_error", "timeout"])
-async def test_failed_build_leaves_the_recorded_boot_verdict_alone(coord, failure_class):
-    """A failed build booted nothing; the next round must still route on the observation the last boot recorded."""
-    from hyperloom.orchestrator.enablement.lane import _rearm_on_advanced
-
-    enablement = coord.shared_state.enablement
-    enablement.launch_log = "ValueError: architectures ['Glm5NextForConditionalGeneration'] are not supported"
-    enablement.launch_observation_path = "/session/reports/bringup/benchmark_vllm-000.json"
-    action = TargetedBuildAction(gap_id="g", framework="vllm", component="vllm_source", capability="glm5", ref="v1")
-    await _enqueue_and_transition(coord, action, "failed")
-    enablement.last_build_failure = {"failure_class": failure_class, "failure_summary": "x"}
-    await coord.enablement_build.maybe_route_build_outcomes()
-
-    _rearm_on_advanced(coord.shared_state, coord._rearm_calls[-1])
-
-    assert enablement.launch_observation_path == "/session/reports/bringup/benchmark_vllm-000.json"
-    assert "Glm5NextForConditionalGeneration" in enablement.launch_log
-
-
-@pytest.mark.asyncio
-async def test_route_same_row_not_processed_twice(coord):
-    action = TargetedBuildAction(gap_id="g", framework="vllm", component="aiter", capability="fp4_moe", ref="v1")
-    await _enqueue_and_transition(coord, action, "failed")
-    coord.shared_state.enablement.last_build_failure = {"failure_class": "compile_error", "failure_summary": "x"}
-    await coord.enablement_build.maybe_route_build_outcomes()
-    await coord.enablement_build.maybe_route_build_outcomes()
-
-    assert len(coord._rearm_calls) == 1  # only once
-
-
-@pytest.mark.asyncio
-async def test_route_failed_build_not_acked_when_rearm_raises(coord):
-    """Failed builds stay unrouted when rearm fails so the next tick can retry."""
-    action = TargetedBuildAction(
-        gap_id="g",
-        framework="vllm",
-        component="aiter",
-        capability="fp4_moe",
-        ref="v1",
-    )
-    task_id = await _enqueue_and_transition(coord, action, "failed")
-    coord.shared_state.enablement.last_build_failure = {
-        "failure_class": "compile_error",
-        "failure_summary": "x",
-    }
-    attempts = {"n": 0}
-    real_rearm = coord.enablement_lane.maybe_rearm_enablement
-
-    async def _flaky_rearm(res):
-        attempts["n"] += 1
-        if attempts["n"] == 1:
-            raise RuntimeError("rearm failed")
-        await real_rearm(res)
-
-    coord.enablement_lane.maybe_rearm_enablement = _flaky_rearm
+async def test_a_failed_build_answers_no_round(coord, tmp_path):
+    """A failed build booted nothing: no rearm, and a verified build after it still probes."""
+    await _recorded_build(coord, gap_id="g_failed_build", state="failed")
+    coord.shared_state.enablement.last_build_failure = {"failure_class": "abi_mismatch", "failure_summary": "x"}
+    verified_tid = await _verified_build(coord, tmp_path / "attempt_after", gap_id="g_after", ref="v2")
 
     await coord.enablement_build.maybe_route_build_outcomes()
-    assert coord.enablement_build._build_routing_record(task_id) is None
-    assert coord.shared_state.enablement.build_novelty == []
 
-    await coord.enablement_build.maybe_route_build_outcomes()
-    assert coord.enablement_build._build_routing_record(task_id) is not None
-    assert attempts["n"] == 2
-    assert len(coord._rearm_calls) == 1
-    assert coord._rearm_calls[-1]["status"] == "advanced"
+    assert coord._rearm_calls == []
+    probes = await _queued_probes(coord)
+    assert len(probes) == 1
+    assert coord.enablement_build._build_routing_record(verified_tid)["probe_task_id"] == probes[0].task_id
 
 
 @pytest.mark.asyncio
@@ -872,19 +730,6 @@ async def test_a_recorded_attempt_row_does_not_shadow_the_routing_sentinel(coord
     )
     assert sentinel is not None and attempt is not None
     assert attempt.get("ok") is True and Path(str(attempt["attempt_root"])).name == task_id
-
-
-@pytest.mark.asyncio
-async def test_a_recorded_failed_attempt_still_reaches_the_rearm_path(coord):
-    await _recorded_build(coord, gap_id="gf", state="failed")
-    coord.shared_state.enablement.last_build_failure = {
-        "failure_class": "timeout",
-        "failure_summary": "build exceeded budget",
-    }
-
-    await coord.enablement_build.maybe_route_build_outcomes()
-
-    assert any(r.get("status") == "advanced" for r in coord._rearm_calls)
 
 
 @pytest.mark.asyncio

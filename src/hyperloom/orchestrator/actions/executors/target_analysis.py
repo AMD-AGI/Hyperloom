@@ -14,7 +14,7 @@ from hyperloom.inference_optimizer.baseline_comparison.target_analyzer import (
     analyze,
     clear_competitor_target,
 )
-from hyperloom.inference_optimizer.baseline_comparison.types import BenchmarkMode
+from hyperloom.inference_optimizer.baseline_comparison.types import BenchmarkMode, TargetAnalysisRequest
 from ...loop.sub_agent_runner import RunnerContext
 
 
@@ -104,13 +104,15 @@ class TargetAnalysisExecutor:
         try:
             summary = analyze(
                 session_dir=session_dir,
-                model_path=model_path,
-                compare_against_gpu=compare_against_gpu,
-                framework=framework,
-                precision=precision,
-                isl=isl,
-                osl=osl,
-                benchmark_mode=benchmark_mode,
+                request=TargetAnalysisRequest(
+                    model_path=model_path,
+                    compare_against_gpu=compare_against_gpu,
+                    framework=framework,
+                    precision=precision,
+                    isl=isl,
+                    osl=osl,
+                    benchmark_mode=benchmark_mode,
+                ),
             )
         except Exception as exc:
             log.exception("target_analysis_executor: analyze() raised: %s", exc)

@@ -40,6 +40,12 @@ class IntegrateAttempt:
     switch_manifest: list[dict[str, Any]] = field(default_factory=list)
     pending: dict[str, Any] = field(default_factory=dict)
 
+    def drop_localization(self) -> None:
+        """Forget the localization, so its manifest is not recorded for a change that was never applied."""
+        self.localization_action = None
+        self.localization_patches = []
+        self.localization_touched = []
+
     @property
     def attempt_venv_root(self) -> str:
         """The acquired runtime, or no runtime when this attempt did not provision."""
@@ -53,3 +59,15 @@ class IntegrateAttempt:
         if self.provision_result is None:
             return ""
         return self.provision_result.runtime.source_root
+
+    def benchmark_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Bind the measured launch to this attempt's acquired runtime and applied source."""
+        result = {
+            **params,
+            "source_patches": [
+                {"framework_root": str(self.framework_root), "patch_file": str(path)} for path in self.applied
+            ],
+        }
+        if self.provision_result is not None and self.provision_result.ok:
+            result["runtime_override"] = self.provision_result.runtime.to_runtime_override()
+        return result

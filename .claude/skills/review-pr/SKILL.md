@@ -78,13 +78,13 @@ Keep the `$WORK` it prints. Read `diff.txt` and `body.txt` before going on.
 | `comments.txt` | existing review and issue comments — do not repeat a point already made (Step 7) |
 | `testfiles.txt` | changed paths under a `tests/` directory |
 | `docfiles.txt` | changed docs, prompts and `.md`/`.rst` paths — empty beside a `src/` change is X3's shape |
-| `openprs.txt` | other open PRs touching the same files — conflicting in-flight work |
+| `openprs.txt` | other open PRs touching the same files — conflicting in-flight work; a `# PARTIAL:` line names what was never compared, reported as `SKIPPED: V4` (rule V4) |
 
 ## Step 1b — Select the rules
 
 Open the index at the top of [`rules.md`](rules.md) and take every row whose trigger matches
 `files.txt` and a skim of `diff.txt`. Write the union of their rule ids into `$WORK/rules.txt`, one
-per line, then read only those bodies. **Never read `rules.md` whole** — it holds 74 rules across 10
+per line, then read only those bodies. **Never read `rules.md` whole** — it holds 75 rules across 10
 families, and a reviewer told to attend to all of them attends to none. Match rows generously: a row
 you are unsure about is taken, never dropped. V1-V8 and X2 are on every list.
 

@@ -416,6 +416,89 @@ async def test_compose_prompt_kernel(coord: Coordinator) -> None:
     assert "SESSION_DIR=" in out_k
 
 
+#: ``(heading, owner, producer)`` for every advisory the orchestration prompt carries, in the order it carries
+#: them. A heading of ``None`` is a block the prompt emits without one. Section order is prompt content: the
+#: model reads these in this sequence, so a reordering is a change to what it was asked.
+_ORCHESTRATION_ADVISORIES = (
+    ("=== Warm start (Recipe KB T0) ===", "shared_state", "to_warm_start_summary"),
+    ("=== Current gaps ===", "shared_state", "to_gaps_summary"),
+    (None, "conversation", "_specialist_findings_block"),
+    ("=== External target gap (advisory) ===", "conversation", "target_gap_advisory_block"),
+    ("=== Specialist proposal scores (advisory) ===", "shared_state", "to_proposal_scores_summary"),
+    ("=== Priors-match (advisory ordering) ===", "conversation", "_priors_match_advisory_block"),
+    ("=== Intervention mix (telemetry) ===", "shared_state", "to_intervention_mix_summary"),
+    ("=== Plateau advisory ===", "conversation", "plateau_advisory_block"),
+    ("=== Bottleneck redirect (advisory) ===", "conversation", "_bottleneck_redirect_advisory_block"),
+    ("=== Acceptance threshold (advisory) ===", "conversation", "_acceptance_threshold_advisory_block"),
+    ("=== Discarded escalation hint (advisory) ===", "conversation", "_discarded_escalate_hint_advisory_block"),
+)
+
+
+def _stub_advisories(coord: Coordinator, monkeypatch) -> list[str]:
+    """Give every advisory a unique non-empty block; return the markers in prompt order."""
+    owners = {"shared_state": coord.shared_state, "conversation": coord.conversation}
+    markers = []
+    for _heading, owner, producer in _ORCHESTRATION_ADVISORIES:
+        marker = f"<{producer}>"
+        monkeypatch.setattr(owners[owner], producer, lambda marker=marker: marker)
+        markers.append(marker)
+    return markers
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_keeps_the_orchestration_advisory_order(coord: Coordinator, monkeypatch) -> None:
+    markers = _stub_advisories(coord, monkeypatch)
+
+    prompt = await coord.conversation.compose_prompt("orchestration")
+
+    for (heading, _owner, _producer), marker in zip(_ORCHESTRATION_ADVISORIES, markers):
+        assert (marker if heading is None else f"{heading}\n{marker}") in prompt
+    positions = [prompt.index(marker) for marker in markers]
+    assert positions == sorted(positions)
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_withholds_every_advisory_from_a_reviewer(coord: Coordinator, monkeypatch) -> None:
+    markers = _stub_advisories(coord, monkeypatch)
+
+    prompt = await coord.conversation.compose_prompt("critic")
+
+    assert [marker for marker in markers if marker in prompt] == []
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_drops_the_heading_of_an_advisory_that_produced_nothing(
+    coord: Coordinator,
+    monkeypatch,
+) -> None:
+    _stub_advisories(coord, monkeypatch)
+    monkeypatch.setattr(coord.conversation, "plateau_advisory_block", lambda: "")
+
+    prompt = await coord.conversation.compose_prompt("orchestration")
+
+    assert "=== Plateau advisory ===" not in prompt
+    # The trajectory digest is shown only on a plateau, so it goes with it.
+    assert "=== Trajectory review (advisory) ===" not in prompt
+    assert "=== Bottleneck redirect (advisory) ===" in prompt
+
+
+@pytest.mark.asyncio
+async def test_compose_prompt_puts_the_trajectory_review_under_the_plateau_advisory(
+    coord: Coordinator,
+    monkeypatch,
+) -> None:
+    from hyperloom.orchestrator.knowledge import trajectory_reviewer
+
+    _stub_advisories(coord, monkeypatch)
+    monkeypatch.setattr(trajectory_reviewer, "build_trajectory_digest", lambda *_a, **_k: "<trajectory>")
+
+    prompt = await coord.conversation.compose_prompt("orchestration")
+
+    assert (
+        "=== Plateau advisory ===\n<plateau_advisory_block>\n=== Trajectory review (advisory) ===\n<trajectory>"
+    ) in prompt
+
+
 # -- advisory blocks -------------------------------------------------------
 def test_advisory_blocks_disabled_return_empty(coord: Coordinator) -> None:
     coord.shared_state.target_advisory_enabled = False
@@ -473,20 +556,13 @@ async def test_escalate_invalid_hint_broadcasts_only(coord: Coordinator) -> None
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("hint", "phase"),
-    [("extend_explore_budget", "FRAMEWORK_AGENT"), ("extend_kernel_budget", "KERNEL_AGENT")],
-)
-async def test_escalate_extend_budget_raises_the_phase_share(coord: Coordinator, hint: str, phase: str) -> None:
-    from hyperloom.orchestrator.phases.machine_state import ESCALATE_HINT_BUDGET_BUMP_DELTA
-
+async def test_escalate_cannot_lengthen_a_phase_budget(coord: Coordinator) -> None:
+    """Phase budgets are operator configuration; no escalate hint raises one."""
     before = dict(coord.shared_state.phase_budget_pct)
 
-    await coord.router._handle_escalate_strategy_change("orchestration", _escalate(hint))
+    await coord.router._handle_escalate_strategy_change("orchestration", _escalate("extend_explore_budget"))
 
-    after = coord.shared_state.phase_budget_pct
-    assert after[phase] == pytest.approx(before[phase] + ESCALATE_HINT_BUDGET_BUMP_DELTA)
-    assert {k: v for k, v in after.items() if k != phase} == {k: v for k, v in before.items() if k != phase}
+    assert coord.shared_state.phase_budget_pct == before
     assert coord.shared_state.pending_escalate_hint == ""
 
 
@@ -971,17 +1047,82 @@ async def test_fan_out_wave_rejects_invalid_entries(coord: Coordinator, monkeypa
 
 # -- warm_specialist_params -----------------------------------------------
 @pytest.mark.asyncio
-async def test_warm_specialist_params_fills_defaults(coord: Coordinator) -> None:
+async def test_warm_specialist_params_always_writes_the_unconditional_keys(coord: Coordinator) -> None:
+    """Three keys are written whatever the session holds, so a specialist can read them without a presence test."""
     coord.shared_state.gpu_type = "mi300x"
-    coord.shared_state.tp = 1
-    coord.shared_state.conc = 64
-    coord.shared_state.isl = 256
-    coord.shared_state.osl = 256
     params: dict = {"domain": "kernel_agent"}
+
     await coord.specialist_dispatch.warm_specialist_params(params)
+
     assert params["gpu_type"] == "mi300x"
-    assert params["tp"] == 1
-    assert "kb_subgraph" in params
+    assert params["kb_subgraph"] == {}
+    assert "keep_threshold_pct" in params
+
+    empty: dict = {"domain": "kernel_agent"}
+    coord.shared_state.gpu_type = ""
+
+    await coord.specialist_dispatch.warm_specialist_params(empty)
+
+    assert empty["gpu_type"] == ""
+
+
+#: ``(state field, param key, value to set, value expected on the params)`` for every field whose value
+#: SharedState hands a specialist. ``grading`` is the one whose key is not its own name.
+_STATE_EXPORTS = (
+    ("warm_start_recipe", "warm_start_recipe", {"backend": "aiter"}, {"backend": "aiter"}),
+    ("warm_start_pitfalls", "warm_start_pitfalls", ["oom"], ["oom"]),
+    ("warm_start_lessons", "warm_start_lessons", ["raise tp"], ["raise tp"]),
+    ("framework", "framework", "  sglang  ", "sglang"),
+    ("tp", "tp", 8, 8),
+    ("precision", "precision", "fp8", "fp8"),
+    ("conc", "conc", 64, 64),
+    ("isl", "isl", 1024, 1024),
+    ("osl", "osl", 128, 128),
+    ("max_model_len", "max_model_len", 8192, 8192),
+    ("benchmark_mode", "benchmark_mode", "agentx", "agentx"),
+    ("agentx_corpus_shape", "agentx_corpus_shape", {"isl": 1024}, {"isl": 1024}),
+    ("grading", "agentx_grading", {"objective": "intvty_p90"}, {"objective": "intvty_p90"}),
+    ("agentx_backend", "agentx_backend", "vllm", "vllm"),
+    ("baseline_tput", "baseline_tput", 900.0, 900.0),
+    ("cumulative_gain_validated", "cumulative_gain_validated", -3.5, -3.5),
+)
+
+
+@pytest.mark.asyncio
+async def test_warm_specialist_params_exports_every_state_field_it_carries(coord: Coordinator) -> None:
+    for field, _key, value, _expected in _STATE_EXPORTS:
+        setattr(coord.shared_state, field, value)
+    params: dict = {"domain": "kernel_agent"}
+
+    await coord.specialist_dispatch.warm_specialist_params(params)
+
+    assert {key: params.get(key) for _f, key, _v, _e in _STATE_EXPORTS} == {
+        key: expected for _f, key, _v, expected in _STATE_EXPORTS
+    }
+
+
+@pytest.mark.asyncio
+async def test_warm_specialist_params_omits_a_field_state_left_empty(coord: Coordinator) -> None:
+    """An absent key is how a specialist is told the session has no value, so an empty one must not be exported."""
+    params: dict = {"domain": "kernel_agent"}
+
+    await coord.specialist_dispatch.warm_specialist_params(params)
+
+    assert [key for _f, key, _v, _e in _STATE_EXPORTS if key in params] == []
+
+
+@pytest.mark.asyncio
+async def test_warm_specialist_params_never_overwrites_a_key_the_caller_set(coord: Coordinator) -> None:
+    for field, _key, value, _expected in _STATE_EXPORTS:
+        setattr(coord.shared_state, field, value)
+    params: dict = {"domain": "kernel_agent"}
+    params.update({key: "caller" for _f, key, _v, _e in _STATE_EXPORTS})
+
+    await coord.specialist_dispatch.warm_specialist_params(params)
+
+    assert {key: params[key] for _f, key, _v, _e in _STATE_EXPORTS} == {
+        key: "caller" for _f, key, _v, _e in _STATE_EXPORTS
+    }
 
 
 # -- finalize_recipe_and_journal ------------------------------------

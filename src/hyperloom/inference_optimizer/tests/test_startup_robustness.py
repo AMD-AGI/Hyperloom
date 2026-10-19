@@ -366,12 +366,11 @@ def test_build_backends_keeps_anthropic_critic_when_codex_follows_claude(
     monkeypatch.setattr(cli_backends, "CriticAgentBackend", _FakeCriticAgent)
 
     built = cli_backends._build_backends(
-        claude_model="claude-opus-4-8",
-        codex_model="stale-codex-model",
-        critic_choice="agent",
+        cli_backends.ModelRouting(
+            claude_model="claude-opus-4-8", codex_model="stale-codex-model", codex_follows_claude=True
+        ),
+        cli_backends.CriticSetup(choice="agent", agent_root=tmp_path),
         session_dir=tmp_path,
-        critic_agent_root=tmp_path,
-        codex_follows_claude=True,
     )
 
     critic = built["critic"]
@@ -519,13 +518,15 @@ def test_emit_launch_info_prints_kv_sentinel(tmp_path, capsys):
     session_dir = tmp_path / "model" / "20260101T000000Z"
     session_dir.mkdir(parents=True)
     info = cli._emit_launch_info(
-        pid=12345,
-        session_dir=session_dir,
-        session_id="sess-xyz",
-        run_log="/tmp/run.log",
-        gpu_type="mi355x",
-        framework="sglang",
-        model="/models/qwen3",
+        cli.LaunchInfo(
+            pid=12345,
+            session_dir=session_dir,
+            session_id="sess-xyz",
+            run_log="/tmp/run.log",
+            gpu_type="mi355x",
+            framework="sglang",
+            model="/models/qwen3",
+        ),
         launch_info_file=None,
     )
     out = capsys.readouterr().out
@@ -547,13 +548,15 @@ def test_emit_launch_info_writes_json_file(tmp_path, capsys):
     session_dir.mkdir()
     out_file = tmp_path / "subdir" / "launch.json"
     cli._emit_launch_info(
-        pid=7777,
-        session_dir=session_dir,
-        session_id="sid",
-        run_log="",
-        gpu_type="mi300x",
-        framework="vllm",
-        model="m",
+        cli.LaunchInfo(
+            pid=7777,
+            session_dir=session_dir,
+            session_id="sid",
+            run_log="",
+            gpu_type="mi300x",
+            framework="vllm",
+            model="m",
+        ),
         launch_info_file=str(out_file),
     )
     assert out_file.exists()
@@ -574,41 +577,17 @@ def test_launch_info_is_emitted_on_resume_too():
     The health check reads pid and session_dir from that file; a resume that skips it leaves the launcher unable
     to identify the optimizer it just started.
     """
-    import ast
-    import pathlib
+    from .conftest import cli_call_sequence
 
-    tree = ast.parse(pathlib.Path(cli.__file__).read_text(encoding="utf-8"))
-
-    def emits(stmts) -> bool:
-        return any(
-            isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_emit_launch_info"
-            for stmt in stmts
-            for node in ast.walk(stmt)
-        )
-
-    resume_ifs = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.If)
-        and any(isinstance(sub, ast.Attribute) and sub.attr == "resume_from" for sub in ast.walk(node.test))
-        and node.orelse
-    ]
-    assert any(emits(node.body) and emits(node.orelse) for node in resume_ifs), (
-        "_emit_launch_info runs on only one side of `if args.resume_from:`"
-    )
+    for path in ("_resume_session", "_seed_fresh_session"):
+        assert "_emit_launch_info" in cli_call_sequence(path), f"{path} does not emit launch info"
 
 
 def test_emit_launch_info_no_file_no_extra_print(tmp_path, capsys):
     session_dir = tmp_path / "sess"
     session_dir.mkdir()
     cli._emit_launch_info(
-        pid=1,
-        session_dir=session_dir,
-        session_id="s",
-        run_log="",
-        gpu_type="",
-        framework="",
-        model="",
+        cli.LaunchInfo(pid=1, session_dir=session_dir, session_id="s", run_log="", gpu_type="", framework="", model=""),
         launch_info_file=None,
     )
     out = capsys.readouterr().out

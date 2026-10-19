@@ -10,11 +10,8 @@ import yaml
 from pathlib import Path
 
 
-from hyperloom.orchestrator.actions.executors._grid_runner import (
-    GridVariant,
-    _build_variant_yaml,
-    apply_runtime_override,
-)
+from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, _build_variant_yaml
+from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
 
 
 def _base_yaml(tmp_path: Path, framework: str = "vllm") -> Path:

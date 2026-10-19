@@ -17,9 +17,14 @@ Orchestration emits a `request{target_agent: "kernel_agent", kind: "<kind>"}` in
 `IntentRouter._handle_request` (`orchestrator/loop/intent_router.py`) intercepts it
 before any agent backend runs:
 
-1. `sequence_denial_for_request` checks the baseline prerequisite — if
-   `baseline_tput == 0` and the kind is not `trace_analyze`, the request is
-   policy-denied immediately (no bus record).
+1. `admission_denial_for_request` checks the baseline prerequisite and the
+   time budget, and a request that fails either is policy-denied immediately
+   (no bus record): any registered kind but `trace_analyze` while
+   `baseline_tput == 0`, or an `integrate` / `apply_patch` whose expected
+   cost — the `integrate` action's estimate, or one measured baseline round
+   when longer — does not fit the time left in the session
+   (`rule=time_budget`) or, in FRAMEWORK_AGENT and KERNEL_AGENT, in the phase
+   (`rule=phase_time_budget`).
 2. Records the request on the message bus (`source: "orchestration"`).
 3. Checks `shared_state.kernel_enabled`; auto-rejects with `agent_disabled` when
    `False` (that is, `--no-kernel`).
@@ -39,7 +44,6 @@ No PolicyGate path runs for the RESPONSE because it's written directly through
 | Request kind | Handler | Entry point |
 |---|---|---|
 | `trace_analyze` | `trace_analyze_handler` | TraceLens `tracelens_analysis.py` |
-| `run_optimization` | `run_optimization_handler` | GEAK or Forge per-kernel |
 | `integrate` | `integrate_handler` | patch → re-baseline → KEEP/REVERT |
 | `apply_patch` | `integrate_handler` (alias) | same as `integrate` |
 
@@ -171,13 +175,11 @@ decides kernel strategy internally:
   `--backends` CLI flags and payload `backends` hints do not override this
   choice.
 
-`run_gemm_tuning_handler` also defaults to GEAK unless the effective
-`KERNEL_OPT_BACKEND_ORDER` is `forge`, whether selected explicitly or by the
-ATOM CLI default. That default applies to an LLM-issued `run_gemm_tuning`
-REQUEST, which is dispatched inline whatever the backend. The KERNEL-**entry**
-GEMM tuning is a different matter: under `geak` it never fires at all, because
-`run_agent` hands the phase to `_run_geak_kernel_phase` and returns
-before reaching it.
+`run_gemm_tuning_handler` runs the Forge GEMM tuner only, and only `KernelPhase`
+calls it. Under `geak` the KERNEL-entry GEMM tuning never fires, because
+`run_agent` hands the phase to `_run_geak_kernel_phase` and returns before
+reaching it. An orchestration-issued `run_gemm_tuning` REQUEST is rejected, as
+described above.
 
 FlyDSL kernels (`source_type=flydsl`) are handled by Forge when it is enabled.
 
@@ -300,9 +302,6 @@ When `--nodes >= 2`, the optimization sandbox has no GPU. Handlers adapt:
 - **Applying patches**: `apply_kernel_patch.py` detects multi-node and fans the
   patch to every pod using `python3 -m hyperloom multi-node apply-patch`.
   Revert uses `manifest.multinode.host_backup_map` to hit the same pods.
-- **Compiling/benchmarking**: Forge/GEAK backends use
-  `python3 -m hyperloom multi-node kernel-bench` instead of
-  local `hipcc`.
 - **Integration**: `integrate_handler` forces a full server restart after a
   successful apply so the re-baseline measures the patched modules.
 - **RayJob recreate**: `_replay_kernel_patches_for_multi_node` replays all

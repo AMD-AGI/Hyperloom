@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+from io import BytesIO
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.error import HTTPError, URLError
 
 import pytest
 
@@ -1319,9 +1321,30 @@ def test_remote_close_writes_new_kb_once_and_skips_legacy_finalize(
     assert audit_rows[-1]["result"]["best_throughput"] == 10.0
 
 
+@pytest.mark.parametrize(
+    "cause, expected_error",
+    [
+        (None, {"type": "OSError"}),
+        (
+            HTTPError("https://private.invalid/secret", 403, "private body", {}, None),
+            {"type": "KBStoreError", "cause_type": "HTTPError", "http_status": 403},
+        ),
+        (
+            URLError(ConnectionRefusedError(111, "private host")),
+            {"type": "KBStoreError", "cause_type": "URLError", "reason_type": "ConnectionRefusedError", "errno": 111},
+        ),
+        (
+            b"private non-JSON response",
+            {"type": "KBStoreError", "cause_type": "JSONDecodeError"},
+        ),
+        (KBStoreError("private error"), {"type": "KBStoreError"}),
+    ],
+)
 def test_remote_close_transport_failure_is_nonfatal(
     tmp_path: Path,
     monkeypatch,
+    cause,
+    expected_error,
 ) -> None:
     class _Journal:
         def finalize(self, **kwargs) -> None:
@@ -1329,7 +1352,23 @@ def test_remote_close_transport_failure_is_nonfatal(
 
     coordinator = SimpleNamespace(
         session_dir=tmp_path,
-        shared_state=SharedState(),
+        shared_state=SharedState(
+            current_best={"tput": 130.0, "extra_server_args": "--page-size 32"},
+            cumulative_gain_validated=30.0,
+            optimization_stack=[
+                {
+                    "action": "explore",
+                    "candidate_extra_server_args": "--page-size 32",
+                    "recipe_delta": {"extra_server_args": "--page-size 32", "args_mode": "append"},
+                }
+            ],
+            cumulative_gain_validated_stack_len=1,
+            kernel_optimizer="native",
+            tp=8,
+            conc=64,
+            isl=1024,
+            osl=256,
+        ),
         recipe_kb=None,
         knowledge_plane=None,
     )
@@ -1338,26 +1377,31 @@ def test_remote_close_transport_failure_is_nonfatal(
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.setenv("KB_STORE_URL", "https://kb.example")
     monkeypatch.setenv("KB_STORE_TOKEN", "token")
-    monkeypatch.setattr(
-        remote_recipe.HyperloomRemoteKB,
-        "from_env",
-        classmethod(lambda cls: (_ for _ in ()).throw(OSError("transport down"))),
-    )
+
+    def respond(request, **kwargs):
+        if isinstance(cause, bytes):
+            return BytesIO(cause)
+        raise cause
+
+    monkeypatch.setattr(kb_store_client.urllib.request, "urlopen", respond)
+    if cause is None or isinstance(cause, KBStoreError):
+
+        def fail_publish(cls):
+            raise cause if cause is not None else OSError("transport down")
+
+        monkeypatch.setattr(remote_recipe.HyperloomRemoteKB, "from_env", classmethod(fail_publish))
     journal = RecipeJournalCollaborator(coordinator)
     journal.ensure_journal = lambda: _Journal()
     journal.workload_canonical_id = lambda: "inference:m:h:f:mt:a:v:p"
     outcome = journal.finalize_recipe_and_journal()
     assert outcome == {
         "status": "error",
-        "reason": "OSError",
+        "reason": expected_error["type"],
         "backend": "kb-store",
         "canonical_id": "inference:m:h:f:mt:a:v:p",
         "session_id": tmp_path.name,
-        # The publisher reports the failure as a bare exception class name, so
-        # the class is carried in a field of its own rather than left for a
-        # reader to recover from ``reason``.
         "result_type": "transport_failed",
-        "error_class": "OSError",
+        "error_class": expected_error["type"],
     }
     from hyperloom.inference_optimizer.session.session_paths import (
         recipe_snapshot_audit_jsonl,
@@ -1365,7 +1409,8 @@ def test_remote_close_transport_failure_is_nonfatal(
 
     row = json.loads(recipe_snapshot_audit_jsonl(tmp_path).read_text(encoding="utf-8"))
     assert row["status"] == "error"
-    assert row["error"]["type"] == "OSError"
+    assert row["error"] == expected_error
+    assert "private" not in json.dumps(row)
 
 
 def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, monkeypatch) -> None:
@@ -1422,7 +1467,7 @@ def test_unvalidated_write_back_audit_omits_mismatched_metrics(tmp_path: Path, m
     )
     monkeypatch.setattr(
         "hyperloom.orchestrator.knowledge.recipe_journal._close_out.record_write_back_settled",
-        lambda *args, **kwargs: captured.update(kwargs),
+        lambda _session_dir, settlement: captured.update(vars(settlement)),
     )
 
     collaborator._record_write_back_settled(
@@ -1664,13 +1709,13 @@ def test_write_boundary_sanitizes_directly_constructed_bundle(tmp_path: Path) ->
         }
     )
 
-    result = RemoteRecipeClient(store).write_if_better(  # type: ignore[arg-type]
+    result = RemoteRecipeClient(store).write_if_better(
         "inference:m:h:f:mt:a:v:p",
         "session-1",
         bundle,
-        scope=_SCOPE,
-        primary_metric="optimized_throughput",
-        primary_value=130.0,
+        KBSelectionProfile(
+            scope=_SCOPE, primary_metric="optimized_throughput", primary_value=130.0, objective_schema="", metrics={}
+        ),
         files_dir=tmp_path,
     )
 
@@ -1710,13 +1755,13 @@ def test_empty_replay_material_skips_even_when_throughput_beats_champion(
             },
         }
     )
-    result = RemoteRecipeClient(store).write_if_better(  # type: ignore[arg-type]
+    result = RemoteRecipeClient(store).write_if_better(
         "inference:m:h:f:mt:a:v:p",
         "session-1",
         bundle,
-        scope=_SCOPE,
-        primary_metric="optimized_throughput",
-        primary_value=200.0,
+        KBSelectionProfile(
+            scope=_SCOPE, primary_metric="optimized_throughput", primary_value=200.0, objective_schema="", metrics={}
+        ),
         files_dir=tmp_path,
     )
     assert result.status == "skipped"

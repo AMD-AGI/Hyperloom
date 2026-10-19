@@ -52,12 +52,11 @@ def _prep_and_mock(tmp_path, monkeypatch, splitk):
 
 def _run(tmp_path):
     return ac.run_aiter_dense_tuner(
-        tuner_name="a8w8",
-        script_key="a8w8_blockscale",
-        env_var="AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
-        ctx=_ctx(tmp_path),
-        work_dir=tmp_path,
-        extra_args=["--libtype", "all", "--splitK"],
+        ac.DenseTunerSpec(
+            "a8w8", "a8w8_blockscale", "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE", ("--libtype", "all", "--splitK")
+        ),
+        _ctx(tmp_path),
+        tmp_path,
     )
 
 
@@ -75,12 +74,9 @@ def _run_no_splitk(tmp_path):
     # Same driver, but no --splitK, so a forced candidate can only come from the new-shape path -- isolating the fix
     # from the split-K force_candidate.
     return ac.run_aiter_dense_tuner(
-        tuner_name="a8w8",
-        script_key="a8w8_blockscale",
-        env_var="AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
-        ctx=_ctx(tmp_path),
-        work_dir=tmp_path,
-        extra_args=["--libtype", "all"],
+        ac.DenseTunerSpec("a8w8", "a8w8_blockscale", "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE", ("--libtype", "all")),
+        _ctx(tmp_path),
+        tmp_path,
     )
 
 

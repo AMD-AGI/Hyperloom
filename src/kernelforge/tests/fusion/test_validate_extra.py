@@ -9,14 +9,15 @@ import subprocess
 
 from kernelforge.fusion.models import Recipe
 from kernelforge.fusion.validate import (
+    DecodeLoad,
     HarnessKernelRunner,
+    SmokeServer,
     _parse_harness_json,
     _runtime_dir,
     _serving_crash_reason,
     _serving_smoke_launch_cmd,
     _tail_text,
     _vllm_decode_probe,
-    classify_serving_smoke_failure,
     serving_smoke,
     snr_db,
     validate_recipe,
@@ -58,13 +59,13 @@ def _make_urlopen(models_payload=None, models_exc=None, completion_payload=None,
 
 def test_vllm_probe_models_http_error(monkeypatch):
     monkeypatch.setattr(_urllib_rq, "urlopen", _make_urlopen(models_exc=OSError("boom")))
-    ok, detail = _vllm_decode_probe(8899, isl=64, osl=8, num_prompts=16, conc=4, timeout_s=5)
+    ok, detail = _vllm_decode_probe(8899, DecodeLoad(isl=64, osl=8, num_prompts=16, conc=4), 5)
     assert ok is False and "/v1/models probe error" in detail
 
 
 def test_vllm_probe_empty_model_id(monkeypatch):
     monkeypatch.setattr(_urllib_rq, "urlopen", _make_urlopen(models_payload={"data": [{}]}))
-    ok, detail = _vllm_decode_probe(8899, isl=64, osl=8, num_prompts=16, conc=4, timeout_s=5)
+    ok, detail = _vllm_decode_probe(8899, DecodeLoad(isl=64, osl=8, num_prompts=16, conc=4), 5)
     assert ok is False and "no served model id" in detail
 
 
@@ -74,7 +75,7 @@ def test_vllm_probe_empty_completion_text(monkeypatch):
         "urlopen",
         _make_urlopen(models_payload={"data": [{"id": "m"}]}, completion_payload={"choices": [{"text": ""}]}),
     )
-    ok, detail = _vllm_decode_probe(8899, isl=64, osl=8, num_prompts=16, conc=4, timeout_s=5)
+    ok, detail = _vllm_decode_probe(8899, DecodeLoad(isl=64, osl=8, num_prompts=16, conc=4), 5)
     assert ok is False and "no output tokens" in detail
 
 
@@ -82,7 +83,7 @@ def test_vllm_probe_completion_http_error(monkeypatch):
     monkeypatch.setattr(
         _urllib_rq, "urlopen", _make_urlopen(models_payload={"data": [{"id": "m"}]}, completion_exc=OSError("net"))
     )
-    ok, detail = _vllm_decode_probe(8899, isl=64, osl=8, num_prompts=16, conc=4, timeout_s=5)
+    ok, detail = _vllm_decode_probe(8899, DecodeLoad(isl=64, osl=8, num_prompts=16, conc=4), 5)
     assert ok is False and "error" in detail
 
 
@@ -92,73 +93,34 @@ def test_vllm_probe_all_ok(monkeypatch):
         "urlopen",
         _make_urlopen(models_payload={"data": [{"id": "m"}]}, completion_payload={"choices": [{"text": "hi"}]}),
     )
-    ok, detail = _vllm_decode_probe(8899, isl=64, osl=8, num_prompts=16, conc=4, timeout_s=5)
+    ok, detail = _vllm_decode_probe(8899, DecodeLoad(isl=64, osl=8, num_prompts=16, conc=4), 5)
     assert ok is True and "decode completions ok" in detail
 
 
 def test_launch_cmd_matches_framework():
     """Repro: serving smoke must launch the framework's own server, not always sglang."""
     for fw in ("vllm", "vllm-aiter"):
-        cmd = _serving_smoke_launch_cmd(fw, "/m", 8977, "")
+        cmd = _serving_smoke_launch_cmd(SmokeServer("/m", {}, framework=fw, port=8977, server_extra=""))
         assert cmd[:2] == ["vllm", "serve"], f"{fw} must launch vllm serve, got {cmd[:2]}"
         assert not any("sglang" in str(c) for c in cmd), f"{fw} must not launch sglang: {cmd}"
-    scmd = _serving_smoke_launch_cmd("sglang", "/m", 8977, "")
+    scmd = _serving_smoke_launch_cmd(SmokeServer("/m", {}, framework="sglang", port=8977, server_extra=""))
     assert any("sglang.launch_server" in str(c) for c in scmd)
 
 
 def test_launch_cmd_matches_session_tp_block_size_and_max_model_len():
     """Serving smoke must boot with the session's TP / KV block size / max len."""
     cmd = _serving_smoke_launch_cmd(
-        "vllm",
-        "/m",
-        8977,
-        "",
-        tp=8,
-        block_size=128,
-        max_model_len=13312,
+        SmokeServer("/m", {}, framework="vllm", port=8977, server_extra="", tp=8, block_size=128, max_model_len=13312)
     )
     assert cmd[cmd.index("--tensor-parallel-size") + 1] == "8"
     assert cmd[cmd.index("--block-size") + 1] == "128"
     assert cmd[cmd.index("--max-model-len") + 1] == "13312"
     scmd = _serving_smoke_launch_cmd(
-        "sglang",
-        "/m",
-        8977,
-        "",
-        tp=8,
-        block_size=128,
-        max_model_len=13312,
+        SmokeServer("/m", {}, framework="sglang", port=8977, server_extra="", tp=8, block_size=128, max_model_len=13312)
     )
     assert scmd[scmd.index("--tp") + 1] == "8"
     assert scmd[scmd.index("--context-length") + 1] == "13312"
     assert "--block-size" not in scmd
-
-
-def test_classify_serving_smoke_failure_only_blames_explicit_gpu_faults():
-    """The reason-only fallback needs fault EVIDENCE, not a keyword that resembles it."""
-    assert (
-        classify_serving_smoke_failure("server exited rc=1 before ready: ValueError: No common block size for 16")
-        == "env_or_boot"
-    )
-    assert classify_serving_smoke_failure("server not ready within 1200s") == "env_or_boot"
-    assert classify_serving_smoke_failure("serving smoke harness error: RuntimeError: popen exploded") == "env_or_boot"
-    # Memory exhaustion reaches us through the same "HIP error:" channel as a fault.
-    assert (
-        classify_serving_smoke_failure("server exited rc=1 before ready: RuntimeError: HIP error: out of memory")
-        == "env_or_boot"
-    )
-    # A live server that refused a request is not the kernel faulting.
-    assert classify_serving_smoke_failure("decode probe failed: /v1/models probe error: OSError: boom") == "env_or_boot"
-    assert (
-        classify_serving_smoke_failure("decode bench failed rc=1: ModuleNotFoundError: sglang.bench_serving")
-        == "env_or_boot"
-    )
-    assert (
-        classify_serving_smoke_failure("scheduler crashed during CUDA-graph decode: HSA_STATUS_ERROR_EXCEPTION")
-        == "kernel_fault"
-    )
-    assert classify_serving_smoke_failure("server crashed at startup: hardware exception") == "kernel_fault"
-    assert classify_serving_smoke_failure("decode bench timed out (possible hang in fused kernel)") == "kernel_fault"
 
 
 def test_serving_smoke_tp_exposes_enough_gpus(monkeypatch, tmp_path):
@@ -175,7 +137,9 @@ def test_serving_smoke_tp_exposes_enough_gpus(monkeypatch, tmp_path):
     import time
 
     monkeypatch.setattr(time, "sleep", lambda *_: None)
-    serving_smoke("/m", {"F": "1"}, framework="vllm", gpu="0", tp=8, timeout_s=1, log_path=str(tmp_path / "tp.log"))
+    serving_smoke(
+        SmokeServer("/m", {"F": "1"}, framework="vllm", gpu="0", tp=8), timeout_s=1, log_path=str(tmp_path / "tp.log")
+    )
     assert captured["env"].get("HIP_VISIBLE_DEVICES") == "0,1,2,3,4,5,6,7"
     assert captured["cmd"][captured["cmd"].index("--tensor-parallel-size") + 1] == "8"
 
@@ -195,7 +159,9 @@ def test_serving_smoke_vllm_uses_vllm_launcher_and_probe(monkeypatch, tmp_path):
     import time
 
     monkeypatch.setattr(time, "sleep", lambda *_: None)
-    ok, reason = serving_smoke("/m", {"F": "1"}, framework="vllm", timeout_s=5, log_path=str(tmp_path / "v.log"))
+    ok, reason = serving_smoke(
+        SmokeServer("/m", {"F": "1"}, framework="vllm"), timeout_s=5, log_path=str(tmp_path / "v.log")
+    )
     assert ok is True and "survives" in reason
     assert captured["cmd"][:2] == ["vllm", "serve"]
     assert not any("sglang" in str(c) for c in captured["cmd"])
@@ -282,7 +248,7 @@ def test_serving_smoke_server_exits_before_ready(monkeypatch, tmp_path):
     import time
 
     monkeypatch.setattr(time, "sleep", lambda *_: None)
-    ok, reason = serving_smoke("/m", {"F": "1"}, timeout_s=5, log_path=str(slog))
+    ok, reason = serving_smoke(SmokeServer("/m", {"F": "1"}), timeout_s=5, log_path=str(slog))
     assert ok is False and "before ready" in reason
 
 
@@ -301,7 +267,7 @@ def test_serving_smoke_ready_then_bench_ok(monkeypatch, tmp_path):
     import time
 
     monkeypatch.setattr(time, "sleep", lambda *_: None)
-    ok, reason = serving_smoke("/m", {"F": "1"}, timeout_s=5, log_path=str(slog))
+    ok, reason = serving_smoke(SmokeServer("/m", {"F": "1"}), timeout_s=5, log_path=str(slog))
     assert ok is True and "survives" in reason
 
 
@@ -324,7 +290,7 @@ def test_serving_smoke_crash_during_decode(monkeypatch, tmp_path):
     import time
 
     monkeypatch.setattr(time, "sleep", lambda *_: None)
-    ok, reason = serving_smoke("/m", {"F": "1"}, timeout_s=5, log_path=str(slog))
+    ok, reason = serving_smoke(SmokeServer("/m", {"F": "1"}), timeout_s=5, log_path=str(slog))
     assert ok is False and "scheduler crashed" in reason
 
 
@@ -339,7 +305,7 @@ def test_serving_smoke_harness_error_is_soft_fail(monkeypatch, tmp_path):
     import time
 
     monkeypatch.setattr(time, "sleep", lambda *_: None)
-    ok, reason = serving_smoke("/m", {"F": "1"}, timeout_s=1, log_path=str(tmp_path / "x.log"))
+    ok, reason = serving_smoke(SmokeServer("/m", {"F": "1"}), timeout_s=1, log_path=str(tmp_path / "x.log"))
     assert ok is False and "harness error" in reason
 
 
@@ -445,8 +411,8 @@ def test_apply_serving_gate_env_boot_failure_keeps_micro_keep(tmp_path, monkeypa
     monkeypatch.setattr(serving_gate, "_serving_check_enabled", lambda: True)
     captured = {}
 
-    def fake_smoke(*a, **k):
-        captured.update(k)
+    def fake_smoke(server, *a, **k):
+        captured["server"] = server
         return SmokeVerdict(
             ok=False,
             reason="server exited rc=1 before ready: ValueError: No common block size for 16",
@@ -477,22 +443,17 @@ def test_apply_serving_gate_env_boot_failure_keeps_micro_keep(tmp_path, monkeypa
     )
     serving_gate.apply_serving_gate(
         result,
-        framework="vllm",
-        out=tmp_path,
-        gpu="0",
-        model_path="/m",
-        isl=8,
-        osl=8,
-        tp=8,
-        block_size=128,
-        max_model_len=13312,
+        serving_gate.ServingSession(
+            framework="vllm", model_path="/m", gpu="0", isl=8, osl=8, tp=8, block_size=128, max_model_len=13312
+        ),
+        tmp_path,
     )
     assert result.kept is True
     assert vr.kernel_speedup == 2.5
     assert "defer" in vr.note.lower() or "e2e" in vr.note.lower()
-    assert captured.get("tp") == 8
-    assert captured.get("block_size") == 128
-    assert captured.get("max_model_len") == 13312
+    assert captured["server"].tp == 8
+    assert captured["server"].block_size == 128
+    assert captured["server"].max_model_len == 13312
 
 
 def test_apply_serving_gate_cuda_graph_crash_clears_keep(tmp_path, monkeypatch):
@@ -535,13 +496,7 @@ def test_apply_serving_gate_cuda_graph_crash_clears_keep(tmp_path, monkeypatch):
         termination_reason="",
     )
     serving_gate.apply_serving_gate(
-        result,
-        framework="sglang",
-        out=tmp_path,
-        gpu="0",
-        model_path="/m",
-        isl=8,
-        osl=8,
+        result, serving_gate.ServingSession(framework="sglang", model_path="/m", gpu="0", isl=8, osl=8), tmp_path
     )
     assert result.kept is False
     assert vr.kept is False

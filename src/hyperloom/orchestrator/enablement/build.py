@@ -13,6 +13,7 @@ from hyperloom.orchestrator.lever import LEVER_ENABLEMENT
 from ..collaborator import CoordinatorCollaborator
 from ..bringup import recorded_verdict, session_root
 from .params import _enablement_carrier_params
+from .generation_scan import GenerationScan
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
@@ -290,98 +291,27 @@ class EnablementBuild(CoordinatorCollaborator):
             log.debug("enablement: specialist-requested build enqueue failed", exc_info=True)
 
     async def maybe_route_build_outcomes(self) -> None:
-        """Route terminal targeted_build rows to maybe_rearm_enablement."""
+        """Turn the oldest unrouted succeeded targeted_build row into a launch probe.
+
+        A build settles no round; a failed one reaches the lane through ``last_build_failure`` in the next mandate.
+        """
         try:
-            all_tasks = []
-            for st in ("succeeded", "failed"):
-                all_tasks.extend(t for t in await self.tasks.by_state(st) if t.kind == "targeted_build")
-            if not all_tasks:
-                return
-            # Oldest terminal row first so a newer, already-routed build cannot hide an older build that still needs
-            # routing.
-            for task in sorted(
-                all_tasks,
-                key=lambda t: str(getattr(t, "updated_at", "") or ""),
-            ):
+            built = [t for t in await self.tasks.by_state("succeeded") if t.kind == "targeted_build"]
+            # Oldest first so a newer, already-routed build cannot hide an older one that still needs routing.
+            for task in sorted(built, key=lambda t: str(getattr(t, "updated_at", "") or "")):
                 task_id = str(getattr(task, "task_id", "") or "")
                 # Skip rows already accounted for (tracked by enablement_build_manifest), unless what they were routed
                 # to was cancelled before it ran, which leaves the build no more launched than an unrouted one.
                 routed = self._build_routing_record(task_id)
                 if routed is not None and not await self._build_probe_was_cancelled(routed):
                     continue
-
-                if task.state == "succeeded":
-                    await self._route_succeeded_build(task, routed)
-                else:
-                    await self._route_failed_build(task)
+                await self._route_succeeded_build(task, routed)
                 return
         except Exception:
             log.debug("enablement: route_build_outcomes failed", exc_info=True)
 
-    async def _route_failed_build(self, task: "Task") -> None:
-        """Route a failed targeted_build row through the enablement rearm path."""
-        task_id = str(getattr(task, "task_id", "") or "")
-        state = self.shared_state
-        fc = ""
-        # failed row — read failure_class from history or last_build_failure
-        history = getattr(task, "history", None) or []
-        if isinstance(history, (list, tuple)) and history:
-            last_ev = history[-1]
-            if isinstance(last_ev, dict):
-                fc = str(last_ev.get("evidence", {}).get("failure_class") or "")
-
-        lbf = state.enablement.last_build_failure or {}
-        if not fc and isinstance(lbf, dict):
-            fc = str(lbf.get("failure_class") or "")
-
-        # Novelty ledger: time-based failures are always advanced; defect failures are advanced when the
-        # (component,ref,gpu_arch,cmd) tuple has not been seen before (novel), reverted when it is a repeat.
-        time_classes = frozenset({"timeout", "preflight_budget", "preflight_disk", "preflight_toolchain"})
-        novelty_key: list[Any] | None = None
-        # A failed build booted nothing, so its rows carry no launch log to replace the recorded one.
-        if fc in time_classes:
-            res = {
-                "enablement": True,
-                "status": "advanced",
-                "advanced": True,
-                "patches_applied": [],
-            }
-        else:
-            from .runtime.build_actions import TargetedBuildAction as _TBA, build_novelty_key as _bnk
-
-            task_params = getattr(task, "params", None) or {}
-            _action = _TBA.from_state(task_params)
-            _key = list(_bnk(_action))
-            ledger = list(state.enablement.build_novelty or [])
-            is_repeat = any(entry == _key for entry in ledger if isinstance(entry, list))
-            if is_repeat:
-                res = {"enablement": True, "status": "reverted"}
-                novelty_key = None
-            else:
-                res = {
-                    "enablement": True,
-                    "status": "advanced",
-                    "advanced": True,
-                    "patches_applied": [],
-                }
-                novelty_key = _key
-        log.info(
-            "ENABLEMENT: targeted_build %s task=%s failure_class=%r",
-            res["status"],
-            task_id,
-            fc,
-        )
-        # Rearm, ledger append, and manifest ack must stay together: a failed
-        # rearm leaves the build unrouted and the novelty ledger unchanged.
-        await self._coord.enablement_lane.maybe_rearm_enablement(res)
-        if novelty_key is not None:
-            ledger = list(state.enablement.build_novelty or [])
-            ledger.append(novelty_key)
-            state.enablement.build_novelty = ledger[-20:]
-        self._note_build_routed(task_id)
-
     async def _route_succeeded_build(self, task: "Task", routed: dict[str, Any] | None) -> None:
-        """Turn a succeeded targeted build into a launch probe, or a no-progress round."""
+        """Turn a succeeded targeted build into a launch probe."""
         task_id = str(getattr(task, "task_id", "") or "")
         attempt_root = str((getattr(task, "params", {}) or {}).get("attempt_root") or "")
         br = None
@@ -390,12 +320,8 @@ class EnablementBuild(CoordinatorCollaborator):
 
             br = _load_result_json(attempt_root)
 
-        # If the runtime can't be read, it can't be launched → reverted.
         if br is None or not br.ok or not br.runtime.to_runtime_override():
-            log.info("ENABLEMENT: targeted_build artifact-unreadable task=%s", task_id)
-            await self._coord.enablement_lane.maybe_rearm_enablement(
-                {"enablement": True, "status": "reverted", "reason": "artifact_unreadable"}
-            )
+            log.info("ENABLEMENT: targeted_build artifact-unreadable task=%s; nothing to launch", task_id)
             self._note_build_routed(task_id)
             return
 
@@ -524,8 +450,10 @@ class EnablementBuild(CoordinatorCollaborator):
         probe_task, generation = await self._coord.enablement_revalidation.open_row_past_spent_generations(
             kind="integrate_patch",
             params=params,
-            key_for=lambda gen: f"build_launch_probe:{build_task_id}:gen{gen}",
-            generation=generation,
+            scan=GenerationScan(
+                key_for=lambda gen: f"build_launch_probe:{build_task_id}:gen{gen}",
+                generation=generation,
+            ),
             label="build launch probe",
             requires_lanes=lanes,
             lease_ttl_sec=ttl,

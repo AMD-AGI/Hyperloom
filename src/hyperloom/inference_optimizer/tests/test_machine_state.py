@@ -39,16 +39,6 @@ def test_normalize_budget_pct_defaults_and_filters() -> None:
     assert out[ps.PHASE_SWEEP] == ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_SWEEP]
 
 
-def test_apply_escalate_budget_bump() -> None:
-    phase = ps.PHASE_FRAMEWORK_AGENT
-    base = {phase: 0.3}
-    assert ps.apply_escalate_budget_bump(base, phase="nope") == base
-    out = ps.apply_escalate_budget_bump({phase: 0.3}, phase=phase, delta=0.1, cap=0.8)
-    assert out[phase] == pytest.approx(0.4)
-    capped = ps.apply_escalate_budget_bump({phase: 0.75}, phase=phase, delta=0.5, cap=0.8)
-    assert capped[phase] == 0.8
-
-
 def test_now_unix_injected() -> None:
     state = SharedState()
     state._now_unix = lambda: 1234.0  # type: ignore[attr-defined]
@@ -187,12 +177,14 @@ def test_post_prelude_target(optimize: bool, kernel: bool, target: str) -> None:
 
 def test_make_history_row() -> None:
     row = ps.make_history_row(
-        from_phase="framework_agent",
-        to_phase="kernel_agent",
-        reason="  plateau  ",
-        evidence={"k": 1},
-        ts="2026-06-09T00:00:00Z",
-        ts_unix=12.0,
+        ps.HistoryEntry(
+            from_phase="framework_agent",
+            to_phase="kernel_agent",
+            reason="  plateau  ",
+            evidence={"k": 1},
+            ts="2026-06-09T00:00:00Z",
+            ts_unix=12.0,
+        )
     )
     assert row["from_phase"] == "FRAMEWORK_AGENT"
     assert row["to_phase"] == "KERNEL_AGENT"

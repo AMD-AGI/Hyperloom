@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: 2025 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for build_utils — all subprocess-free via mocked runners."""
+"""Unit tests for build_utils, through mocked runners except where the pin probe itself is under test."""
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -17,7 +19,7 @@ from hyperloom.orchestrator.enablement.runtime.build_utils import (
     probe_torch_abi,
     run_argv,
     sort_tags_desc,
-    write_rocm_torch_constraints,
+    write_rocm_constraints,
 )
 
 
@@ -82,53 +84,56 @@ def test_run_argv_truncates_output():
     assert len(r.stderr_tail) == 4000
 
 
-# write_rocm_torch_constraints
+# write_rocm_constraints
 
 
-def _make_constraint_runner(hip_rc=0, torch_ver="2.10.0+git8514f05", triton_ver="3.1.0"):
-    """Return a mock runner for write_rocm_torch_constraints."""
+def _constraint_runner(hip_rc=0, pins="torch==2.10.0+git8514f05\ntriton==3.1.0"):
+    """A runner answering the ROCm probe with ``hip_rc`` and the pin probe with ``pins``."""
 
-    def _run(argv, capture_output=False, text=False, timeout=60, env=None):
-        cmd = " ".join(argv)
-        if "hip" in cmd or "sys.exit(0" in cmd:
+    def _run(argv, **_kw):
+        if "sys.exit(0" in argv[2]:
             return _completed(returncode=hip_rc)
-        if "argv[1]" in cmd or "version" in cmd:
-            if "triton" in cmd or (len(argv) > 3 and argv[-1] == "triton"):
-                return _completed(stdout=triton_ver + "\n")
-            return _completed(stdout=torch_ver + "\n")
-        return _completed()
+        return _completed(stdout=pins + "\n")
 
     return _run
 
 
-def test_write_rocm_torch_constraints_success(tmp_path):
+def test_write_rocm_constraints_writes_the_probed_pins(tmp_path):
     f = tmp_path / "c.txt"
-    write_rocm_torch_constraints("python3", str(f), run=_make_constraint_runner())
-    content = f.read_text()
-    assert "torch==2.10.0" in content
-    assert "triton==" in content
+    write_rocm_constraints("python3", str(f), replacing="vllm", run=_constraint_runner())
+    assert f.read_text().splitlines() == ["torch==2.10.0+git8514f05", "triton==3.1.0"]
 
 
-def test_write_rocm_torch_constraints_non_rocm_raises(tmp_path):
-    f = tmp_path / "c.txt"
+def test_write_rocm_constraints_non_rocm_raises(tmp_path):
     with pytest.raises(AbiMismatchError):
-        write_rocm_torch_constraints("python3", str(f), run=_make_constraint_runner(hip_rc=2))
+        write_rocm_constraints("python3", str(tmp_path / "c.txt"), replacing="vllm", run=_constraint_runner(hip_rc=2))
 
 
-def test_write_rocm_torch_constraints_no_triton(tmp_path):
+def test_write_rocm_constraints_without_torch_raises(tmp_path):
+    with pytest.raises(RuntimeError, match="torch version"):
+        write_rocm_constraints("python3", str(tmp_path / "c.txt"), replacing="vllm", run=_constraint_runner(pins=""))
+
+
+def test_rocm_constraints_pin_torch_and_rocm_labelled_builds_but_free_the_replaced_one(tmp_path, monkeypatch):
+    """The pin probe runs in a real interpreter: the first distribution of a name on sys.path is the one pinned."""
+    site = tmp_path / "site"
+    for name, version in (("torch", "2.0.0"), ("rocmlib", "1.0+rocm7.2"), ("plainlib", "1.0"), ("vllm", "9+rocm")):
+        info = site / f"{name}-{version}.dist-info"
+        info.mkdir(parents=True)
+        (info / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n", encoding="utf-8")
+    monkeypatch.setenv("PYTHONPATH", str(site))
+
     def _run(argv, **kw):
-        cmd = " ".join(argv)
-        if "hip" in cmd or "sys.exit" in cmd:
-            return _completed(returncode=0)
-        if "triton" in " ".join(argv[-1:]):
-            return _completed(stdout="", returncode=1)
-        return _completed(stdout="2.10.0\n")
+        if "sys.exit(0" in argv[2]:
+            return _completed()
+        return subprocess.run(argv, check=False, **kw)
 
-    f = tmp_path / "c.txt"
-    write_rocm_torch_constraints("python3", str(f), run=_run)
-    content = f.read_text()
-    assert "torch==2.10.0" in content
-    assert "triton" not in content
+    out = tmp_path / "c.txt"
+    write_rocm_constraints(sys.executable, out, replacing="vllm", run=_run)
+    pins = out.read_text().splitlines()
+    assert "torch==2.0.0" in pins
+    assert "rocmlib==1.0+rocm7.2" in pins
+    assert not any(p.startswith(("plainlib==", "vllm==")) for p in pins)
 
 
 # check_rocm_toolchain_alignment

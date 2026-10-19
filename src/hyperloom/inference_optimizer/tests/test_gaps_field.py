@@ -263,6 +263,68 @@ async def test_refresh_gaps_dedupes_recurring_failures(coord):
 
 
 @pytest.mark.asyncio
+async def test_refresh_gaps_counts_each_failure_once_across_refreshes(coord):
+    """Every refresh re-reads the whole failure log, so a failure already on the gap must not be counted again."""
+    s = coord.shared_state
+    wid = coord.recipe_journal.workload_canonical_id()
+    s.last_action_failures = [
+        {"action": "roofline", "error_class": "trace_analyze_failed", "ts": "2025-01-01T00:00:00+00:00"},
+        {"action": "roofline", "error_class": "trace_analyze_failed", "ts": "2025-01-01T00:05:00+00:00"},
+    ]
+    for _ in range(5):
+        await coord.gap_refresh.refresh_gaps(reason="tick", workload_id=wid)
+    gap = s.find_gap(f"{wid}#fail:roofline:trace_analyze_failed")
+    assert gap is not None
+    assert [a["ts"] for a in gap["attempts"]] == [
+        "2025-01-01T00:00:00+00:00",
+        "2025-01-01T00:05:00+00:00",
+    ]
+
+    # A new failure still lands, once.
+    s.last_action_failures.append(
+        {"action": "roofline", "error_class": "trace_analyze_failed", "ts": "2025-01-01T00:10:00+00:00"}
+    )
+    for _ in range(3):
+        await coord.gap_refresh.refresh_gaps(reason="tick", workload_id=wid)
+    assert [a["ts"][-14:-6] for a in gap["attempts"]] == ["00:00:00", "00:05:00", "00:10:00"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_gaps_keeps_newest_failures_when_log_exceeds_attempt_cap(coord):
+    """A failure log longer than the attempt cap keeps the newest failures, oldest first, refresh after refresh."""
+    s = coord.shared_state
+    wid = coord.recipe_journal.workload_canonical_id()
+    total = _GAPS_ATTEMPTS_HISTORY + 5
+    s.last_action_failures = [
+        {"action": "explore", "error_class": "boot_failed", "ts": f"2025-01-01T00:{i:02d}:00+00:00"}
+        for i in range(total)
+    ]
+    expected = [f"2025-01-01T00:{i:02d}:00+00:00" for i in range(5, total)]
+    for _ in range(3):
+        await coord.gap_refresh.refresh_gaps(reason="tick", workload_id=wid)
+        gap = s.find_gap(f"{wid}#fail:explore:boot_failed")
+        assert gap is not None
+        assert [a["ts"] for a in gap["attempts"]] == expected
+
+
+def test_upsert_gap_collapses_repeated_attempts_already_on_the_row():
+    """A row that already holds copies of one attempt (state saved before the fix) is folded back to one."""
+    s = SharedState()
+    rolled_out = {"action": "roofline", "outcome": "REVERT", "error_class": "trace_analyze_failed", "ts": "t0"}
+    current = {"action": "roofline", "outcome": "REVERT", "error_class": "trace_analyze_failed", "ts": "t1"}
+    half = _GAPS_ATTEMPTS_HISTORY // 2
+    s.gaps = [
+        {
+            "canonical_id": "w#fail:roofline",
+            "attempts": [dict(rolled_out) for _ in range(half)] + [dict(current) for _ in range(half)],
+        }
+    ]
+    # ``t0`` has left the failure log; only ``t1`` is re-derived.
+    gap = s.upsert_gap({"canonical_id": "w#fail:roofline", "attempts": [dict(current)]})
+    assert gap["attempts"] == [rolled_out, current]
+
+
+@pytest.mark.asyncio
 async def test_refresh_gaps_emits_explore_plateau_after_streak(coord):
     s = coord.shared_state
     s.baseline_tput = 1000.0

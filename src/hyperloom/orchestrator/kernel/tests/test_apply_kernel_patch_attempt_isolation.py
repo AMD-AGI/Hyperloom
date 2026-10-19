@@ -17,11 +17,13 @@ def _apply(tmp_path: Path, target: Path, marker: str, kernel_id: str) -> dict:
     patch = tmp_path / f"{marker}.py"
     patch.write_text(f"# {marker}\n{_BODY}", encoding="utf-8")
     return apk.apply_kernel_patch(
-        patch_path=patch,
-        target_file=target,
-        backup_root=tmp_path / "backup",
-        kernel_id=kernel_id,
-        skip_rebuild=True,
+        apk.KernelPatchRequest(
+            patch_path=patch,
+            target_file=target,
+            backup_root=tmp_path / "backup",
+            kernel_id=kernel_id,
+            skip_rebuild=True,
+        )
     )
 
 

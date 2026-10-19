@@ -271,14 +271,14 @@ def test_resolve_framework_root_none(monkeypatch):
 
 def test_run_git_apply_spawn_fail(tmp_path, monkeypatch):
     monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
-    ok, err = ip._run_git_apply(tmp_path, tmp_path / "p.patch", p_level=1, three_way=False, check_only=True)
+    ok, err = ip._run_git_apply(tmp_path, tmp_path / "p.patch", p_level=1, check_only=True)
     assert ok is False
     assert "spawn failed" in err
 
 
 def test_run_git_apply_success(tmp_path, monkeypatch):
     monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: _CP(0, ""))
-    ok, err = ip._run_git_apply(tmp_path, tmp_path / "p.patch", p_level=1, three_way=True, check_only=True)
+    ok, err = ip._run_git_apply(tmp_path, tmp_path / "p.patch", p_level=1, check_only=True)
     assert ok is True
 
 
@@ -466,11 +466,11 @@ def test_git_commit_kept_note_is_empty_only_on_a_real_commit(tmp_path):
     assert note == "nothing to commit"
 
 
-def test_git_checkout_clean_spawn_fail(tmp_path, monkeypatch):
-    """git checkout spawn failure is reported directly."""
+def test_git_reset_clean_spawn_fail(tmp_path, monkeypatch):
+    """git reset spawn failure is reported directly."""
     monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
-    ok, err = ip._git_checkout_clean(tmp_path)
-    assert ok is False and "checkout spawn failed" in err
+    ok, err = ip._git_reset_clean(tmp_path, "HEAD")
+    assert ok is False and "reset spawn failed" in err
 
 
 def test_stash_if_dirty_clean_tree(tmp_path, monkeypatch):
@@ -519,8 +519,8 @@ def test_stash_if_dirty_status_exception(tmp_path, monkeypatch):
     assert state == "failed"
 
 
-def test_checkout_clean_discards_candidate_dirty_without_stashing(tmp_path):
-    """Checkout fallback cleans candidate-owned dirty state without creating a stash."""
+def test_reset_clean_discards_candidate_dirty_without_stashing(tmp_path):
+    """The revert cleans candidate-owned dirty state without creating a stash."""
     import subprocess as sp
 
     sp.run(["git", "init", str(tmp_path)], capture_output=True)
@@ -531,12 +531,77 @@ def test_checkout_clean_discards_candidate_dirty_without_stashing(tmp_path):
     sp.run(["git", "-C", str(tmp_path), "commit", "-m", "init"], capture_output=True)
     (tmp_path / "f.py").write_text("dirty\n")
     (tmp_path / "new_candidate.py").write_text("candidate\n")
-    ok, err = ip._git_checkout_clean(tmp_path)
+    ok, err = ip._git_reset_clean(tmp_path, "HEAD")
     assert ok is True
     assert (tmp_path / "f.py").read_text() == "orig\n"
     assert not (tmp_path / "new_candidate.py").exists()
     cp = sp.run(["git", "-C", str(tmp_path), "stash", "list"], capture_output=True, text=True)
     assert "hyperloom-auto-stash" not in cp.stdout
+
+
+def _git_out(repo: Path, *args: str) -> str:
+    import subprocess as sp
+
+    return sp.run(["git", "-C", str(repo), *args], capture_output=True, text=True, check=True).stdout
+
+
+def _committed_repo(path: Path) -> str:
+    _git_out(path.parent, "init", "-q", str(path))
+    _git_out(path, "config", "user.email", "t@t")
+    _git_out(path, "config", "user.name", "T")
+    (path / "f.py").write_text("orig\n")
+    _git_out(path, "add", "-A")
+    _git_out(path, "commit", "-q", "-m", "init")
+    return _git_out(path, "rev-parse", "HEAD").strip()
+
+
+def test_a_revert_pops_the_stash_back_after_the_candidate_staged_a_file_the_stash_also_holds(tmp_path):
+    """The stash cannot pop over a candidate-created path, so the revert has to remove it from the index too."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    base = _committed_repo(repo)
+    (repo / "shared.py").write_text("user\n")
+    state, stash_ref = ip._git_stash_if_dirty(repo)
+    assert state == "stashed"
+    stash_oid = _git_out(repo, "rev-parse", stash_ref).strip()
+    (repo / "shared.py").write_text("candidate\n")
+    (repo / "f.py").write_text("candidate\n")
+    _git_out(repo, "add", "-A")
+    pending = {
+        "framework_source_root": str(repo),
+        "patches": ["candidate.patch"],
+        "artifacts": [],
+        "recovery": {
+            "version": 1,
+            "phase": "ready",
+            "root": str(tmp_path / "recovery"),
+            "git_head": base,
+            "stash_oid": stash_oid,
+        },
+    }
+
+    out = ip.restore_pending_integrate(pending)
+
+    assert out["failed"] == []
+    assert pending["recovery"]["phase"] == "restored"
+    assert (repo / "shared.py").read_text() == "user\n"
+    assert (repo / "f.py").read_text() == "orig\n"
+
+
+def test_a_patch_that_does_not_apply_leaves_the_tree_untouched(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _committed_repo(repo)
+    patch = tmp_path / "p.patch"
+    patch.write_text(
+        "diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n@@ -1 +1 @@\n-stale\n+new\n"
+        "diff --git a/g.py b/g.py\nnew file mode 100644\n--- /dev/null\n+++ b/g.py\n@@ -0,0 +1 @@\n+created\n"
+    )
+
+    ok, _, feedback = ip._git_apply_collect_feedback(repo, patch)
+
+    assert not ok and feedback is not None
+    assert _git_out(repo, "status", "--porcelain") == ""
 
 
 def test_restore_stash_if_needed_clean_noop(tmp_path):
@@ -642,7 +707,7 @@ def test_restore_uses_exact_attempt_git_base_or_refuses(tmp_path, monkeypatch, h
     calls = []
     monkeypatch.setattr(ip, "_git_head_sha", lambda _root: head)
     monkeypatch.setattr(
-        ip, "_git_checkout_clean", lambda root, **_kwargs: (calls.append(root) or checkout_ok, "denied")
+        ip, "_git_reset_clean", lambda root, _base, **_kwargs: (calls.append(root) or checkout_ok, "denied")
     )
     pending = {
         "framework_source_root": str(tmp_path),

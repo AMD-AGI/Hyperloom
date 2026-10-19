@@ -46,11 +46,6 @@ SUCCESS_STOP_REASONS: frozenset[str] = frozenset(
         "time_exhausted",
         "max_ticks",
         "sweep_done",
-        # The model asking to close early. A run whose infrastructure actually
-        # failed carries baseline_failed or signal instead, so this value marks
-        # a normal closeout; the close collector keeps the escalation flag
-        # either way.
-        "robustness_escalated",
     }
 )
 
@@ -91,11 +86,12 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "signal",
         "unknown",
         "custom",
-        "robustness_escalated",
         "prelude_baseline_failed",
         # The baseline is over ``--max-latency-ms``, or reported no end-to-end latency: every candidate is graded
         # against it, so there is no configuration the run could reach that would satisfy the constraint.
         "baseline_over_latency_budget",
+        # The same for ``--max-power-w``: the baseline's per-GPU mean power is over it, or was not reported.
+        "baseline_over_power_budget",
         "prelude_cold_anchor_low_budget",
         "time_exhausted_during_prelude",
         "warm_replay_rollback_failed",

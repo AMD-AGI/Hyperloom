@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from hyperloom.common.env import is_truthy
+from kernelforge.gemm_tune.evidence import moe_tuple
 
 # Emitted by aiter on every tuned-config lookup miss, naming the table consulted.
 _AITER_SHAPE_MISS_RE = re.compile(
@@ -305,26 +306,6 @@ def parse_aiter_shape_lookups_for_tables(
     return missed, hit
 
 
-def _split_fmoe_tuple(raw: str) -> list[str]:
-    """Split a fused-MoE dispatch tuple, respecting single-quoted fields."""
-    parts: list[str] = []
-    current: list[str] = []
-    in_quote = False
-    for ch in raw:
-        if ch == "'":
-            in_quote = not in_quote
-            continue
-        if ch == "," and not in_quote:
-            parts.append("".join(current).strip())
-            current = []
-            continue
-        current.append(ch)
-    tail = "".join(current).strip()
-    if tail:
-        parts.append(tail)
-    return parts
-
-
 def _normalize_fmoe_q_dtype(value: str) -> str:
     """Map known q-dtype aliases to the canonical string aiter logs."""
     text = str(value or "").strip().strip("'\"")
@@ -409,7 +390,7 @@ def _parse_fused_moe_dispatch_line(line: str) -> dict[str, str] | None:
         kernel_name1 = kn_match.group("kn1")
         kernel_name2 = kn_match.group("kn2")
 
-    record = _fmoe_dispatch_record(_split_fmoe_tuple(keys_raw))
+    record = _fmoe_dispatch_record(moe_tuple(keys_raw))
     if record is None:
         return None
     record["descriptor"] = descriptor

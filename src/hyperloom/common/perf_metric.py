@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from hyperloom.common.benchmark_config import configured_benchmark, is_magpie_agentx
+
 from dataclasses import dataclass
 from math import isfinite
 from typing import Any, Mapping
@@ -88,8 +90,8 @@ VERDICT_REVERT = "REVERT"
 
 
 def agentx_enabled(env: Mapping[str, str] | None = None) -> bool:
-    """Return whether the AgentX benchmark wrapper is explicitly enabled."""
-    return env_bool(_AGENTX_ENV, env=env)
+    """Return whether CLI workload translation or a bound YAML selects AgentX."""
+    return is_magpie_agentx(configured_benchmark(env)) or env_bool(_AGENTX_ENV, env=env)
 
 
 def is_agentx_mode(benchmark_mode: Any) -> bool:
@@ -99,7 +101,7 @@ def is_agentx_mode(benchmark_mode: Any) -> bool:
 
 def agentx_active(*, benchmark_mode: Any = "") -> bool:
     """Whether either persisted workload identity or the environment enables AgentX."""
-    return env_bool(_AGENTX_ENV) or is_agentx_mode(benchmark_mode)
+    return agentx_enabled() or is_agentx_mode(benchmark_mode)
 
 
 def intvty_grading_enabled(*, benchmark_mode: str = "") -> bool:
@@ -116,7 +118,7 @@ def intvty_grading_enabled(*, benchmark_mode: str = "") -> bool:
     raw = env_str("HYPERLOOM_PERF_METRIC").strip().lower()
     if raw:
         return raw == INTVTY_V1
-    if env_bool(_AGENTX_ENV):
+    if agentx_enabled():
         return True
     return is_agentx_mode(benchmark_mode)
 
@@ -157,6 +159,9 @@ def _non_negative(value: Any) -> float | None:
     return coerced if coerced >= 0 else None
 
 
+_AGENTX_EVIDENCE = ("benchmark_backend", "benchmark_valid", "diagnostic_only", "workload_identity")
+
+
 def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, float] | None:
     """The graded axes from a measurement or a ``current_best``; None unless objective and guards are all positive."""
     # Requiring all of them is what stops a lane half-applying the objective. A total that is absent, null or
@@ -192,6 +197,7 @@ def perf_snapshot_from_mapping(source: Mapping[str, Any] | None) -> dict[str, fl
     ):
         if value is not None:
             snap[key] = value
+    snap.update({key: source[key] for key in _AGENTX_EVIDENCE if key in source})
     return snap
 
 
@@ -250,6 +256,7 @@ def graded_axes_of(source: Mapping[str, Any] | None) -> dict[str, float]:
     error_rate = _non_negative(source.get(GRADED_ERROR_RATE))
     if error_rate is not None:
         axes[GRADED_ERROR_RATE] = error_rate
+    axes.update({key: source[key] for key in _AGENTX_EVIDENCE if key in source})
     return axes
 
 
@@ -324,26 +331,116 @@ def holds_within_band(
     return _within_band(axis_of(candidate, key), axis_of(anchor, key), band)
 
 
+def _ceiling_veto(observed: Any, ceiling: float | None, *, exceeded: str, unmeasured: str) -> str:
+    """``exceeded`` over the ceiling, ``unmeasured`` without a usable reading, else ""; "" when no ceiling is set.
+
+    Fails closed on an unmeasured candidate: a constraint nobody measured is not one anybody satisfied.
+    """
+    if not ceiling or ceiling <= 0:
+        return ""
+    if isinstance(observed, bool) or not isinstance(observed, (int, float)):
+        return unmeasured
+    value = float(observed)
+    if not isfinite(value) or value <= 0:
+        return unmeasured
+    return exceeded if value > float(ceiling) else ""
+
+
 def latency_veto_reason(observed_ms: Any, budget_ms: float) -> str:
     """Why the latency budget refuses this candidate, or "" when it does not.
 
     The budget is a ceiling on mean end-to-end latency, so unlike the gain gates
     it refuses a candidate whose throughput won: a lever that buys throughput by
     making each stream slower is exactly the case a throughput-only comparison
-    selects for. Off entirely when *budget_ms* is not positive.
-
-    Fails closed on an unmeasured candidate — a constraint nobody measured is not
-    one anybody satisfied — which is why every lane copies ``e2el_mean_ms`` onto
-    the dict it promotes.
+    selects for. Off entirely when *budget_ms* is not positive. Every lane copies
+    ``e2el_mean_ms`` onto the dict it promotes.
     """
-    if not budget_ms or budget_ms <= 0:
+    return _ceiling_veto(observed_ms, budget_ms, exceeded="latency_budget_exceeded", unmeasured="latency_unmeasured")
+
+
+_POWER_UNMEASURED = "power_unmeasured"
+_POWER_BUDGET_EXCEEDED = "power_budget_exceeded"
+_GPU_POWER_BUDGET_EXCEEDED = "gpu_power_budget_exceeded"
+_POWER_VETO_REASONS = frozenset({_POWER_UNMEASURED, _POWER_BUDGET_EXCEEDED, _GPU_POWER_BUDGET_EXCEEDED})
+
+
+def power_veto_reason(
+    by_gpu_w: Any,
+    *,
+    total_budget_w: float = 0.0,
+    per_gpu_budget_w: Mapping[str, float] | None = None,
+) -> str:
+    """Why the power budgets refuse this candidate, or "" when they do not.
+
+    *by_gpu_w* is each serving card's mean power over the measured round, keyed by physical GPU id. *total_budget_w*
+    caps their sum (``--max-power-w``); *per_gpu_budget_w* caps individual cards (``--max-per-gpu-power-w``). A card
+    with no limit of its own is bound only by the total, and a limited card that did not serve this round is not
+    judged on it. Off entirely when neither budget is set. Fails closed on a candidate with no per-card reading: a
+    constraint nobody measured is not one anybody satisfied.
+    """
+    limits = {str(gpu): float(watts) for gpu, watts in (per_gpu_budget_w or {}).items() if watts and watts > 0}
+    total = float(total_budget_w or 0.0)
+    if total <= 0 and not limits:
         return ""
-    if isinstance(observed_ms, bool) or not isinstance(observed_ms, (int, float)):
-        return "latency_unmeasured"
-    observed = float(observed_ms)
-    if not isfinite(observed) or observed <= 0:
-        return "latency_unmeasured"
-    return "latency_budget_exceeded" if observed > float(budget_ms) else ""
+    if not isinstance(by_gpu_w, Mapping) or not by_gpu_w:
+        return _POWER_UNMEASURED
+    readings: dict[str, float] = {}
+    for gpu, watts in by_gpu_w.items():
+        if isinstance(watts, bool) or not isinstance(watts, (int, float)) or not isfinite(watts) or watts <= 0:
+            return _POWER_UNMEASURED
+        readings[str(gpu)] = float(watts)
+    if any(gpu in readings and readings[gpu] > limit for gpu, limit in limits.items()):
+        return _GPU_POWER_BUDGET_EXCEEDED
+    if total > 0 and sum(readings.values()) > total:
+        return _POWER_BUDGET_EXCEEDED
+    return ""
+
+
+def native_agentx_veto(source: Mapping[str, Any], state: Any) -> str:
+    """Refuse diagnostic, invalid or differently configured AgentX evidence."""
+    if getattr(state, "agentx_backend", "") != "magpie" and source.get("benchmark_backend") != "magpie_agentx":
+        return ""
+    if source.get("benchmark_valid") is not True or source.get("diagnostic_only") is not False:
+        return "agentx_evidence_invalid"
+    anchor = getattr(state, "current_best", None) or getattr(state, "baseline_perf", None) or {}
+    identity = source.get("workload_identity")
+    if not identity or identity != anchor.get("workload_identity"):
+        return "agentx_workload_mismatch"
+    return ""
+
+
+def constraint_veto_reason(measurement: Any, state: Any) -> str:
+    """The first session constraint *measurement* breaks, or ""; the one reader every KEEP decision uses."""
+    source = measurement if isinstance(measurement, Mapping) else {}
+    return (
+        native_agentx_veto(source, state)
+        or latency_veto_reason(source.get("e2el_mean_ms"), float(getattr(state, "latency_budget_ms", 0.0) or 0.0))
+        or power_veto_reason(
+            source.get("gpu_power_by_gpu_w"),
+            total_budget_w=float(getattr(state, "power_budget_w", 0.0) or 0.0),
+            per_gpu_budget_w=getattr(state, "power_budget_per_gpu_w", None),
+        )
+    )
+
+
+#: Every measurement field a session constraint reads, with the mean power reported beside the per-card figures. A
+#: carrier that hands a measurement to a KEEP decision copies them together, so no lane drops one.
+CONSTRAINT_FIELDS = (
+    "e2el_mean_ms",
+    "gpu_power_avg_w",
+    "gpu_power_by_gpu_w",
+    "benchmark_backend",
+    "benchmark_valid",
+    "diagnostic_only",
+    "workload_identity",
+)
+
+
+def constraint_fields(source: Any) -> dict[str, Any]:
+    """:data:`CONSTRAINT_FIELDS` read off a mapping or an object; an absent field is ``None``."""
+    if isinstance(source, Mapping):
+        return {name: source.get(name) for name in CONSTRAINT_FIELDS}
+    return {name: getattr(source, name, None) for name in CONSTRAINT_FIELDS}
 
 
 @dataclass(frozen=True)
@@ -377,6 +474,13 @@ class GradedComparison:
         return not self.degrade_reason
 
     @property
+    def vetoed_by(self) -> str:
+        """The session constraint behind ``veto_reason``: ``power_budget`` or ``latency_budget``; ``""`` when none."""
+        if not self.veto_reason:
+            return ""
+        return "power_budget" if self.veto_reason in _POWER_VETO_REASONS else "latency_budget"
+
+    @property
     def graded_on_intvty(self) -> bool:
         """Whether the interactivity objective actually applied."""
         return self.objective in INTVTY_OBJECTIVES
@@ -384,6 +488,7 @@ class GradedComparison:
 
 __all__ = [
     "AGENTX_KEEP_P50_THRESHOLD_PCT",
+    "CONSTRAINT_FIELDS",
     "DURATION_DRIFT_PCT",
     "ERROR_RATE_SLACK_PCT",
     "GradedComparison",
@@ -409,7 +514,10 @@ __all__ = [
     "intvty_of",
     "intvty_serving_grading_enabled",
     "is_agentx_mode",
+    "constraint_fields",
+    "constraint_veto_reason",
     "latency_veto_reason",
+    "power_veto_reason",
     "output_tput_of",
     "parse_intvty_noise_pct",
     "perf_snapshot_from_mapping",

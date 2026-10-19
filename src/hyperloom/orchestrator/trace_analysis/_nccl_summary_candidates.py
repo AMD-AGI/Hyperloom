@@ -104,15 +104,6 @@ def index_device_symbols(
     return located, False
 
 
-def locate_device_symbol(
-    symbol: str,
-    roots: Sequence[str],
-) -> tuple[str, int, str] | None:
-    """Locate the ``__global__`` definition of a device symbol."""
-    index, _ = index_device_symbols([symbol], roots)
-    return index.get(symbol)
-
-
 def _prorated_totals(
     top_ops: Sequence[dict[str, Any]],
     total_time_ms: float,

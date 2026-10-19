@@ -104,9 +104,11 @@ async def test_a_baseline_carries_the_run_into_the_optimisation_phase_with_work(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("backend_order", "result_field", "result_key", "expected"),
+    # Neither route starts its work: with no measured baseline, the round held back to measure it is the benchmark
+    # hard cap, which outlasts this KERNEL slice.
     [
         ("", "geak_result", "error_class", "insufficient_budget"),
-        ("forge", "kernel_rewrite_controller_result", "status", "no_opportunity"),
+        ("forge", "kernel_rewrite_controller_result", "status", "no_result"),
     ],
     ids=["geak", "forge"],
 )
@@ -119,7 +121,8 @@ async def test_both_arms_dry_walks_the_rest_of_the_chain(
     expected: str,
 ):
     """With nothing left to try, the run reaches CLOSE through every phase, on either kernel route."""
-    from hyperloom.orchestrator.state.attempt_ledger import record_config_attempt
+    from hyperloom.orchestrator.lever import LEVER_CONFIG
+    from hyperloom.orchestrator.state.attempt_ledger import AttemptRow, record_attempt_row
 
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", backend_order)
 
@@ -133,19 +136,21 @@ async def test_both_arms_dry_walks_the_rest_of_the_chain(
         state.framework_agent_empty_discoveries = 99
         # Config arm: a run of benched variants past the streak floor, none adopted.
         for i in range(ps.DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK + 1):
-            record_config_attempt(
+            record_attempt_row(
                 state,
-                task_id=f"explore-{i}",
-                round_id=f"round-{i}",
-                fingerprint=f"fp-{i}",
-                variant_name=f"variant-{i}",
-                outcome="REVERT",
-                adopted=False,
-                gain_pct=0.01,
-                before_tput=1500.0,
-                after_tput=1500.15,
-                error_class="",
-                provenance="default_grid",
+                AttemptRow(
+                    lever_kind=LEVER_CONFIG,
+                    task_id=f"explore-{i}",
+                    round_id=f"round-{i}",
+                    fingerprint=f"fp-{i}",
+                    variant_name=f"variant-{i}",
+                    outcome="REVERT",
+                    adopted=False,
+                    gain_pct=0.01,
+                    before_tput=1500.0,
+                    after_tput=1500.15,
+                    provenance="default_grid",
+                ),
             )
         state.save(session_dir)
 

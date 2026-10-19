@@ -166,7 +166,7 @@ class TestLaneResultShapes:
 
         from hyperloom.orchestrator.specialists import rebench
 
-        monkeypatch.setattr(rebench, "materialize_config_with_envs", lambda *a, **k: tmp_path / "cfg.yaml")
+        monkeypatch.setattr(rebench, "prepare_grid_benchmark_config", lambda *a, **k: tmp_path / "cfg.yaml")
         monkeypatch.setattr(rebench, "_current_leased_cards", lambda: "0")
 
         async def _fake_run_grid(**_kwargs):
@@ -174,7 +174,11 @@ class TestLaneResultShapes:
 
         monkeypatch.setattr(rebench, "run_grid", _fake_run_grid)
         result = asyncio.run(
-            rebench.run_specialist_rebench(config_path=None, output_dir=tmp_path, port=8000),
+            rebench.run_specialist_rebench(
+                output_dir=tmp_path,
+                benchmark=rebench.RebenchBenchmark(config_path=None),
+                server=rebench.RebenchServer(port=8000),
+            ),
         )
         assert result["e2el_mean_ms"] == 1211.0
 

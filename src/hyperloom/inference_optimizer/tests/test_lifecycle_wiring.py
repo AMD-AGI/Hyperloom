@@ -366,7 +366,7 @@ async def test_handle_request_rejected_integrate_emits_lone_end(
         # the emit.
         monkeypatch.setattr(
             c.dispatcher,
-            "sequence_denial_for_request",
+            "admission_denial_for_request",
             lambda target, kind: None,
         )
         monkeypatch.setattr(
@@ -492,9 +492,7 @@ async def test_on_enter_close_emits_report_end(session_dir, monkeypatch):
             lambda: None,
         )
 
-        await c.phase_close.on_enter_close(
-            Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}, loopback=False)
-        )
+        await c.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}))
 
         rpt = [e for e in c.shared_state.lifecycle if e["step"] == "report"]
         statuses = [e["status"] for e in rpt]
@@ -565,9 +563,7 @@ async def test_on_enter_close_emits_report_error_for_failed_task(
             lambda: None,
         )
 
-        await c.phase_close.on_enter_close(
-            Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}, loopback=False)
-        )
+        await c.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}))
 
         rpt = [e for e in c.shared_state.lifecycle if e["step"] == "report"]
         assert [e["status"] for e in rpt] == ["START", "ERROR"]
@@ -637,9 +633,7 @@ async def test_on_enter_close_emits_report_error_for_exception(
             lambda: None,
         )
 
-        await c.phase_close.on_enter_close(
-            Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}, loopback=False)
-        )
+        await c.phase_close.on_enter_close(Transition(from_phase="SWEEP", to_phase="CLOSE", reason="stop", evidence={}))
 
         rpt = [e for e in c.shared_state.lifecycle if e["step"] == "report"]
         assert [e["status"] for e in rpt] == ["START", "ERROR"]

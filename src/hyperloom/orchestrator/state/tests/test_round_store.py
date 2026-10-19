@@ -18,9 +18,10 @@ from hyperloom.orchestrator.state.round_store import (
     STALE_FENCE,
     Round,
     RoundResult,
+    RoundRequest,
     RoundStore,
 )
-from hyperloom.orchestrator.state.task_registry import TaskRegistry, TerminalTaskReuse, create_in_cursor
+from hyperloom.orchestrator.state.task_registry import TaskRegistry, TaskSpec, TerminalTaskReuse, create_in_cursor
 
 _LEASE = 600.0
 
@@ -53,20 +54,26 @@ def _claim(round_id: str, holder_task_id: str, fence: int) -> Round:
 async def test_a_settled_round_releases_the_machine_whatever_it_settled_as(store, virtual_clock, outcome):
     """Settling releases. No outcome buys a round exclusion it did not pay a lease for."""
     clock = virtual_clock
-    opened = await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")
+    opened = await store.open(
+        "r", RoundRequest(now_unix=clock.wall(), request_id="q1"), holder_task_id="t-1", lease_sec=_LEASE
+    )
     assert opened.ok
 
     clock.advance(30.0)
     settled_at = clock.wall()
-    settled = await store.settle(_claim("r", "t-1", 1), outcome=outcome, now_unix=settled_at, request_id="q2")
+    settled = await store.settle(
+        _claim("r", "t-1", 1), RoundRequest(now_unix=settled_at, request_id="q2"), outcome=outcome
+    )
     assert settled.ok
 
     row = await store.get("r")
     assert row is not None and row.outcome == outcome
-    assert row.excludes_at(settled_at) is False
+    assert row.state == rs.SETTLED
     assert await store.excluding(settled_at) == []
     # And the next round is admitted at once, on the same instant.
-    opened = await store.open("next", holder_task_id="t-2", lease_sec=_LEASE, now_unix=settled_at, request_id="q3")
+    opened = await store.open(
+        "next", RoundRequest(now_unix=settled_at, request_id="q3"), holder_task_id="t-2", lease_sec=_LEASE
+    )
     assert opened.ok
 
 
@@ -75,18 +82,19 @@ async def test_an_open_round_holds_the_machine_until_explicit_settlement(store, 
     """Elapsed budget is not evidence that the round's owner stopped."""
     clock = virtual_clock
     opened_at = clock.wall()
-    opened = await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=opened_at, request_id="q1")
+    opened = await store.open(
+        "r", RoundRequest(now_unix=opened_at, request_id="q1"), holder_task_id="t-1", lease_sec=_LEASE
+    )
     assert opened.ok
 
     row = await store.get("r")
     assert row is not None
-    assert row.excludes_at(opened_at + _LEASE - 1.0) is True
-    assert row.excludes_at(opened_at + _LEASE + 1.0) is True
+    assert row.state == rs.OPEN
     assert [r.round_id for r in await store.excluding(opened_at)] == ["r"]
     assert [r.round_id for r in await store.excluding(opened_at + _LEASE + 1.0)] == ["r"]
 
     opened = await store.open(
-        "next", holder_task_id="t-2", lease_sec=_LEASE, now_unix=opened_at + _LEASE + 1.0, request_id="q2"
+        "next", RoundRequest(now_unix=opened_at + _LEASE + 1.0, request_id="q2"), holder_task_id="t-2", lease_sec=_LEASE
     )
     assert not opened.ok
 
@@ -96,13 +104,15 @@ async def test_the_open_round_is_read_back_from_the_table_not_from_a_field(store
     """``held`` is how a later lifecycle call finds the round it must address."""
     clock = virtual_clock
     assert await store.held() is None
-    opened = await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")
+    opened = await store.open(
+        "r", RoundRequest(now_unix=clock.wall(), request_id="q1"), holder_task_id="t-1", lease_sec=_LEASE
+    )
     assert opened.ok
     held = await store.held()
     assert held is not None and held.round_id == "r" and held.holder_task_id == "t-1"
 
     clock.advance(30.0)
-    settled = await store.settle(held, outcome=BOOTED, now_unix=clock.wall(), request_id="q2")
+    settled = await store.settle(held, RoundRequest(now_unix=clock.wall(), request_id="q2"), outcome=BOOTED)
     assert settled.ok
     assert await store.held() is None
 
@@ -111,19 +121,27 @@ async def test_the_open_round_is_read_back_from_the_table_not_from_a_field(store
 async def test_only_one_of_two_contending_acquires_wins_and_the_loser_is_told_why(store, virtual_clock):
     """Two rounds race for a machine one of them gets."""
     clock = virtual_clock
-    first = await store.open("round-a", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")
-    second = await store.open("round-b", holder_task_id="t-2", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q2")
+    first = await store.open(
+        "round-a", RoundRequest(now_unix=clock.wall(), request_id="q1"), holder_task_id="t-1", lease_sec=_LEASE
+    )
+    second = await store.open(
+        "round-b", RoundRequest(now_unix=clock.wall(), request_id="q2"), holder_task_id="t-2", lease_sec=_LEASE
+    )
     assert first.ok and first.fence == 1
     assert second.ok is False
     assert second.reason == rs.EXCLUDED
     assert await store.get("round-b") is None
 
     clock.advance(_LEASE + 1.0)
-    retry = await store.open("round-b", holder_task_id="t-2", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q3")
+    retry = await store.open(
+        "round-b", RoundRequest(now_unix=clock.wall(), request_id="q3"), holder_task_id="t-2", lease_sec=_LEASE
+    )
     assert not retry.ok
-    await store.settle(_claim("round-a", "t-1", 1), outcome=BOOTED, now_unix=clock.wall(), request_id="q4")
+    await store.settle(
+        _claim("round-a", "t-1", 1), RoundRequest(now_unix=clock.wall(), request_id="q4"), outcome=BOOTED
+    )
     acquired = await store.open(
-        "round-b", holder_task_id="t-2", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q5"
+        "round-b", RoundRequest(now_unix=clock.wall(), request_id="q5"), holder_task_id="t-2", lease_sec=_LEASE
     )
     assert acquired.ok
 
@@ -135,14 +153,13 @@ async def test_the_holder_task_row_commits_with_the_acquire_and_never_adopts_a_f
     tasks = TaskRegistry(store.db)
 
     def _join(cur):
-        create_in_cursor(cur, kind="baseline", params={}, idempotency_key="round-a", task_id="t-1")
+        create_in_cursor(cur, TaskSpec(kind="baseline", params={}, idempotency_key="round-a", task_id="t-1"))
 
     opened = await store.open(
         "round-a",
+        RoundRequest(now_unix=clock.wall(), request_id="q1"),
         holder_task_id="t-1",
         lease_sec=_LEASE,
-        now_unix=clock.wall(),
-        request_id="q1",
         join=_join,
     )
     assert opened.ok
@@ -151,14 +168,13 @@ async def test_the_holder_task_row_commits_with_the_acquire_and_never_adopts_a_f
     # A loser rolls back whatever its join wrote, so no task row outlives the
     # acquire that failed.
     def _loser(cur):
-        create_in_cursor(cur, kind="baseline", params={}, idempotency_key="round-b", task_id="t-2")
+        create_in_cursor(cur, TaskSpec(kind="baseline", params={}, idempotency_key="round-b", task_id="t-2"))
 
     denied = await store.open(
         "round-b",
+        RoundRequest(now_unix=clock.wall(), request_id="q2"),
         holder_task_id="t-2",
         lease_sec=_LEASE,
-        now_unix=clock.wall(),
-        request_id="q2",
         join=_loser,
     )
     assert denied.ok is False
@@ -168,15 +184,16 @@ async def test_the_holder_task_row_commits_with_the_acquire_and_never_adopts_a_f
     # than silently held by work that is over.
     await tasks.transition("t-1", "running")
     await tasks.transition("t-1", "succeeded")
-    await store.settle(_claim("round-a", "t-1", 1), outcome=BOOTED, now_unix=clock.wall(), request_id="settle")
+    await store.settle(
+        _claim("round-a", "t-1", 1), RoundRequest(now_unix=clock.wall(), request_id="settle"), outcome=BOOTED
+    )
     clock.advance(_LEASE + 1.0)
     with pytest.raises(TerminalTaskReuse):
         await store.open(
             "round-c",
+            RoundRequest(now_unix=clock.wall(), request_id="q3"),
             holder_task_id="t-1",
             lease_sec=_LEASE,
-            now_unix=clock.wall(),
-            request_id="q3",
             join=_join,
         )
 
@@ -185,16 +202,15 @@ async def test_the_holder_task_row_commits_with_the_acquire_and_never_adopts_a_f
 async def test_renewing_extends_the_lease_without_invalidating_the_holders_settle(store, virtual_clock):
     """A heartbeat is not a change of holder, so it leaves the fence alone."""
     clock = virtual_clock
-    opened = await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")
+    opened = await store.open(
+        "r", RoundRequest(now_unix=clock.wall(), request_id="q1"), holder_task_id="t-1", lease_sec=_LEASE
+    )
     assert opened.ok
 
     for tick in range(3):
         clock.advance(_LEASE / 2.0)
         renewed = await store.renew(
-            _claim("r", "t-1", 1),
-            lease_sec=_LEASE,
-            now_unix=clock.wall(),
-            request_id=f"hb-{tick}",
+            _claim("r", "t-1", 1), RoundRequest(now_unix=clock.wall(), request_id=f"hb-{tick}"), lease_sec=_LEASE
         )
         assert renewed.ok
         assert renewed.fence == 1
@@ -206,7 +222,9 @@ async def test_renewing_extends_the_lease_without_invalidating_the_holders_settl
     assert row.expires_unix == clock.wall() + _LEASE
 
     # The token the holder acquired under still settles the round it holds.
-    settled = await store.settle(_claim("r", "t-1", 1), outcome=BOOTED, now_unix=clock.wall(), request_id="q2")
+    settled = await store.settle(
+        _claim("r", "t-1", 1), RoundRequest(now_unix=clock.wall(), request_id="q2"), outcome=BOOTED
+    )
     assert settled.ok
 
 
@@ -214,16 +232,17 @@ async def test_renewing_extends_the_lease_without_invalidating_the_holders_settl
 async def test_a_handoff_advances_the_fence_and_the_old_holders_settle_is_rejected(store, virtual_clock):
     """The fence names a holder, and only a handoff can change either."""
     clock = virtual_clock
-    opened = await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")
+    opened = await store.open(
+        "r", RoundRequest(now_unix=clock.wall(), request_id="q1"), holder_task_id="t-1", lease_sec=_LEASE
+    )
     assert opened.ok
 
     clock.advance(120.0)
     handed = await store.handoff(
         _claim("r", "t-1", 1),
+        RoundRequest(now_unix=clock.wall(), request_id="q2"),
         new_holder_task_id="t-2",
         lease_sec=_LEASE,
-        now_unix=clock.wall(),
-        request_id="q2",
     )
     assert handed.ok and handed.fence == 2
     row = await store.get("r")
@@ -231,7 +250,9 @@ async def test_a_handoff_advances_the_fence_and_the_old_holders_settle_is_reject
 
     # The old holder is no longer the holder at all.
     clock.advance(60.0)
-    displaced = await store.settle(_claim("r", "t-1", 1), outcome=BOOTED, now_unix=clock.wall(), request_id="q3")
+    displaced = await store.settle(
+        _claim("r", "t-1", 1), RoundRequest(now_unix=clock.wall(), request_id="q3"), outcome=BOOTED
+    )
     assert displaced.ok is False
     assert displaced.reason == rs.NOT_OWNER
 
@@ -240,10 +261,8 @@ async def test_a_handoff_advances_the_fence_and_the_old_holders_settle_is_reject
     # fence rather than a second name for the holder.
     stale = await store.settle(
         _claim("r", "t-2", 1),
+        RoundRequest(now_unix=clock.wall(), request_id="q4", evidence={"tput": 12.5}),
         outcome=BOOTED,
-        now_unix=clock.wall(),
-        request_id="q4",
-        evidence={"tput": 12.5},
     )
     assert stale.ok is False
     assert stale.reason == STALE_FENCE
@@ -258,7 +277,9 @@ async def test_a_handoff_advances_the_fence_and_the_old_holders_settle_is_reject
     assert [(r["request_id"], r["result"], r["reason"]) for r in rows][-1] == ("q4", "rejected", STALE_FENCE)
 
     # The holder the fence names can still settle it.
-    settled = await store.settle(_claim("r", "t-2", 2), outcome=BOOTED, now_unix=clock.wall(), request_id="q5")
+    settled = await store.settle(
+        _claim("r", "t-2", 2), RoundRequest(now_unix=clock.wall(), request_id="q5"), outcome=BOOTED
+    )
     assert settled.ok
 
 
@@ -266,15 +287,21 @@ async def test_a_handoff_advances_the_fence_and_the_old_holders_settle_is_reject
 async def test_settling_twice_records_the_replay_without_changing_the_round(store, virtual_clock):
     """A retried settle is idempotent; a different one is refused."""
     clock = virtual_clock
-    opened = await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")
+    opened = await store.open(
+        "r", RoundRequest(now_unix=clock.wall(), request_id="q1"), holder_task_id="t-1", lease_sec=_LEASE
+    )
     assert opened.ok
     clock.advance(45.0)
     first_settled_at = clock.wall()
-    first = await store.settle(_claim("r", "t-1", 1), outcome=BOOTED, now_unix=first_settled_at, request_id="q2")
+    first = await store.settle(
+        _claim("r", "t-1", 1), RoundRequest(now_unix=first_settled_at, request_id="q2"), outcome=BOOTED
+    )
     assert first.ok and first.duplicate is False
 
     clock.advance(5.0)
-    replay = await store.settle(_claim("r", "t-1", 1), outcome=BOOTED, now_unix=clock.wall(), request_id="q2")
+    replay = await store.settle(
+        _claim("r", "t-1", 1), RoundRequest(now_unix=clock.wall(), request_id="q2"), outcome=BOOTED
+    )
     assert replay.ok and replay.duplicate is True
 
     row = await store.get("r")
@@ -285,7 +312,7 @@ async def test_settling_twice_records_the_replay_without_changing_the_round(stor
     assert row.settled_unix == first_settled_at
 
     contradicting = await store.settle(
-        _claim("r", "t-1", 1), outcome=EXPIRED_UNREAPED, now_unix=clock.wall(), request_id="q3"
+        _claim("r", "t-1", 1), RoundRequest(now_unix=clock.wall(), request_id="q3"), outcome=EXPIRED_UNREAPED
     )
     assert contradicting.ok is False
     assert contradicting.reason == rs.ALREADY_SETTLED
@@ -295,9 +322,13 @@ async def test_settling_twice_records_the_replay_without_changing_the_round(stor
 async def test_a_non_owner_cannot_settle_a_round_it_does_not_hold(store, virtual_clock):
     """Ownership is checked separately from the fence, and both are recorded."""
     clock = virtual_clock
-    opened = await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")
+    opened = await store.open(
+        "r", RoundRequest(now_unix=clock.wall(), request_id="q1"), holder_task_id="t-1", lease_sec=_LEASE
+    )
     assert opened.ok
-    refused = await store.settle(_claim("r", "impostor", 1), outcome=BOOTED, now_unix=clock.wall(), request_id="q2")
+    refused = await store.settle(
+        _claim("r", "impostor", 1), RoundRequest(now_unix=clock.wall(), request_id="q2"), outcome=BOOTED
+    )
     assert refused.ok is False
     assert refused.reason == rs.NOT_OWNER
     rows = await store.db.fetchall(
@@ -321,7 +352,9 @@ async def test_an_open_round_holds_the_lane_and_a_settled_one_does_not(store, vi
     """The round and its lease are one write, so the lease reaper sees the round."""
     clock = virtual_clock
     opened_at = clock.wall()
-    opened = await store.open("r", holder_task_id="t-1", lease_sec=_LEASE, now_unix=opened_at, request_id="q1")
+    opened = await store.open(
+        "r", RoundRequest(now_unix=opened_at, request_id="q1"), holder_task_id="t-1", lease_sec=_LEASE
+    )
     assert opened.ok
 
     row = await _lane_row(store, "r")
@@ -334,7 +367,9 @@ async def test_an_open_round_holds_the_lane_and_a_settled_one_does_not(store, vi
 
     clock.advance(60.0)
     renewed_at = clock.wall()
-    renewed = await store.renew(_claim("r", "t-1", 1), lease_sec=_LEASE, now_unix=renewed_at, request_id="q2")
+    renewed = await store.renew(
+        _claim("r", "t-1", 1), RoundRequest(now_unix=renewed_at, request_id="q2"), lease_sec=_LEASE
+    )
     assert renewed.ok
     row = await _lane_row(store, "r")
     assert row["acquired_at"] == acquired, "a renewal moves the lease, not the acquire"
@@ -343,16 +378,17 @@ async def test_an_open_round_holds_the_lane_and_a_settled_one_does_not(store, vi
     clock.advance(60.0)
     moved = await store.handoff(
         _claim("r", "t-1", 1),
+        RoundRequest(now_unix=clock.wall(), request_id="q3"),
         new_holder_task_id="t-2",
         lease_sec=_LEASE,
-        now_unix=clock.wall(),
-        request_id="q3",
     )
     assert moved.ok
     assert (await _lane_row(store, "r"))["task_id"] == "t-2", "the round stays open, so it keeps the lane"
 
     clock.advance(60.0)
-    settled = await store.settle(_claim("r", "t-2", 2), outcome=BOOTED, now_unix=clock.wall(), request_id="q4")
+    settled = await store.settle(
+        _claim("r", "t-2", 2), RoundRequest(now_unix=clock.wall(), request_id="q4"), outcome=BOOTED
+    )
     assert settled.ok
     assert await _lane_row(store, "r") is None
 
@@ -368,73 +404,68 @@ async def test_every_path_writes_the_same_outbox_row_and_answer(store):
 
     results = [
         await store.open(
-            "a", holder_task_id="t-1", lease_sec=600.0, now_unix=1000.0, request_id="o1", evidence={"z": 1, "a": "x"}
+            "a",
+            RoundRequest(now_unix=1000.0, request_id="o1", evidence={"z": 1, "a": "x"}),
+            holder_task_id="t-1",
+            lease_sec=600.0,
         ),
-        await store.open("b", holder_task_id="t-2", lease_sec=600.0, now_unix=1001.0, request_id="o2"),
-        await store.open("a", holder_task_id="t-3", lease_sec=600.0, now_unix=1002.0, request_id="o3"),
-        await store.renew(_claim("a", "t-1", 1), lease_sec=600.0, now_unix=1010.0, request_id="r1"),
+        await store.open("b", RoundRequest(now_unix=1001.0, request_id="o2"), holder_task_id="t-2", lease_sec=600.0),
+        await store.open("a", RoundRequest(now_unix=1002.0, request_id="o3"), holder_task_id="t-3", lease_sec=600.0),
+        await store.renew(_claim("a", "t-1", 1), RoundRequest(now_unix=1010.0, request_id="r1"), lease_sec=600.0),
     ]
     after_renew = await snapshot()
     results += [
-        await store.renew(_claim("a", "t-9", 1), lease_sec=600.0, now_unix=1011.0, request_id="r2"),
-        await store.renew(_claim("a", "t-1", 7), lease_sec=600.0, now_unix=1012.0, request_id="r3"),
-        await store.renew(_claim("ghost", "t-1", 1), lease_sec=600.0, now_unix=1013.0, request_id="r4"),
+        await store.renew(_claim("a", "t-9", 1), RoundRequest(now_unix=1011.0, request_id="r2"), lease_sec=600.0),
+        await store.renew(_claim("a", "t-1", 7), RoundRequest(now_unix=1012.0, request_id="r3"), lease_sec=600.0),
+        await store.renew(_claim("ghost", "t-1", 1), RoundRequest(now_unix=1013.0, request_id="r4"), lease_sec=600.0),
         await store.handoff(
             _claim("a", "t-1", 1),
+            RoundRequest(now_unix=1020.0, request_id="h1", evidence={"k": "v"}),
             new_holder_task_id="t-2",
             lease_sec=300.0,
-            now_unix=1020.0,
-            request_id="h1",
-            evidence={"k": "v"},
         ),
     ]
     after_handoff = await snapshot()
     results += [
         await store.handoff(
             _claim("a", "t-1", 1),
+            RoundRequest(now_unix=1021.0, request_id="h2"),
             new_holder_task_id="t-3",
             lease_sec=1.0,
-            now_unix=1021.0,
-            request_id="h2",
         ),
         await store.handoff(
             _claim("a", "t-2", 1),
+            RoundRequest(now_unix=1022.0, request_id="h3"),
             new_holder_task_id="t-3",
             lease_sec=1.0,
-            now_unix=1022.0,
-            request_id="h3",
         ),
         await store.handoff(
             _claim("ghost", "t-2", 2),
+            RoundRequest(now_unix=1023.0, request_id="h4"),
             new_holder_task_id="t-3",
             lease_sec=1.0,
-            now_unix=1023.0,
-            request_id="h4",
         ),
-        await store.settle(_claim("a", "t-2", 1), outcome=BOOTED, now_unix=1024.0, request_id="s1"),
-        await store.settle(_claim("a", "t-9", 2), outcome=BOOTED, now_unix=1025.0, request_id="s2"),
+        await store.settle(_claim("a", "t-2", 1), RoundRequest(now_unix=1024.0, request_id="s1"), outcome=BOOTED),
+        await store.settle(_claim("a", "t-9", 2), RoundRequest(now_unix=1025.0, request_id="s2"), outcome=BOOTED),
         await store.settle(
             _claim("a", "t-2", 2),
+            RoundRequest(now_unix=1030.0, request_id="s3", evidence={"reason": "r"}),
             outcome=BOOTED,
-            now_unix=1030.0,
-            request_id="s3",
-            evidence={"reason": "r"},
         ),
-        await store.settle(_claim("a", "t-2", 2), outcome=BOOTED, now_unix=1040.0, request_id="s3"),
-        await store.settle(_claim("a", "t-9", 2), outcome=BOOTED, now_unix=1046.0, request_id="s6"),
-        await store.settle(_claim("a", "t-2", 1), outcome=BOOTED, now_unix=1047.0, request_id="s7"),
-        await store.settle(_claim("a", "t-2", 2), outcome=rs.FAILED, now_unix=1041.0, request_id="s4"),
-        await store.renew(_claim("a", "t-2", 2), lease_sec=600.0, now_unix=1042.0, request_id="r5"),
+        await store.settle(_claim("a", "t-2", 2), RoundRequest(now_unix=1040.0, request_id="s3"), outcome=BOOTED),
+        await store.settle(_claim("a", "t-9", 2), RoundRequest(now_unix=1046.0, request_id="s6"), outcome=BOOTED),
+        await store.settle(_claim("a", "t-2", 1), RoundRequest(now_unix=1047.0, request_id="s7"), outcome=BOOTED),
+        await store.settle(_claim("a", "t-2", 2), RoundRequest(now_unix=1041.0, request_id="s4"), outcome=rs.FAILED),
+        await store.renew(_claim("a", "t-2", 2), RoundRequest(now_unix=1042.0, request_id="r5"), lease_sec=600.0),
         await store.handoff(
             _claim("a", "t-2", 2),
+            RoundRequest(now_unix=1043.0, request_id="h5"),
             new_holder_task_id="t-3",
             lease_sec=1.0,
-            now_unix=1043.0,
-            request_id="h5",
         ),
-        await store.settle(_claim("ghost", "t-2", 2), outcome=BOOTED, now_unix=1044.0, request_id="s5"),
-        await store.open("a", holder_task_id="t-4", lease_sec=600.0, now_unix=1050.0, request_id="o4"),
-        await store.open("b", holder_task_id="t-5", lease_sec=600.0, now_unix=1051.0, request_id="o5"),
+        await store.settle(_claim("ghost", "t-2", 2), RoundRequest(now_unix=1044.0, request_id="s5"), outcome=BOOTED),
+        await store.open("a", RoundRequest(now_unix=1050.0, request_id="o4"), holder_task_id="t-4", lease_sec=600.0),
+        await store.open("b", RoundRequest(now_unix=1051.0, request_id="o5"), holder_task_id="t-5", lease_sec=600.0),
     ]
 
     def ok(round_id, fence, state, outcome="", *, event_id, duplicate=False):
@@ -574,9 +605,13 @@ async def test_every_path_writes_the_same_outbox_row_and_answer(store):
 async def test_a_refused_acquire_leaves_no_lane_behind(store, virtual_clock):
     """A round that was never opened holds nothing; the two roll back together."""
     clock = virtual_clock
-    opened = await store.open("r1", holder_task_id="t-1", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q1")
+    opened = await store.open(
+        "r1", RoundRequest(now_unix=clock.wall(), request_id="q1"), holder_task_id="t-1", lease_sec=_LEASE
+    )
     assert opened.ok
-    refused = await store.open("r2", holder_task_id="t-2", lease_sec=_LEASE, now_unix=clock.wall(), request_id="q2")
+    refused = await store.open(
+        "r2", RoundRequest(now_unix=clock.wall(), request_id="q2"), holder_task_id="t-2", lease_sec=_LEASE
+    )
     assert refused.ok is False and refused.reason == rs.EXCLUDED
     assert await _lane_row(store, "r2") is None
     assert await _lane_row(store, "r1") is not None

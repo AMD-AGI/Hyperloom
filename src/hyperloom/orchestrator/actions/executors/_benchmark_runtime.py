@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Mapping
+from typing import Any
 
 from hyperloom.common.agentx_workload import is_agentx_client_script
 
@@ -24,12 +24,9 @@ def apply_runtime_benchmark_overrides(
     gpu_type: str | None = None,
     benchmark_script: str | None = None,
     conc: Any = None,
-    agentx_mode: bool | None = None,
-    grading: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Apply runtime env/CLI overrides to a Magpie benchmark YAML."""
-    if agentx_mode is None and is_agentx_client_script(str(bench.get("benchmark_script") or "")):
-        agentx_mode = True
+    agentx_mode = True if is_agentx_client_script(str(bench.get("benchmark_script") or "")) else None
 
     if model_path:
         bench["model"] = str(model_path)
@@ -54,7 +51,7 @@ def apply_runtime_benchmark_overrides(
     # AgentX switch on the shared rebuild path: without this, the gpu_type block above re-pins the synthetic
     # {framework}_{gpu_type}.sh and silently reverts a materialize-time AgentX swap (grid/baseline/profile executors
     # rebuild via this function).
-    apply_agentx_switch(bench, model_path, conc=conc, active=agentx_mode, grading=grading)
+    apply_agentx_switch(bench, model_path, conc=conc, active=agentx_mode)
 
     envs: dict[str, Any] = bench.setdefault("envs", {})
     # Same hazard as the AgentX swap above: the gpu_type block re-pins the bare {framework}_{gpu_type}.sh over the

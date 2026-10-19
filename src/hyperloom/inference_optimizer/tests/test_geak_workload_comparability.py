@@ -58,10 +58,20 @@ def coordinator(tmp_path, monkeypatch):
     return Coordinator(sd, backends=backends)
 
 
-def _record(coordinator, *, baseline: float, geak_tput: float, comparability=None):
+def _record(
+    coordinator,
+    *,
+    baseline: float,
+    geak_tput: float,
+    comparability=None,
+    metric_basis: str | None = None,
+    baseline_perf: dict | None = None,
+):
     """Record a GEAK candidate and return the resulting geak_pending."""
     st = coordinator.shared_state
     st.baseline_tput = baseline
+    if baseline_perf is not None:
+        st.baseline_perf = baseline_perf
     st.geak_result = {"status": "ok"}
     result: dict = {
         "status": "ok",
@@ -71,6 +81,8 @@ def _record(coordinator, *, baseline: float, geak_tput: float, comparability=Non
     }
     if comparability is not None:
         result["baseline_basis"] = {"workload_comparability": comparability}
+    if metric_basis is not None:
+        result["metric_basis"] = metric_basis
     coordinator.phase_kernel._record_geak_candidate(result)
     return st.geak_pending
 
@@ -155,3 +167,49 @@ def test_malformed_verdict_does_not_suppress(coordinator) -> None:
     for junk in ({}, {"comparable": None}, {"comparable": "no"}, {"other": 1}):
         pending = _record(coordinator, baseline=100.0, geak_tput=116.0, comparability=junk)
         assert pending["self_reported_gain_pct"] == pytest.approx(16.0), f"verdict {junk!r} must not suppress the gain"
+
+
+# ──────────────────────────────── the axis ───────────────────────────────────
+
+
+def test_an_interactivity_claim_is_divided_by_the_baseline_on_that_axis(coordinator) -> None:
+    """GEAK's median against our median, never against our output throughput.
+
+    Divided across axes, this +5% median win would read as roughly -61%.
+    """
+    pending = _record(
+        coordinator,
+        baseline=400.0,
+        geak_tput=157.5,
+        metric_basis="e2e_norm_intvty_p50",
+        baseline_perf={"e2e_norm_intvty_p50": 150.0, "output_throughput": 400.0},
+    )
+
+    assert pending["self_reported_gain_pct"] == pytest.approx(5.0)
+
+
+def test_an_axis_without_a_same_axis_baseline_records_no_gain(coordinator) -> None:
+    """No reference on GEAK's axis means no percentage, not one taken against output throughput."""
+    pending = _record(
+        coordinator,
+        baseline=400.0,
+        geak_tput=96.0,
+        metric_basis="p90_intvty_inferencex",
+        baseline_perf={"e2e_norm_intvty_p50": 150.0, "output_throughput": 400.0},
+    )
+
+    assert pending["self_reported_gain_pct"] is None
+    assert pending["self_reported_tput"] == pytest.approx(96.0)
+
+
+def test_an_output_claim_keeps_the_output_baseline(coordinator) -> None:
+    """The fixed-ISL/OSL path: GEAK and the session both read output, exactly as before."""
+    pending = _record(
+        coordinator,
+        baseline=100.0,
+        geak_tput=116.0,
+        metric_basis="aggregate_output_tok_s",
+        baseline_perf={"e2e_norm_intvty_p50": 150.0},
+    )
+
+    assert pending["self_reported_gain_pct"] == pytest.approx(16.0)

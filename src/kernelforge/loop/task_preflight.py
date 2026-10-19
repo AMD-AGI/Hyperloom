@@ -22,7 +22,8 @@ from pathlib import Path
 
 from kernelforge.loop.aiter_cache import cleanup_current_owned_aiter_locks
 from kernelforge.loop.profile_contract import PROFILE_RUN_FLAG
-from kernelforge.mcp_server.tools.bench import bench_wallclock
+from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
+from kernelforge.mcp_server.tools.bench import BenchRun, bench_wallclock
 from kernelforge.mcp_server.tools.test import test_correctness
 
 
@@ -247,6 +248,128 @@ PROBE_FAILED = -1
 PROBE_DISTRIBUTED_VIOLATION = -2
 
 
+@dataclass(frozen=True)
+class _ProbeShard:
+    """One graph-probe shard, once its replay count and identity fields check out.
+
+    ``rank`` is None for a launcher or helper process -- one that wrote a shard
+    but is not a worker -- and the identity fields are then unset with it.
+    """
+
+    replays: int
+    rank: int | None
+    pid: int | None
+    ppid: int | None
+    ancestors: frozenset[int]
+    world_size: int | None
+    payload: dict
+
+
+def _shard_process_identity(payload: dict, name: str) -> tuple[int | None, int | None, frozenset[int], str]:
+    """A shard's process identity, or why it cannot tell a worker from a helper it launched."""
+    pid_value = payload.get("pid")
+    ppid_value = payload.get("ppid")
+    try:
+        pid = int(pid_value) if pid_value is not None else None
+        ppid = int(ppid_value) if ppid_value is not None else None
+    except (TypeError, ValueError):
+        return None, None, frozenset(), f"invalid process identity in {name}"
+    if (pid is None) != (ppid is None) or (pid is not None and (pid <= 0 or ppid is None or ppid < 0)):
+        return None, None, frozenset(), f"invalid process identity in {name}"
+    raw_ancestors = payload.get("ancestors") or []
+    if not isinstance(raw_ancestors, list):
+        return None, None, frozenset(), f"invalid process ancestry in {name}"
+    try:
+        ancestors = frozenset(int(ancestor) for ancestor in raw_ancestors)
+    except (TypeError, ValueError):
+        return None, None, frozenset(), f"invalid process ancestry in {name}"
+    if any(ancestor <= 0 for ancestor in ancestors):
+        return None, None, frozenset(), f"invalid process ancestry in {name}"
+    return pid, ppid, ancestors, ""
+
+
+def _parse_graph_probe_shard(shard: Path) -> tuple[_ProbeShard | None, str]:
+    """One shard's contents, or why it cannot be read as a measurement."""
+    name = shard.name
+    try:
+        payload = json.loads(shard.read_text().strip())
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        return None, f"invalid graph probe shard {name}: {exc}"
+    if not isinstance(payload, dict):
+        return None, f"invalid graph probe shard payload in {name}"
+    try:
+        replays = int(payload["replays"])
+    except (KeyError, TypeError, ValueError):
+        return None, f"invalid replay count in {name}"
+    if replays < 0:
+        return None, f"invalid negative replay count in {name}"
+
+    rank_value = payload.get("rank")
+    local_rank_value = payload.get("local_rank")
+    world_size_value = payload.get("world_size")
+    unranked = _ProbeShard(replays, None, None, None, frozenset(), None, payload)
+    if rank_value is None:
+        if local_rank_value is not None:
+            return None, f"incomplete rank identity in {name}"
+        # Launcher/helper processes are not workers even if they inherited a WORLD_SIZE value from their
+        # environment.
+        return unranked, ""
+    if "local_rank" in payload and local_rank_value is None:
+        # A self-launcher can inherit RANK/WORLD_SIZE from its caller.
+        return unranked, ""
+    if world_size_value is None:
+        return None, f"incomplete rank identity in {name}"
+    try:
+        rank = int(rank_value)
+        local_rank = int(local_rank_value) if local_rank_value is not None else None
+        world_size = int(world_size_value)
+    except (TypeError, ValueError):
+        return None, f"invalid rank identity in {name}"
+    if (
+        world_size <= 0
+        or rank < 0
+        or rank >= world_size
+        or (local_rank is not None and (local_rank < 0 or local_rank >= world_size))
+    ):
+        return None, f"invalid rank identity in {name}"
+    pid, ppid, ancestors, error = _shard_process_identity(payload, name)
+    if error:
+        return None, error
+    return _ProbeShard(replays, rank, pid, ppid, ancestors, world_size, payload), ""
+
+
+def _rank_root_shard(rank: int, shards: list[_ProbeShard]) -> tuple[_ProbeShard | None, str]:
+    """The worker shard for one rank: the process every other shard of that rank descends from."""
+    if len(shards) == 1:
+        return shards[0], ""
+    if any(shard.pid is None for shard in shards):
+        return None, f"ambiguous graph probe shards for rank {rank}"
+    roots = [
+        shard
+        for shard in shards
+        if all(
+            other.pid == shard.pid or shard.pid in other.ancestors or (not other.ancestors and other.ppid == shard.pid)
+            for other in shards
+        )
+    ]
+    if len(roots) != 1:
+        return None, f"ambiguous graph probe process tree for rank {rank}"
+    return roots[0], ""
+
+
+def _rank_set_error(actual_ranks: set[int], world_size: int) -> str:
+    """Why the shards do not cover exactly the ranks the run declared, or "" when they do."""
+    expected_ranks = set(range(world_size))
+    if actual_ranks == expected_ranks:
+        return ""
+    missing = sorted(expected_ranks - actual_ranks)
+    unexpected = sorted(actual_ranks - expected_ranks)
+    error = f"incomplete graph probe rank set; missing ranks: {missing}"
+    if unexpected:
+        error += f"; unexpected ranks: {unexpected}"
+    return error
+
+
 def _read_graph_probe_shards(out_path: str, *, expected_world_size: int | None = None) -> tuple[int, str]:
     """Validate graph-probe shards and return the effective replay count.
 
@@ -261,80 +384,20 @@ def _read_graph_probe_shards(out_path: str, *, expected_world_size: int | None =
     :func:`_distributed_contract_violation`.
     """
     unranked_replays: list[int] = []
-    ranked_processes: dict[
-        int,
-        list[tuple[int, int | None, int | None, set[int], dict]],
-    ] = {}
+    ranked_shards: dict[int, list[_ProbeShard]] = {}
     world_sizes: set[int] = set()
 
-    for shard in glob.glob(f"{out_path}.*"):
-        try:
-            payload = json.loads(Path(shard).read_text().strip())
-        except (OSError, json.JSONDecodeError, ValueError) as exc:
-            return PROBE_FAILED, f"invalid graph probe shard {Path(shard).name}: {exc}"
-
-        if not isinstance(payload, dict):
-            return PROBE_FAILED, f"invalid graph probe shard payload in {Path(shard).name}"
-
-        try:
-            replays = int(payload["replays"])
-        except (KeyError, TypeError, ValueError):
-            return PROBE_FAILED, f"invalid replay count in {Path(shard).name}"
-        if replays < 0:
-            return PROBE_FAILED, f"invalid negative replay count in {Path(shard).name}"
-
-        rank_value = payload.get("rank")
-        local_rank_value = payload.get("local_rank")
-        world_size_value = payload.get("world_size")
-        if rank_value is None:
-            if local_rank_value is not None:
-                return PROBE_FAILED, f"incomplete rank identity in {Path(shard).name}"
-            # Launcher/helper processes are not workers even if they inherited a WORLD_SIZE value from their
-            # environment.
-            unranked_replays.append(replays)
+    for path in glob.glob(f"{out_path}.*"):
+        parsed, error = _parse_graph_probe_shard(Path(path))
+        if error:
+            return PROBE_FAILED, error
+        if parsed.rank is None:
+            unranked_replays.append(parsed.replays)
             continue
-        if "local_rank" in payload and local_rank_value is None:
-            # A self-launcher can inherit RANK/WORLD_SIZE from its caller.
-            unranked_replays.append(replays)
-            continue
-        if world_size_value is None:
-            return PROBE_FAILED, f"incomplete rank identity in {Path(shard).name}"
+        ranked_shards.setdefault(parsed.rank, []).append(parsed)
+        world_sizes.add(parsed.world_size)
 
-        try:
-            rank = int(rank_value)
-            local_rank = int(local_rank_value) if local_rank_value is not None else None
-            world_size = int(world_size_value)
-        except (TypeError, ValueError):
-            return PROBE_FAILED, f"invalid rank identity in {Path(shard).name}"
-        if (
-            world_size <= 0
-            or rank < 0
-            or rank >= world_size
-            or (local_rank is not None and (local_rank < 0 or local_rank >= world_size))
-        ):
-            return PROBE_FAILED, f"invalid rank identity in {Path(shard).name}"
-        pid_value = payload.get("pid")
-        ppid_value = payload.get("ppid")
-        try:
-            pid = int(pid_value) if pid_value is not None else None
-            ppid = int(ppid_value) if ppid_value is not None else None
-        except (TypeError, ValueError):
-            return PROBE_FAILED, f"invalid process identity in {Path(shard).name}"
-        if (pid is None) != (ppid is None) or (pid is not None and (pid <= 0 or ppid is None or ppid < 0)):
-            return PROBE_FAILED, f"invalid process identity in {Path(shard).name}"
-        raw_ancestors = payload.get("ancestors") or []
-        if not isinstance(raw_ancestors, list):
-            return PROBE_FAILED, f"invalid process ancestry in {Path(shard).name}"
-        try:
-            ancestors = {int(ancestor) for ancestor in raw_ancestors}
-        except (TypeError, ValueError):
-            return PROBE_FAILED, f"invalid process ancestry in {Path(shard).name}"
-        if any(ancestor <= 0 for ancestor in ancestors):
-            return PROBE_FAILED, f"invalid process ancestry in {Path(shard).name}"
-        ranked_processes.setdefault(rank, []).append((replays, pid, ppid, ancestors, payload))
-        world_sizes.add(world_size)
-
-    if not ranked_processes:
+    if not ranked_shards:
         if expected_world_size is not None and expected_world_size > 1:
             return (
                 PROBE_DISTRIBUTED_VIOLATION,
@@ -352,37 +415,18 @@ def _read_graph_probe_shards(out_path: str, *, expected_world_size: int | None =
             PROBE_DISTRIBUTED_VIOLATION,
             f"the benchmark launched {world_size} ranks; this task declares {expected_world_size}",
         )
-    expected_ranks = set(range(world_size))
-    actual_ranks = set(ranked_processes)
-    if actual_ranks != expected_ranks:
-        missing = sorted(expected_ranks - actual_ranks)
-        unexpected = sorted(actual_ranks - expected_ranks)
-        identity_error = f"incomplete graph probe rank set; missing ranks: {missing}"
-        if unexpected:
-            identity_error += f"; unexpected ranks: {unexpected}"
-        return PROBE_FAILED, identity_error
+    rank_error = _rank_set_error(set(ranked_shards), world_size)
+    if rank_error:
+        return PROBE_FAILED, rank_error
 
     worker_replays: list[int] = []
     worker_payloads: dict[int, dict] = {}
-    for rank, processes in ranked_processes.items():
-        if len(processes) == 1:
-            worker_replays.append(processes[0][0])
-            worker_payloads[rank] = processes[0][4]
-            continue
-        if any(pid is None for _, pid, _, _, _ in processes):
-            return PROBE_FAILED, f"ambiguous graph probe shards for rank {rank}"
-        roots = [
-            (replays, shard)
-            for replays, pid, _ppid, _ancestors, shard in processes
-            if all(
-                other_pid == pid or pid in other_ancestors or (not other_ancestors and other_ppid == pid)
-                for _other_replays, other_pid, other_ppid, other_ancestors, _other_shard in processes
-            )
-        ]
-        if len(roots) != 1:
-            return PROBE_FAILED, f"ambiguous graph probe process tree for rank {rank}"
-        worker_replays.append(roots[0][0])
-        worker_payloads[rank] = roots[0][1]
+    for rank, shards in ranked_shards.items():
+        root, error = _rank_root_shard(rank, shards)
+        if error:
+            return PROBE_FAILED, error
+        worker_replays.append(root.replays)
+        worker_payloads[rank] = root.payload
 
     if expected_world_size is not None and expected_world_size > 1:
         violation = _distributed_contract_violation(worker_payloads)
@@ -538,17 +582,31 @@ async def _check_profile_contract(
     return True, "verified"
 
 
+@dataclass(frozen=True)
+class DriverContract:
+    """What a driver must satisfy: the correctness threshold, graph timing, a profile run, its ranks and cases."""
+
+    snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB
+    require_graph: bool = False
+    require_profile: bool = False
+    require_ranks: int = 1
+    expected_case_ids: list[str] | None = None
+
+
 async def _preflight_async(
     driver: str,
-    snr_threshold: float,
+    contract: DriverContract,
     warmup: int,
     iters: int,
-    require_graph: bool = False,
-    require_profile: bool = False,
-    require_ranks: int = 1,
+    *,
     deadline_unix: float = 0.0,
-    expected_case_ids: list[str] | None = None,
 ) -> PreflightResult:
+    snr_threshold, expected_case_ids = contract.snr_threshold, contract.expected_case_ids
+    require_graph, require_profile, require_ranks = (
+        contract.require_graph,
+        contract.require_profile,
+        contract.require_ranks,
+    )
     reasons: list[str] = []
     details: dict = {}
     diagnostics: dict = {}
@@ -608,10 +666,7 @@ async def _preflight_async(
     stage_started = time.monotonic()
     try:
         bres = await bench_wallclock(
-            driver_script=driver,
-            driver_args=[],
-            warmup_iters=warmup,
-            bench_iters=iters,
+            BenchRun(driver, driver_args=[], warmup_iters=warmup, bench_iters=iters),
             timeout_sec=int(_deadline_timeout(deadline_unix, PREFLIGHT_BENCH_TIMEOUT_S)),
         )
         reported_cases = bres.get("case_times") or {}

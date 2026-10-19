@@ -6,7 +6,9 @@ import logging
 import os
 import re
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 from kernelforge.knowledge.pr_knowledge.client import (
@@ -45,6 +47,88 @@ DEFAULT_MIN_WORTH = 0.0
 _UNKNOWN_WORTH = -1.0
 
 
+class PRState(str, Enum):
+    """Where a PR stands; ``closed`` means closed without being merged."""
+
+    OPEN = "open"
+    CLOSED = "closed"
+    MERGED = "merged"
+
+
+@dataclass(frozen=True)
+class PRLifecycle:
+    """State, draft flag, merge time and target branch; None wherever the service did not say."""
+
+    state: PRState | None = None
+    draft: bool | None = None
+    merged_at: str | None = None
+    base_ref: str | None = None
+
+    @classmethod
+    def from_summary(cls, summary: Mapping[str, Any]) -> PRLifecycle:
+        """Read a PR Monitor summary, which reports GitHub's open/closed state beside a merge flag."""
+        return cls(
+            state=_state_of(summary.get("state"), summary.get("is_merged")),
+            draft=_bool_or_none(summary.get("is_draft")),
+            merged_at=_str_or_none(summary.get("pr_merged_at")),
+            base_ref=_str_or_none(summary.get("base_ref")),
+        )
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, Any]) -> PRLifecycle:
+        """Rebuild from :meth:`to_record` output; a field the record lacks stays unknown."""
+        return cls(
+            state=_recorded_state(record),
+            draft=_bool_or_none(record.get("draft")),
+            merged_at=_str_or_none(record.get("merged_at")),
+            base_ref=_str_or_none(record.get("base_ref")),
+        )
+
+    def to_record(self) -> dict[str, Any]:
+        """JSON-ready fields, the state as its plain value."""
+        return {
+            "state": None if self.state is None else self.state.value,
+            "draft": self.draft,
+            "merged_at": self.merged_at,
+            "base_ref": self.base_ref,
+        }
+
+
+def _state_or_none(raw: Any) -> PRState | None:
+    """Convert a raw state, or None when it is absent or outside the vocabulary."""
+    try:
+        return PRState(raw)
+    except ValueError:
+        return None
+
+
+def _recorded_state(record: Mapping[str, Any]) -> PRState | None:
+    """The recorded state; an entry older than ``state`` holds only ``is_merged``, which is read when it says merged."""
+    if "state" in record:
+        return _state_or_none(record["state"])
+    return PRState.MERGED if record.get("is_merged") is True else None
+
+
+def _state_of(raw_state: Any, is_merged: Any) -> PRState | None:
+    """Fold the raw state and merge flag into one state; None when they cannot tell closed from merged."""
+    if is_merged is True:
+        return PRState.MERGED
+    state = _state_or_none(raw_state)
+    if state is PRState.CLOSED and is_merged is not False:
+        return None
+    return state
+
+
+def _bool_or_none(value: Any) -> bool | None:
+    """A reported boolean, or None for anything else."""
+    return value if isinstance(value, bool) else None
+
+
+def _str_or_none(value: Any) -> str | None:
+    """A reported non-empty string, or None for anything else."""
+    return value if isinstance(value, str) and value else None
+
+
 @dataclass(frozen=True)
 class PRReference:
     """One enriched upstream PR, ready for ranking and rendering."""
@@ -53,7 +137,7 @@ class PRReference:
     number: int
     title: str = ""
     hit_via: tuple[str, ...] = ()
-    is_merged: bool = False
+    lifecycle: PRLifecycle = PRLifecycle()
     worth_trying: float | None = None
     components: tuple[str, ...] = ()
     mechanisms: tuple[str, ...] = ()
@@ -268,8 +352,7 @@ def _build_reference(repo: str, number: int, detail: dict, hit_via: set[str]) ->
         number=number,
         title=str(summary.get("title") or ""),
         hit_via=tuple(sorted(hit_via)),
-        # The service exposes ``is_merged``, not ``merged_at``.
-        is_merged=bool(summary.get("is_merged")),
+        lifecycle=PRLifecycle.from_summary(summary),
         worth_trying=float(worth) if isinstance(worth, (int, float)) else None,
         components=_str_list(distill.get("components")),
         mechanisms=_str_list(distill.get("mechanisms")),
@@ -322,7 +405,7 @@ def rank_references(
             HIT_FILE_PATH in ref.hit_via,
             component_relevance(ref.components, components_of_interest),
             ref.worth_trying if ref.worth_trying is not None else _UNKNOWN_WORTH,
-            ref.is_merged,
+            ref.lifecycle.state is PRState.MERGED,
             ref.updated_at,
         )
 
@@ -344,20 +427,27 @@ def _path_terms(path: str) -> list[str]:
     return parts
 
 
+@dataclass(frozen=True)
+class SearchLimits:
+    """How many references discovery returns and how many candidates it enriches; zero reads ``PR_KB_*``."""
+
+    top_k: int = 0
+    candidate_cap: int = 0
+
+
 def discover(
     client: PRMonitorClient,
     context: PRQueryContext,
     *,
-    top_k: int = 0,
-    candidate_cap: int = 0,
+    limits: SearchLimits = SearchLimits(),
     budget_sec: float = 0.0,
     deadline: float | None = None,
 ) -> SearchOutcome:
     """Discover ranked references; zero-valued limits use ``PR_KB_*`` settings."""
     if context.reason:
         return SearchOutcome(reason=context.reason, stats={"http_calls": 0})
-    top_k = top_k or int(os.environ.get("PR_KB_TOP_K", DEFAULT_TOP_K) or DEFAULT_TOP_K)
-    candidate_cap = candidate_cap or int(
+    top_k = limits.top_k or int(os.environ.get("PR_KB_TOP_K", DEFAULT_TOP_K) or DEFAULT_TOP_K)
+    candidate_cap = limits.candidate_cap or int(
         os.environ.get("PR_KB_CANDIDATE_CAP", DEFAULT_CANDIDATE_CAP) or DEFAULT_CANDIDATE_CAP
     )
     if deadline is None:

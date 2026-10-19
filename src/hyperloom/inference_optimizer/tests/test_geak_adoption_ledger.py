@@ -13,7 +13,7 @@ from typing import Any
 from hyperloom.orchestrator.kernel.geak_config import (
     _geak_accepted_kernel_specs,
     _geak_overlay_digest,
-    _geak_overlay_is_loadable,
+    geak_overlay_is_loadable,
     geak_spec_name,
 )
 from hyperloom.orchestrator.phases.kernel import KernelPhase
@@ -118,7 +118,7 @@ def test_manifest_that_is_not_an_object_is_not_loadable(tmp_path: Path) -> None:
     root.mkdir()
     (root / "sitecustomize.py").write_text("# loads\n")
     (root / "_overlay_manifest.json").write_text(json.dumps(["rebinds"]))
-    assert _geak_overlay_is_loadable(str(root)) is False
+    assert geak_overlay_is_loadable(str(root)) is False
 
 
 def test_unparseable_manifest_still_digests_its_bytes(tmp_path: Path) -> None:
@@ -139,7 +139,7 @@ def _phase() -> SimpleNamespace:
 
 
 def _record(phase: SimpleNamespace, result: Any, **kw: Any) -> None:
-    KernelPhase._record_geak_adopted_kernels(
+    KernelPhase.record_geak_adopted_kernels(
         phase,
         result,
         measured_tput=kw.get("measured_tput", 120.0),

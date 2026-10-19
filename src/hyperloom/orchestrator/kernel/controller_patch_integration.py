@@ -14,7 +14,7 @@ from typing import Any
 
 from kernelforge.kernel_rewrite_controller.task import load_task
 
-from hyperloom.common.io import atomic_write_json
+from hyperloom.common.io import JsonFormat, atomic_write_json
 from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _git_commit_kept,
     _patch_touched_paths,
@@ -23,6 +23,7 @@ from hyperloom.orchestrator.actions.executors.integrate_patch import (
     _git_apply_reverse,
     _git_restore_to_head,
 )
+from hyperloom.orchestrator.actions.stop_attribution import StoppedByTheRun
 
 from .controller_publication import (
     ControllerPatchPublication,
@@ -30,7 +31,7 @@ from .controller_publication import (
     discover_controller_patch_dirs,
     load_controller_publication,
 )
-from .patch_conflict_merge import apply_patch_resolving_conflicts
+from .patch_conflict_merge import LandingContext, apply_patch_resolving_conflicts
 
 _CONTROLLER_SOURCE = "kernel_rewrite_controller"
 _CONTROLLER_BACKEND = "forge"
@@ -79,6 +80,9 @@ PatchValidator = Callable[[ControllerPatchPublication], Awaitable[dict[str, Any]
 #: Records one validated KEEP into SharedState.
 KeepRecorder = Callable[[dict[str, Any]], Awaitable[None]]
 
+#: Given how many E2E rounds already ran, says why the next one cannot start, or ``None`` to start it.
+RoundAdmission = Callable[[int], StoppedByTheRun | None]
+
 
 def _priority_ordered_patch_dirs(patches_root: str | Path) -> tuple[Path, ...]:
     """Order publications by their original Controller task priority."""
@@ -103,6 +107,17 @@ def _git_output(repo: Path, *args: str) -> str:
         check=True,
     )
     return completed.stdout.strip()
+
+
+def _head_against_base(repo: Path, base_commit: str) -> tuple[str, str]:
+    """Return the integration HEAD and why patches built on ``base_commit`` cannot land on it (empty when they can)."""
+    try:
+        head = _git_output(repo, "rev-parse", "HEAD").lower()
+    except (OSError, subprocess.SubprocessError) as error:
+        return "", f"could not read integration Git HEAD: {error}"
+    if head != base_commit:
+        return head, f"integration HEAD {head} does not match controller base {base_commit}"
+    return head, ""
 
 
 def _head_commit(repo: Path) -> str:
@@ -174,11 +189,7 @@ def _settle_apply_manifest(validation: dict[str, Any], *, kept: bool) -> str:
 
 
 def _write_result(results_dir: Path, index: int, result: PatchIntegrationResult) -> None:
-    atomic_write_json(
-        results_dir / f"{index:04d}.json",
-        asdict(result),
-        trailing_newline=True,
-    )
+    atomic_write_json(results_dir / f"{index:04d}.json", asdict(result), fmt=JsonFormat(trailing_newline=True))
 
 
 def _keep_result(
@@ -236,6 +247,7 @@ async def integrate_controller_patches(
     shared_state: Any,
     record_keep: KeepRecorder,
     validator: PatchValidator | None = None,
+    admit_round: RoundAdmission = lambda _rounds_run: None,
 ) -> ControllerIntegrationSummary:
     """Apply and E2E-validate complete Controller patches in task-priority order.
 
@@ -247,6 +259,8 @@ async def integrate_controller_patches(
             so a promotion also lands on the stack ledger.
         validator: Runs the E2E decision for one publication; defaults to the
             optimizer's own integrate handler.
+        admit_round: Asked before each patch is applied; a stop leaves the patch
+            unapplied and unmeasured, recorded under the stop's class.
     """
     integration_root = Path(patches_root).resolve().parent.parent / "integration"
     results_dir = integration_root / "results"
@@ -265,6 +279,7 @@ async def integrate_controller_patches(
     # Patches already committed into each repository, so a merge can be held to
     # keeping what they added.
     landed: dict[Path, list[tuple[str, Path]]] = {}
+    rounds_run = 0
 
     for index, patch_dir in enumerate(_priority_ordered_patch_dirs(patches_root)):
         try:
@@ -281,20 +296,7 @@ async def integrate_controller_patches(
         repo = publication.repo_root
         if repo not in pinned_bases:
             pinned_bases[repo] = publication.base_commit
-            try:
-                pinned_heads[repo] = _git_output(repo, "rev-parse", "HEAD").lower()
-            except (OSError, subprocess.SubprocessError) as error:
-                pinned_heads[repo] = ""
-                pin_errors[repo] = f"could not read integration Git HEAD: {error}"
-            else:
-                pin_errors[repo] = (
-                    ""
-                    if pinned_heads[repo] == publication.base_commit
-                    else (
-                        f"integration HEAD {pinned_heads[repo]} does not match "
-                        f"controller base {publication.base_commit}"
-                    )
-                )
+            pinned_heads[repo], pin_errors[repo] = _head_against_base(repo, publication.base_commit)
 
         if pin_errors.get(repo):
             result = PatchIntegrationResult(
@@ -357,16 +359,25 @@ async def integrate_controller_patches(
             results.append(result)
             _write_result(results_dir, index, result)
             continue
+        if (stop := admit_round(rounds_run)) is not None:
+            result = PatchIntegrationResult(
+                operator_id=publication.operator_id, status=stop.error_class, reason=stop.never_started
+            )
+            results.append(result)
+            _write_result(results_dir, index, result)
+            continue
 
         # Lanes all diff against the pinned base, so every KEEP committed above
         # makes the diffs still queued stale on the files it touched.
         merge = await apply_patch_resolving_conflicts(
             repo,
             publication.patch_path,
-            operator_id=publication.operator_id,
-            landed_operator_ids=[operator for operator, _ in landed.get(repo, [])],
-            landed_patches=[patch for _, patch in landed.get(repo, [])],
-            intent=f"{publication.operator_name} in {publication.kernel_path}",
+            LandingContext(
+                operator_id=publication.operator_id,
+                landed_operator_ids=[operator for operator, _ in landed.get(repo, [])],
+                landed_patches=[patch for _, patch in landed.get(repo, [])],
+                intent=f"{publication.operator_name} in {publication.kernel_path}",
+            ),
         )
         if not merge.applied:
             result = PatchIntegrationResult(
@@ -382,6 +393,7 @@ async def integrate_controller_patches(
             _write_result(results_dir, index, result)
             continue
 
+        rounds_run += 1
         try:
             validation = await validate(publication)
         except Exception as error:  # noqa: BLE001 - translated into a skipped_invalid result
@@ -485,11 +497,7 @@ async def integrate_controller_patches(
         skipped_count=skipped,
         results_dir=str(results_dir),
     )
-    atomic_write_json(
-        integration_root / "summary.json",
-        summary.to_dict(),
-        trailing_newline=True,
-    )
+    atomic_write_json(integration_root / "summary.json", summary.to_dict(), fmt=JsonFormat(trailing_newline=True))
     return summary
 
 

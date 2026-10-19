@@ -13,7 +13,6 @@ import pytest
 from hyperloom.inference_optimizer.breakdown.reporters.llm_client import (
     REPORT_HTTP_TIMEOUT_SEC,
     AnthropicClient,
-    NullClient,
     OpenAIHttpClient,
     build_client_from_env,
 )
@@ -77,10 +76,6 @@ def _install_factories(
     return built
 
 
-def test_null_client_disables_the_narrative_pass() -> None:
-    assert NullClient().complete(system="s", user="u") == ""
-
-
 def test_openai_client_delegates_to_the_shared_chat_helper(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
 
@@ -113,11 +108,12 @@ def test_anthropic_client_delegates_to_the_single_shot_entry_point(monkeypatch: 
 
     client = AnthropicClient(model="m", max_output_tokens=8, timeout_s=12.0)
     assert client.complete(system="sys", user="user") == "narrative"
-    assert calls[0]["model"] == "m"
-    assert calls[0]["system"] == "sys"
-    assert calls[0]["messages"] == [{"role": "user", "content": "user"}]
-    assert calls[0]["max_tokens"] == 8
-    assert calls[0]["timeout_s"] == 12.0
+    request = calls[0]["request"]
+    assert request.model == "m"
+    assert request.system == "sys"
+    assert request.messages == [{"role": "user", "content": "user"}]
+    assert request.max_tokens == 8
+    assert request.timeout_s == 12.0
 
 
 def test_provider_transport_errors_propagate_to_the_caller(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -172,7 +168,7 @@ def test_build_client_wires_the_anthropic_backend(monkeypatch: pytest.MonkeyPatc
 
     assert isinstance(client, AnthropicClient)
     assert client.timeout_s == REPORT_HTTP_TIMEOUT_SEC
-    assert client.model == "claude-opus-5"
+    assert client.model == "claude-opus-5-5"
     assert client.max_output_tokens == 1024
     assert built["openai"] == []
 

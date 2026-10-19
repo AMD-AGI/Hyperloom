@@ -105,6 +105,43 @@ class FrameworkRuntime:
 
 
 @dataclass(frozen=True)
+class RuntimeRequest:
+    """The attempt runtime a specialist asked for in its ``specialist_done`` (``needs_runtime``).
+
+    ``ref`` names framework source to check out and install editable (a GitHub
+    PR URL, ``PR:N``, a tag, a branch or a full sha); ``packages`` are pip
+    requirement strings installed beside it, or alone when there is no ref.
+    """
+
+    ref: str = ""
+    repo_url: str = ""
+    packages: tuple[str, ...] = ()
+    index_url: str = ""
+    capability: str = ""
+    reason: str = ""
+
+    @classmethod
+    def from_payload(cls, raw: Any) -> "RuntimeRequest | None":
+        """Parse a ``needs_runtime`` object; None when it is absent or asks for nothing."""
+        if not isinstance(raw, Mapping):
+            return None
+        packages = raw.get("packages") or ()
+        if isinstance(packages, str):
+            packages = (packages,)
+        if not isinstance(packages, (list, tuple)):
+            packages = ()
+        request = cls(
+            ref=str(raw.get("ref") or "").strip(),
+            repo_url=str(raw.get("repo_url") or "").strip(),
+            packages=tuple(s for s in (str(p).strip() for p in packages) if s),
+            index_url=str(raw.get("index_url") or "").strip(),
+            capability=str(raw.get("capability") or "").strip(),
+            reason=str(raw.get("reason") or "").strip(),
+        )
+        return request if request.ref or request.packages else None
+
+
+@dataclass(frozen=True)
 class EnablementStackAction:
     """A candidate attempt-runtime acquisition the enablement loop may run."""
 
@@ -195,8 +232,8 @@ class ProvisionResult:
     action's own ``ref`` is a branch or tag, which names different bytes
     tomorrow); ``resolved_packages`` is ``{name: {version, artifact_digest}}``
     for a wheel acquisition, because a version string is not the identity of
-    the installed bytes — the install runs ``--upgrade`` against the index, so
-    re-running it reproduces whatever that index holds at replay time.
+    the installed bytes — an unpinned requirement re-resolved at replay time
+    installs whatever the index holds then.
     """
 
     ok: bool
@@ -253,4 +290,5 @@ __all__ = [
     "EnablementStackAction",
     "FrameworkRuntime",
     "ProvisionResult",
+    "RuntimeRequest",
 ]

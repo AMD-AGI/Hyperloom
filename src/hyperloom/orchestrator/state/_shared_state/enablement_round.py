@@ -96,7 +96,6 @@ class EnablementRound:
     # Off-loop targeted-build state.
     build_manifest: list = field(default_factory=list)
     last_build_failure: dict = field(default_factory=dict)
-    build_novelty: list = field(default_factory=list)
     candidate_refs: list = field(default_factory=list)
     # Why the last round's patches were all dropped for absent targets; injected into the next round's mandate so it
     # stops writing diffs that cannot apply.
@@ -224,6 +223,11 @@ class EnablementRound:
         self.launch_observation_path = observation_path
 
     @property
+    def accepts_rounds(self) -> bool:
+        """Whether a result can still advance the lane: it has neither succeeded nor opened its revalidation."""
+        return not self.succeeded and not self.validation_pending
+
+    @property
     def accepted_extra_envs(self) -> dict[str, str]:
         """The env overrides every launch re-applies on top of the base config."""
         return dict((self.accepted_config or {}).get("extra_envs") or {})
@@ -298,6 +302,10 @@ class EnablementRound:
             self.base_sha_by_root,
             {record["path"]: record["base_sha"] for record in self.roots if record["base_sha"]},
         )
+
+    def stack_files(self) -> set[str]:
+        """Every file the accepted stack still reads: its patches and the sources of its artifacts."""
+        return {*(str(p) for p in self.kept_patches), *(str(a["source"]) for a in self.kept_artifacts)}
 
     def accepted_stack(self, applied: Iterable[Any]) -> list[str]:
         """Every kept patch, then this round's ``applied``: the order the stack was built and is replayed in."""

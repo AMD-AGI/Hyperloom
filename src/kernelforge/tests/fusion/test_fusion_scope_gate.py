@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 
+from kernelforge.fusion.locate import FrameworkInstall
+from kernelforge.fusion.discover import DiscoveryTarget
 from kernelforge.fusion.discover import parse_discovered_recipes
 from kernelforge.fusion.locate import out_of_scope_terms
 
@@ -53,10 +55,9 @@ def _survivors(tmp_path, *proposals) -> list[str]:
     source.write_text(_MODEL_SOURCE, encoding="utf-8")
     recipes = parse_discovered_recipes(
         json.dumps(list(proposals)),
-        model_type="my_model",
-        framework="vllm",
-        source_file=str(source),
-        shapes={},
+        DiscoveryTarget(
+            model_type="my_model", install=FrameworkInstall(framework="vllm"), source_file=str(source), shapes={}
+        ),
         category_shares=None,
     )
     return [r.pattern_id for r in recipes]

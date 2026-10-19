@@ -79,71 +79,101 @@ def _frontmatter_field(fm: list[str], key: str) -> str:
     return ""
 
 
+def _tldr_line(lines: list[str]) -> str:
+    """The first non-empty line under a TL;DR heading, blockquote marker stripped."""
+    for index, line in enumerate(lines):
+        if not _TLDR_RE.match(line.strip()):
+            continue
+        for following in lines[index + 1 : index + 6]:
+            text = following.strip().lstrip(">").strip()
+            if text:
+                return text
+        return ""
+    return ""
+
+
+def _frontmatter_summary(lines: list[str]) -> str:
+    """The front matter's ``description``, else its ``title``."""
+    if not lines or lines[0].strip() != "---":
+        return ""
+    block: list[str] = []
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        block.append(line)
+    for key in ("description", "title"):
+        value = _frontmatter_field(block, key)
+        if value:
+            return value
+    return ""
+
+
+def _intro_blockquote(lines: list[str]) -> str:
+    """The guide pattern: a blockquote before the first ``## `` section."""
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            return ""
+        if not stripped.startswith(">"):
+            continue
+        quoted = stripped.lstrip(">").strip()
+        if quoted and not quoted.lower().startswith("**important"):
+            return quoted
+    return ""
+
+
+def _first_heading(lines: list[str]) -> str:
+    """The first H1, else the first H2."""
+    for pattern in (_H1_RE, _H2_RE):
+        for line in lines:
+            match = pattern.match(line.strip())
+            if match:
+                return match.group(1).strip()
+    return ""
+
+
+def _first_prose_line(lines: list[str]) -> str:
+    """The first line that is prose: not front matter, a heading, a table, code or a quote."""
+    in_frontmatter = False
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if index == 0 and stripped == "---":
+            in_frontmatter = True
+            continue
+        if in_frontmatter:
+            if stripped == "---":
+                in_frontmatter = False
+            continue
+        if stripped and not stripped.startswith(("#", ">", "|", "`", "---")):
+            return stripped
+    return ""
+
+
+# The fallback chain, in the order the module doc describes it.
+_DESCRIPTOR_STRATEGIES = (
+    _tldr_line,
+    _frontmatter_summary,
+    _intro_blockquote,
+    _first_heading,
+    _first_prose_line,
+)
+
+
 def _descriptor(path: Path) -> str:
     """One-line descriptor for a file via the fallback chain (see module doc)."""
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return path.stem
-    lines = text.splitlines()
-
-    # .py — the module docstring is the best summary.
     if path.suffix.lower() == ".py":
-        d = _py_docstring(text)
-        return _clip(d) if d else path.stem
-
-    # 1. TL;DR — first non-empty line under the heading (strip blockquote '>').
-    for i, ln in enumerate(lines):
-        if _TLDR_RE.match(ln.strip()):
-            for nxt in lines[i + 1 : i + 6]:
-                s = nxt.strip().lstrip(">").strip()
-                if s:
-                    return _clip(s)
-            break
-
-    # 2 / 3. front-matter description (preferred), else title.
-    if lines and lines[0].strip() == "---":
-        fm: list[str] = []
-        for ln in lines[1:]:
-            if ln.strip() == "---":
-                break
-            fm.append(ln)
-        for key in ("description", "title"):
-            val = _frontmatter_field(fm, key)
-            if val:
-                return _clip(val)
-
-    # 4. intro blockquote ('> ...' before the first '## ' section) — guide pattern.
-    for ln in lines:
-        s = ln.strip()
-        if s.startswith("## "):
-            break
-        if s.startswith(">"):
-            q = s.lstrip(">").strip()
-            if q and not q.lower().startswith("**important"):
-                return _clip(q)
-
-    # 5 / 6. first H1, else first H2.
-    for pat in (_H1_RE, _H2_RE):
-        for ln in lines:
-            m = pat.match(ln.strip())
-            if m:
-                return _clip(m.group(1).strip())
-
-    # 7. first prose line (skip front-matter, headings, tables, code, quotes).
-    in_fm = False
-    for idx, ln in enumerate(lines):
-        s = ln.strip()
-        if idx == 0 and s == "---":
-            in_fm = True
-            continue
-        if in_fm:
-            if s == "---":
-                in_fm = False
-            continue
-        if s and not s.startswith(("#", ">", "|", "`", "---")):
-            return _clip(s)
-
+        # A module docstring is the best summary a Python file has, and the markdown chain says nothing about one.
+        docstring = _py_docstring(text)
+        return _clip(docstring) if docstring else path.stem
+    lines = text.splitlines()
+    for strategy in _DESCRIPTOR_STRATEGIES:
+        found = strategy(lines)
+        if found:
+            return _clip(found)
     return path.stem
 
 
@@ -265,10 +295,8 @@ def build_forge_knowledge(
     INDEX.md convention. Returns "" if the root or all levels are missing.
 
     ``defer_all`` renders EVERY level as a pointer rather than only the carried
-    language -- the ablation behind ``Config.defer_knowledge_maps``. It is off by
-    default: the maps are what tells an agent a card exists at all, and whether it
-    still goes looking without them is a question for an A/B, not for arithmetic
-    on their token cost.
+    language -- what ``Config.defer_knowledge_maps`` (on by default) selects.
+    Called directly, the maps stay inlined unless it is set.
     """
     root_path = Path(root) if root else _DEFAULT_ROOT
     if not root_path.exists():

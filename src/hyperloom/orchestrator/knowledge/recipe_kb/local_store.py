@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import errno
 import fcntl
 import json
 import logging
@@ -15,8 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from hyperloom.common.io import atomic_write_json
-from hyperloom.common.jsonio import read_json
+from hyperloom.common.io import WriteOptions, atomic_write_json
+from hyperloom.common.jsonio import read_json_strict
 from hyperloom.common.timeutil import now_iso
 
 from .canonical_id import (
@@ -24,7 +23,7 @@ from .canonical_id import (
     canonical_id_for_path,
     cid_to_path_components,
 )
-from .schema import Attempt, Recipe
+from .schema import Recipe
 
 
 log = logging.getLogger(__name__)
@@ -33,7 +32,6 @@ log = logging.getLogger(__name__)
 # Filenames + sub-paths within one recipe directory
 RECIPE_FILENAME: str = "recipe.json"
 HISTORY_DIRNAME: str = "history"
-ATTEMPTS_FILENAME: str = "attempts.ndjson"
 LOCK_FILENAME: str = ".lock"
 HISTORY_VERSION_PREFIX: str = "v"
 HISTORY_VERSION_SUFFIX: str = ".json"
@@ -62,6 +60,21 @@ _ORDER_BY_KEYS: dict[str, tuple[str, bool]] = {
 }
 
 
+@dataclass(frozen=True)
+class RecipeFilters:
+    """Metric, recency and ordering terms of a recipe search, beside its label match.
+
+    Attributes:
+        metric_filters: Per-metric ``min`` / ``max`` bounds a row must satisfy.
+        updated_since: ISO timestamp a row must have been updated at or after.
+        order_by: One of the ``_ORDER_BY_KEYS`` spellings.
+    """
+
+    metric_filters: dict[str, Any] | None = None
+    updated_since: str | None = None
+    order_by: str = "updated_at DESC"
+
+
 # Errors
 class LocalRecipeStoreError(RuntimeError):
     """Raised on unrecoverable failures inside the local KB store."""
@@ -72,7 +85,7 @@ def _read_json(path: Path) -> dict[str, Any] | None:
     if not path.is_file():
         return None
     try:
-        return read_json(path, strict=True, require_dict=True)
+        return read_json_strict(path, require_dict=True)
     except FileNotFoundError:
         # Race: file disappeared between is_file() and open(); treat as missing.
         return None
@@ -80,30 +93,6 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         raise LocalRecipeStoreError(
             f"failed to read {path}: {exc}",
         ) from exc
-
-
-def _list_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Read every line of an NDJSON file as a JSON dict."""
-    if not path.is_file():
-        return []
-    rows: list[dict[str, Any]] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError as exc:
-                log.warning(
-                    "skipping malformed NDJSON row in %s: %s",
-                    path,
-                    exc,
-                )
-                continue
-            if isinstance(obj, dict):
-                rows.append(obj)
-    return rows
 
 
 # Per-lock-file mutexes, shared across ``_CidLock`` instances.
@@ -194,10 +183,6 @@ class LocalRecipeStore:
     def _history_version_path(self, canonical_id: str, version: int) -> Path:
         """Return the archive path for a specific recipe version."""
         return self._history_dir(canonical_id) / f"{HISTORY_VERSION_PREFIX}{int(version)}{HISTORY_VERSION_SUFFIX}"
-
-    def _attempts_path(self, canonical_id: str) -> Path:
-        """Return the path to a cid's append-only attempts log."""
-        return self._recipe_dir(canonical_id) / ATTEMPTS_FILENAME
 
     def _lock_path(self, canonical_id: str) -> Path:
         """Return the path to a cid's advisory ``.lock`` file."""
@@ -305,12 +290,7 @@ class LocalRecipeStore:
                         "snapshot": snapshot,
                     }
                     atomic_write_json(
-                        archive_path,
-                        archive_payload,
-                        indent=2,
-                        sort_keys=True,
-                        make_parents=True,
-                        fsync=True,
+                        archive_path, archive_payload, options=WriteOptions(make_parents=True, fsync=True)
                     )
 
             # Build payload via ``Recipe.from_dict`` so dataclass instances and dicts both round-trip into the same
@@ -351,12 +331,7 @@ class LocalRecipeStore:
             recipe = Recipe.from_dict(payload_dict)
             written = recipe.to_dict()
             atomic_write_json(
-                self._live_path(canonical_id),
-                written,
-                indent=2,
-                sort_keys=True,
-                make_parents=True,
-                fsync=True,
+                self._live_path(canonical_id), written, options=WriteOptions(make_parents=True, fsync=True)
             )
             counts = _collection_counts(written)
 
@@ -398,19 +373,15 @@ class LocalRecipeStore:
         self,
         *,
         label_match: dict[str, Any] | None = None,
-        metric_filters: dict[str, Any] | None = None,
-        updated_since: str | None = None,
-        order_by: str = "updated_at DESC",
         limit: int = 50,
-        prefer: dict[str, Any] | None = None,
+        filters: RecipeFilters = RecipeFilters(),
     ) -> list[dict[str, Any]]:
         """Filter live recipes by labels / metrics / updated_at."""
-        del prefer  # client-side rerank lives in RecipeKB
-        if order_by not in _ORDER_BY_KEYS:
+        if filters.order_by not in _ORDER_BY_KEYS:
             raise ValueError(
-                f"order_by must be one of {sorted(_ORDER_BY_KEYS)!r}, got {order_by!r}",
+                f"order_by must be one of {sorted(_ORDER_BY_KEYS)!r}, got {filters.order_by!r}",
             )
-        sort_key, descending = _ORDER_BY_KEYS[order_by]
+        sort_key, descending = _ORDER_BY_KEYS[filters.order_by]
         clamped_limit = max(1, min(1000, int(limit) if limit else 50))
 
         rows: list[dict[str, Any]] = []
@@ -434,9 +405,9 @@ class LocalRecipeStore:
             payload.setdefault("canonical_id", cid)
             if not _matches_labels(payload, label_match or {}):
                 continue
-            if not _matches_metrics(payload, metric_filters or {}):
+            if not _matches_metrics(payload, filters.metric_filters or {}):
                 continue
-            if not _matches_updated_since(payload, updated_since):
+            if not _matches_updated_since(payload, filters.updated_since):
                 continue
             rows.append(payload)
 
@@ -445,86 +416,6 @@ class LocalRecipeStore:
             reverse=descending,
         )
         return rows[:clamped_limit]
-
-    # Attempts, append-only
-    def append_attempt(
-        self,
-        *,
-        canonical_id: str,
-        session_id: str,
-        diff: dict[str, Any] | None = None,
-        predicted_delta: dict[str, Any] | None = None,
-        measured_metrics: dict[str, Any] | None = None,
-        fitness: float | None = None,
-        outcome: str = "",
-        rationale: str = "",
-        attempt_at: str | None = None,
-    ) -> dict[str, Any]:
-        """Append one attempt row."""
-        if not canonical_id:
-            raise ValueError(
-                "append_attempt requires a non-empty canonical_id",
-            )
-        if not session_id:
-            raise ValueError(
-                "append_attempt requires a non-empty session_id",
-            )
-        recipe_dir = self._recipe_dir(canonical_id)
-        recipe_dir.mkdir(parents=True, exist_ok=True)
-        attempts_path = self._attempts_path(canonical_id)
-        # ``id`` is monotonic per cid (existing rows + 1), assigned under the cid lock so concurrent appends don't
-        # collide.
-        lock = _CidLock(self._lock_path(canonical_id))
-        with lock:
-            existing = _list_jsonl(attempts_path)
-            next_id = len(existing) + 1
-            stamped_at = attempt_at or now_iso(timespec="microseconds")
-            attempt = Attempt(
-                id=next_id,
-                recipe_canonical_id=canonical_id,
-                session_id=session_id,
-                attempt_at=stamped_at,
-                diff=dict(diff or {}),
-                predicted_delta=dict(predicted_delta or {}),
-                measured_metrics=dict(measured_metrics or {}),
-                fitness=float(fitness) if fitness is not None else None,
-                outcome=str(outcome),
-                rationale=str(rationale),
-            )
-            row = attempt.to_dict()
-            line = json.dumps(row, sort_keys=True) + "\n"
-            with attempts_path.open("a", encoding="utf-8") as f:
-                f.write(line)
-                f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except OSError as exc:
-                    if exc.errno != errno.EINVAL:
-                        log.debug(
-                            "fsync skipped on %s: %s",
-                            attempts_path,
-                            exc,
-                        )
-        return {
-            "id": next_id,
-            "recipe_canonical_id": canonical_id,
-            "attempt_at": stamped_at,
-        }
-
-    def list_attempts(
-        self,
-        *,
-        canonical_id: str,
-        session_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Return append-only attempts for one Recipe identity."""
-
-        if not canonical_id:
-            raise ValueError("list_attempts requires a non-empty canonical_id")
-        rows = _list_jsonl(self._attempts_path(canonical_id))
-        if session_id is None:
-            return rows
-        return [row for row in rows if str(row.get("session_id") or "") == str(session_id)]
 
 
 # search filter helpers
@@ -750,7 +641,6 @@ def _normalise_sessions(items: list[Any] | None) -> list[dict[str, Any]]:
 
 
 __all__ = [
-    "ATTEMPTS_FILENAME",
     "HISTORY_DIRNAME",
     "LOCK_FILENAME",
     "LocalRecipeStore",

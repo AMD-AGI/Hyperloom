@@ -4,6 +4,8 @@
 """Optional gate-comparable rebench helper for GPU specialists."""
 
 from __future__ import annotations
+from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
+
 
 import argparse
 import asyncio
@@ -11,13 +13,14 @@ import json
 import os
 import socket
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.perf_metric import constraint_fields
 from ..actions.executors._grid_runner import GridVariant, run_grid
 from ..actions.executors._workload_envs import (
     default_baseline_config,
-    materialize_config_with_envs,
 )
 
 
@@ -39,30 +42,58 @@ def _current_leased_cards() -> str:
     return ""
 
 
+@dataclass(frozen=True)
+class RebenchBenchmark:
+    """Which benchmark a rebench runs: the base config and the overrides applied to it.
+
+    Attributes:
+        config_path: Base Magpie YAML; the packaged baseline when ``None``.
+        model_path: Override of the benchmark model path.
+        gpu_type: Pin of the generic benchmark script's GPU type.
+        benchmark_script: Force-pinned benchmark script.
+        magpie_python: Interpreter that can import Magpie.
+    """
+
+    config_path: str | Path | None = None
+    model_path: str | None = None
+    gpu_type: str | None = None
+    benchmark_script: str | None = None
+    magpie_python: str | None = None
+
+
+@dataclass(frozen=True)
+class RebenchServer:
+    """How the server the rebench boots is launched.
+
+    Attributes:
+        base_extra_args: Server args merged ahead of the variant args.
+        extra_envs: Per-run env overrides.
+        port: Server port; an OS-assigned one when ``None``.
+    """
+
+    base_extra_args: str = ""
+    extra_envs: dict[str, str] | None = None
+    port: int | None = None
+
+
 async def run_specialist_rebench(
     *,
-    config_path: str | Path | None,
     output_dir: str | Path,
-    base_extra_args: str = "",
-    extra_envs: dict[str, str] | None = None,
-    port: int | None = None,
-    model_path: str | None = None,
-    gpu_type: str | None = None,
-    benchmark_script: str | None = None,
-    magpie_python: str | None = None,
+    benchmark: RebenchBenchmark = RebenchBenchmark(),
+    server: RebenchServer = RebenchServer(),
 ) -> dict[str, Any]:
     """Run one gate-comparable benchmark on the specialist's leased cards."""
     out_root = Path(output_dir)
     out_root.mkdir(parents=True, exist_ok=True)
-    resolved_port = _resolve_port(port)
+    resolved_port = _resolve_port(server.port)
 
-    base_config = Path(config_path) if config_path else Path(default_baseline_config())
-    materialized = materialize_config_with_envs(
+    base_config = Path(benchmark.config_path) if benchmark.config_path else Path(default_baseline_config())
+    materialized = prepare_grid_benchmark_config(
         base_config,
         out_root,
-        model_path=model_path or None,
-        gpu_type=gpu_type or None,
-        benchmark_script=benchmark_script or None,
+        model_path=benchmark.model_path or None,
+        gpu_type=benchmark.gpu_type or None,
+        benchmark_script=benchmark.benchmark_script or None,
         out_name="specialist_rebench.with_envs.yaml",
     )
 
@@ -70,7 +101,7 @@ async def run_specialist_rebench(
         name="specialist-rebench",
         # Identity variant kept empty so helper-provided server flags are injected exactly once.
         extra_server_args="",
-        extra_envs=dict(extra_envs or {}),
+        extra_envs=dict(server.extra_envs or {}),
         note="specialist_rebench",
     )
 
@@ -86,14 +117,14 @@ async def run_specialist_rebench(
     try:
         results = await run_grid(
             base_yaml_path=materialized,
-            base_extra_args=(base_extra_args or "").strip(),
+            base_extra_args=(server.base_extra_args or "").strip(),
             grid=[variant],
             output_root=out_root,
             keep_going_on_failure=False,
-            model_path=model_path or None,
-            gpu_type=gpu_type or None,
-            benchmark_script=benchmark_script or None,
-            magpie_python=magpie_python or None,
+            model_path=benchmark.model_path or None,
+            gpu_type=benchmark.gpu_type or None,
+            benchmark_script=benchmark.benchmark_script or None,
+            magpie_python=benchmark.magpie_python or None,
             server_lifecycle=server_lifecycle,
         )
     except Exception as exc:  # noqa: BLE001 — surface as a structured failure
@@ -123,8 +154,8 @@ async def run_specialist_rebench(
         # ``itl_ms`` for the collectors.
         "ttft_ms": rb.ttft_mean_ms,
         "itl_ms": rb.tpot_mean_ms,
-        # Canonical name: the latency budget fails closed, so a lane that does not carry this refuses every KEEP.
-        "e2el_mean_ms": rb.e2el_mean_ms,
+        # The session's constraints fail closed, so a lane that drops these refuses every KEEP.
+        **constraint_fields(rb),
         "workspace": str(getattr(rb, "workspace", "") or ""),
         "port": resolved_port,
         "gpu_ids": gpu_ids,
@@ -165,15 +196,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = asyncio.run(
             run_specialist_rebench(
-                config_path=args.config,
                 output_dir=args.output,
-                base_extra_args=args.extra_args,
-                extra_envs=_parse_env_pairs(args.env),
-                port=args.port,
-                model_path=args.model_path,
-                gpu_type=args.gpu_type,
-                benchmark_script=args.benchmark_script,
-                magpie_python=args.magpie_python,
+                benchmark=RebenchBenchmark(
+                    config_path=args.config,
+                    model_path=args.model_path,
+                    gpu_type=args.gpu_type,
+                    benchmark_script=args.benchmark_script,
+                    magpie_python=args.magpie_python,
+                ),
+                server=RebenchServer(
+                    base_extra_args=args.extra_args,
+                    extra_envs=_parse_env_pairs(args.env),
+                    port=args.port,
+                ),
             )
         )
     except ValueError as exc:
@@ -184,6 +219,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 __all__ = [
+    "RebenchBenchmark",
+    "RebenchServer",
     "run_specialist_rebench",
 ]
 

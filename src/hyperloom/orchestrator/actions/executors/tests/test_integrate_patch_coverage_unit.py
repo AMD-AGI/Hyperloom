@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +25,7 @@ from hyperloom.orchestrator.actions.executors import integrate_patch as ip
 from hyperloom.orchestrator.tests._helpers import integrate_extra, variant_result
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
-    _git_checkout_clean,
+    _git_reset_clean,
     _detect_p_level,
     _read_done_payload,
 )
@@ -32,6 +33,7 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     FrameworkScriptMismatchError,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
+from hyperloom.orchestrator.state._shared_state.enablement_round import EnablementRound
 from hyperloom.orchestrator.state.task_registry import Task
 
 
@@ -91,7 +93,7 @@ def _make_ctx(task_id: str, params: dict[str, Any], extra: dict | None = None) -
 
 
 def _stub_bench(result: dict, gate: dict):
-    async def _b(self, **kwargs):
+    async def _b(self, bench, **kwargs):
         return result, gate
 
     return _b
@@ -130,6 +132,9 @@ async def test_rejected_by_critic(tmp_path):
     _write_workspace(session, "spec")
 
     class _SS:
+        phase = "FRAMEWORK_AGENT"
+        enablement = EnablementRound()
+
         def get_specialist_patch_verdict(self, tid):
             return "reject"
 
@@ -157,6 +162,9 @@ async def test_forged_task_without_critic_verdict_is_rejected(tmp_path):
     _write_workspace(session, "spec")
 
     class _SS:
+        phase = "FRAMEWORK_AGENT"
+        enablement = EnablementRound()
+
         def get_specialist_patch_verdict(self, tid):
             return ""  # no verdict on record
 
@@ -193,6 +201,9 @@ async def test_forged_task_rejected_before_any_side_effect(tmp_path, monkeypatch
     monkeypatch.setattr(_setup_replay, "run_setup_commands", _spy_setup)
 
     class _SS:
+        phase = "FRAMEWORK_AGENT"
+        enablement = EnablementRound()
+
         def get_specialist_patch_verdict(self, tid):
             return ""  # no verdict -> must reject before setup
 
@@ -217,8 +228,8 @@ async def test_forged_task_rejected_before_any_side_effect(tmp_path, monkeypatch
 def _capture_bench(captured: dict, result: dict, gate: dict):
     """A ``_bench_patch`` stub that records the kwargs it was handed."""
 
-    async def _b(self, **kwargs):
-        captured.update(kwargs)
+    async def _b(self, bench, **kwargs):
+        captured.update({**vars(bench), **kwargs})
         return result, gate
 
     return _b
@@ -239,6 +250,9 @@ async def test_bench_is_bounded_by_the_session_budget(tmp_path, monkeypatch):
     _write_workspace(session, "spec")
 
     class _SS:
+        phase = "FRAMEWORK_AGENT"
+        enablement = EnablementRound()
+
         baseline_runtime_sec = 600.0
 
         def get_specialist_patch_verdict(self, tid):
@@ -324,16 +338,18 @@ async def test_bench_patch_forwards_the_session_budget_to_the_grid(tmp_path, mon
         return []
 
     monkeypatch.setattr(ip_mod, "run_grid", fake_run_grid)
-    monkeypatch.setattr(ip_mod, "materialize_config_with_envs", lambda *a, **k: config_path)
+    monkeypatch.setattr(ip_mod, "prepare_grid_benchmark_config", lambda *a, **k: config_path)
 
     await IntegratePatchExecutor(session_dir=session)._bench_patch(
-        params={"config_path": str(config_path)},
-        output_root=tmp_path / "out",
+        ip._PatchBench(
+            params={"config_path": str(config_path)},
+            output_root=tmp_path / "out",
+            specialist_task_id="spec",
+            session_deadline_sec=4242.0,
+            variant_expected_sec=600.0,
+        ),
         extra_server_args_applied="",
         extra_envs_applied={},
-        specialist_task_id="spec",
-        session_deadline_sec=4242.0,
-        variant_expected_sec=600.0,
     )
 
     assert captured["session_deadline_sec"] == 4242.0
@@ -347,21 +363,23 @@ async def test_switch_off_parity_leg_is_bounded_by_the_session_budget(tmp_path, 
     session.mkdir()
     captured: dict[str, Any] = {}
 
-    async def _capture(**kwargs):
-        captured.update(kwargs)
+    async def _capture(bench, **kwargs):
+        captured.update({**vars(bench), **kwargs})
         return ({"output_throughput": 100.0, "status": "succeeded"}, {"accuracy_pass": None})
 
     ex = IntegratePatchExecutor(session_dir=session)
     monkeypatch.setattr(ex, "_bench_patch", _capture)
 
     await ex._switch_off_parity(
-        params={},
-        output_root=tmp_path,
-        specialist_task_id="spec",
+        ip._PatchBench(
+            params={},
+            output_root=tmp_path,
+            specialist_task_id="spec",
+            session_deadline_sec=4242.0,
+            variant_expected_sec=600.0,
+        ),
         switch_manifest=[{"switch": "HYPERLOOM_REWRITE_X"}],
         base_tput=100.0,
-        session_deadline_sec=4242.0,
-        variant_expected_sec=600.0,
     )
 
     assert captured["session_deadline_sec"] == 4242.0
@@ -459,7 +477,7 @@ async def test_bench_exception_reverts(tmp_path, monkeypatch):
     _write_workspace(session, "spec")
     ex = IntegratePatchExecutor(session_dir=session)
 
-    async def _raise(self, **kwargs):
+    async def _raise(self, *args, **kwargs):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(IntegratePatchExecutor, "_bench_patch", _raise)
@@ -485,7 +503,7 @@ async def test_bench_script_mismatch_reverts(tmp_path, monkeypatch):
     _write_workspace(session, "spec")
     ex = IntegratePatchExecutor(session_dir=session)
 
-    async def _raise(self, **kwargs):
+    async def _raise(self, *args, **kwargs):
         raise FrameworkScriptMismatchError("mismatch")
 
     monkeypatch.setattr(IntegratePatchExecutor, "_bench_patch", _raise)
@@ -518,8 +536,8 @@ async def test_framework_kb_writeback(tmp_path, monkeypatch):
 
     calls = {}
 
-    async def _fake_write(**kwargs):
-        calls.update(kwargs)
+    async def _fake_write(fields):
+        calls.update(asdict(fields))
         return "/tmp/lessons.jsonl"
 
     monkeypatch.setattr(
@@ -563,8 +581,8 @@ async def test_framework_kb_writeback_config_lever_untagged_proposal(tmp_path, m
 
     calls = {}
 
-    async def _fake_write(**kwargs):
-        calls.update(kwargs)
+    async def _fake_write(fields):
+        calls.update(asdict(fields))
         return "/tmp/lessons.jsonl"
 
     monkeypatch.setattr(
@@ -663,12 +681,7 @@ def test_stamp_framework_kb_provenance_noop_when_done_payload_none():
 async def test_kb_writeback_skips_when_no_pr_keys(tmp_path):
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     payload = {"proposal_set": [{"provenance": "specialist:serving:framework"}]}
-    await ex._maybe_write_framework_kb_record(
-        done_payload=payload,
-        outcome="integrated",
-        tps_delta_pct=1.0,
-        extra={},
-    )
+    await ex._maybe_write_framework_kb_record(ip._KbLesson("integrated", 1.0), done_payload=payload, extra={})
 
 
 def test_find_framework_proposal():
@@ -681,11 +694,11 @@ def test_find_framework_proposal():
     assert found["id"] == 1
 
 
-def test_git_checkout_clean(tmp_path):
+def test_git_reset_clean(tmp_path):
     repo = tmp_path / "repo"
     _init_git_repo(repo)
     (repo / "src.py").write_text("dirty\n", encoding="utf-8")
-    ok, _ = _git_checkout_clean(repo)
+    ok, _ = _git_reset_clean(repo, "HEAD")
     assert ok
     assert (repo / "src.py").read_text().endswith("return 1\n")
 
@@ -698,7 +711,7 @@ def test_detect_p_level_none_for_unmatched(tmp_path):
         "diff --git a/zzz.py b/zzz.py\n--- a/zzz.py\n+++ b/zzz.py\n@@ -1,1 +1,1 @@\n-X\n+Y\n",
         encoding="utf-8",
     )
-    assert _detect_p_level(repo, bad, three_way=False) is None
+    assert _detect_p_level(repo, bad) is None
 
 
 def test_read_done_payload_missing(tmp_path):
@@ -728,7 +741,7 @@ def _FakeVR(**kw):
 async def test_bench_patch_no_accuracy(tmp_path, monkeypatch):
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("x: 1\n", encoding="utf-8")
-    monkeypatch.setattr(ip, "materialize_config_with_envs", lambda *a, **k: cfg)
+    monkeypatch.setattr(ip, "prepare_grid_benchmark_config", lambda *a, **k: cfg)
 
     async def _fake_run_grid(**kwargs):
         return [_FakeVR(output_throughput=200.0)]
@@ -736,11 +749,9 @@ async def test_bench_patch_no_accuracy(tmp_path, monkeypatch):
     monkeypatch.setattr(ip, "run_grid", _fake_run_grid)
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     bench, gate = await ex._bench_patch(
-        params={"config_path": str(cfg)},
-        output_root=tmp_path,
+        ip._PatchBench(params={"config_path": str(cfg)}, output_root=tmp_path, specialist_task_id="abcdef123456"),
         extra_server_args_applied="",
         extra_envs_applied={"E": "1"},
-        specialist_task_id="abcdef123456",
     )
     assert bench["output_throughput"] == 200.0
     assert gate["accuracy_pass"] is None
@@ -750,7 +761,7 @@ async def test_bench_patch_no_accuracy(tmp_path, monkeypatch):
 async def test_bench_patch_with_accuracy(tmp_path, monkeypatch):
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("x: 1\n", encoding="utf-8")
-    monkeypatch.setattr(ip, "materialize_config_with_envs", lambda *a, **k: cfg)
+    monkeypatch.setattr(ip, "prepare_grid_benchmark_config", lambda *a, **k: cfg)
 
     async def _fake_run_grid(**kwargs):
         return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
@@ -762,11 +773,13 @@ async def test_bench_patch_with_accuracy(tmp_path, monkeypatch):
     )
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     bench, gate = await ex._bench_patch(
-        params={"config_path": str(cfg), "accuracy_baseline": 0.8},
-        output_root=tmp_path,
+        ip._PatchBench(
+            params={"config_path": str(cfg), "accuracy_baseline": 0.8},
+            output_root=tmp_path,
+            specialist_task_id="abcdef123456",
+        ),
         extra_server_args_applied="",
         extra_envs_applied={},
-        specialist_task_id="abcdef123456",
     )
     assert gate["accuracy_pass"] is True
 
@@ -775,7 +788,7 @@ async def test_bench_patch_with_accuracy(tmp_path, monkeypatch):
 async def test_bench_patch_accuracy_regression_fails(tmp_path, monkeypatch):
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("x: 1\n", encoding="utf-8")
-    monkeypatch.setattr(ip, "materialize_config_with_envs", lambda *a, **k: cfg)
+    monkeypatch.setattr(ip, "prepare_grid_benchmark_config", lambda *a, **k: cfg)
 
     async def _fake_run_grid(**kwargs):
         return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
@@ -787,11 +800,13 @@ async def test_bench_patch_accuracy_regression_fails(tmp_path, monkeypatch):
     )
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     _, gate = await ex._bench_patch(
-        params={"config_path": str(cfg), "accuracy_baseline": 0.95},
-        output_root=tmp_path,
+        ip._PatchBench(
+            params={"config_path": str(cfg), "accuracy_baseline": 0.95},
+            output_root=tmp_path,
+            specialist_task_id="abcdef123456",
+        ),
         extra_server_args_applied="",
         extra_envs_applied={},
-        specialist_task_id="abcdef123456",
     )
     assert gate["accuracy_pass"] is False
 
@@ -800,7 +815,7 @@ async def test_bench_patch_accuracy_regression_fails(tmp_path, monkeypatch):
 async def test_bench_patch_missing_baseline_skips_with_warning(tmp_path, monkeypatch, caplog):
     cfg = tmp_path / "cfg.yaml"
     cfg.write_text("x: 1\n", encoding="utf-8")
-    monkeypatch.setattr(ip, "materialize_config_with_envs", lambda *a, **k: cfg)
+    monkeypatch.setattr(ip, "prepare_grid_benchmark_config", lambda *a, **k: cfg)
 
     async def _fake_run_grid(**kwargs):
         return [_FakeVR(status="succeeded", workspace=str(tmp_path))]
@@ -813,11 +828,9 @@ async def test_bench_patch_missing_baseline_skips_with_warning(tmp_path, monkeyp
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     with caplog.at_level("WARNING"):
         _, gate = await ex._bench_patch(
-            params={"config_path": str(cfg)},
-            output_root=tmp_path,
+            ip._PatchBench(params={"config_path": str(cfg)}, output_root=tmp_path, specialist_task_id="abcdef123456"),
             extra_server_args_applied="",
             extra_envs_applied={},
-            specialist_task_id="abcdef123456",
         )
     assert gate["accuracy_pass"] is None
     assert any("no baseline accuracy" in r.message for r in caplog.records)
@@ -828,11 +841,11 @@ async def test_bench_patch_config_not_found(tmp_path):
     ex = IntegratePatchExecutor(session_dir=tmp_path)
     with pytest.raises(RuntimeError):
         await ex._bench_patch(
-            params={"config_path": str(tmp_path / "missing.yaml")},
-            output_root=tmp_path,
+            ip._PatchBench(
+                params={"config_path": str(tmp_path / "missing.yaml")}, output_root=tmp_path, specialist_task_id="abc"
+            ),
             extra_server_args_applied="",
             extra_envs_applied={},
-            specialist_task_id="abc",
         )
 
 
@@ -1077,7 +1090,7 @@ async def test_cancelled_gate_reverts_the_patch_and_re_raises(tmp_path, monkeypa
     scratch = repo / "user_scratch.txt"
     scratch.write_text("user work in progress\n", encoding="utf-8")
 
-    async def _cancel(self, **kwargs):
+    async def _cancel(self, *args, **kwargs):
         raise asyncio.CancelledError
 
     monkeypatch.setattr(IntegratePatchExecutor, "_bench_patch", _cancel)
@@ -1137,7 +1150,7 @@ async def test_a_cancel_in_the_apply_stage_still_hands_the_stash_back(tmp_path, 
         )
         return [spec], []
 
-    async def _cancel(self, **kwargs):
+    async def _cancel(self, *args, **kwargs):
         raise asyncio.CancelledError
 
     monkeypatch.setattr(ip, "_resolve_artifact_specs", _fake_resolve)
@@ -1190,7 +1203,9 @@ async def test_a_runtime_only_round_is_benched_and_its_verdict_decides_the_runti
 
     session = tmp_path / "session"
     workspace = _write_workspace(session, "spec")
-    (workspace / "specialist_done.json").write_text(json.dumps({"patches_written": []}))
+    (workspace / "specialist_done.json").write_text(
+        json.dumps({"patches_written": [], "needs_runtime": {"packages": ["transformers==4.57.1"]}})
+    )
     runtime = tmp_path / "attempt-runtime" / "venv"
     runtime.mkdir(parents=True)
     (runtime / "installed").write_text("runtime")
@@ -1199,7 +1214,7 @@ async def test_a_runtime_only_round_is_benched_and_its_verdict_decides_the_runti
         adapters,
         "get_adapter",
         lambda _fw: SimpleNamespace(
-            build_stack_action=lambda _gap, **_kw: EnablementStackAction(
+            build_stack_action=lambda _request: EnablementStackAction(
                 kind="runtime_candidate",
                 framework="vllm",
                 gap_id="gap.enablement.missing_model_arch",
@@ -1243,13 +1258,17 @@ async def test_cancel_preserves_cancellation_when_recovery_save_fails(tmp_path, 
     _init_git_repo(repo)
     _write_workspace(session, "spec")
     state = SimpleNamespace(
-        current_best={}, get_specialist_patch_verdict=lambda _sid: "approve", save=lambda _path: None
+        phase="FRAMEWORK_AGENT",
+        enablement=EnablementRound(),
+        current_best={},
+        get_specialist_patch_verdict=lambda _sid: "approve",
+        save=lambda _path: None,
     )
 
     def fail_save(_path):
         raise OSError("disk full")
 
-    async def cancel(**_kwargs):
+    async def cancel(*_args, **_kwargs):
         state.save = fail_save
         raise asyncio.CancelledError
 
@@ -1276,7 +1295,11 @@ async def test_apply_only_restores_user_stash_but_resume_refuses_unproven_user_m
     user = repo / "user.txt"
     user.write_text("USER")
     state = SimpleNamespace(
-        current_best={}, get_specialist_patch_verdict=lambda _sid: "approve", save=lambda _path: None
+        phase="FRAMEWORK_AGENT",
+        enablement=EnablementRound(),
+        current_best={},
+        get_specialist_patch_verdict=lambda _sid: "approve",
+        save=lambda _path: None,
     )
     result = await IntegratePatchExecutor(session_dir=session)(
         _make_ctx(

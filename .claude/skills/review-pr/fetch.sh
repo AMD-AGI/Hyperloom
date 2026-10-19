@@ -166,14 +166,30 @@ jq -nr --slurpfile t "$raw/trusted.json" '
 # Other open PRs whose changed paths intersect this one's (rule V4). One query: gh
 # returns each open PR's file list, and the intersection is computed locally rather
 # than with one REST call per PR.
+OPEN_PR_LIMIT=100
+gh pr list --repo "$REPO" --state open --limit "$OPEN_PR_LIMIT" \
+  --json number,title,url,files,changedFiles > "$raw/openprs.json"
+LISTED_PRS=$(jq length "$raw/openprs.json")
+# gh stops short of the limit only when it ran out of open PRs, so only a full list needs the total.
+OPEN_PRS=$LISTED_PRS
+if [ "$LISTED_PRS" -ge "$OPEN_PR_LIMIT" ]; then
+  # shellcheck disable=SC2016  # $owner and $name are GraphQL variables, not shell ones
+  OPEN_PRS=$(gh api graphql -f owner="${REPO%%/*}" -f name="${REPO#*/}" \
+    -f query='query($owner: String!, $name: String!) {
+      repository(owner: $owner, name: $name) { pullRequests(states: OPEN) { totalCount } } }' \
+    --jq '.data.repository.pullRequests.totalCount')
+  case "$OPEN_PRS" in
+    '' | *[!0-9]*) die "cannot read the open-PR count for $REPO" ;;
+  esac
+fi
 # shellcheck disable=SC2016  # $p is a jq variable, not a shell one
-gh pr list --repo "$REPO" --state open --limit 100 --json number,title,url,files,changedFiles \
-  --jq '.[] | . as $p | $p.files[].path
-        | [$p.number, $p.title, $p.url, ., ($p.files | length), $p.changedFiles] | @tsv' \
-  > "$WORK/.openprs.tsv"
-# gh lists only the first 100 files of each PR. A larger PR overlapping this one on file 101
-# is then invisible here, and an empty openprs.txt reads as "no in-flight conflict" (rule V4),
-# so the PRs whose lists were cut are named rather than dropped.
+jq -r '.[] | . as $p | $p.files[].path
+       | [$p.number, $p.title, $p.url, ., ($p.files | length), $p.changedFiles] | @tsv' \
+  "$raw/openprs.json" > "$raw/openprs.tsv"
+# gh lists only the newest OPEN_PR_LIMIT open PRs and the first 100 files of each. A PR past
+# the limit, or a larger PR overlapping this one on file 101, is then invisible here, and an
+# empty openprs.txt reads as "no in-flight conflict" (rule V4), so each cut is named in a
+# PARTIAL line rather than dropped.
 awk -v self="$PR" -F'\t' '
   NR == FNR { want[$0] = 1; next }
   $1 == self { next }
@@ -192,8 +208,11 @@ awk -v self="$PR" -F'\t' '
     for (k in cut)
       printf "# PARTIAL: #%s changes %s files, only its first 100 were compared\n", k, cut[k]
   }
-' "$WORK/files.txt" "$WORK/.openprs.tsv" > "$WORK/openprs.txt"
-rm -f "$WORK/.openprs.tsv"
+' "$WORK/files.txt" "$raw/openprs.tsv" > "$WORK/openprs.txt"
+if [ "$LISTED_PRS" -lt "$OPEN_PRS" ]; then
+  printf '# PARTIAL: %s has %s open PRs, only the newest %s were compared\n' \
+    "$REPO" "$OPEN_PRS" "$LISTED_PRS" >> "$WORK/openprs.txt"
+fi
 
 for artifact in meta.txt title.txt body.txt diff.txt files.txt numstat.txt commits.txt \
   base.txt ci.txt comments.txt testfiles.txt docfiles.txt openprs.txt; do

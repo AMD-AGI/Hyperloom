@@ -15,7 +15,7 @@ from kernelforge.loop.analysis_refresh_policy import (
     decide_analysis_refresh,
 )
 from kernelforge.loop.run_state import make_event
-from kernelforge.orchestrator.analysis import AnalysisConfigurationError
+from kernelforge.orchestrator.analysis import AnalysisConfigurationError, AnalysisSources
 from kernelforge.orchestrator.analysis_session import AnalysisAttemptLimitError
 
 
@@ -32,18 +32,12 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
         supervisor_due: bool = False,
         iteration: int | None = None,
     ) -> AnalysisRefreshDecision:
-        state = self.run_state.analysis
         planning_iteration = self.run_state.iteration if iteration is None else int(iteration)
         return decide_analysis_refresh(
+            self.run_state.analysis,
             canonical_commit=context.analysis_commit,
-            evidence_commit=state.evidence_commit,
-            evidence_mean_case_speedup=(state.evidence_mean_case_speedup),
-            evidence_status=state.evidence_status,
             current_mean_case_speedup=self.best_mean_case_speedup,
             supervisor_due=supervisor_due,
-            last_attempt_commit=state.last_attempt_commit,
-            last_attempt_status=state.last_attempt_status,
-            last_attempt_iteration=state.last_attempt_iteration,
             current_iteration=planning_iteration,
         )
 
@@ -147,9 +141,7 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
         try:
             self._analysis_bundle = await analysis_service.ensure_bundle(
                 context,
-                kernel_file=self.ic.kernel_file,
-                driver_script=self.ic.driver_script,
-                source_files=self._target_source_files(),
+                sources=AnalysisSources(self.ic.kernel_file, self.ic.driver_script, self._target_source_files()),
                 usage=self._usage,
                 deadline_unix=self._analysis_deadline_unix(),
                 incremental=incremental,

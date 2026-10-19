@@ -5,10 +5,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from .base import REGISTRY, RenderedSection, render_section, session_of
+from .base import REGISTRY, RenderedSection, fmt_pct, render_section, session_of
 from .cross_section import GlobalFacts, build_global_facts
 from .llm_prompt import SYSTEM_PROMPT, build_user_prompt, parse_llm_response
 
@@ -27,7 +27,6 @@ from ._renderers import (
     attribution as _r_attribution,
     optimizations as _r_optimizations,
     critic as _r_critic,
-    robustness as _r_robustness,
 )
 
 
@@ -41,7 +40,7 @@ SECTION_GROUPS: list[tuple[str, list[str]]] = [
     ),
     ("Capability Search", ["capability_summary", "param_search"]),
     ("Kernel Optimization", ["kernel_lifecycle"]),
-    ("Review", ["critic", "robustness"]),
+    ("Review", ["critic"]),
     ("Run Trace", ["phase_timeline"]),
 ]
 
@@ -63,7 +62,6 @@ __all__ = [
     "_r_attribution",
     "_r_optimizations",
     "_r_critic",
-    "_r_robustness",
 ]
 
 
@@ -84,6 +82,15 @@ class ComposeResult:
     llm_user_prompt: str
     llm_raw_response: str
     used_llm: bool
+
+
+@dataclass(frozen=True)
+class Narration:
+    """What the optional LLM pass wrote; ``used`` is whether a successful pass produced it."""
+
+    exec_summary: str = ""
+    narratives: dict[str, str] = field(default_factory=dict)
+    used: bool = False
 
 
 def render_session_report(
@@ -112,9 +119,7 @@ def render_session_report(
     md = _stitch(
         sections=sections,
         global_facts=global_facts,
-        llm_exec_summary=exec_summary_llm,
-        llm_narratives=narratives,
-        used_llm=used_llm,
+        narration=Narration(exec_summary=exec_summary_llm, narratives=narratives, used=used_llm),
         breakdown=breakdown,
     )
     return ComposeResult(
@@ -132,9 +137,7 @@ def _stitch(
     *,
     sections: list[RenderedSection],
     global_facts: GlobalFacts,
-    llm_exec_summary: str,
-    llm_narratives: dict[str, str],
-    used_llm: bool,
+    narration: Narration,
     breakdown: dict[str, Any],
 ) -> str:
     """Assemble the final markdown document from all rendered pieces.
@@ -146,9 +149,8 @@ def _stitch(
     Args:
         sections (list[RenderedSection]): All renderer outputs.
         global_facts (GlobalFacts): The deterministic cross-section fact pack.
-        llm_exec_summary (str): The LLM-written executive summary (may be empty).
-        llm_narratives (dict[str, str]): Section-id keyed narrative paragraphs.
-        used_llm (bool): Whether a successful LLM pass produced the narratives.
+        narration (Narration): The LLM-written executive summary (may be empty)
+            and section-id keyed narrative paragraphs.
         breakdown (dict[str, Any]): The parsed ``session_breakdown.json`` dict.
 
     Returns:
@@ -160,8 +162,8 @@ def _stitch(
     parts: list[str] = [title, ""]
 
     parts.append("## Executive Summary")
-    if used_llm and llm_exec_summary:
-        parts.append(llm_exec_summary)
+    if narration.used and narration.exec_summary:
+        parts.append(narration.exec_summary)
         # The system prompt asks the model to surface every data-quality flag, but a prompt is a request.
         flag_lines = _data_quality_flag_lines(global_facts)
         if flag_lines:
@@ -185,7 +187,7 @@ def _stitch(
         parts.append("")
         for sec in live:
             parts.append(f"### {sec.title}")
-            narrative = llm_narratives.get(sec.section_id, "").strip()
+            narrative = narration.narratives.get(sec.section_id, "").strip()
             if narrative:
                 parts.append(narrative)
                 parts.append("")
@@ -212,6 +214,7 @@ def _deterministic_exec_summary(g: GlobalFacts) -> str:
         out.append(f"- Gain attribution ({g.attribution_method}): " + "; ".join(g.gain_attribution_lines))
     else:
         out.append(f"- No measurable gain recorded ({g.attribution_method}).")
+    out.append(f"- Variants: {_variant_funnel_text(g)}.")
     funnel = g.kernel_pipeline_funnel
     out.append(
         f"- Kernel pipeline: detected={funnel['detected']} → "
@@ -223,6 +226,31 @@ def _deterministic_exec_summary(g: GlobalFacts) -> str:
         out.append("- Capabilities never invoked: " + ", ".join(f"`{c}`" for c in g.capabilities_not_attempted) + ".")
     out.extend(_data_quality_flag_lines(g))
     return "\n".join(out)
+
+
+def _variant_funnel_text(g: GlobalFacts) -> str:
+    """The variant funnel as one line, shared by the executive summary and the key facts."""
+    funnel = g.variant_funnel
+    runs = funnel["bench_runs"]
+    if not runs:
+        return "none benched"
+    rate = funnel["keep_rate_pct"]
+    rate_text = f" ({rate:.1f}%)" if rate is not None else ""
+    text = (
+        f"{_count(runs, 'bench run')} over {_count(funnel['distinct'], 'distinct change')} → "
+        f"kept {funnel['kept']}{rate_text} · reverted {funnel['reverted']} · failed {funnel['failed']}"
+    )
+    shipped: list[str] = []
+    if funnel["final_stack"] is not None:
+        shipped.append(f"final stack {_count(funnel['final_stack'], 'change')}")
+    if funnel["validated_gain_pct"] is not None:
+        shipped.append(f"validated {fmt_pct(funnel['validated_gain_pct'], plus=True)}")
+    return f"{text} → {', '.join(shipped)}" if shipped else text
+
+
+def _count(n: int, noun: str) -> str:
+    """``n`` followed by ``noun``, pluralised unless ``n`` is one."""
+    return f"{n} {noun}{'' if n == 1 else 's'}"
 
 
 def _data_quality_flag_lines(g: GlobalFacts) -> list[str]:
@@ -245,6 +273,7 @@ def _render_global_facts_block(g: GlobalFacts) -> str:
         f"objective `{g.objective}`"
     )
     out.append(f"- **Workload**: {g.workload_summary}")
+    out.append(f"- **Variants**: {_variant_funnel_text(g)}")
     out.append(
         f"- **Kernel pipeline**: detected={funnel['detected']} → "
         f"recommended={funnel['recommended']} → optimized={funnel['optimized']} → "

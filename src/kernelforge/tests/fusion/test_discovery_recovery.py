@@ -12,6 +12,7 @@ from kernelforge.agent_backends.base import (
     AgentRuntimeConfig,
 )
 
+from kernelforge.fusion.discover import DiscoveryRetry, DiscoverySession
 from kernelforge.fusion import discover as discover_module
 from kernelforge.fusion.discover import _extract_json_array
 
@@ -82,7 +83,7 @@ def test_turn_budget_leaves_room_for_the_tools_discovery_is_given(tmp_path) -> N
     """One turn plus a read tool is a guaranteed turn_cap, not a budget."""
     captured: dict = {}
     fn = discover_module.registered_agent_llm_fn(
-        _backend(captured), model="gpt-test", timeout_s=10, workdir=str(tmp_path)
+        _backend(captured), DiscoverySession(model="gpt-test", timeout_s=10, workdir=str(tmp_path))
     )
 
     fn("DISCOVERY PROMPT")
@@ -96,7 +97,7 @@ def test_turn_budget_is_configurable(tmp_path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("FORGE_FUSION_DISCOVERY_TURNS", "5")
     captured: dict = {}
     fn = discover_module.registered_agent_llm_fn(
-        _backend(captured), model="gpt-test", timeout_s=10, workdir=str(tmp_path)
+        _backend(captured), DiscoverySession(model="gpt-test", timeout_s=10, workdir=str(tmp_path))
     )
 
     fn("DISCOVERY PROMPT")
@@ -129,9 +130,7 @@ def test_proposals_survive_a_session_that_hit_the_turn_ceiling(tmp_path) -> None
     calls: list = []
     fn = discover_module.registered_agent_llm_fn(
         _backend_returning([AgentRunResult(text=PROPOSALS, end_reason="turn_cap")], calls),
-        model="m",
-        timeout_s=10,
-        workdir=str(tmp_path),
+        DiscoverySession(model="m", timeout_s=10, workdir=str(tmp_path)),
     )
 
     assert fn("DISCOVERY PROMPT") == PROPOSALS
@@ -142,12 +141,8 @@ def test_a_cut_short_session_with_no_proposals_still_fails(tmp_path) -> None:
     calls: list = []
     fn = discover_module.registered_agent_llm_fn(
         _backend_returning([AgentRunResult(text="I could not finish reading", end_reason="turn_cap")], calls),
-        model="m",
-        timeout_s=10,
-        workdir=str(tmp_path),
-        attempts=2,
-        base_delay_sec=0,
-        max_delay_sec=0,
+        DiscoverySession(model="m", timeout_s=10, workdir=str(tmp_path)),
+        DiscoveryRetry(attempts=2, base_delay_sec=0, max_delay_sec=0),
     )
 
     with pytest.raises(discover_module.LlmUnavailableError):
@@ -163,12 +158,8 @@ def test_proposals_from_a_session_the_provider_never_finished_are_not_a_discover
     calls: list = []
     fn = discover_module.registered_agent_llm_fn(
         _backend_returning([AgentRunResult(text=PROPOSALS, end_reason=end_reason)], calls),
-        model="m",
-        timeout_s=10,
-        workdir=str(tmp_path),
-        attempts=2,
-        base_delay_sec=0,
-        max_delay_sec=0,
+        DiscoverySession(model="m", timeout_s=10, workdir=str(tmp_path)),
+        DiscoveryRetry(attempts=2, base_delay_sec=0, max_delay_sec=0),
     )
 
     with pytest.raises(discover_module.LlmUnavailableError):
@@ -182,13 +173,8 @@ def test_a_failed_discovery_leaves_a_transcript(tmp_path) -> None:
     calls: list = []
     fn = discover_module.registered_agent_llm_fn(
         _backend_returning([AgentRunResult(text="", end_reason="turn_cap")], calls),
-        model="m",
-        timeout_s=10,
-        workdir=str(tmp_path),
-        log_path=str(log_path),
-        attempts=2,
-        base_delay_sec=0,
-        max_delay_sec=0,
+        DiscoverySession(model="m", timeout_s=10, log_path=str(log_path), workdir=str(tmp_path)),
+        DiscoveryRetry(attempts=2, base_delay_sec=0, max_delay_sec=0),
     )
 
     with pytest.raises(discover_module.LlmUnavailableError):

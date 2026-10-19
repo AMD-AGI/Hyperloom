@@ -14,6 +14,7 @@ from kernelforge.loop.runner import IterationResult
 from kernelforge.orchestrator.analysis import (
     AnalysisAgentService,
     AnalysisBundleError,
+    AnalysisSources,
     _case_directory,
 )
 from kernelforge.tests.test_analysis_agent import _BundleBackend, _context, _service, _workspace
@@ -85,7 +86,7 @@ def test_keep_archive_failure_is_non_fatal_and_clears_pending_journal(
         lambda _archive, _record: (_ for _ in ()).throw(OSError("simulated archive failure")),
     )
 
-    asyncio.run(loop.run(agent_fn=editing_agent))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     pending_path = workspace / "forge_experiments" / "pending_keep.json"
     assert not pending_path.is_file()
@@ -112,14 +113,7 @@ def test_failed_analysis_attempt_does_not_advance_published_commit(tmp_path):
     )
 
     with pytest.raises((AnalysisBundleError, OSError)):
-        asyncio.run(
-            failing.ensure_bundle(
-                context,
-                kernel_file=str(kernel),
-                driver_script=str(driver),
-                source_files=[str(kernel)],
-            )
-        )
+        asyncio.run(failing.ensure_bundle(context, sources=AnalysisSources(str(kernel), str(driver), [str(kernel)])))
 
     commit_root = workspace / "forge_experiments" / "analysis" / context.analysis_commit
     assert AnalysisAgentService._published_generation_root(commit_root) is None
@@ -133,12 +127,7 @@ async def test_profiled_upgrade_preserves_prior_generation(tmp_path) -> None:
         tmp_path,
         _BundleBackend(),
         profiling_enabled=False,
-    ).ensure_bundle(
-        context,
-        kernel_file=str(kernel),
-        driver_script=str(driver),
-        source_files=[str(kernel)],
-    )
+    ).ensure_bundle(context, sources=AnalysisSources(str(kernel), str(driver), [str(kernel)]))
     commit_root = workspace / "forge_experiments" / "analysis" / context.analysis_commit
     first_generation = AnalysisAgentService._published_generation_root(commit_root)
     assert first_generation is not None
@@ -148,12 +137,7 @@ async def test_profiled_upgrade_preserves_prior_generation(tmp_path) -> None:
         tmp_path,
         _BundleBackend(),
         profiling_enabled=True,
-    ).ensure_bundle(
-        context,
-        kernel_file=str(kernel),
-        driver_script=str(driver),
-        source_files=[str(kernel)],
-    )
+    ).ensure_bundle(context, sources=AnalysisSources(str(kernel), str(driver), [str(kernel)]))
 
     second_generation = AnalysisAgentService._published_generation_root(commit_root)
     assert second_generation is not None
@@ -185,12 +169,7 @@ async def test_malformed_analysis_checkpoint_is_rejected(tmp_path) -> None:
 
     service = _service(tmp_path, _BundleBackend(), profiling_enabled=True)
     with pytest.raises(AnalysisBundleError, match="workflow commit is invalid"):
-        await service.ensure_bundle(
-            context,
-            kernel_file=str(kernel),
-            driver_script=str(driver),
-            source_files=[str(kernel)],
-        )
+        await service.ensure_bundle(context, sources=AnalysisSources(str(kernel), str(driver), [str(kernel)]))
 
 
 @pytest.mark.asyncio

@@ -262,6 +262,72 @@ def _builtin_tools(names: list[str]) -> list[str]:
     return [name for name in dict.fromkeys(names) if not name.startswith("mcp__")]
 
 
+class _StreamTranscript:
+    """What one SDK message stream said, in the fields a run result reports."""
+
+    def __init__(self) -> None:
+        self.text_parts: list[str] = []
+        self.tool_calls: list[tuple[str, dict[str, Any]]] = []
+        self.subtype = ""
+        self.num_turns: int | None = None
+        self.session_id = ""
+
+    def absorb(self, message: Any) -> None:
+        """Fold one message into the transcript."""
+        # The init SystemMessage and the final ResultMessage both carry the session id; keep the
+        # latest non-empty one so a caller can resume this exact conversation later.
+        candidate_session = getattr(message, "session_id", "") or ""
+        if isinstance(candidate_session, str) and candidate_session:
+            self.session_id = candidate_session
+        if hasattr(message, "total_cost_usd"):
+            self.subtype = getattr(message, "subtype", "") or ""
+            turns = getattr(message, "num_turns", None)
+            if isinstance(turns, int):
+                self.num_turns = turns
+        if not hasattr(message, "content"):
+            return
+        for block in message.content:
+            if hasattr(block, "text"):
+                self.text_parts.append(block.text)
+            elif block.__class__.__name__ == "ToolUseBlock":
+                self.tool_calls.append((getattr(block, "name", "?"), getattr(block, "input", {}) or {}))
+
+
+def _session_end_reason(*, timed_out: bool, stream_error: Exception | None, subtype: str) -> tuple[str, str, str]:
+    """The subtype, end reason and closing note for a session that has stopped."""
+    if timed_out:
+        return subtype or "error_timeout", "timeout", f"[session ended: {stream_error}]"
+    if stream_error is not None:
+        note = f"[session ended with SDK error: {stream_error}]"
+        if _is_turn_cap_error(stream_error):
+            return subtype or "error_max_turns", "turn_cap", note
+        return subtype or "error", "sdk_error", note
+    if "max_turns" in subtype:
+        return subtype, "turn_cap", ""
+    if subtype and subtype != "success":
+        return subtype, f"sdk_{subtype}", ""
+    if subtype == "success":
+        return subtype, "agent_stopped", ""
+    # The stream ended without the ResultMessage that carries the subtype, so the CLI never said how the
+    # session finished; reading that as a voluntary stop hands the caller whatever the session left behind
+    # as the agent's answer.
+    return subtype, "sdk_no_result", ""
+
+
+def _verified_file_changes(guard: WorkspaceGuard):
+    """What the guard says the session changed, rolling the workspace back when it cannot say.
+
+    ``verify()`` restores the baseline itself before raising, so this covers the
+    paths that fail earlier and must not mask them.
+    """
+    try:
+        return guard.verify()
+    except Exception:
+        with suppress(Exception):  # broad-suppress: rollback must not shadow the verify error
+            guard.rollback()
+        raise
+
+
 class ClaudeBackend:
     """Execute Forge sessions through the Claude Agent SDK."""
 
@@ -380,6 +446,90 @@ class ClaudeBackend:
             )
         return AgentRunResult(text=text, end_reason="agent_stopped")
 
+    def _tool_policy_options(self, policy, spec: AgentRunSpec) -> dict[str, Any]:
+        """The SDK options one generic tool policy asks for."""
+        allowed_tools: list[str] = []
+        if policy.read:
+            allowed_tools.append("Read")
+        if policy.search:
+            allowed_tools.extend(["Grep", "Glob"])
+        if policy.write:
+            allowed_tools.extend(["Edit", "Write"])
+        if policy.shell:
+            allowed_tools.append("Bash")
+        allowed_tools.extend(policy.extra_tools)
+        options: dict[str, Any] = {
+            "allowed_tools": list(dict.fromkeys(allowed_tools)),
+            # ``allowed_tools`` is only a permission list: the CLI still loads
+            # and describes every built-in tool, and those schemas sit in the
+            # cached prefix that is re-read on every turn of the session, so
+            # naming the base set here is a per-turn saving rather than a
+            # one-off. Four campaigns differing in this line alone, all
+            # deferring the knowledge maps, put an analysis session's
+            # first-turn prefix at 35,555 / 35,507 tokens with the default
+            # set against 8,487 / 8,439 naming the six an implementer uses:
+            # -27,068, or -76.2%, with each arm's two replicates within 50
+            # tokens of each other. The implementer lanes of those runs
+            # split by the same amount, 44.9-47.1k against 17.4-19.6k.
+            # The saving assumes the knowledge maps are deferred: inlined,
+            # they dominate the prefix and this line saves only 5,317 tokens.
+            # MCP tools are not part of the built-in set and are carried by
+            # ``allowed_tools`` alone.
+            "tools": _builtin_tools(allowed_tools),
+            "permission_mode": (policy.permission_mode or os.environ.get("FORGE_PERMISSION_MODE", "acceptEdits")),
+        }
+        if policy.max_turns is not None:
+            options["max_turns"] = policy.max_turns
+        if _supports_adaptive_thinking(spec.model):
+            # Claude 4.6+ uses adaptive thinking.
+            options["thinking"] = {"type": "adaptive"}
+        elif policy.thinking_budget_tokens > 0:
+            options["thinking"] = {"type": "enabled", "budget_tokens": policy.thinking_budget_tokens}
+        if policy.bare and spec.hooks is None:
+            options["extra_args"] = {"bare": None}
+        return options
+
+    def _apply_subagents(self, options: dict[str, Any], subagents) -> None:
+        """Declare the spec's subagents, and make sure this session can reach them."""
+        from claude_agent_sdk import AgentDefinition
+
+        options["agents"] = {
+            name: AgentDefinition(
+                description=role.description,
+                prompt=role.instructions,
+                tools=(
+                    self._role_tools(role.tool_policy) if role.tool_policy is not None else ["Read", "Grep", "Glob"]
+                ),
+                model=role.model or None,
+            )
+            for name, role in subagents.items()
+        }
+        allowed = options.setdefault("allowed_tools", [])
+        if "Task" not in allowed:
+            allowed.append("Task")
+        if "tools" in options and "Task" not in options["tools"]:
+            # Task is built-in, so a restricted base set has to name it or the
+            # subagents declared just above are unreachable.
+            options["tools"] = [*options["tools"], "Task"]
+
+    @staticmethod
+    def _apply_mcp_servers(options: dict[str, Any], mcp_servers) -> None:
+        """Declare the spec's MCP servers and allow the tools they carry."""
+        options["mcp_servers"] = {
+            name: {
+                "type": "stdio",
+                "command": server.command,
+                "args": list(server.args),
+                **({"env": server.env} if server.env else {}),
+            }
+            for name, server in mcp_servers.items()
+        }
+        allowed = options.setdefault("allowed_tools", [])
+        for server in mcp_servers.values():
+            for tool in server.tools:
+                if tool not in allowed:
+                    allowed.append(tool)
+
     def _provider_options(self, spec: AgentRunSpec) -> dict[str, Any]:
         """Adapt a generic run specification into Claude SDK options."""
         options: dict[str, Any] = {
@@ -392,91 +542,17 @@ class ClaudeBackend:
             options["effort"] = spec.reasoning_effort
         if spec.additional_directories:
             options["add_dirs"] = list(spec.additional_directories)
-        policy = spec.tool_policy
-        if policy is not None:
-            allowed_tools: list[str] = []
-            if policy.read:
-                allowed_tools.append("Read")
-            if policy.search:
-                allowed_tools.extend(["Grep", "Glob"])
-            if policy.write:
-                allowed_tools.extend(["Edit", "Write"])
-            if policy.shell:
-                allowed_tools.append("Bash")
-            allowed_tools.extend(policy.extra_tools)
-            options.update(
-                allowed_tools=list(dict.fromkeys(allowed_tools)),
-                # ``allowed_tools`` is only a permission list: the CLI still loads
-                # and describes every built-in tool, and those schemas sit in the
-                # cached prefix that is re-read on every turn of the session, so
-                # naming the base set here is a per-turn saving rather than a
-                # one-off. Four campaigns differing in this line alone, all
-                # deferring the knowledge maps, put an analysis session's
-                # first-turn prefix at 35,555 / 35,507 tokens with the default
-                # set against 8,487 / 8,439 naming the six an implementer uses:
-                # -27,068, or -76.2%, with each arm's two replicates within 50
-                # tokens of each other. The implementer lanes of those runs
-                # split by the same amount, 44.9-47.1k against 17.4-19.6k.
-                # The saving assumes the knowledge maps are deferred: inlined,
-                # they dominate the prefix and this line saves only 5,317 tokens.
-                # MCP tools are not part of the built-in set and are carried by
-                # ``allowed_tools`` alone.
-                tools=_builtin_tools(allowed_tools),
-                permission_mode=(policy.permission_mode or os.environ.get("FORGE_PERMISSION_MODE", "acceptEdits")),
-            )
-            if policy.max_turns is not None:
-                options["max_turns"] = policy.max_turns
-            if _supports_adaptive_thinking(spec.model):
-                # Claude 4.6+ uses adaptive thinking.
-                options["thinking"] = {"type": "adaptive"}
-            elif policy.thinking_budget_tokens > 0:
-                options["thinking"] = {
-                    "type": "enabled",
-                    "budget_tokens": policy.thinking_budget_tokens,
-                }
-            if policy.bare and spec.hooks is None:
-                options["extra_args"] = {"bare": None}
+        if spec.tool_policy is not None:
+            options.update(self._tool_policy_options(spec.tool_policy, spec))
         if spec.hooks is not None:
             from claude_agent_sdk import HookMatcher
 
             options["hooks"] = _sdk_hooks(spec.hooks, HookMatcher)
             options.pop("extra_args", None)
         if spec.subagents:
-            from claude_agent_sdk import AgentDefinition
-
-            options["agents"] = {
-                name: AgentDefinition(
-                    description=role.description,
-                    prompt=role.instructions,
-                    tools=(
-                        self._role_tools(role.tool_policy) if role.tool_policy is not None else ["Read", "Grep", "Glob"]
-                    ),
-                    model=role.model or None,
-                )
-                for name, role in spec.subagents.items()
-            }
-            allowed = options.setdefault("allowed_tools", [])
-            if "Task" not in allowed:
-                allowed.append("Task")
-            if "tools" in options and "Task" not in options["tools"]:
-                # Task is built-in, so a restricted base set has to name it or the
-                # subagents declared just above are unreachable.
-                options["tools"] = [*options["tools"], "Task"]
+            self._apply_subagents(options, spec.subagents)
         if spec.mcp_servers:
-            options["mcp_servers"] = {
-                name: {
-                    "type": "stdio",
-                    "command": server.command,
-                    "args": list(server.args),
-                    **({"env": server.env} if server.env else {}),
-                }
-                for name, server in spec.mcp_servers.items()
-            }
-            allowed = options.setdefault("allowed_tools", [])
-            for server in spec.mcp_servers.values():
-                for tool in server.tools:
-                    if tool not in allowed:
-                        allowed.append(tool)
+            self._apply_mcp_servers(options, spec.mcp_servers)
         options.update(self.runtime.options)
         options.update(spec.provider_options)
         if spec.env:
@@ -546,11 +622,7 @@ class ClaudeBackend:
         if resume_session_id:
             provider_options["resume"] = resume_session_id
         options = self._options_type(**provider_options)
-        text_parts: list[str] = []
-        tool_calls: list[tuple[str, dict[str, Any]]] = []
-        subtype = ""
-        num_turns: int | None = None
-        session_id = ""
+        transcript = _StreamTranscript()
 
         # The SDK RAISES on the turn cap (and some other mid-session failures) rather than yielding a final
         # ResultMessage, and its stream is an unbounded ``async for`` -- nothing here stops a session that neither
@@ -576,31 +648,11 @@ class ClaudeBackend:
                         if usage is not None:
                             usage.add_from_message(message, role=spec.role)
                         _record_progress(spec.progress_log, message)
-                        # The init SystemMessage and the final ResultMessage both carry the session id; keep the
-                        # latest non-empty one so a caller can resume this exact conversation later.
-                        candidate_session = getattr(message, "session_id", "") or ""
-                        if isinstance(candidate_session, str) and candidate_session:
-                            session_id = candidate_session
-                        if hasattr(message, "total_cost_usd"):
-                            subtype = getattr(message, "subtype", "") or ""
-                            turns = getattr(message, "num_turns", None)
-                            if isinstance(turns, int):
-                                num_turns = turns
-                        if hasattr(message, "content"):
-                            for block in message.content:
-                                if hasattr(block, "text"):
-                                    text_parts.append(block.text)
-                                elif block.__class__.__name__ == "ToolUseBlock":
-                                    tool_calls.append(
-                                        (
-                                            getattr(block, "name", "?"),
-                                            getattr(block, "input", {}) or {},
-                                        )
-                                    )
+                        transcript.absorb(message)
             except Exception as exc:
                 if deadline.expired():
                     reap_on_exit = True
-                    if not session_id:
+                    if not transcript.session_id:
                         rollback_on_exit = True
                         raise ClaudeTimeoutError(
                             f"Claude session timed out after {spec.timeout_sec}s before it established a session"
@@ -609,20 +661,20 @@ class ClaudeBackend:
                     stream_error = TimeoutError(f"Claude session timed out after {spec.timeout_sec}s")
                     log.warning(
                         "Claude session %s timed out after %ss; preserving the resume handle and reaping its leftovers",
-                        session_id,
+                        transcript.session_id,
                         spec.timeout_sec,
                     )
                     if spec.progress_log is not None:
                         spec.progress_log.append(f"end: timeout {spec.timeout_sec}s")
                 else:
-                    if not session_id:
+                    if not transcript.session_id:
                         rollback_on_exit = True
                         raise
                     stream_error = exc
                     if not _is_turn_cap_error(exc):
                         log.warning(
                             "Claude SDK stream failed after session %s; preserving the resume handle (%s: %s)",
-                            session_id,
+                            transcript.session_id,
                             type(exc).__name__,
                             exc,
                         )
@@ -632,7 +684,7 @@ class ClaudeBackend:
             # The subprocess and any detached benchmark children are running regardless of whether a session id was
             # established; reap them so they do not hold the GPU past this point.
             reap_on_exit = True
-            if not session_id:
+            if not transcript.session_id:
                 rollback_on_exit = True
             raise
         finally:
@@ -648,48 +700,25 @@ class ClaudeBackend:
             if rollback_on_exit:
                 guard.rollback()
 
-        if timed_out:
-            subtype = subtype or "error_timeout"
-            end_reason = "timeout"
-            text_parts.append(f"[session ended: {stream_error}]")
-        elif stream_error is not None:
-            if _is_turn_cap_error(stream_error):
-                subtype = subtype or "error_max_turns"
-                end_reason = "turn_cap"
-            else:
-                subtype = subtype or "error"
-                end_reason = "sdk_error"
-            text_parts.append(f"[session ended with SDK error: {stream_error}]")
-        elif "max_turns" in subtype:
-            end_reason = "turn_cap"
-        elif subtype and subtype != "success":
-            end_reason = f"sdk_{subtype}"
-        elif subtype == "success":
-            end_reason = "agent_stopped"
-        else:
-            # The stream ended without the ResultMessage that carries the subtype, so the CLI never said how the
-            # session finished; reading that as a voluntary stop hands the caller whatever the session left behind
-            # as the agent's answer.
-            end_reason = "sdk_no_result"
+        subtype, end_reason, closing_note = _session_end_reason(
+            timed_out=timed_out,
+            stream_error=stream_error,
+            subtype=transcript.subtype,
+        )
+        if closing_note:
+            transcript.text_parts.append(closing_note)
 
         result = AgentRunResult(
-            text="\n".join(text_parts).strip(),
+            text="\n".join(transcript.text_parts).strip(),
             subtype=subtype,
-            num_turns=num_turns,
+            num_turns=transcript.num_turns,
             end_reason=end_reason,
-            session_id=session_id,
-            tool_calls=tool_calls,
+            session_id=transcript.session_id,
+            tool_calls=transcript.tool_calls,
             stderr_tail=(str(stream_error)[:2000] if stream_error else ""),
             workspace_contention=contention,
         )
-        try:
-            result.file_changes = guard.verify()
-        except Exception:
-            # verify() restores the baseline itself before raising, so this covers the paths that fail earlier and
-            # must not mask them.
-            with suppress(Exception):  # broad-suppress: rollback must not shadow the verify error
-                guard.rollback()
-            raise
+        result.file_changes = _verified_file_changes(guard)
         result.target_edit_count = guard.count_target_edits()
         result.edit_count = result.target_edit_count
         return result

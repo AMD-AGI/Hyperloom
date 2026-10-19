@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from hyperloom.common.git_safety import safe_directory_args
+from hyperloom.common.unified_diff import PatchOp, repo_relative_manifest
 from hyperloom.inference_optimizer.trace.task_progress import heartbeat_while_output_flows
 from hyperloom.orchestrator.kernel import apply_kernel_patch
 
@@ -71,10 +72,8 @@ def _final_content_snapshot(
     if not (patch_path.endswith(".patch") and repo_root):
         return snapshot_dir
     try:
-        descriptors = apply_kernel_patch.parse_patch_manifest(
-            Path(patch_path).read_text(encoding="utf-8", errors="replace")
-        )
-        writes = [str(d.get("path") or "") for d in descriptors if d.get("op") == "write"]
+        targets = repo_relative_manifest(Path(patch_path).read_text(encoding="utf-8", errors="replace"))
+        writes = [t.path for t in targets if t.op is PatchOp.WRITE]
     except Exception:  # noqa: BLE001 — an unreadable patch is apply's error to report.
         return snapshot_dir
     if not writes:
@@ -137,18 +136,20 @@ def _maybe_apply_kernel_patch(
         repo_root=repo_root,
     )
     return apply_kernel_patch.apply_kernel_patch(
-        patch_path=patch_path,
-        target_file=target_file,
-        backup_root=backup_root,
-        kernel_id=kid,
-        artifact_paths=_artifact_paths_from_payload(payload),
-        rebuild_command=payload.get("rebuild_command"),
-        rebuild_timeout_sec=int(payload.get("rebuild_timeout_sec", 1800)),
-        skip_rebuild=bool(payload.get("skip_rebuild", False)),
-        dry_run=bool(payload.get("dry_run_patch", False)),
-        snapshot_dir=snapshot_dir,
-        repo_root=repo_root,
-        producer_manifest=(str(payload.get("producer_manifest") or "").strip() or None),
+        apply_kernel_patch.KernelPatchRequest(
+            patch_path=patch_path,
+            target_file=target_file,
+            backup_root=backup_root,
+            kernel_id=kid,
+            artifact_paths=_artifact_paths_from_payload(payload),
+            rebuild_command=payload.get("rebuild_command"),
+            rebuild_timeout_sec=int(payload.get("rebuild_timeout_sec", 1800)),
+            skip_rebuild=bool(payload.get("skip_rebuild", False)),
+            dry_run=bool(payload.get("dry_run_patch", False)),
+            snapshot_dir=snapshot_dir,
+            repo_root=repo_root,
+            producer_manifest=str(payload.get("producer_manifest") or "").strip() or None,
+        )
     )
 
 
@@ -172,27 +173,15 @@ def materialize_unified_patch_snapshot(
         raise FileNotFoundError(f"kernel repo does not exist: {root}")
 
     patch_text = patch.read_text(encoding="utf-8", errors="replace")
-    descriptors = apply_kernel_patch.parse_patch_manifest(patch_text)
-    if not descriptors:
-        raise ValueError(f"patch has no file operations: {patch}")
-
-    # Paths the patch CREATES: these must be produced by ``git apply``, never
-    # pre-seeded with a base, or apply fails "already exists". Everything else
-    # is a modify whose base we must supply. ``is_new`` comes from
-    # ``parse_patch_manifest`` (single source of truth for both the path
-    # normalization and the create/modify disposition), which avoids a second,
-    # drift-prone parse of the raw patch text.
-    _new_file_paths = {
-        str(desc.get("path") or "") for desc in descriptors if desc.get("op") == "write" and desc.get("is_new")
-    }
+    targets = repo_relative_manifest(patch_text)
 
     snap = Path(snapshot_dir) if snapshot_dir is not None else patch.parent / "fusion_snapshot"
     if snap.exists():
         shutil.rmtree(snap)
     snap.mkdir(parents=True, exist_ok=True)
 
-    for desc in descriptors:
-        rel = Path(str(desc.get("path") or ""))
+    for target in targets:
+        rel = Path(target.path)
         if not rel.parts or rel.is_absolute() or ".." in rel.parts:
             raise ValueError(f"unsafe patch path: {rel}")
         dst = snap / rel
@@ -204,7 +193,7 @@ def materialize_unified_patch_snapshot(
         if base.returncode == 0:
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(base.stdout)
-        elif rel.as_posix() not in _new_file_paths:
+        elif not target.is_new:
             # ``git show HEAD:`` failed and this is a MODIFY (not a create):
             # non-git repo_root (e.g. vLLM/sglang under site-packages/
             # dist-packages) or an untracked-but-present file. Fall back to the
@@ -254,9 +243,9 @@ def materialize_unified_patch_snapshot(
         msg = (proc.stderr or proc.stdout or "").strip()
         raise RuntimeError(f"could not materialize patch snapshot: {msg[:500]}")
 
-    for desc in descriptors:
-        if desc.get("op") == "write" and not (snap / str(desc["path"])).is_file():
-            raise RuntimeError(f"snapshot missing final content for {desc['path']}")
+    for target in targets:
+        if target.op is PatchOp.WRITE and not (snap / target.path).is_file():
+            raise RuntimeError(f"snapshot missing final content for {target.path}")
     return str(snap)
 
 

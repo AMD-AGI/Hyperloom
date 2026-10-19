@@ -728,6 +728,96 @@ async def test_warm_replay_skips_when_best_config_empty(tmp_path):
     assert coord.shared_state.warm_replay_outcome["reason"] == "best_config_empty"
 
 
+def _vllm_baseline(tmp_path: Path, coord: Coordinator) -> None:
+    """Point the stub at a real vLLM baseline config the replay would be appended to."""
+    config = tmp_path / "baseline_config.with_envs.yaml"
+    config.write_text(
+        json.dumps(
+            {
+                "benchmark": {
+                    "framework": "vllm",
+                    "envs": {
+                        "VLLM_ROCM_USE_AITER": "1",
+                        "EXTRA_VLLM_ARGS": "--kv-cache-dtype fp8 --enable-prefix-caching --max-num-seqs 64",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    coord.shared_state.framework = "vllm"
+    coord.shared_state.baseline_config_path = str(config)
+
+
+@pytest.mark.asyncio
+async def test_warm_replay_skips_a_recipe_that_restates_the_baseline(tmp_path):
+    """A recipe whose every arg and env the baseline already sets would measure the baseline again, for a full round."""
+    recipe = _warm_recipe_t1(
+        extra_server_args="--kv-cache-dtype fp8 --enable-prefix-caching",
+        extra_envs={"VLLM_ROCM_USE_AITER": "1"},
+    )
+    coord = _make_coord(tmp_path, warm_start_recipe=recipe)
+    _vllm_baseline(tmp_path, coord)
+
+    assert await coord.phase_prelude.maybe_enqueue_warm_replay(baseline_tput=600.0) is None
+
+    assert coord.tasks.calls == []
+    outcome = coord.shared_state.warm_replay_outcome
+    assert (outcome["status"], outcome["reason"]) == ("skipped", "restates_baseline")
+    persisted = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert persisted["warm_replay_attempted"] is True
+
+
+@pytest.mark.asyncio
+async def test_warm_replay_runs_a_recipe_that_changes_the_baseline(tmp_path):
+    """One setting the baseline does not hold is enough for the replay to run."""
+    recipe = _warm_recipe_t1(extra_server_args="--kv-cache-dtype fp8 --max-num-seqs 128")
+    coord = _make_coord(tmp_path, warm_start_recipe=recipe)
+    _vllm_baseline(tmp_path, coord)
+
+    assert await coord.phase_prelude.maybe_enqueue_warm_replay(baseline_tput=600.0) is not None
+
+    assert [call["params"]["extra_server_args"] for call in coord.tasks.calls] == [
+        "--kv-cache-dtype fp8 --max-num-seqs 128"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_warm_replay_runs_restated_args_under_reference_launch_controls(tmp_path):
+    """Materialization re-applies a replacing reference launch, so the replay need not launch the baseline config."""
+    recipe = _warm_recipe_t1(extra_server_args="--kv-cache-dtype fp8")
+    coord = _make_coord(tmp_path, warm_start_recipe=recipe)
+    _vllm_baseline(tmp_path, coord)
+    coord.shared_state.reference_launch_controls = {"args_mode": "replace"}
+
+    assert await coord.phase_prelude.maybe_enqueue_warm_replay(baseline_tput=600.0) is not None
+
+    assert [call["params"]["extra_server_args"] for call in coord.tasks.calls] == ["--kv-cache-dtype fp8"]
+
+
+@pytest.mark.asyncio
+async def test_warm_replay_runs_restated_args_that_carry_a_code_patch(tmp_path):
+    """The patch is the change, and the argv cannot show it."""
+    framework_root = tmp_path / "vllm"
+    framework_root.mkdir()
+    context = {
+        "status": "hit",
+        "match": {"tier": "exact", "confidence": 0.85, "source": "gbrain"},
+        "recommended_replay": {
+            "extra_server_args": "--kv-cache-dtype fp8",
+            "extra_envs": {},
+            "expected_gain_pct": 25.0,
+            "patches": [{"patch_file": "p.patch", "framework_root": str(framework_root)}],
+        },
+    }
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1(), warm_start_context=context)
+    _vllm_baseline(tmp_path, coord)
+
+    assert await coord.phase_prelude.maybe_enqueue_warm_replay(baseline_tput=600.0) is not None
+
+    assert [len(call["params"]["patches"]) for call in coord.tasks.calls] == [1]
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -2980,3 +3070,26 @@ def test_promote_warm_replay_honours_the_latency_budget(tmp_path, e2el_ms, expec
     assert len(coord.shared_state.optimization_stack) == stack_len
     if expected_status == "drift":
         assert outcome["reason"] == "latency_budget_exceeded"
+
+
+@pytest.mark.parametrize(
+    ("power_w", "expected_status", "stack_len"),
+    [
+        pytest.param(812.0, "drift", 0, id="over-power-budget-rolls-back"),
+        pytest.param(650.0, "reproduced", 1, id="in-power-budget-adopts"),
+    ],
+)
+def test_promote_warm_replay_honours_the_power_budget(tmp_path, power_w, expected_status, stack_len):
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.power_budget_w = 700.0
+    coord.shared_state.warm_replay_outcome = {"status": "in_flight", "expected_gain_pct": 25.0}
+    task = _StubTask(params={"extra_server_args": "--split 8", "baseline_tput_anchor": 600.0})
+    coord.phase_prelude.promote_warm_replay(
+        {"status": "succeeded", "output_throughput": 738.0, "gpu_power_by_gpu_w": {"4": power_w}}, task=task
+    )
+
+    outcome = coord.shared_state.warm_replay_outcome
+    assert outcome["status"] == expected_status
+    assert len(coord.shared_state.optimization_stack) == stack_len
+    if expected_status == "drift":
+        assert outcome["reason"] == "power_budget_exceeded"

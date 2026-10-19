@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_outcome
+from hyperloom.inference_optimizer.breakdown.collectors.v6 import OutcomeSources, collect_v6_outcome
 from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 from hyperloom.inference_optimizer.breakdown.recorder.assembler import stack_event_parts
 from hyperloom.inference_optimizer.breakdown.recorder.event_finalize import finalize_events
@@ -334,10 +334,9 @@ def _outcome(session_dir) -> dict[str, Any]:
     """``outcome.validation`` over the recorded timeline."""
     stack_event.finish()
     return collect_v6_outcome(
-        session={"stop_reason": "target_reached"},
-        close={},
-        state={},
-        timeline=read_timeline_events(session_dir),
+        OutcomeSources(
+            session={"stop_reason": "target_reached"}, close={}, state={}, timeline=read_timeline_events(session_dir)
+        )
     )["validation"]
 
 
@@ -400,12 +399,9 @@ def test_outcome_notes_name_the_anchor_movement_and_the_missing_measurement(tmp_
 
 
 def test_outcome_marks_attribution_unavailable_without_a_ledger_event():
-    validation = collect_v6_outcome(
-        session={"stop_reason": "signal"},
-        close={},
-        state={},
-        timeline=[],
-    )["validation"]
+    validation = collect_v6_outcome(OutcomeSources(session={"stop_reason": "signal"}, close={}, state={}, timeline=[]))[
+        "validation"
+    ]
 
     assert validation["attribution"]["available"] is False
     assert validation["attribution"]["by_source"]["warm_replay"]["total_gain_pct"] is None

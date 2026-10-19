@@ -193,8 +193,8 @@ export CODEX_MODEL=your-gateway-kernel-model
 
 Custom orchestration models are allowed by default: preflight validates the
 chosen `CLAUDE_MODEL` against your gateway's `/models` catalog. To restore the
-stricter AMD Claude allowlist (`claude-opus-5` preferred, `claude-opus-4-8` /
-`claude-opus-4-7` / `claude-opus-4-6` fallback), set
+stricter AMD Claude allowlist (`claude-opus-5-5` preferred, `claude-opus-5` /
+`claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6` fallback), set
 `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`.
 
 A gateway that exposes no `/models` route cannot be probed; preflight warns and

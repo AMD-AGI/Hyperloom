@@ -15,7 +15,10 @@ from kernelforge.knowledge.pr_knowledge.search import (
     HIT_FILE_PATH,
     HIT_RECENT,
     HIT_SEARCH,
+    PRLifecycle,
     PRReference,
+    PRState,
+    SearchLimits,
     component_relevance,
     components_of_interest,
     discover,
@@ -186,7 +189,7 @@ def _ref(number: int, worth: float | None, merged: bool, **kwargs) -> PRReferenc
         number=number,
         hit_via=(HIT_FILE_PATH,),
         worth_trying=worth,
-        is_merged=merged,
+        lifecycle=PRLifecycle(state=PRState.MERGED if merged else PRState.OPEN),
         **kwargs,
     )
 
@@ -612,7 +615,7 @@ def test_candidate_cap_bounds_the_enrichment_request_count(service, client):
     service.by_query = {"moe": list(range(1, 31))}
     service.details = {n: _detail(n) for n in range(1, 31)}
 
-    discover(client, _context(keywords=("moe",)), candidate_cap=4)
+    discover(client, _context(keywords=("moe",)), limits=SearchLimits(candidate_cap=4))
 
     assert service.query_count("/prs/") == 4
 
@@ -622,7 +625,7 @@ def test_cap_prefers_path_hits_over_search_hits(service, client):
     service.by_query = {"moe": [900, 901, 902]}
     service.details = {n: _detail(n) for n in (1, 900, 901, 902)}
 
-    discover(client, _context(file_paths=("a/f.py",), keywords=("moe",)), candidate_cap=1)
+    discover(client, _context(file_paths=("a/f.py",), keywords=("moe",)), limits=SearchLimits(candidate_cap=1))
 
     assert service.query_count("/prs/1") == 1
 
@@ -673,18 +676,62 @@ def test_missing_pr_is_skipped_without_failing_the_batch(service, client):
     assert [ref.number for ref in outcome.references] == [2]
 
 
-def test_merge_state_reads_is_merged_not_merged_at(service, client):
-    """``merged_at`` does not exist; reading it would silently yield False."""
+@pytest.mark.parametrize(
+    ("summary", "expected"),
+    [
+        pytest.param(
+            {"state": "open", "is_merged": False, "is_draft": True, "base_ref": "main", "pr_merged_at": None},
+            PRLifecycle(state=PRState.OPEN, draft=True, base_ref="main"),
+            id="open",
+        ),
+        pytest.param(
+            {
+                "state": "closed",
+                "is_merged": False,
+                "is_draft": False,
+                "base_ref": "main",
+                "pr_closed_at": "2026-08-02T00:00:00Z",
+                "pr_merged_at": None,
+            },
+            PRLifecycle(state=PRState.CLOSED, draft=False, base_ref="main"),
+            id="closed-unmerged",
+        ),
+        pytest.param(
+            {
+                "state": "closed",
+                "is_merged": True,
+                "is_draft": False,
+                "base_ref": "release",
+                "pr_merged_at": "2026-08-02T00:00:00Z",
+            },
+            PRLifecycle(
+                state=PRState.MERGED,
+                draft=False,
+                merged_at="2026-08-02T00:00:00Z",
+                base_ref="release",
+            ),
+            id="merged",
+        ),
+        pytest.param({}, PRLifecycle(), id="fields-missing"),
+        pytest.param({"is_merged": False}, PRLifecycle(), id="unmerged-without-state"),
+        pytest.param({"state": "closed"}, PRLifecycle(), id="closed-without-merge-flag"),
+        pytest.param(
+            {"state": "reopened", "is_draft": "yes", "base_ref": "", "pr_merged_at": 0},
+            PRLifecycle(),
+            id="fields-malformed",
+        ),
+    ],
+)
+def test_reference_carries_only_the_lifecycle_the_service_reports(service, client, summary, expected):
+    """An unmerged PR is not assumed open, and a closed one is not assumed unmerged."""
     service.by_query = {"moe": [1]}
-    detail = _detail(1, merged=True)
-    detail["summary"].pop("is_merged")
-    detail["summary"]["is_merged"] = True
-    detail["summary"]["pr_merged_at"] = "2026-08-01T00:00:00Z"
+    detail = _detail(1)
+    detail["summary"] = {"title": "PR 1", **summary}
     service.details = {1: detail}
 
     outcome = discover(client, _context(keywords=("moe",)))
 
-    assert outcome.references[0].is_merged is True
+    assert outcome.references[0].lifecycle == expected
 
 
 def test_file_count_comes_from_the_files_array(service, client):
@@ -792,7 +839,7 @@ def test_top_k_truncates_the_ranked_list(service, client):
     service.by_query = {"moe": [1, 2, 3, 4, 5, 6]}
     service.details = {n: _detail(n, worth=n / 10) for n in range(1, 7)}
 
-    outcome = discover(client, _context(keywords=("moe",)), top_k=2)
+    outcome = discover(client, _context(keywords=("moe",)), limits=SearchLimits(top_k=2))
 
     assert len(outcome.references) == 2
     assert [ref.number for ref in outcome.references] == [6, 5]

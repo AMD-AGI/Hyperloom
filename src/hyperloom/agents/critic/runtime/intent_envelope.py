@@ -20,9 +20,6 @@ from hyperloom.inference_optimizer.protocol.intent import (
 from .errors import IntentEnvelopeValidationError
 
 
-ENVELOPE_SCHEMA_VERSION = "v0.6"
-
-
 # Intent types the Critic role is allowed to emit.
 ALLOWED_CRITIC_INTENTS: frozenset[str] = frozenset(
     {
@@ -96,61 +93,58 @@ def validate_envelope(envelope: dict[str, Any]) -> IntentEnvelope:
     return out
 
 
+@dataclass(frozen=True)
+class ReviewVerdict:
+    """The Critic's verdict on one proposal, as carried by a ``review_verdict`` intent."""
+
+    target_proposal_msg_id: str
+    verdict: str
+    reasoning: str = ""
+    source: str = "critic"
+    confidence: str | None = None
+    predicted_gain_pct: float | None = None
+    kb_evidence: Iterable[str] | None = None
+    packet_evidence: Iterable[str] | None = None
+    risks: list[dict[str, Any]] | None = None
+    required_evidence: Iterable[str] | None = None
+    alternative_action: str | None = None
+    advice_text: str = ""
+    notes: Iterable[str] | None = None
+    failure_reason_code: str = ""
+
+
 # Builders — convenience constructors used by decision_reviewer.
-def build_review_verdict_intent(
-    *,
-    target_proposal_msg_id: str,
-    verdict: str,
-    reasoning: str = "",
-    source: str = "critic",
-    confidence: str | None = None,
-    predicted_gain_pct: float | None = None,
-    kb_evidence: Iterable[str] | None = None,
-    packet_evidence: Iterable[str] | None = None,
-    risks: list[dict[str, Any]] | None = None,
-    required_evidence: Iterable[str] | None = None,
-    alternative_action: str | None = None,
-    advice_text: str = "",
-    notes: Iterable[str] | None = None,
-    failure_reason_code: str = "",
-) -> Intent:
+def build_review_verdict_intent(review: ReviewVerdict) -> Intent:
     """Build a validated ``review_verdict`` intent."""
-    if verdict not in ALLOWED_VERDICTS:
-        raise IntentEnvelopeValidationError(f"verdict {verdict!r} not in {sorted(ALLOWED_VERDICTS)!r}")
-    if source not in ALLOWED_VERDICT_SOURCES:
-        raise IntentEnvelopeValidationError(f"source {source!r} not in {sorted(ALLOWED_VERDICT_SOURCES)!r}")
-    if not target_proposal_msg_id:
+    if review.verdict not in ALLOWED_VERDICTS:
+        raise IntentEnvelopeValidationError(f"verdict {review.verdict!r} not in {sorted(ALLOWED_VERDICTS)!r}")
+    if review.source not in ALLOWED_VERDICT_SOURCES:
+        raise IntentEnvelopeValidationError(f"source {review.source!r} not in {sorted(ALLOWED_VERDICT_SOURCES)!r}")
+    if not review.target_proposal_msg_id:
         raise IntentEnvelopeValidationError("target_proposal_msg_id is required")
     payload: dict[str, Any] = {
-        "target_proposal_msg_id": target_proposal_msg_id,
-        "verdict": verdict,
-        "source": source,
-        "reasoning": reasoning,
-        "predicted_gain_pct": predicted_gain_pct,
-        "kb_evidence": list(kb_evidence or []),
-        "packet_evidence": list(packet_evidence or []),
-        "risks": list(risks or []),
-        "required_evidence": list(required_evidence or []),
-        "alternative_action": alternative_action,
-        "advice_text": advice_text,
-        "notes": list(notes or []),
-        "failure_reason_code": failure_reason_code,
+        "target_proposal_msg_id": review.target_proposal_msg_id,
+        "verdict": review.verdict,
+        "source": review.source,
+        "reasoning": review.reasoning,
+        "predicted_gain_pct": review.predicted_gain_pct,
+        "kb_evidence": list(review.kb_evidence or []),
+        "packet_evidence": list(review.packet_evidence or []),
+        "risks": list(review.risks or []),
+        "required_evidence": list(review.required_evidence or []),
+        "alternative_action": review.alternative_action,
+        "advice_text": review.advice_text,
+        "notes": list(review.notes or []),
+        "failure_reason_code": review.failure_reason_code,
     }
-    if confidence is not None:
-        payload["confidence"] = confidence
+    if review.confidence is not None:
+        payload["confidence"] = review.confidence
     return Intent(intent_type="review_verdict", payload=payload)
 
 
-def build_idle_intent(body_md: str = DEFAULT_IDLE_BODY) -> Intent:
-    """Build the ``observation`` ``send_message`` intent for an idle turn.
-
-    Args:
-        body_md (str): Message body; defaults to :data:`DEFAULT_IDLE_BODY`.
-
-    Returns:
-        Intent: A ``send_message`` intent on the ``observation`` topic.
-    """
-    return Intent(intent_type="send_message", payload={"topic": "observation", "body_md": body_md})
+def build_idle_intent() -> Intent:
+    """Build the ``observation`` ``send_message`` intent carrying :data:`DEFAULT_IDLE_BODY` for an idle turn."""
+    return Intent(intent_type="send_message", payload={"topic": "observation", "body_md": DEFAULT_IDLE_BODY})
 
 
 def build_advice_intent(body_md: str, *, target_proposal_msg_id: str | None = None) -> Intent:
@@ -181,9 +175,9 @@ __all__ = [
     "ALLOWED_VERDICT_SOURCES",
     "DEFAULT_ADVICE_TOPIC",
     "DEFAULT_IDLE_BODY",
-    "ENVELOPE_SCHEMA_VERSION",
     "Intent",
     "IntentEnvelope",
+    "ReviewVerdict",
     "build_advice_intent",
     "build_envelope",
     "build_idle_intent",

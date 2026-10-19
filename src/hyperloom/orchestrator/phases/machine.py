@@ -24,6 +24,15 @@ _BUDGET_EXIT_STOP_REASONS = {
     "sweep_budget_cap": "time_exhausted",
 }
 
+# The FRAMEWORK_AGENT exit reason for a plateau or an LLM hint; budget and terminal exits never wait.
+_LEVERAGE_EXIT_REASON = "optimize_no_more_leverage"
+
+
+def is_leverage_exit(next_phase: tuple[str, str, dict[str, Any]]) -> bool:
+    """Whether a FRAMEWORK_AGENT transition is the plateau or LLM-hint exit, the one operator work may hold."""
+    _target, reason, evidence = next_phase
+    return _LEVERAGE_EXIT_REASON in (reason, str((evidence or {}).get("passed_through_reason") or ""))
+
 
 @dataclass(frozen=True)
 class Transition:
@@ -31,7 +40,6 @@ class Transition:
     to_phase: str
     reason: str
     evidence: dict
-    loopback: bool
 
 
 class MachinePhase(CoordinatorCollaborator):
@@ -97,9 +105,11 @@ class MachinePhase(CoordinatorCollaborator):
                     "predicate_inputs": _phase_state.initial_workflow_predicate_inputs(
                         state,
                         current_phase="",
-                        kernel_enabled=self.kernel_enabled(),
-                        optimize_enabled=self.optimize_enabled(),
-                        enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
+                        flags=_phase_state.PhaseFlags(
+                            kernel_enabled=self.kernel_enabled(),
+                            optimize_enabled=self.optimize_enabled(),
+                            enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
+                        ),
                     ),
                 },
             )
@@ -125,9 +135,11 @@ class MachinePhase(CoordinatorCollaborator):
                 "predicate_inputs": _phase_state.initial_workflow_predicate_inputs(
                     state,
                     current_phase=_phase_state.PHASE_CLOSE,
-                    kernel_enabled=self.kernel_enabled(),
-                    optimize_enabled=self.optimize_enabled(),
-                    enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
+                    flags=_phase_state.PhaseFlags(
+                        kernel_enabled=self.kernel_enabled(),
+                        optimize_enabled=self.optimize_enabled(),
+                        enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
+                    ),
                 ),
             },
         )
@@ -191,6 +203,28 @@ class MachinePhase(CoordinatorCollaborator):
         if not state.stop_reason:
             state.set_stop_reason(_BUDGET_EXIT_STOP_REASONS.get(reason, reason), strict=True)
 
+    async def _next_phase(
+        self, *, optimize_enabled: bool, enablement_in_flight: bool, kernel_work_in_flight: bool
+    ) -> tuple[str, str, dict[str, Any]] | None:
+        """The transition the predicates ask for, held while the operator-defined specialist's work is pending."""
+        state = self.shared_state
+        next_phase = _phase_state.compute_next_phase(
+            state,
+            enablement_in_flight=enablement_in_flight,
+            kernel_work_in_flight=kernel_work_in_flight,
+            flags=_phase_state.PhaseFlags(
+                kernel_enabled=self.kernel_enabled(),
+                optimize_enabled=optimize_enabled,
+                enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
+            ),
+        )
+        if next_phase is None or str(state.phase or "").upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
+            return next_phase
+        if not is_leverage_exit(next_phase) or not await self._coord.phase_framework.operator_work_pending():
+            return next_phase
+        log.info("phase_machine: holding %s exit (reason=%s) for operator work", state.phase, next_phase[1])
+        return None
+
     async def advance_phase_if_needed(self) -> None:
         """Scan exit conditions and transition phase at most once per tick."""
         state = self.shared_state
@@ -205,17 +239,10 @@ class MachinePhase(CoordinatorCollaborator):
         kernel_facts = await self._coord.phase_kernel.exit_facts()
         optimize_enabled = self.optimize_enabled()
         in_enablement = str(state.phase or "").upper() == _phase_state.PHASE_ENABLEMENT
-        if str(state.phase or "").upper() == _phase_state.PHASE_PRELUDE or in_enablement:
-            # Both phases hold their exit for this marker. A cancelled analysis, or one that ended before a
-            # restart booked it, never reaches the writeback that clears it, so the hold would run to its
-            # allowance.
-            await self._coord.phase_kernel.release_finished_roofline_gate()
+        await self._release_holds_no_task_will_settle()
         enablement_in_flight = in_enablement and await self._coord.enablement_lane.enablement_in_flight()
-        next_phase = _phase_state.compute_next_phase(
-            state,
-            kernel_enabled=self.kernel_enabled(),
+        next_phase = await self._next_phase(
             optimize_enabled=optimize_enabled,
-            enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
             enablement_in_flight=enablement_in_flight,
             kernel_work_in_flight=kernel_facts.agent_in_flight,
         )
@@ -227,43 +254,7 @@ class MachinePhase(CoordinatorCollaborator):
             return
         target, reason, evidence = next_phase
         prior = state.phase
-        barrier_reason = f"phase_transition:{str(prior or '').strip().upper()}->{target}"
-        # The next phase starts on quiet GPUs: every running action is stopped, and the transition waits until the
-        # registry confirms none is left running and every finished one is booked in this phase. Queued work the next
-        # phase does not admit is dropped here too.
-        cancelled = await self.tasks.cancel_queued(
-            allowed_kinds=_phase_state.PHASE_ALLOWED_ACTIONS.get(target, frozenset()),
-            reason=barrier_reason,
-        )
-        stopped = await dispatcher.cancel_inflight_actions(reason=barrier_reason)
-        if cancelled or stopped:
-            log.info(
-                "Coordinator.phase: %s (reason=%s) cancelled %d queued and stopped %d running task(s)",
-                barrier_reason,
-                reason,
-                len(cancelled),
-                len(stopped),
-            )
-            await self.bus.record_observation(
-                "coordinator",
-                "observation",
-                {
-                    "kind": "tasks_cancelled_on_phase_transition",
-                    "prior_phase": str(prior or ""),
-                    "target_phase": target,
-                    "reason": reason,
-                    "cancelled_task_ids": cancelled,
-                    "stopped_task_ids": stopped,
-                },
-            )
-        running = await self.tasks.running()
-        if running or dispatcher.has_unbooked_completions():
-            log.info(
-                "phase_machine: holding %s (reason=%s) until %d running task(s) stop and are booked",
-                barrier_reason,
-                reason,
-                len(running),
-            )
+        if not await self._drain_for_transition(prior=prior, target=target, reason=reason, evidence=evidence):
             return
         dispatcher.admission_frozen = False
         # Consume escalate hint after a hint-driven transition.
@@ -384,6 +375,68 @@ class MachinePhase(CoordinatorCollaborator):
         if save_error is not None:
             raise save_error
 
+    async def _release_holds_no_task_will_settle(self) -> None:
+        """Settle what the current phase's exit is waiting on when the task that would have settled it is gone.
+
+        A task cancelled outside the run (``hyperloom recover``) or ended before a restart booked it never reaches
+        the writeback that settles the phase's hold, so the hold would run to its allowance.
+        """
+        phase = str(self.shared_state.phase or "").upper()
+        if phase in (_phase_state.PHASE_PRELUDE, _phase_state.PHASE_ENABLEMENT):
+            # Both phases hold their exit for this marker.
+            await self._coord.phase_kernel.release_finished_roofline_gate()
+        # SWEEP waits for its conc_sweep's outcome; checked on a resumed process's first decision only.
+        await self._coord.phase_sweep.resume_unsettled_sweep()
+
+    async def _drain_for_transition(self, *, prior: str, target: str, reason: str, evidence: Any) -> bool:
+        """Clear the way to ``target`` and return whether the transition may commit on this tick.
+
+        The next phase starts on quiet GPUs: nothing new is admitted, queued work the next phase does not admit is
+        dropped, and the transition waits until every running action has finished and is booked in this phase.
+        Running work is cancelled only when the transition is terminal (``evidence["terminal"]``): the run is
+        already over, so there is no measurement left worth settling. Otherwise a phase budget only stops new work,
+        and cancelling the last action in flight would throw away the measurement it was about to settle; session
+        exhaustion and shutdown still cancel it through the dispatcher.
+        """
+        dispatcher = self._coord.dispatcher
+        barrier_reason = f"phase_transition:{str(prior or '').strip().upper()}->{target}"
+        cancelled = await self.tasks.cancel_queued(
+            allowed_kinds=_phase_state.PHASE_ALLOWED_ACTIONS.get(target, frozenset()),
+            reason=barrier_reason,
+        )
+        terminal = isinstance(evidence, dict) and bool(evidence.get("terminal"))
+        stopped = await dispatcher.cancel_inflight_actions(reason=barrier_reason) if terminal else []
+        if cancelled or stopped:
+            log.info(
+                "Coordinator.phase: %s (reason=%s) cancelled %d queued and stopped %d running task(s)",
+                barrier_reason,
+                reason,
+                len(cancelled),
+                len(stopped),
+            )
+            await self.bus.record_observation(
+                "coordinator",
+                "observation",
+                {
+                    "kind": "tasks_cancelled_on_phase_transition",
+                    "prior_phase": str(prior or ""),
+                    "target_phase": target,
+                    "reason": reason,
+                    "cancelled_task_ids": cancelled,
+                    "stopped_task_ids": stopped,
+                },
+            )
+        running = await self.tasks.running()
+        if running or dispatcher.has_unbooked_completions():
+            log.info(
+                "phase_machine: holding %s (reason=%s) until %d running task(s) finish and are booked",
+                barrier_reason,
+                reason,
+                len(running),
+            )
+            return False
+        return True
+
     async def _on_phase_entered(
         self,
         *,
@@ -400,7 +453,6 @@ class MachinePhase(CoordinatorCollaborator):
             to_phase=(to_phase or "").upper(),
             reason=str(reason or ""),
             evidence=evidence if isinstance(evidence, dict) else {},
-            loopback=bool(isinstance(evidence, dict) and evidence.get("loopback")),
         )
 
         self.fire_phase_exit(tr)

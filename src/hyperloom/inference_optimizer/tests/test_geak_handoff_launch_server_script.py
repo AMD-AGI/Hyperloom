@@ -74,13 +74,13 @@ def _recipe(
 
 
 def test_agentx_recipe_names_the_builtin_the_client_delegates_to(tmp_path: Path) -> None:
-    """The whole point: aiperf_client.sh in the recipe -> advertise vllm_mi355x.sh.
+    """The whole point: mlperf_agentic_client.sh in the recipe -> advertise vllm_mi355x.sh.
 
     ``runner_type`` supplies the GPU, matching the value Magpie projects into
     ``RUNNER_TYPE`` for the client's own ``{framework}_{gpu}.sh`` derivation.
     """
-    root = _checkout(tmp_path, "vllm_mi355x.sh", "aiperf_client.sh")
-    resolved = _RESOLVE(_recipe(tmp_path, benchmark_script="aiperf_client.sh", inferencex_path=str(root)))
+    root = _checkout(tmp_path, "vllm_mi355x.sh", "mlperf_agentic_client.sh")
+    resolved = _RESOLVE(_recipe(tmp_path, benchmark_script="mlperf_agentic_client.sh", inferencex_path=str(root)))
     assert resolved == str(root / "benchmarks" / "vllm_mi355x.sh")
 
 
@@ -107,25 +107,25 @@ def test_a_pinned_custom_launcher_is_never_rewritten(tmp_path: Path) -> None:
 
 def test_a_missing_builtin_stays_silent_instead_of_pinning_a_dead_path(tmp_path: Path) -> None:
     """No vllm_mi355x.sh on disk -> "" so GEAK degrades as it does today."""
-    root = _checkout(tmp_path, "aiperf_client.sh")
-    assert _RESOLVE(_recipe(tmp_path, benchmark_script="aiperf_client.sh", inferencex_path=str(root))) == ""
+    root = _checkout(tmp_path, "mlperf_agentic_client.sh")
+    assert _RESOLVE(_recipe(tmp_path, benchmark_script="mlperf_agentic_client.sh", inferencex_path=str(root))) == ""
 
 
 def test_a_checkout_without_benchmark_lib_stays_silent(tmp_path: Path) -> None:
     """The builtin sources benchmark_lib.sh from its own dir and dies without it,
     so a half-populated checkout must not be advertised."""
-    root = _checkout(tmp_path, "vllm_mi355x.sh", "aiperf_client.sh", lib=False)
-    assert _RESOLVE(_recipe(tmp_path, benchmark_script="aiperf_client.sh", inferencex_path=str(root))) == ""
+    root = _checkout(tmp_path, "vllm_mi355x.sh", "mlperf_agentic_client.sh", lib=False)
+    assert _RESOLVE(_recipe(tmp_path, benchmark_script="mlperf_agentic_client.sh", inferencex_path=str(root))) == ""
 
 
 def test_agentx_server_script_override_is_honoured(tmp_path: Path) -> None:
     """AGENTX_SERVER_SCRIPT overrides the derived name for the client, so it has
     to override ours too or we would advertise a server it never booted."""
-    root = _checkout(tmp_path, "vllm_special.sh", "aiperf_client.sh")
+    root = _checkout(tmp_path, "vllm_special.sh", "mlperf_agentic_client.sh")
     resolved = _RESOLVE(
         _recipe(
             tmp_path,
-            benchmark_script="aiperf_client.sh",
+            benchmark_script="mlperf_agentic_client.sh",
             inferencex_path=str(root),
             envs={"FRAMEWORK": "vllm", "AGENTX_SERVER_SCRIPT": "vllm_special.sh"},
         )
@@ -135,11 +135,11 @@ def test_agentx_server_script_override_is_honoured(tmp_path: Path) -> None:
 
 def test_recipe_gpu_type_env_beats_runner_type(tmp_path: Path) -> None:
     """Mirrors the client's ``${GPU_TYPE:-${RUNNER_TYPE:-mi300x}}`` precedence."""
-    root = _checkout(tmp_path, "vllm_mi300x.sh", "vllm_mi355x.sh", "aiperf_client.sh")
+    root = _checkout(tmp_path, "vllm_mi300x.sh", "vllm_mi355x.sh", "mlperf_agentic_client.sh")
     resolved = _RESOLVE(
         _recipe(
             tmp_path,
-            benchmark_script="aiperf_client.sh",
+            benchmark_script="mlperf_agentic_client.sh",
             inferencex_path=str(root),
             runner_type="mi355x",
             envs={"FRAMEWORK": "vllm", "GPU_TYPE": "mi300x"},
@@ -151,12 +151,12 @@ def test_recipe_gpu_type_env_beats_runner_type(tmp_path: Path) -> None:
 def test_falls_back_to_the_inferencex_path_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The recipe's checkout is container-local and content-hash addressed, so a
     post-mortem or rebuilt box resolves against $INFERENCEX_PATH instead."""
-    root = _checkout(tmp_path, "vllm_mi355x.sh", "aiperf_client.sh")
+    root = _checkout(tmp_path, "vllm_mi355x.sh", "mlperf_agentic_client.sh")
     monkeypatch.setenv("INFERENCEX_PATH", str(root))
     resolved = _RESOLVE(
         _recipe(
             tmp_path,
-            benchmark_script="aiperf_client.sh",
+            benchmark_script="mlperf_agentic_client.sh",
             inferencex_path="/gone/InferenceX@deadbeef",
         )
     )
@@ -166,12 +166,12 @@ def test_falls_back_to_the_inferencex_path_env(tmp_path: Path, monkeypatch: pyte
 def test_a_framework_less_agentx_recipe_stays_silent(tmp_path: Path) -> None:
     """Without a framework there is no builtin name to derive, and guessing one
     would boot the wrong server."""
-    root = _checkout(tmp_path, "vllm_mi355x.sh", "aiperf_client.sh")
+    root = _checkout(tmp_path, "vllm_mi355x.sh", "mlperf_agentic_client.sh")
     assert (
         _RESOLVE(
             _recipe(
                 tmp_path,
-                benchmark_script="aiperf_client.sh",
+                benchmark_script="mlperf_agentic_client.sh",
                 inferencex_path=str(root),
                 framework="",
                 envs={},

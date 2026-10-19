@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from kernelforge.knowledge.kb_store.identity.source_resolution import (
+    KernelSources,
     detect_backend_language,
     infer_source_owner_framework,
     resolve_operation,
@@ -35,28 +38,34 @@ PATCH_ARTIFACT = "solution.patch"
 EXPERIENCE_ARTIFACT = "experience.md"
 
 
+@dataclass(frozen=True)
+class LoopKernel:
+    """The kernel a forge-loop run optimizes, the workspace it lives in, and the hints that name its operator."""
+
+    kernel_path: str
+    kernel_backend: str
+    kernel_source: str = ""
+    target_functions: list[str] | None = None
+    source_files: list[str] | None = None
+    framework: str = ""
+    operator_name: str = ""
+    workspace: str = ""
+
+
 def resolve_loop_identity(
+    kernel: LoopKernel,
     *,
-    kernel_path: str,
-    kernel_source: str,
-    kernel_backend: str,
     gpu_type: str,
-    target_functions: list[str] | None = None,
-    source_files: list[str] | None = None,
-    framework: str = "",
-    operator_name: str = "",
     producer: str = "",
 ) -> tuple[KernelRecipeIdentity, str, str]:
     """Return ``(identity, concrete_op, framework)`` for this run."""
-    concrete_op = resolve_operation(kernel_source, kernel_path, target_functions=target_functions)
-    operator = normalize_operator_name(operator_name or concrete_op)
-    backend = detect_backend_language(kernel_backend)
+    concrete_op = resolve_operation(kernel.kernel_source, kernel.kernel_path, target_functions=kernel.target_functions)
+    operator = normalize_operator_name(kernel.operator_name or concrete_op)
+    backend = detect_backend_language(kernel.kernel_backend)
     resolved_framework = infer_source_owner_framework(
-        kernel_path=kernel_path,
-        kernel_source=kernel_source,
-        target_functions=target_functions,
-        source_files=source_files,
-        framework_override=framework,
+        KernelSources(kernel.kernel_path, kernel.kernel_source, kernel.source_files),
+        target_functions=kernel.target_functions,
+        framework_override=kernel.framework,
         concrete_operation=concrete_op,
     )
     identity = KernelRecipeIdentity(
@@ -75,6 +84,7 @@ def resolve_loop_identity(
 __all__ = [
     "EXPERIENCE_ARTIFACT",
     "LOOP_PRODUCER",
+    "LoopKernel",
     "PATCH_ARTIFACT",
     "resolve_loop_identity",
 ]

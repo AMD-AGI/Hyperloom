@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 from contextlib import closing
+from datetime import datetime, timezone
 
 import pytest
 
@@ -18,6 +20,7 @@ from hyperloom.inference_optimizer.session.resume_guard import (
     CleanupConfirmationError,
     ResumeBlocked,
     confirm_scope_gone,
+    confirm_task_stopped,
     ensure_resume_safe,
 )
 from hyperloom.orchestrator.bus.storage.schema import ensure_schema
@@ -124,6 +127,34 @@ def test_lost_scope_blocks_resume_until_confirmed_then_work_is_redone(tmp_path, 
     assert record["owner_scope"] == LOST and record["confirmed_by_scope"] == HERE
     assert record["confirmation_reason"] == REASON and record["operator"]
     assert record["cancelled_tasks"] == sorted(running)
+
+
+def test_lane_less_close_task_needs_confirm_stopped_after_the_scope_is_confirmed(tmp_path):
+    """A pod lost during CLOSE: the close step ran without a lane, so it holds no scoped lease."""
+    path = _session(tmp_path, LOST_SHAPES["explore"])
+    _execute(
+        path,
+        "INSERT INTO tasks (task_id, kind, state, params, idempotency_key, requires_lanes, history,"
+        " created_at, updated_at) VALUES ('report-1', 'report', 'running', '{}', 'report-1', '[]', ?, ?, ?)",
+        (json.dumps([{"ts": PAST, "from": "queued", "to": "running"}]), PAST, PAST),
+    )
+    confirmed = confirm_scope_gone(tmp_path, owner_scope=LOST, reason=REASON, current_scope=HERE)
+    assert [task["task_id"] for task in confirmed["tasks"]] == ["explore-1"]
+
+    with pytest.raises(ResumeBlocked) as blocked:
+        ensure_resume_safe(tmp_path, owner_scope=HERE)
+    message = str(blocked.value)
+    assert "task='report-1' lane='unknown' holder='unknown'" in message
+    assert "other owner scopes:" not in message
+    assert "legacy" not in message
+    assert "For a listed task that names no owner scope" in message
+    assert "--confirm-stopped <task-id>" in message
+
+    confirm_task_stopped(tmp_path, task_id="report-1", reason=REASON)
+
+    ensure_resume_safe(tmp_path, owner_scope=HERE)
+    states = {row["task_id"]: row["state"] for row in _rows(path, "SELECT task_id, state FROM tasks")}
+    assert states["report-1"] == "cancelled"
 
 
 @pytest.mark.parametrize("round_expires_unix", [1.0, 32503680000.0])
@@ -317,3 +348,48 @@ def test_recover_cli_rejects_bad_combinations_without_change(tmp_path, monkeypat
     assert path.read_bytes() == before
     with pytest.raises(ResumeBlocked):
         ensure_resume_safe(tmp_path, owner_scope=HERE)
+
+
+# The two-part scope earlier versions recorded, and this container's three-part scope of
+# the same boot and PID namespace: a later container on the node repeated the inode.
+LEGACY = "0d0d0d0d-4444-4444-8444-000000000004:4026552241"
+HERE_NOW = LEGACY + ":123456"
+
+
+def _legacy_session(tmp_path, *, pid, acquired):
+    path = _session(tmp_path, {"explore-1": ["benchmark_lane"]}, scope=LEGACY, expires=FUTURE)
+    _execute(path, "UPDATE leases SET pid=?, acquired_at=?", (pid, acquired))
+    return path
+
+
+def test_an_earlier_containers_two_part_scope_with_no_holder_here_is_confirmed(tmp_path):
+    """Production 10-14: the lost container's two-part scope equaled the new container's
+    boot and namespace; recover refused it as current. Its holder does not run here."""
+    path = _legacy_session(tmp_path, pid=4519, acquired=PAST)
+    result = confirm_scope_gone(tmp_path, owner_scope=LEGACY, reason=REASON, current_scope=HERE_NOW)
+    assert result["status"] == "confirmed"
+    assert _rows(path, "SELECT * FROM leases") == []
+
+
+def test_a_two_part_scope_whose_holder_runs_in_this_container_is_refused(tmp_path):
+    """An optimizer of an earlier version still running here took the lease: not gone."""
+    started = datetime.now(timezone.utc).isoformat()
+    path = _legacy_session(tmp_path, pid=os.getpid(), acquired=started)
+    with pytest.raises(CleanupConfirmationError, match="still runs in this execution environment"):
+        confirm_scope_gone(tmp_path, owner_scope=LEGACY, reason=REASON, current_scope=HERE_NOW)
+    assert len(_rows(path, "SELECT * FROM leases")) == 1
+    assert _ledger(tmp_path) == []
+
+
+def test_a_reused_pid_that_started_after_the_lease_is_not_its_holder(tmp_path):
+    path = _legacy_session(tmp_path, pid=os.getpid(), acquired=PAST)
+    result = confirm_scope_gone(tmp_path, owner_scope=LEGACY, reason=REASON, current_scope=HERE_NOW)
+    assert result["status"] == "confirmed"
+    assert _rows(path, "SELECT * FROM leases") == []
+
+
+def test_resume_after_an_in_place_upgrade_still_sees_its_own_two_part_lease(tmp_path):
+    """A session continued in the container that recorded the two-part scope: its rows are
+    local, for the dead-holder reaper to judge, not a foreign scope that blocks."""
+    _legacy_session(tmp_path, pid=os.getpid(), acquired=datetime.now(timezone.utc).isoformat())
+    ensure_resume_safe(tmp_path, owner_scope=HERE_NOW)

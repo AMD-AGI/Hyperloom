@@ -273,17 +273,14 @@ class FmoeCKTuner(BaseTuner):
                 },
             )
             rc, stdout, stderr, iso_candidate = _tr.run_isolated(
-                script=str(script),
-                base_args=base_args,
-                input_csv=untuned_csv,
-                tuned_stem=tuned_csv.stem,
-                work_dir=self.work_dir,
-                aiter_root=aiter_root,
-                outer_timeout_s=self.ctx.timeout_s,
-                task_timeout_s=_tr.DEFAULT_TASK_TIMEOUT_S,
-                gpu_ids=getattr(self.ctx, "gpu_ids", "") or "",
-                blocklist=blocklist,
-                env_override=env_override,
+                _tr.TunerInvocation(str(script), base_args, untuned_csv, tuned_csv, self.work_dir, aiter_root),
+                _tr.IsolationGuard(
+                    outer_timeout_s=self.ctx.timeout_s,
+                    task_timeout_s=_tr.DEFAULT_TASK_TIMEOUT_S,
+                    gpu_ids=getattr(self.ctx, "gpu_ids", "") or "",
+                    blocklist=blocklist,
+                ),
+                env_override,
             )
         else:
             cmd = _tr.with_task_timeout(

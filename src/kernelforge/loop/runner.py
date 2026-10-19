@@ -30,7 +30,7 @@ from hyperloom.common.unified_diff import touched_paths
 from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON
 from kernelforge.llm.process_reaping import processes_under
 from kernelforge.llm.workspace_policy import is_protected_path
-from kernelforge.llm.git import git
+from kernelforge.llm.git import git, git_bytes
 from kernelforge.config import Config
 from kernelforge.loop.canonical_correctness import accept_candidate
 from kernelforge.loop.validation import run_validation_pipeline
@@ -40,6 +40,10 @@ from kernelforge.loop.lessons import (
     UNDISPROVEN_CLAIM,
     LessonScope,
     LessonStore,
+    OutcomeMeasurement,
+    PrReferenceNote,
+    SessionEnd,
+    SessionObservations,
     build_fallback_document,
     cases_named_in,
     format_outcome_line,
@@ -62,8 +66,10 @@ from kernelforge.loop.search_policy import (
     MARGINAL_GAIN_WINDOW,
     NO_CHANGES_STREAK_WINDOW,
     SEARCH_MODE_EXPLOIT,
+    RecentProgress,
     SearchPolicyDecision,
     SearchPolicyEngine,
+    SearchState,
 )
 from kernelforge.loop.round_budget import (
     admit_dispatch,
@@ -77,8 +83,12 @@ from kernelforge.loop.run_state import (
     SESSION_PAUSED,
     BestRecord,
     CriticRuling,
+    IterationVerdict,
+    LoopStanding,
     LoopStateStore,
+    RoundCost,
     RunState,
+    StallPolicy,
     pin_iteration,
     apply_iteration,
     apply_round_cost,
@@ -107,11 +117,12 @@ from kernelforge.loop.prompt_view import (
     MAX_RECENT_ATTEMPT_LINES,
     render_long_horizon_header,
 )
-from kernelforge.loop.reporting import BestResultPublisher
+from kernelforge.loop.reporting import BestResultPublisher, KeepBundle, KeepIdentity, KeepScore
 from kernelforge.mcp_server.tools.bench import (
     CaseCoverageError,
     calculate_mean_case_speedup,
     calculate_measurement_case_speedups,
+    BenchRun,
     measure_wallclock,
 )
 from kernelforge.mcp_server.tools._subprocess import communicate_process_group
@@ -153,7 +164,7 @@ from kernelforge.loop.merge_candidates import (
     select_merge_pair,
 )
 from kernelforge.mcp_server.tools.registers import check_registers
-from kernelforge.tracker import ExperimentTracker, Experiment
+from kernelforge.tracker import CampaignSegment, ExperimentTracker, Experiment, ExperimentSubject
 
 log = logging.getLogger(__name__)
 
@@ -546,6 +557,99 @@ class HeldRound(NamedTuple):
 
     plan_path: Path | None
     error: str
+
+
+class _StagedMerge(NamedTuple):
+    """A stacked pair staged for measurement, and the diff that stacks it."""
+
+    pair: tuple | None
+    diff: str
+
+
+@dataclass(frozen=True)
+class _IterationFrame:
+    """One iteration's number, its session hand-back, its staged merge and the best it is measured against."""
+
+    iteration: int
+    session_sink: dict
+    merge: _StagedMerge
+    best_before: float | None = None
+    best_mean_case_speedup_before: float | None = None
+
+
+class _Ruling(NamedTuple):
+    """What ruling on an attempt leaves to finish: the pending KEEP, whether its checkpoint is final, its commit."""
+
+    pending_keep: dict | None
+    keep_checkpoint_finalized: bool
+    commit_hash: str
+
+
+@dataclass(frozen=True)
+class _IterationSupply:
+    """What an iteration already holds before it buys a session: a device hazard, a queued lane, a fan-out plan."""
+
+    hazard: Any
+    queued_lane: Any
+    fan_out_plan: HeldRound | None
+
+
+@dataclass(frozen=True)
+class _RoundPlan:
+    """The plan an orchestrated round synthesized, and whether it is executable."""
+
+    path: str = ""
+    executable: bool = False
+
+
+@dataclass(frozen=True)
+class DirectionEvidence:
+    """A decided candidate's measured score, the incumbent's, and the per-case timings behind them."""
+
+    mean_case_speedup: float | None
+    best_mean_case_speedup: float | None
+    bench_detail: dict | None = None
+    incumbent_case_times: dict[str, float] | None = None
+
+
+@dataclass(frozen=True)
+class LoopAgents:
+    """The sessions and services the loop drives: implementer, lane factory, analysis, orchestration, supervisor."""
+
+    agent_fn: Any = None
+    agent_factory: Any = None
+    analysis_service: Any = None
+    orchestration_service: Any = None
+    supervisor_fn: Any = None
+
+
+@dataclass(frozen=True)
+class LoopCallbacks:
+    """What the caller is told as the loop runs: each iteration, each committed best, each best ready to publish."""
+
+    on_iteration: Any = None
+    on_best_committed: Any = None
+    on_best_ready: Any = None
+
+
+def _verdict_of(result: "IterationResult", decision: str, plan: str) -> IterationVerdict:
+    """The run-state verdict of one decided iteration."""
+    return IterationVerdict(
+        result.iteration, decision, result.kept, result.wall_ms, result.commit_hash, plan, result.mean_case_speedup
+    )
+
+
+class _Attempt(NamedTuple):
+    """The candidate an iteration will measure, and where it came from."""
+
+    unmeasured_result: IterationResult | None
+    commit_hash: str
+    rationale: str
+    attempt_source: str
+    attempt_diff: str
+    reusable_benchmark: object | None
+    optimization_plan_path: str
+    optimization_plan_executable: bool
 
 
 @dataclass
@@ -1081,15 +1185,7 @@ class IterationLoop(AnalysisRuntimeMixin):
 
     def _list_untracked(self) -> list[str]:
         """Every untracked, non-ignored path in the workspace, as git reports it."""
-        listed = git(
-            "ls-files",
-            "--others",
-            "--exclude-standard",
-            "-z",
-            cwd=self.ic.workspace_dir,
-            check=False,
-            text=False,
-        )
+        listed = git_bytes("ls-files", "--others", "--exclude-standard", "-z", cwd=self.ic.workspace_dir, check=False)
         if listed.returncode != 0:
             detail = (listed.stderr or listed.stdout).decode(
                 errors="surrogateescape"
@@ -1513,31 +1609,38 @@ class IterationLoop(AnalysisRuntimeMixin):
         benchmark.setdefault("mean_case_speedup", result.mean_case_speedup)
         try:
             self.best_publisher.publish(
-                campaign_id=self.run_state.campaign_id,
-                session_index=int((pending or {}).get("session_index", self.run_state.session_index)),
-                experiment_id=(
-                    str((pending or {}).get("experiment_id") or "")
-                    or (self.experiment.experiment_id if self.experiment else "")
+                KeepIdentity(
+                    campaign_id=self.run_state.campaign_id,
+                    session_index=int((pending or {}).get("session_index", self.run_state.session_index)),
+                    experiment_id=(
+                        str((pending or {}).get("experiment_id") or "")
+                        or (self.experiment.experiment_id if self.experiment else "")
+                    ),
+                    iteration=result.iteration,
+                    commit_hash=result.commit_hash,
+                    plan=plan,
                 ),
-                iteration=result.iteration,
-                commit_hash=result.commit_hash,
-                plan=plan,
-                baseline_wall_ms=baseline,
-                search_start_ms=(self.ic.warm_start_wall_ms or self.ic.baseline_wall_ms),
-                best_wall_ms=result.wall_ms,
-                mean_case_speedup=result.mean_case_speedup,
-                search_start_mean_case_speedup=(
-                    self.ic.warm_start_mean_case_speedup or self.search_start_mean_case_speedup or 1.0
+                KeepScore(
+                    baseline_wall_ms=baseline,
+                    best_wall_ms=result.wall_ms,
+                    mean_case_speedup=result.mean_case_speedup,
+                    search_start_mean_case_speedup=(
+                        self.ic.warm_start_mean_case_speedup or self.search_start_mean_case_speedup or 1.0
+                    ),
+                    snr_db=result.snr_db,
+                    search_start_ms=(self.ic.warm_start_wall_ms or self.ic.baseline_wall_ms),
                 ),
-                snr_db=result.snr_db,
-                validation_text=validation_text,
-                benchmark=benchmark,
-                changed_files=(
-                    list((pending or {}).get("publication_changed_files") or [])
-                    or self._publication_changed_files(result.commit_hash)
-                ),
-                patch=(
-                    str((pending or {}).get("publication_patch") or "") or self._publication_patch(result.commit_hash)
+                KeepBundle(
+                    validation_text=validation_text,
+                    benchmark=benchmark,
+                    changed_files=(
+                        list((pending or {}).get("publication_changed_files") or [])
+                        or self._publication_changed_files(result.commit_hash)
+                    ),
+                    patch=(
+                        str((pending or {}).get("publication_patch") or "")
+                        or self._publication_patch(result.commit_hash)
+                    ),
                 ),
                 round_budget=self._round_budget_summary(),
             )
@@ -2028,12 +2131,11 @@ class IterationLoop(AnalysisRuntimeMixin):
         *,
         iteration: int,
         decision_label: str,
-        mean_case_speedup: float | None,
-        best_mean_case_speedup: float | None,
-        bench_detail: dict | None = None,
-        incumbent_case_times: dict[str, float] | None = None,
+        evidence: DirectionEvidence,
     ) -> None:
         """Pin a rejected candidate that still measured faster than the incumbent."""
+        mean_case_speedup, best_mean_case_speedup = evidence.mean_case_speedup, evidence.best_mean_case_speedup
+        bench_detail, incumbent_case_times = evidence.bench_detail, evidence.incumbent_case_times
         if decision_label != "REVERT_PERF":
             return
         if beats_current_best(
@@ -2052,6 +2154,10 @@ class IterationLoop(AnalysisRuntimeMixin):
         ):
             pin_iteration(state, iteration)
 
+    def _stall_policy(self) -> StallPolicy:
+        """The stall and orchestration-error thresholds this campaign was configured with."""
+        return StallPolicy(self.ic.supervise_after, self.ic.max_consecutive_orchestration_errors)
+
     def _apply_replayed_non_keep(self, state: RunState, event: dict) -> None:
         """Reduce one validated non-KEEP event without persisting state."""
         iteration = int(event["iter"])
@@ -2060,54 +2166,68 @@ class IterationLoop(AnalysisRuntimeMixin):
             raise ValueError(f"iteration {iteration} is not a replayable non-KEEP event")
         apply_iteration(
             state,
-            iteration=iteration,
-            decision=decision,
-            kept=False,
-            wall_ms=event.get("wall_ms"),
-            mean_case_speedup=event.get("mean_case_speedup"),
-            commit_hash=str(event.get("commit_hash") or ""),
-            plan=str(event.get("plan") or ""),
-            baseline_wall_ms=state.baseline_wall_ms,
-            best_wall_ms=event.get("best_after_ms"),
-            best_mean_case_speedup=event.get("best_after_mean_case_speedup"),
-            stall_threshold=self.ic.supervise_after,
-            orchestration_error_threshold=(self.ic.max_consecutive_orchestration_errors),
+            IterationVerdict(
+                iteration=iteration,
+                decision=decision,
+                kept=False,
+                wall_ms=event.get("wall_ms"),
+                commit_hash=str(event.get("commit_hash") or ""),
+                plan=str(event.get("plan") or ""),
+                mean_case_speedup=event.get("mean_case_speedup"),
+            ),
+            LoopStanding(
+                baseline_wall_ms=state.baseline_wall_ms,
+                best_wall_ms=event.get("best_after_ms"),
+                best_mean_case_speedup=event.get("best_after_mean_case_speedup"),
+            ),
+            self._stall_policy(),
         )
         state.diversification_cycle_completed = event.get("diversification_cycle_completed") is True
         self._record_direction_verdict(
             state,
             iteration=iteration,
             decision_label=decision,
-            mean_case_speedup=event.get("mean_case_speedup"),
-            # A non-KEEP leaves the incumbent untouched, so the recorded post-decision score is the bar this candidate
-            # had to clear.
-            best_mean_case_speedup=event.get("best_after_mean_case_speedup"),
+            evidence=DirectionEvidence(
+                mean_case_speedup=event.get("mean_case_speedup"),
+                # A non-KEEP leaves the incumbent untouched, so the recorded post-decision score is the bar this
+                # candidate had to clear.
+                best_mean_case_speedup=event.get("best_after_mean_case_speedup"),
+            ),
         )
 
-    def _plan_resume_recovery(
-        self,
-        state: RunState,
-        pending: dict | None,
-    ) -> tuple[RunState, str, IterationResult | None, bool]:
-        """Validate and reduce the complete contiguous recovery window."""
-        planned = copy.deepcopy(state)
-        events_by_iteration: dict[int, dict] = {}
+    def _iteration_result_events(self) -> dict[int, dict]:
+        """Every recorded iteration result, keyed by iteration.
+
+        A duplicate is refused rather than taken twice: the journal is what a
+        resume replays from, so two records of one iteration would apply it
+        twice.
+        """
+        events: dict[int, dict] = {}
         for event in self.state_store.read_events():
             if event.get("type") != "iteration_result":
                 continue
             iteration = int(event["iter"])
-            if iteration in events_by_iteration:
+            if iteration in events:
                 raise ValueError(f"duplicate iteration_result events for iteration {iteration}")
-            events_by_iteration[iteration] = event
+            events[iteration] = event
+        return events
 
-        cursor = planned.next_iteration
-        pending_iteration = int(pending.get("iteration", 0) or 0) if pending is not None else None
-        if pending is not None and pending_iteration <= 0:
-            raise ValueError("pending KEEP metadata is incomplete")
+    def _replay_non_keep_events(
+        self,
+        planned: RunState,
+        events_by_iteration: dict[int, dict],
+        iterations: list[int],
+        cursor: int,
+        *,
+        boundary: int | None,
+    ) -> int:
+        """Replay the contiguous non-KEEP iterations below ``boundary``; return the cursor after them.
 
-        forward_iterations = sorted(iteration for iteration in events_by_iteration if iteration >= cursor)
-        boundary = pending_iteration
-        for iteration in forward_iterations:
+        The window has to be contiguous and KEEP-free: a gap means the journal
+        is missing a record this resume would skip over, and a KEEP with no
+        pending journal means one landed that was never checkpointed.
+        """
+        for iteration in iterations:
             if boundary is not None and iteration >= boundary:
                 break
             if iteration != cursor:
@@ -2117,18 +2237,88 @@ class IterationLoop(AnalysisRuntimeMixin):
                 raise ValueError(f"uncheckpointed KEEP iteration {iteration} has no matching pending journal")
             self._apply_replayed_non_keep(planned, event)
             cursor = planned.next_iteration
+        return cursor
 
+    def _adopt_pending_keep(
+        self,
+        planned: RunState,
+        pending: dict,
+        keep_event: dict | None,
+        *,
+        pending_iteration: int,
+        already_applied: bool,
+    ) -> tuple[str, IterationResult | None, bool]:
+        """Fold the pending KEEP into the planned state; return its status, result and whether it still needs an event."""
+        status = self._inspect_pending_keep(planned, pending)
+        if keep_event is not None and keep_event.get("decision") != "KEEP":
+            raise ValueError(f"pending KEEP conflicts with iteration {pending_iteration} event")
+        if status == "uncommitted":
+            if keep_event is not None:
+                raise ValueError(f"uncommitted pending KEEP iteration {pending_iteration} already has a KEEP event")
+            return status, None, False
+
+        current_head = self._git("rev-parse", "HEAD").splitlines()[0]
+        result = self._pending_keep_result(pending, current_head)
+        if keep_event is not None:
+            self._require_matching_keep_event(
+                keep_event,
+                pending,
+                current_head,
+            )
+        if not already_applied:
+            apply_iteration(
+                planned,
+                IterationVerdict(
+                    iteration=result.iteration,
+                    decision="KEEP",
+                    kept=True,
+                    wall_ms=result.wall_ms,
+                    commit_hash=result.commit_hash,
+                    plan=str(pending.get("plan") or ""),
+                    mean_case_speedup=result.mean_case_speedup,
+                ),
+                LoopStanding(
+                    baseline_wall_ms=planned.baseline_wall_ms,
+                    best_wall_ms=result.wall_ms,
+                    best_mean_case_speedup=result.mean_case_speedup,
+                ),
+                self._stall_policy(),
+            )
+            control = pending.get("search_control")
+            if isinstance(control, dict):
+                planned.diversification_cycle_completed = control.get("diversification_cycle_completed") is True
+        elif (
+            planned.best.iteration != result.iteration
+            or planned.best.commit_hash != result.commit_hash
+            or planned.best.wall_ms != result.wall_ms
+            or planned.best.mean_case_speedup != result.mean_case_speedup
+        ):
+            raise ValueError(f"run state conflicts with KEEP iteration {result.iteration}")
+        return status, result, keep_event is None
+
+    def _plan_resume_recovery(
+        self,
+        state: RunState,
+        pending: dict | None,
+    ) -> tuple[RunState, str, IterationResult | None, bool]:
+        """Validate and reduce the complete contiguous recovery window."""
+        planned = copy.deepcopy(state)
+        events_by_iteration = self._iteration_result_events()
+
+        cursor = planned.next_iteration
+        pending_iteration = int(pending.get("iteration", 0) or 0) if pending is not None else None
+        if pending is not None and pending_iteration <= 0:
+            raise ValueError("pending KEEP metadata is incomplete")
+
+        forward_iterations = sorted(iteration for iteration in events_by_iteration if iteration >= cursor)
+        cursor = self._replay_non_keep_events(
+            planned,
+            events_by_iteration,
+            forward_iterations,
+            cursor,
+            boundary=pending_iteration,
+        )
         if pending is None:
-            for iteration in forward_iterations:
-                if iteration < cursor:
-                    continue
-                if iteration != cursor:
-                    raise ValueError(f"iteration_result recovery gap: expected {cursor}, got {iteration}")
-                event = events_by_iteration[iteration]
-                if event.get("decision") == "KEEP":
-                    raise ValueError(f"uncheckpointed KEEP iteration {iteration} has no pending journal")
-                self._apply_replayed_non_keep(planned, event)
-                cursor = planned.next_iteration
             return planned, "", None, False
 
         assert pending_iteration is not None
@@ -2143,50 +2333,14 @@ class IterationLoop(AnalysisRuntimeMixin):
                 f"iteration_result exists after pending KEEP iteration {pending_iteration}: {later_events[0]}"
             )
 
-        status = self._inspect_pending_keep(planned, pending)
-        keep_event = events_by_iteration.get(pending_iteration)
-        if keep_event is not None and keep_event.get("decision") != "KEEP":
-            raise ValueError(f"pending KEEP conflicts with iteration {pending_iteration} event")
-        if status == "uncommitted":
-            if keep_event is not None:
-                raise ValueError(f"uncommitted pending KEEP iteration {pending_iteration} already has a KEEP event")
-            return planned, status, None, False
-
-        current_head = self._git("rev-parse", "HEAD").splitlines()[0]
-        result = self._pending_keep_result(pending, current_head)
-        if keep_event is not None:
-            self._require_matching_keep_event(
-                keep_event,
-                pending,
-                current_head,
-            )
-        if not already_applied:
-            apply_iteration(
-                planned,
-                iteration=result.iteration,
-                decision="KEEP",
-                kept=True,
-                wall_ms=result.wall_ms,
-                mean_case_speedup=result.mean_case_speedup,
-                commit_hash=result.commit_hash,
-                plan=str(pending.get("plan") or ""),
-                baseline_wall_ms=planned.baseline_wall_ms,
-                best_wall_ms=result.wall_ms,
-                best_mean_case_speedup=result.mean_case_speedup,
-                stall_threshold=self.ic.supervise_after,
-                orchestration_error_threshold=(self.ic.max_consecutive_orchestration_errors),
-            )
-            control = pending.get("search_control")
-            if isinstance(control, dict):
-                planned.diversification_cycle_completed = control.get("diversification_cycle_completed") is True
-        elif (
-            planned.best.iteration != result.iteration
-            or planned.best.commit_hash != result.commit_hash
-            or planned.best.wall_ms != result.wall_ms
-            or planned.best.mean_case_speedup != result.mean_case_speedup
-        ):
-            raise ValueError(f"run state conflicts with KEEP iteration {result.iteration}")
-        return planned, status, result, keep_event is None
+        status, result, append_keep = self._adopt_pending_keep(
+            planned,
+            pending,
+            events_by_iteration.get(pending_iteration),
+            pending_iteration=pending_iteration,
+            already_applied=already_applied,
+        )
+        return planned, status, result, append_keep
 
     def _coordinate_resume_recovery(self, on_best_committed=None) -> None:
         """Replay, reconcile, and checkpoint one ordered recovery transaction."""
@@ -2421,11 +2575,13 @@ class IterationLoop(AnalysisRuntimeMixin):
         try:
             apply_round_cost(
                 self.run_state,
-                iteration=self._round_iteration,
-                lanes=self._round_lanes,
-                planning_sec=planning_sec,
-                total_sec=total_sec,
-                measurement_sec=measurement_sec,
+                RoundCost(
+                    iteration=self._round_iteration,
+                    lanes=self._round_lanes,
+                    planning_sec=planning_sec,
+                    total_sec=total_sec,
+                    measurement_sec=measurement_sec,
+                ),
                 campaign_sec=self._advance_campaign_clock(),
             )
             self.state_store.append_event(
@@ -2654,11 +2810,9 @@ class IterationLoop(AnalysisRuntimeMixin):
                 print(f"  Baseline build FAILED: {_build_failure_tail(stdout, stderr, 300)}")
                 return None
         bench_result = await measure_wallclock(
-            driver_script=self.ic.driver_script,
-            driver_args=[],
+            BenchRun(self.ic.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
             measurements=KEEP_MEASUREMENT_COUNT,
             timeout_sec=self.ic.bench_timeout_sec,
-            repeat=self.ic.bench_repeat,
         )
         if not bench_result.get("success"):
             print("  Baseline bench FAILED: " + _bench_failure_detail(bench_result))
@@ -2882,11 +3036,9 @@ class IterationLoop(AnalysisRuntimeMixin):
         while rounds < SIGMA_REMEASURE_MAX_ROUNDS and current.dominant_case is not None:
             remeasure_started = time.time()
             extra = await measure_wallclock(
-                driver_script=self.ic.driver_script,
-                driver_args=[],
+                BenchRun(self.ic.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
                 measurements=SIGMA_REMEASURE_BATCH,
                 timeout_sec=self.ic.bench_timeout_sec,
-                repeat=self.ic.bench_repeat,
             )
             self._observe_measurement(remeasure_started)
             rounds += 1
@@ -3310,7 +3462,6 @@ class IterationLoop(AnalysisRuntimeMixin):
                 )
             if self.monitor is not None:
                 self.monitor.no_improve_streak = self.run_state.stall.no_improvement_iters
-                self.monitor.last_intervention_iter = self.run_state.stall.last_supervisor_iter or -10_000
                 self.monitor.last_attempt_iter = self.run_state.stall.last_supervisor_attempt_iter or -10_000
                 self.monitor.intervention_count = self.run_state.intervention_count
             if self.resume:
@@ -3526,18 +3677,9 @@ class IterationLoop(AnalysisRuntimeMixin):
             if newly_applied:
                 apply_iteration(
                     self.run_state,
-                    iteration=result.iteration,
-                    decision=decision_label,
-                    kept=result.kept,
-                    wall_ms=result.wall_ms,
-                    mean_case_speedup=result.mean_case_speedup,
-                    commit_hash=result.commit_hash,
-                    plan=plan,
-                    baseline_wall_ms=self.ic.baseline_wall_ms,
-                    best_wall_ms=self.best_wall_ms,
-                    best_mean_case_speedup=self.best_mean_case_speedup,
-                    stall_threshold=self.ic.supervise_after,
-                    orchestration_error_threshold=(self.ic.max_consecutive_orchestration_errors),
+                    _verdict_of(result, decision_label, plan),
+                    LoopStanding(self.ic.baseline_wall_ms, self.best_wall_ms, self.best_mean_case_speedup),
+                    self._stall_policy(),
                 )
             elif result.kept and (
                 self.run_state.best.iteration != result.iteration
@@ -3571,10 +3713,12 @@ class IterationLoop(AnalysisRuntimeMixin):
                     self.run_state,
                     iteration=result.iteration,
                     decision_label=decision_label,
-                    mean_case_speedup=result.mean_case_speedup,
-                    best_mean_case_speedup=self.best_mean_case_speedup,
-                    bench_detail=result.bench_detail,
-                    incumbent_case_times=self._scored_incumbent_case_times(),
+                    evidence=DirectionEvidence(
+                        mean_case_speedup=result.mean_case_speedup,
+                        best_mean_case_speedup=self.best_mean_case_speedup,
+                        bench_detail=result.bench_detail,
+                        incumbent_case_times=self._scored_incumbent_case_times(),
+                    ),
                 )
             self.state_store.save(self.run_state)
 
@@ -3757,7 +3901,6 @@ class IterationLoop(AnalysisRuntimeMixin):
 
     def _lesson_scope(
         self,
-        store: LessonStore,
         iteration: int,
         session_sink: dict,
         *,
@@ -3769,7 +3912,7 @@ class IterationLoop(AnalysisRuntimeMixin):
         scored = tuple(self._scored_case_ids())
         named = cases_named_in(str(session_sink.get("plan") or ""), scored)
         restricted = bool(named) and len(named) < len(scored)
-        document = store.read(iteration)
+        document = self.lessons.read(iteration)
         return LessonScope(
             cases=named if restricted else scored,
             held_fixed=parse_held_fixed(document),
@@ -3816,8 +3959,7 @@ class IterationLoop(AnalysisRuntimeMixin):
                     iteration=iteration,
                     end_reason=result.session_end_reason,
                     summarizer=session_sink.get("summarize"),
-                    pr_references=self.ic.pr_reference_labels,
-                    pr_reference_context=self.ic.pr_reference_context,
+                    references=PrReferenceNote(self.ic.pr_reference_labels, self.ic.pr_reference_context),
                 )
                 has_narrative = bool(outcome)
                 agent_narrative = has_narrative
@@ -3839,13 +3981,13 @@ class IterationLoop(AnalysisRuntimeMixin):
             # No session could describe what was explored, but the gate's block reasons are a real record of what the
             # agent ran into.
             fallback = build_fallback_document(
-                diff_summary=diff_summary,
-                findings=session_sink.get("findings", ""),
-                end_reason=result.session_end_reason,
-                summary_failure=summary_failure,
-                turns=result.turns,
-                plan=session_sink.get("plan", ""),
-                progress_log=session_sink.get("progress_log"),
+                SessionObservations(
+                    diff_summary=diff_summary,
+                    findings=session_sink.get("findings", ""),
+                    plan=session_sink.get("plan", ""),
+                    progress_log=session_sink.get("progress_log"),
+                ),
+                SessionEnd(result.session_end_reason, turns=result.turns, summary_failure=summary_failure),
             )
             if fallback and store.write(iteration, fallback) is not None:
                 has_narrative = True
@@ -3853,7 +3995,6 @@ class IterationLoop(AnalysisRuntimeMixin):
 
         try:
             scope = self._lesson_scope(
-                store,
                 iteration,
                 session_sink,
                 decision=decision,
@@ -3895,18 +4036,19 @@ class IterationLoop(AnalysisRuntimeMixin):
         except Exception:
             log.debug("lessons: scope append failed", exc_info=True)
 
+        turns, failure = (None, "") if has_narrative else (result.turns, summary_failure)
         store.append_outcome(
             iteration,
             format_outcome_line(
                 decision=decision,
-                wall_ms=result.wall_ms,
-                best_wall_ms=self.best_wall_ms,
-                mean_case_speedup=result.mean_case_speedup,
-                best_mean_case_speedup=self.best_mean_case_speedup,
-                snr_db=result.snr_db,
-                end_reason=result.session_end_reason,
-                turns=result.turns if not has_narrative else None,
-                summary_failure=(summary_failure if not has_narrative else ""),
+                measurement=OutcomeMeasurement(
+                    result.wall_ms,
+                    self.best_wall_ms,
+                    result.snr_db,
+                    result.mean_case_speedup,
+                    self.best_mean_case_speedup,
+                ),
+                session=SessionEnd(result.session_end_reason, turns=turns, summary_failure=failure),
             ),
         )
 
@@ -3988,11 +4130,9 @@ class IterationLoop(AnalysisRuntimeMixin):
         else:
             print("  [bench] Running three independent benchmark suites...")
             bench_result = await measure_wallclock(
-                driver_script=self.ic.driver_script,
-                driver_args=[],
+                BenchRun(self.ic.driver_script, driver_args=[], repeat=self.ic.bench_repeat),
                 measurements=KEEP_MEASUREMENT_COUNT,
                 timeout_sec=self.ic.bench_timeout_sec,
-                repeat=self.ic.bench_repeat,
             )
         self._observe_measurement(measurement_started)
 
@@ -4127,16 +4267,20 @@ class IterationLoop(AnalysisRuntimeMixin):
             since_iteration=self.run_state.stall.last_supervisor_iter,
         )
         decision = self.search_policy_engine.decide(
-            best_source=self.run_state.best.source,
-            no_improvement_iters=self.run_state.stall.unresolved_stall_iters,
-            stall_threshold=self.ic.supervise_after,
-            current_mode=self.run_state.search_mode,
-            residence_iterations_remaining=(self.run_state.search_mode_residence_remaining),
-            diversification_cycle_completed=(self.run_state.diversification_cycle_completed),
-            consecutive_no_changes=self._consecutive_no_changes(
-                self.state_store.recent_results(NO_CHANGES_STREAK_WINDOW)
+            SearchState(
+                best_source=self.run_state.best.source,
+                no_improvement_iters=self.run_state.stall.unresolved_stall_iters,
+                current_mode=self.run_state.search_mode,
+                residence_iterations_remaining=(self.run_state.search_mode_residence_remaining),
+                diversification_cycle_completed=(self.run_state.diversification_cycle_completed),
             ),
-            window_gain_ratio=window_gain.ratio,
+            stall_threshold=self.ic.supervise_after,
+            recent=RecentProgress(
+                consecutive_no_changes=self._consecutive_no_changes(
+                    self.state_store.recent_results(NO_CHANGES_STREAK_WINDOW)
+                ),
+                window_gain_ratio=window_gain.ratio,
+            ),
         )
         previous_mode = self.run_state.search_mode
         previous_reasons = tuple(self.run_state.search_reason_codes)
@@ -4520,30 +4664,18 @@ class IterationLoop(AnalysisRuntimeMixin):
 
     async def run(
         self,
-        agent_fn=None,
-        analysis_service=None,
-        orchestration_service=None,
-        on_iteration=None,
-        on_best_committed=None,
-        on_best_ready=None,
-        usage=None,
-        supervisor_fn=None,
+        agents: LoopAgents = LoopAgents(),
         *,
-        agent_factory=None,
+        callbacks: LoopCallbacks = LoopCallbacks(),
+        usage=None,
         workspace_lock_held: bool = False,
     ) -> list[IterationResult]:
         """Run the loop and clean attempt-owned processes on every exit path."""
         try:
             return await self._run_impl(
-                agent_fn=agent_fn,
-                agent_factory=agent_factory,
-                analysis_service=analysis_service,
-                orchestration_service=orchestration_service,
-                on_iteration=on_iteration,
-                on_best_committed=on_best_committed,
-                on_best_ready=on_best_ready,
+                agents,
+                callbacks=callbacks,
                 usage=usage,
-                supervisor_fn=supervisor_fn,
                 workspace_lock_held=workspace_lock_held,
             )
         finally:
@@ -4558,104 +4690,211 @@ class IterationLoop(AnalysisRuntimeMixin):
 
     async def _run_impl(
         self,
-        agent_fn=None,
-        analysis_service=None,
-        orchestration_service=None,
-        on_iteration=None,
-        on_best_committed=None,
-        on_best_ready=None,
-        usage=None,
-        supervisor_fn=None,
+        agents: LoopAgents,
         *,
-        agent_factory=None,
+        callbacks: LoopCallbacks,
+        usage=None,
         workspace_lock_held: bool = False,
     ) -> list[IterationResult]:
         """Run while exclusively owning this campaign workspace."""
         if workspace_lock_held:
-            return await self._run_locked(
-                agent_fn=agent_fn,
-                agent_factory=agent_factory,
-                analysis_service=analysis_service,
-                orchestration_service=orchestration_service,
-                on_iteration=on_iteration,
-                on_best_committed=on_best_committed,
-                on_best_ready=on_best_ready,
-                usage=usage,
-                supervisor_fn=supervisor_fn,
-            )
+            return await self._run_locked(agents, callbacks=callbacks, usage=usage)
         store = LoopStateStore(self.ic.workspace_dir)
         with store.workspace_lock():
-            return await self._run_locked(
-                agent_fn=agent_fn,
-                agent_factory=agent_factory,
-                analysis_service=analysis_service,
-                orchestration_service=orchestration_service,
-                on_iteration=on_iteration,
-                on_best_committed=on_best_committed,
-                on_best_ready=on_best_ready,
-                usage=usage,
-                supervisor_fn=supervisor_fn,
+            return await self._run_locked(agents, callbacks=callbacks, usage=usage)
+
+    async def _run_supervisor_review(
+        self, supervisor_fn, *, iteration, digest, supervisor_due, supervisor_reason
+    ) -> None:
+        """Ask the supervisor for a ruling when the run has stalled, and record whatever comes back.
+
+        The memo is optional: a supervisor that fails, or returns nothing,
+        leaves the run to continue without an active ruling.
+        """
+        if self.monitor is not None and supervisor_fn is not None:
+            if supervisor_due:
+                print(f"\n[supervisor] intervening at iteration {iteration}: {supervisor_reason}")
+                memo = ""
+                try:
+                    evidence_context = self._build_supervisor_evidence_context(iteration)
+                    # A new review attempt supersedes the prior stall episode's ruling even when the backend
+                    # returns empty.
+                    self._expire_supervisor_ruling()
+                    self.monitor.mark_attempted(iteration)
+                    apply_supervisor_attempt(
+                        self.run_state,
+                        iteration=iteration,
+                    )
+                    self.state_store.append_event(
+                        make_event(
+                            "supervisor_attempt",
+                            iteration,
+                            reason=supervisor_reason,
+                        )
+                    )
+                    self.state_store.save(self.run_state)
+                    memo = await supervisor_fn(
+                        digest=digest,
+                        reason=supervisor_reason,
+                        workspace=self.ic.workspace_dir,
+                        iteration=iteration,
+                        evidence_context=evidence_context,
+                    )
+                except Exception as e:  # noqa: BLE001 - supervisor memo is optional
+                    print(f"  [supervisor] failed ({e}); continuing without a memo")
+                finally:
+                    self._checkpoint_llm_usage()
+                memo = memo or ""
+                if memo.strip():
+                    interaction_path, ruling_path = persist_supervisor_ruling(
+                        self.ic.workspace_dir,
+                        iteration,
+                        supervisor_reason,
+                        memo,
+                    )
+                    self._supervisor_ruling = memo
+                    print(f"  [supervisor] injected free-form ruling: {len(self._supervisor_ruling)} chars")
+                    try:
+                        self.state_store.append_event(
+                            make_event(
+                                "supervisor_ruling",
+                                iteration,
+                                reason=supervisor_reason,
+                                ruling_len=len(self._supervisor_ruling),
+                                interaction_path=(
+                                    str(interaction_path.relative_to(Path(self.ic.workspace_dir)))
+                                    if interaction_path is not None
+                                    else None
+                                ),
+                                ruling_path=(
+                                    str(ruling_path.relative_to(Path(self.ic.workspace_dir)))
+                                    if ruling_path is not None
+                                    else None
+                                ),
+                            )
+                        )
+                    except Exception:
+                        log.debug("run_state: supervisor event append failed", exc_info=True)
+                else:
+                    print("  [supervisor] no new ruling returned; continuing without an active ruling")
+                if memo.strip():
+                    self.monitor.mark_intervened(iteration)
+                    try:
+                        apply_supervisor_intervention(
+                            self.run_state,
+                            iteration=iteration,
+                            stall_threshold=self.ic.supervise_after,
+                        )
+                        self.state_store.save(self.run_state)
+                    except Exception:
+                        log.debug(
+                            "run_state: supervisor reset/save failed",
+                            exc_info=True,
+                        )
+
+    def _record_ledger_iteration(
+        self, result, frame: _IterationFrame, *, iteration_diff_summary, commit_hash, attempt_diff
+    ) -> None:
+        """Record what this iteration decided, and the evidence behind it, in the experience ledger."""
+        iteration, session_sink = frame.iteration, frame.session_sink
+        if getattr(self, "ledger", None) is not None and (commit_hash or attempt_diff):
+            if not result.validation_passed:
+                last = ""
+                if result.validation_summary:
+                    lines = [l for l in result.validation_summary.splitlines() if l.strip()]
+                    last = lines[-1][:120] if lines else ""
+                outcome = f"CRASH: {last}" if result.crashed else f"REVERT (validation failed): {last}"
+            elif result.kept:
+                outcome = f"KEPT — new best mean case speedup={result.mean_case_speedup:.6f}x"
+            else:
+                best_txt = f"{self.best_mean_case_speedup:.6f}x" if self.best_mean_case_speedup is not None else "?"
+                speedup_txt = f"{result.mean_case_speedup:.6f}x" if result.mean_case_speedup is not None else "?"
+                outcome = f"REVERT (correct but not faster): mean case speedup={speedup_txt} vs best={best_txt}"
+            error_text = (
+                session_sink.get("findings", "")
+                or getattr(result, "error_output", "")
+                or (result.validation_summary if not result.validation_passed else "")
+            )
+            self.ledger.record_iteration(
+                iteration=iteration,
+                outcome=outcome,
+                diff_summary=iteration_diff_summary,
+                error_text=error_text,
             )
 
-    async def _run_locked(
+    def _archive_attempt(
         self,
-        agent_fn=None,
-        analysis_service=None,
-        orchestration_service=None,
-        on_iteration=None,
-        on_best_committed=None,
-        on_best_ready=None,
-        usage=None,
-        supervisor_fn=None,
+        result,
+        attempt: _Attempt,
+        frame: _IterationFrame,
         *,
-        agent_factory=None,
-    ) -> list[IterationResult]:
-        """Run the autonomous iteration loop."""
-        import functools
+        ruling: _Ruling,
+        decision_label,
+    ) -> Path | None:
+        """Archive this attempt's candidate, and say where it landed.
 
-        global print
-        print = functools.partial(print, flush=True)  # noqa: A001 - deliberate flush-on-print rebind
+        Archiving is best-effort: a candidate that cannot be written must
+        not take the iteration down with it, so a failure reads as "nowhere".
+        """
+        iteration, session_sink = frame.iteration, frame.session_sink
+        best_before, best_mean_case_speedup_before = frame.best_before, frame.best_mean_case_speedup_before
+        attempt_diff, attempt_source, rationale = attempt.attempt_diff, attempt.attempt_source, attempt.rationale
+        commit_hash, keep_checkpoint_finalized = ruling.commit_hash, ruling.keep_checkpoint_finalized
+        archived_path: Path | None = None
+        if getattr(self, "archive", None) is not None and (commit_hash or attempt_diff):
+            try:
+                decision = decision_label
+                validation_text = result.validation_summary or ""
+                if getattr(result, "error_output", ""):
+                    validation_text = f"{validation_text}\n\n{result.error_output}".strip()
+                archived_path = self.archive.record(
+                    CandidateRecord(
+                        iteration=iteration,
+                        commit_hash=commit_hash,
+                        decision=decision,
+                        kept=result.kept,
+                        validation_passed=result.validation_passed,
+                        wall_ms=result.wall_ms,
+                        mean_case_speedup=result.mean_case_speedup,
+                        bench_detail=result.bench_detail,
+                        snr_db=result.snr_db,
+                        vgpr=result.vgpr,
+                        pmc_diagnosis=result.pmc_diagnosis,
+                        baseline_wall_ms=self.ic.baseline_wall_ms,
+                        best_wall_ms_before=best_before,
+                        best_mean_case_speedup_before=best_mean_case_speedup_before,
+                        plan=session_sink.get("plan", ""),
+                        rationale=rationale,
+                        kernel_file=self.ic.kernel_file,
+                        shape={},
+                        kernel_source=attempt_source,
+                        change_diff=self._full_diff(commit_hash) if commit_hash else attempt_diff,
+                        pmc_full=result.pmc_full,
+                        profile_meta=result.profile_meta,
+                        validation_text=validation_text,
+                        session_end_reason=result.session_end_reason,
+                        turns=result.turns,
+                    )
+                )
+                if keep_checkpoint_finalized and archived_path is None:
+                    raise RuntimeError("candidate archive returned no published path")
+            except Exception as e:  # noqa: BLE001
+                if keep_checkpoint_finalized:
+                    self.persistence_degraded = True
+                    self.persistence_errors.append(f"archive derived KEEP view iteration {iteration}: {e}")
+                    self.persistence_errors = self.persistence_errors[-10:]
+                log.debug("could not archive iteration %s: %s", iteration, e)
+                archived_path = None
+        return archived_path
 
-        self.start_time = time.time()
-        self.results = []
-        self._usage = usage
+    def _restore_or_begin_campaign(
+        self, *, state_exists, current_ruling_path, agent_fn, orchestration_service, on_best_committed
+    ) -> None:
+        """Bring the run state up to where the campaign left off, or start a fresh one.
 
-        # Safety net: if the kernel is an aiter HIP kernel, force it to recompile from the current source
-        # (AITER_REBUILD) so the agent's edits are never silently ignored via aiter's prebuilt in-tree .so.
-        force_jit_rebuild(self._jit_source_files())
-
-        # Cross-iteration objective ledger: records each iteration's net diff, measured outcome, and real error
-        # signatures, then feeds concise toolchain observations and recent entries into the next prompt.
-        self.ledger = ExperienceLedger(self.ic.workspace_dir)
-
-        # Per-iteration lesson documents.
-        self.lessons = LessonStore(self.ic.workspace_dir)
-        self.handoff_store = HandoffStore(self.ic.workspace_dir)
-
-        # Full-fidelity candidate archive: persists each iteration's WHOLE solution (kernel snapshot + diff + full
-        # profile + measurements + decision) so a later iteration can read back any prior attempt's real code.
-        self.archive = CandidateArchive(self.ic.workspace_dir, self.ic.kernel_file)
-        self.best_publisher = BestResultPublisher(self.ic.workspace_dir)
-        # Candidates from one concurrent fan-out, spent one per iteration so each is measured and judged on its own by
-        # the ordinary decision path.
-        self._lane_queue: list[LaneResult] = []
-        self._last_lane_plans: list[str] = []
-        # Stacked iterations run back to back so far.
-        self._merge_precedence_streak = 0
-        # A device the campaign may not measure on, recorded by whichever iteration found it and re-checked by every
-        # iteration after it.
-        self.device_hazard = DeviceHazardLog(self.ic.workspace_dir)
-
-        # Durable, file-backed run state + append-only event log.
-        self.state_store = LoopStateStore(self.ic.workspace_dir)
-        state_exists = self.state_store.state_path.exists()
-        self.run_state = self.state_store.load()
-        current_ruling_path = latest_supervisor_ruling_path(self.ic.workspace_dir)
-        self._supervisor_ruling = load_latest_supervisor_ruling(self.ic.workspace_dir) if self.resume else ""
-
-        # Ownership boundary for anything a candidate creates, taken before this loop touches the workspace.
-        self._pre_untracked = self._untracked_snapshot()
-
+        A fresh campaign refuses a workspace that already holds one, because
+        overwriting it would silently discard the earlier campaign's evidence.
+        """
         if self.resume:
             self._validate_resume_scoring_state(self.run_state)
             # Pending KEEP reconciliation promotes the committed candidate and checkpoints scoring state.
@@ -4723,152 +4962,13 @@ class IterationLoop(AnalysisRuntimeMixin):
                 raise ValueError(f"failed to switch workspace to branch {self.ic.git_branch}")
             self.run_state = RunState()
 
-        # Anchor the campaign clock now that the state carrying what earlier sessions spent is loaded.
-        self._campaign_started_at = self.start_time - max(0.0, float(self.run_state.round_costs.campaign_sec))
+    def _verify_baseline_anchor(self) -> None:
+        """Check the pristine anchor against the task reference, and report what it covered.
 
-        if state_exists and reconcile_stale_running_session(self.run_state):
-            self.state_store.append_event(
-                make_event(
-                    "session_interrupted",
-                    self.run_state.iteration,
-                    reason="stale_running_session_reconciled",
-                )
-            )
-            self.state_store.save(self.run_state)
-
-        parent_experiment_id = self.run_state.last_experiment_id
-        next_segment_index = self.run_state.session_index + 1
-        self._set_state_identity(self.run_state)
-        self._stage_validated_warm_start_state()
-        start_session(self.run_state)
-        self.experiment = self.tracker.create_segment(
-            campaign_id=self.run_state.campaign_id,
-            segment_index=next_segment_index,
-            parent_experiment_id=parent_experiment_id,
-            task_id=Path(self.ic.kernel_file).stem,
-            backend=self.ic.backend,
-            kernel_backend=self.ic.kernel_backend,
-            description=f"Autonomous optimization of {self.ic.kernel_file}",
-            target_wall_ms=self.ic.target_wall_ms,
-            baseline_wall_ms=self.ic.baseline_wall_ms,
-        )
-        self.run_state.last_experiment_id = self.experiment.experiment_id
-        self.state_store.append_event(
-            make_event(
-                "session_started",
-                self.run_state.iteration,
-            )
-        )
-        self.state_store.save(self.run_state)
-
-        # Persist only after the fresh-campaign guard has completed.
-        if self.ic.pr_kb_snapshot:
-            from kernelforge.knowledge.pr_knowledge.references import commit_snapshot
-            from kernelforge.knowledge.pr_knowledge.context import REASON_LOCAL_FAILURE
-
-            try:
-                commit_snapshot(self.ic.workspace_dir, self.ic.pr_kb_snapshot)
-            except (OSError, ValueError) as error:
-                print(f"  [pr-kb] warning: snapshot not persisted ({error})")
-                if self.ic.pr_kb_event:
-                    self.ic.pr_kb_event = dict(self.ic.pr_kb_event)
-                    self.ic.pr_kb_event["degraded_reason"] = REASON_LOCAL_FAILURE
-                else:
-                    self.ic.pr_kb_event = {
-                        "position": "A",
-                        "reason": REASON_LOCAL_FAILURE,
-                        "degraded_reason": REASON_LOCAL_FAILURE,
-                    }
-            self.ic.pr_kb_snapshot = {}
-        if self.ic.pr_kb_event:
-            try:
-                self.state_store.append_event(make_event("pr_refs_refreshed", 0, **self.ic.pr_kb_event))
-            except (OSError, ValueError) as error:
-                print(f"  [pr-kb] warning: event not recorded ({error})")
-            self.ic.pr_kb_event = {}
-
-        # Self-supervision monitor (AVO): tracks stall / unproductive-cycle signals so the loop can call the
-        # supervisor to redirect the search instead of stopping at the first plateau.
-        self.monitor = None
-        if supervisor_fn is not None:
-            from kernelforge.loop.supervisor import SupervisionMonitor
-
-            self.monitor = SupervisionMonitor(
-                supervise_after=self.ic.supervise_after,
-                cooldown=self.ic.supervise_cooldown,
-            )
-            print(
-                f"  Supervisor: enabled (after {self.ic.supervise_after} stalls, "
-                f"cooldown {self.ic.supervise_cooldown}, no intervention cap)"
-            )
-
-        print("Starting autonomous iteration loop")
-        print(f"  Kernel: {self.ic.kernel_file}")
-        print(f"  Target: {self.ic.target_wall_ms} ms")
-        print(
-            f"  Budget: {self.ic.max_time_hours}h "
-            f"(finalize reserve: {self.ic.budget_reserve_sec / 60:.0f} min; "
-            "a round is admitted only when what remains also covers its "
-            "estimated cost)"
-        )
-        # The finalize reserve is an absolute admission guard; on a SHORT budget it can swallow most of the window
-        # (e.g. a 30-min reserve on a 1h run leaves only 30 min for iterations).
-        _budget_sec = self.ic.max_time_hours * 3600.0
-        if _budget_sec > 0 and self.ic.budget_reserve_sec >= 0.5 * _budget_sec:
-            _pct = 100.0 * self.ic.budget_reserve_sec / _budget_sec
-            print(
-                f"  WARNING: finalize reserve ({self.ic.budget_reserve_sec / 60:.0f} min) "
-                f"consumes {_pct:.0f}% of the {self.ic.max_time_hours}h budget; "
-                f"the effective iteration window is only "
-                f"{max(0.0, _budget_sec - self.ic.budget_reserve_sec) / 60:.0f} min. "
-                f"Raise --max-hours for a longer run."
-            )
-        print(f"  Experiment: {self.experiment.experiment_id}")
-        print()
-
-        # The CLI constructs IterationLoop before applying a KB warm-start, then records the freshly measured pristine
-        # case timings on IterationConfig.
-        self._set_baseline_case_times(self.ic.baseline_case_times)
-        if not self.resume and not self.ic.warm_start_commit and self._baseline_case_times:
-            self._best_case_times = dict(self._baseline_case_times)
-            self._unscored_cases = {str(case_id) for case_id in self.ic.preloop_baseline_unscored_cases}
-        if self._best_case_times:
-            self._persist_scoring_state()
-
-        # Anchor speedup reporting.
-        if not self.resume and self.ic.baseline_wall_ms is None:
-            print("Measuring baseline on unmodified kernel...")
-            baseline_ms = await self._measure_baseline()
-            if baseline_ms is not None:
-                self.ic.baseline_wall_ms = baseline_ms
-                self.experiment.baseline_wall_ms = baseline_ms
-                self.tracker.set_baseline(self.experiment.experiment_id, baseline_ms)
-                print(f"  Baseline: {baseline_ms:.3f} ms\n")
-            else:
-                print(
-                    "  Baseline measurement unavailable — see the "
-                    "'Baseline build FAILED'/'Baseline bench FAILED' line above "
-                    "for what the driver actually did\n"
-                )
-
-        if self.ic.pristine_baseline_wall_ms is None:
-            self.ic.pristine_baseline_wall_ms = self.ic.baseline_wall_ms
-
-        # The bar a candidate has to clear is whatever the incumbent scores against the anchor, so it is read off the
-        # incumbent's own per-case times rather than assumed. It comes out at exactly 1.0 when the incumbent IS the
-        # anchor, which is every run that did not supply one. Assuming 1.0 instead would KEEP a candidate that loses
-        # to the kernel the campaign began with, on a fresh run whose anchor came from the caller and on any resume
-        # that has not recorded a KEEP yet.
-        if self.ic.baseline_wall_ms is not None:
-            self.best_wall_ms = self.ic.baseline_wall_ms
-        if self._baseline_case_times:
-            self.best_mean_case_speedup = self._incumbent_mean_case_speedup()
-
-        # Seed the run state's baseline and, guardedly, resume a prior best from a reused workspace (only when the
-        # recorded best commit is still HEAD).
-        self._seed_and_hydrate_run_state()
-        self._adopt_validated_warm_start()
-
+        Every speedup this run reports is a ratio against those timings, so an
+        anchor that drifted from the task's own reference poisons the whole
+        campaign. Drift is reported rather than fatal; a missing anchor is fatal.
+        """
         # After the resume restore and the warm-start adoption above, never before them.
         if not self._baseline_case_times:
             raise RuntimeError(
@@ -4910,1032 +5010,243 @@ class IterationLoop(AnalysisRuntimeMixin):
                 "anchor was accepted under the widened bound"
             )
 
-        # Once the anchor is settled and verified, so the estimate is handed the case set the objective scores and
-        # latencies from the campaign's own clock.
-        await self._establish_ceiling()
+    async def _anchor_speedup_reporting(self) -> None:
+        """Settle the pristine anchor and the bar a candidate has to clear.
 
-        # A crash immediately after a verified commit can leave the KEEP's archive unfinished.
-        await self._finish_recovered_pending_keep()
+        The bar is read off the incumbent's own per-case times rather than
+        assumed to be 1.0: assuming it would KEEP a candidate that loses to the
+        kernel the campaign began with, on any run whose anchor came from the
+        caller and on any resume that has not recorded a KEEP yet.
+        """
+        # The CLI constructs IterationLoop before applying a KB warm-start, then records the freshly measured pristine
+        # case timings on IterationConfig.
+        self._set_baseline_case_times(self.ic.baseline_case_times)
+        if not self.resume and not self.ic.warm_start_commit and self._baseline_case_times:
+            self._best_case_times = dict(self._baseline_case_times)
+            self._unscored_cases = {str(case_id) for case_id in self.ic.preloop_baseline_unscored_cases}
+        if self._best_case_times:
+            self._persist_scoring_state()
 
-        # Candidates an earlier round bought and never measured.
-        self._restore_lane_queue()
-
-        # The previous round's verdict, for the same reason: a REPLACE is spent on the round after the one it judged,
-        # and the budget often ends between the two.
-        self._restore_critic_ruling()
-
-        # Analyze the baseline canonical commit once before any specialist or Implementer session.
-        if analysis_service is not None:
-            await self._resolve_analysis_context(analysis_service)
-
-        iteration = self.run_state.next_iteration - 1
-        while True:
-            iteration += 1
-
-            # Build the lineage digest once per iteration — reused by BOTH the supervisor (trajectory to review) and
-            # the implementer (prompt history).
-            digest = ""
-            if getattr(self, "archive", None) is not None:
-                digest = self.archive.render_digest()
-
-            # Check terminal conditions
-            if self._is_gate_met():
-                self.termination_reason = "gate_met"
-                print(f"\nGATE MET at iteration {iteration}: raw wall target reached at {self.best_wall_ms:.6f} ms")
-                break
-            if self._is_roofline_target_met():
-                self.termination_reason = "roofline_target_met"
-                standing = self._roofline_attainment()
+        # Anchor speedup reporting.
+        if not self.resume and self.ic.baseline_wall_ms is None:
+            print("Measuring baseline on unmodified kernel...")
+            baseline_ms = await self._measure_baseline()
+            if baseline_ms is not None:
+                self.ic.baseline_wall_ms = baseline_ms
+                self.experiment.baseline_wall_ms = baseline_ms
+                self.tracker.set_baseline(self.experiment.experiment_id, baseline_ms)
+                print(f"  Baseline: {baseline_ms:.3f} ms\n")
+            else:
                 print(
-                    f"\nROOFLINE TARGET MET at iteration {iteration}: mean attainment "
-                    f"{standing.mean * 100:.1f}% of the estimated ceiling, at or above the "
-                    f"{float(self.ic.roofline_target) * 100:.0f}% target. The ceiling is an estimate: if this "
-                    "looks early, the derivation in performance_ceiling_analysis.md is where it would be wrong."
-                )
-                for entry in sorted(standing.cases, key=lambda c: c.attainment):
-                    print(
-                        f"  [roofline] {entry.case_id}: {entry.attainment * 100:.1f}% "
-                        f"({entry.t_current_ms:.6g} ms vs ceiling {entry.t_ideal_ms:.6g} ms)"
-                    )
-                break
-            if self.run_state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_OPEN:
-                self.termination_reason = "orchestration_failed"
-                print(
-                    "\nORCHESTRATION FAILED repeatedly; stopping after "
-                    f"{self.run_state.orchestration_error_streak} "
-                    "consecutive infrastructure errors"
-                )
-                break
-            if self._is_budget_exhausted():
-                self.termination_reason = "budget_exhausted"
-                print(f"\nBUDGET EXHAUSTED after {len(self.results)} iterations in this session")
-                break
-            if self._is_force_stopped():
-                self.termination_reason = "force_stop"
-                print("\nFORCE STOP: .stop file detected — remove it and --resume to continue")
-                break
-            # Ruled on once per iteration, here with the other conditions that decide whether this iteration may run
-            # at all.
-            hazard: DeviceHazard | None = self.device_hazard.recheck(iteration)
-            if hazard is not None and hazard.exhausted:
-                self.termination_reason = "device_contended"
-                print(
-                    "\nDEVICE CONTENDED: nothing this campaign may clear has "
-                    f"released the device in {hazard.blocked_iterations} "
-                    "iterations, so no measurement can be trusted; stopping "
-                    f"rather than spending the budget on unmeasurable "
-                    f"iterations. {hazard.describe()}"
-                )
-                break
-
-            # Price the round before anything is spent on it.
-            self._close_round()
-            round_lanes = self.ic.lanes
-            if not self._lane_queue:
-                admitted_lanes = self._admit_next_round(iteration)
-                if admitted_lanes is None:
-                    break
-                round_lanes = admitted_lanes
-                self._open_round(iteration, lanes=round_lanes)
-
-            supervisor_due = False
-            supervisor_reason = ""
-            if self.monitor is not None and supervisor_fn is not None:
-                supervisor_due, supervisor_reason = self.monitor.should_intervene(iteration)
-
-            # Resolve Analysis before any Supervisor or planning call.
-            if analysis_service is not None:
-                await self._resolve_analysis_context(
-                    analysis_service,
-                    supervisor_due=supervisor_due,
-                    iteration=iteration,
+                    "  Baseline measurement unavailable — see the "
+                    "'Baseline build FAILED'/'Baseline bench FAILED' line above "
+                    "for what the driver actually did\n"
                 )
 
-            # Self-supervision (AVO): when supervised, a stall triggers a reviewer that injects fresh directions and
-            # the loop ALWAYS CONTINUES — it never self-terminates on stall.
-            if self.monitor is not None and supervisor_fn is not None:
-                if supervisor_due:
-                    print(f"\n[supervisor] intervening at iteration {iteration}: {supervisor_reason}")
-                    memo = ""
-                    try:
-                        evidence_context = self._build_supervisor_evidence_context(iteration)
-                        # A new review attempt supersedes the prior stall episode's ruling even when the backend
-                        # returns empty.
-                        self._expire_supervisor_ruling()
-                        self.monitor.mark_attempted(iteration)
-                        apply_supervisor_attempt(
-                            self.run_state,
-                            iteration=iteration,
-                        )
-                        self.state_store.append_event(
-                            make_event(
-                                "supervisor_attempt",
-                                iteration,
-                                reason=supervisor_reason,
-                            )
-                        )
-                        self.state_store.save(self.run_state)
-                        memo = await supervisor_fn(
-                            digest=digest,
-                            reason=supervisor_reason,
-                            workspace=self.ic.workspace_dir,
-                            iteration=iteration,
-                            evidence_context=evidence_context,
-                        )
-                    except Exception as e:  # noqa: BLE001 - supervisor memo is optional
-                        print(f"  [supervisor] failed ({e}); continuing without a memo")
-                    finally:
-                        self._checkpoint_llm_usage()
-                    memo = memo or ""
-                    if memo.strip():
-                        interaction_path, ruling_path = persist_supervisor_ruling(
-                            self.ic.workspace_dir,
-                            iteration,
-                            supervisor_reason,
-                            memo,
-                        )
-                        self._supervisor_ruling = memo
-                        print(f"  [supervisor] injected free-form ruling: {len(self._supervisor_ruling)} chars")
-                        try:
-                            self.state_store.append_event(
-                                make_event(
-                                    "supervisor_ruling",
-                                    iteration,
-                                    reason=supervisor_reason,
-                                    ruling_len=len(self._supervisor_ruling),
-                                    interaction_path=(
-                                        str(interaction_path.relative_to(Path(self.ic.workspace_dir)))
-                                        if interaction_path is not None
-                                        else None
-                                    ),
-                                    ruling_path=(
-                                        str(ruling_path.relative_to(Path(self.ic.workspace_dir)))
-                                        if ruling_path is not None
-                                        else None
-                                    ),
-                                )
-                            )
-                        except Exception:
-                            log.debug("run_state: supervisor event append failed", exc_info=True)
-                    else:
-                        print("  [supervisor] no new ruling returned; continuing without an active ruling")
-                    if memo.strip():
-                        self.monitor.mark_intervened(iteration)
-                        try:
-                            apply_supervisor_intervention(
-                                self.run_state,
-                                iteration=iteration,
-                                stall_threshold=self.ic.supervise_after,
-                            )
-                            self.state_store.save(self.run_state)
-                        except Exception:
-                            log.debug(
-                                "run_state: supervisor reset/save failed",
-                                exc_info=True,
-                            )
+        if self.ic.pristine_baseline_wall_ms is None:
+            self.ic.pristine_baseline_wall_ms = self.ic.baseline_wall_ms
 
-            self._update_search_policy(iteration)
+        # The bar a candidate has to clear is whatever the incumbent scores against the anchor, so it is read off the
+        # incumbent's own per-case times rather than assumed. It comes out at exactly 1.0 when the incumbent IS the
+        # anchor, which is every run that did not supply one. Assuming 1.0 instead would KEEP a candidate that loses
+        # to the kernel the campaign began with, on a fresh run whose anchor came from the caller and on any resume
+        # that has not recorded a KEEP yet.
+        if self.ic.baseline_wall_ms is not None:
+            self.best_wall_ms = self.ic.baseline_wall_ms
+        if self._baseline_case_times:
+            self.best_mean_case_speedup = self._incumbent_mean_case_speedup()
 
+    def _announce_run(self, supervisor_fn) -> None:
+        """Arm the supervision monitor and print what this run is about to do.
+
+        The finalize reserve is an absolute admission guard, so on a short budget
+        it can swallow most of the window; the warning says so in the operator's
+        own units rather than leaving them to divide.
+        """
+        # Self-supervision monitor (AVO): tracks stall / unproductive-cycle signals so the loop can call the
+        # supervisor to redirect the search instead of stopping at the first plateau.
+        self.monitor = None
+        if supervisor_fn is not None:
+            from kernelforge.loop.supervisor import SupervisionMonitor
+
+            self.monitor = SupervisionMonitor(
+                supervise_after=self.ic.supervise_after,
+                cooldown=self.ic.supervise_cooldown,
+            )
             print(
-                f"--- Iteration {iteration} "
-                f"(best mean case speedup: {self.best_mean_case_speedup:.6f}x, "
-                f"remaining: {self._time_remaining() / 60:.0f} min) ---"
-                if self.best_mean_case_speedup is not None
-                else f"--- Iteration {iteration} ---"
+                f"  Supervisor: enabled (after {self.ic.supervise_after} stalls, "
+                f"cooldown {self.ic.supervise_cooldown}, no intervention cap)"
             )
-            roofline_progress = self._render_roofline_progress()
-            if roofline_progress:
-                print(roofline_progress)
 
-            # Re-scope the ownership boundary to this iteration: untracked files already here are the operator's or an
-            # earlier round's, and this iteration's REVERT must not delete them.
-            snapshot = self._untracked_snapshot()
-            if snapshot is not None:
-                self._pre_untracked = snapshot
+        print("Starting autonomous iteration loop")
+        print(f"  Kernel: {self.ic.kernel_file}")
+        print(f"  Target: {self.ic.target_wall_ms} ms")
+        print(
+            f"  Budget: {self.ic.max_time_hours}h "
+            f"(finalize reserve: {self.ic.budget_reserve_sec / 60:.0f} min; "
+            "a round is admitted only when what remains also covers its "
+            "estimated cost)"
+        )
+        # The finalize reserve is an absolute admission guard; on a SHORT budget it can swallow most of the window
+        # (e.g. a 30-min reserve on a 1h run leaves only 30 min for iterations).
+        _budget_sec = self.ic.max_time_hours * 3600.0
+        if _budget_sec > 0 and self.ic.budget_reserve_sec >= 0.5 * _budget_sec:
+            _pct = 100.0 * self.ic.budget_reserve_sec / _budget_sec
+            print(
+                f"  WARNING: finalize reserve ({self.ic.budget_reserve_sec / 60:.0f} min) "
+                f"consumes {_pct:.0f}% of the {self.ic.max_time_hours}h budget; "
+                f"the effective iteration window is only "
+                f"{max(0.0, _budget_sec - self.ic.budget_reserve_sec) / 60:.0f} min. "
+                f"Raise --max-hours for a longer run."
+            )
+        print(f"  Experiment: {self.experiment.experiment_id}")
+        print()
 
-            # Durable per-iteration marker (facts only; detail lives in files).
-            self.run_state.iteration = iteration
+    def _persist_pr_knowledge(self) -> None:
+        """Persist the PR-knowledge snapshot and its provenance event.
+
+        Only after the fresh-campaign guard has completed, so a refused run
+        leaves the workspace it refused untouched. A snapshot that cannot be
+        written degrades the recorded reason rather than failing the campaign,
+        because the references are context, not the objective.
+        """
+        # Persist only after the fresh-campaign guard has completed.
+        if self.ic.pr_kb_snapshot:
+            from kernelforge.knowledge.pr_knowledge.references import commit_snapshot
+            from kernelforge.knowledge.pr_knowledge.context import REASON_LOCAL_FAILURE
+
+            try:
+                commit_snapshot(self.ic.workspace_dir, self.ic.pr_kb_snapshot)
+            except (OSError, ValueError) as error:
+                print(f"  [pr-kb] warning: snapshot not persisted ({error})")
+                if self.ic.pr_kb_event:
+                    self.ic.pr_kb_event = dict(self.ic.pr_kb_event)
+                    self.ic.pr_kb_event["degraded_reason"] = REASON_LOCAL_FAILURE
+                else:
+                    self.ic.pr_kb_event = {
+                        "position": "A",
+                        "reason": REASON_LOCAL_FAILURE,
+                        "degraded_reason": REASON_LOCAL_FAILURE,
+                    }
+            self.ic.pr_kb_snapshot = {}
+        if self.ic.pr_kb_event:
+            try:
+                self.state_store.append_event(make_event("pr_refs_refreshed", 0, **self.ic.pr_kb_event))
+            except (OSError, ValueError) as error:
+                print(f"  [pr-kb] warning: event not recorded ({error})")
+            self.ic.pr_kb_event = {}
+
+    def _stop_condition_met(self, iteration) -> tuple[bool, DeviceHazard | None]:
+        """Whether this campaign stops, and the device standing when it does not.
+
+        Every answer here is terminal for the run rather than for one iteration,
+        so each sets ``termination_reason`` before saying so.
+
+        The device is probed last, after every answer that ends the run without
+        touching it. ``recheck`` is a write -- it clears the hazard file, or
+        counts one more blocked iteration into it -- so an iteration that was
+        going to stop anyway must not leave that mark for the next resume.
+        """
+        if self._is_gate_met():
+            self.termination_reason = "gate_met"
+            print(f"\nGATE MET at iteration {iteration}: raw wall target reached at {self.best_wall_ms:.6f} ms")
+            return True, None
+        if self._is_roofline_target_met():
+            self.termination_reason = "roofline_target_met"
+            standing = self._roofline_attainment()
+            print(
+                f"\nROOFLINE TARGET MET at iteration {iteration}: mean attainment "
+                f"{standing.mean * 100:.1f}% of the estimated ceiling, at or above the "
+                f"{float(self.ic.roofline_target) * 100:.0f}% target. The ceiling is an estimate: if this "
+                "looks early, the derivation in performance_ceiling_analysis.md is where it would be wrong."
+            )
+            for entry in sorted(standing.cases, key=lambda c: c.attainment):
+                print(
+                    f"  [roofline] {entry.case_id}: {entry.attainment * 100:.1f}% "
+                    f"({entry.t_current_ms:.6g} ms vs ceiling {entry.t_ideal_ms:.6g} ms)"
+                )
+            return True, None
+        if self.run_state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_OPEN:
+            self.termination_reason = "orchestration_failed"
+            print(
+                "\nORCHESTRATION FAILED repeatedly; stopping after "
+                f"{self.run_state.orchestration_error_streak} "
+                "consecutive infrastructure errors"
+            )
+            return True, None
+        if self._is_budget_exhausted():
+            self.termination_reason = "budget_exhausted"
+            print(f"\nBUDGET EXHAUSTED after {len(self.results)} iterations in this session")
+            return True, None
+        if self._is_force_stopped():
+            self.termination_reason = "force_stop"
+            print("\nFORCE STOP: .stop file detected — remove it and --resume to continue")
+            return True, None
+        hazard: DeviceHazard | None = self.device_hazard.recheck(iteration)
+        if hazard is not None and hazard.exhausted:
+            self.termination_reason = "device_contended"
+            print(
+                "\nDEVICE CONTENDED: nothing this campaign may clear has "
+                f"released the device in {hazard.blocked_iterations} "
+                "iterations, so no measurement can be trusted; stopping "
+                f"rather than spending the budget on unmeasurable "
+                f"iterations. {hazard.describe()}"
+            )
+            return True, hazard
+        return False, hazard
+
+    def _stage_merge(self, *, iteration, hazard, fan_out_plan) -> _StagedMerge:
+        """Stack two rejected gains, and say which pair and what it staged.
+
+        Stacking costs a measurement but no session, so it is tried before
+        spending another Implementer round on a search that has stopped
+        producing a new best -- and, once that search has stalled, before
+        draining a candidate the same search bought.
+        """
+        # Stacking two rejected gains costs a measurement but no session, so it is tried before spending another
+        # Implementer round on a search that has stopped producing a new best -- and, once that search has
+        # stalled, before draining a candidate the same search bought.
+        merge_pair = None if hazard or fan_out_plan is not None else self._select_merge_attempt()
+        merge_refusal = "" if merge_pair is None else self._merge_attempt_refusal()
+        lane_queue_depth = 0 if hazard else len(self._lane_queue)
+        if merge_refusal:
+            merge_diff, merge_obstacle = "", merge_refusal
+        else:
+            merge_diff, merge_obstacle = self._stage_merge_attempt(merge_pair)
+        self._merge_precedence_streak = self._merge_precedence_streak + 1 if merge_diff else 0
+        if merge_diff and lane_queue_depth:
+            # Distinct from ``merge_attempt_staged``, and not foldable into it: that counts every stack measured,
+            # this counts the ones that went ahead of a queue a round already paid for, which is the only thing
+            # precedence can cost.
+            print(f"  [merge] precedence over a lane queue {lane_queue_depth} deep")
             self.state_store.append_event(
                 make_event(
-                    "iteration_started",
+                    "merge_took_precedence",
                     iteration,
-                    best_before_ms=self.best_wall_ms,
-                    best_before_mean_case_speedup=self.best_mean_case_speedup,
-                    phase=self.run_state.phase,
+                    lane_queue_depth=lane_queue_depth,
+                    first_iteration=merge_pair[0].iteration,
+                    second_iteration=merge_pair[1].iteration,
+                    unresolved_stall_iters=(self.run_state.stall.unresolved_stall_iters),
                 )
             )
-
-            # Agent proposes modification
-            session_sink: dict = {}
-            optimization_plan_path = ""
-            optimization_plan_executable = False
-            # What a fan-out round leaves this iteration holding, so the single-session path below spends it instead
-            # of buying it again.
-            fan_out_plan: HeldRound | None = None
-            if hazard is None and (
-                not self._lane_queue
-                and round_lanes > 1
-                and agent_factory is not None
-                and agent_fn is not None
-                and orchestration_service is not None
-            ):
-                fan_out_plan = await self._fan_out_round(
-                    iteration=iteration,
-                    orchestration_service=orchestration_service,
-                    agent_factory=agent_factory,
-                    lanes=round_lanes,
-                )
-                # The round's own lanes share one device with the canonical measurement, so a lane whose teardown
-                # could not clear it has just refused this iteration -- whatever its siblings produced.
-                hazard = self.device_hazard.live
-                if self._refused_round:
-                    # Planning cost more than the round had left.
-                    break
-            # Stacking two rejected gains costs a measurement but no session, so it is tried before spending another
-            # Implementer round on a search that has stopped producing a new best -- and, once that search has
-            # stalled, before draining a candidate the same search bought.
-            merge_pair = None if hazard or fan_out_plan is not None else self._select_merge_attempt()
-            merge_refusal = "" if merge_pair is None else self._merge_attempt_refusal()
-            lane_queue_depth = 0 if hazard else len(self._lane_queue)
-            if merge_refusal:
-                merge_diff, merge_obstacle = "", merge_refusal
-            else:
-                merge_diff, merge_obstacle = self._stage_merge_attempt(merge_pair)
-            self._merge_precedence_streak = self._merge_precedence_streak + 1 if merge_diff else 0
-            if merge_diff and lane_queue_depth:
-                # Distinct from ``merge_attempt_staged``, and not foldable into it: that counts every stack measured,
-                # this counts the ones that went ahead of a queue a round already paid for, which is the only thing
-                # precedence can cost.
-                print(f"  [merge] precedence over a lane queue {lane_queue_depth} deep")
-                self.state_store.append_event(
-                    make_event(
-                        "merge_took_precedence",
-                        iteration,
-                        lane_queue_depth=lane_queue_depth,
-                        first_iteration=merge_pair[0].iteration,
-                        second_iteration=merge_pair[1].iteration,
-                        unresolved_stall_iters=(self.run_state.stall.unresolved_stall_iters),
-                    )
-                )
-            if merge_pair is not None and merge_obstacle:
-                self._decline_merge_attempt(
-                    iteration,
-                    merge_pair,
-                    merge_obstacle,
-                    # A refusal did not reach the pair's diffs, so it is not evidence about them and must not be
-                    # remembered against them.
-                    about_the_iteration=bool(merge_refusal),
-                )
-            # A fan-out round already paid for these candidates, so they are measured before anything new is planned.
-            queued_lane = None if hazard or merge_diff else self._take_lane_candidate()
-            if hazard is not None:
-                unmeasured_result = self._unmeasurable_on_a_held_device(
-                    iteration=iteration,
-                    detail=hazard.describe(),
-                    session_sink=session_sink,
-                )
-                commit_hash = ""
-                rationale = "device held; nothing was planned, run or measured"
-                attempt_source = ""
-                attempt_diff = ""
-                reusable_benchmark = None
-            elif queued_lane is not None:
-                unmeasured_result = None
-                commit_hash = ""
-                rationale = f"lane {queued_lane.lane_id} of a fan-out round"
-                attempt_source = self._read_kernel_source()
-                attempt_diff = self._working_tree_diff()
-                reusable_benchmark = None
-                session_sink["plan"] = queued_lane.plan
-                print(f"  [lane {queued_lane.lane_id}] measuring queued candidate")
-            elif merge_diff and merge_pair is not None:
-                unmeasured_result = None
-                commit_hash = ""
-                rationale = (
-                    f"stacked iterations {merge_pair[0].iteration} and "
-                    f"{merge_pair[1].iteration}; no Implementer session"
-                )
-                attempt_source = self._read_kernel_source()
-                attempt_diff = merge_diff
-                reusable_benchmark = None
-                session_sink["plan"] = merge_plan(*merge_pair)
-                print(f"  [merge] {session_sink['plan']}")
-                # How often the mechanism engaged.
-                self.state_store.append_event(
-                    make_event(
-                        "merge_attempt_staged",
-                        iteration,
-                        first_iteration=merge_pair[0].iteration,
-                        second_iteration=merge_pair[1].iteration,
-                        cases=sorted(merge_pair[0].winning_cases | merge_pair[1].winning_cases),
-                        unresolved_stall_iters=(self.run_state.stall.unresolved_stall_iters),
-                    )
-                )
-            elif agent_fn is not None:
-                print("  [agent] Querying agent for kernel modification...")
-                if orchestration_service is not None:
-                    if fan_out_plan is not None:
-                        plan_path, orchestration_error = fan_out_plan
-                    else:
-                        print("  [orchestration] analyzing and dispatching specialists...")
-                        self._last_orchestration_plan_executable = None
-                        plan_path, orchestration_error = await self._plan_round(
-                            iteration=iteration,
-                            orchestration_service=orchestration_service,
-                        )
-                    if plan_path is None:
-                        result = IterationResult(
-                            iteration=iteration,
-                            duration_sec=0.0,
-                            validation_passed=False,
-                            validation_summary=(f"ORCHESTRATION ERROR: {orchestration_error}"),
-                            session_end_reason="orchestration_error",
-                        )
-                        self.results.append(result)
-                        self._apply_iteration_planning_state(
-                            optimization_plan_created=False,
-                        )
-                        self._record_iteration_outcome(
-                            result,
-                            decision_label="ORCHESTRATION_ERROR",
-                        )
-                        await self._record_lesson(
-                            iteration=iteration,
-                            result=result,
-                            decision="ORCHESTRATION_ERROR",
-                            session_sink=session_sink,
-                        )
-                        self._record_iteration_handoff(
-                            iteration=iteration,
-                            decision="ORCHESTRATION_ERROR",
-                            optimization_plan_path="",
-                            session_sink=session_sink,
-                        )
-                        self._publish_optimization_history()
-                        if on_iteration:
-                            on_iteration(result)
-                        continue
-                    optimization_plan_path = str(plan_path)
-                    optimization_plan_executable = (
-                        self._last_orchestration_plan_executable
-                        if self._last_orchestration_plan_executable is not None
-                        else True
-                    )
-                    complete_orchestration_probe(self.run_state)
-                    self.state_store.save(self.run_state)
-                # The last point before the round buys its session, and the first at which what planning cost is a
-                # measurement rather than an estimate.
-                if not self._admit_dispatch(iteration):
-                    break
-                session_sink["session_started"] = True
-                # Cross-iteration experience assembled from complementary sources (AVO-style lineage view), each
-                # carrying what the others cannot: * the candidate ARCHIVE digest — the trajectory table + full diffs
-                # of the best/near-miss/recent attempts + a pointer to the on-disk archive so the agent can Read any
-                # prior kernel. * the LESSON documents — what each recent session actually explored, in its own words,
-                # including the directions it abandoned (which leave no diff behind). * the experience LEDGER —
-                # objective toolchain observations distilled from machine-verified failure signatures.
-                lh_header = _long_horizon_header(
-                    self.run_state,
-                    self.state_store,
-                    self.handoff_store,
-                )
-
-                # Lesson documents from the most recent iterations, verbatim, plus the absolute path of the directory
-                # holding every past one.
-                lessons_txt = ""
-                if getattr(self, "lessons", None) is not None:
-                    lessons_txt = self.lessons.render_for_prompt(
-                        current_cases=self._scored_case_ids(),
-                        kernel_source=self._kernel_source_for_scope(),
-                    )
-
-                ledger_txt = ""
-                if self.ledger:
-                    # The session narrative lives in the lesson documents, so the ledger contributes only objective
-                    # toolchain observations once any lesson is available.
-                    ledger_txt = self.ledger.render_for_prompt(
-                        include_recent=(not lessons_txt and (bool(lh_header) or not bool(digest)))
-                    )
-                if lh_header:
-                    history = "\n\n".join(p for p in (lessons_txt, ledger_txt) if p)
-                    print(
-                        f"  [agent] injected long-horizon header: {len(lh_header)} chars "
-                        f"(digest reserved for supervisor)"
-                    )
-                else:
-                    history = "\n\n".join(p for p in (digest, lessons_txt, ledger_txt) if p)
-                    if digest:
-                        n_cand = len(self.archive.load_index())
-                        print(
-                            f"  [agent] injected lineage digest: {len(digest)} chars, "
-                            f"{n_cand} prior candidates archived"
-                        )
-                if lessons_txt:
-                    print(f"  [agent] injected lesson documents: {len(lessons_txt)} chars")
-                if not history:
-                    history = "\n".join(_compact_history_entry(r) for r in self.results[-5:])
-                analysis_evidence = self._render_analysis_evidence_for_implementer()
-                if analysis_evidence:
-                    history = f"{analysis_evidence}\n\n{history}"
-                    print(f"  [agent] injected Analysis evidence: {len(analysis_evidence)} chars")
-                coverage_block = self._render_case_config_coverage()
-                if coverage_block:
-                    history = f"{coverage_block}\n\n{history}"
-                    print(f"  [agent] injected per-case configuration coverage: {len(coverage_block)} chars")
-                ceiling_block = self._render_ceiling_advisory()
-                if ceiling_block:
-                    history = f"{ceiling_block}\n\n{history}"
-                    print(f"  [agent] injected roofline attainment standing: {len(ceiling_block)} chars")
-                new_file_block = self._render_uncommittable_new_paths()
-                if new_file_block:
-                    history = f"{new_file_block}\n\n{history}"
-                if self._search_policy_decision is not None:
-                    policy = self._search_policy_decision
-                    policy_lines = [
-                        "## Search Policy (deterministic outer-loop decision)",
-                        f"Mode: {policy.mode}",
-                        f"Objective: {policy.objective_kind}",
-                        "Reasons: " + ", ".join(policy.reason_codes),
-                    ]
-                    policy_lines.append(
-                        f"Mode residence remaining after this iteration: {policy.residence_iterations_remaining}"
-                    )
-                    history = "\n".join(policy_lines) + "\n\n" + history
-                # The latest free-form Supervisor Ruling is durable across KEEP and resume.
-                if self._supervisor_ruling:
-                    history = (
-                        "## Latest Supervisor Ruling\n"
-                        "This review is the current planning authority. It "
-                        "overrides subjective recommendations or conclusions in "
-                        "historical lesson records, but never overrides objective "
-                        "validation or measurement facts.\n\n"
-                        f"{self._supervisor_ruling}\n\n{history}"
-                    )
-                # The long-horizon header (rendered above) goes at the very TOP, above the supervisor/analyst/pmc
-                # prepends, as the compact memory frame the implementer reads first.
-                if lh_header:
-                    history = f"{lh_header}\n\n{history}"
-                if optimization_plan_path:
-                    ruling_instruction = (
-                        "The plan was synthesized from current evidence and the "
-                        "latest Supervisor Ruling. If any plan statement conflicts "
-                        "with that ruling, follow the ruling. "
-                        if self._supervisor_ruling
-                        else "The plan was synthesized from current evidence. "
-                    )
-                    history = (
-                        "## Required optimization plan\n"
-                        f"Read {optimization_plan_path} and execute the integrated "
-                        "plan it contains. "
-                        f"{ruling_instruction}"
-                        "Historical lesson records are evidence, not instructions.\n\n"
-                        f"{history}"
-                    )
-                # Pass extras only to agent_fns that declare them: the in-session gate uses the current best mean case
-                # speedup and immutable pristine per-case timings; session_sink hands back findings and the
-                # resumed-session factual-record callback.
-                extra_kwargs = {}
-                try:
-                    params = inspect.signature(agent_fn).parameters
-                    if "baseline_case_times" in params:
-                        extra_kwargs["baseline_case_times"] = dict(self._baseline_case_times)
-                    if "best_mean_case_speedup" in params:
-                        extra_kwargs["best_mean_case_speedup"] = self.best_mean_case_speedup
-                    if "session_sink" in params:
-                        extra_kwargs["session_sink"] = session_sink
-                except (ValueError, TypeError):
-                    log.debug("could not introspect agent_fn signature", exc_info=True)
-                agent_error = None
-                try:
-                    rationale = await agent_fn(
-                        self.ic.kernel_file,
-                        history,
-                        **extra_kwargs,
-                    )
-                    print(f"  [agent] Rationale: {rationale[:200]}")
-                except Exception as e:  # noqa: BLE001 - agent backend failure is not enumerable
-                    agent_error = e
-                    print(f"  [agent] ERROR: {e}")
-                    rationale = f"agent session ended with error after edits: {e}"
-                    session_sink.setdefault("end_reason", "sdk_error")
-                    session_sink.setdefault(
-                        "findings",
-                        f"Agent session error before outer validation: {e}",
-                    )
-                finally:
-                    # The SDK result stream has completed (or unwound).
-                    self._checkpoint_llm_usage()
-
-                commit_hash = ""
-                # Either kind of "this candidate exists but must not be measured": protected state was tainted, or the
-                # workspace is still busy.
-                unmeasured_result: IterationResult | None = None
-                if session_sink.get("integrity_violation") is True:
-                    # Capture evidence before restoration.
-                    attempt_diff = self._working_tree_diff()
-                    attempt_source = self._read_kernel_source()
-                    integrity_reason = str(session_sink.get("integrity_reason") or "protected workspace state changed")
-                    restore_errors: list[str] = []
-                    restore = session_sink.get("integrity_restore")
-                    if callable(restore):
-                        try:
-                            restore()
-                        except Exception as error:  # noqa: BLE001
-                            restore_errors.append(f"protected snapshot restore failed: {type(error).__name__}: {error}")
-                    else:
-                        restore_errors.append("protected snapshot restore callback unavailable")
-                    try:
-                        self._git_discard_worktree()
-                    except Exception as error:  # noqa: BLE001
-                        restore_errors.append(f"tracked candidate restore failed: {type(error).__name__}: {error}")
-                    if not restore_errors:
-                        try:
-                            self._validate_driver_integrity(self.run_state)
-                        except Exception as error:  # noqa: BLE001
-                            restore_errors.append(str(error))
-                    summary = (
-                        "REVERT (protected integrity violation): canonical "
-                        "correctness and benchmark were skipped before executing "
-                        f"the measurement surface. {integrity_reason}"
-                    )
-                    if restore_errors:
-                        summary += " Restoration errors: " + "; ".join(restore_errors)
-                    session_sink["findings"] = "\n---\n".join(
-                        part
-                        for part in (
-                            str(session_sink.get("findings") or ""),
-                            summary,
-                        )
-                        if part
-                    )
-                    unmeasured_result = IterationResult(
-                        iteration=iteration,
-                        duration_sec=0.0,
-                        validation_passed=False,
-                        validation_summary=summary,
-                        kept=False,
-                        integrity_violation=True,
-                    )
-                    reusable_benchmark = None
-                    print("  [REVERT] Protected integrity violation; canonical validation skipped")
-                elif str(session_sink.get("workspace_contention") or ""):
-                    # The session's own processes are still running in the workspace, or someone else's are and they
-                    # are not ours to kill.
-                    contention = str(session_sink["workspace_contention"])
-                    # Nothing about the end of this iteration makes those processes leave, so the refusal is recorded
-                    # and re-checked rather than forgotten here.
-                    self.device_hazard.record(
-                        iteration=iteration,
-                        detail=contention,
-                        pids=processes_under(self.ic.workspace_dir),
-                    )
-                    attempt_diff = self._working_tree_diff()
-                    attempt_source = self._read_kernel_source()
-                    summary = (
-                        "REVERT (workspace contention): canonical correctness "
-                        "and benchmark were skipped because the session's "
-                        f"workspace could not be cleared. {contention}"
-                    )
-                    try:
-                        # The candidate itself may be sound, but nothing here can establish that, and HEAD has to stay
-                        # at the last measured best rather than carry an unmeasured diff into the next iteration.
-                        self._git_discard_worktree()
-                    except Exception as error:  # noqa: BLE001
-                        summary += f" Candidate restore failed: {type(error).__name__}: {error}"
-                    session_sink["findings"] = "\n---\n".join(
-                        part
-                        for part in (
-                            str(session_sink.get("findings") or ""),
-                            summary,
-                        )
-                        if part
-                    )
-                    unmeasured_result = IterationResult(
-                        iteration=iteration,
-                        duration_sec=0.0,
-                        validation_passed=False,
-                        validation_summary=summary,
-                        kept=False,
-                        workspace_contention=contention,
-                    )
-                    reusable_benchmark = None
-                    print("  [REVERT] Workspace still contended; canonical measurement skipped")
-                else:
-                    # The driver is the measurement boundary and must remain byte-for-byte canonical.
-                    self._validate_driver_integrity(self.run_state)
-
-                    # Keep HEAD at the last validated best state while this candidate remains unverified.
-                    attempt_diff = self._working_tree_diff()
-                    if not attempt_diff.strip():
-                        # An outage leaves the same empty diff as a deliberate no-op.
-                        api_failed = session_sink.get("end_reason") == EXHAUSTED_END_REASON
-                        # A file the agent created is not in the tracked diff.
-                        new_files_only = self._new_paths_need_discard()
-                        if new_files_only:
-                            self._git_discard_worktree()
-                        if agent_error:
-                            decision_label = "AGENT_ERROR"
-                            summary = f"agent_fn error: {agent_error}"
-                        elif api_failed:
-                            decision_label = "API_ERROR"
-                            summary = (
-                                "LLM API never answered this Session; no candidate "
-                                "was attempted (not an optimization result)"
-                            )
-                        elif new_files_only:
-                            decision_label = "NO_CHANGES"
-                            summary = (
-                                "NO TRACKED CHANGES: the whole candidate was in "
-                                "new file(s) matching "
-                                f"{', '.join(self.ic.commit_new_paths)}. A KEEP "
-                                "commit is built from the tracked diff, so an "
-                                "allowlisted new file can only ship alongside a "
-                                "tracked edit. The file was taken off the tree "
-                                "rather than measured with the next candidate."
-                            )
-                        else:
-                            decision_label = "NO_CHANGES"
-                            summary = "NO TRACKED CHANGES: agent produced no candidate diff"
-                        print("  [agent] No tracked source changes; skipping candidate")
-                        result = IterationResult(
-                            iteration=iteration,
-                            duration_sec=0.0,
-                            validation_passed=False,
-                            validation_summary=summary,
-                            kept=False,
-                        )
-                        result.agent_rationale = rationale
-                        result.session_end_reason = session_sink.get("end_reason", "")
-                        result.turns = session_sink.get("turns")
-                        self.results.append(result)
-                        self._apply_iteration_planning_state(
-                            optimization_plan_created=(optimization_plan_executable),
-                        )
-                        self._record_iteration_outcome(
-                            result,
-                            plan=session_sink.get("plan", ""),
-                            decision_label=decision_label,
-                        )
-                        await self._record_lesson(
-                            iteration=iteration,
-                            result=result,
-                            decision=decision_label,
-                            session_sink=session_sink,
-                        )
-                        self._record_iteration_handoff(
-                            iteration=iteration,
-                            decision=decision_label,
-                            optimization_plan_path=optimization_plan_path,
-                            session_sink=session_sink,
-                        )
-                        self._publish_optimization_history()
-                        if on_iteration:
-                            on_iteration(result)
-                        continue
-                    reusable_benchmark = None
-                    gate_measurement = session_sink.get("benchmark_measurement")
-                    if session_sink.get("gate_passed") is True and self._can_reuse_insession_benchmark(
-                        gate_measurement,
-                        attempt_diff=attempt_diff,
-                    ):
-                        reusable_benchmark = gate_measurement
-                    # Capture the attempt before any discard or keep commit.
-                    attempt_source = self._read_kernel_source()
-            else:
-                unmeasured_result = None
-                commit_hash = ""
-                rationale = "no-agent (baseline measurement)"
-                attempt_source = ""
-                attempt_diff = ""
-                reusable_benchmark = None
-
-            # Snapshot the best-so-far BEFORE this iteration is measured, so the archive can record the true delta vs
-            # the standard it had to beat (run_one_iteration mutates self.best_wall_ms on an improvement).
-            best_before = self.best_wall_ms
-            best_mean_case_speedup_before = self.best_mean_case_speedup
-
-            # Run validation + bench.
-            if unmeasured_result is not None:
-                result = unmeasured_result
-            else:
-                try:
-                    run_kwargs = {}
-                    if reusable_benchmark is not None:
-                        run_kwargs["benchmark_measurement"] = reusable_benchmark
-                    result = await self.run_one_iteration(
-                        iteration,
-                        plan=session_sink.get("plan", ""),
-                        **run_kwargs,
-                    )
-                except Exception as e:  # noqa: BLE001
-                    # Turn the crash into a FAILED result (crashed=True) and let it flow through the same
-                    # verdict/ledger/archive path.
-                    print(f"  [CRASH] iteration {iteration} crashed during run: {e}")
-                    result = IterationResult(
-                        iteration=iteration,
-                        duration_sec=0.0,
-                        validation_passed=False,
-                        validation_summary=f"iteration crashed: {e}",
-                        error_output=traceback.format_exc()[-4000:],
-                        kept=False,
-                        crashed=True,
-                    )
-            result.commit_hash = commit_hash
-            result.agent_rationale = rationale
-            # Session end reason + turns spent (from the in-session gate / SDK via session_sink) — persisted so a
-            # run's end-reason distribution (edit cap / turn cap / converged / …) is analyzable.
-            result.session_end_reason = session_sink.get("end_reason", "")
-            result.turns = session_sink.get("turns")
-
-            if agent_fn is not None:
-                self._apply_iteration_planning_state(
-                    optimization_plan_created=optimization_plan_executable,
-                )
-
-            # Keep or revert — detailed verdict
-            pending_keep: dict | None = None
-            keep_checkpoint_finalized = False
-            elapsed = result.duration_sec
-            raw_wall_txt = f"{result.wall_ms:.3f} ms" if result.wall_ms is not None else "unavailable"
-            if not result.validation_passed:
-                if commit_hash:
-                    self._git_revert_last()
-                elif attempt_diff or self._new_paths_need_discard():
-                    self._git_discard_worktree()
-                label = "Iteration crashed" if result.crashed else "Validation failed"
-                print(f"  [REVERT] {label} ({elapsed:.0f}s)")
-                print(f"           {result.validation_summary.splitlines()[-1] if result.validation_summary else ''}")
-            elif not result.kept:
-                if commit_hash:
-                    self._git_revert_last()
-                elif attempt_diff or self._new_paths_need_discard():
-                    self._git_discard_worktree()
-                speedup_txt = f"{result.mean_case_speedup:.6f}x" if result.mean_case_speedup is not None else "None"
-                best_txt = f"{self.best_mean_case_speedup:.6f}x" if self.best_mean_case_speedup is not None else "?"
-                print(
-                    f"  [REVERT] mean case speedup={speedup_txt} not better than "
-                    f"best={best_txt}; raw mean={raw_wall_txt} ({elapsed:.0f}s)"
-                )
-            elif result.kept:
-                # Defer SIGTERM/SIGINT across the durable best-commit publication (main #hardening) so a kill
-                # mid-checkpoint cannot leave the pending-keep/run-state half-written.
-                with _defer_termination_signals(bool(attempt_diff)):
-                    if attempt_diff:
-                        try:
-                            pending_keep = self._build_pending_keep(
-                                result,
-                                plan=session_sink.get("plan", ""),
-                                best_before=best_before,
-                                rationale=rationale,
-                                kernel_source=attempt_source,
-                            )
-                            self._persist_pending_keep(pending_keep)
-                            commit_hash = self._git_commit(str(pending_keep["commit_message"]))
-                        except Exception as e:  # noqa: BLE001 - a KEEP that cannot be built is not a KEEP
-                            result.kept = False
-                            result.validation_passed = False
-                            result.crashed = True
-                            result.validation_summary = f"COMMIT FAILED: {e}"
-                            result.error_output = str(e)
-                            self._git_discard_all_tracked_changes()
-                            self._clear_pending_keep()
-                            print(f"  [REVERT] Commit failed after validation ({elapsed:.0f}s)")
-                            print(f"           {str(e)[-300:]}")
-                        else:
-                            result.commit_hash = commit_hash
-                            self._promote_best(result)
-                            self.best_mean_case_speedup = result.mean_case_speedup
-                            self._finalize_keep_checkpoint(
-                                result,
-                                plan=session_sink.get("plan", ""),
-                                best_before=best_before,
-                                pending=pending_keep,
-                            )
-                            keep_checkpoint_finalized = True
-                            print(f"  [agent] Committed verified best: {commit_hash[:8]}")
-                    else:
-                        # No-agent measurement path: there is no candidate diff to commit, but the measurement can
-                        # still establish a best.
-                        self._promote_best(result)
-                        self.best_mean_case_speedup = result.mean_case_speedup
-                    # Bridge to the caller's checkpoint sink (main): lets the CLI persist a Hyperloom-recovery
-                    # checkpoint JSON alongside our run-state durability.
-                    if result.kept and on_best_committed:
-                        on_best_committed(result)
-                    if keep_checkpoint_finalized:
-                        self._clear_pending_keep()
-                if result.kept:
-                    improvement = ""
-                    if best_mean_case_speedup_before and result.mean_case_speedup:
-                        pct = (result.mean_case_speedup / best_mean_case_speedup_before - 1.0) * 100
-                        improvement = f" ({pct:+.1f}% vs previous best)"
-                    snr_str = f" SNR={result.snr_db:.1f}dB" if result.snr_db is not None else ""
-                    print(
-                        f"  [KEEP] mean case speedup={result.mean_case_speedup:.6f}x "
-                        f"— NEW BEST{improvement}; raw mean={raw_wall_txt}"
-                        f"{snr_str} ({elapsed:.0f}s)"
-                    )
-            else:
-                print(f"  [SKIP]   wall_ms={result.wall_ms} ({elapsed:.0f}s)")
-
-            # Remote/external work belongs outside the SIGTERM deferral window but still precedes potentially long
-            # post-KEEP profiling.
-            if keep_checkpoint_finalized and pending_keep is not None:
-                self._publish_best_result(
-                    result,
-                    plan=session_sink.get("plan", ""),
-                    best_before=best_before,
-                    pending=pending_keep,
-                )
-            if result.kept and on_best_ready:
-                on_best_ready(result)
-
-            if self.experiment:
-                self.tracker.log_iteration(
-                    self.experiment.experiment_id,
-                    config={"iteration": iteration, "kept": result.kept},
-                    snr_db=result.snr_db,
-                    wall_ms=result.wall_ms,
-                    mean_case_speedup=result.mean_case_speedup,
-                    pmc_diagnosis=result.pmc_diagnosis,
-                    vgpr=result.vgpr,
-                    decision="KEEP" if result.kept else "REVERT",
-                    notes=session_sink.get("plan", ""),
-                )
-
-            self.results.append(result)
-
-            # Reduce this finished iteration into the durable run state + append a factual event, then checkpoint.
-            if not keep_checkpoint_finalized:
-                self._record_iteration_outcome(
-                    result,
-                    plan=session_sink.get("plan", ""),
-                )
-
-            # The verdict is now known, so ask the just-finished implementer session to record what it explored, then
-            # stamp the measured outcome onto the same document.
-            decision_label = _decision_label(result)
-            if merge_diff and merge_pair is not None:
-                print(
-                    f"  [merge] iterations {merge_pair[0].iteration}+"
-                    f"{merge_pair[1].iteration} measured stacked: {decision_label}"
-                )
-                if decision_label == "KEEP":
-                    # How often the mechanism changed an outcome, which is the other of the two numbers
-                    # ``merge_attempt_staged`` carries.
-                    self.state_store.append_event(
-                        make_event(
-                            "merge_attempt_kept",
-                            iteration,
-                            first_iteration=merge_pair[0].iteration,
-                            second_iteration=merge_pair[1].iteration,
-                            mean_case_speedup=result.mean_case_speedup,
-                        )
-                    )
-            iteration_diff_summary = (
-                self._diff_summary(commit_hash) if commit_hash else self._diff_summary_from_diff(attempt_diff)
+        if merge_pair is not None and merge_obstacle:
+            self._decline_merge_attempt(
+                iteration,
+                merge_pair,
+                merge_obstacle,
+                # A refusal did not reach the pair's diffs, so it is not evidence about them and must not be
+                # remembered against them.
+                about_the_iteration=bool(merge_refusal),
             )
-            await self._record_lesson(
-                iteration=iteration,
-                result=result,
-                decision=decision_label,
-                session_sink=session_sink,
-                diff_summary=iteration_diff_summary,
-            )
+        return _StagedMerge(merge_pair, merge_diff)
 
-            # Record this iteration into the cross-iteration experience ledger.
-            if getattr(self, "ledger", None) is not None and (commit_hash or attempt_diff):
-                if not result.validation_passed:
-                    last = ""
-                    if result.validation_summary:
-                        lines = [l for l in result.validation_summary.splitlines() if l.strip()]
-                        last = lines[-1][:120] if lines else ""
-                    outcome = f"CRASH: {last}" if result.crashed else f"REVERT (validation failed): {last}"
-                elif result.kept:
-                    outcome = f"KEPT — new best mean case speedup={result.mean_case_speedup:.6f}x"
-                else:
-                    best_txt = f"{self.best_mean_case_speedup:.6f}x" if self.best_mean_case_speedup is not None else "?"
-                    speedup_txt = f"{result.mean_case_speedup:.6f}x" if result.mean_case_speedup is not None else "?"
-                    outcome = f"REVERT (correct but not faster): mean case speedup={speedup_txt} vs best={best_txt}"
-                error_text = (
-                    session_sink.get("findings", "")
-                    or getattr(result, "error_output", "")
-                    or (result.validation_summary if not result.validation_passed else "")
-                )
-                self.ledger.record_iteration(
-                    iteration=iteration,
-                    outcome=outcome,
-                    diff_summary=iteration_diff_summary,
-                    error_text=error_text,
-                )
+    def _print_final_report(self) -> None:
+        """Print what the campaign did, and what it cost.
 
-            # Archive the full solution and measurements as a derived view.
-            archived_path = None
-            if getattr(self, "archive", None) is not None and (commit_hash or attempt_diff):
-                try:
-                    decision = decision_label
-                    validation_text = result.validation_summary or ""
-                    if getattr(result, "error_output", ""):
-                        validation_text = f"{validation_text}\n\n{result.error_output}".strip()
-                    archived_path = self.archive.record(
-                        CandidateRecord(
-                            iteration=iteration,
-                            commit_hash=commit_hash,
-                            decision=decision,
-                            kept=result.kept,
-                            validation_passed=result.validation_passed,
-                            wall_ms=result.wall_ms,
-                            mean_case_speedup=result.mean_case_speedup,
-                            bench_detail=result.bench_detail,
-                            snr_db=result.snr_db,
-                            vgpr=result.vgpr,
-                            pmc_diagnosis=result.pmc_diagnosis,
-                            baseline_wall_ms=self.ic.baseline_wall_ms,
-                            best_wall_ms_before=best_before,
-                            best_mean_case_speedup_before=best_mean_case_speedup_before,
-                            plan=session_sink.get("plan", ""),
-                            rationale=rationale,
-                            kernel_file=self.ic.kernel_file,
-                            shape={},
-                            kernel_source=attempt_source,
-                            change_diff=self._full_diff(commit_hash) if commit_hash else attempt_diff,
-                            pmc_full=result.pmc_full,
-                            profile_meta=result.profile_meta,
-                            validation_text=validation_text,
-                            session_end_reason=result.session_end_reason,
-                            turns=result.turns,
-                        )
-                    )
-                    if keep_checkpoint_finalized and archived_path is None:
-                        raise RuntimeError("candidate archive returned no published path")
-                except Exception as e:  # noqa: BLE001
-                    if keep_checkpoint_finalized:
-                        self.persistence_degraded = True
-                        self.persistence_errors.append(f"archive derived KEEP view iteration {iteration}: {e}")
-                        self.persistence_errors = self.persistence_errors[-10:]
-                    log.debug("could not archive iteration %s: %s", iteration, e)
-
-            if not keep_checkpoint_finalized:
-                self._publish_best_result(
-                    result,
-                    plan=session_sink.get("plan", ""),
-                    best_before=best_before,
-                )
-            self._record_iteration_handoff(
-                iteration=iteration,
-                decision=decision_label,
-                optimization_plan_path=optimization_plan_path,
-                session_sink=session_sink,
-                archived_path=archived_path,
-            )
-            self._publish_optimization_history()
-
-            if on_iteration:
-                on_iteration(result)
-
-            # A KEEP makes the prior evidence stale but does not discard its paths.
-            if result.kept:
-                self._analysis_bundle = None
-
-        # Whatever the last iteration cost belongs to this campaign's history even though no further round will read
-        # it: a resumed session will.
-        self._close_round()
-        self.best_publisher.refresh_round_budget(self._round_budget_summary())
-
-        # Persist the terminal control state so a resume/inspection sees why the run ended and what the final best
-        # was.
-        try:
-            terminal_reason = self.termination_reason or self.run_state.termination_reason or "unknown"
-            finish_session(
-                self.run_state,
-                status=(SESSION_COMPLETED if terminal_reason == "gate_met" else SESSION_PAUSED),
-                reason=terminal_reason,
-            )
-            head_out = self._git("rev-parse", "HEAD").strip()
-            if head_out:
-                self.run_state.head_commit = head_out.splitlines()[0]
-            self.state_store.append_event(
-                make_event(
-                    "run_terminated",
-                    self.run_state.iteration,
-                    reason=terminal_reason,
-                    best_wall_ms=self.best_wall_ms,
-                    best_mean_case_speedup=self.best_mean_case_speedup,
-                )
-            )
-            self.state_store.save(self.run_state)
-        except Exception:
-            log.debug("run_state: terminal save failed", exc_info=True)
-        self.persistence_degraded = self.persistence_degraded or self.state_store.degraded
-        self.persistence_errors = (self.persistence_errors + self.state_store.persistence_errors)[-10:]
-
-        # Persist the run's total LLM token spend onto the experiment record so external callers can read the token
-        # cost.
-        self._checkpoint_llm_usage()
-
-        if self.experiment:
-            self.tracker.mark_complete(self.experiment.experiment_id)
-
+        The round figures are campaign totals rather than this session's, so
+        they are labelled as such and their share is taken against the campaign
+        clock rather than the session wall-clock printed above them.
+        """
         # Final report
         total_time = time.time() - self.start_time
         kept_count = sum(1 for r in self.results if r.kept)
@@ -5975,6 +5286,1125 @@ class IterationLoop(AnalysisRuntimeMixin):
             for line in llm_spend_lines(self.llm_usage):
                 print(line)
         print(f"  Experiment: {self.experiment.experiment_id}")
+
+    def _persist_terminal_state(self) -> None:
+        """Close the last round and record why the run ended.
+
+        Whatever the last iteration cost belongs to this campaign's history even
+        though no further round will read it: a resumed session will, and so
+        will an inspection asking what the final best was.
+        """
+        # Whatever the last iteration cost belongs to this campaign's history even though no further round will read
+        # it: a resumed session will.
+        self._close_round()
+        self.best_publisher.refresh_round_budget(self._round_budget_summary())
+
+        # Persist the terminal control state so a resume/inspection sees why the run ended and what the final best
+        # was.
+        try:
+            terminal_reason = self.termination_reason or self.run_state.termination_reason or "unknown"
+            finish_session(
+                self.run_state,
+                status=(SESSION_COMPLETED if terminal_reason == "gate_met" else SESSION_PAUSED),
+                reason=terminal_reason,
+            )
+            head_out = self._git("rev-parse", "HEAD").strip()
+            if head_out:
+                self.run_state.head_commit = head_out.splitlines()[0]
+            self.state_store.append_event(
+                make_event(
+                    "run_terminated",
+                    self.run_state.iteration,
+                    reason=terminal_reason,
+                    best_wall_ms=self.best_wall_ms,
+                    best_mean_case_speedup=self.best_mean_case_speedup,
+                )
+            )
+            self.state_store.save(self.run_state)
+        except Exception:
+            log.debug("run_state: terminal save failed", exc_info=True)
+        self.persistence_degraded = self.persistence_degraded or self.state_store.degraded
+        self.persistence_errors = (self.persistence_errors + self.state_store.persistence_errors)[-10:]
+
+        # Persist the run's total LLM token spend onto the experiment record so external callers can read the token
+        # cost.
+        self._checkpoint_llm_usage()
+
+        if self.experiment:
+            self.tracker.mark_complete(self.experiment.experiment_id)
+
+    def _rule_on_attempt(
+        self,
+        result,
+        attempt: _Attempt,
+        frame: _IterationFrame,
+        *,
+        on_best_committed,
+    ) -> _Ruling:
+        """Keep or revert this attempt, and say what the verdict left behind.
+
+        Returns the pending KEEP record, whether its checkpoint was finalized,
+        and the commit the verdict settled on -- a KEEP commits here, so the
+        hash the caller came in with is not the one it leaves with.
+        """
+        session_sink = frame.session_sink
+        best_before, best_mean_case_speedup_before = frame.best_before, frame.best_mean_case_speedup_before
+        commit_hash, attempt_diff = attempt.commit_hash, attempt.attempt_diff
+        attempt_source, rationale = attempt.attempt_source, attempt.rationale
+        # Keep or revert — detailed verdict
+        pending_keep: dict | None = None
+        keep_checkpoint_finalized = False
+        elapsed = result.duration_sec
+        raw_wall_txt = f"{result.wall_ms:.3f} ms" if result.wall_ms is not None else "unavailable"
+        if not result.validation_passed:
+            if commit_hash:
+                self._git_revert_last()
+            elif attempt_diff or self._new_paths_need_discard():
+                self._git_discard_worktree()
+            label = "Iteration crashed" if result.crashed else "Validation failed"
+            print(f"  [REVERT] {label} ({elapsed:.0f}s)")
+            print(f"           {result.validation_summary.splitlines()[-1] if result.validation_summary else ''}")
+        elif not result.kept:
+            if commit_hash:
+                self._git_revert_last()
+            elif attempt_diff or self._new_paths_need_discard():
+                self._git_discard_worktree()
+            speedup_txt = f"{result.mean_case_speedup:.6f}x" if result.mean_case_speedup is not None else "None"
+            best_txt = f"{self.best_mean_case_speedup:.6f}x" if self.best_mean_case_speedup is not None else "?"
+            print(
+                f"  [REVERT] mean case speedup={speedup_txt} not better than "
+                f"best={best_txt}; raw mean={raw_wall_txt} ({elapsed:.0f}s)"
+            )
+        else:
+            # Defer SIGTERM/SIGINT across the durable best-commit publication (main #hardening) so a kill
+            # mid-checkpoint cannot leave the pending-keep/run-state half-written.
+            with _defer_termination_signals(bool(attempt_diff)):
+                if attempt_diff:
+                    try:
+                        pending_keep = self._build_pending_keep(
+                            result,
+                            plan=session_sink.get("plan", ""),
+                            best_before=best_before,
+                            rationale=rationale,
+                            kernel_source=attempt_source,
+                        )
+                        self._persist_pending_keep(pending_keep)
+                        commit_hash = self._git_commit(str(pending_keep["commit_message"]))
+                    except Exception as e:  # noqa: BLE001 - a KEEP that cannot be built is not a KEEP
+                        result.kept = False
+                        result.validation_passed = False
+                        result.crashed = True
+                        result.validation_summary = f"COMMIT FAILED: {e}"
+                        result.error_output = str(e)
+                        self._git_discard_all_tracked_changes()
+                        self._clear_pending_keep()
+                        print(f"  [REVERT] Commit failed after validation ({elapsed:.0f}s)")
+                        print(f"           {str(e)[-300:]}")
+                    else:
+                        result.commit_hash = commit_hash
+                        self._promote_best(result)
+                        self.best_mean_case_speedup = result.mean_case_speedup
+                        self._finalize_keep_checkpoint(
+                            result,
+                            plan=session_sink.get("plan", ""),
+                            best_before=best_before,
+                            pending=pending_keep,
+                        )
+                        keep_checkpoint_finalized = True
+                        print(f"  [agent] Committed verified best: {commit_hash[:8]}")
+                else:
+                    # No-agent measurement path: there is no candidate diff to commit, but the measurement can
+                    # still establish a best.
+                    self._promote_best(result)
+                    self.best_mean_case_speedup = result.mean_case_speedup
+                # Bridge to the caller's checkpoint sink (main): lets the CLI persist a Hyperloom-recovery
+                # checkpoint JSON alongside our run-state durability.
+                if result.kept and on_best_committed:
+                    on_best_committed(result)
+                if keep_checkpoint_finalized:
+                    self._clear_pending_keep()
+            if result.kept:
+                improvement = ""
+                if best_mean_case_speedup_before and result.mean_case_speedup:
+                    pct = (result.mean_case_speedup / best_mean_case_speedup_before - 1.0) * 100
+                    improvement = f" ({pct:+.1f}% vs previous best)"
+                snr_str = f" SNR={result.snr_db:.1f}dB" if result.snr_db is not None else ""
+                print(
+                    f"  [KEEP] mean case speedup={result.mean_case_speedup:.6f}x "
+                    f"— NEW BEST{improvement}; raw mean={raw_wall_txt}"
+                    f"{snr_str} ({elapsed:.0f}s)"
+                )
+        return _Ruling(pending_keep, keep_checkpoint_finalized, commit_hash)
+
+    async def _close_iteration(
+        self,
+        result: IterationResult,
+        attempt: _Attempt,
+        frame: _IterationFrame,
+        *,
+        ruling: _Ruling,
+        callbacks: LoopCallbacks,
+    ) -> None:
+        """Settle what this iteration owes the campaign now that it has a verdict.
+
+        The publication, the lesson, the ledger entry, the archive and the
+        handoff are all derived views of the same verdict, so they are
+        written together and in that order: a resume reads them back as one
+        iteration or not at all.
+        """
+        iteration, session_sink, best_before = frame.iteration, frame.session_sink, frame.best_before
+        merge_pair, merge_diff = frame.merge
+        pending_keep, keep_checkpoint_finalized, commit_hash = ruling
+        # Remote/external work belongs outside the SIGTERM deferral window but still precedes potentially long
+        # post-KEEP profiling.
+        if keep_checkpoint_finalized and pending_keep is not None:
+            self._publish_best_result(
+                result,
+                plan=session_sink.get("plan", ""),
+                best_before=best_before,
+                pending=pending_keep,
+            )
+        if result.kept and callbacks.on_best_ready:
+            callbacks.on_best_ready(result)
+
+        if self.experiment:
+            self.tracker.log_iteration(
+                self.experiment.experiment_id,
+                config={"iteration": iteration, "kept": result.kept},
+                snr_db=result.snr_db,
+                wall_ms=result.wall_ms,
+                mean_case_speedup=result.mean_case_speedup,
+                pmc_diagnosis=result.pmc_diagnosis,
+                vgpr=result.vgpr,
+                decision="KEEP" if result.kept else "REVERT",
+                notes=session_sink.get("plan", ""),
+            )
+
+        self.results.append(result)
+
+        # Reduce this finished iteration into the durable run state + append a factual event, then checkpoint.
+        if not keep_checkpoint_finalized:
+            self._record_iteration_outcome(
+                result,
+                plan=session_sink.get("plan", ""),
+            )
+
+        # The verdict is now known, so ask the just-finished implementer session to record what it explored, then
+        # stamp the measured outcome onto the same document.
+        decision_label = _decision_label(result)
+        if merge_diff and merge_pair is not None:
+            print(
+                f"  [merge] iterations {merge_pair[0].iteration}+"
+                f"{merge_pair[1].iteration} measured stacked: {decision_label}"
+            )
+            if decision_label == "KEEP":
+                # How often the mechanism changed an outcome, which is the other of the two numbers
+                # ``merge_attempt_staged`` carries.
+                self.state_store.append_event(
+                    make_event(
+                        "merge_attempt_kept",
+                        iteration,
+                        first_iteration=merge_pair[0].iteration,
+                        second_iteration=merge_pair[1].iteration,
+                        mean_case_speedup=result.mean_case_speedup,
+                    )
+                )
+        iteration_diff_summary = (
+            self._diff_summary(commit_hash) if commit_hash else self._diff_summary_from_diff(attempt.attempt_diff)
+        )
+        await self._record_lesson(
+            iteration=iteration,
+            result=result,
+            decision=decision_label,
+            session_sink=session_sink,
+            diff_summary=iteration_diff_summary,
+        )
+
+        # Record this iteration into the cross-iteration experience ledger.
+        self._record_ledger_iteration(
+            result,
+            frame,
+            iteration_diff_summary=iteration_diff_summary,
+            commit_hash=commit_hash,
+            attempt_diff=attempt.attempt_diff,
+        )
+
+        # Archive the full solution and measurements as a derived view.
+        archived_path = self._archive_attempt(result, attempt, frame, ruling=ruling, decision_label=decision_label)
+
+        if not keep_checkpoint_finalized:
+            self._publish_best_result(
+                result,
+                plan=session_sink.get("plan", ""),
+                best_before=best_before,
+            )
+        self._record_iteration_handoff(
+            iteration=iteration,
+            decision=decision_label,
+            optimization_plan_path=attempt.optimization_plan_path,
+            session_sink=session_sink,
+            archived_path=archived_path,
+        )
+        self._publish_optimization_history()
+
+        if callbacks.on_iteration:
+            callbacks.on_iteration(result)
+
+        # A KEEP makes the prior evidence stale but does not discard its paths.
+        if result.kept:
+            self._analysis_bundle = None
+
+    async def _source_attempt(
+        self,
+        frame: _IterationFrame,
+        supply: _IterationSupply,
+        *,
+        agents: LoopAgents,
+        digest,
+        callbacks: LoopCallbacks,
+    ) -> _Attempt | None:
+        """Decide what this iteration measures, and produce it.
+
+        A held device, a queued lane candidate and a staged merge each cost
+        nothing to source, so they are answered before an Implementer
+        session is bought. Returns None when the iteration has nothing to
+        measure: either it was closed out here, or the round was refused for
+        budget and ``_refused_round`` now says the campaign is over.
+        """
+        iteration, session_sink = frame.iteration, frame.session_sink
+        merge_pair, merge_diff = frame.merge
+        hazard, queued_lane, fan_out_plan = supply.hazard, supply.queued_lane, supply.fan_out_plan
+        agent_fn, orchestration_service, on_iteration = (
+            agents.agent_fn,
+            agents.orchestration_service,
+            callbacks.on_iteration,
+        )
+        # Only an orchestrated round synthesizes a plan; every other way of
+        # sourcing an attempt leaves the iteration without one.
+        optimization_plan_path = ""
+        optimization_plan_executable = False
+        if hazard is not None:
+            unmeasured_result = self._unmeasurable_on_a_held_device(
+                iteration=iteration,
+                detail=hazard.describe(),
+                session_sink=session_sink,
+            )
+            commit_hash = ""
+            rationale = "device held; nothing was planned, run or measured"
+            attempt_source = ""
+            attempt_diff = ""
+            reusable_benchmark = None
+        elif queued_lane is not None:
+            unmeasured_result = None
+            commit_hash = ""
+            rationale = f"lane {queued_lane.lane_id} of a fan-out round"
+            attempt_source = self._read_kernel_source()
+            attempt_diff = self._working_tree_diff()
+            reusable_benchmark = None
+            session_sink["plan"] = queued_lane.plan
+            print(f"  [lane {queued_lane.lane_id}] measuring queued candidate")
+        elif merge_diff and merge_pair is not None:
+            unmeasured_result = None
+            commit_hash = ""
+            rationale = (
+                f"stacked iterations {merge_pair[0].iteration} and {merge_pair[1].iteration}; no Implementer session"
+            )
+            attempt_source = self._read_kernel_source()
+            attempt_diff = merge_diff
+            reusable_benchmark = None
+            session_sink["plan"] = merge_plan(*merge_pair)
+            print(f"  [merge] {session_sink['plan']}")
+            # How often the mechanism engaged.
+            self.state_store.append_event(
+                make_event(
+                    "merge_attempt_staged",
+                    iteration,
+                    first_iteration=merge_pair[0].iteration,
+                    second_iteration=merge_pair[1].iteration,
+                    cases=sorted(merge_pair[0].winning_cases | merge_pair[1].winning_cases),
+                    unresolved_stall_iters=(self.run_state.stall.unresolved_stall_iters),
+                )
+            )
+        elif agent_fn is not None:
+            print("  [agent] Querying agent for kernel modification...")
+            if orchestration_service is not None:
+                if fan_out_plan is not None:
+                    plan_path, orchestration_error = fan_out_plan
+                else:
+                    print("  [orchestration] analyzing and dispatching specialists...")
+                    self._last_orchestration_plan_executable = None
+                    plan_path, orchestration_error = await self._plan_round(
+                        iteration=iteration,
+                        orchestration_service=orchestration_service,
+                    )
+                if plan_path is None:
+                    await self._abandon_iteration(
+                        IterationResult(
+                            iteration=iteration,
+                            duration_sec=0.0,
+                            validation_passed=False,
+                            validation_summary=(f"ORCHESTRATION ERROR: {orchestration_error}"),
+                            session_end_reason="orchestration_error",
+                        ),
+                        frame,
+                        decision_label="ORCHESTRATION_ERROR",
+                        on_iteration=on_iteration,
+                    )
+                    return None
+                optimization_plan_path = str(plan_path)
+                optimization_plan_executable = (
+                    self._last_orchestration_plan_executable
+                    if self._last_orchestration_plan_executable is not None
+                    else True
+                )
+                complete_orchestration_probe(self.run_state)
+                self.state_store.save(self.run_state)
+            # The last point before the round buys its session, and the first at which what planning cost is a
+            # measurement rather than an estimate.
+            if not self._admit_dispatch(iteration):
+                return None
+            session_sink["session_started"] = True
+            history = self._implementer_history(
+                digest=digest,
+                optimization_plan_path=optimization_plan_path,
+            )
+            # Pass extras only to agent_fns that declare them: the in-session gate uses the current best mean case
+            # speedup and immutable pristine per-case timings; session_sink hands back findings and the
+            # resumed-session factual-record callback.
+            extra_kwargs = {}
+            try:
+                params = inspect.signature(agent_fn).parameters
+                if "baseline_case_times" in params:
+                    extra_kwargs["baseline_case_times"] = dict(self._baseline_case_times)
+                if "best_mean_case_speedup" in params:
+                    extra_kwargs["best_mean_case_speedup"] = self.best_mean_case_speedup
+                if "session_sink" in params:
+                    extra_kwargs["session_sink"] = session_sink
+            except (ValueError, TypeError):
+                log.debug("could not introspect agent_fn signature", exc_info=True)
+            agent_error = None
+            try:
+                rationale = await agent_fn(
+                    self.ic.kernel_file,
+                    history,
+                    **extra_kwargs,
+                )
+                print(f"  [agent] Rationale: {rationale[:200]}")
+            except Exception as e:  # noqa: BLE001 - agent backend failure is not enumerable
+                agent_error = e
+                print(f"  [agent] ERROR: {e}")
+                rationale = f"agent session ended with error after edits: {e}"
+                session_sink.setdefault("end_reason", "sdk_error")
+                session_sink.setdefault(
+                    "findings",
+                    f"Agent session error before outer validation: {e}",
+                )
+            finally:
+                # The SDK result stream has completed (or unwound).
+                self._checkpoint_llm_usage()
+
+            return await self._collect_session_candidate(
+                frame,
+                agent_error=agent_error,
+                rationale=rationale,
+                plan=_RoundPlan(optimization_plan_path, optimization_plan_executable),
+                on_iteration=on_iteration,
+            )
+        else:
+            unmeasured_result = None
+            commit_hash = ""
+            rationale = "no-agent (baseline measurement)"
+            attempt_source = ""
+            attempt_diff = ""
+            reusable_benchmark = None
+        return _Attempt(
+            unmeasured_result=unmeasured_result,
+            commit_hash=commit_hash,
+            rationale=rationale,
+            attempt_source=attempt_source,
+            attempt_diff=attempt_diff,
+            reusable_benchmark=reusable_benchmark,
+            optimization_plan_path=optimization_plan_path,
+            optimization_plan_executable=optimization_plan_executable,
+        )
+
+    async def _collect_session_candidate(
+        self,
+        frame: _IterationFrame,
+        *,
+        agent_error,
+        rationale,
+        plan: _RoundPlan,
+        on_iteration,
+    ) -> _Attempt | None:
+        """Collect what the Implementer session left behind, or None if nothing can be.
+
+        A session that tainted protected state or left the workspace
+        contended produced a candidate that exists but must not be measured,
+        so it comes back already judged. A session that changed nothing
+        tracked is closed out here and the iteration is abandoned.
+        """
+        iteration, session_sink = frame.iteration, frame.session_sink
+        optimization_plan_path, optimization_plan_executable = plan.path, plan.executable
+        # Either kind of "this candidate exists but must not be measured": protected state was tainted, or the
+        # workspace is still busy.
+        unmeasured_result: IterationResult | None = None
+        if session_sink.get("integrity_violation") is True:
+            # Capture evidence before restoration.
+            attempt_diff = self._working_tree_diff()
+            attempt_source = self._read_kernel_source()
+            integrity_reason = str(session_sink.get("integrity_reason") or "protected workspace state changed")
+            restore_errors: list[str] = []
+            restore = session_sink.get("integrity_restore")
+            if callable(restore):
+                try:
+                    restore()
+                except Exception as error:  # noqa: BLE001
+                    restore_errors.append(f"protected snapshot restore failed: {type(error).__name__}: {error}")
+            else:
+                restore_errors.append("protected snapshot restore callback unavailable")
+            try:
+                self._git_discard_worktree()
+            except Exception as error:  # noqa: BLE001
+                restore_errors.append(f"tracked candidate restore failed: {type(error).__name__}: {error}")
+            if not restore_errors:
+                try:
+                    self._validate_driver_integrity(self.run_state)
+                except Exception as error:  # noqa: BLE001
+                    restore_errors.append(str(error))
+            summary = (
+                "REVERT (protected integrity violation): canonical "
+                "correctness and benchmark were skipped before executing "
+                f"the measurement surface. {integrity_reason}"
+            )
+            if restore_errors:
+                summary += " Restoration errors: " + "; ".join(restore_errors)
+            session_sink["findings"] = "\n---\n".join(
+                part
+                for part in (
+                    str(session_sink.get("findings") or ""),
+                    summary,
+                )
+                if part
+            )
+            unmeasured_result = IterationResult(
+                iteration=iteration,
+                duration_sec=0.0,
+                validation_passed=False,
+                validation_summary=summary,
+                kept=False,
+                integrity_violation=True,
+            )
+            reusable_benchmark = None
+            print("  [REVERT] Protected integrity violation; canonical validation skipped")
+        elif str(session_sink.get("workspace_contention") or ""):
+            # The session's own processes are still running in the workspace, or someone else's are and they
+            # are not ours to kill.
+            contention = str(session_sink["workspace_contention"])
+            # Nothing about the end of this iteration makes those processes leave, so the refusal is recorded
+            # and re-checked rather than forgotten here.
+            self.device_hazard.record(
+                iteration=iteration,
+                detail=contention,
+                pids=processes_under(self.ic.workspace_dir),
+            )
+            attempt_diff = self._working_tree_diff()
+            attempt_source = self._read_kernel_source()
+            summary = (
+                "REVERT (workspace contention): canonical correctness "
+                "and benchmark were skipped because the session's "
+                f"workspace could not be cleared. {contention}"
+            )
+            try:
+                # The candidate itself may be sound, but nothing here can establish that, and HEAD has to stay
+                # at the last measured best rather than carry an unmeasured diff into the next iteration.
+                self._git_discard_worktree()
+            except Exception as error:  # noqa: BLE001
+                summary += f" Candidate restore failed: {type(error).__name__}: {error}"
+            session_sink["findings"] = "\n---\n".join(
+                part
+                for part in (
+                    str(session_sink.get("findings") or ""),
+                    summary,
+                )
+                if part
+            )
+            unmeasured_result = IterationResult(
+                iteration=iteration,
+                duration_sec=0.0,
+                validation_passed=False,
+                validation_summary=summary,
+                kept=False,
+                workspace_contention=contention,
+            )
+            reusable_benchmark = None
+            print("  [REVERT] Workspace still contended; canonical measurement skipped")
+        else:
+            # The driver is the measurement boundary and must remain byte-for-byte canonical.
+            self._validate_driver_integrity(self.run_state)
+
+            # Keep HEAD at the last validated best state while this candidate remains unverified.
+            attempt_diff = self._working_tree_diff()
+            if not attempt_diff.strip():
+                # An outage leaves the same empty diff as a deliberate no-op.
+                api_failed = session_sink.get("end_reason") == EXHAUSTED_END_REASON
+                # A file the agent created is not in the tracked diff.
+                new_files_only = self._new_paths_need_discard()
+                if new_files_only:
+                    self._git_discard_worktree()
+                if agent_error:
+                    decision_label = "AGENT_ERROR"
+                    summary = f"agent_fn error: {agent_error}"
+                elif api_failed:
+                    decision_label = "API_ERROR"
+                    summary = (
+                        "LLM API never answered this Session; no candidate was attempted (not an optimization result)"
+                    )
+                elif new_files_only:
+                    decision_label = "NO_CHANGES"
+                    summary = (
+                        "NO TRACKED CHANGES: the whole candidate was in "
+                        "new file(s) matching "
+                        f"{', '.join(self.ic.commit_new_paths)}. A KEEP "
+                        "commit is built from the tracked diff, so an "
+                        "allowlisted new file can only ship alongside a "
+                        "tracked edit. The file was taken off the tree "
+                        "rather than measured with the next candidate."
+                    )
+                else:
+                    decision_label = "NO_CHANGES"
+                    summary = "NO TRACKED CHANGES: agent produced no candidate diff"
+                print("  [agent] No tracked source changes; skipping candidate")
+                result = IterationResult(
+                    iteration=iteration,
+                    duration_sec=0.0,
+                    validation_passed=False,
+                    validation_summary=summary,
+                    kept=False,
+                )
+                result.agent_rationale = rationale
+                result.session_end_reason = session_sink.get("end_reason", "")
+                result.turns = session_sink.get("turns")
+                await self._abandon_iteration(
+                    result,
+                    frame,
+                    decision_label=decision_label,
+                    on_iteration=on_iteration,
+                    round_plan=_RoundPlan(optimization_plan_path, optimization_plan_executable),
+                )
+                return None
+            reusable_benchmark = None
+            gate_measurement = session_sink.get("benchmark_measurement")
+            if session_sink.get("gate_passed") is True and self._can_reuse_insession_benchmark(
+                gate_measurement,
+                attempt_diff=attempt_diff,
+            ):
+                reusable_benchmark = gate_measurement
+            # Capture the attempt before any discard or keep commit.
+            attempt_source = self._read_kernel_source()
+        return _Attempt(
+            unmeasured_result=unmeasured_result,
+            commit_hash="",
+            rationale=rationale,
+            attempt_source=attempt_source,
+            attempt_diff=attempt_diff,
+            reusable_benchmark=reusable_benchmark,
+            optimization_plan_path=optimization_plan_path,
+            optimization_plan_executable=optimization_plan_executable,
+        )
+
+    async def _abandon_iteration(
+        self,
+        result: IterationResult,
+        frame: _IterationFrame,
+        *,
+        decision_label: str,
+        on_iteration,
+        round_plan: _RoundPlan = _RoundPlan(),
+    ) -> None:
+        """Close out an iteration that ended before anything could be measured.
+
+        Nothing reached the measurement surface, but the iteration still owes
+        the campaign its outcome, its lesson and its handoff: without them a
+        resume would re-plan the round this one already spent.
+        """
+        iteration, session_sink = frame.iteration, frame.session_sink
+        optimization_plan_path, optimization_plan_created = round_plan.path, round_plan.executable
+        self.results.append(result)
+        self._apply_iteration_planning_state(
+            optimization_plan_created=optimization_plan_created,
+        )
+        self._record_iteration_outcome(
+            result,
+            plan=session_sink.get("plan", ""),
+            decision_label=decision_label,
+        )
+        await self._record_lesson(
+            iteration=iteration,
+            result=result,
+            decision=decision_label,
+            session_sink=session_sink,
+        )
+        self._record_iteration_handoff(
+            iteration=iteration,
+            decision=decision_label,
+            optimization_plan_path=optimization_plan_path,
+            session_sink=session_sink,
+        )
+        self._publish_optimization_history()
+        if on_iteration:
+            on_iteration(result)
+
+    def _implementer_history(self, *, digest, optimization_plan_path) -> str:
+        """Assemble the cross-iteration experience the Implementer session reads.
+
+        Each source carries what the others cannot: the candidate archive digest
+        is the trajectory table with full diffs and a pointer to every archived
+        kernel; the lesson documents are what each recent session explored in
+        its own words, including the directions it abandoned, which leave no
+        diff behind; the experience ledger is objective toolchain observation
+        distilled from machine-verified failure signatures.
+
+        Order is the message: the long-horizon header is the compact memory
+        frame the implementer reads first, and the plan instruction sits above
+        the evidence because lesson records are evidence, not instructions.
+        """
+        # Cross-iteration experience assembled from complementary sources (AVO-style lineage view), each
+        # carrying what the others cannot: * the candidate ARCHIVE digest — the trajectory table + full diffs
+        # of the best/near-miss/recent attempts + a pointer to the on-disk archive so the agent can Read any
+        # prior kernel. * the LESSON documents — what each recent session actually explored, in its own words,
+        # including the directions it abandoned (which leave no diff behind). * the experience LEDGER —
+        # objective toolchain observations distilled from machine-verified failure signatures.
+        lh_header = _long_horizon_header(
+            self.run_state,
+            self.state_store,
+            self.handoff_store,
+        )
+
+        # Lesson documents from the most recent iterations, verbatim, plus the absolute path of the directory
+        # holding every past one.
+        lessons_txt = ""
+        if getattr(self, "lessons", None) is not None:
+            lessons_txt = self.lessons.render_for_prompt(
+                current_cases=self._scored_case_ids(),
+                kernel_source=self._kernel_source_for_scope(),
+            )
+
+        ledger_txt = ""
+        if self.ledger:
+            # The session narrative lives in the lesson documents, so the ledger contributes only objective
+            # toolchain observations once any lesson is available.
+            ledger_txt = self.ledger.render_for_prompt(
+                include_recent=(not lessons_txt and (bool(lh_header) or not bool(digest)))
+            )
+        if lh_header:
+            history = "\n\n".join(p for p in (lessons_txt, ledger_txt) if p)
+            print(f"  [agent] injected long-horizon header: {len(lh_header)} chars (digest reserved for supervisor)")
+        else:
+            history = "\n\n".join(p for p in (digest, lessons_txt, ledger_txt) if p)
+            if digest:
+                n_cand = len(self.archive.load_index())
+                print(f"  [agent] injected lineage digest: {len(digest)} chars, {n_cand} prior candidates archived")
+        if lessons_txt:
+            print(f"  [agent] injected lesson documents: {len(lessons_txt)} chars")
+        if not history:
+            history = "\n".join(_compact_history_entry(r) for r in self.results[-5:])
+        analysis_evidence = self._render_analysis_evidence_for_implementer()
+        if analysis_evidence:
+            history = f"{analysis_evidence}\n\n{history}"
+            print(f"  [agent] injected Analysis evidence: {len(analysis_evidence)} chars")
+        coverage_block = self._render_case_config_coverage()
+        if coverage_block:
+            history = f"{coverage_block}\n\n{history}"
+            print(f"  [agent] injected per-case configuration coverage: {len(coverage_block)} chars")
+        ceiling_block = self._render_ceiling_advisory()
+        if ceiling_block:
+            history = f"{ceiling_block}\n\n{history}"
+            print(f"  [agent] injected roofline attainment standing: {len(ceiling_block)} chars")
+        new_file_block = self._render_uncommittable_new_paths()
+        if new_file_block:
+            history = f"{new_file_block}\n\n{history}"
+        if self._search_policy_decision is not None:
+            policy = self._search_policy_decision
+            policy_lines = [
+                "## Search Policy (deterministic outer-loop decision)",
+                f"Mode: {policy.mode}",
+                f"Objective: {policy.objective_kind}",
+                "Reasons: " + ", ".join(policy.reason_codes),
+            ]
+            policy_lines.append(
+                f"Mode residence remaining after this iteration: {policy.residence_iterations_remaining}"
+            )
+            history = "\n".join(policy_lines) + "\n\n" + history
+        # The latest free-form Supervisor Ruling is durable across KEEP and resume.
+        if self._supervisor_ruling:
+            history = (
+                "## Latest Supervisor Ruling\n"
+                "This review is the current planning authority. It "
+                "overrides subjective recommendations or conclusions in "
+                "historical lesson records, but never overrides objective "
+                "validation or measurement facts.\n\n"
+                f"{self._supervisor_ruling}\n\n{history}"
+            )
+        # The long-horizon header (rendered above) goes at the very TOP, above the supervisor/analyst/pmc
+        # prepends, as the compact memory frame the implementer reads first.
+        if lh_header:
+            history = f"{lh_header}\n\n{history}"
+        if optimization_plan_path:
+            ruling_instruction = (
+                "The plan was synthesized from current evidence and the "
+                "latest Supervisor Ruling. If any plan statement conflicts "
+                "with that ruling, follow the ruling. "
+                if self._supervisor_ruling
+                else "The plan was synthesized from current evidence. "
+            )
+            history = (
+                "## Required optimization plan\n"
+                f"Read {optimization_plan_path} and execute the integrated "
+                "plan it contains. "
+                f"{ruling_instruction}"
+                "Historical lesson records are evidence, not instructions.\n\n"
+                f"{history}"
+            )
+        return history
+
+    async def _open_iteration(self, *, iteration, digest, supervisor_fn, analysis_service) -> None:
+        """Resolve evidence, review the trajectory and re-scope what this iteration owns.
+
+        Analysis resolves before any Supervisor or planning call, so both read
+        the same evidence. A stall triggers the reviewer and the loop ALWAYS
+        CONTINUES -- it never self-terminates on one. Untracked files already
+        on the tree belong to the operator or to an earlier round, so the
+        boundary is re-taken here and this iteration's REVERT cannot delete them.
+        """
+        supervisor_due = False
+        supervisor_reason = ""
+        if self.monitor is not None and supervisor_fn is not None:
+            supervisor_due, supervisor_reason = self.monitor.should_intervene(iteration)
+
+        # Resolve Analysis before any Supervisor or planning call.
+        if analysis_service is not None:
+            await self._resolve_analysis_context(
+                analysis_service,
+                supervisor_due=supervisor_due,
+                iteration=iteration,
+            )
+
+        # Self-supervision (AVO): when supervised, a stall triggers a reviewer that injects fresh directions and
+        # the loop ALWAYS CONTINUES — it never self-terminates on stall.
+        await self._run_supervisor_review(
+            supervisor_fn,
+            iteration=iteration,
+            digest=digest,
+            supervisor_due=supervisor_due,
+            supervisor_reason=supervisor_reason,
+        )
+
+        self._update_search_policy(iteration)
+
+        print(
+            f"--- Iteration {iteration} "
+            f"(best mean case speedup: {self.best_mean_case_speedup:.6f}x, "
+            f"remaining: {self._time_remaining() / 60:.0f} min) ---"
+            if self.best_mean_case_speedup is not None
+            else f"--- Iteration {iteration} ---"
+        )
+        roofline_progress = self._render_roofline_progress()
+        if roofline_progress:
+            print(roofline_progress)
+
+        # Re-scope the ownership boundary to this iteration: untracked files already here are the operator's or an
+        # earlier round's, and this iteration's REVERT must not delete them.
+        snapshot = self._untracked_snapshot()
+        if snapshot is not None:
+            self._pre_untracked = snapshot
+
+        # Durable per-iteration marker (facts only; detail lives in files).
+        self.run_state.iteration = iteration
+        self.state_store.append_event(
+            make_event(
+                "iteration_started",
+                iteration,
+                best_before_ms=self.best_wall_ms,
+                best_before_mean_case_speedup=self.best_mean_case_speedup,
+                phase=self.run_state.phase,
+            )
+        )
+
+    async def _run_locked(
+        self,
+        agents: LoopAgents,
+        *,
+        callbacks: LoopCallbacks,
+        usage=None,
+    ) -> list[IterationResult]:
+        """Run the autonomous iteration loop."""
+        import functools
+
+        agent_fn, agent_factory, supervisor_fn = agents.agent_fn, agents.agent_factory, agents.supervisor_fn
+        analysis_service, orchestration_service = agents.analysis_service, agents.orchestration_service
+
+        global print
+        print = functools.partial(print, flush=True)  # noqa: A001 - deliberate flush-on-print rebind
+
+        self.start_time = time.time()
+        self.results = []
+        self._usage = usage
+
+        # Safety net: if the kernel is an aiter HIP kernel, force it to recompile from the current source
+        # (AITER_REBUILD) so the agent's edits are never silently ignored via aiter's prebuilt in-tree .so.
+        force_jit_rebuild(self._jit_source_files())
+
+        # Cross-iteration objective ledger: records each iteration's net diff, measured outcome, and real error
+        # signatures, then feeds concise toolchain observations and recent entries into the next prompt.
+        self.ledger = ExperienceLedger(self.ic.workspace_dir)
+
+        # Per-iteration lesson documents.
+        self.lessons = LessonStore(self.ic.workspace_dir)
+        self.handoff_store = HandoffStore(self.ic.workspace_dir)
+
+        # Full-fidelity candidate archive: persists each iteration's WHOLE solution (kernel snapshot + diff + full
+        # profile + measurements + decision) so a later iteration can read back any prior attempt's real code.
+        self.archive = CandidateArchive(self.ic.workspace_dir, self.ic.kernel_file)
+        self.best_publisher = BestResultPublisher(self.ic.workspace_dir)
+        # Candidates from one concurrent fan-out, spent one per iteration so each is measured and judged on its own by
+        # the ordinary decision path.
+        self._lane_queue: list[LaneResult] = []
+        self._last_lane_plans: list[str] = []
+        # Stacked iterations run back to back so far.
+        self._merge_precedence_streak = 0
+        # A device the campaign may not measure on, recorded by whichever iteration found it and re-checked by every
+        # iteration after it.
+        self.device_hazard = DeviceHazardLog(self.ic.workspace_dir)
+
+        # Durable, file-backed run state + append-only event log.
+        self.state_store = LoopStateStore(self.ic.workspace_dir)
+        state_exists = self.state_store.state_path.exists()
+        self.run_state = self.state_store.load()
+        current_ruling_path = latest_supervisor_ruling_path(self.ic.workspace_dir)
+        self._supervisor_ruling = load_latest_supervisor_ruling(self.ic.workspace_dir) if self.resume else ""
+
+        # Ownership boundary for anything a candidate creates, taken before this loop touches the workspace.
+        self._pre_untracked = self._untracked_snapshot()
+
+        self._restore_or_begin_campaign(
+            state_exists=state_exists,
+            current_ruling_path=current_ruling_path,
+            agent_fn=agent_fn,
+            orchestration_service=orchestration_service,
+            on_best_committed=callbacks.on_best_committed,
+        )
+
+        # Anchor the campaign clock now that the state carrying what earlier sessions spent is loaded.
+        self._campaign_started_at = self.start_time - max(0.0, float(self.run_state.round_costs.campaign_sec))
+
+        if state_exists and reconcile_stale_running_session(self.run_state):
+            self.state_store.append_event(
+                make_event(
+                    "session_interrupted",
+                    self.run_state.iteration,
+                    reason="stale_running_session_reconciled",
+                )
+            )
+            self.state_store.save(self.run_state)
+
+        parent_experiment_id = self.run_state.last_experiment_id
+        next_segment_index = self.run_state.session_index + 1
+        self._set_state_identity(self.run_state)
+        self._stage_validated_warm_start_state()
+        start_session(self.run_state)
+        self.experiment = self.tracker.create_segment(
+            CampaignSegment(self.run_state.campaign_id, next_segment_index, parent_experiment_id),
+            ExperimentSubject(
+                task_id=Path(self.ic.kernel_file).stem,
+                backend=self.ic.backend,
+                kernel_backend=self.ic.kernel_backend,
+                description=f"Autonomous optimization of {self.ic.kernel_file}",
+                target_wall_ms=self.ic.target_wall_ms,
+                baseline_wall_ms=self.ic.baseline_wall_ms,
+            ),
+        )
+        self.run_state.last_experiment_id = self.experiment.experiment_id
+        self.state_store.append_event(
+            make_event(
+                "session_started",
+                self.run_state.iteration,
+            )
+        )
+        self.state_store.save(self.run_state)
+
+        self._persist_pr_knowledge()
+        self._announce_run(supervisor_fn)
+
+        await self._anchor_speedup_reporting()
+
+        # Seed the run state's baseline and, guardedly, resume a prior best from a reused workspace (only when the
+        # recorded best commit is still HEAD).
+        self._seed_and_hydrate_run_state()
+        self._adopt_validated_warm_start()
+
+        self._verify_baseline_anchor()
+
+        # Once the anchor is settled and verified, so the estimate is handed the case set the objective scores and
+        # latencies from the campaign's own clock.
+        await self._establish_ceiling()
+
+        # A crash immediately after a verified commit can leave the KEEP's archive unfinished.
+        await self._finish_recovered_pending_keep()
+
+        # Candidates an earlier round bought and never measured.
+        self._restore_lane_queue()
+
+        # The previous round's verdict, for the same reason: a REPLACE is spent on the round after the one it judged,
+        # and the budget often ends between the two.
+        self._restore_critic_ruling()
+
+        # Analyze the baseline canonical commit once before any specialist or Implementer session.
+        if analysis_service is not None:
+            await self._resolve_analysis_context(analysis_service)
+
+        iteration = self.run_state.next_iteration - 1
+        while True:
+            iteration += 1
+
+            # Build the lineage digest once per iteration — reused by BOTH the supervisor (trajectory to review) and
+            # the implementer (prompt history).
+            digest = ""
+            if getattr(self, "archive", None) is not None:
+                digest = self.archive.render_digest()
+
+            # Ruled on once per iteration, with the other conditions that decide whether this iteration may run at
+            # all -- and after them, so a run that was stopping anyway never touches the device.
+            stop, hazard = self._stop_condition_met(iteration)
+            if stop:
+                break
+
+            # Price the round before anything is spent on it.
+            self._close_round()
+            round_lanes = self.ic.lanes
+            if not self._lane_queue:
+                admitted_lanes = self._admit_next_round(iteration)
+                if admitted_lanes is None:
+                    break
+                round_lanes = admitted_lanes
+                self._open_round(iteration, lanes=round_lanes)
+
+            await self._open_iteration(
+                iteration=iteration,
+                digest=digest,
+                supervisor_fn=supervisor_fn,
+                analysis_service=analysis_service,
+            )
+
+            # Agent proposes modification
+            session_sink: dict = {}
+            # What a fan-out round leaves this iteration holding, so the single-session path below spends it instead
+            # of buying it again.
+            fan_out_plan: HeldRound | None = None
+            if hazard is None and (
+                not self._lane_queue
+                and round_lanes > 1
+                and agent_factory is not None
+                and agent_fn is not None
+                and orchestration_service is not None
+            ):
+                fan_out_plan = await self._fan_out_round(
+                    iteration=iteration,
+                    orchestration_service=orchestration_service,
+                    agent_factory=agent_factory,
+                    lanes=round_lanes,
+                )
+                # The round's own lanes share one device with the canonical measurement, so a lane whose teardown
+                # could not clear it has just refused this iteration -- whatever its siblings produced.
+                hazard = self.device_hazard.live
+                if self._refused_round:
+                    # Planning cost more than the round had left.
+                    break
+            merge = self._stage_merge(
+                iteration=iteration,
+                hazard=hazard,
+                fan_out_plan=fan_out_plan,
+            )
+            # A fan-out round already paid for these candidates, so they are measured before anything new is planned.
+            queued_lane = None if hazard or merge.diff else self._take_lane_candidate()
+            frame = _IterationFrame(iteration, session_sink, merge)
+            attempt = await self._source_attempt(
+                frame,
+                _IterationSupply(hazard, queued_lane, fan_out_plan),
+                agents=agents,
+                digest=digest,
+                callbacks=callbacks,
+            )
+            if attempt is None:
+                if self._refused_round:
+                    break
+                continue
+            (
+                unmeasured_result,
+                commit_hash,
+                rationale,
+                attempt_source,
+                attempt_diff,
+                reusable_benchmark,
+                optimization_plan_path,
+                optimization_plan_executable,
+            ) = attempt
+
+            # Snapshot the best-so-far BEFORE this iteration is measured, so the archive can record the true delta vs
+            # the standard it had to beat (run_one_iteration mutates self.best_wall_ms on an improvement).
+            best_before = self.best_wall_ms
+            best_mean_case_speedup_before = self.best_mean_case_speedup
+            frame = replace(
+                frame,
+                best_before=best_before,
+                best_mean_case_speedup_before=best_mean_case_speedup_before,
+            )
+
+            # Run validation + bench.
+            if unmeasured_result is not None:
+                result = unmeasured_result
+            else:
+                try:
+                    run_kwargs = {}
+                    if reusable_benchmark is not None:
+                        run_kwargs["benchmark_measurement"] = reusable_benchmark
+                    result = await self.run_one_iteration(
+                        iteration,
+                        plan=session_sink.get("plan", ""),
+                        **run_kwargs,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    # Turn the crash into a FAILED result (crashed=True) and let it flow through the same
+                    # verdict/ledger/archive path.
+                    print(f"  [CRASH] iteration {iteration} crashed during run: {e}")
+                    result = IterationResult(
+                        iteration=iteration,
+                        duration_sec=0.0,
+                        validation_passed=False,
+                        validation_summary=f"iteration crashed: {e}",
+                        error_output=traceback.format_exc()[-4000:],
+                        kept=False,
+                        crashed=True,
+                    )
+            result.commit_hash = commit_hash
+            result.agent_rationale = rationale
+            # Session end reason + turns spent (from the in-session gate / SDK via session_sink) — persisted so a
+            # run's end-reason distribution (edit cap / turn cap / converged / …) is analyzable.
+            result.session_end_reason = session_sink.get("end_reason", "")
+            result.turns = session_sink.get("turns")
+
+            if agent_fn is not None:
+                self._apply_iteration_planning_state(
+                    optimization_plan_created=optimization_plan_executable,
+                )
+
+            ruling = self._rule_on_attempt(result, attempt, frame, on_best_committed=callbacks.on_best_committed)
+
+            await self._close_iteration(result, attempt, frame, ruling=ruling, callbacks=callbacks)
+
+        self._persist_terminal_state()
+
+        self._print_final_report()
 
         return self.results
 

@@ -460,7 +460,6 @@ def _collect_landed_stack(out: dict[str, Any], state: dict[str, Any], *, session
         ("candidate_refs", "candidate_refs", str),
         ("setup_commands", "setup_commands", str),
         ("localization_manifest", "localization_manifest", str),
-        ("build_novelty", "build_novelty", str),
     ):
         raw = _eg(state, name)
         if isinstance(raw, list) and raw:

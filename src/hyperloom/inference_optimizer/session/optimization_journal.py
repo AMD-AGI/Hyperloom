@@ -13,7 +13,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_text
+from hyperloom.common.io import WriteOptions, atomic_write_text
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.timeutil import now_iso
 
@@ -190,17 +190,8 @@ class Journal:
 
     # Construction
     @classmethod
-    def load_or_create(
-        cls,
-        session_dir: Path,
-        *,
-        session_id: str,
-        model: str,
-        hardware: str,
-        framework: str = "",
-        baseline_throughput: float | None = None,
-    ) -> Journal:
-        """Return the existing journal if on disk, else mint a new one (on-disk header fields win only when the caller leaves them empty)."""
+    def load_or_create(cls, session_dir: Path, fresh: Journal) -> Journal:
+        """Return the existing journal if on disk, else ``fresh`` (on-disk header fields win only where ``fresh`` leaves them empty)."""
         path = cls._journal_path(session_dir)
         blob: dict[str, Any] = {}
         if path.exists():
@@ -213,12 +204,12 @@ class Journal:
         entries_raw = blob.get("entries") or []
         entries = [JournalEntry.from_dict(e) for e in entries_raw if isinstance(e, dict)]
         return cls(
-            session_id=str(blob.get("session_id") or session_id),
-            model=str(blob.get("model") or model),
-            hardware=str(blob.get("hardware") or hardware),
-            framework=str(blob.get("framework") or framework),
+            session_id=str(blob.get("session_id") or fresh.session_id),
+            model=str(blob.get("model") or fresh.model),
+            hardware=str(blob.get("hardware") or fresh.hardware),
+            framework=str(blob.get("framework") or fresh.framework),
             baseline_throughput=_measured_float(blob.get("baseline_throughput"))
-            or _measured_float(baseline_throughput),
+            or _measured_float(fresh.baseline_throughput),
             final_throughput=blob.get("final_throughput"),
             total_gain_pct=blob.get("total_gain_pct"),
             entries=entries,
@@ -272,7 +263,7 @@ class Journal:
             atomic_write_text(
                 self.path,
                 json.dumps(self.to_dict(), indent=2, sort_keys=False) + "\n",
-                make_parents=True,
+                options=WriteOptions(make_parents=True),
             )
         except OSError as exc:
             log.warning("optimization_journal flush failed (%s): %s", self.path, exc)

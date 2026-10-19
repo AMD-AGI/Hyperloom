@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
@@ -121,6 +120,25 @@ async def test_run_gemm_tuning_response_records_to_shared_state(
 
 
 @pytest.mark.asyncio
+async def test_a_gemm_lane_the_phase_could_not_fund_is_no_attempt_and_stays_armed(session_dir):
+    """The lane never started, so it neither counts as an attempt nor latches GEMM tuning off for a later entry."""
+    from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
+    from hyperloom.orchestrator.kernel.lane_budget import LANE_GEMM
+
+    c = Coordinator(session_dir, backends=_silent_backends())
+    try:
+        c.shared_state.framework = "sglang"
+
+        await c.phase_kernel._handle_gemm_tuning_result(kernel_request_handlers._unfunded_lane_skip(LANE_GEMM))
+
+        assert c.shared_state.last_gemm_tuning == {}
+        assert c.shared_state.gemm_tuning_attempts == []
+        assert c.phase_kernel._gemm_tuning_required_before_kernel_opt()
+    finally:
+        await c.stop()
+
+
+@pytest.mark.asyncio
 async def test_run_optimization_no_longer_gated_on_fp8_gemm_tuning(session_dir):
     """The gemm-before-run_optimization sequence deny was removed; the request-layer pre-deny no longer fires."""
     c = Coordinator(session_dir, backends=_silent_backends())
@@ -135,7 +153,7 @@ async def test_run_optimization_no_longer_gated_on_fp8_gemm_tuning(session_dir):
             "candidates_path": "/tmp/candidates.json",
         }
 
-        assert c.dispatcher.sequence_denial_for_request("kernel_agent", "run_optimization") is None
+        assert c.dispatcher.admission_denial_for_request("kernel_agent", "run_optimization") is None
     finally:
         await c.stop()
 
@@ -151,6 +169,7 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
         c.shared_state.precision = "fp8"
         c.shared_state.framework = "sglang"
         c.shared_state.baseline_tput = 800.0
+        c.shared_state.baseline_runtime_sec = 600.0
         c.shared_state.last_profile_trace = "/tmp/profile.trace.json.gz"
         c.shared_state.last_trace_analyze = {
             "trace_input": "/tmp/profile.trace.json.gz",
@@ -200,18 +219,3 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
         assert c.phase_kernel._gemm_tuning_required_before_kernel_opt() is False
     finally:
         await c.stop()
-
-
-# D — native-only guard for kernel optimization handler
-def _partial_kernel_opt_result(kernel_id: str, decision: str = "PARTIAL") -> dict[str, Any]:
-    return {
-        "status": "ok",
-        "kernel_id": kernel_id,
-        "proposal": {"decision": decision, "reasons": ["no measurable speedup found"]},
-        "verification": {
-            "compile_passed": True,
-            "correctness_passed": False,
-            "micro_speedup": 1.0,
-            "best_artifact_path": f"/tmp/{kernel_id}.hip",
-        },
-    }

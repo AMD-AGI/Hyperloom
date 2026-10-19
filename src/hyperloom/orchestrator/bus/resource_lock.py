@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from hyperloom.common.owner_scope import local_owner_scope
+from hyperloom.common.owner_scope import local_owner_scope, same_environment
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.state.task_states import TERMINAL_STATES
 
@@ -178,7 +178,7 @@ CLEANUP_TREE_PGID_KEY = "cleanup_tree_pgid"
 
 #: Why a retained row could not be verified. Logged verbatim to the operator,
 #: so each one reads as a cause rather than a code.
-UNVERIFIABLE_FOREIGN_SCOPE = "the row was acquired in another boot or PID namespace"
+UNVERIFIABLE_FOREIGN_SCOPE = "the row was acquired in another boot, PID namespace or container"
 #: The ordinary case: the holder ended without confirming its cleanup, so the
 #: release was skipped on purpose and its work may still be running. Nothing
 #: this process can observe settles it -- every cheaper proof tried during
@@ -197,7 +197,9 @@ UNVERIFIABLE_CONFIRMED_BUT_HELD = "the holder confirmed its cleanup yet its lane
 #: name its own ownership domain (an unreadable /proc), so nothing here may be
 #: judged at all. Labelling this "another namespace" would tell an operator to
 #: go look at a machine that is not involved.
-UNVERIFIABLE_NO_LOCAL_SCOPE = "this process cannot read its own boot/PID namespace, so no row here can be judged"
+UNVERIFIABLE_NO_LOCAL_SCOPE = (
+    "this process cannot read its own boot, PID namespace and container start, so no row here can be judged"
+)
 #: Retained by the gpu_leases exemption. Not a defect -- a lane records its
 #: coordinator, not the specialist's GPU worker -- but the operator still has to
 #: be told, because this is the very path that wedged 2026-09-21 and the
@@ -283,7 +285,7 @@ def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
 
     Args:
         cur: Cursor of the caller's transaction.
-        scope: The boot/PID namespace whose rows this process may judge; empty
+        scope: The boot, PID namespace and container whose rows this process may judge; empty
             when the kernel would not name one, in which case no row is ours.
 
     Returns:
@@ -332,7 +334,7 @@ def _unverifiable_holders(cur: sqlite3.Cursor, *, scope: str) -> list[dict]:
             row["reason"] = UNVERIFIABLE_HOLDS_GPU
             stuck.append(row)
             continue
-        if not scope or row["owner_scope"] != scope:
+        if not same_environment(row["owner_scope"], scope):
             # Never probed, but for two different reasons that owe the operator
             # two different messages: with no local scope nothing here can be
             # judged at all, whereas a mismatching scope means the recorded id
@@ -599,8 +601,7 @@ class SqliteLeaseBackend:
     @classmethod
     def holder_is_dead(cls, row) -> bool:
         """Accept only an absent PID observed in its recorded local PID domain."""
-        scope = local_owner_scope()
-        if not scope or row["owner_scope"] != scope:
+        if not same_environment(row["owner_scope"], local_owner_scope()):
             return False
         try:
             pid = int(row["pid"] or 0)
@@ -659,14 +660,6 @@ class SqliteLeaseBackend:
         _report_unverifiable(stuck, db_path=str(getattr(self.db, "db_path", "") or ""))
         return stuck
 
-    async def bringup_round_holders(self, now_unix: float) -> set[str]:
-        """Return round ids with a retained ownership row, irrespective of age."""
-        rows = await self.db.fetchall(
-            "SELECT holder_id FROM leases WHERE lane = ?",
-            (BRINGUP_ROUND_LANE,),
-        )
-        return {str(r["holder_id"]) for r in rows}
-
     async def lane_holders(self) -> dict[str, int]:
         """Return ``{lane: holder_count}`` for every retained ownership row."""
         rows = await self.db.fetchall("SELECT lane, COUNT(*) AS n FROM leases GROUP BY lane")
@@ -688,12 +681,7 @@ class SqliteLeaseBackend:
 
     async def lane_capacities(self) -> dict[str, int]:
         """Return ``{lane: capacity}`` for every row in ``lane_capacity``."""
-        try:
-            rows = await self.db.fetchall("SELECT lane, capacity FROM lane_capacity")
-        except sqlite3.OperationalError as exc:
-            # Legacy DB never opened with v0.8 lacks the table; fall back to defaults.
-            log.debug("lane_capacities: lane_capacity table unavailable: %s", exc)
-            return dict(DEFAULT_LANE_CAPACITIES)
+        rows = await self.db.fetchall("SELECT lane, capacity FROM lane_capacity")
         out: dict[str, int] = dict(DEFAULT_LANE_CAPACITIES)
         for r in rows:
             out[r["lane"]] = int(r["capacity"])
@@ -741,17 +729,6 @@ class ResourceLockManager:
     async def cleanup_confirmation_rate(self) -> tuple[int, int]:
         """Unconfirmed-cleanup count and total ended tasks, via the backend."""
         return await self.backend.cleanup_confirmation_rate()
-
-    async def bringup_round_holders(self, now_unix: float) -> set[str]:
-        """Return the ids of rounds still holding their lane, via the backend.
-
-        Args:
-            now_unix: The instant to test.
-
-        Returns:
-            set[str]: Round ids holding :data:`BRINGUP_ROUND_LANE` then.
-        """
-        return await self.backend.bringup_round_holders(now_unix)
 
     async def lane_holders(self) -> dict[str, int]:
         """Return ``{lane: live_holder_count}`` via the backend."""

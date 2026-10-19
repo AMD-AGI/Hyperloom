@@ -25,15 +25,17 @@ def test_backend_resolution_controls_magpie_need(monkeypatch):
 
 def test_preflight_gates_magpie_on_backend():
     src = inspect.getsource(preflight_mod._preflight)
-    # The Magpie import/install must be guarded by the active backend.
+    # Preflight resolves the active backend and hands the gate to the Magpie step.
     assert "resolve_backend_name" in src
     assert "_magpie_backend_active" in src
+    assert "magpie_active=_magpie_backend_active" in src
     # The gate wraps the import check and the clone/install branch.
-    assert "import Magpie" in src
-    assert "if _magpie_backend_active and" in src
-    # InferenceX must NOT be gated away (bypass still needs it): the InferenceX section marker exists and is not
-    # inside the magpie-only branch.
-    assert "3. InferenceX" in src
+    magpie_src = inspect.getsource(preflight_mod._ensure_magpie)
+    assert "import Magpie" in magpie_src
+    assert "if magpie_active and" in magpie_src
+    # The synthetic bypass backend still needs InferenceX; its preparation is separate from the Magpie install.
+    assert "_prepare_inferencex(install_event, magpie_active=_magpie_backend_active)" in src
+    assert "_ensure_inferencex" not in magpie_src
 
 
 def test_preflight_resolves_interpreter_via_backend_not_magpie():

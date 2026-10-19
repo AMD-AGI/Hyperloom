@@ -47,6 +47,20 @@ def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
     aiter_jit = sys.modules.get("hyperloom.orchestrator.actions.executors._aiter_jit")
     if aiter_jit is not None:
         monkeypatch.setattr(aiter_jit, "AITER_JIT_PROBE_PATHS", ())
+    _isolate_framework_trees(monkeypatch)
+
+
+def _isolate_framework_trees(monkeypatch) -> None:
+    """Leave a test no host framework checkout to stash, reset or seal unless it names one itself.
+
+    The CLI writes ``FRAMEWORK`` and ``FRAMEWORK_REPO_PATH`` into ``os.environ``, so one CLI test
+    would otherwise point every later test at the host's live tree.
+    """
+    from hyperloom.orchestrator.kernel import campaign_baseline
+
+    monkeypatch.setattr(campaign_baseline, "_package_repository", lambda _name: None)
+    for name in ("FRAMEWORK", "FRAMEWORK_REPO_PATH", "INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS"):
+        monkeypatch.delenv(name, raising=False)
 
 
 class NoLaunchBackendInstalled(BaseException):

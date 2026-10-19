@@ -1332,7 +1332,6 @@ async def test_required_context_surfaces_in_metadata(
 """End-to-end test: real critic-agent runtime + mocked Codex + Coordinator.
 
 Shells out to the real ``hyperloom/agents/critic/runtime/cli.py`` (only Codex is faked).
-Marker ``critic_agent_e2e`` lets devs without the checkout skip it.
 """
 
 
@@ -1351,9 +1350,6 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-
-
-pytestmark = pytest.mark.critic_agent_e2e
 
 
 # Fake Codex (only the LLM layer; the runtime is real).
@@ -1805,10 +1801,10 @@ async def test_anthropic_protocol_single_proposal_yields_verdict(
     # One call carrying the system prompt in its own field, under the shared cap.
     assert len(fake_completion.calls) == 1
     call = fake_completion.calls[0]
-    assert call["model"] == "claude-opus-4-8"
-    assert call["system"] == "critic system"
-    assert call["max_tokens"] == CRITIC_AGENT_MAX_COMPLETION_TOKENS
-    user_content = call["messages"][0]["content"]
+    assert call["request"].model == "claude-opus-4-8"
+    assert call["request"].system == "critic system"
+    assert call["request"].max_tokens == CRITIC_AGENT_MAX_COMPLETION_TOKENS
+    user_content = call["request"].messages[0]["content"]
     assert "JUDGE BUNDLE" in user_content
     assert "critic system" not in user_content
 
@@ -1871,8 +1867,8 @@ async def test_truncated_review_is_retried_with_a_bigger_cap(
     assert len(verdicts) == 1
     assert verdicts[0].payload["target_proposal_msg_id"] == "p1"
     assert len(fake_completion.calls) == 2
-    assert fake_completion.calls[0]["max_tokens"] == CRITIC_AGENT_MAX_COMPLETION_TOKENS
-    assert fake_completion.calls[1]["max_tokens"] == (
+    assert fake_completion.calls[0]["request"].max_tokens == CRITIC_AGENT_MAX_COMPLETION_TOKENS
+    assert fake_completion.calls[1]["request"].max_tokens == (
         CRITIC_AGENT_MAX_COMPLETION_TOKENS * CRITIC_AGENT_TRUNCATION_RETRY_FACTOR
     )
 
@@ -1973,7 +1969,7 @@ async def test_max_completion_tokens_env_override_raises_the_cap(
 
     await backend.run("prompt", system_prompt="critic system")
 
-    assert fake_completion.calls[0]["max_tokens"] == 64000
+    assert fake_completion.calls[0]["request"].max_tokens == 64000
 
 
 @pytest.mark.parametrize(

@@ -13,6 +13,7 @@ from kernelforge.orchestrator.contracts import (
     LaneDrop,
     OrchestrationContext,
     PlanCriticOutcome,
+    SpecialistRound,
     SynthesizedPlan,
 )
 from kernelforge.orchestrator.plan_critic import (
@@ -104,17 +105,19 @@ def test_critic_prompt_uses_checklist_and_workspace_paths(tmp_path):
     system, user = build_plan_critic_prompts(
         context=context,
         drafts=[SynthesizedPlan(text="# Plan\nUse vector loads.")],
-        dispatch_plan=DispatchPlan(
-            analysis_commit="abc123",
-            assignments=(),
+        specialists=SpecialistRound(
+            DispatchPlan(
+                analysis_commit="abc123",
+                assignments=(),
+            ),
+            (),
+            {
+                "successful_roles": [],
+                "covered_cases": [],
+                "missing_cases": ["case-a"],
+                "failed_roles": [],
+            },
         ),
-        specialist_outcomes=(),
-        coverage={
-            "successful_roles": [],
-            "covered_cases": [],
-            "missing_cases": ["case-a"],
-            "failed_roles": [],
-        },
     )
     payload = json.loads(user)
 
@@ -139,12 +142,14 @@ async def test_critic_runs_one_independent_read_only_session(tmp_path):
     outcome = await critic.review(
         context=_context(tmp_path),
         drafts=[SynthesizedPlan(text="# Plan\nUse vector loads.")],
-        dispatch_plan=DispatchPlan(
-            analysis_commit="abc123",
-            assignments=(),
+        specialists=SpecialistRound(
+            DispatchPlan(
+                analysis_commit="abc123",
+                assignments=(),
+            ),
+            (),
+            {},
         ),
-        specialist_outcomes=(),
-        coverage={},
     )
 
     assert outcome.verdict == "ACCEPT"
@@ -179,12 +184,14 @@ async def test_critic_infers_revision_and_records_missing_verdict(
         outcome = await critic.review(
             context=_context(tmp_path),
             drafts=[SynthesizedPlan(text="# Draft")],
-            dispatch_plan=DispatchPlan(
-                analysis_commit="abc123",
-                assignments=(),
+            specialists=SpecialistRound(
+                DispatchPlan(
+                    analysis_commit="abc123",
+                    assignments=(),
+                ),
+                (),
+                {},
             ),
-            specialist_outcomes=(),
-            coverage={},
         )
 
     assert outcome.verdict == "REVISE"
@@ -227,12 +234,14 @@ async def test_critic_failure_records_no_verdict_and_still_publishes(
         outcome = await critic.review(
             context=_context(tmp_path),
             drafts=[SynthesizedPlan(text="# Draft")],
-            dispatch_plan=DispatchPlan(
-                analysis_commit="abc123",
-                assignments=(),
+            specialists=SpecialistRound(
+                DispatchPlan(
+                    analysis_commit="abc123",
+                    assignments=(),
+                ),
+                (),
+                {},
             ),
-            specialist_outcomes=(),
-            coverage={},
         )
 
     # An outage is not a judgement: reading this round as an ACCEPT is what told the next round, and anyone reading
@@ -257,14 +266,16 @@ def _round_prompts(tmp_path, drafts):
     return build_plan_critic_prompts(
         context=_context(tmp_path),
         drafts=drafts,
-        dispatch_plan=DispatchPlan(analysis_commit="abc123", assignments=()),
-        specialist_outcomes=(),
-        coverage={
-            "successful_roles": [],
-            "covered_cases": [],
-            "missing_cases": [],
-            "failed_roles": [],
-        },
+        specialists=SpecialistRound(
+            DispatchPlan(analysis_commit="abc123", assignments=()),
+            (),
+            {
+                "successful_roles": [],
+                "covered_cases": [],
+                "missing_cases": [],
+                "failed_roles": [],
+            },
+        ),
     )
 
 
@@ -325,12 +336,14 @@ async def test_critic_error_detail_is_single_line_and_bounded(tmp_path):
     outcome = await critic.review(
         context=_context(tmp_path),
         drafts=[SynthesizedPlan(text="# Draft")],
-        dispatch_plan=DispatchPlan(
-            analysis_commit="abc123",
-            assignments=(),
+        specialists=SpecialistRound(
+            DispatchPlan(
+                analysis_commit="abc123",
+                assignments=(),
+            ),
+            (),
+            {},
         ),
-        specialist_outcomes=(),
-        coverage={},
     )
 
     assert "\n" not in outcome.error
@@ -547,9 +560,7 @@ async def test_the_reviews_narrowing_reaches_the_round(tmp_path):
     outcome = await critic.review(
         context=_context(tmp_path),
         drafts=_two_lane_drafts(),
-        dispatch_plan=DispatchPlan(analysis_commit="abc123", assignments=()),
-        specialist_outcomes=(),
-        coverage={},
+        specialists=SpecialistRound(DispatchPlan(analysis_commit="abc123", assignments=()), (), {}),
     )
 
     assert outcome.verdict == "REVISE"
@@ -584,9 +595,7 @@ async def test_a_drop_stated_only_in_prose_is_recovered_by_one_repair(tmp_path):
     outcome = await critic.review(
         context=_context(tmp_path),
         drafts=_two_lane_drafts(),
-        dispatch_plan=DispatchPlan(analysis_commit="abc123", assignments=()),
-        specialist_outcomes=(),
-        coverage={},
+        specialists=SpecialistRound(DispatchPlan(analysis_commit="abc123", assignments=()), (), {}),
     )
 
     assert [(drop.lane_id, drop.reason) for drop in outcome.lane_drops] == [
@@ -633,9 +642,7 @@ async def test_a_recovered_width_ruling_is_not_logged_as_a_failure(
         outcome = await critic.review(
             context=_context(tmp_path),
             drafts=_two_lane_drafts(),
-            dispatch_plan=DispatchPlan(analysis_commit="abc123", assignments=()),
-            specialist_outcomes=(),
-            coverage={},
+            specialists=SpecialistRound(DispatchPlan(analysis_commit="abc123", assignments=()), (), {}),
         )
 
     assert [drop.lane_id for drop in outcome.lane_drops] == [2]
@@ -666,9 +673,7 @@ async def test_a_width_ruling_nothing_recovered_is_still_a_warning(
         outcome = await critic.review(
             context=_context(tmp_path),
             drafts=_two_lane_drafts(),
-            dispatch_plan=DispatchPlan(analysis_commit="abc123", assignments=()),
-            specialist_outcomes=(),
-            coverage={},
+            specialists=SpecialistRound(DispatchPlan(analysis_commit="abc123", assignments=()), (), {}),
         )
 
     assert outcome.lane_drops == ()
@@ -703,9 +708,7 @@ async def test_an_entry_the_block_wasted_is_warned_about_as_that(
         outcome = await critic.review(
             context=_context(tmp_path),
             drafts=_two_lane_drafts(),
-            dispatch_plan=DispatchPlan(analysis_commit="abc123", assignments=()),
-            specialist_outcomes=(),
-            coverage={},
+            specialists=SpecialistRound(DispatchPlan(analysis_commit="abc123", assignments=()), (), {}),
         )
 
     assert [drop.lane_id for drop in outcome.lane_drops] == [2]
@@ -728,9 +731,7 @@ async def test_a_drop_stated_only_in_prose_that_repair_misses_is_still_named(
     outcome = await critic.review(
         context=_context(tmp_path),
         drafts=_two_lane_drafts(),
-        dispatch_plan=DispatchPlan(analysis_commit="abc123", assignments=()),
-        specialist_outcomes=(),
-        coverage={},
+        specialists=SpecialistRound(DispatchPlan(analysis_commit="abc123", assignments=()), (), {}),
     )
 
     assert outcome.verdict == "REVISE"
@@ -753,9 +754,7 @@ async def test_a_repair_that_answers_nothing_leaves_the_ruling_unread(tmp_path):
     outcome = await critic.review(
         context=_context(tmp_path),
         drafts=_two_lane_drafts(),
-        dispatch_plan=DispatchPlan(analysis_commit="abc123", assignments=()),
-        specialist_outcomes=(),
-        coverage={},
+        specialists=SpecialistRound(DispatchPlan(analysis_commit="abc123", assignments=()), (), {}),
     )
 
     assert outcome.lane_drops == ()
@@ -772,9 +771,7 @@ async def test_a_one_plan_review_is_never_asked_for_a_width_block(tmp_path):
     outcome = await critic.review(
         context=_context(tmp_path),
         drafts=[SynthesizedPlan(text="# Plan")],
-        dispatch_plan=DispatchPlan(analysis_commit="abc123", assignments=()),
-        specialist_outcomes=(),
-        coverage={},
+        specialists=SpecialistRound(DispatchPlan(analysis_commit="abc123", assignments=()), (), {}),
     )
 
     assert outcome.narrowing_status == "not_asked"
@@ -793,9 +790,7 @@ async def test_a_review_that_failed_narrows_nothing(tmp_path):
     outcome = await critic.review(
         context=_context(tmp_path),
         drafts=[SynthesizedPlan(text="# Draft")],
-        dispatch_plan=DispatchPlan(analysis_commit="abc123", assignments=()),
-        specialist_outcomes=(),
-        coverage={},
+        specialists=SpecialistRound(DispatchPlan(analysis_commit="abc123", assignments=()), (), {}),
     )
 
     assert outcome.fail_open is True

@@ -18,6 +18,8 @@ from hyperloom.inference_optimizer.framework_paths import probe_framework_source
 from hyperloom.orchestrator.prompts.prompt_builder import (
     FULL_ENABLED_ACTIONS,
     build_orchestration_prompt,
+    PromptAssets,
+    SessionContext,
 )
 from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
@@ -595,11 +597,7 @@ class TestAtomPathPresentInAllThreeLocations:
         assert any("/app/atom/atom" in r.lower() for r in fp._DEFAULT_SOURCE_ROOTS)
 
     def test_atom_present_in_reusable_source_roots(self):
-        from hyperloom.orchestrator.kernel import (
-            request_handlers as krh,
-        )
-
-        assert any("/app/atom/atom" in r.lower() for r in krh._reusable_source_roots())
+        assert any("/app/atom/atom" in r.lower() for r in fp.resolve_known_source_prefixes())
 
     def test_atom_present_in_tracelens_reusable_roots(self):
         """The kernel-agent's tracelens_analysis ``_REUSABLE_SOURCE_ROOTS`` must track the orchestrator-side list."""
@@ -615,12 +613,9 @@ class TestAtomPathPresentInAllThreeLocations:
 
     def test_kernel_request_handlers_and_tracelens_analysis_atom_paths_in_sync(self):
         """The orchestrator gate and kernel-agent classifier derive reusable roots from the same source, so their atom subsets must match."""
-        from hyperloom.orchestrator.kernel import (
-            request_handlers as krh,
-        )
         from hyperloom.orchestrator.trace_analysis import tracelens_analysis
 
-        orch_atom = frozenset(r.lower() for r in krh._reusable_source_roots() if "/atom/" in r.lower())
+        orch_atom = frozenset(r.lower() for r in fp.resolve_known_source_prefixes() if "/atom/" in r.lower())
         tracelens_analysis._framework_source_roots.cache_clear()
         ka_atom = frozenset(r.lower() for r in tracelens_analysis._reusable_roots() if "/atom/" in r.lower())
         assert orch_atom, "orchestrator reusable roots carry no atom entry"
@@ -635,10 +630,8 @@ def test_prompt_renders_framework_source_roots(registry=None):
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=FULL_ENABLED_ACTIONS,
-        framework="sglang",
-        max_minutes=60,
-        rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
-        framework_source_roots=custom,
+        session=SessionContext(framework="sglang", max_minutes=60, framework_source_roots=custom),
+        assets=PromptAssets(rules_fragment_path=asset_system_prompts_dir() / "orchestration.md"),
     )
     assert "framework_source_roots:" in text
     assert "/custom/sglang/" in text

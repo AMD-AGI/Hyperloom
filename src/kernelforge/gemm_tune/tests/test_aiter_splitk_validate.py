@@ -12,7 +12,6 @@ import kernelforge.gemm_tune.aiter_splitk_validate as mod
 from kernelforge.gemm_tune.aiter_splitk_validate import (
     make_support_fn,
     max_supported_splitk,
-    supported_ops,
 )
 
 OP = "a8w8_blockscale"
@@ -29,25 +28,25 @@ def test_none_when_control_fails(monkeypatch):
         raise RuntimeError("no gpu")
 
     _probe(monkeypatch, boom)
-    assert max_supported_splitk(64, 5120, 5120) is None
+    assert max_supported_splitk((64, 5120, 5120)) is None
 
 
 def test_none_when_control_unsupported(monkeypatch):
     # Control returns False (not an exception) -> still None.
     _probe(monkeypatch, lambda m, n, k, sk, device="cuda": False)
-    assert max_supported_splitk(64, 5120, 5120) is None
+    assert max_supported_splitk((64, 5120, 5120)) is None
 
 
 def test_scans_to_first_gap(monkeypatch):
     # Supports 0,1,2 then fails at 3 -> max is 2.
     _probe(monkeypatch, lambda m, n, k, sk, device="cuda": sk <= 2)
-    assert max_supported_splitk(64, 5120, 5120, ceiling=6) == 2
+    assert max_supported_splitk((64, 5120, 5120), ceiling=6) == 2
 
 
 def test_higher_max_when_supported(monkeypatch):
     # A shape that supports up to 3 keeps the extra gain cap=2 would drop.
     _probe(monkeypatch, lambda m, n, k, sk, device="cuda": sk <= 3)
-    assert max_supported_splitk(16, 5120, 5120, ceiling=6) == 3
+    assert max_supported_splitk((16, 5120, 5120), ceiling=6) == 3
 
 
 def test_exception_mid_scan_treated_as_unsupported(monkeypatch):
@@ -58,7 +57,7 @@ def test_exception_mid_scan_treated_as_unsupported(monkeypatch):
         return True
 
     _probe(monkeypatch, flaky)
-    assert max_supported_splitk(64, 5120, 5120, ceiling=6) == 1
+    assert max_supported_splitk((64, 5120, 5120), ceiling=6) == 1
 
 
 def test_make_support_fn_memoizes_per_shape(monkeypatch):
@@ -89,8 +88,7 @@ class TestOpAwareness:
     def test_only_verified_ops_are_registered(self):
         # bpreshuffle's ck/cktile wrappers take no splitK argument at all, so
         # there is no production limit to measure for them.
-        assert supported_ops() == {"a8w8_blockscale"}
-        assert "a8w8_blockscale_bpreshuffle" not in supported_ops()
+        assert set(mod._TRIAL_OPS) == {"a8w8_blockscale"}
 
     def test_unregistered_op_never_trials(self, monkeypatch):
         calls = []
@@ -100,7 +98,7 @@ class TestOpAwareness:
             return True
 
         _probe(monkeypatch, fake)
-        assert max_supported_splitk(64, 5120, 17408, op="a8w8_blockscale_bpreshuffle") is None
+        assert max_supported_splitk((64, 5120, 17408), op="a8w8_blockscale_bpreshuffle") is None
         assert not calls, "an unregistered op must not dispatch another op's kernel"
 
     def test_unregistered_op_support_fn_answers_unknown(self, monkeypatch):

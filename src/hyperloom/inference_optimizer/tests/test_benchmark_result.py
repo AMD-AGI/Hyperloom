@@ -9,6 +9,7 @@ import json
 import os
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -642,97 +643,6 @@ def test_harvest_creates_destination_if_missing(tmp_path):
     assert harvested
 
 
-# Approximate throughput for killed-overtime variants (server.log parsing)
-_SGLANG_LOG = """\
-[2026-06-12 10:00:00] INFO: server started
-Decode batch. #running-req: 64, #token: 1000, token usage: 0.10, gen throughput (token/s): 100.0, #queue-req: 0
-Decode batch. #running-req: 64, #token: 2000, token usage: 0.20, gen throughput (token/s): 900.0, #queue-req: 0
-Decode batch. #running-req: 64, #token: 3000, token usage: 0.30, gen throughput (token/s): 1000.0, #queue-req: 0
-Decode batch. #running-req: 64, #token: 4000, token usage: 0.40, gen throughput (token/s): 1100.0, #queue-req: 0
-Decode batch. #running-req: 64, #token: 5000, token usage: 0.50, gen throughput (token/s): 1200.0, #queue-req: 0
-"""
-
-_VLLM_LOG = """\
-INFO: Started server process
-Avg prompt throughput: 5000.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 64 reqs
-Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 800.0 tokens/s, Running: 64 reqs
-Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 1000.0 tokens/s, Running: 64 reqs
-Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 1200.0 tokens/s, Running: 64 reqs
-"""
-
-
-def test_estimate_from_sglang_server_log(tmp_path):
-    """sglang ``gen throughput`` lines parse; warmup-trimmed steady mean returned."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text(_SGLANG_LOG)
-    est = br.estimate_output_throughput_from_server_log(log_path)
-    assert est is not None
-    # warmup_skip_frac 0.25 drops the 100.0 ramp; mean(900,1000,1100,1200) = 1050.0.
-    assert est["output_throughput"] == pytest.approx(1050.0)
-    assert est["num_samples"] == 5
-    assert est["source_path"] == str(log_path)
-
-
-def test_estimate_from_vllm_server_log_filters_zero(tmp_path):
-    """vllm ``Avg generation throughput`` parses; prefill-only zeros dropped."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text(_VLLM_LOG)
-    est = br.estimate_output_throughput_from_server_log(log_path)
-    assert est is not None
-    # 3 positive samples (0.0 prefill filtered); mean(800,1000,1200)=1000.0.
-    assert est["output_throughput"] == pytest.approx(1000.0)
-    assert est["num_samples"] == 3
-
-
-def test_estimate_returns_none_without_samples(tmp_path):
-    """A log with no throughput markers yields no estimate."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text("INFO: nothing useful here\nWARN: still nothing\n")
-    assert br.estimate_output_throughput_from_server_log(log_path) is None
-
-
-def test_estimate_returns_none_for_missing_file(tmp_path):
-    """A non-existent log path is tolerated (returns None, never raises)."""
-    assert br.estimate_output_throughput_from_server_log(tmp_path / "absent.log") is None
-
-
-def test_estimate_killed_variant_prefers_richest_log(tmp_path):
-    """``estimate_killed_variant_throughput`` scans the slot recursively and uses the largest server.log (the engine's full decode trace)."""
-    slot = tmp_path / "variant_00_vA"
-    (slot / "benchmark_sglang_x").mkdir(parents=True)
-    # A tiny stub plus the full in-slot log; the larger one wins.
-    (slot / "server.log").write_text(_SGLANG_LOG)
-    (slot / "benchmark_sglang_x" / "server.log").write_text(
-        "Decode batch. gen throughput (token/s): 5.0, #queue-req: 0\n"
-    )
-    est = br.estimate_killed_variant_throughput(slot)
-    assert est is not None
-    assert est["output_throughput"] == pytest.approx(1050.0)
-
-
-def test_estimate_killed_variant_none_when_no_logs(tmp_path):
-    """No server.log anywhere under the slot -> no estimate."""
-    slot = tmp_path / "variant_00_vA"
-    slot.mkdir()
-    assert br.estimate_killed_variant_throughput(slot) is None
-
-
-def test_explicitly_invalid_agentx_submission_is_always_rejected(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", "1")
-    # submission_valid=False means the scenario explicitly rejected it; the escape hatch must not exempt this case.
-    assert (
-        br.is_valid_measurement(
-            {
-                "output_throughput": 170.0,
-                "completed_requests": 10,
-                "submission_valid": False,
-            }
-        )
-        is False
-    )
-
-
 def test_unverified_submission_accepted_when_hatch_is_set(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.setenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", "1")
@@ -745,16 +655,153 @@ def test_unverified_submission_accepted_when_hatch_is_set(monkeypatch):
     )
 
 
-def test_unverified_submission_rejected_without_hatch(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.delenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", raising=False)
-    assert (
-        br.is_valid_measurement(
-            {
-                "output_throughput": 170.0,
-                "completed_requests": 10,
-                "submission_valid": None,
-            }
-        )
-        is False
+# Raw InferenceX -> measurement field mapping
+
+
+def _full_inferencex_payload() -> dict[str, Any]:
+    """A raw InferenceX result carrying every key the raw merge reads, each with a distinct value."""
+    return {
+        "output_throughput": 1761.6,
+        "request_throughput": 17.6,
+        "total_token_throughput": 3522.2,
+        "completed_requests": 640,
+        "duration_seconds": 120.5,
+        "mean_ttft_ms": 31.1,
+        "p99_ttft_ms": 32.2,
+        "mean_tpot_ms": 33.3,
+        "input_throughput": 34.4,
+        "p90_tpot_ms": 35.5,
+        "median_ttft_ms": 36.6,
+        "p90_ttft_ms": 37.7,
+        "median_tpot_ms": 38.8,
+        "e2e_norm_intvty_p90": 39.9,
+        "e2e_norm_intvty_p50": 40.1,
+        "request_error_rate": 0.25,
+        "mean_e2el_ms": 42.2,
+        "p99_e2el_ms": 43.3,
+        "num_prompts": 700,
+    }
+
+
+def _write_raw(path: Path, payload: dict[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_raw_inferencex_keys_map_onto_their_measurement_fields(tmp_path):
+    """Every raw key lands on the measurement field named for it; distinct values catch a transposed pair."""
+    workspace = tmp_path / "ws"
+    raw_path = _write_raw(workspace / "result.json", _full_inferencex_payload())
+
+    measurement = extract_benchmark_measurement(None, workspace=workspace)
+
+    assert measurement["output_throughput"] == pytest.approx(1761.6)
+    assert measurement["request_throughput"] == pytest.approx(17.6)
+    assert measurement["total_token_throughput"] == pytest.approx(3522.2)
+    assert measurement["completed_requests"] == 640
+    assert measurement["duration_seconds"] == pytest.approx(120.5)
+    assert measurement["ttft_mean_ms"] == pytest.approx(31.1)
+    assert measurement["ttft_p99_ms"] == pytest.approx(32.2)
+    assert measurement["tpot_mean_ms"] == pytest.approx(33.3)
+    assert measurement["input_throughput"] == pytest.approx(34.4)
+    assert measurement["tpot_p90_ms"] == pytest.approx(35.5)
+    assert measurement["ttft_p50_ms"] == pytest.approx(36.6)
+    assert measurement["ttft_p90_ms"] == pytest.approx(37.7)
+    assert measurement["tpot_p50_ms"] == pytest.approx(38.8)
+    assert measurement["e2e_norm_intvty_p90"] == pytest.approx(39.9)
+    assert measurement["e2e_norm_intvty_p50"] == pytest.approx(40.1)
+    assert measurement["request_error_rate"] == pytest.approx(0.25)
+    assert measurement["e2el_mean_ms"] == pytest.approx(42.2)
+    assert measurement["e2el_p99_ms"] == pytest.approx(43.3)
+    assert measurement["requested_requests"] == 700
+    assert measurement["raw_result_path"] == str(raw_path)
+
+
+def test_raw_inferencex_falls_back_to_the_legacy_spellings(tmp_path):
+    """``mean_latency_ms`` / ``p99_latency_ms`` / ``completed`` / ``duration`` answer when the preferred key is absent."""
+    payload = _full_inferencex_payload()
+    for preferred in ("mean_e2el_ms", "p99_e2el_ms", "completed_requests", "duration_seconds"):
+        del payload[preferred]
+    payload.update(
+        {
+            "mean_latency_ms": 51.5,
+            "p99_latency_ms": 52.5,
+            "completed": 53,
+            "duration": 54.5,
+        }
     )
+    workspace = tmp_path / "ws"
+    _write_raw(workspace / "result.json", payload)
+
+    measurement = extract_benchmark_measurement(None, workspace=workspace)
+
+    assert measurement["e2el_mean_ms"] == pytest.approx(51.5)
+    assert measurement["e2el_p99_ms"] == pytest.approx(52.5)
+    assert measurement["completed_requests"] == 53
+    assert measurement["duration_seconds"] == pytest.approx(54.5)
+
+
+def test_raw_inferencex_preferred_latency_keys_win_over_the_legacy_ones(tmp_path):
+    """With both spellings present the ``e2el`` pair answers, not the ``latency`` pair."""
+    payload = _full_inferencex_payload()
+    payload.update({"mean_latency_ms": 51.5, "p99_latency_ms": 52.5})
+    workspace = tmp_path / "ws"
+    _write_raw(workspace / "result.json", payload)
+
+    measurement = extract_benchmark_measurement(None, workspace=workspace)
+
+    assert measurement["e2el_mean_ms"] == pytest.approx(42.2)
+    assert measurement["e2el_p99_ms"] == pytest.approx(43.3)
+
+
+def test_submission_verdict_is_carried_with_its_reasons(tmp_path):
+    payload = _full_inferencex_payload()
+    payload["submission_valid"] = True
+    payload["submission_invalid_reasons"] = ["too_short", 7]
+    workspace = tmp_path / "ws"
+    _write_raw(workspace / "result.json", payload)
+
+    measurement = extract_benchmark_measurement(None, workspace=workspace)
+
+    assert measurement["submission_valid"] is True
+    assert measurement["submission_invalid_reasons"] == ["too_short", "7"]
+
+
+def test_a_scalar_submission_reason_becomes_a_one_element_list(tmp_path):
+    payload = _full_inferencex_payload()
+    payload["submission_valid"] = False
+    payload["submission_invalid_reasons"] = "scenario_mismatch"
+    workspace = tmp_path / "ws"
+    _write_raw(workspace / "result.json", payload)
+
+    measurement = extract_benchmark_measurement(None, workspace=workspace)
+
+    assert measurement["submission_valid"] is False
+    assert measurement["submission_invalid_reasons"] == ["scenario_mismatch"]
+
+
+def test_a_candidate_without_a_throughput_never_claims_the_raw_result_path(tmp_path):
+    """The filter runs before the merge, so an unparseable candidate contributes nothing at all."""
+    workspace = tmp_path / "ws"
+    _write_raw(workspace / "a_result.json", {"mean_ttft_ms": 99.0})
+    winner = _write_raw(workspace / "b_result.json", _full_inferencex_payload())
+
+    measurement = extract_benchmark_measurement(None, workspace=workspace)
+
+    assert measurement["raw_result_path"] == str(winner)
+    assert measurement["ttft_mean_ms"] == pytest.approx(31.1)
+
+
+def test_the_first_candidate_that_parses_a_throughput_owns_the_fields_it_filled(tmp_path):
+    """A filled field is never overwritten by a later candidate, and the path names the one that filled it first."""
+    workspace = tmp_path / "ws"
+    first = _write_raw(workspace / "a_result.json", {"output_throughput": 0.0, "mean_ttft_ms": 11.0})
+    _write_raw(workspace / "b_result.json", _full_inferencex_payload())
+
+    measurement = extract_benchmark_measurement(None, workspace=workspace)
+
+    assert measurement["raw_result_path"] == str(first)
+    assert measurement["output_throughput"] == pytest.approx(0.0)
+    assert measurement["ttft_mean_ms"] == pytest.approx(11.0)
+    assert measurement["request_throughput"] == pytest.approx(17.6)

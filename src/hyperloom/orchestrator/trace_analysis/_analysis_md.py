@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from ._kernel_category import canonical_category
@@ -13,6 +14,14 @@ DASH = "\u2014"
 EXEC_SUMMARY_HEADING = "## Executive Summary"
 SYSTEM_SIGNALS_HEADING = "## System-Level Signals"
 TOP_HOT_KERNELS_HEADING = "## Top Hot Kernels"
+
+#: Row labels of the Executive Summary and System-Level Signals tables, which readers look up by name.
+TOTAL_GPU_TIME_LABEL = "Total GPU Time"
+GPU_BUSY_LABEL = "GPU Busy %"
+GPU_IDLE_LABEL = "GPU Idle %"
+TOP_BOTTLENECK_LABEL = "Top Bottleneck Category"
+ATTRIBUTION_LABEL = "Op-attribution Coverage"
+EXPOSED_COMM_LABEL = "Exposed communication"
 
 #: Column header row for the shared Top Hot Kernels table.
 TOP_HOT_KERNELS_COLUMNS = "| Rank | Operation | Time (us) | GPU% | Eff% | AI | Bound | Category | Source File |"
@@ -57,19 +66,32 @@ def _text(value: Any) -> str:
     return s or DASH
 
 
-def render_report(
-    *,
-    route: str,
-    model_name: str,
-    provenance_detail: str,
-    exec_summary: dict[str, Any],
-    system_signals: dict[str, Any],
-    idle_threshold: float,
-    hot_kernels: list[dict[str, Any]],
-    p_items: list[dict[str, Any]],
-    extra_sections: str = "",
-) -> str:
+@dataclass(frozen=True)
+class AnalysisReport:
+    """Everything the canonical ``analysis.md`` body is rendered from."""
+
+    route: str
+    model_name: str
+    provenance_detail: str
+    exec_summary: dict[str, Any]
+    system_signals: dict[str, Any]
+    idle_threshold: float
+    hot_kernels: list[dict[str, Any]]
+    p_items: list[dict[str, Any]]
+    extra_sections: str = ""
+
+
+def render_report(report: AnalysisReport) -> str:
     """Render the canonical ``analysis.md`` body."""
+    route = report.route
+    model_name = report.model_name
+    provenance_detail = report.provenance_detail
+    exec_summary = report.exec_summary
+    system_signals = report.system_signals
+    idle_threshold = report.idle_threshold
+    hot_kernels = report.hot_kernels
+    p_items = report.p_items
+    extra_sections = report.extra_sections
     lines: list[str] = []
     title = f"# Performance Analysis Report \u2014 {model_name}" if model_name else "# Performance Analysis Report"
     lines.append(title)
@@ -87,14 +109,14 @@ def render_report(
     lines.append("|--------|-------|")
     total_ms = exec_summary.get("total_gpu_time_ms")
     memcpy_ms = exec_summary.get("gpu_memcpy_ms")
-    lines.append(f"| Total GPU Time | {_num(total_ms, nd=3)} ms |")
-    lines.append(f"| GPU Busy % | {_pct(exec_summary.get('gpu_busy_pct'))} |")
-    lines.append(f"| GPU Idle % | {_pct(exec_summary.get('gpu_idle_pct'))} |")
+    lines.append(f"| {TOTAL_GPU_TIME_LABEL} | {_num(total_ms, nd=3)} ms |")
+    lines.append(f"| {GPU_BUSY_LABEL} | {_pct(exec_summary.get('gpu_busy_pct'))} |")
+    lines.append(f"| {GPU_IDLE_LABEL} | {_pct(exec_summary.get('gpu_idle_pct'))} |")
     lines.append(f"| GPU MemCpy | {_num(memcpy_ms, nd=3)} ms |")
     lines.append(
-        f"| Top Bottleneck Category | {_text(canonical_category(exec_summary.get('top_bottleneck_category')))} |"
+        f"| {TOP_BOTTLENECK_LABEL} | {_text(canonical_category(exec_summary.get('top_bottleneck_category')))} |"
     )
-    lines.append(f"| Op-attribution Coverage | {_pct(exec_summary.get('attribution_pct'))} |")
+    lines.append(f"| {ATTRIBUTION_LABEL} | {_pct(exec_summary.get('attribution_pct'))} |")
     lines.append("")
 
     # System-Level Signals.
@@ -112,7 +134,7 @@ def render_report(
     else:
         note = "-"
     lines.append(f"| GPU idle | {_pct(idle_share)} | {note} |")
-    lines.append(f"| Exposed communication | {_pct(system_signals.get('exposed_comm_pct'))} | - |")
+    lines.append(f"| {EXPOSED_COMM_LABEL} | {_pct(system_signals.get('exposed_comm_pct'))} | - |")
     lines.append(f"| Exposed memcpy (device copy) | {_pct(system_signals.get('exposed_memcpy_pct'))} | - |")
     lines.append("")
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable
 
-from kernelforge.llm.git import GitError, git
+from kernelforge.llm.git import GitError, git_bytes
 from kernelforge.loop.aiter_cache import activate_aiter_cache_for_sources
 
 _CPP_EXTS = (".cu", ".cuh", ".hip", ".cpp", ".cc", ".cxx", ".c", ".h", ".hpp")
@@ -39,7 +39,7 @@ def tracked_source_changes(workspace: str | Path) -> list[str]:
     """Return existing tracked files changed from HEAD, as absolute paths."""
 
     root = Path(workspace).expanduser().resolve()
-    result = git("diff", "--name-only", "-z", "HEAD", "--", ".", cwd=root, text=False)
+    result = git_bytes("diff", "--name-only", "-z", "HEAD", "--", ".", cwd=root)
     changed: list[str] = []
     for encoded in result.stdout.split(b"\0"):
         if not encoded:

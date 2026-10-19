@@ -75,6 +75,8 @@ subtrees:
     title: Operator scripts
   - file: reference/multi-node.md
     title: Multi-node inference optimization
+  - file: reference/primatune-predictor.md
+    title: PrimaTune predictor
   - file: reference/troubleshooting.md
     title: Troubleshooting
 

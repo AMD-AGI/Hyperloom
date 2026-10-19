@@ -18,6 +18,10 @@ from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
     PRODUCER,
     PROFILE_ATTEMPT_COMPUTE_BOUND,
     PROFILE_ATTEMPT_INITIAL,
+    AnalysisRunOutcome,
+    ProfileRunOutcome,
+    RooflineConclusion,
+    RooflineRequest,
     _summarize_trace_files,
     make_roofline_recorder,
     roofline_event_id,
@@ -28,6 +32,7 @@ from hyperloom.orchestrator.actions.executors.profile import (
     CHECK_GRAPH_LAUNCH_COVERAGE,
     CHECK_RANK_SHAPE,
     CHECK_TRACE_HAS_OPS,
+    _TraceProbe,
     _build_trace_validate,
 )
 from hyperloom.orchestrator.actions.executors.trace_analyze import _analysis_steady_state
@@ -56,10 +61,7 @@ def _recorder(
     """Build a standalone recorder, the way a dispatched roofline gets one."""
     recorder = make_roofline_recorder(
         make_sink(roofline_event_id(phase, macro_cycle), producer=PRODUCER),
-        task_id=task_id,
-        task_kind=task_kind,
-        reason=reason,
-        framework=framework,
+        RooflineRequest(task_id=task_id, task_kind=task_kind, reason=reason, framework=framework),
     )
     assert recorder is not None
     return recorder
@@ -155,11 +157,13 @@ def test_a_run_that_succeeded_still_reports_its_engine_dying(tmp_path: Path) -> 
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.end_profile_run(
-        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
-        status="succeeded",
-        disable_cuda_graph=False,
-        profile_result=_profile_result(),
-        server_liveness={"pidfiles": 1, "alive": 0, "dead_with_pidfile": 1},
+        recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
+        ProfileRunOutcome(
+            status="succeeded",
+            disable_cuda_graph=False,
+            profile_result=_profile_result(),
+            server_liveness={"pidfiles": 1, "alive": 0, "dead_with_pidfile": 1},
+        ),
     )
     recorder.finish_failed(phase="trace_analyze", message="stopped")
 
@@ -201,7 +205,6 @@ def _validate(**overrides: Any) -> dict[str, Any]:
             "severity": "ok",
             "blocking_reasons": [],
             "warnings": [],
-            "recommended_splitter_mode": "decode_only",
             "measures": {"attributed_pct": 91.0, "graph_launch_coverage": 0.9},
             "thresholds_effective": {"graph_launch_coverage_max": 0.2},
         },
@@ -267,12 +270,14 @@ def test_selfcert_scalars_reach_the_event_and_the_tables_do_not(tmp_path: Path) 
     recorder = _recorder()
     recorder.begin(max_profile_attempts=1)
     recorder.end_profile_run(
-        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
-        status="succeeded",
-        disable_cuda_graph=False,
-        profile_result=_profile_result(
-            trace_validate=_validate(),
-            trace_validate_path="/w/traces/selfcert.json",
+        recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
+        ProfileRunOutcome(
+            status="succeeded",
+            disable_cuda_graph=False,
+            profile_result=_profile_result(
+                trace_validate=_validate(),
+                trace_validate_path="/w/traces/selfcert.json",
+            ),
         ),
     )
     recorder.finish_failed(phase="analysis", message="stop")
@@ -315,21 +320,23 @@ def test_an_attempt_that_produced_no_trace_still_carries_its_patch_state(tmp_pat
     recorder = _recorder()
     recorder.begin(max_profile_attempts=3)
     recorder.end_profile_run(
-        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
-        status="failed",
-        disable_cuda_graph=False,
-        profile_result=None,
-        failure={"stage": "profile", "error_class": "RuntimeError", "message": "boom"},
-        instrumentation={
-            "check_id": "instrumentation_preflight",
-            "status": "failed",
-            "detail": {
-                "tracelens_patch_status": "unavailable",
-                "degraded_reason": "tracelens_runtime_patch_unavailable",
-                "patchers": {"benchmark_lib": True, "benchmark_serving": False},
-                "failed_patchers": ["benchmark_serving"],
+        recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
+        ProfileRunOutcome(
+            status="failed",
+            disable_cuda_graph=False,
+            profile_result=None,
+            failure={"stage": "profile", "error_class": "RuntimeError", "message": "boom"},
+            instrumentation={
+                "check_id": "instrumentation_preflight",
+                "status": "failed",
+                "detail": {
+                    "tracelens_patch_status": "unavailable",
+                    "degraded_reason": "tracelens_runtime_patch_unavailable",
+                    "patchers": {"benchmark_lib": True, "benchmark_serving": False},
+                    "failed_patchers": ["benchmark_serving"],
+                },
             },
-        },
+        ),
     )
     recorder.finish_failed(phase="profile", message="boom")
 
@@ -345,20 +352,22 @@ def test_a_successful_attempt_records_the_patchers_that_worked(tmp_path: Path) -
     recorder = _recorder()
     recorder.begin(max_profile_attempts=1)
     recorder.end_profile_run(
-        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
-        status="succeeded",
-        disable_cuda_graph=False,
-        profile_result=_profile_result(trace_validate=_validate()),
-        instrumentation={
-            "check_id": "instrumentation_preflight",
-            "status": "passed",
-            "detail": {
-                "tracelens_patch_status": "ok",
-                "degraded_reason": "",
-                "patchers": {"benchmark_lib": True, "benchmark_serving": True},
-                "failed_patchers": [],
+        recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
+        ProfileRunOutcome(
+            status="succeeded",
+            disable_cuda_graph=False,
+            profile_result=_profile_result(trace_validate=_validate()),
+            instrumentation={
+                "check_id": "instrumentation_preflight",
+                "status": "passed",
+                "detail": {
+                    "tracelens_patch_status": "ok",
+                    "degraded_reason": "",
+                    "patchers": {"benchmark_lib": True, "benchmark_serving": True},
+                    "failed_patchers": [],
+                },
             },
-        },
+        ),
     )
     recorder.finish_failed(phase="analysis", message="stop")
 
@@ -372,25 +381,27 @@ def test_profile_runs_collapse_into_one_action(tmp_path: Path) -> None:
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.end_profile_run(
-        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
-        status="failed",
-        disable_cuda_graph=False,
-        profile_result=_profile_result(trace_health={"zero_ops": True, "issues": ["[7] no ops"], "checks": []}),
-        failure={"stage": "profile_zero_ops", "error_class": "zero_ops", "message": "metadata-only trace"},
+        recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
+        ProfileRunOutcome(
+            status="failed",
+            disable_cuda_graph=False,
+            profile_result=_profile_result(trace_health={"zero_ops": True, "issues": ["[7] no ops"], "checks": []}),
+            failure={"stage": "profile_zero_ops", "error_class": "zero_ops", "message": "metadata-only trace"},
+        ),
     )
     recorder.end_profile_run(
-        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_COMPUTE_BOUND),
-        status="succeeded",
-        disable_cuda_graph=True,
-        profile_result=_profile_result(),
+        recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_COMPUTE_BOUND),
+        ProfileRunOutcome(status="succeeded", disable_cuda_graph=True, profile_result=_profile_result()),
     )
     recorder.adopt_profile_run(run_index=2, profile_result=_profile_result(), params={"reason": "kernel_followup"})
     recorder.finish_succeeded(
-        snapshot_id=1,
-        hot_kernel_count=3,
-        kernel_attribution_degraded=False,
-        cached={"roofline_snapshot_id": 1},
-        trace_path="/w/traces/merged-a.pt.trace.json.gz",
+        RooflineConclusion(
+            snapshot_id=1,
+            hot_kernel_count=3,
+            kernel_attribution_degraded=False,
+            cached={"roofline_snapshot_id": 1},
+            trace_path="/w/traces/merged-a.pt.trace.json.gz",
+        )
     )
 
     actions = _actions(tmp_path)
@@ -420,8 +431,8 @@ def test_the_recorder_numbers_each_half_and_times_each_run_from_its_begin(tmp_pa
     first_analysis = recorder.begin_analysis_run(attempt_reason=ANALYSIS_ATTEMPT_INITIAL)
     second_analysis = recorder.begin_analysis_run(attempt_reason=ANALYSIS_ATTEMPT_N26_RETRY)
     assert (first_profile, first_analysis, second_analysis) == (1, 1, 2)
-    recorder.end_analysis_run(run_index=second_analysis, status="succeeded", trace_input="/w/traces/a.gz")
-    recorder.end_profile_run(run_index=first_profile, status="succeeded", disable_cuda_graph=False)
+    recorder.end_analysis_run(second_analysis, AnalysisRunOutcome(status="succeeded", trace_input="/w/traces/a.gz"))
+    recorder.end_profile_run(first_profile, ProfileRunOutcome(status="succeeded", disable_cuda_graph=False))
     recorder.finish_failed(phase="analysis", message="stop")
 
     action = _actions(tmp_path)[0]
@@ -446,27 +457,33 @@ def test_analysis_retry_keeps_both_runs_and_one_conclusion(tmp_path: Path) -> No
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.end_analysis_run(
-        run_index=recorder.begin_analysis_run(attempt_reason=ANALYSIS_ATTEMPT_INITIAL),
-        status="failed",
-        trace_input="/w/traces/a.gz",
-        ta_result=_ta_result(status="failed"),
-        failure={"stage": "trace_analyze", "error_class": "", "message": "steady_state_chunk_low_quality"},
+        recorder.begin_analysis_run(attempt_reason=ANALYSIS_ATTEMPT_INITIAL),
+        AnalysisRunOutcome(
+            status="failed",
+            trace_input="/w/traces/a.gz",
+            ta_result=_ta_result(status="failed"),
+            failure={"stage": "trace_analyze", "error_class": "", "message": "steady_state_chunk_low_quality"},
+        ),
     )
     retried = _ta_result(n26_auto_retry={"applied": True, "from_mode": "mixed", "to_mode": "decode_only"})
     recorder.end_analysis_run(
-        run_index=recorder.begin_analysis_run(attempt_reason=ANALYSIS_ATTEMPT_N26_RETRY),
-        status="succeeded",
-        trace_input="/w/traces/a.gz",
-        requested_steady_state_mode="decode_only",
-        ta_result=retried,
+        recorder.begin_analysis_run(attempt_reason=ANALYSIS_ATTEMPT_N26_RETRY),
+        AnalysisRunOutcome(
+            status="succeeded",
+            trace_input="/w/traces/a.gz",
+            requested_steady_state_mode="decode_only",
+            ta_result=retried,
+        ),
     )
     recorder.adopt_analysis_run(run_index=2, ta_result=retried, trace_input="/w/traces/a.gz")
     recorder.finish_succeeded(
-        snapshot_id=1,
-        hot_kernel_count=1,
-        kernel_attribution_degraded=False,
-        cached={"roofline_snapshot_id": 1},
-        trace_path="/w/traces/a.gz",
+        RooflineConclusion(
+            snapshot_id=1,
+            hot_kernel_count=1,
+            kernel_attribution_degraded=False,
+            cached={"roofline_snapshot_id": 1},
+            trace_path="/w/traces/a.gz",
+        )
     )
 
     analysis = _actions(tmp_path)[0]["analysis"]
@@ -497,11 +514,13 @@ def test_failed_action_names_the_failing_substep(tmp_path: Path) -> None:
 
 def _succeed(recorder, *, snapshot_id: int = 1) -> None:
     recorder.finish_succeeded(
-        snapshot_id=snapshot_id,
-        hot_kernel_count=3,
-        kernel_attribution_degraded=False,
-        cached={"roofline_snapshot_id": snapshot_id},
-        trace_path="/w/traces/a.gz",
+        RooflineConclusion(
+            snapshot_id=snapshot_id,
+            hot_kernel_count=3,
+            kernel_attribution_degraded=False,
+            cached={"roofline_snapshot_id": snapshot_id},
+            trace_path="/w/traces/a.gz",
+        )
     )
 
 
@@ -551,11 +570,13 @@ def test_degraded_when_attribution_folded(tmp_path: Path) -> None:
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.finish_succeeded(
-        snapshot_id=2,
-        hot_kernel_count=0,
-        kernel_attribution_degraded=True,
-        cached={"roofline_snapshot_id": 2, "analysis_md_path": "/w/reports/analysis.md"},
-        trace_path="/w/traces/a.gz",
+        RooflineConclusion(
+            snapshot_id=2,
+            hot_kernel_count=0,
+            kernel_attribution_degraded=True,
+            cached={"roofline_snapshot_id": 2, "analysis_md_path": "/w/reports/analysis.md"},
+            trace_path="/w/traces/a.gz",
+        )
     )
 
     event = _roofline_events(tmp_path)[0]
@@ -615,11 +636,13 @@ def test_the_action_carries_the_per_kernel_roofline_table(tmp_path: Path) -> Non
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.finish_succeeded(
-        snapshot_id=1,
-        hot_kernel_count=2,
-        kernel_attribution_degraded=False,
-        cached={"roofline_snapshot_id": 1, "kernel_roofline_path": _write_sidecar(tmp_path)},
-        trace_path="/w/traces/a.gz",
+        RooflineConclusion(
+            snapshot_id=1,
+            hot_kernel_count=2,
+            kernel_attribution_degraded=False,
+            cached={"roofline_snapshot_id": 1, "kernel_roofline_path": _write_sidecar(tmp_path)},
+            trace_path="/w/traces/a.gz",
+        )
     )
 
     table = _actions(tmp_path)[0]["kernel_roofline"]
@@ -646,11 +669,13 @@ def test_a_missing_sidecar_does_not_fail_a_run_that_succeeded(tmp_path: Path) ->
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.finish_succeeded(
-        snapshot_id=1,
-        hot_kernel_count=2,
-        kernel_attribution_degraded=False,
-        cached={"roofline_snapshot_id": 1, "kernel_roofline_path": str(tmp_path / "absent.json")},
-        trace_path="/w/traces/a.gz",
+        RooflineConclusion(
+            snapshot_id=1,
+            hot_kernel_count=2,
+            kernel_attribution_degraded=False,
+            cached={"roofline_snapshot_id": 1, "kernel_roofline_path": str(tmp_path / "absent.json")},
+            trace_path="/w/traces/a.gz",
+        )
     )
 
     event = _roofline_events(tmp_path)[0]
@@ -662,30 +687,32 @@ def test_the_outcome_carries_the_snapshot_and_not_only_its_id(tmp_path: Path) ->
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.finish_succeeded(
-        snapshot_id=7,
-        hot_kernel_count=2,
-        kernel_attribution_degraded=False,
-        cached={"roofline_snapshot_id": 7},
-        trace_path="/w/traces/a.gz",
-        snapshot={
-            "snapshot_id": 7,
-            "ts": "2026-09-06T10:00:00Z",
-            "framework": "sglang",
-            "achieved_tok_per_sec": 1200.0,
-            "theoretical_peak_tok_per_sec": 4000.0,
-            "roofline_mem_ceiling_tok_per_sec": 4000.0,
-            "roofline_cmp_ceiling_tok_per_sec": 9000.0,
-            "roofline_bound_kind": "memory",
-            "within_roofline_pct": 30.0,
-            "gap_to_roofline_pct": 70.0,
-            "compute_pct": 55.0,
-            "idle_pct": 30.0,
-            "comm_pct": 15.0,
-            "top_bottleneck": "memory",
-            "top_kernel": {"name": "gemm", "gpu_pct": 61.0, "efficiency_pct": 78.0, "bound_type": "compute"},
-            "roofline_provenance": {"formula": "decode_mem"},
-            "perfmodel_breakdown": {"bound_kind": "memory", "ops": [{"name": "attn", "time_s": 0.001}]},
-        },
+        RooflineConclusion(
+            snapshot_id=7,
+            hot_kernel_count=2,
+            kernel_attribution_degraded=False,
+            cached={"roofline_snapshot_id": 7},
+            trace_path="/w/traces/a.gz",
+            snapshot={
+                "snapshot_id": 7,
+                "ts": "2026-09-06T10:00:00Z",
+                "framework": "sglang",
+                "achieved_tok_per_sec": 1200.0,
+                "theoretical_peak_tok_per_sec": 4000.0,
+                "roofline_mem_ceiling_tok_per_sec": 4000.0,
+                "roofline_cmp_ceiling_tok_per_sec": 9000.0,
+                "roofline_bound_kind": "memory",
+                "within_roofline_pct": 30.0,
+                "gap_to_roofline_pct": 70.0,
+                "compute_pct": 55.0,
+                "idle_pct": 30.0,
+                "comm_pct": 15.0,
+                "top_bottleneck": "memory",
+                "top_kernel": {"name": "gemm", "gpu_pct": 61.0, "efficiency_pct": 78.0, "bound_type": "compute"},
+                "roofline_provenance": {"formula": "decode_mem"},
+                "perfmodel_breakdown": {"bound_kind": "memory", "ops": [{"name": "attn", "time_s": 0.001}]},
+            },
+        )
     )
 
     snapshot = _actions(tmp_path)[0]["outcome"]["snapshot"]
@@ -711,11 +738,13 @@ def test_the_table_is_recorded_once_however_the_action_unwinds(tmp_path: Path) -
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.finish_succeeded(
-        snapshot_id=1,
-        hot_kernel_count=2,
-        kernel_attribution_degraded=False,
-        cached={"roofline_snapshot_id": 1, "kernel_roofline_path": _write_sidecar(tmp_path)},
-        trace_path="/w/traces/a.gz",
+        RooflineConclusion(
+            snapshot_id=1,
+            hot_kernel_count=2,
+            kernel_attribution_degraded=False,
+            cached={"roofline_snapshot_id": 1, "kernel_roofline_path": _write_sidecar(tmp_path)},
+            trace_path="/w/traces/a.gz",
+        )
     )
     recorder.finish_crashed(RuntimeError("late"))
 
@@ -732,10 +761,7 @@ def test_an_inline_action_leaves_no_roofline_event(tmp_path: Path) -> None:
     event = kernel_event_id(3)
     recorder = make_roofline_recorder(
         make_sink(event, producer=PRODUCER),
-        task_id="t-reprofile",
-        task_kind="roofline",
-        reason="kernel_entry_g0_abc",
-        framework="sglang",
+        RooflineRequest(task_id="t-reprofile", task_kind="roofline", reason="kernel_entry_g0_abc", framework="sglang"),
         owns_event=False,
     )
     assert recorder is not None
@@ -802,7 +828,6 @@ def _certificate(*, density: dict[str, Any], verdict: dict[str, Any], rank_count
             {
                 "rank": 0,
                 "density": density,
-                "split_forecast": {"viable_modes": ["mixed"], "viable_consumer_modes": ["mixed"]},
             }
         ],
         "verdict": {"thresholds_effective": {"graph_launch_coverage_max": 0.5}, **verdict},
@@ -812,31 +837,30 @@ def _certificate(*, density: dict[str, Any], verdict: dict[str, Any], rank_count
 def test_trace_validate_keeps_the_two_verdict_axes_apart() -> None:
     out = _build_trace_validate(
         {"checks": [{"check_id": CHECK_TRACE_HAS_OPS, "status": "passed"}]},
-        trace_dir=Path("/w"),
-        framework="sglang",
-        certificate=_certificate(
-            density={
-                "graph_mode": True,
-                "graph_launch_count": 128,
-                "graph_launches_with_kernels": 1,
-                "graph_launch_coverage": 0.0078,
-                "graph_under_recorded": True,
-            },
-            verdict={
-                "usable_by": ["bypass", "tracelens"],
-                "decode_conclusions_valid": False,
-                "silently_wrong": True,
-            },
+        _TraceProbe(
+            Path("/w"),
+            "sglang",
+            certificate=_certificate(
+                density={
+                    "graph_mode": True,
+                    "graph_launch_count": 128,
+                    "graph_launches_with_kernels": 1,
+                    "graph_launch_coverage": 0.0078,
+                    "graph_under_recorded": True,
+                },
+                verdict={
+                    "usable_by": ["bypass", "tracelens"],
+                    "decode_conclusions_valid": False,
+                    "silently_wrong": True,
+                },
+            ),
         ),
     )
     assert out["verdict"]["usable_by"] == ["bypass", "tracelens"]
     assert out["verdict"]["decode_conclusions_valid"] is False
     assert out["verdict"]["silently_wrong"] is True
     assert out["probe_status"] == "ok"
-    # Chunks do not exist until the splitter runs, so the profile stage records the forecast the analysis stage will
-    # later be measured against instead.
     assert out["chunk_level"] == []
-    assert out["steady_state_forecast"]["viable_modes"] == ["mixed"]
 
     coverage = next(row for row in out["checks"] if row["check_id"] == CHECK_GRAPH_LAUNCH_COVERAGE)
     assert coverage["status"] == "failed"
@@ -850,17 +874,23 @@ def test_trace_validate_keeps_the_two_verdict_axes_apart() -> None:
 def test_eager_capture_skips_coverage_instead_of_failing_it() -> None:
     out = _build_trace_validate(
         {"checks": []},
-        trace_dir=Path("/w"),
-        framework="sglang",
-        certificate=_certificate(
-            density={
-                "graph_mode": False,
-                "graph_launch_count": 0,
-                "graph_launches_with_kernels": 0,
-                "graph_launch_coverage": None,
-                "graph_under_recorded": False,
-            },
-            verdict={"usable_by": ["bypass", "tracelens"], "decode_conclusions_valid": True, "silently_wrong": False},
+        _TraceProbe(
+            Path("/w"),
+            "sglang",
+            certificate=_certificate(
+                density={
+                    "graph_mode": False,
+                    "graph_launch_count": 0,
+                    "graph_launches_with_kernels": 0,
+                    "graph_launch_coverage": None,
+                    "graph_under_recorded": False,
+                },
+                verdict={
+                    "usable_by": ["bypass", "tracelens"],
+                    "decode_conclusions_valid": True,
+                    "silently_wrong": False,
+                },
+            ),
         ),
     )
     coverage = next(row for row in out["checks"] if row["check_id"] == CHECK_GRAPH_LAUNCH_COVERAGE)
@@ -871,12 +901,14 @@ def test_eager_capture_skips_coverage_instead_of_failing_it() -> None:
 def test_tensor_parallel_capture_reports_the_uncertified_ranks() -> None:
     out = _build_trace_validate(
         {"checks": []},
-        trace_dir=Path("/w"),
-        framework="sglang",
-        certificate=_certificate(
-            density={"graph_mode": True, "graph_under_recorded": False},
-            verdict={"usable_by": ["bypass"], "decode_conclusions_valid": True, "silently_wrong": False},
-            rank_count=8,
+        _TraceProbe(
+            Path("/w"),
+            "sglang",
+            certificate=_certificate(
+                density={"graph_mode": True, "graph_under_recorded": False},
+                verdict={"usable_by": ["bypass"], "decode_conclusions_valid": True, "silently_wrong": False},
+                rank_count=8,
+            ),
         ),
     )
     shape = next(row for row in out["checks"] if row["check_id"] == CHECK_RANK_SHAPE)
@@ -888,9 +920,7 @@ def test_tensor_parallel_capture_reports_the_uncertified_ranks() -> None:
 def test_probe_failure_is_recorded_rather_than_read_as_a_verdict() -> None:
     out = _build_trace_validate(
         {"checks": [{"check_id": CHECK_TRACE_HAS_OPS, "status": "passed"}]},
-        trace_dir=Path("/w"),
-        framework="sglang",
-        probe_error="OSError: trace unreadable",
+        _TraceProbe(Path("/w"), "sglang", error="OSError: trace unreadable"),
     )
     assert out["probe_status"] == "failed"
     assert out["probe_error"] == "OSError: trace unreadable"
@@ -902,34 +932,38 @@ def test_validate_lands_per_profile_attempt(tmp_path: Path) -> None:
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.end_profile_run(
-        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
-        status="failed",
-        disable_cuda_graph=False,
-        profile_result=_profile_result(
-            trace_validate={
-                "verdict": {"usable_by": [], "decode_conclusions_valid": None, "silently_wrong": False},
-                "probe_status": "ok",
-                "checked_at": "2026-01-01T00:00:01+00:00",
-                "checks": [{"check_id": CHECK_TRACE_HAS_OPS, "status": "failed"}],
-            }
+        recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
+        ProfileRunOutcome(
+            status="failed",
+            disable_cuda_graph=False,
+            profile_result=_profile_result(
+                trace_validate={
+                    "verdict": {"usable_by": [], "decode_conclusions_valid": None, "silently_wrong": False},
+                    "probe_status": "ok",
+                    "checked_at": "2026-01-01T00:00:01+00:00",
+                    "checks": [{"check_id": CHECK_TRACE_HAS_OPS, "status": "failed"}],
+                }
+            ),
+            failure={"stage": "profile_zero_ops", "error_class": "zero_ops", "message": "no ops"},
         ),
-        failure={"stage": "profile_zero_ops", "error_class": "zero_ops", "message": "no ops"},
     )
     recorder.end_profile_run(
-        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_COMPUTE_BOUND),
-        status="succeeded",
-        disable_cuda_graph=False,
-        profile_result=_profile_result(
-            trace_validate={
-                "verdict": {
-                    "usable_by": ["bypass", "tracelens"],
-                    "decode_conclusions_valid": True,
-                    "silently_wrong": False,
-                },
-                "probe_status": "ok",
-                "checked_at": "2026-01-01T00:01:01+00:00",
-                "checks": [{"check_id": CHECK_TRACE_HAS_OPS, "status": "passed"}],
-            }
+        recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_COMPUTE_BOUND),
+        ProfileRunOutcome(
+            status="succeeded",
+            disable_cuda_graph=False,
+            profile_result=_profile_result(
+                trace_validate={
+                    "verdict": {
+                        "usable_by": ["bypass", "tracelens"],
+                        "decode_conclusions_valid": True,
+                        "silently_wrong": False,
+                    },
+                    "probe_status": "ok",
+                    "checked_at": "2026-01-01T00:01:01+00:00",
+                    "checks": [{"check_id": CHECK_TRACE_HAS_OPS, "status": "passed"}],
+                }
+            ),
         ),
     )
     _succeed(recorder)
@@ -959,10 +993,8 @@ def test_a_crash_after_the_profile_was_adopted_blames_the_analysis(tmp_path: Pat
     recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.end_profile_run(
-        run_index=recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
-        status="succeeded",
-        disable_cuda_graph=False,
-        profile_result=_profile_result(),
+        recorder.begin_profile_run(attempt_reason=PROFILE_ATTEMPT_INITIAL),
+        ProfileRunOutcome(status="succeeded", disable_cuda_graph=False, profile_result=_profile_result()),
     )
     recorder.adopt_profile_run(run_index=1, profile_result=_profile_result(), params={"reason": "kernel_followup"})
     recorder.finish_crashed(RuntimeError("trace_analyze_handler blew up"))
@@ -1001,7 +1033,7 @@ def test_open_ended_route_ext_is_size_capped(tmp_path: Path) -> None:
 
 
 def test_no_sink_records_nothing(tmp_path: Path) -> None:
-    assert make_roofline_recorder(None, reason="kernel_followup", framework="sglang") is None
+    assert make_roofline_recorder(None, RooflineRequest(reason="kernel_followup", framework="sglang")) is None
     assert not (tmp_path / "reports").exists()
 
 

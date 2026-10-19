@@ -14,7 +14,7 @@ Hyperloom uses a recipe-snapshot KB and selects exactly one store:
 
 | KB path | Owner / process | Purpose |
 |---------|-----------------|---------|
-| Local recipe KB | `inference_optimizer` | Selected by local/default mode; reads and writes durable Recipe JSON, history, and attempts. |
+| Local recipe KB | `inference_optimizer` | Selected by local/default mode; reads and writes durable Recipe JSON and history. |
 | Remote Recipe KB | KB Store | Selected only by `KNOWLEDGE_STORE_MODE=remote`; reads the current Recipe View for warm replay and writes one final session at CLOSE. |
 
 Ambient KB Store or GBrain credentials do not select remote mode.
@@ -39,9 +39,6 @@ To choose an explicit local path:
 export KNOWLEDGE_LOCAL_ROOT=/path/to/hyperloom-knowledge
 ```
 
-The older `HYPERLOOM_LOCAL_KB_ROOT` and `--local-kb-root` forms remain
-deprecated compatibility inputs.
-
 To force a run without KB hooks:
 
 ```bash
@@ -55,14 +52,7 @@ python3 -m hyperloom optimize --degraded-kb ...
 Local/default mode uses this resolver order:
 
 1. `KNOWLEDGE_LOCAL_ROOT` when set
-2. deprecated `--local-kb-root` or `HYPERLOOM_LOCAL_KB_ROOT`
-3. `$USER_DATA_PATH/knowledge`, otherwise `~/.cache/hyperloom/knowledge`
-
-When no root is explicit, the first upgraded startup performs a one-time copy
-of legacy Recipes from `$USER_DATA_PATH/kb`, or `/workspace/hyperloom/kb` when
-`USER_DATA_PATH` is unset. It does not copy lock/temp files and does not replace
-existing destination Recipes. See the [upgrade guide](upgrade.md) for the
-stop, backup, and rollout procedure.
+2. `$USER_DATA_PATH/knowledge`, otherwise `~/.cache/hyperloom/knowledge`
 
 The store uses a nested on-disk layout keyed by recipe canonical-id components.
 Treat the directory as Hyperloom-owned; use the CLI/runtime APIs rather than
@@ -174,8 +164,7 @@ mode or `--degraded-kb` rather than relying on an implicit fallback.
 
 **Q: Can I back up the KB?**
 
-Yes. Back up the directory selected by `--local-kb-root` or
-`HYPERLOOM_LOCAL_KB_ROOT`; otherwise back up `KNOWLEDGE_LOCAL_ROOT` or the
+Yes. Back up the directory selected by `KNOWLEDGE_LOCAL_ROOT`, or the
 default `$USER_DATA_PATH/knowledge`.
 
 **Q: Do I need the KB for a first run?**

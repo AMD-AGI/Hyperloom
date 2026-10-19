@@ -15,15 +15,13 @@ from kernelforge.knowledge.pr_knowledge.client import (
     PRContractError,
     PRMonitorClient,
 )
-from kernelforge.knowledge.pr_knowledge.search import discover
+from kernelforge.knowledge.pr_knowledge.search import PRLifecycle, discover
 from kernelforge.knowledge.pr_knowledge.context import PRQueryContext
 from kernelforge.mcp_server import stdio_transport
 
 #: Re-exported so the two servers stay one import away from the shared wire
 #: format; both spellings name the same objects.
 InvalidParamsError = stdio_transport.InvalidParamsError
-_write_message = stdio_transport.write_message
-_write_error = stdio_transport.write_error
 
 SERVER_NAME = "kernelforge-pr-monitor"
 # Agents see these as mcp__pr_monitor__<name>.
@@ -38,9 +36,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "pr_find_references",
         "description": (
-            "Find merged/open upstream pull requests related to a file path or "
-            "to short keyword phrases. Returns ranked references with a "
-            "worth_trying score and the distilled optimization summary. Pass "
+            "Find upstream pull requests related to a file path or to short "
+            "keyword phrases. Returns ranked references with their state "
+            "(open, closed without merging, merged, or null when unreported), "
+            "a worth_trying score and the distilled optimization summary. Pass "
             "one- or two-word phrases: the search matches the whole query "
             "string, so a sentence returns nothing."
         ),
@@ -66,9 +65,10 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "name": "pr_get_reference",
         "description": (
-            "Fetch one pull request: title, state, changed-file list, commit "
-            "count and its distilled summary. Use after pr_find_references to "
-            "see which files a PR touched."
+            "Fetch one pull request: title, state, draft flag, merge time, base "
+            "branch, changed-file list, commit count and its distilled "
+            "summary; a field the service does not report is null. "
+            "Use after pr_find_references to see which files a PR touched."
         ),
         "inputSchema": {
             "type": "object",
@@ -137,7 +137,7 @@ def _find_references(arguments: dict[str, Any]) -> dict[str, Any]:
             {
                 "number": ref.number,
                 "title": ref.title,
-                "state": "merged" if ref.is_merged else "open",
+                **ref.lifecycle.to_record(),
                 "worth_trying": ref.worth_trying,
                 "hit_via": list(ref.hit_via),
                 "components": list(ref.components),
@@ -188,7 +188,7 @@ def _get_reference(arguments: dict[str, Any]) -> dict[str, Any]:
         "repo": repo,
         "number": number,
         "title": summary.get("title", ""),
-        "state": "merged" if summary.get("is_merged") else "open",
+        **PRLifecycle.from_summary(summary).to_record(),
         "additions": summary.get("additions"),
         "deletions": summary.get("deletions"),
         "n_files": len(files),

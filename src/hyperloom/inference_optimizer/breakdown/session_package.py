@@ -14,6 +14,7 @@ import shutil
 import tempfile
 import zipfile
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -334,39 +335,46 @@ def _glob_match(rel: str, pattern: str) -> bool:
     return _compile_glob(pattern).match(rel) is not None
 
 
-def _build_manifest(
-    session_dir: Path,
-    session_id: str,
-    included: list[tuple[str, int]],
-    missing_globs: list[str],
-    *,
-    truncated: bool = False,
-    dropped_files: list[str] | None = None,
-    failed_files: list[str] | None = None,
-    refused_files: list[str] | None = None,
-    reserved_overflow: bool = False,
-) -> dict:
+@dataclass(frozen=True)
+class PackPlan:
+    """What the curated selection and the caps decided for one session's package.
+
+    Shared by every manifest of that package; only what each copy actually
+    wrote differs between them.
+    """
+
+    session_dir: Path
+    session_id: str
+    missing_globs: list[str]
+    truncated: bool = False
+    dropped_files: list[str] | None = None
+    refused_files: list[str] | None = None
+    reserved_overflow: bool = False
+
+
+def _build_manifest(plan: PackPlan, included: list[tuple[str, int]], failed_files: list[str] | None = None) -> dict:
     """Build the manifest dict describing a session package."""
     total = sum(sz for _, sz in included)
-    dropped = list(dropped_files or [])
+    dropped = list(plan.dropped_files or [])
     failed = list(failed_files or [])
-    refused = list(refused_files or [])
+    refused = list(plan.refused_files or [])
+    truncated = plan.truncated
     return {
         "schema_version": PACKAGE_SCHEMA_VERSION,
         "packaged_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "session_id": session_id,
-        "session_dir": str(session_dir),
+        "session_id": plan.session_id,
+        "session_dir": str(plan.session_dir),
         "included_count": len(included),
         "included_total_bytes": total,
         "included_files": [{"path": rel, "bytes": sz} for rel, sz in included],
-        "unmatched_globs": missing_globs,
+        "unmatched_globs": plan.missing_globs,
         "selection_globs": list(PACKAGE_GLOBS),
         "reserved_paths": list(RESERVED_PATHS),
         # True when a cap dropped something selected (consult dropped_files);
         # the caps skip a file and keep packing.
         "truncated": truncated,
         # True only when the must-ship partition exceeded its own ceiling.
-        "reserved_overflow": reserved_overflow,
+        "reserved_overflow": plan.reserved_overflow,
         "dropped_files": dropped,
         # Selected but absent: writes that failed, and entries refused for resolving outside the session or not being
         # regular files.
@@ -576,6 +584,15 @@ def package_session_artifacts(
             return None
 
         selected, truncated, reserved_overflow, dropped, total = _pack(sd, matched)
+        plan = PackPlan(
+            session_dir=sd,
+            session_id=sid,
+            missing_globs=missing_globs,
+            truncated=truncated,
+            dropped_files=dropped,
+            refused_files=refused,
+            reserved_overflow=reserved_overflow,
+        )
 
         root = Path(dest_root).resolve() if dest_root else _dest_root()
         out_dir = root / PACKAGE_SUBDIR
@@ -603,17 +620,7 @@ def package_session_artifacts(
                         write_failures.append(rel)
                         log.warning("session package: failed to add %s", rel)
                 # Built here so it describes the members that exist, not the ones that were selected.
-                manifest = _build_manifest(
-                    sd,
-                    sid,
-                    written,
-                    missing_globs,
-                    truncated=truncated,
-                    dropped_files=dropped,
-                    failed_files=write_failures,
-                    refused_files=refused,
-                    reserved_overflow=reserved_overflow,
-                )
+                manifest = _build_manifest(plan, written, write_failures)
                 zf.writestr(MANIFEST_JSON_NAME, json.dumps(manifest, indent=2))
                 zf.writestr(MANIFEST_TXT_NAME, _manifest_text(manifest))
             os.replace(tmp_path, target)
@@ -635,20 +642,7 @@ def package_session_artifacts(
         if _loose_enabled():
             try:
                 copied, loose_failures = _copy_loose_tree(selected, root)
-                _write_loose_manifest(
-                    root,
-                    _build_manifest(
-                        sd,
-                        sid,
-                        copied,
-                        missing_globs,
-                        truncated=truncated,
-                        dropped_files=dropped,
-                        failed_files=loose_failures,
-                        refused_files=refused,
-                        reserved_overflow=reserved_overflow,
-                    ),
-                )
+                _write_loose_manifest(root, _build_manifest(plan, copied, loose_failures))
                 log.info(
                     "session package: copied %d loose files into %s",
                     len(copied),
