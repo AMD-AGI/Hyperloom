@@ -691,14 +691,10 @@ async def sweep_case(
     return result
 
 
-def sweep_cli(
-    argv: list[str] | None = None,
-    *,
-    prog: str = "python3 -m kernelforge.evaluation.benchmark.runner",
-) -> int:
+def _sweep_cli(argv: list[str] | None = None) -> int:
     """One command, one data point -- the shell face of ``sweep_case``."""
     parser = argparse.ArgumentParser(
-        prog=prog,
+        prog="python3 -m kernelforge.evaluation.benchmark.runner",
         description=(
             "Time one declared case at one point in the dispatch-constant space. "
             "Exploratory only: the acceptance gate refuses these measurements."
@@ -760,4 +756,4 @@ def sweep_cli(
 
 
 if __name__ == "__main__":
-    sys.exit(sweep_cli())
+    sys.exit(_sweep_cli())
