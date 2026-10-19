@@ -42,7 +42,7 @@ from hyperloom.orchestrator.actions.executors import (
     default_baseline_config,
     materialize_benchmark_config,
 )
-from hyperloom.orchestrator.actions.executors.magpie_agentx import native_config
+from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile, native_config
 
 
 class PointError(RecipeError):
@@ -222,13 +222,14 @@ def generate_profile_point(
     The profile configuration turns the torch profiler on (``PROFILE=1``, ``PROFILE_EXTRA_BODY``, the framework's
     capture flags) and the renderer sizes the capture window from the workload, as the single-lineage profile does.
     The point runs at the primary concurrency without accuracy; apart from the output length the measurement surface
-    must still be the canonical one.
+    must still be the canonical one. An AgentX workload profiles the point it measures: Magpie captures the traces
+    when the point's ``profiler.torch_profiler`` is enabled, as the single-lineage AgentX profile turns it on.
     """
 
     if canonical.agentx:
-        raise PointError(
-            "a profile test of an AgentX workload is not supported: its profiler is the InferenceX client's"
-        )
+        (point,) = generate_points(environment, canonical, out_dir, concurrency=(canonical.primary_concurrency,))
+        enable_profile(point)
+        return (point,)
     launch = environment.recipe.launch
     check_launch_envs([*launch.envs, *environment.envs])
     out_dir.mkdir(parents=True, exist_ok=True)

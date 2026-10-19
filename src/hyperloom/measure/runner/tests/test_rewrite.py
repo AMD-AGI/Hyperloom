@@ -22,10 +22,19 @@ benchmark:
 """
 
 
-def _rewrite(tmp_path, farm=None, visible="0,1"):
+AGENTX_SHEET = """
+benchmark:
+  framework: sglang
+  agentx: {enabled: true, mode: canonical, launch_overrides: {version: 1, env: {SGLANG_X: "1", PYTHONPATH: /rt/site}}}
+  envs:
+    TP: 1
+"""
+
+
+def _rewrite(tmp_path, farm=None, visible="0,1", sheet=SHEET):
     out = tmp_path / "point.yaml"
     rewrite_config(
-        SHEET,
+        sheet,
         out,
         Placement(
             placed={"aiter": tmp_path / "attach" / "aiter"},
@@ -54,3 +63,13 @@ def test_the_rebuilt_framework_goes_first_on_the_servers_path(tmp_path):
     bench = _rewrite(tmp_path, farm=Farm(tmp_path / "farm" / "site", ("sglang",)))
 
     assert bench["envs"]["PYTHONPATH"] == f"{tmp_path}/farm/site:/rt/site"
+
+
+def test_the_rebuilt_framework_goes_first_on_an_agentx_servers_path_not_in_the_benchmark_envs(tmp_path):
+    (tmp_path / "farm" / "site").mkdir(parents=True)
+
+    bench = _rewrite(tmp_path, farm=Farm(tmp_path / "farm" / "site", ("sglang",)), sheet=AGENTX_SHEET)
+
+    launch = bench["agentx"]["launch_overrides"]
+    assert launch["env"]["PYTHONPATH"] == f"{tmp_path}/farm/site:/rt/site" and launch["env"]["SGLANG_X"] == "1"
+    assert "PYTHONPATH" not in bench["envs"]

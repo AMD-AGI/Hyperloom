@@ -12,7 +12,7 @@ from typing import Any
 import yaml
 
 from hyperloom.measure.attachments import substitute
-from hyperloom.measure.farm import Farm, prepend_pythonpath
+from hyperloom.measure.farm import Farm, place_farm
 from hyperloom.orchestrator.actions.executors import strip_visible_devices_from_config
 
 __all__ = ["Placement", "rewrite_config"]
@@ -60,7 +60,7 @@ def rewrite_config(yaml_text: str, out_path: Path, placement: Placement) -> Path
     if isinstance(bench.get("server_lifecycle"), dict):
         bench["server_lifecycle"]["pid_dir"] = str(placement.pid_dir)
     bench["inferencex_path"] = str(placement.inferencex_path)
-    if placement.farm is not None:
-        prepend_pythonpath(envs, placement.farm.site)
     out_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_UTF8)
+    if placement.farm is not None:
+        place_farm(out_path, placement.farm)
     return out_path

@@ -15,14 +15,27 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
-from collections.abc import Callable, Iterable, MutableMapping
+from collections.abc import Callable, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from hyperloom.measure.spec import EnvEntry, EnvRoot
+import yaml
 
-__all__ = ["Farm", "FarmError", "build_farm", "prepend_pythonpath", "verify_farm"]
+from hyperloom.common.benchmark_config import is_magpie_agentx
+from hyperloom.measure.spec import EnvEntry, EnvRoot
+from hyperloom.orchestrator.actions.executors.magpie_agentx import apply_native_runtime
+
+__all__ = [
+    "Farm",
+    "FarmError",
+    "build_farm",
+    "place_farm",
+    "prepend_pythonpath",
+    "server_environment",
+    "server_python",
+    "verify_farm",
+]
 
 _FIND_SPEC = (
     "import importlib.util, sys\n"
@@ -30,6 +43,7 @@ _FIND_SPEC = (
     "print('\\n'.join(spec.submodule_search_locations or []) if spec else '')\n"
 )
 _PROBE_TIMEOUT_SEC = 120
+_AGENTX_DEFAULT_PYTHON = "python3"
 
 
 class FarmError(Exception):
@@ -130,7 +144,61 @@ def prepend_pythonpath(envs: MutableMapping[str, Any], site: Path) -> None:
     envs["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(part for part in parts if part))
 
 
-def verify_farm(farm: Farm, envs: dict[str, Any], *, python: str, cwd: Path) -> None:
+def _agentx_launch(bench: Mapping[str, Any]) -> Mapping[str, Any]:
+    agentx = bench.get("agentx")
+    return (agentx.get("launch_overrides") if isinstance(agentx, Mapping) else None) or {}
+
+
+def server_environment(config: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The variables the framework server of ``config`` is launched with.
+
+    Magpie launches an AgentX server from ``agentx.launch_overrides.env`` and never reads ``benchmark.envs`` for it;
+    any other server gets ``benchmark.envs``.
+    """
+    bench = config.get("benchmark") or {}
+    return (_agentx_launch(bench).get("env") if is_magpie_agentx(bench) else bench.get("envs")) or {}
+
+
+def named_python(config: Mapping[str, Any]) -> str:
+    """The interpreter ``config`` names for its server through ``HYPERLOOM_FRAMEWORK_PYTHON``, or ``""``.
+
+    An AgentX server's interpreter can also be the ``executable`` its launch already carries.
+    """
+    named = server_environment(config).get("HYPERLOOM_FRAMEWORK_PYTHON")
+    if not named and is_magpie_agentx(config.get("benchmark") or {}):
+        named = _agentx_launch(config["benchmark"]).get("executable")
+    return str(named or "")
+
+
+def server_python(config: Mapping[str, Any], *, default: str) -> str:
+    """The interpreter the server of ``config`` runs with: the one it names, else its launcher's default.
+
+    Magpie starts an AgentX server with ``python3`` unless the launch names an executable; any other server uses
+    ``default``.
+    """
+    agentx = is_magpie_agentx(config.get("benchmark") or {})
+    return named_python(config) or (_AGENTX_DEFAULT_PYTHON if agentx else default)
+
+
+def place_farm(config_path: Path, farm: Farm) -> Mapping[str, Any]:
+    """Put the farm first on the import path of the server ``config_path`` launches; return the variables it gets.
+
+    An AgentX server's variables and interpreter are the launch's, so the farm goes where the single-lineage flow puts
+    an overlay: ``apply_native_runtime`` writes it into ``launch_overrides.env`` and binds the rebuilt files as source
+    evidence, and an interpreter the YAML names becomes the launch executable.
+    """
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+    if is_magpie_agentx(config.get("benchmark") or {}):
+        python = named_python(config)
+        apply_native_runtime(config_path, {"runtime_python_exe": python} if python else {}, str(farm.site))
+        return server_environment(yaml.safe_load(config_path.read_text(encoding="utf-8")))
+    envs = config.setdefault("benchmark", {}).setdefault("envs", {})
+    prepend_pythonpath(envs, farm.site)
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    return envs
+
+
+def verify_farm(farm: Farm, envs: Mapping[str, Any], *, python: str, cwd: Path) -> None:
     """Check that ``python``, given this YAML's ``PYTHONPATH``, finds every rebuilt package in the farm first."""
     environment = {**os.environ, "PYTHONPATH": str(envs.get("PYTHONPATH") or "")}
     for name in farm.packages:

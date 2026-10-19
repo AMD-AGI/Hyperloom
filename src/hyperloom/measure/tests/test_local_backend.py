@@ -549,6 +549,79 @@ def test_a_patched_test_measures_the_rebuilt_framework_that_the_compile_produced
     assert outcome.sandbox.image_digest == IMAGE
 
 
+def _agentx_point(tmp_path, monkeypatch, **launch_envs: str) -> Path:
+    """The point the toolbox renders for an AgentX session whose recipe launches with ``launch_envs``."""
+    from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
+    from hyperloom.inference_optimizer.cli.benchmark_config import AgentXWorkload, write_agentx_benchmark
+    from hyperloom.orchestrator.actions.executors import materialize_benchmark_config
+
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.setenv(BENCHMARK_CONFIG_ENV, "")
+    source = tmp_path / "agentx.yaml"
+    workload = AgentXWorkload(framework="sglang", model="Qwen/Qwen3-8B", precision="fp8", tp=2, ep=1, conc=4)
+    write_agentx_benchmark(source, workload)
+    return materialize_benchmark_config(source, tmp_path / "agentx", extra_envs={**launch_envs, "RUN_EVAL": "false"})
+
+
+def _magpie_launch(monkeypatch, tmp_path, python) -> dict[str, Any]:
+    """What ``run_grid`` hands Magpie for the point, and what the server it launches then imports from ``a.f()``."""
+    import subprocess
+
+    from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
+
+    launched: dict[str, Any] = {}
+
+    async def look(**kwargs):
+        candidate = _build_variant_yaml(
+            Path(kwargs["base_yaml_path"]), "", kwargs["grid"][0], output_subdir=tmp_path / "candidate"
+        )
+        launch = yaml.safe_load(candidate.read_text())["benchmark"]["agentx"]["launch_overrides"]
+        done = subprocess.run(
+            [launch.get("executable") or "python3", "-c", "import sglang.srt.a as a; print(a.f())"],
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+            env={"PYTHONPATH": launch["env"]["PYTHONPATH"], "PATH": str(Path(python).parent)},
+        )
+        launched.update(value=done.stdout.strip(), launch=launch)
+        return [VariantResult(name="test", extra_server_args="", extra_envs={}, status="succeeded", returncode=0)]
+
+    monkeypatch.setattr(local, "run_grid", look)
+    return launched
+
+
+def test_a_patched_agentx_test_hands_the_rebuilt_framework_to_the_server_magpie_launches(
+    monkeypatch, tmp_path, installed_framework
+):
+    """``benchmark.envs`` never reaches an AgentX server: its environment and interpreter are the launch's."""
+    python, package = installed_framework
+    launched = _magpie_launch(monkeypatch, tmp_path, python)
+    point = _agentx_point(tmp_path, monkeypatch, HYPERLOOM_FRAMEWORK_PYTHON=str(python))
+
+    _run(_call(tmp_path, point, environment=_compile(tmp_path, installed_framework)))
+
+    launch = launched["launch"]
+    assert launched["value"] == "10"  # the interpreter Magpie launches imported the patched file, not the image's
+    assert launch["executable"] == str(python) and "HYPERLOOM_FRAMEWORK_PYTHON" not in launch["env"]
+    assert launch["env"]["PYTHONPATH"].split(":")[0] in "".join(launch["source_files"]), "rebuilt files are evidence"
+    assert (package / "srt" / "a.py").read_text() == OLD_SOURCE
+    assert "PYTHONPATH" not in yaml.safe_load(point.read_text())["benchmark"]["envs"]
+
+
+def test_a_patched_agentx_test_that_names_no_interpreter_is_rebuilt_for_the_python3_magpie_launches(
+    monkeypatch, tmp_path, installed_framework
+):
+    """Magpie starts the server with ``python3`` unless told otherwise; the farm is built and checked against that."""
+    python, _ = installed_framework
+    monkeypatch.setenv("PATH", f"{python.parent}{os.pathsep}{os.environ['PATH']}")
+    launched = _magpie_launch(monkeypatch, tmp_path, python)
+    point = _agentx_point(tmp_path, monkeypatch)
+
+    _run(_call(tmp_path, point, environment=_compile(tmp_path, installed_framework)))
+
+    assert launched["value"] == "10" and "executable" not in launched["launch"]
+
+
 def test_a_test_on_the_image_as_it_is_runs_the_point_unchanged(grid, tmp_path, installed_framework):
     from hyperloom.contracts.recipe import RecipeDelta
     from hyperloom.measure.compile import LocalBlobStore, compile_environment
@@ -672,6 +745,32 @@ def test_a_profile_call_that_would_not_profile_or_asks_for_more_is_refused(grid,
 
     with pytest.raises(TestCallRefused, match=match):
         _run(_call(tmp_path, path, kind="profile", **kwargs))
+    assert grid.calls == []
+
+
+def test_an_agentx_profile_test_is_one_profiled_round_that_turns_the_profiler_on_in_the_yaml(
+    grid, tmp_path, monkeypatch
+):
+    from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile
+
+    point = _agentx_point(tmp_path, monkeypatch)
+    enable_profile(point)
+    capture = "0123456789abcdef0123456789abcdef"
+    _with_trace(grid, where=f"torch_trace/{capture}")
+
+    outcome = _run(_call(tmp_path, point, kind="profile", rounds=RoundPlan(warmup_rounds=1)))
+
+    (kwargs,) = grid.calls
+    assert kwargs["warmup_before_measure"] is False and kwargs["base_yaml_path"] == point
+    assert outcome.returncode == 0
+    assert (tmp_path / "out" / "profile" / "torch_trace" / capture / "rank0.pt.trace.json.gz").is_file()
+
+
+def test_an_agentx_profile_call_whose_point_leaves_the_profiler_off_is_refused(grid, tmp_path, monkeypatch):
+    point = _agentx_point(tmp_path, monkeypatch)
+
+    with pytest.raises(TestCallRefused, match="does not turn the torch profiler on"):
+        _run(_call(tmp_path, point, kind="profile"))
     assert grid.calls == []
 
 

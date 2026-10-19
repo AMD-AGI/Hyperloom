@@ -32,6 +32,7 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.benchmark_config import is_magpie_agentx
 from hyperloom.common.env import is_truthy
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.contracts.measurement import SandboxFacts
@@ -39,7 +40,7 @@ from hyperloom.measure.attachments import AttachmentError, place_attachments, su
 from hyperloom.measure.accuracy import read_accuracy
 from hyperloom.measure.compile import CompiledEnvironment, LocalBlobStore
 from hyperloom.measure.decode import DecodePassError, plan_pass, run_pass, vocab_size_of, write_outputs
-from hyperloom.measure.farm import FarmError, build_farm, prepend_pythonpath, verify_farm
+from hyperloom.measure.farm import FarmError, build_farm, place_farm, server_python, verify_farm
 from hyperloom.measure.profile_traces import PROFILE_DIR, collect_traces
 from hyperloom.measure.repro import ReproError, find_case, run_case
 from hyperloom.measure.returncodes import HOSTED_INFRA_FAILURE_RC
@@ -185,17 +186,21 @@ def _validate(call: TestCall) -> None:
 def _validate_profile(call: TestCall) -> None:
     """A profile test is one profiled round of one point: no accuracy, no sweep, and the point must turn the profiler on.
 
-    A point that does not would run a plain round and leave no trace, which the result would then be refused for.
+    A point that does not would run a plain round and leave no trace, which the result would then be refused for. An
+    AgentX point turns it on in its YAML alone, as the single-lineage AgentX profile does; the InferenceX client also
+    needs ``PROFILE=1``.
     """
     if call.prep != _GRID:
         raise TestCallRefused("a profile test profiles one point; it is not a sweep")
     if call.accuracy:
         raise TestCallRefused("a profile test does not run accuracy")
-    config = _point_config(call.points[0])
-    envs = (config.get("benchmark") or {}).get("envs") or {}
-    torch_profiler = ((config.get("benchmark") or {}).get("profiler") or {}).get("torch_profiler") or {}
-    if str(envs.get("PROFILE", "")).strip() != "1" or torch_profiler.get("enabled") is not True:
-        raise TestCallRefused(f"{call.points[0]} does not turn the torch profiler on (PROFILE=1 and torch_profiler)")
+    benchmark = _point_config(call.points[0]).get("benchmark") or {}
+    torch_profiler = (benchmark.get("profiler") or {}).get("torch_profiler") or {}
+    client_profiling = str((benchmark.get("envs") or {}).get("PROFILE", "")).strip() == "1"
+    if torch_profiler.get("enabled") is not True or not (client_profiling or is_magpie_agentx(benchmark)):
+        raise TestCallRefused(
+            f"{call.points[0]} does not turn the torch profiler on (torch_profiler, and PROFILE=1 unless AgentX)"
+        )
 
 
 def _validate_repro(call: TestCall) -> None:
@@ -261,18 +266,16 @@ def _rebuilt_points(call: TestCall, environment: CompiledEnvironment, work: Path
             work / "attach",
             read_blob,
         )
-        python = str(_point_envs(call.points[0]).get("HYPERLOOM_FRAMEWORK_PYTHON") or sys.executable)
+        python = server_python(_point_config(call.points[0]), default=sys.executable)
         roots = [SpecEnvRoot.parse(root.to_document(), "environment.roots") for root in environment.roots]
         farm = build_farm(roots, work / "farm", python=python, read_blob=read_blob)
         points = []
         for index, point in enumerate(call.points):
             config = yaml.safe_load(substitute(Path(point).read_text(encoding=_UTF8), placed)) or {}
-            envs = config.setdefault("benchmark", {}).setdefault("envs", {})
-            if farm is not None:
-                prepend_pythonpath(envs, farm.site)
-                verify_farm(farm, envs, python=python, cwd=work)
             target = work / f"point_{index}.yaml"
             target.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_UTF8)
+            if farm is not None:
+                verify_farm(farm, place_farm(target, farm), python=python, cwd=work)
             points.append(target)
     except (AttachmentError, FarmError, OSError, ValueError) as exc:
         raise TestCallRefused(f"the compiled environment cannot be rebuilt here: {exc}") from exc

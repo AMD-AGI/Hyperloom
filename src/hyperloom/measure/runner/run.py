@@ -25,7 +25,7 @@ from hyperloom.measure.local import LocalMeasurementBackend, TestCallRefused
 from hyperloom.measure.manifest import encode_manifest, RESULT_SCHEMA
 from hyperloom.measure.runner import hardware
 from hyperloom.measure.attachments import AttachmentError, place_attachments
-from hyperloom.measure.farm import Farm, FarmError, build_farm, verify_farm
+from hyperloom.measure.farm import Farm, FarmError, build_farm, server_environment, server_python, verify_farm
 from hyperloom.measure.runner.inventory import OutputRejected, inventory, write_farm_inventory
 from hyperloom.measure.runner.platform_env import align_platform_env, take_topology
 from hyperloom.measure.runner.rewrite import Placement, rewrite_config
@@ -142,8 +142,7 @@ def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[
         raise RunnerFailure(_START_FAILED, str(exc)) from exc
     try:
         placed = place_attachments(spec.attachments, ctx.work / "attach", ctx.read_blob)
-        envs = (yaml.safe_load(spec.config[0].yaml).get("benchmark") or {}).get("envs") or {}
-        python = str(envs.get("HYPERLOOM_FRAMEWORK_PYTHON") or "python3")
+        python = server_python(yaml.safe_load(spec.config[0].yaml) or {}, default="python3")
         farm = build_farm(spec.environment.roots, ctx.work / "farm", python=python, read_blob=ctx.read_blob)
         placement = Placement(
             placed=placed,
@@ -158,9 +157,8 @@ def _prepare(ctx: _Context, spec: MeasurementSpec, visible: list[int]) -> tuple[
         ]
         if farm is not None:
             for point in points:
-                rewritten = yaml.safe_load(point.read_text())["benchmark"]["envs"]
-                verify_farm(farm, rewritten, python=python, cwd=ctx.work)
-    except (AttachmentError, FarmError) as exc:
+                verify_farm(farm, server_environment(yaml.safe_load(point.read_text())), python=python, cwd=ctx.work)
+    except (AttachmentError, FarmError, ValueError) as exc:
         raise RunnerFailure(_SPEC_REJECTED, str(exc)) from exc
     return points, inferencex, farm
 

@@ -33,6 +33,7 @@ from hyperloom.orchestrator.actions.executors._workload_envs import (
     materialize_benchmark_config,
     materialize_config_with_envs,
 )
+from hyperloom.orchestrator.actions.executors.magpie_agentx import enable_profile
 
 SERVER_ARGS = "--max-running-requests 77 --enable-dp-attention"
 
@@ -328,10 +329,39 @@ def test_an_agentx_launch_variable_a_variant_may_not_set_is_refused_as_on_the_in
         generate_points(env, agentx_canonical, tmp_path / "points")
 
 
-def test_an_agentx_workload_has_no_profile_point(agentx_canonical, blobs, tmp_path):
-    with pytest.raises(PointError, match="profile test of an AgentX workload"):
-        generate_profile_point(environment(blobs, tmp_path), agentx_canonical, tmp_path / "points")
-    assert not (tmp_path / "points").exists()
+def test_an_agentx_profile_point_is_the_main_flows_agentx_profile_of_the_recipe(
+    agentx_canonical, blobs, tmp_path, model
+):
+    env = environment(blobs, tmp_path, delta=RecipeDelta(config=ConfigDelta(server_args=SERVER_ARGS)))
+    source = agentx_source(tmp_path / "single" / "benchmark.yaml", 32)
+
+    (point,) = generate_profile_point(env, agentx_canonical, tmp_path / "points")
+
+    main_flow = materialize_benchmark_config(
+        source,
+        tmp_path / "main",
+        extra_server_args=SERVER_ARGS,
+        extra_envs={"RUN_EVAL": "false"},
+        model_path=str(model),
+    )
+    enable_profile(main_flow)
+    rendered = load(point)
+    assert rendered == load(main_flow)
+    assert rendered["benchmark"]["profiler"]["torch_profiler"]["enabled"] is True
+    assert "PROFILE" not in rendered["benchmark"]["envs"]
+    assert rendered["benchmark"]["agentx"]["launch_overrides"]["append_args"] == SERVER_ARGS.split()
+
+
+def test_acceptance_generates_the_agentx_profile_point_for_a_profile_request(agentx_canonical, blobs, tmp_path):
+    compiler = EnvironmentCompiler(blobs, IMAGE, locator=lambda _l: PackageBase("sglang", tmp_path, None, None))
+    request = TestRequest(
+        kind=TestKind.PROFILE, purpose=Purpose.PROFILE, branch_id="b1", parent_commit="c" * 40, delta=RecipeDelta()
+    )
+
+    accepted = accept_measurement(request, recipe_with(), compiler, agentx_canonical, tmp_path / "points")
+
+    (point,) = accepted.points
+    assert load(point)["benchmark"]["profiler"]["torch_profiler"]["enabled"] is True
 
 
 def test_an_inferencex_point_is_what_the_inferencex_renderer_hands_magpie(canonical, blobs, tmp_path, model):
