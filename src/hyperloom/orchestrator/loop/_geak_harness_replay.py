@@ -11,7 +11,7 @@ construction, which is what makes a succeeded replay engagement proof.
 from __future__ import annotations
 
 import logging as _logging
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping, NamedTuple
 
 from hyperloom.common.env import env_int
 
@@ -30,6 +30,79 @@ if TYPE_CHECKING:
     from ..state.task_registry import Task
 
 log = _logging.getLogger(__name__)
+
+
+class _ReplayRegime(NamedTuple):
+    """The single operating point a 2a replay re-measures at."""
+
+    conc: int
+    isl: int
+    osl: int
+
+
+class _ReplayOverlay(NamedTuple):
+    """The kernel overlay a 2a replay expected, as it stood before the replay ran."""
+
+    path: str
+    digest_before: str
+
+
+def _promotion_measurement(res: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The measurement a GEAK sweep promotes on, or an empty mapping when it carries none."""
+    measurement = res.get("promotion_measurement")
+    return measurement if isinstance(measurement, Mapping) else {}
+
+
+def _geak_own_speedup(accepted: Mapping[str, Any]) -> float:
+    """GEAK's own within-harness speedup, read on the basis it promoted on.
+
+    It serves only to sanity-check that GEAK claimed a win before the replay
+    measurement becomes the headline. Older ``result.json`` files carry no
+    ``throughput_speedup``, so the explicit within-GEAK ratios stand in,
+    preferring the promoted basis.
+    """
+    try:
+        speedup = float(accepted.get("throughput_speedup") or 0.0)
+    except (TypeError, ValueError):
+        speedup = 0.0
+    if speedup > 0:
+        return speedup
+    metrics = accepted.get("alignment_metrics") or {}
+    basis = str(metrics.get("final_basis") or accepted.get("final_throughput_basis") or "hot")
+    fallback_key = "cold_geak_speedup" if basis == "cold" else "hot_geak_speedup"
+    try:
+        return float(metrics.get(fallback_key) or metrics.get("hot_geak_speedup") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _replay_regime(accepted: Mapping[str, Any]) -> _ReplayRegime:
+    """The operating point a 2a replay re-measures, falling back to the canonical one."""
+    regimes = accepted.get("validated_regimes") or []
+    first = regimes[0] if regimes and isinstance(regimes[0], dict) else {}
+    try:
+        return _ReplayRegime(
+            conc=int(first.get("conc") or 64),
+            isl=int(first.get("isl") or 1024),
+            osl=int(first.get("osl") or 1024),
+        )
+    except (TypeError, ValueError):
+        return _ReplayRegime(conc=64, isl=1024, osl=1024)
+
+
+def _overlay_survived_replay(overlay: _ReplayOverlay) -> bool:
+    """Whether the kernel overlay was still installable, and still the same one, at replay time.
+
+    A succeeded replay proves the configuration engaged; it proves nothing
+    about the overlay, which is a separate artifact on a path in
+    ``result.json`` and can be gone or inert by then. Of 64 observed runs
+    declaring a ``final_overlay``, 25 named a directory that did not exist and
+    30 named one holding no ``sitecustomize.py``, so a non-empty path is not
+    evidence that a kernel ran.
+    """
+    if not overlay.path or not geak_overlay_is_loadable(overlay.path):
+        return False
+    return not overlay.digest_before or _geak_overlay_digest(overlay.path) == overlay.digest_before
 
 
 class GeakHarnessReplay(CoordinatorCollaborator):
@@ -57,7 +130,7 @@ class GeakHarnessReplay(CoordinatorCollaborator):
             A summary dict describing whether validation succeeded.
         """
         from hyperloom.common.perf_metric import is_agentx_mode
-        from ..actions.executors._workload_envs import agentx_enabled, geak_metric_axis
+        from ..actions.executors._workload_envs import agentx_enabled
 
         mode = str(self.shared_state.benchmark_mode or "").strip()
         agentx = is_agentx_mode(mode) if mode else agentx_enabled()
@@ -67,68 +140,53 @@ class GeakHarnessReplay(CoordinatorCollaborator):
                 "status": "incomparable",
                 "reason": "geak_harness_unsupported_canonical_workload",
             }
-        ps = self.shared_state.geak_result if isinstance(self.shared_state.geak_result, dict) else {}
-        if str(ps.get("status") or "") != "ok" and not _geak_has_accepted_kernel(ps):
+        accepted = self.shared_state.geak_result if isinstance(self.shared_state.geak_result, dict) else {}
+        if str(accepted.get("status") or "") != "ok" and not _geak_has_accepted_kernel(accepted):
             return {"validated": False, "skipped": True, "reason": "no_geak_result"}
-        from hyperloom.common.jsonio import read_json
+        # The overlay's identity is captured before the replay so it can be
+        # compared after; see :func:`_overlay_survived_replay`.
+        overlay_path = _normalize_geak_overlay_dir(str(accepted.get("final_overlay") or "").strip())
+        overlay = _ReplayOverlay(
+            path=overlay_path,
+            digest_before=_geak_overlay_digest(overlay_path) if overlay_path else "",
+        )
+        geak_speedup = _geak_own_speedup(accepted)
+        res = await self._replay_through_geak(accepted, mode)
+        accuracy_failure = self._replay_accuracy_failure(_promotion_measurement(res))
+        if accuracy_failure:
+            self._refuse_replay_on_accuracy(accepted, res, accuracy_failure)
+            return {"validated": False, "status": "no_promote", "reason": accuracy_failure}
+        if str(res.get("status") or "") == "succeeded" and geak_speedup > 1.0:
+            return self._promote_replayed_geak_win(accepted, res, overlay, reason=reason)
+        if res.get("error"):
+            reason = str(res["error"])
+        log.warning(
+            "geak 2a fallback did not validate (status=%r geak_speedup=%r reason=%s)",
+            res.get("status"),
+            geak_speedup,
+            reason,
+        )
+        return {"validated": False, "status": res.get("status"), "reason": reason}
 
-        handoff = read_json(self.session_dir / "geak" / "handoff.json", default={}, require_dict=True)
-        env_spec = self.build_env_spec()
-        # Overlay identity, captured BEFORE the replay so it can be compared
-        # after. 2a replays GEAK's own launch script, which is why a
-        # ``succeeded`` status proves the *config* engaged -- but the overlay is
-        # a separate artifact on a path in ``result.json``, and it can be gone
-        # or inert by the time the replay runs. Measured over
-        # ``/shared_nfs/hyperloom-claw``: of 64 runs declaring a
-        # ``final_overlay``, 25 name a directory that does not exist and 30 name
-        # one holding no ``sitecustomize.py``. Only 9 can install a kernel. A
-        # non-empty string is therefore not evidence the kernel ran, and using
-        # it as evidence would stamp 55 flag-only measurements as kernel wins.
-        # Same check 2b runs; see ``geak_overlay_is_loadable``.
-        ps_overlay_2a = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
-        overlay_digest_before = _geak_overlay_digest(ps_overlay_2a) if ps_overlay_2a else ""
-        am = ps.get("alignment_metrics") or {}
-        # Read GEAK's OWN within-harness speedup on the SAME basis it promoted
-        # (result.throughput_speedup == cold_geak_speedup when final_basis=="cold",
-        # else the hot within-GEAK ratio; see run_e2e final-basis selection). It is
-        # used solely to sanity-check that GEAK claimed a win on its promoted basis
-        # before the replay measurement is promoted as the headline.
-        # Falls back to the explicit within-GEAK ratios when throughput_speedup is
-        # missing (older result.json), preferring the promoted basis.
-        try:
-            geak_sp = float(ps.get("throughput_speedup") or 0.0)
-        except (TypeError, ValueError):
-            geak_sp = 0.0
-        if geak_sp <= 0:
-            basis = str(am.get("final_basis") or ps.get("final_throughput_basis") or "hot")
-            fallback_key = "cold_geak_speedup" if basis == "cold" else "hot_geak_speedup"
-            try:
-                geak_sp = float(am.get(fallback_key) or am.get("hot_geak_speedup") or 0.0)
-            except (TypeError, ValueError):
-                geak_sp = 0.0
-        regimes = ps.get("validated_regimes") or []
-        reg = regimes[0] if regimes and isinstance(regimes[0], dict) else {}
-        try:
-            conc = int(reg.get("conc") or 64)
-            isl = int(reg.get("isl") or 1024)
-            osl = int(reg.get("osl") or 1024)
-        except (TypeError, ValueError):
-            conc, isl, osl = 64, 1024, 1024
+    async def _replay_through_geak(self, accepted: Mapping[str, Any], mode: str) -> dict[str, Any]:
+        """Re-run an accepted GEAK win through GEAK's own end-to-end harness."""
+        from hyperloom.common.jsonio import read_json
         from hyperloom.inference_optimizer.session.session_paths import unique_runs_dir
         from ..actions.executors._geak_sweep import sweep_via_geak
+        from ..actions.executors._workload_envs import geak_metric_axis
 
-        timeout = env_int("SWEEP_VARIANT_TIMEOUT_SEC", default=2400)
-        res = await sweep_via_geak(
-            result=ps,
-            handoff=handoff,
-            env_spec=env_spec,
-            conc_values=[conc],
-            isl_osl_configs=[f"{isl}:{osl}"],
+        regime = _replay_regime(accepted)
+        return await sweep_via_geak(
+            result=accepted,
+            handoff=read_json(self.session_dir / "geak" / "handoff.json", default={}, require_dict=True),
+            env_spec=self.build_env_spec(),
+            conc_values=[regime.conc],
+            isl_osl_configs=[f"{regime.isl}:{regime.osl}"],
             # A kernel-lane re-benchmark, not a dispatched action: it borrows the
             # ``integrate`` workspace namespace under a task id that names it,
             # as the stack re-validation and the GEAK integrate rebench do.
             output_root=unique_runs_dir(self.session_dir, "integrate", "revalidate_geak"),
-            variant_timeout_sec=timeout,
+            variant_timeout_sec=env_int("SWEEP_VARIANT_TIMEOUT_SEC", default=2400),
             repeats=3,
             # Single-point validated replay pins the headline protocol (num_prompts
             # etc.) so it is protocol-identical to the reported result.
@@ -136,92 +194,94 @@ class GeakHarnessReplay(CoordinatorCollaborator):
             # The axis the handoff sent GEAK, so the replay measures what GEAK accepted on.
             metric_axis=geak_metric_axis(benchmark_mode=mode, grading=self.shared_state.grading or None),
         )
-        measurement = res.get("promotion_measurement")
-        measurement = measurement if isinstance(measurement, Mapping) else {}
+
+    def _replay_accuracy_failure(self, measurement: Mapping[str, Any]) -> str:
+        """Why the replay's accuracy disqualifies the win, or ``""`` when it does not.
+
+        A session that never measured a baseline accuracy has nothing to hold
+        the replay to.
+        """
         baseline_accuracy = float(self.shared_state.baseline_accuracy or 0.0)
+        if baseline_accuracy <= 0:
+            return ""
         replay_accuracy = measurement.get("accuracy")
-        accuracy_failure = ""
-        if baseline_accuracy > 0:
-            if (
-                isinstance(replay_accuracy, bool)
-                or not isinstance(replay_accuracy, (int, float))
-                or not 0.0 <= replay_accuracy <= 1.0
-            ):
-                accuracy_failure = EVAL_KIND_ACCURACY_UNAVAILABLE
-            elif not accuracy_passed(baseline_accuracy, float(replay_accuracy)):
-                accuracy_failure = "accuracy_drop"
-        if accuracy_failure:
-            self._coord.phase_kernel.reject_geak_promotion(
-                {
-                    **ps,
-                    "fallback_result": res,
-                    "failure_reason": accuracy_failure,
-                    "baseline_accuracy": baseline_accuracy,
-                },
-                measured_tput=_geak_sweep_measured_tput(res) or 0.0,
-                current_best_tput=float((self.shared_state.current_best or {}).get("tput") or 0.0),
-                reason=accuracy_failure,
-            )
-            self.shared_state.save(self.session_dir)
-            return {"validated": False, "status": "no_promote", "reason": accuracy_failure}
-        if str(res.get("status") or "") == "succeeded" and geak_sp > 1.0:
-            # Rebench-first: write the headline from the GEAK-harness MEASURED
-            # throughput (engages by construction via the launch-script replay),
-            # keeping the leaderboard number a same-harness total rather than a
-            # self-reported speedup.
-            measured = _geak_sweep_measured_tput(res)
-            if measured is None:
-                log.warning("geak 2a: succeeded sweep but no measurable throughput; candidate stays pending")
-                return {"validated": False, "status": res.get("status"), "reason": reason}
-            # The replay proves the config engaged. It does not prove the
-            # overlay did: the overlay has to still be loadable, and still be
-            # the same overlay, at the moment the replay ran.
-            overlay_loaded_2a = bool(ps_overlay_2a) and geak_overlay_is_loadable(ps_overlay_2a)
-            if overlay_loaded_2a and overlay_digest_before:
-                overlay_loaded_2a = _geak_overlay_digest(ps_overlay_2a) == overlay_digest_before
-            if ps_overlay_2a and not overlay_loaded_2a:
-                log.warning(
-                    "geak 2a: overlay %r is not loadable evidence "
-                    "(loadable=%r digest before=%r after=%r) -> gain credited "
-                    "to config, not to a kernel",
-                    ps_overlay_2a,
-                    geak_overlay_is_loadable(ps_overlay_2a),
-                    overlay_digest_before,
-                    _geak_overlay_digest(ps_overlay_2a),
-                )
-            accepted = self._coord.phase_kernel.promote_geak_from_candidate(
-                ps,
-                measured_tput=measured,
-                provenance="geak_same_harness_geak",
-                overlay_loaded=overlay_loaded_2a,
-                measurement_provenance=measurement or res,
-            )
-            try:
-                self.shared_state.save(self.session_dir)
-            except Exception:
-                log.exception("geak 2a: SharedState.save failed")
-            if not accepted:
-                return {
-                    "validated": False,
-                    "status": "no_promote",
-                    "reason": str(self.shared_state.geak_result.get("revalidation_error") or "promotion_rejected"),
-                }
-            gain_out = float(self.shared_state.cumulative_gain_validated)
-            return {"validated": True, "gain": gain_out, "reason": reason}
-        if res.get("error"):
-            reason = str(res["error"])
-        log.warning(
-            "geak 2a fallback did not validate (status=%r geak_speedup=%r reason=%s accuracy_failure=%s)",
-            res.get("status"),
-            geak_sp,
-            reason,
-            accuracy_failure,
+        if (
+            isinstance(replay_accuracy, bool)
+            or not isinstance(replay_accuracy, (int, float))
+            or not 0.0 <= replay_accuracy <= 1.0
+        ):
+            return EVAL_KIND_ACCURACY_UNAVAILABLE
+        if not accuracy_passed(baseline_accuracy, float(replay_accuracy)):
+            return "accuracy_drop"
+        return ""
+
+    def _refuse_replay_on_accuracy(
+        self,
+        accepted: Mapping[str, Any],
+        res: Mapping[str, Any],
+        failure: str,
+    ) -> None:
+        """Close the candidate out on the accuracy its 2a replay measured."""
+        self._coord.phase_kernel.reject_geak_promotion(
+            {
+                **accepted,
+                "fallback_result": res,
+                "failure_reason": failure,
+                "baseline_accuracy": float(self.shared_state.baseline_accuracy or 0.0),
+            },
+            measured_tput=_geak_sweep_measured_tput(res) or 0.0,
+            current_best_tput=float((self.shared_state.current_best or {}).get("tput") or 0.0),
+            reason=failure,
         )
-        return {
-            "validated": False,
-            "status": "failed" if accuracy_failure else res.get("status"),
-            "reason": accuracy_failure or reason,
-        }
+        self.shared_state.save(self.session_dir)
+
+    def _promote_replayed_geak_win(
+        self,
+        accepted: Mapping[str, Any],
+        res: Mapping[str, Any],
+        overlay: _ReplayOverlay,
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Write the headline a succeeded 2a replay earns; report what it settled.
+
+        The leaderboard number is the measured same-harness total rather than
+        GEAK's self-reported speedup, because the launch-script replay engages
+        the optimized config by construction.
+        """
+        measured = _geak_sweep_measured_tput(res)
+        if measured is None:
+            log.warning("geak 2a: succeeded sweep but no measurable throughput; candidate stays pending")
+            return {"validated": False, "status": res.get("status"), "reason": reason}
+        overlay_loaded = _overlay_survived_replay(overlay)
+        if overlay.path and not overlay_loaded:
+            log.warning(
+                "geak 2a: overlay %r is not loadable evidence "
+                "(loadable=%r digest before=%r after=%r) -> gain credited "
+                "to config, not to a kernel",
+                overlay.path,
+                geak_overlay_is_loadable(overlay.path),
+                overlay.digest_before,
+                _geak_overlay_digest(overlay.path),
+            )
+        promoted = self._coord.phase_kernel.promote_geak_from_candidate(
+            accepted,
+            measured_tput=measured,
+            provenance="geak_same_harness_geak",
+            overlay_loaded=overlay_loaded,
+            measurement_provenance=_promotion_measurement(res) or res,
+        )
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:
+            log.exception("geak 2a: SharedState.save failed")
+        if not promoted:
+            return {
+                "validated": False,
+                "status": "no_promote",
+                "reason": str(self.shared_state.geak_result.get("revalidation_error") or "promotion_rejected"),
+            }
+        return {"validated": True, "gain": float(self.shared_state.cumulative_gain_validated), "reason": reason}
 
     async def _replay_via_geak_harness(
         self,

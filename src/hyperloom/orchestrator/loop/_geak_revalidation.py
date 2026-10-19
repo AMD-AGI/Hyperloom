@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging as _logging
 from typing import TYPE_CHECKING, Any, Mapping, NamedTuple
 
+from hyperloom.common.perf_metric import GradedComparison
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 
 from ..actions.executors._accuracy_gate import EVAL_KIND_ACCURACY_UNAVAILABLE
@@ -93,6 +94,91 @@ class _MaterialVerdict(NamedTuple):
     rejection: str | None = None
 
 
+class _RebenchEngagement(NamedTuple):
+    """What a settled 2b rebench reported about the config and overlay it was dispatched with.
+
+    ``config_matched`` and ``overlay_loaded`` are ``None`` when nothing was
+    expected on that axis, which is a different answer from a miss.
+    """
+
+    config_matched: bool | None
+    overlay_loaded: bool | None
+    observed_cfg_hash: str
+    observed_overlay_digest: str
+
+
+class _GeakProduct(NamedTuple):
+    """The deployable parts of an accepted GEAK result."""
+
+    flags: str
+    envs: Mapping[str, Any]
+    controls: dict[str, Any]
+    overlay: str
+    has_material: bool
+
+
+def _geak_rebench_grid_row(accepted: Mapping[str, Any], product: _GeakProduct, overlay: str) -> dict[str, Any]:
+    """The single grid variant a 2b rebench measures."""
+    kernels = [geak_spec_name(spec) for spec in _geak_accepted_kernel_specs(accepted)]
+    return {
+        "name": "geak_revalidate",
+        "extra_args": product.flags,
+        "extra_envs": dict(product.envs),
+        **product.controls,
+        "overlay_pythonpath": overlay,
+        "provenance": "geak_revalidate",
+        "accepted_kernels": kernels if overlay else [],
+        "note": "same-harness config-identity revalidation of the geak e2e win",
+    }
+
+
+def _grades_can_rule(
+    result: Mapping[str, Any],
+    measured: float,
+    baseline_grade: GradedComparison,
+    current_grade: GradedComparison,
+) -> bool:
+    """Whether a 2b rebench produced a reading both grades can rule on.
+
+    A round that measured nothing, did not succeed, or whose two grades read
+    different axes says nothing about the stack and goes to the harness replay.
+    """
+    if measured <= 0 or str(result.get("status") or "succeeded") not in {"succeeded", "ok"}:
+        return False
+    return (
+        baseline_grade.comparable and current_grade.comparable and baseline_grade.objective == current_grade.objective
+    )
+
+
+def _gate_refused(entry: Mapping[str, Any]) -> bool:
+    """Whether a per-variant outcome records a graded-axes or accuracy gate turning it down."""
+    if "gates" not in entry:
+        return entry.get("reason") in {"accuracy_drop", EVAL_KIND_ACCURACY_UNAVAILABLE, "intvty_regression"}
+    return any(
+        isinstance(gate, Mapping) and gate.get("gate") in {"graded_axes", "accuracy"} and gate.get("passed") is False
+        for gate in entry.get("gates") or []
+    )
+
+
+def _native_rejection_reason(result: Mapping[str, Any], expected_hash: str) -> str:
+    """Why the native gate turned this rebench's own variant down, or ``""`` when it did not.
+
+    A refusal whose fingerprint does not match the one dispatched belongs to
+    another variant of the round and says nothing about this one.
+    """
+    return next(
+        (
+            str(entry.get("reason") or "native_gate_rejected")
+            for entry in result.get("per_variant_outcomes") or []
+            if isinstance(entry, Mapping)
+            and entry.get("outcome") == "REVERT"
+            and _gate_refused(entry)
+            and (not expected_hash or entry.get("fingerprint") == expected_hash)
+        ),
+        "",
+    )
+
+
 class GeakRevalidation(CoordinatorCollaborator):
     """Dispatches the GEAK 2b rebench and rules on what it measured."""
 
@@ -102,116 +188,128 @@ class GeakRevalidation(CoordinatorCollaborator):
         Native source products use reviewed integration; configuration and overlay
         products use the existing explore executor. ``reason`` is recorded in the task.
         """
-        benchmark_script = self.shared_state.accepted_baseline_script()
-        recipe_generation = int(self.shared_state.working_recipe_generation or 0)
-        ps = self.shared_state.geak_result if isinstance(self.shared_state.geak_result, dict) else {}
-        ps_cfg = ps.get("accepted_config") or {}
-        ps_overlay = _normalize_geak_overlay_dir(str(ps.get("final_overlay") or "").strip())
-        ps_admissible = str(ps.get("status") or "") == "ok" or _geak_has_accepted_kernel(ps)
+        from ..phases.geak_native_revalidation import source_rebench_params
+
+        accepted = self.shared_state.geak_result if isinstance(self.shared_state.geak_result, dict) else {}
         try:
-            ps_controls = _accepted_config_controls(
-                ps_cfg, inherited_remove_args=self.current_best_launch_config()["remove_args"]
-            )
-            ps_flags, ps_envs = _accepted_config_as_variant(ps_cfg)
-            ps_has_material = ps_admissible and _geak_result_has_material(ps)
+            product = self._accepted_geak_product(accepted)
         except ValueError as exc:
             self._coord.phase_kernel.reject_geak_promotion(
-                ps, measured_tput=0.0, current_best_tput=0.0, reason=str(exc)
+                accepted, measured_tput=0.0, current_best_tput=0.0, reason=str(exc)
             )
             self.shared_state.save(self.session_dir)
             return {"skipped": True, "reason": "geak_invalid_config"}
-        if not (
-            ps_admissible
-            and (
-                ps_cfg.get("flags")
-                or ps_cfg.get("env")
-                or "env_map" in ps_cfg
-                or ps_controls
-                or ps_overlay
-                or ps_has_material
-            )
-        ):
+        if product is None:
             return {"skipped": True, "reason": "geak_no_material"}
-
-        from ..actions.executors._proposal_identity import effective_fingerprint
-
-        from ..phases.geak_native_revalidation import source_rebench_params
-
         source_params = source_rebench_params(
             self._coord,
             reason=reason,
-            result=ps,
-            launch={"extra_server_args": ps_flags, "extra_envs": dict(ps_envs), **ps_controls},
-            overlay=ps_overlay,
+            result=accepted,
+            launch={"extra_server_args": product.flags, "extra_envs": dict(product.envs), **product.controls},
+            overlay=product.overlay,
         )
         if source_params is not None:
             return source_params
+        return self._geak_explore_rebench_params(accepted, product, reason=reason)
 
-        overlay_requested = bool(ps_overlay)
-        if ps_overlay and not geak_overlay_is_loadable(ps_overlay):
+    def _accepted_geak_product(self, accepted: Mapping[str, Any]) -> _GeakProduct | None:
+        """What an accepted GEAK result offers to deploy, or ``None`` when it offers nothing.
+
+        Raises:
+            ValueError: The accepted config does not parse, so nothing can
+                revalidate it.
+        """
+        config = accepted.get("accepted_config") or {}
+        admissible = str(accepted.get("status") or "") == "ok" or _geak_has_accepted_kernel(accepted)
+        controls = _accepted_config_controls(
+            config, inherited_remove_args=self.current_best_launch_config()["remove_args"]
+        )
+        flags, envs = _accepted_config_as_variant(config)
+        overlay = _normalize_geak_overlay_dir(str(accepted.get("final_overlay") or "").strip())
+        has_material = admissible and _geak_result_has_material(accepted)
+        deployable = (
+            config.get("flags") or config.get("env") or "env_map" in config or controls or overlay or has_material
+        )
+        if not (admissible and deployable):
+            return None
+        return _GeakProduct(flags=flags, envs=envs, controls=controls, overlay=overlay, has_material=has_material)
+
+    def _geak_explore_rebench_params(
+        self,
+        accepted: Mapping[str, Any],
+        product: _GeakProduct,
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        """The explore-executor params that re-measure a GEAK config or overlay product.
+
+        An overlay that cannot install a kernel is dropped and the configuration
+        revalidated without it; a product with nothing left to apply has to go
+        back through GEAK's own harness instead.
+        """
+        from ..actions.executors._proposal_identity import effective_fingerprint
+
+        overlay = product.overlay
+        if overlay and not geak_overlay_is_loadable(overlay):
             log.warning(
                 "geak 2b: overlay %r is not loadable (no sitecustomize.py); "
                 "revalidating the config WITHOUT the authored kernel",
-                ps_overlay,
+                overlay,
             )
-            ps_overlay = ""
-        if not (ps_flags or ps_envs or ps_controls or ps_overlay):
-            if not ps_has_material:
+            overlay = ""
+        if not (product.flags or product.envs or product.controls or overlay):
+            if not product.has_material:
                 return {"skipped": True, "reason": "geak_no_material"}
             return {
                 "skipped": True,
-                "reason": "geak_overlay_unloadable" if overlay_requested else "geak_material_requires_harness",
+                "reason": "geak_overlay_unloadable" if product.overlay else "geak_material_requires_harness",
                 "fallback": "geak_harness",
             }
-        base_params = stack_base_params({**self.shared_state.current_best, **self.current_best_launch_config()})
-        base_params = {
-            key: value
-            for key, value in base_params.items()
-            if key not in {"base_remove_args", "base_unset_envs", "base_args_mode"} or value
-        }
-        if ps_controls.get("args_mode") == "replace":
-            base_params["base_extra_args"] = ""
-            base_params["base_args_mode"] = "replace"
-            base_params.pop("base_remove_args", None)
-        expected_cfg_hash = effective_fingerprint(
-            ps_flags,
-            ps_envs,
-            controls=ps_controls,
-            base_remove_args=base_params.get("base_remove_args"),
-            base_unset_envs=base_params.get("base_unset_envs"),
-            base_args_mode=base_params.get("base_args_mode"),
-        )
-        expected_overlay_digest = _geak_overlay_digest(ps_overlay)
-        ps_kernels = [geak_spec_name(k) for k in _geak_accepted_kernel_specs(ps)]
-        params_ps: dict[str, Any] = {
+        base_params = self._geak_rebench_base_params(product.controls)
+        params: dict[str, Any] = {
             "source": STACK_REVALIDATE_SOURCE,
             "reason": reason,
-            "recipe_generation": recipe_generation,
+            "recipe_generation": int(self.shared_state.working_recipe_generation or 0),
             "geak_fallback": True,
-            "expected_cfg_hash": expected_cfg_hash,
-            "expected_overlay": ps_overlay,
-            "expected_overlay_digest": expected_overlay_digest,
-            "grid": [
-                {
-                    "name": "geak_revalidate",
-                    "extra_args": ps_flags,
-                    "extra_envs": dict(ps_envs),
-                    **ps_controls,
-                    "overlay_pythonpath": ps_overlay,
-                    "provenance": "geak_revalidate",
-                    "accepted_kernels": ps_kernels if ps_overlay else [],
-                    "note": "same-harness config-identity revalidation of the geak e2e win",
-                }
-            ],
+            "expected_cfg_hash": effective_fingerprint(
+                product.flags,
+                product.envs,
+                controls=product.controls,
+                base_remove_args=base_params.get("base_remove_args"),
+                base_unset_envs=base_params.get("base_unset_envs"),
+                base_args_mode=base_params.get("base_args_mode"),
+            ),
+            "expected_overlay": overlay,
+            "expected_overlay_digest": _geak_overlay_digest(overlay),
+            "grid": [_geak_rebench_grid_row(accepted, product, overlay)],
             "base_tput": float(self.shared_state.baseline_tput or 0.0),
             **base_params,
         }
         if self.shared_state.baseline_config_path:
-            params_ps["config_path"] = self.shared_state.baseline_config_path
+            params["config_path"] = self.shared_state.baseline_config_path
+        benchmark_script = self.shared_state.accepted_baseline_script()
         if benchmark_script:
-            params_ps["benchmark_script"] = benchmark_script
-        self._coord.proposals.inject_explore_runtime_params(params_ps)
-        return params_ps
+            params["benchmark_script"] = benchmark_script
+        self._coord.proposals.inject_explore_runtime_params(params)
+        return params
+
+    def _geak_rebench_base_params(self, controls: Mapping[str, Any]) -> dict[str, Any]:
+        """The launch the 2b rebench measures the GEAK product on top of.
+
+        A product that replaces the launch args starts from nothing, so the
+        inherited removals have no base left to apply to.
+        """
+        base = stack_base_params({**self.shared_state.current_best, **self.current_best_launch_config()})
+        base = {
+            key: value
+            for key, value in base.items()
+            if key not in {"base_remove_args", "base_unset_envs", "base_args_mode"} or value
+        }
+        if controls.get("args_mode") == "replace":
+            base["base_extra_args"] = ""
+            base["base_args_mode"] = "replace"
+            base.pop("base_remove_args", None)
+        return base
 
     async def _rule_on_geak_rebench(
         self,
@@ -251,8 +349,7 @@ class GeakRevalidation(CoordinatorCollaborator):
             if verdict.rejection is not None:
                 native_rejection = verdict.rejection
 
-        pending = self.shared_state.geak_pending or {}
-        pending_status = str(pending.get("status") or "") if isinstance(pending, dict) else ""
+        pending_status = self._geak_candidate_slot_status()
         if decision == "validated":
             # Only an overlay that was dispatched AND still matches its
             # manifest proves a kernel was in the measurement.
@@ -276,10 +373,12 @@ class GeakRevalidation(CoordinatorCollaborator):
             decision=decision,
             pending_status=pending_status,
             measured=rebench.measured,
-            config_matched=(rebench.got_hash == expected_hash) if expected_hash else None,
-            overlay_loaded=overlay_loaded if expected_overlay else None,
-            got_hash=rebench.got_hash,
-            got_overlay_digest=got_digest,
+            engagement=_RebenchEngagement(
+                config_matched=(rebench.got_hash == expected_hash) if expected_hash else None,
+                overlay_loaded=overlay_loaded if expected_overlay else None,
+                observed_cfg_hash=rebench.got_hash,
+                observed_overlay_digest=got_digest,
+            ),
         )
         self.shared_state.record_action_attempt(
             action="explore",
@@ -291,6 +390,11 @@ class GeakRevalidation(CoordinatorCollaborator):
         )
         outcome.verdict = Verdict.ADOPTED if promoted else Verdict.REFUSED
         outcome.changed = True
+
+    def _geak_candidate_slot_status(self) -> str:
+        """The status of the candidate slot this revalidation was dispatched for."""
+        pending = self.shared_state.geak_pending or {}
+        return str(pending.get("status") or "") if isinstance(pending, dict) else ""
 
     def _read_geak_rebench(self, result: dict) -> _GeakRebench:
         """Read a 2b rebench round: the variant measured, and what it measured against.
@@ -387,41 +491,13 @@ class GeakRevalidation(CoordinatorCollaborator):
             min_engaged_gain_pct=_MIN_KERNEL_ENGAGED_GAIN_PCT,
             current_best=current_grade.reference,
         )
-        if (
-            measured <= 0
-            or not baseline_grade.comparable
-            or not current_grade.comparable
-            or baseline_grade.objective != current_grade.objective
-            or str(result.get("status") or "succeeded") not in {"succeeded", "ok"}
-        ):
+        if not _grades_can_rule(result, measured, baseline_grade, current_grade):
             decision = "fallback"
         elif (not expected_hash or got_hash == expected_hash) and any(
             grade.graded_on_intvty and grade.verdict != "KEEP" for grade in (baseline_grade, current_grade)
         ):
             decision = "no_promote"
-        native_rejection = next(
-            (
-                str(entry.get("reason") or "native_gate_rejected")
-                for entry in result.get("per_variant_outcomes") or []
-                if isinstance(entry, Mapping)
-                and entry.get("outcome") == "REVERT"
-                and (
-                    any(
-                        isinstance(gate, Mapping)
-                        and gate.get("gate") in {"graded_axes", "accuracy"}
-                        and gate.get("passed") is False
-                        for gate in entry.get("gates") or []
-                    )
-                    or (
-                        "gates" not in entry
-                        and entry.get("reason")
-                        in {"accuracy_drop", EVAL_KIND_ACCURACY_UNAVAILABLE, "intvty_regression"}
-                    )
-                )
-                and (not expected_hash or entry.get("fingerprint") == expected_hash)
-            ),
-            "",
-        )
+        native_rejection = _native_rejection_reason(result, expected_hash)
         if (
             measured > 0
             and got_hash == expected_hash
@@ -605,10 +681,7 @@ class GeakRevalidation(CoordinatorCollaborator):
         decision: str,
         pending_status: str,
         measured: Any,
-        config_matched: bool | None,
-        overlay_loaded: bool | None,
-        got_hash: str,
-        got_overlay_digest: str,
+        engagement: _RebenchEngagement,
     ) -> None:
         """Record one GEAK rebench attempt on the kernel timeline event.
 
@@ -622,10 +695,7 @@ class GeakRevalidation(CoordinatorCollaborator):
             decision: The final verdict.
             pending_status: The candidate slot's status.
             measured: The throughput the attempt measured.
-            config_matched: Whether the config fingerprint survived the run.
-            overlay_loaded: Whether the overlay survived the run.
-            got_hash: The fingerprint the run reported.
-            got_overlay_digest: The overlay digest observed after the run.
+            engagement: What the run reported about the config and the overlay.
         """
         recorder = self._coord.phase_kernel.timeline()
         if recorder is None:
@@ -644,12 +714,12 @@ class GeakRevalidation(CoordinatorCollaborator):
             decision_reason=str(params.get("reason") or ""),
             status=pending_status,
             engagement={
-                "config_matched": config_matched,
-                "overlay_loaded": overlay_loaded,
+                "config_matched": engagement.config_matched,
+                "overlay_loaded": engagement.overlay_loaded,
                 "expected_cfg_hash": params.get("expected_cfg_hash"),
-                "observed_cfg_hash": got_hash,
+                "observed_cfg_hash": engagement.observed_cfg_hash,
                 "expected_overlay_digest": params.get("expected_overlay_digest"),
-                "observed_overlay_digest": got_overlay_digest,
+                "observed_overlay_digest": engagement.observed_overlay_digest,
             },
         )
 

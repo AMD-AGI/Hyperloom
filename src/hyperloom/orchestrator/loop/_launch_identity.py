@@ -30,6 +30,49 @@ from ..collaborator import CoordinatorCollaborator
 from ..kernel.geak_config import _geak_overlay_digest
 
 
+def _source_snapshot_layer(entry: Mapping[str, Any]) -> dict[str, Any]:
+    """One durable source-layer snapshot of the stack, as a consumer replays it.
+
+    A ``source_patch`` entry with no durable snapshot is still surfaced, with an
+    empty directory, so the consumer can flag an unreproducible baseline rather
+    than silently launch a weaker stock tree.
+    """
+    from ..source_snapshot import source_layer_overlay_dir, source_layer_reproducible
+
+    snapshot = str(entry.get("source_snapshot") or "").strip()
+    return {
+        "id": str(entry.get("variant_name") or entry.get("name") or ""),
+        # GEAK PYTHONPATHs this value; it is the import root inside the
+        # snapshot, not the snapshot's own top level.
+        "snapshot_dir": source_layer_overlay_dir(entry) if snapshot else "",
+        "framework_root": str(entry.get("framework_root") or ""),
+        "base_sha": str(entry.get("base_sha") or ""),
+        "reproducible": source_layer_reproducible(entry) if snapshot else False,
+    }
+
+
+def _source_snapshot_layers(stack: Any) -> list[dict[str, Any]]:
+    """The ordered source-layer snapshots a stack reconstructs its framework tree from."""
+    return [
+        _source_snapshot_layer(entry)
+        for entry in (stack or [])
+        if isinstance(entry, dict) and entry.get("scope") == "source_patch"
+    ]
+
+
+def _measurement_identity(measurement: Mapping[str, Any]) -> dict[str, Any]:
+    """Which launch a measurement was taken on, and how well that launch is evidenced."""
+    return {
+        "declared_launch_identity": str(
+            measurement.get("declared_launch_identity") or measurement.get("launch_identity") or ""
+        ),
+        "observed_launch_identity": str(measurement.get("observed_launch_identity") or ""),
+        "verification_status": str(measurement.get("identity_verification_status") or "unverified"),
+        "observed_server_identity": dict(measurement.get("observed_server_identity") or {}),
+        "resolved_server_config": dict(measurement.get("resolved_server_config") or {}),
+    }
+
+
 class LaunchIdentity(CoordinatorCollaborator):
     """Owns the launch descriptor and identity stamped onto ``current_best``."""
 
@@ -320,57 +363,16 @@ class LaunchIdentity(CoordinatorCollaborator):
         baseline ref is materialized from the SAME layers as ``current_best``
         (not just its flags/env), closing the cross-harness baseline gap.
         """
-        from ..source_snapshot import source_layer_overlay_dir, source_layer_reproducible
-
-        cb = self.shared_state.current_best
         materialized = self.current_best_launch_config()
         # current_best's embedded stack was promoted with its tput. Reading the
         # mutable global stack here could attach an unrelated source patch after
         # a resume or partial state write.
-        stack = [e for e in (cb.get("optimization_stack") or []) if isinstance(e, dict)]
-        source_snapshots: list[dict[str, Any]] = []
-        for entry in stack:
-            if entry.get("scope") != "source_patch":
-                continue
-            snap = str(entry.get("source_snapshot") or "").strip()
-            if not snap:
-                # A source_patch with no durable snapshot (e.g. a pre-fix legacy
-                # KEEP) is surfaced so the consumer can flag an unreproducible
-                # baseline rather than silently launch a weaker stock tree.
-                source_snapshots.append(
-                    {
-                        "id": str(entry.get("variant_name") or entry.get("name") or ""),
-                        "snapshot_dir": "",
-                        "framework_root": str(entry.get("framework_root") or ""),
-                        "base_sha": str(entry.get("base_sha") or ""),
-                        "reproducible": False,
-                    }
-                )
-                continue
-            source_snapshots.append(
-                {
-                    "id": str(entry.get("variant_name") or entry.get("name") or ""),
-                    # GEAK PYTHONPATHs this value; it is the import root inside
-                    # the snapshot, not the snapshot's own top level.
-                    "snapshot_dir": source_layer_overlay_dir(entry),
-                    "framework_root": str(entry.get("framework_root") or ""),
-                    "base_sha": str(entry.get("base_sha") or ""),
-                    "reproducible": source_layer_reproducible(entry),
-                }
-            )
-        # ``extra_server_args`` remains the current_best delta; ``extra_envs`` is the
-        # current_best delta layered over any recipe launch environment (see below).
-        # Full engine flags must come from the same promoted measurement, not a
-        # search over historical benchmarks with a similar throughput.
+        source_snapshots = _source_snapshot_layers(self.shared_state.current_best.get("optimization_stack"))
         if not isinstance(measurement, Mapping):
-            state_measurement = self.shared_state.current_best_measurement
-            measurement = (
-                state_measurement
-                if isinstance(state_measurement, Mapping) and state_measurement
-                else (cb.get("measurement") if isinstance(cb.get("measurement"), Mapping) else {})
-            )
+            measurement = self._promoted_measurement()
         if server_launch_flags is None:
             server_launch_flags = self._measurement_launch_flags(measurement)
+        recipe_path = str(self.shared_state.baseline_config_path or "")
         env_spec = {
             "schema_version": 1,
             "config": {
@@ -388,22 +390,26 @@ class LaunchIdentity(CoordinatorCollaborator):
             "source_snapshots": source_snapshots,
             "overlay_pythonpath": materialized.get("final_overlay") or "",
             "overlay_digest": _geak_overlay_digest(str(materialized.get("final_overlay") or "")),
-            "base_launch_recipe": str(self.shared_state.baseline_config_path or ""),
-            "base_launch_recipe_digest": self._launch_recipe_digest(str(self.shared_state.baseline_config_path or "")),
+            "base_launch_recipe": recipe_path,
+            "base_launch_recipe_digest": self._launch_recipe_digest(recipe_path),
             # Backward-compatible alias for existing GEAK v2 consumers.
-            "launch_recipe": str(self.shared_state.baseline_config_path or ""),
+            "launch_recipe": recipe_path,
             # Additive evidence record. Consumers can distinguish a captured
             # launch from a declaration resolved without a new CLI line.
             "measurement_evidence": dict(measurement.get("launch_evidence") or {}),
-            "measurement_identity": {
-                "declared_launch_identity": str(
-                    measurement.get("declared_launch_identity") or measurement.get("launch_identity") or ""
-                ),
-                "observed_launch_identity": str(measurement.get("observed_launch_identity") or ""),
-                "verification_status": str(measurement.get("identity_verification_status") or "unverified"),
-                "observed_server_identity": dict(measurement.get("observed_server_identity") or {}),
-                "resolved_server_config": dict(measurement.get("resolved_server_config") or {}),
-            },
+            "measurement_identity": _measurement_identity(measurement),
         }
         env_spec["launch_identity"] = self._handoff_launch_identity(env_spec)
         return env_spec
+
+    def _promoted_measurement(self) -> Mapping[str, Any]:
+        """The measurement ``current_best`` was promoted on.
+
+        The complete engine flags have to come from that measurement, never from
+        a search over historical benchmarks with a similar throughput.
+        """
+        stored = self.shared_state.current_best_measurement
+        if isinstance(stored, Mapping) and stored:
+            return stored
+        embedded = self.shared_state.current_best.get("measurement")
+        return embedded if isinstance(embedded, Mapping) else {}
