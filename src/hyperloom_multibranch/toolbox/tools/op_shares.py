@@ -3,14 +3,18 @@
 
 """The per-op shares of a TraceLens analysis, for the tools that run one (``tracelens``, ``roofline``).
 
-The shares come from the ``analysis.json`` beside the analysis report, read by the single flow's own loader. A tool
-that produced no table, or whose request does not name the commit the profile ran on, reports no shares: they are
-never guessed. A report TraceLens marked degraded (its deterministic fallback, or a poor trace) carries no shares
-either: the decomposition behind them failed, so the one row it keeps is a kernel name, not an op.
+The shares come from TraceLens' ``ops_summary.csv`` (the ``perf_report_csvs`` folder beside the analysis report): the
+complete per-op GPU time table its perf report writes deterministically from the trace, every op's share of the
+total. It is not the ``analysis.json`` task list, which holds only the few optimisation tasks the report recommends
+(a few percent of the time) and would hide GEMM and attention from the Amdahl ceiling. A tool that produced no table,
+or whose request does not name the commit the profile ran on, reports no shares: they are never guessed. A report
+TraceLens marked degraded (its deterministic fallback, or a poor trace) carries no shares either: the decomposition
+behind them failed, so the one row it keeps is a kernel name, not an op.
 """
 
 from __future__ import annotations
 
+import csv
 import json
 import logging
 import math
@@ -25,6 +29,8 @@ from hyperloom_multibranch.toolbox.tools.base import ToolOutput, ToolRequest
 log = logging.getLogger(__name__)
 
 ANALYSIS_JSON = "analysis.json"
+OPS_SUMMARY = "perf_report_csvs/ops_summary.csv"
+_NAME_COLUMN, _SHARE_COLUMN = "name", "Percentage (%)"
 COMMIT_PARAM = "commit_id"
 PROFILE_REQUEST_PARAM = "profile_request_id"
 _REPORT_KEYS = ("trace_report_path", "analysis_md_path")
@@ -61,27 +67,33 @@ def degraded_reason(result: Mapping[str, Any]) -> str:
     return " ".join(f"mode={mode or '?'} trace_quality={quality or '?'}: {detail}".split())
 
 
-def read_op_shares(result: Mapping[str, Any], limit: int = MAX_OP_SHARES) -> dict[str, float]:
-    """``percent_of_total`` per op name of the analysis ``result`` points at, the ``limit`` largest only.
+def _table_rows(path: Path) -> list[dict[str, str]]:
+    try:
+        with path.open(encoding="utf-8", newline="") as handle:
+            return list(csv.DictReader(handle))
+    except (OSError, ValueError, csv.Error):
+        log.warning("op shares not read: %s is unreadable", path.name, exc_info=True)
+        return []
 
-    An op the table lists in several rows has the rows' shares summed. Empty when the analysis wrote no table,
-    or a degraded one.
+
+def read_op_shares(result: Mapping[str, Any], limit: int = MAX_OP_SHARES) -> dict[str, float]:
+    """``Percentage (%)`` per op name of the ops summary the analysis ``result`` points at, the ``limit`` largest only.
+
+    An op the table lists in several rows has the rows' shares summed. Empty when the analysis wrote no table, or a
+    degraded one.
     """
     directory = _report_dir(result)
     if directory is None or degraded_reason(result):
         return {}
-    try:
-        from hyperloom.orchestrator.trace_analysis.analysis_json import load_report_tasks
-
-        rows = load_report_tasks(directory / ANALYSIS_JSON)
-    except ImportError:
-        log.warning("op shares not read: the TraceLens reader is not importable", exc_info=True)
-        return {}
     shares: dict[str, float] = {}
-    for row in rows:
-        name, share = str(row.get("name") or "").strip(), row.get("gpu_pct")
-        if name and isinstance(share, (int, float)) and math.isfinite(share):
-            shares[name] = shares.get(name, 0.0) + float(share)
+    for row in _table_rows(directory / OPS_SUMMARY):
+        name = str(row.get(_NAME_COLUMN) or "").strip()
+        try:
+            share = float(row.get(_SHARE_COLUMN) or "")
+        except ValueError:
+            continue
+        if name and math.isfinite(share):
+            shares[name] = shares.get(name, 0.0) + share
     largest = sorted(shares.items(), key=lambda item: (-item[1], item[0]))[:limit]
     return dict(largest)
 

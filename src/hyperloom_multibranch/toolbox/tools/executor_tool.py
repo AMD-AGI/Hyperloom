@@ -19,6 +19,7 @@ from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
 from hyperloom_multibranch.toolbox.tools.base import InvalidRequest, ToolOutput, ToolRequest
+from hyperloom_multibranch.toolbox.tools.op_shares import ANALYSIS_JSON, OPS_SUMMARY
 
 ExecutorFn = Callable[[RunnerContext], Awaitable[dict]]
 _FAILED = frozenset({"failed", "error", "timeout", "cancelled"})
@@ -139,7 +140,7 @@ class HandlerTool(_Reporting):
 
 
 def _copy_back(result: Mapping[str, Any], scratch: Path, workdir: Path) -> dict[str, Any]:
-    """Copy the files ``result`` names (and the ``analysis.json`` beside a report) from ``scratch`` into ``workdir``.
+    """Copy the files ``result`` names (and the ``analysis.json`` and ops summary beside a report) from ``scratch`` into ``workdir``.
 
     The handler ran on local disk because shared storage rejects the ``:`` in the names TraceLens' splitter writes;
     such files are never copied. Paths in the result are rewritten to the copies.
@@ -170,9 +171,10 @@ def _copy_back(result: Mapping[str, Any], scratch: Path, workdir: Path) -> dict[
 
     out = walk(result)
     for key in ("trace_report_path", "analysis_md_path"):
-        sibling = Path(str(result.get(key) or "")).parent / "analysis.json"
-        if str(sibling).startswith(str(scratch) + "/"):
-            land(str(sibling))
+        for name in (ANALYSIS_JSON, OPS_SUMMARY):
+            sibling = Path(str(result.get(key) or "")).parent / name
+            if str(sibling).startswith(str(scratch) + "/"):
+                land(str(sibling))
     return out
 
 

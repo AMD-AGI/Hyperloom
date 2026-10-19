@@ -230,8 +230,9 @@ async def test_a_patched_recipe_goes_through_the_planner_and_is_measured_on_the_
 
 PROFILE_TRACE = "*.trace.json.gz"  # SGLang writes <ts>-TP-<r>-<DECODE|EXTEND>.trace.json.gz and a merged one
 TRACELENS_JOB_SEC = 1800
-#: The per-op shares come from the ``analysis.json`` of TraceLens' skill route, which runs an agent runtime (needs its
-#: credentials); the ``bypass`` route writes none. ``HL_W13_ANALYSIS_ROUTE=bypass`` therefore shows empty shares.
+MIN_TOTAL_SHARE = 50.0  # percent of the GPU time the (at most 50) kept ops must add up to
+#: The per-op shares come from the ``ops_summary.csv`` TraceLens' skill route writes (the route runs an agent runtime,
+#: which needs its credentials); the ``bypass`` route writes none. ``HL_W13_ANALYSIS_ROUTE=bypass`` therefore shows empty shares.
 ANALYSIS_ROUTE = os.environ.get("HL_W13_ANALYSIS_ROUTE", "agent")
 
 
@@ -302,6 +303,9 @@ async def test_a_profile_on_two_cards_is_analysed_by_the_real_tracelens_into_op_
         assert pointer.op_shares, f"TraceLens left no op shares: {pointer.summary}"
         assert pointer.commit_id == request.parent_commit and pointer.profile_request_id == request_id
         assert all(0.0 < share <= 100.0 for share in pointer.op_shares.values())
+        # the complete per-op GPU time table, not the few optimisation tasks: the top ops cover most of the time
+        assert sum(pointer.op_shares.values()) >= MIN_TOTAL_SHARE, pointer.op_shares
+        print("TOP5_OP_SHARES", sorted(pointer.op_shares.items(), key=lambda item: -item[1])[:5])
         shares = await notebook.op_shares(request.parent_commit)
         assert shares is not None and shares.job_id == job and dict(shares.shares) == dict(pointer.op_shares)
     finally:
