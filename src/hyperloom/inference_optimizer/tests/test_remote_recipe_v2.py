@@ -1467,7 +1467,7 @@ def test_unvalidated_write_back_audit_omits_mismatched_metrics(tmp_path: Path, m
     )
     monkeypatch.setattr(
         "hyperloom.orchestrator.knowledge.recipe_journal._close_out.record_write_back_settled",
-        lambda *args, **kwargs: captured.update(kwargs),
+        lambda _session_dir, settlement: captured.update(vars(settlement)),
     )
 
     collaborator._record_write_back_settled(

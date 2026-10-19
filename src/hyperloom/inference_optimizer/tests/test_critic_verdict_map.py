@@ -1711,6 +1711,7 @@ async def test_materialize_filter_drops_rejected_variants(tmp_path: Path):
         variants=["v_a", "v_b", "v_c", "v_d"],
     )
 
+    @dataclass
     class _MoreState(_BareSharedState):
         baseline_config_path: str = ""
         baseline_tput: float = 1000.0
@@ -1749,6 +1750,7 @@ async def test_materialize_filter_skips_when_no_variant_survives(tmp_path: Path)
     coord.tasks = _StubTaskRegistry()
     pending = _seed_explore_proposal(coord, variants=["v_a", "v_b"])
 
+    @dataclass
     class _MoreState(_BareSharedState):
         baseline_config_path: str = ""
         baseline_tput: float = 1000.0

@@ -89,7 +89,7 @@ def test_runtime_to_override_omits_empty():
 
 def test_runtime_override_lands_in_yaml():
     """to_runtime_override output must flow through apply_runtime_override."""
-    from hyperloom.orchestrator.actions.executors._grid_runner import apply_runtime_override
+    from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
 
     rt = FrameworkRuntime(bin_path="/attempt/bin", python_path="/attempt/bin/python", venv_root="/attempt")
     envs: dict[str, str] = {}
@@ -167,7 +167,7 @@ def test_runtime_python_exe_round_trip():
 
 def test_runtime_python_exe_overrides_framework_python_in_envs():
     """runtime_python_exe must win over framework_python for HYPERLOOM_FRAMEWORK_PYTHON."""
-    from hyperloom.orchestrator.actions.executors._grid_runner import apply_runtime_override
+    from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
 
     rt = FrameworkRuntime(
         python_path="/old/bin/python",

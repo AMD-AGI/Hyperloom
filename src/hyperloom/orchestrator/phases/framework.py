@@ -18,7 +18,7 @@ from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.inference_optimizer import framework_registry
 
 from . import machine_state as _phase_state
-from ..state.attempt_ledger import record_patch_attempt
+from ..state.attempt_ledger import AttemptRow, record_attempt_row
 from ..state.failure_evidence import UNMEASURED_OUTCOMES, classify_failure_attribution
 from ..state.task_registry import TaskNotFound
 from ..state.shared_state import resolve_grading_anchor_tput, inject_stack_base_params
@@ -37,11 +37,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
 from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR
 from ..specialists.profile import is_authoring_specialist
 from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX
-from hyperloom.orchestrator.lever import (
-    LEVER_SOURCE_PATCH,
-    LEVER_UPSTREAM_PR,
-    patch_owner_phase,
-)
+from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, patch_lever_kind, patch_owner_phase
 from .proposal_bench import CUSTOM_PROPOSAL_DOMAIN, ProposalBench, kb_exposure_of
 
 log = _logging.getLogger(__name__)
@@ -256,6 +252,44 @@ def _forward_integrate_source(
         dst["experience_citations"] = list(citations)
 
 
+def _integrate_review_params(
+    sid: str,
+    spec_params: dict[str, Any],
+    done_payload: dict[str, Any],
+    deliverable: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the synthetic integrate_patch params that review a specialist's deliverable."""
+    proposals = done_payload.get("proposal_set")
+    first = proposals[0] if isinstance(proposals, list) and proposals else None
+    params: dict[str, Any] = {
+        "specialist_task_id": sid,
+        "provenance": "specialist",
+        "patch_name": str(first.get("name") or "") if isinstance(first, dict) else "",
+        **deliverable,
+    }
+    _forward_integrate_source(spec_params, params, done_payload)
+    # The authored-outcome bridge keys the progress row on the real candidate id.
+    for key in ("framework_agent_candidate_id", "framework_batch_id"):
+        value = str(spec_params.get(key) or "")
+        if value:
+            params[key] = value
+    if spec_params.get("enablement"):
+        # Without the marker the integrate result never carries
+        # ``enablement=True``, so the round is never rearmed, settled or charged.
+        params["enablement"] = True
+        _forward_enablement_carriers(spec_params, params)
+        # Earlier rounds' setup commands plus this deliverable's own, so the
+        # round replays its install step before booting.
+        setup_commands = [
+            *(spec_params.get("enablement_setup_commands") or []),
+            *(done_payload.get("setup_commands") or []),
+        ]
+        merged_setup = list(dict.fromkeys(str(c) for c in setup_commands if str(c)))
+        if merged_setup:
+            params["enablement_setup_commands"] = merged_setup
+    return params
+
+
 # These helpers are module-level because the phase's methods get borrowed onto
 # lightweight test stand-ins, where a ``self._record_*`` call would break every
 # stand-in that does not implement it.
@@ -461,7 +495,7 @@ def _record_source_attempt(
     recorder = _recorder(coord)
     if recorder is None:
         return
-    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_SOURCE
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_SOURCE, GateVerdict
 
     task_id = str(getattr(task, "task_id", "") or "")
     if not task_id:
@@ -565,26 +599,30 @@ def _record_source_attempt(
     if isinstance(delta_pct, (int, float)) and isinstance(keep_threshold, (int, float)):
         recorder.record_attempt_gate(
             task_id,
-            "keep_threshold",
-            passed=float(delta_pct) >= float(keep_threshold),
-            observed=delta_pct,
-            threshold=keep_threshold,
+            GateVerdict(
+                gate="keep_threshold",
+                passed=float(delta_pct) >= float(keep_threshold),
+                observed=delta_pct,
+                threshold=keep_threshold,
+            ),
         )
     if accuracy_pass is not None:
         recorder.record_attempt_gate(
             task_id,
-            "accuracy",
-            passed=bool(accuracy_pass),
-            observed=result.get("accuracy_value"),
-            threshold=result.get("accuracy_reference"),
+            GateVerdict(
+                gate="accuracy",
+                passed=bool(accuracy_pass),
+                observed=result.get("accuracy_value"),
+                threshold=result.get("accuracy_reference"),
+            ),
         )
     parity = result.get("switch_off_parity")
     if isinstance(parity, Mapping) and parity.get("ran"):
         recorder.record_attempt_gate(
             task_id,
-            "switch_off_parity",
-            passed=bool(parity.get("ok")),
-            reason=str(parity.get("reason") or ""),
+            GateVerdict(
+                gate="switch_off_parity", passed=bool(parity.get("ok")), reason=str(parity.get("reason") or "")
+            ),
         )
     _record_step(
         coord,
@@ -1289,7 +1327,6 @@ class FrameworkPhase(ProposalBench):
         specialist_task_id: str = "",
         attempt: int = 1,
         retry_feedback: "list[dict[str, Any]] | None" = None,
-        critic_feedback: "dict[str, Any] | None" = None,
         vetting_drops: "list[str] | None" = None,
     ) -> str:
         """Dispatch a fresh authoring specialist for an apply-failure retry."""
@@ -1348,17 +1385,12 @@ class FrameworkPhase(ProposalBench):
                 raw_audit = spec_params.get("framework_audit")
                 if isinstance(raw_audit, dict):
                     audit = raw_audit
-            # Merge apply feedback + critic feedback into a single note block.
-            merged_feedback = dict(critic_feedback or {})
-            if feedback_lines:
-                existing_advice = str(merged_feedback.get("advice_text") or "")
-                apply_advice = "\n".join(feedback_lines)
-                merged_feedback["advice_text"] = apply_advice + ("\n\n" + existing_advice if existing_advice else "")
+            merged_feedback = {"advice_text": "\n".join(feedback_lines)} if feedback_lines else None
             new_task_id = await self._enqueue_framework_agent_authoring_specialist(
                 candidate,
                 audit=audit,
                 reauthor_attempt=attempt,
-                critic_feedback=merged_feedback if merged_feedback else None,
+                critic_feedback=merged_feedback,
             )
             log.info(
                 "AUTHORED_LANE: dispatched perf_framework retry specialist cand=%s attempt=%d task=%s",
@@ -1384,15 +1416,6 @@ class FrameworkPhase(ProposalBench):
         if not gap_cid:
             gap_cid = f"gap.explore.retry.{specialist_task_id or 'unknown'}"
         notes_lines: list[str] = list(feedback_lines)
-        if critic_feedback:
-            req_ev = [str(x).strip() for x in (critic_feedback.get("required_evidence") or []) if str(x).strip()]
-            if req_ev:
-                notes_lines.append("")
-                notes_lines.append("PRIOR CRITIC FEEDBACK (also address this):")
-                notes_lines.extend(f"  • {ev}" for ev in req_ev[:10])
-            advice = str(critic_feedback.get("advice_text") or "").strip()
-            if advice:
-                notes_lines.append(f"- advice: {advice}")
         notes = "\n".join(notes_lines).strip()
         params: dict[str, Any] = {
             "domain": "serving_specialist",
@@ -1566,14 +1589,14 @@ class FrameworkPhase(ProposalBench):
         """Compose the ``(gap, keywords)`` steering the local-exploration arm."""
         state = self.shared_state
         try:
-            from ..actions.executors._framework_gap_composer import compose_gap
+            from ..actions.executors._framework_gap_composer import GapEvidence, compose_gap
 
             return compose_gap(
                 framework=str(state.framework or ""),
                 gpu_type=str(state.gpu_type or ""),
                 model_class=str(state.model_class or ""),
                 precision=str(state.precision or ""),
-                rewrite_evidence_path=state.last_framework_rewrite_evidence or None,
+                evidence=GapEvidence(rewrite_evidence_path=state.last_framework_rewrite_evidence or None),
             )
         except Exception:
             log.debug("FRAMEWORK: local-explore gap compose failed", exc_info=True)
@@ -2400,9 +2423,11 @@ class FrameworkPhase(ProposalBench):
         )
         if not recorded:
             return
-        record_patch_attempt(
-            self.shared_state,
+        evidence = {**res, **params}  # A lever the dispatch named outranks the one the deliverable names.
+        row = AttemptRow(
+            lever_kind=patch_lever_kind(evidence),
             task_id=str(getattr(task, "task_id", "") or ""),
+            candidate_id=str(evidence.get("framework_agent_candidate_id") or ""),
             specialist_task_id=spec_tid,
             outcome=status,
             adopted=adopted,
@@ -2410,10 +2435,8 @@ class FrameworkPhase(ProposalBench):
             before_tput=res.get("base_tput") if res.get("base_tput") is not None else params.get("base_tput"),
             after_tput=new_tput,
             error_class=str(res.get("error_class") or ""),
-            # The deliverable names the lever when the dispatch did not,
-            # but a dispatch that named one outranks it.
-            evidence={**res, **params},
         )
+        record_attempt_row(self.shared_state, row)
         _record_source_attempt(
             self,
             task=task,
@@ -2908,21 +2931,7 @@ class FrameworkPhase(ProposalBench):
                     },
                 )
             return
-        # Already ruled on by the Critic (e.g. after resume) — nothing to do.
-        if self.shared_state.get_specialist_patch_verdict(sid):
-            return
-        if integrate_review_in_flight(self.state.pending_proposals, sid):
-            return
-        proposals = done_payload.get("proposal_set") or []
-        patch_name = ""
-        if isinstance(proposals, list) and proposals:
-            patch_name = str((proposals[0] or {}).get("name") or "")
         spec_params = getattr(task, "params", None) or {}
-        integrate_params: dict[str, Any] = {
-            "specialist_task_id": sid,
-            "provenance": "specialist",
-            "patch_name": patch_name,
-        }
         # In an ENABLEMENT round a companion lever is inseparable from the patch it
         # ships with: the patch clears a framework guard the server then asserts on
         # through a launch flag, so a round that applies one without the other cannot
@@ -2952,66 +2961,19 @@ class FrameworkPhase(ProposalBench):
             round_args = dedupe_extra_server_args(
                 merge_server_args(str(established.get("extra_server_args") or ""), round_args)
             )
+        deliverable: dict[str, Any] = {}
         if round_args or round_envs:
-            integrate_params["extra_server_args"] = round_args
-            integrate_params["extra_envs"] = round_envs
-        _forward_integrate_source(
+            deliverable["extra_server_args"] = round_args
+            deliverable["extra_envs"] = round_envs
+        if spec_params.get("framework_agent_authoring"):
+            deliverable["framework_agent_authoring"] = True
+        await self._submit_integrate_review(
+            sid,
             spec_params,
-            integrate_params,
             done_payload,
-        )
-        # FRAMEWORK authoring provenance passthrough: propagate the PR
-        # candidate/batch id onto the synthetic integrate_patch task so the
-        # authored-outcome bridge keys the progress row on the real candidate id.
-        if bool(spec_params.get("framework_agent_authoring")):
-            integrate_params["framework_agent_authoring"] = True
-            fa_cand = str(spec_params.get("framework_agent_candidate_id") or "")
-            fa_batch = str(spec_params.get("framework_batch_id") or "")
-            if fa_cand:
-                integrate_params["framework_agent_candidate_id"] = fa_cand
-            if fa_batch:
-                integrate_params["framework_batch_id"] = fa_batch
-        # Propagate the enablement marker so integrate_patch applies the
-        # runnable_decision gate.
-        if bool(spec_params.get("enablement")):
-            integrate_params["enablement"] = True
-            _forward_enablement_carriers(spec_params, integrate_params)
-            # Merge stacked base setup commands with any NEW setup_commands the
-            # specialist proposed (e.g. a stack upgrade), so a patch-bearing
-            # enablement round replays the install step instead of silently
-            # dropping it.
-            merged_setup: list[str] = []
-            for c in spec_params.get("enablement_setup_commands") or []:
-                sc = str(c)
-                if sc and sc not in merged_setup:
-                    merged_setup.append(sc)
-            for c in done_payload.get("setup_commands") or []:
-                sc = str(c)
-                if sc and sc not in merged_setup:
-                    merged_setup.append(sc)
-            if merged_setup:
-                integrate_params["enablement_setup_commands"] = merged_setup
-        propose_payload = {
-            "action_name": "integrate_patch",
-            "provenance": "specialist",
-            "predicted_gain_pct": 0.0,
-            "params": integrate_params,
-        }
-        pending = await record_proposal(
-            self._coord,
-            from_agent="coordinator",
-            action_name="integrate_patch",
-            predicted_gain_pct=0.0,
-            payload=dict(propose_payload),
-        )
-        await self.bus.record_observation(
-            "coordinator",
-            "observation",
-            {
+            deliverable,
+            observation={
                 "kind": "specialist_patch_autosubmitted_for_review",
-                "specialist_task_id": sid,
-                "proposal_msg_id": pending.proposal_msg_id,
-                "patch_name": patch_name,
                 "patches": [str(x) for x in patches][:8],
                 # Artifact-only deliverables: record their install targets.
                 "artifacts_written": [
@@ -3021,13 +2983,6 @@ class FrameworkPhase(ProposalBench):
                 ][:8],
             },
         )
-        try:
-            self.shared_state.save(self.session_dir)
-        except Exception:
-            log.exception(
-                "save after specialist patch autosubmit failed for task=%s",
-                sid,
-            )
 
     async def maybe_autosubmit_framework_config(
         self,
@@ -3077,96 +3032,84 @@ class FrameworkPhase(ProposalBench):
             return
         if config_levers and self._config_lever_known_bad(config_levers):
             return
-        # Already ruled on (e.g. after resume) — nothing to do.
-        if self.shared_state.get_specialist_patch_verdict(sid):
-            return
-        if integrate_review_in_flight(self.state.pending_proposals, sid):
-            return
-        proposals = done_payload.get("proposal_set") or []
-        patch_name = ""
-        if isinstance(proposals, list) and proposals and isinstance(proposals[0], dict):
-            patch_name = str(proposals[0].get("name") or "")
-        integrate_params: dict[str, Any] = {
-            "specialist_task_id": sid,
-            "provenance": "specialist",
-            "patch_name": patch_name,
-            "extra_server_args": str(config_levers.get("extra_server_args") or ""),
-            "extra_envs": dict(config_levers.get("extra_envs") or {}),
-        }
-        _forward_integrate_source(
+        extra_server_args = str(config_levers.get("extra_server_args") or "")
+        extra_envs = dict(config_levers.get("extra_envs") or {})
+        candidate_id = str(spec_params.get("framework_agent_candidate_id") or "")
+        pending = await self._submit_integrate_review(
+            sid,
             spec_params,
-            integrate_params,
             done_payload,
+            {"extra_server_args": extra_server_args, "extra_envs": extra_envs, "framework_agent_authoring": True},
+            observation={
+                "kind": "framework_config_autosubmitted_for_review",
+                "candidate_id": candidate_id,
+                "extra_server_args": extra_server_args,
+                "extra_envs": dict(extra_envs),
+            },
         )
-        # FRAMEWORK authoring provenance passthrough for the authored-outcome bridge.
-        fa_cand = str(spec_params.get("framework_agent_candidate_id") or "")
-        fa_batch = str(spec_params.get("framework_batch_id") or "")
-        integrate_params["framework_agent_authoring"] = True
-        if fa_cand:
-            integrate_params["framework_agent_candidate_id"] = fa_cand
-        if fa_batch:
-            integrate_params["framework_batch_id"] = fa_batch
-        # Enablement passthrough (mirrors maybe_autosubmit_specialist_patches): a
-        # config-lever-only enablement deliverable MUST still flow the enablement
-        # marker + setup_commands into integrate_patch, or the result never
-        # carries ``enablement=True``, ``maybe_rearm_enablement`` no-ops, and
-        # the round is never settled or charged.
-        if bool(spec_params.get("enablement")):
-            integrate_params["enablement"] = True
-            _forward_enablement_carriers(spec_params, integrate_params)
-            # Merge the stacked base setup commands with any NEW setup_commands the
-            # specialist just proposed in this deliverable (e.g. a stack upgrade),
-            # so a config-lever-only enablement round actually replays the install
-            # step before booting instead of silently dropping it.
-            merged_setup: list[str] = []
-            for c in spec_params.get("enablement_setup_commands") or []:
-                sc = str(c)
-                if sc and sc not in merged_setup:
-                    merged_setup.append(sc)
-            for c in done_payload.get("setup_commands") or []:
-                sc = str(c)
-                if sc and sc not in merged_setup:
-                    merged_setup.append(sc)
-            if merged_setup:
-                integrate_params["enablement_setup_commands"] = merged_setup
-        propose_payload = {
-            "action_name": "integrate_patch",
-            "provenance": "specialist",
-            "predicted_gain_pct": 0.0,
-            "params": integrate_params,
-        }
+        if pending is not None:
+            log.info(
+                "FRAMEWORK: config-lever deliverable routed to integrate_patch candidate=%s args=%s env_keys=%s",
+                candidate_id or sid,
+                extra_server_args,
+                sorted(extra_envs),
+            )
+
+    async def _submit_integrate_review(
+        self,
+        sid: str,
+        spec_params: dict[str, Any],
+        done_payload: dict[str, Any],
+        deliverable: dict[str, Any],
+        *,
+        observation: dict[str, Any],
+    ) -> PendingProposal | None:
+        """Propose a specialist deliverable to the Critic as a synthetic integrate_patch; idempotent per specialist.
+
+        Args:
+            sid: The specialist task id the review is keyed on.
+            spec_params: The specialist's dispatch params, whose provenance and
+                enablement context travel to integrate_patch.
+            done_payload: The specialist's ``specialist_done`` payload.
+            deliverable: The integrate_patch params that say what to apply.
+            observation: The bus observation recorded with the proposal.
+
+        Returns:
+            The recorded proposal, or ``None`` when the Critic already ruled on
+            this specialist or its review is still pending.
+        """
+        if self.shared_state.get_specialist_patch_verdict(sid) or integrate_review_in_flight(
+            self.state.pending_proposals, sid
+        ):
+            return None
+        params = _integrate_review_params(sid, spec_params, done_payload, deliverable)
         pending = await record_proposal(
             self._coord,
             from_agent="coordinator",
             action_name="integrate_patch",
             predicted_gain_pct=0.0,
-            payload=dict(propose_payload),
+            payload={
+                "action_name": "integrate_patch",
+                "provenance": "specialist",
+                "predicted_gain_pct": 0.0,
+                "params": params,
+            },
         )
         await self.bus.record_observation(
             "coordinator",
             "observation",
             {
-                "kind": "framework_config_autosubmitted_for_review",
+                **observation,
                 "specialist_task_id": sid,
                 "proposal_msg_id": pending.proposal_msg_id,
-                "candidate_id": fa_cand,
-                "extra_server_args": integrate_params["extra_server_args"],
-                "extra_envs": dict(integrate_params["extra_envs"]),
+                "patch_name": params["patch_name"],
             },
-        )
-        log.info(
-            "FRAMEWORK: config-lever deliverable routed to integrate_patch candidate=%s args=%s env_keys=%s",
-            fa_cand or sid,
-            integrate_params["extra_server_args"],
-            sorted(integrate_params["extra_envs"]),
         )
         try:
             self.shared_state.save(self.session_dir)
         except Exception:
-            log.exception(
-                "FRAMEWORK: save after config autosubmit failed for task=%s",
-                sid,
-            )
+            log.exception("save after integrate-review autosubmit failed for task=%s", sid)
+        return pending
 
     def _config_lever_known_bad(self, config_levers: dict[str, Any]) -> bool:
         """True when this exact config already lost an accuracy gate.

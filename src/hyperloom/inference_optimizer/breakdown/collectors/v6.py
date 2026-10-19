@@ -9,6 +9,7 @@ that measured it.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -49,22 +50,33 @@ def langfuse_block(langfuse: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def collect_v6_metadata(
-    *,
-    exported_at_utc: str,
-    session: dict[str, Any],
-    workload: dict[str, Any],
-    model_info: dict[str, Any],
-    langfuse: dict[str, Any],
-    state: dict[str, Any],
-    warnings: list[str],
-    recorded: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+@dataclass(frozen=True)
+class MetadataSources:
+    """What the V6 ``metadata`` section is projected from.
+
+    Attributes:
+        session: The resolved ``session`` section.
+        workload: The resolved ``workload`` section.
+        model_info: The parsed model config summary.
+        langfuse: The Langfuse push receipt.
+        state: Parsed ``state.json``.
+        recorded: The recorder's ``metadata`` fragment, when present.
+    """
+
+    session: dict[str, Any]
+    workload: dict[str, Any]
+    model_info: dict[str, Any]
+    langfuse: dict[str, Any]
+    state: dict[str, Any]
+    recorded: dict[str, Any] | None = None
+
+
+def collect_v6_metadata(sources: MetadataSources, *, exported_at_utc: str, warnings: list[str]) -> dict[str, Any]:
     """Build the V6 ``metadata`` section, preferring recorded facts.
 
     Every field here is recorded at the moment it is decided (see
     ``recorder/session_metadata.py``); this collector is the fallback for a
-    session whose fragments are missing or partial, and ``recorded`` is
+    session whose fragments are missing or partial, and ``sources.recorded`` is
     overlaid leaf-by-leaf on top of it so a live-recorded run is never
     downgraded to a re-derived value.
 
@@ -72,18 +84,14 @@ def collect_v6_metadata(
     not the session, so they are never taken from a fragment.
 
     Args:
+        sources: What the section is projected from.
         exported_at_utc: When this export ran.
-        session: The resolved ``session`` section.
-        workload: The resolved ``workload`` section.
-        model_info: The parsed model config summary.
-        langfuse: The Langfuse push receipt.
-        state: Parsed ``state.json``.
         warnings: The V6 warnings accumulated by this export.
-        recorded: The recorder's ``metadata`` fragment, when present.
 
     Returns:
         The ``metadata`` section.
     """
+    session, workload, state = sources.session, sources.workload, sources.state
     recovery = session.get("recovery") if isinstance(session.get("recovery"), dict) else {}
     image = str(session.get("image") or "").strip()
     task_config = {
@@ -103,7 +111,7 @@ def collect_v6_metadata(
         "objective": dict(workload.get("objective") or {}),
         "launch_env": dict(state.get("operator_extra_env") or {}),
         "launch_server_args": str(state.get("operator_server_args") or state.get("server_args") or ""),
-        "architecture": architecture_block(model_info, model_class=workload.get("model_class")),
+        "architecture": architecture_block(sources.model_info, model_class=workload.get("model_class")),
     }
     signature = workload_signature(task_config)
     if signature:
@@ -145,12 +153,12 @@ def collect_v6_metadata(
             },
         },
         "task_config": task_config,
-        "langfuse": langfuse_block(langfuse),
+        "langfuse": langfuse_block(sources.langfuse),
     }
     grading = grading_block(state)
     if grading:
         projected["grading"] = grading
-    metadata = _overlay_recorded(projected, recorded)
+    metadata = _overlay_recorded(projected, sources.recorded)
     _mask_launch_env(metadata)
     return {"exported_at_utc": exported_at_utc, **metadata, "warnings": list(warnings)}
 
@@ -621,18 +629,11 @@ def _validation_notes(ledger: dict[str, Any]) -> list[str]:
     return notes
 
 
-def collect_v6_outcome(
-    *,
-    session: dict[str, Any],
-    close: dict[str, Any],
-    state: dict[str, Any],
-    timeline: list[dict[str, Any]],
-    warnings: list[str] | None = None,
-    recorded: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Assemble the V6 ``outcome`` block off the timeline and the close-out.
+@dataclass(frozen=True)
+class OutcomeSources:
+    """What the V6 ``outcome`` block is assembled from.
 
-    Args:
+    Attributes:
         session (dict[str, Any]): The session section, read for the stop
             reason.
         close (dict[str, Any]): The ``close`` section, whose ``final_recipe``
@@ -643,10 +644,24 @@ def collect_v6_outcome(
         state (dict[str, Any]): Parsed ``state.json``, read for the stage the
             run reached.
         timeline (list[dict[str, Any]]): The assembled V6 timeline.
+        recorded (dict[str, Any] | None): The recorder's ``outcome`` fragment,
+            when present.
+    """
+
+    session: dict[str, Any]
+    close: dict[str, Any]
+    state: dict[str, Any]
+    timeline: list[dict[str, Any]]
+    recorded: dict[str, Any] | None = None
+
+
+def collect_v6_outcome(sources: OutcomeSources, warnings: list[str] | None = None) -> dict[str, Any]:
+    """Assemble the V6 ``outcome`` block off the timeline and the close-out.
 
     Returns:
         dict[str, Any]: The ``outcome`` block.
     """
+    session, state, timeline = sources.session, sources.state, sources.timeline
     stop_reason = str(session.get("stop_reason") or "").strip()
     baseline_ids: list[str] = []
     baseline = _baseline_from_timeline(timeline, baseline_ids)
@@ -662,8 +677,8 @@ def collect_v6_outcome(
         break
     validation_ids: list[str] = []
     validation = _validation_from_timeline(timeline, validation_ids)
-    recipe = _mapping(close.get("final_recipe"))
-    stage_recorded = str(_mapping(recorded).get("stage_reached_recorded") or "")
+    recipe = _mapping(sources.close.get("final_recipe"))
+    stage_recorded = str(_mapping(sources.recorded).get("stage_reached_recorded") or "")
     outcome = {
         "stop_reason": stop_reason,
         "status": outcome_status,

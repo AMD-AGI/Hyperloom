@@ -39,10 +39,11 @@ _LEAKY_ENV = (
 def _isolate(monkeypatch):
     for k in _LEAKY_ENV:
         monkeypatch.delenv(k, raising=False)
-    # Pin the two knobs that would otherwise depend on the host (GPU count and runtime patching), keeping the golden
-    # output byte-stable.
+    # Pin what would otherwise depend on the host (GPU count, runtime patching, and the reference recipe in the host's
+    # session state), keeping the golden output byte-stable.
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
+    monkeypatch.setattr(we, "resolve_reference_launch", lambda: ("", {}, {}))
 
 
 def _write(path, bench):

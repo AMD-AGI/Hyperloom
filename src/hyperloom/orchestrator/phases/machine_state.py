@@ -18,14 +18,12 @@ from hyperloom.orchestrator.lever import (
     LEVER_SOURCE_PATCH,
     LEVER_UPSTREAM_PR,
 )
-from hyperloom.inference_optimizer.breakdown.recorder.phase_event import is_phase_transition_row
 from hyperloom.inference_optimizer.breakdown.stop_reasons import is_valid_stop_reason
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
 )
 from ..kernel.patch_landing import IntegratedStack
 from ..state.kernel_decision_settings import resolve_kernel_opt_max_failures
-from .session_contract import bound_session_declares
 from ..state.shared_state import (
     ESCALATE_HINT_SKIP_TO_CLOSE,
     ESCALATE_HINT_SKIP_TO_KERNEL,
@@ -220,10 +218,6 @@ def _default_cycle_reloop_min_remaining_sec() -> float:
     return v if v > 0 else 10800.0
 
 
-# Minimum session wall-clock (seconds) that must remain to justify opening a new macro-cycle; below this we wind down
-# to CLOSE instead of starting a cycle we cannot meaningfully use.
-DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC: float = _default_cycle_reloop_min_remaining_sec()
-
 # R7 global convergence: number of consecutive no-gain macro-cycles after which the run is considered converged (stop
 # looping → CLOSE).
 DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES: int = 3
@@ -305,16 +299,11 @@ def _kernel_idle_max_ticks() -> int:
     return val if val >= 1 else 3
 
 
-KERNEL_IDLE_MAX_TICKS: int = _kernel_idle_max_ticks()
-
-
 def _kernel_idle_min_seconds() -> float:
     """Wall-clock seconds a KERNEL idle streak must last before winding down."""
     val = _env_float("INFERENCE_OPTIMIZER_KERNEL_IDLE_MIN_SECONDS", default=600.0)
     return val if val > 0.0 else 600.0
 
-
-KERNEL_IDLE_MIN_SECONDS: float = _kernel_idle_min_seconds()
 
 #: How often the intent router refreshes the inline-step liveness stamp.
 KERNEL_HEARTBEAT_SEC: float = 150.0
@@ -483,26 +472,6 @@ def phase_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float
     started = max(started, _resume_boundary_unix(state))
     now = float(now_unix if now_unix is not None else _now_unix(state))
     return max(0.0, now - started)
-
-
-def phase_elapsed_totals_from_history(history: Any) -> dict[str, float]:
-    """Rebuild per-phase completed-segment totals from a ``phase_history`` log."""
-    if not isinstance(history, list):
-        return {}
-    rows = [row for row in history if isinstance(row, dict)]
-    totals: dict[str, float] = {}
-    transition_rows = [row for row in rows if is_phase_transition_row(row)]
-    for idx in range(len(transition_rows) - 1):
-        phase = str(transition_rows[idx].get("to_phase") or "").strip().upper()
-        try:
-            entered = float(transition_rows[idx].get("ts_unix") or 0.0)
-            exited = float(transition_rows[idx + 1].get("ts_unix") or 0.0)
-        except (TypeError, ValueError):
-            continue
-        if not phase or entered <= 0.0 or exited <= entered:
-            continue
-        totals[phase] = totals.get(phase, 0.0) + (exited - entered)
-    return totals
 
 
 def phase_cumulative_seconds(
@@ -1157,9 +1126,8 @@ def _budget_predicate_inputs(
         "cap_sec": phase_cap_seconds(state),
         "entry_elapsed_sec": phase_elapsed_seconds(state, now_unix=now_unix),
         "cumulative_elapsed_sec": phase_cumulative_seconds(state, now_unix=now_unix),
+        "current_balance": remaining_sec,
     }
-    if bound_session_declares("phase_budget", "current_balance"):
-        budget["current_balance"] = remaining_sec
     return budget
 
 
@@ -1187,11 +1155,8 @@ def _base_workflow_predicate_inputs(
         "cycle_reloop_min_remaining_sec": (
             _cycle_reloop_min_remaining_sec(state) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else 0.0
         ),
+        "baseline_tput": ((_number(state.baseline_tput) or 0.0) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else None),
     }
-    if bound_session_declares("workflow_global", "baseline_tput"):
-        global_inputs["baseline_tput"] = (
-            (_number(state.baseline_tput) or 0.0) if hint == ESCALATE_HINT_SKIP_TO_CLOSE else None
-        )
     return {
         "current_phase": current,
         "now_unix": now_unix,
@@ -1898,9 +1863,6 @@ def make_history_row(
 
 
 # Lifecycle events — operator-facing phase/step boundary log.
-LIFECYCLE_STATUS_START = "START"
-LIFECYCLE_STATUS_END = "END"
-LIFECYCLE_STATUS_ERROR = "ERROR"
 # Phase-boundary marker: a point-in-time "entered <phase>" mark with no matching END (unlike START, which pairs with a
 # later END for the same step).
 LIFECYCLE_STATUS_ENTER = "ENTER"
@@ -2052,6 +2014,7 @@ def record_phase_transition(
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import phase_event, record_stage_reached
         from hyperloom.inference_optimizer.breakdown.recorder.outcome_stage import PHASE_STAGES
+        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseEntry, PhaseExit
         from hyperloom.inference_optimizer.session.session_binding import bound_session
 
         # The phase itself, as a timeline event: close the span being left on
@@ -2061,23 +2024,25 @@ def record_phase_transition(
         # row at all to close the segment the session ended in.
         if from_phase and from_phase != str(row.get("to_phase") or ""):
             phase_event.record_exit(
-                phase=from_phase,
-                macro_cycle=prev_cycle,
-                to_phase=str(row.get("to_phase") or ""),
-                reason=str(row.get("reason") or ""),
-                evidence=dict(row.get("evidence") or {}),
-                exited_at=str(row.get("ts") or ""),
-                exited_unix=now_unix,
+                PhaseExit(
+                    at=PhaseCycle(from_phase, prev_cycle),
+                    to_phase=str(row.get("to_phase") or ""),
+                    reason=str(row.get("reason") or ""),
+                    evidence=dict(row.get("evidence") or {}),
+                    exited_at=str(row.get("ts") or ""),
+                    exited_unix=now_unix,
+                )
             )
         phase_event.record_entry(
-            phase=str(row.get("to_phase") or ""),
-            macro_cycle=entry_cycle,
-            sequence=len(history),
-            from_phase=from_phase,
-            reason=str(row.get("reason") or ""),
-            evidence=dict(row.get("evidence") or {}),
-            entered_at=str(row.get("ts") or ""),
-            entered_unix=now_unix,
+            PhaseEntry(
+                at=PhaseCycle(str(row.get("to_phase") or ""), entry_cycle),
+                sequence=len(history),
+                from_phase=from_phase,
+                reason=str(row.get("reason") or ""),
+                evidence=dict(row.get("evidence") or {}),
+                entered_at=str(row.get("ts") or ""),
+                entered_unix=now_unix,
+            )
         )
         stage = PHASE_STAGES.get(str(row.get("to_phase") or ""))
         if stage:
@@ -2118,14 +2083,16 @@ def append_phase_history_event(
     state.phase_history = history
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseMarker
 
         phase_event.record_marker(
-            phase=phase,
-            macro_cycle=state.macro_cycle,
-            sequence=len(history),
-            reason=str(row.get("reason") or ""),
-            evidence=dict(row.get("evidence") or {}),
-            ts=str(row.get("ts") or ""),
+            PhaseMarker(
+                at=PhaseCycle(phase, state.macro_cycle),
+                sequence=len(history),
+                reason=str(row.get("reason") or ""),
+                evidence=dict(row.get("evidence") or {}),
+                ts=str(row.get("ts") or ""),
+            )
         )
     except Exception:  # noqa: BLE001 -- telemetry must never block the marker
         pass
@@ -2173,10 +2140,7 @@ __all__ = [
     "DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK",
     "DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT",
     "DEFAULT_PLATEAU_EXPLORE_LOOKBACK",
-    "LIFECYCLE_STATUS_END",
     "LIFECYCLE_STATUS_ENTER",
-    "LIFECYCLE_STATUS_ERROR",
-    "LIFECYCLE_STATUS_START",
     "LIFECYCLE_STEP_LABELS",
     "ENABLEMENT_MAX_ATTEMPTS",
     "PHASE_ALLOWED_ACTIONS",
@@ -2193,7 +2157,6 @@ __all__ = [
     "lifecycle_label",
     "make_lifecycle_event",
     "DEFAULT_MAX_MACRO_CYCLES",
-    "DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC",
     "DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES",
     "DEFAULT_LONGRUN_THRESHOLD_MINUTES",
     "is_long_run",
@@ -2224,7 +2187,6 @@ __all__ = [
     "phase_budget_remaining_seconds",
     "phase_cumulative_seconds",
     "phase_elapsed_seconds",
-    "phase_elapsed_totals_from_history",
     "phase_index",
     "phase_status_summary",
     "session_remaining_seconds",

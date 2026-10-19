@@ -11,7 +11,7 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import append_jsonl
+from hyperloom.common.io import JsonLineFormat, append_jsonl
 from hyperloom.inference_optimizer.session.session_paths import llm_calls_path
 from ._row_utils import (
     call_key_fields,
@@ -62,6 +62,20 @@ class LLMTraceRowError(ValueError):
 def new_call_id() -> str:
     """Mint a per-call id for the two halves of one LLM call to share."""
     return uuid.uuid4().hex
+
+
+@dataclass(frozen=True)
+class LLMCallSite:
+    """Who made an LLM call and where in the run: the join keys a token row is attributed by."""
+
+    session_id: str
+    component: str
+    role: str | None = None
+    task_id: str | None = None
+    dyn_id: str | None = None
+    tick: int | None = None
+    phase: str | None = None
+    turn: int | None = None
 
 
 @dataclass
@@ -118,32 +132,25 @@ class LLMCallRecord:
     @classmethod
     def from_metadata(
         cls,
-        *,
-        session_id: str,
-        component: str,
+        site: LLMCallSite,
         metadata: dict[str, Any] | None,
-        role: str | None = None,
-        task_id: str | None = None,
-        dyn_id: str | None = None,
-        tick: int | None = None,
-        phase: str | None = None,
-        turn: int | None = None,
+        *,
         latency_ms: int | None = None,
     ) -> "LLMCallRecord":
         """Build a record from a ``BackendTurnResult.metadata`` dict."""
         md = metadata or {}
         return cls(
-            session_id=session_id,
-            component=component,
+            session_id=site.session_id,
+            component=site.component,
             # Stamped by the backend that produced the metadata, so the conversation half of the same call reads the
             # same id.
             call_id=md.get("call_id"),
-            role=role,
-            task_id=task_id,
-            dyn_id=dyn_id,
-            tick=tick,
-            phase=phase,
-            turn=turn,
+            role=site.role,
+            task_id=site.task_id,
+            dyn_id=site.dyn_id,
+            tick=site.tick,
+            phase=site.phase,
+            turn=site.turn,
             model=md.get("model"),
             input_tokens=md.get("input_tokens"),
             output_tokens=md.get("output_tokens"),
@@ -156,31 +163,24 @@ class LLMCallRecord:
     @classmethod
     def for_failure(
         cls,
-        *,
-        session_id: str,
-        component: str,
+        site: LLMCallSite,
         error: BaseException | str,
+        *,
         model: str | None = None,
         call_id: str | None = None,
-        role: str | None = None,
-        task_id: str | None = None,
-        dyn_id: str | None = None,
-        tick: int | None = None,
-        phase: str | None = None,
-        turn: int | None = None,
         latency_ms: int | None = None,
     ) -> "LLMCallRecord":
         """Build an ``error`` record for a call that produced no usable response."""
         return cls(
-            session_id=session_id,
-            component=component,
+            session_id=site.session_id,
+            component=site.component,
             call_id=call_id,
-            role=role,
-            task_id=task_id,
-            dyn_id=dyn_id,
-            tick=tick,
-            phase=phase,
-            turn=turn,
+            role=site.role,
+            task_id=site.task_id,
+            dyn_id=site.dyn_id,
+            tick=site.tick,
+            phase=site.phase,
+            turn=site.turn,
             model=model,
             latency_ms=latency_ms,
             status=LLM_STATUS_ERROR,
@@ -223,7 +223,7 @@ def append_llm_call(
         raise LLMTraceRowError(f"llm_calls row 'status'={status!r} is not one of {sorted(VALID_STATUSES)!r}")
     dest = llm_calls_path(session_dir)
     try:
-        append_jsonl(dest, row, make_parents=True, sort_keys=True)
+        append_jsonl(dest, row, make_parents=True, fmt=JsonLineFormat(sort_keys=True))
     except OSError as exc:
         log.warning(
             "llm_trace: append failed for component=%s session_id=%s: %r",
@@ -249,6 +249,7 @@ __all__ = [
     "LLM_STATUS_ERROR",
     "LLM_STATUS_OK",
     "LLMCallRecord",
+    "LLMCallSite",
     "LLMTraceRowError",
     "VALID_COMPONENTS",
     "VALID_STATUSES",

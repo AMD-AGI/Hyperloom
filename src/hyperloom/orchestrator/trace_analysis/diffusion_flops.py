@@ -516,13 +516,10 @@ def analytic_ceiling(
     *,
     gpu_type: str = "mi355x",
     precision: str = "bf16",
-    height: int = 1024,
-    width: int = 1024,
     num_steps: int | None = None,
-    cfg_batch: int | None = None,
 ) -> dict[str, Any] | None:
     """Analytic compute-bound ceiling (ideal ms) for one image."""
-    est = estimate_image_flops(model_dir, height=height, width=width, num_steps=num_steps, cfg_batch=cfg_batch)
+    est = estimate_image_flops(model_dir, num_steps=num_steps)
     if est is None:
         return None
     pk = peak_tflops(gpu_type, precision)

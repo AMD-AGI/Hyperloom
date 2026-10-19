@@ -9,7 +9,8 @@ import pytest
 
 from kernelforge.config import Config
 from kernelforge.knowledge.kb_store.reader import read_top_solutions
-from kernelforge.knowledge.kb_store.writer import write_run_experience
+from kernelforge.knowledge.kb_store.writer import RunOutcome, write_run_experience
+from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.knowledge.kb_store.config import KnowledgeConfig
 
 TRITON_SRC = "import triton\n@triton.jit\ndef fused_moe_kernel(x):\n    return x\n"
@@ -57,18 +58,22 @@ def _producer_write(tmp_path, knowledge_root, *, experiment_id="producer-0731", 
     kernel = _write_source(workspace, "vllm/model_executor/fused_moe.py")
     return write_run_experience(
         config=_config(workspace, knowledge_root, gpu_type),
-        workspace=str(workspace),
-        kernel_path=str(kernel),
-        kernel_source=TRITON_SRC,
-        kernel_backend="triton",
-        gpu_target="gfx950",
-        experiment_id=experiment_id,
-        baseline_wall_ms=10.0,
-        best_wall_ms=best_wall_ms,
-        mean_case_speedup=10.0 / best_wall_ms,
-        cumulative_diff=DIFF.replace("+new", f"+{experiment_id}"),
-        digest="digest",
-        framework="vllm",
+        kernel=LoopKernel(
+            kernel_path=str(kernel),
+            kernel_backend="triton",
+            kernel_source=TRITON_SRC,
+            framework="vllm",
+            workspace=str(workspace),
+        ),
+        outcome=RunOutcome(
+            experiment_id=experiment_id,
+            gpu_target="gfx950",
+            baseline_wall_ms=10.0,
+            best_wall_ms=best_wall_ms,
+            cumulative_diff=DIFF.replace("+new", f"+{experiment_id}"),
+            digest="digest",
+            mean_case_speedup=10.0 / best_wall_ms,
+        ),
         summary_override=SUMMARY,
     )
 
@@ -79,10 +84,7 @@ def _consumer_read(tmp_path, knowledge_root, *, top_k=3, gpu_type="mi355x"):
     kernel = _write_source(workspace, "vllm/model_executor/fused_moe.py")
     return read_top_solutions(
         config=_config(workspace, knowledge_root, gpu_type),
-        kernel_path=str(kernel),
-        kernel_source=TRITON_SRC,
-        kernel_backend="triton",
-        framework="vllm",
+        kernel=LoopKernel(kernel_path=str(kernel), kernel_backend="triton", kernel_source=TRITON_SRC, framework="vllm"),
         top_k=top_k,
     )
 
@@ -125,19 +127,23 @@ def test_framework_follows_the_defining_file_across_packages(tmp_path, knowledge
 
     status = write_run_experience(
         config=config,
-        workspace=str(workspace),
-        kernel_path=str(vllm_entry),
-        kernel_source=entry_src,
-        kernel_backend="triton",
-        gpu_target="gfx950",
-        experiment_id="producer-x",
-        baseline_wall_ms=10.0,
-        best_wall_ms=5.0,
-        mean_case_speedup=2.0,
-        cumulative_diff=DIFF,
-        digest="d",
-        source_files=[str(aiter_file)],
-        target_functions=["unified_attention_kernel"],
+        kernel=LoopKernel(
+            kernel_path=str(vllm_entry),
+            kernel_backend="triton",
+            kernel_source=entry_src,
+            target_functions=["unified_attention_kernel"],
+            source_files=[str(aiter_file)],
+            workspace=str(workspace),
+        ),
+        outcome=RunOutcome(
+            experiment_id="producer-x",
+            gpu_target="gfx950",
+            baseline_wall_ms=10.0,
+            best_wall_ms=5.0,
+            cumulative_diff=DIFF,
+            digest="d",
+            mean_case_speedup=2.0,
+        ),
         summary_override=SUMMARY,
     )
 
@@ -146,11 +152,13 @@ def test_framework_follows_the_defining_file_across_packages(tmp_path, knowledge
 
     solutions = read_top_solutions(
         config=config,
-        kernel_path=str(vllm_entry),
-        kernel_source=entry_src,
-        kernel_backend="triton",
-        target_functions=["unified_attention_kernel"],
-        source_files=[str(aiter_file)],
+        kernel=LoopKernel(
+            kernel_path=str(vllm_entry),
+            kernel_backend="triton",
+            kernel_source=entry_src,
+            target_functions=["unified_attention_kernel"],
+            source_files=[str(aiter_file)],
+        ),
         top_k=3,
     )
 

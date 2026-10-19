@@ -246,7 +246,7 @@ async def test_geak_handoff_preserves_serving_fidelity_knobs_and_output_metric(
 
 
 @pytest.mark.asyncio
-async def test_an_agentx_handoff_names_the_server_script_not_the_aiperf_client(
+async def test_an_agentx_handoff_names_the_server_script_not_the_mlperf_client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -259,7 +259,7 @@ async def test_an_agentx_handoff_names_the_server_script_not_the_aiperf_client(
     """
     benchmarks = tmp_path / "InferenceX" / "benchmarks"
     benchmarks.mkdir(parents=True)
-    for name in ("benchmark_lib.sh", "vllm_mi355x.sh", "aiperf_client.sh"):
+    for name in ("benchmark_lib.sh", "vllm_mi355x.sh", "mlperf_agentic_client.sh"):
         (benchmarks / name).write_text("# stub\n", encoding="utf-8")
     recipe = tmp_path / "baseline_config.with_envs.yaml"
     recipe.write_text(
@@ -269,7 +269,7 @@ async def test_an_agentx_handoff_names_the_server_script_not_the_aiperf_client(
                     "framework": "vllm",
                     "runner_type": "mi355x",
                     "envs": {"FRAMEWORK": "vllm", "AGENTX_DURATION": "3600"},
-                    "benchmark_script": "aiperf_client.sh",
+                    "benchmark_script": "mlperf_agentic_client.sh",
                     "inferencex_path": str(benchmarks.parent),
                     "workload_spec": {
                         "kind": "agentx_trace_replay",

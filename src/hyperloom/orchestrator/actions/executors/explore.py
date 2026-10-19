@@ -4,7 +4,8 @@
 """ExploreExecutor."""
 
 from __future__ import annotations
-
+from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
+from hyperloom.common.benchmark_config import is_magpie_agentx
 import functools
 import logging
 import os
@@ -27,6 +28,7 @@ from hyperloom.common.perf_metric import (
     GRADED_INTVTY_P50,
     GRADED_OUTPUT,
     VERDICT_REVERT,
+    agentx_active,
     constraint_fields,
     graded_axes_of,
     perf_snapshot_from_mapping,
@@ -93,9 +95,10 @@ from hyperloom.inference_optimizer.grid_server_args import (
     server_args_env_name,
 )
 from ._ray_serving import maybe_serving_lease
+from ._spec_decode_context_copy import CONTEXT_COPY_REFUSAL, context_copy_refusal
 
 from ._launch_restatement import config_envs, named_settings, restates_the_baseline
-from ._server_argv import config_server_argv
+from ._server_argv import ConfigUnreadable, config_server_argv
 from ._server_lifecycle import (
     resolve_lifecycle_params,
     teardown_lifecycle_server,
@@ -103,7 +106,6 @@ from ._server_lifecycle import (
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
-    materialize_config_with_envs,
 )
 
 
@@ -126,9 +128,6 @@ _CARRIED_VARIANT_ATTRS: tuple[str, ...] = (
     "scope",
     "overlay_pythonpath",
     "accepted_kernels",
-    "kb_evidence",
-    "pr_evidence",
-    "source_evidence",
     "experience_citations",
 )
 
@@ -199,6 +198,17 @@ def _variant_control_fields(variant: Any) -> dict[str, Any]:
     return out
 
 
+def _keep_uses_effective_args(
+    benchmark: dict[str, Any], base_mode: str, variant_mode: str, remove_args: list[str], unset_envs: list[str]
+) -> bool:
+    """Native KEEP edits remain relative to the verified recipe unless explicitly replaced."""
+    return (
+        base_mode == "replace"
+        or variant_mode == "replace"
+        or (not is_magpie_agentx(benchmark) and bool(remove_args or unset_envs))
+    )
+
+
 def _action_reasoning(raw: dict[str, Any]) -> tuple[str, str]:
     """Return the action-authored rationale and the payload field that supplied it."""
     for field in ("reasoning", "rationale", "reason", "note"):
@@ -225,7 +235,7 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
             unset_envs=fields["unset_envs"],
             args_mode=fields["args_mode"],
         )
-        # Stash extra metadata on the GridVariant so the ledger writer can pull provenance/evidence.
+        # Stash extra metadata on the GridVariant so the ledger writer can pull provenance.
         gv.provenance = str(raw.get("provenance") or "default_grid")  # type: ignore[attr-defined]
         gv.reasoning_origin = reasoning_origin  # type: ignore[attr-defined]
         gv.scope = str(raw.get("scope") or "")  # type: ignore[attr-defined]
@@ -235,9 +245,6 @@ def _grid_variants_from_payload(payload: list[Any]) -> list[GridVariant]:
         gv.accepted_kernels = [  # type: ignore[attr-defined]
             str(k).strip() for k in (raw.get("accepted_kernels") or []) if str(k).strip()
         ]
-        gv.kb_evidence = list(raw.get("kb_evidence") or [])  # type: ignore[attr-defined]
-        gv.pr_evidence = list(raw.get("pr_evidence") or [])  # type: ignore[attr-defined]
-        gv.source_evidence = list(raw.get("source_evidence") or [])  # type: ignore[attr-defined]
         # Validated against what the proposing agent was shown before the grid reached this executor.
         gv.experience_citations = [  # type: ignore[attr-defined]
             dict(item) for item in (raw.get("experience_citations") or []) if isinstance(item, dict)
@@ -523,6 +530,54 @@ def _is_noop_filter_exempt(variant: GridVariant) -> bool:
     return str(getattr(variant, "provenance", "") or "").strip() in _NOOP_FILTER_ALWAYS_RUNS
 
 
+def _materialized_launch(
+    base_yaml_path: Path, base_extra_args: str, gv: GridVariant, output_subdir: Path, **build: Any
+) -> tuple[str, dict[str, str]]:
+    """The server argv and benchmark envs ``run_grid`` would launch *gv* with."""
+    out_path = _build_variant_yaml(base_yaml_path, base_extra_args, gv, output_subdir=output_subdir, **build)
+    return config_server_argv(out_path).text, config_envs(out_path)
+
+
+def filter_context_copy_drafts(
+    grid: list[GridVariant], *, base_yaml_path: Path, base_extra_args: str, **build: Any
+) -> tuple[list[GridVariant], list[tuple[str, str]]]:
+    """Drop variants that introduce or change a context-copying speculative-decoding draft (synthetic sessions only).
+
+    Each variant and its base are materialized through ``_build_variant_yaml``, the way ``run_grid`` builds the round,
+    so a draft reached through args, replace mode, envs or a server-args env counts. A launch that cannot be
+    materialized is judged on the variant's own args and envs against an empty base.
+
+    Returns the variants still to run, plus ``(name, reason)`` for each drop.
+    """
+    if not grid:
+        return [], []
+    kept: list[GridVariant] = []
+    dropped: list[tuple[str, str]] = []
+    with tempfile.TemporaryDirectory(prefix="explore_spec_probe_") as tmp_dir:
+        tmp_root = Path(tmp_dir)
+        try:
+            base = _materialized_launch(
+                base_yaml_path, base_extra_args, GridVariant(_NOOP_PROBE_BASE_NAME), tmp_root / "base", **build
+            )
+        except (OSError, ValueError, yaml.YAMLError, ConfigUnreadable) as exc:
+            log.warning("explore: could not materialize the base to read its speculative decoding (%s)", exc)
+            base = ("", {})
+        for idx, gv in enumerate(grid):
+            against = base
+            try:
+                launch = _materialized_launch(base_yaml_path, base_extra_args, gv, tmp_root / f"v{idx}", **build)
+            except (OSError, ValueError, yaml.YAMLError, ConfigUnreadable) as exc:
+                log.warning("explore: could not materialize %s to read its speculative decoding (%s)", gv.name, exc)
+                launch = (str(gv.extra_server_args or ""), {str(k): str(v) for k, v in (gv.extra_envs or {}).items()})
+                against = ("", {})
+            reason = context_copy_refusal(against[0], against[1], launch[0], launch[1])
+            if reason:
+                dropped.append((gv.name, reason))
+            else:
+                kept.append(gv)
+    return kept, dropped
+
+
 def filter_baseline_noop_variants(
     grid: list[GridVariant],
     *,
@@ -747,7 +802,7 @@ class ExploreExecutor:
                 "error": str(exc),
             }
         try:
-            config_path = materialize_config_with_envs(
+            config_path = prepare_grid_benchmark_config(
                 config_path,
                 output_root,
                 model_path=resolved_model or None,
@@ -818,6 +873,7 @@ class ExploreExecutor:
         except (TypeError, ValueError):
             baseline_warm_runtime_sec = 0.0
         # Resolve framework from materialized YAML (for the ledger + the atom seed-grid fallback below).
+        _cfg = {}
         try:
             with config_path.open(encoding="utf-8") as _f:
                 _cfg = yaml.safe_load(_f) or {}
@@ -1036,6 +1092,10 @@ class ExploreExecutor:
         stack_remove_args = list(dict.fromkeys(base_remove_args))
         stack_unset_envs = list(dict.fromkeys(base_unset_envs))
         stack_base_args_mode = base_args_mode
+        # A context-copying draft is refused on the synthetic benchmark, whose repetition loops it would copy.
+        refuse_context_copy = not agentx_active(benchmark_mode=getattr(ss, "benchmark_mode", "")) and not (
+            is_stack_revalidation(params)
+        )
         running_base_tput = base_tput
 
         def _measured_against() -> dict[str, Any]:
@@ -1142,6 +1202,26 @@ class ExploreExecutor:
                         len(runnable),
                     )
                     break
+                if refuse_context_copy:
+                    # Judged against the stack as it stands now: a KEEP earlier in this round may have changed it.
+                    _, _copy_refused = filter_context_copy_drafts(
+                        [gv],
+                        base_yaml_path=config_path,
+                        base_extra_args=stack_extra_args,
+                        model_path=resolved_model,
+                        gpu_type=resolved_gpu,
+                        benchmark_script=override_script,
+                        base_args_mode=stack_base_args_mode,
+                        base_extra_envs=dict(stack_extra_envs),
+                        base_remove_args=list(stack_remove_args),
+                        base_unset_envs=list(stack_unset_envs),
+                    )
+                    if _copy_refused:
+                        log.warning("explore: refusing variant %s (%s)", gv.name, _copy_refused[0][1])
+                        skipped_dup.append(
+                            {"name": gv.name, "reason": CONTEXT_COPY_REFUSAL, "detail": _copy_refused[0][1]}
+                        )
+                        continue
                 fp = getattr(gv, "canonical_fp", "")
                 provenance = getattr(gv, "provenance", "llm_direct")
                 scope = str(getattr(gv, "scope", "") or "")
@@ -1162,7 +1242,7 @@ class ExploreExecutor:
                     extra_server_args=gv.extra_server_args,
                     extra_envs=run_extra_envs,
                     note=gv.note,
-                    remove_args=run_remove_args,
+                    remove_args=list(gv.remove_args),
                     unset_envs=run_unset_envs,
                     args_mode=str(getattr(gv, "args_mode", "append") or "append"),
                 )
@@ -1518,45 +1598,30 @@ class ExploreExecutor:
 
                     # ---- KEEP path ----
                     if outcome == "KEEP":
-                        # Layer onto the running stack. For
-                        # removal variants, next_args/next_envs are the
-                        # effective launch config that must persist if the KEEP
-                        # survives; gv.extra_* remain only the candidate delta.
-                        _keep_remove_args = (
-                            to_str_list(getattr(gv, "remove_args", []))
-                            if stack_base_args_mode == "replace"
-                            else list(dict.fromkeys(stack_remove_args + to_str_list(getattr(gv, "remove_args", []))))
-                        )
-                        _keep_unset_envs = list(
-                            dict.fromkeys(stack_unset_envs + to_str_list(getattr(gv, "unset_envs", [])))
-                        )
                         next_effective_args = compose_server_args(
                             inherited_args=_effective_inherited_args,
                             base_extra_args=stack_extra_args,
                             variant_extra_args=gv.extra_server_args,
-                            remove_args=_keep_remove_args,
-                            args_mode="replace"
-                            if stack_base_args_mode == "replace"
-                            else getattr(gv, "args_mode", "append"),
+                            remove_args=run_remove_args,
+                            args_mode="replace" if stack_base_args_mode == "replace" else gv.args_mode,
                         )
                         next_stack_args = compose_server_args(
-                            inherited_args="",
                             base_extra_args=stack_extra_args,
                             variant_extra_args=gv.extra_server_args,
-                            remove_args=to_str_list(getattr(gv, "remove_args", [])),
-                            args_mode=getattr(gv, "args_mode", "append"),
+                            remove_args=gv.remove_args,
+                            args_mode=gv.args_mode,
                         )
-                        next_envs = dict(run_extra_envs)
                         effective_control_fields = dict(control_fields)
-                        if _keep_remove_args:
-                            effective_control_fields["remove_args"] = list(_keep_remove_args)
-                        if _keep_unset_envs:
-                            effective_control_fields["unset_envs"] = list(_keep_unset_envs)
-                        persist_effective_args = bool(
-                            run_remove_args
-                            or run_unset_envs
-                            or str(getattr(gv, "args_mode", "append") or "append").strip().lower() == "replace"
-                            or stack_base_args_mode == "replace"
+                        if run_remove_args:
+                            effective_control_fields["remove_args"] = list(run_remove_args)
+                        if run_unset_envs:
+                            effective_control_fields["unset_envs"] = list(run_unset_envs)
+                        persist_effective_args = _keep_uses_effective_args(
+                            _cfg.get("benchmark") or {},
+                            stack_base_args_mode,
+                            gv.args_mode,
+                            run_remove_args,
+                            run_unset_envs,
                         )
                         if persist_effective_args:
                             effective_control_fields["args_mode"] = "replace"
@@ -1572,7 +1637,7 @@ class ExploreExecutor:
                             },
                             "extra_server_args": next_effective_args if persist_effective_args else next_stack_args,
                             "effective_extra_server_args": next_effective_args,
-                            "extra_envs": dict(next_envs),
+                            "extra_envs": dict(run_extra_envs),
                             **effective_control_fields,
                             **_decision_fields(gv),
                             "provenance": provenance,
@@ -1599,9 +1664,9 @@ class ExploreExecutor:
                         }
                         # The variant KEEPs on the round that graded it.
                         stack_extra_args = next_effective_args if persist_effective_args else next_stack_args
-                        stack_extra_envs = next_envs
-                        stack_remove_args = list(_keep_remove_args)
-                        stack_unset_envs = list(_keep_unset_envs)
+                        stack_extra_envs = dict(run_extra_envs)
+                        stack_remove_args = list(run_remove_args)
+                        stack_unset_envs = list(run_unset_envs)
                         stack_base_args_mode = "replace" if persist_effective_args else "append"
                         if decision_tput and decision_tput > 0:
                             running_base_tput = decision_tput

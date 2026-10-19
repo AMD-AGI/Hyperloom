@@ -530,16 +530,13 @@ def test_targeted_build_in_coordinator_internal_actions():
 def test_targeted_build_params_pass_policy_gate(tmp_path):
     """Build params must not be misidentified as path-like fields."""
     from hyperloom.orchestrator.policy.gate import PolicyGate
-    from hyperloom.orchestrator.roles.agent_role import AgentRole, BackendType
+    from hyperloom.orchestrator.roles.agent_role import AgentRole
     from hyperloom.inference_optimizer.protocol.intent import IntentType
 
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     orch_role = AgentRole(
         name="orchestration",
-        backend_type=BackendType.CLAUDE,
-        model="claude-3-5-sonnet",
-        api_key_env="ANTHROPIC_API_KEY",
         allowed_intents=frozenset(IntentType),
     )
     gate = PolicyGate(

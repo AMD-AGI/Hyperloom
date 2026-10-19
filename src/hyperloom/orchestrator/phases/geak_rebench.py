@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
 from typing import Any
 
 INCOMPARABLE_REVALIDATION = "incomparable"
@@ -14,6 +16,8 @@ _REVALIDATION_ANNOTATION_KEYS: frozenset[str] = frozenset(
     {
         "kernel_event_id",
         "final_validation",
+        "native_source_revalidation",
+        "canonical_revalidation",
         "revalidation_status",
         "revalidation_error",
         "revalidation_error_class",
@@ -77,13 +81,15 @@ def geak_candidate_is_adjudicated(persisted: Any, recovered: Any, *, harness_can
     prev = persisted if isinstance(persisted, dict) else {}
     if harness_can_replay:
         return str(prev.get("revalidation_status") or "") in _TERMINAL_REVALIDATION_STATUSES
+    if prev.get("native_source_revalidation"):
+        return geak_candidate_matches(prev, recovered) and source_verdict_matches(prev)
     if not geak_verdict_is_terminal(prev):
         return False
     blocked_overlay = str(prev.get("revalidation_blocked_overlay") or "")
     if blocked_overlay:
-        from ..kernel.geak_config import _geak_overlay_is_loadable, _normalize_geak_overlay_dir
+        from ..kernel.geak_config import geak_overlay_is_loadable, _normalize_geak_overlay_dir
 
-        if _geak_overlay_is_loadable(_normalize_geak_overlay_dir(blocked_overlay)):
+        if geak_overlay_is_loadable(_normalize_geak_overlay_dir(blocked_overlay)):
             return False
     return geak_candidate_matches(prev, recovered)
 
@@ -113,3 +119,46 @@ __all__ = [
     "geak_harness_replays_workload",
     "geak_verdict_is_terminal",
 ]
+
+
+def source_digest(path: Path) -> str:
+    """Hash the exact source bytes bound to a review."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def overlay_source_files(overlay: str) -> dict[str, str]:
+    """Use the native launch's source evidence for every deployable overlay file."""
+    if not overlay:
+        return {}
+    return {
+        str(path): source_digest(path)
+        for path in sorted(Path(overlay).rglob("*"))
+        if path.is_file() and "__pycache__" not in path.parts
+    }
+
+
+def verify_source_artifacts(params: dict[str, Any]) -> None:
+    """Reject changes to a reviewed patch or deployable overlay."""
+    for filename, expected in params["native_geak_files"].items():
+        path = Path(filename)
+        if not path.is_file() or source_digest(path) != expected:
+            raise ValueError(f"reviewed GEAK source patch changed or disappeared: {path}")
+    overlay = str(params.get("overlay_pythonpath") or "")
+    if overlay and overlay_source_files(overlay) != params.get("native_geak_overlay_files"):
+        raise ValueError("reviewed GEAK overlay changed or disappeared")
+
+
+def source_verdict_matches(result: dict[str, Any]) -> bool:
+    """A canonical verdict settles only the source bytes that were reviewed."""
+    settled = result["native_source_revalidation"]
+    if settled.get("status") not in {"validated", "no_promote"}:
+        return False
+    params = settled["params"]
+    try:
+        verify_source_artifacts(params)
+        return all(
+            Path(name).is_file() and source_digest(Path(name)) == digest
+            for name, digest in params["native_geak_original_files"].items()
+        )
+    except (OSError, ValueError):
+        return False

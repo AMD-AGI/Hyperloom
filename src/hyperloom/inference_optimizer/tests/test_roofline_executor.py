@@ -1074,32 +1074,6 @@ def test_strip_preserves_empty_alt_text():
     assert "image" in out
 
 
-def test_strip_reduces_real_r1_report_by_90pct_plus():
-    import os
-
-    p = "/shared/user1/sessions/kernel-agent/runs/sessions/tracelens/analysis.md"
-    if not os.path.exists(p):
-        pytest.skip(f"sample analysis.md not present at {p}")
-    with open(p, encoding="utf-8") as f:
-        md = f.read()
-    if "data:image/" not in md:
-        pytest.skip(
-            "sample analysis.md no longer contains base64 data URLs "
-            "(file overwritten by a later session); can't validate "
-            "the ≥80% reduction claim without the original artefact"
-        )
-    before = len(md)
-    stripped = SharedState._strip_base64_data_urls(md)
-    after = len(stripped)
-    reduction_pct = (1 - after / before) * 100
-    assert reduction_pct > 80, (
-        f"N11 must reduce real R1 analysis.md by ≥80%; got before={before} after={after} reduction={reduction_pct:.1f}%"
-    )
-    assert "Executive Summary" in stripped
-    assert "Idle %" in stripped
-    assert "fmoe_fp8_blockscale_g1u1" in stripped or "MoE" in stripped
-
-
 def test_format_analysis_md_full_strips_base64_before_injection(monkeypatch):
     monkeypatch.setenv("INFERENCE_OPTIMIZER_PROMPT_ANALYSIS_MD_INLINE", "1")
     s = SharedState()

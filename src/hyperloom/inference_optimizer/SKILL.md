@@ -635,7 +635,7 @@ ones after it that fit are still injected. The injected agents
 cite the Experiences that shaped a proposal in its `experience_citations`,
 which reach the measured Experience's `provenance.extra`. `experiences` holds one
 summary per injected Experience, in `experience_ids` order: `experience_id`,
-`source_run_id`, `change_summary`, `decision`, `baseline_value`,
+`source_run_id`, `identity`, `change_summary`, `decision`, `baseline_value`,
 `outcome_value`, `score`, and `why_matched`. `read_optimizer_state.py` prints
 the latest orchestration and specialist entries with one line per injected
 Experience. When a poll shows a new entry, report each Experience's summary
@@ -757,7 +757,7 @@ and the operator's stated value is lost:
 | Model class | `--model-class` | categorical key for the deterministic consumers (atom seed grid, framework-agent gap search token, recipe key, prompt label); when unset, Coordinator boot infers and persists it from model metadata or model-path family keywords. For richer advisory model context see Step 1.5 (`model_arch.json`) |
 | Input seq length | `--isl` | Pass the prompt's ISL. Default `1024` when omitted. |
 | Output seq length | `--osl` | Pass the prompt's OSL. Default `1024` when omitted. |
-| Concurrency | `--conc` | Pass the prompt's CONC (max in-flight requests). Default `64`. SWEEP measures a ladder around it (under AgentX only with `--enable-conc-sweep`); `--conc-sweep-concs` overrides the workload's default ladder. |
+| Concurrency | `--conc` | Pass the prompt's CONC (max in-flight requests). Default `64`. SWEEP measures a ladder around it (native AgentX instead fixes CONC in its YAML); `--conc-sweep-concs` overrides the workload's default ladder. |
 | Tensor parallel | `--tp` | Pass the prompt's TP. Default `1`. |
 | Expert parallel | `--ep` | Pass the prompt's EP for MoE. Default `1`. |
 | Precision | `--precision` | Match the checkpoint (`bf16` default / `fp8` / ...). Keep consistent with `--quantize`. |
@@ -859,8 +859,8 @@ auto-`pip install` the SDKs / `ray` / `Magpie` /
 canonical `Preflight diagnostics:` block (paste verbatim into status
 reports). Two checks **abort** the run on failure: the model gate
 (probed against `<OPENAI_BASE_URL>/models`; the allowlist
-{`claude-opus-5` preferred, `claude-opus-4-8`, `claude-opus-4-7`,
-`claude-opus-4-6` fallback}
+{`claude-opus-5-5` preferred, `claude-opus-5`, `claude-opus-4-8`,
+`claude-opus-4-7`, `claude-opus-4-6` fallback}
 binds only under `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0` — otherwise
 the catalog probe is the sole gate; see
 `## Failure Handling`) and, when `--critic-agent` is active, the
@@ -877,8 +877,11 @@ signals. There is no automatic supervision or restart. After inspecting the
 failure and confirming that the old process is gone, explicitly resume the same
 session with `--resume-from "$SESSION_DIR"` when appropriate. Historical stop
 reasons remain readable; they are not instructions to restart automatically.
-`recover` remains an offline artifact-reconstruction tool, not a runtime
-recovery action.
+`recover` is an offline tool, not a runtime recovery action: it reconstructs
+artifacts, or records the cleanup confirmation a refused resume asks for:
+`--confirm-scope-gone` when the lost pod's owner scope must be confirmed gone,
+`--confirm-stopped` for a blocked task that names no owner scope (for example a
+CLOSE-phase step, which runs without a lane; it refuses a scoped task); see Scenario A in `docs/reference/operations.md`.
 
 If the CLI exits with `Claude SDK exit code 1` or `Primus.00009 token not present`,
 the gateway rejected the request. Check that `OPENAI_BASE_URL` / `OPENAI_API_KEY`
@@ -995,6 +998,17 @@ failure routes PRELUDE into the ENABLEMENT phase, which authors patches until
 the combo boots. With `--enablement off`, three consecutive failures stop the
 run with `stop_reason='baseline_failed'`.
 
+An AgentX baseline whose server ran with the prefix cache off fails with
+`error_class=agentx_baseline_prefix_cache_off` and stops the run with
+`stop_reason='baseline_failed'` on the first occurrence, whichever AgentX client
+replayed it. Each engine is read from its own launch account: SGLang's resolved
+`disable_radix_cache=True`, vLLM's launch record showing
+`enable_prefix_caching=False`, and, because ATOM keeps the cache off by default
+and prints no record, ATOM server args without `--enable_prefix_caching`. A
+launch whose account cannot be read is left alone. Do not propose
+`--disable-radix-cache` or `--no-enable-prefix-caching` for an AgentX baseline;
+on ATOM pass `--server-args "--enable_prefix_caching"`.
+
 Operator server flags have one supported CLI entry point:
 `optimize --server-args "<framework serve flags>"`. The CLI exports this as
 `INFERENCE_OPTIMIZER_SERVER_ARGS`, and YAML materialization routes it into
@@ -1002,7 +1016,14 @@ Operator server flags have one supported CLI entry point:
 profile, explore, and sweep. Explicit `--max-model-len` / `$MAX_MODEL_LEN`
 wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
 `4,16,128` is accepted for compatibility; baseline uses the first value.
-Use `--conc-sweep-concs` to override the ladder SWEEP measures (`256,128,64,32,16,8,4,2` synthetic, `1,4,8,10,14,20,28` under AgentX). Under AgentX the sweep is off unless `--enable-conc-sweep` is passed, since every rung is a 3600 s window.
+Use `--conc-sweep-concs` to override the synthetic ladder SWEEP measures (`256,128,64,32,16,8,4,2`). Native AgentX uses `HYPERLOOM_AGENTX=1` with the ordinary workload flags, or `--benchmark-config` for advanced Magpie settings. Hyperloom archives the resolved workload as `benchmark.yaml`; CONC is fixed per session, so start a separate session to measure another concurrency.
+
+Native AgentX supports one node and SGLang/vLLM. It rejects `--enable-conc-sweep`,
+`--isl`, `--osl`, `--profile-osl`, `--max-model-len`, `--reference-script`,
+`--quantize` and `--quantize-scheme`. Prepare quantized checkpoints before the run.
+Do not pass `ISL`, `OSL`, `RANDOM_RANGE_RATIO`, `MAX_MODEL_LEN`, `EP_SIZE`, or
+`AIPERF_*` / `AGENTX_*` / `AGENTIC_*` controls through `--extra-env`; use `--ep`
+for expert parallelism and Magpie YAML for advanced workload settings.
 
 Operator server flags are the workload baseline, but they are not sacred. When
 the configuration arm has evidence or an operator hint that a pinned flag may
@@ -1639,7 +1660,7 @@ Transient SDK errors retry/resume up to the Coordinator emergency threshold.
 Custom orchestration models are enabled by default and are validated against the
 configured gateway catalog. Set `INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`
 only when you intentionally want the strict AMD Claude allowlist
-(`claude-opus-5` / `claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6`).
+(`claude-opus-5-5` / `claude-opus-5` / `claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6`).
 
 | Symptom | Fix |
 |---|---|

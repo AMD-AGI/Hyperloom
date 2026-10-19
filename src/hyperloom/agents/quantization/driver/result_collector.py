@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -66,7 +66,6 @@ class CollectedArtifacts:
     # SKILL.md control-plane files
     last_phase: str | None  # contents of last_phase.txt
     blocked_reason: str | None  # contents of blocked.md
-    fix_hypothesis_attempts: tuple[int, ...] = field(default_factory=tuple)
 
 
 # parsing helpers
@@ -173,21 +172,6 @@ def _has_glob(directory: Path, patterns: Iterable[str]) -> bool:
     return False
 
 
-def _scan_hypothesis_attempts(workspace: Path) -> tuple[int, ...]:
-    """Find ``fix_hypothesis_attempt_N.md`` files and return the sorted Ns."""
-
-    pattern = re.compile(r"^fix_hypothesis_attempt_(\d+)\.md$")
-    ns: list[int] = []
-    try:
-        for entry in workspace.iterdir():
-            m = pattern.match(entry.name)
-            if m and entry.is_file():
-                ns.append(int(m.group(1)))
-    except FileNotFoundError:
-        return ()
-    return tuple(sorted(ns))
-
-
 def _strict_validation_enabled(env: dict[str, str] | None = None) -> bool:
     """Return whether strict validation mode is enabled."""
     raw = (env if env is not None else os.environ).get(STRICT_VALIDATION_ENV, "1")
@@ -237,7 +221,6 @@ def collect_artifacts(
         eval_skipped_reason=_read_text(workspace / "eval_skipped.txt"),
         last_phase=(_read_text(workspace / "last_phase.txt") or "").strip() or None,
         blocked_reason=_read_text(workspace / "blocked.md"),
-        fix_hypothesis_attempts=_scan_hypothesis_attempts(workspace),
     )
 
 

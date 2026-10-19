@@ -7,10 +7,7 @@ from __future__ import annotations
 
 from typing import MutableMapping
 
-# Default per-request API timeout: 5 minutes (in ms).
-DEFAULT_API_TIMEOUT_MS = "300000"
-
-__all__ = ["DEFAULT_API_TIMEOUT_MS", "apply_llm_stability_env"]
+__all__ = ["apply_llm_stability_env"]
 
 
 def apply_llm_stability_env(

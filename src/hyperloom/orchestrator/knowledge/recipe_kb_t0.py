@@ -22,6 +22,7 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
     cid_to_path_components,
     recipe_canonical_id,
 )
+from hyperloom.orchestrator.knowledge.workload_tags import WORKLOAD_SHAPE_FIELDS, workload_shape_tags
 from hyperloom.inference_optimizer.breakdown.recorder import warm_start_event as _warm_start_event
 from hyperloom.inference_optimizer.recipe_snapshot_constants import detect_framework_version, kb_hardware_slug
 from hyperloom.inference_optimizer.session.session_paths import (
@@ -38,21 +39,10 @@ def _default_status_emitter(line: str) -> None:
     log.info("%s", line)
 
 
-# Numeric workload knobs threaded into the KB ``prefer`` block so a closer-workload recipe is reranked first.
-_PREFER_NUMERIC_ATTRS: tuple[str, ...] = (
-    "tp",
-    "ep",
-    "conc",
-    "isl",
-    "osl",
-    "max_model_len",
-)
-
-
 def _build_warm_prefer(shared_state: Any, framework_version: str) -> dict[str, Any]:
-    """Assemble the ``prefer`` similarity hints from SharedState."""
+    """Assemble the ``prefer`` similarity hints from SharedState so a closer-workload recipe is reranked first."""
     prefer: dict[str, Any] = {}
-    for attr in _PREFER_NUMERIC_ATTRS:
+    for attr in WORKLOAD_SHAPE_FIELDS:
         val = getattr(shared_state, attr, None)
         if val not in (None, "", 0):
             prefer[attr] = val
@@ -572,32 +562,7 @@ def _build_t0_trace_extras(
         v = str(extra.get(src_key) or "").strip()
         if v:
             _extras[src_key] = v
-    for src_attr, dst_key in (
-        ("tp", "tp"),
-        ("ep", "ep"),
-        ("conc", "conc"),
-        ("isl", "isl"),
-        ("osl", "osl"),
-        ("max_model_len", "max_model_len"),
-    ):
-        v = getattr(shared_state, src_attr, None)
-        if v not in (None, "", 0):
-            _extras[dst_key] = v
-    if "ep" not in _extras:
-        raw_ep = (os.environ.get("EP") or "").strip()
-        try:
-            n = int(raw_ep) if raw_ep else 0
-        except ValueError:
-            n = 0
-        if n > 0:
-            _extras["ep"] = n
-    raw_pp = (os.environ.get("PP") or "").strip()
-    try:
-        pp_n = int(raw_pp) if raw_pp else 0
-    except ValueError:
-        pp_n = 0
-    if pp_n > 0:
-        _extras["pp"] = pp_n
+    _extras.update(workload_shape_tags(shared_state))
     return _extras
 
 

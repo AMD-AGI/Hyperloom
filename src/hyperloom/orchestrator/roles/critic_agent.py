@@ -18,6 +18,7 @@ from typing import Any, Callable, Literal
 from hyperloom.common.framework_arm import review_row_id
 from hyperloom.common.llm_config import (
     DEFAULT_CODEX_MODEL,
+    AnthropicCompletionRequest,
     LLMConfigError,
     aanthropic_completion,
     achat_completion,
@@ -43,7 +44,7 @@ from hyperloom.inference_optimizer.session.session_paths import allocate_turn_wo
 from hyperloom.common.token_usage import uncached_input_tokens
 from hyperloom.inference_optimizer.trace._row_utils import coerce_optional_int
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
-from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
 from hyperloom.inference_optimizer.trace.parse_usage import reasoning_output_tokens
 from hyperloom.inference_optimizer.trace.trajectory_trace import current_context
 from .base import BackendError, BackendTurnResult, LLMCallFailed, build_chat_messages, parse_call_timeout_env
@@ -689,13 +690,15 @@ class CriticAgentBackend:
 
             critic_out.record_critic_iteration(
                 self.session_dir,
-                iter_n=turn_idx,
-                request=request,
-                judge_bundle=judge_bundle,
-                review=review,
-                emit=emit,
-                workdir=workdir,
-                kb_priors=kb_priors_trace,
+                critic_out.CriticIteration(
+                    iter_n=turn_idx,
+                    request=request,
+                    judge_bundle=judge_bundle,
+                    review=review,
+                    emit=emit,
+                    workdir=workdir,
+                    kb_priors=kb_priors_trace,
+                ),
             )
         except Exception:  # noqa: BLE001
             pass
@@ -789,12 +792,6 @@ class CriticAgentBackend:
         memory_dir.mkdir(parents=True, exist_ok=True)
         env.setdefault("CRITIC_SESSION_MEMORY_DIR", str(memory_dir))
         env["CRITIC_KB_CLIENT_MODE"] = self.kb_mode
-
-        # Point the runtime at the sibling robustness findings JSONL.
-        env.setdefault(
-            "ROBUSTNESS_AGENT_SESSION_DIR",
-            str(self.session_dir),
-        )
 
         # Dead-letter dir under the session so cron replays don't cross sessions.
         dlq_dir = self.session_dir / "critic-kb-dead-letter"
@@ -1101,16 +1098,15 @@ class CriticAgentBackend:
         connect_timeout_s, rw_timeout_s = self._resolve_llm_timeouts()
         _t0 = time.perf_counter()
         try:
-            result = await aanthropic_completion(
-                component="critic",
-                operation="review",
+            request = AnthropicCompletionRequest(
                 model=self._review_model,
-                system=system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
                 max_tokens=max_tokens,
+                system=system_prompt,
                 timeout=build_http_timeout(connect=connect_timeout_s, read=rw_timeout_s),
                 timeout_s=rw_timeout_s,
             )
+            result = await aanthropic_completion(request=request, component="critic", operation="review")
         except Exception as exc:
             raise self._llm_call_failed(
                 f"Anthropic completion failed (critic-agent reasoning): {exc!r}",
@@ -1229,16 +1225,15 @@ class CriticAgentBackend:
     ) -> None:
         """Append one ``llm_calls.jsonl`` row for a call that never returned."""
         try:
-            record = LLMCallRecord.for_failure(
+            site = LLMCallSite(
                 session_id=self.session_dir.name,
                 component="critic",
                 role="critic",
-                error=error,
-                call_id=call_id,
-                model=self._review_model,
                 tick=self._trace_tick,
                 phase=self._trace_phase,
-                latency_ms=latency_ms,
+            )
+            record = LLMCallRecord.for_failure(
+                site, error, model=self._review_model, call_id=call_id, latency_ms=latency_ms
             )
             append_llm_call(session_dir=self.session_dir, record=record)
         except Exception:

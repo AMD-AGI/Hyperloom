@@ -81,17 +81,19 @@ def _run_gate(monkeypatch, tmp_path, verdict, *, repo_root="", pristine_dir="", 
     result, vr = _kept_result(source or "/m.py")
     serving_gate.apply_serving_gate(
         result,
-        framework="vllm",
-        out=out,
-        gpu="0",
-        model_path="/models/minimax",
-        isl=8,
-        osl=8,
+        serving_gate.ServingSession(
+            framework="vllm",
+            model_path="/models/minimax",
+            gpu="0",
+            isl=8,
+            osl=8,
+            tp=8,
+            block_size=128,
+            max_model_len=13312,
+        ),
+        out,
         repo_root=repo_root,
         pristine_dir=pristine_dir,
-        tp=8,
-        block_size=128,
-        max_model_len=13312,
     )
     return result, vr, out, observed
 

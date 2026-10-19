@@ -37,7 +37,6 @@ class ClosureVerdict:
 
     kind: str
     reason: str = ""
-    compiled_paths: tuple[str, ...] = ()
 
     @property
     def is_localizable(self) -> bool:
@@ -68,7 +67,6 @@ def classify_closure(paths: list[str]) -> ClosureVerdict:
                 "closure includes compiled / build-backend file(s) requiring a "
                 "targeted build (Rung 5, deferred): " + ", ".join(compiled[:8])
             ),
-            compiled_paths=compiled,
         )
     return ClosureVerdict(kind=PYTHON_ONLY, reason=f"{len(clean)} python-only file(s)")
 

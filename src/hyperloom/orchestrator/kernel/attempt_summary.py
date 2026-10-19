@@ -561,12 +561,7 @@ def _summary_one_line(
     return handling.summary(entry, backend_ladder, artifact_error)
 
 
-def build_kernel_optimization_summary(
-    state: Any,
-    session_dir: Path | str,
-    *,
-    schema_version: int = 2,
-) -> dict[str, Any]:
+def build_kernel_optimization_summary(state: Any, session_dir: Path | str) -> dict[str, Any]:
     """Build the full summary block for one session."""
     sd_path = Path(session_dir)
     session_id = str(getattr(state, "session_id", "") or "")
@@ -733,12 +728,9 @@ def build_kernel_optimization_summary(
         "geak": _geak_lane_totals(state),
         "gemm_tuning": _gemm_tuning_lane_totals(state),
     }
-    overall_outcome = source_outcome
-    if schema_version >= 2:
-        counts["attempted"] = sum(int(lane["attempted"]) for lane in lane_totals.values())
-        overall_outcome = _overall_lane_outcome(lane_totals)
-        if counts["attempted"] and lane_totals["source_level"]["attempted"] == 0:
-            top_takeaways[0] = "No source-level kernel rewrites were attempted; other kernel lanes did run."
+    counts["attempted"] = sum(int(lane["attempted"]) for lane in lane_totals.values())
+    if counts["attempted"] and lane_totals["source_level"]["attempted"] == 0:
+        top_takeaways[0] = "No source-level kernel rewrites were attempted; other kernel lanes did run."
     geak_result = getattr(state, "geak_result", None)
     absent_backends = geak_result.get("absent_backends") if isinstance(geak_result, dict) else None
     if isinstance(absent_backends, dict) and absent_backends:
@@ -747,22 +739,20 @@ def build_kernel_optimization_summary(
             "any no-win it reports did not try them."
         )
 
-    summary = {
-        "schema_version": schema_version,
+    return {
+        "schema_version": 2,
         "session_id": session_id,
         "model_name": str(getattr(state, "model_name", "") or ""),
         "cumulative_gain_validated_pct": float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0),
-        "kernel_opt_outcome": overall_outcome,
+        "kernel_opt_outcome": _overall_lane_outcome(lane_totals),
         "totals": counts,
         "rejection_breakdown": rejection_breakdown,
         "failure_reason_breakdown": failure_reason_breakdown,
         "field_glossary": FIELD_GLOSSARY,
         "by_kernel": by_kernel,
         "top_takeaways": top_takeaways,
+        "lane_totals": lane_totals,
     }
-    if schema_version >= 2:
-        summary["lane_totals"] = lane_totals
-    return summary
 
 
 def _render_attempted_row(

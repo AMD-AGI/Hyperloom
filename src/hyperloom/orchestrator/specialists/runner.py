@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common import io as _common_io
+from hyperloom.common.io import JsonFormat, WriteOptions, atomic_write_json
 from hyperloom.common.deadline import Deadline, seconds_until
 from hyperloom.common.env_safety import BENCHMARK_SECRET_ENV_NAMES, redact_secret_values
 from hyperloom.common.timeutil import now_iso
@@ -32,7 +32,7 @@ from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, runs_dir, specialist_intel_path
 from ..state.experience_citations import normalize_citations, shown_ids
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
-from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
     EVENT_LLM_CALL,
     STATUS_COMPLETED,
@@ -407,16 +407,6 @@ class SpecialistFailureType(str, enum.Enum):
     UNKNOWN = "unknown"
 
 
-# Transient infra failures a bounded auto-retry may re-dispatch.
-RETRYABLE_SPECIALIST_FAILURES: frozenset[SpecialistFailureType] = frozenset(
-    {
-        SpecialistFailureType.TIMEOUT,
-        SpecialistFailureType.STALE_HEARTBEAT,
-        SpecialistFailureType.CRASH,
-    }
-)
-
-
 def classify_specialist_failure(
     runner_status: str,
     error: str,
@@ -652,7 +642,6 @@ class SpecialistRunner:
                 # Coordinator-populated roofline pre-fetch; empty when not warmed.
                 roofline_evidence=dict(params.get("roofline_evidence") or {}),
                 runtime_findings=str(params.get("runtime_findings") or ""),
-                sub_kind=str(params.get("sub_kind") or ""),
                 extra_focus_tags=_extra_focus_tags(params, domain),
                 warm_start_recipe=dict(params.get("warm_start_recipe") or {}),
                 warm_start_pitfalls=list(params.get("warm_start_pitfalls") or []),
@@ -805,16 +794,15 @@ class SpecialistRunner:
             )
             if not has_tokens:
                 return
-            record = LLMCallRecord.from_metadata(
+            site = LLMCallSite(
                 session_id=self.session_dir.name,
                 component="specialist",
                 task_id=task_id,
-                turn=turn,
-                metadata=md,
-                latency_ms=latency_ms,
                 tick=tick,
                 phase=phase,
+                turn=turn,
             )
+            record = LLMCallRecord.from_metadata(site, md, latency_ms=latency_ms)
             append_llm_call(session_dir=self.session_dir, record=record)
         except Exception:
             log.debug(
@@ -1497,7 +1485,7 @@ class SpecialistRunner:
             "max_turns": max_turns,
             "status": status,
         }
-        _common_io.atomic_write_json(path, payload, indent=None, sort_keys=True, make_parents=False)
+        atomic_write_json(path, payload, fmt=JsonFormat(indent=None), options=WriteOptions())
 
     def _write_specialist_done(
         self,
@@ -1516,12 +1504,11 @@ class SpecialistRunner:
         path = self._done_path(workspace)
         if path is None:
             return
-        _common_io.atomic_write_json(path, {"ts": now_iso(), **payload}, make_parents=False)
+        atomic_write_json(path, {"ts": now_iso(), **payload}, options=WriteOptions())
 
 
 __all__ = [
     "NO_GIT_FRAMEWORK_SOURCE_ROOT",
-    "RETRYABLE_SPECIALIST_FAILURES",
     "SPECIALIST_TOOL_DENYLIST",
     "SpecialistFailureType",
     "SpecialistRunResult",

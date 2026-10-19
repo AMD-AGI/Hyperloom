@@ -139,8 +139,6 @@ class ArgvVerdict:
         dropped: Flags removed by the one allowed repair.
         repaired_digest: The original argv's digest when a repair applied, so
             the caller can record that this argv has spent its one repair.
-        probe_interpreter: The interpreter the parser ran in.
-        serving_interpreter: The interpreter the server will run in.
     """
 
     status: str
@@ -150,8 +148,6 @@ class ArgvVerdict:
     text: str = ""
     dropped: tuple[str, ...] = ()
     repaired_digest: str = ""
-    probe_interpreter: str = ""
-    serving_interpreter: str = ""
 
     @property
     def terminal(self) -> bool:
@@ -404,8 +400,6 @@ def check_server_argv(
             detail=detail,
             argv=tuple(argv),
             text=text,
-            probe_interpreter=probe_interpreter,
-            serving_interpreter=serving,
         )
 
     if not serving or not probe_interpreter:
@@ -438,8 +432,6 @@ def check_server_argv(
             reason=PARSED,
             argv=tuple(argv),
             text=text,
-            probe_interpreter=probe_interpreter,
-            serving_interpreter=serving,
         )
 
     def _invalid(reason: str, why: str, *, dropped: tuple[str, ...] = ()) -> ArgvVerdict:
@@ -450,8 +442,6 @@ def check_server_argv(
             argv=tuple(argv),
             text=text,
             dropped=dropped,
-            probe_interpreter=probe_interpreter,
-            serving_interpreter=serving,
         )
 
     if not flags:
@@ -498,8 +488,6 @@ def check_server_argv(
         text=repaired_text,
         dropped=flags,
         repaired_digest=digest,
-        probe_interpreter=probe_interpreter,
-        serving_interpreter=serving,
     )
 
 

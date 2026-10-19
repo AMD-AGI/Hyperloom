@@ -59,14 +59,14 @@ class _State:
         self.benchmark_mode = benchmark_mode
 
 
-def _agentx(monkeypatch) -> None:
+def _agentx(monkeypatch, native_benchmark) -> None:
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
 
 
 def _synthetic(monkeypatch) -> None:
     monkeypatch.delenv("HYPERLOOM_PERF_METRIC", raising=False)
-    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.delenv("HYPERLOOM_BENCHMARK_CONFIG", raising=False)
 
 
 def _full_measurement(
@@ -94,8 +94,8 @@ def _full_measurement(
 # --- both sides, one axis ---
 
 
-def test_agentx_reads_both_sides_on_the_intvty_axis(monkeypatch):
-    _agentx(monkeypatch)
+def test_agentx_reads_both_sides_on_the_intvty_axis(native_benchmark, monkeypatch):
+    _agentx(monkeypatch, native_benchmark)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     graded = resolve_graded_comparison(
         state, _full_measurement(total=26500.0, output=190.0, intvty=24.0), keep_threshold_pct=2.0
@@ -107,9 +107,9 @@ def test_agentx_reads_both_sides_on_the_intvty_axis(monkeypatch):
     assert graded.degrade_reason == ""
 
 
-def test_agentx_keep_verdict_when_intvty_clears_threshold(monkeypatch):
+def test_agentx_keep_verdict_when_intvty_clears_threshold(native_benchmark, monkeypatch):
     """A candidate that improves the median >= 3% with both guards in band is KEEP."""
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     # +10% interactivity, same tput
     graded = resolve_graded_comparison(
@@ -119,9 +119,9 @@ def test_agentx_keep_verdict_when_intvty_clears_threshold(monkeypatch):
     assert graded.refused_by == ""
 
 
-def test_agentx_revert_when_both_axes_worse(monkeypatch):
+def test_agentx_revert_when_both_axes_worse(native_benchmark, monkeypatch):
     """Both interactivity AND tput regressed beyond the noise band -> REVERT, naming every gate that failed."""
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     graded = resolve_graded_comparison(
         state, _full_measurement(total=20000.0, output=130.0, intvty=15.0), keep_threshold_pct=2.0
@@ -130,9 +130,9 @@ def test_agentx_revert_when_both_axes_worse(monkeypatch):
     assert graded.refused_by == "p50_gain_below_threshold,p90_regressed,output_regressed"
 
 
-def test_agentx_revert_when_median_gain_is_below_threshold(monkeypatch):
+def test_agentx_revert_when_median_gain_is_below_threshold(native_benchmark, monkeypatch):
     """A median gain the guards tolerate is still short of the bar, and short of the bar is REVERT."""
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     # +1% median, well inside both guard bands.
     graded = resolve_graded_comparison(
@@ -142,9 +142,9 @@ def test_agentx_revert_when_median_gain_is_below_threshold(monkeypatch):
     assert graded.refused_by == "p50_gain_below_threshold"
 
 
-def test_agentx_revert_when_the_slow_tail_guard_fails(monkeypatch):
+def test_agentx_revert_when_the_slow_tail_guard_fails(native_benchmark, monkeypatch):
     """The median can rise while the slow tail collapses; the guard is what catches it."""
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     graded = resolve_graded_comparison(
         state,
@@ -155,9 +155,9 @@ def test_agentx_revert_when_the_slow_tail_guard_fails(monkeypatch):
     assert graded.refused_by == "p90_regressed"
 
 
-def test_agentx_revert_when_the_output_guard_fails(monkeypatch):
+def test_agentx_revert_when_the_output_guard_fails(native_benchmark, monkeypatch):
     """A median win bought by dropping output throughput past the band is not a win."""
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     graded = resolve_graded_comparison(
         state,
@@ -168,9 +168,9 @@ def test_agentx_revert_when_the_output_guard_fails(monkeypatch):
     assert graded.refused_by == "output_regressed"
 
 
-def test_a_degraded_pair_never_reports_a_keep_verdict(monkeypatch):
+def test_a_degraded_pair_never_reports_a_keep_verdict(native_benchmark, monkeypatch):
     """The resolver chokepoint must not emit KEEP on a substitute output axis."""
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     graded = resolve_graded_comparison(state, {"output_throughput": 190.0})
     assert graded.degrade_reason == "candidate_axes_missing"
@@ -186,13 +186,13 @@ def test_a_degraded_pair_never_reports_a_keep_verdict(monkeypatch):
         pytest.param(("input_throughput", "total_token_throughput", "e2e_norm_intvty_p90"), id="both"),
     ],
 )
-def test_a_candidate_without_the_graded_axes_degrades_both_sides_together(monkeypatch, missing_axes):
+def test_a_candidate_without_the_graded_axes_degrades_both_sides_together(native_benchmark, monkeypatch, missing_axes):
     """Degrading one side alone would grade an output figure against interactivity.
 
     Either axis going missing degrades the pair: the verdict is 2-D, so a candidate that can supply only one of them
     cannot be placed on the frontier at all.
     """
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     measurement = _full_measurement(total=26500.0, output=190.0, intvty=24.0)
     for axis in missing_axes:
@@ -215,13 +215,13 @@ def test_a_candidate_without_the_graded_axes_degrades_both_sides_together(monkey
         pytest.param(("input_throughput", "total_throughput", "e2e_norm_intvty_p90"), id="both"),
     ],
 )
-def test_an_anchor_without_the_graded_axes_degrades_both_sides_together(monkeypatch, missing_axes):
+def test_an_anchor_without_the_graded_axes_degrades_both_sides_together(native_benchmark, monkeypatch, missing_axes):
     """A ``current_best`` missing an axis must degrade, not fall through to a complete ``baseline_perf``.
 
     Falling through would anchor the candidate against a recipe it was never measured on, which reads as a win or a
     loss that no measurement supports.
     """
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     anchor = dict(_ANCHOR)
     for axis in missing_axes:
         anchor.pop(axis)
@@ -249,13 +249,13 @@ def test_a_synthetic_run_grades_output_against_output(monkeypatch):
 
 
 @pytest.mark.parametrize("mode", ["explicit-output", "synthetic", "scriptable"])
-def test_output_only_measurements_are_comparable_when_intvty_is_not_requested(monkeypatch, mode):
+def test_output_only_measurements_are_comparable_when_intvty_is_not_requested(native_benchmark, monkeypatch, mode):
     """An output-only measurement is not a degraded pair when nobody asked for the interactivity axis.
 
     ``degrade_reason`` names a session that wanted interactivity and could not have it. A session that never asked
     must not report one, or every synthetic run would read as failing closed.
     """
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     if mode == "explicit-output":
         monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_throughput")
     elif mode == "synthetic":
@@ -271,9 +271,9 @@ def test_output_only_measurements_are_comparable_when_intvty_is_not_requested(mo
     assert graded.comparable is True
 
 
-def test_a_scriptable_framework_keeps_output_grading_under_agentx(monkeypatch):
+def test_a_scriptable_framework_keeps_output_grading_under_agentx(monkeypatch, native_benchmark):
     """A scriptable framework reports an image-quality gate, not a total axis."""
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0, framework="xdit")
     graded = resolve_graded_comparison(state, _full_measurement(total=26500.0, output=190.0, intvty=24.0))
 
@@ -283,9 +283,9 @@ def test_a_scriptable_framework_keeps_output_grading_under_agentx(monkeypatch):
 # --- the interactivity constraint travels with the objective ---
 
 
-def test_an_interactivity_regression_bought_with_throughput_is_revert(monkeypatch):
+def test_an_interactivity_regression_bought_with_throughput_is_revert(native_benchmark, monkeypatch):
     """Buying total throughput with interactivity no longer earns a middle verdict."""
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     graded = resolve_graded_comparison(
         state, _full_measurement(total=40000.0, output=190.0, intvty=10.0), keep_threshold_pct=2.0
@@ -295,9 +295,9 @@ def test_an_interactivity_regression_bought_with_throughput_is_revert(monkeypatc
     assert graded.verdict == VERDICT_REVERT
 
 
-def test_both_axes_worse_is_revert(monkeypatch):
+def test_both_axes_worse_is_revert(native_benchmark, monkeypatch):
     """Both interactivity AND throughput regress -> hard REVERT."""
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
     # Both regress strongly beyond the 5% noise band
     graded = resolve_graded_comparison(
@@ -320,8 +320,8 @@ def test_a_collapsed_interactivity_does_not_block_a_synthetic_run(monkeypatch):
 # --- grading against the session baseline ---
 
 
-def test_cumulative_gain_reads_the_baseline_on_the_graded_axis(monkeypatch):
-    _agentx(monkeypatch)
+def test_cumulative_gain_reads_the_baseline_on_the_graded_axis(native_benchmark, monkeypatch):
+    _agentx(monkeypatch, native_benchmark)
     state = _State(baseline_perf=_ANCHOR, baseline_tput=183.44)
     graded = resolve_graded_comparison(
         state,
@@ -333,9 +333,9 @@ def test_cumulative_gain_reads_the_baseline_on_the_graded_axis(monkeypatch):
     assert graded.reference == pytest.approx(_ANCHOR["e2e_norm_intvty_p50"])
 
 
-def test_cumulative_gain_falls_back_to_baseline_tput_together(monkeypatch):
+def test_cumulative_gain_falls_back_to_baseline_tput_together(native_benchmark, monkeypatch):
     """A resumed session that never wrote ``baseline_perf`` still grades one axis."""
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     state = _State(baseline_perf={}, baseline_tput=183.44)
     graded = resolve_graded_comparison(
         state,
@@ -363,7 +363,9 @@ def test_cumulative_gain_falls_back_to_baseline_tput_together(monkeypatch):
         pytest.param(100.75, True, id="stack-output-gain"),
     ],
 )
-def test_native_performance_requires_requested_axes(monkeypatch, missing_from, missing_axis, output, stack):
+def test_native_performance_requires_requested_axes(
+    native_benchmark, monkeypatch, missing_from, missing_axis, output, stack
+):
     """A native integration that could not be graded on the requested axis fails closed.
 
     The output figure survives as a diagnostic, but neither a large output win nor a stacked layer's lowered
@@ -371,7 +373,7 @@ def test_native_performance_requires_requested_axes(monkeypatch, missing_from, m
     """
     from hyperloom.orchestrator.measurement.integrate_performance import assess_integrate_performance
 
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     anchor = {"tput": 100.0, **_full_measurement(total=1000.0, output=100.0, intvty=100.0)}
     state = _State(current_best=dict(anchor), baseline_perf=anchor, baseline_tput=100.0)
     state.current_best["action"] = "integrate" if stack else "baseline"
@@ -401,11 +403,11 @@ def test_native_performance_requires_requested_axes(monkeypatch, missing_from, m
     )
 
 
-def test_native_performance_does_not_promote_a_recorded_point(monkeypatch):
+def test_native_performance_does_not_promote_a_recorded_point(native_benchmark, monkeypatch):
     """RECORDED is a different point on the frontier; the stack's lowered threshold must not promote it."""
     from hyperloom.orchestrator.measurement.integrate_performance import assess_integrate_performance
 
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     anchor = {"tput": 100.0, **_full_measurement(total=1000.0, output=100.0, intvty=100.0)}
     state = _State(current_best=dict(anchor), baseline_perf=anchor, baseline_tput=100.0)
     state.current_best["action"] = "integrate"
@@ -428,16 +430,16 @@ def test_native_performance_does_not_promote_a_recorded_point(monkeypatch):
 
 
 @pytest.mark.parametrize("agentx", [True, False])
-def test_the_anchor_chokepoint_is_the_output_axis_on_every_session(monkeypatch, agentx):
+def test_the_anchor_chokepoint_is_the_output_axis_on_every_session(native_benchmark, monkeypatch, agentx):
     """It seeds ``base_tput``, backs the drift check, and answers the two objective resolvers, whose targets are operator-supplied output figures."""
-    _agentx(monkeypatch) if agentx else _synthetic(monkeypatch)
+    _agentx(monkeypatch, native_benchmark) if agentx else _synthetic(monkeypatch)
     state = _State(current_best=_ANCHOR, baseline_tput=180.0)
 
     assert resolve_grading_anchor_tput(state) == pytest.approx(_ANCHOR["tput"])
 
 
-def test_the_anchor_falls_back_to_the_baseline_before_any_layer_lands(monkeypatch):
-    _agentx(monkeypatch)
+def test_the_anchor_falls_back_to_the_baseline_before_any_layer_lands(native_benchmark, monkeypatch):
+    _agentx(monkeypatch, native_benchmark)
     state = _State(current_best={}, baseline_tput=180.0)
 
     assert resolve_grading_anchor_tput(state) == pytest.approx(180.0)
@@ -446,11 +448,11 @@ def test_the_anchor_falls_back_to_the_baseline_before_any_layer_lands(monkeypatc
 # --- a KEEP must not strip the axes off the anchor ---
 
 
-def test_graded_axes_survive_a_winner_record(monkeypatch):
+def test_graded_axes_survive_a_winner_record(native_benchmark, monkeypatch):
     """The defect this guards: AgentX grading dies after the first KEEP, because ``current_best`` is the next
     round's anchor and a winner record carrying no graded axes writes an anchor with none.
     """
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     measurement = _full_measurement(total=26500.0, output=190.0, intvty=24.0)
     winner = {"name": "v", "tput": 190.0, **graded_axes_of(measurement)}
 
@@ -492,13 +494,13 @@ def test_a_synthetic_session_is_untouched_by_the_marker_check(monkeypatch):
 
 
 @pytest.fixture
-def baseline_writer(monkeypatch, tmp_path):
+def baseline_writer(native_benchmark, monkeypatch, tmp_path):
     from hyperloom.inference_optimizer.session.optimization_journal import Verdict
     from hyperloom.orchestrator.loop.writeback import _PromoteOutcome
 
     from .conftest import make_coordinator
 
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     coord = make_coordinator(tmp_path, shared_state_overrides={"framework": "vllm", "benchmark_mode": "agentx"})
     writer = coord.writeback
     monkeypatch.setattr(coord.gap_refresh, "refresh_gaps", AsyncMock())
@@ -691,9 +693,9 @@ def test_graded_axes_stamp_the_comparability_inputs_onto_a_winner():
     assert axes[GRADED_ERROR_RATE] == 0.0
 
 
-def test_agentx_revert_when_the_windows_differ(monkeypatch):
+def test_agentx_revert_when_the_windows_differ(native_benchmark, monkeypatch):
     """A round that replayed a shorter slice of the corpus measured different work, so it cannot win."""
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     state = _State(current_best=dict(_ANCHOR))
     graded = resolve_graded_comparison(
         state,
@@ -704,9 +706,9 @@ def test_agentx_revert_when_the_windows_differ(monkeypatch):
     assert graded.refused_by == "duration_drift"
 
 
-def test_agentx_keeps_when_the_window_drifts_inside_the_allowance(monkeypatch):
+def test_agentx_keeps_when_the_window_drifts_inside_the_allowance(native_benchmark, monkeypatch):
     """Full rounds drift by a few percent; that is not a truncation."""
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     state = _State(current_best=dict(_ANCHOR))
     graded = resolve_graded_comparison(
         state,
@@ -716,9 +718,9 @@ def test_agentx_keeps_when_the_window_drifts_inside_the_allowance(monkeypatch):
     assert graded.verdict == VERDICT_KEEP
 
 
-def test_agentx_revert_when_more_requests_failed_than_the_anchor(monkeypatch):
+def test_agentx_revert_when_more_requests_failed_than_the_anchor(native_benchmark, monkeypatch):
     """A rate that rose because requests dropped out is not an improvement."""
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     state = _State(current_best={**_ANCHOR, "request_error_rate": 1.0})
     graded = resolve_graded_comparison(
         state,
@@ -729,9 +731,9 @@ def test_agentx_revert_when_more_requests_failed_than_the_anchor(monkeypatch):
     assert graded.refused_by == "extra_failed_requests"
 
 
-def test_agentx_keeps_through_one_extra_failure_inside_the_slack(monkeypatch):
+def test_agentx_keeps_through_one_extra_failure_inside_the_slack(native_benchmark, monkeypatch):
     """One extra failure in a full round cannot carry the gain: it moves the median's rank by a fraction of a point."""
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     state = _State(current_best=dict(_ANCHOR))
     graded = resolve_graded_comparison(
         state,
@@ -741,9 +743,9 @@ def test_agentx_keeps_through_one_extra_failure_inside_the_slack(monkeypatch):
     assert graded.verdict == VERDICT_KEEP
 
 
-def test_agentx_revert_when_a_comparability_input_is_unreported(monkeypatch):
+def test_agentx_revert_when_a_comparability_input_is_unreported(native_benchmark, monkeypatch):
     """No evidence is not evidence of comparability: the gate fails closed."""
-    _agentx(monkeypatch)
+    _agentx(monkeypatch, native_benchmark)
     state = _State(current_best=dict(_ANCHOR))
     measurement = _full_measurement(total=25984.0, output=183.0, intvty=24.8)
     measurement.pop("duration_seconds")

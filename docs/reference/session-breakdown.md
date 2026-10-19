@@ -97,12 +97,11 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "outcome":            { /* terminal result — SaFE contract core */ },
   "timeline":           [ /* the run itself: one event per stage, in order */ ],
   "close":              { /* what the session settled at close */ },
-  "critic":             { /* the critic agent's own run, iteration by iteration */ },
-  "robustness":         { "turns": [] /* historical turns remain readable */ },
+  "critic":             { /* the critic agent's own run, iteration by iteration */ }
 }
 ```
 
-Those nine keys are the whole of the export. Every key is always present; a
+Those eight keys are the whole of the export. Every key is always present; a
 section the run produced nothing for is `{}` or `[]` rather than absent.
 
 Two things a reader of an older export will look for and not find. The flat
@@ -112,8 +111,7 @@ per-topic sections (`baseline`, `final`, `phase_timeline`,
 each was a projection of the run rather than a fact of it, and they now come
 out of `timeline`, whose events carry the same facts attached to the stage
 that produced them. The old combined `critic_robustness` key is absent. Critic
-activity lives under `critic`; `robustness` is retained for V6 wire compatibility
-and historical artifact readers, not as a live agent surface.
+activity lives under `critic`.
 
 How the export itself went is reported once, on `metadata.warnings`. An
 earlier shape also carried a top-level `warnings`, taken partway through the
@@ -309,9 +307,7 @@ records. This is where the facts the older flat sections projected now live,
 attached to the stage that produced them.
 
 `close` is what the session settled at close: the `steps` the close sequencer
-ran and the `artifacts` it published. Its `robustness` field retains the
-`escalated` verdict and recorded `stop_reason`. Historical findings remain
-readable; new sessions do not run a Robustness agent to produce them.
+ran and the `artifacts` it published.
 
 `V6Outcome`, `V6TimelineEvent` and `V6Close` in
 `src/hyperloom/inference_optimizer/breakdown/schema.py` are the authority on
@@ -346,22 +342,6 @@ it was never asked.
 both the authored `verdict` and the `effective_verdict` the loop held it to.
 Both are kept: a reject the loop downgraded to advice still ran, and
 reporting either alone misreads the round.
-
----
-
-## `robustness`
-
-New sessions emit `{"turns": []}`. No Robustness agent, runtime RCA, monitor, or
-supervisor runs, and new report UI omits this section. The V6 key and historical
-readers remain so archived sessions can still be inspected without inventing
-activity. `close.robustness` separately retains `escalated` and `stop_reason`,
-plus any findings recorded in historical sessions.
-
-Historical `turns` rows may contain `turn_idx`, `tick_index`, `ts`, `intents`,
-`parse_warnings`, and `outcome`. In those records, `invalid_envelope` or
-`no_envelope` indicates an incomplete turn, whereas `intents` with an empty list
-indicates a completed turn with nothing raised. These are archived facts, not
-live recovery instructions.
 
 ---
 
@@ -548,8 +528,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
     "start_time": "2026-05-17T13:48:10Z",
     "end_time": "2026-05-17T13:58:42Z",
     "steps": [],
-    "artifacts": {},
-    "robustness": { "escalated": false, "stop_reason": "time_exhausted" }
+    "artifacts": {}
   },
 
   "critic": {
@@ -579,9 +558,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
         ]
       }
     ]
-  },
-
-  "robustness": { "turns": [] }
+  }
 }
 ```
 

@@ -109,10 +109,9 @@ def record_metadata_identity(
     payload: dict[str, Any] = {"session": session, "task_config": task_config}
     workflow_flags = manifest.get("workflow_flags")
     if isinstance(workflow_flags, Mapping):
-        from ..workflow_contract import manifest_contract_version, workflow_metadata
+        from ..workflow_contract import workflow_metadata
 
-        version = manifest_contract_version(manifest)
-        workflow = workflow_metadata(workflow_flags, version=version)
+        workflow = workflow_metadata(workflow_flags)
         authored_digest = manifest.get("workflow_contract_digest")
         if manifest.get("workflow_contract_version") and authored_digest != workflow["contract_digest"]:
             raise ValueError("manifest workflow contract identity does not match the published contract")

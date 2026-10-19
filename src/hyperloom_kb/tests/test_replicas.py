@@ -21,6 +21,7 @@ from hyperloom_kb import (
     ImmutableExperienceConflict,
     LLMQueryPlanner,
     PlannerConfiguration,
+    ReadQuery,
     RemoteClient,
     RemoteClientError,
     RemoteConfig,
@@ -47,7 +48,7 @@ def _replica(home: Path, database: Database) -> ExperienceHTTPService:
 
 
 def _read_ids(replica: ExperienceHTTPService) -> set[str]:
-    read = replica.read(decision=DECISION, context=_read_context(), limit=100)
+    read = replica.read(ReadQuery(decision=DECISION, context=_read_context(), limit=100))
     return {str(reference["id"]) for reference in read["rendered_refs"]}
 
 

@@ -478,12 +478,13 @@ class TestCliExport:
 
         monkeypatch.setattr(cli.os, "environ", dict(cli.os.environ), raising=False)
 
-        def call(layout=CPX_36, **kw):
+        def call(layout=CPX_36, *, declared_mode=None, streams_per_partition=None, model_path=None, **kw):
             card(layout)
-            kw.setdefault("declared_mode", None)
-            kw.setdefault("streams_per_partition", None)
             kw.setdefault("framework", "xdit")
-            return cli._export_partition_shape(**kw)
+            model = cli.PartitionModel(model_path, kw.pop("precision", None), kw.pop("shared_state", None))
+            return cli._export_partition_shape(
+                cli.PartitionRequest(declared_mode, streams_per_partition), model=model, **kw
+            )
 
         return call
 

@@ -108,6 +108,18 @@ class RequestContext:
         )
 
 
+@dataclass(frozen=True)
+class ServedRequest:
+    """One answered HTTP request as the metrics count it: its method, route, status, duration and sizes."""
+
+    method: str
+    route: str
+    status: int
+    seconds: float
+    bytes_in: int
+    bytes_out: int
+
+
 current_request: ContextVar[RequestContext | None] = ContextVar("hyperloom_kb_request", default=None)
 
 
@@ -191,20 +203,19 @@ class Metrics:
         with self._lock:
             self._counters[key] = self._counters.get(key, 0.0) + amount
 
-    def observe_request(
-        self, *, method: str, route: str, status: int, seconds: float, bytes_in: int, bytes_out: int
-    ) -> None:
-        self.count("hyperloom_kb_http_requests_total", method=method, route=route, status=str(status))
-        self.count("hyperloom_kb_http_request_bytes_total", bytes_in, route=route)
-        self.count("hyperloom_kb_http_response_bytes_total", bytes_out, route=route)
-        labels: Labels = (("method", method), ("route", route))
+    def observe_request(self, served: ServedRequest) -> None:
+        route = served.route
+        self.count("hyperloom_kb_http_requests_total", method=served.method, route=route, status=str(served.status))
+        self.count("hyperloom_kb_http_request_bytes_total", served.bytes_in, route=route)
+        self.count("hyperloom_kb_http_response_bytes_total", served.bytes_out, route=route)
+        labels: Labels = (("method", served.method), ("route", route))
         with self._lock:
             buckets = self._buckets.setdefault(labels, [0] * (len(LATENCY_BUCKETS) + 1))
             for index, bound in enumerate(LATENCY_BUCKETS):
-                if seconds <= bound:
+                if served.seconds <= bound:
                     buckets[index] += 1
             buckets[-1] += 1
-            self._sums[labels] = self._sums.get(labels, 0.0) + seconds
+            self._sums[labels] = self._sums.get(labels, 0.0) + served.seconds
 
     @contextmanager
     def in_flight(self) -> Iterator[None]:
@@ -260,6 +271,7 @@ __all__ = [
     "JsonLogFormatter",
     "Metrics",
     "RequestContext",
+    "ServedRequest",
     "client_headers",
     "current_request",
     "event",

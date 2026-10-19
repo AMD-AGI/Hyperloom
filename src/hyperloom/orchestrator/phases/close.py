@@ -36,8 +36,6 @@ _TASK_STATE_RUNNING: str = "running"
 # Appended to a close step's idempotency key when its first row is dead, so ``create_or_return_existing`` mints a new
 # task instead of returning the corpse.
 _RETRY_KEY_SUFFIX: str = "retry"
-# Fallback registry poll interval, for a caller with no dispatcher poll set.
-_DEFAULT_TASK_POLL_SEC: float = 10.0
 
 # Floor on how long CLOSE waits for a step it found already running, for a step the catalogue prices at almost nothing
 # or does not carry at all.
@@ -261,13 +259,15 @@ class ClosePhase(CoordinatorCollaborator):
             snapshots = state.roofline_snapshots if isinstance(state.roofline_snapshots, list) else []
             _close_out.record_roofline_progress(
                 self.session_dir,
-                baseline_tput=state.baseline_tput,
-                baseline_ts=state.start_ts,
-                optimization_stack=state.optimization_stack,
-                latest_snapshot=snapshots[-1] if snapshots else None,
-                current_best_tput=(state.current_best or {}).get("tput"),
-                cumulative_gain_pct=state.cumulative_gain_validated,
-                failure_streak=state.roofline_failure_streak,
+                _close_out.RooflineProgress(
+                    baseline_tput=state.baseline_tput,
+                    baseline_ts=state.start_ts,
+                    optimization_stack=state.optimization_stack,
+                    latest_snapshot=snapshots[-1] if snapshots else None,
+                    current_best_tput=(state.current_best or {}).get("tput"),
+                    cumulative_gain_pct=state.cumulative_gain_validated,
+                    failure_streak=state.roofline_failure_streak,
+                ),
             )
         except Exception:
             log.debug("CLOSE: roofline progress record failed", exc_info=True)
@@ -303,7 +303,7 @@ class ClosePhase(CoordinatorCollaborator):
         """Snapshot the configuration the session ended on into the close section."""
         try:
             state = self.shared_state
-            best = state.current_best if isinstance(state.current_best, dict) else {}
+            best = state.current_best
             config = self._coord.writeback.current_best_launch_config()
             action_path: list[str] = []
             for entry in state.optimization_stack or []:
@@ -314,12 +314,14 @@ class ClosePhase(CoordinatorCollaborator):
                 action_path.append(f"{action}:{variant}" if variant else action)
             _close_out.record_final_recipe(
                 self.session_dir,
-                throughput=best.get("tput"),
-                ttft_mean_ms=best.get("ttft_mean_ms"),
-                e2el_mean_ms=best.get("e2el_mean_ms"),
-                action_path=action_path,
-                extra_server_args=config.get("extra_server_args") or "",
-                extra_envs=config.get("extra_envs") or {},
+                _close_out.FinalRecipe(
+                    throughput=best.get("tput"),
+                    ttft_mean_ms=best.get("ttft_mean_ms"),
+                    e2el_mean_ms=best.get("e2el_mean_ms"),
+                    action_path=action_path,
+                    extra_server_args=config.get("extra_server_args") or "",
+                    extra_envs=config.get("extra_envs") or {},
+                ),
             )
         except Exception:
             log.debug("CLOSE: final recipe record failed", exc_info=True)
@@ -528,10 +530,7 @@ class ClosePhase(CoordinatorCollaborator):
         # The verdict, recorded last because reaching this line is the evidence
         # for it. A reader looking at the steps alone cannot tell the ones that
         # had not happened yet from the ones that never will.
-        _close_out.record_close_settled(
-            self.session_dir,
-            stop_reason=str(self.shared_state.stop_reason or ""),
-        )
+        _close_out.record_close_settled(self.session_dir)
         from hyperloom.inference_optimizer.breakdown.recorder import record_stage_reached
 
         record_stage_reached(self.session_dir, "close")
@@ -796,15 +795,17 @@ class ClosePhase(CoordinatorCollaborator):
         ts = datetime.now(timezone.utc).isoformat()
         _close_out.record_close_step(
             self.session_dir,
-            step=step,
-            status=status,
-            ts=ts,
-            task_id=task_id,
-            detail=detail,
-            optional=step in _OPTIONAL_CLOSE_STEPS,
-            artifact_path=artifact_path,
-            artifact_digest=artifact_digest,
-            error=detail if status == "failed" else "",
+            _close_out.CloseStep(
+                step=step,
+                status=status,
+                ts=ts,
+                task_id=task_id,
+                detail=detail,
+                optional=step in _OPTIONAL_CLOSE_STEPS,
+                artifact_path=artifact_path,
+                artifact_digest=artifact_digest,
+                error=detail if status == "failed" else "",
+            ),
         )
         entry: dict[str, Any] = {
             "step": step,
@@ -866,9 +867,7 @@ class ClosePhase(CoordinatorCollaborator):
         elif state.pending_escalate_hint:
             state.discard_pending_escalate_hint()
         _phase_state.record_phase_transition(state, to_phase=target, reason=reason, evidence=evidence, ts_unix=now)
-        machine.fire_phase_exit(
-            Transition(from_phase=prior, to_phase=target, reason=reason, evidence=evidence, loopback=False)
-        )
+        machine.fire_phase_exit(Transition(from_phase=prior, to_phase=target, reason=reason, evidence=evidence))
         _phase_state.record_lifecycle_event(
             state, step=target, status=_phase_state.LIFECYCLE_STATUS_ENTER, phase=target, detail=f"reason={reason}"
         )
@@ -968,7 +967,6 @@ class ClosePhase(CoordinatorCollaborator):
                 to_phase=_phase_state.PHASE_CLOSE,
                 reason=reason,
                 evidence={},
-                loopback=False,
             )
         )
         return True

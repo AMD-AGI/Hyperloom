@@ -549,7 +549,6 @@ def test_stop_reason_vocab_has_v08_additions():
     for new in (
         "no_kernel_skipped",
         "sweep_done",
-        "robustness_escalated",
         "prelude_baseline_failed",
         "time_exhausted_during_prelude",
     ):

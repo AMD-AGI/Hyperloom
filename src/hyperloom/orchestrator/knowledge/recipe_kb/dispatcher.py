@@ -237,24 +237,6 @@ class RecipeKB:
         )
         return rows
 
-    def append_attempt(self, **kwargs: Any) -> dict[str, Any]:
-        """Append one local attempt row."""
-
-        return self.local.append_attempt(**kwargs)
-
-    def list_attempts(
-        self,
-        *,
-        canonical_id: str,
-        session_id: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """List local attempts, optionally filtered by session id."""
-
-        return self.local.list_attempts(
-            canonical_id=canonical_id,
-            session_id=session_id,
-        )
-
     def close(self) -> None:
         """Close the local store when it exposes a transport."""
 

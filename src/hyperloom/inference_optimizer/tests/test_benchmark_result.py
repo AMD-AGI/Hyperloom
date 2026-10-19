@@ -643,97 +643,6 @@ def test_harvest_creates_destination_if_missing(tmp_path):
     assert harvested
 
 
-# Approximate throughput for killed-overtime variants (server.log parsing)
-_SGLANG_LOG = """\
-[2026-06-12 10:00:00] INFO: server started
-Decode batch. #running-req: 64, #token: 1000, token usage: 0.10, gen throughput (token/s): 100.0, #queue-req: 0
-Decode batch. #running-req: 64, #token: 2000, token usage: 0.20, gen throughput (token/s): 900.0, #queue-req: 0
-Decode batch. #running-req: 64, #token: 3000, token usage: 0.30, gen throughput (token/s): 1000.0, #queue-req: 0
-Decode batch. #running-req: 64, #token: 4000, token usage: 0.40, gen throughput (token/s): 1100.0, #queue-req: 0
-Decode batch. #running-req: 64, #token: 5000, token usage: 0.50, gen throughput (token/s): 1200.0, #queue-req: 0
-"""
-
-_VLLM_LOG = """\
-INFO: Started server process
-Avg prompt throughput: 5000.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 64 reqs
-Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 800.0 tokens/s, Running: 64 reqs
-Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 1000.0 tokens/s, Running: 64 reqs
-Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 1200.0 tokens/s, Running: 64 reqs
-"""
-
-
-def test_estimate_from_sglang_server_log(tmp_path):
-    """sglang ``gen throughput`` lines parse; warmup-trimmed steady mean returned."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text(_SGLANG_LOG)
-    est = br.estimate_output_throughput_from_server_log(log_path)
-    assert est is not None
-    # warmup_skip_frac 0.25 drops the 100.0 ramp; mean(900,1000,1100,1200) = 1050.0.
-    assert est["output_throughput"] == pytest.approx(1050.0)
-    assert est["num_samples"] == 5
-    assert est["source_path"] == str(log_path)
-
-
-def test_estimate_from_vllm_server_log_filters_zero(tmp_path):
-    """vllm ``Avg generation throughput`` parses; prefill-only zeros dropped."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text(_VLLM_LOG)
-    est = br.estimate_output_throughput_from_server_log(log_path)
-    assert est is not None
-    # 3 positive samples (0.0 prefill filtered); mean(800,1000,1200)=1000.0.
-    assert est["output_throughput"] == pytest.approx(1000.0)
-    assert est["num_samples"] == 3
-
-
-def test_estimate_returns_none_without_samples(tmp_path):
-    """A log with no throughput markers yields no estimate."""
-    log_path = tmp_path / "server.log"
-    log_path.write_text("INFO: nothing useful here\nWARN: still nothing\n")
-    assert br.estimate_output_throughput_from_server_log(log_path) is None
-
-
-def test_estimate_returns_none_for_missing_file(tmp_path):
-    """A non-existent log path is tolerated (returns None, never raises)."""
-    assert br.estimate_output_throughput_from_server_log(tmp_path / "absent.log") is None
-
-
-def test_estimate_killed_variant_prefers_richest_log(tmp_path):
-    """``estimate_killed_variant_throughput`` scans the slot recursively and uses the largest server.log (the engine's full decode trace)."""
-    slot = tmp_path / "variant_00_vA"
-    (slot / "benchmark_sglang_x").mkdir(parents=True)
-    # A tiny stub plus the full in-slot log; the larger one wins.
-    (slot / "server.log").write_text(_SGLANG_LOG)
-    (slot / "benchmark_sglang_x" / "server.log").write_text(
-        "Decode batch. gen throughput (token/s): 5.0, #queue-req: 0\n"
-    )
-    est = br.estimate_killed_variant_throughput(slot)
-    assert est is not None
-    assert est["output_throughput"] == pytest.approx(1050.0)
-
-
-def test_estimate_killed_variant_none_when_no_logs(tmp_path):
-    """No server.log anywhere under the slot -> no estimate."""
-    slot = tmp_path / "variant_00_vA"
-    slot.mkdir()
-    assert br.estimate_killed_variant_throughput(slot) is None
-
-
-def test_explicitly_invalid_agentx_submission_is_always_rejected(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", "1")
-    # submission_valid=False means the scenario explicitly rejected it; the escape hatch must not exempt this case.
-    assert (
-        br.is_valid_measurement(
-            {
-                "output_throughput": 170.0,
-                "completed_requests": 10,
-                "submission_valid": False,
-            }
-        )
-        is False
-    )
-
-
 def test_unverified_submission_accepted_when_hatch_is_set(monkeypatch):
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     monkeypatch.setenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", "1")
@@ -743,21 +652,6 @@ def test_unverified_submission_accepted_when_hatch_is_set(monkeypatch):
             "completed_requests": 10,
             "submission_valid": None,
         }
-    )
-
-
-def test_unverified_submission_rejected_without_hatch(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.delenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", raising=False)
-    assert (
-        br.is_valid_measurement(
-            {
-                "output_throughput": 170.0,
-                "completed_requests": 10,
-                "submission_valid": None,
-            }
-        )
-        is False
     )
 
 

@@ -70,15 +70,6 @@ def serving_slot_busy() -> bool:
         return False
 
 
-@dataclass
-class SubprocessResult:
-    """Declarative shape for a subprocess executed inside a Ray worker."""
-
-    returncode: int
-    stdout: str
-    stderr: str
-
-
 def align_hip_with_ray_rocr(env: dict[str, str]) -> dict[str, str]:
     """Ray narrows only ``ROCR_VISIBLE_DEVICES`` per task; re-index HIP into that view, in place."""
     hip = hip_mask_within_rocr(env)
@@ -97,33 +88,40 @@ def _merge_worker_env(caller_env: dict[str, str] | None) -> dict[str, str]:
     return scrub_benchmark_process_env(align_hip_with_ray_rocr(merged))
 
 
-def _run_subprocess_worker(
-    *,
-    cmd: list[str],
-    env: dict[str, str] | None,
-    cwd: str | None,
-    timeout_s: int | float | None,
-    silence_timeout_sec: float | None,
-    server_log_path: str | None,
-    server_already_ready: bool,
-    session_remaining_sec: float | None = None,
-) -> tuple[int, str, str]:
+@dataclass(frozen=True)
+class SessionKillRound:
+    """One benchmark round a Ray worker runs under session-kill semantics.
+
+    ``session_remaining_sec`` is a duration, re-anchored as a deadline on the worker's own clock.
+    """
+
+    cmd: list[str]
+    env: dict[str, str] | None = None
+    cwd: str | None = None
+    timeout: int | float | None = None
+    silence_timeout_sec: float | None = None
+    server_log_path: str | None = None
+    server_already_ready: bool = False
+    session_remaining_sec: float | None = None
+
+
+def _run_subprocess_worker(bench_round: SessionKillRound) -> tuple[int, str, str]:
     """Ray worker body: run the subprocess under session-kill semantics."""
     from hyperloom.orchestrator.actions.executors._subprocess_kill import (
         session_remaining_to_deadline_sec,
     )
     from hyperloom.orchestrator.actions.executors._subprocess_kill import run_with_session_kill
 
-    worker_env = _merge_worker_env(env)
+    worker_env = _merge_worker_env(bench_round.env)
     proc = run_with_session_kill(
-        cmd,
+        bench_round.cmd,
         env=worker_env,
-        cwd=cwd,
-        timeout=timeout_s,
-        silence_timeout_sec=silence_timeout_sec,
-        server_log_path=server_log_path,
-        server_already_ready=server_already_ready,
-        session_deadline_sec=session_remaining_to_deadline_sec(session_remaining_sec),
+        cwd=bench_round.cwd,
+        timeout=bench_round.timeout,
+        silence_timeout_sec=bench_round.silence_timeout_sec,
+        server_log_path=bench_round.server_log_path,
+        server_already_ready=bench_round.server_already_ready,
+        session_deadline_sec=session_remaining_to_deadline_sec(bench_round.session_remaining_sec),
     )
     return proc.returncode, proc.stdout or "", proc.stderr or ""
 
@@ -163,17 +161,6 @@ def _resolve_head_num_gpus(num_gpus: int | None) -> int | None:
         return num_gpus
     env_n = os.environ.get("INFERENCE_OPTIMIZER_RAY_NUM_GPUS", "").strip()
     return int(env_n) if env_n.isdigit() else None
-
-
-def resolve_shared_artifact_root(session_dir: Path | str) -> Path:
-    """Resolve the shared artifact root for per-task artifacts."""
-    session_dir = Path(session_dir)
-    mn_root = os.environ.get("HYPERLOOM_MN_PROFILE_TRACE_DIR", "").strip()
-    from ._multi_node_env import is_multi_node
-
-    if is_multi_node() and mn_root:
-        return Path(mn_root)
-    return session_dir
 
 
 def strip_visible_devices_from_config(config_path: Path | str) -> Path:
@@ -231,10 +218,8 @@ def mark_ray_backend_unhealthy() -> None:
 
 __all__ = [
     "RayExecutionBackend",
-    "SubprocessResult",
     "_should_use_ray_backend",
     "get_ray_backend",
     "mark_ray_backend_unhealthy",
-    "resolve_shared_artifact_root",
     "strip_visible_devices_from_config",
 ]

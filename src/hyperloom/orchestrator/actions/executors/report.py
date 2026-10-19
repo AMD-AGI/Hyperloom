@@ -238,13 +238,6 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "coordinator_exception": "The coordinator loop raised an unhandled exception; the last validated result was preserved.",
     "custom": "A caller-supplied stop condition (stop_when) fired.",
     "unknown": "No specific stop reason was recorded (e.g. a terminal session was resumed); treat as unclassified.",
-    # Policy / robustness governor.
-    "robustness_escalated": (
-        "Robustness escalated: the run closed early with budget still on the clock (not a target hit). "
-        "Common triggers are a validated-gain plateau, rising crash_count, or a stale aiter JIT build. "
-        "A close driven by the remaining budget reports time_exhausted instead. "
-        "The best validated result was locked in before exit."
-    ),
     "baseline_failed": "Baseline never produced a valid measurement; see the failure summary / server log.",
     "server_argv_invalid": (
         "The installed framework's own argument parser refused the composed server argv before any "
@@ -308,12 +301,8 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "enablement_attempts_exhausted": "The enablement loop stopped after too many consecutive rounds bought no ground. A bring-up that is still clearing new boot failures is bounded by the run's wall clock instead.",
     "baseline_accuracy_failed": "The baseline produced no accuracy result even though the accuracy test was expected to run (broken eval or missing quality gate). The run stopped rather than optimize against an unvalidated baseline.",
     AGENTX_PREFLIGHT_STOP_REASON: (
-        "HYPERLOOM_AGENTX is on but its benchmark client (aiperf) is missing or is not the pinned "
-        "AIPERF_REF build, and the automatic install did not resolve it. This is an environment gap, "
-        "not something a framework patch can close, so the run stopped on the first occurrence rather "
-        "than spending its budget in the enablement lane. Fix: run "
-        "src/hyperloom/inference_optimizer/assets/install.sh --only-aiperf (the failure it prints is "
-        "the real cause), or point AIPERF_BIN at an existing pinned build."
+        "The MLPerf agentic client failed its execution preflight. Check the named missing dependency "
+        "and rerun setup before resuming; a framework patch cannot repair this environment gap."
     ),
     PATCH_RECOVERY_INCOMPLETE_STOP_REASON: (
         "A patch lifecycle owed the framework tree a revert and could not finish it, so the tree still "
@@ -590,7 +579,7 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append(f"- **Budget**: {summary['max_minutes']} minutes")
     lines.append(f"- **Generated**: {summary['report_generated_at']}")
     lines.append("")
-    # Per-framework primary metric: serving reports throughput (tok/s/GPU), scriptable xDiT reports per-image latency
+    # Per-framework primary metric: serving reports throughput (tok/s), scriptable xDiT reports per-image latency
     # (e2el_mean_ms).
     from hyperloom.inference_optimizer import framework_registry
 
@@ -880,7 +869,7 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
             "_The **Theoretical peak** below is the decode "
             "memory-roofline ceiling derived from the GPU's HBM "
             "bandwidth and the model's weight + KV-cache traffic per "
-            "token (see `roofline_ceiling.compute_peak_from_state`). "
+            "token (see `roofline_ceiling.compute_roofline_breakdown_from_state`). "
             "It is an upper bound: real `output_throughput` always "
             "stays under it because of comm overhead, kernel "
             "efficiency < 100%, and KV-cache fragmentation. **Within "
@@ -921,7 +910,7 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
         "_The **Theoretical peak** below is the decode "
         "memory-roofline ceiling derived from the GPU's HBM "
         "bandwidth and the model's weight + KV-cache traffic per "
-        "token (see `roofline_ceiling.compute_peak_from_state`). "
+        "token (see `roofline_ceiling.compute_roofline_breakdown_from_state`). "
         "It is an upper bound: real `output_throughput` always "
         "stays under it because of comm overhead, kernel "
         "efficiency < 100%, and KV-cache fragmentation. **Within "

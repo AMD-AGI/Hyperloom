@@ -22,6 +22,9 @@ from kernelforge.fusion.author import (
     AUTHOR_RC_FAILED,
     AUTHOR_RC_SAFETY,
     AUTHOR_RC_TIMEOUT,
+    AuthorAgent,
+    AuthorBrief,
+    AuthorWorkspace,
     build_multi_author_prompt,
     run_author,
 )
@@ -49,7 +52,7 @@ def _recipe(flag: str = "FUSED"):
 
 
 def test_multi_prompt_single_recipe_delegates():
-    p = build_multi_author_prompt([_recipe()], framework="sglang", ab_hint="run")
+    p = build_multi_author_prompt([_recipe()], AuthorBrief(framework="sglang", ab_hint="run"))
     # single recipe path returns the same shape as build_author_prompt
     assert "residual_add_rmsnorm" in p
     assert "Fusion 1:" not in p
@@ -57,7 +60,7 @@ def test_multi_prompt_single_recipe_delegates():
 
 def test_multi_prompt_multiple_recipes():
     r1, r2 = _recipe("FLAG_A"), _recipe("FLAG_B")
-    p = build_multi_author_prompt([r1, r2], framework="sglang", ab_hint="run", harness_path="/tmp/h.py")
+    p = build_multi_author_prompt([r1, r2], AuthorBrief(framework="sglang", ab_hint="run", harness_path="/tmp/h.py"))
     assert "Fusion 1:" in p and "Fusion 2:" in p
     assert "FLAG_A" in p and "FLAG_B" in p
     assert "env_flags=FLAG_A FLAG_B" in p
@@ -67,7 +70,7 @@ def test_multi_prompt_multiple_recipes():
 def test_multi_prompt_rocm_absent_when_none_native():
     r1, r2 = _recipe("FLAG_A"), _recipe("FLAG_B")
     r1["rocm_native"] = r2["rocm_native"] = False
-    p = build_multi_author_prompt([r1, r2], framework="sglang", ab_hint="run")
+    p = build_multi_author_prompt([r1, r2], AuthorBrief(framework="sglang", ab_hint="run"))
     assert "TARGET IS ROCm" not in p
 
 
@@ -91,13 +94,8 @@ def test_registered_author_uses_backend_contract(tmp_path):
 
     rc = run_author(
         "USER AUTHORING PROMPT",
-        workdir=str(repo),
-        log_path=str(log_path),
-        gpu="3",
-        max_turns=17,
-        timeout_s=33,
-        backend=Backend(),
-        target_files=[str(source)],
+        AuthorWorkspace(workdir=str(repo), log_path=str(log_path), target_files=[str(source)]),
+        AuthorAgent(backend=Backend(), gpu="3", max_turns=17, timeout_s=33),
     )
 
     assert rc == 0
@@ -147,11 +145,8 @@ def test_registered_author_timeout_keeps_return_code_contract(tmp_path, monkeypa
 
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(tmp_path / "author.log"),
-        backend=Backend(),
-        target_files=[str(target)],
-        timeout_s=1,
+        AuthorWorkspace(workdir=str(repo), log_path=str(tmp_path / "author.log"), target_files=[str(target)]),
+        AuthorAgent(backend=Backend(), timeout_s=1),
     )
 
     assert rc == AUTHOR_RC_TIMEOUT
@@ -180,10 +175,8 @@ def test_registered_author_reports_provider_safety_stop_as_deterministic(tmp_pat
     log_path = tmp_path / "author-provider-safety.log"
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(log_path),
-        backend=Backend(),
-        target_files=[str(target)],
+        AuthorWorkspace(workdir=str(repo), log_path=str(log_path), target_files=[str(target)]),
+        AuthorAgent(backend=Backend()),
     )
 
     assert rc == AUTHOR_RC_SAFETY
@@ -204,10 +197,8 @@ def test_registered_author_reports_transport_failure_as_retryable(tmp_path):
 
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(tmp_path / "author-transport.log"),
-        backend=Backend(),
-        target_files=[str(target)],
+        AuthorWorkspace(workdir=str(repo), log_path=str(tmp_path / "author-transport.log"), target_files=[str(target)]),
+        AuthorAgent(backend=Backend()),
     )
 
     assert rc == AUTHOR_RC_FAILED
@@ -244,15 +235,17 @@ def test_registered_author_retries_a_provider_safety_class_raised_for_io(tmp_pat
 
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(tmp_path / "author-provider-io.log"),
-        backend=_io_safety_backend(
-            _provider_safety_error(
-                "Could not snapshot /repo/models/qwen3.py: [Errno 5] Input/output error",
-                rejection=False,
+        AuthorWorkspace(
+            workdir=str(repo), log_path=str(tmp_path / "author-provider-io.log"), target_files=[str(target)]
+        ),
+        AuthorAgent(
+            backend=_io_safety_backend(
+                _provider_safety_error(
+                    "Could not snapshot /repo/models/qwen3.py: [Errno 5] Input/output error",
+                    rejection=False,
+                )
             )
         ),
-        target_files=[str(target)],
     )
 
     assert rc == AUTHOR_RC_FAILED
@@ -281,10 +274,10 @@ def test_registered_author_reports_a_timeout_a_failed_rollback_wrapped(tmp_path)
 
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(tmp_path / "author-timeout-rollback.log"),
-        backend=Backend(),
-        target_files=[str(target)],
+        AuthorWorkspace(
+            workdir=str(repo), log_path=str(tmp_path / "author-timeout-rollback.log"), target_files=[str(target)]
+        ),
+        AuthorAgent(backend=Backend()),
     )
 
     assert rc == AUTHOR_RC_TIMEOUT
@@ -298,10 +291,8 @@ def test_registered_author_retries_a_locked_git_index_before_the_run(tmp_path):
     log_path = tmp_path / "author-index-locked.log"
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(log_path),
-        backend=_mutating_backend(lambda: None),
-        target_files=[str(target)],
+        AuthorWorkspace(workdir=str(repo), log_path=str(log_path), target_files=[str(target)]),
+        AuthorAgent(backend=_mutating_backend(lambda: None)),
     )
 
     assert rc == AUTHOR_RC_FAILED
@@ -319,10 +310,8 @@ def test_registered_author_retries_a_git_index_locked_during_restoration(tmp_pat
     log_path = tmp_path / "author-index-locked-late.log"
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(log_path),
-        backend=_mutating_backend(mutate),
-        target_files=[str(target)],
+        AuthorWorkspace(workdir=str(repo), log_path=str(log_path), target_files=[str(target)]),
+        AuthorAgent(backend=_mutating_backend(mutate)),
     )
 
     assert rc == AUTHOR_RC_FAILED
@@ -338,11 +327,13 @@ def test_registered_author_rejects_a_nominated_module_directory_that_is_absent(
     log_path = tmp_path / "author-absent-module-dir.log"
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(log_path),
-        backend=_mutating_backend(lambda: None),
-        target_files=[str(target)],
-        new_module_dirs=[str(repo / "models")],
+        AuthorWorkspace(
+            workdir=str(repo),
+            log_path=str(log_path),
+            target_files=[str(target)],
+            new_module_dirs=[str(repo / "models")],
+        ),
+        AuthorAgent(backend=_mutating_backend(lambda: None)),
     )
 
     assert rc == AUTHOR_RC_SAFETY
@@ -367,10 +358,8 @@ def test_registered_author_names_the_run_failure_beside_a_workspace_rejection(
     log_path = tmp_path / "author-violation-and-timeout.log"
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(log_path),
-        backend=Backend(),
-        target_files=[str(target)],
+        AuthorWorkspace(workdir=str(repo), log_path=str(log_path), target_files=[str(target)]),
+        AuthorAgent(backend=Backend()),
     )
 
     assert rc == AUTHOR_RC_SAFETY
@@ -395,11 +384,10 @@ def test_registered_author_rejects_a_permitted_new_module_that_was_staged(tmp_pa
     log_path = tmp_path / "author-staged-new-module.log"
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(log_path),
-        backend=_mutating_backend(mutate),
-        target_files=[str(target)],
-        new_module_dirs=[str(repo)],
+        AuthorWorkspace(
+            workdir=str(repo), log_path=str(log_path), target_files=[str(target)], new_module_dirs=[str(repo)]
+        ),
+        AuthorAgent(backend=_mutating_backend(mutate)),
     )
 
     assert rc == AUTHOR_RC_SAFETY
@@ -503,10 +491,8 @@ def test_registered_author_restores_non_target_git_mutations(tmp_path, mutation)
     log_path = tmp_path / f"author-{mutation}.log"
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(log_path),
-        backend=_mutating_backend(mutate),
-        target_files=[str(target)],
+        AuthorWorkspace(workdir=str(repo), log_path=str(log_path), target_files=[str(target)]),
+        AuthorAgent(backend=_mutating_backend(mutate)),
     )
 
     assert rc == AUTHOR_RC_SAFETY
@@ -534,10 +520,8 @@ def test_registered_author_preserves_allowed_target_changes(tmp_path):
 
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(tmp_path / "author-target.log"),
-        backend=_mutating_backend(mutate),
-        target_files=[str(target)],
+        AuthorWorkspace(workdir=str(repo), log_path=str(tmp_path / "author-target.log"), target_files=[str(target)]),
+        AuthorAgent(backend=_mutating_backend(mutate)),
     )
 
     assert rc == 0
@@ -556,10 +540,8 @@ def test_registered_author_may_write_the_staged_harness(tmp_path):
 
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(tmp_path / "author-staging.log"),
-        backend=_mutating_backend(mutate),
-        target_files=[str(target)],
+        AuthorWorkspace(workdir=str(repo), log_path=str(tmp_path / "author-staging.log"), target_files=[str(target)]),
+        AuthorAgent(backend=_mutating_backend(mutate)),
     )
 
     assert rc == 0
@@ -599,11 +581,8 @@ def test_registered_author_restores_after_backend_timeout(tmp_path):
     log_path = tmp_path / "author-timeout-restore.log"
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(log_path),
-        backend=Backend(),
-        target_files=[str(target)],
-        timeout_s=1,
+        AuthorWorkspace(workdir=str(repo), log_path=str(log_path), target_files=[str(target)]),
+        AuthorAgent(backend=Backend(), timeout_s=1),
     )
 
     assert rc != 0
@@ -674,10 +653,8 @@ def test_registered_author_preserves_preexisting_dirty_index_and_untracked_state
 
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(tmp_path / "author-dirty.log"),
-        backend=_mutating_backend(mutate),
-        target_files=[str(target)],
+        AuthorWorkspace(workdir=str(repo), log_path=str(tmp_path / "author-dirty.log"), target_files=[str(target)]),
+        AuthorAgent(backend=_mutating_backend(mutate)),
     )
 
     assert rc == AUTHOR_RC_SAFETY
@@ -736,10 +713,10 @@ def test_registered_author_accepts_target_edit_with_preexisting_dirty_state(tmp_
 
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(tmp_path / "author-dirty-target.log"),
-        backend=_mutating_backend(mutate),
-        target_files=[str(target)],
+        AuthorWorkspace(
+            workdir=str(repo), log_path=str(tmp_path / "author-dirty-target.log"), target_files=[str(target)]
+        ),
+        AuthorAgent(backend=_mutating_backend(mutate)),
     )
 
     assert rc == 0
@@ -793,11 +770,10 @@ def test_registered_author_keeps_permitted_new_fused_module(tmp_path):
     log_path = tmp_path / "author-new-module.log"
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(log_path),
-        backend=_mutating_backend(mutate),
-        target_files=[str(target)],
-        new_module_dirs=[str(repo)],
+        AuthorWorkspace(
+            workdir=str(repo), log_path=str(log_path), target_files=[str(target)], new_module_dirs=[str(repo)]
+        ),
+        AuthorAgent(backend=_mutating_backend(mutate)),
     )
 
     assert rc == 0
@@ -828,11 +804,10 @@ def test_registered_author_restores_new_file_outside_permitted_scope(tmp_path, r
     log_path = tmp_path / "author-outside-scope.log"
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(log_path),
-        backend=_mutating_backend(mutate),
-        target_files=[str(target)],
-        new_module_dirs=[str(repo)],
+        AuthorWorkspace(
+            workdir=str(repo), log_path=str(log_path), target_files=[str(target)], new_module_dirs=[str(repo)]
+        ),
+        AuthorAgent(backend=_mutating_backend(mutate)),
     )
 
     assert rc == AUTHOR_RC_SAFETY
@@ -857,11 +832,13 @@ def test_registered_author_restores_edit_to_existing_fused_module(tmp_path):
 
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(tmp_path / "author-existing-fused.log"),
-        backend=_mutating_backend(mutate),
-        target_files=[str(target)],
-        new_module_dirs=[str(repo)],
+        AuthorWorkspace(
+            workdir=str(repo),
+            log_path=str(tmp_path / "author-existing-fused.log"),
+            target_files=[str(target)],
+            new_module_dirs=[str(repo)],
+        ),
+        AuthorAgent(backend=_mutating_backend(mutate)),
     )
 
     assert rc == AUTHOR_RC_SAFETY
@@ -884,11 +861,13 @@ def test_registered_author_hook_and_prompt_match_the_permitted_scope(tmp_path):
 
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(tmp_path / "author-hook-scope.log"),
-        backend=Backend(),
-        target_files=[str(target)],
-        new_module_dirs=[str(repo)],
+        AuthorWorkspace(
+            workdir=str(repo),
+            log_path=str(tmp_path / "author-hook-scope.log"),
+            target_files=[str(target)],
+            new_module_dirs=[str(repo)],
+        ),
+        AuthorAgent(backend=Backend()),
     )
 
     assert rc == 0
@@ -926,10 +905,10 @@ def test_registered_author_preserves_allowed_target_index_change_while_restoring
 
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(tmp_path / "author-target-index.log"),
-        backend=_mutating_backend(mutate),
-        target_files=[str(target)],
+        AuthorWorkspace(
+            workdir=str(repo), log_path=str(tmp_path / "author-target-index.log"), target_files=[str(target)]
+        ),
+        AuthorAgent(backend=_mutating_backend(mutate)),
     )
 
     assert rc == AUTHOR_RC_SAFETY
@@ -957,10 +936,10 @@ def test_registered_author_restores_assume_unchanged_non_target(tmp_path):
 
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(tmp_path / "author-assume-unchanged.log"),
-        backend=_mutating_backend(mutate),
-        target_files=[str(target)],
+        AuthorWorkspace(
+            workdir=str(repo), log_path=str(tmp_path / "author-assume-unchanged.log"), target_files=[str(target)]
+        ),
+        AuthorAgent(backend=_mutating_backend(mutate)),
     )
 
     assert rc == AUTHOR_RC_SAFETY
@@ -997,10 +976,8 @@ def test_registered_author_rejects_unsafe_target_paths(tmp_path, target_kind):
     log_path = tmp_path / f"unsafe-{target_kind}.log"
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(log_path),
-        backend=Backend(),
-        target_files=[str(unsafe_target), str(target)],
+        AuthorWorkspace(workdir=str(repo), log_path=str(log_path), target_files=[str(unsafe_target), str(target)]),
+        AuthorAgent(backend=Backend()),
     )
 
     assert rc == AUTHOR_RC_SAFETY
@@ -1019,10 +996,8 @@ def test_registered_author_restores_target_symlink_escape(tmp_path):
 
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(tmp_path / "target-symlink.log"),
-        backend=_mutating_backend(mutate),
-        target_files=[str(target)],
+        AuthorWorkspace(workdir=str(repo), log_path=str(tmp_path / "target-symlink.log"), target_files=[str(target)]),
+        AuthorAgent(backend=_mutating_backend(mutate)),
     )
 
     assert rc == AUTHOR_RC_SAFETY
@@ -1069,10 +1044,8 @@ def test_registered_author_never_follows_non_target_parent_symlink(tmp_path):
 
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(tmp_path / "parent-symlink.log"),
-        backend=_mutating_backend(mutate),
-        target_files=[str(target)],
+        AuthorWorkspace(workdir=str(repo), log_path=str(tmp_path / "parent-symlink.log"), target_files=[str(target)]),
+        AuthorAgent(backend=_mutating_backend(mutate)),
     )
 
     assert rc == AUTHOR_RC_SAFETY
@@ -1092,10 +1065,10 @@ def test_registered_author_restores_file_replaced_by_directory(tmp_path):
 
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(tmp_path / "file-to-directory.log"),
-        backend=_mutating_backend(mutate),
-        target_files=[str(target)],
+        AuthorWorkspace(
+            workdir=str(repo), log_path=str(tmp_path / "file-to-directory.log"), target_files=[str(target)]
+        ),
+        AuthorAgent(backend=_mutating_backend(mutate)),
     )
 
     assert rc == AUTHOR_RC_SAFETY
@@ -1133,10 +1106,8 @@ def test_registered_author_fails_closed_when_git_head_changes(tmp_path):
     log_path = tmp_path / "head-change.log"
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(log_path),
-        backend=_mutating_backend(mutate),
-        target_files=[str(target)],
+        AuthorWorkspace(workdir=str(repo), log_path=str(log_path), target_files=[str(target)]),
+        AuthorAgent(backend=_mutating_backend(mutate)),
     )
 
     assert rc == AUTHOR_RC_SAFETY
@@ -1286,16 +1257,12 @@ def _counting_backend(*outcomes):
     return Backend
 
 
-def _author_with(tmp_path, backend_cls, **kwargs):
+def _author_with(tmp_path, backend_cls, timeout_s=1):
     repo, target, _non_target = _author_repo(tmp_path)
-    kwargs.setdefault("timeout_s", 1)
     rc = run_author(
         "P",
-        workdir=str(repo),
-        log_path=str(tmp_path / "author.log"),
-        backend=backend_cls(),
-        target_files=[str(target)],
-        **kwargs,
+        AuthorWorkspace(workdir=str(repo), log_path=str(tmp_path / "author.log"), target_files=[str(target)]),
+        AuthorAgent(backend=backend_cls(), timeout_s=timeout_s),
     )
     return rc, backend_cls.calls
 

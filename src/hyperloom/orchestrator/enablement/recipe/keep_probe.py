@@ -174,7 +174,7 @@ def probe_environment_closure(
 
 def _keep_probe_env(override: Mapping[str, Any] | None) -> dict[str, str]:
     """Return the inherited environment with the graded override applied."""
-    from ...actions.executors._grid_runner import apply_runtime_override
+    from hyperloom.inference_optimizer.runtime_environment import apply_runtime_override
 
     env = dict(os.environ)
     if override:

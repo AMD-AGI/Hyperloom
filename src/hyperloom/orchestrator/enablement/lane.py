@@ -26,8 +26,8 @@ from ..loop.offload import offload
 from .params import ENABLEMENT_PARAMS_BUDGET_SEC, _round_carriers
 from .artifacts import snapshot_round, write_setting_script
 from ..bringup import recorded_verdict, session_root
-from ..state.round_store import ADVANCED, BOOTED, FAILED, Round
-from ..state.task_registry import create_in_cursor, task_dispatch_origin
+from ..state.round_store import ADVANCED, BOOTED, FAILED, Round, RoundRequest
+from ..state.task_registry import TaskSpec, create_in_cursor, task_dispatch_origin
 from .recipe.section import recipe_for
 
 if TYPE_CHECKING:
@@ -162,13 +162,15 @@ class EnablementLane(CoordinatorCollaborator):
         # kind exists only in the params this dispatch built, and the log the
         # round was pointed at is replaced by the next advance.
         enablement_event.record_dispatch(
-            task_id=spec_tid,
-            attempt=stalled + 1,
-            failure_kind=str(params.get("enablement_failure_kind") or ""),
-            launch_log=launch_log,
-            candidate_refs=params.get("enablement_candidate_refs"),
-            mode=str(state.enablement_mode or ""),
-            origin=state.enablement.origin or enablement_event.ORIGIN_BOOT,
+            enablement_event.AuthoringDispatch(
+                task_id=spec_tid,
+                attempt=stalled + 1,
+                failure_kind=str(params.get("enablement_failure_kind") or ""),
+                launch_log=launch_log,
+                candidate_refs=params.get("enablement_candidate_refs"),
+                mode=str(state.enablement_mode or ""),
+                origin=state.enablement.origin or enablement_event.ORIGIN_BOOT,
+            )
         )
         state.save(self.session_dir)
         log.info(
@@ -289,23 +291,24 @@ class EnablementLane(CoordinatorCollaborator):
         def _join(cur: sqlite3.Cursor) -> None:
             create_in_cursor(
                 cur,
-                kind="specialist",
-                params=params,
-                idempotency_key=holder,
-                requires_lanes=lanes,
-                side_effects=["writes_results", "writes_patches"],
-                lease_ttl_sec=lease_ttl_sec,
-                task_id=holder,
-                dispatch_class="coordinator",
-                dispatch_origin=task_dispatch_origin(self.shared_state),
+                TaskSpec(
+                    kind="specialist",
+                    params=params,
+                    idempotency_key=holder,
+                    requires_lanes=lanes,
+                    side_effects=["writes_results", "writes_patches"],
+                    lease_ttl_sec=lease_ttl_sec,
+                    task_id=holder,
+                    dispatch_class="coordinator",
+                    dispatch_origin=task_dispatch_origin(self.shared_state),
+                ),
             )
 
         acquired = await self.rounds.open(
             _authoring_round_id(holder),
+            RoundRequest(now_unix=time.time(), request_id=holder),
             holder_task_id=holder,
             lease_sec=float(lease_ttl_sec),
-            now_unix=time.time(),
-            request_id=holder,
             join=_join,
         )
         if not acquired.ok:
@@ -363,9 +366,8 @@ class EnablementLane(CoordinatorCollaborator):
         now = time.time()
         await self.rounds.renew(
             round_row,
+            RoundRequest(now_unix=now, request_id=f"renew:{round_row.round_id}:{round_row.fence}:{now:.0f}"),
             lease_sec=lease,
-            now_unix=now,
-            request_id=f"renew:{round_row.round_id}:{round_row.fence}:{now:.0f}",
         )
 
     async def handoff_enablement_round(self, task: "Task") -> None:
@@ -390,10 +392,9 @@ class EnablementLane(CoordinatorCollaborator):
             lease = max(_MIN_LEASE_SEC, float(round_row.expires_unix) - float(round_row.renewed_unix))
         moved = await self.rounds.handoff(
             round_row,
+            RoundRequest(now_unix=time.time(), request_id=f"handoff:{task.task_id}"),
             new_holder_task_id=task.task_id,
             lease_sec=lease,
-            now_unix=time.time(),
-            request_id=f"handoff:{task.task_id}",
         )
         if not moved.ok:
             log.warning(
@@ -420,10 +421,12 @@ class EnablementLane(CoordinatorCollaborator):
             return
         await self.rounds.settle(
             round_row,
+            RoundRequest(
+                now_unix=time.time(),
+                request_id=f"settle:{round_row.round_id}:{round_row.fence}",
+                evidence={"reason": reason} if reason else {},
+            ),
             outcome=outcome,
-            now_unix=time.time(),
-            request_id=f"settle:{round_row.round_id}:{round_row.fence}",
-            evidence={"reason": reason} if reason else {},
         )
         holder = round_row.holder_task_id
         if await self.tasks.cancel_if_queued(holder, kind="specialist", reason="enablement_round_settled"):
@@ -749,23 +752,25 @@ def _finish_lane_event(
 ) -> None:
     """Assemble and emit the terminal enablement_event.finish call."""
     enablement_event.finish(
-        outcome=outcome,
-        reason=reason,
-        recipe=recipe_for(
-            lane,
-            session_dir=str(session_dir or ""),
-            mode=str(state.enablement_mode or ""),
-        ),
-        kept_patches=lane.kept_patches,
-        kept_artifacts=lane.kept_artifacts,
-        setup_commands=lane.setup_commands,
-        accepted_config=lane.accepted_config,
-        accepted_config_path=str(lane.accepted_config_path or ""),
-        setting_script=setting_script,
-        active_runtime=lane.active_runtime,
-        attempt_runtimes=lane.attempt_runtimes,
-        framework_root=str(lane.framework_root or ""),
-        stall_streak=stall_streak,
+        enablement_event.LaneTerminal(
+            outcome=outcome,
+            reason=reason,
+            recipe=recipe_for(
+                lane,
+                session_dir=str(session_dir or ""),
+                mode=str(state.enablement_mode or ""),
+            ),
+            kept_patches=lane.kept_patches,
+            kept_artifacts=lane.kept_artifacts,
+            setup_commands=lane.setup_commands,
+            accepted_config=lane.accepted_config,
+            accepted_config_path=str(lane.accepted_config_path or ""),
+            setting_script=setting_script,
+            active_runtime=lane.active_runtime,
+            attempt_runtimes=lane.attempt_runtimes,
+            framework_root=str(lane.framework_root or ""),
+            stall_streak=stall_streak,
+        )
     )
 
 
@@ -833,12 +838,14 @@ def _record_enablement_round(
     lane = state.enablement
     succeeded = bool(lane.succeeded)
     enablement_event.record_round(
-        task_id=_round_task_id(state, res),
-        attempt=int(attempt or 0),
-        result=res,
-        stall_streak=int(stall_streak or 0),
-        succeeded=succeeded,
-        validation_pending=bool(lane.validation_pending),
+        enablement_event.AuthoringRound(
+            task_id=_round_task_id(state, res),
+            attempt=int(attempt or 0),
+            result=res,
+            stall_streak=int(stall_streak or 0),
+            succeeded=succeeded,
+            validation_pending=bool(lane.validation_pending),
+        )
     )
     # A KEEP opens a revalidation window, so succeeded is only set by the
     # promote path, not here. This branch fires only after the stall cap.

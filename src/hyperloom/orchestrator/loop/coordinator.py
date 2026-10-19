@@ -11,7 +11,6 @@ import logging
 import math
 import os
 import time
-import traceback
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from functools import partial
@@ -67,7 +66,7 @@ from .intent_router import IntentRouter
 from .sub_agent_runner import SubAgentRunner
 from ..state.task_registry import TaskRegistry, task_dispatch_origin
 from ..collaborator import OrchestrationPrompt
-from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, append_llm_call, new_call_id
+from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
 from hyperloom.inference_optimizer.trace.context_events import PromptSnapshotTracker, record_prompt_snapshot
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
     EVENT_LLM_CALL,
@@ -792,9 +791,7 @@ class Coordinator:
                 tick=int(self.shared_state.tick or 0),
                 stage=stage,
                 agent=agent,
-                exc_type=type(exc).__name__,
-                message=str(exc),
-                traceback_text="".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+                exc=exc,
             )
             self.shared_state.increment_crash_count()
             self.shared_state.save(self.session_dir)
@@ -1298,15 +1295,14 @@ class Coordinator:
             )
             if not has_tokens:
                 return
-            record = LLMCallRecord.from_metadata(
+            site = LLMCallSite(
                 session_id=self.session_dir.name,
                 component=agent_name,
                 role=agent_name,
-                metadata=metadata,
                 tick=int(self.shared_state.tick or 0),
                 phase=(self.shared_state.phase or "") or None,
-                latency_ms=latency_ms,
             )
+            record = LLMCallRecord.from_metadata(site, metadata, latency_ms=latency_ms)
             append_llm_call(session_dir=self.session_dir, record=record)
         except Exception:
             log.debug(
@@ -1325,17 +1321,15 @@ class Coordinator:
     ) -> None:
         """Append one ``status=\"error\"`` ``llm_calls.jsonl`` row for a failed turn."""
         try:
-            record = LLMCallRecord.for_failure(
+            site = LLMCallSite(
                 session_id=self.session_dir.name,
                 component=agent_name,
                 role=agent_name,
-                error=error,
-                call_id=call_id,
-                model=getattr(self.backends.get(agent_name), "model", None),
                 tick=int(self.shared_state.tick or 0),
                 phase=(self.shared_state.phase or "") or None,
-                latency_ms=latency_ms,
             )
+            model = getattr(self.backends.get(agent_name), "model", None)
+            record = LLMCallRecord.for_failure(site, error, model=model, call_id=call_id, latency_ms=latency_ms)
             append_llm_call(session_dir=self.session_dir, record=record)
         except Exception:
             log.debug(

@@ -74,7 +74,6 @@ def predict_cuda_graph_on_gain(
     *,
     decode_batch: int = 16,
     calibration: Optional[list[tuple[float, float]]] = None,
-    discount: float = DEFAULT_SHARE_TO_GAIN_DISCOUNT,
     mem_share: Optional[float] = None,
     mem_saved_fraction: float = DEFAULT_MEM_SAVED_FRACTION,
 ) -> float:
@@ -92,4 +91,4 @@ def predict_cuda_graph_on_gain(
         # those ops occupy -- the documented invariant) AND the chain's own measured memory traffic m (cannot save
         # more than it moves; guards mem_saved_fraction > 1).
         return min(share, m, gain)
-    return min(share, share * discount * _batch_factor(decode_batch))
+    return min(share, share * DEFAULT_SHARE_TO_GAIN_DISCOUNT * _batch_factor(decode_batch))

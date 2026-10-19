@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hyperloom-inference_optimizer"
-version = "1.1.3"
+version = "1.1.4"
 description = "Inference Optimizer — two-role (Orchestration/Critic) autonomous LLM inference optimization runtime for AMD GPU platforms. Kernel optimization is handled by programmatic Python handlers."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -244,6 +244,7 @@ hyperloom = [
     "actions/*.md",
     # Release-contract shell installers + configs.
     "assets/*.sh",
+    "assets/*.py",
     "assets/*.example",
     "assets/configs/*.yaml",
     "assets/agentx/*.sh",
@@ -326,7 +327,6 @@ testpaths = [
 ]
 pythonpath = ["src", ".", "scripts"]
 markers = [
-    "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "targeted_build_e2e: end-to-end tests that run a real AITER compile on a ROCm host; skip with '-m \"not targeted_build_e2e\"' in CI.",
 ]
 
@@ -455,7 +455,7 @@ fail_under = 90
 # Base trailing argv for ``pytest`` in CI; the workflow appends sharding
 # (``--splits``/``--group``) and ``-n`` from the values below.
 pytest_ci_args = [
-    "-m", "not critic_agent_e2e and not targeted_build_e2e",
+    "-m", "not targeted_build_e2e",
     "--cov=.", "--cov-report=",
 ]
 # In-runner pytest-xdist workers per shard job (``-n auto`` yields 1 on the
@@ -463,8 +463,6 @@ pytest_ci_args = [
 xdist_workers = 2
 # GitHub matrix shards the suite is split across (pytest-split).
 total_shards = 6
-# Repository variable name: when truthy, CI skips fail_under enforcement.
-relax_fail_under_repo_var = "COVERAGE_RELAX_FAIL_UNDER"
 
 # White-box code-metrics gate: ``scripts/code_metrics.py``, run by
 # ``.github/workflows/code-metrics.yml``. Each number below carries its reason.
@@ -524,6 +522,11 @@ function-lines = 80
 # pylint R1702 default: past five nested blocks, the innermost line depends on
 # six conditions at once; extract the inner loop or invert a condition.
 nested-blocks = 5
+# pylint R0913 default: past five, a call site no longer reads as a sentence and the
+# values travel together anyway -- pass the object they come from, or name them in a
+# dataclass. ``self``/``cls`` and ``*args``/``**kwargs`` do not count; keyword-only
+# parameters do.
+function-args = 5
 # Fails above 1200 physical lines: half again the review trigger of 800, the
 # size at which a module almost always holds more than one job.
 module-lines = 1200

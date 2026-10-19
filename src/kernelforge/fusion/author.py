@@ -13,9 +13,10 @@ import stat
 import subprocess
 import tempfile
 import time
+import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 from kernelforge.agent_backends.base import (
     AgentHook,
@@ -39,7 +40,7 @@ from .llm_failure import (
 )
 from .harness_contract import harness_contract, trace_kernels_block
 from .validate import DEFAULT_TARGET_SPEEDUP
-from kernelforge.llm.git import git
+from kernelforge.llm.git import git_bytes
 
 log = logging.getLogger("forge_fusion")
 
@@ -107,17 +108,22 @@ def _model_dir_block(model_path: str) -> str:
     )
 
 
-def build_author_prompt(
-    recipe: dict,
-    *,
-    framework: str,
-    ab_hint: str,
-    target_speedup: float = DEFAULT_TARGET_SPEEDUP,
-    harness_path: str = "",
-    gpu_arch: str = "",
-    model_path: str = "",
-) -> str:
+@dataclass(frozen=True)
+class AuthorBrief:
+    """What the author is told besides the recipe: framework, how it is validated, the bar, harness, GPU and model."""
+
+    framework: str
+    ab_hint: str
+    target_speedup: float = DEFAULT_TARGET_SPEEDUP
+    harness_path: str = ""
+    gpu_arch: str = ""
+    model_path: str = ""
+
+
+def build_author_prompt(recipe: dict, brief: AuthorBrief) -> str:
     """Build the authoring prompt from a recipe dict (``Recipe.to_dict()``)."""
+    framework, ab_hint, target_speedup = brief.framework, brief.ab_hint, brief.target_speedup
+    harness_path, gpu_arch, model_path = brief.harness_path, brief.gpu_arch, brief.model_path
     shapes = recipe.get("shapes", {})
     hints = recipe.get("source_hints", [])
     env_flag = recipe.get("env_flag", "FUSED")
@@ -203,27 +209,12 @@ Do not edit the A/B harness or hard-code any numbers.
 """
 
 
-def build_multi_author_prompt(
-    recipes: list[dict],
-    *,
-    framework: str,
-    ab_hint: str,
-    target_speedup: float = DEFAULT_TARGET_SPEEDUP,
-    harness_path: str = "",
-    gpu_arch: str = "",
-    model_path: str = "",
-) -> str:
+def build_multi_author_prompt(recipes: list[dict], brief: AuthorBrief) -> str:
     """Prompt to author SEVERAL confirmed fusions in one pass (each env-gated)."""
     if len(recipes) == 1:
-        return build_author_prompt(
-            recipes[0],
-            framework=framework,
-            ab_hint=ab_hint,
-            target_speedup=target_speedup,
-            harness_path=harness_path,
-            gpu_arch=gpu_arch,
-            model_path=model_path,
-        )
+        return build_author_prompt(recipes[0], brief)
+    framework, ab_hint, target_speedup = brief.framework, brief.ab_hint, brief.target_speedup
+    harness_path, gpu_arch, model_path = brief.harness_path, brief.gpu_arch, brief.model_path
     blocks = []
     all_flags = []
     for i, r in enumerate(recipes, 1):
@@ -330,15 +321,7 @@ def _git_bytes(
 ) -> subprocess.CompletedProcess:
     """Run one bounded Git plumbing command without decoding path bytes."""
     try:
-        result = git(
-            "-C",
-            str(root),
-            *args,
-            input=input_data,
-            check=False,
-            text=False,
-            timeout=60,
-        )
+        result = git_bytes("-C", str(root), *args, input=input_data, check=False, timeout=60)
     except (OSError, subprocess.SubprocessError) as exc:
         # Pure I/O, and ``SubprocessError`` covers ``TimeoutExpired``: a 60s ``git ls-files`` timeout against an NFS
         # worktree under a concurrent serving campaign is weather, not a verdict on what the author did.
@@ -1069,20 +1052,30 @@ def _write_registered_author_log(
     )
 
 
-def _run_registered_author(
-    backend: Any,
-    prompt: str,
-    *,
-    workdir: str,
-    log_path: str,
-    gpu: str,
-    model: str,
-    max_turns: int,
-    timeout_s: int,
-    target_files: list[str],
-    new_module_dirs: list[str],
-) -> int:
+@dataclass(frozen=True)
+class AuthorAgent:
+    """The agent that authors: its backend (or a factory for one), model, device, turn cap and per-attempt timeout."""
+
+    backend: Any
+    gpu: str = "0"
+    model: Optional[str] = None
+    max_turns: int = 100
+    timeout_s: int = 7200
+
+
+@dataclass(frozen=True)
+class AuthorWorkspace:
+    """Where an authoring session runs and logs, the files it may edit, and where it may add new modules."""
+
+    workdir: str
+    log_path: str
+    target_files: Sequence[str] = ()
+    new_module_dirs: Sequence[str] = ()
+
+
+def _run_registered_author(prompt: str, workspace: AuthorWorkspace, agent: AuthorAgent) -> int:
     """Run authoring, retrying only a transport that never delivered an answer."""
+    timeout_s = agent.timeout_s
     attempts = max(1, int(env_setting("FORGE_FUSION_AUTHOR_ATTEMPTS", DEFAULT_AUTHOR_ATTEMPTS, cast=int)))
     base_delay = float(env_setting("FORGE_FUSION_LLM_RETRY_BASE_SEC", DEFAULT_BASE_DELAY_SEC, cast=float))
     max_delay = float(env_setting("FORGE_FUSION_LLM_RETRY_MAX_SEC", DEFAULT_MAX_DELAY_SEC, cast=float))
@@ -1095,18 +1088,7 @@ def _run_registered_author(
     deadline = float(env_setting("FORGE_LLM_RETRY_DEADLINE_SEC", default_deadline, cast=float))
     started_at = time.monotonic()
     for attempt in range(1, attempts + 1):
-        rc, retryable = _run_registered_author_once(
-            backend,
-            prompt,
-            workdir=workdir,
-            log_path=log_path,
-            gpu=gpu,
-            model=model,
-            max_turns=max_turns,
-            timeout_s=timeout_s,
-            target_files=target_files,
-            new_module_dirs=new_module_dirs,
-        )
+        rc, retryable = _run_registered_author_once(prompt, workspace, agent)
         if not retryable or attempt >= attempts:
             return rc
         delay = retry_delay(attempt, base_sec=base_delay, max_sec=max_delay)
@@ -1176,23 +1158,13 @@ def _author_run_error_verdict(run_error: Exception, *, backend: Any, timeout_s: 
     return AUTHOR_RC_FAILED, classify_llm_error(run_error) in RETRYABLE_KINDS
 
 
-def _run_registered_author_once(
-    backend: Any,
-    prompt: str,
-    *,
-    workdir: str,
-    log_path: str,
-    gpu: str,
-    model: str,
-    max_turns: int,
-    timeout_s: int,
-    target_files: list[str],
-    new_module_dirs: list[str],
-) -> tuple[int, bool]:
+def _run_registered_author_once(prompt: str, workspace: AuthorWorkspace, agent: AuthorAgent) -> tuple[int, bool]:
     """One authoring run, with whether its failure was the transport's rather than the task's."""
+    backend, timeout_s = agent.backend, agent.timeout_s
+    workdir, log_path = workspace.workdir, workspace.log_path
     progress: list[str] = []
-    requested_targets = list(dict.fromkeys(str(path) for path in target_files if str(path)))
-    requested_module_dirs = list(dict.fromkeys(str(path) for path in new_module_dirs if str(path)))
+    requested_targets = list(dict.fromkeys(str(path) for path in workspace.target_files if str(path)))
+    requested_module_dirs = list(dict.fromkeys(str(path) for path in workspace.new_module_dirs if str(path)))
     try:
         guard = _AuthorWorkspaceGuard(workdir, requested_targets, requested_module_dirs)
     except AuthorSafetyError as exc:
@@ -1212,7 +1184,7 @@ def _run_registered_author_once(
         user_prompt=prompt,
         role="fusion author",
         cwd=workdir,
-        model=model,
+        model=agent.model,
         writable=True,
         timeout_sec=max(1, int(timeout_s)),
         tool_policy=AgentToolPolicy(
@@ -1220,7 +1192,7 @@ def _run_registered_author_once(
             search=True,
             write=True,
             shell=True,
-            max_turns=max(1, int(max_turns)),
+            max_turns=max(1, int(agent.max_turns)),
         ),
         target_files=targets,
         allow_dirty_targets=True,
@@ -1242,7 +1214,7 @@ def _run_registered_author_once(
         )
 
     previous_gpu = os.environ.get("HIP_VISIBLE_DEVICES")
-    os.environ["HIP_VISIBLE_DEVICES"] = gpu
+    os.environ["HIP_VISIBLE_DEVICES"] = agent.gpu
     result = None
     run_error: BaseException | None = None
     try:
@@ -1332,39 +1304,19 @@ def _run_registered_author_once(
     return AUTHOR_RC_FAILED, is_api_failure(result)
 
 
-def run_author(
-    prompt: str,
-    *,
-    workdir: str,
-    log_path: str,
-    gpu: str = "0",
-    model: Optional[str] = None,
-    max_turns: int = 100,
-    timeout_s: int = 7200,
-    backend: Any,
-    target_files: Optional[list[str]] = None,
-    new_module_dirs: Optional[list[str]] = None,
-) -> int:
+def run_author(prompt: str, workspace: AuthorWorkspace, agent: AuthorAgent) -> int:
     """Drive the selected Agent backend and return the legacy process-style code."""
+    backend = agent.backend
     if callable(backend) and not hasattr(backend, "run"):
         backend = backend()
-    selected_model = str(model or "").strip() or str(getattr(getattr(backend, "runtime", None), "model", "")).strip()
+    selected_model = (
+        str(agent.model or "").strip() or str(getattr(getattr(backend, "runtime", None), "model", "")).strip()
+    )
     log.info(
         "running %s Agent author (model=%s max_turns=%d workdir=%s)",
         backend.name,
         selected_model,
-        max_turns,
-        workdir,
+        agent.max_turns,
+        workspace.workdir,
     )
-    return _run_registered_author(
-        backend,
-        prompt,
-        workdir=workdir,
-        log_path=log_path,
-        gpu=gpu,
-        model=selected_model,
-        max_turns=max_turns,
-        timeout_s=timeout_s,
-        target_files=list(target_files or []),
-        new_module_dirs=list(new_module_dirs or []),
-    )
+    return _run_registered_author(prompt, workspace, dataclasses.replace(agent, backend=backend, model=selected_model))
