@@ -85,7 +85,7 @@ def test_keep_archive_failure_is_non_fatal_and_clears_pending_journal(
         lambda _archive, _record: (_ for _ in ()).throw(OSError("simulated archive failure")),
     )
 
-    asyncio.run(loop.run(agent_fn=editing_agent))
+    asyncio.run(loop.run(runner_module.LoopAgents(agent_fn=editing_agent)))
 
     pending_path = workspace / "forge_experiments" / "pending_keep.json"
     assert not pending_path.is_file()

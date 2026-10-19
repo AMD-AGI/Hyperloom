@@ -114,6 +114,19 @@ class AgentRuntimeConfig:
             raise ValueError("timeout_sec must be greater than zero")
 
 
+@dataclass(frozen=True)
+class AgentRuntimeSettings:
+    """The runtime settings a provider's session runs with; blank strings resolve to the defaults."""
+
+    executable: str = ""
+    timeout_sec: int = 1800
+    reasoning_effort: str = DEFAULT_REASONING_EFFORT
+    sandbox_mode: str = "bypass"
+    precheck: bool = True
+    fallback_provider: str = ""
+    options: Mapping[str, Any] | None = None
+
+
 def with_writable_sandbox(runtime: AgentRuntimeConfig) -> AgentRuntimeConfig:
     """Return ``runtime`` permitted to write, without loosening it any further."""
     if runtime.sandbox_mode.strip().lower() != "read-only":

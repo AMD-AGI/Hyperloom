@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from kernelforge.orchestrator.supervisor import (
+    SupervisorInteraction,
     _build_task_prompt,
     _persist_interaction,
     load_latest_supervisor_ruling,
@@ -16,7 +17,7 @@ from kernelforge.orchestrator.supervisor import (
 
 
 def test_build_task_prompt_uses_bounded_artifact_access():
-    p = _build_task_prompt("PROG", "TRAJ", "budget exhausted", "gfx942", 3)
+    p = _build_task_prompt("PROG", "TRAJ", "budget exhausted", "gfx942")
     assert "gfx942" in p
     assert "budget exhausted" in p
     assert "PROG" in p
@@ -28,7 +29,7 @@ def test_build_task_prompt_uses_bounded_artifact_access():
 
 
 def test_build_task_prompt_empty_digest_placeholder():
-    p = _build_task_prompt("PROG", "", "reason", "gfx942", 3)
+    p = _build_task_prompt("PROG", "", "reason", "gfx942")
     assert "(no archived trajectory yet)" in p
 
 
@@ -38,7 +39,6 @@ def test_build_task_prompt_includes_structured_profile_evidence():
         "TRAJ",
         "stall",
         "gfx942",
-        3,
         evidence_context='{"case_id": "case-a", "bottleneck": "memory"}',
     )
 
@@ -55,13 +55,15 @@ def test_persist_interaction_writes_file(tmp_path):
     reply = "\n  REPLY with intentional surrounding whitespace  \n"
     _persist_interaction(
         str(tmp_path),
-        7,
-        "stall",
-        "SYSTEM",
-        "USER",
-        reply,
-        backend="codex",
-        model="gpt-5.3-codex",
+        SupervisorInteraction(
+            iteration=7,
+            reason="stall",
+            system="SYSTEM",
+            user="USER",
+            reply=reply,
+            backend="codex",
+            model="gpt-5.3-codex",
+        ),
     )
     f = tmp_path / "forge_experiments" / "supervisor" / "intervention_iter_007.md"
     assert f.exists()
@@ -74,7 +76,12 @@ def test_persist_interaction_writes_file(tmp_path):
 
 
 def test_persist_interaction_empty_reply_placeholder(tmp_path):
-    _persist_interaction(str(tmp_path), 1, "stall", "SYS", "USR", "", backend="claude", model="gpt-5.5")
+    _persist_interaction(
+        str(tmp_path),
+        SupervisorInteraction(
+            iteration=1, reason="stall", system="SYS", user="USR", reply="", backend="claude", model="gpt-5.5"
+        ),
+    )
     f = tmp_path / "forge_experiments" / "supervisor" / "intervention_iter_001.md"
     assert "(empty" in f.read_text()
     assert load_latest_supervisor_ruling(str(tmp_path)) == ""
@@ -83,23 +90,15 @@ def test_persist_interaction_empty_reply_placeholder(tmp_path):
 def test_empty_attempt_expires_latest_ruling(tmp_path):
     _persist_interaction(
         str(tmp_path),
-        1,
-        "stall",
-        "SYS",
-        "USR",
-        "FIRST",
-        backend="claude",
-        model="gpt-5.5",
+        SupervisorInteraction(
+            iteration=1, reason="stall", system="SYS", user="USR", reply="FIRST", backend="claude", model="gpt-5.5"
+        ),
     )
     _persist_interaction(
         str(tmp_path),
-        2,
-        "stall",
-        "SYS",
-        "USR",
-        "",
-        backend="claude",
-        model="gpt-5.5",
+        SupervisorInteraction(
+            iteration=2, reason="stall", system="SYS", user="USR", reply="", backend="claude", model="gpt-5.5"
+        ),
     )
 
     assert load_latest_supervisor_ruling(str(tmp_path)) == ""
@@ -125,4 +124,7 @@ def test_injected_ruling_gets_fallback_audit_artifact(tmp_path):
 def test_persist_interaction_survives_an_unwritable_workspace(tmp_path):
     workspace = tmp_path / "not_a_dir"
     workspace.write_text("")
-    _persist_interaction(str(workspace), 1, "r", "s", "u", "reply", backend="codex", model="m")
+    _persist_interaction(
+        str(workspace),
+        SupervisorInteraction(iteration=1, reason="r", system="s", user="u", reply="reply", backend="codex", model="m"),
+    )

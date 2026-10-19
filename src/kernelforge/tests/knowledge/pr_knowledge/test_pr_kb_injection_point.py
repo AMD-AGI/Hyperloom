@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from kernelforge.knowledge.pr_knowledge.context import PrReferenceQuery
 from kernelforge.knowledge.pr_knowledge.references import (
     UNTRUSTED_PREFIX,
     collect_references,
@@ -55,7 +56,7 @@ def build_agent_fn(monkeypatch):
             config = Config()
             config.agent_runtime = lambda: runtime
             kwargs.setdefault("program_md", "PROGRAM BODY")
-            agent_fn = agent_mod.make_agent_fn(config=config, **kwargs)
+            agent_fn = agent_mod.make_agent_fn(config, agent_mod.ImplementerSetup(agent_mod.ImplementerTask(**kwargs)))
         finally:
             agent_mod.create_registered_backend = original
         return dict(
@@ -148,9 +149,10 @@ def system_prompt_for(monkeypatch):
             config = Config()
             config.agent_runtime = lambda: runtime
             agent_fn = agent_mod.make_agent_fn(
-                config=config,
-                program_md="PROGRAM BODY",
-                pre_task_context=pre_task_context,
+                config,
+                agent_mod.ImplementerSetup(
+                    agent_mod.ImplementerTask(program_md="PROGRAM BODY", pre_task_context=pre_task_context)
+                ),
             )
         finally:
             agent_mod.create_registered_backend = original
@@ -239,9 +241,8 @@ def test_hostile_pr_text_is_neutralized_end_to_end(tmp_path, system_prompt_for):
     """The full path: service payload -> render -> Implementer system prompt."""
     result = collect_references(
         workspace_dir=str(tmp_path),
+        query=PrReferenceQuery(kernel_backend="aiter", operator_name="rmsnorm"),
         client=_HostileClient(),
-        kernel_backend="aiter",
-        operator_name="rmsnorm",
     )
     assert result.injected
     block = result.prompt_context
@@ -261,9 +262,8 @@ def test_hostile_pr_text_is_neutralized_end_to_end(tmp_path, system_prompt_for):
 def test_block_is_bounded_even_for_hostile_input(tmp_path):
     result = collect_references(
         workspace_dir=str(tmp_path),
+        query=PrReferenceQuery(kernel_backend="aiter", operator_name="rmsnorm"),
         client=_HostileClient(),
-        kernel_backend="aiter",
-        operator_name="rmsnorm",
     )
 
     assert len(result.prompt_context.encode("utf-8")) <= 4096
