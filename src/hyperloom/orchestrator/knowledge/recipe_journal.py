@@ -6,10 +6,8 @@
 from __future__ import annotations
 
 import logging as _logging
-from copy import copy
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Collection, Mapping, NamedTuple
 
 from hyperloom.common.coerce import to_float, to_int
@@ -32,6 +30,14 @@ from hyperloom.orchestrator.lever import LEVER_CONFIG, lever_kind_for_task
 from ..collaborator import CoordinatorCollaborator
 from ..state.attempt_ledger import AttemptRow, record_attempt_row
 from ._config_timeline import NON_ATTEMPT_OUTCOMES, record_config_attempts, record_config_run
+from ._recipe_amend import (
+    amend_provenance,
+    amended_recipe_extras,
+    amended_recipe_fields,
+    appended,
+    improved_best_config,
+    rows_not_superseded,
+)
 from ._recipe_attrs import recipe_attrs_from_state, workload_kb_tags
 from .config import KnowledgeStoreMode
 
@@ -66,44 +72,6 @@ _REMOTE_RESULT_TYPES: dict[str, str] = {
 # that we never reached the store at all.
 _REMOTE_VALIDATION_ERROR = "RemoteRecipeValidationError"
 
-
-#: Recipe fields an amend carries forward when the caller does not override
-#: them, each with the empty value ``put_recipe`` falls back to.
-_PRESERVED_RECIPE_FIELDS: Mapping[str, Any] = MappingProxyType(
-    {
-        "best_config": {},
-        "best_throughput": 0.0,
-        "what_worked": [],
-        "what_failed": [],
-        "remaining_gaps": [],
-        "last_profiled": "",
-        "stack_fingerprint": {},
-        "sessions": [],
-        "authority": "EXPERIENTIAL",
-        "confidence": 0.85,
-        "evidence_refs": [],
-    }
-)
-
-#: Row keys ``put_recipe`` owns; everything else on a live row is a session
-#: extra and survives the amend untouched.
-_RECIPE_OWNED_KEYS: frozenset[str] = frozenset(_PRESERVED_RECIPE_FIELDS) | frozenset(
-    {
-        "canonical_id",
-        "version",
-        "created_at",
-        "updated_at",
-        "model",
-        "hardware",
-        "framework",
-        "framework_name",
-        "framework_version",
-        "precision",
-        "pitfalls",
-        "lessons",
-        "provenance",
-    }
-)
 
 #: Explore outcomes the journal collapses into a plain revert.
 _MEASURED_LOSS_OUTCOMES: frozenset[str] = frozenset({OUTCOME_REVERT, "FAILED"})
@@ -361,90 +329,6 @@ def _remote_publish_failure_type(exc: BaseException) -> str:
     if type(exc).__name__ == _REMOTE_VALIDATION_ERROR:
         return _close_out.RESULT_BUNDLE_BUILD_FAILED
     return _close_out.RESULT_TRANSPORT_FAILED
-
-
-def _rows_not_superseded(live_rows: Any, superseding: Any, key: str) -> list[dict[str, Any]]:
-    """Copies of the live rows whose ``key`` no superseding row already claims."""
-    claimed = {str(row.get(key) or "") for row in superseding or [] if isinstance(row, dict)}
-    kept: list[dict[str, Any]] = []
-    for row in live_rows or []:
-        if not isinstance(row, dict):
-            continue
-        if str(row.get(key) or "") in claimed:
-            continue
-        kept.append(dict(row))
-    return kept
-
-
-def _improved_best_config(state: Any, attrs: Mapping[str, Any], live: Mapping[str, Any]) -> dict[str, Any]:
-    """The ``best_config`` override, empty unless this session genuinely beat the live row.
-
-    A session that validated nothing has no standing to overwrite a
-    configuration somebody else measured.
-    """
-    my_throughput = float(attrs.get("best_throughput") or 0.0)
-    validated_gain = float(state.cumulative_gain_validated or 0.0)
-    current_args = str(state.current_best.get("extra_server_args") or "").strip()
-    has_validated_win = bool((state.optimization_stack or []) or validated_gain > 0.0 or current_args)
-    if not has_validated_win or my_throughput <= to_float(live.get("best_throughput"), 0.0):
-        return {}
-    return {
-        "best_config": attrs["best_config"],
-        "best_throughput": my_throughput,
-    }
-
-
-def _appended(live_facts: Any, addition: Mapping[str, Any] | None) -> list[Any]:
-    """The live lesson or pitfall list with one more appended, when the caller brought one."""
-    facts = list(live_facts or [])
-    if addition is not None:
-        facts.append(addition)
-    return facts
-
-
-def _amend_provenance(details: Mapping[str, Any] | None) -> dict[str, Any]:
-    """The provenance block stamped on every amend; the central server requires one."""
-    return {
-        "source": "hyperloom-inference-optimizer",
-        "generator": "coordinator",
-        "generated_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
-        "details": dict(details or {}),
-    }
-
-
-def _amended_recipe_fields(live: Mapping[str, Any], overrides: Mapping[str, Any]) -> dict[str, Any]:
-    """The preserved recipe fields for one amend: an override wins, an unset field keeps its live value.
-
-    An absent or empty live value falls back to the field's own default, so
-    ``put_recipe`` never sees ``None`` where it declares a container.
-    """
-    merged: dict[str, Any] = {}
-    for field, default in _PRESERVED_RECIPE_FIELDS.items():
-        if field in overrides:
-            merged[field] = overrides[field]
-            continue
-        live_value = live.get(field)
-        merged[field] = type(default)(live_value) if live_value else copy(default)
-    return merged
-
-
-def _amended_recipe_extras(live: Mapping[str, Any], overrides: Mapping[str, Any], state: Any) -> dict[str, Any]:
-    """The free-form extras an amend writes back: the prior ones, the caller's, then the model's identity.
-
-    The architecture tags are re-stamped from config.json each time because a
-    row written before the architecture was read carries none.
-    """
-    extras = {key: value for key, value in live.items() if key not in _RECIPE_OWNED_KEYS}
-    extras.update(overrides.get("extras") or {})
-    architectures = state.model_architectures or []
-    if isinstance(architectures, list):
-        named = [str(name).strip() for name in architectures if str(name or "").strip()]
-        if named:
-            extras["architectures"] = named
-    model_type = str(state.model_type or "").strip()
-    if model_type:
-        extras["model_type"] = model_type
-    return extras
 
 
 class RecipeJournalCollaborator(CoordinatorCollaborator):
@@ -1251,17 +1135,17 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         my_kernels = list(attrs.get("kernel_optimizations") or [])
         # KEEP'd kernel optimizations ride the extras channel.
         extras = dict(attrs.get("workload") or {})
-        kernels = my_kernels + _rows_not_superseded(live.get("kernel_optimizations"), my_kernels, "kernel_id")
+        kernels = my_kernels + rows_not_superseded(live.get("kernel_optimizations"), my_kernels, "kernel_id")
         if kernels:
             extras["kernel_optimizations"] = kernels
         overrides: dict[str, Any] = {
             "what_worked": attrs["what_worked"],
             "what_failed": attrs["what_failed"],
             "last_profiled": attrs["last_profiled"],
-            "sessions": _rows_not_superseded(live.get("sessions"), my_sessions, "session_id") + my_sessions,
+            "sessions": rows_not_superseded(live.get("sessions"), my_sessions, "session_id") + my_sessions,
             "extras": extras,
         }
-        overrides.update(_improved_best_config(state, attrs, live))
+        overrides.update(improved_best_config(state, attrs, live))
         return overrides
 
     def _write_local_recipe(self) -> dict[str, Any]:
@@ -1473,11 +1357,11 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
             "framework_name": identity.name,
             "framework_version": identity.version,
             "precision": identity.precision,
-            "pitfalls": _appended(live.get("pitfalls"), append_pitfall),
-            "lessons": _appended(live.get("lessons"), append_lesson),
-            "extras": _amended_recipe_extras(live, overrides, state),
-            "provenance": _amend_provenance(provenance_details),
-            **_amended_recipe_fields(live, overrides),
+            "pitfalls": appended(live.get("pitfalls"), append_pitfall),
+            "lessons": appended(live.get("lessons"), append_lesson),
+            "extras": amended_recipe_extras(live, overrides, state),
+            "provenance": amend_provenance(provenance_details),
+            **amended_recipe_fields(live, overrides),
         }
         try:
             self.recipe_kb.put_recipe(**put_kwargs)
