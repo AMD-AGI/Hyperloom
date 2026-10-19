@@ -10,6 +10,7 @@ import os
 import re
 import shutil
 import subprocess
+from collections.abc import Iterable
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -43,15 +44,37 @@ def _ref_matches(path: Path | str, ref: str) -> bool:
     return head.startswith(ref.lower()) or ref.lower().startswith(head)
 
 
+def has_benchmark_lib(path: Path | str) -> bool:
+    """True when ``path`` carries the library every InferenceX benchmark script sources."""
+    return (Path(path) / "benchmarks" / "benchmark_lib.sh").is_file()
+
+
 def checkout_ok(path: Path | str, *, ref: str | None = None) -> bool:
     """True when ``path`` is a usable InferenceX checkout at the expected ref."""
-    if not (Path(path) / "benchmarks" / "benchmark_lib.sh").is_file():
+    if not has_benchmark_lib(path):
         return False
     if ref is None:
         ref = os.environ.get("INFERENCEX_REF") or DEFAULT_REF
     if not ref:
         return True
     return _ref_matches(path, ref)
+
+
+def pick_tree(paths: Iterable[str], default: str = "") -> str:
+    """The first of ``paths`` that is an InferenceX tree, else ``default``."""
+    return next((path for path in paths if has_benchmark_lib(path)), default)
+
+
+def unusable_reason(path: Path | str) -> str:
+    """Why ``path`` cannot be the InferenceX checkout a benchmark runs from, or "" when it can.
+
+    Magpie stages its scripts into ``<path>/benchmarks`` and the server script sources ``benchmark_lib.sh`` from there.
+    A tree without the library, a framework source tree for one, starts no server, and the script's own failure to
+    source it does not stop the run.
+    """
+    if has_benchmark_lib(path):
+        return ""
+    return f"{path} is not an InferenceX checkout: it has no benchmarks/benchmark_lib.sh"
 
 
 def destination_name(ref: str) -> str:

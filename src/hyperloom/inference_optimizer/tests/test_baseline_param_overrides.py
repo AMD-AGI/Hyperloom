@@ -691,7 +691,10 @@ def test_baseline_executor_defaults_result_dir_to_workspace(tmp_path, monkeypatc
 
 def test_baseline_executor_pins_magpie_inferencex_path(tmp_path, monkeypatch):
     """The baseline executor's Magpie subprocess must inherit ``MAGPIE_INFERENCEX_PATH=$INFERENCEX_PATH`` so Magpie loads the patched checkout."""
-    monkeypatch.setenv("INFERENCEX_PATH", "/path/hyperloom/InferenceX")
+    inferencex = tmp_path / "InferenceX"
+    (inferencex / "benchmarks").mkdir(parents=True)
+    (inferencex / "benchmarks" / "benchmark_lib.sh").write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    monkeypatch.setenv("INFERENCEX_PATH", str(inferencex))
     base = tmp_path / "base.yaml"
     _write_yaml(base)
     output_dir = tmp_path / "ws"
@@ -711,14 +714,17 @@ def test_baseline_executor_pins_magpie_inferencex_path(tmp_path, monkeypatch):
     )
     ctx = _make_ctx({"output_dir": str(output_dir), "timeout_sec": 10})
 
-    with patch(
-        "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-        side_effect=fake_run,
+    with (
+        patch("hyperloom.orchestrator.actions.executors.baseline.failed_patch_anchors_in", return_value=[]),
+        patch(
+            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
+            side_effect=fake_run,
+        ),
     ):
         result = _run(executor(ctx))
 
     assert result["status"] == "succeeded"
-    assert captured["env"].get("MAGPIE_INFERENCEX_PATH") == ("/path/hyperloom/InferenceX"), (
+    assert captured["env"].get("MAGPIE_INFERENCEX_PATH") == str(inferencex), (
         "MAGPIE_INFERENCEX_PATH must equal $INFERENCEX_PATH so Magpie loads the patched checkout (#210 root cause)"
     )
 
