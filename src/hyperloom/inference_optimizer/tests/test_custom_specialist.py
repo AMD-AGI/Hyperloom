@@ -239,6 +239,7 @@ def test_orchestration_prompt_never_offers_custom_specialist(phase):
 
     assert domains == (
         "serving_specialist|kernel_switch_specialist|comm_specialist|compiler_specialist|system_specialist"
+        "|speculative_decoding_specialist"
         "|candidate_discovery_specialist|research_scout_specialist|static_recon_specialist"
         "|framework_rewrite_specialist"
     )
@@ -284,6 +285,7 @@ def test_knowledge_domain_tags_do_not_include_the_custom_specialist():
         "communication",
         "compiler",
         "systems",
+        "speculative_decoding",
         "pr_intelligence",
         "research_scout",
         "static_recon",

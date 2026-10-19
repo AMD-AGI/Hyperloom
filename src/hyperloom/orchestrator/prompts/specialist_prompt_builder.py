@@ -31,6 +31,7 @@ from .proposal_schemas import (
     UPSTREAM_CANDIDATE_CONTRACT,
     UPSTREAM_CANDIDATE_EXAMPLE,
 )
+from .speculative_decoding_focus import speculative_decoding_focus
 from ..measurement.runtime_findings import CORRECTNESS_FIX_MAX_DROP_PCT, CORRECTNESS_FIX_RULES
 
 from ..specialists.domains import (
@@ -829,6 +830,13 @@ def _focus_custom_specialist(inp: SpecialistPromptInputs) -> list[str]:
     return text.splitlines() if text else []
 
 
+def _focus_speculative_decoding_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    """Render the speculative-decoding focus for this session's target model."""
+    return speculative_decoding_focus(
+        model_name=inp.model_name, model_path=inp.model_path, draft_models_dir=inp.draft_models_dir
+    )
+
+
 _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]]"] = {
     "serving_specialist": _focus_serving_specialist,
     "framework_rewrite_specialist": _focus_framework_rewrite_specialist,
@@ -836,6 +844,7 @@ _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]
     "comm_specialist": _focus_comm_specialist,
     "compiler_specialist": _focus_compiler_specialist,
     "system_specialist": _focus_system_specialist,
+    "speculative_decoding_specialist": _focus_speculative_decoding_specialist,
     "candidate_discovery_specialist": _focus_candidate_discovery_specialist,
     "research_scout_specialist": _focus_research_scout_specialist,
     "static_recon_specialist": _focus_static_recon_specialist,
@@ -985,6 +994,11 @@ class SpecialistPromptInputs:
     # Operator-defined specialist focus, rendered verbatim; empty when not configured.
     custom_specialist_prompt: str = ""
 
+    # Target model, and the session directory downloaded drafter weights go to.
+    model_name: str = ""
+    model_path: str = ""
+    draft_models_dir: str = ""
+
 
 # Section 1 — Identity & autonomy
 def _authors_patches(inp: SpecialistPromptInputs) -> bool:
@@ -1004,6 +1018,7 @@ _THROUGHPUT_AUTHORING_DOMAINS = frozenset(
         "comm_specialist",
         "compiler_specialist",
         "system_specialist",
+        "speculative_decoding_specialist",
     }
 )
 

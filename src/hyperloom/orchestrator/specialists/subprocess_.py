@@ -136,6 +136,11 @@ _SPECIALIST_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "CLAUDE_CONFIG_DIR",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
+        # Hugging Face Hub cache, offline switch and mirror; HF_TOKEN is a credential and stays out.
+        "HF_ENDPOINT",
+        "HF_HOME",
+        "HF_HUB_CACHE",
+        "HF_HUB_OFFLINE",
         "HOME",
         "HTTPS_PROXY",
         "HTTP_PROXY",

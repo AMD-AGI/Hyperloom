@@ -44,6 +44,8 @@ _STATE_PARAMS: tuple[tuple[str, str, Callable[[Any], Any]], ...] = (
     ("warm_start_pitfalls", "warm_start_pitfalls", list),
     ("warm_start_lessons", "warm_start_lessons", list),
     ("framework", "framework", str.strip),
+    ("model_name", "model_name", str.strip),
+    ("model_path", "model_path", str.strip),
     ("tp", "tp", int),
     ("precision", "precision", str),
     ("conc", "conc", int),

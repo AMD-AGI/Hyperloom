@@ -501,6 +501,8 @@ tables rebuilt and re-uploaded. Sending a scriptable pipeline to
 * **register pressure, inductor advice** → `compiler_specialist`
 * **launch latency, dispatch overhead, device sync, host-blocking /
   host-pacing GPU idle** → `system_specialist`
+* **memory-bound decode with idle compute — small batch or long context** →
+  `speculative_decoding_specialist` (serving frameworks only)
 * **uncertain / cross-cutting** → `candidate_discovery_specialist`
 
 Landing upstream work is a lever in its own right, ranked with the others
