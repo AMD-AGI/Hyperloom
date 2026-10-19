@@ -215,10 +215,7 @@ def build_mandate(
     *,
     gpu: str = "",
     framework: str = "",
-    dtype_note: str = "",
     candidate_protocol: str | None = None,
-    reference_skeleton: str = "",
-    budget_seconds: int = 1500,
 ) -> TunerMandate:
     """Build a mandate from a gap and its demanded shapes.
 
@@ -240,10 +237,7 @@ def build_mandate(
         why_existing_tiers_failed=str(getattr(gap, "reason", "") or ""),
         gpu=gpu,
         framework=framework,
-        dtype_note=dtype_note,
         candidate_protocol=candidate_protocol,
-        reference_skeleton=reference_skeleton,
-        budget_seconds=budget_seconds,
         correctness_trials=int(rule.get("trials", CORRECTNESS_TRIALS)),
         max_relative_error=float(rule.get("limit", MAX_RELATIVE_ERROR)),
         max_relative_error_definition=str(rule.get("definition", MAX_RELATIVE_ERROR_DEFINITION)),

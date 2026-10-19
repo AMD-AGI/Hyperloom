@@ -26,7 +26,6 @@ BACKEND_ENV = "HYPERLOOM_AGENTIC_BACKEND"
 # The MLPerf agentic v6 corpus and the two flows ``run_agentic.sh`` accepts.
 MLPERF_CORPUS = "agentic_combined_v6"
 MLPERF_SMOKE_FLOW = "smoke_test"
-MLPERF_FULL_FLOW = "full"
 MLPERF_SMOKE_TRAJECTORIES = 150
 MLPERF_CANONICAL_TRAJECTORIES = 613
 

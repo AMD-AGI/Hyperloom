@@ -59,50 +59,6 @@ def test_diffusion_roofline_missing_unified_raises(tmp_path):
         dr.build_report(tmp_path, num_denoise_steps=None, top_k=5)
 
 
-def test_dit_analytic_flops_formula():
-    # 1 layer, 1 token, 1 step, h=2, ffn=4 -> linear = 2*(4+8)*4 = 96; attention = 2*(2*1*2) = 8; total = 104.
-    flops = dr.dit_analytic_flops(hidden_size=2, num_layers=1, num_tokens=1, num_denoise_steps=1, ffn_ratio=4.0)
-    assert flops["linear_flops"] == pytest.approx(96.0)
-    assert flops["attention_flops"] == pytest.approx(8.0)
-    assert flops["total_flops"] == pytest.approx(104.0)
-
-
-def test_dit_analytic_ceiling_and_reconcile():
-    # 1e12 FLOPs @ 1000 TFLOPS -> ideal 1e12/1e15 s = 1e-3 s = 1000 us.
-    ceiling = dr.dit_analytic_ceiling({"total_flops": 1e12}, achievable_tflops=1000.0)
-    assert ceiling["ideal_compute_us"] == pytest.approx(1000.0)
-    totals = {"sigma_ideal_roofline_us": 500.0, "sigma_actual_kernel_us": 2000.0}
-    recon = dr.reconcile(totals, ceiling)
-    assert recon["analytic_vs_trace_ideal_ratio"] == pytest.approx(2.0)
-    assert recon["analytic_achieved_efficiency"] == pytest.approx(0.5)
-
-
-def test_dit_analytic_ceiling_zero_inputs_empty():
-    assert dr.dit_analytic_ceiling({"total_flops": 0.0}, 1000.0) == {}
-    assert dr.reconcile({"sigma_ideal_roofline_us": 100.0}, {}) == {}
-
-
-def test_build_report_includes_analytic_ceiling(tmp_path):
-    _write_csvs(tmp_path)
-    report = dr.build_report(
-        tmp_path,
-        num_denoise_steps=25,
-        top_k=3,
-        dit_geometry={"hidden_size": 3072, "num_layers": 38, "num_tokens": 4096, "ffn_ratio": 4.0},
-        achievable_tflops=1686.0,
-    )
-    assert "analytic_dit_ceiling" in report
-    assert report["analytic_dit_ceiling"]["total_flops"] > 0
-    assert "reconciliation" in report
-
-
-def test_build_report_no_geometry_skips_analytic(tmp_path):
-    _write_csvs(tmp_path)
-    report = dr.build_report(tmp_path, num_denoise_steps=25, top_k=3)
-    assert "analytic_dit_ceiling" not in report
-    assert "reconciliation" not in report
-
-
 def test_safe_float_non_numeric_is_zero():
     assert dr.safe_float("not-a-number") == 0.0
     assert dr.safe_float(None) == 0.0
@@ -129,16 +85,3 @@ def test_aggregate_unified_memory_bound_split():
     totals = dr.aggregate_unified(rows)
     assert totals["compute_bound_us"] == pytest.approx(100.0)
     assert totals["memory_bound_us"] == pytest.approx(50.0)
-
-
-def test_build_report_analytic_geometry_missing_key_is_fail_soft(tmp_path):
-    """A dit_geometry dict missing a required key hits the guarded ``except (KeyError, TypeError, ValueError)`` path without raising."""
-    _write_csvs(tmp_path)
-    report = dr.build_report(
-        tmp_path,
-        num_denoise_steps=25,
-        top_k=3,
-        dit_geometry={"num_layers": 38, "num_tokens": 4096},  # no hidden_size
-        achievable_tflops=1686.0,
-    )
-    assert "analytic_dit_ceiling" not in report

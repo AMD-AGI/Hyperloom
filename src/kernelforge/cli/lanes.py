@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -128,13 +128,20 @@ def _require_lane_provider_capabilities(provider: str, lanes: int) -> None:
     )
 
 
+@dataclass(frozen=True)
+class LaneBinding:
+    """The canonical workspace paths a lane rebinds onto its own copy."""
+
+    workspace_dir: str
+    driver: str
+    source_files: Iterable[str]
+
+
 def _make_lane_agent_factory(
     *,
     make_agent,
     config: Config,
-    workspace_dir: str,
-    driver: str,
-    source_files: Iterable[str],
+    binding: LaneBinding,
     session_kwargs: dict,
 ):
     """Build the factory that binds one Implementer session to one lane."""
@@ -151,9 +158,9 @@ def _make_lane_agent_factory(
             insession_gate=True,
             insession_gate_stop_check=False,
             driver_script=_lane_workspace_path(
-                driver,
+                binding.driver,
                 lane_dir=lane_dir,
-                workspace_dir=workspace_dir,
+                workspace_dir=binding.workspace_dir,
                 label="driver",
             ),
             # The lock-taking wrapper the round installed for this lane.
@@ -162,10 +169,10 @@ def _make_lane_agent_factory(
                 _lane_workspace_path(
                     path,
                     lane_dir=lane_dir,
-                    workspace_dir=workspace_dir,
+                    workspace_dir=binding.workspace_dir,
                     label="source file",
                 )
-                for path in source_files
+                for path in binding.source_files
             ],
             profiling_enabled=False,
             **session_kwargs,

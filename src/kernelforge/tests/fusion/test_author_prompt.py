@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from kernelforge.fusion.author import build_author_prompt
+from kernelforge.fusion.author import AuthorBrief, build_author_prompt
 
 
 def _recipe():
@@ -23,7 +23,7 @@ def _recipe():
 
 
 def test_prompt_contains_recipe_fields():
-    p = build_author_prompt(_recipe(), framework="sglang", ab_hint="run the A/B")
+    p = build_author_prompt(_recipe(), AuthorBrief(framework="sglang", ab_hint="run the A/B"))
     assert "residual_add_rmsnorm" in p
     assert "LFM2_FUSED_RESIDUAL" in p  # env-gated by the recipe flag
     assert "y, residual = norm(x, residual)" in p  # fusion math
@@ -33,7 +33,7 @@ def test_prompt_contains_recipe_fields():
 
 
 def test_rocm_guard_present_when_native():
-    p = build_author_prompt(_recipe(), framework="sglang", ab_hint="x")
+    p = build_author_prompt(_recipe(), AuthorBrief(framework="sglang", ab_hint="x"))
     assert "ROCm" in p and "Triton" in p
     assert "Do NOT reuse a framework CUDA-only fused op" in p
 
@@ -41,7 +41,7 @@ def test_rocm_guard_present_when_native():
 def test_rocm_guard_absent_when_not_native():
     r = _recipe()
     r["rocm_native"] = False
-    p = build_author_prompt(r, framework="sglang", ab_hint="x")
+    p = build_author_prompt(r, AuthorBrief(framework="sglang", ab_hint="x"))
     assert "TARGET IS ROCm" not in p
 
 
@@ -50,7 +50,7 @@ def test_integration_candidate_benchmarks_existing_operator_before_authoring():
     r["candidate_kind"] = "integration"
     r["existing_operator"] = "gemm_a16w16_gated"
 
-    p = build_author_prompt(r, framework="sglang", ab_hint="x")
+    p = build_author_prompt(r, AuthorBrief(framework="sglang", ab_hint="x"))
 
     assert "gemm_a16w16_gated" in p
     assert "benchmark and wire the existing operator first" in p
@@ -63,7 +63,7 @@ def test_integration_candidate_demands_recorded_parity_evidence():
     r["candidate_kind"] = "integration"
     r["existing_operator"] = "gemm_a16w16_gated"
 
-    p = build_author_prompt(r, framework="sglang", ab_hint="x")
+    p = build_author_prompt(r, AuthorBrief(framework="sglang", ab_hint="x"))
 
     assert "parity" in p.lower()
     assert "rtol" in p.lower()

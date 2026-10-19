@@ -10,9 +10,10 @@ import os
 import subprocess
 import sys
 
-from kernelforge.fusion.diagnose import diagnose_from_shares
+from kernelforge.fusion.discover import DiscoveryTarget
+from kernelforge.fusion.diagnose import TraceProfile, diagnose_from_shares
 from kernelforge.fusion.discover import parse_discovered_recipes
-from kernelforge.fusion.locate import build_recipes, vllm_compile_pass_state, vllm_pass_config_flag
+from kernelforge.fusion.locate import FrameworkInstall, build_recipes, vllm_compile_pass_state, vllm_pass_config_flag
 from kernelforge.fusion.vllm_passes import (
     _PROBE_SRC,
     _VLLM_PASS_PROBE_MARKER,
@@ -60,11 +61,13 @@ class TestPatternRoute:
         # THE MISS: pass exists but is disabled -> must be proposed, not dropped.
         model, root = _fake_vllm_tree(tmp_path, "qklm", QK_BODY)
         recipes = build_recipes(
-            diagnose_from_shares(QK_SHARES, busy_fraction_of_wall=0.21),
+            diagnose_from_shares(TraceProfile(QK_SHARES, busy_fraction_of_wall=0.21)),
+            install=FrameworkInstall(
+                framework="vllm",
+                framework_root=root,
+                pass_probe=_fake_probe(enabled=False, config_file="/fw/vllm/config/compilation.py"),
+            ),
             model_path=model,
-            framework="vllm",
-            framework_root=root,
-            pass_probe=_fake_probe(enabled=False, config_file="/fw/vllm/config/compilation.py"),
         )
         cp = [r for r in recipes if r.candidate_kind == "compile_pass"]
         assert len(cp) == 1, f"expected an enable-the-pass recipe, got {[r.pattern_id for r in recipes]}"
@@ -79,11 +82,9 @@ class TestPatternRoute:
         # No regression: an ENABLED pass really does make source-level fusion a no-op.
         model, root = _fake_vllm_tree(tmp_path, "qklm", QK_BODY)
         recipes = build_recipes(
-            diagnose_from_shares(QK_SHARES, busy_fraction_of_wall=0.21),
+            diagnose_from_shares(TraceProfile(QK_SHARES, busy_fraction_of_wall=0.21)),
+            install=FrameworkInstall(framework="vllm", framework_root=root, pass_probe=_fake_probe(enabled=True)),
             model_path=model,
-            framework="vllm",
-            framework_root=root,
-            pass_probe=_fake_probe(enabled=True),
         )
         assert all(r.pattern_id != "qk_norm_rope" for r in recipes)
         assert all(r.candidate_kind != "compile_pass" for r in recipes)
@@ -104,11 +105,9 @@ class TestPatternRoute:
         for label, (kw, want_compile_pass, want_authoring) in cases.items():
             model, root = _fake_vllm_tree(tmp_path / label, "qklm", QK_BODY)
             recipes = build_recipes(
-                diagnose_from_shares(QK_SHARES, busy_fraction_of_wall=0.21),
+                diagnose_from_shares(TraceProfile(QK_SHARES, busy_fraction_of_wall=0.21)),
+                install=FrameworkInstall(framework="vllm", framework_root=root, pass_probe=_fake_probe(**kw)),
                 model_path=model,
-                framework="vllm",
-                framework_root=root,
-                pass_probe=_fake_probe(**kw),
             )
             kinds = [r.candidate_kind for r in recipes]
             got_cp = "compile_pass" in kinds
@@ -134,11 +133,9 @@ class TestPatternRoute:
             json.dumps({"model_type": "qklm", "hidden_size": 2048, "num_attention_heads": 16}), encoding="utf-8"
         )
         recipes = build_recipes(
-            diagnose_from_shares(QK_SHARES, busy_fraction_of_wall=0.21),
+            diagnose_from_shares(TraceProfile(QK_SHARES, busy_fraction_of_wall=0.21)),
+            install=FrameworkInstall(framework="sglang", framework_root=str(tmp_path / "fw"), pass_probe=boom),
             model_path=str(model),
-            framework="sglang",
-            framework_root=str(tmp_path / "fw"),
-            pass_probe=boom,
         )
         assert any(r.pattern_id == "qk_norm_rope" for r in recipes)
 
@@ -162,11 +159,9 @@ class TestRanking:
     def _recipes(self, tmp_path):
         model, root = _fake_vllm_tree(tmp_path, "ranklm", self.BODY)
         return build_recipes(
-            diagnose_from_shares(self.SHARES, busy_fraction_of_wall=0.21),
+            diagnose_from_shares(TraceProfile(self.SHARES, busy_fraction_of_wall=0.21)),
+            install=FrameworkInstall(framework="vllm", framework_root=root, pass_probe=_fake_probe(enabled=False)),
             model_path=model,
-            framework="vllm",
-            framework_root=root,
-            pass_probe=_fake_probe(enabled=False),
         )
 
     def test_compile_pass_outranks_authoring_despite_lower_share(self, tmp_path):
@@ -201,11 +196,12 @@ class TestDiscoveryRoute:
     def test_proposes_enabling_the_switch_when_it_is_off(self):
         recipes = parse_discovered_recipes(
             self._payload(),
-            model_type="m",
-            framework="vllm",
-            source_file="/x.py",
-            shapes={},
-            pass_probe=_fake_probe(enabled=False),
+            DiscoveryTarget(
+                model_type="m",
+                install=FrameworkInstall(framework="vllm", pass_probe=_fake_probe(enabled=False)),
+                source_file="/x.py",
+                shapes={},
+            ),
         )
         assert len(recipes) == 1
         assert recipes[0].candidate_kind == "compile_pass"
@@ -215,11 +211,12 @@ class TestDiscoveryRoute:
     def test_still_drops_when_the_switch_is_already_on(self):
         recipes = parse_discovered_recipes(
             self._payload(),
-            model_type="m",
-            framework="vllm",
-            source_file="/x.py",
-            shapes={},
-            pass_probe=_fake_probe(enabled=True),
+            DiscoveryTarget(
+                model_type="m",
+                install=FrameworkInstall(framework="vllm", pass_probe=_fake_probe(enabled=True)),
+                source_file="/x.py",
+                shapes={},
+            ),
         )
         assert recipes == []
 
@@ -236,7 +233,13 @@ class TestDiscoveryRoute:
         }
         for label, (kw, want_cp, want_auth) in cases.items():
             recipes = parse_discovered_recipes(
-                payload, model_type="m", framework="vllm", source_file="/x.py", shapes={}, pass_probe=_fake_probe(**kw)
+                payload,
+                DiscoveryTarget(
+                    model_type="m",
+                    install=FrameworkInstall(framework="vllm", pass_probe=_fake_probe(**kw)),
+                    source_file="/x.py",
+                    shapes={},
+                ),
             )
             kinds = [r.candidate_kind for r in recipes]
             assert ("compile_pass" in kinds) is want_cp, f"{label}: {kinds}"
@@ -259,11 +262,12 @@ class TestDiscoveryRoute:
         )
         recipes = parse_discovered_recipes(
             payload,
-            model_type="m",
-            framework="vllm",
-            source_file="/x.py",
-            shapes={},
-            pass_probe=_fake_probe(enabled=False),
+            DiscoveryTarget(
+                model_type="m",
+                install=FrameworkInstall(framework="vllm", pass_probe=_fake_probe(enabled=False)),
+                source_file="/x.py",
+                shapes={},
+            ),
         )
         assert [r.candidate_kind for r in recipes] == ["compile_pass", "new_fusion"]
         assert recipes[0].trigger_share < recipes[1].trigger_share

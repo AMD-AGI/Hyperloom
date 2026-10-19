@@ -499,7 +499,7 @@ def _record_source_attempt(
     recorder = _recorder(coord)
     if recorder is None:
         return
-    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_SOURCE
+    from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_SOURCE, GateVerdict
 
     task_id = str(getattr(task, "task_id", "") or "")
     if not task_id:
@@ -603,26 +603,30 @@ def _record_source_attempt(
     if isinstance(delta_pct, (int, float)) and isinstance(keep_threshold, (int, float)):
         recorder.record_attempt_gate(
             task_id,
-            "keep_threshold",
-            passed=float(delta_pct) >= float(keep_threshold),
-            observed=delta_pct,
-            threshold=keep_threshold,
+            GateVerdict(
+                gate="keep_threshold",
+                passed=float(delta_pct) >= float(keep_threshold),
+                observed=delta_pct,
+                threshold=keep_threshold,
+            ),
         )
     if accuracy_pass is not None:
         recorder.record_attempt_gate(
             task_id,
-            "accuracy",
-            passed=bool(accuracy_pass),
-            observed=result.get("accuracy_value"),
-            threshold=result.get("accuracy_reference"),
+            GateVerdict(
+                gate="accuracy",
+                passed=bool(accuracy_pass),
+                observed=result.get("accuracy_value"),
+                threshold=result.get("accuracy_reference"),
+            ),
         )
     parity = result.get("switch_off_parity")
     if isinstance(parity, Mapping) and parity.get("ran"):
         recorder.record_attempt_gate(
             task_id,
-            "switch_off_parity",
-            passed=bool(parity.get("ok")),
-            reason=str(parity.get("reason") or ""),
+            GateVerdict(
+                gate="switch_off_parity", passed=bool(parity.get("ok")), reason=str(parity.get("reason") or "")
+            ),
         )
     _record_step(
         coord,
@@ -1327,7 +1331,6 @@ class FrameworkPhase(ProposalBench):
         specialist_task_id: str = "",
         attempt: int = 1,
         retry_feedback: "list[dict[str, Any]] | None" = None,
-        critic_feedback: "dict[str, Any] | None" = None,
         vetting_drops: "list[str] | None" = None,
     ) -> str:
         """Dispatch a fresh authoring specialist for an apply-failure retry."""
@@ -1386,17 +1389,12 @@ class FrameworkPhase(ProposalBench):
                 raw_audit = spec_params.get("framework_audit")
                 if isinstance(raw_audit, dict):
                     audit = raw_audit
-            # Merge apply feedback + critic feedback into a single note block.
-            merged_feedback = dict(critic_feedback or {})
-            if feedback_lines:
-                existing_advice = str(merged_feedback.get("advice_text") or "")
-                apply_advice = "\n".join(feedback_lines)
-                merged_feedback["advice_text"] = apply_advice + ("\n\n" + existing_advice if existing_advice else "")
+            merged_feedback = {"advice_text": "\n".join(feedback_lines)} if feedback_lines else None
             new_task_id = await self._enqueue_framework_agent_authoring_specialist(
                 candidate,
                 audit=audit,
                 reauthor_attempt=attempt,
-                critic_feedback=merged_feedback if merged_feedback else None,
+                critic_feedback=merged_feedback,
             )
             log.info(
                 "AUTHORED_LANE: dispatched perf_framework retry specialist cand=%s attempt=%d task=%s",
@@ -1422,15 +1420,6 @@ class FrameworkPhase(ProposalBench):
         if not gap_cid:
             gap_cid = f"gap.explore.retry.{specialist_task_id or 'unknown'}"
         notes_lines: list[str] = list(feedback_lines)
-        if critic_feedback:
-            req_ev = [str(x).strip() for x in (critic_feedback.get("required_evidence") or []) if str(x).strip()]
-            if req_ev:
-                notes_lines.append("")
-                notes_lines.append("PRIOR CRITIC FEEDBACK (also address this):")
-                notes_lines.extend(f"  • {ev}" for ev in req_ev[:10])
-            advice = str(critic_feedback.get("advice_text") or "").strip()
-            if advice:
-                notes_lines.append(f"- advice: {advice}")
         notes = "\n".join(notes_lines).strip()
         params: dict[str, Any] = {
             "domain": "serving_specialist",

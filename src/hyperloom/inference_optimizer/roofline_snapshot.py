@@ -165,15 +165,6 @@ def _clamp_within(raw: float | None) -> tuple[float | None, float | None]:
     return within, round(100.0 - within, 2)
 
 
-def _compute_within_and_gap(
-    *,
-    peak: float,
-    achieved: float,
-) -> tuple[float | None, float | None]:
-    """Return ``(within_roofline_pct, gap_to_roofline_pct)``; both ``None`` when either input is non-positive."""
-    return _clamp_within(within_roofline_pct(peak=peak, achieved=achieved))
-
-
 def attach_perfmodel_breakdown(snapshot: dict[str, Any], state: Any, *, arm: str) -> None:
     """Add ``roofline_provenance`` (+ ``perfmodel_breakdown`` when the PerfModel succeeds) for *arm*."""
     try:

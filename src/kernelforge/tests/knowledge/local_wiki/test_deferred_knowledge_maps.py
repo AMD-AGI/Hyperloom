@@ -1,13 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The ablation that defers every knowledge map to a pointer.
+"""Deferring every knowledge map to a pointer, which is the default.
 
 The maps are the bulk of a kernel-backend system prompt and that prompt is the
 cached prefix, so they are re-read on every turn of every session. Deferring
-them is a behaviour trade, not a free win, which is why it is off by default --
-these tests pin the default and the shape of the alternative rather than argue
-for either.
+them is a behaviour trade, not a free win; these tests pin the default and the
+shape of both arms rather than argue for either.
 """
 
 from __future__ import annotations

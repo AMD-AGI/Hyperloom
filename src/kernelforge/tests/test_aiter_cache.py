@@ -223,9 +223,8 @@ def test_finished_attempt_deletes_private_cache(tmp_path, monkeypatch):
     assert active is not None
     monkeypatch.setattr(aiter_cache, "_live_cache_users", lambda _isolation: [])
 
-    stats = aiter_cache.cleanup_current_aiter_cache()
+    stats = aiter_cache.cleanup_owned_aiter_cache(isolation)
 
-    assert stats is not None
     assert stats["deleted"] is True
     assert not isolation.cache_root.exists()
     assert "FORGE_AITER_CACHE_ROOT" not in os.environ
@@ -241,9 +240,8 @@ def test_finished_attempt_preserves_cache_with_live_child(tmp_path, monkeypatch)
     assert aiter_cache.activate_aiter_cache_for_sources([str(source)]) is not None
     monkeypatch.setattr(aiter_cache, "_live_cache_users", lambda _isolation: [4321])
 
-    stats = aiter_cache.cleanup_current_aiter_cache()
+    stats = aiter_cache.cleanup_owned_aiter_cache(isolation)
 
-    assert stats is not None
     assert stats["deleted"] is False
     assert stats["skipped_live_pids"] == [4321]
     assert isolation.cache_root.exists()
