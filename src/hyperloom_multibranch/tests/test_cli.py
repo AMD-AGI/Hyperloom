@@ -194,13 +194,18 @@ def test_an_agentx_switch_that_contradicts_the_workload_exits_two(
 
 @pytest.fixture
 def ready_environment(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
-    """No Experience KB, no Recipe KB, the launcher's image named, the shipped tool pins, a model the price sheet lists,
-    a writable RSI archive outside the test's workspace, and the framework's package installed in the image."""
+    """No Experience KB, no Recipe KB, the launcher's image named, the shipped tool pins, an InferenceX checkout, a
+    model the price sheet lists, a writable RSI archive outside the test's workspace, and the framework's package
+    installed in the image."""
 
     for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN", "MAGPIE_REF", "INFERENCEX_REF"):
         monkeypatch.delenv(name, raising=False)
     for name, value in zip(IMAGE_VARS, IMAGE):
         monkeypatch.setenv(name, value)
+    inferencex = tmp_path_factory.mktemp("InferenceX")
+    (inferencex / "benchmarks").mkdir()
+    (inferencex / "benchmarks" / "benchmark_lib.sh").write_text("")
+    monkeypatch.setenv("INFERENCEX_PATH", str(inferencex))
     monkeypatch.delenv("KB_STORE_URL", raising=False)
     monkeypatch.delenv("KB_STORE_TOKEN", raising=False)
     monkeypatch.setenv("CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL)

@@ -10,7 +10,8 @@ environment compiler reads, like the repository, from the session's blob store a
 on; its learnings tool recalls this session's learnings only, as MB1 runs on no Experience KB
 (:func:`~hyperloom_multibranch.scheduling.mb_fakes.mb_fake_learning_recall`). Every test is measured on a
 :class:`MeasurementHost`: this machine's cards, the image the launcher names in ``HYPERLOOM_ACTIVE_IMAGE_REF`` and
-``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` and the tool commits Hyperloom pins. The gate's session service and the specialist
+``HYPERLOOM_ACTIVE_IMAGE_DIGEST``, the tool commits Hyperloom pins and an InferenceX checkout at its commit; the
+canonical measurement is rendered with the workload's model and GPU type and that checkout. The gate's session service and the specialist
 runtime judge on one rule, :func:`workload_rule`; the runtime settles through a rule gate that asks the scheduler's fork
 desk for branches, and the MCP service's ``request_repair`` and ``decline_repair`` conclude a blocked candidate through
 the same gate, which the scheduler has land each fork it admits and record each fork and repair it voids. A specialist
@@ -60,7 +61,10 @@ from hyperloom_multibranch.specialist.judging import Judging
 from hyperloom_multibranch.specialist.runtime import RuntimePacing, SpecialistRuntime
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from hyperloom.measure.pins import ActiveImage, ToolCommits
+    from hyperloom.measure.points import CanonicalMeasurement
     from hyperloom_multibranch.specialist.agent_session import AgentCommand
     from hyperloom_multibranch.specialist.model_sessions import ModelSessions
 
@@ -97,12 +101,14 @@ SpecialistSessions = Callable[[SessionWiring], "ModelSessions"]
 @dataclass(frozen=True)
 class MeasurementHost:
     """What the toolbox measures on and the session's workload does not name: the cards of the machine, the image
-    the tests run in (its digest is also the base image every recipe must carry, the root recipe's first) and the
-    Magpie and InferenceX commits the runner checks out."""
+    the tests run in (its digest is also the base image every recipe must carry, the root recipe's first), the
+    Magpie and InferenceX commits the runner checks out and this machine's InferenceX checkout at that commit, which
+    every measurement point names."""
 
     cards: tuple[int, ...]
     image: ActiveImage
     tools: ToolCommits
+    inferencex_path: str
 
 
 def workload_environment(workload: Workload) -> Mapping[str, str]:
@@ -136,6 +142,21 @@ def workload_rule(workload: Workload, notebook: CommitQuery) -> Rule:
     return InferenceXRule(notebook, workload.conc)
 
 
+def _canonical(out_dir: Path, workload: Workload, host: MeasurementHost) -> CanonicalMeasurement:
+    """The canonical measurement every point of the session is rendered from. The renderer takes the model and the
+    runner type only as arguments, so a point never falls back to the shipped YAML's model."""
+
+    from hyperloom.measure.points import default_canonical
+
+    return default_canonical(
+        out_dir,
+        primary_concurrency=workload.conc,
+        model_path=resolve_serving_model_path(workload.model),
+        gpu_type=workload.gpu_type,
+        inferencex_path=host.inferencex_path,
+    )
+
+
 def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: PeerSetup) -> Peers:
     """The session's peers on this machine; exports :func:`workload_environment` into this process.
 
@@ -146,7 +167,6 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     from hyperloom.hosted.mcp_server import McpServer, McpServerConfig
     from hyperloom.measure.compile import EnvironmentCompiler
     from hyperloom.measure.hosted_spec import SpecContext
-    from hyperloom.measure.points import default_canonical
     from hyperloom_multibranch.notebook.learning_search import LEARNINGS_LOG, RetrievalLog
     from hyperloom_multibranch.toolbox.local_hosted import LocalSession, build_local_toolbox
     from hyperloom_multibranch.toolbox.mcp_tools import (
@@ -162,7 +182,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     layout, workload = setup.layout, setup.workload
     os.environ.update(workload_environment(workload))
     repo = GitExperimentRepo(layout.repo, setup.blobs)
-    canonical = default_canonical(layout.toolbox / CANONICAL_DIR, primary_concurrency=workload.conc)
+    canonical = _canonical(layout.toolbox / CANONICAL_DIR, workload, host)
     image = host.image
     compiler = EnvironmentCompiler(setup.blobs, image.digest)
     spec = SpecContext(
@@ -239,16 +259,27 @@ def machine_cards() -> tuple[int, ...]:
 
 
 def measurement_host(env: Mapping[str, str]) -> MeasurementHost:
-    """This machine's cards, the image ``env`` names and the tool commits Hyperloom pins, ``env`` overriding as
-    ``install.sh`` lets it; raises :class:`PeersUnavailable` when the image or a commit cannot be pinned, an
-    unnamed image included."""
+    """This machine's cards, the image ``env`` names, the tool commits Hyperloom pins, ``env`` overriding as
+    ``install.sh`` lets it, and the InferenceX checkout ``INFERENCEX_PATH`` names or ``install.sh`` left; raises
+    :class:`PeersUnavailable` when the image or a commit cannot be pinned, an unnamed image included, or no writable
+    checkout at the pinned InferenceX commit is found."""
 
+    from hyperloom.inference_optimizer import inferencex_checkout
     from hyperloom.measure.pins import ImagePinError, ToolPinError, active_image, pinned_tool_commits
 
     try:
-        return MeasurementHost(machine_cards(), active_image(env), pinned_tool_commits(env))
+        image, tools = active_image(env), pinned_tool_commits(env)
     except (ImagePinError, ToolPinError) as exc:
         raise PeersUnavailable(f"the measurement pins cannot be read: {exc}") from exc
+    checkout = env.get("INFERENCEX_PATH", "").strip() or inferencex_checkout.detect()
+    if not (
+        checkout and inferencex_checkout.checkout_ok(checkout, ref=tools.inferencex) and os.access(checkout, os.W_OK)
+    ):
+        raise PeersUnavailable(
+            f"no InferenceX checkout at {tools.inferencex[:12]} is writable at {checkout or 'any detected path'}: "
+            "run install.sh, or set INFERENCEX_PATH to one"
+        )
+    return MeasurementHost(machine_cards(), image, tools, checkout)
 
 
 def machine_parallel_tests(tp: int) -> int:

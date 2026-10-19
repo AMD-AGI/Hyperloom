@@ -16,8 +16,10 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
+import yaml
 
 from hyperloom.contracts.measurement import AttachmentRef
+from hyperloom.inference_optimizer import inferencex_checkout
 from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.perf_metric import agentx_enabled
@@ -73,7 +75,7 @@ WORKLOAD = Workload(
 )
 AGENTX = replace(WORKLOAD, inferencex=None)
 IMAGE = ActiveImage("registry.example/sglang:v1", "sha256:" + "2" * 64)
-HOST = MeasurementHost((0, 1, 2, 3), IMAGE, ToolCommits("a" * 40, "b" * 40))
+HOST = MeasurementHost((0, 1, 2, 3), IMAGE, ToolCommits("a" * 40, "b" * 40), "/opt/InferenceX")
 IMAGE_VARS = ("HYPERLOOM_ACTIVE_IMAGE_REF", "HYPERLOOM_ACTIVE_IMAGE_DIGEST")
 
 
@@ -197,14 +199,34 @@ def four_cards(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
 
 
+def _inferencex_checkout(root: Path) -> Path:
+    (root / "benchmarks").mkdir(parents=True)
+    (root / "benchmarks" / "benchmark_lib.sh").write_text("")
+    return root
+
+
 @pytest.mark.usefixtures("four_cards")
-def test_the_host_is_this_machines_cards_on_the_launchers_image_and_the_pinned_tool_commits() -> None:
-    env = {IMAGE_VARS[0]: IMAGE.ref, IMAGE_VARS[1]: IMAGE.digest}
+def test_the_host_is_this_machines_cards_on_the_launchers_image_and_the_pinned_tool_commits(tmp_path: Path) -> None:
+    checkout = _inferencex_checkout(tmp_path / "InferenceX")
+    env = {IMAGE_VARS[0]: IMAGE.ref, IMAGE_VARS[1]: IMAGE.digest, "INFERENCEX_PATH": str(checkout)}
 
     host = measurement_host(env)
 
-    assert host == MeasurementHost((4, 5, 6, 7), IMAGE, pinned_tool_commits({}))
+    assert host == MeasurementHost((4, 5, 6, 7), IMAGE, pinned_tool_commits({}), str(checkout))
     assert machine_parallel_tests(2) == 2
+
+
+@pytest.mark.usefixtures("four_cards")
+def test_a_machine_without_an_inferencex_checkout_refuses_the_peers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(inferencex_checkout, "detect", lambda: "")
+    env = {IMAGE_VARS[0]: IMAGE.ref, IMAGE_VARS[1]: IMAGE.digest}
+
+    with pytest.raises(PeersUnavailable, match="no InferenceX checkout"):
+        measurement_host(env)
+    with pytest.raises(PeersUnavailable, match=f"no InferenceX checkout .*{tmp_path.name}"):
+        measurement_host({**env, "INFERENCEX_PATH": str(tmp_path)})
 
 
 @pytest.mark.parametrize("mask", ["ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"])
@@ -306,7 +328,12 @@ async def test_the_real_peers_live_inside_the_session_directory(built: _Built) -
     assert isinstance(peers.lifecycle, SpecialistRuntime) and peers.briefs.warm == ()
     assert peers.briefs.repo is peers.repo
     assert isinstance(peers.toolbox, LocalHostedToolbox) and isinstance(peers.repo, GitExperimentRepo)
-    assert (layout.toolbox / "canonical" / "canonical.yaml").is_file()
+    canonical = yaml.safe_load((layout.toolbox / "canonical" / "canonical.yaml").read_text())["benchmark"]
+    assert (canonical["model"], canonical["runner_type"], canonical["inferencex_path"]) == (
+        WORKLOAD.model,
+        WORKLOAD.gpu_type,
+        HOST.inferencex_path,
+    )
     assert not (layout.toolbox / "measurement-config.json").exists()
     assert peers.base_image_digest == IMAGE.digest
     assert peers.mcp.url.startswith("http://127.0.0.1:")
