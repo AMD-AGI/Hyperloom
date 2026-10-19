@@ -13,14 +13,14 @@ sources:
 # Measuring a FlyDSL GEMM change
 
 > The effects worth chasing on a tuned GEMM are 0.3–3%; the apparatus moves by that much on its own.
-> Every rule here comes from a FlyDSL GEMM measurement on MI355X *(field)* that reported a confident
-> number and was wrong. The general protocol is `../../../../common_methodology/profiling/measure_protocol.md`;
+> Numbers marked *(field)* are measured values. Use them for direction and order of magnitude, not as
+> targets. The general protocol is `../../../../common_methodology/profiling/measure_protocol.md`;
 > this card is what a GEMM A/B adds to it.
 
 ## Route here when
 - Comparing two builds, configs or kernels; deciding whether a delta is real.
 - Writing a probe, a micro-ruler or an autotune race.
-- Closing a campaign: which of the changes actually paid.
+- Closing a series of changes: which of them actually paid.
 
 ## 1. Pick the ruler for the effect size
 
@@ -53,7 +53,7 @@ sources:
 
 ## 3. Warmup, clocks and load
 
-- **An idle MI355X needs 60–90 s of sustained real-shape load to reach its working clock.** *(field)* The
+- **An idle card needs 60–90 s of sustained real-shape load to reach its working clock.** *(field)* The
   same config climbed from 3990 to 4910 TF/s while each reading looked stable (0.26% spread). Short
   warmups make every absolute number ~20% low.
 - **On a power-capped kernel the first arm of a batch runs slow** while the clock policy settles
@@ -62,7 +62,7 @@ sources:
   `rocm-smi` between batches (which catches idle windows). Two arms at different clocks are two
   machines, not two kernels.
 - **Measure CU-fill levers under the real load mix.** *(field)* An isolated loop let the under-filled
-  arm boost to 1699 MHz and made a tail split look negative; under the 12-shape mix both arms ran at
+  arm boost to 1699 MHz and made a tail split look negative; under the real mix both arms ran at
   ~1605 MHz and the split won by 21.5% on the scored table.
 - **Cache, residency, swizzle and placement levers do not transfer from isolated back-to-back loops.**
   *(field)* A write-placement change read +1.1…6.5% isolated and −0.45% on the scored bench; an `nt`
@@ -120,8 +120,8 @@ sources:
 - **Each arm at its own best configuration.** *(field)* Pinning both arms to `block_m=64` turned a 2.4%
   loss into a reported 1.8% win, because 64 was the new kernel's best and the old kernel's worst.
 - **Re-measure the competitor column yourself**, with its own calling convention, and confirm it took
-  its fast path; *(field)* the competitor reached only 0.966–0.992 of its own frozen column on the
-  same box, which turned a 10/12 result into 12/12.
+  its fast path; *(field)* re-measured, the competitor reached only 0.966–0.992 of its own frozen
+  column, which turned a 10/12 result into 12/12.
 - **Aggregate with weights of the right dimension.** Time-share weights take an arithmetic mean of
   times; harmonic means are for FLOP-weighted rates. *(field)* A harmonic mean over time-share weights
   reported +8.0% for a true +6.9%.
@@ -133,7 +133,7 @@ sources:
 A per-shape race is a measurement too, with its own noise and order bias. How to build one that cannot
 regress is in `flydsl_gemm_autotune.md`.
 
-## 9. Closing a campaign
+## 9. Closing a series of changes
 
 - **Ablate every component on the full table, including an all-off arm**: BASE → each one off → all
   off → BASE again. Turning off one at a time makes two compensating components look like two
@@ -143,7 +143,7 @@ regress is in `flydsl_gemm_autotune.md`.
 - Keep a change only if its price exceeds the BASE-to-BASE drift and its sign agrees across cells.
   Re-verify any causal claim made from a single shape on the whole table (*field:* a narrow-tile rule
   credited with +1.9% on one shape was +0.09% better removed).
-- The best banked score of a campaign is the maximum of a noise distribution; re-measure it.
+- The best score banked across many attempts is the maximum of a noise distribution; re-measure it.
 - Equivalence by ISA hash only after confirming the same tree gives a stable hash (in-process
   autotuning can change the ISA); never drop outliers or let sample counts differ between arms.
 

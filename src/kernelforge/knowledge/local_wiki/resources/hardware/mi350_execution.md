@@ -49,7 +49,7 @@ A **workgroup is dispatched to one CU** and never migrates; its waves stripe acr
   64 / 72 / 80 / 96 / 128 / 168 / 256 (8 down to 2 waves/SIMD). Shaving registers *within* a tier changes
   nothing; shaving across one can jump a whole occupancy tier.
 - The ROCm workload-tuning guide says "blocks of 16"; gfx950 uses 8. `llc -mcpu=gfx950` reports
-  occupancy 7 at 65 VGPRs, and on an MI355X 65- and 72-VGPR single-wave workgroups run 7 per SIMD
+  occupancy 7 at 65 VGPRs, and on the hardware 65- and 72-VGPR single-wave workgroups run 7 per SIMD
   concurrently while 73-VGPR ones run 6. A 16-register granule would cap both at 6.
 - **AGPRs are the escape hatch**: park large FP32 matmul accumulators there so they do not consume the
   architected budget that limits occupancy. Cost is a `v_accvgpr_read_b32` per element in the epilogue

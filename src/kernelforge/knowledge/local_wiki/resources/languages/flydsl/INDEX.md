@@ -99,7 +99,7 @@ languages/flydsl/
 │   └── examples/                         # runnable skeletons: 01 vectorAdd · 02 tiledCopy · 03 tiledMma · 04 preshuffle_gemm
 ├── skills/                               ← techniques by phase
 │   ├── gemm/                             # dense GEMM package (exemplar: Primus-Turbo main) — open its INDEX.md
-│   │   ├── INDEX.md                      # task → card routing, Turbo kernel map, FlyDSL 0.2.4/0.3.2/0.3.4.1 deltas
+│   │   ├── INDEX.md                      # task → card routing, Turbo kernel map
 │   │   └── flydsl_gemm_*.md              # workflow · grid_pricing · mainloop · datapath · schedule_and_locality ·
 │   │                                     #   epilogue · autotune · attribution · correctness · measurement
 │   ├── optimize/

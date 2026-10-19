@@ -290,7 +290,7 @@ rocdl.sched_dsrd(cnt)    # schedule group: the next cnt DS (LDS) reads
 rocdl.sched_dswr(cnt)    # schedule group: the next cnt DS (LDS) writes
 ```
 
-*(KernelForge correction — upstream v0.3.2 comments these as "wait for cnt … to complete".)* Each
+Each
 helper is `sched_group_barrier(mask, cnt, 0)` (`python/flydsl/expr/rocdl/__init__.py:152-168`): an
 ordering hint to the scheduler that waits for nothing. Waiting is `rocdl.s_waitcnt(vmcnt=…, lgkmcnt=…)`.
 

@@ -43,9 +43,9 @@ answer than a rewrite.
 
 Read the Primus-Turbo FlyDSL GEMM for your dtype and layout before designing your own (kernel map in
 `INDEX.md`). It is built for training shapes; for M ≤ 256 use `flydsl_gemm_small_m.md` instead. Its comments
-record why each choice was made, and it runs on flydsl 0.3.2. Copy the structure and the reasoning; re-derive the constants
-(tile tables, wait counts, margins, L2 thresholds) for your shape and machine. Those constants were tuned
-on specific shapes and on MI355X.
+record why each choice was made, and it runs on FlyDSL v0.3.2. Copy the structure and the reasoning;
+re-derive the constants (tile tables, wait counts, margins, L2 thresholds) for your shape and machine. Those
+constants were tuned on specific shapes.
 
 ## Step 1 — establish that it really is a GEMM
 
@@ -92,8 +92,7 @@ re-tuned after the tile is fixed. Do not touch step 5 while steps 1–4 still ha
 ## The round discipline
 
 These rules come from Primus-Turbo's optimization loop (`agent/skills/kernel-optimize/SKILL.md`,
-`agent/rules/iteration_rules.mdc`) and from FlyDSL GEMM campaigns. Each exists because breaking it cost
-rounds.
+`agent/rules/iteration_rules.mdc`). Each exists because breaking it cost rounds.
 
 - **One change per measured round.** Sweeping one configuration axis with the kernel code unchanged
   counts as one change. A new MFMA atom plus a new LDS stage is two, and their effects cannot be

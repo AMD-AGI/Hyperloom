@@ -19,10 +19,9 @@ sources:
 > The exemplar here is **Primus-Turbo's FlyDSL GEMM** (`primus_turbo/flydsl/{gemm,utils}`),
 > built for training shapes (large M; small M is in `flydsl_gemm_small_m.md`). "FP8" below means
 > `gemm/gemm_fp8_kernel.py`, "FP4" means `gemm/gemm_mxfp4_kernel.py` and "GH" means `utils/gemm_helper.py`,
-> all at Turbo main `7615a5a2`. That commit pins flydsl 0.3.4.1, and it also runs unmodified on 0.3.2.
+> all at Turbo main `7615a5a2`, which runs unmodified on FlyDSL v0.3.2.
 > FlyDSL's own GEMM kernels are summarized in §8, for when you call them as a library.
-> Numbers marked *(field)* were measured on MI355X during FlyDSL GEMM work. Use them for direction and
-> order of magnitude, not as targets.
+> Numbers marked *(field)* are measured values. Use them for direction and order of magnitude, not as targets.
 
 ## Route here when
 - You are choosing or writing the K loop of a FlyDSL GEMM: wave count, LDS buffering, where the waits go,
@@ -47,8 +46,8 @@ are in `flydsl_gemm_schedule_and_locality.md`. LDS layout, global→LDS DMA and 
 
 **Why the 4-wave tile wins on long K.** A 2×2-wave split of a 256×256 tile gives each wave a 128×128
 block. That is 64 MACs per operand element per K step, against 42.7 for the 8-wave's 128×64 wave blocks,
-so the 4-wave tile issues 1.5× fewer LDS reads per MAC. *(field)* rocprofv3 measured the 8-wave/4-wave
-LDS instruction ratio at 1.49×. The 4-wave lead grew with K, from 6.4% at K=8192 to 10.5% at K=28672.
+so the 4-wave tile issues 1.5× fewer LDS reads per MAC. *(field)* The 8-wave/4-wave LDS instruction ratio
+was 1.49×. The 4-wave lead grew with K, from 6.4% at K=8192 to 10.5% at K=28672.
 Turbo's own comment gives the mechanism on a power-capped part: "the whole-loop moves a third less LDS
 traffic per MFMA, which buys clock" (FP8:3200).
 
@@ -75,8 +74,8 @@ epilogue, so no fixed rule works.
   swap cur/next names in Python
   ```
 - **Every barrier is load-bearing.** The kernel docstring says "each guards a compiler-reorder race".
-  *(field)* On the MXFP4 4-wave whole loop, every attempt to drop a barrier produced an operand race;
-  the cross-wave cause is a missing LDS rendezvous, not out-of-order `vmcnt`.
+  *(field)* Every attempt to drop a barrier produced an operand race; the cross-wave cause is a missing
+  LDS rendezvous, not out-of-order `vmcnt`.
 - **The end-of-iteration drain is a correctness knob, not a tuning knob.** `nt_vmcnt=3` is documented
   at FP8:92: N=3 gave bitwise-repeatable output at ≤1.1% cost, N≥4 raced, N<3 was slower. If you build
   this pipeline, sweep the drain with a bitwise repetition gate (`flydsl_gemm_correctness.md` §3),
@@ -101,7 +100,7 @@ What this buys:
 - Code size does not grow with K. The trip count can be a compile-time constant or a runtime SGPR.
 - FlyDSL's own fp4 kernel avoids full unrolling for that reason: "full unroll -> 111KB > 32KB I-cache"
   (`kernels/gemm/fp4_gemm_4wave.py:651`).
-- *(field)* The whole-loop rewrite was the largest single lever on the MXFP4 4-wave dense kernel.
+- *(field)* The whole-loop rewrite was the largest single lever.
 
 How Turbo structures it (FP8:1133-1230, 2187-2412):
 - **Operand pools.** A macro tile is described as `(side, width, nbuf)` pools. The NT square tile is
@@ -128,8 +127,7 @@ How Turbo structures it (FP8:1133-1230, 2187-2412):
 - **Buffer select is free.** Each pool keeps one set of per-lane addresses. The buffer and tile deltas
   go into the 16-bit `ds_read` offset field (`_Tn4Pool` asserts the sum stays below 65536, FP8:1208).
 
-*(field)* This emit order is a sharp local optimum. On an fp8 TN whole loop, every perturbation
-lost:
+*(field)* This emit order is a sharp local optimum. Every perturbation lost:
 
 | Perturbation | Effect |
 |---|---|
@@ -174,21 +172,14 @@ hot loop) and by wall time, not by `accum_offset` or register totals.
   VGPRs with no shuttle (`_MXFP4_ARCH_ACC`, FP4:578-582).
 - The same trade on the fp8 NT whole loop "measured a wash" (FP8:2045-2047): an MFMA writing an arch
   VGPR that a VALU then reads needs wait states that the single wave per SIMD has nothing to fill.
-- *(field, attention)* At unchanged occupancy, freed registers buy nothing on their own. Releasing 72
+- *(field)* At unchanged occupancy, freed registers buy nothing on their own. Releasing 72
   VGPRs and 72 AGPRs cost −2.05%. Name the specific gain the headroom is for before building it.
 
-**Setting `amdgpu-agpr-alloc` and friends: the attribute name depends on the FlyDSL version.** Turbo
-passes these through `value_attrs` (`make_value_attrs`, GH:1580). Verified on MI355X by checking
-`.amdhsa_next_free_vgpr` in the ISA:
-
-| flydsl | `"passthrough": [...]` | `"llvm.passthrough": [...]` |
-|---|---|---|
-| 0.2.4 | kept | **silently ignored** |
-| 0.3.2, 0.3.4.1 | **silently dropped** at `convert_gpu_to_rocdl` | kept |
-
-A dropped attribute gives no error. An inline-asm AGPR accumulator then gets the default allocation, and
-the result is wrong. After setting any kernel attribute, read `.agpr_count`, `.vgpr_count` and the
-waves-per-eu fields from the ISA (`FLYDSL_DUMP_IR=1`, §10).
+**Setting `amdgpu-agpr-alloc` and friends.** Turbo passes these through `value_attrs`
+(`make_value_attrs`, GH:1580). Put them under `"llvm.passthrough": [...]`. A bare `"passthrough": [...]`
+key is silently dropped at `convert_gpu_to_rocdl`. A dropped attribute gives no error. An inline-asm AGPR
+accumulator then gets the default allocation, and the result is wrong. After setting any kernel attribute,
+read `.agpr_count`, `.vgpr_count` and the waves-per-eu fields from the ISA (`FLYDSL_DUMP_IR=1`, §10).
 
 ## 5. MFMA atom choice
 
@@ -197,10 +188,10 @@ waves-per-eu fields from the ISA (`FLYDSL_DUMP_IR=1`, §10).
   (fp4 takes 4 dwords).
 - **bf16: prefer 16x16x32 to 32x32x16.** Both cover the same block with the same accumulators, operand
   bytes and `ds_read` count, but each MFMA rewrites its whole accumulator tile, so the smaller atom moves
-  fewer register-file bytes per MAC. On a part pinned at 1400 W the clock rose from 1.40 to 1.667 GHz
-  and the wall fell 10.8%, while cycles per dispatch rose 8% and MFMA utilization fell from 84% to 77%
-  (Turbo commit `ed8d7af46`). `SQ_VALU_MFMA_BUSY_CYCLES` was bit-identical across the
-  swap. **Rank atoms on wall time and energy, never on utilization counters.**
+  fewer register-file bytes per MAC. *(field)* At the power cap the clock rose from 1.40 to 1.667 GHz
+  and the wall fell 10.8%, while cycles per dispatch rose 8% and MFMA utilization fell from 84% to 77%.
+  `SQ_VALU_MFMA_BUSY_CYCLES` was bit-identical across the swap. **Rank atoms on wall time and energy,
+  never on utilization counters.**
 
 ## 6. K tails inside the kernel
 
@@ -254,7 +245,7 @@ Facts about PS and A16 that matter when tuning them:
   by a predicate.
 - **A16 waits.** A16 waits with `rocdl.asyncmark()` / `rocdl.wait_asyncmark(stages-2)` around
   `cdna4.BufferLoadAsyncLDS128b`, which counts DMA groups instead of `vmcnt`. This is the in-DSL
-  alternative to hand-written waits on 0.3.2 and later.
+  alternative to hand-written waits.
 - **Configuration space.** The argument space of the aiter-shipped variants is in
   `../optimize/flydsl_levers/flydsl_knob_space.md`.
 

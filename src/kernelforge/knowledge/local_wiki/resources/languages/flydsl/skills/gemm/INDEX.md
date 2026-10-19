@@ -19,8 +19,7 @@ when you call them as a library.
 **Small M (decode, M ≤ 256) is not a Primus-Turbo target.** For it, read `flydsl_gemm_small_m.md`: the kernel there
 is FlyDSL's `gemm_a16w16_gfx950`, as shipped in aiter.
 
-Numbers marked *(field)* in these cards were measured on MI355X during FlyDSL kernel work. They give
-direction and order of magnitude; they are not targets for your shape.
+Numbers marked *(field)* are measured values. Use them for direction and order of magnitude, not as targets.
 
 ## Start here
 
@@ -36,7 +35,7 @@ direction and order of magnitude; they are not targets for your shape.
 | putting several configurations behind one entry point; launch overhead; CUDA graphs | `flydsl_gemm_autotune.md` |
 | finding out where the time goes before changing anything | `flydsl_gemm_attribution.md` |
 | writing or trusting a correctness gate | `flydsl_gemm_correctness.md` |
-| measuring an A/B, setting a noise floor, closing a campaign | `flydsl_gemm_measurement.md` |
+| measuring an A/B, setting a noise floor, deciding which of a series of changes paid | `flydsl_gemm_measurement.md` |
 | debugging a wrong result | `../bottleneck/debug-flydsl-kernel.md` |
 
 ## Kernel map: Primus-Turbo main `7615a5a2`, dense
@@ -54,26 +53,19 @@ Paths are under `primus_turbo/flydsl/`.
 | `utils/prims.py` | shared | `readfirstlane`, unsigned index math, wave scans | — |
 
 Constants in these files (candidate tables, wait counts, adoption margins, L2 and burst thresholds) were
-tuned on specific model shapes on MI355X. Reuse the mechanism and re-derive the number.
+tuned on specific model shapes. Reuse the mechanism and re-derive the number.
 
-## FlyDSL versions
+## FlyDSL version
 
-Primus-Turbo main pins flydsl 0.3.4.1; this knowledge base's API docs are vendored from 0.3.2; Primus-Turbo
-before `7615a5a2` used 0.2.4. Turbo main `7615a5a2` runs unmodified on 0.3.2 *(field, 2026-10-19: fp8 and MXFP4
-8192³ bit-identical to 0.3.4.1)*. The differences that matter for GEMM code:
-
-| | 0.2.4 | 0.3.2 | 0.3.4.1 |
-|---|---|---|---|
-| raw buffer helpers (`create_buffer_resource`, …) | `flydsl.expr.buffer_ops` | not in the wheel (`kernels/common/buffer_ops.py` in the repo); Turbo vendors its own copy in `utils/buffer_ops.py` | same as 0.3.2 |
-| kernel attributes through `value_attrs` | `"passthrough"` kept, `"llvm.passthrough"` **silently ignored** | `"passthrough"` **silently dropped**, `"llvm.passthrough"` kept | same as 0.3.2 |
-| `rocdl.s_waitcnt` | raw bitfield only | raw bitfield, or `s_waitcnt(vmcnt=…, lgkmcnt=…)` | same as 0.3.2 |
-| `rocdl.asyncmark()` / `wait_asyncmark(n)` with `cdna4.BufferLoadAsyncLDS*` | absent | present | present |
-| `aux` (cache policy) on `rocdl.raw_ptr_buffer_*` wrappers | — | a non-`int` value is silently replaced by `None` | same |
-| closure-captured Python dict in the JIT cache key | — | not in the key | not in the key |
-
-The attribute rows were checked by reading `.amdhsa_next_free_vgpr` in the ISA on MI355X; the others by
-reading each tag's source. See `flydsl_gemm_mainloop.md` §4 and `../bottleneck/debug-flydsl-kernel.md` § What
-the cache key sees.
+All API statements in this package are for FlyDSL v0.3.2. Turbo main `7615a5a2` runs unmodified on it. The
+raw buffer helpers (`create_buffer_resource`, …) are not in the wheel: they live in `kernels/common/buffer_ops.py`
+in the FlyDSL repo, and Turbo vendors its own copy in `utils/buffer_ops.py`. Kernel attributes passed through
+`value_attrs`, such as `amdgpu-agpr-alloc`, must go under `"llvm.passthrough"`; a bare `"passthrough"` key is
+silently dropped. `rocdl.s_waitcnt` takes a raw bitfield or the keyword form `s_waitcnt(vmcnt=…, lgkmcnt=…)`.
+`rocdl.asyncmark()` and `wait_asyncmark(n)` exist and pair with `cdna4.BufferLoadAsyncLDS*`. A non-`int` `aux`
+(cache policy) on the `rocdl.raw_ptr_buffer_*` wrappers is silently replaced by `None`. A closure-captured Python
+dict is not in the JIT cache key. See `flydsl_gemm_mainloop.md` §4 and `../bottleneck/debug-flydsl-kernel.md`
+§ What the cache key sees.
 
 ## Cards
 
@@ -88,5 +80,5 @@ the cache key sees.
 | `flydsl_gemm_autotune.md` | first-call race, never-regress margins, cache keys, launch path, CUDA graphs |
 | `flydsl_gemm_attribution.md` | regime probes, subtractive and additive arms, energy at the power cap, wave-cycle budget |
 | `flydsl_gemm_correctness.md` | gates that reach the changed path, races, waits, bounds, register classes |
-| `flydsl_gemm_measurement.md` | rulers, arm order, warm-up, noise floors, statistics, closing a campaign |
+| `flydsl_gemm_measurement.md` | rulers, arm order, warm-up, noise floors, statistics, closing a series of changes |
 | `flydsl_gemm_small_m.md` | decode-shape GEMM: cold rulers, dispatch rounds, split-K reduction cost, tile/stage/cache-policy choices, aiter tuned rows |

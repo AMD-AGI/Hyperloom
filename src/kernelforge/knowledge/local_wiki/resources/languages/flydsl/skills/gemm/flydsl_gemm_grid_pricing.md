@@ -15,12 +15,12 @@ sources:
 
 # Pricing a FlyDSL GEMM's grid and tile
 
-> Most GEMM wins on gfx950 — and most wasted rounds — are decided by arithmetic you can do before
+> Most GEMM wins on gfx950 — and most wasted attempts — are decided by arithmetic you can do before
 > writing code: how many workgroups there are, how full the last dispatch round is, what a split
 > costs, and what a structural change could return at most. Do that arithmetic first.
 >
-> Numbers marked *(field)* are measurements from FlyDSL GEMM work on MI355X. They are not reproducible
-> from a pinned source; use them for order of magnitude and direction, never as a target for your shape.
+> Numbers marked *(field)* are measured values. Use them for direction and order of magnitude, never as a
+> target for your shape.
 
 ## Route here when
 - You are choosing `tile_m` / `tile_n`, or deciding whether to widen or narrow a tile.
@@ -54,7 +54,7 @@ How to read it:
 | `last_round < slots` | CUs idle through the last round | **narrow** the tile (or split) so the last round fills |
 
 Narrowing pays even when it does not remove a round — filling a partial last round is enough.
-*(field)* Two campaigns on related MXFP6/MXFP4 GEMM kernels, same GPU, same week: widening `tile_n` 256→384 on
+*(field)* On related MXFP6/MXFP4 GEMM kernels, widening `tile_n` 256→384 on
 forward shapes whose last round was already full gained +16.9%; narrowing 256→192 gained on exactly the 6
 of 12 backward shapes whose last round was partial and on none of the others, and the gain tracked the
 idle fraction (last round 144/256 → +16%, 128/256 → +4–6%).
@@ -96,7 +96,7 @@ time it recovers, no split wins.
   (`gemm_mxfp4_kernel.py:4536-4538`). Atomic split-K is also not bitwise reproducible.
 - **MXFP8 splits only the tail round.** `k_split = NCU / tail` when the tail divides the CU count, with
   at least 16 K iterations per slice; head and tail must both be whole rounds (`_mx_ksplit`,
-  `gemm_mxfp8_kernel.py:654-672`). "A uniform split netted out at zero" (commit `d522ee0ae`).
+  `gemm_mxfp8_kernel.py:654-672`). *(field)* A uniform split netted out at zero.
 - **Dense fp8 TN splits one window.** Only the last partial round's `rem` tiles are sliced s ways
   (s ∈ {2, 3, 4}), choosing the shortest s that keeps the window inside one round (`_dense_tn_split`,
   `gemm_fp8_kernel.py:1857-1872`). At s=2 the two slices hand off through a device-scope flag inside the
@@ -158,13 +158,12 @@ waves_per_cu = floor(4 * occ_simd / W) * W          # W = waves per workgroup
 ```
 
 With an 8-wave workgroup only 2/4/6/8 waves per SIMD are reachable: cutting from 128 to 96 registers
-(per-SIMD tier 4 → 5) buys nothing. Align a register-reduction target to a reachable tier before spending
-a round on it.
+(per-SIMD tier 4 → 5) buys nothing. Align a register-reduction target to a reachable tier before chasing
+it.
 
-The compiler's `; Occupancy:` comment in the ISA does **not** apply this quantization. Checked with
-`llc -mcpu=gfx950` (AMD LLVM 22.0.0git, ROCm 7.2.1): a kernel using 96 VGPRs with
-`amdgpu-flat-work-group-size=512,512` is reported as occupancy 5; the CU can hold only two such
-workgroups, i.e. 4 waves per SIMD.
+The compiler's `; Occupancy:` comment in the ISA does **not** apply this quantization. Example:
+`llc -mcpu=gfx950` reports a kernel using 96 VGPRs with `amdgpu-flat-work-group-size=512,512` as
+occupancy 5; the CU can hold only two such workgroups, i.e. 4 waves per SIMD.
 
 ## 5. K granularity: the MFMA decides what a K-tail can save
 
@@ -201,7 +200,7 @@ share `F / (a · n_kblocks + F)` grows as K shrinks. Across a shape table it usu
 ranking better than any other variable. *(field)* `F` = 2.21 K-blocks: 19% of tile time at K=2944, 1.7%
 at K=32768, and the table's TF/s order was essentially the inverse of that share. By the fit, removing
 one K-block of `F` is worth ~4–5% over that table — a projection, not a measurement, but already larger
-than the 1–2% the swizzle and candidate-table sweeps measured.
+than the 1–2% that swizzle and candidate-table changes returned.
 
 Two traps when reading such a table:
 - **Compare absolute µs, not TF/s, across padded shapes.** TF/s counts useful FLOPs, so padding waste
@@ -216,7 +215,7 @@ For any proposal that shortens a wait, removes a transfer or skips work, first b
 it entirely — the results are wrong, the time is the ceiling. Prove the arm really compiled in with an
 output checksum (an absurd sum shows it did); a "change" that never reached the binary reads as noise.
 If the ceiling is below what you need, skip the idea. *(field)* Removing the whole first prologue wait
-bounded the gain at 0.72%; the planned half-wait reorganization was worth at most ~0.35% and was dropped.
+bounded the gain at 0.72%, so a half-wait reorganization was worth at most ~0.35% and was not built.
 
 ## 8. Boundary variants are not free
 

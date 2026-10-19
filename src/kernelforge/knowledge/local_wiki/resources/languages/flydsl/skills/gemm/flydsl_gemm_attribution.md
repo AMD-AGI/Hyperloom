@@ -10,8 +10,8 @@ updated: 2026-10-19
 
 # Attributing a FlyDSL GEMM's time
 
-> Counters propose; probes decide. Every number here marked *(field)* was measured on MI355X (gfx950,
-> 1400 W cap) on FlyDSL kernels: GEMMs unless the note says attention. Use them for direction and order of magnitude, not as targets.
+> Counters propose; probes decide. Numbers marked *(field)* are measured values. Use them for direction
+> and order of magnitude, not as targets.
 > Trace capture and ATT tooling are in `../profile/`; this card is about turning readings into a price.
 
 ## Route here when
@@ -33,7 +33,7 @@ only). Check in the ISA that the instructions really were added and not removed 
   not the problem; look at what the barrier protects.
 
 **Apparent byte rate.** Divide the kernel's bytes by its wall time and compare with the stream bandwidth
-you measured on the same box. *(field)* MI355X: `copy_` 4.98 TB/s, `add(out=)` 6.25 TB/s, `sum` 3.74,
+you measured on the same box. *(field)* `copy_` 4.98 TB/s, `add(out=)` 6.25 TB/s, `sum` 3.74,
 `amax` 2.01 (a reduction is not a bandwidth ruler). A rate above stream bandwidth means caches are serving
 part of the traffic; the kernel is not at the HBM limit.
 
@@ -51,17 +51,17 @@ that changes). Keep probe switches out of the delivered code.
 
 - Touch only the main loop body. Keep the prologue and K-tail as they are, so LDS always holds legal data
   and the kernel cannot hang.
-- *(field)* On an fp8 GEMM, dropping the main body's fills saved 155 µs (18.6%); aliasing them saved
+- *(field)* Dropping the main body's fills saved 155 µs (18.6%); aliasing them saved
   roughly half of that. The other half was issue and LDS-write cost, which deeper prefetch cannot reach.
   Without the alias arm, prefetch would have been credited with twice what it could deliver.
 - **A probe gives a bound, not an achievable gain, and the bound can be wrong in either direction.**
-  *(field, attention)* Several "store is 30–47% of wall" and "half the MFMAs" ceilings turned into net
+  *(field)* Several "store is 30–47% of wall" and "half the MFMAs" ceilings turned into net
   losses when built, because the removed part was doing other work (cross-wave sharing, latency hiding). Other
   changes beat their bound because they also removed a serial dependency or a spill. Decide only on the
   real implementation.
 - **Instruction counts predict exactly; time does not.** *(field)* A paper count of 1.043478× MFMAs matched
   `SQ_INSTS_MFMA` to five digits, while the time saved was 50–60% of the proportional estimate.
-- **An isolated micro-benchmark can flip the sign.** *(field, attention)* A reduce kernel's best workgroup shape in
+- **An isolated micro-benchmark can flip the sign.** *(field)* A reduce kernel's best workgroup shape in
   isolation lost 0.4% in the full pass. Use micro-benchmarks to discard bad options, and pick the winner
   in the full pipeline.
 
@@ -75,7 +75,7 @@ When a part cannot be removed safely, run it one extra time and fold the result 
 - Make the probe a compile-time parameter that appears in the kernel name, and time it against the base
   in the same process. *(field)* Cross-process spread reached 12.9%, which hides a 1–4% margin.
 - **The margin is an upper bound on the saving only when the kernel has no idle issue slots.**
-  *(field, attention)* A rendezvous that cost +1–4% as an extra copy was *slower* to remove (+1.2–5.9%), because its reads were
+  *(field)* A rendezvous that cost +1–4% as an extra copy was *slower* to remove (+1.2–5.9%), because its reads were
   covering another read's latency.
 - The same trick prices a whole launch. *(field)* `rocprofv3 --kernel-trace` start→end overstated a small
   kernel 2–3× against its marginal cost in the stream.
@@ -121,7 +121,7 @@ wanting to issue but blocked by a busy pipe, and waiting on `s_waitcnt` or `s_ba
 ## 6. LDS: latency, bandwidth, or neither
 
 `SQ_WAIT_INST_LDS` counts dependent waits. Co-resident waves can hide them, so a high value is not proof that
-LDS bounds the kernel. *(field, attention)* A kernel with 81% of its cycle budget in LDS waits gained 0.0% when each of
+LDS bounds the kernel. *(field)* A kernel with 81% of its cycle budget in LDS waits gained 0.0% when each of
 three LDS read streams was halved. Decide with a halve-the-reads probe and ISA counts. Compare
 `SQ_LDS_IDX_ACTIVE` with `SQ_VALU_MFMA_BUSY_CYCLES` to see whether the LDS port is anywhere near busy.
 
@@ -150,10 +150,10 @@ three LDS read streams was halved. Decide with a halve-the-reads probe and ISA c
   did interleave (one MFMA per 29 instructions), but spills went 0 → 16 and wall time lost 2–4%. Dump the
   ISA and check spills before timing.
 - **At two or more waves per SIMD, moving VALU work between clusters is throughput-invariant.** Other waves
-  already fill the gaps, so the expected gain is about zero. *(field, attention)* Moving a row sum gave −3.1% and −0.1%;
+  already fill the gaps, so the expected gain is about zero. *(field)* Moving a row sum gave −3.1% and −0.1%;
   deleting it gave +6.4%. Only changes that reduce total pipe cycles pay.
 - **Find the bottleneck pipe first.** If a "bare" VALU chain sits on the busiest pipe, covering it with
-  MFMAs changes nothing. *(field, attention)* A loop with 1308 VALU cycles against 1152 MFMA cycles was VALU-bound;
+  MFMAs changes nothing. *(field)* A loop with 1308 VALU cycles against 1152 MFMA cycles was VALU-bound;
   covering the chain lost 1.5%, and removing 128 VALU cycles saved 11.25%.
 - `v_exp_f32` and other transcendentals issue at half rate (8 cycles) on gfx950. Check a per-class model
   against `SQ_ACTIVE_INST_VALU`.
@@ -164,7 +164,7 @@ three LDS read streams was halved. Decide with a halve-the-reads probe and ISA c
   the ISA (`flydsl_gemm_mainloop.md` §10).
 - `MfmaUtil` accumulates per wave: a kernel with two waves per SIMD reads twice the value of a one-wave
   kernel doing the same work.
-- `SQ_LEVEL_WAVES` and `SQ_ACCUM_PREV_HIRES` read 0 on rocprofv3 1.1.0 for gfx950. Wait counters cannot
+- `SQ_LEVEL_WAVES` and `SQ_ACCUM_PREV_HIRES` read 0 in rocprofv3 on gfx950. Wait counters cannot
   separate `vmcnt` waits from barrier waits there; use probes.
 - In an ATT trace, an MFMA waiting for its operand is charged to the MFMA, not to an `s_waitcnt`. *(field)*
   1.8% VMEM wait next to 89.5% MFMA stall was hidden memory latency.

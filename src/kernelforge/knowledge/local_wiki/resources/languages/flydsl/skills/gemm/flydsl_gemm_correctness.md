@@ -17,10 +17,10 @@ sources:
 
 # Correctness for a FlyDSL GEMM
 
-> A GEMM that is fast and wrong usually passed its gate. The cases below are field incidents from
-> FlyDSL GEMM work on MI355X *(field)*; each one went through a gate that reported clean. Use them to
-> design the gate before trusting it. Debugging a kernel that is already known wrong starts in
-> `../bottleneck/debug-flydsl-kernel.md`.
+> A GEMM that is fast and wrong usually passed its gate. Each case marked *(field)* below went through
+> a gate that reported clean. Use them to design the gate before trusting it. Numbers marked *(field)*
+> are measured values. Use them for direction and order of magnitude, not as targets. Debugging a
+> kernel that is already known wrong starts in `../bottleneck/debug-flydsl-kernel.md`.
 
 ## Route here when
 - You changed the pipeline, a wait, a barrier, the LDS layout, register classes or inline asm.
@@ -33,14 +33,14 @@ sources:
   never runs shows up as a stable, clean number that looks exactly like a pass, and running the gate
   more times cannot change that. *(field)* A gate whose shapes gave the kernel only one or two
   K blocks made the runtime dispatcher take the short branch, so the steady-state loop never ran. A
-  steady-state bug passed at 55.09 dB for several rounds; with four times the K the same code read
+  steady-state bug passed repeatedly at 55.09 dB; with four times the K the same code read
   19.40 dB.
 - Before trusting a gate, compute for its shapes the trip counts the kernel derives (`k_iters`,
   phases per tile, groups that reach the steady loop). A 0 or 1 is an alarm. Keep a second probe
   that reuses the gate's reference and scales the shape up.
 - Include the operands production feeds: padded or strided rows, unequal strides, ragged M/N/K.
   A probe that only uses contiguous tensors never reaches the strided branch.
-- "Last round's kept change" is not a trusted baseline until a gate that covers it has passed.
+- A previously kept change is not a trusted baseline until a gate that covers it has passed.
 
 **Shapes every GEMM gate needs.** Each one forces a path that only runs at an edge:
 1. **The minimum trip count.** Take a K where the main loop runs zero times (e.g. `K = 2·BLOCK_K` for a
@@ -66,7 +66,7 @@ reference built from the dequantized operands, and compare repeated outputs bitw
 
 *(field)* A kernel was clean on its first call after compilation (55.54 dB) and 33 dB from the
 second call on, with the error moving each time. The harness scored the first call, so the race
-stayed hidden for seven rounds. Every gate calls the kernel at least twice and checks the second and
+stayed hidden. Every gate calls the kernel at least twice and checks the second and
 later results. Work that depends on a first call (atomic counters, semaphores, lazily initialized
 workspaces) must be warmed before a probe starts counting.
 
@@ -116,17 +116,16 @@ workspaces) must be warmed before a probe starts counting.
 - **Reordering `@fx.struct` fields does not move LDS.** With `SharedAllocator(static=True)` every leaf
   is its own symbol placed by the backend (`expr/gpu.py:157`); an arm that stops using a leaf lets
   the others be re-packed. Read `group_segment_fixed_size` before interpreting an LDS-placement result.
-- **Buffers that must be contiguous go in one field, or use `static=False`.** Checked on flydsl 0.3.2 from the
-  allocated addresses: the default static allocator placed fields by size, largest first, and equal sizes by
-  symbol name (declared `a4k, b16k, c8k, d256, e1k` landed as `b16k, c8k, a4k, e1k, d256`; a Turbo NN
-  kernel's B buffers landed before its A buffers). `SharedAllocator(static=False)` kept declaration order
-  in every case tested. A pool addressed as one base plus immediates must not rely on the static order.
+- **Buffers that must be contiguous go in one field, or use `static=False`.** The default static
+  allocator places fields by size, largest first, and equal sizes by symbol name (declared
+  `a4k, b16k, c8k, d256, e1k` land as `b16k, c8k, a4k, e1k, d256`). `SharedAllocator(static=False)` kept
+  declaration order in every case tested. A pool addressed as one base plus immediates must not rely on the static order.
 
 ## 6. Bounds
 
-- **MFMA ignores EXEC.** Checked on MI355X with flydsl 0.3.2: with EXEC set by inline asm to lanes 0–31,
-  32–63, lane 0 only, or none, `v_mfma_f32_16x16x32_bf16` wrote full results in all 64 lanes, while a
-  `v_mov` in the same asm block was masked as expected. A divergent `if tid < 32:` around an MFMA in FlyDSL
+- **MFMA ignores EXEC.** With EXEC set by inline asm to lanes 0–31, 32–63, lane 0 only, or none,
+  `v_mfma_f32_16x16x32_bf16` writes full results in all 64 lanes, while a `v_mov` in the same asm block
+  is masked as expected. A divergent `if tid < 32:` around an MFMA in FlyDSL
   therefore overwrites the accumulators of the "inactive" lanes; when the operand loads were only used
   inside the branch, LLVM sank them into it and every lane came out as garbage. Bound ragged tiles through
   the buffer descriptor (operands read as zero) or select whole tiles; never mask an MFMA with a branch.
@@ -158,8 +157,8 @@ workspaces) must be warmed before a probe starts counting.
   the same. `&` is incompatible with a tied (`"0"`) operand.
 - In `$n` numbering, tied inputs count: in `"=v,0,v,v"`, `$1` is the tied input.
 - The constraint rules for a whole-loop asm region (literal `src2=0` for a zero accumulator, `~{scc}`
-  around an asm loop, every `=&s` output written) and the version-dependent name of the
-  `amdgpu-agpr-alloc` attribute are in `flydsl_gemm_mainloop.md` §4.
+  around an asm loop, every `=&s` output written) and how to set the `amdgpu-agpr-alloc` attribute
+  are in `flydsl_gemm_mainloop.md` §4.
 
 ## 8. Reproducibility and tolerance
 
@@ -179,8 +178,8 @@ workspaces) must be warmed before a probe starts counting.
 4. performance. Block-scaled probes need random E8M0 exponents (e.g. `torch.randint(122, 132)`), not
 scales quantized from `randn` data: N(0,1) blocks almost always share one power-of-two exponent, so a
 kernel applying the wrong scale set reads the same as a correct one. *(field)* A tail phase that kept
-reusing the scales from two phases earlier read 49.6 dB with `randn`-derived scales for 19 rounds and
-11–14 dB the moment the exponents were random.
+reusing the scales from two phases earlier read 49.6 dB with `randn`-derived scales and 11–14 dB the
+moment the exponents were random.
 
 ## Related
 `../bottleneck/debug-flydsl-kernel.md` · `flydsl_gemm_mainloop.md` · `flydsl_gemm_datapath.md` ·

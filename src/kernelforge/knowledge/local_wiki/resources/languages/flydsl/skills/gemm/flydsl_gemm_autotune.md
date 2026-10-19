@@ -19,8 +19,8 @@ sources:
 > policy and split-K all change sign between shapes (`flydsl_gemm_mainloop.md` §1,
 > `flydsl_gemm_epilogue.md` §5). Turbo's dense GEMMs therefore race a short candidate list on the first call
 > for each shape and cache the winner. "FP8", "FP4", "MX8" and "GH" are the files under
-> `primus_turbo/flydsl/{gemm,utils}` at Primus-Turbo main `7615a5a2`. Numbers marked *(field)* were measured
-> on MI355X.
+> `primus_turbo/flydsl/{gemm,utils}` at Primus-Turbo main `7615a5a2`. Numbers marked *(field)* are measured
+> values. Use them for direction and order of magnitude, not as targets.
 
 ## Route here when
 - You are adding a configuration axis, or a second kernel design, behind one entry point.
@@ -38,9 +38,9 @@ For each candidate `(cfg, factory)`:
    minimum (`_pick_dense_candidate`, FP8:3067).
 4. Cache the winner per static shape key. Call `torch.cuda.empty_cache()` to release the race buffers.
 
-**Keep the race; do not replace it with a model.** *(field)* An agent replaced the TN race with "sort by an
-analytic model, take the first". The scored shapes were unaffected, because the model ranked them right.
-Off the scored set, Llama-2 wgrad shapes lost 13–14%. Restoring the race recovered every cell. A static
+**Keep the race; do not replace it with a model.** *(field)* Replacing the TN race with "sort by an
+analytic model, take the first" left the scored shapes unaffected, because the model ranked them right.
+Off the scored set, wgrad shapes lost 13–14%. Restoring the race recovered every cell. A static
 analysis is a cheap way to find suspect shapes; only a measurement decides. Any change that replaces a race
 must be validated on shapes outside the scoring set.
 
@@ -113,20 +113,21 @@ When a search stalls, change the family of the dimension you search (split-K, MF
   Never key on `id(tensor)`. A freed tensor's id is reused, so the cache returns another tensor's result.
   Turbo's compiled-launch key is `(shape, stride, dtype)` per tensor plus integer arguments; strides are in
   because the compile pins the operand layout (FP8:2988-3005).
-- **A missing discriminator gives a wrong answer, not a slow one.** Turbo's MXFP4 GEMM needed three keys
-  extended in one day for `row_bytes`, then `k_real` and the operand side, then `scales_prepacked`. Each
-  omission produced wrong results (commits `f6d5ab685`, `4b5833334`).
+- **A missing discriminator gives a wrong answer, not a slow one.** Turbo's MXFP4 artifact key carries
+  `row_bytes` (one logical shape, two allocations, two kernels) and `scales_prepacked` (the two builds
+  differ in whether the launch runs the scale preshuffle) beyond the shape (FP4:4518-4519, FP4:4650-4651).
+  Leave either out and one call is handed the other's module.
 - **A value used as a compile-time constant is part of the specialization.** Pass truly dynamic values as
-  `fx.Int32` arguments. Closure-captured Python dicts are *not* in FlyDSL's JIT cache key on 0.3.2 or
-  0.3.4.1 (`../bottleneck/debug-flydsl-kernel.md` § What the cache key sees).
+  `fx.Int32` arguments. Closure-captured Python dicts are *not* in FlyDSL's JIT cache key
+  (`../bottleneck/debug-flydsl-kernel.md` § What the cache key sees).
 - Build knobs that select a code path (tile order, store policy) must be in the key. Otherwise two policies
   share one cache slot and silently run as one binary.
 
 ## 6. The launch path
 
 - **Call the `flyc.compile` object, not the `@flyc.jit` function.** The jit call re-binds the signature,
-  rebuilds the cache key and re-checks globals on every launch. Turbo measured 180 µs against 37 µs for a
-  ~24-argument launch (`run_compiled`, GH:2049-2069). Compile once per key with `_static_layout`
+  rebuilds the cache key and re-checks globals on every launch: 180 µs against 37 µs for a ~24-argument
+  launch (`run_compiled`, GH:2049-2069). Compile once per key with `_static_layout`
   (`flyc.from_torch_tensor` per tensor, FP8:2973) so the object does not re-read shapes and strides.
 - **Skip no-op tensor ops on the hot path.** A no-op `.to()` or `.reshape()` still costs a dispatch
   (`_scalar_scale`, FP8:3098-3105). Turbo reads the stream through `torch._C._cuda_getCurrentRawStream`
@@ -144,7 +145,7 @@ When a search stalls, change the family of the dimension you search (split-K, MF
 - **`except Exception: continue` turns a build bug into "no working config".** A `NameError`, a signature
   mismatch or a key-tuple mismatch looks exactly like an incompatible configuration. *(field)* This has removed a
   whole optimization axis three times while every benchmark stayed green. In one case, a launch mode never
-  built for a 16-round campaign.
+  built at all.
   - Record `(candidate, repr(exception))` in a module-level list that a verbose path prints.
   - Add a smoke test that builds every launch mode once without timing.
   - Assert the derived knobs (tiles per workgroup, split factor, block_n) on one host-known shape.
