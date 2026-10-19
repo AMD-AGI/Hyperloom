@@ -135,8 +135,10 @@ def test_the_ceiling_line_names_the_parents_largest_ops() -> None:
 
     assert render_ceiling(stated, shares).splitlines() == [
         "Amdahl ceiling +70.94% for a target worth 41.50% of GPU time",
-        "largest ops on c1 (job-7): moe_gemm 41.5% (ceiling +70.9%), attention 22.0% (ceiling +28.2%), "
-        "norm 1.0% (ceiling +1.0%)",
+        (
+            "largest ops on c1 (job-7): moe_gemm 41.5% (ceiling +70.9%), attention 22.0% (ceiling +28.2%), "
+            "norm 1.0% (ceiling +1.0%)"
+        ),
     ]
     assert render_ceiling(unstated, shares).startswith("largest ops on c1")
     assert render_ceiling(replace(unstated, layer=IntentLayer.CONFIG), shares) == ""
