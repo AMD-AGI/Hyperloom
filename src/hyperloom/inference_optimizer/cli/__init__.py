@@ -1114,15 +1114,12 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
 
 
 def _detect_checkpoint_precision(model_path: str | None) -> str:
-    """Detect weight precision from model config.json; returns '' on failure."""
+    """Detect weight precision from model config.json; returns '' when it names none."""
     if not model_path:
         return ""
-    try:
-        from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
+    from hyperloom.inference_optimizer.model_config_utils import summarize_model_config
 
-        summary = summarize_model_config(str(model_path))
-    except Exception:  # noqa: BLE001
-        return ""
+    summary = summarize_model_config(str(model_path))
     quant = (summary.get("quantization") or "").strip().lower()
     if quant:
         if quant.startswith("fp8"):

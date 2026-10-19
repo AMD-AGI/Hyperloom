@@ -468,7 +468,7 @@ class ClosePhase(CoordinatorCollaborator):
             )
         else:
             await self._record_close_step(
-                "artifact_package", status="skipped", detail="no artifacts matched or dest unwritable"
+                "artifact_package", status="skipped", detail="no artifacts matched or session dir missing"
             )
         return pkg_path
 

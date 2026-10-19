@@ -47,7 +47,7 @@ cognitive-complexity src/hyperloom/orchestrator/actions/executors/_grid_base.py:
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 196
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::_read_aiperf_aggregate_json 91
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::sample_from_families 33
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/_launch_evidence.py::build_launch_evidence 37
+cognitive-complexity src/hyperloom/orchestrator/actions/executors/_launch_evidence.py::build_launch_evidence 35
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_env.py::resolve_kb_topology 32
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_collect_worker_server_logs 32
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 107
@@ -115,8 +115,8 @@ cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::Rec
 cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator._build_recipe_attrs_from_state 41
 cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator._collect_attempt_provenance 34
 cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator._collect_workload_tags 37
-cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator.finalize_recipe_and_journal 63
-cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator.kb_amend_recipe 51
+cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator.finalize_recipe_and_journal 61
+cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator.kb_amend_recipe 49
 cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::_record_config_attempts 38
 cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::_build_warm_start_context 71
 cognitive-complexity src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::_cascade_warm_start_search 46
@@ -245,7 +245,7 @@ cognitive-complexity src/kernelforge/gemm_tune/tuners/vllm_dense_tunableop.py::V
 cognitive-complexity src/kernelforge/kernel_rewrite_controller/opportunity_agent.py::OpportunityAnalysisAgent.run 34
 cognitive-complexity src/kernelforge/knowledge/pr_knowledge/references.py::collect_references 39
 cognitive-complexity src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._apply_last_analysis_evidence 46
-cognitive-complexity src/kernelforge/loop/analysis_runtime.py::AnalysisRuntimeMixin._resolve_analysis_context 43
+cognitive-complexity src/kernelforge/loop/analysis_runtime.py::AnalysisRuntimeMixin._resolve_analysis_context 41
 cognitive-complexity src/kernelforge/loop/archive.py::CandidateArchive._reconcile_storage 32
 cognitive-complexity src/kernelforge/loop/canonical_correctness.py::_run_canonical_suite 31
 cognitive-complexity src/kernelforge/loop/external_artifacts.py::ExternalArtifactTransaction._copy_tree 33
@@ -310,7 +310,6 @@ cyclomatic-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_fi
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_resolve_integrate_payload 24
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::_run_forge_gemm_tuning 56
 cyclomatic-complexity src/hyperloom/orchestrator/kernel/request_handlers.py::integrate_handler 46
-cyclomatic-complexity src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator.finalize_recipe_and_journal 21
 cyclomatic-complexity src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py::run_t0_anchor 33
 cyclomatic-complexity src/hyperloom/orchestrator/knowledge/remote_recipe/values.py::_adopt_replayed_prior 28
 cyclomatic-complexity src/hyperloom/orchestrator/loop/conversation.py::_format_inbox_event 30
@@ -561,7 +560,7 @@ function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/final.py::render 178
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/kernel_lifecycle.py::render 156
 function-lines src/hyperloom/inference_optimizer/breakdown/reporters/_renderers/session.py::render 93
-function-lines src/hyperloom/inference_optimizer/breakdown/session_package.py::package_session_artifacts 91
+function-lines src/hyperloom/inference_optimizer/breakdown/session_package.py::package_session_artifacts 87
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_export_partition_shape 101
 function-lines src/hyperloom/inference_optimizer/cli/__init__.py::_run_optimize 273
 function-lines src/hyperloom/inference_optimizer/cli/bootstrap.py::_seed_shared_state 155
@@ -575,7 +574,7 @@ function-lines src/hyperloom/inference_optimizer/cli/multi_node.py::_replay_kern
 function-lines src/hyperloom/inference_optimizer/cli/parser.py::_build_parser 991
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_check_serving_framework 162
 function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_ensure_lm_eval_dep 89
-function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_preflight 209
+function-lines src/hyperloom/inference_optimizer/cli/preflight.py::_preflight 204
 function-lines src/hyperloom/inference_optimizer/multi_node/cli.py::build_parser 266
 function-lines src/hyperloom/inference_optimizer/multi_node/commands/infera.py::_infera_restart_server 199
 function-lines src/hyperloom/inference_optimizer/multi_node/scripts/apply_tracelens_patch_multinode.py::_apply_on_pod 101
@@ -600,7 +599,7 @@ function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run
 function-lines src/hyperloom/orchestrator/actions/executors/_kernel_agent_tool.py::materialize_unified_patch_snapshot 94
 function-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::_read_aiperf_aggregate_json 101
 function-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::sample_from_families 100
-function-lines src/hyperloom/orchestrator/actions/executors/_launch_evidence.py::build_launch_evidence 100
+function-lines src/hyperloom/orchestrator/actions/executors/_launch_evidence.py::build_launch_evidence 97
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_published_service_ready_async 90
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 188
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_workers_ready_async 97
@@ -701,8 +700,8 @@ function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::_run_integ
 function-lines src/hyperloom/orchestrator/kernel/request_handlers.py::integrate_handler 562
 function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator._build_recipe_attrs_from_state 102
 function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator._record_fact_per_variant 114
-function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator.finalize_recipe_and_journal 240
-function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator.kb_amend_recipe 140
+function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator.finalize_recipe_and_journal 237
+function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::RecipeJournalCollaborator.kb_amend_recipe 127
 function-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py::_record_config_attempts 140
 function-lines src/hyperloom/orchestrator/knowledge/recipe_kb/local_store.py::LocalRecipeStore.put_recipe 133
 function-lines src/hyperloom/orchestrator/knowledge/recipe_kb/schema.py::Recipe.from_dict 102
@@ -901,7 +900,7 @@ function-lines src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin.
 function-lines src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._build_orchestration_context 160
 function-lines src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._render_analysis_evidence_for_implementer 84
 function-lines src/kernelforge/loop/analysis_refresh_policy.py::decide_analysis_refresh 85
-function-lines src/kernelforge/loop/analysis_runtime.py::AnalysisRuntimeMixin._resolve_analysis_context 212
+function-lines src/kernelforge/loop/analysis_runtime.py::AnalysisRuntimeMixin._resolve_analysis_context 205
 function-lines src/kernelforge/loop/archive.py::CandidateArchive.record 109
 function-lines src/kernelforge/loop/archive.py::CandidateArchive.render_digest 84
 function-lines src/kernelforge/loop/campaign_config.py::create_campaign_config 122
@@ -954,12 +953,12 @@ function-lines src/kernelforge/rewrite_by_flydsl/runner.py::run_rewrite 303
 module-lines src/hyperloom/inference_optimizer/breakdown/recorder/kernel_event.py 2168
 module-lines src/hyperloom/inference_optimizer/breakdown/schema.py 2681
 module-lines src/hyperloom/inference_optimizer/cli/__init__.py 2569
-module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1821
-module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2696
-module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1874
+module-lines src/hyperloom/inference_optimizer/cli/model_gate.py 1815
+module-lines src/hyperloom/inference_optimizer/cli/preflight.py 2676
+module-lines src/hyperloom/inference_optimizer/multi_node/cli.py 1867
 module-lines src/hyperloom/inference_optimizer/roofline_ceiling.py 1445
 module-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py 2089
-module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1606
+module-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py 1590
 module-lines src/hyperloom/orchestrator/actions/executors/_workload_envs.py 2161
 module-lines src/hyperloom/orchestrator/actions/executors/baseline.py 4253
 module-lines src/hyperloom/orchestrator/actions/executors/explore.py 1880
@@ -970,7 +969,7 @@ module-lines src/hyperloom/orchestrator/actions/executors/roofline.py 1303
 module-lines src/hyperloom/orchestrator/kernel/apply_kernel_patch.py 2657
 module-lines src/hyperloom/orchestrator/kernel/conc_sweep.py 1429
 module-lines src/hyperloom/orchestrator/kernel/request_handlers.py 4888
-module-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py 1785
+module-lines src/hyperloom/orchestrator/knowledge/recipe_journal.py 1781
 module-lines src/hyperloom/orchestrator/knowledge/recipe_kb_t0.py 1318
 module-lines src/hyperloom/orchestrator/knowledge/remote_recipe/values.py 1284
 module-lines src/hyperloom/orchestrator/loop/coordinator.py 1423
@@ -1000,8 +999,7 @@ module-lines src/kernelforge/loop/knowledge_integration.py 1457
 module-lines src/kernelforge/loop/runner.py 6051
 module-lines src/kernelforge/loop/task_preparer.py 1299
 module-lines src/kernelforge/orchestrator/analysis.py 2080
-module-lines src/kernelforge/orchestrator/orchestration.py 1831
-nested-blocks src/hyperloom/inference_optimizer/breakdown/session_package.py::package_session_artifacts 6
+module-lines src/kernelforge/orchestrator/orchestration.py 1828
 nested-blocks src/hyperloom/inference_optimizer/framework_paths.py::_discover_installed_framework_roots 6
 nested-blocks src/hyperloom/inference_optimizer/trace/tool_events.py::stream_json_tool_events 6
 nested-blocks src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::_read_aiperf_aggregate_json 6

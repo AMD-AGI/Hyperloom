@@ -534,10 +534,7 @@ class CriticAgentBackend:
             kb_priors=kb_priors_trace,
         )
         # Record this critic iteration before the workdir can be pruned.
-        try:
-            critic_out.record_critic_iteration(self.session_dir, iteration)
-        except Exception:  # noqa: BLE001
-            pass
+        critic_out.record_critic_iteration(self.session_dir, iteration)
 
         # Attach what each ruling was grounded in to the ruling itself, on the
         # proposal it judged. Done here because these are the turn's own facts:
@@ -790,18 +787,18 @@ class CriticAgentBackend:
             "notes": judge_bundle.get("notes"),
         }
         bundle_text = json.dumps(bundle_view, ensure_ascii=False, separators=(",", ":"))
-        user_prompt = (
-            f"{preamble}\n\n"
-            f"==== JUDGE BUNDLE ====\n{bundle_text}\n==== END JUDGE BUNDLE ====\n\n"
-            f"{_REVIEW_OUTPUT_INSTRUCTIONS}"
+        review_prompt = (
+            f"==== JUDGE BUNDLE ====\n{bundle_text}\n==== END JUDGE BUNDLE ====\n\n{_REVIEW_OUTPUT_INSTRUCTIONS}"
         )
+        user_prompt = f"{preamble}\n\n{review_prompt}"
         max_tokens = self._resolve_max_completion_tokens()
         # One id per review call, shared by its token row and its conversation row so the two halves pair on the call
         # rather than on a ts second. A caller that opened an ``llm.call`` trajectory span owns the id.
         call_id = current_context().call_id or new_call_id()
         text, finish = await self._run_reasoning_loop(
             system_prompt=system_prompt,
-            user_prompt=user_prompt,
+            preamble=preamble,
+            review_prompt=review_prompt,
             max_tokens=max_tokens,
             call_id=call_id,
         )
@@ -831,7 +828,8 @@ class CriticAgentBackend:
             try:
                 text, finish = await self._run_reasoning_loop(
                     system_prompt=system_prompt,
-                    user_prompt=user_prompt,
+                    preamble=preamble,
+                    review_prompt=review_prompt,
                     max_tokens=retry_tokens,
                     call_id=retry_call_id,
                 )
@@ -862,7 +860,8 @@ class CriticAgentBackend:
         self,
         *,
         system_prompt: str | None,
-        user_prompt: str,
+        preamble: str,
+        review_prompt: str,
         max_tokens: int,
         call_id: str | None = None,
     ) -> tuple[str, str | None]:
@@ -870,13 +869,14 @@ class CriticAgentBackend:
         if self.protocol == "anthropic":
             return await self._run_anthropic_reasoning(
                 system_prompt=system_prompt,
-                user_prompt=user_prompt,
+                preamble=preamble,
+                review_prompt=review_prompt,
                 max_tokens=max_tokens,
                 call_id=call_id,
             )
         return await self._run_openai_reasoning(
             system_prompt=system_prompt,
-            user_prompt=user_prompt,
+            user_prompt=f"{preamble}\n\n{review_prompt}",
             max_tokens=max_tokens,
             call_id=call_id,
         )
@@ -920,17 +920,22 @@ class CriticAgentBackend:
         self,
         *,
         system_prompt: str | None,
-        user_prompt: str,
+        preamble: str,
+        review_prompt: str,
         max_tokens: int,
         call_id: str | None = None,
     ) -> tuple[str, str | None]:
         """Issue one single-shot Anthropic completion for the review."""
+        content = []
+        if preamble:
+            content.append({"type": "text", "text": preamble, "cache_control": {"type": "ephemeral"}})
+        content.append({"type": "text", "text": review_prompt})
         connect_timeout_s, rw_timeout_s = self._resolve_llm_timeouts()
         _t0 = time.perf_counter()
         try:
             request = AnthropicCompletionRequest(
                 model=self._review_model,
-                messages=[{"role": "user", "content": user_prompt}],
+                messages=[{"role": "user", "content": content}],
                 max_tokens=max_tokens,
                 system=system_prompt,
                 timeout=build_http_timeout(connect=connect_timeout_s, read=rw_timeout_s),
