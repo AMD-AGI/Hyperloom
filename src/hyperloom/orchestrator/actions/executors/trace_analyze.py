@@ -12,6 +12,7 @@ import shlex
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -377,39 +378,48 @@ def _optional_flags(*pairs: tuple[str, Any]) -> list[str]:
     return tokens
 
 
+@dataclass(frozen=True)
+class _AnalysisRun:
+    """What the handler resolved for one analysis run: the trace, workspace, tool and the workload it describes."""
+
+    trace_input: Any
+    workspace_path: str
+    tracelens_root: "Path | None"
+    is_bypass: bool
+    scriptable: bool
+    model_name: str
+    framework: str
+    target_platform: str
+    analysis_mode: str
+
+
 def _build_trace_analyze_cmd(
     payload: dict,
+    run: _AnalysisRun,
     *,
     session_dir: Path,
     state: Any,
-    workspace_path: str,
-    trace_input: Any,
-    tracelens_root: "Path | None",
-    is_bypass: bool,
-    scriptable: bool,
     workload: dict,
-    model_name: str,
-    framework: str,
-    target_platform: str,
-    analysis_mode: str,
 ) -> "tuple[list[str], str]":
     """Assemble the trace-analysis tool argv (TraceLens or bypass); returns
     ``(cmd, steady_state_mode)`` so the caller can record discovery provenance."""
+    is_bypass = run.is_bypass
+    scriptable = run.scriptable
     # Both tools share the CLI surface below except ``--tracelens-root``.
     cmd = [
         sys.executable,
         "-m",
         _BYPASS_TRACE_ANALYSIS_MODULE if is_bypass else _TRACELENS_ANALYSIS_MODULE,
         "--trace-input",
-        str(trace_input),
+        str(run.trace_input),
         "--session-id",
         str(payload.get("session_id") or session_dir.name),
         "--workspace-path",
-        workspace_path,
+        run.workspace_path,
     ]
     if not is_bypass:
         # Pass the resolved root explicitly so the tool never relies on inherited env.
-        cmd += ["--tracelens-root", str(tracelens_root)]
+        cmd += ["--tracelens-root", str(run.tracelens_root)]
         # The tool's SDK run books its model requests onto this session's trajectory ledger.
         for key, value in inherited_scope_fields().items():
             cmd += [f"--trajectory-{key.replace('_', '-')}", str(value)]
@@ -424,10 +434,10 @@ def _build_trace_analyze_cmd(
         payload.get("precision") or getattr(state, "precision", "") or workload.get("precision") or ""
     ).strip()
     cmd += _optional_flags(
-        ("--model-name", model_name),
-        ("--framework", framework),
-        ("--target-platform", target_platform),
-        ("--analysis-mode", analysis_mode),
+        ("--model-name", run.model_name),
+        ("--framework", run.framework),
+        ("--target-platform", run.target_platform),
+        ("--analysis-mode", run.analysis_mode),
         ("--model-path", model_path),
         ("--precision", precision),
     )
@@ -512,11 +522,15 @@ def _analysis_steady_state(
     }
 
 
+def _analysis_tool(route: str) -> str:
+    """The tool a route runs: agent runs TraceLens, bypass its standalone reader."""
+    return "bypass" if route == "bypass" else "tracelens"
+
+
 def _build_analysis_meta(
     result: dict[str, Any],
     *,
     route: str,
-    tool: str,
     requested_mode: str,
     trace_input: str,
     duration_sec: float,
@@ -531,8 +545,8 @@ def _build_analysis_meta(
 
     Args:
         result: The analysis tool's result dict.
-        route: The requested analysis route (``agent`` / ``bypass``).
-        tool: The tool that actually ran (``tracelens`` / ``bypass``).
+        route: The requested analysis route (``agent`` / ``bypass``); it names
+            the tool that ran (``tracelens`` / ``bypass``).
         requested_mode: The steady-state mode asked of the tool.
         trace_input: The trace the run analyzed.
         duration_sec: Wall-clock seconds the subprocess took.
@@ -540,6 +554,7 @@ def _build_analysis_meta(
     Returns:
         The analysis metadata dict.
     """
+    tool = _analysis_tool(route)
     run_meta = result.get("run_meta") if isinstance(result.get("run_meta"), dict) else {}
     steps = run_meta.get("steps")
     return {
@@ -679,18 +694,20 @@ async def trace_analyze_handler(
 
     cmd, steady_state_mode = _build_trace_analyze_cmd(
         payload,
+        _AnalysisRun(
+            trace_input=trace_input,
+            workspace_path=workspace_path,
+            tracelens_root=tracelens_root,
+            is_bypass=is_bypass,
+            scriptable=scriptable,
+            model_name=model_name,
+            framework=framework,
+            target_platform=target_platform,
+            analysis_mode=analysis_mode,
+        ),
         session_dir=session_dir,
         state=state,
-        workspace_path=workspace_path,
-        trace_input=trace_input,
-        tracelens_root=tracelens_root,
-        is_bypass=is_bypass,
-        scriptable=scriptable,
         workload=workload,
-        model_name=model_name,
-        framework=framework,
-        target_platform=target_platform,
-        analysis_mode=analysis_mode,
     )
     timeout_sec = int(payload.get("budget_minutes", 60)) * 60
 
@@ -760,14 +777,12 @@ async def trace_analyze_handler(
 
         # Route and tool are one-to-one after the no-LLM TraceLens route was
         # removed: agent runs TraceLens, while bypass runs its standalone reader.
-        _disc_route = analysis_route
-        _disc_tool = "bypass" if is_bypass else "tracelens"
+        _disc_tool = _analysis_tool(analysis_route)
         # Surfaced for the caller's SBD V6 roofline event, which records the run
         # as it happens rather than re-deriving it at export time.
         result["analysis_meta"] = _build_analysis_meta(
             result,
-            route=_disc_route,
-            tool=_disc_tool,
+            route=analysis_route,
             requested_mode=steady_state_mode,
             trace_input=str(trace_input),
             duration_sec=_disc_duration_sec,

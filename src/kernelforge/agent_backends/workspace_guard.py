@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from kernelforge.agent_backends.base import AgentProviderError, AgentRunSpec
-from kernelforge.llm.git import git
+from kernelforge.llm.git import git, git_bytes
 from kernelforge.loop.new_path_allowlist import matches_commit_new_paths, normalize_commit_new_paths
 from kernelforge.llm.workspace_policy import (
     is_protected_path,
@@ -48,7 +48,7 @@ class WorkspaceSafetyError(AgentProviderError):
 
 def _git_output(cwd: Path, *args: str) -> str:
     """Run a read-only git query and return decoded stdout."""
-    result = git(*args, cwd=cwd, check=False, text=False)
+    result = git_bytes(*args, cwd=cwd, check=False)
     if result.returncode != 0:
         detail = result.stderr.decode(errors="replace").strip()
         raise WorkspaceSafetyError(f"git {' '.join(args)} failed: {detail}", rejection=False)
@@ -455,7 +455,7 @@ class WorkspaceGuard:
 
     def _run_git_restore(self, *args: str) -> None:
         """Run one repository mutation used only for exact safety recovery."""
-        result = git(*args, cwd=self.root, check=False, text=False)
+        result = git_bytes(*args, cwd=self.root, check=False)
         if result.returncode != 0:
             detail = result.stderr.decode(errors="replace").strip()
             raise WorkspaceSafetyError(

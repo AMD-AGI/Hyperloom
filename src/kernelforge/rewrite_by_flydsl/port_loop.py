@@ -128,7 +128,8 @@ async def run_port_loop(
     pre_task_context: str = "",
 ) -> PortResult:
     """Run the correctness-only port loop; return whether a correct port emerged."""
-    from kernelforge.orchestrator.agent import make_agent_fn
+    from kernelforge.loop.gate_settings import GateMeasurement
+    from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask, SessionOptions, make_agent_fn
 
     if stop_at_unix and stop_at_unix > 0 and time.time() >= stop_at_unix:
         return PortResult(
@@ -140,25 +141,24 @@ async def run_port_loop(
     program_md = build_port_program_md(spec, driver_path)
 
     agent_fn = make_agent_fn(
-        config=config,
-        program_md=program_md,
-        kernel_backend_name=kernel_backend,
-        pre_task_context=pre_task_context,
-        insession_gate=True,
-        # PORT is correctness-only: the in-session gate must NOT impose a perf requirement (a correct FlyDSL port is
-        # the goal; OPTIMIZE tunes speed later).
-        correctness_only=True,
-        driver_script=driver_path,
-        snr_threshold=spec.snr_threshold,
-        validation_timeout_sec=validate_stage_timeout_sec,
-        permission_mode=permission_mode,
-        # Single-file target: only the FlyDSL kernel is editable.
-        source_files=[spec.flydsl_kernel],
-        target_functions=[spec.builder_symbol],
-        # Protect the source kernel we port FROM — the driver imports it as the live correctness oracle + baseline, so
-        # it must not be editable during PORT.
-        extra_protected_paths=[spec.source_kernel],
-        extra_protected_globs=[spec.source_kernel_name],
+        config,
+        ImplementerSetup(
+            ImplementerTask(
+                program_md=program_md,
+                kernel_backend_name=kernel_backend,
+                pre_task_context=pre_task_context,
+                # Only the FlyDSL kernel is editable; the kernel it ports FROM is the driver's live oracle and baseline.
+                source_files=[spec.flydsl_kernel],
+                target_functions=[spec.builder_symbol],
+                extra_protected_globs=[spec.source_kernel_name],
+                extra_protected_paths=[spec.source_kernel],
+            ),
+            # PORT is correctness-only: no perf requirement (a correct port is the goal; OPTIMIZE tunes speed later).
+            GateMeasurement(
+                driver_path, spec.snr_threshold, stage_timeout_sec=validate_stage_timeout_sec, correctness_only=True
+            ),
+            SessionOptions(permission_mode=permission_mode, insession_gate=True),
+        ),
         usage=usage,
     )
 

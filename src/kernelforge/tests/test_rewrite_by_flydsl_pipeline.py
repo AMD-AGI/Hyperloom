@@ -2044,7 +2044,7 @@ def _install_agent(monkeypatch, kernel_text):
     """Make make_agent_fn return an async agent that writes kernel_text to disk."""
     import kernelforge.orchestrator.agent as agent_mod
 
-    def _make(**kw):
+    def _make(*_args, **kw):
         async def _agent_fn(kernel_path, history, session_sink=None):
             from pathlib import Path
 
@@ -2123,7 +2123,7 @@ def test_port_loop_survives_a_session_crash(tmp_path, monkeypatch):
     (tmp_path / "driver.py").write_text("print('drive')\n")
     import kernelforge.orchestrator.agent as agent_mod
 
-    def _make(**kw):
+    def _make(*_args, **kw):
         async def _agent_fn(*a, **k):
             raise RuntimeError("session died")
 
@@ -2151,7 +2151,7 @@ def test_port_loop_restores_protected_inputs_without_validation(
     validation_calls: list[int] = []
     import kernelforge.orchestrator.agent as agent_mod
 
-    def make_agent(**_kwargs):
+    def make_agent(*_args, **_kwargs):
         async def unsafe_agent(kernel_path, _history, session_sink=None):
             Path(kernel_path).write_text(_REAL_FLYDSL)
             source.write_text("def softmax(_x):\n    return 'gamed'\n")
@@ -2203,7 +2203,7 @@ def test_port_loop_does_not_create_an_agent_after_the_search_cutoff(
     (tmp_path / "driver.py").write_text("print('drive')\n")
     import kernelforge.orchestrator.agent as agent_mod
 
-    def unexpected_agent(**kwargs):
+    def unexpected_agent(*_args, **kwargs):
         raise AssertionError("agent must not be created after the cutoff")
 
     monkeypatch.setattr(agent_mod, "make_agent_fn", unexpected_agent)
@@ -2230,8 +2230,8 @@ def test_port_loop_injects_rejected_kb_candidates_as_reference_context(
 
     captured = {}
 
-    def make_agent(**kwargs):
-        captured["pre_task_context"] = kwargs.get("pre_task_context")
+    def make_agent(_config, setup, **kwargs):
+        captured["pre_task_context"] = setup.task.pre_task_context
 
         async def agent(kernel_path, *args, **agent_kwargs):
             from pathlib import Path
