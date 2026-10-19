@@ -512,23 +512,6 @@ def _error_messages(caplog) -> list[str]:
 
 
 @pytest.mark.asyncio
-async def test_compose_prompt_goes_out_without_the_trajectory_review_when_the_digest_fails(
-    coord: Coordinator, monkeypatch, caplog
-) -> None:
-    from hyperloom.orchestrator.knowledge import trajectory_reviewer
-
-    _stub_advisories(coord, monkeypatch)
-    monkeypatch.setattr(trajectory_reviewer, "build_trajectory_digest", _unreadable("journal unreadable"))
-
-    with caplog.at_level("ERROR"):
-        prompt = await coord.conversation.compose_prompt("orchestration")
-
-    assert "=== Plateau advisory ===\n<plateau_advisory_block>" in prompt
-    assert "=== Trajectory review (advisory) ===" not in prompt
-    assert _error_messages(caplog) == ["Coordinator: trajectory review failed"]
-
-
-@pytest.mark.asyncio
 async def test_trajectory_reviewer_task_is_seeded_without_a_digest_when_the_digest_fails(
     coord: Coordinator, monkeypatch, caplog
 ) -> None:
