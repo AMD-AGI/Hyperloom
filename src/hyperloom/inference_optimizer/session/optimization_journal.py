@@ -13,7 +13,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_text
+from hyperloom.common.io import WriteOptions, atomic_write_text
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.timeutil import now_iso
 
@@ -272,7 +272,7 @@ class Journal:
             atomic_write_text(
                 self.path,
                 json.dumps(self.to_dict(), indent=2, sort_keys=False) + "\n",
-                make_parents=True,
+                options=WriteOptions(make_parents=True),
             )
         except OSError as exc:
             log.warning("optimization_journal flush failed (%s): %s", self.path, exc)

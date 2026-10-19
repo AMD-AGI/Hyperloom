@@ -14,7 +14,6 @@ import pytest
 import yaml
 
 from hyperloom.orchestrator.actions.executors._server_lifecycle import GpuHandoff
-from hyperloom.orchestrator.actions.executors._workload_envs import geak_acceptance
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -63,26 +62,8 @@ def _coord(
 ) -> Coordinator:
     benchmarks = tmp_path / "InferenceX" / "benchmarks"
     benchmarks.mkdir(parents=True)
-    for name in ("benchmark_lib.sh", f"{framework}_mi355x.sh", "aiperf_client.sh"):
+    for name in ("benchmark_lib.sh", f"{framework}_mi355x.sh"):
         (benchmarks / name).write_text("# stub\n", encoding="utf-8")
-    keep_rule = geak_acceptance(_BASIS_OF[metric], 5.0)
-    workload_spec = (
-        {
-            "workload_spec": {
-                "kind": "agentx_trace_replay",
-                "client": "aiperf",
-                "scenario": "inferencex-agentx-mvp",
-                "corpus": "semianalysis_cc_traces_weka_062126",
-                "duration_s": 3600,
-                "geak_loop_duration_s": 900,
-                "concurrency": 6,
-                "metric_basis": _BASIS_OF[metric],
-                **({"acceptance": keep_rule} if keep_rule else {}),
-            }
-        }
-        if agentx
-        else {}
-    )
     recipe = tmp_path / "baseline.yaml"
     recipe.write_text(
         yaml.safe_dump(
@@ -92,8 +73,7 @@ def _coord(
                     "model": "/models/accepted",
                     "runner_type": "mi355x",
                     "inferencex_path": str(benchmarks.parent),
-                    "benchmark_script": "aiperf_client.sh" if agentx else f"{framework}_mi355x.sh",
-                    **workload_spec,
+                    **({"agentx": {"enabled": True}} if agentx else {"benchmark_script": f"{framework}_mi355x.sh"}),
                     "envs": {
                         "CONC": 6,
                         "ISL": 2048,
@@ -115,6 +95,7 @@ def _coord(
     coord.shared_state = SharedState(
         baseline_config_path=str(recipe),
         benchmark_mode="agentx" if agentx else "synthetic",
+        agentx_backend="magpie" if agentx else "",
         framework=framework,
         model_path="/models/accepted",
         gpu_type="mi355x",
@@ -142,6 +123,18 @@ def _coord(
     coord.shared_state.current_best["measurement"]["launch_identity"] = coord.writeback.build_env_spec()[
         "launch_identity"
     ]
+    if agentx:
+        prefix = (
+            ["python", "-m", "sglang.launch_server"]
+            if framework == "sglang"
+            else ["python", "-m", "vllm.entrypoints.openai.api_server", "--model", "/models/accepted"]
+        )
+        coord.shared_state.current_best["measurement"]["launch_evidence"] = {
+            "magpie_server_launch": {
+                "effective_argv": prefix + ["--tensor-parallel-size", "2", "--accepted-flag", "1"],
+                "runtime_environment": {"ACCEPTED_SETTING": "1", "HIP_VISIBLE_DEVICES": "6,7"},
+            }
+        }
     coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
     return coord
 
@@ -188,7 +181,7 @@ def _launch_mock_runner(coord: Coordinator, monkeypatch: pytest.MonkeyPatch, tmp
 
 @pytest.mark.parametrize("framework", ["sglang", "vllm"])
 @pytest.mark.asyncio
-async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
+async def test_native_handoff_keeps_supported_schema_and_seeds_geaks_own_launcher(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, framework: str
 ) -> None:
     coord = _coord(tmp_path, framework=framework)
@@ -203,11 +196,10 @@ async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
     assert handoff["schema_version"] == 3
     assert handoff["bench_client"] == "auto"
     assert handoff["bench_launcher"] == "native"
-    assert not {"bench_client_config", "benchmark_mode", "workload_identity"} & handoff.keys()
-    assert handoff["launch_server_script"] == str(tmp_path / "InferenceX" / "benchmarks" / f"{framework}_mi355x.sh")
-    recipe = yaml.safe_load(Path(coord.shared_state.baseline_config_path).read_text(encoding="utf-8"))
-    assert handoff["workload_spec"] == recipe["benchmark"]["workload_spec"]
-    assert handoff["workload_spec"]["metric_basis"] == "e2e_norm_intvty_p50"
+    assert (
+        not {"bench_client_config", "benchmark_mode", "workload_identity", "launch_server_script", "workload_spec"}
+        & handoff.keys()
+    )
     assert handoff["e2e_metric"] == "e2e_norm_intvty_p50"
     assert handoff["framework"] == framework
     assert handoff["model_path"] == "/models/accepted"
@@ -219,7 +211,8 @@ async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
     assert handoff["gpu_ids"] == "0,1"
     assert handoff["gpu_ids_space"] == "logical"
     assert handoff["tp"] == 2
-    assert handoff["accepted_flags"] == "--accepted-flag 1"
+    assert handoff["accepted_flags"] == ""
+    assert handoff["baseline_env_spec"]["config"]["server_launch_flags"] == "--accepted-flag 1"
     assert "ACCEPTED_SETTING=1" in handoff["accepted_env"]
     assert handoff["same_config_reference_status"] == "unverified"
     assert handoff["same_config_reference_verification_status"] == "unverified_workload"
@@ -230,6 +223,33 @@ async def test_agentx_handoff_keeps_supported_schema_and_frozen_launch_controls(
     assert spec["config"]["remove_args"] == ["--obsolete-flag"]
     assert spec["config"]["unset_envs"] == ["OBSOLETE_SETTING"]
     assert spec["config"]["args_mode"] == "replace"
+
+
+@pytest.mark.asyncio
+async def test_native_handoff_uses_verified_launch_without_searching_server_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coord = _coord(tmp_path)
+    receipt = coord.shared_state.current_best["measurement"]["launch_evidence"]["magpie_server_launch"]
+    receipt["effective_argv"] += ["--mem-fraction-static", "0.95", "--trust-remote-code"]
+    receipt["runtime_environment"]["AITER_SETTING"] = "enabled"
+    handoff = await _handoff(coord, monkeypatch)
+    config = handoff["baseline_env_spec"]["config"]
+    assert config["server_launch_flags"] == "--accepted-flag 1 --mem-fraction-static 0.95 --trust-remote-code"
+    assert config["extra_envs"] == {"ACCEPTED_SETTING": "1", "AITER_SETTING": "enabled"}
+    assert handoff["native_server_launch"] == receipt
+    assert handoff["bench_launcher"] == "native"
+
+
+@pytest.mark.asyncio
+async def test_native_handoff_does_not_depend_on_inferencex_shell_launchers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    coord = _coord(tmp_path)
+    (tmp_path / "InferenceX" / "benchmarks" / "sglang_mi355x.sh").unlink()
+    handoff = await _handoff(coord, monkeypatch)
+    assert "launch_server_script" not in handoff
+    assert handoff["bench_launcher"] == "native"
 
 
 @pytest.mark.parametrize(
@@ -263,9 +283,7 @@ async def test_agentx_geak_metric_aligned_result_is_only_a_proposal_proxy(
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     [captured_env] = launches
     assert (handoff["e2e_metric"], captured_env["E2E_METRIC"]) == (expected_metric, expected_metric)
-    assert handoff["workload_spec"]["metric_basis"] == _BASIS_OF[expected_metric]
-    # The nested rule survives the recipe round trip, so GEAK grades on the bar the rebench keeps on.
-    assert handoff["workload_spec"].get("acceptance") == geak_acceptance(_BASIS_OF[expected_metric], 5.0)
+    assert "workload_spec" not in handoff
     assert handoff["same_config_reference_status"] == "unverified"
     assert handoff["same_config_reference_verification_status"] == "unverified_workload"
     assert handoff["orchestrator_best_tput_same_config"] == 0.0

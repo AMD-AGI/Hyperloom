@@ -9,6 +9,7 @@ import pytest
 
 from hyperloom.agents.critic.runtime.errors import KBValidationError
 from hyperloom.agents.critic.runtime.in_memory_kb_client import InMemoryKBClient
+from hyperloom.agents.critic.runtime.kb_client import KBListQuery
 
 
 def _scope():
@@ -121,7 +122,7 @@ def test_list_returns_only_matching_scope_after_normalisation():
             "importance": 0.5,
         }
     )
-    out = kb.list(scope_filter={"framework": "  SGLang "})
+    out = kb.list(KBListQuery(scope_filter={"framework": "  SGLang "}))
     assert all(r["scope"]["framework"] == "sglang" for r in out["entries"])
     assert any(r["slug"] == "a-pitfall1" for r in out["entries"])
 
@@ -138,8 +139,9 @@ def test_metadata_filter_supports_nested_paths():
         }
     )
     out = kb.list(
-        scope_filter=_scope(),
-        metadata_filter={"evidence": {"packet_evidence": ["benchmark.after.gain_pct"]}},
+        KBListQuery(
+            scope_filter=_scope(), metadata_filter={"evidence": {"packet_evidence": ["benchmark.after.gain_pct"]}}
+        )
     )
     assert len(out["entries"]) == 1
 
@@ -155,14 +157,8 @@ def test_metadata_filter_array_contains_subset():
             "metadata": {"tags": ["dispatch", "kernel_agent", "active_path"]},
         }
     )
-    hit = kb.list(
-        scope_filter=_scope(),
-        metadata_filter={"tags": ["dispatch"]},
-    )
-    miss = kb.list(
-        scope_filter=_scope(),
-        metadata_filter={"tags": ["nonexistent"]},
-    )
+    hit = kb.list(KBListQuery(scope_filter=_scope(), metadata_filter={"tags": ["dispatch"]}))
+    miss = kb.list(KBListQuery(scope_filter=_scope(), metadata_filter={"tags": ["nonexistent"]}))
     assert len(hit["entries"]) == 1
     assert miss["entries"] == []
 
@@ -193,12 +189,12 @@ def test_list_default_excludes_deleted_rows():
     out = kb.upsert({"scope": _scope(), "kind": "pitfall", "slug": "abcdef-1", "importance": 0.5})
     rid = out["row"]["id"]
     kb._rows[rid].deleted = True
-    assert kb.list(scope_filter=_scope())["entries"] == []
-    assert kb.list(scope_filter=_scope(), include_deleted=True)["entries"]
+    assert kb.list(KBListQuery(scope_filter=_scope()))["entries"] == []
+    assert kb.list(KBListQuery(scope_filter=_scope(), include_deleted=True))["entries"]
 
 
 def test_list_scope_value_normalisation_handles_uppercase_in_filter_too():
     kb = InMemoryKBClient()
     kb.upsert({"scope": _scope(), "kind": "pitfall", "slug": "abcdef-1", "importance": 0.5})
-    out = kb.list(scope_filter={"model": "DEEPSEEK-R1"})
+    out = kb.list(KBListQuery(scope_filter={"model": "DEEPSEEK-R1"}))
     assert out["entries"]

@@ -27,6 +27,7 @@ from hyperloom.orchestrator.actions.executors._subprocess_kill import (
 )
 
 _PATCHER = "hyperloom.orchestrator.actions.executors._grid_runner"
+_EVAL_PATCHER = "hyperloom.orchestrator.actions.executors._inferencex_patcher"
 
 
 def _write_config(path: Path, **envs) -> Path:
@@ -137,7 +138,7 @@ def test_the_grid_arm_asserts_bounds_even_when_inferencex_path_is_unset(tmp_path
         return True
 
     with (
-        patch(f"{_PATCHER}.ensure_eval_probe_patched", side_effect=recording_ensure),
+        patch(f"{_EVAL_PATCHER}.ensure_eval_probe_patched", side_effect=recording_ensure),
         patch(
             f"{_PATCHER}.run_with_session_kill",
             side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 0, "ok", ""),
@@ -161,8 +162,8 @@ def test_a_variant_fails_when_the_bounds_target_is_present_but_unpatchable(tmp_p
     launched: list[object] = []
 
     with (
-        patch(f"{_PATCHER}.ensure_eval_probe_patched", return_value=False),
-        patch(f"{_PATCHER}.eval_probe_targets_exist", return_value=True),
+        patch(f"{_EVAL_PATCHER}.ensure_eval_probe_patched", return_value=False),
+        patch(f"{_EVAL_PATCHER}.eval_probe_targets_exist", return_value=True),
         patch(
             f"{_PATCHER}.run_with_session_kill",
             side_effect=lambda cmd, *a, **k: launched.append(cmd) or subprocess.CompletedProcess(cmd, 0, "ok", ""),
@@ -186,8 +187,8 @@ def test_a_variant_still_runs_when_no_bounds_target_exists(tmp_path, monkeypatch
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
 
     with (
-        patch(f"{_PATCHER}.ensure_eval_probe_patched", return_value=False),
-        patch(f"{_PATCHER}.eval_probe_targets_exist", return_value=False),
+        patch(f"{_EVAL_PATCHER}.ensure_eval_probe_patched", return_value=False),
+        patch(f"{_EVAL_PATCHER}.eval_probe_targets_exist", return_value=False),
         patch(
             f"{_PATCHER}.run_with_session_kill",
             side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 0, "ok", ""),
@@ -209,8 +210,8 @@ def test_a_variant_that_runs_no_eval_is_not_failed_by_the_bounds_check(tmp_path,
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "skip-kill")
 
     with (
-        patch(f"{_PATCHER}.ensure_eval_probe_patched", return_value=False),
-        patch(f"{_PATCHER}.eval_probe_targets_exist", return_value=True),
+        patch(f"{_EVAL_PATCHER}.ensure_eval_probe_patched", return_value=False),
+        patch(f"{_EVAL_PATCHER}.eval_probe_targets_exist", return_value=True),
         patch(
             f"{_PATCHER}.run_with_session_kill",
             side_effect=lambda cmd, *a, **k: subprocess.CompletedProcess(cmd, 0, "ok", ""),
@@ -235,8 +236,8 @@ async def test_run_grid_labels_the_bounds_gap_instead_of_a_missing_workspace(tmp
     monkeypatch.delenv("INFERENCE_OPTIMIZER_BENCHMARK_TIMEOUT_SEC", raising=False)
 
     with (
-        patch(f"{_PATCHER}.ensure_eval_probe_patched", return_value=False),
-        patch(f"{_PATCHER}.eval_probe_targets_exist", return_value=True),
+        patch(f"{_EVAL_PATCHER}.ensure_eval_probe_patched", return_value=False),
+        patch(f"{_EVAL_PATCHER}.eval_probe_targets_exist", return_value=True),
         patch(f"{_PATCHER}._run_magpie", wraps=_run_magpie) as run_magpie,
         patch(f"{_PATCHER}.run_with_session_kill") as launch,
     ):
@@ -295,7 +296,7 @@ def test_the_shared_reader_lives_in_a_module_every_arm_can_import():
     }
     assert siblings == set(), f"_accuracy_gate must stay a leaf, but it imports {sorted(siblings)}"
 
-    from hyperloom.orchestrator.actions.executors import _grid_runner, baseline
+    from hyperloom.orchestrator.actions.executors import benchmark_config, baseline
 
-    for arm in (_grid_runner, baseline):
+    for arm in (benchmark_config, baseline):
         assert arm.materialized_run_eval_disabled is materialized_run_eval_disabled, arm.__name__

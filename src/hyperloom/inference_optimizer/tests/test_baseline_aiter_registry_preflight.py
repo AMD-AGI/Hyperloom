@@ -347,13 +347,13 @@ def test_the_preflight_runs_before_the_config_is_materialized():
         if not isinstance(node, ast.Call):
             continue
         name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
-        if name in ("_prepare_aiter_serving_so", "materialize_config_with_envs"):
+        if name in ("_prepare_aiter_serving_so", "materialize_benchmark_config"):
             called.append((node.lineno, name))
 
     ordered = [name for _lineno, name in sorted(called)]
-    assert ordered[:2] == ["_prepare_aiter_serving_so", "materialize_config_with_envs"]
+    assert ordered[:2] == ["_prepare_aiter_serving_so", "materialize_benchmark_config"]
     preflight = source.index("await _prepare_aiter_serving_so(base_extra_envs)")
-    materialize = source.index("config_path = materialize_config_with_envs(")
+    materialize = source.index("config_path = materialize_benchmark_config(")
     assert preflight < materialize
 
 

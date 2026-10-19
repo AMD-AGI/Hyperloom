@@ -393,14 +393,6 @@ def resolve_gpu_power_settings(
 def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
     """Return the canonical corpus shape, until a measurement replaces it."""
     from hyperloom.common.agentx_workload import MLPERF_CORPUS, is_mlperf_backend, mlperf_trajectories
-    from hyperloom.inference_optimizer.agentx.mapping import (
-        CANONICAL_CORPUS_DURATION_S,
-        CANONICAL_CORPUS_ENTRIES,
-        CANONICAL_CORPUS_LOADER,
-        CANONICAL_ISL,
-        CANONICAL_OSL,
-        CANONICAL_PREFIX_CACHE_HIT,
-    )
 
     if is_mlperf_backend():
         # The MLPerf corpus has no published shape; the first measurement supplies it.
@@ -410,14 +402,15 @@ def _build_agentx_corpus_shape_seed() -> dict[str, Any]:
             "source": "canonical_mlperf",
         }
 
+    return {}
+
+
+def _custom_specialist_fields(args: argparse.Namespace) -> dict[str, Any]:
+    """The operator-defined specialist's SharedState fields from the parsed ``--custom-specialist-*`` flags."""
     return {
-        "corpus_loader": CANONICAL_CORPUS_LOADER,
-        "corpus_entries": CANONICAL_CORPUS_ENTRIES,
-        "duration_s": float(CANONICAL_CORPUS_DURATION_S),
-        "isl": dict(CANONICAL_ISL),
-        "osl": dict(CANONICAL_OSL),
-        "prefix_cache_hit": CANONICAL_PREFIX_CACHE_HIT,
-        "source": "canonical",
+        "custom_specialist_prompt": str(getattr(args, "custom_specialist_prompt", "") or ""),
+        "custom_specialist_description": str(getattr(args, "custom_specialist_description", "") or ""),
+        "custom_specialist_only": bool(getattr(args, "custom_specialist_only", False)),
     }
 
 
@@ -539,8 +532,7 @@ def _seed_shared_state(
         # rather than from argv.
         operator_server_args=str(getattr(args, "server_args", "") or "").strip(),
         operator_extra_env=parse_operator_extra_env(args),
-        custom_specialist_prompt=str(getattr(args, "custom_specialist_prompt", "") or ""),
-        custom_specialist_description=str(getattr(args, "custom_specialist_description", "") or ""),
+        **_custom_specialist_fields(args),
         bypass_scripts_dir=os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip(),
         framework_repo_path=os.environ.get("FRAMEWORK_REPO_PATH", "").strip(),
         benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),

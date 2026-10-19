@@ -15,10 +15,14 @@ from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_tim
 from hyperloom.inference_optimizer.breakdown.critic_reviews import normalize_framework_reviews
 from hyperloom.inference_optimizer.session.sbd_v6 import (
     SCHEMA_VERSION_V6,
-    read_timeline_event,
     read_timeline_events,
     write_timeline_event_at,
 )
+
+
+def read_timeline_event(session_dir: Path, event_type: str) -> dict | None:
+    matching = [event for event in read_timeline_events(session_dir) if event["type"] == event_type]
+    return matching[-1] if matching else None
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -734,8 +738,8 @@ def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatc
     monkeypatch.setattr(preflight, "_ensure_lm_eval_dep", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(preflight, "_ensure_framework_deps", lambda *_args: None)
     monkeypatch.setattr(preflight, "_check_serving_framework", lambda *_args: None)
-    monkeypatch.setattr(preflight, "_inferencex_checkout_ok", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(preflight, "_inferencex_head_sha", lambda *_args: "abc123")
+    monkeypatch.setattr(preflight.inferencex_checkout, "checkout_ok", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(preflight.inferencex_checkout, "head_sha", lambda *_args: "abc123")
     monkeypatch.setattr(preflight, "_report_inferencex_patch_anchors", lambda *_args: True)
     monkeypatch.setattr(preflight, "_check_node_claude_cli", lambda: None)
     monkeypatch.setattr(preflight.shutil, "which", lambda name: f"/usr/bin/{name}")

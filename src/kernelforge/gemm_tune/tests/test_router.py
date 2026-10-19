@@ -3,12 +3,20 @@
 
 """Tests for router module."""
 
+from pathlib import Path
+
 import pytest
 
 from kernelforge.gemm_tune import router
 from kernelforge.gemm_tune.model_analyzer import ModelProfile
 from kernelforge.gemm_tune.report import build_report
+from kernelforge.gemm_tune.tuners.base import TuneContext
 from kernelforge.gemm_tune.router import select_tuners
+
+
+def _tune_ctx(**fields) -> TuneContext:
+    """A tuning context carrying the run fields a report records; the tuner knobs are placeholders."""
+    return TuneContext(mp=1, output_dir=Path("."), iters=1, warmup=1, min_improvement_pct=0.0, timeout_s=1, **fields)
 
 
 def _make_profile(is_moe=False, num_experts=0, **kwargs):
@@ -401,16 +409,18 @@ class TestOnlyTheMeasuredPrecisionIsTuned:
         assert not any(spec.should_run for spec in specs)
 
         report = build_report(
+            ctx=_tune_ctx(
+                profile=profile,
+                framework="vllm",
+                precision="bf16",
+                quant_type="auto",
+                gpu_type="mi355x",
+                tp=1,
+                conc=64,
+                tokens=[16, 64],
+            ),
             results=[],
             skipped=[(spec.name, spec.skip_reason) for spec in specs],
-            profile=profile,
-            framework="vllm",
-            precision="bf16",
-            quant_type="auto",
-            gpu_type="mi355x",
-            tp=1,
-            conc=64,
-            tokens=[16, 64],
             started_at="2026-01-01T00:00:00Z",
             total_elapsed_s=0.0,
         )

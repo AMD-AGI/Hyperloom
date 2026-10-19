@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from hyperloom.agents.framework.kb import LESSONS_FILE, framework_optimization_root
-from hyperloom.common.io import append_jsonl
+from hyperloom.common.io import JsonLineFormat, append_jsonl
 
 
 def _default_kb_root() -> Path:
@@ -94,7 +94,7 @@ def _record(
 def _append_record_sync(record: dict) -> Path:
     """Append a single JSONL record under the resolved KB root."""
     path = _default_kb_root() / LESSONS_FILE
-    append_jsonl(path, record, make_parents=True, sort_keys=True)
+    append_jsonl(path, record, make_parents=True, fmt=JsonLineFormat(sort_keys=True))
     return path
 
 

@@ -75,7 +75,7 @@ class TestCategorizeKernelName:
 class TestDiagnoseFromShares:
     def test_launch_bound_is_candidate(self):
         shares = {"gemm": 0.5, "add": 0.14, "rmsnorm": 0.08, "activation": 0.05, "rope": 0.02}
-        d = dg.diagnose_from_shares(shares, busy_fraction_of_wall=0.21)
+        d = dg.diagnose_from_shares(dg.TraceProfile(shares, busy_fraction_of_wall=0.21))
         assert d.is_candidate
         assert d.launch_bound_share >= 0.25
         assert d.dominant_categories[0] == "add"
@@ -83,7 +83,7 @@ class TestDiagnoseFromShares:
     def test_compute_bound_is_annotated_not_vetoed(self):
         """A high GPU-busy fraction no longer rejects the model."""
         shares = {"gemm": 0.55, "add": 0.25, "rmsnorm": 0.20}
-        d = dg.diagnose_from_shares(shares, busy_fraction_of_wall=0.72)
+        d = dg.diagnose_from_shares(dg.TraceProfile(shares, busy_fraction_of_wall=0.72))
         assert d.is_candidate
         assert "busy" in d.reason
         assert d.busy_fraction_of_wall == 0.72
@@ -91,7 +91,7 @@ class TestDiagnoseFromShares:
     def test_below_share_threshold_not_candidate(self):
         # Below the soft launch-bound FLOOR (0.10): almost nothing fusible present.
         shares = {"gemm": 0.72, "attention": 0.20, "rmsnorm": 0.05, "activation": 0.03}
-        d = dg.diagnose_from_shares(shares, busy_fraction_of_wall=0.40)
+        d = dg.diagnose_from_shares(dg.TraceProfile(shares, busy_fraction_of_wall=0.40))
         assert not d.is_candidate
         assert "launch_bound_share" in d.reason
 
@@ -99,12 +99,12 @@ class TestDiagnoseFromShares:
         # Calibration regression: GraniteMoE-like case -- LOW launch-bound share (big MoE GEMMs dilute it) but the GPU
         # is mostly idle (dispatch-bound), so it MUST be a candidate.
         shares = {"gemm": 0.55, "moe": 0.27, "add": 0.10, "rmsnorm": 0.05, "rope": 0.03}
-        d = dg.diagnose_from_shares(shares, busy_fraction_of_wall=0.29)
+        d = dg.diagnose_from_shares(dg.TraceProfile(shares, busy_fraction_of_wall=0.29))
         assert d.is_candidate
         assert d.launch_bound_share < 0.25
 
     def test_empty_shares(self):
-        d = dg.diagnose_from_shares({}, busy_fraction_of_wall=None)
+        d = dg.diagnose_from_shares(dg.TraceProfile({}, busy_fraction_of_wall=None))
         assert not d.is_candidate and d.reason == "empty_trace"
 
 

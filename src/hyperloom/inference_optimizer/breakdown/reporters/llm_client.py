@@ -20,7 +20,6 @@ REPORT_HTTP_TIMEOUT_SEC = 60.0
 
 __all__ = [
     "REPORT_HTTP_TIMEOUT_SEC",
-    "NullClient",
     "OpenAIHttpClient",
     "AnthropicClient",
     "build_client_from_env",
@@ -28,20 +27,11 @@ __all__ = [
 
 
 @dataclass
-class NullClient:
-    """No-op client; compose treats this exactly like ``llm_client=None``."""
-
-    def complete(self, *, system: str, user: str) -> str:
-        """Return an empty string, disabling the narrative pass."""
-        return ""
-
-
-@dataclass
 class OpenAIHttpClient:
     """OpenAI-compatible chat-completions client for the narrative pass."""
 
     client: Any
-    model: str = "claude-opus-5"
+    model: str = llm_config.DEFAULT_CLAUDE_MODEL
     max_output_tokens: int = 1024
 
     def complete(self, *, system: str, user: str) -> str:
@@ -64,7 +54,7 @@ class OpenAIHttpClient:
 class AnthropicClient:
     """Anthropic client for the narrative pass."""
 
-    model: str = "claude-opus-5"
+    model: str = llm_config.DEFAULT_CLAUDE_MODEL
     max_output_tokens: int = 1024
     timeout: Any = None
     timeout_s: float = REPORT_HTTP_TIMEOUT_SEC
@@ -72,14 +62,16 @@ class AnthropicClient:
     def complete(self, *, system: str, user: str) -> str:
         """Issue one single-shot completion and return the reply text."""
         return llm_config.anthropic_completion(
+            request=llm_config.AnthropicCompletionRequest(
+                model=self.model,
+                messages=[{"role": "user", "content": user}],
+                max_tokens=self.max_output_tokens,
+                system=system,
+                timeout=self.timeout,
+                timeout_s=self.timeout_s,
+            ),
             component="breakdown",
             operation="compose_report",
-            model=self.model,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-            max_tokens=self.max_output_tokens,
-            timeout=self.timeout,
-            timeout_s=self.timeout_s,
         ).text
 
 
@@ -88,7 +80,7 @@ def build_client_from_env() -> Any | None:
     backend = (os.environ.get("HYPERLOOM_REPORT_LLM_BACKEND") or "none").lower()
     if backend in ("", "none", "off", "disabled"):
         return None
-    model = os.environ.get("HYPERLOOM_REPORT_MODEL") or "claude-opus-5"
+    model = os.environ.get("HYPERLOOM_REPORT_MODEL") or llm_config.DEFAULT_CLAUDE_MODEL
     try:
         max_tokens = int(os.environ.get("HYPERLOOM_REPORT_MAX_TOKENS") or "1024")
     except ValueError:

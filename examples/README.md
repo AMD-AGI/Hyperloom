@@ -42,7 +42,7 @@ From the agent terminal in that workspace, install the published release wheel
 into the current directory:
 
 ```bash
-pip install hyperloom-inference-optimizer==1.1.3 --target .
+pip install hyperloom-inference-optimizer==1.1.4 --target .
 ```
 
 It is normal for the current directory to contain many Python package directories
@@ -77,7 +77,7 @@ It asks for these values with a fixed option order:
    - If `.env` already exists, setup preserves unrelated keys but updates the
      Hyperloom setup keys selected in this run.
 3. Model, asked alongside the non-secret values:
-   - `Use default (claude-opus-5)`
+   - `Use default (claude-opus-5-5)`
    - `Custom`
 4. `USER_DATA_PATH`:
    - Default: `<workspace>/session`

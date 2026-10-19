@@ -733,24 +733,6 @@ def test_coordinator_init_writes_phase_prelude_for_fresh_session(coordinator_wit
     assert c.shared_state.phase_budget_pct == dict(phase_state.DEFAULT_PHASE_BUDGET_PCT)
 
 
-def test_a_resume_keeps_the_configured_shares_extend_hints_are_capped_against(coordinator_with_mocks):
-    from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_EXTEND_EXPLORE_BUDGET
-
-    c = coordinator_with_mocks
-    configured = dict(c.shared_state.phase_budget_pct)
-    assert c.shared_state.configured_phase_budget_pct == configured
-    c.shared_state.bump_phase_budget(ESCALATE_HINT_EXTEND_EXPLORE_BUDGET)
-
-    c.phase_machine.ensure_phase_initialised(None)
-
-    assert c.shared_state.configured_phase_budget_pct == configured
-    assert c.shared_state.phase_budget_pct != configured
-    # A session recorded before the configured shares were takes the ones it resumes with.
-    c.shared_state.configured_phase_budget_pct = {}
-    c.phase_machine.ensure_phase_initialised(None)
-    assert c.shared_state.configured_phase_budget_pct == c.shared_state.phase_budget_pct
-
-
 def test_a_session_recorded_at_an_unknown_phase_refuses_to_resume(coordinator_with_mocks):
     """A phase this build does not have was written by a build whose machine differed."""
     c = coordinator_with_mocks
@@ -764,7 +746,6 @@ def test_a_session_recorded_at_an_unknown_phase_refuses_to_resume(coordinator_wi
 
 
 _NO_KERNEL_CYCLE_SEC = 600 * 60.0
-# Low enough that one extend hint stays under the bump cap after the KERNEL share is redistributed.
 _NO_KERNEL_CLI_BUDGET_PCT = {phase_state.PHASE_FRAMEWORK_AGENT: 0.2}
 
 
@@ -834,38 +815,6 @@ async def test_no_kernel_framework_share_is_the_same_for_machine_dispatch_and_pr
         framework_exit = c.shared_state.phase_history[-1]
         assert framework_exit["from_phase"] == phase_state.PHASE_FRAMEWORK_AGENT
         assert framework_exit["evidence"]["passed_through_reason"] == "optimize_phase_budget_exhausted"
-    finally:
-        await c.stop()
-
-
-@pytest.mark.asyncio
-async def test_extend_explore_budget_moves_the_share_every_reader_uses(no_kernel_coordinator):
-    from hyperloom.orchestrator.state.shared_state import ESCALATE_HINT_EXTEND_EXPLORE_BUDGET
-
-    c = no_kernel_coordinator
-    share = c.shared_state.phase_budget_pct[phase_state.PHASE_FRAMEWORK_AGENT]
-    bumped = share + phase_state.ESCALATE_HINT_BUDGET_BUMP_DELTA
-    try:
-        _enter_framework_for(c, _NO_KERNEL_CYCLE_SEC * (share + bumped) / 2)
-        assert c.dispatcher.dispatch_paused_for_phase_budget() is True
-        assert "remaining_sec=0" in await _phase_block(c)
-
-        await c.router._handle_escalate_strategy_change(
-            "orchestration",
-            Intent(
-                type=IntentType.ESCALATE_STRATEGY_CHANGE,
-                payload={"summary": "s", "next_action_hint": ESCALATE_HINT_EXTEND_EXPLORE_BUDGET},
-            ),
-        )
-
-        assert c.shared_state.phase_budget_pct[phase_state.PHASE_FRAMEWORK_AGENT] == pytest.approx(bumped)
-        assert SharedState.load_or_init(c.session_dir).phase_budget_pct == c.shared_state.phase_budget_pct
-        assert c.dispatcher.dispatch_paused_for_phase_budget() is False
-        block = await _phase_block(c)
-        assert f"pct={bumped:.2f}" in block
-        assert "remaining_sec=0 " not in block
-        await c.phase_machine.advance_phase_if_needed()
-        assert c.shared_state.phase == phase_state.PHASE_FRAMEWORK_AGENT
     finally:
         await c.stop()
 

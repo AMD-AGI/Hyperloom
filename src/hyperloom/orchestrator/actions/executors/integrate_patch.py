@@ -4,7 +4,7 @@
 """Apply specialist patches to live framework roots and KEEP or REVERT by benchmark."""
 
 from __future__ import annotations
-
+from hyperloom.orchestrator.actions.executors._workload_envs import prepare_grid_benchmark_config
 import asyncio
 import csv
 import functools
@@ -92,6 +92,7 @@ from ._apply_feedback import ApplyFeedback, build_apply_feedback
 from ._git import _git_head_sha, _run_git_cp
 from ._integrate_attempt import IntegrateAttempt
 from ._setup_replay import replay_setup_commands
+from .source_tree_identity import new_recovery_record
 from ._patch_source_pr import (
     DEFAULT_DIFF_FETCH_TIMEOUT_SEC,
     _candidate_slug,
@@ -136,7 +137,6 @@ from ._server_argv import ConfigUnreadable
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
-    materialize_config_with_envs,
 )
 
 
@@ -2674,13 +2674,7 @@ class IntegratePatchExecutor:
         recovery_parent = runs_dir(self.session_dir, "integrate_patch", attempt.task_id)
         recovery_parent.mkdir(parents=True, exist_ok=True)
         recovery_root = Path(tempfile.mkdtemp(prefix="recovery-", dir=recovery_parent)).resolve()
-        recovery: dict[str, Any] = {
-            "version": 1,
-            "phase": "before_stash",
-            "git_head": git_head,
-            "stash_oid": "",
-            "root": str(recovery_root),
-        }
+        recovery = new_recovery_record(framework_root, git_head=git_head, recovery_root=recovery_root)
         # Write pending_integrate sentinel before any framework tree mutation.
         # The Coordinator clears this after promoting the final result.
         # shared_state.save() is called here (executor owns the sentinel write;
@@ -2910,12 +2904,7 @@ class IntegratePatchExecutor:
         shared_state = attempt.shared_state
         output_root = attempt.output_root
         assert output_root is not None
-        # Activate the provisioned attempt runtime by threading its YAML-layer
-        # override into params so both bench wirings pick it up.
-        provision_result = attempt.provision_result
-        if provision_result is not None and getattr(provision_result, "ok", False):
-            params = dict(params)
-            params["runtime_override"] = provision_result.runtime.to_runtime_override()
+        params = attempt.benchmark_params(params)
 
         # Bound both bench legs by the session wall-clock, as the sweep and explore
         # arms already are: the declared cap answers "how long before this counts
@@ -4540,8 +4529,6 @@ class IntegratePatchExecutor:
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
         if not config_path.exists():
             raise RuntimeError(f"integrate_patch bench: config not found at {config_path}")
-        # Last rung of the precedence: without it a task with no params
-        # model_path and no MODEL_PATH in env resolves to the empty string.
         resolved_model = resolve_session_model_path(
             params=params,
             state_model_path=state_model_path,
@@ -4552,7 +4539,7 @@ class IntegratePatchExecutor:
         )
         override_script = sanitize_script_name(params.get("benchmark_script"))
         override_result_dir = sanitize_result_dir(params.get("result_dir"))
-        config_path = materialize_config_with_envs(
+        config_path = prepare_grid_benchmark_config(
             config_path,
             output_root,
             model_path=resolved_model or None,
@@ -4581,9 +4568,10 @@ class IntegratePatchExecutor:
             extra_server_args=extra_server_args_applied,
             extra_envs=variant_envs,
             unset_envs=to_str_list(unset_envs),
-            args_mode=args_mode,
             note=f"integrate_patch:{specialist_task_id}{variant_suffix}",
         )
+        variant.overlay_pythonpath = params.get("overlay_pythonpath", "")
+        variant.source_patches = list(params.get("source_patches", []))
         effective_unset = list(dict.fromkeys(base_unset + list(variant.unset_envs)))
         _rt = params.get("runtime_override")
         if isinstance(_rt, dict) and _rt:

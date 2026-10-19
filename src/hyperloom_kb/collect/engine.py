@@ -21,7 +21,7 @@ from hyperloom_kb.collect.sensitive import FREE_TEXT_FIELDS, find_sensitive, fin
 from hyperloom_kb.config import ConfigurationError
 from hyperloom_kb.files import file_ref
 from hyperloom_kb.identity import derive_experience_id
-from hyperloom_kb.remote import RemoteWriteResult, SessionValue
+from hyperloom_kb.remote import ExperienceStart, RemoteWriteResult, SessionValue
 from hyperloom_kb.runtime import experience_kb_from_env
 from hyperloom_kb.schema import (
     Experience,
@@ -62,19 +62,7 @@ class CollectionTarget(Protocol):
     def schema_ref(self) -> str:
         """The schema this KB's Experiences are written under."""
 
-    def begin(
-        self,
-        *,
-        run_id: str,
-        seq: int,
-        objective: str,
-        provenance: Provenance,
-        identity: Mapping[str, FieldValue] | None = None,
-        baseline: Mapping[str, SessionValue] | None = None,
-        parent_id: str = "",
-        supersedes: str = "",
-        created_at: datetime | None = None,
-    ) -> Any:
+    def begin(self, start: ExperienceStart) -> Any:
         """Open the Experience session for ``run_id``/``seq``, through which its decision and outcome are recorded."""
 
 
@@ -385,15 +373,17 @@ def _with_paths(values: Mapping[str, FieldValue], files: Mapping[str, Path]) -> 
 def _publish(target: CollectionTarget, projected: _Projected) -> str:
     experience, files = projected.experience, projected.files
     session = target.begin(
-        run_id=experience.run_id,
-        seq=experience.seq,
-        objective=experience.objective,
-        provenance=experience.provenance,
-        identity=dict(experience.identity),
-        baseline=_with_paths(experience.baseline, files),
-        parent_id=experience.parent_id,
-        supersedes=experience.supersedes,
-        created_at=experience.created_at,
+        ExperienceStart(
+            run_id=experience.run_id,
+            seq=experience.seq,
+            objective=experience.objective,
+            provenance=experience.provenance,
+            identity=dict(experience.identity),
+            baseline=_with_paths(experience.baseline, files),
+            parent_id=experience.parent_id,
+            supersedes=experience.supersedes,
+            created_at=experience.created_at,
+        )
     )
     record = session.record
     if not isinstance(record, Experience):

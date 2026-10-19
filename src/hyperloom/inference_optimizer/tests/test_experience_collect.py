@@ -53,7 +53,7 @@ def session_dir(tmp_path: Path):
 
 
 def _tr(reason: str) -> Transition:
-    return Transition(from_phase="FRAMEWORK_AGENT", to_phase="SWEEP", reason=reason, evidence={}, loopback=False)
+    return Transition(from_phase="FRAMEWORK_AGENT", to_phase="SWEEP", reason=reason, evidence={})
 
 
 def _coordinator(session_dir: Path) -> Coordinator:

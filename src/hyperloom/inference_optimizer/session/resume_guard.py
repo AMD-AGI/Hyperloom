@@ -19,6 +19,7 @@ from hyperloom.common.timeutil import now_iso
 
 from . import lock as session_lock
 from . import session_paths
+from .coordinator_db import OlderCoordinatorDB, refuse_older_schema
 from .paths import db_path_for
 
 
@@ -212,9 +213,12 @@ def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
         with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as db:
             db.row_factory = sqlite3.Row
             db.execute("BEGIN")
+            refuse_older_schema(db)
             diagnostics = _inspect(db, owner_scope)
             if diagnostics:
                 diagnostics += _other_scopes(db, owner_scope)
+    except OlderCoordinatorDB as exc:
+        raise ResumeBlocked(str(exc)) from exc
     except (OSError, sqlite3.Error, ValueError, TypeError) as exc:
         raise ResumeBlocked(
             "cannot inspect persisted execution ownership read-only; resume is blocked. "
@@ -226,11 +230,12 @@ def ensure_resume_safe(session_dir: Path, *, owner_scope: str) -> None:
             + "\n  ".join(diagnostics)
             + "\nNo ownership was cleared. Inspect and finish cleanup in the original execution environment "
             "before retrying; do not start replacement work on the same resources. "
-            "For legacy empty-scope ownership only, after verifying the task's entire process tree and any "
-            "remote workers/Ray actors have stopped, record that confirmation with hyperloom recover "
-            "--session-dir <session> --confirm-stopped <task-id> --confirmation-reason <reason>. "
             "If the environment of another owner scope is gone, record that with hyperloom recover "
-            "--session-dir <session> --confirm-scope-gone <owner-scope> --confirmation-reason <reason>."
+            "--session-dir <session> --confirm-scope-gone <owner-scope> --confirmation-reason <reason>. "
+            "For a listed task that names no owner scope (such as a lane-less CLOSE-phase step), after "
+            "verifying its entire process tree and any remote workers/Ray actors have stopped, record that "
+            "confirmation with hyperloom recover --session-dir <session> --confirm-stopped <task-id> "
+            "--confirmation-reason <reason>; it refuses, changing nothing, a task recorded under an owner scope."
         )
 
 
@@ -375,6 +380,25 @@ def _confirmation_entry(
     if not terminal:
         entry.update({"from": state, "to": "cancelled"})
     return entry
+
+
+def confirmed_stopped_scope(history: object) -> str | None:
+    """Read back the confirmation :func:`_confirmation_entry` wrote, when it is the task's last outcome.
+
+    Returns:
+        ``None`` unless the latest recorded outcome is an operator confirmation
+        that the task's execution stopped and its cleanup is complete; otherwise
+        the owner scope confirmed gone with it, or ``""`` when the confirmation
+        named this one task rather than a whole vanished execution environment.
+    """
+    for entry in reversed(history if isinstance(history, list) else []):
+        evidence = entry.get("evidence") if isinstance(entry, dict) else None
+        if not isinstance(evidence, dict) or not isinstance(evidence.get("outcome"), dict):
+            continue
+        if evidence.get("reason") != "operator_confirmed_stopped" or evidence.get("cleanup_confirmed") is not True:
+            return None
+        return str(evidence.get("confirmed_scope_gone") or "")
+    return None
 
 
 def _write_confirmation(
@@ -594,7 +618,7 @@ def _in_locked_ledger(session_dir: Path, update: Callable[[sqlite3.Connection, s
 
 
 def confirm_task_stopped(session_dir: Path, *, task_id: str, reason: str) -> dict:
-    """Record an operator's explicit physical-cleanup confirmation for one legacy task.
+    """Record an operator's explicit physical-cleanup confirmation for one task that names no owner scope.
 
     This does not stop or inspect processes or Ray actors. The operator must first
     verify their exit. Only empty-scope execution ownership is eligible.

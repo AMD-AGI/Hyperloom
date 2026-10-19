@@ -8,6 +8,7 @@ from __future__ import annotations
 import gzip
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -243,20 +244,28 @@ def load_op_bytes_from_kineto_trace(path: str | Path) -> dict[str, float]:
     return {k: v / total for k, v in bytes_by_cat.items()}
 
 
+@dataclass(frozen=True)
+class TraceProfile:
+    """What a decode trace measured: per-category busy shares, GPU busy time, launches per step, memory traffic."""
+
+    category_shares: dict[str, float]
+    busy_fraction_of_wall: float | None
+    kernels_per_step: float = 0.0
+    category_bytes_share: dict[str, float] | None = None
+
+
 def diagnose_from_shares(
-    category_shares: dict[str, float],
+    profile: TraceProfile,
     *,
-    busy_fraction_of_wall: float | None,
-    kernels_per_step: float = 0.0,
     decode_batch: int = 16,
-    category_bytes_share: dict[str, float] | None = None,
-    min_launch_bound_share: float = DEFAULT_MIN_LAUNCH_BOUND_SHARE,
-    max_busy_wall: float = DEFAULT_MAX_BUSY_WALL,
     min_predicted_gain: float = DEFAULT_MIN_PREDICTED_GAIN,
 ) -> Diagnosis:
     """Turn category busy-shares into a fusion-candidate verdict."""
-    shares = {str(k).strip().lower(): float(v) for k, v in (category_shares or {}).items() if v is not None}
-    bytes_share = {str(k).strip().lower(): float(v) for k, v in (category_bytes_share or {}).items() if v is not None}
+    busy_fraction_of_wall = profile.busy_fraction_of_wall
+    shares = {str(k).strip().lower(): float(v) for k, v in (profile.category_shares or {}).items() if v is not None}
+    bytes_share = {
+        str(k).strip().lower(): float(v) for k, v in (profile.category_bytes_share or {}).items() if v is not None
+    }
     lb_share = sum(v for k, v in shares.items() if k in LAUNCH_BOUND_CATEGORIES)
     # When the trace exposed op shapes, ground the predicted cg-ON gain in the MEASURED launch-bound memory-traffic
     # share; otherwise fall back to the flat launch-share discount (mem_share=None keeps the legacy behavior).
@@ -276,7 +285,7 @@ def diagnose_from_shares(
             lb_share,
             busy_fraction_of_wall,
             dominant,
-            kernels_per_step,
+            profile.kernels_per_step,
             shares,
             is_candidate,
             reason,
@@ -286,16 +295,16 @@ def diagnose_from_shares(
 
     if not shares:
         return _diag(False, "empty_trace")
-    if lb_share < min_launch_bound_share:
+    if lb_share < DEFAULT_MIN_LAUNCH_BOUND_SHARE:
         return _diag(
             False,
-            f"launch_bound_share {lb_share:.3f} < {min_launch_bound_share} (compute/attention/moe dominated)",
+            f"launch_bound_share {lb_share:.3f} < {DEFAULT_MIN_LAUNCH_BOUND_SHARE} (compute/attention/moe dominated)",
         )
     # busy_fraction_of_wall is annotated but NOT a hard veto.
     busy_note = ""
-    if busy_fraction_of_wall is not None and busy_fraction_of_wall > max_busy_wall:
+    if busy_fraction_of_wall is not None and busy_fraction_of_wall > DEFAULT_MAX_BUSY_WALL:
         busy_note = (
-            f" (GPU busy {busy_fraction_of_wall:.2f} > {max_busy_wall} of wall: "
+            f" (GPU busy {busy_fraction_of_wall:.2f} > {DEFAULT_MAX_BUSY_WALL} of wall: "
             f"compute-bound, so expect a smaller share of time to be fusible; "
             f"annotated for ranking, validate/loop will confirm)"
         )
@@ -326,5 +335,6 @@ def diagnose_trace(
     bytes_share = load_op_bytes_from_kineto_trace(trace_path)
     kps = n_kernels / decode_steps if decode_steps > 0 else n_kernels
     return diagnose_from_shares(
-        shares, busy_fraction_of_wall=busy, kernels_per_step=kps, category_bytes_share=bytes_share, **kwargs
+        TraceProfile(shares, busy_fraction_of_wall=busy, kernels_per_step=kps, category_bytes_share=bytes_share),
+        **kwargs,
     )

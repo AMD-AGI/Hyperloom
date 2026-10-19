@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -34,28 +35,35 @@ _SGLANG_CUDAGRAPH_BS_THOROUGH = [
 ]
 
 
-def compute_dense_nk_shapes(
-    hidden_size: int,
-    intermediate_size: int,
-    num_heads: int,
-    num_kv_heads: int,
-    tp: int,
-    *,
-    head_dim: int = 0,
-    v_head_dim: int = 0,
-    q_lora_rank: int = 0,
-    kv_lora_rank: int = 0,
-    qk_nope_head_dim: int = 0,
-    qk_rope_head_dim: int = 0,
-    o_lora_rank: int = 0,
-    o_groups: int = 0,
-) -> list[tuple[int, int]]:
+@dataclass(frozen=True)
+class DenseGeometry:
+    """The model dimensions the dense projection shapes follow from; 0 means absent or derived."""
+
+    hidden_size: int
+    intermediate_size: int
+    num_heads: int
+    num_kv_heads: int
+    head_dim: int = 0
+    v_head_dim: int = 0
+    q_lora_rank: int = 0
+    kv_lora_rank: int = 0
+    qk_nope_head_dim: int = 0
+    qk_rope_head_dim: int = 0
+
+
+def compute_dense_nk_shapes(geometry: DenseGeometry, tp: int) -> list[tuple[int, int]]:
     """Compute the dense GEMM (N, K) = (output_dim, input_dim) projection shapes."""
+    hidden_size = geometry.hidden_size
+    intermediate_size = geometry.intermediate_size
+    q_lora_rank = geometry.q_lora_rank
+    kv_lora_rank = geometry.kv_lora_rank
+    qk_nope_head_dim = geometry.qk_nope_head_dim
+    qk_rope_head_dim = geometry.qk_rope_head_dim
     tp = max(1, int(tp or 1))
-    nh = max(1, int(num_heads or 1))
-    nkv = max(1, int(num_kv_heads or nh))
-    qk_head = int(head_dim or 0) or (hidden_size // nh if hidden_size else 0)
-    vh = int(v_head_dim or 0) or qk_head
+    nh = max(1, int(geometry.num_heads or 1))
+    nkv = max(1, int(geometry.num_kv_heads or nh))
+    qk_head = int(geometry.head_dim or 0) or (hidden_size // nh if hidden_size else 0)
+    vh = int(geometry.v_head_dim or 0) or qk_head
 
     shapes: list[tuple[int, int]] = []
     if q_lora_rank and kv_lora_rank:
@@ -146,17 +154,15 @@ def write_mnk_untuned_csv(
     output_path: Path,
     *,
     needs_q_dtype_w: bool = False,
-    q_dtype: str = "",
-    filename: str = "untuned_dense.csv",
 ) -> Path:
     """Write an aiter-style untuned CSV for the fp8/fp4 dense tuners."""
-    csv_path = output_path / filename
+    csv_path = output_path / "untuned_dense.csv"
     output_path.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", encoding="utf-8") as f:
         if needs_q_dtype_w:
             from .tuners._aiter_dense_common import _aiter_fp8_dtype_str
 
-            effective_q = q_dtype or _aiter_fp8_dtype_str()
+            effective_q = _aiter_fp8_dtype_str()
             f.write("M,N,K,q_dtype_w\n")
             for m in m_values:
                 for n, k in nk_shapes:

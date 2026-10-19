@@ -26,7 +26,7 @@ from ... import framework_registry
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
 from .event_sink import RecordSink
-from .event_timeline import finish_event, open_event
+from .event_timeline import EventHeader, finish_event, open_event
 
 log = logging.getLogger(__name__)
 
@@ -197,10 +197,8 @@ def _republish_closed_event(event: str) -> None:
         return max(ends)
 
     republish_closed_event(
-        event,
+        EventHeader(EVENT_TYPE, event, EVENT_KIND),
         section=SECTION_EVENT,
-        event_type=EVENT_TYPE,
-        kind=EVENT_KIND,
         load_parts=lambda: baseline_event_parts(event),
         assemble=assemble_baseline_ext,
         end_time=_end_time,
@@ -551,12 +549,9 @@ class BaselineEventRecorder:
         if not self._owns_event:
             return
         self._sequence = open_event(
-            event_type=EVENT_TYPE,
-            event=self.event_id,
+            EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
             event_section=SECTION_EVENT,
             producer=PRODUCER,
-            kind=EVENT_KIND,
-            start_time=self._start_time,
         )
 
     def begin_run(self, *, attempt_reason: str) -> int:
@@ -765,13 +760,10 @@ class BaselineEventRecorder:
             # timeline.
             opened_at = str(_event_header(parts, event=self.event_id).get("start_time") or "")
             finish_event(
-                event_type=EVENT_TYPE,
-                event=self.event_id,
+                EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, opened_at or self._start_time),
                 sequence=self._sequence,
                 status=derived or status,
                 ext=ext,
-                kind=EVENT_KIND,
-                start_time=opened_at or self._start_time,
                 end_time=end_time,
             )
         except RECORDING_ERRORS as exc:

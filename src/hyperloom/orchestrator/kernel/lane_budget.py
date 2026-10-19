@@ -24,6 +24,10 @@ FUSION_MAX_TARGETS = 3
 #: itself needs to close out.
 PHASE_RESERVE_SEC = 300
 
+#: Why KERNEL work did not start: what is left of a bounded phase cannot fund one run of it.
+#: A skip, not a verdict on the work: a later KERNEL entry may still fund it.
+INSUFFICIENT_BUDGET = "insufficient_budget"
+
 #: Rewrite is not a lane: the route budgets itself against the wall clock (see
 #: ``_kernel_rewrite_controller_timeouts``), so its half comes off the top and
 #: never becomes an allocation the caller has to discard.

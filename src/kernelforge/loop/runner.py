@@ -3363,7 +3363,6 @@ class IterationLoop(AnalysisRuntimeMixin):
                 )
             if self.monitor is not None:
                 self.monitor.no_improve_streak = self.run_state.stall.no_improvement_iters
-                self.monitor.last_intervention_iter = self.run_state.stall.last_supervisor_iter or -10_000
                 self.monitor.last_attempt_iter = self.run_state.stall.last_supervisor_attempt_iter or -10_000
                 self.monitor.intervention_count = self.run_state.intervention_count
             if self.resume:

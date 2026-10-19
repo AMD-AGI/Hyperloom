@@ -59,7 +59,7 @@ _SERVING_VRAM_FRACTION = 0.10
 _START_SLACK_SEC = 5.0
 
 _BOOT = "boot"
-_PHASES = (_BOOT, "warmup", "measured", "eval")
+_PHASES = (_BOOT, "warmup", "measured", "finished", "eval")
 
 
 def _value(block: Any) -> float | None:

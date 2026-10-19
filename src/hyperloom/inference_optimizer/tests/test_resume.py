@@ -289,7 +289,10 @@ async def test_replay_mixed_pending_and_decided(session_dir):
         }
         c1.shared_state.save(session_dir)
         proposal_ids = []
-        for action in ("baseline", "profile", "explore"):
+        for action in ("baseline", "target_analysis", "explore"):
+            if action == "explore":
+                # Admission holds each proposal to its phase's actions; explore is FRAMEWORK_AGENT's.
+                c1.shared_state.phase = "FRAMEWORK_AGENT"
             await c1.router.handle_intent(
                 "orchestration",
                 Intent(
@@ -779,7 +782,7 @@ class TestASweepCancelledByRecoverIsRedispatchedOnResume:
             first.shared_state.phase = "SWEEP"
             first.shared_state.baseline_tput = 800.0
             await first.phase_sweep.on_enter_sweep(
-                Transition(from_phase="KERNEL_AGENT", to_phase="SWEEP", reason="test", evidence={}, loopback=False)
+                Transition(from_phase="KERNEL_AGENT", to_phase="SWEEP", reason="test", evidence={})
             )
             [sweep] = await first.tasks.queued()
             assert sweep.kind == "conc_sweep"

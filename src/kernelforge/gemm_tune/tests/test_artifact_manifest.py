@@ -113,19 +113,16 @@ def test_schema_and_provenance(tmp_path):
     csv.write_text("M,N,K\n8192,5120,5120\n")
     mf = tmp_path / "m.json"
     mf.write_text(json.dumps(_manifest_dict()))
-    am = build_artifact_manifest(
-        _report(),
-        [_candidate_result(str(csv))],
-        shape_manifest_path=mf,
-        gpu_type="mi355x",
-        framework="vllm-aiter",
-        precision="fp8",
-        quant_type="blockscale",
-        tp=1,
-        generated_at="2026-07-23T00:00:00Z",
-    )
+    report = _report()
+    report.gpu_type = "mi355x"
+    report.framework = "vllm-aiter"
+    report.precision = "fp8"
+    report.quant_type = "blockscale"
+    report.tp = 1
+    am = build_artifact_manifest(report, [_candidate_result(str(csv))], shape_manifest_path=mf)
     assert am["schema_version"] == TUNING_ARTIFACT_SCHEMA_VERSION
     assert am["provenance"]["gpu_type"] == "mi355x"
+    assert am["generated_at"] == "2026-07-23T00:00:00Z"
     assert am["micro_decision"] == "candidate"
     # source manifest linkage
     src = am["source_manifest"]

@@ -43,7 +43,7 @@ def test_closure_compiled_or_build_defers_rung5(path):
     v = loc.classify_closure(["vllm/model.py", path])
     assert v.kind == loc.NEEDS_RUNG5
     assert not v.is_localizable
-    assert path in v.compiled_paths or "cap" in v.reason
+    assert path in v.reason
 
 
 def test_a_large_python_closure_is_localizable():

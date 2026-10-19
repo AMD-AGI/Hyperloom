@@ -44,7 +44,8 @@ def coord(tmp_path: Path):
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState(session_id="decouple-test")
-    state.max_minutes = 30
+    # Room for a patch specialist's 60-minute admission floor.
+    state.max_minutes = 120
     state.save(tmp_path)
     idle = ScriptedPlan(turns=[MockTurn(intents=[])])
     return Coordinator(

@@ -32,7 +32,6 @@ def _tr(reason: str) -> Transition:
         to_phase="SWEEP",
         reason=reason,
         evidence={},
-        loopback=False,
     )
 
 

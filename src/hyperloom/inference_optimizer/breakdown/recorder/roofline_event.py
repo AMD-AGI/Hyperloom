@@ -9,6 +9,7 @@ import json
 import logging
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +28,7 @@ from .event_fields import (
 from .event_ids import event_id
 from .event_rows import group_rows, rows_for_event, sort_rows, wire_rows
 from .event_sink import RecordSink
-from .event_timeline import finish_event, open_event
+from .event_timeline import EventHeader, finish_event, open_event
 
 log = logging.getLogger(__name__)
 
@@ -118,7 +119,11 @@ __all__ = [
     "SECTION_PROFILE_RUN",
     "SUBSTEP_ANALYSIS",
     "SUBSTEP_PROFILE",
+    "AnalysisRunOutcome",
+    "ProfileRunOutcome",
+    "RooflineConclusion",
     "RooflineEventRecorder",
+    "RooflineRequest",
     "assemble_roofline_action",
     "assemble_roofline_ext",
     "make_roofline_recorder",
@@ -419,11 +424,6 @@ def _summarize_validate(profile_result: dict[str, Any]) -> dict[str, Any]:
         "blocking_reasons": [_clip(row) for row in _as_list(verdict.get("blocking_reasons"))],
         "warnings": [_clip(row) for row in _as_list(verdict.get("warnings"))],
         "severity": verdict.get("severity"),
-        "recommended_steady_state_mode": verdict.get("recommended_steady_state_mode"),
-        "recommended_splitter_mode": verdict.get("recommended_splitter_mode"),
-        "modes_that_would_fail": verdict.get("modes_that_would_fail"),
-        "steady_state_forecast": _as_dict(validate.get("steady_state_forecast")),
-        "hot_kernel_list_would_be_suppressed": verdict.get("hot_kernel_list_would_be_suppressed"),
         "thresholds_effective": _as_dict(verdict.get("thresholds_effective")),
         "trace_quality": _summarize_trace_quality(validate),
         # Where the unbounded per-rank / per-candidate / per-chunk tables live.
@@ -438,20 +438,93 @@ def _summarize_validate(profile_result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@dataclass(frozen=True)
+class RooflineRequest:
+    """The dispatched roofline action a recorder is bound to."""
+
+    task_id: str = ""
+    task_kind: str = ""
+    reason: str = ""
+    framework: str = ""
+    params: dict[str, Any] | None = None
+
+    def block(self) -> dict[str, Any]:
+        """The ``request`` block this action persists as."""
+        params = _as_dict(self.params)
+        # ``arm`` names the configuration the run measured, which only a roofline dispatch does.
+        kind = str(self.task_kind or "")
+        arm = (
+            ""
+            if kind not in ("", EVENT_TYPE)
+            else ("baseline" if str(self.reason or "") == "prelude_initial" else "current_best")
+        )
+        return {
+            "task_id": str(self.task_id or ""),
+            "task_kind": kind,
+            "reason": str(self.reason or ""),
+            "arm": arm,
+            "framework": str(self.framework or ""),
+            "workspace_path": str(params.get("workspace_path") or ""),
+        }
+
+
+@dataclass(frozen=True)
+class ProfileRunOutcome:
+    """How one profile attempt ended.
+
+    ``server_liveness`` is the post-attempt process-level probe. A run whose
+    trace exported completely and whose engine then died is indistinguishable
+    from a clean run by the result dict alone, so the row carries the process
+    outcome next to the wall clock rather than leaving it to be inferred.
+
+    ``instrumentation`` is which patchers ran on this attempt and what they
+    returned. It is stored on the run row rather than folded into ``validate``
+    because ``validate`` only exists once a trace was produced and certified,
+    and the attempts that never got that far are exactly the ones whose patch
+    state is in question.
+    """
+
+    status: str
+    disable_cuda_graph: bool
+    profile_result: dict[str, Any] | None = None
+    failure: dict[str, Any] | None = None
+    server_liveness: Mapping[str, Any] | None = None
+    instrumentation: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class AnalysisRunOutcome:
+    """How one trace-analysis attempt ended."""
+
+    status: str
+    trace_input: str
+    requested_steady_state_mode: str = ""
+    ta_result: dict[str, Any] | None = None
+    failure: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class RooflineConclusion:
+    """What a succeeded roofline action promoted.
+
+    ``kernel_attribution_degraded`` says that zero hot kernels are an
+    attribution artifact rather than a real absence, and ``snapshot`` is
+    passed in rather than looked up because the recorder holds no reference
+    to session state.
+    """
+
+    snapshot_id: Any
+    hot_kernel_count: int
+    kernel_attribution_degraded: bool
+    cached: dict[str, Any] | None
+    trace_path: str
+    snapshot: Mapping[str, Any] | None = None
+
+
 class RooflineEventRecorder:
     """Records one roofline action's facts into whichever event owns it."""
 
-    def __init__(
-        self,
-        sink: RecordSink,
-        *,
-        task_id: str = "",
-        task_kind: str = "",
-        reason: str = "",
-        framework: str = "",
-        params: dict[str, Any] | None = None,
-        owns_event: bool = True,
-    ):
+    def __init__(self, sink: RecordSink, request: RooflineRequest, *, owns_event: bool = True):
         """Bind a recorder to one action inside one event."""
         self._sink = sink
         self._t0 = time.monotonic()
@@ -466,15 +539,7 @@ class RooflineEventRecorder:
             SECTION_PROFILE_RUN: [],
             SECTION_ANALYSIS_RUN: [],
         }
-        params = _as_dict(params)
-        # ``arm`` names the configuration the run measured, which only a roofline dispatch does.
-        kind = str(task_kind or "")
-        arm = (
-            ""
-            if kind not in ("", EVENT_TYPE)
-            else ("baseline" if str(reason or "") == "prelude_initial" else "current_best")
-        )
-        self._task_id = str(task_id or "")
+        self._task_id = str(request.task_id or "")
         self._action_id = self._task_id or "unnamed"
         self._sink.record(
             SECTION_ACTION,
@@ -482,14 +547,7 @@ class RooflineEventRecorder:
                 "task_id": self._task_id,
                 "start_time": self._start_time,
                 "in_flight_substep": self._substep,
-                "request": {
-                    "task_id": self._task_id,
-                    "task_kind": kind,
-                    "reason": str(reason or ""),
-                    "arm": arm,
-                    "framework": str(framework or ""),
-                    "workspace_path": str(params.get("workspace_path") or ""),
-                },
+                "request": request.block(),
             },
             row_type=ROW_ACTION,
             natural_ids=self._action_id,
@@ -517,12 +575,9 @@ class RooflineEventRecorder:
         if not self._owns_event:
             return
         self._sequence = open_event(
-            event_type=EVENT_TYPE,
-            event=self.event_id,
+            EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
             event_section=SECTION_EVENT,
             producer=PRODUCER,
-            kind=EVENT_KIND,
-            start_time=self._start_time,
             ext={"in_flight_substep": self._substep},
         )
 
@@ -566,44 +621,25 @@ class RooflineEventRecorder:
         """Start one profile attempt and return its run index; its row is written when it ends."""
         return self._begin_run(SECTION_PROFILE_RUN, attempt_reason)
 
-    def end_profile_run(
-        self,
-        *,
-        run_index: int,
-        status: str,
-        disable_cuda_graph: bool,
-        profile_result: dict[str, Any] | None = None,
-        failure: dict[str, Any] | None = None,
-        server_liveness: Mapping[str, Any] | None = None,
-        instrumentation: Mapping[str, Any] | None = None,
-    ) -> None:
-        """Record how one profile attempt ended.
-
-        ``server_liveness`` is the post-attempt process-level probe. A run whose trace exported completely and
-        whose engine then died is indistinguishable from a clean run by the result dict alone, so the row carries
-        the process outcome next to the wall clock rather than leaving it to be inferred.
-
-        ``instrumentation`` is which patchers ran on this attempt and what they returned. It is stored on the run
-        row rather than folded into ``validate`` because ``validate`` only exists once a trace was produced and
-        certified, and the attempts that never got that far are exactly the ones whose patch state is in question.
-        """
+    def end_profile_run(self, run_index: int, outcome: ProfileRunOutcome) -> None:
+        """Record how one profile attempt ended."""
         self._end_run(
             SECTION_PROFILE_RUN,
             ROW_PROFILE_RUN,
             run_index,
-            status,
+            outcome.status,
             {
-                "disable_cuda_graph": bool(disable_cuda_graph),
-                "failure": failure,
-                "server_liveness": dict(server_liveness) if server_liveness else None,
-                "instrumentation": dict(instrumentation) if instrumentation else None,
-                "validate": _summarize_validate(_as_dict(profile_result)),
+                "disable_cuda_graph": bool(outcome.disable_cuda_graph),
+                "failure": outcome.failure,
+                "server_liveness": dict(outcome.server_liveness) if outcome.server_liveness else None,
+                "instrumentation": dict(outcome.instrumentation) if outcome.instrumentation else None,
+                "validate": _summarize_validate(_as_dict(outcome.profile_result)),
             },
         )
         # An action-level rollup of the per-run flag. Roofline does not fall back to eager on a capture failure,
         # so this only latches when the arm or the operator override asked for graph capture to be off -- which
         # matters downstream, because kernel shapes differ between eager and captured execution.
-        if disable_cuda_graph:
+        if outcome.disable_cuda_graph:
             self._record_action({"graph_capture_disabled": True})
 
     def adopt_profile_run(
@@ -645,33 +681,26 @@ class RooflineEventRecorder:
         """Start one trace-analysis attempt and return its run index; its row is written when it ends."""
         return self._begin_run(SECTION_ANALYSIS_RUN, attempt_reason)
 
-    def end_analysis_run(
-        self,
-        *,
-        run_index: int,
-        status: str,
-        trace_input: str,
-        requested_steady_state_mode: str = "",
-        ta_result: dict[str, Any] | None = None,
-        failure: dict[str, Any] | None = None,
-    ) -> None:
+    def end_analysis_run(self, run_index: int, outcome: AnalysisRunOutcome) -> None:
         """Record how one trace-analysis attempt ended."""
-        result = _as_dict(ta_result)
+        result = _as_dict(outcome.ta_result)
         meta = _as_dict(result.get("analysis_meta"))
         self._end_run(
             SECTION_ANALYSIS_RUN,
             ROW_ANALYSIS_RUN,
             run_index,
-            status,
+            outcome.status,
             {
                 "route": str(meta.get("route") or ""),
                 "tool": str(meta.get("tool") or ""),
-                "requested_steady_state_mode": str(requested_steady_state_mode or meta.get("steady_state_mode") or ""),
-                "trace_input": str(trace_input or ""),
+                "requested_steady_state_mode": str(
+                    outcome.requested_steady_state_mode or meta.get("steady_state_mode") or ""
+                ),
+                "trace_input": str(outcome.trace_input or ""),
                 "hot_kernel_count": len(
                     [row for row in _as_list(result.get("hot_kernels_top15") or result.get("hot_kernels")) if row]
                 ),
-                "failure": failure,
+                "failure": outcome.failure,
             },
         )
 
@@ -711,26 +740,14 @@ class RooflineEventRecorder:
             }
         )
 
-    def finish_succeeded(
-        self,
-        *,
-        snapshot_id: Any,
-        hot_kernel_count: int,
-        kernel_attribution_degraded: bool,
-        cached: dict[str, Any] | None,
-        trace_path: str,
-        snapshot: Mapping[str, Any] | None = None,
-    ) -> None:
+    def finish_succeeded(self, conclusion: RooflineConclusion) -> None:
         """Close the action as succeeded and record the promoted artifacts.
 
         Also records the two things the run concluded: the snapshot's own
         numbers, and the per-kernel roofline table read back from the sidecar.
-        ``kernel_attribution_degraded`` says that zero hot kernels are an
-        attribution artifact rather than a real absence, and ``snapshot`` is
-        passed in rather than looked up because the recorder holds no reference
-        to session state.
         """
-        promoted = _as_dict(cached)
+        promoted = _as_dict(conclusion.cached)
+        snapshot = conclusion.snapshot
         roofline_path = str(promoted.get("kernel_roofline_path") or "")
         table, kernels = read_kernel_roofline(roofline_path)
         for rank, kernel in enumerate(kernels):
@@ -747,13 +764,13 @@ class RooflineEventRecorder:
         # Zero routable candidates is a completed roofline that cannot advance
         # kernel work, which is a different operational state from a clean run.
         self._close(
-            status="degraded" if kernel_attribution_degraded else "succeeded",
+            status="degraded" if conclusion.kernel_attribution_degraded else "succeeded",
             payload={
                 "outcome": {
-                    "snapshot_id": _int_or_none(promoted.get("roofline_snapshot_id") or snapshot_id),
-                    "hot_kernel_count": int(hot_kernel_count),
-                    "kernel_attribution_degraded": bool(kernel_attribution_degraded),
-                    "profile_trace": str(trace_path or ""),
+                    "snapshot_id": _int_or_none(promoted.get("roofline_snapshot_id") or conclusion.snapshot_id),
+                    "hot_kernel_count": int(conclusion.hot_kernel_count),
+                    "kernel_attribution_degraded": bool(conclusion.kernel_attribution_degraded),
+                    "profile_trace": str(conclusion.trace_path or ""),
                     "steady_state_trace": str(promoted.get("steady_state_trace") or ""),
                     "analysis_md_path": str(promoted.get("analysis_md_path") or ""),
                     "candidates_path": str(promoted.get("candidates_path") or ""),
@@ -821,13 +838,10 @@ class RooflineEventRecorder:
         try:
             ext, derived = assemble_roofline_ext(roofline_event_parts(self.event_id), event=self.event_id)
             finish_event(
-                event_type=EVENT_TYPE,
-                event=self.event_id,
+                EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
                 sequence=self._sequence,
                 status=derived or status,
                 ext=ext,
-                kind=EVENT_KIND,
-                start_time=self._start_time,
                 end_time=end_time,
             )
         except RECORDING_ERRORS as exc:
@@ -959,23 +973,11 @@ def _mark_effective(runs: list[dict[str, Any]], effective_index: int | None) -> 
 
 def make_roofline_recorder(
     sink: RecordSink | None,
+    request: RooflineRequest,
     *,
-    task_id: str = "",
-    task_kind: str = "",
-    reason: str = "",
-    framework: str = "",
-    params: dict[str, Any] | None = None,
     owns_event: bool = True,
 ) -> RooflineEventRecorder | None:
     """Build a recorder, or ``None`` when ``sink`` is absent."""
     if sink is None:
         return None
-    return RooflineEventRecorder(
-        sink,
-        task_id=task_id,
-        task_kind=task_kind,
-        reason=reason,
-        framework=framework,
-        params=params,
-        owns_event=owns_event,
-    )
+    return RooflineEventRecorder(sink, request, owns_event=owns_event)

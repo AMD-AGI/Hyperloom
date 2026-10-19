@@ -86,7 +86,7 @@ def _entrypoint_markers(framework: str) -> tuple[str, ...]:
         return ("atom.entrypoints",)
     if "vllm" in fw:
         return ("vllm serve",)
-    return ("sglang.launch_server",)
+    return ("sglang.launch_server", "sglang serve")
 
 
 def _join_continuations(text: str) -> list[str]:
@@ -178,7 +178,7 @@ def parse_reference_script(source: str, *, framework: str) -> ReferenceRecipe:
         )
         return ReferenceRecipe(server_args="", envs=envs, model=None, launch_controls=controls)
 
-    server_args, model = _extract_server_args(shlex.split(line), framework)
+    server_args, model = _extract_server_args(shlex.split(line))
     return ReferenceRecipe(server_args=server_args, envs=envs, model=model, launch_controls=controls)
 
 
@@ -256,27 +256,23 @@ def _resolve_self_default(key: str, val: str) -> str | None:
     return None if _has_shell_expansion(default) else default
 
 
-def _extract_server_args(
-    tokens: list[str],
-    framework: str,
-) -> tuple[str, str | None]:
+_SERVE_CLIS = frozenset({"vllm", "sglang"})
+
+
+def _flags_start(tokens: list[str]) -> int:
+    """Index of the first token after the entrypoint: ``python3 -m <module>`` or ``<vllm|sglang> serve``."""
+    for i, t in enumerate(tokens):
+        if t == "-m" and i + 1 < len(tokens):
+            return i + 2
+        if t == "serve" and i > 0 and Path(tokens[i - 1]).name in _SERVE_CLIS:
+            return i + 1
+    return 0
+
+
+def _extract_server_args(tokens: list[str]) -> tuple[str, str | None]:
     """Walk entrypoint tokens as (flag, value) pairs; keep static flags only."""
     tokens = _strip_redirection(tokens)
-    # Skip the entrypoint prefix itself.
-    fw = str(framework or "").strip().lower()
-    start = 0
-    if "vllm" in fw and "atom" not in fw:
-        # ``vllm serve <model> ...`` → entrypoint is the first two tokens.
-        for i, t in enumerate(tokens):
-            if t == "serve":
-                start = i + 1
-                break
-    else:
-        # ``python3 -m <module> ...``: flags follow the ``-m module`` run.
-        for i, t in enumerate(tokens):
-            if t == "-m" and i + 1 < len(tokens):
-                start = i + 2
-                break
+    start = _flags_start(tokens)
 
     model: str | None = None
     kept: list[str] = []
