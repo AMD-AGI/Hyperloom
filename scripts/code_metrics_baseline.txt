@@ -191,12 +191,6 @@ cognitive-complexity src/hyperloom/orchestrator/state/_shared_state/phase_state.
 cognitive-complexity src/hyperloom/orchestrator/state/_shared_state/render.py::_RenderMixin._format_variant_line 36
 cognitive-complexity src/hyperloom/orchestrator/state/_shared_state/render.py::_RenderMixin.to_proposal_scores_summary 74
 cognitive-complexity src/hyperloom/orchestrator/state/_shared_state/render.py::_RenderMixin.to_warm_start_summary 42
-cognitive-complexity src/hyperloom/orchestrator/state/gaps.py::GapsStateMixin.upsert_gap 31
-cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState._append_roofline_snapshot_history 41
-cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState._build_explore_search 45
-cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState._build_hot_kernel_summaries 36
-cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState.profile_workload_context 43
-cognitive-complexity src/hyperloom/orchestrator/state/shared_state.py::SharedState.record_trace_analyze 45
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/_bypass_report.py::_render_bypass_extra_sections 62
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/_bypass_report.py::build_candidates 66
 cognitive-complexity src/hyperloom/orchestrator/trace_analysis/_bypass_trace_reader.py::_finalize 143
@@ -810,10 +804,6 @@ function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::Specialist
 function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::SpecialistSubprocessDispatcher.run 348
 function-lines src/hyperloom/orchestrator/specialists/subprocess_.py::_codex_mcp_config 139
 function-lines src/hyperloom/orchestrator/state/_shared_state/render.py::_RenderMixin.to_warm_start_summary 96
-function-lines src/hyperloom/orchestrator/state/shared_state.py::SharedState._append_roofline_snapshot_history 153
-function-lines src/hyperloom/orchestrator/state/shared_state.py::SharedState._build_hot_kernel_summaries 87
-function-lines src/hyperloom/orchestrator/state/shared_state.py::SharedState.record_trace_analyze 110
-function-lines src/hyperloom/orchestrator/state/shared_state.py::resolve_graded_comparison 99
 function-lines src/hyperloom/orchestrator/trace_analysis/_analysis_md.py::render_report 104
 function-lines src/hyperloom/orchestrator/trace_analysis/_bypass_report.py::_build_task_groups 96
 function-lines src/hyperloom/orchestrator/trace_analysis/_bypass_report.py::_render_bypass_extra_sections 199
@@ -990,7 +980,7 @@ module-lines src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py 257
 module-lines src/hyperloom/orchestrator/roles/critic_agent.py 1276
 module-lines src/hyperloom/orchestrator/specialists/runner.py 1520
 module-lines src/hyperloom/orchestrator/specialists/subprocess_.py 1747
-module-lines src/hyperloom/orchestrator/state/shared_state.py 2641
+module-lines src/hyperloom/orchestrator/state/shared_state.py 2270
 module-lines src/hyperloom/orchestrator/trace_analysis/_bypass_report.py 1231
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_analysis.py 5347
 module-lines src/hyperloom/orchestrator/trace_analysis/tracelens_skill_runner.py 1366

@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
 from hyperloom.common.deadline import Deadline
 from hyperloom.common.coerce import to_str_list, to_unix
@@ -29,6 +29,7 @@ if TYPE_CHECKING:  # import cycle: perf_metric is imported lazily at call time
     from hyperloom.common.perf_metric import GradedComparison
 
 from . import _profile_workload
+from . import _trace_analyze
 from ._explore_search_ledger import shape_explore_search
 from . import kernel_decision_settings as _kernel_decision_settings
 from ._shared_state.attempt_audit import _AUDIT_ACTIONS, _KEY_METRIC_MAP
@@ -146,6 +147,65 @@ def resolve_graded_comparison(
     )
 
 
+class _SnapshotArm(NamedTuple):
+    """Which arm a roofline snapshot measures, and the throughput that arm achieved."""
+
+    name: str
+    achieved_tput: float
+
+
+def _newest_snapshot_before_cycle(snapshots: list[Any], latest_cycle: int) -> dict[str, Any]:
+    """Return the newest roofline snapshot recorded in a macro cycle earlier than ``latest_cycle``."""
+    for snapshot in reversed(snapshots):
+        if not isinstance(snapshot, dict):
+            continue
+        try:
+            cycle = int(snapshot.get("macro_cycle", 0) or 0)
+        except (TypeError, ValueError):
+            cycle = 0
+        if cycle < latest_cycle:
+            return snapshot
+    return {}
+
+
+def _saturation_delta(sat: Mapping[str, Any], prev_sat: Mapping[str, Any], key: str) -> float | None:
+    """Return the change in one saturation percentage since the previous cycle, ``None`` when either side lacks it."""
+    current, previous = sat.get(key), prev_sat.get(key)
+    if not isinstance(current, (int, float)) or not isinstance(previous, (int, float)):
+        return None
+    return round(float(current) - float(previous), 2)
+
+
+def _bottleneck_shift(
+    sat: dict[str, Any],
+    prev_sat: dict[str, Any],
+    *,
+    previous_snapshot: Mapping[str, Any],
+    domain_key: str,
+    latest_cycle: int,
+) -> dict[str, Any]:
+    """Describe how the top bottleneck moved between the previous macro cycle and this snapshot.
+
+    Returns:
+        The shift record ``bottleneck_shift`` holds, with both saturation
+        readings and the deltas between them.
+    """
+    bound_kind_changed = bool(prev_sat) and str(prev_sat.get("bound_kind") or "") != str(sat.get("bound_kind") or "")
+    return {
+        "from": prev_sat.get("direction", "") if prev_sat else "",
+        "to": sat.get("direction", ""),
+        "from_domain": (prev_sat.get("domain_hint") or {}).get("domain", "") if prev_sat else "",
+        "to_domain": domain_key,
+        "prev_cycle": previous_snapshot.get("macro_cycle") if previous_snapshot else None,
+        "cycle": latest_cycle,
+        "within_delta": _saturation_delta(sat, prev_sat, "within_pct"),
+        "gap_delta": _saturation_delta(sat, prev_sat, "gap_pct"),
+        "bound_kind_changed": bound_kind_changed,
+        "current": sat,
+        "previous": prev_sat,
+    }
+
+
 def _last_lifecycle_fields(last: Any) -> dict[str, Any]:
     """Report the sequence, status and phase the most recent lifecycle row carries."""
     if not isinstance(last, dict):
@@ -226,10 +286,6 @@ _INTEGRATE_FAULT_ERROR_CLASSES = frozenset(
         "subprocess_timeout",
     }
 )
-# How many hot / skipped kernels ``record_trace_analyze`` keeps in the trace summary (matches the ``*_top15`` field
-# names).
-_TRACE_HOT_KERNEL_TOP_N = 15
-
 # Session-level kernel-roofline report the analyzer writes for a non-close run; read back when the trace_analyze
 # envelope arrives without its payload keys.
 _DEFAULT_ROOFLINE_REPORT_NAME = "kernel_roofline_current.json"
@@ -259,6 +315,9 @@ class KbInjection:
 
 # roofline_snapshots history cap (record_trace_analyze).
 _ROOFLINE_SNAPSHOTS_CAP = 50
+
+# Arms a roofline snapshot can measure; anything else falls through to current_best inference.
+_ROOFLINE_ARMS: frozenset[str] = frozenset({"baseline", "current_best"})
 
 
 #: top-level state.json schema version, stamped on every save.
@@ -1818,107 +1877,19 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         """Write ``last_trace_analyze`` (single writer); ``roofline_snapshot_id`` increments from the previous nested value, restarting from 1 when the cache was cleared."""
         if not isinstance(result, dict):
             return
-        trace_input = (payload or {}).get("trace_input") or (payload or {}).get("trace_dir") or ""
-        artifacts = result.get("artifact_paths") or {}
-        if not isinstance(artifacts, dict):
-            artifacts = {}
-        candidates_path = result.get("candidates_path") or ""
-        if not candidates_path:
-            candidates_path = artifacts.get("kernel_candidates", "") or ""
-        kernel_roofline_path = result.get("kernel_roofline_path") or ""
-        if not kernel_roofline_path:
-            kernel_roofline_path = artifacts.get("kernel_roofline", "") or ""
-        disk = self._read_session_roofline_report(payload, kernel_roofline_path)
-        if disk:
-            kernel_roofline_path = kernel_roofline_path or str(disk["path"])
-            candidates_path = candidates_path or str(disk["payload"].get("kernel_candidates_path") or "")
-            if not result.get("trace_report_path"):
-                result = dict(result)
-                result["trace_report_path"] = str(disk["payload"].get("analysis_md_path") or "")
-            if not (result.get("hot_kernels") or result.get("hot_kernels_top15")):
-                result = dict(result)
-                result["hot_kernels"] = disk["kernels"]
-                log.warning(
-                    "record_trace_analyze: envelope carried no hot kernels; "
-                    "recovered %d from %s. The analysis succeeded — the result "
-                    "envelope lost its payload in transit.",
-                    len(disk["kernels"]),
-                    disk["path"],
-                )
-        steady_state_trace = result.get("steady_state_trace") or artifacts.get("tracelens_steady_state_trace") or ""
-        summary, kernel_roofline, reusable_ids = self._build_hot_kernel_summaries(result, kernel_roofline_path)
-
-        # Project skipped (non-routable) candidates so the LLM sees unoptimizable operators.
-        skipped = result.get("skipped_kernels") or []
-        skipped_summary: list[dict[str, Any]] = []
-        if isinstance(skipped, list):
-            skipped_sorted = sorted(
-                (e for e in skipped if isinstance(e, dict)),
-                key=lambda e: float(e.get("gpu_pct") or 0.0),
-                reverse=True,
-            )
-            for entry in skipped_sorted[:_TRACE_HOT_KERNEL_TOP_N]:
-                skipped_summary.append(
-                    {
-                        "kernel_id": entry.get("kernel_id"),
-                        "name": entry.get("name"),
-                        "skip_reason": entry.get("skip_reason") or "",
-                        "gpu_pct": entry.get("gpu_pct"),
-                    }
-                )
-
-        raw_warnings = result.get("trace_health_warnings") or []
-        warnings_cleaned: list[dict[str, Any]] = []
-        if isinstance(raw_warnings, list):
-            for entry in raw_warnings:
-                if isinstance(entry, dict) and entry.get("code"):
-                    warnings_cleaned.append(dict(entry))
-
-        # Monotonic snapshot counter: read previous value + 1.
-        prev_snapshot_id = 0
-        if isinstance(self.last_trace_analyze, dict):
-            prev_raw = self.last_trace_analyze.get("roofline_snapshot_id")
-            if isinstance(prev_raw, int):
-                prev_snapshot_id = prev_raw
-        snapshot_id = prev_snapshot_id + 1
-
-        analysis_md_path = result.get("trace_report_path") or ""
-        analysis_md_text = ""
-        if analysis_md_path:
-            try:
-                # Stored verbatim; the prompt path strips base64 data-URLs.
-                analysis_md_text = Path(analysis_md_path).read_text(
-                    encoding="utf-8",
-                    errors="replace",
-                )
-            except (OSError, ValueError):
-                analysis_md_text = ""
-
-        task_groups = result.get("task_groups") or []
-        if not isinstance(task_groups, list):
-            task_groups = []
-
-        ts_iso = now_iso()
-        self.last_trace_analyze = {
-            "trace_input": str(trace_input),
-            "steady_state_trace": str(steady_state_trace),
-            "candidates_path": str(candidates_path),
-            "kernel_roofline_path": str(kernel_roofline_path),
-            "hot_kernels_top15": summary,
-            "kernel_roofline_top15": kernel_roofline,
-            "skipped_kernels_top": skipped_summary,
-            "task_groups": task_groups,
-            "reusable_native_kernel_ids": reusable_ids,
-            "trace_health_warnings": warnings_cleaned,
-            "analysis_md_path": str(analysis_md_path),
-            "analysis_md_text": analysis_md_text,
-            "roofline_snapshot_id": snapshot_id,
-            "roofline_baseline_gain_at_snapshot": float(
-                self.cumulative_gain_validated,
-            ),
-            "ts": ts_iso,
-        }
-
+        paths = _trace_analyze.artifact_paths(result)
+        recovered = _trace_analyze.recover_from_session_report(
+            result,
+            paths,
+            self._read_session_roofline_report(payload, paths.kernel_roofline),
+        )
+        self.last_trace_analyze = _trace_analyze.build_trace_analyze_record(
+            recovered,
+            trace_input=(payload or {}).get("trace_input") or (payload or {}).get("trace_dir") or "",
+            steady_state_trace=paths.steady_state_trace,
+            snapshot_id=_trace_analyze.next_roofline_snapshot_id(self.last_trace_analyze),
+            baseline_gain=self.cumulative_gain_validated,
+        )
         self._append_roofline_snapshot_history(payload)
 
     def _read_session_roofline_report(
@@ -1944,246 +1915,134 @@ class SharedState(_RenderMixin, GapsStateMixin, _PhaseStateMixin):
         rows.sort(key=lambda row: float(row.get("gpu_pct") or 0.0), reverse=True)
         return {"path": path, "payload": report, "kernels": rows}
 
-    def _build_hot_kernel_summaries(
-        self,
-        result: dict[str, Any],
-        kernel_roofline_path: str,
-    ) -> "tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]":
-        """Build ``(summary, kernel_roofline, reusable_ids)`` from the top-N hot kernels, merging the optional per-kernel rocprof roofline sidecar."""
-        hot = result.get("hot_kernels") or []
-        summary: list[dict[str, Any]] = []
-        kernel_roofline: list[dict[str, Any]] = []
-        reusable_ids: list[str] = []
-        rocprof_by_kernel_id: dict[str, Any] = {}
-        if kernel_roofline_path:
-            try:
-                roofline_payload = json.loads(Path(kernel_roofline_path).read_text(encoding="utf-8"))
-                for row in roofline_payload.get("kernels") or []:
-                    if not isinstance(row, dict) or not row.get("kernel_id"):
-                        continue
-                    rocprof_by_kernel_id[str(row["kernel_id"])] = row.get("rocprof_roofline")
-            except Exception:  # noqa: BLE001 — sidecar merge is best-effort
-                rocprof_by_kernel_id = {}
-        for entry in hot[:_TRACE_HOT_KERNEL_TOP_N] if isinstance(hot, list) else []:
-            if not isinstance(entry, dict):
-                continue
-            kid = entry.get("kernel_id")
-            reusable = bool(entry.get("reusable_native_kernel"))
-            arithmetic_intensity = entry.get("arithmetic_intensity")
-            if arithmetic_intensity is None:
-                arithmetic_intensity = entry.get("flops_per_byte")
-            efficiency_percent = entry.get("efficiency_percent")
-            if efficiency_percent is None:
-                efficiency_percent = entry.get("efficiency_pct")
-            rocprof_roofline = entry.get("rocprof_roofline")
-            if rocprof_roofline is None and kid is not None:
-                rocprof_roofline = rocprof_by_kernel_id.get(str(kid))
-            summary_entry = {
-                "kernel_id": kid,
-                "name": entry.get("name"),
-                # TraceLens kernel_category bucket ("" when absent).
-                "kernel_category": entry.get("kernel_category") or "",
-                "gpu_pct": entry.get("gpu_pct"),
-                "tracelens_pitem_rank": entry.get("tracelens_pitem_rank"),
-                "impact_score": entry.get("impact_score"),
-                "bottleneck": entry.get("bottleneck"),
-                "bound_type": entry.get("bound_type"),
-                "arithmetic_intensity": arithmetic_intensity,
-                "flops_per_byte": entry.get("flops_per_byte"),
-                "efficiency_percent": efficiency_percent,
-                "compute_utilization_pct": entry.get("compute_utilization_pct"),
-                "bandwidth_utilization_pct": entry.get("bandwidth_utilization_pct"),
-                "suggestion": entry.get("suggestion") or "",
-                "roofline_name": entry.get("roofline_name"),
-                "rocprof_roofline": rocprof_roofline,
-                "source_file": entry.get("source_file"),
-                "reusable_native_kernel": reusable,
-                "kernel_contract": entry.get("kernel_contract"),
-                "is_multigpu": entry.get("is_multigpu") is True,
-                # Names the deterministic extractor a row came from, so a reader need not re-derive provenance from
-                # the kernel name alone.
-                "candidate_source": entry.get("candidate_source") or "",
-                "recommended_backends": entry.get("recommended_backends") or [],
-                "recommended_actions": entry.get("recommended_actions") or [],
-                # Vendor-playbook fields (mori's dispatch+combine is the first case -- see
-                # _vendor_operator_playbooks.py).
-                "patch_strategy": entry.get("patch_strategy") or "",
-                "vendor_playbook_group_id": entry.get("vendor_playbook_group_id") or "",
-                "vendor_playbook_aggregate_gpu_pct": entry.get("vendor_playbook_aggregate_gpu_pct"),
-                "vendor_playbook_min_gpu_pct_floor": entry.get("vendor_playbook_min_gpu_pct_floor"),
+    def _resolve_snapshot_arm(self, payload: dict[str, Any]) -> _SnapshotArm:
+        """Resolve which arm a roofline snapshot measures and what it achieved, so ceiling and achieved share one anchor."""
+        forced_arm = str((payload or {}).get("roofline_arm") or "").strip()
+        # Unknown arm values fall through to current_best inference; warn.
+        if forced_arm and forced_arm not in _ROOFLINE_ARMS:
+            log.warning(
+                "record_trace_analyze: ignoring unknown roofline_arm=%r; falling back to current_best inference",
+                forced_arm,
+            )
+            forced_arm = ""
+        if forced_arm == "baseline":
+            return _SnapshotArm("baseline", self._resolve_baseline_achieved_tput())
+        if forced_arm == "current_best":
+            # Explicit tag wins: keep the optimized arm even if tput is absent.
+            return _SnapshotArm("current_best", self._resolve_current_best_achieved_tput())
+        cb_tput = self.current_best.get("tput")
+        if isinstance(cb_tput, (int, float)) and cb_tput > 0:
+            return _SnapshotArm("current_best", float(cb_tput))
+        return _SnapshotArm("baseline", self._resolve_baseline_achieved_tput())
+
+    def _build_roofline_snapshot(self, arm: _SnapshotArm) -> dict[str, Any]:
+        """Build the compact roofline snapshot the report's Roofline Comparison reads.
+
+        Returns:
+            The snapshot, carrying the arm's ceiling, what it achieved, and the
+            artifacts the reading was derived from.
+        """
+        from hyperloom.inference_optimizer.roofline_snapshot import (
+            RooflineReading,
+            attach_perfmodel_breakdown,
+            build_roofline_snapshot,
+        )
+        from hyperloom.inference_optimizer.roofline_ceiling import compute_roofline_breakdown_from_state
+
+        latest = self.last_trace_analyze
+        kernel_roofline_path = latest["kernel_roofline_path"]
+        analysis_md_path = str(latest["analysis_md_path"])
+        # Scriptable/diffusion has no tok/s decode ceiling; surface the compute-latency roofline (measured
+        # per-image e2e latency vs the ideal floor from the sidecar).
+        fw = str(getattr(self, "framework", "") or "")
+        e2e_mean_ms, roofline_ideal_ms = self._scriptable_latency_roofline(fw, arm.achieved_tput, kernel_roofline_path)
+        history_entry = build_roofline_snapshot(
+            snapshot_id=latest["roofline_snapshot_id"],
+            ts=latest["ts"],
+            analysis_md_path=analysis_md_path,
+            reading=RooflineReading(
+                # Primary decode ceiling plus memory/compute sides (PerfModel bottom-up).
+                ceiling=compute_roofline_breakdown_from_state(self, arm=arm.name),
+                achieved_tok_per_sec=arm.achieved_tput,
+                throughput_unit=self._roofline_throughput_unit(),
+                e2e_mean_ms=e2e_mean_ms,
+                roofline_ideal_ms=roofline_ideal_ms,
+            ),
+            framework=fw,
+        )
+        # Per-op PerfModel breakdown for dashboard visualization.
+        attach_perfmodel_breakdown(history_entry, self, arm=arm.name)
+        history_entry["trace_input"] = str(latest["trace_input"])
+        history_entry["macro_cycle"] = int(getattr(self, "macro_cycle", 0) or 0)
+        history_entry["analysis_md_path"] = analysis_md_path
+        # Sidecar artifact pointer for per-kernel roofline data.
+        history_entry["kernel_roofline_path"] = str(kernel_roofline_path)
+        return history_entry
+
+    def _previous_cycle_snapshot(self, latest_cycle: int) -> dict[str, Any]:
+        """Find the snapshot this one is compared against: the newest from an earlier macro cycle, else the one before it."""
+        earlier = _newest_snapshot_before_cycle(self.roofline_snapshots[:-1], latest_cycle)
+        if earlier:
+            return earlier
+        preceding = self.roofline_snapshots[-2:-1]
+        return preceding[0] if preceding and isinstance(preceding[0], dict) else {}
+
+    def _record_bottleneck_saturation(self, history_entry: dict[str, Any]) -> None:
+        """Record which direction has saturated, and how the top bottleneck moved since the previous macro cycle."""
+        try:
+            from hyperloom.inference_optimizer.roofline_snapshot import direction_saturation
+
+            sat = direction_saturation(history_entry)
+            direction = str(sat.get("direction") or "")
+            hint = sat.get("domain_hint") if isinstance(sat.get("domain_hint"), dict) else {}
+            domain_key = str(hint.get("domain") or direction or "unknown")
+            latest_cycle = int(history_entry.get("macro_cycle") or 0)
+            previous = self._previous_cycle_snapshot(latest_cycle)
+            prev_sat = direction_saturation(previous) if previous else {}
+            if not isinstance(self.saturated_directions, dict):
+                self.saturated_directions = {}
+            self.saturated_directions[domain_key] = {
+                **sat,
+                "domain": domain_key,
+                "tag": str(hint.get("tag") or ""),
+                "macro_cycle": latest_cycle,
+                "snapshot_id": self.last_trace_analyze["roofline_snapshot_id"],
+                "top_bottleneck": history_entry.get("top_bottleneck"),
             }
-            summary.append(summary_entry)
-            if any(
-                summary_entry.get(key) not in (None, "", [])
-                for key in (
-                    "bound_type",
-                    "arithmetic_intensity",
-                    "flops_per_byte",
-                    "efficiency_percent",
-                    "compute_utilization_pct",
-                    "bandwidth_utilization_pct",
-                    "suggestion",
-                    "roofline_name",
-                    "rocprof_roofline",
-                )
-            ):
-                kernel_roofline.append(dict(summary_entry))
-            if reusable and kid:
-                reusable_ids.append(str(kid))
-        return summary, kernel_roofline, reusable_ids
+            self.bottleneck_shift = _bottleneck_shift(
+                sat,
+                prev_sat,
+                previous_snapshot=previous,
+                domain_key=domain_key,
+                latest_cycle=latest_cycle,
+            )
+        except Exception:  # noqa: BLE001 - saturation telemetry is advisory only
+            pass
+
+    def _cap_roofline_snapshots(self) -> None:
+        """Trim the snapshot history to its cap, always keeping snapshot #1 as the report's baseline anchor."""
+        if len(self.roofline_snapshots) <= _ROOFLINE_SNAPSHOTS_CAP:
+            return
+        base = self.roofline_snapshots[0]
+        tail = self.roofline_snapshots[-(_ROOFLINE_SNAPSHOTS_CAP - 1) :]
+        self.roofline_snapshots = [base, *tail]
 
     def _append_roofline_snapshot_history(self, payload: dict[str, Any]) -> None:
         """Append a compact roofline snapshot of ``last_trace_analyze`` for report-side comparison; best-effort,
         failures never block the canonical write above.
         """
-        latest = self.last_trace_analyze
-        snapshot_id = latest["roofline_snapshot_id"]
-        ts_iso = latest["ts"]
-        analysis_md_path = latest["analysis_md_path"]
-        trace_input = latest["trace_input"]
-        kernel_roofline_path = latest["kernel_roofline_path"]
-        # Append compact history for report-side Roofline Comparison; best-effort.
         try:
-            from hyperloom.inference_optimizer.roofline_snapshot import (
-                RooflineReading,
-                attach_perfmodel_breakdown,
-                build_roofline_snapshot,
-            )
-
-            # Stamp decode-roofline ceiling + measured tput.
-            from hyperloom.inference_optimizer.roofline_ceiling import (
-                RooflineBreakdown,
-                compute_roofline_breakdown_from_state,
-            )
-
-            # Resolve which arm this snapshot measures first so the ceiling is anchored to the same arm as achieved.
-            forced_arm = str((payload or {}).get("roofline_arm") or "").strip()
-            # Unknown arm values fall through to current_best inference; warn.
-            if forced_arm and forced_arm not in ("baseline", "current_best"):
-                log.warning(
-                    "record_trace_analyze: ignoring unknown roofline_arm=%r; falling back to current_best inference",
-                    forced_arm,
-                )
-                forced_arm = ""
-            cb_tput = self.current_best.get("tput")
-            if forced_arm == "baseline":
-                snapshot_arm = "baseline"
-                achieved_tput = self._resolve_baseline_achieved_tput()
-            elif forced_arm == "current_best":
-                # Explicit tag wins: keep the optimized arm even if tput is absent.
-                snapshot_arm = "current_best"
-                achieved_tput = self._resolve_current_best_achieved_tput()
-            elif isinstance(cb_tput, (int, float)) and cb_tput > 0:
-                snapshot_arm = "current_best"
-                achieved_tput = float(cb_tput)
-            else:
-                snapshot_arm = "baseline"
-                achieved_tput = self._resolve_baseline_achieved_tput()
-            # Primary decode ceiling plus memory/compute sides (PerfModel bottom-up).
-            breakdown = RooflineBreakdown(0.0, 0.0, 0.0, "unknown")
-            breakdown = compute_roofline_breakdown_from_state(
-                self,
-                arm=snapshot_arm,
-            )
-            # Scriptable/diffusion has no tok/s decode ceiling; surface the compute-latency roofline (measured
-            # per-image e2e latency vs the ideal floor from the sidecar).
-            fw = str(getattr(self, "framework", "") or "")
-            e2e_mean_ms, roofline_ideal_ms = self._scriptable_latency_roofline(fw, achieved_tput, kernel_roofline_path)
-            history_entry = build_roofline_snapshot(
-                snapshot_id=snapshot_id,
-                ts=ts_iso,
-                analysis_md_path=str(analysis_md_path),
-                reading=RooflineReading(
-                    ceiling=breakdown,
-                    achieved_tok_per_sec=achieved_tput,
-                    throughput_unit=self._roofline_throughput_unit(),
-                    e2e_mean_ms=e2e_mean_ms,
-                    roofline_ideal_ms=roofline_ideal_ms,
-                ),
-                framework=fw,
-            )
-            # Per-op PerfModel breakdown for dashboard visualization.
-            attach_perfmodel_breakdown(history_entry, self, arm=snapshot_arm)
-            history_entry["trace_input"] = str(trace_input)
-            history_entry["macro_cycle"] = int(getattr(self, "macro_cycle", 0) or 0)
-            history_entry["analysis_md_path"] = str(analysis_md_path)
-            # Sidecar artifact pointer for per-kernel roofline data.
-            history_entry["kernel_roofline_path"] = str(kernel_roofline_path)
+            history_entry = self._build_roofline_snapshot(self._resolve_snapshot_arm(payload))
             if not isinstance(self.roofline_snapshots, list):
                 self.roofline_snapshots = []
             self.roofline_snapshots.append(history_entry)
-            try:
-                from hyperloom.inference_optimizer.roofline_snapshot import direction_saturation
-
-                sat = direction_saturation(history_entry)
-                direction = str(sat.get("direction") or "")
-                hint = sat.get("domain_hint") if isinstance(sat.get("domain_hint"), dict) else {}
-                domain_key = str(hint.get("domain") or direction or "unknown")
-                latest_cycle = int(history_entry.get("macro_cycle") or 0)
-                prev_cycle_snapshot: dict[str, Any] = {}
-                for prev in reversed(self.roofline_snapshots[:-1]):
-                    if not isinstance(prev, dict):
-                        continue
-                    try:
-                        prev_cycle = int(prev.get("macro_cycle", 0) or 0)
-                    except (TypeError, ValueError):
-                        prev_cycle = 0
-                    if prev_cycle < latest_cycle:
-                        prev_cycle_snapshot = prev
-                        break
-                if not prev_cycle_snapshot and len(self.roofline_snapshots) >= 2:
-                    prev = self.roofline_snapshots[-2]
-                    prev_cycle_snapshot = prev if isinstance(prev, dict) else {}
-                prev_sat = direction_saturation(prev_cycle_snapshot) if prev_cycle_snapshot else {}
-                if not isinstance(self.saturated_directions, dict):
-                    self.saturated_directions = {}
-                self.saturated_directions[domain_key] = {
-                    **sat,
-                    "domain": domain_key,
-                    "tag": str(hint.get("tag") or ""),
-                    "macro_cycle": latest_cycle,
-                    "snapshot_id": snapshot_id,
-                    "top_bottleneck": history_entry.get("top_bottleneck"),
-                }
-                self.bottleneck_shift = {
-                    "from": prev_sat.get("direction", "") if prev_sat else "",
-                    "to": sat.get("direction", ""),
-                    "from_domain": (prev_sat.get("domain_hint") or {}).get("domain", "") if prev_sat else "",
-                    "to_domain": domain_key,
-                    "prev_cycle": prev_cycle_snapshot.get("macro_cycle") if prev_cycle_snapshot else None,
-                    "cycle": latest_cycle,
-                    "within_delta": (
-                        round(float(sat["within_pct"]) - float(prev_sat["within_pct"]), 2)
-                        if prev_sat
-                        and isinstance(sat.get("within_pct"), (int, float))
-                        and isinstance(prev_sat.get("within_pct"), (int, float))
-                        else None
-                    ),
-                    "gap_delta": (
-                        round(float(sat["gap_pct"]) - float(prev_sat["gap_pct"]), 2)
-                        if prev_sat
-                        and isinstance(sat.get("gap_pct"), (int, float))
-                        and isinstance(prev_sat.get("gap_pct"), (int, float))
-                        else None
-                    ),
-                    "bound_kind_changed": (
-                        bool(prev_sat) and str(prev_sat.get("bound_kind") or "") != str(sat.get("bound_kind") or "")
-                    ),
-                    "current": sat,
-                    "previous": prev_sat,
-                }
-            except Exception:  # noqa: BLE001 — saturation telemetry is advisory only
-                pass
+            self._record_bottleneck_saturation(history_entry)
             # R3: retire the pending switch once the top bottleneck has drifted.
             self.maybe_clear_bottleneck_switch_on_drift(
                 str(history_entry.get("top_bottleneck") or ""),
             )
-            if len(self.roofline_snapshots) > _ROOFLINE_SNAPSHOTS_CAP:
-                # Always keep snapshot #1 as the report's baseline anchor.
-                base = self.roofline_snapshots[0]
-                tail = self.roofline_snapshots[-(_ROOFLINE_SNAPSHOTS_CAP - 1) :]
-                self.roofline_snapshots = [base, *tail]
-        except Exception:  # noqa: BLE001 — never block record on render concerns
+            self._cap_roofline_snapshots()
+        except Exception:  # noqa: BLE001 - never block record on render concerns
             pass
 
     def record_conc_sweep(self, result: dict[str, Any]) -> None:
