@@ -15,6 +15,7 @@ restored by the next launch that passes the flag.
 from __future__ import annotations
 
 import atexit
+import os
 import signal
 import sys
 from contextlib import contextmanager
@@ -313,10 +314,10 @@ def apply_declared_gpu_power_settings(
 
     def _restore() -> list[str]:
         nonlocal done
-        if done:
-            return []
-        done = True
         with _stop_signals_held():
+            if done:
+                return []
+            done = True
             problems = _restore_and_verify(hooks, originals)
             try:
                 lease.clear(set(originals) - set(problems))
@@ -457,7 +458,7 @@ class _RestoreGuard:
             print("GPU power settings restored to the values the session found.")
 
 
-_GUARD = _RestoreGuard()
+_GUARD: _RestoreGuard = _RestoreGuard()
 
 
 @contextmanager
@@ -482,6 +483,13 @@ def apply_for_session(declared: DeclaredPowerSettings, *, nodes: int, owner: str
         GpuPowerSettingsError: the settings could not be applied. Nothing was left changed, unless the message says
             that putting the originals back failed too; the record is then kept for the next launch.
     """
+    if os.geteuid() != 0:
+        # amd-smi set needs root; refused before the records exist, so an unprivileged attempt leaves no file behind
+        # that a later root launch would have to distrust.
+        raise GpuPowerSettingsError(
+            "--apply-gpu-power-settings needs root, as amd-smi set does: relaunch as root, or drop the flag and set "
+            "the cards with amd-smi set before launch"
+        )
     applied = apply_declared_gpu_power_settings(declared, nodes=nodes, owner=owner)
     print(f"GPU power settings applied to GPU(s) {', '.join(map(str, applied.record['gpus']))}; restored at exit.")
     return applied.record

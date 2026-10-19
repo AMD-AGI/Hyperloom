@@ -299,8 +299,9 @@ multi-node session, so asserting one there refuses.
 `--gpu-power-cap-w` / `--gpu-perf-level` itself, once at launch, and to keep
 them for the whole session. The same read-back check then verifies them, and
 the fingerprint records them as applied by Hyperloom along with the originals.
-It needs `amd-smi set` privileges: without them the launch refuses (exit 2)
-with the cards unchanged. It also refuses, with nothing left changed:
+It needs root, as `amd-smi set` does: a launch without root refuses (exit 2)
+before it writes any power-settings record, with the cards unchanged. It also
+refuses, with nothing left changed:
 
 - without an integer `ROCR_VISIBLE_DEVICES` / `HIP_VISIBLE_DEVICES` mask. It
   sets exactly the masked cards, never the whole host;
@@ -331,15 +332,17 @@ The originals are written to a per-card record under
 host-local and fixed, whatever `HYPERLOOM_RUNTIME_DIR` or `USER_DATA_PATH` say,
 so every session on the host finds the same records. Inside a container it is
 the container's own `/var/tmp`, so mount the host's `/var/tmp/hyperloom` into
-every container that applies settings, or sessions in different containers
-will not see each other's records. Each record is stamped with the host's boot
-id, so one written before a reboot is ignored. The session holds an exclusive
-`flock` on each record until it restores the card, which keeps two sessions
-from setting the same card. A restore sets whatever a record says, usually as
-root, so records are readable by every account (for the warning below) but
-writable only by their owner. A record, or a directory holding them, that is
-owned by another unprivileged account or writable by others (other than a
-sticky directory) is refused rather than read.
+every container that applies settings, or sessions in different containers will
+not see each other's records. Each record is stamped with the host's boot id, so
+one written before a reboot is ignored. The session holds an exclusive `flock`
+on each record until it restores the card, which keeps two sessions from setting
+the same card. A restore sets whatever a record says, as root, so the record
+directory and its parent are writable only by root, and records are readable by
+every account (for the warning below) but writable only by root; a launch with
+the flag creates both directories at mode 0755, and sets an existing one root
+owns (such as a mounted host directory) to 0755. A record that is a symlink or a
+hard link, or a record or directory owned by another unprivileged account or
+writable by others, is refused rather than read.
 
 The originals are restored when the session ends: at a stop reason, an operator
 stop, an error exit, or a SIGTERM / SIGHUP at any point after the cards were set,
@@ -347,8 +350,8 @@ including startup and the close sequence. A stop signal during the restore
 itself is ignored so it cannot cut it short. A SIGKILL (an OOM kill, or a
 scheduler escalating after its grace period, such as Slurm's `KillWait`) cannot
 be caught: the cards stay at the applied settings, and the record is left with
-its lock free. The next launch on that host that passes the flag restores those
-cards before doing anything else; a launch without the flag warns that the
+its lock free. The next launch on that host that passes the flag with those
+cards in its mask restores them before doing anything else; a launch without the flag warns that the
 cards were left changed and names their original values. Records are judged
 setting by setting: a setting that still reads at the applied value is put back
 (a restore that put back the cap but not the level gets the level restored),

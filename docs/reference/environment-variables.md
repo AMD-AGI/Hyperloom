@@ -113,7 +113,7 @@ when `--gpu-type` is omitted.
   start or resume if a card it uses differs, and records what the cards report
   either way. `--apply-gpu-power-settings` lets the session set them itself on
   the cards of its integer visible-device mask for the whole session, and
-  restore the originals when it ends (records under
+  restore the originals when it ends; it needs root (records under
   `/var/tmp/hyperloom/gpu_power_settings/`).
 - **Cluster topology & multi-node backend:** `--nodes`, `--gpus-per-node`,
   `--gpu-type`, `--mn-backend` (`rayjob` / `infera`), `--server-args` (rayjob).

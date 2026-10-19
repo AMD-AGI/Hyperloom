@@ -5,9 +5,11 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -135,17 +137,47 @@ class TestLease:
         monkeypatch.setattr(gpu_power_control, "current_boot_id", lambda: "another-boot")
         assert orphaned_power_records(tmp_path) == {}
 
-    def test_records_are_readable_by_all_and_writable_by_their_owner_in_a_sticky_directory(self, tmp_path):
+    def test_records_are_readable_by_all_and_writable_only_by_the_account_that_applies(self, tmp_path):
         ledger = tmp_path / "ledger"
         PowerSettingsLease(ledger, {4}).release()
-        assert ledger.stat().st_mode & 0o7777 == 0o1777
+        assert ledger.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH | stat.S_ISVTX) == 0
         assert (ledger / "gpu4.json").stat().st_mode & 0o777 == 0o644
 
-    def test_a_directory_other_accounts_can_plant_records_in_is_refused(self, tmp_path):
+    def test_the_ledger_stays_readable_by_every_account_under_a_strict_umask(self, tmp_path):
+        """A root launch under umask 077 must not leave a ledger the warning of a non-root launch cannot read."""
+        previous = os.umask(0o077)
+        try:
+            PowerSettingsLease(tmp_path / "var" / "ledger", {4}).release()
+        finally:
+            os.umask(previous)
+        for level in (tmp_path / "var", tmp_path / "var" / "ledger"):
+            assert level.stat().st_mode & 0o777 == 0o755
+
+    def test_a_ledger_made_by_hand_too_narrow_is_opened_up_for_the_warning(self, tmp_path):
+        """A directory an operator made for the host mount under a strict umask must not hide records from others."""
+        ledger = tmp_path / "var" / "ledger"
+        ledger.mkdir(parents=True, mode=0o700)
+        os.chmod(tmp_path / "var", 0o700)
+        PowerSettingsLease(ledger, {4}).release()
+        for level in (tmp_path / "var", ledger):
+            assert level.stat().st_mode & 0o777 == 0o755
+
+    def test_a_ledger_this_account_cannot_reach_reads_as_no_records(self, tmp_path):
+        """The warning of a launch without the flag must not crash on a ledger it may not search."""
+        ledger = tmp_path / "var" / "ledger"
+        PowerSettingsLease(ledger, {4}).release()
+        os.chmod(tmp_path / "var", 0o000)
+        try:
+            assert orphaned_power_records(ledger) == {}
+        finally:
+            os.chmod(tmp_path / "var", 0o755)
+
+    @pytest.mark.parametrize("mode", [0o777, 0o1777], ids=["world-writable", "sticky"])
+    def test_a_directory_other_accounts_can_plant_records_in_is_refused(self, tmp_path, mode):
         """A privileged restore sets whatever a record says, so a planted record must never be read."""
         ledger = tmp_path / "ledger"
         ledger.mkdir()
-        os.chmod(ledger, 0o777)
+        os.chmod(ledger, mode)
         with pytest.raises(GpuPowerSettingsError, match="writable by other accounts"):
             PowerSettingsLease(ledger, {4})
         assert orphaned_power_records(ledger) == {}
@@ -167,6 +199,17 @@ class TestLease:
         (ledger / "gpu4.json").symlink_to(target)
         with pytest.raises(GpuPowerSettingsError):
             PowerSettingsLease(ledger, {4})
+
+    def test_a_hard_linked_record_is_refused_and_its_target_left_alone(self, tmp_path):
+        """A root restore writing through a planted hard link would overwrite whatever file it points at."""
+        target = tmp_path / "elsewhere"
+        target.write_text("keep")
+        ledger = tmp_path / "ledger"
+        ledger.mkdir(mode=0o755)
+        os.link(target, ledger / "gpu4.json")
+        with pytest.raises(GpuPowerSettingsError, match="not a plain file"):
+            PowerSettingsLease(ledger, {4})
+        assert target.read_text() == "keep"
 
     def test_the_ledger_is_host_local_and_ignores_the_workspace(self):
         assert str(GPU_POWER_LEDGER_DIR) == "/var/tmp/hyperloom/gpu_power_settings"
@@ -564,6 +607,37 @@ class TestRestoreGuard:
         guard.run()
         assert steps == ["finished"]
 
+    def test_the_default_hooks_hand_the_restore_to_the_sessions_guard(self, guard, tmp_path):
+        """A real launch passes no hooks: its restore reaches the session's guard only through the defaults."""
+        stubbed, smi = _hooks(mask={4})
+        hooks = _Hooks(
+            **{f.name: getattr(stubbed, f.name) for f in dataclasses.fields(_Hooks) if f.name not in ("arm", "disarm")}
+        )
+        apply_declared_gpu_power_settings(
+            DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, owner="s", ledger_dir=tmp_path, hooks=hooks
+        )
+        guard.run()
+        assert [call[-1] for call in smi.calls] == ["1000", "1400"]
+
+    def test_the_cli_runs_the_session_inside_the_guard(self, guard, monkeypatch):
+        from hyperloom.inference_optimizer import cli
+
+        restored: list[bool] = []
+
+        async def _session(args):
+            gpu_power_apply._GUARD.arm(lambda: restored.append(True) or [])
+            raise SystemExit(3)
+
+        monkeypatch.setattr(cli, "_run_optimize", _session)
+        saved = dict(os.environ)
+        try:
+            with pytest.raises(SystemExit) as exc:
+                cli.main(["optimize"])
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+        assert (exc.value.code, restored) == (3, [True])
+
     def test_the_restore_runs_once_and_a_failure_is_loud(self, guard, capsys):
         calls: list[int] = []
         guard.arm(lambda: calls.append(1) or ["amd-smi set exited 1"])
@@ -574,6 +648,17 @@ class TestRestoreGuard:
 
 
 class TestSessionWiring:
+    def test_a_launch_without_root_is_refused_before_any_record_exists(self, monkeypatch):
+        """amd-smi set needs root; records an unprivileged attempt left would make a later root launch refuse."""
+        monkeypatch.setattr(os, "geteuid", lambda: 1000)
+        monkeypatch.setattr(
+            gpu_power_apply,
+            "apply_declared_gpu_power_settings",
+            lambda *a, **kw: pytest.fail("must not take the lease without root"),
+        )
+        with pytest.raises(GpuPowerSettingsError, match="needs root"):
+            gpu_power_apply.apply_for_session(DeclaredPowerSettings(power_cap_w=1000.0), nodes=1, owner="s")
+
     def test_without_permission_nothing_is_applied_and_orphans_are_reported(self, monkeypatch, capsys):
         monkeypatch.setattr(
             gpu_power_apply,

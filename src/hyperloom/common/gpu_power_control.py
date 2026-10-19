@@ -23,7 +23,7 @@ import socket
 import stat
 import subprocess  # nosec B404 - fixed amd-smi invocations.
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, TypeGuard
 
 from hyperloom.common.gpu_power_settings import (
     GpuPowerSettingsError,
@@ -44,7 +44,10 @@ __all__ = [
 
 #: Host-local, outside any workspace or runtime directory a job can redirect: every session on the host has to find
 #: the same records, whatever its ``HYPERLOOM_RUNTIME_DIR`` or ``USER_DATA_PATH``.
-GPU_POWER_LEDGER_DIR = Path("/var/tmp/hyperloom/gpu_power_settings")
+GPU_POWER_LEDGER_DIR = Path("/var/tmp/hyperloom/gpu_power_settings")  # nosec B108 - fixed path; _check_trusted guards it
+
+#: Writable only by the account that applies (root); readable by every account, for the orphan warning.
+_LEDGER_DIR_MODE = 0o755
 
 _BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 _POWER_CAP_W = "power_cap_w"
@@ -72,7 +75,7 @@ def _run_amd_smi(run: Callable[..., subprocess.CompletedProcess], args: list[str
         lines = [line.strip() for line in (done.stderr or done.stdout or "").splitlines() if line.strip()]
         detail = (lines[-1] if lines else "")[:200]
         raise GpuPowerSettingsError(f"amd-smi {' '.join(args)} exited {done.returncode}: {detail}")
-    return done.stdout
+    return str(done.stdout or "")
 
 
 def read_resident_vram_mb(
@@ -87,7 +90,8 @@ def read_resident_vram_mb(
         raise GpuPowerSettingsError("amd-smi metric --mem-usage printed no JSON") from exc
     out: dict[int, float] = {}
     for row in _gpu_rows(payload):
-        mem = row.get("mem_usage") if isinstance(row.get("mem_usage"), dict) else {}
+        mem_usage = row.get("mem_usage")
+        mem = mem_usage if isinstance(mem_usage, dict) else {}
         used = _watts(mem.get("used_vram"))
         if used is not None:
             out[row["gpu"]] = used
@@ -110,7 +114,7 @@ def _set_commands(settings: Mapping[int, Mapping[str, Any]]) -> list[list[str]]:
     return commands
 
 
-def _is_number(value: Any) -> bool:
+def _is_number(value: Any) -> TypeGuard[float]:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
@@ -149,36 +153,37 @@ def apply_gpu_power_settings(
         _run_amd_smi(run, args, timeout)
 
 
-def _check_trusted(path: Path, st: os.stat_result, *, directory: bool) -> None:
+def _check_trusted(path: Path, st: os.stat_result) -> None:
     """Refuse a record, or a directory holding records, that another unprivileged account could have written.
 
-    A restore runs ``amd-smi set`` with whatever a record says, usually as root, so a record is trusted only when
+    A restore runs ``amd-smi set`` with whatever a record says, as root, so a record is trusted only when
     nobody but this account or root can have put its content there.
     """
     if st.st_uid not in (0, os.geteuid()):
         raise GpuPowerSettingsError(
             f"{path} is owned by uid {st.st_uid}, not by this account or root, so its power-settings records "
-            "cannot be trusted; remove it, or launch as its owner"
+            "cannot be trusted; remove it"
         )
-    writable_by_others = st.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-    if writable_by_others and not (directory and st.st_mode & stat.S_ISVTX):
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
         raise GpuPowerSettingsError(
             f"{path} is writable by other accounts, so its power-settings records cannot be trusted; remove it"
         )
 
 
 def _ensure_ledger_dir(directory: Path) -> None:
-    """Create the record directory and its parent so every account on the host can add its own per-card records,
-    and refuse either when another account could have planted records in it."""
+    """Create the record directory and its parent, writable only by the account that applies, and refuse either when
+    another account could have planted records in it."""
     for level in (directory.parent, directory):
         with contextlib.suppress(FileExistsError):
-            level.mkdir()
-            # Sticky and world-writable, like /var/tmp itself: any account may create a card's record, and only
-            # its owner may replace or remove it.
-            os.chmod(level, 0o1777)  # nosec B103
-        _check_trusted(level, os.lstat(level), directory=True)
-        if not stat.S_ISDIR(os.lstat(level).st_mode):
+            level.mkdir(mode=_LEDGER_DIR_MODE)
+        st = os.lstat(level)
+        _check_trusted(level, st)
+        if not stat.S_ISDIR(st.st_mode):
             raise GpuPowerSettingsError(f"{level} is not a directory")
+        if st.st_uid == os.geteuid() and stat.S_IMODE(st.st_mode) != _LEDGER_DIR_MODE:
+            # Set, not left to the umask or to whoever made it by hand: every account reads the records for the
+            # orphan warning.
+            os.chmod(level, _LEDGER_DIR_MODE)  # nosec B103
 
 
 def _open_record(path: Path, flags: int) -> int:
@@ -186,7 +191,10 @@ def _open_record(path: Path, flags: int) -> int:
     fd = os.open(path, flags | os.O_NOFOLLOW, 0o644)
     try:
         st = os.fstat(fd)
-        _check_trusted(path, st, directory=False)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            # A hard link to another file would have a privileged restore's record write land on that file.
+            raise GpuPowerSettingsError(f"{path} is not a plain file of its own; remove it")
+        _check_trusted(path, st)
         if flags & os.O_CREAT and st.st_uid == os.geteuid():
             # Readable by every account so a launch without the flag can warn about a card left changed;
             # writable only by its owner.
@@ -227,10 +235,7 @@ class PowerSettingsLease:
                 self._fds[gpu] = fd
         except OSError as exc:
             self.release()
-            raise GpuPowerSettingsError(
-                f"cannot open the power-settings record under {self._dir}: {exc}; a card's record belongs to the "
-                "account that first applied settings to it, so apply as that account or as root"
-            ) from exc
+            raise GpuPowerSettingsError(f"cannot open the power-settings record under {self._dir}: {exc}") from exc
         except GpuPowerSettingsError:
             self.release()
             raise
@@ -304,13 +309,14 @@ def orphaned_power_records(directory: Path | str, gpus: set[int] | None = None) 
     """
     out: dict[int, dict[str, Any]] = {}
     root = Path(directory)
-    if not root.is_dir():
-        return out
     try:
-        _check_trusted(root, os.lstat(root), directory=True)
-    except GpuPowerSettingsError:
+        if not root.is_dir():
+            return out
+        _check_trusted(root, os.lstat(root))
+        paths = sorted(root.glob("gpu*.json"))
+    except (OSError, GpuPowerSettingsError):
         return out
-    for path in sorted(root.glob("gpu*.json")):
+    for path in paths:
         try:
             gpu = int(path.stem[3:])
         except ValueError:
