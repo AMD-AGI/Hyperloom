@@ -55,12 +55,7 @@ async def test_kb_writeback_rejects_unknown_outcome() -> None:
 
     with pytest.raises(ValueError):
         await kb_writeback.write_framework_record(
-            pr_url="u",
-            pr_sha="s",
-            patch_path="p",
-            outcome="not_a_real_outcome",
-            tps_delta_pct=1.0,
-            session_id="sess",
+            kb_writeback.FrameworkOutcome("u", "s", "p", "not_a_real_outcome", 1.0, "sess")
         )
 
 
@@ -69,12 +64,9 @@ async def test_kb_writeback_appends_record(monkeypatch, tmp_path) -> None:
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_FA_KB_PATH", str(tmp_path / "fa"))
     path = await kb_writeback.write_framework_record(
-        pr_url="https://x/pr/1",
-        pr_sha="abc",
-        patch_path="/tmp/p.patch",
-        outcome=kb_writeback.OUTCOME_INTEGRATED,
-        tps_delta_pct=3.5,
-        session_id="sess-1",
+        kb_writeback.FrameworkOutcome(
+            "https://x/pr/1", "abc", "/tmp/p.patch", kb_writeback.OUTCOME_INTEGRATED, 3.5, "sess-1"
+        )
     )
     rec = json.loads(path.read_text(encoding="utf-8").strip())
     assert rec["outcome"] == "integrated"
