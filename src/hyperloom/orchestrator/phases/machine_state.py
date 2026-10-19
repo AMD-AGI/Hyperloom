@@ -25,6 +25,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
 )
 from ..kernel.patch_landing import IntegratedStack
 from ..state.kernel_decision_settings import resolve_kernel_opt_max_failures
+from .prelude_hold import holds_for_initial_analysis, initial_analysis_hold_lines, initial_analysis_inputs
 from ..state.shared_state import (
     ESCALATE_HINT_SKIP_TO_CLOSE,
     ESCALATE_HINT_SKIP_TO_KERNEL,
@@ -648,6 +649,8 @@ def phase_status_summary(
         budget_line,
         allowed_line,
     ]
+    if phase in (PHASE_PRELUDE, PHASE_ENABLEMENT) and (_number(state.baseline_tput) or 0.0) > 0.0:
+        lines += initial_analysis_hold_lines(initial_analysis_inputs(state, prelude_affordable_seconds(state)[0]))
     # Whether deferring work to a later cycle is still a real option.
     if phase in (PHASE_ENABLEMENT, PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
         feasible, evidence = cycle_reloop_decision(state, now_unix=now_unix)
@@ -689,6 +692,13 @@ def _rows_for_current_cycle(rows: Any, state: Any) -> list[dict[str, Any]]:
 
 # Let SWEEP's recorded closeout outrank an LLM skip_to_close hint.
 _SWEEP_CLOSEOUT_STATUSES: frozenset[str] = frozenset({"succeeded", "partial", "completed", "skipped", "failed"})
+
+
+def _close_hint_overruled(current: str, inputs: dict[str, Any]) -> bool:
+    """SWEEP's recorded closeout outranks the hint, and so does PRELUDE's own exit once a baseline has landed."""
+    if current == PHASE_SWEEP:
+        return str(dict(inputs.get("global") or {}).get("sweep_closeout_status") or "") in _SWEEP_CLOSEOUT_STATUSES
+    return current == PHASE_PRELUDE and (_number(dict(inputs.get("baseline") or {}).get("tput")) or 0.0) > 0.0
 
 
 # per-phase judgments
@@ -1194,8 +1204,7 @@ def _prelude_predicate_inputs(state: Any, *, now_unix: float) -> dict[str, Any]:
         "warm_replay_status": warm_status,
         "measure_round_dropped": bool(state.baseline_measure_round_dropped),
         "tput": _number(state.baseline_tput) or 0.0,
-        "initial_analysis_pending": bool((state.auto_roofline_pending_task_id or "").strip()),
-        "analysis_affordable_sec": prelude_affordable_seconds(state)[0],
+        **initial_analysis_inputs(state, prelude_affordable_seconds(state)[0]),
         "session_usable_sec": session_usable_seconds(state),
         "phase_spent_sec": phase_cumulative_seconds(state, phase=PHASE_PRELUDE, now_unix=now_unix),
         "runtime_sec": _positive_number(state.baseline_runtime_sec),
@@ -1352,8 +1361,7 @@ def workflow_predicate_inputs(
         enablement = state.enablement
         inputs["baseline"] = {
             "tput": _number(state.baseline_tput) or 0.0,
-            "initial_analysis_pending": bool((state.auto_roofline_pending_task_id or "").strip()),
-            "analysis_affordable_sec": prelude_affordable_seconds(state)[0],
+            **initial_analysis_inputs(state, prelude_affordable_seconds(state)[0]),
         }
         inputs["pending_work"] = {
             "validation_pending": bool(enablement.validation_pending),
@@ -1646,18 +1654,6 @@ def _skip_to_close_reason(
     return reason, evidence
 
 
-def _holds_for_initial_analysis(baseline: dict[str, Any]) -> bool:
-    """Whether the phase must stay open for an initial roofline it enqueued but has not booked yet.
-
-    Leaving now would hand that analysis to the next phase instead of seeding this one with it.
-    The hold is bounded by the optimization reserve, which it must never eat into.
-    """
-    if not bool(baseline.get("initial_analysis_pending")):
-        return False
-    affordable = _number(baseline.get("analysis_affordable_sec"))
-    return affordable is None or affordable > 0.0
-
-
 def replay_next_phase(
     inputs: dict[str, Any],
     *,
@@ -1678,9 +1674,7 @@ def replay_next_phase(
     hint = str(inputs.get("hint") or "")
 
     if current != PHASE_CLOSE:
-        if hint == ESCALATE_HINT_SKIP_TO_CLOSE and not (
-            current == PHASE_SWEEP and str(global_inputs.get("sweep_closeout_status") or "") in _SWEEP_CLOSEOUT_STATUSES
-        ):
+        if hint == ESCALATE_HINT_SKIP_TO_CLOSE and not _close_hint_overruled(current, inputs):
             reason, evidence = _skip_to_close_reason(global_inputs, hint, unrecorded_baseline_tput)
             return _transition_result(PHASE_CLOSE, reason, {"terminal": True, **evidence}, inputs)
         stop_reason = str(global_inputs.get("stop_reason") or "")
@@ -1741,7 +1735,7 @@ def replay_next_phase(
             and not bool(baseline.get("measure_round_dropped"))
             and (_number(baseline.get("tput")) or 0.0) > 0.0
         )
-        if normal and _holds_for_initial_analysis(baseline):
+        if normal and holds_for_initial_analysis(baseline):
             return None
         if normal:
             target = _post_prelude_target(optimize_enabled=optimize_enabled, kernel_enabled=kernel_enabled)
@@ -1771,7 +1765,7 @@ def replay_next_phase(
             and not bool(pending.get("validation_pending"))
             and not bool(pending.get("enablement_in_flight"))
         ):
-            if _holds_for_initial_analysis(baseline):
+            if holds_for_initial_analysis(baseline):
                 # A session whose first baseline failed promotes its first anchor here, and that is what
                 # enqueues the initial roofline, so this exit faces the same race PRELUDE does.
                 return None
