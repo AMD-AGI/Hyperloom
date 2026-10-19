@@ -7,14 +7,16 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from kernelforge.kernel_rewrite_controller.contracts import KernelRewriteTask
+from kernelforge.kernel_rewrite_controller.contracts import KernelRewriteTask, TaskStateError
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 from kernelforge.kernel_rewrite_controller.publisher import (
     PUBLICATION_FILENAME,
+    PublicationError,
     publication_from_task,
     publish_operator_result,
 )
@@ -23,6 +25,7 @@ from kernelforge.kernel_rewrite_controller.task import discover_task_dirs, load_
 from kernelforge.kernel_rewrite_controller.worktree import (
     FORGE_LOOP_OUTPUT_DIRNAME,
     OperatorWorktree,
+    WorktreeError,
     changed_files_from_base,
     commit_exists,
     export_patch_from_base,
@@ -243,7 +246,7 @@ def recover_task_result(
             patch_dir=patch_dir,
             best_commit=best_commit,
         )
-    except Exception as error:  # noqa: BLE001 - recovery must not mask the original failure
+    except (WorktreeError, PublicationError, TaskStateError, subprocess.SubprocessError, OSError) as error:
         log.warning(
             "could not publish result for %s: %s",
             task.operator_id,
