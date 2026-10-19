@@ -223,7 +223,6 @@ cognitive-complexity src/kernelforge/agent_backends/claude.py::ClaudeBackend._qu
 cognitive-complexity src/kernelforge/agent_backends/codex.py::_normalize_sdk_result 46
 cognitive-complexity src/kernelforge/agent_backends/workspace_guard.py::WorkspaceGuard.prepare 39
 cognitive-complexity src/kernelforge/assembly/capture.py::bind_compile 60
-cognitive-complexity src/kernelforge/cli/forge_loop_command.py::forge_loop 31
 cognitive-complexity src/kernelforge/fusion/author.py::_AuthorWorkspaceGuard.__init__ 37
 cognitive-complexity src/kernelforge/fusion/author.py::_AuthorWorkspaceGuard.enforce 39
 cognitive-complexity src/kernelforge/fusion/command.py::_run_fusion_autoloop 33
@@ -844,7 +843,7 @@ function-lines src/kernelforge/agent_backends/codex.py::CodexBackend.probe 83
 function-lines src/kernelforge/agent_backends/codex.py::_normalize_sdk_result 89
 function-lines src/kernelforge/agent_backends/session_resume.py::run_session_with_api_resume 98
 function-lines src/kernelforge/assembly/prepare.py::prepare_assembly 110
-function-lines src/kernelforge/cli/forge_loop_command.py::forge_loop 530
+function-lines src/kernelforge/cli/forge_loop_command.py::forge_loop 503
 function-lines src/kernelforge/fusion/author.py::_AuthorWorkspaceGuard.__init__ 118
 function-lines src/kernelforge/fusion/author.py::_AuthorWorkspaceGuard.enforce 92
 function-lines src/kernelforge/fusion/author.py::_run_registered_author_once 134
@@ -902,9 +901,8 @@ function-lines src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin.
 function-lines src/kernelforge/loop/analysis_evidence.py::AnalysisEvidenceMixin._render_analysis_evidence_for_implementer 84
 function-lines src/kernelforge/loop/analysis_refresh_policy.py::decide_analysis_refresh 85
 function-lines src/kernelforge/loop/analysis_runtime.py::AnalysisRuntimeMixin._resolve_analysis_context 205
-function-lines src/kernelforge/loop/archive.py::CandidateArchive.record 109
 function-lines src/kernelforge/loop/archive.py::CandidateArchive.render_digest 84
-function-lines src/kernelforge/loop/campaign_config.py::create_campaign_config 122
+function-lines src/kernelforge/loop/campaign_config.py::create_campaign_config 119
 function-lines src/kernelforge/loop/campaign_setup.py::resolve_campaign 105
 function-lines src/kernelforge/loop/canonical_correctness.py::_run_canonical_suite 95
 function-lines src/kernelforge/loop/insession_gate.py::InSessionGate.__init__ 84
@@ -917,10 +915,10 @@ function-lines src/kernelforge/loop/reporting.py::BestResultPublisher.publish 16
 function-lines src/kernelforge/loop/runner.py::IterationLoop.__init__ 100
 function-lines src/kernelforge/loop/runner.py::IterationLoop._adopt_validated_warm_start 82
 function-lines src/kernelforge/loop/runner.py::IterationLoop._reconcile_best_publication 89
-function-lines src/kernelforge/loop/runner.py::IterationLoop._record_iteration_outcome 112
+function-lines src/kernelforge/loop/runner.py::IterationLoop._record_iteration_outcome 107
 function-lines src/kernelforge/loop/runner.py::IterationLoop._record_lesson 124
 function-lines src/kernelforge/loop/runner.py::IterationLoop._resolve_keep_sigma 96
-function-lines src/kernelforge/loop/runner.py::IterationLoop._run_locked 276
+function-lines src/kernelforge/loop/runner.py::IterationLoop._run_locked 256
 function-lines src/kernelforge/loop/runner.py::IterationLoop.run_one_iteration 206
 function-lines src/kernelforge/loop/task_preflight.py::_count_graph_replays 85
 function-lines src/kernelforge/loop/task_preflight.py::_preflight_async 195
