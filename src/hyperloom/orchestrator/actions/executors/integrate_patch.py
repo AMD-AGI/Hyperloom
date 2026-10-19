@@ -2420,15 +2420,17 @@ class IntegratePatchExecutor:
         The KEEP closure alone cannot say which versions the enablement changed;
         the setup script checks the difference between the two.
         """
-        from ...enablement.recipe.keep_probe import graded_framework, probe_keep_environment
+        from ...enablement.recipe.keep_probe import KeepEvidence, graded_framework, probe_keep_environment
 
         closure, _assertions = await asyncio.to_thread(
             probe_keep_environment,
             params,
+            KeepEvidence(
+                build_manifest=(),
+                specialist_task_id=attempt.specialist_task_id,
+                provision_result=attempt.provision_result,
+            ),
             framework=graded_framework(params, ""),
-            build_manifest=(),
-            specialist_task_id=attempt.specialist_task_id,
-            provision_result=attempt.provision_result,
         )
         if not attempt.shared_state.enablement.record_closure_baseline(closure):
             return
@@ -3268,7 +3270,7 @@ class IntegratePatchExecutor:
         reason: ``base_sha`` has to keep naming the tree the first accepted round
         applied to, because this round's HEAD already contains its predecessors.
         """
-        from ...enablement.recipe.keep_probe import graded_framework, probe_keep_environment
+        from ...enablement.recipe.keep_probe import KeepEvidence, graded_framework, probe_keep_environment
         from ...enablement.recipe.keep_records import (
             accepted_stack_artifacts,
             build_extensions_not_carried,
@@ -3418,10 +3420,12 @@ class IntegratePatchExecutor:
         framework = graded_framework(params, materialized_config)
         closure, assertions = probe_keep_environment(
             params,
+            KeepEvidence(
+                build_manifest=enablement.build_manifest,
+                specialist_task_id=specialist_task_id,
+                provision_result=provision_result,
+            ),
             framework=framework,
-            build_manifest=enablement.build_manifest,
-            specialist_task_id=specialist_task_id,
-            provision_result=provision_result,
             materialized_config=materialized_config,
         )
         launch_evidence, argv_refused = project_launch_evidence(bench_result.get("launch_evidence"))
