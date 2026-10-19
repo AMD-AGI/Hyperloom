@@ -251,9 +251,11 @@ breakdown. Do not assume it contains every env var the session ran with.
 `baseline.perf` and `final.perf` carry the AgentX axes the measurement
 reported, each an explicit `null` where nothing measured it. Absent would
 be indistinguishable from an axis the framework failed to report, and zero
-reads as "measured, and it was zero", so a synthetic run publishes nulls
-throughout. The set is `common/perf_metric.py:GRADED_AXIS_KEYS`, which both
-publishing projections read, and it is grouped as:
+reads as "measured, and it was zero", so the AgentX-only axes stay `null`
+in a synthetic run, while `output_tput_per_gpu` carries a value whenever the
+tensor-parallel degree is known. The set is
+`common/perf_metric.py:GRADED_AXIS_KEYS`, which both publishing projections
+read, and it is grouped as:
 
 * the objective and its two guards — `e2e_norm_intvty_p50`,
   `e2e_norm_intvty_p90`, `output_tput_per_gpu`;
@@ -459,7 +461,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
       "perf": {
         "e2e_norm_intvty_p50": null,
         "e2e_norm_intvty_p90": null,
-        "output_tput_per_gpu": null,
+        "output_tput_per_gpu": 25.0,
         "duration_seconds": null,
         "request_error_rate": null,
         "ttft_p50_ms": null,
@@ -499,7 +501,7 @@ The following example shows a complete `session_breakdown.json` for a finished G
       "perf": {
         "e2e_norm_intvty_p50": null,
         "e2e_norm_intvty_p90": null,
-        "output_tput_per_gpu": null,
+        "output_tput_per_gpu": 37.5,
         "duration_seconds": null,
         "request_error_rate": null,
         "ttft_p50_ms": null,
