@@ -294,27 +294,6 @@ class KernelStackPhase(CoordinatorCollaborator):
         """Initialise the phase with its own in-flight integrate guard."""
         super().__init__(coordinator)
 
-    async def _dispatch_queued_integrate(self, pending: dict[str, Any]) -> None:
-        """Run one queued KEEP integrate and bank whatever it decided."""
-        from ..kernel.request_handlers import integrate_handler
-
-        state = self.shared_state
-        result = await integrate_handler(
-            {
-                "kernel_id": str(pending.get("kernel_id") or ""),
-                "integration_id": str(pending.get("integration_id") or ""),
-                "task_group_key": str(pending.get("task_group_key") or ""),
-                "identity_route": str(pending.get("identity_route") or ""),
-                "base_tput": float((state.current_best or {}).get("tput") or state.baseline_tput or 0.0),
-            },
-            session_dir=self.session_dir,
-        )
-        if isinstance(result, dict) and result.get("status") != "skipped":
-            state.record_kernel_integrate_result(result)
-            if str(result.get("decision") or "").upper() == "KEEP":
-                await self._coord.writeback.record_integrate_keep(result)
-        state.save(self.session_dir)
-
     def _reject_undispatchable_integrate(self, pending: dict[str, Any]) -> None:
         """Retire a queued integrate whose dispatch raised, so the drain loop cannot deadlock on it."""
         state = self.shared_state
@@ -333,10 +312,11 @@ class KernelStackPhase(CoordinatorCollaborator):
         queued = (state.pending_kernel_integrations or {}).get(str(pending.get("integration_id") or ""))
         if isinstance(queued, dict):
             queued["status"] = "dispatch_failed"
-        state.save(self.session_dir)
 
     async def drain_pending_keep_integrates(self) -> None:
         """Drain pending KEEP integrates inherited from KERNEL so sweep measures full current_best. Cap 10; a dispatch failure sets ``rejected_reason=integrate_dispatch_exception`` on the per-kernel and per-task_key attempt ledgers and flips the queued record to ``dispatch_failed``; only records with no ``task_key`` are also appended to ``rejected_kernel_ids``."""
+        from ..kernel.request_handlers import integrate_handler
+
         state = self.shared_state
         drained = 0
         max_drain = 10
@@ -346,14 +326,28 @@ class KernelStackPhase(CoordinatorCollaborator):
                 break
             pending = pending_records[0]
             kid = str(pending.get("kernel_id") or "")
+            integration_id = str(pending.get("integration_id") or "")
             log.info(
                 "SWEEP entry: draining pending KEEP integrate for kernel_id=%s integration_id=%s (drained %d so far)",
                 kid,
-                str(pending.get("integration_id") or ""),
+                integration_id,
                 drained,
             )
             try:
-                await self._dispatch_queued_integrate(pending)
+                result = await integrate_handler(
+                    {
+                        "kernel_id": kid,
+                        "integration_id": integration_id,
+                        "task_group_key": str(pending.get("task_group_key") or ""),
+                        "identity_route": str(pending.get("identity_route") or ""),
+                        "base_tput": float((state.current_best or {}).get("tput") or state.baseline_tput or 0.0),
+                    },
+                    session_dir=self.session_dir,
+                )
+                if isinstance(result, dict) and result.get("status") != "skipped":
+                    state.record_kernel_integrate_result(result)
+                    if str(result.get("decision") or "").upper() == "KEEP":
+                        await self._coord.writeback.record_integrate_keep(result)
             except Exception as exc:
                 log.exception(
                     "SWEEP entry: integrate(%s) raised %r; marking rejected to prevent drain loop deadlock",
@@ -361,6 +355,7 @@ class KernelStackPhase(CoordinatorCollaborator):
                     exc,
                 )
                 self._reject_undispatchable_integrate(pending)
+            state.save(self.session_dir)
             drained += 1
         if drained >= max_drain:
             log.warning(
