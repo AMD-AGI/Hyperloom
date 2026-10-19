@@ -1002,8 +1002,8 @@ def test_materialize_non_profile_keeps_legacy_seq_cost_factor(
 
 
 def _mock_patchers(monkeypatch, *, vllm: bool, sglang: bool) -> dict[str, int]:
-    """Replace the two patcher symbols on `_workload_envs` with stubs that record invocation counts for per-framework dispatch asserts."""
-    from hyperloom.orchestrator.actions.executors import _workload_envs
+    """Replace the two patchers with stubs that record which framework a profile tried to patch."""
+    from hyperloom.orchestrator.actions.executors import _server_patcher
 
     counts = {"vllm": 0, "sglang": 0}
 
@@ -1015,16 +1015,8 @@ def _mock_patchers(monkeypatch, *, vllm: bool, sglang: bool) -> dict[str, int]:
         counts["sglang"] += 1
         return sglang
 
-    monkeypatch.setattr(
-        _workload_envs,
-        "ensure_vllm_patched_for_tracelens",
-        _vllm_stub,
-    )
-    monkeypatch.setattr(
-        _workload_envs,
-        "ensure_sglang_patched_for_tracelens",
-        _sglang_stub,
-    )
+    monkeypatch.setattr(_server_patcher, "ensure_vllm_patched_for_tracelens", _vllm_stub)
+    monkeypatch.setattr(_server_patcher, "ensure_sglang_patched_for_tracelens", _sglang_stub)
     return counts
 
 

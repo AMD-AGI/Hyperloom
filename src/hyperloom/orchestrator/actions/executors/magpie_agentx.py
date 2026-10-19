@@ -149,10 +149,16 @@ def bind_source_evidence(config_path: Path, patches: list[dict[str, Any]]) -> No
 
 
 def enable_profile(config_path: Path) -> None:
-    """Derive the diagnostic run without modifying the accepted YAML."""
+    """Apply the fixed-sequence TraceLens profile setup to this rendered copy.
+
+    The accepted session YAML is left unchanged. Patching, the kernel-shape tool,
+    and the capture window come from the same code the fixed-sequence route uses.
+    """
     config = yaml.safe_load(config_path.read_text(encoding=_ENCODING))
-    profile = config["benchmark"].setdefault("profiler", {}).setdefault("torch_profiler", {})
-    profile["enabled"] = True
+    bench = config["benchmark"]
+    from ._profile_setup import prepare_profile
+
+    prepare_profile(bench, bench.setdefault("envs", {}), write_workload=False)
     config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding=_ENCODING)
 
 

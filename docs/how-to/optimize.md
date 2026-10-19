@@ -182,11 +182,12 @@ cannot supply KEEP evidence. Baseline and candidate must have the same workload
 identity. GEAK's search measurements are provisional until the candidate passes
 the same canonical Magpie workload and Hyperloom's KEEP gate.
 
-The profile phase enables `profiler.torch_profiler` on a separate copy of the YAML.
-The generated YAML uses Magpie's capture defaults. For custom capture steps, count,
-interval or annotation options, supply a YAML with those settings and leave
-`enabled` false in the benchmark input. Magpie owns capture timing; Hyperloom selects a
-primary rank and passes each capture window separately to TraceLens. Profiled
+The profile phase applies the fixed-sequence TraceLens setup on a separate copy of the YAML:
+the same runtime patch, kernel-shape tool, and capture window. That copy gets one profile,
+`start_seconds` 0, `num_steps` equal to the fixed-sequence capture length, and
+`detailed_annotations` from the same patch result. `interval_seconds` stays at Magpie's
+default unless the input YAML sets it. Magpie still owns the native server and the capture
+lifecycle. Fixed-sequence vLLM's `delay_iterations` has no AgentX field. Profiled
 measurements never replace the unprofiled performance baseline.
 
 The session archives its resolved workload as `benchmark.yaml` before writing the

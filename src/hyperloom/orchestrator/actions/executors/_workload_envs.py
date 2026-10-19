@@ -21,7 +21,6 @@ the end of :func:`materialize_config_with_envs`; nothing may write it after.
 from __future__ import annotations
 
 import logging
-import math
 import os
 import re
 import shutil
@@ -34,7 +33,7 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.inference_optimizer.runtime_environment import prepend_launch_path
-from hyperloom.common.env import env_bool, env_flag, is_truthy
+from hyperloom.common.env import is_truthy
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.perf_metric import (
     AGENTX_KEEP_P50_THRESHOLD_PCT,
@@ -76,14 +75,9 @@ from hyperloom.inference_optimizer.grid_server_args import validate_server_args_
 from hyperloom.inference_optimizer import framework_registry
 from ._recipe_script import launcher_overwritten_envs
 from ._server_argv import add_server_arg_unless_pinned, seal_server_argv
-from ._server_patcher import (
-    ensure_sglang_patched_for_tracelens,
-    ensure_vllm_patched_for_tracelens,
-)
 from hyperloom.inference_optimizer.model_config_utils import (
     _fp8_is_per_channel_per_token,
     _load_model_config_dict,
-    _model_is_gemma2,
     _sparse_kv_block_size,
 )
 
@@ -105,13 +99,6 @@ _MOE_RUNNER_BACKEND_RE = re.compile(r"(?:^|\s)--moe-runner-backend(?:(?:[=\s]+)(
 # serialization-safe on a large TP=8 MoE. Tunable via
 # HYPERLOOM_PROFILE_MAX_STEPS_CAP.
 _DEFAULT_PROFILE_MAX_STEPS = 128
-# AgentX counterpart of the cap above. The 128 is calibrated in decode steps
-# against the synthetic 1024/1024 shape; an agentic step carries a measured ISL
-# p50 of 56k-96k tokens, so the same step count buffers orders of magnitude more
-# profiler events in HOST RAM. Measured on DeepSeek-V4-Pro: eight vLLM workers at
-# 113-127 GB each, Ray reported 1012/1024 GB and killed the capture three times.
-# The AgentX client bounds the window by wall clock anyway (~20s of steady
-# state), so the extra steps buy nothing. HYPERLOOM_PROFILE_MAX_ITERS overrides.
 # Default profile OSL ceiling when --profile-osl / PROFILE_OSL is unset: the
 # profile reuses min(served OSL, this) so its trace stays light.
 _PROFILE_DEFAULT_OSL = 1024
@@ -1469,263 +1456,13 @@ def materialize_config_with_envs(
     # instead of accepting the flag on its name alone.
     pending_vllm_profiler_cap: int = 0
     if is_profile and not _is_scriptable_profile:
-        try:
-            r_val = float(envs.get("RANDOM_RANGE_RATIO", 1.0))
-        except (TypeError, ValueError):
-            r_val = 1.0
-        safe_conc = max(conc_val, 1)
-        # Cap captured decode steps at a serialization-safe default so the
-        # torch-profiler trace can be written without starving the engine RPC.
-        cap = _profile_steps_cap(os.environ)
+        from ._profile_setup import prepare_profile
 
-        # Resolve the profile-scoped OSL. PROFILE_OSL (via --profile-osl) is
-        # honored as-is; otherwise default to min(served OSL,
-        # _PROFILE_DEFAULT_OSL). Scoped to is_profile.
-        _profile_osl_raw = os.environ.get("PROFILE_OSL", "").strip()
-        profile_osl_explicit = _profile_osl_raw.isdigit() and int(_profile_osl_raw) > 0
-        if profile_osl_explicit:
-            osl_val = int(_profile_osl_raw)
-        else:
-            osl_val = min(osl_val, _PROFILE_DEFAULT_OSL)
-        safe_osl = max(osl_val, 1)
-
-        # Steady-state floor: minimum captured decode steps for the splitter to
-        # isolate a steady-state window (mirrors TraceLens
-        # find_steady_state_window). The capture must be >= this or the splitter
-        # reports trace_split_no_steady_state.
-        steady_floor = math.ceil(safe_osl * (1.0 + r_val) / (2.0 * safe_conc))
-        if steady_floor > cap:
-            if profile_osl_explicit:
-                # Honor the operator's explicit OSL; warn about the window.
-                log.warning(
-                    "PROFILE_OSL=%d needs %d captured steps to reach steady "
-                    "state, above the profile cap of %d; the trace may lack a "
-                    "steady-state window (trace_split_no_steady_state). Lower "
-                    "--profile-osl or raise HYPERLOOM_PROFILE_MAX_STEPS_CAP.",
-                    osl_val,
-                    steady_floor,
-                    cap,
-                )
-            else:
-                # Auto path: lower the profile OSL so the floor fits the cap.
-                fitted_osl = max(1, int(cap * 2 * safe_conc / (1.0 + r_val)))
-                log.warning(
-                    "profile OSL %d would need %d captured steps to reach "
-                    "steady state (> cap %d); lowering profile OSL to %d so the "
-                    "capture stays serializable. Baseline/optimize unaffected.",
-                    osl_val,
-                    steady_floor,
-                    cap,
-                    fitted_osl,
-                )
-                osl_val = fitted_osl
-                safe_osl = max(osl_val, 1)
-                steady_floor = math.ceil(safe_osl * (1.0 + r_val) / (2.0 * safe_conc))
-
-        # Profile server runs at the resolved profile OSL, decoupled from --osl.
-        envs["OSL"] = osl_val
-
-        delay_iters, max_iters = _profile_capture_window(
-            os.environ,
-            cap=cap,
-            delay_iters=max(0, int(osl_val * (r_val + 1) * 3 - cap / 2)),
-            steady_floor=steady_floor,
-        )
-        # NUM_PROMPTS must let the engine reach ``delay_iters + max_iters``
-        # decode steps before running out of prompts (N prompts ≈ N * OSL / CONC
-        # iters; invert + 2x buffer). Hyperloom owns this under PROFILE.
-        required_iters = delay_iters + max_iters
-        iters_to_prompts = max(
-            1,
-            (required_iters * safe_conc + safe_osl - 1) // safe_osl,
-        )
-        profile_num_prompts = max(safe_conc, iters_to_prompts * 2)
-        fw = str(bench.get("framework") or "").lower()
-        # atom's profiler is HTTP-driven via atom_mi*x.sh, so this layer sets no
-        # atom profiler envs and must NOT inject --profiler-config.* flags.
-        is_atom = "atom" in fw
-        # TraceLens profiler flags exist only in patched vLLM / SGLang builds;
-        # try to patch, fall back to the safe set on failure. Default-on
-        # (HYPERLOOM_ENABLE_PATCH=0 disables); skip for atom.
-        tracelens_patch_ok = False
-        # Function-local import to stay out of the module-level import cycle
-        # (matches _multi_node_server_lifecycle).
-        from ._server_patcher import kernel_shape_tool_dir, resolve_sglang_shape_mode
-
-        is_sglang = "sglang" in fw
-        sglang_sitecustomize = is_sglang and resolve_sglang_shape_mode() == "sitecustomize"
-        patch_attempted = _tracelens_patch_enabled() and not is_atom and not sglang_sitecustomize
-        # Written in every branch, not only the failing one: "patched fine" and "never tried because the image
-        # already carries it" call for different reactions when a trace later turns up without annotations.
-        envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "not_attempted"
-        if patch_attempted:
-            if "vllm" in fw:
-                tracelens_patch_ok = ensure_vllm_patched_for_tracelens()
-            else:
-                tracelens_patch_ok = ensure_sglang_patched_for_tracelens()
-            envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] = "ok" if tracelens_patch_ok else "unavailable"
-            if not tracelens_patch_ok:
-                envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] = _TRACELENS_PATCH_UNAVAILABLE
-                log.warning(
-                    "TraceLens runtime patch unavailable for framework=%s; "
-                    "profile will omit annotation-only flags and roofline "
-                    "analysis may be degraded.",
-                    fw or "<unset>",
-                )
-        elif sglang_sitecustomize and _tracelens_patch_enabled():
-            # Shapes come from kernel_shape_tool, but the per-batch-size capture trace still needs
-            # sglang_gc_patch or it IndexErrors. Only profiling captures traces, so patch only here.
-            if not ensure_sglang_patched_for_tracelens():
-                log.warning(
-                    "SGLang graph-capture patch (sglang_gc_patch) not applied; profiling "
-                    "continues on the unpatched server, where per-batch-size CUDA-graph "
-                    "capture can IndexError on multi-variant models (DSA dense+sparse). "
-                    "It needs TRACELENS_ROOT with an exact "
-                    "examples/custom_workflows/inference_analysis/sglang_gc_patch/sglang_<X_Y_Z> dir."
-                )
-        if is_atom:
-            # ATOM has no delay/max-iteration window; extra prompts only grow
-            # the HTTP-bracketed trace. Force NUM_PROMPTS=CONC.
-            profile_num_prompts = conc_val
-            atom_caps = _atom_tracelens_caps()
-        elif "vllm" in fw:
-            existing_vllm_args = str(envs.get("EXTRA_VLLM_ARGS", ""))
-            profiler_flags = [
-                ("delay_iterations", f"--profiler-config.delay_iterations {delay_iters}"),
-                ("max_iterations", f"--profiler-config.max_iterations {max_iters}"),
-            ]
-            # ``profiler`` and ``torch_profiler_dir`` are normally set by
-            # Magpie's launcher script, not by this layer -- but that script
-            # appends its own flags *before* EXTRA_VLLM_ARGS in the real
-            # ``vllm serve`` invocation, so the argv preflight probe (which
-            # only sees EXTRA_VLLM_ARGS) checks capture_torch_profiler/
-            # delay_iterations/max_iterations against a ProfilerConfig that
-            # never saw ``profiler=torch`` or a trace dir. vLLM's validator
-            # requires both whenever those bounds are present, so the probe
-            # appended, and this layer's profiler bounds get treated as
-            # invalid and dropped instead of launched. Assert ``profiler=torch``
-            # here so the probed fragment is self-consistent; do not append a
-            # ``torch_profiler_dir`` here. On the real ``vllm serve`` line Magpie's
-            # launcher emits ``<workspace>/torch_trace`` *before* ``EXTRA_VLLM_ARGS``;
-            # vLLM's last-wins merge would let a second ``torch_profiler_dir`` in
-            # ``EXTRA_VLLM_ARGS`` override Magpie and send traces to the task root.
-            # With no dir in ``EXTRA_VLLM_ARGS``, steady-state traces stay under
-            # ``<workspace>/torch_trace``. ``baseline.py`` / ``bypass_engine`` use
-            # probe-only dirs on other paths; an operator-set flag in the YAML is
-            # left untouched.
-            if _profiler_flag_value(existing_vllm_args, "profiler") is None:
-                profiler_flags.append(("profiler", "--profiler-config.profiler torch"))
-            if tracelens_patch_ok:
-                profiler_flags.append(("capture_torch_profiler", "--profiler-config.capture_torch_profiler True"))
-                profiler_flags.append(("detailed_trace_annotation", "--profiler-config.detailed_trace_annotation True"))
-            # vLLM's AsyncLLM-side profiler tracks no iterations and captures the
-            # whole start_profile..stop_profile range, so it has to stay off
-            # wherever we bound the worker-side one. The YAML normally carries the
-            # flag, but a replacing candidate wipes the YAML value too, so it
-            # belongs in the set the re-assertion can restore.
-            profiler_flags.append(("ignore_frontend", "--profiler-config.ignore_frontend True"))
-            # vLLM's stop path builds a key_averages() summary table in Python on every rank. Nothing here reads
-            # it, and on a long-prompt eager trace it blocks the engine and grows each worker by hundreds of GiB.
-            profiler_flags.append(
-                ("torch_profiler_dump_cuda_time_total", "--profiler-config.torch_profiler_dump_cuda_time_total False")
-            )
-            pending_vllm_profiler_flags = profiler_flags
-            pending_vllm_profiler_cap = max_iters
-            # Injected unconditionally so the computed cap WINS over anything the YAML
-            # pins, via the repeated-flag last-wins that vLLM's argparse and this
-            # layer both rely on. Filtering out a flag the YAML already carries would
-            # hand the run e.g. a hand-written ``max_iterations 100000`` -- unbounded
-            # in practice -- and quietly discard the serialization-safe budget
-            # computed above; HYPERLOOM_PROFILE_MAX_ITERS is the override channel for
-            # that, not the YAML. ``ignore_frontend`` is the exception: the shipped
-            # profile YAML already sets it, and vLLM warns on duplicate keys.
-            profiler_args = " ".join(
-                flag
-                for sentinel, flag in profiler_flags
-                if sentinel != "ignore_frontend" or "ignore_frontend" not in existing_vllm_args
-            )
-            if "delay_iterations" not in existing_vllm_args:
-                envs["EXTRA_VLLM_ARGS"] = f"{existing_vllm_args} {profiler_args}".strip()
-        else:
-            import json as _json
-
-            try:
-                _raw_body = _json.loads(str(envs.get("PROFILE_EXTRA_BODY", "{}")))
-                extra_body = _raw_body if isinstance(_raw_body, dict) else {}
-            except (ValueError, TypeError):
-                extra_body = {}
-            # Always override start_step/num_steps (the template has CONC=8
-            # placeholders).
-            extra_body["start_step"] = delay_iters
-            extra_body["num_steps"] = max_iters
-            # shape_discovery balloons an eager+with_stack trace; allow disabling
-            # it via env for eager profiles.
-            _shape_disc = env_flag("HYPERLOOM_PROFILE_SHAPE_DISCOVERY", default=True)
-            # Gemma2 + shape-discovery crashes CUDA-graph capture, so disable
-            # shape-discovery for Gemma2. Escape hatch
-            # HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 only skips the Gemma2
-            # gate; it does NOT override a global
-            # HYPERLOOM_PROFILE_SHAPE_DISCOVERY=0 setting.
-            _force_shape_disc = env_bool("HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE")
-            if _shape_disc and not _force_shape_disc:
-                _model = str(bench.get("model") or "")
-                if _model_is_gemma2(_model):
-                    _shape_disc = False
-                    log.info(
-                        "Gemma2 roofline: disabling shape-discovery to avoid "
-                        "CUDA-graph capture crash (hipErrorStreamCapture"
-                        "Unsupported); CUDA graph + profiling kept. Set "
-                        "HYPERLOOM_PROFILE_SHAPE_DISCOVERY_FORCE=1 to override.",
-                    )
-                    if _load_model_config_dict(_model) is None:
-                        log.warning(
-                            "Gemma2 detected via path heuristic (no readable "
-                            "config.json at %r); shape-discovery skip may be "
-                            "imprecise.",
-                            _model,
-                        )
-            if sglang_sitecustomize:
-                # No-patch path: shapes come from the tool via PYTHONPATH, not a
-                # request-body flag or CUDA-graph arg (unpatched SGLang rejects both).
-                extra_body.pop("shape_discovery", None)
-                extra_body.setdefault("detailed_annotations", True)
-                _tool_dir = kernel_shape_tool_dir()
-                if _shape_disc and _tool_dir is not None:
-                    prepend_launch_path(envs, "PYTHONPATH", str(_tool_dir))
-                    envs["TRACELENS_SHAPE_DISCOVERY"] = "1"
-                else:
-                    envs["TRACELENS_SHAPE_DISCOVERY"] = "0"
-                    if _shape_disc and _tool_dir is None:
-                        log.warning(
-                            "SGLang shape mode=sitecustomize but kernel_shape_tool "
-                            "not found under TRACELENS_ROOT; shapes will be absent "
-                            "(set TRACELENS_ROOT to an NFS path visible to the server).",
-                        )
-                envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
-            else:
-                # Legacy patched path: capture options need the git-apply patch to
-                # land. Keyed on the degraded reason, not tracelens_patch_ok, since a
-                # patch may be baked into the image without being attempted here.
-                _patch_degraded = envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") == _TRACELENS_PATCH_UNAVAILABLE
-                if _patch_degraded:
-                    _shape_disc = False
-                extra_body["shape_discovery"] = _shape_disc
-                if _patch_degraded:
-                    extra_body["detailed_annotations"] = False
-                else:
-                    extra_body.setdefault("detailed_annotations", True)
-                # Written before the per-task extra_envs merge, so an extra_envs
-                # PROFILE_EXTRA_BODY can still drop start_step/num_steps. Not
-                # re-asserted for SGLang (unlike vLLM): "unbounded" vs "no capture"
-                # for non-positive num_steps needs a SGLang-side answer.
-                envs["PROFILE_EXTRA_BODY"] = _json.dumps(extra_body)
-                if tracelens_patch_ok and _shape_disc:
-                    # Patched SGLang exposes this arg; unpatched errors on it.
-                    existing_sglang = str(envs.get("EXTRA_SGLANG_ARGS", ""))
-                    if "shape-discovery-for-cuda-graph-profile" not in existing_sglang:
-                        envs["EXTRA_SGLANG_ARGS"] = (
-                            f"{existing_sglang} --enable-shape-discovery-for-cuda-graph-profile"
-                        ).strip()
+        outcome = prepare_profile(bench, envs, write_workload=True)
+        profile_num_prompts = outcome.num_prompts
+        atom_caps = outcome.atom_caps
+        pending_vllm_profiler_flags = outcome.vllm_flags
+        pending_vllm_profiler_cap = outcome.vllm_cap
 
     if not _is_scriptable_profile:
         # NUM_PROMPTS / NUM_WARMUPS are serving-request concepts; xDiT drives its
@@ -2123,14 +1860,9 @@ def materialize_config_with_envs(
         # After extra_envs / replace_args / remove_args so TraceLens knobs
         # survive the same last-wins path as vLLM profiler bounds. Must land
         # before seal_server_argv — that function is the last write.
-        if atom_caps.detailed_annotation:
-            envs["ATOM_ENABLE_DETAILED_ANNOTATION"] = "1"
-        if atom_caps.profiler_more:
-            envs["ATOM_PROFILER_MORE"] = "1"
-        if atom_caps.mark_trace:
-            extra = str(envs.get("EXTRA_ATOM_ARGS", "")).strip()
-            if "--mark-trace" not in extra:
-                envs["EXTRA_ATOM_ARGS"] = f"{extra} --mark-trace".strip()
+        from ._profile_setup import apply_atom_profile_caps
+
+        apply_atom_profile_caps(envs, atom_caps)
     _apply_vllm_source_runtime(bench, envs)
     # The rendered YAML is persisted, so credentials must not reach it.
     filtered_envs, dropped_credentials = filter_untrusted_env_mapping(

@@ -237,15 +237,30 @@ def test_rejected_report_cannot_be_salvaged(report, key, tmp_path):
     assert measured["output_throughput"] == 50
 
 
-def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path, report):
+def test_profile_uses_same_workload_and_is_never_keep_evidence(source, tmp_path, report, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_ENABLE_PATCH", "0")
+    monkeypatch.setenv("HYPERLOOM_SGLANG_SHAPE_MODE", "patched")
+    monkeypatch.delenv("PROFILE_OSL", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PROFILE_MAX_ITERS", raising=False)
+    monkeypatch.delenv("HYPERLOOM_PROFILE_DELAY_ITERS", raising=False)
     rendered = materialize_benchmark_config(source, tmp_path / "profile")
     enable_profile(rendered)
-    assert load_benchmark(rendered)["profiler"]["torch_profiler"] == {
-        "enabled": True,
+    bench = load_benchmark(rendered)
+    torch_profiler = bench["profiler"]["torch_profiler"]
+    body = json.loads(bench["envs"]["PROFILE_EXTRA_BODY"])
+    assert torch_profiler["enabled"] is True
+    assert torch_profiler["num_profiles"] == 1
+    assert torch_profiler["start_seconds"] == 0
+    assert torch_profiler["num_steps"] == body["num_steps"]
+    assert torch_profiler["detailed_annotations"] is body["detailed_annotations"]
+    assert bench["model"] == "Qwen/Qwen3-0.6B"
+    assert str(bench["envs"]["CONC"]) == "8"
+    assert "OSL" not in bench["envs"]
+    assert load_benchmark(source)["profiler"]["torch_profiler"] == {
+        "enabled": False,
         "num_steps": 5,
         "num_profiles": 3,
     }
-    assert load_benchmark(source)["profiler"]["torch_profiler"]["enabled"] is False
     report["agentx_metrics"]["diagnostic_only"] = True
     measured = extract_benchmark_measurement(report)
     assert measured["round_succeeded"] is True
