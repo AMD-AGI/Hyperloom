@@ -12,8 +12,8 @@ import pytest
 
 from hyperloom.orchestrator.actions.executors.report import (
     _build_summary_dict,
-    _format_roofline_comparison_section,
 )
+from hyperloom.orchestrator.actions.executors._report_md import _format_roofline_comparison_section
 
 
 # Test fixtures

@@ -578,7 +578,7 @@ def test_preflight_serving_framework_still_blocks_vlm(tmp_path, monkeypatch):
 
 # 5. report rendering of the degraded-mode section
 def test_report_renders_degraded_mode_section():
-    from hyperloom.orchestrator.actions.executors import report
+    from hyperloom.orchestrator.actions.executors import _report_md, report
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState(session_id="s", model_name="kimi", model_path="/m/kimi")
@@ -597,18 +597,18 @@ def test_report_renders_degraded_mode_section():
     assert summary["degraded_mode"] is True
     assert len(summary["model_warnings"]) == 1
 
-    md = report._format_md(summary)
+    md = _report_md._format_md(summary)
     assert "Degraded mode" in md
     assert "text path only" in md
     assert "KimiK25ForConditionalGeneration" in md
 
 
 def test_report_no_degraded_section_when_clean():
-    from hyperloom.orchestrator.actions.executors import report
+    from hyperloom.orchestrator.actions.executors import _report_md, report
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState(session_id="s", model_name="llama", model_path="/m/llama")
     summary = report._build_summary_dict(state, {}, [], external_baseline=None)
     assert summary["degraded_mode"] is False
-    md = report._format_md(summary)
+    md = _report_md._format_md(summary)
     assert "## Degraded mode" not in md

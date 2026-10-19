@@ -363,7 +363,7 @@ class TestReportedProvenance:
 
     @staticmethod
     def _render(shape):
-        from hyperloom.orchestrator.actions.executors.report import (
+        from hyperloom.orchestrator.actions.executors._report_md import (
             _format_compute_partition_section,
         )
 

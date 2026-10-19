@@ -684,7 +684,7 @@ def _ext_payload(**overrides) -> dict[str, Any]:
 
 
 def test_report_section_renders_no_target_gpu_marker():
-    from hyperloom.orchestrator.actions.executors.report import (
+    from hyperloom.orchestrator.actions.executors._report_md import (
         _format_external_baseline_section,
     )
 
@@ -705,7 +705,7 @@ def test_report_section_renders_no_target_gpu_marker():
 
 
 def test_report_section_renders_ok_with_reference_best():
-    from hyperloom.orchestrator.actions.executors.report import (
+    from hyperloom.orchestrator.actions.executors._report_md import (
         _format_external_baseline_section,
     )
 
@@ -716,7 +716,7 @@ def test_report_section_renders_ok_with_reference_best():
 
 
 def test_report_section_renders_fetch_error_with_warning():
-    from hyperloom.orchestrator.actions.executors.report import (
+    from hyperloom.orchestrator.actions.executors._report_md import (
         _format_external_baseline_section,
     )
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 
+from hyperloom.orchestrator.actions.executors import _report_md as rp_md
 from hyperloom.orchestrator.actions.executors import report as rp
 from hyperloom.inference_optimizer.session.session_paths import (
     reports_dir,
@@ -16,11 +17,11 @@ from hyperloom.inference_optimizer.session.session_paths import (
 
 # ---- _format_completeness_annotations ----
 def test_completeness_annotations_empty():
-    assert rp._format_completeness_annotations({}) == []
+    assert rp_md._format_completeness_annotations({}) == []
 
 
 def test_completeness_annotations_full():
-    out = rp._format_completeness_annotations(
+    out = rp_md._format_completeness_annotations(
         {
             "has_unvalidated_keeps": True,
             "untried_hot_reusable_kernels": ["k1"],
@@ -34,7 +35,7 @@ def test_completeness_annotations_full():
 
 
 def test_degraded_mode_section():
-    out = rp._format_degraded_mode_section(
+    out = rp_md._format_degraded_mode_section(
         {
             "degraded_mode": True,
             "model_warnings": [
@@ -49,11 +50,11 @@ def test_degraded_mode_section():
 
 
 def test_degraded_mode_section_empty():
-    assert rp._format_degraded_mode_section({}) == []
+    assert rp_md._format_degraded_mode_section({}) == []
 
 
 def test_format_md_shows_validated_gain_when_timestamp_missing():
-    md = rp._format_md(
+    md = rp_md._format_md(
         {
             "session_id": "s1",
             "model_name": "m",
@@ -81,18 +82,18 @@ def test_format_md_shows_validated_gain_when_timestamp_missing():
 
 # ---- _extract_executive_summary ----
 def test_extract_exec_summary_no_path():
-    assert "no analysis.md" in rp._extract_executive_summary("")
+    assert "no analysis.md" in rp_md._extract_executive_summary("")
 
 
 def test_extract_exec_summary_missing_file(tmp_path):
-    out = rp._extract_executive_summary(str(tmp_path / "nope.md"))
+    out = rp_md._extract_executive_summary(str(tmp_path / "nope.md"))
     assert "could not read" in out
 
 
 def test_extract_exec_summary_no_block(tmp_path):
     md = tmp_path / "a.md"
     md.write_text("# Title\nno exec block here\n", encoding="utf-8")
-    assert "does not contain" in rp._extract_executive_summary(str(md))
+    assert "does not contain" in rp_md._extract_executive_summary(str(md))
 
 
 def test_extract_exec_summary_present_and_image_stripped(tmp_path):
@@ -101,7 +102,7 @@ def test_extract_exec_summary_present_and_image_stripped(tmp_path):
         "## Executive Summary\n![chart](data:image/png;base64,AAAA)\ncompute 70%\n## Next Section\nignored\n",
         encoding="utf-8",
     )
-    out = rp._extract_executive_summary(str(md))
+    out = rp_md._extract_executive_summary(str(md))
     assert "Executive Summary" in out
     assert "[image stripped]" in out
     assert "Next Section" not in out
@@ -110,7 +111,7 @@ def test_extract_exec_summary_present_and_image_stripped(tmp_path):
 def test_extract_exec_summary_truncates(tmp_path):
     md = tmp_path / "a.md"
     md.write_text("## Executive Summary\n" + ("x" * 5000), encoding="utf-8")
-    out = rp._extract_executive_summary(str(md))
+    out = rp_md._extract_executive_summary(str(md))
     assert out.endswith("...")
     assert len(out) <= 2048
 
@@ -199,7 +200,7 @@ def test_explain_stop_reason_unknown_is_empty():
 
 
 def test_format_md_renders_stop_explanation():
-    md = rp._format_md(
+    md = rp_md._format_md(
         {
             "session_id": "s",
             "model_name": "m",
@@ -269,10 +270,10 @@ def _summary_without_platform(**extra) -> dict:
 
 def test_report_says_platform_is_missing_when_the_summary_predates_the_field():
     """A summary with no platform key still gets a line."""
-    md = rp._format_md(_summary_without_platform())
+    md = rp_md._format_md(_summary_without_platform())
     assert "- platform       : not recorded" in md
 
 
 def test_report_gives_the_reason_the_platform_is_missing_when_it_has_one():
-    md = rp._format_md(_summary_without_platform(platform={"status": "unavailable", "reason": "no host CPU sysfs"}))
+    md = rp_md._format_md(_summary_without_platform(platform={"status": "unavailable", "reason": "no host CPU sysfs"}))
     assert "not recorded — no host CPU sysfs" in md

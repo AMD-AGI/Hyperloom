@@ -2234,13 +2234,13 @@ def test_render_conc_sweep_curve_with_fake_matplotlib(tmp_path: Path, monkeypatc
 
 
 def test_format_conc_sweep_curve_section_empty_summary():
-    from hyperloom.orchestrator.actions.executors.report import _format_conc_sweep_curve_section
+    from hyperloom.orchestrator.actions.executors._report_md import _format_conc_sweep_curve_section
 
     assert _format_conc_sweep_curve_section({}) == []
 
 
 def test_format_conc_sweep_curve_section_with_png():
-    from hyperloom.orchestrator.actions.executors.report import _format_conc_sweep_curve_section
+    from hyperloom.orchestrator.actions.executors._report_md import _format_conc_sweep_curve_section
 
     lines = _format_conc_sweep_curve_section({"conc_sweep_curve_png": "reports/conc_sweep_curve.png"})
     embed = next(line for line in lines if line.startswith("!["))

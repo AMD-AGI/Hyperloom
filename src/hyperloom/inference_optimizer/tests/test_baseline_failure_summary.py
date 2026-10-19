@@ -9,11 +9,11 @@ from hyperloom.orchestrator.actions.executors.report import (
     _build_failure_summary,
     _build_summary_dict,
     _classify_root_cause_type,
-    _format_md,
     _highlight_is_benign,
     _is_benign_failure_text,
     _partition_benign_lines,
 )
+from hyperloom.orchestrator.actions.executors._report_md import _format_md
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 _BENIGN_WARN = (
