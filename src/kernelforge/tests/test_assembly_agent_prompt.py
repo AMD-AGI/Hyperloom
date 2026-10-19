@@ -50,18 +50,18 @@ def test_gated_implementer_scopes_assembly_to_its_own_campaign(tmp_path, monkeyp
 
     monkeypatch.setattr(agent, "create_registered_backend", lambda runtime, **kwargs: RecordingBackend(runtime))
     agent_fn = agent.make_agent_fn(
-        config=Config(
+        Config(
             gpu_target="gfx950",
             workspace=str(tmp_path),
             agent_backend="claude",
             agent_model="claude-test",
             agent_precheck=False,
         ),
-        program_md=program,
-        kernel_backend_name=kernel_backend,
-        insession_gate=True,
-        driver_script=str(driver),
-        source_files=source_files,
+        agent.ImplementerSetup(
+            agent.ImplementerTask(program_md=program, kernel_backend_name=kernel_backend, source_files=source_files),
+            measurement=agent.GateMeasurement(driver_script=str(driver)),
+            session=agent.SessionOptions(insession_gate=True),
+        ),
     )
     asyncio.run(agent_fn(str(kernel), ""))
 
@@ -133,12 +133,16 @@ def test_assembly_optimizer_enforces_only_selected_asm(tmp_path, monkeypatch, ga
 
     monkeypatch.setattr(agent, "create_registered_backend", lambda runtime, **kw: RecordingBackend(runtime))
     run = agent.make_agent_fn(
-        config=Config(workspace=str(tmp_path), gpu_target="gfx950", agent_backend="claude", agent_precheck=False),
-        program_md="Optimize only kernel.s after preparation.",
-        kernel_backend_name="assembly",
-        insession_gate=gate_enabled,
-        driver_script=str(tmp_path / "driver.py"),
-        source_files=[str(tmp_path / "kernel.s")],
+        Config(workspace=str(tmp_path), gpu_target="gfx950", agent_backend="claude", agent_precheck=False),
+        agent.ImplementerSetup(
+            agent.ImplementerTask(
+                program_md="Optimize only kernel.s after preparation.",
+                kernel_backend_name="assembly",
+                source_files=[str(tmp_path / "kernel.s")],
+            ),
+            measurement=agent.GateMeasurement(driver_script=str(tmp_path / "driver.py")),
+            session=agent.SessionOptions(insession_gate=gate_enabled),
+        ),
     )
     if changed == "kernel.s":
         asyncio.run(run(str(tmp_path / "kernel.py"), ""))

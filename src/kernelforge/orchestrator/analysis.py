@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from kernelforge.llm.git import git
+from kernelforge.llm.git import git_bytes
 from kernelforge.agent_backends import (
     AgentBackend,
     AgentHook,
@@ -26,10 +26,7 @@ from kernelforge.agent_backends import (
     create_registered_backend,
     watchdog_timeout_sec,
 )
-from kernelforge.agent_backends.session_resume import (
-    EXHAUSTED_END_REASON,
-    run_session_with_api_resume,
-)
+from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON, ResumePolicy, run_session_with_api_resume
 from kernelforge.config import Config
 from kernelforge.orchestrator.contracts import (
     CaseEvidence,
@@ -1557,7 +1554,7 @@ class AnalysisAgentService:
                         hooks=hooks,
                     ),
                     usage=usage,
-                    deadline_sec=timeout_sec,
+                    policy=ResumePolicy(deadline_sec=timeout_sec),
                 ),
                 timeout=watchdog_timeout_sec(timeout_sec),
             )
@@ -1847,7 +1844,7 @@ Update analysis incrementally:
             Path(driver_script).resolve(),
             *(Path(path).resolve() for path in source_files),
         }
-        result = git("ls-files", "-z", cwd=workspace, check=False, text=False)
+        result = git_bytes("ls-files", "-z", cwd=workspace, check=False)
         if result.returncode == 0:
             for raw in result.stdout.split(b"\0"):
                 if raw:

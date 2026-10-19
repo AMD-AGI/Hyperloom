@@ -48,26 +48,35 @@ def _checked(
     return completed
 
 
-def git(
-    *args: str,
-    cwd: str | Path | None = None,
-    check: bool = True,
-    text: bool = True,
-    timeout: float | None = DEFAULT_TIMEOUT_SEC,
-    input: str | bytes | None = None,
-    env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess:
-    """Run one git command to completion, capturing both streams."""
-    with subprocess.Popen(
+def _spawn(
+    args: tuple[str, ...],
+    cwd: str | Path | None,
+    env: dict[str, str] | None,
+    *,
+    stdin: bool,
+    text: bool,
+) -> subprocess.Popen:
+    """Start git in its own session with both output streams captured."""
+    return subprocess.Popen(
         ["git", *args],
         cwd=None if cwd is None else str(cwd),
-        stdin=subprocess.PIPE if input is not None else None,
+        stdin=subprocess.PIPE if stdin else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=text,
         env=None if env is None else {**os.environ, **env},
         start_new_session=True,
-    ) as process:
+    )
+
+
+def _communicate(
+    process: subprocess.Popen,
+    input: str | bytes | None,
+    timeout: float | None,
+    check: bool,
+) -> subprocess.CompletedProcess:
+    """Feed git its input and wait for it to finish."""
+    with process:
         try:
             stdout, stderr = process.communicate(input, timeout=timeout)
         except BaseException:
@@ -79,6 +88,32 @@ def git(
         subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr),
         check,
     )
+
+
+def git(
+    *args: str,
+    cwd: str | Path | None = None,
+    check: bool = True,
+    timeout: float | None = DEFAULT_TIMEOUT_SEC,
+    input: str | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run one git command to completion, capturing both streams as text."""
+    process = _spawn(args, cwd, env, stdin=input is not None, text=True)
+    return _communicate(process, input, timeout, check)
+
+
+def git_bytes(
+    *args: str,
+    cwd: str | Path | None = None,
+    check: bool = True,
+    timeout: float | None = DEFAULT_TIMEOUT_SEC,
+    input: bytes | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run one git command to completion, capturing both streams as raw bytes."""
+    process = _spawn(args, cwd, env, stdin=input is not None, text=False)
+    return _communicate(process, input, timeout, check)
 
 
 FALLBACK_COMMIT_IDENTITY = ("KernelForge", "kernel-forge@localhost")
