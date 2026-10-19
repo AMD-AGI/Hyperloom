@@ -874,7 +874,7 @@ def _stub_geak_runner_call(monkeypatch, outcome) -> list[str]:
 
     async def _to_thread(func, /, *args, **kwargs):
         qualname = getattr(func, "__qualname__", "")
-        if qualname.endswith("_run_geak_kernel_phase.<locals>._run"):
+        if qualname.endswith("KernelPhase._run_geak_runner"):
             calls.append(qualname)
             return outcome()
         return await original_to_thread(func, *args, **kwargs)

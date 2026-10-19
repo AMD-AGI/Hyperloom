@@ -5,14 +5,11 @@
 
 from __future__ import annotations
 import asyncio
-import csv
 import hashlib
 import importlib.util
 import json
 import logging as _logging
-import math
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -25,6 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
+from . import _aiter_config_merge
 from . import _geak_handoff
 from . import _kernel_timeline
 from . import geak_rebench as _geak_rebench
@@ -127,43 +125,6 @@ def _withheld_targets(result: object) -> int:
     return max(0, withheld) if isinstance(withheld, int) and not isinstance(withheld, bool) else 0
 
 
-#: What an aiter dispatch table means by a column a source table never wrote.
-_AITER_COLUMN_DEFAULTS: dict[str, str] = {"xbf16": "0", "run_1stage": "0", "ksplit": "0"}
-
-#: How a tuned table's stem names the untuned table that defines its dispatch keys.
-_TUNED_STEM_SUFFIX = re.compile(r"(?:_)?tuned$")
-
-
-class _DispatchTable(NamedTuple):
-    """A dispatch table as it is read off disk: its columns, and its rows."""
-
-    columns: list[str]
-    rows: list[dict[str, str]]
-
-
-class _MergeSources(NamedTuple):
-    """The complete runtime tables a candidate is merged into, and the directory they came from."""
-
-    paths: list[Path]
-    config_dir: Path | None
-
-
-def _read_table(path: Path) -> _DispatchTable:
-    """Read a dispatch table off disk."""
-    with path.open(newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        return _DispatchTable(list(reader.fieldnames or []), [dict(row) for row in reader])
-
-
-def _write_table(path: Path, columns: list[str], rows: list[dict[str, str]]) -> Path:
-    """Write a dispatch table to ``path``, and return where it landed."""
-    with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=columns)
-        writer.writeheader()
-        writer.writerows(rows)
-    return path
-
-
 def _aiter_config_dirs(session_dir: Path) -> list[Path]:
     """Every existing directory the runtime's aiter config tables could be read from, nearest first."""
     dirs: list[Path] = []
@@ -186,161 +147,6 @@ def _aiter_config_dirs(session_dir: Path) -> list[Path]:
             seen.add(str(config_dir))
             unique.append(config_dir)
     return unique
-
-
-def _untuned_table_stem(tuned_stem: str) -> str:
-    """The stem of the untuned table that pairs with a tuned one."""
-    if _TUNED_STEM_SUFFIX.search(tuned_stem):
-        return _TUNED_STEM_SUFFIX.sub("_untuned", tuned_stem)
-    return tuned_stem.replace("tuned", "untuned")
-
-
-def _runtime_config_sources(config_dirs: list[Path], *, filename: str, tuned_stem: str) -> _MergeSources:
-    """The complete runtime tables the candidate has to be merged into before it can be served."""
-    cache_dir = Path(os.environ.get("INFERENCE_OPTIMIZER_AITER_CONFIG_CACHE_DIR", "/tmp/aiter_configs"))
-    cached = cache_dir / filename
-    if cached.is_file():
-        return _MergeSources([cached], None)
-    for config_dir in config_dirs:
-        base_path = config_dir / filename
-        model_paths = sorted(
-            path
-            for path in (config_dir / "model_configs").glob(f"*{tuned_stem}*.csv")
-            if path.is_file() and "untuned" not in path.name
-        )
-        paths = ([base_path] if base_path.is_file() else []) + model_paths
-        if paths:
-            return _MergeSources(paths, config_dir)
-    return _MergeSources([], None)
-
-
-def _untuned_header(config_dir: Path | None, config_dirs: list[Path], untuned_stem: str) -> list[str]:
-    """The columns the untuned table names, which is what makes a dispatch key authoritative."""
-    if config_dir is None:
-        config_dir = next((d for d in config_dirs if (d / f"{untuned_stem}.csv").is_file()), None)
-    if config_dir is None:
-        return []
-    untuned_path = config_dir / f"{untuned_stem}.csv"
-    return _read_table(untuned_path).columns if untuned_path.is_file() else []
-
-
-def _merged_columns(source_columns: list[list[str]], candidate_columns: list[str]) -> list[str]:
-    """Every column the merged table carries, with columns new to it placed before ``tflops``."""
-    all_columns = list(source_columns[0])
-    for columns in [*source_columns[1:], candidate_columns]:
-        for column in columns:
-            if column not in all_columns:
-                insert_at = all_columns.index("tflops") if "tflops" in all_columns else len(all_columns)
-                all_columns.insert(insert_at, column)
-    return all_columns
-
-
-def _column_value(row: Mapping[str, str], column: str) -> str:
-    """A row's value for ``column``, defaulted where the table it came from has no such field."""
-    value = row.get(column)
-    return _AITER_COLUMN_DEFAULTS.get(column, "0") if value is None else value
-
-
-def _rows_over_columns(rows: list[dict[str, str]], columns: list[str]) -> list[dict[str, str]]:
-    """``rows`` restated over ``columns``, so tables with different fields can be concatenated."""
-    return [{column: _column_value(row, column) for column in columns} for row in rows]
-
-
-def _dispatch_key_columns(all_columns: list[str], untuned_header: list[str]) -> list[str]:
-    """The columns that together say which dispatch a row tunes."""
-    key_cols = [column for column in untuned_header if column in all_columns]
-    if not key_cols:
-        key_cols = [column for column in ("M", "N", "K") if column in all_columns]
-    for column in ("gfx", "cu_num", "_tag"):
-        if column in all_columns and column not in key_cols:
-            key_cols.append(column)
-    return key_cols
-
-
-def _dispatch_key(row: Mapping[str, str], key_cols: list[str]) -> tuple[str, ...]:
-    """The values that identify which dispatch a row tunes."""
-    return tuple(row.get(column, "") for column in key_cols)
-
-
-def _measured_microseconds(row: Mapping[str, str]) -> float:
-    """A row's measured time, or infinity when it carries none a comparison could use."""
-    try:
-        return float(row.get("us", ""))
-    except (TypeError, ValueError):
-        return math.inf
-
-
-def _fastest_row_per_dispatch(rows: list[dict[str, str]], key_cols: list[str]) -> list[dict[str, str]]:
-    """Keep the fastest row per dispatch key; ties keep the first row seen, unreadable times sort last."""
-    best: dict[tuple[str, ...], dict[str, str]] = {}
-    order: list[tuple[str, ...]] = []
-    for row in rows:
-        key = _dispatch_key(row, key_cols)
-        if key not in best:
-            best[key] = row
-            order.append(key)
-        elif _measured_microseconds(row) < _measured_microseconds(best[key]):
-            best[key] = row
-    return [best[key] for key in order]
-
-
-def _deduplicated_dispatch_rows(
-    rows: list[dict[str, str]], key_cols: list[str], *, label: str, env_var: str, timed: bool
-) -> list[dict[str, str]] | None:
-    """One row per dispatch key, or ``None`` when duplicates cannot be resolved by measurement."""
-    keys = [_dispatch_key(row, key_cols) for row in rows]
-    if len(set(keys)) == len(keys):
-        return rows
-    if not timed:
-        log.warning(
-            "gemm E2E: %s has duplicate dispatch keys for %s but no 'us' column to select the fastest row",
-            label,
-            env_var,
-        )
-        return None
-    deduplicated = _fastest_row_per_dispatch(rows, key_cols)
-    log.info(
-        "gemm E2E: removed %d duplicate %s row(s) for %s",
-        len(rows) - len(deduplicated),
-        label,
-        env_var,
-    )
-    return deduplicated
-
-
-def _merge_candidate_into_runtime(
-    candidate_path: Path, sources: _MergeSources, *, env_var: str, untuned_stem: str, config_dirs: list[Path]
-) -> str | None:
-    """Write the table the candidate's rows and the runtime's complete config produce together."""
-    candidate = _read_table(candidate_path)
-    source_tables = [_read_table(path) for path in sources.paths]
-    all_columns = _merged_columns([table.columns for table in source_tables], candidate.columns)
-    runtime_rows: list[dict[str, str]] = []
-    for table in source_tables:
-        runtime_rows.extend(_rows_over_columns(table.rows, all_columns))
-    candidate_rows = _rows_over_columns(candidate.rows, all_columns)
-    key_cols = _dispatch_key_columns(all_columns, _untuned_header(sources.config_dir, config_dirs, untuned_stem))
-    if not key_cols:
-        log.warning("gemm E2E: cannot derive dispatch keys for %s", env_var)
-        return None
-    timed = "us" in all_columns
-    kept = _deduplicated_dispatch_rows(runtime_rows, key_cols, label="runtime config", env_var=env_var, timed=timed)
-    tuned = _deduplicated_dispatch_rows(candidate_rows, key_cols, label="candidate", env_var=env_var, timed=timed)
-    if kept is None or tuned is None:
-        return None
-    # Drop rows from runtime that the candidate improves, then concat.
-    tuned_keys = {_dispatch_key(row, key_cols) for row in tuned}
-    merged_rows = [row for row in kept if _dispatch_key(row, key_cols) not in tuned_keys] + tuned
-    merged_path = _write_table(candidate_path.parent / f"merged_{candidate_path.name}", all_columns, merged_rows)
-    log.info(
-        "gemm E2E: merged %d candidate rows into %d rows from %d aiter config file(s) -> %d total (%s)",
-        len(tuned),
-        len(kept),
-        len(sources.paths),
-        len(merged_rows),
-        merged_path,
-    )
-    return str(merged_path)
 
 
 def _controller_produced_nothing(status: str, reason: str, output_dir: Path) -> dict[str, Any]:
@@ -776,6 +582,66 @@ def _assumed_blockscale_candidates(result: Mapping[str, Any]) -> list[dict[str, 
             "micro_speedup": micro_speedup,
         }
     ]
+
+
+def _charge_fusion_retry_caps(state: Any, fusion: Mapping[str, Any]) -> None:
+    """Charge this fusion run against the session's abort and withheld-target retry caps.
+
+    Counted on the session, not on the record: ``last_fusion`` is replaced by every
+    run, so a timeout or a handler crash landing between two aborts would carry no
+    count forward and hand the cap back a clean slate on every other entry.
+    """
+    if fusion.get("infrastructure_abort"):
+        state.fusion_infra_aborts = _as_int(state.fusion_infra_aborts) + 1
+    if not fusion.get("kept") and _withheld_targets(fusion) > 0:
+        state.fusion_withheld_retries = _as_int(state.fusion_withheld_retries) + 1
+
+
+def _save_last_fusion(state: Any, session_dir: Path, record: dict[str, Any]) -> None:
+    """Keep this run's record as the session's last fusion."""
+    try:
+        state.last_fusion = record
+        state.save(session_dir)
+    except Exception:  # noqa: BLE001 - state shape tolerant (best-effort idempotency record)
+        pass
+
+
+async def _announce_fusion_done(bus: Any, result: Any, *, status: str) -> None:
+    """Surface the settled fusion run on the bus for whoever is waiting on it."""
+    try:
+        await bus.append_and_seq(
+            Message.new(
+                "kernel_agent",
+                "orchestration",
+                "response",
+                {
+                    "in_reply_to": "",
+                    "kind": "run_fusion_done",
+                    "status": status,
+                    "result": result,
+                    "source": "kernel_entry_auto",
+                },
+            )
+        )
+    except Exception:
+        log.exception("failed to post run_fusion_done bus message")
+
+
+def _write_geak_adoptions(
+    state: Any, ledger: dict[str, Any], specs: list[dict[str, Any]], measurement: AdoptionMeasurement
+) -> None:
+    """Record each accepted kernel's adoption in the per-kernel ledger and on the kernel timeline."""
+    cycle = int(state.macro_cycle or 0)
+    for spec in specs:
+        kid = _adopted_kernel_id(spec)
+        entry = adoption_entry(ledger.get(kid) or {}, kid=kid, spec=spec, measurement=measurement)
+        ledger[kid] = entry
+        # GEAK adopts by writing this ledger directly rather than through
+        # the integrate queue, so without this the kernel timeline holds no
+        # gate row for a GEAK adoption at all -- and the basis the gain was
+        # measured on lives only here.
+        _record_geak_integration(entry, kernel_id=kid, macro_cycle=cycle)
+    state.kernel_integrate_attempts = ledger
 
 
 class _AdoptionOrigin(NamedTuple):
@@ -2477,17 +2343,12 @@ class KernelPhase(CoordinatorCollaborator):
         origin = _AdoptionOrigin(
             provenance=provenance, overlay_loaded=overlay_loaded, attributable=bool(overlay_loaded) and len(specs) == 1
         )
-        self._write_geak_adoptions(
-            ledger,
-            specs,
-            _geak_adoption_measurement(
-                result,
-                measured_tput=measured_tput,
-                rebench_gain=gain,
-                cycle=int(self.shared_state.macro_cycle or 0),
-                origin=origin,
-            ),
+        state = self.shared_state
+        cycle = int(state.macro_cycle or 0)
+        measurement = _geak_adoption_measurement(
+            result, measured_tput=measured_tput, rebench_gain=gain, cycle=cycle, origin=origin
         )
+        _write_geak_adoptions(state, ledger, specs, measurement)
         log.info(
             "geak: recorded %d adopted kernel(s) in the per-kernel ledger (overlay_loaded=%r attributable=%r gain=%r)",
             len(specs),
@@ -2495,22 +2356,6 @@ class KernelPhase(CoordinatorCollaborator):
             origin.attributable,
             gain if origin.attributable else None,
         )
-
-    def _write_geak_adoptions(
-        self, ledger: dict[str, Any], specs: list[dict[str, Any]], measurement: AdoptionMeasurement
-    ) -> None:
-        """Record each accepted kernel's adoption in the per-kernel ledger and on the kernel timeline."""
-        cycle = int(self.shared_state.macro_cycle or 0)
-        for spec in specs:
-            kid = _adopted_kernel_id(spec)
-            entry = adoption_entry(ledger.get(kid) or {}, kid=kid, spec=spec, measurement=measurement)
-            ledger[kid] = entry
-            # GEAK adopts by writing this ledger directly rather than through
-            # the integrate queue, so without this the kernel timeline holds no
-            # gate row for a GEAK adoption at all -- and the basis the gain was
-            # measured on lives only here.
-            _record_geak_integration(entry, kernel_id=kid, macro_cycle=cycle)
-        self.shared_state.kernel_integrate_attempts = ledger
 
     def _record_geak_measurement(self, result: dict[str, Any]) -> None:
         """Record the latency and parity GEAK's harness measured for this run.
@@ -2993,18 +2838,20 @@ class KernelPhase(CoordinatorCollaborator):
         config_dirs = _aiter_config_dirs(self.session_dir)
         tuned_stem = Path(runtime_filename).stem
         try:
-            sources = _runtime_config_sources(config_dirs, filename=runtime_filename, tuned_stem=tuned_stem)
+            sources = _aiter_config_merge.runtime_config_sources(
+                config_dirs, filename=runtime_filename, tuned_stem=tuned_stem
+            )
             if not sources.paths:
                 log.warning(
                     "gemm E2E: no complete aiter config found for %s; candidate-only validation would be unsafe",
                     env_var,
                 )
                 return None
-            return _merge_candidate_into_runtime(
+            return _aiter_config_merge.merge_candidate_into_runtime(
                 candidate_path,
                 sources,
                 env_var=env_var,
-                untuned_stem=_untuned_table_stem(tuned_stem),
+                untuned_stem=_aiter_config_merge.untuned_table_stem(tuned_stem),
                 config_dirs=config_dirs,
             )
         except Exception as exc:  # noqa: BLE001
@@ -3770,61 +3617,21 @@ class KernelPhase(CoordinatorCollaborator):
 
     async def _handle_fusion_result(self, result: dict) -> None:
         """Record the forge-fusion result + surface it on the bus."""
+        state = self.shared_state
         if not isinstance(result, dict):
-            self._save_last_fusion({"status": "failed"})
-            await self._announce_fusion_done(result, status="failed")
+            _save_last_fusion(state, self.session_dir, {"status": "failed"})
+            await _announce_fusion_done(self.bus, result, status="failed")
             return
         _fail_unreadable_fusion_envelope(result)
-        self._charge_fusion_retry_caps(result)
+        _charge_fusion_retry_caps(state, result)
         if not str(result.get("fusion_run_id") or "").strip():
-            result["fusion_run_id"] = f"fusion-c{int(self.shared_state.macro_cycle or 0)}-{time.time_ns():x}"
-        self._save_last_fusion(result)
+            result["fusion_run_id"] = f"fusion-c{int(state.macro_cycle or 0)}-{time.time_ns():x}"
+        _save_last_fusion(state, self.session_dir, result)
         self._record_fusion_timeline(result)
-        await self._announce_fusion_done(result, status=str(result.get("status") or "unknown"))
+        await _announce_fusion_done(self.bus, result, status=str(result.get("status") or "unknown"))
         # A KEPT fusion is handed to integrate for the e2e re-baseline decision.
         if _fusion_awaits_e2e(result):
             await self._integrate_fusion(result)
-
-    def _charge_fusion_retry_caps(self, fusion: Mapping[str, Any]) -> None:
-        """Charge this fusion run against the session's abort and withheld-target retry caps.
-
-        Counted on the session, not on the record: ``last_fusion`` is replaced by every
-        run, so a timeout or a handler crash landing between two aborts would carry no
-        count forward and hand the cap back a clean slate on every other entry.
-        """
-        state = self.shared_state
-        if fusion.get("infrastructure_abort"):
-            state.fusion_infra_aborts = _as_int(state.fusion_infra_aborts) + 1
-        if not fusion.get("kept") and _withheld_targets(fusion) > 0:
-            state.fusion_withheld_retries = _as_int(state.fusion_withheld_retries) + 1
-
-    def _save_last_fusion(self, record: dict[str, Any]) -> None:
-        """Keep this run's record as the session's last fusion."""
-        try:
-            self.shared_state.last_fusion = record
-            self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 - state shape tolerant (best-effort idempotency record)
-            pass
-
-    async def _announce_fusion_done(self, result: Any, *, status: str) -> None:
-        """Surface the settled fusion run on the bus for whoever is waiting on it."""
-        try:
-            await self.bus.append_and_seq(
-                Message.new(
-                    "kernel_agent",
-                    "orchestration",
-                    "response",
-                    {
-                        "in_reply_to": "",
-                        "kind": "run_fusion_done",
-                        "status": status,
-                        "result": result,
-                        "source": "kernel_entry_auto",
-                    },
-                )
-            )
-        except Exception:
-            log.exception("failed to post run_fusion_done bus message")
 
     async def _integrate_fusion(self, result: dict) -> None:
         """Queue every KEPT forge-fusion sibling for the shared e2e integrate lane."""

@@ -8,13 +8,23 @@ import re
 from hyperloom.orchestrator.phases import kernel as kernel_mod
 
 
+#: Every method the GEMM e2e validation runs through; the blocking reads may sit in any of them.
+_VALIDATOR_METHODS = (
+    "_validate_gemm_tuning_e2e",
+    "_gemm_e2e_run",
+    "_validate_one_gemm_candidate",
+    "_gemm_apply_blockers",
+)
+
+
 def _validator_source() -> str:
-    return inspect.getsource(kernel_mod.KernelPhase._validate_gemm_tuning_e2e)
+    return "".join(inspect.getsource(getattr(kernel_mod.KernelPhase, name)) for name in _VALIDATOR_METHODS)
 
 
 def test_the_validator_is_still_a_coroutine():
     # The whole premise: if it ever becomes sync, it is not on the loop and these assertions are measuring nothing.
-    assert inspect.iscoroutinefunction(kernel_mod.KernelPhase._validate_gemm_tuning_e2e)
+    for name in _VALIDATOR_METHODS:
+        assert inspect.iscoroutinefunction(getattr(kernel_mod.KernelPhase, name)), name
 
 
 def test_the_fused_moe_probe_runs_off_the_loop():
