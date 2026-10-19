@@ -106,6 +106,34 @@ def _wait_ports_free(ports: list[int], timeout_s: float) -> list[int]:
 _MIB_PER_UNIT = {"B": 1.0 / 1024**2, "KB": 1.0 / 1024, "MB": 1.0, "MIB": 1.0, "GB": 1024.0, "GIB": 1024.0}
 
 
+def _amd_smi_rows(args: list[str]) -> list | None:
+    """Run a read-only ``amd-smi`` subcommand and return its per-GPU rows, or None if it cannot be read."""
+    try:
+        proc = subprocess.run(["amd-smi", *args, "--json"], capture_output=True, text=True, timeout=20)
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return None
+    try:
+        data = json.loads(proc.stdout)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    rows = data.get("gpu_data") if isinstance(data, dict) else data
+    return rows if isinstance(rows, list) else None
+
+
+def _mib(block: object, default_unit: str) -> float | None:
+    """Convert an amd-smi memory field to MiB; None when it is absent, not a number, or in an unknown unit."""
+    if isinstance(block, dict):
+        value, unit = block.get("value"), str(block.get("unit") or default_unit).strip().upper()
+    else:
+        value, unit = block, default_unit
+    scale = _MIB_PER_UNIT.get(unit)
+    if scale is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) * scale
+
+
 def _gpu_vram_used_mb() -> list[float] | None:
     """Return per-GPU used VRAM (MiB) via amd-smi, or None if unavailable.
 
@@ -117,35 +145,17 @@ def _gpu_vram_used_mb() -> list[float] | None:
     Returns:
         list[float] | None: Used VRAM per card in MiB, or None when amd-smi is absent or unreadable.
     """
-    try:
-        proc = subprocess.run(
-            ["amd-smi", "metric", "--mem-usage", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+    rows = _amd_smi_rows(["metric", "--mem-usage"])
+    if rows is None:
         return None
-    if proc.returncode != 0 or not proc.stdout.strip():
-        return None
-    try:
-        data = json.loads(proc.stdout)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    rows = data.get("gpu_data") if isinstance(data, dict) else data
     used: list[float] = []
-    for row in rows or []:
+    for row in rows:
         # Exact key: the neighbouring used_visible_vram and used_gtt are different quantities, and on an APU GTT is
         # 24x VRAM, so a substring match would report a plausible number that is wrong.
         block = row.get("mem_usage", {}).get("used_vram") if isinstance(row, dict) else None
-        if isinstance(block, dict):
-            value, unit = block.get("value"), str(block.get("unit") or "MB").strip().upper()
-        else:
-            value, unit = block, "MB"
-        scale = _MIB_PER_UNIT.get(unit)
-        if scale is None or isinstance(value, bool) or not isinstance(value, (int, float)):
-            continue
-        used.append(float(value) * scale)
+        mib = _mib(block, "MB")
+        if mib is not None:
+            used.append(mib)
     return used or None
 
 
@@ -170,6 +180,26 @@ def _gpu_total_used_mb() -> float | None:
     return sum(used)
 
 
+def _process_pid_and_vram_mib(entry: object) -> tuple[int, float] | None:
+    """Return ``(pid, vram_mib)`` for one ``process --json`` entry, or None when it names no attributable process.
+
+    ``process_info`` is a string -- "No running processes detected", or "N/A" when a filter matched nothing --
+    rather than a dict whenever there is no process to read, so that case is not an error.
+    """
+    if not isinstance(entry, dict):
+        return None
+    info = entry.get("process_info")
+    if not isinstance(info, dict):
+        return None
+    try:
+        pid = int(info.get("pid"))
+    except (TypeError, ValueError):
+        return None
+    memory_usage = info.get("memory_usage")
+    mib = _mib(memory_usage.get("vram_mem") if isinstance(memory_usage, dict) else None, "B")
+    return None if mib is None else (pid, mib)
+
+
 def _gpu_used_mb_for_pgids(pgids: set[int]) -> float | None:
     """Return VRAM (MiB) held by processes in ``pgids`` per amd-smi process --json.
 
@@ -192,53 +222,23 @@ def _gpu_used_mb_for_pgids(pgids: set[int]) -> float | None:
     """
     if not pgids:
         return 0.0
-    try:
-        proc = subprocess.run(
-            ["amd-smi", "process", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=20,
-        )
-    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+    rows = _amd_smi_rows(["process"])
+    if rows is None:
         return None
-    if proc.returncode != 0 or not proc.stdout.strip():
-        return None
-    try:
-        data = json.loads(proc.stdout)
-    except (json.JSONDecodeError, ValueError):
-        return None
-    rows = data.get("gpu_data") if isinstance(data, dict) else data
     total_mib = 0.0
-    for row in rows or []:
+    for row in rows:
         if not isinstance(row, dict):
             continue
         for entry in row.get("process_list") or []:
-            if not isinstance(entry, dict):
+            found = _process_pid_and_vram_mib(entry)
+            if found is None:
                 continue
-            info = entry.get("process_info")
-            # A string here is "No running processes detected" (or "N/A" when a filter matched nothing) -- either
-            # way, no pid to attribute VRAM to.
-            if not isinstance(info, dict):
-                continue
+            pid, mib = found
             try:
-                pid = int(info.get("pid"))
-            except (TypeError, ValueError):
-                continue
-            try:
-                if os.getpgid(pid) not in pgids:
-                    continue
+                if os.getpgid(pid) in pgids:
+                    total_mib += mib
             except OSError:
                 continue
-            memory_usage = info.get("memory_usage")
-            block = memory_usage.get("vram_mem") if isinstance(memory_usage, dict) else None
-            if isinstance(block, dict):
-                value, unit = block.get("value"), str(block.get("unit") or "B").strip().upper()
-            else:
-                value, unit = block, "B"
-            scale = _MIB_PER_UNIT.get(unit)
-            if scale is None or isinstance(value, bool) or not isinstance(value, (int, float)):
-                continue
-            total_mib += float(value) * scale
     return total_mib
 
 

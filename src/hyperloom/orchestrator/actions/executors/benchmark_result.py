@@ -401,6 +401,48 @@ def _aggregate_gpu_samples_by_role(samples: list[dict[str, Any]]) -> dict[str, A
     return out
 
 
+def _inject_gpu_monitor(
+    destination: Path, samples: list[dict[str, Any]], pd: dict[str, Any], out: dict[str, Any]
+) -> None:
+    """Write the harvested samples into the round's ``benchmark_report.json``.
+
+    Args:
+        destination: The round workspace holding ``benchmark_report.json``.
+        samples: Flat gpu_monitor samples, oldest first.
+        pd: PD-disaggregation topology, empty when the run is not disaggregated.
+        out: The harvest result, updated in place with what was injected.
+    """
+    report_path = destination / "benchmark_report.json"
+    if not report_path.is_file():
+        return
+    try:
+        with report_path.open(encoding="utf-8") as f:
+            report = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(report, dict):
+        return
+    if len(samples) > _MN_GPU_SAMPLE_CAP:
+        stride = max(1, len(samples) // _MN_GPU_SAMPLE_CAP)
+        report["gpu_monitor"] = samples[::stride]
+    else:
+        report["gpu_monitor"] = samples
+    # PD-disaggregation: surface topology + per-role GPU aggregate so downstream analysis / the specialist LLM can
+    # target prefill (compute/TTFT) vs decode (bandwidth/TPOT).
+    if pd:
+        report["pd"] = pd
+        by_role = _aggregate_gpu_samples_by_role(samples)
+        if by_role:
+            report["gpu_monitor_by_role"] = by_role
+            out["gpu_monitor_by_role"] = {k: v.get("samples") for k, v in by_role.items()}
+    try:
+        with report_path.open("w", encoding="utf-8") as f:
+            json.dump(report, f, indent=2)
+        out["gpu_monitor_samples"] = len(report["gpu_monitor"])
+    except (OSError, TypeError) as exc:
+        log.warning("benchmark_result: gpu_monitor inject failed: %s", exc)
+
+
 def harvest_mn_gpu_metrics(
     destination: Path,
     *,
@@ -504,33 +546,7 @@ def harvest_mn_gpu_metrics(
             log.warning("benchmark_result: MN gpu_metrics.csv write failed: %s", exc)
 
     if samples:
-        report_path = destination / "benchmark_report.json"
-        if report_path.is_file():
-            try:
-                with report_path.open(encoding="utf-8") as f:
-                    report = json.load(f)
-            except (OSError, json.JSONDecodeError):
-                report = None
-            if isinstance(report, dict):
-                if len(samples) > _MN_GPU_SAMPLE_CAP:
-                    stride = max(1, len(samples) // _MN_GPU_SAMPLE_CAP)
-                    report["gpu_monitor"] = samples[::stride]
-                else:
-                    report["gpu_monitor"] = samples
-                # PD-disaggregation: surface topology + per-role GPU aggregate so downstream analysis / the specialist
-                # LLM can target prefill (compute/TTFT) vs decode (bandwidth/TPOT).
-                if pd:
-                    report["pd"] = pd
-                    by_role = _aggregate_gpu_samples_by_role(samples)
-                    if by_role:
-                        report["gpu_monitor_by_role"] = by_role
-                        out["gpu_monitor_by_role"] = {k: v.get("samples") for k, v in by_role.items()}
-                try:
-                    with report_path.open("w", encoding="utf-8") as f:
-                        json.dump(report, f, indent=2)
-                    out["gpu_monitor_samples"] = len(report["gpu_monitor"])
-                except (OSError, TypeError) as exc:
-                    log.warning("benchmark_result: gpu_monitor inject failed: %s", exc)
+        _inject_gpu_monitor(destination, samples, pd, out)
     if out:
         log.info("benchmark_result: harvested MN GPU metrics %s", out)
     return out
