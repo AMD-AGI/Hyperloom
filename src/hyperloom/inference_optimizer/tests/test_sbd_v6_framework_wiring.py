@@ -23,6 +23,7 @@ from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinato
 from hyperloom.orchestrator.phases.machine import Transition
 from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
+from hyperloom.orchestrator.phases.framework import ProgressStamp
 
 
 def _tr(reason: str) -> Transition:
@@ -264,11 +265,13 @@ def test_terminal_row_settles_the_proposal(session_dir: Path):
     coord.phase_framework._open_framework_timeline()
 
     coord.phase_framework._stamp_framework_progress(
-        candidate_id="cand-1",
-        batch_id="b1",
-        status="apply_failed",
-        rationale="patch did not apply",
-        provenance="pump",
+        ProgressStamp(
+            candidate_id="cand-1",
+            batch_id="b1",
+            status="apply_failed",
+            rationale="patch did not apply",
+            provenance="pump",
+        )
     )
     coord.phase_framework.close_framework_timeline(_tr("optimize_no_more_leverage"))
 
