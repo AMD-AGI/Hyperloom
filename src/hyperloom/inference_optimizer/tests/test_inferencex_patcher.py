@@ -856,6 +856,7 @@ def test_baseline_after_materialize_applies_eval_probe(tmp_path, monkeypatch):
     from hyperloom.orchestrator.actions.executors.baseline import BaselineExecutor
 
     ix_root = tmp_path / "InferenceX@deadbeef"
+    _write_eval_dest_lib(ix_root)
     target = _write_eval_probe_target(ix_root)
     config_path = tmp_path / "baseline.yaml"
     config_path.write_text(
