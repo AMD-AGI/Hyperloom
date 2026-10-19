@@ -42,7 +42,7 @@ A **workgroup is dispatched to one CU** and never migrates; its waves stripe acr
 |---|---|---|
 | VGPR (architected) | **512 × 4 B per SIMD** | all VALU |
 | AGPR (accumulation) | up to **256 × 4 B per SIMD** | MFMA + `v_accvgpr_read/write_b32` only |
-| SGPR (scalar) | ~800/CU, ≤102/wave usable | scalar unit |
+| SGPR (scalar) | ~800 per SIMD, ≤102/wave usable | scalar unit |
 
 - The VGPR/AGPR pool is **unified** — a wave flexes the split between them.
 - **Allocation granule is 8 registers.** 170 used → **176 reserved**. Tier boundaries sit at
