@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,7 +24,7 @@ from kernelforge.durable_io import atomic_write_text
 from kernelforge.loop.canonical_correctness import accept_candidate
 from kernelforge.loop.numerical import validate_contract, validate_source_independence
 from kernelforge.loop.validation import run_validation_pipeline
-from kernelforge.mcp_server.tools.bench import bench_wallclock, calculate_mean_case_speedup
+from kernelforge.mcp_server.tools.bench import BenchRun, bench_wallclock, calculate_mean_case_speedup
 
 if TYPE_CHECKING:
     from kernelforge.config import Config
@@ -33,6 +34,52 @@ if TYPE_CHECKING:
 
 class AssemblyPreparationError(ValueError):
     """No verified assembly implementation is available for optimization."""
+
+
+@dataclass(frozen=True)
+class AssemblyTask:
+    """The kernel an assembly campaign prepares, its editable sources, and the driver and threshold that judge it."""
+
+    kernel: str
+    driver: str
+    sources: list[str]
+    threshold: float
+
+
+@dataclass(frozen=True)
+class _Binding:
+    """The workspace, the launcher and the one editable assembly source a campaign binds."""
+
+    workspace: Path
+    kernel: Path
+    assembly: Path
+
+
+@dataclass(frozen=True)
+class _Checkpoint:
+    """The workspace before preparation, put back when a run does not reach a record."""
+
+    binding: _Binding
+    start_commit: str
+    paths: list[str]
+    original: bytes
+    original_assembly: bytes | None
+    manifest: Path
+    capture: bool
+
+    def restore(self) -> None:
+        """Put back everything preparation touched."""
+        workspace, kernel_path, assembly = self.binding.workspace, self.binding.kernel, self.binding.assembly
+        _git(workspace, "reset", "--soft", self.start_commit)
+        _git(workspace, "reset", self.start_commit, "--", *self.paths)
+        kernel_path.write_bytes(self.original)
+        if kernel_path != assembly:
+            if self.original_assembly is None:
+                assembly.unlink(missing_ok=True)
+            else:
+                assembly.write_bytes(self.original_assembly)
+        if self.capture:
+            self.manifest.unlink(missing_ok=True)
 
 
 # The exact key set of ``assembly_preparation/result.json``; resume refuses any other shape.
@@ -182,7 +229,7 @@ def _no_op_source(text: str) -> str:
 
 
 async def verify_assembly(
-    kernel: Path, assembly: Path, driver: str, target: str, threshold: float, deadline: float
+    assembly: Path, driver: str, target: str, threshold: float, deadline: float
 ) -> ValidationReport:
     """Require correctness and prove that a fresh driver consumes the editable source."""
     source = assembly.read_bytes()
@@ -245,7 +292,8 @@ async def _verify_numerical_source(workspace: Path, assembly: Path, baseline: di
     return result.numerical_evidence
 
 
-def _load_ready(path: Path, workspace: Path, kernel: Path, assembly: Path, base_commit: str, target: str) -> dict:
+def _load_ready(path: Path, binding: _Binding, base_commit: str, target: str) -> dict:
+    workspace, kernel, assembly = binding.workspace, binding.kernel, binding.assembly
     record: dict = json.loads(path.read_text(encoding="utf-8"))
     if (
         not isinstance(record, dict)
@@ -295,57 +343,31 @@ async def _measure_source_baseline(
     )
     if not acceptance.passed:
         raise AssemblyPreparationError(acceptance.detail)
-    source_bench = await bench_wallclock(driver, timeout_sec=_timeout(deadline, 600))
+    source_bench = await bench_wallclock(BenchRun(driver), timeout_sec=_timeout(deadline, 600))
     if not source_bench.get("success") or not source_bench.get("case_times"):
         raise AssemblyPreparationError("original source benchmark failed")
     _assembly_score(source_bench, source_bench)
     return source_bench, acceptance.numerical_evidence
 
 
-def _restore_prepared_workspace(
-    workspace: Path,
-    *,
-    start_commit: str,
-    paths: list[str],
-    kernel_path: Path,
-    original: bytes,
-    assembly: Path,
-    original_assembly: bytes | None,
-    manifest: Path,
-    capture: bool,
-) -> None:
-    """Put back everything preparation touched, for a run that did not reach a record."""
-    _git(workspace, "reset", "--soft", start_commit)
-    _git(workspace, "reset", start_commit, "--", *paths)
-    kernel_path.write_bytes(original)
-    if kernel_path != assembly:
-        if original_assembly is None:
-            assembly.unlink(missing_ok=True)
-        else:
-            assembly.write_bytes(original_assembly)
-    if capture:
-        manifest.unlink(missing_ok=True)
-
-
 async def prepare_assembly(
-    *,
     config: Config,
-    kernel: str,
-    driver: str,
-    sources: list[str],
+    task: AssemblyTask,
+    *,
     base_commit: str,
-    threshold: float,
     deadline: float,
     resume: bool = False,
 ) -> dict:
     """Export and bind compiler output, or verify an explicitly bound assembly input."""
+    kernel, driver, threshold = task.kernel, task.driver, task.threshold
     workspace = Path(config.workspace).resolve()
     kernel_path = _inside(workspace, kernel)
-    assembly = assembly_edit_paths(workspace, kernel, sources)[0]
+    assembly = assembly_edit_paths(workspace, kernel, task.sources)[0]
+    binding = _Binding(workspace, kernel_path, assembly)
     root = workspace / "forge_experiments" / "assembly_preparation"
     record_path = root / "result.json"
     if record_path.is_file():
-        return _load_ready(record_path, workspace, kernel_path, assembly, base_commit, config.gpu_target)
+        return _load_ready(record_path, binding, base_commit, config.gpu_target)
     if resume:
         raise AssemblyPreparationError("assembly resume requires a verified preparation record; start a fresh campaign")
     if _git(workspace, "status", "--porcelain"):
@@ -372,6 +394,7 @@ async def prepare_assembly(
     )
     if capture:
         paths.append(manifest.relative_to(workspace).as_posix())
+    checkpoint = _Checkpoint(binding, start_commit, paths, original, original_assembly, manifest, capture)
     try:
         source_bench, source_numerical_evidence = await _measure_source_baseline(driver, workspace, threshold, deadline)
         if capture:
@@ -383,7 +406,7 @@ async def prepare_assembly(
             if provenance["compiler_assembly_sha256"] != _digest(assembly):
                 raise AssemblyPreparationError("initial assembly differs from compiler output")
             kernel_path.write_text(candidate_source, encoding="utf-8")
-        report = await verify_assembly(kernel_path, assembly, driver, config.gpu_target, threshold, deadline)
+        report = await verify_assembly(assembly, driver, config.gpu_target, threshold, deadline)
         numerical_probe = await _verify_numerical_source(workspace, assembly, source_numerical_evidence, deadline)
         acceptance = await accept_candidate(
             str(workspace),
@@ -393,7 +416,7 @@ async def prepare_assembly(
         )
         if not acceptance.passed:
             raise AssemblyPreparationError(acceptance.detail)
-        initial_bench = await bench_wallclock(driver, timeout_sec=_timeout(deadline, 600))
+        initial_bench = await bench_wallclock(BenchRun(driver), timeout_sec=_timeout(deadline, 600))
         if not initial_bench.get("success") or set(initial_bench.get("case_times", {})) != set(
             source_bench["case_times"]
         ):
@@ -436,14 +459,4 @@ async def prepare_assembly(
         return record
     finally:
         if not committed:
-            _restore_prepared_workspace(
-                workspace,
-                start_commit=start_commit,
-                paths=paths,
-                kernel_path=kernel_path,
-                original=original,
-                assembly=assembly,
-                original_assembly=original_assembly,
-                manifest=manifest,
-                capture=capture,
-            )
+            checkpoint.restore()

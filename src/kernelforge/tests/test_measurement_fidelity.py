@@ -7,6 +7,7 @@ import asyncio
 import json
 import pathlib
 
+from kernelforge.loop.gate_settings import GateMeasurement
 from kernelforge.loop.insession_gate import InSessionGate
 from kernelforge.loop.scoring import (
     keep_score,
@@ -16,6 +17,7 @@ from kernelforge.loop.scoring import (
 from kernelforge.mcp_server.tools import bench as bench_module
 from kernelforge.resources import resource_path
 from kernelforge.mcp_server.tools.bench import (
+    BenchRun,
     bench_wallclock,
     measure_wallclock,
 )
@@ -32,7 +34,7 @@ def _run_bench(tmp_path, **kwargs) -> list[str]:
     """Run bench_wallclock against the argv-recording driver, return its argv."""
     drv = tmp_path / "drv.py"
     drv.write_text(_ARGV_DRIVER)
-    res = asyncio.run(bench_wallclock(driver_script=str(drv), **kwargs))
+    res = asyncio.run(bench_wallclock(BenchRun(str(drv), **kwargs)))
     assert res["success"], res
     return json.loads(pathlib.Path(str(drv) + ".argv").read_text())
 
@@ -85,14 +87,14 @@ def test_three_measurements_aggregate_diagnostics_by_per_case_median(monkeypatch
     )
     calls = []
 
-    async def fake_bench(**kwargs):
-        calls.append(kwargs)
+    async def fake_bench(run, **kwargs):
+        calls.append((run, kwargs))
         return next(results)
 
     monkeypatch.setattr(bench_module, "bench_wallclock", fake_bench)
     measured = asyncio.run(
         measure_wallclock(
-            driver_script="driver.py",
+            BenchRun("driver.py"),
             measurements=3,
             timeout_sec=45,
         )
@@ -134,11 +136,9 @@ def test_the_published_pristine_score_is_monotonic_across_keeps():
 
 def _gate(**kwargs) -> InSessionGate:
     return InSessionGate(
-        driver_script="/tmp/drv.py",
-        snr_threshold=30.0,
+        GateMeasurement(driver_script="/tmp/drv.py", snr_threshold=30.0, **kwargs),
         baseline_case_times={"case": 1.0},
         best_mean_case_speedup=1.0,
-        **kwargs,
     )
 
 
@@ -308,16 +308,19 @@ def test_driver_aggregates_repeats_by_median():
 def test_cli_can_actually_call_kb_warmstart():
     """The CLI's call site must match the function it calls."""
     import inspect
-    import re
+    import textwrap
 
     from kernelforge.cli import forge_loop_command
     from kernelforge.loop.knowledge_integration import kb_warmstart
 
     accepted = set(inspect.signature(kb_warmstart).parameters)
-    src = inspect.getsource(forge_loop_command._read_kb_warm_start)
-    call = src[src.index("kb_warmstart(") + len("kb_warmstart(") :]
-    call = call[: call.index(")\n")]
-    passed = set(re.findall(r"(?:^|[\s,(])([a-z_][a-z0-9_]*)\s*=", call))
+    tree = ast.parse(textwrap.dedent(inspect.getsource(forge_loop_command._read_kb_warm_start)))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "kb_warmstart"
+    ]
+    passed = {keyword.arg for call in calls for keyword in call.keywords}
     assert passed, "could not read the CLI call site"
     unknown = passed - accepted
     assert not unknown, f"CLI passes keywords kb_warmstart rejects: {sorted(unknown)}"

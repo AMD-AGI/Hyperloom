@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -41,24 +42,39 @@ def _i(value: Any, default: int = 0) -> int:
         return default
 
 
+@dataclass(frozen=True)
+class ReportSubject:
+    """What a benchmark report describes: the framework, the model and whether the run was profiled."""
+
+    framework: str
+    model: str
+    profiling_enabled: bool = False
+
+
+@dataclass(frozen=True)
+class RunOutcome:
+    """How one benchmark run ended: its verdict, errors, raw client result and analysis."""
+
+    success: bool
+    errors: list[str] | None = None
+    raw_result: dict[str, Any] | None = None
+    analysis: dict[str, Any] | None = None
+
+
 def build_report(
-    raw_result: dict[str, Any] | None,
+    subject: ReportSubject,
+    outcome: RunOutcome,
     *,
-    framework: str,
-    model: str,
-    success: bool,
     workspace_dir: str,
     execution_time: float,
-    errors: list[str] | None = None,
-    analysis: dict[str, Any] | None = None,
-    profiling_enabled: bool = False,
 ) -> dict[str, Any]:
     """Build a Magpie-compatible ``benchmark_report.json`` dict."""
-    raw = raw_result or {}
+    raw = outcome.raw_result or {}
+    analysis = outcome.analysis
     report: dict[str, Any] = {
-        "success": bool(success),
-        "framework": framework,
-        "model": model or raw.get("model_id", ""),
+        "success": bool(outcome.success),
+        "framework": subject.framework,
+        "model": subject.model or raw.get("model_id", ""),
         "throughput": None,
         "latency": None,
         "kernel_summary": [],
@@ -68,8 +84,8 @@ def build_report(
         "gpu_monitor": None,
         "workspace_dir": workspace_dir,
         "execution_time": _f(execution_time),
-        "errors": list(errors or []),
-        "profiling_enabled": bool(profiling_enabled),
+        "errors": list(outcome.errors or []),
+        "profiling_enabled": bool(subject.profiling_enabled),
     }
     if raw:
         report["throughput"] = {
