@@ -4,8 +4,9 @@
 """Judging a branch's measured candidates: the half of the specialist runtime that is not a model.
 
 The specialist proposes and the toolbox measures; this code compares each measurement through the rule gate, retests a
-gain on another node, and tells the specialist in its branch log what landed and what the gate could not land. Every step is read back
-from the notebook, so a restarted runtime takes each step once.
+gain on another node, checks a declared correctness fix (``fix_check``) and lands it or asks for its fork, and tells the
+specialist in its branch log what landed and what the gate could not land. Every step is read back from the notebook,
+so a restarted runtime takes each step once; a fix check interrupted by a restart runs its repro tests again.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from typing import Protocol
 
 from hyperloom.contracts.measurement import Purpose, Validity
 from hyperloom_multibranch.contracts.branch_log import BranchLogEntry, BranchLogType
+from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission
 from hyperloom_multibranch.contracts.gate import ResultUnverified
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook.interfaces import (
@@ -33,6 +35,7 @@ from hyperloom_multibranch.rulegate.decision import Action, decide
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.readings import UnreadableResult
 from hyperloom_multibranch.rulegate.rules import Rule, repeats, retest_request
+from hyperloom_multibranch.specialist.fix_check import FixCheck, FixChecking, check_fix, declares_fix
 
 #: Opens every branch log entry the runtime writes, so the specialist tells them from its own.
 NOTICE = "rule gate:"
@@ -44,12 +47,14 @@ class JudgeNotebook(Inbox, SnapshotQuery, BranchLogStore, CommitQuery, Protocol)
 
 @dataclass(frozen=True)
 class Judging:
-    """What every branch's judge settles candidates with: the workload's rule, the gate that lands what clears it, and
-    the toolbox a retest goes to."""
+    """What every branch's judge settles candidates with: the workload's rule, the gate that lands what clears it, the
+    toolbox a retest goes to, and how a declared correctness fix is checked (``None``: a declared fix is judged on its
+    performance alone, and its specialist told so)."""
 
     gate: RuleGate
     toolbox: Toolbox
     rule: Rule
+    fixes: FixChecking | None = None
 
 
 class BranchJudge:
@@ -59,6 +64,7 @@ class BranchJudge:
         self._branch = branch
         self._notebook = notebook
         self._gate, self._toolbox, self._rule = judging.gate, judging.toolbox, judging.rule
+        self._fixes = judging.fixes
 
     async def run(self, poll_seconds: float, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
         """Judge what waits, then again whenever the inbox brings a result, until cancelled; ``sleep`` waits between
@@ -106,6 +112,10 @@ class BranchJudge:
         await self._settle(first, judgement, logged)
 
     async def _settle(self, first: TestRecord, judgement: Judgement, logged: set[BranchLogEntry]) -> None:
+        fix = None
+        if declares_fix(first.request, judgement):
+            checked = await self._check_fix(first, judgement, logged)
+            judgement, fix = checked.judgement, checked.proof
         if decide(judgement) is Action.DIAGNOSE:
             # Before the gate holds the candidate: once held, it is never judged again, so a notice lost after that
             # would never be written.
@@ -115,7 +125,11 @@ class BranchJudge:
                 logged, f"{content}; diagnose it, then request_repair or decline_repair", *judgement.request_ids
             )
         try:
-            action = await self._gate.settle(first.request, judgement)
+            action = await self._gate.settle(first.request, judgement, fix=fix)
+            if action is Action.REQUEST_FORK:
+                reason = f"correctness fix of {first.request_id}"
+                admission = await self._gate.fork(first.request, judgement, reason, fix=fix)
+                await self._notice(logged, _forked(first, admission), *judgement.request_ids)
         except ResultUnverified as error:
             unverified = "a result behind it did not re-verify against its signed bundle"
             content = f"{first.request_id} was not committed: {unverified} ({error.request_id}: {error.reason})"
@@ -123,14 +137,24 @@ class BranchJudge:
             return
         if action is Action.COMMIT:
             landed = f"{first.request_id} landed on your branch at {judgement.gain_pct:+.2f}% over {first.request.parent_commit}"
+            if fix is not None:
+                landed = f"{landed} with its repro case, which now guards every later commit"
             await self._notice(logged, f"{landed}; your next candidates go on the new head", *judgement.request_ids)
         elif action is Action.RETEST:
             await self._toolbox.submit_test(retest_request(first, self._rule))
-        elif action is Action.REQUEST_FORK:
-            raise RuntimeError(f"{first.request_id} calls for a fork, which the runtime does not request yet")
         elif action is Action.RECORD_ONLY and decide(judgement) is Action.COMMIT:
             moved = f"{first.request_id} improved on {first.request.parent_commit}, but the branch has moved on"
             await self._notice(logged, f"{moved}; submit it again on the head as a new test", *judgement.request_ids)
+
+    async def _check_fix(self, first: TestRecord, judgement: Judgement, logged: set[BranchLogEntry]) -> FixCheck:
+        if self._fixes is None:
+            checked = FixCheck(judgement, None, "this session does not check correctness fixes")
+        else:
+            checked = await check_fix(self._fixes, self._notebook, first.request, judgement)
+        if checked.alone:
+            content = f"{first.request_id} is judged on its performance alone: {checked.alone}"
+            await self._notice(logged, content, first.request_id)
+        return checked
 
     async def _notice(self, logged: set[BranchLogEntry], content: str, *request_ids: str) -> None:
         entry = BranchLogEntry(self._branch, BranchLogType.RESULT, f"{NOTICE} {content}", request_ids)
@@ -146,6 +170,15 @@ def _awaits_judgement(record: TestRecord) -> bool:
 
 def _succeeded(record: TestRecord) -> bool:
     return record.result is not None and record.result.validity is Validity.SUCCEEDED
+
+
+def _forked(first: TestRecord, admission: ForkAdmission) -> str:
+    fix = f"{first.request_id} fixes a defect of {first.request.parent_commit}"
+    if admission.status is AdmissionStatus.ACCEPTED:
+        return f"{fix}: it goes to a new branch, {admission.branch}, cut at that commit; you go on on yours"
+    if admission.status is AdmissionStatus.PENDING:
+        return f"{fix}: it waits for a branch slot as {admission.branch}; if the fork is dropped it is recorded only"
+    return f"{fix}, but its fork was refused ({admission.reason}); it is recorded only"
 
 
 def _ended(record: TestRecord) -> str:

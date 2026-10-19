@@ -8,8 +8,17 @@ import pytest
 
 from hyperloom.common.accuracy import ACCURACY_METRICS
 from hyperloom.common.perf_metric import GRADED_OUTPUT
-from hyperloom.contracts.measurement import AttachmentRef, Purpose, TestKind, TestRequest, Validity
+from hyperloom.contracts.measurement import (
+    NOT_REPRODUCED,
+    REPRODUCED,
+    AttachmentRef,
+    Purpose,
+    TestKind,
+    TestRequest,
+    Validity,
+)
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta
+from hyperloom.measure.compile import LocalBlobStore
 from hyperloom_multibranch.contracts.fork import AdmissionStatus
 from hyperloom_multibranch.contracts.judgement import ACCURACY_SCORE, Verdict
 from hyperloom_multibranch.contracts.notebook import Role, Writer
@@ -20,9 +29,14 @@ from hyperloom_multibranch.notebook.tests.factories import delta
 from hyperloom_multibranch.rulegate.baseline import write_inferencex_baseline
 from hyperloom_multibranch.rulegate.gate import RuleGate
 from hyperloom_multibranch.rulegate.inferencex import DROPPED_REQUESTS, GAIN_NOT_CONFIRMED
+from hyperloom_multibranch.rulegate.critic import CriticVerdict, FixReview
+from hyperloom_multibranch.rulegate.fix_case import FIX_CASE_ID, pack_case
+from hyperloom_multibranch.rulegate.regression import ReproRunner
 from hyperloom_multibranch.rulegate.rules import InferenceXRule
+from hyperloom_multibranch.rulegate.service import Polling
+from hyperloom_multibranch.specialist.fix_check import FixChecking
 from hyperloom_multibranch.specialist.judging import NOTICE, BranchJudge, Judging
-from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler, RecordingVerifier
+from hyperloom_multibranch.tests.fakes import InMemoryRepo, RecordingScheduler, RecordingVerifier, ReproToolbox
 from hyperloom_multibranch.toolbox.fake import FakeToolbox
 from hyperloom_multibranch.toolbox.fake_model import Fate, FakeToolboxConfig, NoiseModel
 
@@ -30,7 +44,11 @@ ROOT, BRANCH, CONC = "c0", "s1", 64
 RECIPE = Recipe("rocm/vllm@sha256:" + "c" * 64, LaunchConfig(server_args="--max-num-seqs 128"))
 QUIET = NoiseModel(node_bias_median=0.0, node_bias_p90=0.0, test_noise_sigma=0.0)
 FAST, FAST_TOO, FLAT, WRONG, BROKEN = (delta(f"--max-num-seqs {n}") for n in (256, 384, 136, 512, 1024))
-EFFECTS = {change.fingerprint(): 0.05 for change in (FAST, FAST_TOO, WRONG)} | {FLAT.fingerprint(): 0.005}
+SLOW = delta("--max-num-seqs 64")
+EFFECTS = {change.fingerprint(): 0.05 for change in (FAST, FAST_TOO, WRONG)} | {
+    FLAT.fingerprint(): 0.005,
+    SLOW.fingerprint(): -0.05,
+}
 
 
 def _request(
@@ -75,10 +93,31 @@ class _Session:
         self.repo = InMemoryRepo(RECIPE)
         self.verifier = RecordingVerifier()
         self.gate = RuleGate(self.gate_notebook, self.repo, RecordingScheduler(AdmissionStatus.ACCEPTED), self.verifier)
+        self.fixes: FixChecking | None = None
         self.judge = self.new_judge()
 
     def new_judge(self) -> BranchJudge:
-        return BranchJudge(BRANCH, self.runtime, Judging(self.gate, self.toolbox, InferenceXRule(self.runtime, CONC)))
+        rule = InferenceXRule(self.runtime, CONC)
+        return BranchJudge(BRANCH, self.runtime, Judging(self.gate, self.toolbox, rule, self.fixes))
+
+    def check_fixes(self, root, critic: "_Critic", *, parent_reproduces: bool = True) -> AttachmentRef:
+        """Check declared fixes with a repro toolbox whose case reproduces on an unchanged commit (when
+        ``parent_reproduces``) and runs clean on a changed one; returns the case to attach."""
+
+        def answer(request: TestRequest) -> str:
+            unchanged = request.delta == RecipeDelta()
+            return REPRODUCED if unchanged and parent_reproduces else NOT_REPRODUCED
+
+        blobs = LocalBlobStore(root / "blobs")
+        repro = ReproToolbox(LocalNotebook(root / "notebook", Writer(Role.TOOLBOX, "repro")), answer)
+        runner = ReproRunner(repro, self.runtime, RecordingVerifier(), polling=Polling(0.001))
+        self.fixes = FixChecking(runner, critic, blobs, "qwen3-8b on vllm, TP 1, ISL 1024, OSL 1024, concurrency 64")
+        self.judge = self.new_judge()
+        sha = blobs.put(pack_case("curl -s $HL_BASE_URL/v1/completions -d @long.json | grep -q nan && exit 1", "nan"))
+        return AttachmentRef(FIX_CASE_ID, "dir", sha)
+
+    async def declare(self, change: RecipeDelta, case: AttachmentRef) -> str:
+        return await self.toolbox.submit_test(replace(_request(BRANCH, Purpose.EXPLORE, change), attachments=(case,)))
 
     async def prelude(self) -> None:
         root_event = LineageEvent(LineageKind.ROOT, INTEGRATION_BRANCH, commit_id=ROOT, recipe_digest=RECIPE.digest())
@@ -205,6 +244,78 @@ async def test_a_gain_that_drops_requests_on_both_measurements_is_held_for_the_s
     assert await session.repo.head(BRANCH) == ROOT
     (notice,) = await session.notices()
     assert f"{first} cleared the bar twice and is held back by {DROPPED_REQUESTS};" in notice
+
+
+class _Critic:
+    def __init__(self, reachable: bool = True) -> None:
+        self.reachable, self.reviews = reachable, []
+
+    async def review(self, review: FixReview) -> CriticVerdict:
+        self.reviews.append(review)
+        return CriticVerdict(self.reachable, "a 4k prompt triggers it" if self.reachable else "only 64k prompts do")
+
+
+async def test_a_proven_reachable_fix_that_costs_nothing_lands_with_its_case(session, tmp_path):
+    critic = _Critic()
+    first = await session.declare(FLAT, session.check_fixes(tmp_path, critic))
+    await session.step()
+
+    record = await session.runtime.record(first)
+    head = await session.repo.head(BRANCH)
+    assert (record.conclusion, record.commit_id) == (Conclusion.COMMITTED_WITH_REPRO, head)
+    assert (record.judgement.fixes_correctness, record.judgement.foundation_fix) == (True, True)
+    assert [case.fix_commit for case in await session.runtime.regression_cases_for(head)] == [head]
+    assert critic.reviews[0].case.diagnosis == "nan"
+    (notice,) = await session.notices()
+    assert "with its repro case, which now guards every later commit" in notice
+
+
+async def test_a_proven_reachable_fix_that_costs_performance_asks_for_its_fork(session, tmp_path):
+    first = await session.declare(SLOW, session.check_fixes(tmp_path, _Critic()))
+    await session.step()
+
+    record = await session.runtime.record(first)
+    assert (record.conclusion, await session.repo.head(BRANCH)) == (Conclusion.SPLIT_REQUESTED, ROOT)
+    (notice,) = await session.notices()
+    assert f"{first} fixes a defect of {ROOT}: it goes to a new branch, fork-1, cut at that commit" in notice
+
+
+@pytest.mark.parametrize(
+    ("checked", "reachable", "parent_reproduces", "why"),
+    [
+        (True, True, False, "its fix is not proven: the case did not reproduce on the parent"),
+        (True, False, True, "the reviewer refused its fix: only 64k prompts do"),
+        (False, True, True, "this session does not check correctness fixes"),
+    ],
+    ids=["not-proven", "refused", "unchecked"],
+)
+async def test_a_fix_that_does_not_count_is_judged_on_its_performance_alone(
+    session, tmp_path, checked, reachable, parent_reproduces, why
+):
+    case = session.check_fixes(tmp_path, _Critic(reachable), parent_reproduces=parent_reproduces)
+    if not checked:
+        session.fixes = None
+        session.judge = session.new_judge()
+    first = await session.declare(FLAT, case)
+    await session.step()
+
+    record = await session.runtime.record(first)
+    assert (record.conclusion, record.judgement.fixes_correctness) == (Conclusion.RECORDED_ONLY, False)
+    (notice,) = await session.notices()
+    assert notice.startswith(f"{NOTICE} {first} is judged on its performance alone: {why}")
+
+
+async def test_a_gain_that_carries_a_proven_case_lands_on_its_gain_and_keeps_the_case_unreviewed(session, tmp_path):
+    critic = _Critic()
+    first = await session.declare(FAST, session.check_fixes(tmp_path, critic))
+    await session.step()
+    await session.step()
+
+    record = await session.runtime.record(first)
+    head = await session.repo.head(BRANCH)
+    assert (record.conclusion, record.judgement.fixes_correctness) == (Conclusion.COMMITTED, False)
+    assert len(await session.runtime.regression_cases_for(head)) == 1
+    assert critic.reviews == []
 
 
 async def test_a_failed_measurement_takes_no_judgement(session):
