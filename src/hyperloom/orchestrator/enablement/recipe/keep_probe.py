@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import subprocess  # nosec B404 - local interpreter probe, argv-only, no shell.
+from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from .steps import select_linked_build
@@ -218,13 +219,27 @@ def graded_launch_env(override: Mapping[str, Any] | None, materialized_config: s
     return config_launch_env(materialized_config, env)
 
 
+@dataclass(frozen=True)
+class KeepEvidence:
+    """What a round's provisioning and build left behind for its KEEP probe.
+
+    Attributes:
+        build_manifest: The durable build manifest the linked attempt is joined from.
+        specialist_task_id: The round declaring this KEEP.
+        provision_result: The round's provisioning result, or ``None`` when no
+            provisioning stage ran.
+    """
+
+    build_manifest: Sequence[Any]
+    specialist_task_id: str
+    provision_result: Any
+
+
 def probe_keep_environment(
     params: Mapping[str, Any],
+    evidence: KeepEvidence,
     *,
     framework: str,
-    build_manifest: Sequence[Any],
-    specialist_task_id: str,
-    provision_result: Any,
     materialized_config: str = "",
 ) -> tuple[dict[str, Any], dict[str, str]]:
     """Observe the closure and assertion set under the accepted runtime.
@@ -262,6 +277,7 @@ def probe_keep_environment(
     from ...actions.executors._benchmark_interpreter import _resolve_probe_python
     from ...actions.executors.benchmark_backend import resolve_backend_name, resolve_benchmark_interpreter
 
+    provision_result = evidence.provision_result
     override: dict[str, Any] = {}
     if provision_result is not None and getattr(provision_result, "ok", False):
         override = provision_result.runtime.to_runtime_override()
@@ -284,8 +300,8 @@ def probe_keep_environment(
     )
     packages = keep_assertion_packages(
         provision_versions=provision_versions,
-        build_manifest=build_manifest,
-        specialist_task_id=specialist_task_id,
+        build_manifest=evidence.build_manifest,
+        specialist_task_id=evidence.specialist_task_id,
     )
     # The serving framework is always asserted: an enablement that patches it
     # in place provisions and builds nothing, so without this it names no

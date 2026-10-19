@@ -374,6 +374,52 @@ def test_kernel_lifecycle_funnel_propagates_to_global_facts() -> None:
     assert f["optimized"] == 0 and f["adopted"] == 0
 
 
+def test_variant_funnel_reaches_the_key_facts_and_the_summary() -> None:
+    """A breakdown exported before ``outcome.variants`` existed is counted off its timeline."""
+    md = render_session_report(_fixture_breakdown()).markdown
+
+    line = "1 bench run over 1 distinct change → kept 1 (100.0%) · reverted 0 · failed 0 → validated +10.99%"
+    assert f"- **Variants**: {line}\n" in md
+    assert f"- Variants: {line}.\n" in md
+
+
+def test_variant_funnel_reads_the_exported_block() -> None:
+    bd = _fixture_breakdown()
+    bd["outcome"]["variants"] = {
+        "bench_runs": 12,
+        "distinct": 7,
+        "kept": 2,
+        "reverted": 10,
+        "failed": 0,
+        "keep_rate_pct": 16.67,
+    }
+    bd["outcome"]["validation"]["adoption_count"] = 2
+
+    r = render_session_report(bd)
+
+    assert (
+        "- **Variants**: 12 bench runs over 7 distinct changes → kept 2 (16.7%) · reverted 10 · failed 0"
+        " → final stack 2 changes, validated +10.99%\n"
+    ) in r.markdown
+    assert json.loads(r.llm_user_prompt)["global_facts"]["variant_funnel"]["bench_runs"] == 12
+
+
+def test_a_session_that_benched_nothing_says_so() -> None:
+    bd = _fixture_breakdown()
+    bd["timeline"] = [_baseline_event(), _kernel_event()]
+
+    assert "- **Variants**: none benched\n" in render_session_report(bd).markdown
+
+
+def test_a_drifted_variants_block_still_renders() -> None:
+    bd = _fixture_breakdown()
+    bd["outcome"]["variants"] = {"bench_runs": "3", "kept": "x", "keep_rate_pct": "n/a"}
+
+    funnel = render_session_report(bd).global_facts.variant_funnel
+
+    assert (funnel["bench_runs"], funnel["kept"], funnel["keep_rate_pct"]) == (3, 0, None)
+
+
 @pytest.mark.parametrize(
     "outcome,expected_kind",
     [

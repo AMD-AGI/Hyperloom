@@ -10,6 +10,7 @@ import inspect
 import pytest
 
 from hyperloom.inference_optimizer import cli
+from hyperloom.orchestrator.loop.coordinator import CoordinatorSettings
 from hyperloom.orchestrator.phases.machine_state import (
     DEFAULT_PHASE_BUDGET_PCT,
     PHASE_FRAMEWORK_AGENT,
@@ -210,7 +211,7 @@ def _persisted_session(session_dir, **fields) -> None:
 
 def test_fresh_session_budget_args_override_state(tmp_path) -> None:
     """Fresh session: explicit budget args reach state after renormalise + redistribute."""
-    coord = make_coordinator(tmp_path, phase_budget_pct={PHASE_KERNEL_AGENT: 0.55})
+    coord = make_coordinator(tmp_path, settings=CoordinatorSettings(phase_budget_pct={PHASE_KERNEL_AGENT: 0.55}))
 
     budget = coord.shared_state.phase_budget_pct
     assert budget[PHASE_KERNEL_AGENT] == pytest.approx(0.55)
@@ -236,7 +237,7 @@ def test_resume_with_explicit_budget_args_overwrites_state(tmp_path) -> None:
     _persisted_session(tmp_path, phase_budget_pct=persisted, phase=PHASE_PRELUDE)
 
     # Operator explicitly passes a new kernel share.
-    coord = make_coordinator(tmp_path, phase_budget_pct={PHASE_KERNEL_AGENT: 0.30})
+    coord = make_coordinator(tmp_path, settings=CoordinatorSettings(phase_budget_pct={PHASE_KERNEL_AGENT: 0.30}))
 
     # The CLI value wins over the persisted share.
     assert coord.shared_state.phase_budget_pct[PHASE_KERNEL_AGENT] == pytest.approx(0.30)

@@ -177,12 +177,14 @@ def test_post_prelude_target(optimize: bool, kernel: bool, target: str) -> None:
 
 def test_make_history_row() -> None:
     row = ps.make_history_row(
-        from_phase="framework_agent",
-        to_phase="kernel_agent",
-        reason="  plateau  ",
-        evidence={"k": 1},
-        ts="2026-06-09T00:00:00Z",
-        ts_unix=12.0,
+        ps.HistoryEntry(
+            from_phase="framework_agent",
+            to_phase="kernel_agent",
+            reason="  plateau  ",
+            evidence={"k": 1},
+            ts="2026-06-09T00:00:00Z",
+            ts_unix=12.0,
+        )
     )
     assert row["from_phase"] == "FRAMEWORK_AGENT"
     assert row["to_phase"] == "KERNEL_AGENT"
