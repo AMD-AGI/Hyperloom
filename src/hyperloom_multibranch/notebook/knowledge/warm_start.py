@@ -17,6 +17,9 @@ Every record goes through ``knowledge_to_warm_recipe``, so records the single-li
 A lead names the dimensions where it differs from this session. It is a lead, not a starting point: specialists still
 measure it on this session's root.
 
+PRELUDE reads the KB once per session, and the KB Store answers a server error now and then, so each read is asked
+again after a server error or a dropped connection, waiting :data:`KB_RETRY_SECONDS`; a refusal is not asked again.
+
 :func:`replay_leads` gives the first leads a :class:`PreparedReplay`: the champion's recipe, patches and kernel
 artifacts too, their files downloaded from the KB into the session's blob store. A champion built on another image, or
 one whose files the KB does not hold, replays its launch config only. The specialist's ``notebook_replay`` makes the
@@ -27,10 +30,13 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Mapping, Sequence
+import time
+import urllib.error
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 
 from hyperloom.contracts.recipe import LaunchConfig, Recipe, RecipeDelta, RecipeError, delta_between
 from hyperloom.inference_optimizer.recipe_snapshot_constants import F_LABEL_FRAMEWORK_VERSION, canonical_labels
@@ -54,8 +60,34 @@ MAX_CANDIDATES = 20
 PAGE_SIZE = 50
 #: How many of the best leads get a replay; each whole one downloads the champion's files.
 REPLAY_LEADS = 3
+#: The waits before each new ask of a read that failed transiently; one more ask follows the last wait.
+KB_RETRY_SECONDS = (2.0, 5.0, 15.0)
 _UNSAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
 _REPLAY_ERRORS = (KBStoreError, RemoteRecipeValidationError, RecipeError, BlobError, OSError, ValueError)
+_Read = TypeVar("_Read")
+
+
+def _transient(error: KBStoreError) -> bool:
+    """Whether ``error`` is a server error or a dropped connection, as the KB Store client raises them."""
+
+    cause = error.__cause__
+    if isinstance(cause, urllib.error.HTTPError):
+        return cause.code >= 500
+    return isinstance(cause, OSError)
+
+
+def _asked(read: Callable[[], _Read]) -> _Read:
+    """``read()``, asked again after each wait of :data:`KB_RETRY_SECONDS` while it fails transiently."""
+
+    for wait in KB_RETRY_SECONDS:
+        try:
+            return read()
+        except KBStoreError as exc:
+            if not _transient(exc):
+                raise
+            log.warning("Recipe KB read failed, asking again in %gs: %s", wait, exc)
+            time.sleep(wait)
+    return read()
 
 
 class RecipeReader(Protocol):
@@ -210,7 +242,7 @@ def candidates(reader: RecipeReader, scheme: str, match: dict[str, str], limit: 
     found: dict[str, Mapping[str, Any]] = {}
     offset: int | None = 0
     while offset is not None and len(found) < limit:
-        page = reader.search_identities(scheme=scheme, match=match, offset=offset, limit=PAGE_SIZE)
+        page = _asked(partial(reader.search_identities, scheme=scheme, match=match, offset=offset, limit=PAGE_SIZE))
         items = [item for item in page.get("items") or () if isinstance(item, Mapping)]
         for item in items:
             canonical_id = str(item.get("canonical_id") or "")
@@ -226,7 +258,7 @@ def _read_lead(
 ) -> WarmLead | None:
     canonical_id = str(item["canonical_id"])
     try:
-        envelope = reader.get_view(canonical_id, scope)
+        envelope = _asked(partial(reader.get_view, canonical_id, scope))
         dimensions = item.get("dimensions")
         return (
             lead_of(envelope, scope, labels, dimensions if isinstance(dimensions, Mapping) else {})
@@ -305,7 +337,7 @@ def replay_leads(
 def _champion(client: RecipeDownloader, lead: WarmLead, scope: RecipeScope, target: ReplayTarget) -> Recipe:
     """The champion's recipe on this session's image, its files put into the session's blob store."""
 
-    envelope = client.get_view(lead.canonical_id, scope)
+    envelope = _asked(partial(client.get_view, lead.canonical_id, scope))
     if envelope is None:
         raise RecipeError("the record is gone")
     champion = _recorded_recipe(envelope)
@@ -319,7 +351,7 @@ def _champion(client: RecipeDownloader, lead: WarmLead, scope: RecipeScope, targ
     if unloadable:
         raise RecipeError(f"measurement loads no {', '.join(unloadable)} kernel artifacts yet")
     destination = target.workdir / _UNSAFE_NAME.sub("-", lead.canonical_id)
-    client.read(lead.canonical_id, destination, scope=scope, envelope=envelope)
+    _asked(partial(client.read, lead.canonical_id, destination, scope=scope, envelope=envelope))
     files = destination / "files"
     for stack, component in enumerate(champion.components):
         for member, patch in enumerate(component.patches):
@@ -357,6 +389,7 @@ def _layer(delta: RecipeDelta) -> IntentLayer:
 
 
 __all__ = [
+    "KB_RETRY_SECONDS",
     "MAX_CANDIDATES",
     "REPLAY_LEADS",
     "PreparedReplay",

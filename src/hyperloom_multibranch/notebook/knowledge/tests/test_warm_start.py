@@ -8,7 +8,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import logging
+import urllib.error
 from dataclasses import dataclass, field, replace
+from email.message import Message
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +26,7 @@ from hyperloom.contracts.recipe import (
     apply,
 )
 from hyperloom.measure.compile import LocalBlobStore
-from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
+from hyperloom.orchestrator.knowledge.remote_recipe.client import KBStoreError, RemoteRecipeClient
 from hyperloom.orchestrator.knowledge.remote_recipe.models import RecipeScope
 from hyperloom.orchestrator.knowledge.remote_recipe.values import (
     CURRENT_KNOWLEDGE_SCHEMA_VERSION,
@@ -36,6 +38,7 @@ from hyperloom_multibranch.notebook.knowledge.recipe_kb import overlay_ref
 from hyperloom_multibranch.notebook.knowledge.recipe_writeback import FinalRecipe, knowledge_document, recipe_identity
 from hyperloom_multibranch.notebook.knowledge.tests.fakes import FakeRecipeStore
 from hyperloom_multibranch.contracts.notebook.records import REPLAY_TOOL
+from hyperloom_multibranch.notebook.knowledge import warm_start
 from hyperloom_multibranch.notebook.knowledge.warm_start import (
     ReplayTarget,
     WarmLead,
@@ -179,6 +182,58 @@ def test_a_lead_without_values_renders_what_it_has(store: FakeRecipeStore) -> No
 
     assert (older.server_args, dict(older.envs)) == ("", {})
     assert older.gain_pct == 0.0 and older.render().endswith(": +0.00% [older]")
+
+
+def _failed(cause: Exception) -> KBStoreError:
+    error = KBStoreError(f"POST /v1/kb/search failed: {cause!r}")
+    error.__cause__ = cause
+    return error
+
+
+def _http(code: int) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError("https://kb.example/v1/kb/search", code, "error", Message(), None)
+
+
+@dataclass
+class _Flaky(FakeRecipeStore):
+    """A store whose next searches fail with ``failures``, one each, before it answers."""
+
+    failures: list[KBStoreError] = field(default_factory=list)
+    asks: int = 0
+
+    def search_identities(self, **query: Any) -> dict[str, Any]:
+        self.asks += 1
+        if self.failures:
+            raise self.failures.pop(0)
+        return super().search_identities(**query)
+
+
+@pytest.fixture
+def no_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(warm_start, "KB_RETRY_SECONDS", (0.0, 0.0, 0.0))
+
+
+@pytest.mark.usefixtures("no_waits")
+@pytest.mark.parametrize("cause", [_http(503), urllib.error.URLError(ConnectionResetError("reset by peer"))])
+def test_a_server_error_or_a_dropped_connection_is_asked_again(store: FakeRecipeStore, cause: Exception) -> None:
+    flaky = _Flaky(identities=store.identities, views=store.views, failures=[_failed(cause), _failed(cause)])
+
+    leads = warm_leads(RemoteRecipeClient(flaky), PROFILE)
+
+    assert [lead.canonical_id for lead in leads] == [EXACT_ID, OLDER_ID]
+    assert flaky.asks == len(flaky.searches) + 2
+
+
+@pytest.mark.usefixtures("no_waits")
+def test_a_refusal_is_not_asked_again_and_a_kb_that_keeps_failing_fails_the_read(store: FakeRecipeStore) -> None:
+    refused = _Flaky(identities=store.identities, views=store.views, failures=[_failed(_http(403))])
+    down = _Flaky(identities=store.identities, views=store.views, failures=[_failed(_http(503)) for _ in range(4)])
+
+    for kb in (refused, down):
+        with pytest.raises(KBStoreError):
+            warm_leads(RemoteRecipeClient(kb), PROFILE)
+
+    assert (refused.asks, down.asks) == (1, 4)
 
 
 @dataclass
