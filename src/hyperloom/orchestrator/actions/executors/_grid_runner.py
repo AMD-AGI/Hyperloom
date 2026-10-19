@@ -16,7 +16,7 @@ import time
 from collections.abc import Sequence
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Callable, NoReturn
+from typing import Any, Callable, NamedTuple, NoReturn
 
 import yaml
 
@@ -755,6 +755,21 @@ def session_grid_bounds(shared_state: Any) -> tuple[float | None, float | None]:
     return (deadline, variant_sec)
 
 
+class _RoundAttempt(NamedTuple):
+    """One variant's run of one round, and what it left behind.
+
+    ``server_survivors`` are the servers the variant booted that outlived its teardown.
+    """
+
+    idx: int
+    variant: GridVariant
+    slot: Path
+    returncode: int | None
+    started_unix: float
+    server_log: Path
+    server_survivors: list[int]
+
+
 async def run_grid(
     *,
     base_yaml_path: Path,
@@ -861,59 +876,52 @@ async def run_grid(
 
     def _abort_on_round_stop(
         stopped: StoppedByTheRun,
+        attempt: _RoundAttempt,
         *,
-        idx: int,
-        variant: GridVariant,
-        slot: Path,
         round_label: str,
-        returncode: int | None,
-        started_unix: float,
-        server_log: Path,
-        server_survivors: list[int],
     ) -> NoReturn:
-        """End the variant on a round the run stopped.
-
-        ``server_survivors`` are the servers the variant booted that outlived its teardown.
-        """
-        if returncode == SESSION_TIME_EXHAUSTED_RETURNCODE:
+        """End the variant on a round the run stopped."""
+        if attempt.returncode == SESSION_TIME_EXHAUSTED_RETURNCODE:
             stopped = deadline_stop
-        runtime_sec = round(max(0.0, time.time() - started_unix), 2)
+        runtime_sec = round(max(0.0, time.time() - attempt.started_unix), 2)
         log.warning(
             "grid_runner: variant %d/%d name=%s %s round reaped after %.1fs: %s; recorded as skipped, not failed",
-            idx + 1,
+            attempt.idx + 1,
             len(grid),
-            variant.name,
+            attempt.variant.name,
             round_label,
             runtime_sec,
             stopped.interrupted,
         )
         teardown = "tree reaped"
-        if server_survivors:
-            teardown += f", but server pid(s) {', '.join(map(str, server_survivors))} survived SIGKILL"
+        if attempt.server_survivors:
+            teardown += f", but server pid(s) {', '.join(map(str, attempt.server_survivors))} survived SIGKILL"
         _write_variant_abort_marker(
-            slot,
-            variant_name=variant.name,
+            attempt.slot,
+            variant_name=attempt.variant.name,
             error_class=stopped.error_class,
             error_summary=f"{stopped.interrupted}; {teardown}",
-            extra_args=variant.extra_server_args,
+            extra_args=attempt.variant.extra_server_args,
         )
         ends_the_batch = stopped.ends_the_batch
         raise _VariantAborted(
             VariantResult(
-                name=variant.name,
-                extra_server_args=variant.extra_server_args,
-                extra_envs=dict(variant.extra_envs),
+                name=attempt.variant.name,
+                extra_server_args=attempt.variant.extra_server_args,
+                extra_envs=dict(attempt.variant.extra_envs),
                 status="skipped",
-                returncode=returncode,
+                returncode=attempt.returncode,
                 runtime_sec=runtime_sec,
                 error=stopped.interrupted,
                 error_class=stopped.error_class,
-                server_log_path=_measurement_server_log_path(server_log, slot=slot),
-                note=variant.note,
-                nonfatal_warnings=[f"server_survived_teardown:{pid}" for pid in server_survivors],
+                server_log_path=_measurement_server_log_path(attempt.server_log, slot=attempt.slot),
+                note=attempt.variant.note,
+                nonfatal_warnings=[f"server_survived_teardown:{pid}" for pid in attempt.server_survivors],
             ),
             halt=_Halt.STOP if ends_the_batch else _Halt.ON_FAILURE,
-            trailing=[_not_run_skip_result(rest, stopped) for rest in grid[idx + 1 :]] if ends_the_batch else (),
+            trailing=[_not_run_skip_result(rest, stopped) for rest in grid[attempt.idx + 1 :]]
+            if ends_the_batch
+            else (),
         )
 
     # How many full benchmark passes one variant costs.
@@ -1188,14 +1196,16 @@ async def run_grid(
                     warmup_survivors = _teardown_variant_server(slot, lifecycle)
                     _abort_on_round_stop(
                         warmup_stopped,
-                        idx=i,
-                        variant=variant,
-                        slot=slot,
+                        _RoundAttempt(
+                            idx=i,
+                            variant=variant,
+                            slot=slot,
+                            returncode=warmup_rc,
+                            started_unix=warmup_started_unix,
+                            server_log=warmup_server_log,
+                            server_survivors=warmup_survivors,
+                        ),
                         round_label="warmup",
-                        returncode=warmup_rc,
-                        started_unix=warmup_started_unix,
-                        server_log=warmup_server_log,
-                        server_survivors=warmup_survivors,
                     )
 
                 warmup_run_ws = select_run_workspace(warmup_slot, known_before=warmup_workspaces_before)
@@ -1386,14 +1396,16 @@ async def run_grid(
                     _mn_warm_survivors = _teardown_variant_server(slot, lifecycle if auto_warmup else None)
                     _abort_on_round_stop(
                         _mn_warm_stopped,
-                        idx=i,
-                        variant=variant,
-                        slot=slot,
+                        _RoundAttempt(
+                            idx=i,
+                            variant=variant,
+                            slot=slot,
+                            returncode=_mn_warm_rc,
+                            started_unix=_mn_warm_started_unix,
+                            server_log=_mn_warm_slot / "server.log",
+                            server_survivors=_mn_warm_survivors,
+                        ),
                         round_label="mn_warmup",
-                        returncode=_mn_warm_rc,
-                        started_unix=_mn_warm_started_unix,
-                        server_log=_mn_warm_slot / "server.log",
-                        server_survivors=_mn_warm_survivors,
                     )
 
             # Snapshot wall-clock before launch so the salvage path can mtime-gate leak destinations per-variant.
@@ -1585,14 +1597,16 @@ async def run_grid(
             if stopped is not None:
                 _abort_on_round_stop(
                     stopped,
-                    idx=i,
-                    variant=variant,
-                    slot=slot,
+                    _RoundAttempt(
+                        idx=i,
+                        variant=variant,
+                        slot=slot,
+                        returncode=rc,
+                        started_unix=variant_started_unix,
+                        server_log=server_log,
+                        server_survivors=round_survivors,
+                    ),
                     round_label="measured",
-                    returncode=rc,
-                    started_unix=variant_started_unix,
-                    server_log=server_log,
-                    server_survivors=round_survivors,
                 )
 
             workspace = select_run_workspace(slot, known_before=slot_workspaces_before)

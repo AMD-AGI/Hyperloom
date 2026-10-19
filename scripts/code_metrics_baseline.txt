@@ -540,7 +540,6 @@ function-args src/hyperloom/orchestrator/actions/executors/_grid_base.py::GridVa
 function-args src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_build_variant_yaml 12
 function-args src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_run_magpie 12
 function-args src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 23
-function-args src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid._record_round_stop 9
 function-args src/hyperloom/orchestrator/actions/executors/_grid_variant_filter.py::apply_compatibility_filter 6
 function-args src/hyperloom/orchestrator/actions/executors/_inferencex_patcher.py::_ensure_patched 6
 function-args src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::KvMetricsRecorder.__init__ 6
