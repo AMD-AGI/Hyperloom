@@ -129,45 +129,6 @@ def _prompt_from_messages(messages: Sequence[Mapping[str, Any]] | None) -> str:
     return prompt
 
 
-def _build_options(
-    sdk: Any,
-    *,
-    model: str,
-    system: str | None,
-    max_tokens: int | None,
-    env: Mapping[str, str] | None = None,
-    component: str = "",
-    operation: str = "",
-) -> Any:
-    """Assemble the tool-free, single-turn options for one completion."""
-    kwargs: dict[str, Any] = dict(
-        claude_sdk_env_options(model=model, env=env, component=component, operation=operation)
-    )
-    if max_tokens:
-        # claude_sdk_env_options returns {} when no provider signal is set; fall back to the caller's environment so
-        # the cap is the only addition.
-        base = kwargs.get("env") or (env if env is not None else os.environ)
-        child_env = dict(base)
-        child_env[OUTPUT_TOKEN_CAP_ENV] = str(int(max_tokens))
-        kwargs["env"] = child_env
-    kwargs.update(
-        {
-            "model": model or None,
-            "system_prompt": system or None,
-            "tools": [],
-            "setting_sources": [],
-            "skills": [],
-            "strict_mcp_config": True,
-            "mcp_servers": {},
-            "plugins": [],
-            "max_turns": 1,
-            "allowed_tools": [],
-            "disallowed_tools": list(DISALLOWED_TOOLS),
-        }
-    )
-    return sdk.ClaudeAgentOptions(**kwargs)
-
-
 async def _drive(sdk: Any, prompt: str, options: Any) -> AnthropicMessageResult:
     """Consume one ``query`` stream and flatten it onto the shared result type."""
     final = ""
@@ -207,6 +168,35 @@ class ClaudeOneShotClient:
     component: str = ""
     operation: str = ""
 
+    def _options(self, sdk: Any, *, model: str, system: str | None, max_tokens: int | None) -> Any:
+        """Assemble the tool-free, single-turn options for one completion."""
+        kwargs: dict[str, Any] = dict(
+            claude_sdk_env_options(model=model, env=self.env, component=self.component, operation=self.operation)
+        )
+        if max_tokens:
+            # claude_sdk_env_options returns {} when no provider signal is set; fall back to the caller's environment
+            # so the cap is the only addition.
+            base = kwargs.get("env") or (self.env if self.env is not None else os.environ)
+            child_env = dict(base)
+            child_env[OUTPUT_TOKEN_CAP_ENV] = str(int(max_tokens))
+            kwargs["env"] = child_env
+        kwargs.update(
+            {
+                "model": model or None,
+                "system_prompt": system or None,
+                "tools": [],
+                "setting_sources": [],
+                "skills": [],
+                "strict_mcp_config": True,
+                "mcp_servers": {},
+                "plugins": [],
+                "max_turns": 1,
+                "allowed_tools": [],
+                "disallowed_tools": list(DISALLOWED_TOOLS),
+            }
+        )
+        return sdk.ClaudeAgentOptions(**kwargs)
+
     async def amessages(
         self,
         *,
@@ -217,15 +207,7 @@ class ClaudeOneShotClient:
     ) -> AnthropicMessageResult:
         """Run one completion and return its text, stop reason and usage."""
         sdk = _load_sdk()
-        options = _build_options(
-            sdk,
-            model=model,
-            system=system,
-            max_tokens=max_tokens,
-            env=self.env,
-            component=self.component,
-            operation=self.operation,
-        )
+        options = self._options(sdk, model=model, system=system, max_tokens=max_tokens)
         return await asyncio.wait_for(
             _drive(sdk, _prompt_from_messages(messages), options),
             timeout=max(0.1, float(self.timeout_s)),

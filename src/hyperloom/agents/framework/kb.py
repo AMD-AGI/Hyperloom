@@ -30,15 +30,10 @@ LESSONS_FILE: str = "lessons.jsonl"
 #: allowlist, which is a prefix rule rather than an entry for this name.
 KB_ROOT_ENV: str = "INFERENCE_OPTIMIZER_FA_KB_PATH"
 
-#: Workspace subdirectory holding this KB. Deliberately not ``kb``: that is the
-#: legacy recipe root (``inference_optimizer.cli.kb._legacy_recipe_root``, still
-#: read by the one-time recipe migration). The current recipe root is
-#: ``<workspace>/knowledge`` and never collided.
+#: Workspace subdirectory holding this KB; the recipe root is ``<workspace>/knowledge``.
 _MUTABLE_KB_DIRNAME: str = "framework-kb"
 
 #: Where the writer put this partition before it was given its own directory.
-#: Same value as ``inference_optimizer.cli.kb._legacy_recipe_root``'s leaf, which
-#: this package cannot import; the guard test asserts they still agree.
 _LEGACY_WORKSPACE_KB_DIRNAME: str = "kb"
 
 #: Withdrawn override. Only the reader honoured it, so setting it split the KB

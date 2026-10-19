@@ -17,7 +17,6 @@ def test_clean_workspace_returns_zero_artifacts(tmp_path):
     assert art.quantized_dir_exists is False
     assert art.validation_report_present is False
     assert art.eval_report_data is None
-    assert art.fix_hypothesis_attempts == ()
     assert art.last_phase is None
 
 
@@ -86,12 +85,6 @@ def test_eval_report_json_malformed(tmp_path):
     art = collect_artifacts(tmp_path)
     assert art.eval_report_present is True
     assert art.eval_report_data is None
-
-
-def test_fix_hypothesis_attempts_sorted(build_workspace):
-    ws = build_workspace(fix_hypotheses=(3, 1, 2))
-    art = collect_artifacts(ws)
-    assert art.fix_hypothesis_attempts == (1, 2, 3)
 
 
 def test_last_phase_stripped(tmp_path):

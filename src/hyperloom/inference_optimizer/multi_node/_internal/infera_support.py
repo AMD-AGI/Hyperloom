@@ -16,7 +16,6 @@ INFERA_FRONTEND_PORT = 8000
 # SSH control plane: hostNetwork pods on the same node share one IP, so each GPU role binds a distinct MN_SSH_PORT
 # (decode offset by ROLE_STRIDE).
 INFERA_SSH_PORT_ROLE_STRIDE = 10
-_INFERA_IDLE_SCRIPT = "/usr/local/bin/mn-idle.sh"
 
 
 def ssh_role_port_offset(role: str) -> int:
@@ -24,23 +23,6 @@ def ssh_role_port_offset(role: str) -> int:
     if (role or "").lower() == "decode":
         return INFERA_SSH_PORT_ROLE_STRIDE
     return 0
-
-
-def ssh_port_for_pod(
-    role: str,
-    lws_index: int | None,
-    *,
-    ssh_port_base: int = DEFAULT_SSH_PORT,
-) -> int:
-    """Compute the sshd port a pod listens on."""
-    idx = lws_index if isinstance(lws_index, int) else 0
-    return int(ssh_port_base) + ssh_role_port_offset(role) + idx
-
-
-def idle_worker_entrypoint(*, role: str, ssh_port_base: int = DEFAULT_SSH_PORT) -> str:
-    """Build the idle worker entryPoint with a role-scoped ``MN_SSH_PORT``."""
-    role_base = int(ssh_port_base) + ssh_role_port_offset(role)
-    return f"export MN_SSH_PORT=$(( {role_base} + ${{LWS_WORKER_INDEX:-0}} )); exec {_INFERA_IDLE_SCRIPT}"
 
 
 def pod_targets_from_lists(

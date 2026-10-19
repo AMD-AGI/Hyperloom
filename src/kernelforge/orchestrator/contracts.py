@@ -697,8 +697,3 @@ class OrchestrationRunResult:
             raise ValueError("orchestration optimization_plan_executable must be a boolean")
         if not isinstance(self.plan_revised, bool):
             raise ValueError("orchestration plan_revised must be a boolean")
-
-    @property
-    def optimization_plan(self) -> str:
-        """Lane 1's plan, which is the whole round on the single-lane path."""
-        return self.optimization_plans[0]

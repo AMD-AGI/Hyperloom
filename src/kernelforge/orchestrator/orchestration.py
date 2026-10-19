@@ -541,25 +541,6 @@ class OrchestrationAgent:
             normalization_notes=tuple(notes),
         )
 
-    async def synthesize_optimization_plan(
-        self,
-        context: OrchestrationContext,
-        specialist_outcomes: Sequence[SpecialistOutcome],
-        dispatch_plan: DispatchPlan,
-        coverage: Mapping[str, object],
-        *,
-        usage=None,
-    ) -> str:
-        """Fuse all successful specialist analyses into one Markdown plan."""
-        result = await self._synthesize_optimization_plan_result(
-            context,
-            specialist_outcomes,
-            dispatch_plan,
-            coverage,
-            usage=usage,
-        )
-        return result.text
-
     async def _synthesize_optimization_plan_result(
         self,
         context: OrchestrationContext,
@@ -632,27 +613,6 @@ class OrchestrationAgent:
             ),
             session_id=str(result.session_id or "").strip(),
         )
-
-    async def synthesize_lane_plans(
-        self,
-        context: OrchestrationContext,
-        specialist_outcomes: Sequence[SpecialistOutcome],
-        dispatch_plan: DispatchPlan,
-        coverage: Mapping[str, object],
-        *,
-        lanes: int,
-        usage=None,
-    ) -> list[str]:
-        """Return lane plan text while keeping session details internal."""
-        results = await self.synthesize_lane_plan_results(
-            context,
-            specialist_outcomes,
-            dispatch_plan,
-            coverage,
-            lanes=lanes,
-            usage=usage,
-        )
-        return [result.text for result in results]
 
     async def synthesize_lane_plan_results(
         self,

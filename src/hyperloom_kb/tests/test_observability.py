@@ -60,7 +60,7 @@ def _lose(database: Database) -> None:
 def _service(home: Path, *, global_url: str | None = None, name: str = "") -> ExperienceHTTPService:
     global_kb = None if global_url is None else RemoteClient(RemoteConfig(global_url, TOKEN))
     return ExperienceHTTPService(
-        HTTPServiceConfig(home, TOKEN), SCHEMA, None, database=fresh_database(), global_kb=global_kb, name=name
+        HTTPServiceConfig(home, TOKEN, name=name), SCHEMA, None, database=fresh_database(), global_kb=global_kb
     )
 
 

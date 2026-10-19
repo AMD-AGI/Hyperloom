@@ -307,14 +307,14 @@ def test_mark_interrupted_is_idempotent_and_does_not_overwrite_completion(tmp_pa
     tracker = ExperimentTracker(tmp_path)
     exp = tracker.create(task_id="gemm")
 
-    first = tracker.mark_interrupted(exp.experiment_id)
-    second = tracker.mark_interrupted(exp.experiment_id)
+    first = tracker._mark_interrupted_locked(tracker.get(exp.experiment_id))
+    second = tracker._mark_interrupted_locked(tracker.get(exp.experiment_id))
     assert first.status == "interrupted"
     assert second.ended_at == first.ended_at
 
     completed = tracker.create(task_id="completed")
     tracker.mark_complete(completed.experiment_id)
-    tracker.mark_interrupted(completed.experiment_id)
+    tracker._mark_interrupted_locked(tracker.get(completed.experiment_id))
     assert tracker.get(completed.experiment_id).status == "completed"
 
 

@@ -19,7 +19,7 @@ from .assessment import (
 )
 from .outcomes import OutcomeId, SUCCESS_TAGS, UNCLASSIFIED_FAILURE
 from .result_collector import CollectedArtifacts, collect_artifacts
-from .runner import RunOneAttemptFn, run_one_attempt
+from .runner import AttemptContext, RunOneAttemptFn, run_one_attempt
 
 
 _COUNTER_FILE = "requantize_attempts.txt"
@@ -85,10 +85,10 @@ def _ask_operator(message: str) -> bool:
 # retry decision
 
 
-def _has_fix_hypothesis(workspace: Path, attempt_number: int) -> bool:
-    """Look for the hypothesis written by SKILL.md for the NEXT attempt."""
+def _fix_hypothesis_path(workspace: Path, attempt_number: int) -> Path:
+    """Where SKILL.md writes its hypothesis for the attempt after ``attempt_number``."""
 
-    return (workspace / f"fix_hypothesis_attempt_{attempt_number + 1}.md").is_file()
+    return workspace / f"fix_hypothesis_attempt_{attempt_number + 1}.md"
 
 
 @dataclass(frozen=True)
@@ -103,8 +103,7 @@ class _RetryDecision:
 def _decide_next_step(
     outcome: OutcomeId | None,
     *,
-    workspace: Path,
-    attempt_number: int,
+    fix_hypothesis: Path,
     interactive: bool,
     max_requantize_attempts: int,
     counter: int,
@@ -143,11 +142,10 @@ def _decide_next_step(
                 retry=False,
                 note=f"max_attempts_exhausted:counter={counter}/{max_requantize_attempts}",
             )
-        if not _has_fix_hypothesis(workspace, attempt_number):
+        if not fix_hypothesis.is_file():
             return _RetryDecision(retry=False, note="no_fix_hypothesis")
         if interactive and not _ask_operator(
-            f"[quantization-agent] Outcome `{outcome}` → fix hypothesis at "
-            f"fix_hypothesis_attempt_{attempt_number + 1}.md. Retry? [y/N]: "
+            f"[quantization-agent] Outcome `{outcome}` → fix hypothesis at {fix_hypothesis.name}. Retry? [y/N]: "
         ):
             return _RetryDecision(retry=False, note="operator_declined_retry")
         return _RetryDecision(retry=True, note="")
@@ -202,7 +200,7 @@ async def quantize_via_prompt(
 
     attempt_n = 1
     while True:
-        attempt_result = await run_attempt(
+        attempt = AttemptContext(
             user_prompt=prompt,
             workspace=workspace_path,
             quark_root=quark_root_path,
@@ -210,9 +208,8 @@ async def quantize_via_prompt(
             acceptable_eval_gap=acceptable_eval_gap,
             interactive=interactive_resolved,
             previous_outcome=last_outcome.value if isinstance(last_outcome, OutcomeId) else None,
-            model=model,
-            log=log,
         )
+        attempt_result = await run_attempt(attempt, model=model, log=log)
 
         artifacts = collect_artifacts(workspace_path)
         outcome = classify_attempt(
@@ -228,8 +225,7 @@ async def quantize_via_prompt(
         counter = _read_counter(workspace_path)
         decision = _decide_next_step(
             outcome,
-            workspace=workspace_path,
-            attempt_number=attempt_n,
+            fix_hypothesis=_fix_hypothesis_path(workspace_path, attempt_n),
             interactive=interactive_resolved,
             max_requantize_attempts=max_requantize_attempts,
             counter=counter,

@@ -5,9 +5,7 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -18,15 +16,3 @@ def tmp_session_root(tmp_path: Path) -> Path:
     root = tmp_path / "critic-session-memory"
     root.mkdir()
     return root
-
-
-@pytest.fixture()
-def write_json(tmp_path: Path):
-    """Helper to drop a JSON object on disk and return the path."""
-
-    def _write(name: str, body: dict[str, Any]) -> Path:
-        p = tmp_path / name
-        p.write_text(json.dumps(body), encoding="utf-8")
-        return p
-
-    return _write

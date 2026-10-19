@@ -15,7 +15,7 @@ from typing import Any
 
 from hyperloom.common.perf_metric import agentx_active
 from hyperloom.inference_optimizer.experience_kb_service import REQUEST_TIMEOUT_SECONDS, mapping_schema_ref
-from hyperloom_kb import ConfigurationError, RemoteClient, RemoteClientError, RemoteConfig
+from hyperloom_kb import ConfigurationError, ReadQuery, RemoteClient, RemoteClientError, RemoteConfig
 from hyperloom_kb.collect import MappingError
 
 log = logging.getLogger(__name__)
@@ -237,10 +237,7 @@ class ExperienceKBIntegration:
                 warnings=("experience_kb_reads_off_for_session",),
             )
         result = self.client.read(
-            decision,
-            context,
-            schema_ref=self.schema_ref,
-            render_budget_chars=RENDER_BUDGET_CHARS,
+            ReadQuery(decision, context, schema_ref=self.schema_ref, render_budget_chars=RENDER_BUDGET_CHARS)
         )
         self._failed_in_a_row = 0 if result.status == "completed" else self._failed_in_a_row + 1
         if self._failed_in_a_row == READS_OFF_AFTER_FAILURES:

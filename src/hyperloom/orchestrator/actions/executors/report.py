@@ -238,13 +238,6 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "coordinator_exception": "The coordinator loop raised an unhandled exception; the last validated result was preserved.",
     "custom": "A caller-supplied stop condition (stop_when) fired.",
     "unknown": "No specific stop reason was recorded (e.g. a terminal session was resumed); treat as unclassified.",
-    # Policy / robustness governor.
-    "robustness_escalated": (
-        "Robustness escalated: the run closed early with budget still on the clock (not a target hit). "
-        "Common triggers are a validated-gain plateau, rising crash_count, or a stale aiter JIT build. "
-        "A close driven by the remaining budget reports time_exhausted instead. "
-        "The best validated result was locked in before exit."
-    ),
     "baseline_failed": "Baseline never produced a valid measurement; see the failure summary / server log.",
     "server_argv_invalid": (
         "The installed framework's own argument parser refused the composed server argv before any "
@@ -876,7 +869,7 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
             "_The **Theoretical peak** below is the decode "
             "memory-roofline ceiling derived from the GPU's HBM "
             "bandwidth and the model's weight + KV-cache traffic per "
-            "token (see `roofline_ceiling.compute_peak_from_state`). "
+            "token (see `roofline_ceiling.compute_roofline_breakdown_from_state`). "
             "It is an upper bound: real `output_throughput` always "
             "stays under it because of comm overhead, kernel "
             "efficiency < 100%, and KV-cache fragmentation. **Within "
@@ -917,7 +910,7 @@ def _format_roofline_comparison_section(cmp: dict[str, Any]) -> list[str]:
         "_The **Theoretical peak** below is the decode "
         "memory-roofline ceiling derived from the GPU's HBM "
         "bandwidth and the model's weight + KV-cache traffic per "
-        "token (see `roofline_ceiling.compute_peak_from_state`). "
+        "token (see `roofline_ceiling.compute_roofline_breakdown_from_state`). "
         "It is an upper bound: real `output_throughput` always "
         "stays under it because of comm overhead, kernel "
         "efficiency < 100%, and KV-cache fragmentation. **Within "

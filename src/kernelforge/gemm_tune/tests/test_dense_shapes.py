@@ -7,23 +7,25 @@ from __future__ import annotations
 
 import pytest
 
-from kernelforge.gemm_tune.dense_shapes import compute_dense_nk_shapes
+from kernelforge.gemm_tune.dense_shapes import DenseGeometry, compute_dense_nk_shapes
 
 
 def test_mla_deepseek_v3_matches_recorded_shapes():
     """DeepSeek-R1 (MLA) derives exactly the 6 recorded (N,K) at tp=8."""
     nk = set(
         compute_dense_nk_shapes(
-            hidden_size=7168,
-            intermediate_size=18432,
-            num_heads=128,
-            num_kv_heads=128,
-            tp=8,
-            q_lora_rank=1536,
-            kv_lora_rank=512,
-            qk_nope_head_dim=128,
-            qk_rope_head_dim=64,
-            v_head_dim=128,
+            DenseGeometry(
+                hidden_size=7168,
+                intermediate_size=18432,
+                num_heads=128,
+                num_kv_heads=128,
+                q_lora_rank=1536,
+                kv_lora_rank=512,
+                qk_nope_head_dim=128,
+                qk_rope_head_dim=64,
+                v_head_dim=128,
+            ),
+            8,
         )
     )
     assert nk == {
@@ -40,16 +42,16 @@ def test_deepseek_v4_sparse_mla_matches_runtime_shapes():
     """DeepSeek-V4-Flash attention GEMMs at tp=4 (no kv_lora_rank, no dense FFN)."""
     nk = set(
         compute_dense_nk_shapes(
-            hidden_size=4096,
-            intermediate_size=0,
-            num_heads=64,
-            num_kv_heads=1,
-            tp=4,
-            head_dim=512,
-            q_lora_rank=1024,
-            kv_lora_rank=0,
-            o_lora_rank=1024,
-            o_groups=8,
+            DenseGeometry(
+                hidden_size=4096,
+                intermediate_size=0,
+                num_heads=64,
+                num_kv_heads=1,
+                head_dim=512,
+                q_lora_rank=1024,
+                kv_lora_rank=0,
+            ),
+            4,
         )
     )
     assert nk == {
@@ -62,13 +64,15 @@ def test_separate_qk_v_head_dims_matches_recorded_shapes():
     """MiMo (GQA, qk head=192, v head=128) derives the 3 recorded (N,K) at tp=8."""
     nk = set(
         compute_dense_nk_shapes(
-            hidden_size=6144,
-            intermediate_size=16384,
-            num_heads=128,
-            num_kv_heads=8,
-            tp=8,
-            head_dim=192,
-            v_head_dim=128,
+            DenseGeometry(
+                hidden_size=6144,
+                intermediate_size=16384,
+                num_heads=128,
+                num_kv_heads=8,
+                head_dim=192,
+                v_head_dim=128,
+            ),
+            8,
         )
     )
     assert nk == {
@@ -100,7 +104,7 @@ def test_generic_llama_is_unchanged():
         (4096, 14336, 32, 8, 2),
         (8192, 28672, 64, 8, 8),
     ]:
-        assert compute_dense_nk_shapes(h, i, nh, nkv, tp) == _old(h, i, nh, nkv, tp)
+        assert compute_dense_nk_shapes(DenseGeometry(h, i, nh, nkv), tp) == _old(h, i, nh, nkv, tp)
 
 
 # ── ISL-derived M-value capping (review: long-context ISL -> giant GEMM) ──────

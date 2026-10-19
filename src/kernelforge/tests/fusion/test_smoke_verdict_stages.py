@@ -14,6 +14,7 @@ from kernelforge.fusion.validate import (
     SMOKE_STAGE_DECODE_PROBE,
     SMOKE_STAGE_HARNESS_ERROR,
     SMOKE_STAGE_STARTUP_CRASH,
+    SmokeServer,
     serving_smoke_verdict,
 )
 
@@ -60,7 +61,9 @@ def test_a_boot_time_oom_is_the_environment_not_the_kernel(monkeypatch, tmp_path
         poll_seq=[0],
     )
 
-    verdict = serving_smoke_verdict("/m", {"F": "1"}, framework="vllm", timeout_s=5, log_path=str(tmp_path / "a.log"))
+    verdict = serving_smoke_verdict(
+        SmokeServer("/m", {"F": "1"}, framework="vllm"), timeout_s=5, log_path=str(tmp_path / "a.log")
+    )
 
     assert verdict.ok is False
     assert verdict.stage == SMOKE_STAGE_STARTUP_CRASH
@@ -76,7 +79,9 @@ def test_a_boot_time_gpu_fault_does_blame_the_kernel(monkeypatch, tmp_path):
         poll_seq=[None, None, 1],
     )
 
-    verdict = serving_smoke_verdict("/m", {"F": "1"}, framework="vllm", timeout_s=5, log_path=str(tmp_path / "b.log"))
+    verdict = serving_smoke_verdict(
+        SmokeServer("/m", {"F": "1"}, framework="vllm"), timeout_s=5, log_path=str(tmp_path / "b.log")
+    )
 
     assert verdict.stage == SMOKE_STAGE_STARTUP_CRASH
     assert verdict.blames_kernel is True
@@ -92,7 +97,7 @@ def test_gpu_fault_detection_is_case_insensitive(monkeypatch, tmp_path):
     )
 
     verdict = serving_smoke_verdict(
-        "/m", {"F": "1"}, framework="vllm", timeout_s=5, log_path=str(tmp_path / "case.log")
+        SmokeServer("/m", {"F": "1"}, framework="vllm"), timeout_s=5, log_path=str(tmp_path / "case.log")
     )
 
     assert verdict.stage == SMOKE_STAGE_STARTUP_CRASH
@@ -104,7 +109,9 @@ def test_a_boot_timeout_is_never_the_kernel(monkeypatch, tmp_path):
     _patch_smoke(monkeypatch, tmp_path, tail="still loading weights\n", poll_seq=[None, None])
 
     # timeout_s=0 makes the readiness deadline expire immediately.
-    verdict = serving_smoke_verdict("/m", {"F": "1"}, framework="vllm", timeout_s=0, log_path=str(tmp_path / "c.log"))
+    verdict = serving_smoke_verdict(
+        SmokeServer("/m", {"F": "1"}, framework="vllm"), timeout_s=0, log_path=str(tmp_path / "c.log")
+    )
 
     assert verdict.stage == SMOKE_STAGE_BOOT_TIMEOUT
     assert verdict.blames_kernel is False
@@ -119,7 +126,9 @@ def test_a_probe_transport_error_is_not_the_kernel(monkeypatch, tmp_path):
         lambda *a, **k: (False, "/v1/models probe error: OSError: boom"),
     )
 
-    verdict = serving_smoke_verdict("/m", {"F": "1"}, framework="vllm", timeout_s=5, log_path=str(tmp_path / "d.log"))
+    verdict = serving_smoke_verdict(
+        SmokeServer("/m", {"F": "1"}, framework="vllm"), timeout_s=5, log_path=str(tmp_path / "d.log")
+    )
 
     assert verdict.stage == SMOKE_STAGE_DECODE_PROBE
     assert verdict.blames_kernel is False
@@ -135,7 +144,9 @@ def test_a_fault_during_decode_blames_the_kernel(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(validate, "_vllm_decode_probe", lambda *a, **k: (True, "ok"))
 
-    verdict = serving_smoke_verdict("/m", {"F": "1"}, framework="vllm", timeout_s=5, log_path=str(tmp_path / "e.log"))
+    verdict = serving_smoke_verdict(
+        SmokeServer("/m", {"F": "1"}, framework="vllm"), timeout_s=5, log_path=str(tmp_path / "e.log")
+    )
 
     assert verdict.stage == SMOKE_STAGE_DECODE_CRASH
     assert verdict.blames_kernel is True
@@ -152,7 +163,9 @@ def test_an_oom_death_during_decode_is_still_the_environment(monkeypatch, tmp_pa
     )
     monkeypatch.setattr(validate, "_vllm_decode_probe", lambda *a, **k: (False, "no tokens"))
 
-    verdict = serving_smoke_verdict("/m", {"F": "1"}, framework="vllm", timeout_s=5, log_path=str(tmp_path / "f.log"))
+    verdict = serving_smoke_verdict(
+        SmokeServer("/m", {"F": "1"}, framework="vllm"), timeout_s=5, log_path=str(tmp_path / "f.log")
+    )
 
     assert verdict.stage == SMOKE_STAGE_DECODE_CRASH
     assert verdict.blames_kernel is False
@@ -175,7 +188,9 @@ def test_a_decode_hang_blames_the_kernel(monkeypatch, tmp_path):
         run=boom,
     )
 
-    verdict = serving_smoke_verdict("/m", {"F": "1"}, framework="sglang", timeout_s=5, log_path=str(tmp_path / "g.log"))
+    verdict = serving_smoke_verdict(
+        SmokeServer("/m", {"F": "1"}, framework="sglang"), timeout_s=5, log_path=str(tmp_path / "g.log")
+    )
 
     assert verdict.stage == SMOKE_STAGE_DECODE_HANG
     assert verdict.blames_kernel is True
@@ -195,7 +210,9 @@ def test_a_bench_that_could_not_run_is_not_the_kernel(monkeypatch, tmp_path):
         run=run,
     )
 
-    verdict = serving_smoke_verdict("/m", {"F": "1"}, framework="sglang", timeout_s=5, log_path=str(tmp_path / "h.log"))
+    verdict = serving_smoke_verdict(
+        SmokeServer("/m", {"F": "1"}, framework="sglang"), timeout_s=5, log_path=str(tmp_path / "h.log")
+    )
 
     assert verdict.stage == SMOKE_STAGE_DECODE_BENCH
     assert verdict.blames_kernel is False
@@ -213,7 +230,7 @@ def test_a_harness_error_is_not_the_kernel(monkeypatch, tmp_path):
 
     monkeypatch.setattr(time, "sleep", lambda *_: None)
 
-    verdict = serving_smoke_verdict("/m", {"F": "1"}, timeout_s=1, log_path=str(tmp_path / "i.log"))
+    verdict = serving_smoke_verdict(SmokeServer("/m", {"F": "1"}), timeout_s=1, log_path=str(tmp_path / "i.log"))
 
     assert verdict.stage == SMOKE_STAGE_HARNESS_ERROR
     assert verdict.blames_kernel is False
@@ -230,7 +247,7 @@ def test_serving_smoke_still_returns_the_two_tuple_callers_expect(monkeypatch, t
     monkeypatch.setattr(validate, "_vllm_decode_probe", lambda *a, **k: (True, "ok"))
 
     ok, reason = validate.serving_smoke(
-        "/m", {"F": "1"}, framework="vllm", timeout_s=5, log_path=str(tmp_path / "j.log")
+        SmokeServer("/m", {"F": "1"}, framework="vllm"), timeout_s=5, log_path=str(tmp_path / "j.log")
     )
 
     assert ok is True

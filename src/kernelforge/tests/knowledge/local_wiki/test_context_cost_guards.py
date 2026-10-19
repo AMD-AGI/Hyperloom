@@ -13,8 +13,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from kernelforge.knowledge.local_wiki import index as local_index
 from kernelforge.knowledge.local_wiki.index import _strip_frontmatter, build_forge_knowledge
 from kernelforge.resources import resource_path
@@ -133,8 +131,6 @@ def test_deferring_the_carried_map_actually_shrinks_the_block() -> None:
     the saving is real only because the real Gluon map is thousands of tokens.
     """
     root = resource_path("local_knowledge")
-    if not (root / "languages" / "gluon" / "INDEX.md").is_file():
-        pytest.skip("shipped knowledge tree not present in this checkout")
     paired = build_forge_knowledge(root, language=("triton", "gluon"))
     solo = build_forge_knowledge(root, language="triton")
     # What inlining the carried map would have cost: the paired block before

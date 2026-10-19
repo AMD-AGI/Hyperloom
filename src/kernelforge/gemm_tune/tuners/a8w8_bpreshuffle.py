@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 
 from .base import BaseTuner, TuneResult
-from ._aiter_dense_common import run_aiter_dense_tuner, validate_dense_tuner_inputs
+from ._aiter_dense_common import DenseTunerSpec, run_aiter_dense_tuner, validate_dense_tuner_inputs
 from ..utils import TUNER_ENV_VARS
 
 log = logging.getLogger(__name__)
@@ -25,9 +25,7 @@ class A8W8BpreshuffleTuner(BaseTuner):
 
     def run(self) -> TuneResult:
         return run_aiter_dense_tuner(
-            tuner_name=self.name,
-            script_key="a8w8_bpreshuffle",
-            env_var=self.env_var,
-            ctx=self.ctx,
-            work_dir=self.work_dir,
+            DenseTunerSpec(self.name, "a8w8_bpreshuffle", self.env_var),
+            self.ctx,
+            self.work_dir,
         )
