@@ -104,14 +104,44 @@ _CONSTRAINTS: tuple[str, ...] = (
 )
 
 
-def speculative_decoding_focus(*, model_name: str, model_path: str, draft_models_dir: str) -> list[str]:
+_DRAFTER_STEPS: tuple[str, ...] = (
+    "1. **MTP first.** If the target has MTP layers, use MTP and stop here.",
+    "   Check both `num_nextn_predict_layers > 0` in config.json **and** that",
+    "   the weight index actually contains the MTP layer tensors — some",
+    "   quantized or converted checkpoints keep the config field but drop the",
+    "   weights. Fall back to the methods below only when MTP is absent or",
+    "   fails to start on the installed framework.",
+    "2. **Drafter-based methods (EAGLE / EAGLE-3, DFlash / DSpark, draft",
+    "   model): look locally first.** Search the directories next to the",
+    "   target's weights and the Hugging Face cache (`$HF_HUB_CACHE`, else",
+    "   `$HF_HOME/hub`) for a drafter trained for this exact target.",
+    "3. **If nothing local fits, search Hugging Face and download.** Skip",
+    "   this step when `HF_HUB_OFFLINE` is set; only public repos are",
+    "   reachable.",
+    "   - The drafter must name this target as its base model (same family",
+    "     and version), with matching hidden size and vocabulary, in a",
+    "     format the installed framework loads for this method.",
+    "   - Prefer repos from the target's publisher or the method's authors.",
+    "     Take safetensors weights only; never enable `trust_remote_code`",
+    "     for a drafter.",
+    "   - Check the download size against the remaining wall budget and",
+    "     free disk.",
+    "   - Download to a location that outlives this dispatch — not your",
+    "     worktree or workspace, which may be cleaned up — because every later",
+    "     benchmark launch of the proposal loads the drafter from that path.",
+    "     Pin the revision.",
+    "   - Record the repo id and commit sha in the proposal.",
+    "4. If no drafter trained for this target exists locally or on Hugging",
+    "   Face, say so; never substitute one trained for a different target.",
+)
+
+
+def speculative_decoding_focus(*, model_name: str, model_path: str) -> list[str]:
     """Render the speculative-decoding focus block for one target model.
 
     Args:
         model_name: Canonical name of the target model.
         model_path: What the target was launched from: a local path or a Hugging Face repo id.
-        draft_models_dir: Session directory downloaded drafter weights go to; empty when the
-            dispatch has no session directory, which rules downloads out.
 
     Returns:
         Markdown lines of the focus block.
@@ -123,56 +153,12 @@ def speculative_decoding_focus(*, model_name: str, model_path: str, draft_models
         "",
         *_METHODS,
         "",
-        *_method_choice(model_name=model_name, model_path=model_path, draft_models_dir=draft_models_dir),
-        "",
-        *_CONSTRAINTS,
-    ]
-
-
-def _method_choice(*, model_name: str, model_path: str, draft_models_dir: str) -> list[str]:
-    """MTP first, then a drafter for this exact target: local weights before a Hugging Face download."""
-    searched = "the Hugging Face cache (`$HF_HUB_CACHE`, else `$HF_HOME/hub`)"
-    if draft_models_dir:
-        searched += f" and `{draft_models_dir}`"
-    return [
         "**Choosing the method and finding drafter weights**",
         f"Target model: `{model_name or '(unknown)'}`, launched from `{model_path or '(unknown)'}`"
         " (a local path or a Hugging Face repo id).",
-        "1. **MTP first.** If the target has MTP layers, use MTP and stop here.",
-        "   Check both `num_nextn_predict_layers > 0` in config.json **and** that",
-        "   the weight index actually contains the MTP layer tensors — some",
-        "   quantized or converted checkpoints keep the config field but drop the",
-        "   weights. Fall back to the methods below only when MTP is absent or",
-        "   fails to start on the installed framework.",
-        "2. **Drafter-based methods (EAGLE / EAGLE-3, DFlash / DSpark, draft",
-        "   model): look locally first.** Search the directories next to the",
-        f"   target's weights, {searched}, for a drafter trained for this exact",
-        "   target.",
-        *_download_step(draft_models_dir),
-        "4. If no drafter trained for this target exists locally or on Hugging",
-        "   Face, say so; never substitute one trained for a different target.",
-    ]
-
-
-def _download_step(draft_models_dir: str) -> list[str]:
-    """Where and how a missing drafter is fetched from Hugging Face."""
-    if not draft_models_dir:
-        return ["3. No session directory is available to download into, so use local weights only."]
-    return [
-        "3. **If nothing local fits, search Hugging Face and download.** Skip",
-        "   this step when `HF_HUB_OFFLINE` is set; only public repos are",
-        "   reachable.",
-        "   - The drafter must name this target as its base model (same family",
-        "     and version), with matching hidden size and vocabulary, in a",
-        "     format the installed framework loads for this method.",
-        "   - Prefer repos from the target's publisher or the method's authors.",
-        "     Take safetensors weights only; never enable `trust_remote_code`",
-        "     for a drafter.",
-        "   - Check the download size against the remaining wall budget and",
-        "     free disk.",
-        f"   - Download into a subdirectory of `{draft_models_dir}` named after",
-        "     the repo, pinned to a revision.",
-        "   - Record the repo id and commit sha in the proposal.",
+        *_DRAFTER_STEPS,
+        "",
+        *_CONSTRAINTS,
     ]
 
 

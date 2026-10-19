@@ -268,11 +268,6 @@ def forge_handoff_dir(session_dir: Path, macro_cycle: int) -> Path:
     return forge_cycle_dir(session_dir, macro_cycle) / "handoff"
 
 
-def draft_models_dir(session_dir: Path) -> Path:
-    """``<sd>/draft_models/`` — speculative-decoding drafter weights a specialist downloaded; a later benchmark launch loads them, so they live outside any specialist worktree."""
-    return Path(session_dir) / "draft_models"
-
-
 def competitor_target_json(session_dir: Path) -> Path:
     """``<sd>/competitor_target.json`` — LLM-authored competitor target numbers (each per-concurrency entry carries its own source)."""
     return Path(session_dir) / "competitor_target.json"
@@ -444,7 +439,6 @@ __all__ = [
     "recipe_kb_pending_ndjson",
     "recipe_kb_pitfalls_json",
     "decision_trace_path",
-    "draft_models_dir",
     "proposal_task_map_path",
     "forge_steps_path",
     "gemm_tuning_steps_path",

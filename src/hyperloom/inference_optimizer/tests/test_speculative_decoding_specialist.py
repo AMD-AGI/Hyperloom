@@ -20,7 +20,6 @@ from hyperloom.orchestrator.specialists.runner import SpecialistRunner, Speciali
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 DOMAIN_KEY = "speculative_decoding_specialist"
-_DRAFT_DIR = "/sessions/s-1/draft_models"
 
 
 def _system_prompt(**kw: Any) -> str:
@@ -59,38 +58,37 @@ def test_orchestration_may_delegate_to_the_domain_under_its_own_kb_anchor():
     ],
 )
 def test_focus_says_when_speculative_decoding_fits(marker):
-    assert marker in _system_prompt(draft_models_dir=_DRAFT_DIR)
+    assert marker in _system_prompt()
 
 
 @pytest.mark.parametrize("method", ["MTP", "EAGLE-3", "DFlash / DSpark", "Separate draft model", "suffix decoding"])
 def test_focus_says_where_each_method_fits(method):
-    assert method in _system_prompt(draft_models_dir=_DRAFT_DIR)
+    assert method in _system_prompt()
 
 
 def test_focus_puts_mtp_first_and_checks_its_weights_exist():
-    text = _system_prompt(draft_models_dir=_DRAFT_DIR)
+    text = _system_prompt()
     assert "**MTP first.**" in text
     assert "weight index actually contains the MTP layer tensors" in text
     assert text.index("**MTP first.**") < text.index("look locally first")
 
 
-def test_focus_looks_for_drafters_locally_before_downloading_into_the_session():
-    text = _system_prompt(model_name="org/Target-7B", model_path="/models/Target-7B", draft_models_dir=_DRAFT_DIR)
+def test_focus_looks_for_drafters_locally_before_downloading_one():
+    text = _system_prompt(model_name="org/Target-7B", model_path="/models/Target-7B")
     assert "`org/Target-7B`, launched from `/models/Target-7B`" in text
     assert text.index("look locally first") < text.index("search Hugging Face and download")
-    assert f"Download into a subdirectory of `{_DRAFT_DIR}`" in text
     for rule in ("HF_HUB_OFFLINE", "only public repos", "safetensors", "never enable `trust_remote_code`"):
         assert rule in text
 
 
-def test_focus_rules_downloads_out_without_a_session_directory():
+def test_focus_leaves_the_download_location_open_but_requires_it_to_outlive_the_dispatch():
     text = _system_prompt()
-    assert "use local weights only" in text
-    assert "search Hugging Face and download" not in text
+    assert "Download to a location that outlives this dispatch" in text
+    assert "not your\n     worktree or workspace" in text
 
 
 def test_focus_carries_the_constraints_the_runner_enforces():
-    text = _system_prompt(draft_models_dir=_DRAFT_DIR)
+    text = _system_prompt()
     assert "**Never propose\n  these on the synthetic benchmark**" in text
     assert "the draft is pinned" in text
     assert "do not switch it to simulated" in text
@@ -105,7 +103,7 @@ class _StubTask:
     kind: str = "specialist"
 
 
-async def test_dispatch_tells_the_specialist_the_target_model_and_the_session_draft_directory(tmp_path):
+async def test_dispatch_tells_the_specialist_the_target_model(tmp_path):
     from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
     from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
 
@@ -127,4 +125,3 @@ async def test_dispatch_tells_the_specialist_the_target_model_and_the_session_dr
     )
 
     assert "`org/Target-7B`, launched from `/models/Target-7B`" in prep.system_prompt
-    assert f"`{tmp_path / 'draft_models'}`" in prep.system_prompt

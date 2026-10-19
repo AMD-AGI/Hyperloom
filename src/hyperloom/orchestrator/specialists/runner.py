@@ -29,12 +29,7 @@ from hyperloom.common.deadline import Deadline, seconds_until
 from hyperloom.common.env_safety import BENCHMARK_SECRET_ENV_NAMES, redact_secret_values
 from hyperloom.common.timeutil import now_iso
 
-from hyperloom.inference_optimizer.session.session_paths import (
-    draft_models_dir,
-    fs_safe_id,
-    runs_dir,
-    specialist_intel_path,
-)
+from hyperloom.inference_optimizer.session.session_paths import fs_safe_id, runs_dir, specialist_intel_path
 from ..state.experience_citations import normalize_citations, shown_ids
 from hyperloom.inference_optimizer.trace.conversation_trace import ConversationRecord, append_conversation
 from hyperloom.inference_optimizer.trace.llm_trace import LLMCallRecord, LLMCallSite, append_llm_call, new_call_id
@@ -739,7 +734,6 @@ class SpecialistRunner:
                 custom_specialist_prompt=custom_specialist_prompt,
                 model_name=str(params.get("model_name") or ""),
                 model_path=str(params.get("model_path") or ""),
-                draft_models_dir=str(draft_models_dir(self.session_dir)) if self.session_dir else "",
             )
 
         system_prompt, user_prompt = build_specialist_prompts(prompt_inputs)
