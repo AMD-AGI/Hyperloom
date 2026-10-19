@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NamedTuple, NoReturn
 
@@ -1910,26 +1911,28 @@ def _begin_install_event(args: argparse.Namespace | None) -> dict[str, Any]:
     return event
 
 
-def _record_install_step(
-    event: dict[str, Any],
-    *,
-    step_id: str,
-    category: str,
-    status: str,
-    skip_reason: str | None = None,
-    message: str | None = None,
-    **fields: Any,
-) -> None:
-    step: dict[str, Any] = {
-        "step_id": step_id,
-        "category": category,
-        "status": status,
-        "skip_reason": skip_reason,
+@dataclass(frozen=True)
+class InstallStep:
+    """One install-event step: its id and category, the status it ended in, and why it skipped or what it said."""
+
+    step_id: str
+    category: str
+    status: str
+    skip_reason: str | None = None
+    message: str | None = None
+
+
+def _record_install_step(event: dict[str, Any], step: InstallStep, **fields: Any) -> None:
+    row: dict[str, Any] = {
+        "step_id": step.step_id,
+        "category": step.category,
+        "status": step.status,
+        "skip_reason": step.skip_reason,
     }
-    if message is not None:
-        step["message"] = message
-    step.update(fields)
-    event["ext"]["steps"].append(step)
+    if step.message is not None:
+        row["message"] = step.message
+    row.update(fields)
+    event["ext"]["steps"].append(row)
 
 
 def _fail_install_step(
@@ -1944,10 +1947,7 @@ def _fail_install_step(
         failure_fields["detail"] = {"exit_code": exc.code}
     _record_install_step(
         event,
-        step_id=step_id,
-        category=category,
-        status="failed",
-        message=str(exc) or type(exc).__name__,
+        InstallStep(step_id, category, "failed", message=str(exc) or type(exc).__name__),
         error_class=type(exc).__name__,
         **failure_fields,
     )
@@ -2004,11 +2004,7 @@ def _run_install_step(
     fields = {**success_fields, **outcome}
     _record_install_step(
         event,
-        step_id=step_id,
-        category=category,
-        status=status,
-        skip_reason=skip_reason,
-        message=message,
+        InstallStep(step_id, category, status, skip_reason=skip_reason, message=message),
         **fields,
     )
     return result
@@ -2025,28 +2021,30 @@ def _resolved_provider_mode(resolved_urls: tuple[str, str] | None) -> str | None
     return None
 
 
-def _finish_install_event(
-    event: dict[str, Any],
-    *,
-    args: argparse.Namespace | None,
-    benchmark_backend: str,
-    benchmark_python: str,
-    magpie_python: str,
-    inferencex_path: str,
-    resolved_urls: tuple[str, str] | None,
-) -> None:
+@dataclass(frozen=True)
+class PreflightRuntime:
+    """The benchmark runtime preflight settled on: backend, interpreters, InferenceX checkout and LLM endpoints."""
+
+    benchmark_backend: str
+    benchmark_python: str
+    magpie_python: str
+    inferencex_path: str
+    resolved_urls: tuple[str, str] | None
+
+
+def _finish_install_event(event: dict[str, Any], *, args: argparse.Namespace | None, runtime: PreflightRuntime) -> None:
     no_kernel = bool(getattr(args, "no_kernel", False)) if args is not None else False
     enable_roofline = bool(getattr(args, "enable_roofline", True)) if args is not None else True
     tracelens_required = _tracelens_required_at_preflight(no_kernel, enable_roofline)
     event["ext"]["runtime_snapshot"] = {
-        "benchmark_backend": benchmark_backend,
-        "benchmark_interpreter": benchmark_python,
-        "magpie_python": magpie_python,
-        "inferencex_path": inferencex_path,
+        "benchmark_backend": runtime.benchmark_backend,
+        "benchmark_interpreter": runtime.benchmark_python,
+        "magpie_python": runtime.magpie_python,
+        "inferencex_path": runtime.inferencex_path,
         "magpie_path": os.environ.get("MAGPIE_PATH") or None,
         "tracelens_required": tracelens_required,
         "tracelens_route_hint": "agent" if not no_kernel else ("bypass" if enable_roofline else None),
-        "provider_mode": _resolved_provider_mode(resolved_urls),
+        "provider_mode": _resolved_provider_mode(runtime.resolved_urls),
     }
     statuses = {str(step.get("status") or "") for step in event["ext"]["steps"]}
     if "failed" in statuses:
@@ -2197,16 +2195,18 @@ def _ensure_magpie(
         raise
     _record_install_step(
         install_event,
-        step_id="ensure_magpie",
-        category="install",
-        status=("skipped" if not magpie_active else "applied" if magpie_installed else "already_present"),
-        skip_reason=None if magpie_active else "benchmark_backend_not_magpie",
-        message=(
-            f"installed {magpie_spec}"
-            if magpie_installed
-            else f"benchmark backend is {benchmark_backend!r}"
-            if not magpie_active
-            else None
+        InstallStep(
+            "ensure_magpie",
+            "install",
+            "skipped" if not magpie_active else "applied" if magpie_installed else "already_present",
+            skip_reason=None if magpie_active else "benchmark_backend_not_magpie",
+            message=(
+                f"installed {magpie_spec}"
+                if magpie_installed
+                else f"benchmark backend is {benchmark_backend!r}"
+                if not magpie_active
+                else None
+            ),
         ),
         target="magpie-eval",
         interpreter=magpie_python,
@@ -2273,10 +2273,7 @@ def _ensure_inferencex(install_event: Any) -> str:
         )
     _record_install_step(
         install_event,
-        step_id=_CLONE_INFERENCEX_STEP,
-        category="install",
-        status="applied" if inferencex_cloned else "already_present",
-        skip_reason=None,
+        InstallStep(_CLONE_INFERENCEX_STEP, "install", "applied" if inferencex_cloned else "already_present"),
         target="InferenceX",
         version_after=inferencex_checkout.head_sha(inferencex_path) or None,
         detail={
@@ -2314,10 +2311,12 @@ def _patch_magpie_compat(install_event: Any, inferencex_path: str, *, magpie_act
     patch_ok = trust_ok and concurrency_ok and anchors_ok
     _record_install_step(
         install_event,
-        step_id="patch_magpie_eval_concurrency",
-        category="patch",
-        status=("skipped" if not magpie_active else "applied" if patch_ok else "warned"),
-        skip_reason=None if magpie_active else "benchmark_backend_not_magpie",
+        InstallStep(
+            "patch_magpie_eval_concurrency",
+            "patch",
+            "skipped" if not magpie_active else "applied" if patch_ok else "warned",
+            skip_reason=None if magpie_active else "benchmark_backend_not_magpie",
+        ),
         detail={
             "client_trust_compatible": trust_ok,
             "eval_concurrency_compatible": concurrency_ok,
@@ -2334,10 +2333,7 @@ def _prepare_inferencex(install_event: Any, *, magpie_active: bool) -> str:
     if agentx_enabled() and not is_mlperf_backend():
         _record_install_step(
             install_event,
-            step_id=_CLONE_INFERENCEX_STEP,
-            category="install",
-            status="skipped",
-            skip_reason="magpie_manages_native_agentx",
+            InstallStep(_CLONE_INFERENCEX_STEP, "install", "skipped", skip_reason="magpie_manages_native_agentx"),
         )
         return ""
     inferencex_path = _ensure_inferencex(install_event)
@@ -2358,10 +2354,7 @@ def _check_kernel_and_tracelens_clis(install_event: Any, args: argparse.Namespac
     if no_kernel:
         _record_install_step(
             install_event,
-            step_id="check_kernel_tuning_clis",
-            category="check",
-            status="skipped",
-            skip_reason="no_kernel",
+            InstallStep("check_kernel_tuning_clis", "check", "skipped", skip_reason="no_kernel"),
         )
     else:
         _run_install_step(
@@ -2386,19 +2379,18 @@ def _check_kernel_and_tracelens_clis(install_event: Any, args: argparse.Namespac
         )
     _record_install_step(
         install_event,
-        step_id="check_tracelens_cli",
-        category="check",
-        status="skipped",
-        skip_reason="no_kernel_and_roofline_disabled",
+        InstallStep(
+            "check_tracelens_cli",
+            "check",
+            "skipped",
+            skip_reason="no_kernel_and_roofline_disabled",
+            message=f"missing CLIs: {missing}" if missing else None,
+        ),
         target="TraceLens",
-        message=f"missing CLIs: {missing}" if missing else None,
     )
     _record_install_step(
         install_event,
-        step_id="check_tracelens_root",
-        category="check",
-        status="skipped",
-        skip_reason="tracelens_not_required",
+        InstallStep("check_tracelens_root", "check", "skipped", skip_reason="tracelens_not_required"),
         target="TRACELENS_ROOT",
     )
 
@@ -2598,10 +2590,7 @@ def _preflight(
     else:
         _record_install_step(
             install_event,
-            step_id="ir3_pr_monitor_probe",
-            category="degrade",
-            status="skipped",
-            skip_reason="args_unavailable",
+            InstallStep("ir3_pr_monitor_probe", "degrade", "skipped", skip_reason="args_unavailable"),
         )
 
     # --- Single canonical diagnostics block ---
@@ -2620,11 +2609,9 @@ def _preflight(
         _finish_install_event(
             install_event,
             args=args,
-            benchmark_backend=benchmark_backend,
-            benchmark_python=benchmark_python,
-            magpie_python=magpie_python,
-            inferencex_path=inferencex_path,
-            resolved_urls=resolved_urls,
+            runtime=PreflightRuntime(
+                benchmark_backend, benchmark_python, magpie_python, inferencex_path, resolved_urls
+            ),
         )
     except Exception:
         log.warning("failed to finalize SBD V6 install event", exc_info=True)

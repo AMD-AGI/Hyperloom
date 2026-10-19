@@ -755,7 +755,7 @@ def _kernel_decision(task_id: str, ts: str = "2026-06-09T16:00:00Z") -> dict:
 
 
 def _journal_decision(sd: Path, task_id: str, ts: str) -> None:
-    Journal.load_or_create(sd, session_id="SID", model="m", hardware="h").append_entry(
+    Journal.load_or_create(sd, Journal(session_id="SID", model="m", hardware="h")).append_entry(
         JournalEntry(phase="KERNEL", iter=1, kind="kernel", change=task_id, outcome="KEEP", task_id=task_id, ts=ts)
     )
 
