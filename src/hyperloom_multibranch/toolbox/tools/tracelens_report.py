@@ -12,6 +12,10 @@ check on the result. A report the check marks graph-collapsed gets TraceLens' de
 ``analysis.json``, which is how :func:`~hyperloom_multibranch.toolbox.tools.op_shares.degraded_reason` knows to withhold
 its shares. Without a model it takes about a minute.
 
+The splitter's workload hints (``--CONC``, ``--OSL``, ``--R``) and the steady-state mode come from the request alone. A
+specialist's request gets the hints from the profile test's own point (``toolbox/analysis.py``), not from anything the
+caller or the toolbox process says; the splitter picks its window without a hint the request lacks.
+
 It is for LLM serving traces (SGLang, vLLM, ATOM): the splitter reads their step annotations. Anything else asks for
 ``analysis_route: agent``.
 """
@@ -19,7 +23,7 @@ It is for LLM serving traces (SGLang, vLLM, ATOM): the splitter reads their step
 from __future__ import annotations
 
 import asyncio
-import os
+import math
 import shlex
 import subprocess
 import sys
@@ -55,8 +59,10 @@ _CHUNK_PREFIX = {
 _CHUNK_SUFFIXES = ("trace.json.gz", "json.gz", "trace.json", "json")
 #: Trace candidates opened looking for GPU kernels; the likeliest one is first, so more than a few is a real problem.
 _PROBE_LIMIT = 8
-#: The splitter's hints and where each comes from: the request's own key, else the workload's environment variable.
-_SPLIT_HINTS = (
+#: The splitter's hints: its flag, the request key that carries it, and the benchmark environment variable of the
+#: profile test's own point it is measured from (the server reads that, see ``toolbox/analysis.py``). The route reads the
+#: request only, never the process environment: a toolbox serving many branches has no workload of its own.
+SPLIT_HINTS = (
     ("--CONC", "split_conc", "CONC"),
     ("--OSL", "split_osl", "OSL"),
     ("--R", "split_r", "RANDOM_RANGE_RATIO"),
@@ -128,18 +134,40 @@ def _analysed_trace(trace_input: Path) -> Path:
     )
 
 
-def _split_command(trace: Path, split_dir: Path, payload: Mapping[str, Any]) -> list[str]:
+def split_hint(flag: str, raw: object) -> str | None:
+    """``raw`` as the text the splitter's ``flag`` takes, or ``None`` when it is not a value that flag accepts."""
+    try:
+        value = float(str(raw).strip())
+    except ValueError:
+        return None
+    if not math.isfinite(value):
+        return None
+    accepted = {"--CONC": value >= 1 and value.is_integer(), "--OSL": value > 0, "--R": 0 <= value <= 1}[flag]
+    if not accepted:
+        return None
+    return str(int(value)) if value.is_integer() else repr(value)
+
+
+def _split_hints(payload: Mapping[str, Any]) -> dict[str, str]:
+    """The splitter hints the request carries, by request key, each as the splitter takes it."""
+    hints: dict[str, str] = {}
+    for flag, key, _ in SPLIT_HINTS:
+        raw = _text(payload, key)
+        if not raw:
+            continue
+        hint = split_hint(flag, raw)
+        if hint is None:
+            raise _Refused("invalid_split_hint", f"{key}={raw!r} is not a value {flag} takes")
+        hints[key] = hint
+    return hints
+
+
+def _split_command(trace: Path, split_dir: Path, hints: Mapping[str, str]) -> list[str]:
     cmd = [sys.executable, "-m", _SPLITTER, str(trace), "-o", str(split_dir), "--find-steady-state"]
     cmd += ["--num-steps", str(_SPLIT_NUM_STEPS), "--llm-inference"]
-    for flag, key, env_name in _SPLIT_HINTS:
-        hint = _text(payload, key) or os.environ.get(env_name, "").strip()
-        if not hint:
-            continue
-        try:
-            float(hint)
-        except ValueError:
-            raise _Refused("invalid_split_hint", f"{key}={hint!r} is not a number") from None
-        cmd += [flag, hint]
+    for flag, key, _ in SPLIT_HINTS:
+        if key in hints:
+            cmd += [flag, hints[key]]
     return cmd
 
 
@@ -191,90 +219,10 @@ def _write_degraded_report(run: _Run, coverage: GraphReplayCoverage) -> None:
     render_analysis_json(report)
 
 
-def _analysed_trace(trace_input: Path) -> Path:
-    """The trace of the input that holds GPU kernels: the file itself, or the first trace of a directory that does."""
-    from hyperloom.orchestrator.trace_analysis.tracelens_analysis import count_gpu_kernel_events, discover_trace_inputs
-
-    try:
-        _, files = discover_trace_inputs(trace_input)
-    except FileNotFoundError as exc:
-        raise _Refused("trace_input_missing", str(exc)) from None
-    for candidate in files[:_PROBE_LIMIT]:
-        if count_gpu_kernel_events(candidate):
-            return candidate
-    raise _Refused(
-        "trace_without_gpu_kernels", f"none of the first {_PROBE_LIMIT} traces under {trace_input} has a GPU kernel"
-    )
-
-
-def _split_command(trace: Path, split_dir: Path, payload: Mapping[str, Any]) -> list[str]:
-    cmd = [sys.executable, "-m", _SPLITTER, str(trace), "-o", str(split_dir), "--find-steady-state"]
-    cmd += ["--num-steps", str(_SPLIT_NUM_STEPS), "--llm-inference"]
-    for flag, key, env_name in _SPLIT_HINTS:
-        hint = _text(payload, key) or os.environ.get(env_name, "").strip()
-        if not hint:
-            continue
-        try:
-            float(hint)
-        except ValueError:
-            raise _Refused("invalid_split_hint", f"{key}={hint!r} is not a number") from None
-        cmd += [flag, hint]
-    return cmd
-
-
-def _steady_state_chunk(split_dir: Path, mode: str) -> Path:
-    """The window the splitter wrote for ``mode``."""
-    for suffix in _CHUNK_SUFFIXES:
-        found = sorted(split_dir.rglob(f"{_CHUNK_PREFIX[mode]}_*.{suffix}"))
-        if found:
-            return found[0]
-    written = sorted(path.name for path in split_dir.iterdir())[:8] if split_dir.is_dir() else []
-    raise _Refused(
-        "steady_state_chunk_missing", f"the splitter wrote no {mode} steady-state window under {split_dir}: {written}"
-    )
-
-
-def _perf_report_command(chunk: Path, run: _Run, arch: Path | None, capture: Path | None) -> list[str]:
-    """TraceLens' inference perf report of the window, as its analysis skill runs it (graph-capture variant when a folder exists)."""
-    cmd = [sys.executable, "-m", _PERF_REPORT, "--profile_json_path", str(chunk)]
-    if arch is not None:
-        cmd += ["--gpu_arch_json_path", str(arch)]
-    cmd += ["--group_by_parent_module", "--enable_pseudo_ops", "--group_by_num_kernels", "--include_call_stack"]
-    cmd += ["--output_xlsx_path", str(run.out_dir / "perf_report.xlsx"), "--output_csvs_dir", str(run.csv_dir)]
-    if capture is not None:
-        cmd += ["--capture_folder", str(capture)]
-    return cmd
-
-
-def _check_graph_replay(run: _Run) -> GraphReplayCoverage:
-    """TraceLens' verdict on whether the report's work hides behind graph-replay launches.
-
-    A collapsed report gets TraceLens' degraded fallback ``analysis.md`` and the ``analysis.json`` rendered from it, the
-    two files the agent route writes in that case.
-    """
-    from TraceLens.Agent.Analysis.post_processing import render_analysis_json
-    from TraceLens.Agent.Analysis.utils import check_graph_replay_coverage
-    from TraceLens.Agent.Analysis.utils.deterministic_fallback import render_fallback_report
-
-    unified = run.csv_dir / "unified_perf_summary.csv"
-    if not unified.is_file() or not (run.csv_dir / "ops_summary.csv").is_file():
-        raise _Refused(
-            "perf_report_incomplete",
-            f"the perf report wrote no unified_perf_summary.csv and ops_summary.csv in {run.csv_dir}",
-        )
-    coverage = check_graph_replay_coverage(unified)
-    if coverage.graph_under_recorded:
-        report = run.out_dir / "analysis.md"
-        report.write_text(render_fallback_report(unified, coverage.graph_replay_fraction), encoding="utf-8")
-        render_analysis_json(report)
-    return coverage
-
-
 def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
     started = time.monotonic()
     trace_input = Path(str(payload["trace_input"])).expanduser().resolve()
-    mode = _text(payload, "steady_state_mode") or os.environ.get("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "").strip()
-    mode = mode or _DEFAULT_MODE
+    mode = _text(payload, "steady_state_mode") or _DEFAULT_MODE
     if mode not in _CHUNK_PREFIX:
         raise _Refused("invalid_steady_state_mode", f"steady_state_mode {mode!r} is not one of {sorted(_CHUNK_PREFIX)}")
     root = session_paths.tracelens_root()
@@ -284,8 +232,9 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
     run = _Run(root, session_dir / "tracelens", int(float(budget or 60) * 60))
     run.out_dir.mkdir(parents=True, exist_ok=True)
 
+    hints = _split_hints(payload)
     trace = _analysed_trace(trace_input)
-    _sh(run, "split", _split_command(trace, run.out_dir / "trace_split", payload))
+    _sh(run, "split", _split_command(trace, run.out_dir / "trace_split", hints))
     chunk = _steady_state_chunk(run.out_dir / "trace_split", mode)
     capture_text = _text(payload, *_CAPTURE_KEYS)
     capture = (
@@ -308,6 +257,7 @@ def _analyse(payload: Mapping[str, Any], session_dir: Path) -> dict[str, Any]:
         "trace_input": str(trace_input),
         "analysed_trace": trace.name,
         "steady_state_mode": mode,
+        "split_hints": hints,
         "steady_state_chunk": chunk.name,
         "capture_folder": str(capture or ""),
         "graph_replay_fraction": round(coverage.graph_replay_fraction, 4),
@@ -335,4 +285,4 @@ async def report_handler(payload: dict, *, session_dir: Path) -> dict[str, Any]:
         }
 
 
-__all__ = ["DEFAULT_PLATFORM", "REPORT_ROUTE", "report_handler"]
+__all__ = ["DEFAULT_PLATFORM", "REPORT_ROUTE", "SPLIT_HINTS", "report_handler", "split_hint"]

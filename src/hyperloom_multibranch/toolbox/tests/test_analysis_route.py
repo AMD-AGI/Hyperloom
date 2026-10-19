@@ -138,10 +138,10 @@ def _text(reply: dict[str, Any]) -> str:
     return str(reply["result"]["content"][0]["text"])
 
 
-async def _profile_test(stack: Stack, branch: str = "b1", commit: str = PARENT) -> str:
+async def _profile_test(stack: Stack, branch: str = "b1", commit: str = PARENT, **result: Any) -> str:
     """A measured PROFILE test of ``branch`` on ``commit``, as the notebook holds it."""
     rig = stack.rig
-    rig.executor.script = [lambda job: ok(job, profile_location="traces/p1")]
+    rig.executor.script = [lambda job: ok(job, profile_location="traces/p1", **result)]
     request = replace(
         req(branch, purpose=Purpose.PROFILE, kind=TestKind.PROFILE, server_args="--p"), parent_commit=commit
     )
@@ -287,3 +287,91 @@ async def test_a_profile_test_without_a_trace_location_is_refused_by_name(stack:
     text = await stack.refused(tool="tracelens", profile_request_id=mine)
     assert "profile_without_trace" in text
     assert stack.tools["tracelens"].requests == []
+
+
+POINT = """\
+benchmark:
+  framework: sglang
+  envs:
+    TP: '2'
+    CONC: '4'
+    ISL: '256'
+    OSL: 64
+    RANDOM_RANGE_RATIO: '1'
+"""
+LANDED = "tests/p1/attempt-1"
+HINTS = {"split_conc": "4", "split_osl": "64", "split_r": "1"}
+
+
+async def _profile_with_points(stack: Stack, tmp_path: Path, files: dict[str, str]) -> str:
+    """A PROFILE test of b1 whose landed test directory holds ``files`` (relative to it), under the toolbox's root."""
+    stack.rig.repo.heads["b1"] = PARENT
+    session = tmp_path / "session"
+    for name, text in files.items():
+        (session / LANDED / name).parent.mkdir(parents=True, exist_ok=True)
+        (session / LANDED / name).write_text(text, encoding="utf-8")
+    stack.rig.toolbox.trace_root = session
+    return await _profile_test(stack, output_dir=LANDED)
+
+
+async def _split_params(stack: Stack, tool: str, profile: str) -> dict[str, Any]:
+    job = json.loads(_text(await stack.start(tool=tool, profile_request_id=profile)))["job_id"]
+    await stack.jobs.wait(job)
+    (request,) = stack.tools[tool].requests
+    return {key: value for key, value in request.params.items() if key.startswith("split_")}
+
+
+async def test_the_splitter_hints_are_the_workload_of_the_profile_tests_own_point(stack: Stack, tmp_path: Path) -> None:
+    profile = await _profile_with_points(stack, tmp_path, {"variant_00_test/config.yaml": POINT})
+    assert await _split_params(stack, "tracelens", profile) == HINTS
+    roofline_profile = await _split_params(stack, "roofline", profile)
+    assert roofline_profile == {}  # the roofline tool has no splitter
+
+
+@pytest.mark.parametrize("key", sorted(HINTS))
+@pytest.mark.parametrize("with_profile", [True, False])
+async def test_a_hint_of_the_callers_is_refused_and_cannot_replace_the_point(
+    stack: Stack, tmp_path: Path, key: str, with_profile: bool
+) -> None:
+    profile = await _profile_with_points(stack, tmp_path, {"variant_00_test/config.yaml": POINT})
+    for tool in ("tracelens", "roofline"):
+        text = await stack.refused(tool=tool, params={key: "1"}, profile_request_id=profile if with_profile else "")
+        assert "server_owned_param" in text and key in text
+    assert stack.tools["tracelens"].requests == [] and stack.tools["roofline"].requests == []
+
+
+@pytest.mark.parametrize(
+    ("files", "hints"),
+    [
+        ({}, {}),
+        ({"variant_00_test/config.yaml": POINT, "variant_01_test/config.yaml": POINT}, {}),
+        ({"variant_00_test/config.yaml": "benchmark: [not, a, mapping"}, {}),
+        ({"variant_00_test/config.yaml": "benchmark:\n  envs: 7\n"}, {}),
+        ({"variant_00_test/config.yaml": "- a\n- list\n"}, {}),
+        ({"variant_00_test/config.yaml": POINT.replace("    CONC: '4'\n", "")}, {"split_osl": "64", "split_r": "1"}),
+        (
+            {"variant_00_test/config.yaml": POINT.replace("'4'", "many").replace("64", "0").replace("'1'", "2")},
+            {},
+        ),
+        ({"variant_00_test/benchmark_sglang_1/config.yaml": POINT}, {}),  # the benchmark's own copy is not the point
+    ],
+)
+async def test_a_point_that_cannot_give_a_hint_gives_none_and_the_analysis_still_starts(
+    stack: Stack, tmp_path: Path, files: dict[str, str], hints: dict[str, str]
+) -> None:
+    profile = await _profile_with_points(stack, tmp_path, files)
+    assert await _split_params(stack, "tracelens", profile) == hints
+
+
+async def test_a_point_that_is_a_link_out_of_the_session_gives_no_hint(stack: Stack, tmp_path: Path) -> None:
+    outside = tmp_path / "outside.yaml"
+    outside.write_text(POINT, encoding="utf-8")
+    profile = await _profile_with_points(stack, tmp_path, {"variant_00_test/other.yaml": ""})
+    (tmp_path / "session" / LANDED / "variant_00_test" / "config.yaml").symlink_to(outside)
+    assert await _split_params(stack, "tracelens", profile) == {}
+
+
+async def test_without_a_session_root_there_is_no_point_to_read_and_no_hint(stack: Stack, tmp_path: Path) -> None:
+    stack.rig.repo.heads["b1"] = PARENT
+    profile = await _profile_test(stack, output_dir=LANDED)  # the rig has no trace_root
+    assert await _split_params(stack, "tracelens", profile) == {}

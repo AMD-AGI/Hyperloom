@@ -27,6 +27,7 @@ OPS_SUMMARY = (
     "name,parent_module,Percentage (%)\naten::mm,A,20.0\naten::mm,B,4.5\naten::copy_,C,19.0\naten::mul,D,10.0\n"
 )
 SHARES = {"aten::mm": 24.5, "aten::copy_": 19.0, "aten::mul": 10.0}
+HINTS = {"split_conc": "4", "split_osl": "64", "split_r": "1"}
 ANALYSIS_JSON = {"report_info": {"mode": "deterministic-fallback", "trace_quality": "poor", "warnings": ["collapsed"]}}
 
 
@@ -82,14 +83,7 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Rig:
     trace.write_bytes(b"trace")
     (tmp_path / "TraceLens").mkdir()
     monkeypatch.setenv("TRACELENS_ROOT", str(tmp_path / "TraceLens"))
-    for name in (
-        "HYPERLOOM_TRACE_ANALYSIS_ROUTE",
-        "INFERENCE_OPTIMIZER_STEADY_STATE_MODE",
-        "CONC",
-        "RANDOM_RANGE_RATIO",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("OSL", "64")
+    monkeypatch.delenv("HYPERLOOM_TRACE_ANALYSIS_ROUTE", raising=False)
     shell = Shell()
     monkeypatch.setattr(report, "run_with_session_kill", shell)
     monkeypatch.setattr(report, "resolve_arch_json_path", lambda platform: tmp_path / f"{platform}.json")
@@ -121,20 +115,61 @@ async def _run(tmp_path: Path, params: dict[str, Any], rig: Rig) -> tuple[JobSta
 
 
 async def test_by_default_no_agent_runs_and_the_pointer_carries_the_ops_table_shares(rig: Rig, tmp_path: Path) -> None:
-    status, pointer, record = await _run(tmp_path, {}, rig)
+    status, pointer, record = await _run(tmp_path, HINTS, rig)
     assert status is JobStatus.SUCCEEDED and rig.agent_calls == []
     assert dict(pointer.op_shares) == SHARES
     assert (pointer.commit_id, pointer.profile_request_id) == ("c9", "r1")
     split, perf = rig.shell.commands
     assert split[split.index("-o") + 1].endswith("/tracelens/trace_split")
-    assert {"--find-steady-state", "--llm-inference"} <= set(split) and split[split.index("--OSL") + 1] == "64"
+    assert {"--find-steady-state", "--llm-inference"} <= set(split)
+    assert [split[split.index(flag) + 1] for flag in ("--CONC", "--OSL", "--R")] == ["4", "64", "1"]
     assert perf[perf.index("--profile_json_path") + 1].endswith(CHUNK)
     assert perf[perf.index("--capture_folder") + 1].endswith("torch_trace/graph_capture_profile")
     assert perf[perf.index("--gpu_arch_json_path") + 1].endswith("MI355X.json")
     assert {"--group_by_parent_module", "--enable_pseudo_ops", "--include_call_stack"} <= set(perf)
     result = record["result"]
     assert (result["route"], result["steady_state_mode"], result["graph_under_recorded"]) == ("report", "mixed", False)
+    assert result["split_hints"] == HINTS
     assert Path(result["ops_summary_path"]).read_text(encoding="utf-8") == OPS_SUMMARY  # copied next to result.json
+
+
+async def test_the_splitter_hints_and_the_mode_come_from_the_request_never_from_the_toolbox_process(
+    rig: Rig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real session's toolbox process exports no workload, and one that did would speak for every branch."""
+    for name, value in (
+        ("CONC", "9"),
+        ("OSL", "99"),
+        ("RANDOM_RANGE_RATIO", "0.5"),
+        ("TRACELENS_SPLIT_CONC", "9"),
+        ("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", "decode_only"),
+    ):
+        monkeypatch.setenv(name, value)
+    status, _, record = await _run(tmp_path, {}, rig)
+    assert status is JobStatus.SUCCEEDED, record
+    split, _ = rig.shell.commands
+    assert not {"--CONC", "--OSL", "--R"} & set(split)
+    assert record["result"]["split_hints"] == {} and record["result"]["steady_state_mode"] == "mixed"
+
+
+@pytest.mark.parametrize(
+    ("params", "hints"),
+    [
+        ({"split_conc": 8}, {"split_conc": "8"}),
+        (
+            {"split_conc": "8.0", "split_osl": "128.5", "split_r": "0"},
+            {"split_conc": "8", "split_osl": "128.5", "split_r": "0"},
+        ),
+        ({"split_osl": "", "split_r": None}, {}),
+    ],
+)
+async def test_a_hint_is_passed_as_the_splitter_takes_it(
+    rig: Rig, tmp_path: Path, params: dict, hints: dict[str, str]
+) -> None:
+    status, _, record = await _run(tmp_path, params, rig)
+    assert status is JobStatus.SUCCEEDED and record["result"]["split_hints"] == hints
+    split, _ = rig.shell.commands
+    assert sum(flag in split for flag in ("--CONC", "--OSL", "--R")) == len(hints)
 
 
 @pytest.mark.parametrize(
@@ -198,6 +233,10 @@ async def test_a_graph_collapsed_report_gets_the_degraded_fallback_and_no_shares
     [
         ({"steady_state_mode": "everything"}, Shell(), "invalid_steady_state_mode"),
         ({"split_conc": "many"}, Shell(), "invalid_split_hint"),
+        ({"split_conc": "4.5"}, Shell(), "invalid_split_hint"),
+        ({"split_osl": "0"}, Shell(), "invalid_split_hint"),
+        ({"split_r": "1.5"}, Shell(), "invalid_split_hint"),
+        ({"split_osl": "nan"}, Shell(), "invalid_split_hint"),
         ({}, Shell(chunk=None), "steady_state_chunk_missing"),
         ({}, Shell(report_rc=2), "tracelens_command_failed"),
     ],
