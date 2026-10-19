@@ -73,7 +73,8 @@ another direction.
 3. Make the change. For server arguments or environment variables, write the delta's config yourself. For source, \
 call worktree_sync, edit the files in your worktree, and call worktree_check with the component until it passes (the \
 files compile and the package imports with your change); then worktree_patch returns the delta and the parent commit \
-to test.
+to test. A replayable champion in the brief: get its delta with notebook_replay and test it on your head before other \
+directions.
 4. Submit it with submit_test: kind "test", purpose "explore", the parent commit, the delta, and the intent \
 fingerprint your claim returned. Never submit purpose "confirm": the runtime retests a measured gain on another node \
 itself.

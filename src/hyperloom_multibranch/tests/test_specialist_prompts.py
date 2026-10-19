@@ -81,6 +81,12 @@ def test_the_role_says_a_brief_item_asks_for_the_brief_again_before_the_next_cla
     assert prompt.index("call notebook_brief with the head it names") < prompt.index("before your next claim")
 
 
+def test_the_role_tests_a_replayable_champion_on_the_head_before_other_directions():
+    prompt = role_prompt(WORKLOAD)
+
+    assert "get its delta with notebook_replay and test it on your head before other directions" in prompt
+
+
 def test_the_role_lists_every_known_fake_gain_with_its_refusal():
     prompt = role_prompt(WORKLOAD)
 
