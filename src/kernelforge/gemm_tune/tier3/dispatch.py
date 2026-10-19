@@ -322,7 +322,7 @@ class _FusedMoeAdapter:
             fm.cfg_2stages = None
             fm.get_2stage_cfgs.cache_clear()
         except (ImportError, OSError):
-            # aiter is absent off-GPU, so there is no cache to drop.
+            # aiter is absent or cannot load off-GPU, so there is no cache to drop.
             pass
         shutil.rmtree(self._workdir, ignore_errors=True)
 

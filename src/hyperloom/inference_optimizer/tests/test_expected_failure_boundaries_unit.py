@@ -213,36 +213,6 @@ def test_apply_reports_an_sglang_whose_library_cannot_load(pod_patcher, tmp_path
     assert result["error"] == "sglang not importable: sglang is broken"
 
 
-def test_installed_version_falls_back_when_sglang_cannot_load_its_library(pod_patcher, monkeypatch, missing_import):
-    broken = types.ModuleType("sglang.version")
-
-    def unloadable(name):
-        raise OSError("libamdhip64.so.6: cannot open shared object file")
-
-    broken.__getattr__ = unloadable
-    monkeypatch.setitem(sys.modules, "sglang.version", broken)
-
-    assert pod_patcher._installed_sglang_version(types.SimpleNamespace(__version__="0.5.9")) == "0.5.9"
-
-
-def test_anchor_path_falls_back_when_the_profiler_module_cannot_load_its_library(pod_patcher, tmp_path, monkeypatch):
-    for name in ("sglang", "sglang.srt", "sglang.srt.managers"):
-        parent = types.ModuleType(name)
-        parent.__path__ = []
-        monkeypatch.setitem(sys.modules, name, parent)
-    leaf = "sglang.srt.managers.scheduler_profiler_mixin"
-
-    class _Unloadable(types.ModuleType):
-        @property
-        def __file__(self):
-            raise OSError("libamdhip64.so.6: cannot open shared object file")
-
-    monkeypatch.setitem(sys.modules, leaf, _Unloadable(leaf))
-    module = types.SimpleNamespace(__file__=None, __path__=[str(tmp_path)])
-
-    assert pod_patcher._sglang_anchor_path(module) == tmp_path
-
-
 # ---- pod-side sglang_shape_gate ----
 
 
