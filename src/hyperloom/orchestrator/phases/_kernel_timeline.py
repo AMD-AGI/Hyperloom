@@ -44,6 +44,34 @@ class SettledRun:
                 return str(value)
         return default
 
+    def status(self, default: str = "unknown") -> str:
+        """The terminal state the run settled on."""
+        return self.text("status", default=default)
+
+    def started_at(self) -> str:
+        """When the run started, as its own producer stamped it."""
+        return self.text("started_at")
+
+    def ended_at(self, default: str = "") -> str:
+        """When the run ended, as its own producer stamped it."""
+        return self.text("ended_at", "ts", default=default)
+
+    def error_class(self) -> str:
+        """The failure taxonomy class the run settled on."""
+        return self.text("error_class")
+
+    def error(self) -> str:
+        """What the run reported went wrong."""
+        return self.text("error")
+
+    def failure_reason(self) -> str:
+        """Why the run did not land, whichever way its producer spelled it."""
+        return self.text("error", "skip_reason", "error_class")
+
+    def eval_dir(self) -> str:
+        """Where the run was to write what it evaluated."""
+        return self.text("eval_dir")
+
 
 class RunnerRun(NamedTuple):
     """What the coordinator itself observed of one delegated GEAK runner process.
@@ -187,7 +215,7 @@ def _campaign_facts(result: Mapping[str, Any], *, macro_cycle: int) -> _Campaign
     workspace = fields.text("workspace")
     return _CampaignFacts(
         run_id=fields.text("task_id") or (Path(workspace).name if workspace else "") or f"gemm-c{macro_cycle}",
-        status=fields.text("status", default="unknown"),
+        status=fields.status(),
         shapes_total=result.get("shapes_total", capture.get("shape_count")),
         tuned_file=fields.text("tuned_file", "config_path"),
         # _validate_gemm_tuning_e2e writes the validated gain to e2e_gain_pct, not gain_pct -- no
@@ -196,8 +224,8 @@ def _campaign_facts(result: Mapping[str, Any], *, macro_cycle: int) -> _Campaign
         graded_objective=fields.text("graded_objective"),
         micro_decision=fields.text("micro_decision", "decision"),
         integrate_ref=fields.text("integration_id"),
-        started_at=fields.text("started_at"),
-        ended_at=fields.text("ended_at", "ts"),
+        started_at=fields.started_at(),
+        ended_at=fields.ended_at(),
         duration_sec=result.get("duration_sec"),
     )
 
@@ -213,7 +241,7 @@ def _record_tuner_run(recorder: Any, row: Mapping[str, Any], facts: _CampaignFac
     applied = bool(facts.tuned_file) and artifact == facts.tuned_file
     recorder.record_gemm_tuning_run(
         run_id=f"{facts.run_id}-{tuner}" if tuner else facts.run_id,
-        status=fields.text("status", default=facts.status),
+        status=fields.status(facts.status),
         shapes_total=row.get("total_shapes", facts.shapes_total),
         shapes_tuned=row.get("improved_shapes"),
         config_path=artifact,
@@ -225,8 +253,8 @@ def _record_tuner_run(recorder: Any, row: Mapping[str, Any], facts: _CampaignFac
         started_at=facts.started_at,
         ended_at=facts.ended_at,
         duration_sec=row.get("elapsed_s", facts.duration_sec),
-        error_class=fields.text("error_class"),
-        failure_reason=fields.text("error", "skip_reason", "error_class"),
+        error_class=fields.error_class(),
+        failure_reason=fields.failure_reason(),
     )
 
 
@@ -247,8 +275,8 @@ def _record_untuned_campaign_run(recorder: Any, result: Mapping[str, Any], facts
         started_at=facts.started_at,
         ended_at=facts.ended_at,
         duration_sec=facts.duration_sec,
-        error_class=fields.text("error_class"),
-        failure_reason=fields.text("error", "skip_reason", "error_class"),
+        error_class=fields.error_class(),
+        failure_reason=fields.failure_reason(),
     )
 
 
@@ -257,7 +285,7 @@ def record_fusion_campaign(recorder: Any, session_dir: Path, result: Mapping[str
     fields = SettledRun(result)
     recorder.record_fusion_run(
         run_id=fields.text("fusion_run_id"),
-        status=fields.text("status", default="unknown"),
+        status=fields.status(),
         pattern=fields.text("pattern", "fusion_pattern"),
         target_module=fields.text("target_module", "kernel_name"),
         applied=bool(result.get("kept")),
@@ -265,11 +293,11 @@ def record_fusion_campaign(recorder: Any, session_dir: Path, result: Mapping[str
         patch_path=fields.text("patch_path", "source_patch"),
         micro_decision=fields.text("micro_decision", "decision"),
         integrate_ref=fields.text("integration_id"),
-        started_at=fields.text("started_at"),
-        ended_at=fields.text("ended_at", "ts"),
+        started_at=fields.started_at(),
+        ended_at=fields.ended_at(),
         duration_sec=result.get("duration_sec"),
-        error_class=fields.text("error_class"),
-        failure_reason=fields.text("error", "skip_reason", "error_class"),
+        error_class=fields.error_class(),
+        failure_reason=fields.failure_reason(),
     )
     tool_versions.record_tool_version(session_dir, tool="forge")
     agent_backend = fields.text("agent_backend").lower()
@@ -279,7 +307,7 @@ def record_fusion_campaign(recorder: Any, session_dir: Path, result: Mapping[str
 
 def note_absent_backends(result: dict[str, Any], *, handoff: Mapping[str, Any]) -> None:
     """Stamp the backends GEAK's environment report lists as absent onto ``result``."""
-    absent = geak_absent_backends(SettledRun(result).text("eval_dir") or SettledRun(handoff).text("eval_dir"))
+    absent = geak_absent_backends(SettledRun(result).eval_dir() or SettledRun(handoff).eval_dir())
     if not absent:
         return
     result["absent_backends"] = absent
@@ -319,19 +347,19 @@ def record_geak_delegation(
     handed = SettledRun(handoff)
     versions = result.get("versions")
     recorder.record_geak_delegation(
-        runner_status=fields.text("status", default="unknown"),
-        started_at=run.started_at or fields.text("started_at"),
+        runner_status=fields.status(),
+        started_at=run.started_at or fields.started_at(),
         ended_at=fields.text("ended_at", default=datetime.now(timezone.utc).isoformat()),
         duration_sec=run.duration_sec if run.duration_sec is not None else result.get("duration_sec"),
-        error_class=fields.text("error_class"),
-        error=fields.text("error"),
+        error_class=fields.error_class(),
+        error=fields.error(),
         returncode=result.get("returncode"),
         runner_timeout_sec=(
             run.runner_timeout_sec if run.runner_timeout_sec is not None else result.get("runner_timeout_s")
         ),
         kill_timeout_sec=(run.kill_timeout_sec if run.kill_timeout_sec is not None else result.get("kill_timeout_s")),
         exp_root=fields.text("exp_root") or handed.text("exp_root"),
-        eval_dir=fields.text("eval_dir") or handed.text("eval_dir"),
+        eval_dir=fields.eval_dir() or handed.eval_dir(),
         report_path=fields.text("report_path"),
         versions=versions if isinstance(versions, dict) else {},
         recovered_from_disk=run.recovered_from_disk,

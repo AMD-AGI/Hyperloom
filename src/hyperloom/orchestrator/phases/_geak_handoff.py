@@ -89,6 +89,11 @@ class DevicePin(NamedTuple):
     pin: dict[str, Any]
 
 
+def geak_dir(session_dir: Path) -> Path:
+    """The directory one GEAK delegation reads and writes everything under."""
+    return session_dir / "geak"
+
+
 def same_config_reference(state: Any, env_spec: dict[str, Any], *, writeback: Any, agentx: bool) -> SameConfigReference:
     """Read back the accepted launch this session measured its current best under."""
     best = state.current_best
@@ -327,10 +332,10 @@ def _handoff_payload(
         "observed_server_identity": reference.observed_server_identity,
         "measurement_evidence": reference.launch_evidence,
         "resolved_server_config": dict(measurement.get("resolved_server_config") or {}),
-        "exp_root": str(session_dir / "geak"),
+        "exp_root": str(geak_dir(session_dir)),
         # Macro-cycle-scoped eval_dir so a same-cycle resume reuses the in-progress on-disk artifacts while a new
         # cycle gets a fresh dir.
-        "eval_dir": str(session_dir / "geak" / f"e2e_cycle{int(state.macro_cycle or 0)}"),
+        "eval_dir": str(geak_dir(session_dir) / f"e2e_cycle{int(state.macro_cycle or 0)}"),
         # GEAK owns client selection; AgentX results are proposal proxies.
         "bench_client": "auto",
         "e2e_metric": e2e_metric,
@@ -390,7 +395,7 @@ def _fit_to_agentx(handoff: dict[str, Any], *, has_launch_script: bool) -> None:
 
 def write_handoff(handoff: Mapping[str, Any], *, session_dir: Path) -> Path:
     """Write the handoff file GEAK's runner reads, and return where it landed."""
-    out_dir = session_dir / "geak"
+    out_dir = geak_dir(session_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / "handoff.json"
     path.write_text(json.dumps(handoff, indent=2), encoding="utf-8")

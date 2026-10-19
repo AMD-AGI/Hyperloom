@@ -1679,7 +1679,7 @@ class KernelPhase(CoordinatorCollaborator):
         if delegation is None:
             return
         handoff = delegation.payload
-        result_path = self.session_dir / "geak" / "result.json"
+        result_path = _geak_handoff.geak_dir(self.session_dir) / "result.json"
         if await self._promote_geak_result_left_on_disk(handoff, agentx=agentx, result_path=result_path):
             return
         still_busy = await self._free_gpus_for_geak(
@@ -1696,7 +1696,7 @@ class KernelPhase(CoordinatorCollaborator):
         runner_timeout, kill_timeout, budget_known = self._geak_timeouts()
         if self._refuse_geak_for_budget(handoff, runner_timeout=runner_timeout, budget_known=budget_known):
             return
-        cmd = _geak_runner_command(delegation.path, self.session_dir / "geak", runner_timeout)
+        cmd = _geak_runner_command(delegation.path, _geak_handoff.geak_dir(self.session_dir), runner_timeout)
         log.info(
             "KERNEL entry: delegating to GEAK e2e (from=%s) runner_timeout=%ds kill_timeout=%ds budget_known=%s cmd=%s",
             from_phase or "<unknown>",
