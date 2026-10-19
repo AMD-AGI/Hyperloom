@@ -1236,7 +1236,6 @@ class ExploreExecutor:
                 # throughput-only anchor, and ``parse_eval_results`` falls back
                 # to the score the warmup took. Without a warmup there is nothing
                 # to fall back to, so the decision round keeps its own eval.
-                warmup_gv = run_gv
                 decision_gv = _variant_with_eval_off(run_gv) if use_warm_decision else run_gv
                 slot = output_root / f"v{idx:02d}_{_safe(gv.name)}"
                 slot.mkdir(parents=True, exist_ok=True)
@@ -1256,7 +1255,7 @@ class ExploreExecutor:
                         warmup_results = await run_grid(
                             base_yaml_path=config_path,
                             base_extra_args=stack_extra_args,
-                            grid=[warmup_gv],
+                            grid=[run_gv],
                             output_root=warmup_slot,
                             model_path=resolved_model,
                             gpu_type=resolved_gpu,

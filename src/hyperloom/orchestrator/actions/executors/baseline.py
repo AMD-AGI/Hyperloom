@@ -1923,7 +1923,7 @@ class BenchmarkRunExecutor:
         return result
 
     async def _run_retrying(self, ctx: RunnerContext, *, recorder: Any = None) -> dict[str, Any]:
-        """Run the Magpie baseline, with a one-shot eval-failure fallback."""
+        """Run the Magpie baseline; an eval-rooted failure fails the round, a MoE-runner failure retries once."""
         result = await self._run_pass(ctx, recorder=recorder, attempt_reason=RUN_INITIAL)
         # An eval that never reached a verdict because the server was gone is a broken measurement, not a statement
         # about accuracy or about a missing framework capability. Leaving it in the eval-rooted branch stamps it as an
