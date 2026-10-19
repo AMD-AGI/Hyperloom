@@ -3544,7 +3544,7 @@ class TestRunGemmTuningHandler:
             },
         )
         state.last_profile_workload = state.profile_workload_context()
-        caplog.set_level(20, logger=krh.__name__)
+        caplog.set_level(20, logger=shape_capture.__name__)
 
         assert (
             krh._reuse_vllm_block_fp8_roofline_shapes(

@@ -705,5 +705,3 @@ async def _capture_vllm_tunableop_shapes(
     if payload.get("_shape_capture_mode") == "block_fp8_profile":
         return await _capture_block_fp8_profile_shapes(run, state, payload)
     return await _capture_tunableop_recording(run, state, payload)
-
-

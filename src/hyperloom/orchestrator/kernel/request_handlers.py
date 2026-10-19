@@ -2492,6 +2492,496 @@ def _bridge_forge_decision(
         result.setdefault("error_class", f"forge_{micro}")
 
 
+class _ForgeGemmRun(NamedTuple):
+    """One forge GEMM tuning run: what it tunes for, where it works, and the log it reads."""
+
+    session_dir: Path
+    workspace: Path
+    framework: str
+    tuning_framework: str
+    precision: str
+    quant_type: str
+    gpu_type: str
+    tp: int
+    conc: int
+    mp: int
+    model_dir: str
+    model_id: str
+    server_log: str
+    thorough: bool
+
+
+class _ForgeShapeSources(NamedTuple):
+    """Every shape input a forge GEMM run hands its tuners."""
+
+    tokens: str
+    shapes_json: str
+    untuned_csv: str
+    moe_untuned_csv: str
+    moe_key_report: dict[str, Any]
+    tunableop_input: str
+    shapes_manifest: str
+    demand_json: str
+    capture: HandlerResult | None
+
+
+class _DenseShapes(NamedTuple):
+    """The dense-shape source a forge run starts from: a structured JSON, or an untuned CSV."""
+
+    shapes_json: str
+    untuned_csv: str
+
+
+class _MoeShapeTable(NamedTuple):
+    """The MoE shape table a forge run tunes against, and what the serving log said about it."""
+
+    csv_path: str
+    key_report: dict[str, Any]
+
+
+class _CapturedForgeShapes(NamedTuple):
+    """What a capture pass left a run with: its shape sources, or the result that replaces the run."""
+
+    sources: _ForgeShapeSources
+    failure: HandlerResult | None
+
+
+def _requested_existing_file(payload: dict, key: str) -> str:
+    """The path this request names for ``key``, or empty when it is not a file on disk.
+
+    A caller may hand inline content or a stale path; forge reads every one of
+    these as an input file.
+    """
+    path = str(payload.get(key) or "").strip()
+    return path if _path_is_existing_file(path) else ""
+
+
+def _forge_gemm_run(state: Any, payload: dict, session_dir: Path) -> _ForgeGemmRun:
+    """Open a workspace and settle what one forge GEMM tuning run tunes for.
+
+    ``model_dir`` is empty when the model cannot be resolved to a local
+    directory, and ``model_id`` when the request names no model at all; the
+    routing and the server log are filled in afterwards.
+    """
+    from hyperloom.common.model_paths import resolve_serving_model_path
+    from hyperloom.common.visible_devices import detect_gpu_count
+    from hyperloom.inference_optimizer.model_config_utils import resolve_local_model_dir
+
+    workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)
+    workspace.mkdir(parents=True, exist_ok=True)
+    # Resolve precision from actual runtime, not just session-level state.
+    precision, quant_type = _resolve_forge_precision_and_quant(state, payload)
+
+    # Bootstrap already walked HL_MODEL_BASE and the hub cache to decide what to
+    # serve; probing only the hub cache here would reject a repo id that the
+    # running server resolved fine.
+    model_id = _requested_setting(payload, state, "model_path", os.environ.get("MODEL_PATH") or "")
+    model_dir = resolve_local_model_dir(resolve_serving_model_path(model_id) or model_id) if model_id else None
+
+    tp = int(payload.get("tp") or state.tp or os.environ.get("TP") or 1)
+    # Default mp = all visible GPUs.
+    detected_gpus = detect_gpu_count() or tp
+    mp = int(payload.get("mp") or os.environ.get("FORGE_GEMM_TUNE_MP") or detected_gpus)
+    return _ForgeGemmRun(
+        session_dir=session_dir,
+        workspace=workspace,
+        framework=_requested_setting(payload, state, "framework", "sglang").lower(),
+        tuning_framework="",
+        precision=precision,
+        quant_type=quant_type,
+        gpu_type=_requested_setting(payload, state, "gpu_type", os.environ.get("GPU_TYPE") or "mi300x").lower(),
+        tp=tp,
+        conc=int(payload.get("conc") or state.conc or os.environ.get("CONC") or 64),
+        mp=mp,
+        model_dir=str(model_dir) if model_dir is not None else "",
+        model_id=model_id,
+        server_log="",
+        # Exhaustive search when budget allows (>= 24h) and mp >= 4.
+        thorough=bool(float(getattr(state, "max_minutes", 0) or 0) >= 1440 and mp >= 4),
+    )
+
+
+async def _route_forge_gemm_run(run: _ForgeGemmRun, state: Any, payload: dict) -> _ForgeGemmRun:
+    """Pick the tuner family a forge GEMM run is handed to, from what its serving log shows aiter doing."""
+    requested_log = str(payload.get("kernel_signature_log") or "").strip()
+    # Off the event loop: this walks runs/ and byte-scans server logs that
+    # measure ~17MB apiece on the fleet. Inline, it stalled every other
+    # coroutine on this orchestrator -- heartbeats included -- for the duration.
+    server_log = requested_log or await asyncio.to_thread(_resolve_forge_server_log, state, run.session_dir)
+    return run._replace(
+        server_log=server_log,
+        tuning_framework=_forge_framework_for_vllm(
+            framework=run.framework,
+            precision=run.precision,
+            quant_type=run.quant_type,
+            tunableop_input=str(payload.get("tunableop_input") or "").strip(),
+            **_resolve_vllm_aiter_routing(model_path=run.model_dir, server_log=server_log, tp=run.tp),
+        ),
+    )
+
+
+async def _forge_tuning_tokens(payload: dict, server_log: str) -> str:
+    """The M values forge tunes for: the request's own, else the ones the serving log observed.
+
+    forge's own fallback derives ``--tokens`` from ``conc``, which is a guess
+    about M; the serving log records the M values the model actually ran.
+    """
+    tokens = _normalize_tokens(payload.get("tokens"))
+    if tokens or not server_log:
+        return tokens
+    observed = _normalize_tokens(await asyncio.to_thread(_tokens_from_serving_log, server_log))
+    if observed:
+        log.info("GEMM: derived --tokens=%s from observed M in %s", observed, server_log)
+    return observed
+
+
+def _forge_dense_shapes(state: Any, payload: dict, run: _ForgeGemmRun) -> _DenseShapes:
+    """Where forge reads this run's dense GEMM shapes: the request's own, else the session's evidence.
+
+    Automatic SGLang priority is the latest TraceLens runtime profile, then
+    Forge's config-derived fallback CSV -- a specialist checkout is not
+    sufficient evidence that its static CSV came from the active benchmark.
+    vLLM instead requires native TunableOp rows or a workload-matched block-FP8
+    profile, so it is left without a dense source here.
+    """
+    shapes_json = _normalize_forge_shapes_json(payload.get("shapes_json"), run.workspace)
+    untuned_csv = _requested_existing_file(payload, "untuned_csv")
+    if shapes_json or untuned_csv or run.framework == "vllm":
+        return _DenseShapes(shapes_json, untuned_csv)
+    traced_shapes = _resolve_forge_shapes(state, run.session_dir, require_fresh_profile=True, precision=run.precision)
+    if traced_shapes:
+        return _DenseShapes(traced_shapes, "")
+    return _DenseShapes(
+        "",
+        _resolve_forge_untuned_csv(run.session_dir, run.precision, run.quant_type, run.model_dir),
+    )
+
+
+def _forge_moe_shape_table(payload: dict, server_log: str, tokens: str, workspace: Path) -> _MoeShapeTable:
+    """The MoE shape table forge tunes against, read off the runtime rather than inferred.
+
+    The dispatch tuple in the server log states the quantisation pair, the
+    per-partition inter_dim and the EP-inflated expert/topk counts; none of the
+    three is recoverable from the model config, and guessing them is what
+    produced tuned tables no runtime lookup could reach.
+    """
+    requested = _requested_existing_file(payload, "moe_untuned_csv")
+    if requested:
+        return _MoeShapeTable(requested, {})
+    return _MoeShapeTable(*_write_fmoe_untuned_csv_from_log(server_log, tokens, workspace))
+
+
+async def _forge_shape_sources(state: Any, payload: dict, run: _ForgeGemmRun) -> _ForgeShapeSources:
+    """Everything this forge run can tune from before any shape-capture pass.
+
+    The tokens are settled first because ``_write_fmoe_untuned_csv_from_log``
+    consumes them directly and falls back to ``[1]`` for an empty one: built the
+    other way round, the MoE lane gets a table with a single M=1 row, which
+    misses on every prefill and large-batch lookup and is reverted as
+    ``no_shape_key_matched``.
+    """
+    tokens = await _forge_tuning_tokens(payload, run.server_log)
+    moe = _forge_moe_shape_table(payload, run.server_log, tokens, run.workspace)
+    dense = _forge_dense_shapes(state, payload, run)
+    return _ForgeShapeSources(
+        tokens=tokens,
+        shapes_json=dense.shapes_json,
+        untuned_csv=dense.untuned_csv,
+        moe_untuned_csv=moe.csv_path,
+        moe_key_report=moe.key_report,
+        tunableop_input=str(payload.get("tunableop_input") or "").strip(),
+        shapes_manifest="",
+        demand_json=_requested_existing_file(payload, "demand_json"),
+        capture=None,
+    )
+
+
+def _profiled_block_fp8_shapes(
+    state: Any,
+    payload: dict,
+    run: _ForgeGemmRun,
+    sources: _ForgeShapeSources,
+) -> _ForgeShapeSources:
+    """Block-FP8 shapes the session already profiled, so no capture pass has to be paid for.
+
+    Decode steps replay inside a CUDA Graph and therefore emit no Kineto *op*
+    events, so every profile-derived block-FP8 shape set structurally carries
+    prefill M only -- measured on a real capture, the decode-only trace split
+    yields zero block-FP8 events while the prefill splits yield M=2095. Tuning
+    that alone optimizes an operating point the workload barely uses. TraceLens
+    candidates are built from the device kernel timeline, which does see through
+    the graph and carries the decode M that dominates throughput, so prefer
+    them. ``require_fresh_profile`` keeps the vLLM rule that shapes must be
+    workload-matched, and ``precision`` keeps BF16 heads out of an FP8 tuner's
+    input.
+    """
+    if not _vllm_block_fp8_profile_capture_required(
+        framework=run.framework,
+        precision=run.precision,
+        quant_type=run.quant_type,
+        shapes_json=sources.shapes_json,
+        tunableop_input=sources.tunableop_input,
+        dry_run=bool(payload.get("dry_run")),
+    ):
+        return sources
+    traced_shapes = _resolve_forge_shapes(state, run.session_dir, require_fresh_profile=True, precision=run.precision)
+    if traced_shapes:
+        return sources._replace(shapes_json=traced_shapes, untuned_csv="")
+    reused = _reuse_vllm_block_fp8_roofline_shapes(
+        state,
+        workspace=run.workspace,
+        current_workload=state.current_profile_workload_context(payload),
+    )
+    if reused is None:
+        return sources
+    return sources._replace(shapes_json=str(reused["shapes_json"]), untuned_csv="", capture=reused)
+
+
+async def _captured_forge_shapes(
+    state: Any,
+    payload: dict,
+    run: _ForgeGemmRun,
+    sources: _ForgeShapeSources,
+    priced_lane: Any,
+) -> _CapturedForgeShapes:
+    """Serve the workload once to record the shapes a vLLM run has no other source for."""
+    sources = _profiled_block_fp8_shapes(state, payload, run, sources)
+    block_fp8_capture = _vllm_block_fp8_profile_capture_required(
+        framework=run.framework,
+        precision=run.precision,
+        quant_type=run.quant_type,
+        shapes_json=sources.shapes_json,
+        tunableop_input=sources.tunableop_input,
+        dry_run=bool(payload.get("dry_run")),
+    )
+    # Keyed on the routed framework: a run handed to the AITER tuner family has
+    # no use for a TunableOp recording pass, and paying for one costs a full
+    # extra server boot.
+    tunableop_capture = (
+        _vllm_dense_shape_capture_required(
+            framework=run.tuning_framework,
+            model_path=run.model_dir,
+            shapes_json=sources.shapes_json,
+            tunableop_input=sources.tunableop_input,
+            dry_run=bool(payload.get("dry_run")),
+        )
+        and not block_fp8_capture
+    )
+    if not block_fp8_capture and not tunableop_capture:
+        return _CapturedForgeShapes(sources, None)
+    # A capture costs a full extra server boot, wasted on a lane the phase cannot fund once it has the shapes.
+    lane_after_capture = await priced_lane(
+        has_untuned_csv=tunableop_capture and bool(sources.untuned_csv),
+        has_shapes_json=block_fp8_capture,
+        has_tunableop_input=tunableop_capture,
+    )
+    if lane_after_capture is None:
+        return _CapturedForgeShapes(sources, _unfunded_lane_skip(LANE_GEMM))
+
+    capture_payload = dict(payload)
+    if block_fp8_capture:
+        capture_payload["_shape_capture_mode"] = "block_fp8_profile"
+    capture = await _capture_vllm_tunableop_shapes(
+        state=state,
+        session_dir=run.session_dir,
+        payload=capture_payload,
+        workspace=run.workspace,
+    )
+    if capture.get("status") != "ok":
+        return _CapturedForgeShapes(sources, _stamp_forge_gemm_provenance(capture, run))
+    captured = sources._replace(
+        tunableop_input=str(capture.get("tunableop_input") or "").strip(),
+        capture=capture,
+    )
+    captured_shapes = str(capture.get("shapes_json") or "").strip()
+    if not captured_shapes:
+        return _CapturedForgeShapes(captured, None)
+    # Forge dense tuners prefer untuned_csv over shapes_json. A fresh profile
+    # capture is workload-matched and must supersede any stale specialist CSV
+    # resolved before the capture pass.
+    return _CapturedForgeShapes(captured._replace(shapes_json=captured_shapes, untuned_csv=""), None)
+
+
+async def _forge_dense_shape_manifest(
+    state: Any,
+    payload: dict,
+    run: _ForgeGemmRun,
+    sources: _ForgeShapeSources,
+) -> str:
+    """The trace shape manifest forge ranks above ``shapes_json``, when this run produced nothing better.
+
+    forge ranks the manifest at priority 0 on the premise that it was explicitly
+    supplied; a manifest found by walking the session tree carries no such
+    promise -- it can come from an earlier run at a different precision or with
+    different server args, and there is no consistency check to catch that.
+    Letting it win would discard a block-FP8 profile capture or a TunableOp
+    shape capture that deliberately cleared ``untuned_csv`` so the fresh result
+    would be used, and would bypass :func:`_align_forge_shapes_for_aiter` too.
+    """
+    requested = str(payload.get("shapes_manifest") or "").strip()
+    if requested:
+        return requested if _path_is_existing_file(requested) else ""
+    if sources.untuned_csv or sources.shapes_json:
+        log.debug(
+            "GEMM: not scavenging a trace shape manifest; this run already has "
+            "a workload-matched dense-shape source (%s)",
+            "untuned_csv" if sources.untuned_csv else "shapes_json",
+        )
+        return ""
+    # Off the event loop for the same reason: a ``**/`` walk of a session tree
+    # that holds thousands of run artifacts.
+    scavenged = await asyncio.to_thread(_resolve_trace_shape_manifest, state, run.session_dir)
+    return scavenged if _path_is_existing_file(scavenged) else ""
+
+
+def _forge_tuner_ceiling(payload: dict, lane: LaneAllocation) -> int:
+    """How many routed tuners the lane's share pays for; ``0`` leaves forge's own routing intact.
+
+    An explicit payload value stays an operator/test escape hatch; a named
+    ``tuner`` already narrows the set to one, so no ceiling is needed then.
+    """
+    if str(payload.get("tuner") or "").strip():
+        return 0
+    requested_tuners = _positive_int(payload.get("max_tuners"))
+    return requested_tuners if requested_tuners > 0 else lane.max_targets
+
+
+def _forge_gemm_tune_input(
+    payload: dict,
+    run: _ForgeGemmRun,
+    sources: _ForgeShapeSources,
+    timeout: int,
+    tuner_ceiling: int,
+) -> dict[str, Any]:
+    """The ``kernelforge gemm-tune`` invocation this run asks for."""
+    return {
+        "model_path": run.model_dir,
+        "framework": run.tuning_framework,
+        "precision": run.precision,
+        "quant_type": run.quant_type,
+        "gpu_type": run.gpu_type,
+        "tp": run.tp,
+        "conc": run.conc,
+        "mp": run.mp,
+        "output_dir": str(run.workspace),
+        # Passing the same value to both made the producer's own
+        # min(per_tuner, remaining) an identity, so the first tuner could
+        # consume the entire session and every later one was skipped for lack of
+        # time. The per-target cap must stay strictly below the global one.
+        "timeout": gemm_per_tuner_timeout_sec(timeout),
+        # Bounds the whole session across all tuners.
+        "global_timeout": timeout,
+        "skip_gpu_check": True,
+        "tokens": sources.tokens,
+        "untuned_csv": sources.untuned_csv,
+        "moe_untuned_csv": sources.moe_untuned_csv,
+        "shapes_json": sources.shapes_json,
+        "shapes_manifest": sources.shapes_manifest,
+        "demand_json": sources.demand_json,
+        "tunableop_input": sources.tunableop_input,
+        "kernel_signature_log": run.server_log,
+        "tuner": str(payload.get("tuner") or ""),
+        # How many routed tuners the lane's share pays for. Omitted when none
+        # could be derived, which leaves the producer's own routing intact.
+        **({"max_tuners": tuner_ceiling} if tuner_ceiling > 0 else {}),
+        "thorough": run.thorough,
+    }
+
+
+def _stamp_forge_gemm_provenance(
+    result: HandlerResult,
+    run: _ForgeGemmRun,
+    tuning_framework: str = "",
+) -> HandlerResult:
+    """Say which forge run produced a result, where it worked and what it tuned for.
+
+    The engine tag is what makes the breakdown attribute the run to forge.
+    """
+    result.setdefault("backend", "forge")
+    result.setdefault("engine", "forge")
+    result.setdefault("workspace", str(run.workspace))
+    result.setdefault("precision", run.precision)
+    result.setdefault("framework", run.framework)
+    if tuning_framework:
+        result.setdefault("tuning_framework", tuning_framework)
+    result.setdefault("model_path", run.model_id)
+    return result
+
+
+def _report_forge_shape_provenance(
+    result: HandlerResult,
+    sources: _ForgeShapeSources,
+    shape_alignment: dict[str, Any] | None,
+) -> None:
+    """Record where this run's shapes came from, so a missing MoE problem and an untunable one read apart.
+
+    The MoE key report is kept even when nothing was tunable: "no MoE problem
+    was observed" and "the observed pair is one aiter cannot tune" lead to
+    different actions, and neither is visible from the tuner's own status.
+    """
+    if sources.moe_key_report:
+        result.setdefault("moe_key_source", sources.moe_key_report)
+    if shape_alignment is not None:
+        result.setdefault("shape_alignment", shape_alignment)
+    if sources.capture is None:
+        return
+    result.setdefault(
+        "shape_capture",
+        {
+            "status": "ok",
+            "workspace": sources.capture.get("shape_capture_workspace"),
+            "tunableop_input": sources.tunableop_input,
+            "shapes_json": sources.shapes_json,
+            "shape_count": sources.capture.get("shape_count"),
+            "capture_mode": sources.capture.get("capture_mode", "tunableop"),
+            "source_profile_trace": sources.capture.get("source_profile_trace"),
+        },
+    )
+
+
+def _fill_forge_tuner_outcomes(result: HandlerResult, workspace: Path) -> None:
+    """Surface why forge skipped and which of its tuners crashed, from the sentinel or from disk.
+
+    forge lists every failure in ``failed_tuners`` regardless of the overall
+    decision; dropped here, a dense tuner winning would hide a MoE tuner's
+    crash, and a KEEP would read as "no headroom elsewhere" when siblings had in
+    fact hard-failed. The failure is logged as well, so it is never silent even
+    when the session is kept.
+    """
+    if not result.get("tuners_skipped"):
+        disk_skipped = _read_forge_result_json(workspace).get("tuners_skipped")
+        if disk_skipped:
+            result["tuners_skipped"] = disk_skipped
+    if not result.get("skip_reason"):
+        reason = _derive_gemm_skip_reason(result.get("tuners_skipped"))
+        if reason:
+            result["skip_reason"] = reason
+    if not result.get("failed_tuners"):
+        disk_failed = _read_forge_result_json(workspace).get("failed_tuners")
+        if disk_failed:
+            result["failed_tuners"] = disk_failed
+    _log_failed_tuners(result)
+    _lift_forge_tuner_error(result)
+
+
+def _lift_forge_tuner_error(result: HandlerResult) -> None:
+    """Carry the first tuner's own error class and message onto the run's envelope.
+
+    The breakdown and the stack read the envelope, not the jsonl audit row, and
+    a specific class has to outrank the generic wording the bridge would write.
+    ``tuners_run`` is forge's JSON and may be any shape; this is bookkeeping and
+    must not raise.
+    """
+    rows = result.get("tuners_run")
+    rows = rows if isinstance(rows, list) else []
+    for key in ("error_class", "error"):
+        if result.get(key):
+            continue
+        reported = next((str(row[key]) for row in rows if isinstance(row, dict) and row.get(key)), "")
+        if reported:
+            result[key] = reported
+
+
 async def _run_forge_gemm_tuning(
     payload: dict,
     *,
@@ -2530,26 +3020,10 @@ async def _run_forge_gemm_tuning(
             "backend": "forge",
         }
 
-    # Resolve precision from actual runtime, not just session-level state.
-    precision, quant_type = _resolve_forge_precision_and_quant(state, payload)
-    framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
-
-    workspace = _gemm_tuning_workspace(payload, session_dir=session_dir)
-    workspace.mkdir(parents=True, exist_ok=True)
-
-    raw_model_path = str(payload.get("model_path") or state.model_path or os.environ.get("MODEL_PATH") or "").strip()
-    if not raw_model_path:
+    run = _forge_gemm_run(state, payload, session_dir)
+    if not run.model_id:
         return {"status": "failed", "error_class": "model_path_missing", "error": "model_path is required"}
-    from hyperloom.common.model_paths import resolve_serving_model_path
-    from hyperloom.inference_optimizer.model_config_utils import (
-        resolve_local_model_dir,
-    )
-
-    # Bootstrap already walked HL_MODEL_BASE and the hub cache to decide what to
-    # serve; probing only the hub cache here would reject a repo id that the
-    # running server resolved fine.
-    resolved_model_dir = resolve_local_model_dir(resolve_serving_model_path(raw_model_path) or raw_model_path)
-    if resolved_model_dir is None:
+    if not run.model_dir:
         # Forge needs the config on disk to derive shapes, so it cannot run --
         # but not running one tuning backend is a skip, not a session failure.
         # Reporting it as failed would spend a REVERT verdict on an experiment
@@ -2558,358 +3032,58 @@ async def _run_forge_gemm_tuning(
             "status": "skipped",
             "error_class": "model_path_unavailable",
             "skip_reason": (
-                f"Model path {raw_model_path!r} is neither an existing local "
+                f"Model path {run.model_id!r} is neither an existing local "
                 "directory nor an available Hugging Face cache snapshot"
             ),
             "backend": "forge",
         }
-    resolved_model_path = str(resolved_model_dir)
-
-    tp = int(payload.get("tp") or state.tp or os.environ.get("TP") or 1)
-    conc = int(payload.get("conc") or state.conc or os.environ.get("CONC") or 64)
-    gpu_type = str(payload.get("gpu_type") or state.gpu_type or os.environ.get("GPU_TYPE") or "mi300x").strip().lower()
-    tokens = _normalize_tokens(payload.get("tokens"))
-    # Default mp = all visible GPUs.
-    from hyperloom.common.visible_devices import detect_gpu_count
-
-    detected_gpus = detect_gpu_count() or tp
-    mp = int(payload.get("mp") or os.environ.get("FORGE_GEMM_TUNE_MP") or detected_gpus)
-
-    # Resolve server log for 1-stage ASM detection.
-    kernel_sig_log = str(payload.get("kernel_signature_log") or "").strip()
-    if not kernel_sig_log:
-        # Off the event loop: this walks runs/ and byte-scans server logs that
-        # measure ~17MB apiece on the fleet. Inline, it stalled every other
-        # coroutine on this orchestrator -- heartbeats included -- for the
-        # duration.
-        kernel_sig_log = await asyncio.to_thread(_resolve_forge_server_log, state, session_dir)
-
-    # Explicit operator/benchmark input wins. Automatic SGLang priority is:
-    # latest TraceLens runtime profile, specialist-worktree CSV fallback, then
-    # Forge's config-derived fallback. A specialist checkout is not sufficient
-    # evidence that its static CSV came from the active benchmark. vLLM instead
-    # requires native TunableOp rows or a workload-matched block-FP8 profile.
-    shapes_json = _normalize_forge_shapes_json(payload.get("shapes_json"), workspace)
-    untuned_csv = str(payload.get("untuned_csv") or "").strip()
-    if untuned_csv and not _path_is_existing_file(untuned_csv):
-        # Guard against inline content / stale paths.
-        untuned_csv = ""
-    if not shapes_json and not untuned_csv and framework != "vllm":
-        shapes_json = _resolve_forge_shapes(
-            state,
-            session_dir,
-            require_fresh_profile=True,
-            precision=precision,
-        )
-        if not shapes_json:
-            untuned_csv = _resolve_forge_untuned_csv(
-                session_dir,
-                precision,
-                quant_type,
-                resolved_model_path,
-            )
-
-    # forge's own fallback derives --tokens from ``conc``, which is a guess
-    # about M. The serving log records the M values the model actually ran, so
-    # prefer those whenever a log with dispatch evidence was resolved.
-    #
-    # This has to happen BEFORE the MoE untuned CSV is built, not just before
-    # the payload is assembled: ``_write_fmoe_untuned_csv_from_log`` consumes
-    # ``tokens`` directly, and its fallback for an empty one is ``[1]``. Derived
-    # afterwards, the dense lane would get the full observed sweep while the MoE
-    # lane gets a table with a single M=1 row, which misses on every prefill and
-    # large-batch lookup and is reverted as no_shape_key_matched.
-    if not tokens and kernel_sig_log:
-        tokens = _normalize_tokens(await asyncio.to_thread(_tokens_from_serving_log, kernel_sig_log))
-        if tokens:
-            log.info("GEMM: derived --tokens=%s from observed M in %s", tokens, kernel_sig_log)
-
-    # MoE shapes come from the runtime, never from inference. The dispatch tuple
-    # in the server log states the quantisation pair, the per-partition inter_dim
-    # and the EP-inflated expert/topk counts; none of the three is recoverable
-    # from the model config, and guessing them is what produced tuned tables no
-    # runtime lookup could reach.
-    moe_untuned_csv = str(payload.get("moe_untuned_csv") or "").strip()
-    if moe_untuned_csv and not _path_is_existing_file(moe_untuned_csv):
-        moe_untuned_csv = ""
-    moe_key_report: dict[str, Any] = {}
-    if not moe_untuned_csv:
-        moe_untuned_csv, moe_key_report = _write_fmoe_untuned_csv_from_log(kernel_sig_log, tokens, workspace)
-
-    tunableop_input = str(payload.get("tunableop_input") or "").strip()
-    forge_framework = _forge_framework_for_vllm(
-        framework=framework,
-        precision=precision,
-        quant_type=quant_type,
-        tunableop_input=tunableop_input,
-        **_resolve_vllm_aiter_routing(
-            model_path=resolved_model_path,
-            server_log=kernel_sig_log,
-            tp=tp,
-        ),
-    )
-    shape_capture: HandlerResult | None = None
-    block_fp8_profile_capture = _vllm_block_fp8_profile_capture_required(
-        framework=framework,
-        precision=precision,
-        quant_type=quant_type,
-        shapes_json=shapes_json,
-        tunableop_input=tunableop_input,
-        dry_run=bool(payload.get("dry_run")),
-    )
-    if block_fp8_profile_capture:
-        # Decode steps replay inside a CUDA Graph and therefore emit no Kineto
-        # *op* events, so every profile-derived block-FP8 shape set structurally
-        # carries prefill M only -- measured on a real capture, the decode-only
-        # trace split yields zero block-FP8 events while the prefill splits yield
-        # M=2095. Tuning that alone optimizes an operating point the workload
-        # barely uses. TraceLens candidates are built from the device kernel
-        # timeline, which does see through the graph and carries the decode M
-        # that dominates throughput, so prefer them. ``require_fresh_profile``
-        # keeps the vLLM rule that shapes must be workload-matched, and
-        # ``precision`` keeps BF16 heads out of an FP8 tuner's input.
-        traced_shapes = _resolve_forge_shapes(
-            state,
-            session_dir,
-            require_fresh_profile=True,
-            precision=precision,
-        )
-        if traced_shapes:
-            shapes_json = traced_shapes
-            untuned_csv = ""
-            block_fp8_profile_capture = False
-    if block_fp8_profile_capture:
-        shape_capture = _reuse_vllm_block_fp8_roofline_shapes(
-            state,
-            workspace=workspace,
-            current_workload=state.current_profile_workload_context(payload),
-        )
-        if shape_capture is not None:
-            shapes_json = str(shape_capture["shapes_json"])
-            untuned_csv = ""
-            block_fp8_profile_capture = False
-    tunableop_capture = (
-        # Keyed on the routed framework: a run handed to the AITER tuner family
-        # has no use for a TunableOp recording pass, and paying for one costs a
-        # full extra server boot.
-        _vllm_dense_shape_capture_required(
-            framework=forge_framework,
-            model_path=resolved_model_path,
-            shapes_json=shapes_json,
-            tunableop_input=tunableop_input,
-            dry_run=bool(payload.get("dry_run")),
-        )
-        and not block_fp8_profile_capture
-    )
+    run = await _route_forge_gemm_run(run, state, payload)
     priced_gemm_lane = functools.partial(
         _priced_gemm_lane,
         state,
-        model_path=resolved_model_path,
-        framework=forge_framework,
-        precision=precision,
-        quant_type=quant_type,
-        gpu_type=gpu_type,
-        kernel_signature_log=kernel_sig_log,
+        model_path=run.model_dir,
+        framework=run.tuning_framework,
+        precision=run.precision,
+        quant_type=run.quant_type,
+        gpu_type=run.gpu_type,
+        kernel_signature_log=run.server_log,
     )
-    if block_fp8_profile_capture or tunableop_capture:
-        # A capture costs a full extra server boot, wasted on a lane the phase cannot fund once it has the shapes.
-        lane_after_capture = await priced_gemm_lane(
-            has_untuned_csv=tunableop_capture and bool(untuned_csv),
-            has_shapes_json=block_fp8_profile_capture,
-            has_tunableop_input=tunableop_capture,
-        )
-        if lane_after_capture is None:
-            return _unfunded_lane_skip(LANE_GEMM)
-        capture_payload = dict(payload)
-        if block_fp8_profile_capture:
-            capture_payload["_shape_capture_mode"] = "block_fp8_profile"
-        shape_capture = await _capture_vllm_tunableop_shapes(
-            state=state,
-            session_dir=session_dir,
-            payload=capture_payload,
-            workspace=workspace,
-        )
-        if shape_capture.get("status") != "ok":
-            shape_capture.setdefault("backend", "forge")
-            shape_capture.setdefault("engine", "forge")
-            shape_capture.setdefault("workspace", str(workspace))
-            shape_capture.setdefault("precision", precision)
-            shape_capture.setdefault("framework", framework)
-            shape_capture.setdefault("model_path", raw_model_path)
-            return shape_capture
-        tunableop_input = str(shape_capture.get("tunableop_input") or "").strip()
-        captured_shapes = str(shape_capture.get("shapes_json") or "").strip()
-        if captured_shapes:
-            shapes_json = captured_shapes
-            # Forge dense tuners prefer untuned_csv over shapes_json. A fresh
-            # profile capture is workload-matched and must supersede any stale
-            # specialist CSV resolved before the capture pass.
-            untuned_csv = ""
 
-    # forge prefers the manifest over shapes_json as a dense-shape source, and
-    # an explicit demand.json over re-deriving demand from the serving log.
-    # Both are optional: forge drops a path that is not there, with a warning.
-    shapes_manifest = str(payload.get("shapes_manifest") or "").strip()
-    if not shapes_manifest:
-        # Scavenge one from the session only when nothing more specific was
-        # produced for THIS run. forge ranks the manifest at priority 0 on the
-        # premise that it was explicitly supplied; a manifest found by walking
-        # the session tree carries no such promise -- it can come from an
-        # earlier run at a different precision or with different server args,
-        # and there is no consistency check to catch that. Letting it win would
-        # discard a block-FP8 profile capture or a TunableOp shape capture that
-        # deliberately cleared ``untuned_csv`` so the fresh result would be
-        # used, and would bypass ``_align_forge_shapes_for_aiter`` as well.
-        if untuned_csv or shapes_json:
-            log.debug(
-                "GEMM: not scavenging a trace shape manifest; this run already has "
-                "a workload-matched dense-shape source (%s)",
-                "untuned_csv" if untuned_csv else "shapes_json",
-            )
-        else:
-            # Off the event loop for the same reason: a ``**/`` walk of a
-            # session tree that holds thousands of run artifacts.
-            shapes_manifest = await asyncio.to_thread(_resolve_trace_shape_manifest, state, session_dir)
-    if shapes_manifest and not _path_is_existing_file(shapes_manifest):
-        shapes_manifest = ""
-    demand_json = str(payload.get("demand_json") or "").strip()
-    if demand_json and not _path_is_existing_file(demand_json):
-        demand_json = ""
+    sources = await _forge_shape_sources(state, payload, run)
+    captured = await _captured_forge_shapes(state, payload, run, sources, priced_gemm_lane)
+    if captured.failure is not None:
+        return captured.failure
+    sources = captured.sources._replace(
+        shapes_manifest=await _forge_dense_shape_manifest(state, payload, run, captured.sources)
+    )
 
     gemm_lane = await priced_gemm_lane(
-        has_untuned_csv=bool(untuned_csv),
-        has_shapes_json=bool(shapes_json or shapes_manifest or demand_json),
-        has_tunableop_input=bool(tunableop_input),
+        has_untuned_csv=bool(sources.untuned_csv),
+        has_shapes_json=bool(sources.shapes_json or sources.shapes_manifest or sources.demand_json),
+        has_tunableop_input=bool(sources.tunableop_input),
     )
     if gemm_lane is None:
         return _unfunded_lane_skip(LANE_GEMM)
     timeout = _gemm_tuning_timeout_sec(payload, lane_budget_sec=gemm_lane.budget_sec)
-    requested_tuners = _positive_int(payload.get("max_tuners"))
-    # An explicit payload value stays an operator/test escape hatch; a named
-    # ``tuner`` already narrows the set to one, so no ceiling is needed then.
-    if str(payload.get("tuner") or "").strip():
-        gemm_tuner_ceiling = 0
-    else:
-        gemm_tuner_ceiling = requested_tuners if requested_tuners > 0 else gemm_lane.max_targets
-    session_max_min = float(getattr(state, "max_minutes", 0) or 0)
     shape_alignment: dict[str, Any] | None = None
-    if shapes_json:
-        shapes_json, shape_alignment = _align_forge_shapes_for_aiter(
-            shapes_json,
-            forge_framework=forge_framework,
-            workspace=workspace,
+    if sources.shapes_json:
+        aligned_shapes, shape_alignment = _align_forge_shapes_for_aiter(
+            sources.shapes_json,
+            forge_framework=run.tuning_framework,
+            workspace=run.workspace,
             budget_sec=timeout,
-            mp=mp,
+            mp=run.mp,
         )
+        sources = sources._replace(shapes_json=aligned_shapes)
 
-    input_payload = {
-        "model_path": resolved_model_path,
-        "framework": forge_framework,
-        "precision": precision,
-        "quant_type": quant_type,
-        "gpu_type": gpu_type,
-        "tp": tp,
-        "conc": conc,
-        "mp": mp,
-        "output_dir": str(workspace),
-        # Passing the same value to both made the producer's own
-        # min(per_tuner, remaining) an identity, so the first tuner could
-        # consume the entire session and every later one was skipped for lack of
-        # time. The per-target cap must stay strictly below the global one.
-        "timeout": gemm_per_tuner_timeout_sec(timeout),
-        # Bounds the whole session across all tuners.
-        "global_timeout": timeout,
-        "skip_gpu_check": True,
-        "tokens": tokens,
-        "untuned_csv": untuned_csv,
-        "moe_untuned_csv": moe_untuned_csv,
-        "shapes_json": shapes_json,
-        "shapes_manifest": shapes_manifest,
-        "demand_json": demand_json,
-        "tunableop_input": tunableop_input,
-        "kernel_signature_log": kernel_sig_log,
-        "tuner": str(payload.get("tuner") or ""),
-        # How many routed tuners the lane's share pays for. Omitted when none
-        # could be derived, which leaves the producer's own routing intact.
-        **({"max_tuners": gemm_tuner_ceiling} if gemm_tuner_ceiling > 0 else {}),
-        # Exhaustive search when budget allows (>= 24h) and mp >= 4.
-        "thorough": bool(session_max_min >= 1440 and mp >= 4),
-    }
-    result = await _invoke_forge_gemm_tune(input_payload, timeout)
-
-    result.setdefault("backend", "forge")
-    # Tag the tuning engine so the breakdown attributes this run to forge.
-    result.setdefault("engine", "forge")
-    result.setdefault("workspace", str(workspace))
-    result.setdefault("precision", precision)
-    result.setdefault("framework", framework)
-    result.setdefault("tuning_framework", forge_framework)
-    result.setdefault("model_path", raw_model_path)
-    if moe_key_report:
-        # Kept even when nothing was tunable: "no MoE problem was observed" and
-        # "the observed pair is one aiter cannot tune" lead to different actions,
-        # and neither is visible from the tuner's own status.
-        result.setdefault("moe_key_source", moe_key_report)
-    if shape_alignment is not None:
-        result.setdefault("shape_alignment", shape_alignment)
-    if shape_capture is not None:
-        result.setdefault(
-            "shape_capture",
-            {
-                "status": "ok",
-                "workspace": shape_capture.get("shape_capture_workspace"),
-                "tunableop_input": tunableop_input,
-                "shapes_json": shapes_json,
-                "shape_count": shape_capture.get("shape_count"),
-                "capture_mode": shape_capture.get("capture_mode", "tunableop"),
-                "source_profile_trace": shape_capture.get("source_profile_trace"),
-            },
-        )
-
-    # Surface why forge skipped: merge per-tuner skip reasons from the on-disk
-    # result.json and derive a top-level skip_reason.
-    if not result.get("tuners_skipped"):
-        disk_skipped = _read_forge_result_json(workspace).get("tuners_skipped")
-        if disk_skipped:
-            result["tuners_skipped"] = disk_skipped
-    if not result.get("skip_reason"):
-        reason = _derive_gemm_skip_reason(result.get("tuners_skipped"))
-        if reason:
-            result["skip_reason"] = reason
-
-    # Surface crashed tuners. forge lists every failure in ``failed_tuners``
-    # regardless of the overall decision; dropped here, a dense tuner winning
-    # would hide a MoE tuner's crash, and a KEEP would read as "no headroom
-    # elsewhere" when siblings had in fact hard-failed.
-    # Backfill from disk when the sentinel omitted it (mirrors tuners_skipped),
-    # keep it on the envelope for the trace row / breakdown, and log it so the
-    # failure is never silent even when the session is kept.
-    if not result.get("failed_tuners"):
-        disk_failed = _read_forge_result_json(workspace).get("failed_tuners")
-        if disk_failed:
-            result["failed_tuners"] = disk_failed
-    _log_failed_tuners(result)
-
-    # The breakdown and the stack read the envelope, not the jsonl audit row, so
-    # a tuner's own error class has to surface here too. Lifted before the bridge
-    # so a specific class outranks the generic wording. ``tuners_run`` is forge's
-    # JSON and may be any shape; this is bookkeeping and must not raise.
-    _tuner_rows = result.get("tuners_run")
-    if not isinstance(_tuner_rows, list):
-        _tuner_rows = []
-    if not result.get("error_class"):
-        for _t in _tuner_rows:
-            if isinstance(_t, dict) and _t.get("error_class"):
-                result["error_class"] = str(_t["error_class"])
-                break
-    if not result.get("error"):
-        for _t in _tuner_rows:
-            if isinstance(_t, dict) and _t.get("error"):
-                result["error"] = str(_t["error"])
-                break
-
-    _bridge_forge_decision(result, raw_model_path=raw_model_path, session_dir=session_dir)
-
+    result = await _invoke_forge_gemm_tune(
+        _forge_gemm_tune_input(payload, run, sources, timeout, _forge_tuner_ceiling(payload, gemm_lane)),
+        timeout,
+    )
+    _stamp_forge_gemm_provenance(result, run, tuning_framework=run.tuning_framework)
+    _report_forge_shape_provenance(result, sources, shape_alignment)
+    _fill_forge_tuner_outcomes(result, run.workspace)
+    _bridge_forge_decision(result, raw_model_path=run.model_id, session_dir=run.session_dir)
     return result
 
 
