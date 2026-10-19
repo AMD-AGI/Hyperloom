@@ -315,121 +315,162 @@ def _fill_integrate_defaults_from_state(
             that resolves and its ``kernel_id`` matches more than one pending
             record.
     """
-    from ..state.shared_state import SharedState, resolve_grading_anchor_tput
+    from ..state.shared_state import SharedState
 
     resolved = dict(payload)
     if resolved.get("source") == "forge_gemm_paired":
-        reference = resolved.get("paired_reference")
-        if (
-            not isinstance(reference, dict)
-            or float(reference.get("tput") or 0.0) <= 0
-            or not resolved.get("config_path")
-            or "extra_server_args" not in resolved
-            or not isinstance(resolved.get("extra_envs"), dict)
-        ):
-            raise ValueError("GEMM paired measurement requires an explicit entry reference and recipe")
-        resolved["base_tput"] = reference["tput"]
+        _anchor_on_paired_reference(resolved)
         return resolved
     state = SharedState.load_or_init(session_dir)
 
-    integration_id = str(resolved.get("integration_id") or "")
-    pending_records = state.pending_kernel_integration_records()
-    pending_record = next(
-        (record for record in pending_records if str(record.get("integration_id") or "") == integration_id),
-        None,
-    )
-    if pending_record is None and resolved.get("kernel_id"):
-        requested_kernel_id = str(resolved.get("kernel_id") or "")
-        requested_task_key = str(resolved.get("task_group_key") or "")
-        candidates = [
-            record
-            for record in pending_records
-            if str(record.get("kernel_id") or "") == requested_kernel_id
-            and (not requested_task_key or str(record.get("task_group_key") or "") == requested_task_key)
-        ]
-        if len(candidates) > 1:
-            # Siblings of one nomination round share a kernel_id, so picking any
-            # of them would bind the verdict to a record nobody named.
-            raise AmbiguousIntegrationTarget(
-                f"integrate refused: kernel_id={requested_kernel_id!r} matches "
-                f"{len(candidates)} pending integration records; an explicit "
-                "integration_id is required to bind the KEEP/REVERT verdict. "
-                f"candidates={sorted(str(record.get('integration_id') or '') for record in candidates)!r}"
-            )
-        pending_record = candidates[0] if candidates else None
+    pending_record = _pending_record_for_integrate(state, resolved)
     if pending_record is not None:
-        resolved.setdefault(
-            "integration_id",
-            str(pending_record.get("integration_id") or ""),
-        )
-        resolved.setdefault(
-            "kernel_id",
-            str(pending_record.get("kernel_id") or ""),
-        )
-        resolved.setdefault(
-            "task_group_key",
-            str(pending_record.get("task_group_key") or ""),
-        )
-        resolved.setdefault(
-            "identity_route",
-            str(pending_record.get("identity_route") or ""),
-        )
-        resolved.setdefault(
-            "artifact_kind",
-            str(pending_record.get("artifact_kind") or ""),
-        )
-        resolved.setdefault(
-            "integration_validation_status",
-            str(pending_record.get("integration_validation_status") or ""),
-        )
-        # Fusion siblings carry three facts the generic drain cannot infer. The
-        # env flags gate the fused path (unset => the patch measures as the eager
-        # path and REVERTs a real win); the keep bar is fusion-specific; the
-        # action label routes the promoted stack row. Fold them in HERE, before
-        # the extra_envs merge below, so the fused path is active during e2e.
-        if str(pending_record.get("source") or "") == "forge_fusion":
-            resolved.setdefault("source", "forge_fusion")
-            resolved.setdefault("action_label", str(pending_record.get("action_label") or "fusion"))
-            fusion_env_flags = pending_record.get("fusion_env_flags")
-            if isinstance(fusion_env_flags, dict) and fusion_env_flags:
-                requested = resolved.get("extra_envs")
-                requested = dict(requested) if isinstance(requested, dict) else {}
-                # The sibling's own flags win over anything already requested.
-                resolved["extra_envs"] = {**requested, **{str(k): str(v) for k, v in fusion_env_flags.items()}}
-            if "keep_threshold_pct" not in resolved and pending_record.get("keep_threshold_pct") is not None:
-                try:
-                    resolved["keep_threshold_pct"] = float(pending_record.get("keep_threshold_pct"))
-                except (TypeError, ValueError):
-                    pass
+        resolved.setdefault("integration_id", str(pending_record.get("integration_id") or ""))
+        resolved.setdefault("kernel_id", str(pending_record.get("kernel_id") or ""))
+        _fill_pending_record_identity(resolved, pending_record)
+        _fill_fusion_sibling_defaults(resolved, pending_record)
 
     current_best = getattr(state, "current_best", None) or {}
+    _fill_integrate_recipe_from_current_best(resolved, state, current_best)
+    _merge_integrate_extra_envs(resolved, payload, current_best)
+    _fill_integrate_kernel_attempt_defaults(resolved, state)
+    return resolved
+
+
+def _anchor_on_paired_reference(resolved: dict) -> None:
+    """Grade a GEMM paired measurement against the entry reference the request carries.
+
+    Args:
+        resolved: The integrate request being filled in; its ``base_tput`` is set.
+
+    Raises:
+        ValueError: the request does not carry both an explicit reference
+            throughput and the recipe that reference was measured under.
+    """
+    reference = resolved.get("paired_reference")
+    if (
+        not isinstance(reference, dict)
+        or float(reference.get("tput") or 0.0) <= 0
+        or not resolved.get("config_path")
+        or "extra_server_args" not in resolved
+        or not isinstance(resolved.get("extra_envs"), dict)
+    ):
+        raise ValueError("GEMM paired measurement requires an explicit entry reference and recipe")
+    resolved["base_tput"] = reference["tput"]
+
+
+def _pending_record_for_integrate(state: Any, resolved: Mapping[str, Any]) -> dict | None:
+    """The pending integration record an integrate request binds to, by id or by kernel.
+
+    Raises:
+        AmbiguousIntegrationTarget: the request names no ``integration_id`` that
+            resolves and its ``kernel_id`` matches several queued records.
+    """
+    records = state.pending_kernel_integration_records()
+    record = _pending_integration_record(records, str(resolved.get("integration_id") or ""))
+    if record is not None or not resolved.get("kernel_id"):
+        return record
+    return _sole_pending_record_for_kernel(records, resolved)
+
+
+def _sole_pending_record_for_kernel(records: list[dict], resolved: Mapping[str, Any]) -> dict | None:
+    """The one queued record a bare ``kernel_id`` names, or ``None`` when none does.
+
+    Raises:
+        AmbiguousIntegrationTarget: siblings of one nomination round share a
+            kernel_id, so picking any of them would bind the verdict to a record
+            nobody named.
+    """
+    requested_kernel_id = str(resolved.get("kernel_id") or "")
+    requested_task_key = str(resolved.get("task_group_key") or "")
+    candidates = [
+        record
+        for record in records
+        if str(record.get("kernel_id") or "") == requested_kernel_id
+        and (not requested_task_key or str(record.get("task_group_key") or "") == requested_task_key)
+    ]
+    if len(candidates) > 1:
+        raise AmbiguousIntegrationTarget(
+            f"integrate refused: kernel_id={requested_kernel_id!r} matches "
+            f"{len(candidates)} pending integration records; an explicit "
+            "integration_id is required to bind the KEEP/REVERT verdict. "
+            f"candidates={sorted(str(record.get('integration_id') or '') for record in candidates)!r}"
+        )
+    return candidates[0] if candidates else None
+
+
+def _fill_fusion_sibling_defaults(resolved: dict, pending_record: Mapping[str, Any]) -> None:
+    """Carry a fusion sibling's env flags, keep bar and action label into its integrate.
+
+    The generic drain cannot infer any of the three: the env flags gate the fused
+    path, so leaving them unset measures the eager path and REVERTs a real win;
+    the keep bar is fusion-specific; the action label routes the promoted stack
+    row. They land before the ``extra_envs`` merge so the fused path is active
+    during the end-to-end run.
+    """
+    if str(pending_record.get("source") or "") != "forge_fusion":
+        return
+    resolved.setdefault("source", "forge_fusion")
+    resolved.setdefault("action_label", str(pending_record.get("action_label") or "fusion"))
+    fusion_env_flags = pending_record.get("fusion_env_flags")
+    if isinstance(fusion_env_flags, dict) and fusion_env_flags:
+        requested = resolved.get("extra_envs")
+        requested = dict(requested) if isinstance(requested, dict) else {}
+        # The sibling's own flags win over anything already requested.
+        resolved["extra_envs"] = {**requested, **{str(k): str(v) for k, v in fusion_env_flags.items()}}
+    if "keep_threshold_pct" not in resolved and pending_record.get("keep_threshold_pct") is not None:
+        try:
+            resolved["keep_threshold_pct"] = float(pending_record.get("keep_threshold_pct"))
+        except (TypeError, ValueError):
+            pass
+
+
+def _fill_integrate_recipe_from_current_best(
+    resolved: dict,
+    state: Any,
+    current_best: Mapping[str, Any],
+) -> None:
+    """Default an integrate's grading anchor and serving recipe to the session's current best.
+
+    The server args come from the current best, so the anchor the candidate is
+    graded against has to be the throughput that recipe reached.
+    """
+    from ..state.shared_state import resolve_grading_anchor_tput
 
     if float(resolved.get("base_tput", 0.0) or 0.0) <= 0:
-        # ``extra_server_args`` below is filled from current_best, so the
-        # candidate must be graded against that recipe too.
-        bt = resolve_grading_anchor_tput(state)
-        if bt > 0:
-            resolved["base_tput"] = bt
+        anchor_tput = resolve_grading_anchor_tput(state)
+        if anchor_tput > 0:
+            resolved["base_tput"] = anchor_tput
 
     if not resolved.get("config_path"):
-        cfg = getattr(state, "baseline_config_path", "") or ""
-        if cfg:
-            resolved["config_path"] = cfg
+        config_path = getattr(state, "baseline_config_path", "") or ""
+        if config_path:
+            resolved["config_path"] = config_path
 
     if not resolved.get("extra_server_args"):
-        cb_args = current_best.get("extra_server_args") or ""
-        if cb_args:
-            resolved["extra_server_args"] = cb_args
+        inherited_args = current_best.get("extra_server_args") or ""
+        if inherited_args:
+            resolved["extra_server_args"] = inherited_args
     for key in ("remove_args", "unset_envs"):
         resolved[key] = to_str_list(resolved.get(key, current_best.get(key)))
     resolved.setdefault("args_mode", current_best.get("args_mode") or "append")
+
+
+def _merge_integrate_extra_envs(
+    resolved: dict,
+    payload: Mapping[str, Any],
+    current_best: Mapping[str, Any],
+) -> None:
+    """Layer an integrate's own env overrides over the ones it inherits from the current best.
+
+    A candidate can replace an inherited removal, but not its own explicit unset.
+    """
     current_envs = current_best.get("extra_envs")
     current_envs = dict(current_envs) if isinstance(current_envs, dict) else {}
     for key in resolved["unset_envs"]:
         current_envs.pop(key, None)
     requested_envs = resolved.get("extra_envs")
     requested_envs = dict(requested_envs) if isinstance(requested_envs, dict) else {}
-    # A candidate can replace an inherited removal, not its own explicit unset.
     if "unset_envs" not in payload:
         resolved["unset_envs"] = [key for key in resolved["unset_envs"] if key not in requested_envs]
     else:
@@ -438,29 +479,32 @@ def _fill_integrate_defaults_from_state(
     if current_envs or requested_envs or "extra_envs" in resolved:
         resolved["extra_envs"] = {**current_envs, **requested_envs}
 
-    kernel_id = str(resolved.get("kernel_id") or "")
-    if kernel_id:
-        attempt = _entry_by_kernel_id(state, kernel_id) or {}
-        if not resolved.get("task_group_key"):
-            task_group_key = str(attempt.get("task_group_key") or "")
-            if task_group_key:
-                resolved["task_group_key"] = task_group_key
-        # Defense-in-depth mirror of _queue_kernel_keep()'s refusal to queue
-        # a vendor-playbook KEEP for auto-integration (PR #1191 review
-        # finding #1): this also catches an LLM-initiated integrate request
-        # that names the kernel_id directly, bypassing the pending-queue
-        # lookup above via _resolve_kernel_patch_identity()'s
-        # last_kernel_opt.best_artifact_path backfill.
-        if attempt.get("vendor_playbook_deploy_blocked"):
-            resolved["_vendor_playbook_deploy_blocked"] = True
-        elif (
-            isinstance(state.last_kernel_opt, dict)
-            and str(state.last_kernel_opt.get("kernel_id") or "") == kernel_id
-            and state.last_kernel_opt.get("vendor_playbook_deploy_blocked")
-        ):
-            resolved["_vendor_playbook_deploy_blocked"] = True
 
-    return resolved
+def _fill_integrate_kernel_attempt_defaults(resolved: dict, state: Any) -> None:
+    """Fill an integrate's task group from the kernel's attempt ledger and stamp a refused deploy.
+
+    The vendor-playbook stamp mirrors the pending queue's own refusal, which an
+    LLM-initiated request naming the kernel_id directly would otherwise bypass
+    through the ``last_kernel_opt.best_artifact_path`` backfill.
+    """
+    kernel_id = str(resolved.get("kernel_id") or "")
+    if not kernel_id:
+        return
+    attempt = _entry_by_kernel_id(state, kernel_id) or {}
+    if not resolved.get("task_group_key"):
+        task_group_key = str(attempt.get("task_group_key") or "")
+        if task_group_key:
+            resolved["task_group_key"] = task_group_key
+    if attempt.get("vendor_playbook_deploy_blocked") or _last_kernel_opt_blocks_deploy(state, kernel_id):
+        resolved["_vendor_playbook_deploy_blocked"] = True
+
+
+def _last_kernel_opt_blocks_deploy(state: Any, kernel_id: str) -> bool:
+    """Whether the session's last kernel result refuses to deploy this kernel."""
+    last_kernel_opt = state.last_kernel_opt
+    if not isinstance(last_kernel_opt, dict) or str(last_kernel_opt.get("kernel_id") or "") != kernel_id:
+        return False
+    return bool(last_kernel_opt.get("vendor_playbook_deploy_blocked"))
 
 
 def _fill_integrate_snapshot_from_bundle(resolved: dict, bundle: Any) -> None:
@@ -520,6 +564,141 @@ def _fill_integrate_provenance(
             resolved["integration_validation_status"] = status
 
 
+class _ArtifactRecord(NamedTuple):
+    """Where a recorded candidate keeps the patch, snapshot and source an integrate needs."""
+
+    bundle: Any
+    snapshot_dir: str
+    deploy_patch_path: str
+    deploy_repo_root: str
+    artifact_path: str
+    source_file: str
+    framework_applyback: Any
+    integration_validation_status: Any
+
+
+def _best_kernel_artifact(last_kernel: Mapping[str, Any]) -> _ArtifactRecord:
+    """What the session's strongest kernel result deploys."""
+    return _ArtifactRecord(
+        bundle=last_kernel.get("best_artifact_bundle"),
+        snapshot_dir=str(last_kernel.get("deploy_snapshot_dir") or ""),
+        deploy_patch_path=str(last_kernel.get("deploy_patch_path") or ""),
+        deploy_repo_root=str(last_kernel.get("deploy_repo_root") or ""),
+        artifact_path=str(
+            last_kernel.get("best_artifact_path")
+            or last_kernel.get("patch_path")
+            or last_kernel.get("optimized_path")
+            or ""
+        ),
+        source_file=str(last_kernel.get("source_file") or ""),
+        framework_applyback=last_kernel.get("framework_applyback"),
+        integration_validation_status=last_kernel.get("integration_validation_status"),
+    )
+
+
+def _ledger_kernel_artifact(attempt: Mapping[str, Any]) -> _ArtifactRecord:
+    """What the per-kernel attempt ledger last recorded for a kernel."""
+    return _ArtifactRecord(
+        bundle=attempt.get("last_artifact_bundle"),
+        snapshot_dir=str(attempt.get("last_snapshot_dir") or ""),
+        deploy_patch_path=str(attempt.get("last_deploy_patch_path") or ""),
+        deploy_repo_root=str(attempt.get("last_deploy_repo_root") or ""),
+        artifact_path=str(attempt.get("last_artifact_path") or ""),
+        source_file=str(attempt.get("last_source_file") or ""),
+        framework_applyback=attempt.get("last_framework_applyback"),
+        integration_validation_status=attempt.get("last_integration_validation_status"),
+    )
+
+
+def _fill_integrate_from_artifact(resolved: dict, record: _ArtifactRecord) -> None:
+    """Backfill an integrate from a recorded artifact, leaving anything the request named alone.
+
+    A snapshot's own patch and repo root are adopted only together with the
+    snapshot directory they belong to, so a multi-file write set never lands
+    half from one record and half from another.
+    """
+    _fill_integrate_snapshot_from_bundle(resolved, record.bundle)
+    if not resolved.get("snapshot_dir") and record.snapshot_dir:
+        resolved["snapshot_dir"] = record.snapshot_dir
+        if record.deploy_patch_path and not resolved.get("patch_path"):
+            resolved["patch_path"] = record.deploy_patch_path
+        if record.deploy_repo_root and not resolved.get("kernel_repo"):
+            resolved["kernel_repo"] = record.deploy_repo_root
+    if not resolved.get("patch_path") and record.artifact_path:
+        resolved["patch_path"] = record.artifact_path
+    if not resolved.get("source_file") and record.source_file:
+        resolved["source_file"] = record.source_file
+    _fill_integrate_provenance(
+        resolved,
+        framework_applyback=record.framework_applyback,
+        integration_validation_status=record.integration_validation_status,
+    )
+
+
+def _pending_integration_record(records: list[dict], integration_id: str) -> dict | None:
+    """The pending kernel-integration record an ``integration_id`` names, if it is still queued."""
+    return next(
+        (record for record in records if str(record.get("integration_id") or "") == integration_id),
+        None,
+    )
+
+
+def _fill_pending_record_identity(resolved: dict, pending_record: Mapping[str, Any]) -> None:
+    """Carry a pending record's routing and provenance into the integrate it is bound to.
+
+    Provenance travels with the artifact so the serving verdict can tell a
+    reference-only apply-back from one already proven in place.
+    """
+    for key in ("task_group_key", "identity_route", "artifact_kind", "integration_validation_status"):
+        resolved.setdefault(key, str(pending_record.get(key) or ""))
+
+
+def _bind_integrate_to_pending_record(resolved: dict, pending_record: Mapping[str, Any]) -> None:
+    """Bind an integrate to the pending record whose KEEP/REVERT verdict it settles."""
+    resolved["kernel_id"] = str(pending_record.get("kernel_id") or resolved.get("kernel_id") or "")
+    resolved["integration_id"] = str(pending_record.get("integration_id") or resolved.get("integration_id") or "")
+    _fill_pending_record_identity(resolved, pending_record)
+    _fill_integrate_snapshot_from_bundle(resolved, pending_record.get("artifact_bundle"))
+    if not resolved.get("snapshot_dir") and pending_record.get("snapshot_dir"):
+        resolved["snapshot_dir"] = str(pending_record["snapshot_dir"])
+    if not resolved.get("patch_path"):
+        resolved["patch_path"] = str(
+            pending_record.get("deploy_patch_path") or pending_record.get("artifact_path") or ""
+        )
+    if not resolved.get("kernel_repo") and pending_record.get("deploy_repo_root"):
+        resolved["kernel_repo"] = str(pending_record["deploy_repo_root"])
+    if not resolved.get("source_file") and pending_record.get("source_file"):
+        resolved["source_file"] = str(pending_record["source_file"])
+
+
+def _missing_integration_inputs(resolved: dict, last_kernel: Mapping[str, Any]) -> HandlerResult | None:
+    """The refusal owed when no artifact or target source could be resolved, else ``None``."""
+    patch_path = str(resolved.get("patch_path") or "").strip()
+    target_file = str(resolved.get("target_file") or resolved.get("source_file") or "").strip()
+    if patch_path and target_file:
+        return None
+    missing = []
+    if not patch_path:
+        missing.append("patch_path")
+    if not target_file:
+        missing.append("target_file/source_file")
+    return {
+        "status": "failed",
+        "error_class": "missing_integration_inputs",
+        "error": "integrate requires an optimized artifact and target source before E2E",
+        "decision": "REVERT",
+        "kernel_id": str(resolved.get("kernel_id") or "") or None,
+        "patch_path": patch_path or None,
+        "target_file": target_file or None,
+        "missing": missing,
+        "last_kernel_opt": {
+            k: last_kernel.get(k)
+            for k in ("kernel_id", "best_artifact_path", "patch_path", "source_file")
+            if k in last_kernel
+        },
+    }
+
+
 def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dict, HandlerResult | None]:
     """Fill integrate inputs from SharedState when Orchestration sends only kernel_id (artifact in ``last_kernel_opt``, source in ``last_trace_analyze``).
 
@@ -535,131 +714,32 @@ def _resolve_integrate_payload(payload: dict, *, session_dir: Path) -> tuple[dic
     from ..state.shared_state import SharedState
 
     resolved = dict(payload)
-    kernel_id = str(resolved.get("kernel_id") or "")
     state = SharedState.load_or_init(session_dir)
     last_kernel = state.last_kernel_opt or {}
-    integration_id = str(resolved.get("integration_id") or "")
-    pending_record = next(
-        (
-            record
-            for record in state.pending_kernel_integration_records()
-            if str(record.get("integration_id") or "") == integration_id
-        ),
-        None,
+    pending_record = _pending_integration_record(
+        state.pending_kernel_integration_records(),
+        str(resolved.get("integration_id") or ""),
     )
     if pending_record is not None:
-        kernel_id = str(pending_record.get("kernel_id") or kernel_id)
-        resolved["kernel_id"] = kernel_id
-        resolved["integration_id"] = str(pending_record.get("integration_id") or integration_id)
-        resolved.setdefault(
-            "task_group_key",
-            str(pending_record.get("task_group_key") or ""),
-        )
-        resolved.setdefault(
-            "identity_route",
-            str(pending_record.get("identity_route") or ""),
-        )
-        # Provenance travels with the artifact so the serving verdict can tell a
-        # reference-only apply-back from one already proven in place.
-        resolved.setdefault(
-            "artifact_kind",
-            str(pending_record.get("artifact_kind") or ""),
-        )
-        resolved.setdefault(
-            "integration_validation_status",
-            str(pending_record.get("integration_validation_status") or ""),
-        )
-        _fill_integrate_snapshot_from_bundle(
-            resolved,
-            pending_record.get("artifact_bundle"),
-        )
-        if not resolved.get("snapshot_dir") and pending_record.get("snapshot_dir"):
-            resolved["snapshot_dir"] = str(pending_record["snapshot_dir"])
-        if not resolved.get("patch_path"):
-            resolved["patch_path"] = str(
-                pending_record.get("deploy_patch_path") or pending_record.get("artifact_path") or ""
-            )
-        if not resolved.get("kernel_repo") and pending_record.get("deploy_repo_root"):
-            resolved["kernel_repo"] = str(pending_record["deploy_repo_root"])
-        if not resolved.get("source_file") and pending_record.get("source_file"):
-            resolved["source_file"] = str(pending_record["source_file"])
+        _bind_integrate_to_pending_record(resolved, pending_record)
+    kernel_id = str(resolved.get("kernel_id") or "")
 
     if kernel_id and str(last_kernel.get("kernel_id") or "") == kernel_id:
         # Snapshot deploy: prefer the original patch + snapshot dir so the whole
         # multi-file patch lands atomically.
-        _fill_integrate_snapshot_from_bundle(resolved, last_kernel.get("best_artifact_bundle"))
-        if not resolved.get("snapshot_dir") and last_kernel.get("deploy_snapshot_dir"):
-            resolved["snapshot_dir"] = str(last_kernel["deploy_snapshot_dir"])
-            if last_kernel.get("deploy_patch_path") and not resolved.get("patch_path"):
-                resolved["patch_path"] = str(last_kernel["deploy_patch_path"])
-            if last_kernel.get("deploy_repo_root") and not resolved.get("kernel_repo"):
-                resolved["kernel_repo"] = str(last_kernel["deploy_repo_root"])
-        if not resolved.get("patch_path"):
-            artifact = (
-                last_kernel.get("best_artifact_path")
-                or last_kernel.get("patch_path")
-                or last_kernel.get("optimized_path")
-            )
-            if artifact:
-                resolved["patch_path"] = str(artifact)
-        if not resolved.get("source_file") and last_kernel.get("source_file"):
-            resolved["source_file"] = str(last_kernel["source_file"])
-        _fill_integrate_provenance(
-            resolved,
-            framework_applyback=last_kernel.get("framework_applyback"),
-            integration_validation_status=last_kernel.get("integration_validation_status"),
-        )
+        _fill_integrate_from_artifact(resolved, _best_kernel_artifact(last_kernel))
 
     # Multi-KEEP queue fallback: pull patch_path/source_file from the per-kernel
     # ledger for KEEPs other than the strongest pending one.
     if kernel_id:
-        attempt = _entry_by_kernel_id(state, kernel_id) or {}
-        _fill_integrate_snapshot_from_bundle(resolved, attempt.get("last_artifact_bundle"))
-        if not resolved.get("snapshot_dir") and attempt.get("last_snapshot_dir"):
-            resolved["snapshot_dir"] = str(attempt["last_snapshot_dir"])
-            if attempt.get("last_deploy_patch_path") and not resolved.get("patch_path"):
-                resolved["patch_path"] = str(attempt["last_deploy_patch_path"])
-            if attempt.get("last_deploy_repo_root") and not resolved.get("kernel_repo"):
-                resolved["kernel_repo"] = str(attempt["last_deploy_repo_root"])
-        if not resolved.get("patch_path") and attempt.get("last_artifact_path"):
-            resolved["patch_path"] = str(attempt["last_artifact_path"])
-        if not resolved.get("source_file") and attempt.get("last_source_file"):
-            resolved["source_file"] = str(attempt["last_source_file"])
-        _fill_integrate_provenance(
-            resolved,
-            framework_applyback=attempt.get("last_framework_applyback"),
-            integration_validation_status=attempt.get("last_integration_validation_status"),
-        )
+        _fill_integrate_from_artifact(resolved, _ledger_kernel_artifact(_entry_by_kernel_id(state, kernel_id) or {}))
 
     if kernel_id and not (resolved.get("target_file") or resolved.get("source_file")):
         source = _find_selected_kernel_source(state, kernel_id)
         if source:
             resolved["source_file"] = source
 
-    patch_path = str(resolved.get("patch_path") or "").strip()
-    target_file = str(resolved.get("target_file") or resolved.get("source_file") or "").strip()
-    if not patch_path or not target_file:
-        missing = []
-        if not patch_path:
-            missing.append("patch_path")
-        if not target_file:
-            missing.append("target_file/source_file")
-        return resolved, {
-            "status": "failed",
-            "error_class": "missing_integration_inputs",
-            "error": "integrate requires an optimized artifact and target source before E2E",
-            "decision": "REVERT",
-            "kernel_id": kernel_id or None,
-            "patch_path": patch_path or None,
-            "target_file": target_file or None,
-            "missing": missing,
-            "last_kernel_opt": {
-                k: last_kernel.get(k)
-                for k in ("kernel_id", "best_artifact_path", "patch_path", "source_file")
-                if k in last_kernel
-            },
-        }
-    return resolved, None
+    return resolved, _missing_integration_inputs(resolved, last_kernel)
 
 
 def _normalize_precision(value: Any) -> str:
@@ -673,6 +753,21 @@ def _normalize_precision(value: Any) -> str:
             string for falsy input.
     """
     return str(value or "").strip().lower()
+
+
+def _requested_setting(payload: dict, state: Any, key: str, fallback: str = "") -> str:
+    """What this request names for ``key``, else what the session carries, else ``fallback``.
+
+    Args:
+        payload: The request payload.
+        state: SharedState snapshot; a field it does not carry reads as unset.
+        key: The field name, identical in the payload and in SharedState.
+        fallback: Used when neither names the field.
+
+    Returns:
+        The resolved value, trimmed.
+    """
+    return str(payload.get(key) or getattr(state, key, "") or fallback).strip()
 
 
 def _lane_budget(state: Any, lane: str, *, gemm_target_costs_sec: tuple[int, ...] = ()) -> LaneAllocation | None:
@@ -1080,14 +1175,15 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     """
     from hyperloom.inference_optimizer.roofline_ceiling import _parse_server_arg, resolve_runtime_workload
 
-    framework = str(payload.get("framework") or getattr(state, "framework", "") or "").strip().lower()
+    model_path = _requested_setting(payload, state, "model_path")
+    gpu_type = _requested_setting(payload, state, "gpu_type")
+    framework = _requested_setting(payload, state, "framework").lower()
+    requested_quant_type = str(payload.get("quant_type") or "auto").strip()
 
     if payload.get("precision"):
         precision = _normalize_precision(payload["precision"])
-        quant_type = str(payload.get("quant_type") or "auto").strip()
+        quant_type = requested_quant_type
         if precision == "fp8" and quant_type.lower() == "auto":
-            model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
-            gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
             quant_type = _resolve_fp8_quant_type(model_path, gpu_type, framework)
         return precision, quant_type
 
@@ -1103,16 +1199,11 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     quantization_arg = _parse_server_arg(server_args, "--quantization").lower()
 
     if quantization_arg == "fp8":
-        precision = "fp8"
         # Hand forge the fp8 GEMM path the model runs: explicit per-token env wins,
         # else the checkpoint's static format, else "auto".
         if per_token_signal:
-            quant_type = "per_token"
-        else:
-            model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
-            gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
-            quant_type = _resolve_fp8_quant_type(model_path, gpu_type, framework)
-        return precision, quant_type
+            return "fp8", "per_token"
+        return "fp8", _resolve_fp8_quant_type(model_path, gpu_type, framework)
 
     if quantization_arg in ("fp4", "mxfp4"):
         return quantization_arg, "fp4"
@@ -1121,16 +1212,30 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
     # is one label for layers the checkpoint can store differently (MXFP4 experts, fp8 attention), and forge can tell
     # them apart only when it is left to route each lane itself.
     precision = _normalize_precision(state.precision)
-    quant_type = str(payload.get("quant_type") or "auto").strip()
-    model_path = str(payload.get("model_path") or getattr(state, "model_path", "") or "").strip()
-    if precision and precision == checkpoint_format((_read_model_config(model_path) or {}).get("quantization_config")):
-        return "auto", quant_type
+    if _precision_only_names_the_checkpoint_format(precision, model_path):
+        return "auto", requested_quant_type
     if not precision:
         precision = "bf16"
+    quant_type = requested_quant_type
     if precision == "fp8" and quant_type.lower() == "auto":
-        gpu_type = str(payload.get("gpu_type") or getattr(state, "gpu_type", "") or "").strip()
         quant_type = _resolve_fp8_quant_type(model_path, gpu_type, framework)
     return precision, quant_type
+
+
+def _precision_only_names_the_checkpoint_format(precision: str, model_path: str) -> bool:
+    """Whether the session precision says no more than the checkpoint's own nested format.
+
+    Args:
+        precision: The session-level precision label.
+        model_path: Local directory or repo id of the served checkpoint.
+
+    Returns:
+        ``True`` when the label merely repeats the checkpoint's quantization
+        format, so it cannot tell forge how any individual lane is stored.
+    """
+    if not precision:
+        return False
+    return precision == checkpoint_format((_read_model_config(model_path) or {}).get("quantization_config"))
 
 
 #: An aiter dispatch line, hit or miss. Either one proves the process actually
@@ -3694,7 +3799,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "kept": False,
         }
 
-    model_path = str(payload.get("model_path") or state.model_path or os.environ.get("MODEL_PATH") or "").strip()
+    model_path = _requested_setting(payload, state, "model_path", os.environ.get("MODEL_PATH") or "")
     if not model_path:
         return {
             "status": "failed",
@@ -3722,7 +3827,7 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
             "kept": False,
         }
 
-    framework = str(payload.get("framework") or state.framework or "sglang").strip().lower()
+    framework = _requested_setting(payload, state, "framework", "sglang").lower()
     gpu = str(payload.get("gpu") or "0").strip()
     try:
         agent_backend, llm_model = _resolve_forge_agent(payload)
@@ -4180,6 +4285,53 @@ def _eval_generation_budget() -> int:
     return value if value >= 0 else _EVAL_DEFAULT_MAX_TOKENS
 
 
+class _EvalScore(NamedTuple):
+    """One serving-eval score and the task, metric and file it was read from."""
+
+    accuracy: float | None
+    task: str
+    metric: str
+    source_file: str
+
+
+def _integrate_eval_score(bench_result: dict[str, Any], workspace: Path) -> _EvalScore:
+    """Read back the serving-eval score of a re-baseline.
+
+    The staged accuracy round attaches its score to the result. Older runs ran
+    eval in the warmup slot and left it only in the workspace, so a result
+    without a score is looked up there.
+
+    Args:
+        bench_result: The re-baseline result dict from ``BaselineExecutor``.
+        workspace: The integrate task workspace holding both round slots.
+
+    Returns:
+        The score and its provenance; ``accuracy`` is ``None`` when neither
+        source recorded one.
+    """
+    from ..actions.executors._accuracy_gate import parse_eval_results
+
+    measured = bench_result.get("accuracy")
+    attached = _EvalScore(
+        float(measured) if isinstance(measured, (int, float)) else None,
+        str(bench_result.get("accuracy_task") or ""),
+        str(bench_result.get("accuracy_metric") or ""),
+        str(bench_result.get("accuracy_source") or ""),
+    )
+    if attached.accuracy is not None:
+        return attached
+    eval_out = parse_eval_results(workspace, framework=os.environ.get("FRAMEWORK") or None)
+    parsed = eval_out.get("accuracy")
+    if not isinstance(parsed, (int, float)):
+        return attached
+    return _EvalScore(
+        float(parsed),
+        str(eval_out.get("task") or ""),
+        str(eval_out.get("metric") or ""),
+        str(eval_out.get("source_file") or ""),
+    )
+
+
 def _grade_integrate_accuracy(
     bench_result: dict[str, Any],
     *,
@@ -4218,7 +4370,6 @@ def _grade_integrate_accuracy(
     from ..actions.executors._accuracy_gate import (
         accuracy_keep_block,
         accuracy_passed,
-        parse_eval_results,
         require_kernel_accuracy_default,
         resolve_served_context,
         served_context_hosts_eval,
@@ -4232,19 +4383,8 @@ def _grade_integrate_accuracy(
     except Exception:
         log.debug("integrate_handler: could not resolve baseline_accuracy", exc_info=True)
 
-    measured = bench_result.get("accuracy")
-    new_accuracy = float(measured) if isinstance(measured, (int, float)) else None
-    task = str(bench_result.get("accuracy_task") or "")
-    metric = str(bench_result.get("accuracy_metric") or "")
-    source_file = str(bench_result.get("accuracy_source") or "")
-    if new_accuracy is None:
-        eval_out = parse_eval_results(workspace, framework=os.environ.get("FRAMEWORK") or None)
-        parsed = eval_out.get("accuracy")
-        if isinstance(parsed, (int, float)):
-            new_accuracy = float(parsed)
-            task = str(eval_out.get("task") or "")
-            metric = str(eval_out.get("metric") or "")
-            source_file = str(eval_out.get("source_file") or "")
+    scored = _integrate_eval_score(bench_result, workspace)
+    new_accuracy = scored.accuracy
 
     accuracy_pass: bool | None = None
     if new_accuracy is not None and baseline_accuracy > 0:
@@ -4287,7 +4427,7 @@ def _grade_integrate_accuracy(
         degraded,
         "n/a" if new_accuracy is None else f"{new_accuracy:.4f}",
         baseline_accuracy,
-        source_file or "none",
+        scored.source_file or "none",
     )
     return {
         "blocked": blocked,
@@ -4297,9 +4437,9 @@ def _grade_integrate_accuracy(
         "infeasible": infeasible,
         "accuracy": new_accuracy,
         "baseline_accuracy": baseline_accuracy,
-        "task": task,
-        "metric": metric,
-        "source_file": source_file,
+        "task": scored.task,
+        "metric": scored.metric,
+        "source_file": scored.source_file,
     }
 
 
