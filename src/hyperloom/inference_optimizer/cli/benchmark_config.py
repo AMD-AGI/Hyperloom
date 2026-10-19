@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -142,29 +143,44 @@ def _validate_agentx_benchmark(benchmark: dict) -> None:
         raise ValueError("Use Magpie agentx configuration instead of legacy client controls: " + ", ".join(legacy))
 
 
-def _generated_agentx_benchmark(args: argparse.Namespace) -> dict:
-    """Translate resolved Hyperloom workload values into Magpie's public schema."""
+@dataclass(frozen=True)
+class AgentXWorkload:
+    """A resolved Hyperloom workload. ``model_path`` is pinned only when it is a local directory, and then stands for
+    the model: a ``--model`` bound to the written file must name it."""
+
+    framework: str
+    model: str
+    precision: str
+    tp: int
+    ep: int
+    conc: int
+    model_path: str = ""
+    gpu_type: str | None = None
+    docker_image: str | None = None
+
+
+def write_agentx_benchmark(target: Path, workload: AgentXWorkload) -> None:
+    """Write ``workload`` to ``target`` in Magpie's public AgentX schema."""
     benchmark: dict[str, Any] = {
-        "framework": os.environ["FRAMEWORK"],
-        "model": str(args.model),
-        "precision": args.precision,
+        "framework": workload.framework,
+        "model": workload.model,
+        "precision": workload.precision,
         "run_mode": "local",
         "agentx": {"enabled": True, "mode": _CANONICAL, "launch_overrides": {"version": 1}},
-        "envs": {"TP": args.tp, "EP_SIZE": args.ep, "CONC": args.conc},
+        "envs": {"TP": workload.tp, "EP_SIZE": workload.ep, "CONC": workload.conc},
         "profiler": {"torch_profiler": {"enabled": False}},
     }
-    model_path = os.environ.get("MODEL_PATH", "")
-    if model_path and Path(model_path).is_dir():
-        benchmark["envs"]["MODEL_PATH"] = str(Path(model_path).resolve())
-    if args.gpu_type:
+    if workload.model_path and Path(workload.model_path).is_dir():
+        benchmark["envs"]["MODEL_PATH"] = str(Path(workload.model_path).resolve())
+    if workload.gpu_type:
         # Magpie resolves {framework}_{runner_type}.sh and ships no script for mi308x or
-        # mi325x; both run the mi300x one. ``args.gpu_type`` is the real board, so the
+        # mi325x; both run the mi300x one. ``gpu_type`` is the real board, so the
         # runner label has to be derived here the way $GPU_TYPE already is.
-        benchmark["runner_type"] = _gpu_runner_type(args.gpu_type)
-    if args.docker_image:
-        benchmark["docker_image"] = args.docker_image
+        benchmark["runner_type"] = _gpu_runner_type(workload.gpu_type)
+    if workload.docker_image:
+        benchmark["docker_image"] = workload.docker_image
     _validate_agentx_benchmark(benchmark)
-    return benchmark
+    target.write_text(yaml.safe_dump({"benchmark": benchmark}, sort_keys=False), encoding="utf-8")
 
 
 def bind_benchmark(session_dir: Path, args: argparse.Namespace) -> None:
@@ -175,9 +191,18 @@ def bind_benchmark(session_dir: Path, args: argparse.Namespace) -> None:
         if source.resolve() != target.resolve():
             target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
     elif env_bool("HYPERLOOM_AGENTX") and not is_mlperf_backend():
-        target.write_text(
-            yaml.safe_dump({"benchmark": _generated_agentx_benchmark(args)}, sort_keys=False), encoding="utf-8"
+        workload = AgentXWorkload(
+            framework=os.environ["FRAMEWORK"],
+            model=str(args.model),
+            precision=args.precision,
+            tp=args.tp,
+            ep=args.ep,
+            conc=args.conc,
+            model_path=os.environ.get("MODEL_PATH", ""),
+            gpu_type=args.gpu_type,
+            docker_image=args.docker_image,
         )
+        write_agentx_benchmark(target, workload)
     else:
         return
     os.environ[BENCHMARK_CONFIG_ENV] = str(target.resolve())
