@@ -166,7 +166,7 @@ def test_llm_call_failed_is_a_backend_error(tmp_path: Path):
         raise LLMCallFailed("gateway 400")
 
 
-def test_llm_trace_langfuse_mirror_failure_propagates(tmp_path: Path, monkeypatch):
+def test_llm_trace_langfuse_mirror_failure_swallowed(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(_row_utils, "now_iso", lambda **_: "2026-01-01T00:00:00Z")
 
     import hyperloom.inference_optimizer.trace.langfuse_emitter as le
@@ -177,5 +177,5 @@ def test_llm_trace_langfuse_mirror_failure_propagates(tmp_path: Path, monkeypatc
     monkeypatch.setattr(le, "get_emitter", _boom)
 
     record = llm_trace.LLMCallRecord(session_id="s3", component="forge")
-    with pytest.raises(RuntimeError):
-        llm_trace.append_llm_call(session_dir=tmp_path, record=record)
+    # Must not raise even though the Langfuse mirror blows up.
+    llm_trace.append_llm_call(session_dir=tmp_path, record=record)

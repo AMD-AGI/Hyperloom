@@ -89,4 +89,5 @@ def test_close_propagates_local_store_close_failure(kb: RecipeKB) -> None:
 
 
 def test_close_without_local_close_is_a_noop(kb: RecipeKB) -> None:
-    assert kb.close() is None
+    result = kb.close()
+    assert result is None

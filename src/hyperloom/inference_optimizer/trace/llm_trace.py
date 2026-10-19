@@ -232,10 +232,13 @@ def append_llm_call(
             exc,
         )
 
-    # Second sink (opt-in): mirror the call to Langfuse live.
-    from .langfuse_emitter import get_emitter
+    # Second sink (opt-in): mirror the call to Langfuse live. Best-effort.
+    try:
+        from .langfuse_emitter import get_emitter
 
-    get_emitter(session_dir).record_llm_call(row)
+        get_emitter(session_dir).record_llm_call(row)
+    except Exception:
+        log.debug("llm_trace: langfuse mirror failed", exc_info=True)
 
 
 # The closed on-disk schema: every record field plus the write-time ``ts``.

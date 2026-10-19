@@ -182,13 +182,11 @@ def test_drift_warns_but_never_raises(tmp_path: Path, monkeypatch, capsys):
 
 
 def test_patcher_explosion_propagates(monkeypatch, capsys):
-    import hyperloom.orchestrator.actions.executors._magpie_patcher as patcher_mod
-
     def boom(*_args):
         raise RuntimeError("patcher exploded")
 
     monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
-    monkeypatch.setattr(patcher_mod, "ensure_client_trust_compat", boom)
+    monkeypatch.setattr("hyperloom.orchestrator.actions.executors._magpie_patcher.ensure_client_trust_compat", boom)
 
     with pytest.raises(RuntimeError):
         _ensure_client_trust_compat("/m")
