@@ -11,7 +11,7 @@ import pytest
 
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.bus.storage import SqliteConnection
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import Coordinator, RunOptions
 from hyperloom.orchestrator.phases import machine_state
 from hyperloom.orchestrator.roles import MockBackend, MockTurn, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -176,7 +176,7 @@ async def test_a_rejected_proposal_closes_cancelled_without_a_task(session_dir):
 async def test_a_proposal_the_session_ends_without_a_verdict_on_closes_cancelled(session_dir):
     c = Coordinator(session_dir, backends=_backends(ScriptedPlan(turns=[MockTurn(intents=[_propose("baseline")])])))
     try:
-        assert await c.run(max_ticks=1) == "max_ticks"
+        assert await c.run(options=RunOptions(max_ticks=1)) == "max_ticks"
         proposal_id = next(iter(c.state.pending_proposals))
         # A resumed leg ending over the same proposal must not close it twice.
         with tt.trajectory_scope(session_dir=session_dir, component="coordinator"):

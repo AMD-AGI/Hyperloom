@@ -300,6 +300,14 @@ the gap meaningless. Every adoption in that sum is on the named axis by
 construction — a comparison that could not supply the configured axis pair
 failed instead of being graded on another one.
 
+`outcome.variants` counts what the framework phase benched: `bench_runs`
+configuration variants and source patches that were `kept`, `reverted`, or
+`failed` without a measurement, the `distinct` changes among them, and
+`keep_rate_pct`, kept per bench run. A change benched again on a later stack is
+one distinct change and two bench runs, and an attempt that never reached the
+bench is not counted. Kernel candidates are not variants: the kernel lane
+reports its own funnel.
+
 `timeline` is the run itself — one event per stage, oldest first. An event
 carries its `type`, its identity (`event_id`, `phase`, `macro_cycle`), its
 span, its `status`, and an `ext` block holding what that kind of stage
@@ -506,7 +514,9 @@ The following example shows a complete `session_breakdown.json` for a finished G
       "closing_phase_entered": true,
       "closing_started_unix": 1747487201.0,
       "closing_report_task_id": "t-close-final"
-    }
+    },
+
+    "variants": { "bench_runs": 12, "distinct": 10, "kept": 3, "reverted": 8, "failed": 1, "keep_rate_pct": 25.0 }
   },
 
   "timeline": [
