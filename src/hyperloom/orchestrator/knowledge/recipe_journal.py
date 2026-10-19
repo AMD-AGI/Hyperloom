@@ -566,18 +566,28 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
         if fact.variant_name is not None:
             provenance_base["source_variant_name"] = fact.variant_name
 
-        try:
-            if fact.is_keep and fact.gain_pct is not None and fact.gain_pct > 0:
-                statement = self._build_statement(
-                    change=fact.change,
-                    kind="lesson",
-                )
-                impact = self._build_measured_impact(
+        lesson = None
+        pitfall = None
+        if fact.is_keep and fact.gain_pct is not None and fact.gain_pct > 0:
+            lesson = {
+                "statement": self._build_statement(change=fact.change, kind="lesson"),
+                "measured_impact": self._build_measured_impact(
                     gain_pct=fact.gain_pct,
                     throughput_after=fact.throughput_after,
                     stack_depth=len(self.shared_state.optimization_stack or []),
                     measured_at=now_iso,
-                )
+                ),
+            }
+        else:
+            severity = self._pitfall_severity_for(fact.pitfall_severity_dict)
+            if severity is not None:
+                pitfall = {
+                    "description": self._build_statement(change=fact.change, severity=severity, kind="pitfall"),
+                    "severity": severity,
+                }
+
+        try:
+            if lesson is not None:
                 live = self.read_local_recipe_row()
                 recipe_overrides = self.kb_best_config_overrides_for_keep(
                     live=live,
@@ -585,31 +595,20 @@ class RecipeJournalCollaborator(CoordinatorCollaborator):
                     throughput_after=fact.throughput_after,
                 )
                 self.kb_amend_recipe(
-                    append_lesson={
-                        "statement": statement,
-                        "measured_impact": impact,
-                    },
+                    append_lesson=lesson,
                     recipe_overrides=recipe_overrides or None,
                     provenance_details=provenance_base,
                 )
-                return
-
-            severity = self._pitfall_severity_for(fact.pitfall_severity_dict)
-            if severity is not None:
-                description = self._build_statement(
-                    change=fact.change,
-                    severity=severity,
-                    kind="pitfall",
-                )
-                self.kb_amend_recipe(
-                    append_pitfall={
-                        "description": description,
-                        "severity": severity,
-                    },
-                    provenance_details=provenance_base,
-                )
+            elif pitfall is not None:
+                self.kb_amend_recipe(append_pitfall=pitfall, provenance_details=provenance_base)
         except (LocalRecipeStoreError, OSError, ValueError) as error:
-            log.warning("recipe KB write for task %s failed: %s", fact.task.task_id, error)
+            log.warning(
+                "recipe KB write for task %s variant %s failed: %s: %s",
+                fact.task.task_id,
+                fact.variant_name,
+                type(error).__name__,
+                error,
+            )
 
     def _record_fact_per_task(
         self,
