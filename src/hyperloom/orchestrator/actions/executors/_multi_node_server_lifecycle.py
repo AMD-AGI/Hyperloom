@@ -834,7 +834,7 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
     default_port = int(state.get("ssh_port") or 2233)
     ssh_run = None
     if key_path and known_hosts:
-        from hyperloom.inference_optimizer.multi_node._internal.ssh_client import ssh_run as _ssh_run
+        from hyperloom.inference_optimizer.multi_node import SshTarget, ssh_run as _ssh_run
 
         ssh_run = _ssh_run
     for role in ("prefill", "decode", "worker"):
@@ -855,11 +855,8 @@ def _collect_worker_server_logs(state: dict, reason: str) -> None:
                 try:
                     port = int(pod.get("sshPort") or default_port)
                     cp = ssh_run(
-                        ip,
+                        SshTarget(host=ip, key_path=key_path, known_hosts=known_hosts, port=port),
                         "tail -c 2000000 " + remote + " 2>/dev/null",
-                        key_path=key_path,
-                        known_hosts=known_hosts,
-                        port=port,
                         timeout=60,
                     )
                     body = cp.stdout or ""

@@ -387,7 +387,7 @@ def test_the_driver_receives_the_producer_owned_environment(tmp_path):
             """
         ),
     )
-    run = driver_contract.run_driver(spec, driver, [], timeout_sec=60)
+    run = driver_contract.run_driver(spec, driver, driver_contract.DriverMode(), timeout_sec=60)
 
     assert run.ok is True
     assert "logical: softmax" in run.output
@@ -422,7 +422,9 @@ def test_the_driver_owns_case_selection(tmp_path):
         tmp_path,
         driver_body="import sys\nprint('argv:', ' '.join(sys.argv[1:]))\n",
     )
-    run = driver_contract.run_driver(spec, driver, ["--bench-mode"], warmup=3, iters=7, timeout_sec=60)
+    run = driver_contract.run_driver(
+        spec, driver, driver_contract.DriverMode(("--bench-mode",), warmup=3, iters=7), timeout_sec=60
+    )
 
     assert "argv: --bench-mode --warmup 3 --iters 7" in run.output
 
@@ -433,7 +435,7 @@ def test_a_timed_out_driver_leaves_no_survivor(tmp_path):
         tmp_path,
         driver_body="import time\nprint('start', flush=True)\ntime.sleep(60)\n",
     )
-    run = driver_contract.run_driver(spec, driver, [], timeout_sec=1)
+    run = driver_contract.run_driver(spec, driver, driver_contract.DriverMode(), timeout_sec=1)
 
     assert run.timed_out is True
     assert run.ok is False

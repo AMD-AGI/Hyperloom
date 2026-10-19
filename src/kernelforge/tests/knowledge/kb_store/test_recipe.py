@@ -24,6 +24,7 @@ from kernelforge.rewrite_by_flydsl import kb as flydsl_kb
 from kernelforge.knowledge.kb_store.recipe import KernelRecipeKB
 from kernelforge.rewrite_by_flydsl.identity import framework_version, resolve_identity
 from kernelforge.knowledge.kb_store.record_store import KBStoreError, RewriteRecordError
+from kernelforge.rewrite_by_flydsl.measurement import FlydslMeasurement
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 
 from kernelforge.tests.test_rewrite_by_flydsl_kb import (
@@ -58,7 +59,6 @@ def _resolved_identity(
 ) -> KernelRecipeIdentity:
     identity, _canonical_id, _signature, _implementation = resolve_identity(
         spec,
-        framework="vllm",
         gpu=str(config.gpu_type or "").strip(),
         source_text=Path(spec.source_kernel).read_text(
             encoding="utf-8",
@@ -721,13 +721,8 @@ def test_a_refused_flydsl_solution_write_redacts_and_bounds_the_store_error(
     monkeypatch.setattr(store, "put_knowledge", refuse)
 
     outcome = flydsl_kb.write_flydsl_kb_solution(
-        spec,
-        str(driver),
-        _remote_config_with_token(tmp_path, token),
-        source_ms=2.0,
-        flydsl_best_ms=1.0,
-        speedup=2.0,
-        framework="vllm",
+        flydsl_kb.RewriteKbTarget(spec, str(driver), _remote_config_with_token(tmp_path, token)),
+        FlydslMeasurement(2.0, 1.0, 2.0),
     )
 
     assert outcome["written"] is False

@@ -43,11 +43,13 @@ def session_dir(tmp_path: Path) -> Path:
 def test_load_or_create_mints_new_when_absent(session_dir: Path):
     j = Journal.load_or_create(
         session_dir,
-        session_id="sid-1",
-        model="m",
-        hardware="mi300x",
-        framework="sglang",
-        baseline_throughput=600.0,
+        Journal(
+            session_id="sid-1",
+            model="m",
+            hardware="mi300x",
+            framework="sglang",
+            baseline_throughput=600.0,
+        ),
     )
     assert j.session_id == "sid-1"
     assert j.model == "m"
@@ -64,10 +66,12 @@ def test_load_or_create_mints_new_when_absent(session_dir: Path):
 def test_load_or_create_round_trips_existing_file(session_dir: Path):
     j1 = Journal.load_or_create(
         session_dir,
-        session_id="sid-1",
-        model="m",
-        hardware="mi300x",
-        baseline_throughput=600.0,
+        Journal(
+            session_id="sid-1",
+            model="m",
+            hardware="mi300x",
+            baseline_throughput=600.0,
+        ),
     )
     j1.append_entry(
         JournalEntry(
@@ -83,10 +87,12 @@ def test_load_or_create_round_trips_existing_file(session_dir: Path):
 
     j2 = Journal.load_or_create(
         session_dir,
-        session_id="sid-1",
-        model="m",
-        hardware="mi300x",
-        baseline_throughput=600.0,
+        Journal(
+            session_id="sid-1",
+            model="m",
+            hardware="mi300x",
+            baseline_throughput=600.0,
+        ),
     )
     assert j2.final_throughput == 900.0
     assert j2.total_gain_pct == 50.0
@@ -101,10 +107,12 @@ def test_load_or_create_keeps_existing_header_when_caller_passes_defaults(
     """Header fields from disk win over empty-string defaults on resume."""
     j1 = Journal.load_or_create(
         session_dir,
-        session_id="sid-1",
-        model="m",
-        hardware="mi300x",
-        baseline_throughput=700.0,
+        Journal(
+            session_id="sid-1",
+            model="m",
+            hardware="mi300x",
+            baseline_throughput=700.0,
+        ),
     )
     j1.append_entry(
         JournalEntry(
@@ -117,10 +125,12 @@ def test_load_or_create_keeps_existing_header_when_caller_passes_defaults(
     )
     j2 = Journal.load_or_create(
         session_dir,
-        session_id="",
-        model="",
-        hardware="",
-        baseline_throughput=0.0,
+        Journal(
+            session_id="",
+            model="",
+            hardware="",
+            baseline_throughput=0.0,
+        ),
     )
     assert j2.session_id == "sid-1"
     assert j2.model == "m"
@@ -136,9 +146,11 @@ def test_load_or_create_recovers_from_corrupt_file(
     path.write_text("{ not json", encoding="utf-8")
     j = Journal.load_or_create(
         session_dir,
-        session_id="sid-x",
-        model="m",
-        hardware="h",
+        Journal(
+            session_id="sid-x",
+            model="m",
+            hardware="h",
+        ),
     )
     assert j.entries == []
     assert j.session_id == "sid-x"
@@ -148,10 +160,12 @@ def test_load_or_create_recovers_from_corrupt_file(
 def test_append_entry_flushes_to_disk(session_dir: Path):
     j = Journal.load_or_create(
         session_dir,
-        session_id="s",
-        model="m",
-        hardware="h",
-        baseline_throughput=600.0,
+        Journal(
+            session_id="s",
+            model="m",
+            hardware="h",
+            baseline_throughput=600.0,
+        ),
     )
     j.append_entry(
         JournalEntry(
@@ -172,9 +186,11 @@ def test_append_entry_flushes_to_disk(session_dir: Path):
 def test_append_entry_dedupes_on_resume_replay(session_dir: Path):
     j = Journal.load_or_create(
         session_dir,
-        session_id="s",
-        model="m",
-        hardware="h",
+        Journal(
+            session_id="s",
+            model="m",
+            hardware="h",
+        ),
     )
     e = JournalEntry(
         phase="EXPLORE",
@@ -193,9 +209,11 @@ def test_append_entry_dedupe_per_variant(session_dir: Path):
     """variant_name breaks the dedupe tie for two variants of the same round."""
     j = Journal.load_or_create(
         session_dir,
-        session_id="s",
-        model="m",
-        hardware="h",
+        Journal(
+            session_id="s",
+            model="m",
+            hardware="h",
+        ),
     )
     base_kwargs = dict(
         phase="EXPLORE",
@@ -217,9 +235,11 @@ def test_append_entry_dedupe_per_task_id(session_dir: Path):
 
     j = Journal.load_or_create(
         session_dir,
-        session_id="s",
-        model="m",
-        hardware="h",
+        Journal(
+            session_id="s",
+            model="m",
+            hardware="h",
+        ),
     )
     base_kwargs = dict(
         phase="KERNEL",
@@ -239,10 +259,12 @@ def test_append_entry_dedupe_per_task_id(session_dir: Path):
 def test_finalize_updates_only_summary_fields(session_dir: Path):
     j = Journal.load_or_create(
         session_dir,
-        session_id="s",
-        model="m",
-        hardware="h",
-        baseline_throughput=600.0,
+        Journal(
+            session_id="s",
+            model="m",
+            hardware="h",
+            baseline_throughput=600.0,
+        ),
     )
     j.append_entry(
         JournalEntry(
@@ -265,9 +287,11 @@ def test_finalize_updates_only_summary_fields(session_dir: Path):
 def test_finalize_with_partial_args_only_updates_given_fields(session_dir: Path):
     j = Journal.load_or_create(
         session_dir,
-        session_id="s",
-        model="m",
-        hardware="h",
+        Journal(
+            session_id="s",
+            model="m",
+            hardware="h",
+        ),
     )
     j.finalize(total_gain_pct=44.9)
     assert j.total_gain_pct == 44.9
@@ -280,10 +304,12 @@ def test_finalize_with_partial_args_only_updates_given_fields(session_dir: Path)
 def test_update_baseline_ignores_non_positive(session_dir: Path):
     j = Journal.load_or_create(
         session_dir,
-        session_id="s",
-        model="m",
-        hardware="h",
-        baseline_throughput=600.0,
+        Journal(
+            session_id="s",
+            model="m",
+            hardware="h",
+            baseline_throughput=600.0,
+        ),
     )
     j.update_baseline(0.0)
     assert j.baseline_throughput == 600.0
@@ -305,10 +331,12 @@ def test_a_run_that_anchors_no_baseline_reports_no_baseline(session_dir: Path, n
     """
     j = Journal.load_or_create(
         session_dir,
-        session_id="s",
-        model="m",
-        hardware="h",
-        baseline_throughput=never_anchored,
+        Journal(
+            session_id="s",
+            model="m",
+            hardware="h",
+            baseline_throughput=never_anchored,
+        ),
     )
     j.update_baseline(never_anchored)
 
@@ -319,11 +347,11 @@ def test_a_run_that_anchors_no_baseline_reports_no_baseline(session_dir: Path, n
 
 def test_a_journal_on_disk_without_a_baseline_stays_without_one(session_dir: Path):
     """Resume reads the same absence back rather than minting a zero for it."""
-    j1 = Journal.load_or_create(session_dir, session_id="s", model="m", hardware="h")
+    j1 = Journal.load_or_create(session_dir, Journal(session_id="s", model="m", hardware="h"))
     j1.finalize(total_gain_pct=None)
     assert j1.path.exists()
 
-    j2 = Journal.load_or_create(session_dir, session_id="", model="", hardware="")
+    j2 = Journal.load_or_create(session_dir, Journal(session_id="", model="", hardware=""))
 
     assert j2.baseline_throughput is None
 
@@ -331,9 +359,11 @@ def test_a_journal_on_disk_without_a_baseline_stays_without_one(session_dir: Pat
 def test_to_dict_strips_none_in_entries(session_dir: Path):
     j = Journal.load_or_create(
         session_dir,
-        session_id="s",
-        model="m",
-        hardware="h",
+        Journal(
+            session_id="s",
+            model="m",
+            hardware="h",
+        ),
     )
     j.append_entry(
         JournalEntry(

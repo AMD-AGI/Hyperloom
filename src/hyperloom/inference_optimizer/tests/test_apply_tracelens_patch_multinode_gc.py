@@ -217,8 +217,8 @@ def test_infera_forwards_patch_set(monkeypatch):
     monkeypatch.setattr(inf._mn_cli, "_poll_timeout_from_args", lambda args: 1)
     op_args: list[str] = []
 
-    def _ssh(st, ip, script, python, args, **kw):
-        op_args.append(args)
+    def _ssh(st, ip, script, **kw):
+        op_args.append(script.args)
         stdout = '{"status":"applied","per_pod":[{"status":"applied"}]}'
         return types.SimpleNamespace(returncode=0, stdout=stdout, stderr="")
 
