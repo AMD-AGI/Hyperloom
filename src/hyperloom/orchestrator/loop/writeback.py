@@ -1434,7 +1434,7 @@ class WritebackCollaborator(CoordinatorCollaborator):
             ``True`` when the configuration was accepted, ``False`` when a
             performance winner was not comparable or did not beat the anchor.
         """
-        from hyperloom.common.perf_metric import VERDICT_KEEP, constraint_fields, graded_axes_of
+        from hyperloom.common.perf_metric import VERDICT_KEEP, baseline_on_axis, constraint_fields, graded_axes_of
 
         prebaseline_enablement = (
             task_kind == "integrate_patch"
@@ -1664,7 +1664,6 @@ class WritebackCollaborator(CoordinatorCollaborator):
                 # write below overwrites it. A pre-baseline enablement patch was
                 # never graded against an anchor, so it has no adoption to claim.
                 if not prebaseline_enablement:
-                    from hyperloom.common.perf_metric import baseline_on_axis
                     from hyperloom.inference_optimizer.breakdown.recorder import stack_event
 
                     stack_event.record_adoption(

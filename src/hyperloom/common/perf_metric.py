@@ -21,6 +21,9 @@ _AGENTX_ENV = "HYPERLOOM_AGENTX"
 # that started the run.
 _AGENTX_MODE = "agentx"
 
+# The ``SharedState`` attribute holding the baseline's graded-axis snapshot.
+_BASELINE_PERF_ATTR = "baseline_perf"
+
 # Graded axis names, which are also the snapshot keys they are read from. InferenceX publishes a 2-D Pareto frontier
 # with interactivity on x and per-chip throughput on y, and no fixed interactivity target, so trading one for the
 # other moves a point along the frontier rather than violating a constraint.
@@ -229,7 +232,7 @@ def baseline_on_axis(state: Any, objective: str) -> float | None:
     """The session baseline read on *objective*'s axis, or None when that axis was not measured."""
     # A ledger divides by this, so an output baseline must never stand in for an interactivity objective.
     if objective in INTVTY_OBJECTIVES:
-        value = axis_of(getattr(state, "baseline_perf", None), objective)
+        value = axis_of(getattr(state, _BASELINE_PERF_ATTR, None), objective)
     else:
         value = float(getattr(state, "baseline_tput", 0.0) or 0.0)
     return value if value > 0 else None
@@ -280,7 +283,7 @@ def resolve_grading_anchor_perf(state: Any) -> tuple[dict[str, float] | None, st
         if snap is not None:
             return snap, ""
         return None, "current_best_axes_missing"
-    baseline_snap = perf_snapshot_from_mapping(getattr(state, "baseline_perf", None))
+    baseline_snap = perf_snapshot_from_mapping(getattr(state, _BASELINE_PERF_ATTR, None))
     if baseline_snap is not None:
         return baseline_snap, ""
     return None, "baseline_perf_missing"
@@ -412,7 +415,7 @@ def native_agentx_veto(source: Mapping[str, Any], state: Any) -> str:
         return ""
     if source.get("benchmark_valid") is not True or source.get("diagnostic_only") is not False:
         return "agentx_evidence_invalid"
-    anchor = getattr(state, "current_best", None) or getattr(state, "baseline_perf", None) or {}
+    anchor = getattr(state, "current_best", None) or getattr(state, _BASELINE_PERF_ATTR, None) or {}
     identity = source.get("workload_identity")
     if not identity or identity != anchor.get("workload_identity"):
         return "agentx_workload_mismatch"
