@@ -18,6 +18,7 @@ import pytest
 
 from hyperloom.inference_optimizer.cli import (
     _apply_custom_specialist_resume,
+    OrchestrationPromptContext,
     _build_orchestration_prompt,
     _custom_specialist_conflict,
     _load_custom_specialist_args,
@@ -228,10 +229,9 @@ async def test_custom_specialist_prompt_shows_the_experience_kb_block_its_warmup
 @pytest.mark.parametrize("phase", ["ENABLEMENT", "FRAMEWORK_AGENT"])
 def test_orchestration_prompt_never_offers_custom_specialist(phase):
     prompt = _build_orchestration_prompt(
-        no_kernel=False,
-        framework="sglang",
-        objective=build_objective({"MAX_HOURS": 1}),
-        max_minutes=60,
+        OrchestrationPromptContext(
+            no_kernel=False, framework="sglang", objective=build_objective({"MAX_HOURS": 1}), max_minutes=60
+        ),
         phase=phase,
     )
     emit = next(line for line in prompt.splitlines() if "delegate{action_name='specialist'" in line)

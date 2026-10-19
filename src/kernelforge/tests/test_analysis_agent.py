@@ -16,6 +16,7 @@ from kernelforge.orchestrator.analysis import (
     AnalysisAgentService,
     AnalysisBundleError,
     AnalysisConfigurationError,
+    AnalysisSources,
     IncrementalAnalysisInput,
     _AnalysisProtection,
 )
@@ -429,12 +430,7 @@ async def test_analysis_agent_publishes_multi_case_bundle(tmp_path) -> None:
     service = _service(tmp_path, backend)
     context = _context(workspace)
 
-    bundle = await service.ensure_bundle(
-        context,
-        kernel_file=str(kernel),
-        driver_script=str(driver),
-        source_files=[str(kernel)],
-    )
+    bundle = await service.ensure_bundle(context, sources=AnalysisSources(str(kernel), str(driver), [str(kernel)]))
 
     assert backend.calls == 1
     assert bundle.root.parent.name == "abc123"
@@ -519,12 +515,7 @@ async def test_analysis_agent_publishes_multi_case_bundle(tmp_path) -> None:
     assert restored.evidence_commit == "abc123"
     assert restored.evidence_stale is True
 
-    cached = await service.ensure_bundle(
-        context,
-        kernel_file=str(kernel),
-        driver_script=str(driver),
-        source_files=[str(kernel)],
-    )
+    cached = await service.ensure_bundle(context, sources=AnalysisSources(str(kernel), str(driver), [str(kernel)]))
     assert cached.root == bundle.root
     assert backend.calls == 1
 
@@ -535,12 +526,7 @@ async def test_published_evidence_cross_checks_request_and_manifest_digests(
     workspace, kernel, driver = _workspace(tmp_path)
     service = _service(tmp_path, _BundleBackend())
     context = _context(workspace)
-    bundle = await service.ensure_bundle(
-        context,
-        kernel_file=str(kernel),
-        driver_script=str(driver),
-        source_files=[str(kernel)],
-    )
+    bundle = await service.ensure_bundle(context, sources=AnalysisSources(str(kernel), str(driver), [str(kernel)]))
     manifest_path = bundle.root / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     manifest["source_digest"] = "tampered"
@@ -571,12 +557,7 @@ async def test_analysis_reports_missing_optional_profiling_methodology(
     missing = tmp_path / "knowledge" / "common_methodology" / "profiling" / "measure_roofline.md"
     missing.unlink()
 
-    await service.ensure_bundle(
-        _context(workspace),
-        kernel_file=str(kernel),
-        driver_script=str(driver),
-        source_files=[str(kernel)],
-    )
+    await service.ensure_bundle(_context(workspace), sources=AnalysisSources(str(kernel), str(driver), [str(kernel)]))
 
     assert backend.calls == 1
     payload = json.loads(backend.specs[0].user_prompt)
@@ -598,10 +579,7 @@ async def test_analysis_requires_packaged_profiling_script(
         match="packaged Analysis profiling script is missing",
     ):
         await service.ensure_bundle(
-            _context(workspace),
-            kernel_file=str(kernel),
-            driver_script=str(driver),
-            source_files=[str(kernel)],
+            _context(workspace), sources=AnalysisSources(str(kernel), str(driver), [str(kernel)])
         )
 
     assert backend.calls == 0
@@ -615,10 +593,7 @@ async def test_post_keep_analysis_is_incremental_and_deadline_bounded(
     service = _service(tmp_path, backend)
     parent_context = _context(workspace)
     parent = await service.ensure_bundle(
-        parent_context,
-        kernel_file=str(kernel),
-        driver_script=str(driver),
-        source_files=[str(kernel)],
+        parent_context, sources=AnalysisSources(str(kernel), str(driver), [str(kernel)])
     )
     kernel.write_text("def kernel():\n    return 2\n")
     child_context = replace(
@@ -628,9 +603,7 @@ async def test_post_keep_analysis_is_incremental_and_deadline_bounded(
 
     child = await service.ensure_bundle(
         child_context,
-        kernel_file=str(kernel),
-        driver_script=str(driver),
-        source_files=[str(kernel)],
+        sources=AnalysisSources(str(kernel), str(driver), [str(kernel)]),
         deadline_unix=time.time() + 5,
         incremental=IncrementalAnalysisInput(
             parent_commit=parent_context.analysis_commit,
@@ -662,9 +635,7 @@ async def test_invalid_incremental_parent_falls_back_to_full_analysis(
 
     bundle = await service.ensure_bundle(
         context,
-        kernel_file=str(kernel),
-        driver_script=str(driver),
-        source_files=[str(kernel)],
+        sources=AnalysisSources(str(kernel), str(driver), [str(kernel)]),
         incremental=IncrementalAnalysisInput(
             parent_commit="abc123",
             parent_bundle=workspace / "missing-parent",
@@ -690,10 +661,7 @@ async def test_unvalidated_profile_files_publish_partial(
     backend = _MarkdownOnlyBackend()
 
     bundle = await _service(tmp_path, backend).ensure_bundle(
-        _context(workspace),
-        kernel_file=str(kernel),
-        driver_script=str(driver),
-        source_files=[str(kernel)],
+        _context(workspace), sources=AnalysisSources(str(kernel), str(driver), [str(kernel)])
     )
 
     assert bundle.manifest["status"] == "PARTIAL"
@@ -712,26 +680,17 @@ async def test_incomplete_markdown_analysis_publishes_partial(
     service = _service(tmp_path, backend)
 
     bundle = await service.ensure_bundle(
-        _context(workspace),
-        kernel_file=str(kernel),
-        driver_script=str(driver),
-        source_files=[str(kernel)],
+        _context(workspace), sources=AnalysisSources(str(kernel), str(driver), [str(kernel)])
     )
 
     assert bundle.manifest["status"] == "PARTIAL"
     assert bundle.manifest["completed_case_ids"] == []
     assert bundle.manifest["skipped_case_ids"] == ["case-a", "case-b"]
     retried = await service.ensure_bundle(
-        _context(workspace),
-        kernel_file=str(kernel),
-        driver_script=str(driver),
-        source_files=[str(kernel)],
+        _context(workspace), sources=AnalysisSources(str(kernel), str(driver), [str(kernel)])
     )
     cached = await service.ensure_bundle(
-        _context(workspace),
-        kernel_file=str(kernel),
-        driver_script=str(driver),
-        source_files=[str(kernel)],
+        _context(workspace), sources=AnalysisSources(str(kernel), str(driver), [str(kernel)])
     )
     assert retried.manifest["status"] == "PARTIAL"
     assert cached.root == retried.root
@@ -752,10 +711,7 @@ async def test_analysis_agent_resumes_same_session_after_api_failure(
     backend = _ResumableAnalysisBackend()
 
     bundle = await _service(tmp_path, backend).ensure_bundle(
-        _context(workspace),
-        kernel_file=str(kernel),
-        driver_script=str(driver),
-        source_files=[str(kernel)],
+        _context(workspace), sources=AnalysisSources(str(kernel), str(driver), [str(kernel)])
     )
 
     assert bundle.manifest["status"] == "READY"
@@ -773,10 +729,7 @@ async def test_static_analysis_uses_one_session_and_marks_cases_skipped(
     service = _service(tmp_path, backend, profiling_enabled=False)
 
     bundle = await service.ensure_bundle(
-        _context(workspace),
-        kernel_file=str(kernel),
-        driver_script=str(driver),
-        source_files=[str(kernel)],
+        _context(workspace), sources=AnalysisSources(str(kernel), str(driver), [str(kernel)])
     )
 
     assert bundle.manifest["status"] == "PARTIAL"
@@ -803,12 +756,7 @@ async def test_profiled_service_upgrades_cached_static_bundle(
         tmp_path,
         static_backend,
         profiling_enabled=False,
-    ).ensure_bundle(
-        context,
-        kernel_file=str(kernel),
-        driver_script=str(driver),
-        source_files=[str(kernel)],
-    )
+    ).ensure_bundle(context, sources=AnalysisSources(str(kernel), str(driver), [str(kernel)]))
     assert static_bundle.manifest["status"] == "PARTIAL"
 
     profiled_backend = _BundleBackend()
@@ -816,12 +764,7 @@ async def test_profiled_service_upgrades_cached_static_bundle(
         tmp_path,
         profiled_backend,
         profiling_enabled=True,
-    ).ensure_bundle(
-        context,
-        kernel_file=str(kernel),
-        driver_script=str(driver),
-        source_files=[str(kernel)],
-    )
+    ).ensure_bundle(context, sources=AnalysisSources(str(kernel), str(driver), [str(kernel)]))
 
     assert profiled_backend.calls == 1
     assert profiled_bundle.manifest["status"] == "READY"
@@ -837,10 +780,7 @@ async def test_analysis_agent_restores_modified_kernel_and_rejects_bundle(
 
     with pytest.raises(AnalysisBundleError, match="modified immutable inputs"):
         await service.ensure_bundle(
-            _context(workspace),
-            kernel_file=str(kernel),
-            driver_script=str(driver),
-            source_files=[str(kernel)],
+            _context(workspace), sources=AnalysisSources(str(kernel), str(driver), [str(kernel)])
         )
 
     assert kernel.read_bytes() == original
@@ -856,10 +796,7 @@ async def test_analysis_session_preserves_and_resumes_completed_outputs(
 
     with pytest.raises(AnalysisBundleError, match="checkpoint="):
         await _service(tmp_path, failing).ensure_bundle(
-            context,
-            kernel_file=str(kernel),
-            driver_script=str(driver),
-            source_files=[str(kernel)],
+            context, sources=AnalysisSources(str(kernel), str(driver), [str(kernel)])
         )
 
     work_root = workspace / "forge_experiments" / "analysis" / "work" / "abc123"
@@ -869,10 +806,7 @@ async def test_analysis_session_preserves_and_resumes_completed_outputs(
 
     recovered_backend = _BundleBackend()
     bundle = await _service(tmp_path, recovered_backend).ensure_bundle(
-        context,
-        kernel_file=str(kernel),
-        driver_script=str(driver),
-        source_files=[str(kernel)],
+        context, sources=AnalysisSources(str(kernel), str(driver), [str(kernel)])
     )
 
     assert bundle.root.parent.name == "abc123"
@@ -901,12 +835,7 @@ async def test_partial_checkpoint_is_exposed_as_orchestration_evidence(
     context = _context(workspace)
 
     with pytest.raises(AnalysisBundleError):
-        await service.ensure_bundle(
-            context,
-            kernel_file=str(kernel),
-            driver_script=str(driver),
-            source_files=[str(kernel)],
-        )
+        await service.ensure_bundle(context, sources=AnalysisSources(str(kernel), str(driver), [str(kernel)]))
 
     checkpoint = service.apply_checkpoint(context)
     evidence = {item.kind: item for item in checkpoint.evidence_refs}

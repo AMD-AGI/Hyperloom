@@ -120,11 +120,8 @@ def _probe_via_infera_ssh(state: dict[str, Any], *, timeout_s: int) -> str | Non
 
     try:
         cp = ssh_client.ssh_run(
-            host,
+            ssh_client.SshTarget(host=host, key_path=key_path, known_hosts=known_hosts, port=port),
             _PROBE_CMD,
-            key_path=key_path,
-            known_hosts=known_hosts,
-            port=port,
             timeout=max(1, timeout_s),
         )
     finally:

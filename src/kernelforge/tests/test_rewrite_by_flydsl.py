@@ -69,11 +69,9 @@ def test_build_spec_autodiscovers_entry_when_absent(tmp_path):
     src = tmp_path / "softmax.py"
     src.write_text("def _softmax_kernel(): ...\ndef softmax(x):\n    _softmax_kernel[(1,)](x)\n    return x\n")
     spec = ingest.build_spec(
-        op_name="softmax",
-        source_kernel=str(src),
+        ingest.RewriteSubject(op_name="softmax", source_kernel=str(src), target_functions=["_softmax_kernel"]),
         flydsl_kernel=str(tmp_path / "kernel.py"),
         workspace=str(tmp_path),
-        target_functions=["_softmax_kernel"],
     )
     assert spec.source_entry == "softmax"
 
@@ -83,11 +81,9 @@ def test_build_spec_does_not_raise_on_unresolved_entry(tmp_path):
     src = tmp_path / "mystery.py"
     src.write_text("def unrelated():\n    return 1\n")
     spec = ingest.build_spec(
-        op_name="op",
-        source_kernel=str(src),
+        ingest.RewriteSubject(op_name="op", source_kernel=str(src), target_functions=["nonexistent_kernel"]),
         flydsl_kernel=str(tmp_path / "kernel.py"),
         workspace=str(tmp_path),
-        target_functions=["nonexistent_kernel"],
     )
     assert spec.source_entry == ""  # unresolved, but no exception
 
@@ -99,11 +95,9 @@ def test_candidate_outside_the_workspace_reads_as_its_bare_name(tmp_path):
     src.write_text("def softmax(x):\n    return x\n")
     outside = tmp_path / "elsewhere" / "kernel.py"
     spec = ingest.build_spec(
-        op_name="softmax",
-        source_kernel=str(src),
+        ingest.RewriteSubject(op_name="softmax", source_kernel=str(src), target_functions=["softmax"]),
         flydsl_kernel=str(outside),
         workspace=str(workspace),
-        target_functions=["softmax"],
     )
 
     assert spec.flydsl_kernel_relpath == "kernel.py"
@@ -187,11 +181,9 @@ def test_build_spec_resolves_the_language_and_the_c_like_entry(tmp_path):
     src.write_text(_HIP_SRC)
 
     spec = ingest.build_spec(
-        op_name="attention",
-        source_kernel=str(src),
+        ingest.RewriteSubject(op_name="attention", source_kernel=str(src), target_functions=["attention_kernel"]),
         flydsl_kernel=str(tmp_path / "kernel.py"),
         workspace=str(tmp_path),
-        target_functions=["attention_kernel"],
     )
 
     assert spec.source_language == "hip"
@@ -321,26 +313,25 @@ def test_rewrite_uses_forge_loop_result_sentinel():
 
 def test_speedup_only_when_port_ok_and_scored():
     ok = report.build_result(
-        op_name="op",
-        port_ok=True,
-        port_attempts=1,
-        source_ms=2.0,
-        optimize_result={"best_ms": 1.0, "mean_case_speedup": 2.0},
+        report.ResultScope("op"),
+        report.RewriteOutcome(
+            port_ok=True, port_attempts=1, source_ms=2.0, optimize_result={"best_ms": 1.0, "mean_case_speedup": 2.0}
+        ),
     )
     assert ok.speedup == pytest.approx(2.0)
     assert ok.compiled and ok.correct and ok.target_language == "flydsl"
 
     unscored = report.build_result(
-        op_name="op", port_ok=True, port_attempts=1, source_ms=2.0, optimize_result={"best_ms": 1.0}
+        report.ResultScope("op"),
+        report.RewriteOutcome(port_ok=True, port_attempts=1, source_ms=2.0, optimize_result={"best_ms": 1.0}),
     )
     assert unscored.speedup is None
 
     failed = report.build_result(
-        op_name="op",
-        port_ok=False,
-        port_attempts=3,
-        source_ms=2.0,
-        optimize_result={"mean_case_speedup": 2.0},
+        report.ResultScope("op"),
+        report.RewriteOutcome(
+            port_ok=False, port_attempts=3, source_ms=2.0, optimize_result={"mean_case_speedup": 2.0}
+        ),
     )
     assert failed.speedup is None and not failed.correct
 
@@ -358,12 +349,10 @@ def test_rewrite_result_includes_cumulative_llm_usage():
     }
 
     result = report.build_result(
-        op_name="op",
-        port_ok=True,
-        port_attempts=1,
-        source_ms=2.0,
-        optimize_result={"best_ms": 1.0},
-        llm_usage=usage,
+        report.ResultScope("op"),
+        report.RewriteOutcome(
+            port_ok=True, port_attempts=1, source_ms=2.0, optimize_result={"best_ms": 1.0}, llm_usage=usage
+        ),
     )
 
     assert result.llm_usage == usage
@@ -372,48 +361,54 @@ def test_rewrite_result_includes_cumulative_llm_usage():
 
 def test_applyback_is_required_only_for_framework_repositories():
     legacy = report.build_result(
-        op_name="op",
-        port_ok=True,
-        port_attempts=1,
-        source_ms=2.0,
-        optimize_result={"best_ms": 1.0},
-        applyback_result={"ok": False, "error": "no git base"},
-        applyback_required=False,
+        report.ResultScope("op"),
+        report.RewriteOutcome(
+            port_ok=True,
+            port_attempts=1,
+            source_ms=2.0,
+            optimize_result={"best_ms": 1.0},
+            applyback_result={"ok": False, "error": "no git base"},
+            applyback_required=False,
+        ),
     )
     assert legacy.success is True
 
     framework = report.build_result(
-        op_name="op",
-        port_ok=True,
-        port_attempts=1,
-        source_ms=2.0,
-        optimize_result={"best_ms": 1.0},
-        applyback_result={"ok": False, "error": "agent failed"},
-        applyback_required=True,
+        report.ResultScope("op"),
+        report.RewriteOutcome(
+            port_ok=True,
+            port_attempts=1,
+            source_ms=2.0,
+            optimize_result={"best_ms": 1.0},
+            applyback_result={"ok": False, "error": "agent failed"},
+            applyback_required=True,
+        ),
     )
     assert framework.success is False
 
 
 def test_rewrite_result_exposes_canonical_forge_patch_contract():
     result = report.build_result(
-        op_name="op",
-        port_ok=True,
-        port_attempts=1,
-        source_ms=2.0,
-        optimize_result={"best_ms": 1.0, "best_commit": "flydsl-best"},
-        applyback_result={
-            "ok": True,
-            "best_commit": "framework-best",
-            "manifest_path": ("/workspace/forge_experiments/rewrite_applyback/best/manifest.json"),
-            "patch_path": ("/workspace/forge_experiments/rewrite_applyback/best/iter_001/forge.patch"),
-            "canonical_patch_path": ("/workspace/forge_experiments/rewrite_applyback/best/iter_001/forge.patch"),
-            "canonical_files_root": ("/workspace/forge_experiments/rewrite_applyback/best/iter_001/files"),
-            "canonical_result_path": ("/workspace/forge_experiments/rewrite_applyback/result.json"),
-            "forge_workspace": "/workspace",
-            "artifacts": ["/workspace/forge_experiments/rewrite_applyback/best/iter_001/forge.patch"],
-            "changed_files": ["framework/op.py"],
-        },
-        applyback_required=True,
+        report.ResultScope("op"),
+        report.RewriteOutcome(
+            port_ok=True,
+            port_attempts=1,
+            source_ms=2.0,
+            optimize_result={"best_ms": 1.0, "best_commit": "flydsl-best"},
+            applyback_result={
+                "ok": True,
+                "best_commit": "framework-best",
+                "manifest_path": ("/workspace/forge_experiments/rewrite_applyback/best/manifest.json"),
+                "patch_path": ("/workspace/forge_experiments/rewrite_applyback/best/iter_001/forge.patch"),
+                "canonical_patch_path": ("/workspace/forge_experiments/rewrite_applyback/best/iter_001/forge.patch"),
+                "canonical_files_root": ("/workspace/forge_experiments/rewrite_applyback/best/iter_001/files"),
+                "canonical_result_path": ("/workspace/forge_experiments/rewrite_applyback/result.json"),
+                "forge_workspace": "/workspace",
+                "artifacts": ["/workspace/forge_experiments/rewrite_applyback/best/iter_001/forge.patch"],
+                "changed_files": ["framework/op.py"],
+            },
+            applyback_required=True,
+        ),
     )
 
     assert result.success is True
@@ -430,11 +425,8 @@ def test_rewrite_result_exposes_canonical_forge_patch_contract():
 
 def test_rewrite_result_reports_the_logical_identity_and_its_symbol():
     result = report.build_result(
-        op_name="vllm::softmax",
-        port_ok=True,
-        port_attempts=1,
-        source_ms=2.0,
-        optimize_result={"best_ms": 1.0},
+        report.ResultScope("vllm::softmax"),
+        report.RewriteOutcome(port_ok=True, port_attempts=1, source_ms=2.0, optimize_result={"best_ms": 1.0}),
     )
 
     assert result.logical_op_name == "vllm::softmax"
@@ -444,13 +436,15 @@ def test_rewrite_result_reports_the_logical_identity_and_its_symbol():
 
 def test_rewrite_result_never_reports_the_standalone_best_as_framework_best():
     failed = report.build_result(
-        op_name="op",
-        port_ok=True,
-        port_attempts=1,
-        source_ms=2.0,
-        optimize_result={"best_ms": 1.0, "best_commit": "flydsl-best"},
-        applyback_result={"ok": False, "error": "agent failed"},
-        applyback_required=True,
+        report.ResultScope("op"),
+        report.RewriteOutcome(
+            port_ok=True,
+            port_attempts=1,
+            source_ms=2.0,
+            optimize_result={"best_ms": 1.0, "best_commit": "flydsl-best"},
+            applyback_result={"ok": False, "error": "agent failed"},
+            applyback_required=True,
+        ),
     )
 
     assert failed.success is False
@@ -462,11 +456,10 @@ def test_rewrite_result_never_reports_the_standalone_best_as_framework_best():
     assert failed.artifact_schema_version == 0
 
     standalone = report.build_result(
-        op_name="op",
-        port_ok=True,
-        port_attempts=1,
-        source_ms=2.0,
-        optimize_result={"best_ms": 1.0, "best_commit": "flydsl-best"},
+        report.ResultScope("op"),
+        report.RewriteOutcome(
+            port_ok=True, port_attempts=1, source_ms=2.0, optimize_result={"best_ms": 1.0, "best_commit": "flydsl-best"}
+        ),
     )
 
     assert standalone.success is True

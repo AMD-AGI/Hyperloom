@@ -60,6 +60,8 @@ from ..actions.executors._workload_envs import (
 )
 from ..actions.executors._proposal_identity import controls_of, is_executable, normalize_proposal
 from hyperloom.inference_optimizer.roofline_ceiling import (
+    ComputeTarget,
+    DecodeShape,
     compute_compute_bound_ceiling_tok_per_sec,
     compute_theoretical_peak_output_tok_per_sec,
     load_model_meta,
@@ -280,9 +282,7 @@ def _build_roofline_ceiling(
         return None
 
     t_cmp = compute_compute_bound_ceiling_tok_per_sec(
-        gpu_type=gpu_type,
-        num_gpus=num_gpus,
-        precision_tag=precision,
+        ComputeTarget(gpu_type=gpu_type, num_gpus=num_gpus, precision_tag=precision),
         active_weight_bytes=meta.active_weight_bytes,
         weight_bytes=meta.weight_bytes,
         weight_dtype_bytes=meta.weight_dtype_bytes,
@@ -294,20 +294,11 @@ def _build_roofline_ceiling(
     rows: list[dict[str, Any]] = []
     for c in concs:
         t_mem = compute_theoretical_peak_output_tok_per_sec(
+            meta,
+            DecodeShape(isl=isl, osl=osl, concurrency=c),
             gpu_type=gpu_type,
             num_gpus=num_gpus,
-            weight_bytes=meta.weight_bytes,
-            active_weight_bytes=meta.active_weight_bytes,
-            num_experts=meta.num_experts,
-            experts_per_tok=meta.experts_per_tok,
-            expert_weight_bytes=meta.expert_weight_bytes,
-            num_layers=meta.num_layers,
-            num_kv_heads=meta.num_kv_heads,
-            head_dim=meta.head_dim,
             kv_dtype_bytes=meta.weight_dtype_bytes,
-            isl=isl,
-            osl=osl,
-            concurrency=c,
         )
         t_peak, bound_kind = select_peak_and_bound(t_mem, t_cmp)
         # Local import avoids a module-level import cycle.

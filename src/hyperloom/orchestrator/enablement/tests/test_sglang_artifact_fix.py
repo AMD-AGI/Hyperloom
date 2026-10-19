@@ -8,7 +8,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from hyperloom.inference_optimizer.reference_script import render_reference_script
+from hyperloom.inference_optimizer.reference_script import LaunchSettings, render_reference_script
 from hyperloom.orchestrator.enablement.artifacts import write_setting_script
 from hyperloom.orchestrator.specialists import patch_safety as _ps
 from hyperloom.orchestrator.specialists.runner import _sibling_checkouts
@@ -325,7 +325,7 @@ def test_create_only_reason_does_not_depend_on_the_candidates(tmp_path):
 
 
 def test_script_without_a_setup_stays_a_launch_recipe():
-    text = render_reference_script(framework="sglang", server_args="")
+    text = render_reference_script(framework="sglang", launch=LaunchSettings(server_args=""))
     assert "current best launch recipe" in text
     assert "enablement_setup.sh" not in text
 
