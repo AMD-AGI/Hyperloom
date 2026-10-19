@@ -1,13 +1,18 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Recording the GEMM shapes a vLLM server really runs.
+"""What a recording of the GEMM shapes a vLLM server really runs is made of.
 
 Forge tunes the shapes it is given, so a vLLM run that cannot point at a
 workload-matched shape source has to produce one first. Two passes do that, each
 serving the workload once under the session's own recipe: PyTorch TunableOp's
 untuned log for dense linears, and a Kineto profile for the block-FP8 path,
 whose shapes the trace carries as operator arguments.
+
+This module decides whether a pass is needed, states the recipe and the server
+environment it runs under, and reads what it left behind. Dispatching the
+serving run itself belongs to the request handlers, which own this package's
+one link to the orchestration loop.
 """
 
 from __future__ import annotations
@@ -365,13 +370,6 @@ class _ShapeCaptureRun(NamedTuple):
     args_mode: str
 
 
-class _CaptureLaunch(NamedTuple):
-    """What a capture's serving run produced, or the launch fault that stands in for it."""
-
-    benchmark_result: dict[str, Any]
-    fault: HandlerResult | None
-
-
 def _shape_capture_failure(
     error: str,
     capture_dir: Path,
@@ -484,41 +482,6 @@ def _capture_task_params(run: _ShapeCaptureRun, state: Any, payload: dict) -> di
     }
 
 
-def _capture_context(run: _ShapeCaptureRun, capture_state: Any, task_params: dict[str, Any]) -> Any:
-    """The runner context a capture's serving task runs in."""
-    from ..loop.sub_agent_runner import RunnerContext
-    from ..state.task_registry import Task
-
-    ctx = RunnerContext(
-        task=Task(
-            task_id=run.task_id,
-            kind="gemm_shape_capture",
-            state="running",
-            params=task_params,
-            idempotency_key=f"{run.task_id}-run",
-        ),
-        lease=None,
-    )
-    ctx.extra = {
-        "shared_state": capture_state,
-        "session_dir": run.session_dir,
-        "workspace": run.capture_dir,
-    }
-    return ctx
-
-
-async def _served_capture_workload(executor: Any, ctx: Any, capture_dir: Path) -> _CaptureLaunch:
-    """Serve the workload once for a capture, so a launch fault reads as a capture failure."""
-    try:
-        benchmark_result = await executor(ctx)
-    except Exception as exc:  # noqa: BLE001 - convert capture launch faults to a stable result
-        return _CaptureLaunch(
-            {},
-            _shape_capture_failure(f"vLLM TunableOp shape capture raised {exc!r}", capture_dir),
-        )
-    return _CaptureLaunch(benchmark_result if isinstance(benchmark_result, dict) else {}, None)
-
-
 def _capture_timeout_sec(payload: dict) -> int:
     """How long a TunableOp recording pass may serve the workload before it is stopped."""
     try:
@@ -625,83 +588,3 @@ def _tunableop_recording_result(
         capture_dir,
         shape_count=row_count,
     )
-
-
-async def _capture_block_fp8_profile_shapes(run: _ShapeCaptureRun, state: Any, payload: dict) -> HandlerResult:
-    """Harvest block-FP8 GEMM shapes from a profiler trace of the served workload."""
-    from ..actions.executors.roofline import RooflineExecutor
-
-    task_params = _capture_task_params(run, state, payload)
-    task_params["workspace_path"] = str(run.capture_dir / "tracelens")
-    last_baseline = getattr(state, "last_baseline", None)
-    if isinstance(last_baseline, dict):
-        benchmark_script = str(last_baseline.get("benchmark_script") or "").strip()
-        if benchmark_script:
-            task_params["benchmark_script"] = benchmark_script
-    launch = await _served_capture_workload(
-        RooflineExecutor(shared_state=state),
-        _capture_context(run, state, task_params),
-        run.capture_dir,
-    )
-    if launch.fault is not None:
-        return launch.fault
-    return _block_fp8_profile_result(launch.benchmark_result, run.capture_dir)
-
-
-async def _capture_tunableop_recording(run: _ShapeCaptureRun, state: Any, payload: dict) -> HandlerResult:
-    """Record the dense GEMMs vLLM runs, through PyTorch TunableOp's untuned log."""
-    import copy
-
-    from ..actions.executors.baseline import BaselineExecutor
-
-    config_path = str(payload.get("config_path") or getattr(state, "baseline_config_path", "") or "").strip()
-    if not config_path or not Path(config_path).is_file():
-        return _shape_capture_failure(
-            "vLLM TunableOp shape capture requires an existing baseline_config_path",
-            run.capture_dir,
-        )
-    try:
-        capture_port = _resolve_shape_capture_port(payload.get("shape_capture_port"))
-    except ValueError as exc:
-        return _shape_capture_failure(str(exc), run.capture_dir)
-
-    task_params = _capture_task_params(run, state, payload)
-    task_params.update(
-        {
-            "extra_envs": _tunableop_recording_envs(run.envs, capture_port, run.capture_dir),
-            "unset_envs": _tunableop_recording_unset_envs(run.unset_envs),
-            "remove_args": [*run.remove_args, "--port"],
-            "config_path": config_path,
-            "timeout_sec": _capture_timeout_sec(payload),
-            "disable_run_eval": True,
-            "baseline_double_run": False,
-        }
-    )
-    capture_state = copy.deepcopy(state)
-    capture_state.baseline_eager_fallback = False
-    launch = await _served_capture_workload(
-        BaselineExecutor(session_dir=run.session_dir, shared_state=capture_state),
-        _capture_context(run, capture_state, task_params),
-        run.capture_dir,
-    )
-    if launch.fault is not None:
-        return launch.fault
-    return _tunableop_recording_result(
-        launch.benchmark_result,
-        run.capture_dir / _TUNABLEOP_UNTUNED_NAME,
-        run.capture_dir,
-    )
-
-
-async def _capture_vllm_tunableop_shapes(
-    *,
-    state: Any,
-    session_dir: Path,
-    payload: dict,
-    workspace: Path,
-) -> HandlerResult:
-    """Record real vLLM GEMMs using TunableOp or a block-FP8 profiler trace."""
-    run = _shape_capture_run(state, payload, workspace, session_dir)
-    if payload.get("_shape_capture_mode") == "block_fp8_profile":
-        return await _capture_block_fp8_profile_shapes(run, state, payload)
-    return await _capture_tunableop_recording(run, state, payload)
