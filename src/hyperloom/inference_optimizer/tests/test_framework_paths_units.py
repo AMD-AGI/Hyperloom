@@ -18,6 +18,8 @@ from hyperloom.inference_optimizer.framework_paths import probe_framework_source
 from hyperloom.orchestrator.prompts.prompt_builder import (
     FULL_ENABLED_ACTIONS,
     build_orchestration_prompt,
+    PromptAssets,
+    SessionContext,
 )
 from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir
 from hyperloom.orchestrator.kernel import apply_kernel_patch as akp
@@ -628,10 +630,8 @@ def test_prompt_renders_framework_source_roots(registry=None):
     text = build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=FULL_ENABLED_ACTIONS,
-        framework="sglang",
-        max_minutes=60,
-        rules_fragment_path=asset_system_prompts_dir() / "orchestration.md",
-        framework_source_roots=custom,
+        session=SessionContext(framework="sglang", max_minutes=60, framework_source_roots=custom),
+        assets=PromptAssets(rules_fragment_path=asset_system_prompts_dir() / "orchestration.md"),
     )
     assert "framework_source_roots:" in text
     assert "/custom/sglang/" in text

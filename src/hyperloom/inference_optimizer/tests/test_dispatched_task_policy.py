@@ -16,7 +16,7 @@ from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, Sqlite
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
-from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
+from hyperloom.orchestrator.loop.sub_agent_runner import RunnerLinks, SubAgentRunner
 from hyperloom.orchestrator.policy.gate import PolicyDenied, PolicyGate
 from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.roles import MockBackend, ScriptedPlan
@@ -108,13 +108,7 @@ def _runner_with_policy(tmp_path: Path, monkeypatch, *, shared_state: object | N
         strict_paths=True,
         resources=ResourceFacts(),
     )
-    return SubAgentRunner(
-        locks,
-        tasks,
-        session_dir=sd,
-        shared_state=state,
-        policy=gate,
-    )
+    return SubAgentRunner(locks, tasks, session_dir=sd, links=RunnerLinks(shared_state=state, policy=gate))
 
 
 @pytest.mark.asyncio
@@ -538,13 +532,7 @@ async def test_dispatched_integrate_patch_resume_with_persisted_verdict_passes(t
         shared_state=resumed_state,
         strict_paths=True,
     )
-    sub = SubAgentRunner(
-        locks2,
-        tasks2,
-        session_dir=sd,
-        shared_state=resumed_state,
-        policy=gate,
-    )
+    sub = SubAgentRunner(locks2, tasks2, session_dir=sd, links=RunnerLinks(shared_state=resumed_state, policy=gate))
     executed = {"ran": False}
 
     async def _stub(_ctx) -> dict:
@@ -722,7 +710,7 @@ async def test_runner_without_policy_skips_dispatch_validation(tmp_path, monkeyp
     db = SqliteConnection(tmp_path / "coord.db")
     locks = ResourceLockManager(SqliteLeaseBackend(db))
     tasks = TaskRegistry(db)
-    sub = SubAgentRunner(locks, tasks, session_dir=sd, policy=None)
+    sub = SubAgentRunner(locks, tasks, session_dir=sd, links=RunnerLinks(policy=None))
     executed = {"ran": False}
 
     async def _stub(_ctx) -> dict:

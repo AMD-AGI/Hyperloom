@@ -63,6 +63,7 @@ from ._accuracy_gate import (
 )
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import effective_fingerprint
+from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
 from ._grid_base import (
     TS_FAILED,
     TS_KILLED_OVERTIME,
@@ -121,6 +122,9 @@ log = logging.getLogger(__name__)
 _now_iso = functools.partial(now_iso, "auto")
 
 STACK_REVALIDATE_SOURCE: str = "stack_revalidate"
+
+# ``skipped_dup`` reason for a variant whose launch the session already measured on the same stack.
+ALREADY_MEASURED: str = "already_measured"
 
 
 def is_stack_revalidation(params: dict | None) -> bool:
@@ -585,7 +589,7 @@ def _refused_by(graded: Any) -> str:
         return graded.veto_reason
     if graded.graded_on_intvty:
         return f"{graded.refused_by} ({_graded_axes_moved(graded)})"
-    return "gain_below_threshold"
+    return GAIN_BELOW_THRESHOLD
 
 
 def _graded_decision(graded: Any, r: Any, variant_name: str) -> _GradedVerdict:
@@ -808,7 +812,8 @@ class _ExploreRound:
     serving_lease: Any
     keep_threshold_pct: float
     grade_on_intvty: bool
-    refuse_context_copy: bool
+    on_the_synthetic_benchmark: bool
+    is_revalidation: bool
     workload_signature: str
 
     def measured_against(self) -> dict[str, Any]:
@@ -876,13 +881,44 @@ class _ExploreRound:
         )
         return True
 
+    def already_measured(self, gv: GridVariant) -> bool:
+        """Whether the session ledger already holds a verdict for ``gv`` on this stack, recording the skip if so.
+
+        The stack a KEEP earlier in the round advanced is what the variant would
+        launch on, so the check runs per variant rather than once for the round.
+        A stack revalidation exists to re-measure, and a kernel overlay changes
+        the launch without changing the fingerprint, so neither is ever skipped.
+        """
+        if self.shared_state is None or self.is_revalidation or getattr(gv, "overlay_pythonpath", ""):
+            return False
+        fp = str(getattr(gv, "canonical_fp", "") or "")
+        prior = measured_verdict(
+            getattr(self.shared_state, "explore_search", None),
+            fp,
+            variant={"extra_args": gv.extra_server_args, "extra_envs": gv.extra_envs, **_variant_control_fields(gv)},
+            now=MeasuredOn(
+                stack_of_measured(self.measured_against()), self.workload_signature, self.keep_threshold_pct
+            ),
+        )
+        if prior is None:
+            return False
+        detail = (
+            f"measured as {prior.get('name') or fp} in {prior.get('round_id') or 'an earlier round'} on this "
+            f"stack: {prior.get('outcome')}"
+        )
+        log.info("explore: skipping already-measured variant %s (%s)", gv.name, detail)
+        self.ledger.skipped.append({"name": gv.name, "fingerprint": fp, "reason": ALREADY_MEASURED, "detail": detail})
+        return True
+
     def context_copy_refusal(self, gv: GridVariant) -> str:
         """Why this draft's copied context is refused on the stack as it stands, or ``""``.
 
-        Judged against the stack as it stands now: a KEEP earlier in this round
-        may have changed it.
+        Only the synthetic benchmark refuses one, its repetition loops being what
+        a copied context would copy, and a revalidation re-measures the stack it
+        already carries. Judged against the stack as it stands now: a KEEP earlier
+        in this round may have changed it.
         """
-        if not self.refuse_context_copy:
+        if not self.on_the_synthetic_benchmark or self.is_revalidation:
             return ""
         _, copy_refused = filter_context_copy_drafts(
             [gv],
@@ -1076,15 +1112,16 @@ class _ExploreRound:
             persist_effective,
         )
 
-    def produced_a_measurement(self) -> bool:
-        """Whether any variant got far enough to be a signal, winner or not.
+    def answered_its_grid(self) -> bool:
+        """Whether the round has a verdict for the grid it was given, winner or not.
 
         A variant reaped by the overtime gate counts: ``KILLED_OVERTIME`` is a
-        real signal, not an absence of one.
+        real signal, not an absence of one. A round whose every variant already
+        had its verdict is answered too, as if it had measured them again.
         """
-        return bool(self.ledger.winners) or any(
-            t.get("outcome") in ("KEEP", "REVERT", TS_KILLED_OVERTIME) for t in self.ledger.tested.values()
-        )
+        measured = any(t.get("outcome") in ("KEEP", "REVERT", TS_KILLED_OVERTIME) for t in self.ledger.tested.values())
+        already = sum(sd.get("reason") == ALREADY_MEASURED for sd in self.ledger.skipped)
+        return measured or bool(self.ledger.winners) or (bool(self.runnable) and already == len(self.runnable))
 
     def budget_error(self, status: str) -> dict[str, Any]:
         """Why a round that measured nothing measured nothing, when the run stopped it.
@@ -1204,9 +1241,8 @@ class ExploreExecutor:
             else None,
             keep_threshold_pct=float(params.get("keep_threshold_pct", self.keep_threshold_pct)),
             grade_on_intvty=anchor.on_intvty,
-            # A context-copying draft is refused on the synthetic benchmark, whose repetition loops it would copy.
-            refuse_context_copy=not agentx_active(benchmark_mode=getattr(ss, "benchmark_mode", ""))
-            and not is_stack_revalidation(params),
+            on_the_synthetic_benchmark=not agentx_active(benchmark_mode=getattr(ss, "benchmark_mode", "")),
+            is_revalidation=is_stack_revalidation(params),
             workload_signature=workload_signature(),
         )
 
@@ -1389,6 +1425,8 @@ class ExploreExecutor:
         """Measure every variant the round can still afford, in the order the grid gives them."""
         try:
             for idx, gv in enumerate(explore_round.runnable):
+                if explore_round.already_measured(gv):
+                    continue
                 needed_sec = explore_round.variant_cost_sec()
                 stop = variant_budget_stop(
                     explore_round.budget.session_deadline_sec, explore_round.budget.phase_deadline, needed_sec
@@ -1613,7 +1651,7 @@ class ExploreExecutor:
             default=None,
         )
         best_gain_pct = float(best_winner.get("gain_pct") or 0.0) if best_winner else 0.0
-        status = "succeeded" if explore_round.produced_a_measurement() else "failed"
+        status = "succeeded" if explore_round.answered_its_grid() else "failed"
         return {
             "status": status,
             **explore_round.budget_error(status),

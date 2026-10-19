@@ -74,9 +74,60 @@ _TIMEOUT_DENY_SQL = """
 
 __all__ = [
     "TIMEOUT_VERDICT",
+    "ReconcileLimits",
+    "ReconcileLinks",
     "ReconcileReport",
+    "ReconcileStores",
     "Reconciler",
 ]
+
+
+@dataclass(frozen=True)
+class ReconcileStores:
+    """The durable stores the pass repairs.
+
+    Attributes:
+        rounds: The durable round store.
+        tasks: The task registry.
+        locks: The lease manager; this pass is its only sweeper.
+    """
+
+    rounds: RoundStore
+    tasks: TaskRegistry
+    locks: ResourceLockManager
+
+
+@dataclass(frozen=True)
+class ReconcileLinks:
+    """The running loop's state the pass reads and writes, each optional.
+
+    Attributes:
+        resources: The gate's resource facts; ``None`` skips the update.
+        proposals: Returns the in-memory pending proposals, so a durable
+            timeout deny also reaches the copy the loop consults.
+        session_dir: Where SharedState is saved after a terminal is set.
+        result_pending: Whether a terminal task's result is still to be
+            booked by the dispatcher; ``None`` treats every terminal row
+            as booked.
+    """
+
+    resources: Any = None
+    proposals: Callable[[], Mapping[str, Any]] | None = None
+    session_dir: Any = None
+    result_pending: Callable[[str], bool] | None = None
+
+
+@dataclass(frozen=True)
+class ReconcileLimits:
+    """How long the pass waits before it settles a round or denies a review.
+
+    Attributes:
+        terminal_holder_cap_sec: Cap for a round whose holder went terminal.
+        review_ttl_sec: TTL for an undecided review.
+    """
+
+    terminal_holder_cap_sec: float = TERMINAL_HOLDER_CAP_SEC
+    review_ttl_sec: float = REVIEW_TTL_SEC
 
 
 @dataclass
@@ -127,49 +178,34 @@ class Reconciler:
 
     def __init__(
         self,
-        *,
-        rounds: RoundStore,
-        tasks: TaskRegistry,
-        locks: ResourceLockManager,
+        stores: ReconcileStores,
         shared_state: Any,
-        resources: Any = None,
-        proposals: Callable[[], Mapping[str, Any]] | None = None,
-        session_dir: Any = None,
-        result_pending: Callable[[str], bool] | None = None,
-        terminal_holder_cap_sec: float = TERMINAL_HOLDER_CAP_SEC,
-        review_ttl_sec: float = REVIEW_TTL_SEC,
+        *,
+        links: ReconcileLinks = ReconcileLinks(),
+        limits: ReconcileLimits = ReconcileLimits(),
     ):
         """Initialise the reconciler.
 
         Args:
-            rounds: The durable round store.
-            tasks: The task registry.
-            locks: The lease manager; this pass is its only sweeper.
+            stores: The durable stores the pass repairs.
             shared_state: SharedState, read for the projection and written when
                 an unreaped round stops the session.
-            resources: The gate's resource facts; ``None`` skips the update.
-            proposals: Returns the in-memory pending proposals, so a durable
-                timeout deny also reaches the copy the loop consults.
-            session_dir: Where SharedState is saved after a terminal is set.
-            result_pending: Whether a terminal task's result is still to be
-                booked by the dispatcher; ``None`` treats every terminal row
-                as booked.
-            terminal_holder_cap_sec: Cap for a round whose holder went terminal.
-            review_ttl_sec: TTL for an undecided review.
+            links: The running loop's state the pass reads and writes.
+            limits: How long a round or a review may wait.
         """
-        self._rounds = rounds
+        self._rounds = stores.rounds
         # One connection serves the whole session; a second would have to be
         # arbitrated against this one by the database's busy timeout.
-        self._db = rounds.db
-        self._tasks = tasks
-        self._locks = locks
+        self._db = stores.rounds.db
+        self._tasks = stores.tasks
+        self._locks = stores.locks
         self._shared_state = shared_state
-        self._resources = resources
-        self._proposals = proposals
-        self._session_dir = session_dir
-        self._result_pending = result_pending
-        self.terminal_holder_cap_sec = max(0.0, float(terminal_holder_cap_sec))
-        self.review_ttl_sec = max(0.0, float(review_ttl_sec))
+        self._resources = links.resources
+        self._proposals = links.proposals
+        self._session_dir = links.session_dir
+        self._result_pending = links.result_pending
+        self.terminal_holder_cap_sec = max(0.0, float(limits.terminal_holder_cap_sec))
+        self.review_ttl_sec = max(0.0, float(limits.review_ttl_sec))
         self.last_report = ReconcileReport()
 
     async def run(self, now_unix: float) -> ReconcileReport:

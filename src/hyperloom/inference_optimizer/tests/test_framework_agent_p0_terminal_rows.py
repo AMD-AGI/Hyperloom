@@ -13,6 +13,7 @@ from hyperloom.orchestrator.framework.artifacts import candidate_key
 from hyperloom.orchestrator.state.task_registry import Task
 
 from .conftest import make_coordinator
+from hyperloom.orchestrator.phases.framework import ProgressStamp
 
 
 def test_candidate_key_precedence_and_fallbacks():
@@ -35,9 +36,7 @@ def test_pr_url_only_candidate_dedups_against_progress_row(tmp_path: Path):
     ]
     assert len(phase._unprocessed_framework_agent_candidates()) == 2
     phase._stamp_framework_progress(
-        candidate_id=phase._framework_candidate_key(cand_pr_only),
-        batch_id="b1",
-        status="critic_denied",
+        ProgressStamp(candidate_id=phase._framework_candidate_key(cand_pr_only), batch_id="b1", status="critic_denied")
     )
     remaining = phase._unprocessed_framework_agent_candidates()
     assert [candidate_key(c) for c in remaining] == ["cid-2"]
@@ -47,12 +46,14 @@ def test_stamp_writes_row_and_is_idempotent(tmp_path: Path):
     coord = make_coordinator(tmp_path)
     phase = coord.phase_framework
     first = phase._stamp_framework_progress(
-        candidate_id="cid-1",
-        batch_id="b1",
-        status="reauthor_cap",
-        rationale="cap reached",
-        provenance="pump",
-        extra={"error": "boom"},
+        ProgressStamp(
+            candidate_id="cid-1",
+            batch_id="b1",
+            status="reauthor_cap",
+            rationale="cap reached",
+            provenance="pump",
+            extra={"error": "boom"},
+        )
     )
     assert first is True
     rows = coord.shared_state.framework_agent_phase_progress
@@ -66,9 +67,7 @@ def test_stamp_writes_row_and_is_idempotent(tmp_path: Path):
     assert row["error"] == "boom"
     assert row["ts"]
     second = phase._stamp_framework_progress(
-        candidate_id="cid-1",
-        batch_id="b1",
-        status="no_result_failed",
+        ProgressStamp(candidate_id="cid-1", batch_id="b1", status="no_result_failed")
     )
     assert second is False
     assert len(coord.shared_state.framework_agent_phase_progress) == 1
@@ -77,7 +76,7 @@ def test_stamp_writes_row_and_is_idempotent(tmp_path: Path):
 
 def test_stamp_empty_key_is_noop(tmp_path: Path):
     coord = make_coordinator(tmp_path)
-    assert coord.phase_framework._stamp_framework_progress(candidate_id="", status="x") is False
+    assert coord.phase_framework._stamp_framework_progress(ProgressStamp(candidate_id="", status="x")) is False
     assert coord.shared_state.framework_agent_phase_progress == []
 
 

@@ -23,6 +23,7 @@ from hyperloom.inference_optimizer.breakdown.round_archive import (
     ROLE_SERVER_LOG,
     ROLE_SPECIALIST_RESULT,
 )
+from hyperloom.inference_optimizer.reference_script import ServingTarget
 from hyperloom.orchestrator.enablement.artifacts import (
     _FILE_SIZE_LIMIT,
     _LOG_TRUNCATION_NOTE,
@@ -360,7 +361,7 @@ def test_setup_only_round_does_not_install_rejected_scan_patch(tmp_path, target,
     en.environment_closure = closure
     en.environment_closure_baseline = {"interpreter": "/usr/bin/python3", "distributions": {"local-runtime": "0.9"}}
 
-    write_setting_script(tmp_path, en, "sglang", model="/models/M")
+    write_setting_script(tmp_path, en, "sglang", target=ServingTarget(model="/models/M"))
 
     text = (tmp_path / "reports" / "enablement" / "enablement_setup.sh").read_text(encoding="utf-8")
     assert setup[0] in text
