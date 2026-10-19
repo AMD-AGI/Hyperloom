@@ -14,6 +14,9 @@ from kernelforge.loop.lessons import (
     UNDISPROVEN_CLAIM,
     LessonScope,
     LessonStore,
+    OutcomeMeasurement,
+    SessionEnd,
+    SessionObservations,
     build_fallback_document,
     build_summary_prompt,
     cases_named_in,
@@ -90,10 +93,8 @@ def test_append_outcome_ignores_empty_line(tmp_path):
 def test_format_outcome_line_includes_available_measurements():
     line = format_outcome_line(
         decision="REVERT_PERF",
-        wall_ms=1.2340,
-        best_wall_ms=1.1980,
-        snr_db=42.25,
-        end_reason="turn_cap",
+        measurement=OutcomeMeasurement(wall_ms=1.2340, best_wall_ms=1.1980, snr_db=42.25),
+        session=SessionEnd("turn_cap"),
     )
     assert line == ("OUTCOME: REVERT_PERF | wall 1.2340 ms vs best 1.1980 ms | snr 42.2 dB | session ended: turn_cap")
 
@@ -101,10 +102,8 @@ def test_format_outcome_line_includes_available_measurements():
 def test_format_outcome_line_tolerates_missing_measurements():
     line = format_outcome_line(
         decision="BUILD_FAILED",
-        wall_ms=None,
-        best_wall_ms=None,
-        snr_db=None,
-        end_reason="",
+        measurement=OutcomeMeasurement(wall_ms=None, best_wall_ms=None, snr_db=None),
+        session=SessionEnd(""),
     )
     assert line == "OUTCOME: BUILD_FAILED"
 
@@ -328,13 +327,15 @@ def test_summarize_reports_a_lesson_store_write_failure(tmp_path, monkeypatch):
 
 def test_fallback_document_carries_the_gate_rejections():
     doc = build_fallback_document(
-        diff_summary="softmax_kernel.py | 12 +++---",
-        findings=(
-            "Your change is NOT finished: the kernel fails correctness.\ndetail\n"
-            "---\n"
-            "The kernel is CORRECT but NOT faster than the current best.\nmore"
+        SessionObservations(
+            diff_summary="softmax_kernel.py | 12 +++---",
+            findings=(
+                "Your change is NOT finished: the kernel fails correctness.\ndetail\n"
+                "---\n"
+                "The kernel is CORRECT but NOT faster than the current best.\nmore"
+            ),
         ),
-        end_reason="block_budget_exhausted",
+        SessionEnd("block_budget_exhausted"),
     )
 
     assert doc.splitlines()[0].startswith("(no agent summary)")
@@ -349,9 +350,8 @@ def test_fallback_document_carries_the_gate_rejections():
 
 def test_fallback_document_without_findings_still_records_the_diff():
     doc = build_fallback_document(
-        diff_summary="a.py | 1 +",
-        findings="",
-        end_reason="",
+        SessionObservations(diff_summary="a.py | 1 +", findings=""),
+        SessionEnd(""),
     )
     assert doc.splitlines()[0].startswith("(no agent summary)")
     assert "a.py | 1 +" in doc
@@ -360,9 +360,8 @@ def test_fallback_document_without_findings_still_records_the_diff():
 def test_fallback_document_is_empty_when_nothing_was_observed():
     assert (
         build_fallback_document(
-            diff_summary="",
-            findings="",
-            end_reason="turn_cap",
+            SessionObservations(diff_summary="", findings=""),
+            SessionEnd("turn_cap"),
         )
         == ""
     )
@@ -371,9 +370,8 @@ def test_fallback_document_is_empty_when_nothing_was_observed():
 def test_fallback_document_caps_the_rejection_list():
     findings = "\n---\n".join(f"rejection {i}" for i in range(20))
     doc = build_fallback_document(
-        diff_summary="",
-        findings=findings,
-        end_reason="",
+        SessionObservations(diff_summary="", findings=findings),
+        SessionEnd(""),
         max_findings=3,
     )
     listed = [line for line in doc.splitlines() if line.startswith("- rejection")]

@@ -280,7 +280,7 @@ class TestShadowRepo:
 
     def test_the_loop_accepts_the_workspace_the_shadow_hands_it(self, tmp_path, monkeypatch):
         """Run the loop's own campaign resolution against a real shadow tree."""
-        from kernelforge.loop.campaign_config import create_campaign_config
+        from kernelforge.loop.campaign_config import CampaignInputs, create_campaign_config
 
         root, source = _framework_tree(tmp_path)
         fused = source.parent / "lfm2_fused_residual.py"
@@ -298,18 +298,20 @@ class TestShadowRepo:
             monkeypatch.setenv(name, value)
 
         campaign = create_campaign_config(
-            workspace_dir=shadow.root,
-            kernel=str(source),
-            driver=str(driver),
-            source_files=list(shadow.created_paths),
-            program_md_file=str(program),
-            git_branch=SHADOW_BRANCH,
-            kernel_backend="fusion",
-            task_type="repository",
-            producer="fusion",
-            operator_name="residual_add_rmsnorm",
-            gpu_type="mi355x",
-            gpu_target="gfx950",
+            shadow.root,
+            CampaignInputs(
+                kernel=str(source),
+                driver=str(driver),
+                source_files=",".join(list(shadow.created_paths)),
+                program_md_file=str(program),
+                operator_name="residual_add_rmsnorm",
+                producer="fusion",
+                kernel_backend="fusion",
+                git_branch=SHADOW_BRANCH,
+                gpu_target="gfx950",
+                gpu_type="mi355x",
+                task_type="repository",
+            ),
         )
 
         assert campaign.producer == "fusion"

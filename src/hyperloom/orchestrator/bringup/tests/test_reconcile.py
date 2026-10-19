@@ -24,6 +24,7 @@ from hyperloom.orchestrator.policy.projection import ResourceFacts
 from hyperloom.orchestrator.state.round_store import (
     OPEN,
     SETTLED,
+    RoundRequest,
     RoundStore,
 )
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
@@ -109,10 +110,9 @@ async def _open_round(rounds: RoundStore, tasks: TaskRegistry, *, holder: str, l
     await tasks.create(kind="specialist", params={}, idempotency_key=f"k:{holder}", task_id=holder)
     result = await rounds.open(
         f"round-{holder}",
+        RoundRequest(now_unix=_NOW, request_id=f"open:{holder}"),
         holder_task_id=holder,
         lease_sec=lease,
-        now_unix=_NOW,
-        request_id=f"open:{holder}",
     )
     assert result.ok
 
