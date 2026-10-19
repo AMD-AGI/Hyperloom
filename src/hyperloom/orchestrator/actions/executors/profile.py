@@ -5,14 +5,15 @@
 
 from __future__ import annotations
 
-import gzip
+import asyncio
 import json
 import logging
 import os
 import tempfile
-from dataclasses import dataclass
+import time
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, AsyncIterator, Mapping, NamedTuple
 
 import yaml
 
@@ -23,9 +24,8 @@ from hyperloom.orchestrator.trace_analysis._trace_rank import (
     select_primary_trace,
     trace_rank as _trace_rank,
 )
-from hyperloom.common.io import atomic_write_json, safe_mtime
+from hyperloom.common.io import safe_mtime
 from hyperloom.common.profile_args import sanitize_profile_server_args as _sanitize_profile_server_args
-from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.paths import asset_root, mn_profile_trace_root
 from hyperloom.inference_optimizer import framework_registry
 from ._inferencex_patcher import (
@@ -34,6 +34,16 @@ from ._inferencex_patcher import (
     ensure_benchmark_lib_eval_dest_patched,
     ensure_benchmark_serving_patched,
 )
+from ._profile_trace_checks import (
+    CHECK_SGLANG_SHAPE_PROFILER,
+    CHECK_STEP_ANNOTATIONS,
+    _build_trace_validate,
+    _certify_trace_dir,
+    _instrumentation_preflight_row,
+    _TraceProbe,
+    _validate_trace_structure,
+    _write_trace_certificate,
+)
 from ._xdit_patcher import verify_xdit_profiler_baked
 from .baseline import BenchmarkRunExecutor
 
@@ -41,641 +51,10 @@ from .baseline import BenchmarkRunExecutor
 log = logging.getLogger(__name__)
 
 
-# Leading bytes of a trace to sample for sentinel substrings.
-_TRACE_INSPECT_BYTES = 2_000_000
-
-# Cap for the confirmation streaming scan used when the leading-window sample finds zero of a sentinel.
-_TRACE_CONFIRM_BYTES = 64_000_000
-
-# Min fraction of ``cpu_op`` events carrying ``Input Dims`` for a healthy ``capture_traces/`` file (Deval ref 99.97%;
-# gated low to avoid false-positives).
-_INPUT_DIMS_FRACTION_FLOOR = 0.90
-
-# Kineto puts the annotation category in ``cat`` and the label the framework wrote in ``name``, so a marker keyed on
-# ``"name": "user_annotation"`` looks for a label no producer emits.
-_USER_ANNOTATION_MARKER = '"user_annotation"'
-
-
-def _trace_contains(path: Path, substring: str, max_bytes: int | None = None) -> bool:
-    """Stream-decompress ``path`` for ``substring``, reading at most ``max_bytes`` (default :data:`_TRACE_CONFIRM_BYTES`)."""
-    if not substring:
-        return False
-    if max_bytes is None:
-        try:
-            max_bytes = int(
-                os.environ.get(
-                    "INFERENCE_OPTIMIZER_TRACE_CONFIRM_BYTES",
-                    _TRACE_CONFIRM_BYTES,
-                )
-            )
-        except (TypeError, ValueError):
-            max_bytes = _TRACE_CONFIRM_BYTES
-    read = 0
-    carry = ""
-    chunk_size = 4_000_000
-    try:
-        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
-            while read < max_bytes:
-                chunk = fh.read(chunk_size)
-                if not chunk:
-                    break
-                read += len(chunk)
-                if substring in (carry + chunk):
-                    return True
-                # Carry tail to catch a sentinel split across the chunk boundary.
-                carry = chunk[-(len(substring)) :]
-    except (OSError, EOFError, UnicodeDecodeError) as e:
-        log.debug("_trace_contains: cannot stream %s: %s", path, e)
-        return False
-    return False
-
-
-def _sample_trace_text(path: Path) -> str | None:
-    """Read up to ``_TRACE_INSPECT_BYTES`` of decompressed text from a gzipped trace."""
-    try:
-        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
-            return fh.read(_TRACE_INSPECT_BYTES)
-    except (OSError, EOFError, UnicodeDecodeError) as e:
-        # Best-effort: a malformed sample must not fail the profile path.
-        log.debug(
-            "_validate_trace_structure: cannot sample %s: %s",
-            path,
-            e,
-        )
-        return None
-
-
-def _count_substring_occurrences(text: str, substring: str) -> int:
-    """Count non-overlapping ``substring`` occurrences as a cheap lower-bound event count (avoids full JSON parsing)."""
-    if not substring:
-        return 0
-    return text.count(substring)
-
-
-# Structured verdict ids for the post-profile trace validation.
-CHECK_INSTRUMENTATION_PREFLIGHT = "instrumentation_preflight"
-CHECK_CAPTURE_TRACES_PRESENT = "capture_traces_present"
-CHECK_CAPTURE_INPUT_DIMS = "capture_input_dims"
-CHECK_STEP_ANNOTATIONS = "step_annotations"
-CHECK_SPLIT_CHUNK_ANNOTATIONS = "split_chunk_annotations"
-CHECK_SGLANG_SHAPE_PROFILER = "sglang_shape_profiler"
-CHECK_STEADY_STATE_SPLIT_NAMING = "steady_state_split_naming"
-CHECK_TRACE_HAS_OPS = "trace_has_ops"
-CHECK_GRAPH_LAUNCH_COVERAGE = "graph_launch_coverage"
-CHECK_RANK_SHAPE = "rank_shape"
-
-
-def _check_row(
-    check_id: str,
-    *,
-    status: str,
-    skip_reason: str | None = None,
-    **detail: Any,
-) -> dict[str, Any]:
-    """Build one structured check row."""
-    return {"check_id": check_id, "status": status, "skip_reason": skip_reason, "detail": detail}
-
-
-def _instrumentation_preflight_row(bench: Any, patchers: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """State, before the run, whether the annotations the trace checks look for can land at all.
-
-    When the TraceLens runtime patch is unavailable the env layer turns ``detailed_annotations`` and
-    ``shape_discovery`` off, which makes checks 3 and 5 certain to fail. Recording that decision here gives the
-    post-hoc failures their cause. This only reports it -- the run proceeds unchanged, because a trace without
-    annotations is still a trace.
-
-    ``patchers`` carries each patcher's own outcome. The env block records what the patch results *caused*, which
-    is not the same as which patcher ran and what it returned: a successful patch records its outcome too, so
-    "instrumentation was fine" and "nobody looked" are different records.
-    """
-    envs = (bench or {}).get("envs") if isinstance(bench, dict) else None
-    if not isinstance(envs, dict):
-        return _check_row(
-            CHECK_INSTRUMENTATION_PREFLIGHT,
-            status="skipped",
-            skip_reason="materialized config carries no benchmark.envs block",
-        )
-    degraded = str(envs.get("HYPERLOOM_PROFILE_DEGRADED_REASON") or "")
-    patchers = dict(patchers or {})
-    try:
-        extra_body = json.loads(str(envs.get("PROFILE_EXTRA_BODY") or "{}"))
-    except (TypeError, ValueError):
-        extra_body = {}
-    if not isinstance(extra_body, dict):
-        extra_body = {}
-    failed_patchers = sorted(name for name, ok in patchers.items() if ok is False)
-    return _check_row(
-        CHECK_INSTRUMENTATION_PREFLIGHT,
-        status="failed" if (degraded or failed_patchers) else "passed",
-        degraded_reason=degraded,
-        tracelens_patch_status=str(envs.get("HYPERLOOM_TRACELENS_PATCH_STATUS") or ""),
-        detailed_annotations=extra_body.get("detailed_annotations"),
-        shape_discovery=extra_body.get("shape_discovery"),
-        # The sglang flag the patched build exposes; absent means capture-time shapes were never requested.
-        shape_discovery_flag_present=(
-            "shape-discovery-for-cuda-graph-profile" in str(envs.get("EXTRA_SGLANG_ARGS") or "")
-        ),
-        patchers=patchers,
-        failed_patchers=failed_patchers,
-        # Named so a reader knows which post-hoc checks this predicts rather than having to rediscover the link.
-        predicts_failure_of=[CHECK_STEP_ANNOTATIONS, CHECK_SGLANG_SHAPE_PROFILER] if degraded else [],
-    )
-
-
-def _probe_check_rows(certificate: dict[str, Any]) -> list[dict[str, Any]]:
-    """Express the probe's measurements in the shared check vocabulary."""
-    inventory = certificate.get("trace_dir_level") or {}
-    thresholds = (certificate.get("verdict") or {}).get("thresholds_effective") or {}
-    ranks = [row for row in (certificate.get("rank_level") or []) if isinstance(row, dict)]
-    rows: list[dict[str, Any]] = []
-
-    for rank in ranks:
-        density = rank.get("density") or {}
-        measured = {
-            "rank": rank.get("rank"),
-            "graph_mode": density.get("graph_mode"),
-            "graph_launch_count": density.get("graph_launch_count"),
-            "graph_launches_with_kernels": density.get("graph_launches_with_kernels"),
-            "graph_launch_coverage": density.get("graph_launch_coverage"),
-            "coverage_max": thresholds.get("graph_launch_coverage_max"),
-        }
-        under_recorded = density.get("graph_under_recorded")
-        if under_recorded is None:
-            # Nothing was measured, which is not the same as measured and fine.
-            rows.append(
-                _check_row(
-                    CHECK_GRAPH_LAUNCH_COVERAGE,
-                    status="skipped",
-                    skip_reason="the probe reached no coverage measurement for this rank",
-                    **measured,
-                )
-            )
-        elif not density.get("graph_mode"):
-            # An eager capture has no graph launches, so the coverage denominator is zero.
-            rows.append(
-                _check_row(
-                    CHECK_GRAPH_LAUNCH_COVERAGE,
-                    status="skipped",
-                    skip_reason="capture recorded no CUDA graph launches",
-                    **measured,
-                )
-            )
-        else:
-            rows.append(
-                _check_row(
-                    CHECK_GRAPH_LAUNCH_COVERAGE,
-                    status="failed" if under_recorded else "passed",
-                    **measured,
-                )
-            )
-
-    rank_count = inventory.get("rank_count")
-    certified = [rank.get("rank") for rank in ranks]
-    shape = {
-        "rank_count": rank_count,
-        "certified_rank_count": len(ranks),
-        "certified_ranks": certified,
-    }
-    if isinstance(rank_count, int) and rank_count > len(ranks):
-        # The probe certifies the file the live resolver would open, so on a tensor-parallel capture the other ranks
-        # are unmeasured rather than measured and equal.
-        rows.append(
-            _check_row(
-                CHECK_RANK_SHAPE,
-                status="skipped",
-                skip_reason="only the resolved rank was certified; the remaining ranks are unmeasured",
-                **shape,
-            )
-        )
-    else:
-        rows.append(_check_row(CHECK_RANK_SHAPE, status="passed", **shape))
-    return rows
-
-
-@dataclass(frozen=True)
-class _TraceProbe:
-    """One self-certification probe over a trace dir: where it ran, and its certificate or why it produced none."""
-
-    trace_dir: Path
-    framework: str
-    certificate: dict[str, Any] | None = None
-    error: str = ""
-
-
-def _build_trace_validate(
-    health: dict[str, Any],
-    probe: _TraceProbe,
-    *,
-    preflight: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Assemble the profile-stage trace validation block.
-
-    ``preflight`` leads the check list because it was known before the run: when it failed, the trace checks that
-    follow are consequences rather than independent findings.
-    """
-    checks = [row for row in (health.get("checks") or []) if isinstance(row, dict)]
-    if isinstance(preflight, dict):
-        checks = [preflight] + checks
-    certificate = probe.certificate or {}
-    if certificate:
-        checks = checks + _probe_check_rows(certificate)
-        probe_status = "ok"
-    else:
-        probe_status = "failed" if probe.error else "skipped"
-    return {
-        "schema_version": certificate.get("schema_version"),
-        "probe_version": certificate.get("probe_version"),
-        "probe_status": probe_status,
-        "probe_error": str(probe.error or ""),
-        "checked_at": now_iso(timespec="seconds"),
-        "trace_dir": str(probe.trace_dir),
-        "framework": str(probe.framework or ""),
-        "verdict": certificate.get("verdict") or {},
-        "trace_dir_level": certificate.get("trace_dir_level") or {},
-        "rank_level": certificate.get("rank_level") or [],
-        "chunk_level": [],
-        "checks": checks,
-    }
-
-
-def _write_trace_certificate(trace_dir: Path, validate: dict[str, Any]) -> str:
-    """Write the full certificate beside the trace it describes, returning the path (empty when unwritable).
-
-    Deliberately written *outside* ``trace_dir``: the resolver's ``_trace_candidates`` rglobs that directory for
-    anything ending in ``_TRACE_EXTS``, which includes a bare ``.json``, so a certificate stored among the traces
-    becomes a trace candidate itself. That is not hypothetical -- it makes ``require_single_rank`` resolution
-    return nothing (a second unranked candidate) and lets an 82 KB certificate outrank a small real trace in the
-    size fallback. A subdirectory would not help, the scan is recursive. The name carries ``trace_dir``'s so the
-    ``torch_trace`` and ``capture_traces`` certificates of one workspace do not collide.
-    """
-    target = trace_dir.parent / f"{trace_dir.name}.selfcert.json"
-    try:
-        atomic_write_json(target, validate)
-    except OSError as exc:
-        log.warning("profile_executor: cannot write trace certificate to %s: %s", target, exc)
-        return ""
-    return str(target)
-
-
-def _certify_trace_dir(trace_dir: Path, framework: str) -> dict[str, Any]:
-    """Run the capture-time self-certification probe over a profile trace."""
-    from hyperloom.orchestrator.trace_analysis import trace_selfcert
-
-    return trace_selfcert.certify_trace_dir(
-        trace_dir,
-        framework=framework or trace_selfcert.read_framework(trace_dir),
-    )
-
-
-def _validate_trace_structure(
-    trace_dir: Path,
-    framework: str,
-) -> dict[str, Any]:
-    """Post-profile sanity check on the produced trace structure."""
-    issues: list[str] = []
-    per_kernel_attribution_degraded = False
-    capture_traces_present = False
-    zero_ops = False
-    # Structured mirror of ``issues``: same findings, but with the measured values attached so a consumer can compare
-    # attempts instead of diffing prose.
-    checks: list[dict[str, Any]] = []
-
-    def _note_check(
-        check_id: str,
-        *,
-        status: str,
-        skip_reason: str | None = None,
-        **detail: Any,
-    ) -> None:
-        """Record one structured check verdict."""
-        checks.append(_check_row(check_id, status=status, skip_reason=skip_reason, **detail))
-
-    # Scriptable image frameworks (xDiT diffusion) produce a plain torch- profiler trace, so checks 1-6
-    # (LLM/serving-specific) would emit spurious warnings; only check 7 (zero_ops) is meaningful and always runs
-    # below.
-    from hyperloom.inference_optimizer import framework_registry as _fw_reg
-
-    # A roofline-composite ctx carries no framework, and an empty name resolves to the serving default — which fires
-    # every serving-only check below against a scriptable trace. $FRAMEWORK is the session-wide lock, so fall back to
-    # it.
-    framework = str(framework or os.environ.get("FRAMEWORK", "") or "")
-    scriptable = _fw_reg.is_scriptable(framework)
-
-    # --- Check 1: graph-capture directory presence (LLM/serving only) ---
-    capture_dirs = [
-        trace_dir / "capture_traces",
-        trace_dir / "graph_capture_profile",
-        trace_dir / "graph_capture",
-    ]
-    capture = next((path for path in capture_dirs if path.is_dir()), None)
-    capture_files: list[Path] = []
-    if scriptable:
-        _note_check(
-            CHECK_CAPTURE_TRACES_PRESENT,
-            status="skipped",
-            skip_reason="scriptable framework writes a plain torch-profiler trace",
-        )
-    else:
-        if capture is None:
-            issues.append(
-                "[1] graph-capture subdirectory missing — graph capture "
-                "didn't fire. Verify EXTRA_VLLM_ARGS / EXTRA_SGLANG_ARGS "
-                "include the TraceLens flag and the server-side patch landed."
-            )
-            _note_check(CHECK_CAPTURE_TRACES_PRESENT, status="failed", capture_dir_present=False, file_count=0)
-        else:
-            capture_files = sorted(p for p in capture.iterdir() if p.is_file())
-            capture_traces_present = bool(capture_files)
-            if not capture_files:
-                issues.append(
-                    f"[1] {capture.name}/ exists but is empty — graph capture path fired but produced no files."
-                )
-            _note_check(
-                CHECK_CAPTURE_TRACES_PRESENT,
-                status="passed" if capture_files else "failed",
-                capture_dir_present=True,
-                capture_dir=str(capture),
-                file_count=len(capture_files),
-            )
-
-    # --- Check 2 (Deval): capture file has cpu_op + Input Dims --- Sample the heaviest capture file; gate
-    # cpu_op-with-Input-Dims fraction at _INPUT_DIMS_FRACTION_FLOOR.
-    if not capture_files:
-        _note_check(
-            CHECK_CAPTURE_INPUT_DIMS,
-            status="skipped",
-            skip_reason="no capture file to sample",
-        )
-    else:
-        target = max(capture_files, key=lambda p: p.stat().st_size)
-        text = _sample_trace_text(target)
-        if text is None:
-            _note_check(
-                CHECK_CAPTURE_INPUT_DIMS,
-                status="skipped",
-                skip_reason="capture file could not be sampled",
-                sampled_file=target.name,
-            )
-        else:
-            # ``cpu_op`` is the event's category; its ``name`` is the operator (``aten::mm``). Matching on the
-            # name key found nothing in any real trace, so this check reported "no cpu_op events" on captures
-            # that were fully instrumented, and the advisory below rationalised the miss as an SGLang naming
-            # quirk. Verified against a real sglang capture: 0 hits for the name form, 2915 for this one.
-            cpu_op_count = _count_substring_occurrences(text, '"cat": "cpu_op"')
-            input_dims_count = _count_substring_occurrences(text, '"Input Dims"')
-            _input_dims_fraction = input_dims_count / cpu_op_count if cpu_op_count else None
-            if _input_dims_fraction is None:
-                # Zero cpu_op leaves no fraction to judge, and on ROCm/SGLang it is an event-naming difference rather
-                # than a capture failure -- which is what the advisory below says.
-                _note_check(
-                    CHECK_CAPTURE_INPUT_DIMS,
-                    status="skipped",
-                    skip_reason="no literal cpu_op events to measure the Input Dims fraction against",
-                    sampled_file=target.name,
-                    cpu_op_count=cpu_op_count,
-                    input_dims_count=input_dims_count,
-                    input_dims_fraction=None,
-                    floor=_INPUT_DIMS_FRACTION_FLOOR,
-                )
-            else:
-                _note_check(
-                    CHECK_CAPTURE_INPUT_DIMS,
-                    status="passed" if _input_dims_fraction >= _INPUT_DIMS_FRACTION_FLOOR else "failed",
-                    sampled_file=target.name,
-                    cpu_op_count=cpu_op_count,
-                    input_dims_count=input_dims_count,
-                    input_dims_fraction=_input_dims_fraction,
-                    floor=_INPUT_DIMS_FRACTION_FLOOR,
-                )
-            if cpu_op_count == 0:
-                # ROCm/SGLang often log graph-capture kernels under other names, so zero cpu_op isn't itself a capture
-                # failure (cross-check [5]).
-                issues.append(
-                    f"[2] capture file {target.name} has no literal "
-                    f"'cpu_op' events in the first "
-                    f"{_TRACE_INSPECT_BYTES // 1_000_000} MB — on ROCm/SGLang "
-                    "this is often just an event-naming difference (kernels "
-                    "logged under 'sglang_profiler::*'); cross-check Check "
-                    "[5] (kernel_shape_profiler) and the server log before "
-                    "treating it as a capture regression."
-                )
-            elif input_dims_count / max(cpu_op_count, 1) < _INPUT_DIMS_FRACTION_FLOOR:
-                pct = 100.0 * input_dims_count / cpu_op_count
-                issues.append(
-                    f"[2] capture file {target.name}: only {pct:.1f}% of "
-                    f"cpu_op events carry 'Input Dims' (expected ≥ "
-                    f"{int(_INPUT_DIMS_FRACTION_FLOOR * 100)}%). Shape-"
-                    "discovery instrumentation may not be fully active — "
-                    "verify TraceLens server patch and capture flag."
-                )
-
-    # --- Check 3 (Deval): main trace has user_annotation + execute_* --- execute_* annotations = InferenceX per-step
-    # writes when detailed_annotations is honoured (distinct from check 5).
-    main_traces = sorted(
-        (p for p in trace_dir.glob("*.trace.json.gz") if p.is_file()),
-        key=lambda p: p.stat().st_size,
-        reverse=True,
-    )
-    main_text: str | None = None
-    if main_traces:
-        main_text = _sample_trace_text(main_traces[0])
-        if main_text is not None:
-            user_ann_count = _count_substring_occurrences(main_text, _USER_ANNOTATION_MARKER)
-            execute_count = _count_substring_occurrences(main_text, '"execute_')
-            # ``execute_*`` labels are the real health signal; ``user_annotation`` presence is
-            # profiler-version-dependent.
-            confirmed_absent = (
-                not scriptable
-                and execute_count == 0
-                and user_ann_count == 0
-                and not (
-                    _trace_contains(main_traces[0], '"execute_')
-                    or _trace_contains(main_traces[0], _USER_ANNOTATION_MARKER)
-                )
-            )
-            _note_check(
-                CHECK_STEP_ANNOTATIONS,
-                status="failed" if confirmed_absent else "passed",
-                sampled_file=main_traces[0].name,
-                execute_annotation_count=execute_count,
-                user_annotation_count=user_ann_count,
-                confirmed_absent=confirmed_absent,
-            )
-            if confirmed_absent:
-                per_kernel_attribution_degraded = True
-                issues.append(
-                    f"[3] main trace {main_traces[0].name} has no "
-                    "execute_* / user_annotation events — InferenceX "
-                    "per-step annotations didn't fire. Verify "
-                    "detailed_annotations reached the framework "
-                    "(PROFILE_EXTRA_BODY consumed; see #210)."
-                )
-        else:
-            _note_check(
-                CHECK_STEP_ANNOTATIONS,
-                status="skipped",
-                skip_reason="main trace could not be sampled",
-                sampled_file=main_traces[0].name,
-            )
-    else:
-        _note_check(
-            CHECK_STEP_ANNOTATIONS,
-            status="skipped",
-            skip_reason="no *.trace.json.gz in the trace dir",
-        )
-
-    # --- Check 4 (Deval): per-file execute_* in trace_split/ --- An empty split means the splitter ran but got no
-    # usable events.
-    split = trace_dir / "trace_split"
-    split_files: list[Path] = []
-    if split.is_dir() and not scriptable:
-        split_files = sorted(p for p in split.iterdir() if p.is_file())
-        empty_splits: list[str] = []
-        for sp in split_files:
-            if not sp.name.endswith(".json.gz"):
-                continue
-            text = _sample_trace_text(sp)
-            if text is None:
-                continue
-            if _count_substring_occurrences(text, '"execute_') == 0:
-                empty_splits.append(sp.name)
-        _note_check(
-            CHECK_SPLIT_CHUNK_ANNOTATIONS,
-            status="failed" if (split_files and empty_splits) else "passed",
-            split_file_count=len(split_files),
-            empty_chunk_count=len(empty_splits),
-            empty_chunk_samples=empty_splits[:3],
-        )
-        if split_files and empty_splits:
-            issues.append(
-                f"[4] {len(empty_splits)} trace_split/ file(s) have NO "
-                "execute_* user_annotations: "
-                f"{', '.join(empty_splits[:3])}"
-                + (f" (and {len(empty_splits) - 3} more)" if len(empty_splits) > 3 else "")
-                + " — splitter ran but the chunks are empty. Likely the "
-                "trace lacks the per-step annotations needed for splitting "
-                "(see check [3])."
-            )
-    else:
-        _note_check(
-            CHECK_SPLIT_CHUNK_ANNOTATIONS,
-            status="skipped",
-            skip_reason=("scriptable framework has no per-step split" if scriptable else "no trace_split/ directory"),
-        )
-
-    # --- Check 6 (Hyperloom): _extend_* / _decode_* without --- _steady_state_* in trace_split/.
-    if split.is_dir() and not scriptable:
-        names = [p.name for p in split_files]
-        has_extend = any("_extend_" in n or "extend_only_" in n for n in names)
-        has_decode = any("_decode_" in n or "decode_only_" in n for n in names)
-        has_steady_state = any("steady_state" in n for n in names)
-        _note_check(
-            CHECK_STEADY_STATE_SPLIT_NAMING,
-            status="failed" if ((has_extend or has_decode) and not has_steady_state) else "passed",
-            has_extend=has_extend,
-            has_decode=has_decode,
-            has_steady_state=has_steady_state,
-        )
-        if (has_extend or has_decode) and not has_steady_state:
-            issues.append(
-                "[6] trace_split/ has _extend_* / _decode_* files but NO "
-                "_steady_state_* — profile_by_stage=True leaked through, "
-                "PROFILE_EXTRA_BODY env was not consumed by the framework. "
-                "Confirm _inferencex_patcher patched Magpie's bundled "
-                "InferenceX (#210; check $MAGPIE_PATH/InferenceX/utils/"
-                "bench_serving/benchmark_serving.py)."
-            )
-    else:
-        _note_check(
-            CHECK_STEADY_STATE_SPLIT_NAMING,
-            status="skipped",
-            skip_reason=("scriptable framework has no per-step split" if scriptable else "no trace_split/ directory"),
-        )
-
-    # --- Check 7 (Hyperloom): torch-profiler captured zero ops --- A metadata-only trace (no ``cpu_op`` / ``kernel``
-    # events) means the profiler active window never recorded real execution; flag it so roofline re-profiles rather
-    # than caching an empty snapshot.
-    if main_traces:
-        has_ops = _trace_contains(main_traces[0], '"cat": "cpu_op"') or _trace_contains(
-            main_traces[0], '"cat": "kernel"'
-        )
-        _note_check(
-            CHECK_TRACE_HAS_OPS,
-            status="passed" if has_ops else "failed",
-            sampled_file=main_traces[0].name,
-            has_ops=has_ops,
-        )
-        if not has_ops:
-            zero_ops = True
-            issues.append(
-                f"[7] main trace {main_traces[0].name} has NO cpu_op / kernel "
-                "events — the torch-profiler active window recorded nothing "
-                "(metadata-only trace). On xDiT/diffusion this is the "
-                "torch.profiler.schedule repeat=0 discard (the active window is "
-                "dropped when the schedule restarts after the last active "
-                "step). The trace is unusable for roofline; re-profile needed."
-            )
-    else:
-        _note_check(
-            CHECK_TRACE_HAS_OPS,
-            status="skipped",
-            skip_reason="no *.trace.json.gz in the trace dir",
-        )
-
-    # --- Check 5 (Deval): sglang kernel_shape_profiler presence ---
-    if framework.lower() != "sglang":
-        _note_check(
-            CHECK_SGLANG_SHAPE_PROFILER,
-            status="skipped",
-            skip_reason=f"framework is {framework or 'unset'}, not sglang",
-        )
-    elif main_text is None:
-        _note_check(
-            CHECK_SGLANG_SHAPE_PROFILER,
-            status="skipped",
-            skip_reason="main trace could not be sampled",
-        )
-    else:
-        # Shape markers left by either mechanism: the sglang_profiler:: op
-        # namespace, or the kernel_shape_profiler frame (when with_stack is on).
-        _shape_markers = ("sglang_profiler::", "kernel_shape_profiler")
-        _shape_present = any(m in main_text for m in _shape_markers)
-        _note_check(
-            CHECK_SGLANG_SHAPE_PROFILER,
-            status="passed" if _shape_present else "failed",
-            sampled_file=main_traces[0].name,
-            sampled_bytes=_TRACE_INSPECT_BYTES,
-        )
-        if not _shape_present:
-            issues.append(
-                f"[5] sglang main trace ({main_traces[0].name}, sampled "
-                f"first {_TRACE_INSPECT_BYTES // 1_000_000} MB) lacks "
-                "kernel-shape events — shape discovery didn't reach the live "
-                "SGLang. For SGLang < 0.5.18 verify the _server_patcher "
-                "git-apply succeeded; for >= 0.5.18 verify the kernel_shape_tool "
-                "is on the server PYTHONPATH and TRACELENS_SHAPE_DISCOVERY=1 "
-                "(check log warnings)."
-            )
-
-    if issues:
-        for issue in issues:
-            log.warning("trace structure check: %s", issue)
-        log.warning(
-            "trace structure check: %d issue(s) detected — TraceLens "
-            "downstream analysis may be degraded. See per-issue messages "
-            "above for the actionable check.",
-            len(issues),
-        )
-    return {
-        "issues": issues,
-        "per_kernel_attribution_degraded": per_kernel_attribution_degraded,
-        "capture_traces_present": capture_traces_present,
-        "zero_ops": zero_ops,
-        "checks": checks,
-    }
-
-
 PROFILE_DEFAULT_TIMEOUT_SEC = 14400  # 4 h wall cap
+
+#: Keys of ``$PROFILE_EXTRA_BODY`` the Infera engine profiling API may be driven with.
+_SAFE_PROFILE_KEYS = ("output_dir",)
 
 
 def _is_capture_trace(path: Path, root: Path | None = None) -> bool:
@@ -760,6 +139,285 @@ def _default_profile_config() -> Path:
     """Resolve the shipped profile YAML for ``$FRAMEWORK``, or for the default framework when it is unset."""
     fw = os.environ.get("FRAMEWORK") or framework_registry.DEFAULT_FRAMEWORK
     return asset_root() / "assets" / "configs" / framework_registry.shipped_config_name("profile", fw)
+
+
+def _merged_server_args(params: Mapping[str, Any]) -> str:
+    """The server args this round runs with: the action's base args, overlaid by the caller's."""
+    from ._grid_runner import merge_server_args
+
+    base_args = _sanitize_profile_server_args(str(params.get("base_extra_args") or "").strip())
+    caller_args = _sanitize_profile_server_args(str(params.get("extra_server_args") or ""))
+    return merge_server_args(base_args, caller_args)
+
+
+def _merged_envs(params: Mapping[str, Any]) -> dict[str, Any]:
+    """The environment overrides this round runs with: the action's base envs under the caller's."""
+    merged: dict[str, Any] = {}
+    for source in (params.get("base_extra_envs"), params.get("extra_envs")):
+        if isinstance(source, dict):
+            merged.update(source)
+    return merged
+
+
+def _as_list(raw: Any) -> list[Any]:
+    """One string, or an iterable of them, as a list."""
+    return [raw] if isinstance(raw, str) else list(raw or [])
+
+
+def _apply_round_defaults(params: dict[str, Any]) -> None:
+    """Fold this action's ``base_*`` defaults into the params the benchmark round will run with."""
+    merged_args = _merged_server_args(params)
+    if merged_args:
+        params["extra_server_args"] = merged_args
+    else:
+        params.pop("extra_server_args", None)
+    merged_envs = _merged_envs(params)
+    if merged_envs:
+        params["extra_envs"] = merged_envs
+    else:
+        params.pop("extra_envs", None)
+    if params.get("base_remove_args") and "remove_args" not in params:
+        params["remove_args"] = _as_list(params.get("base_remove_args"))
+    if params.get("base_unset_envs") and "unset_envs" not in params:
+        params["unset_envs"] = _as_list(params.get("base_unset_envs"))
+    if str(params.get("base_args_mode") or "").strip().lower() == "replace":
+        params.setdefault("args_mode", "replace")
+
+
+async def _restart_mn_server_for_profile(params: Mapping[str, Any], round_trace_root: str) -> dict[str, Any] | None:
+    """Restart the multi-node server onto this round's trace dir; its failure result, or None once it came up."""
+    from ._multi_node_server_lifecycle import ServerRestartFailed, restart_server_for_round
+
+    try:
+        await restart_server_for_round(
+            extra_server_args=str(params.get("extra_server_args") or ""),
+            torch_profiler_dir=round_trace_root,
+            framework=os.environ.get("FRAMEWORK") or None,
+            model_path=str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None,
+            tp=int(os.environ.get("TP") or 0) or None,
+            ep=int(os.environ.get("EP") or 0) or None,
+        )
+    except ServerRestartFailed as exc:
+        return {
+            "status": "failed",
+            "error_class": "mn_server_restart_failed",
+            "error": str(exc),
+            "trace_dir": round_trace_root,
+        }
+    return None
+
+
+def _engine_profile_body(round_trace_root: str) -> dict[str, Any]:
+    """The body the Infera engine profiling API is started with for this round."""
+    try:
+        parsed = json.loads(os.environ.get("PROFILE_EXTRA_BODY") or "{}")
+    except (ValueError, TypeError):
+        parsed = {}
+    body = {k: v for (k, v) in parsed.items() if k in _SAFE_PROFILE_KEYS} if isinstance(parsed, dict) else {}
+    if round_trace_root:
+        body.setdefault("output_dir", round_trace_root)
+    return body
+
+
+@asynccontextmanager
+async def _bounded_engine_profile(round_trace_root: str) -> AsyncIterator[None]:
+    """Capture an Infera engine profile over a warmup-then-bounded window while the block runs."""
+    from ._multi_node_server_lifecycle import trigger_infera_engine_profile
+
+    body = _engine_profile_body(round_trace_root)
+    warmup_s = float(os.environ.get("HYPERLOOM_MN_PROFILE_WARMUP_S", "60") or 60)
+    window_s = float(os.environ.get("HYPERLOOM_MN_PROFILE_WINDOW_S", "8") or 8)
+    capturing = {"v": False}
+
+    async def _window() -> None:
+        """Run a warmup-then-bounded engine profiling window."""
+        await asyncio.sleep(warmup_s)
+        await trigger_infera_engine_profile("start", body)
+        capturing["v"] = True
+        await asyncio.sleep(window_s)
+        await trigger_infera_engine_profile("stop")
+        capturing["v"] = False
+
+    window = asyncio.create_task(_window())
+    try:
+        yield
+    finally:
+        if not window.done():
+            window.cancel()
+            try:
+                await window
+            except (asyncio.CancelledError, OSError, RuntimeError, ValueError) as exc:
+                log.debug("profile_executor: bounded profile task ended during cleanup: %r", exc)
+        if capturing.get("v"):
+            await trigger_infera_engine_profile("stop")
+
+
+def _tensor_parallel_size(result: Mapping[str, Any], params: Mapping[str, Any], shared_state: Any) -> int | None:
+    """The tensor-parallel width this round ran at, from the first source that states one."""
+    for raw_tp in (result.get("tp"), params.get("tp"), getattr(shared_state, "tp", None), os.environ.get("TP")):
+        try:
+            parsed_tp = int(raw_tp or 0)
+        except (TypeError, ValueError):
+            continue
+        if parsed_tp > 0:
+            return parsed_tp
+    return None
+
+
+def _log_missing_round_traces(trace_dir: Path, historical_count: int, task_started_unix: float) -> None:
+    """Say why this round's multi-node trace dir yielded nothing the round itself produced."""
+    if historical_count:
+        log.warning(
+            "profile_executor: multi-node trace dir %s has %d historical trace(s) but none with mtime >= %.0f (this round's start); sglang may have skipped /start_profile or the trace flush is lagging",
+            trace_dir,
+            historical_count,
+            task_started_unix,
+        )
+    else:
+        log.warning(
+            "profile_executor: multi-node trace dir %s exists but no .trace.json.gz files found yet (server pods may still be flushing)",
+            trace_dir,
+        )
+
+
+def _record_mn_round_traces(result: dict[str, Any], round_trace_root: str, task_started_unix: float) -> None:
+    """Attach the traces this round's multi-node server flushed to ``result``."""
+    trace_dir = Path(round_trace_root)
+    if not trace_dir.is_dir():
+        result["trace_dir"] = None
+        result["trace_files"] = []
+        log.warning(
+            "profile_executor: round trace dir %s does not exist after magpie completed; check sglang server logs for torch profiler errors",
+            round_trace_root,
+        )
+        return
+    all_files = sorted(trace_dir.glob("*.trace.json.gz"))
+    trace_files = [p for p in all_files if safe_mtime(p) >= task_started_unix]
+    result["trace_dir"] = str(trace_dir)
+    result["trace_files"] = [str(p) for p in trace_files]
+    _record_trace_topology(result, trace_files)
+    if not trace_files:
+        _log_missing_round_traces(trace_dir, len(all_files), task_started_unix)
+        return
+    main_trace = max(trace_files, key=_trace_size_bytes)
+    result["main_trace_path"] = str(main_trace)
+    log.info(
+        "profile_executor: multi-node main trace selected: %s (%d candidate traces this round)",
+        main_trace.name,
+        len(trace_files),
+    )
+
+
+class _TraceSelection(NamedTuple):
+    """The trace directory a profile workspace produced, the files worth reading in it, and what was ruled out."""
+
+    trace_dir: Path | None
+    files: list[Path]
+    capture_only: bool
+    empty_dirs: list[Path]
+
+
+def _select_workspace_traces(candidate_dirs: list[Path]) -> _TraceSelection:
+    """Pick the trace dir a profile workspace produced, falling back to SGLang capture sidecars (#575)."""
+    empty_dirs: list[Path] = []
+    for trace_dir in candidate_dirs:
+        if not trace_dir.is_dir():
+            continue
+        trace_files = _trace_files_for_dir(trace_dir)
+        if trace_files:
+            return _TraceSelection(trace_dir, trace_files, False, empty_dirs)
+        empty_dirs.append(trace_dir)
+    for trace_dir in candidate_dirs:
+        if not trace_dir.is_dir():
+            continue
+        sidecars = _capture_sidecar_traces_for_dir(trace_dir)
+        if sidecars:
+            return _TraceSelection(trace_dir, sidecars, True, empty_dirs)
+    return _TraceSelection(None, [], False, empty_dirs)
+
+
+def _record_selected_traces(
+    result: dict[str, Any],
+    selection: _TraceSelection,
+    tensor_parallel_size: int | None,
+) -> None:
+    """Attach the selected trace dir, its files and the main trace TraceLens should read to ``result``."""
+    result["trace_dir"] = str(selection.trace_dir)
+    result["trace_files"] = [str(p) for p in selection.files]
+    _record_trace_topology(result, selection.files)
+    if selection.capture_only:
+        result["profile_trace_selection_reason"] = "capture_only_fallback"
+        main_trace = selection.trace_dir
+        log.info(
+            "profile_executor: no *.trace.json.gz; falling back to %d SGLang capture sidecar(s) in %s (#575)",
+            len(selection.files),
+            selection.trace_dir,
+        )
+    else:
+        main_trace = _preferred_main_trace_path(
+            selection.trace_dir,
+            selection.files,
+            require_single_rank=False,
+            tensor_parallel_size=tensor_parallel_size,
+        )
+        if main_trace is not None:
+            result["profile_trace_selection_reason"] = (
+                "merged_trace_preferred" if main_trace.name.startswith("merged-") else "trace_dir_preferred"
+            )
+    if main_trace is not None:
+        result["main_trace_path"] = str(main_trace)
+
+
+def _record_no_trace_failure(
+    result: dict[str, Any],
+    workspace_str: str,
+    candidate_dirs: list[Path],
+    empty_dirs: list[Path],
+) -> None:
+    """Fail the profile result because its workspace produced no trace, naming where one was looked for."""
+    result["trace_dir"] = None
+    result["trace_files"] = []
+    result["status"] = "failed"
+    result["error_class"] = "no_trace_files"
+    probed = ", ".join((str(p) for p in candidate_dirs))
+    result["error"] = f"no .trace.json.gz or capture sidecar under {workspace_str} (probed: {probed})"
+    if empty_dirs:
+        log.warning(
+            "profile_executor: trace dirs exist but no .trace.json.gz or capture sidecar (bs_*_rank*.json.gz) files in %s",
+            ", ".join((str(p) for p in empty_dirs)),
+        )
+    else:
+        log.warning(
+            "profile_executor: workspace=%s has no trace dir (checked: %s)",
+            workspace_str,
+            ", ".join((str(p) for p in candidate_dirs)),
+        )
+
+
+def _record_trace_validation(
+    result: dict[str, Any],
+    trace_dir: Path,
+    framework: str,
+    preflight: dict[str, Any] | None,
+) -> None:
+    """Attach the post-profile structure checks and the self-certification certificate to ``result``."""
+    health = _validate_trace_structure(trace_dir, framework)
+    if not isinstance(health, dict):
+        return
+    result["trace_health"] = health
+    certificate: dict[str, Any] = {}
+    probe_error = ""
+    try:
+        certificate = _certify_trace_dir(trace_dir, framework)
+    except (OSError, RuntimeError, ValueError, TypeError) as e:
+        probe_error = f"{type(e).__name__}: {e}"
+        log.debug("profile_executor: trace self-certification failed: %s", probe_error)
+    result["trace_validate"] = _build_trace_validate(
+        health,
+        _TraceProbe(trace_dir, framework, certificate=certificate, error=probe_error),
+        preflight=preflight,
+    )
+    result["trace_validate_path"] = _write_trace_certificate(trace_dir, result["trace_validate"])
 
 
 class ProfileExecutor(BenchmarkRunExecutor):
@@ -1054,272 +712,64 @@ class ProfileExecutor(BenchmarkRunExecutor):
             out_path,
         )
 
+    def _ensure_workspace(self, ctx, extra: dict[str, Any], params: Mapping[str, Any]) -> None:
+        """Give this round a workspace to write into when neither the caller nor the context named one."""
+        if params.get("output_dir") or extra.get("workspace"):
+            return
+        output_dir = self._resolve_workspace(ctx, "profile")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        extra["workspace"] = str(output_dir)
+
+    def _record_workspace_traces(
+        self,
+        ctx,
+        result: dict[str, Any],
+        extra: Mapping[str, Any],
+        tensor_parallel_size: int | None,
+    ) -> None:
+        """Attach the traces a single-node profile workspace produced, with their structure checks."""
+        workspace_str = result["workspace"]
+        candidate_dirs = _candidate_trace_dirs(Path(workspace_str))
+        selection = _select_workspace_traces(candidate_dirs)
+        if selection.trace_dir is None:
+            _record_no_trace_failure(result, workspace_str, candidate_dirs, selection.empty_dirs)
+            return
+        _record_selected_traces(result, selection, tensor_parallel_size)
+        framework = str(getattr(ctx, "framework", "") or extra.get("framework") or "")
+        try:
+            _record_trace_validation(result, selection.trace_dir, framework, self._instrumentation_preflight)
+        except (OSError, RuntimeError, ValueError, TypeError) as e:
+            log.debug("profile_executor: trace structure validator failed: %s", e)
+
     async def __call__(self, ctx) -> dict[str, Any]:
         """Run the profiling action for the given context."""
         params = ctx.task.params or {}
-        base_args = _sanitize_profile_server_args(str(params.get("base_extra_args") or "").strip())
-        caller_args = _sanitize_profile_server_args(str(params.get("extra_server_args") or ""))
-        from ._grid_runner import merge_server_args
-
-        merged_args = merge_server_args(base_args, caller_args)
-        if merged_args:
-            params["extra_server_args"] = merged_args
-        else:
-            params.pop("extra_server_args", None)
-        base_envs = params.get("base_extra_envs")
-        caller_envs = params.get("extra_envs")
-        merged_envs: dict[str, Any] = {}
-        if isinstance(base_envs, dict):
-            merged_envs.update(base_envs)
-        if isinstance(caller_envs, dict):
-            merged_envs.update(caller_envs)
-        if merged_envs:
-            params["extra_envs"] = merged_envs
-        else:
-            params.pop("extra_envs", None)
-        if params.get("base_remove_args") and "remove_args" not in params:
-            raw_remove = params.get("base_remove_args")
-            params["remove_args"] = [raw_remove] if isinstance(raw_remove, str) else list(raw_remove or [])
-        if params.get("base_unset_envs") and "unset_envs" not in params:
-            raw_unset = params.get("base_unset_envs")
-            params["unset_envs"] = [raw_unset] if isinstance(raw_unset, str) else list(raw_unset or [])
-        if str(params.get("base_args_mode") or "").strip().lower() == "replace":
-            params.setdefault("args_mode", "replace")
+        _apply_round_defaults(params)
         extra = getattr(ctx, "extra", None) or {}
-        shared_state = (extra.get("shared_state") if isinstance(extra, dict) else None) or getattr(
-            self, "shared_state", None
-        )
+        shared_state = extra.get("shared_state") or getattr(self, "shared_state", None)
         from hyperloom.common.benchmark_config import configured_benchmark, is_magpie_agentx
 
         if is_magpie_agentx(configured_benchmark()):
             return await self._run_native_profile(ctx)
-        if not (params.get("output_dir") or extra.get("workspace")):
-            output_dir = self._resolve_workspace(ctx, "profile")
-            output_dir.mkdir(parents=True, exist_ok=True)
-            if extra is None:
-                ctx.extra = {"workspace": str(output_dir)}
-                extra = ctx.extra
-            else:
-                extra["workspace"] = str(output_dir)
-        import time as _time
-
-        task_started_unix = _time.time()
+        self._ensure_workspace(ctx, extra, params)
+        task_started_unix = time.time()
+        round_trace_root = self._resolve_mn_round_trace_root(ctx)
         from ._multi_node_env import log_mn_banner
 
-        log_mn_banner("profile_executor", log, trace_dir=self._resolve_mn_round_trace_root(ctx))
-        round_trace_root = self._resolve_mn_round_trace_root(ctx)
+        log_mn_banner("profile_executor", log, trace_dir=round_trace_root)
         if round_trace_root:
-            from ._multi_node_server_lifecycle import ServerRestartFailed, restart_server_for_round
-
-            try:
-                await restart_server_for_round(
-                    extra_server_args=str(params.get("extra_server_args") or ""),
-                    torch_profiler_dir=round_trace_root,
-                    framework=os.environ.get("FRAMEWORK") or None,
-                    model_path=str(params.get("model_path") or "").strip() or os.environ.get("MODEL_PATH") or None,
-                    tp=int(os.environ.get("TP") or 0) or None,
-                    ep=int(os.environ.get("EP") or 0) or None,
-                )
-            except ServerRestartFailed as exc:
-                return {
-                    "status": "failed",
-                    "error_class": "mn_server_restart_failed",
-                    "error": str(exc),
-                    "trace_dir": round_trace_root,
-                }
-            if isinstance(extra, dict):
-                extra["mn_round_restarted"] = True
-        from ._multi_node_server_lifecycle import trigger_infera_engine_profile
-
-        prof_body: dict[str, Any] = {}
-        try:
-            import json as _json
-
-            parsed = _json.loads(os.environ.get("PROFILE_EXTRA_BODY") or "{}")
-            if isinstance(parsed, dict):
-                prof_body = parsed
-        except (ValueError, TypeError):
-            prof_body = {}
-        _SAFE_PROFILE_KEYS = ("output_dir",)
-        prof_body = {k: v for (k, v) in prof_body.items() if k in _SAFE_PROFILE_KEYS}
-        if round_trace_root:
-            prof_body.setdefault("output_dir", round_trace_root)
-        import asyncio as _asyncio
-
-        warmup_s = float(os.environ.get("HYPERLOOM_MN_PROFILE_WARMUP_S", "60") or 60)
-        window_s = float(os.environ.get("HYPERLOOM_MN_PROFILE_WINDOW_S", "8") or 8)
-        _prof_started = {"v": False}
-
-        async def _bounded_profile_window() -> None:
-            """Run a warmup-then-bounded engine profiling window."""
-            await _asyncio.sleep(warmup_s)
-            await trigger_infera_engine_profile("start", prof_body)
-            _prof_started["v"] = True
-            await _asyncio.sleep(window_s)
-            await trigger_infera_engine_profile("stop")
-            _prof_started["v"] = False
-
-        prof_task = _asyncio.create_task(_bounded_profile_window())
-        try:
+            restart_failure = await _restart_mn_server_for_profile(params, round_trace_root)
+            if restart_failure is not None:
+                return restart_failure
+            extra["mn_round_restarted"] = True
+        async with _bounded_engine_profile(round_trace_root):
             result = await super().__call__(ctx)
-        finally:
-            if not prof_task.done():
-                prof_task.cancel()
-                try:
-                    await prof_task
-                except (_asyncio.CancelledError, OSError, RuntimeError, ValueError) as exc:
-                    log.debug("profile_executor: bounded profile task ended during cleanup: %r", exc)
-            if _prof_started.get("v"):
-                await trigger_infera_engine_profile("stop")
         self._collect_rewrite_evidence(result)
-        workspace_str = result.get("workspace")
-        tensor_parallel_size: int | None = None
-        for raw_tp in (result.get("tp"), params.get("tp"), getattr(shared_state, "tp", None), os.environ.get("TP")):
-            try:
-                parsed_tp = int(raw_tp or 0)
-            except (TypeError, ValueError):
-                continue
-            if parsed_tp > 0:
-                tensor_parallel_size = parsed_tp
-                break
+        tensor_parallel_size = _tensor_parallel_size(result, params, shared_state)
         if round_trace_root:
-            trace_dir = Path(round_trace_root)
-            if trace_dir.is_dir():
-                all_files = sorted(trace_dir.glob("*.trace.json.gz"))
-                trace_files = [p for p in all_files if safe_mtime(p) >= task_started_unix]
-                result["trace_dir"] = str(trace_dir)
-                result["trace_files"] = [str(p) for p in trace_files]
-                _record_trace_topology(result, trace_files)
-                if trace_files:
-
-                    def _safe_size(p: Path) -> int:
-                        """Return ``p``'s size in bytes, or 0 on stat() failure."""
-                        try:
-                            return p.stat().st_size
-                        except OSError:
-                            return 0
-
-                    main_trace = max(trace_files, key=_safe_size)
-                    result["main_trace_path"] = str(main_trace)
-                    log.info(
-                        "profile_executor: multi-node main trace selected: %s (%d candidate traces this round)",
-                        main_trace.name if main_trace is not None else "<none>",
-                        len(trace_files),
-                    )
-                elif all_files:
-                    log.warning(
-                        "profile_executor: multi-node trace dir %s has %d historical trace(s) but none with mtime >= %.0f (this round's start); sglang may have skipped /start_profile or the trace flush is lagging",
-                        trace_dir,
-                        len(all_files),
-                        task_started_unix,
-                    )
-                else:
-                    log.warning(
-                        "profile_executor: multi-node trace dir %s exists but no .trace.json.gz files found yet (server pods may still be flushing)",
-                        trace_dir,
-                    )
-            else:
-                result["trace_dir"] = None
-                result["trace_files"] = []
-                log.warning(
-                    "profile_executor: round trace dir %s does not exist after magpie completed; check sglang server logs for torch profiler errors",
-                    round_trace_root,
-                )
-        elif workspace_str:
-            workspace = Path(workspace_str)
-            selected_trace_dir: Path | None = None
-            selected_trace_files: list[Path] = []
-            existing_empty_dirs: list[Path] = []
-            capture_only = False
-            candidate_trace_dirs = _candidate_trace_dirs(workspace)
-            for trace_dir in candidate_trace_dirs:
-                if not trace_dir.is_dir():
-                    continue
-                trace_files = _trace_files_for_dir(trace_dir)
-                if trace_files:
-                    selected_trace_dir = trace_dir
-                    selected_trace_files = trace_files
-                    break
-                existing_empty_dirs.append(trace_dir)
-            if selected_trace_dir is None:
-                for trace_dir in candidate_trace_dirs:
-                    if not trace_dir.is_dir():
-                        continue
-                    sidecars = _capture_sidecar_traces_for_dir(trace_dir)
-                    if sidecars:
-                        selected_trace_dir = trace_dir
-                        selected_trace_files = sidecars
-                        capture_only = True
-                        break
-            if selected_trace_dir is not None:
-                result["trace_dir"] = str(selected_trace_dir)
-                result["trace_files"] = [str(p) for p in selected_trace_files]
-                _record_trace_topology(result, selected_trace_files)
-                if capture_only:
-                    result["profile_trace_selection_reason"] = "capture_only_fallback"
-                    main_trace = selected_trace_dir
-                    log.info(
-                        "profile_executor: no *.trace.json.gz; falling back to %d SGLang capture sidecar(s) in %s (#575)",
-                        len(selected_trace_files),
-                        selected_trace_dir,
-                    )
-                else:
-                    main_trace = _preferred_main_trace_path(
-                        selected_trace_dir,
-                        selected_trace_files,
-                        require_single_rank=False,
-                        tensor_parallel_size=tensor_parallel_size,
-                    )
-                    if main_trace is not None:
-                        result["profile_trace_selection_reason"] = (
-                            "merged_trace_preferred" if main_trace.name.startswith("merged-") else "trace_dir_preferred"
-                        )
-                if main_trace is not None:
-                    result["main_trace_path"] = str(main_trace)
-                try:
-                    framework = str(
-                        getattr(ctx, "framework", "")
-                        or (extra.get("framework") if isinstance(extra, dict) else "")
-                        or ""
-                    )
-                    health = _validate_trace_structure(selected_trace_dir, framework)
-                    if isinstance(health, dict):
-                        result["trace_health"] = health
-                        certificate: dict[str, Any] = {}
-                        probe_error = ""
-                        try:
-                            certificate = _certify_trace_dir(selected_trace_dir, framework)
-                        except (OSError, RuntimeError, ValueError, TypeError) as e:
-                            probe_error = f"{type(e).__name__}: {e}"
-                            log.debug("profile_executor: trace self-certification failed: %s", probe_error)
-                        result["trace_validate"] = _build_trace_validate(
-                            health,
-                            _TraceProbe(selected_trace_dir, framework, certificate=certificate, error=probe_error),
-                            preflight=self._instrumentation_preflight,
-                        )
-                        result["trace_validate_path"] = _write_trace_certificate(
-                            selected_trace_dir, result["trace_validate"]
-                        )
-                except (OSError, RuntimeError, ValueError, TypeError) as e:
-                    log.debug("profile_executor: trace structure validator failed: %s", e)
-            else:
-                result["trace_dir"] = None
-                result["trace_files"] = []
-                result["status"] = "failed"
-                result["error_class"] = "no_trace_files"
-                probed = ", ".join((str(p) for p in candidate_trace_dirs))
-                result["error"] = f"no .trace.json.gz or capture sidecar under {workspace_str} (probed: {probed})"
-                if existing_empty_dirs:
-                    log.warning(
-                        "profile_executor: trace dirs exist but no .trace.json.gz or capture sidecar (bs_*_rank*.json.gz) files in %s",
-                        ", ".join((str(p) for p in existing_empty_dirs)),
-                    )
-                else:
-                    log.warning(
-                        "profile_executor: workspace=%s has no trace dir (checked: %s)",
-                        workspace_str,
-                        ", ".join((str(p) for p in candidate_trace_dirs)),
-                    )
+            _record_mn_round_traces(result, round_trace_root, task_started_unix)
+        elif result.get("workspace"):
+            self._record_workspace_traces(ctx, result, extra, tensor_parallel_size)
         if result.get("main_trace_path"):
             result["trace_input_ready"] = True
         return result
@@ -1329,8 +779,6 @@ class ProfileExecutor(BenchmarkRunExecutor):
 
     async def _run_native_profile(self, ctx) -> dict[str, Any]:
         """Collect Magpie-owned captures and certify each time window separately."""
-        import asyncio
-
         result = await super().__call__(ctx)
         if result.get("status") != "succeeded":
             return result

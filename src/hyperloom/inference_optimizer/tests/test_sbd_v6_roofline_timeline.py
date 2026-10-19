@@ -28,7 +28,7 @@ from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
 )
 from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
 from hyperloom.inference_optimizer.session.session_binding import session_scope
-from hyperloom.orchestrator.actions.executors.profile import (
+from hyperloom.orchestrator.actions.executors._profile_trace_checks import (
     CHECK_GRAPH_LAUNCH_COVERAGE,
     CHECK_RANK_SHAPE,
     CHECK_TRACE_HAS_OPS,
