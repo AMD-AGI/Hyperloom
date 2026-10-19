@@ -32,6 +32,7 @@ from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
 from ._dispatch_helpers import pump_until_settled
+from hyperloom.orchestrator.specialists.subprocess_ import SpecialistSpawn
 
 
 def _dispatcher(tmp_path):
@@ -729,15 +730,17 @@ def test_specialist_followup_ack_reaches_dispatcher_cleanup(tmp_path, monkeypatc
 
     async def execute(ctx):
         result = await specialist.run(
-            task_id=ctx.task.task_id,
-            workspace=tmp_path,
-            worktree=None,
-            worktree_base=None,
-            system_prompt="system",
-            user_prompt="user",
-            max_turns=1,
-            gpu_lease=lease,
-            deadline=Deadline.after(0 if phase == "timeout" else 600, now=100),
+            SpecialistSpawn(
+                task_id=ctx.task.task_id,
+                workspace=tmp_path,
+                worktree=None,
+                worktree_base=None,
+                system_prompt="system",
+                user_prompt="user",
+                max_turns=1,
+                gpu_lease=lease,
+                deadline=Deadline.after(0 if phase == "timeout" else 600, now=100),
+            )
         )
         return asdict(result)
 

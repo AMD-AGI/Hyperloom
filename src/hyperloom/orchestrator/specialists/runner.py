@@ -52,6 +52,7 @@ from .domains import (
 )
 from .subprocess_ import (
     UNBOUNDED_REAP_CAP_SEC,
+    SpecialistSpawn,
     SpecialistSubprocessConfig,
     SpecialistSubprocessDispatcher,
     SpecialistSubprocessResult,
@@ -969,18 +970,20 @@ class SpecialistRunner:
             # so any GPU command lands within Ray's assigned devices. ``None`` keeps
             # the local path (``gpu_ids`` pinned into *_VISIBLE_DEVICES).
             sub_result: SpecialistSubprocessResult = await self.subprocess_dispatcher.run(
-                task_id=ctx.task.task_id,
-                workspace=workspace,
-                worktree=prep.worktree,
-                worktree_base=prep.worktree_base,
-                system_prompt=prep.system_prompt,
-                user_prompt=prep.user_prompt,
-                disallowed_tools=SPECIALIST_TOOL_DENYLIST,
-                max_turns=prep.max_turns,
-                gpu_ids=tuple(ctx.extra.get("gpu_ids") or ()),
-                deadline=deadline,
-                gpu_lease=ctx.extra.get("gpu_specialist_lease"),
-                progress_cb=ctx.extra.get("specialist_progress_cb"),
+                SpecialistSpawn(
+                    task_id=ctx.task.task_id,
+                    workspace=workspace,
+                    worktree=prep.worktree,
+                    worktree_base=prep.worktree_base,
+                    system_prompt=prep.system_prompt,
+                    user_prompt=prep.user_prompt,
+                    disallowed_tools=SPECIALIST_TOOL_DENYLIST,
+                    max_turns=prep.max_turns,
+                    gpu_ids=tuple(ctx.extra.get("gpu_ids") or ()),
+                    deadline=deadline,
+                    gpu_lease=ctx.extra.get("gpu_specialist_lease"),
+                    progress_cb=ctx.extra.get("specialist_progress_cb"),
+                )
             )
             call_status, call_attributes = _subprocess_call_outcome(sub_result)
             call_span.finish(call_status, **call_attributes)
