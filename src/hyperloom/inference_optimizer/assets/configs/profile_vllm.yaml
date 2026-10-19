@@ -76,10 +76,9 @@ benchmark:
   gpu_selection:
     auto: false                # executor pins via ROCR_VISIBLE_DEVICES at runtime
 
-  # 4 h hard cap: an AgentX profile round needs AGENTX_DATASET_CONFIG_TIMEOUT (1800) +
-  # AGENTX_WARMUP_GRACE_PERIOD (1800) + AGENTX_DURATION (3600) + AGENTX_TRACE_FLUSH_TIMEOUT_S (1800)
-  # = 9000s of pure client runtime before server startup, so a 7200s cap cancels every attempt
-  # mid-run. Matches PROFILE_DEFAULT_TIMEOUT_SEC and profile_sglang.yaml.
+  # 4 h hard cap, as profile_sglang.yaml and PROFILE_DEFAULT_TIMEOUT_SEC. An AgentX profile round is
+  # server boot + dataset load + warmup drain + the AGENTX_DURATION window + profiler overhead, which
+  # can run past 7200s; keep this at or above the 7800s cap AgentX baseline rounds get.
   timeout_seconds: 14400
 
   profiler:
