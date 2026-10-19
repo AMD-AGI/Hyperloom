@@ -4290,7 +4290,7 @@ class IntegratePatchExecutor:
         if shared_state is not None:
             session_id = str(getattr(shared_state, "recipe_kb_session_id", "") or "")
         try:
-            from ...knowledge.kb_writeback import write_framework_record
+            from ...knowledge.kb_writeback import FrameworkOutcome, write_framework_record
 
             gap_keywords = proposal.get("gap_keywords") or (done_payload or {}).get("gap_keywords") or []
             if isinstance(gap_keywords, str):
@@ -4306,38 +4306,41 @@ class IntegratePatchExecutor:
                 except (TypeError, ValueError):
                     accuracy_delta_pct = 0.0
             written = await write_framework_record(
-                pr_url=pr_url,
-                pr_sha=pr_sha,
-                patch_path=patch_path,
-                outcome=outcome,
-                tps_delta_pct=float(tps_delta_pct),
-                session_id=session_id,
-                framework=str(proposal.get("framework") or (done_payload or {}).get("framework") or "").strip().lower(),
-                gap_canonical_id=str(
-                    proposal.get("gap_canonical_id") or (done_payload or {}).get("gap_canonical_id") or ""
-                ).strip(),
-                gap_keywords=[str(k).strip().lower() for k in gap_keywords if str(k).strip()],
-                model_class=str(getattr(shared_state, "model_class", "") if shared_state is not None else "").strip(),
-                gpu_type=str(getattr(shared_state, "gpu_type", "") if shared_state is not None else "").strip(),
-                precision=str(getattr(shared_state, "precision", "") if shared_state is not None else "").strip(),
-                applicability=(
-                    config_fingerprint
-                    or str(proposal.get("applicability") or (done_payload or {}).get("applicability") or "").strip()
-                ),
-                provenance=str(proposal.get("provenance") or (done_payload or {}).get("provenance") or "").strip(),
-                accuracy_delta_pct=accuracy_delta_pct,
-                changed_files=[str(f).strip() for f in changed_files if str(f).strip()],
-                source_framework=str(
-                    proposal.get("source_framework") or (done_payload or {}).get("source_framework") or ""
+                FrameworkOutcome(
+                    pr_url=pr_url,
+                    pr_sha=pr_sha,
+                    patch_path=patch_path,
+                    outcome=outcome,
+                    tps_delta_pct=float(tps_delta_pct),
+                    session_id=session_id,
+                    framework=str(proposal.get("framework") or (done_payload or {}).get("framework") or "")
+                    .strip()
+                    .lower(),
+                    gap_canonical_id=str(
+                        proposal.get("gap_canonical_id") or (done_payload or {}).get("gap_canonical_id") or ""
+                    ).strip(),
+                    gap_keywords=[str(k).strip().lower() for k in gap_keywords if str(k).strip()],
+                    model_class=str(
+                        getattr(shared_state, "model_class", "") if shared_state is not None else ""
+                    ).strip(),
+                    gpu_type=str(getattr(shared_state, "gpu_type", "") if shared_state is not None else "").strip(),
+                    precision=str(getattr(shared_state, "precision", "") if shared_state is not None else "").strip(),
+                    applicability=config_fingerprint
+                    or str(proposal.get("applicability") or (done_payload or {}).get("applicability") or "").strip(),
+                    provenance=str(proposal.get("provenance") or (done_payload or {}).get("provenance") or "").strip(),
+                    accuracy_delta_pct=accuracy_delta_pct,
+                    changed_files=[str(f).strip() for f in changed_files if str(f).strip()],
+                    source_framework=str(
+                        proposal.get("source_framework") or (done_payload or {}).get("source_framework") or ""
+                    )
+                    .strip()
+                    .lower(),
+                    target_framework=str(
+                        proposal.get("target_framework") or (done_payload or {}).get("target_framework") or ""
+                    )
+                    .strip()
+                    .lower(),
                 )
-                .strip()
-                .lower(),
-                target_framework=str(
-                    proposal.get("target_framework") or (done_payload or {}).get("target_framework") or ""
-                )
-                .strip()
-                .lower(),
-                session_dir=self.session_dir,
             )
             log.info(
                 "integrate_patch: wrote framework KB record to %s (outcome=%s pr_url=%s tps_delta=%+.2f%%)",
