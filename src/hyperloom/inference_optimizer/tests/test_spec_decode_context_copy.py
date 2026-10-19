@@ -324,12 +324,12 @@ async def test_a_stack_revalidation_is_not_filtered(sub_agent_runner, tmp_path):
 
 @pytest.mark.asyncio
 async def test_a_variant_that_cannot_be_materialized_is_judged_on_its_own_args(sub_agent_runner, tmp_path, monkeypatch):
-    from hyperloom.orchestrator.actions.executors import explore
+    from hyperloom.orchestrator.actions.executors import _variant_grid
 
     def _unreadable(*_args, **_kwargs):
         raise OSError("probe")
 
-    monkeypatch.setattr(explore, "_materialized_launch", _unreadable)
+    monkeypatch.setattr(_variant_grid, "_materialized_launch", _unreadable)
     launched, out = await _explore(sub_agent_runner, tmp_path, ["ngram_k7", "lever"])
     assert launched == ["lever"]
     assert list(_refused(out)) == ["ngram_k7"]
