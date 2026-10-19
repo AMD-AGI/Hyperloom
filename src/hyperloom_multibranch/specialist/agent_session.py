@@ -7,8 +7,10 @@ long as its branch runs.
 Every session starts at the branch head, with the worktree synced to it and a launch prompt built from the brief,
 rebuilt at that head when the setup can, and the branch log. A session that ends as a session should, its model's turn done or its deadline reached, is
 followed by a fresh one: a branch runs until the scheduler stops it. A Claude CLI whose turn ended but that a leftover
-background shell keeps alive is ended, as a turn that finished. One that is lost, exits with an error or ends
-within ``min_session_seconds`` raises, and the runtime decides whether to restart it. Claude streams partial messages
+background shell keeps alive is ended, as a turn that finished. One that ends within ``min_session_seconds`` while its
+branch has a test in flight ended to wait for it: the next launch starts once that test has its result. One that is
+lost, exits with an error or otherwise ends within ``min_session_seconds`` raises, and the runtime decides whether to
+restart it. Claude streams partial messages
 into its log, so a long reasoning step shows as log growth and is not taken for a lost session. The session's process registry
 adopts every process the socket starts, so the session stop kills it even when this stop cannot. Each launch's spend,
 its logged tokens at the gateway's rates, is written to the branch's notebook once the launch is collected, however it
@@ -41,7 +43,7 @@ from hyperloom.orchestrator.specialists.agent_runner import (
 )
 from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
 from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore, UsageSink
-from hyperloom_multibranch.contracts.notebook.records import LlmUsage
+from hyperloom_multibranch.contracts.notebook.records import LlmUsage, NotebookSnapshot
 from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 from hyperloom_multibranch.contracts.repo import ExperimentRepo
 from hyperloom_multibranch.contracts.toolbox import SCOPE_SPECIALIST, SpecialistGrant, SpecialistTokens
@@ -63,6 +65,8 @@ TURN_END_GRACE_POLLS = 2
 #: A session silent this long, with no log growth, CPU work or tool call in flight, is hung: a test takes about eight
 #: minutes and one reasoning step can take as long, and Claude streams its reasoning into the log.
 SPECIALIST_LOST_AFTER_S = 600.0
+#: How a launch that ended early to wait for its branch's test ended, as the next launch is told.
+WAITED_END = "its model ended its turn to wait for a test, which has its result now"
 _LOG_TAIL_BYTES = 65536
 PROMPT_FILE, ROLE_FILE, DONE_FILE, HEARTBEAT_FILE = (
     "prompt.md",
@@ -154,7 +158,10 @@ class AgentSetup:
 
 
 class SessionNotebook(BranchLogStore, UsageSink, Protocol):
-    """A branch's runtime handle as its sessions use it: the branch log, and the spend of each launch."""
+    """A branch's runtime handle as its sessions use it: the branch log, the spend of each launch, and the snapshot
+    that says whether the branch has a test in flight."""
+
+    async def snapshot(self) -> NotebookSnapshot: ...
 
 
 @dataclass(frozen=True)
@@ -212,13 +219,24 @@ class AgentSession:
         seconds = clock() - started
         if self._stopped.is_set():
             return last_end
-        if (
-            status.state == STATE_LOST
-            or (status.returncode and not status.timed_out)
-            or seconds < self._setup.min_session_seconds
-        ):
+        failed = status.state == STATE_LOST or bool(status.returncode and not status.timed_out)
+        if not failed and seconds < self._setup.min_session_seconds and await self._tests_in_flight():
+            await self._until_tests_land()
+            return WAITED_END
+        if failed or seconds < self._setup.min_session_seconds:
             raise SessionCrashed(_describe(status, seconds), lost=status.state == STATE_LOST, worked=bool(last_end))
         return "it reached its deadline" if status.timed_out else "its model finished its turn"
+
+    async def _tests_in_flight(self) -> bool:
+        branch = self._start.branch
+        records = (await self._place.notebook.snapshot()).records
+        return any(record.request.branch == branch and record.in_flight for record in records)
+
+    async def _until_tests_land(self) -> None:
+        """Wait, without a CLI running, until the branch has no test in flight or the session is stopped."""
+        while not self._stopped.is_set() and await self._tests_in_flight():
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._stopped.wait(), self._setup.poll_seconds)
 
     async def _briefed(self, head: str) -> SessionStart:
         """The start a launch at ``head`` shows: its brief rebuilt there, or the first one when that fails."""

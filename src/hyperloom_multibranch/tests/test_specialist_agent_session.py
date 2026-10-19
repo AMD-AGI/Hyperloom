@@ -19,8 +19,10 @@ from hyperloom_multibranch.contracts.notebook.records import LineageEvent, LlmUs
 from hyperloom_multibranch.contracts.notebook.vocab import INTEGRATION_BRANCH, LineageKind, UsageSource
 from hyperloom_multibranch.contracts.toolbox import SpecialistGrant
 from hyperloom_multibranch.notebook import LocalNotebook
+from hyperloom_multibranch.notebook.tests.factories import intent, request, result
 from hyperloom_multibranch.repo.git_repo import GitExperimentRepo
 from hyperloom_multibranch.specialist.agent_session import (
+    WAITED_END,
     AgentCommand,
     AgentSession,
     AgentSetup,
@@ -123,6 +125,7 @@ async def rig(tmp_path):
         worktree=base.worktree(BRANCH, tmp_path / "s1" / "worktree"),
         workspace=tmp_path / "s1" / "session",
         notebook=notebook,
+        toolbox_notebook=LocalNotebook(tmp_path / "notebook", Writer(Role.TOOLBOX, "toolbox")),
     )
 
     def session(command=AgentCommand("claude", "claude"), runner=None, **overrides) -> AgentSession:
@@ -197,6 +200,23 @@ async def test_a_cli_held_open_after_its_turn_ended_is_ended_as_a_finished_turn(
     assert rig.runner.cancelled[0] == 1
     assert "ended: its model finished its turn" in rig.runner.prompts[1]
     assert "--include-partial-messages" in rig.runner.specs[0].argv
+
+
+async def test_a_launch_ended_early_to_wait_for_its_test_is_no_crash_and_the_next_waits_for_the_result(rig):
+    await rig.toolbox_notebook.write_request(request("r1", intent(BRANCH, rig.root)))
+    session = rig.session()
+    running = asyncio.create_task(session.run())
+    await _until(lambda: len(rig.runner.specs) == 1, "the first launch")
+
+    rig.runner.end(1, EXITED_WELL, 30.0)
+    await asyncio.sleep(0.2)
+    assert len(rig.runner.specs) == 1 and not running.done()
+    await rig.toolbox_notebook.write_result(result("r1"))
+    await _until(lambda: len(rig.runner.specs) == 2, "a launch once the test has its result")
+    await session.stop()
+    await asyncio.wait_for(running, 1)
+
+    assert f"ended: {WAITED_END}" in rig.runner.prompts[1]
 
 
 async def test_each_launch_records_its_tokens_at_the_gateway_s_rates_however_it_ended(rig):
