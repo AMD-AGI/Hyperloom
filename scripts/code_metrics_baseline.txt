@@ -37,18 +37,13 @@ cognitive-complexity src/hyperloom/inference_optimizer/session/manifest.py::buil
 cognitive-complexity src/hyperloom/inference_optimizer/tools/backfill_langfuse.py::ingest 44
 cognitive-complexity src/hyperloom/inference_optimizer/trace/decision_trace.py::write_decision_trace 53
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_accuracy_gate.py::parse_eval_results 34
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/_aiter_jit.py::_any_live_compiler 37
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_benchmark_runtime.py::apply_runtime_benchmark_overrides 32
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_framework_gap_composer.py::_extract_bottleneck_from_breakdown 38
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/_framework_rewrite_evidence.py::build_evidence 32
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/_framework_switch_manifest.py::parse_manifest 62
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_geak_sweep.py::sweep_via_geak 67
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_grid_base.py::coerce_extra_envs 38
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 196
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::_read_aiperf_aggregate_json 91
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::sample_from_families 33
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/_launch_evidence.py::build_launch_evidence 37
-cognitive-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_env.py::resolve_kb_topology 32
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_collect_worker_server_logs 32
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 107
 cognitive-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_workers_ready_async 76
@@ -277,7 +272,6 @@ cognitive-complexity src/kernelforge/rewrite_by_flydsl/ingest.py::discover_sourc
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/kb.py::try_flydsl_kb_warmstart 71
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/port_loop.py::check_flydsl_port 35
 cognitive-complexity src/kernelforge/rewrite_by_flydsl/port_loop.py::run_port_loop 52
-cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_framework_switch_manifest.py::parse_manifest 27
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run_grid 61
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::_read_aiperf_aggregate_json 22
 cyclomatic-complexity src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 23
@@ -592,8 +586,6 @@ function-lines src/hyperloom/inference_optimizer/session/manifest.py::build_mani
 function-lines src/hyperloom/inference_optimizer/tools/backfill_langfuse.py::ingest 148
 function-lines src/hyperloom/inference_optimizer/trace/decision_trace.py::write_decision_trace 151
 function-lines src/hyperloom/orchestrator/actions/executors/_accuracy_gate.py::parse_eval_results 108
-function-lines src/hyperloom/orchestrator/actions/executors/_framework_rewrite_evidence.py::build_evidence 104
-function-lines src/hyperloom/orchestrator/actions/executors/_framework_switch_manifest.py::parse_manifest 95
 function-lines src/hyperloom/orchestrator/actions/executors/_geak_sweep.py::sweep_via_geak 217
 function-lines src/hyperloom/orchestrator/actions/executors/_gpu_pin.py::resolve_gpu_pin 105
 function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::_build_variant_yaml 135
@@ -602,7 +594,6 @@ function-lines src/hyperloom/orchestrator/actions/executors/_grid_runner.py::run
 function-lines src/hyperloom/orchestrator/actions/executors/_kernel_agent_tool.py::materialize_unified_patch_snapshot 94
 function-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::_read_aiperf_aggregate_json 101
 function-lines src/hyperloom/orchestrator/actions/executors/_kv_metrics.py::sample_from_families 100
-function-lines src/hyperloom/orchestrator/actions/executors/_launch_evidence.py::build_launch_evidence 100
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_published_service_ready_async 90
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_server_health_async 188
 function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_lifecycle.py::_wait_for_workers_ready_async 97
@@ -610,7 +601,6 @@ function-lines src/hyperloom/orchestrator/actions/executors/_multi_node_server_l
 function-lines src/hyperloom/orchestrator/actions/executors/_nogit_patch.py::_apply_patch_no_git 169
 function-lines src/hyperloom/orchestrator/actions/executors/_partition_shape.py::validate_session_shape 127
 function-lines src/hyperloom/orchestrator/actions/executors/_patch_snapshot.py::replayed_stack_ops 81
-function-lines src/hyperloom/orchestrator/actions/executors/_patch_source_pr.py::materialize_candidate_patches 94
 function-lines src/hyperloom/orchestrator/actions/executors/_ray_serving.py::ServingLease._await_or_cancel 172
 function-lines src/hyperloom/orchestrator/actions/executors/_server_patcher.py::_apply_atomic 149
 function-lines src/hyperloom/orchestrator/actions/executors/_server_patcher.py::_discover_sglang_plan 92
