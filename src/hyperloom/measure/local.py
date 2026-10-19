@@ -424,7 +424,7 @@ async def _decode_on_new_server(run: _Run, lifecycle: _Lifecycle) -> None:
         base_url=f"http://127.0.0.1:{lifecycle.port}",
         model=str(benchmark.get("model") or ""),
         concurrency=concurrency,
-        request_timeout_sec=max(1.0, min(_DECODE_TIMEOUT_SEC, left * _CASE_TIME_SHARE)),
+        timeout_sec=max(1.0, min(_DECODE_TIMEOUT_SEC, left * _CASE_TIME_SHARE)),
     )
     write_outputs(Path(call.output_dir), plan, outputs)
 

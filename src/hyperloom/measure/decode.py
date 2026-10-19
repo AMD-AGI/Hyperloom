@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import random
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -156,10 +157,10 @@ def _complete(url: str, payload: bytes, timeout_sec: float) -> tuple[int, ...]:
 
 
 def run_pass(
-    plan: PassPlan, *, base_url: str, model: str, concurrency: int, request_timeout_sec: float
+    plan: PassPlan, *, base_url: str, model: str, concurrency: int, timeout_sec: float
 ) -> tuple[tuple[int, ...], ...]:
     """Decode every prompt of ``plan`` against ``base_url`` with at most ``concurrency`` requests in flight,
-    each given ``request_timeout_sec``.
+    the whole pass bounded by ``timeout_sec``.
 
     Raises:
         DecodePassError: A request failed or the response held no token ids; no partial result is returned.
@@ -178,8 +179,21 @@ def run_pass(
         ).encode()
         for prompt in plan.prompt_ids()
     ]
+    deadline = time.monotonic() + timeout_sec
+
+    def decode(payload: bytes) -> tuple[int, ...]:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise DecodePassError("pass_timed_out")
+        return _complete(url, payload, left)
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, min(concurrency, plan.prompts))) as pool:
-        return tuple(pool.map(lambda payload: _complete(url, payload, request_timeout_sec), payloads))
+        futures = [pool.submit(decode, payload) for payload in payloads]
+        try:
+            return tuple(future.result() for future in futures)
+        finally:
+            for future in futures:
+                future.cancel()  # a pass that failed leaves no queued request behind
 
 
 # -- the record ------------------------------------------------------------------------------------------------------

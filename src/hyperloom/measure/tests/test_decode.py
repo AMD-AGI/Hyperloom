@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -44,9 +45,7 @@ def test_everything_that_decides_the_prompt_set_changes_the_identity(change):
 
 def test_the_pass_sends_greedy_requests_at_the_graded_point_and_returns_each_prompts_tokens_in_order():
     with fake_server(delay_sec=0.05) as server:
-        outputs = run_pass(
-            PLAN, base_url=f"http://127.0.0.1:{server.port}", model="m", concurrency=2, request_timeout_sec=10
-        )
+        outputs = run_pass(PLAN, base_url=f"http://127.0.0.1:{server.port}", model="m", concurrency=2, timeout_sec=10)
 
     prompts = PLAN.prompt_ids()
     assert outputs == tuple(tuple(expected_tokens(p, 256)) for p in prompts)
@@ -60,13 +59,20 @@ def test_the_pass_sends_greedy_requests_at_the_graded_point_and_returns_each_pro
 @pytest.mark.parametrize(("mode", "reason"), [("error", "http_500"), ("no_ids", "no_token_ids_in_response")])
 def test_a_pass_that_gets_no_answer_it_can_use_fails_with_its_reason_and_returns_nothing(mode, reason):
     with fake_server(mode) as server, pytest.raises(DecodePassError) as caught:
-        run_pass(PLAN, base_url=f"http://127.0.0.1:{server.port}", model="m", concurrency=4, request_timeout_sec=10)
+        run_pass(PLAN, base_url=f"http://127.0.0.1:{server.port}", model="m", concurrency=4, timeout_sec=10)
     assert str(caught.value) == reason
+
+
+def test_a_server_that_is_too_slow_ends_the_whole_pass_at_its_time_limit_not_after_every_prompt():
+    started = time.monotonic()
+    with fake_server(delay_sec=1.0) as server, pytest.raises(DecodePassError):
+        run_pass(PLAN, base_url=f"http://127.0.0.1:{server.port}", model="m", concurrency=1, timeout_sec=0.5)
+    assert time.monotonic() - started < 3, "six prompts at one second each would take six"
 
 
 def test_a_server_that_is_not_there_fails_the_pass():
     with pytest.raises(DecodePassError, match="request_failed_"):
-        run_pass(PLAN, base_url="http://127.0.0.1:1", model="m", concurrency=1, request_timeout_sec=2)
+        run_pass(PLAN, base_url="http://127.0.0.1:1", model="m", concurrency=1, timeout_sec=2)
 
 
 def test_the_record_has_the_identity_header_then_one_line_per_prompt_and_parses_back(tmp_path: Path):
