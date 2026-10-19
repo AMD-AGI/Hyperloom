@@ -1413,6 +1413,72 @@ def test_remote_close_transport_failure_is_nonfatal(
     assert "private" not in json.dumps(row)
 
 
+def _remote_journal_failing_with(tmp_path: Path, monkeypatch, failure: Exception) -> RecipeJournalCollaborator:
+    from hyperloom.orchestrator.knowledge import remote_recipe
+
+    class _Journal:
+        def finalize(self, **kwargs) -> None:
+            pass
+
+    coordinator = SimpleNamespace(
+        session_dir=tmp_path,
+        shared_state=SharedState(current_best={"tput": 130.0}, cumulative_gain_validated=30.0),
+        recipe_kb=None,
+        knowledge_plane=None,
+    )
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    monkeypatch.setenv("KB_STORE_URL", "https://kb.example")
+    monkeypatch.setenv("KB_STORE_TOKEN", "token")
+
+    def fail_publish(cls):
+        raise failure
+
+    monkeypatch.setattr(remote_recipe.HyperloomRemoteKB, "from_env", classmethod(fail_publish))
+    journal = RecipeJournalCollaborator(coordinator)
+    journal.ensure_journal = lambda: _Journal()
+    journal.workload_canonical_id = lambda: "inference:m:h:f:mt:a:v:p"
+    return journal
+
+
+@pytest.mark.parametrize(
+    ("failure", "result_type"),
+    [
+        (ValueError("extra_server_args contains a whitespace-bearing value"), "transport_failed"),
+        (RemoteRecipeValidationError("staged section is invalid"), "bundle_build_failed"),
+        (PermissionError("cannot read accepted patch"), "transport_failed"),
+    ],
+    ids=["publish-sanitizer", "bundle-validation", "oserror"],
+)
+def test_remote_close_records_a_publish_failure_it_expects(
+    tmp_path: Path, monkeypatch, failure: Exception, result_type: str
+) -> None:
+    journal = _remote_journal_failing_with(tmp_path, monkeypatch, failure)
+
+    outcome = journal.finalize_recipe_and_journal()
+
+    assert outcome == {
+        "status": "error",
+        "reason": type(failure).__name__,
+        "backend": "kb-store",
+        "canonical_id": "inference:m:h:f:mt:a:v:p",
+        "session_id": tmp_path.name,
+        "result_type": result_type,
+        "error_class": type(failure).__name__,
+    }
+    from hyperloom.inference_optimizer.session.session_paths import recipe_snapshot_audit_jsonl
+
+    row = json.loads(recipe_snapshot_audit_jsonl(tmp_path).read_text(encoding="utf-8"))
+    assert row["status"] == "error"
+    assert row["error"]["type"] == type(failure).__name__
+
+
+def test_remote_close_propagates_an_unexpected_publish_failure(tmp_path: Path, monkeypatch) -> None:
+    journal = _remote_journal_failing_with(tmp_path, monkeypatch, TypeError("bundle is not a mapping"))
+
+    with pytest.raises(TypeError, match="bundle is not a mapping"):
+        journal.finalize_recipe_and_journal()
+
+
 def test_remote_close_never_sends_an_unvalidated_working_recipe(tmp_path: Path, monkeypatch) -> None:
     from hyperloom.orchestrator.knowledge import remote_recipe
     from hyperloom.orchestrator.state.shared_state import SharedState

@@ -1240,6 +1240,28 @@ async def test_recipe_kb_t4_hook_remote_runs_without_recipe_kb_or_sid(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
+    coord, save_calls = _remote_t4_coordinator(tmp_path, monkeypatch, {})
+
+    finalize_calls: list[str] = []
+
+    def _finalize(*, source: str) -> dict:
+        finalize_calls.append(source)
+        return {"status": "written"}
+
+    coord.recipe_journal.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
+
+    await coord._recipe_kb_t4_hook()
+
+    assert finalize_calls == ["t4_fallback"]
+    assert save_calls
+    assert all(path == tmp_path / "session" for path in save_calls)
+
+
+def _remote_t4_coordinator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, save_failures: dict[int, Exception]):
+    """A remote-mode coordinator whose Nth ``SharedState.save`` call raises the exception mapped to N.
+
+    Returns the coordinator and the list of session directories each save call received.
+    """
     session_dir = tmp_path / "session"
     session_dir.mkdir()
     idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
@@ -1258,22 +1280,73 @@ async def test_recipe_kb_t4_hook_remote_runs_without_recipe_kb_or_sid(
     )
     coord.shared_state.recipe_kb_session_id = ""
     coord.shared_state.close_sequence_done = False
+    coord.recipe_journal.finalize_recipe_and_journal = lambda *, source: {"status": "written"}  # type: ignore[method-assign]
+    saves: list[Path] = []
 
-    finalize_calls: list[str] = []
-    save_calls: list[Path] = []
+    def _save(path: Path) -> None:
+        saves.append(path)
+        failure = save_failures.get(len(saves))
+        if failure is not None:
+            raise failure
 
-    def _finalize(*, source: str) -> dict:
-        finalize_calls.append(source)
-        return {"status": "written"}
+    coord.shared_state.save = _save  # type: ignore[method-assign]
+    return coord, saves
 
-    coord.recipe_journal.finalize_recipe_and_journal = _finalize  # type: ignore[method-assign]
-    coord.shared_state.save = lambda path: save_calls.append(path)  # type: ignore[method-assign]
 
-    await coord._recipe_kb_t4_hook()
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failing_call", "logged"),
+    [(1, "Recipe finalize pending-state save failed"), (2, "Recipe finalize outcome save failed")],
+)
+async def test_recipe_finalize_continues_past_a_save_os_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, failing_call: int, logged: str
+):
+    coord, calls = _remote_t4_coordinator(tmp_path, monkeypatch, {failing_call: OSError("no space left on device")})
 
-    assert finalize_calls == ["t4_fallback"]
-    assert save_calls
-    assert all(path == session_dir for path in save_calls)
+    with caplog.at_level("ERROR"):
+        outcome = coord.recipe_journal.ensure_recipe_finalized(source="t4_fallback")
+
+    assert outcome["status"] == "written"
+    assert len(calls) == 2
+    assert [r.getMessage() for r in caplog.records if r.levelname == "ERROR"] == [logged]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_call", [1, 2])
+async def test_recipe_finalize_propagates_a_save_serialization_defect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failing_call: int
+):
+    coord, _calls = _remote_t4_coordinator(
+        tmp_path, monkeypatch, {failing_call: TypeError("Object of type set is not JSON serializable")}
+    )
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        coord.recipe_journal.ensure_recipe_finalized(source="t4_fallback")
+
+
+@pytest.mark.asyncio
+async def test_recipe_kb_t4_hook_logs_a_final_save_os_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    coord, calls = _remote_t4_coordinator(tmp_path, monkeypatch, {3: OSError("no space left on device")})
+
+    with caplog.at_level("ERROR"):
+        await coord._recipe_kb_t4_hook()
+
+    assert len(calls) == 3
+    assert [r.getMessage() for r in caplog.records if r.levelname == "ERROR"] == [
+        "recipe KB T4 SharedState.save failed"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_recipe_kb_t4_hook_propagates_a_final_save_serialization_defect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    coord, _calls = _remote_t4_coordinator(tmp_path, monkeypatch, {3: TypeError("not JSON serializable")})
+
+    with pytest.raises(TypeError, match="not JSON serializable"):
+        await coord._recipe_kb_t4_hook()
 
 
 @pytest.mark.asyncio
