@@ -337,13 +337,13 @@ def test_the_preflight_runs_before_the_config_is_materialized():
     import ast
 
     source = Path(baseline_mod.__file__).read_text(encoding="utf-8")
-    run_once = next(
+    materialize_round = next(
         node
         for node in ast.walk(ast.parse(source))
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_run_once"
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_materialize_round_config"
     )
     called: list[str] = []
-    for node in ast.walk(run_once):
+    for node in ast.walk(materialize_round):
         if not isinstance(node, ast.Call):
             continue
         name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
@@ -352,7 +352,7 @@ def test_the_preflight_runs_before_the_config_is_materialized():
 
     ordered = [name for _lineno, name in sorted(called)]
     assert ordered[:2] == ["_prepare_aiter_serving_so", "materialize_benchmark_config"]
-    preflight = source.index("await _prepare_aiter_serving_so(base_extra_envs)")
+    preflight = source.index("await _prepare_aiter_serving_so(setup.extra_envs)")
     materialize = source.index("config_path = materialize_benchmark_config(")
     assert preflight < materialize
 

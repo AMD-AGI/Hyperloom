@@ -868,6 +868,94 @@ class _PatchSettlement(NamedTuple):
     failure: dict[str, Any] | None = None
 
 
+class _BaselineRunRequest(NamedTuple):
+    """How one baseline attempt differs from the plain one."""
+
+    force_disable_eval: bool
+    force_drop_moe_runner_backend: bool
+    recorder: Any
+    run_index: int
+
+
+class _FrameworkArgs(NamedTuple):
+    """The framework one attempt runs, and the server args it runs with."""
+
+    framework: str
+    server_args: str
+
+
+class _ScriptOverrides(NamedTuple):
+    """The orchestration-supplied benchmark script and result dir, or the refusal that rejected one."""
+
+    failure: dict[str, Any] | None
+    script: Any
+    result_dir: Any
+
+
+class _RoundSetup(NamedTuple):
+    """What one baseline attempt runs with, resolved before its benchmark config is written."""
+
+    failure: dict[str, Any] | None
+    ctx: RunnerContext
+    params: dict[str, Any]
+    shared_state: Any
+    ctx_extra: Mapping[str, Any]
+    framework: str
+    server_args: str
+    inferencex_path: str
+    output_dir: Path
+    config_path: Path
+    timeout_sec: float
+    resolved_model: str
+    resolved_gpu: str
+    override_script: Any
+    override_result_dir: Any
+    extra_envs: dict[str, Any]
+    eval_disabled: bool
+    defer_accuracy: bool
+
+
+class _MaterializedRound(NamedTuple):
+    """A baseline attempt whose benchmark config is written and whose runtime is activated."""
+
+    failure: dict[str, Any] | None
+    setup: _RoundSetup
+    config_path: Path
+    lifecycle: Mapping[str, Any]
+    double_run_wanted: bool
+    double_run: bool
+    run_eval_disabled: bool
+
+
+class _RoundPatches(NamedTuple):
+    """The warm-replay overlays this attempt's rounds are measured on top of."""
+
+    failure: dict[str, Any] | None
+    application: list[dict[str, str]] | dict[str, Any]
+    applied: list[dict[str, str]]
+    pre_sha: str
+
+
+class _RoundExecution(NamedTuple):
+    """The arguments every round of one attempt shares, and the resources they hold."""
+
+    common: dict[str, Any]
+    lease: Any
+    patches: _RoundPatches
+
+
+class _AccuracyStageDecision(NamedTuple):
+    """Whether the staged accuracy round earned its GPU time, and what to record when it did not."""
+
+    run: bool
+    skipped: dict[str, Any]
+
+
+def _refused_round(setup: _RoundSetup, failure: dict[str, Any]) -> _MaterializedRound:
+    """An attempt that will not be run, carrying the failure its caller reports."""
+    return _MaterializedRound(failure, setup, setup.config_path, {}, False, False, False)
+
+
 class BenchmarkRunExecutor:
     """One benchmark action: materialize the config, launch the backend, retry, parse the report."""
 
@@ -1558,39 +1646,27 @@ class BenchmarkRunExecutor:
             return None
         return eval_data
 
-    async def _run_once(
+    def _settle_attempt_server_args(
         self,
-        ctx: RunnerContext,
+        params: dict[str, Any],
+        shared_state: Any,
         *,
-        force_disable_eval: bool = False,
-        force_drop_moe_runner_backend: bool = False,
-        recorder: Any = None,
-        run_index: int = 0,
-    ) -> dict[str, Any]:
-        """Run the Magpie baseline benchmark and parse its result."""
-        params = ctx.task.params or {}
-        # Only a genuine ``baseline`` task may establish/overwrite the quality reference; ``replay_warm_recipe``
-        # reuses this executor but must compare against the pure baseline reference rather than redefine it.
-        is_genuine_baseline = _should_establish_quality_ref(getattr(ctx.task, "kind", ""), params)
-        config_path = Path(params.get("config_path") or self.default_config_path or self._resolve_default_config())
-        if not config_path.exists():
-            raise FileNotFoundError(f"baseline config not found: {config_path}")
-
+        drop_moe_runner_backend: bool,
+    ) -> _FrameworkArgs:
+        """Decide the server args this attempt runs with and align the task envelope with them."""
         # One-shot cuda-graph eager fallback: a prior baseline armed state.baseline_eager_fallback.
-        effective_extra_server_args = str(params.get("extra_server_args") or "")
-        extra = getattr(ctx, "extra", None) or {}
-        live_shared_state = extra.get("shared_state") or self.shared_state
+        server_args = str(params.get("extra_server_args") or "")
         fw = str(params.get("framework") or "").strip() or os.environ.get("FRAMEWORK", "").strip()
-        if not fw and self._eager_fallback_armed(live_shared_state):
+        if not fw and self._eager_fallback_armed(shared_state):
             log.warning(
                 "baseline_executor: eager fallback is armed but framework is "
                 "unknown; leaving the one-shot armed (not consuming) so a "
                 "later baseline with a known framework can apply it",
             )
-        elif fw and self._consume_eager_fallback(live_shared_state):
+        elif fw and self._consume_eager_fallback(shared_state):
             cg_flag = _disable_cuda_graph_flag(fw)
-            effective_extra_server_args = _with_cuda_graph_disabled(
-                effective_extra_server_args,
+            server_args = _with_cuda_graph_disabled(
+                server_args,
                 fw,
             )
             log.warning(
@@ -1598,189 +1674,251 @@ class BenchmarkRunExecutor:
                 cg_flag,
                 fw,
             )
-        if force_drop_moe_runner_backend:
-            effective_extra_server_args = _remove_moe_runner_backend_arg(effective_extra_server_args)
-        if effective_extra_server_args or "extra_server_args" in params:
+        if drop_moe_runner_backend:
+            server_args = _remove_moe_runner_backend_arg(server_args)
+        if server_args or "extra_server_args" in params:
             # Keep the task envelope aligned with the materialized runtime so Roofline fingerprints record one-shot
             # eager fallback accurately.
-            params["extra_server_args"] = effective_extra_server_args
+            params["extra_server_args"] = server_args
+        return _FrameworkArgs(fw, server_args)
 
-        output_dir = self._resolve_workspace(ctx, "baseline")
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        # Warm patches are prepared after config/runtime preflight, immediately before the single final benchmark.
-        patch_application: list[dict[str, str]] | dict[str, Any] = []
-        applied_patches: list[dict[str, str]] = []
-        _pre_patch_sha = ""
-
-        timeout_sec = self._resolve_timeout(params)
-        # Model path: unified resolver (params → $MODEL_PATH → SharedState), then serving-path normalization
-        # (HL_MODEL_BASE / HF cache).
-        resolved_model = resolve_session_model_path(
-            params=params,
-            state_model_path=str(getattr(live_shared_state, "model_path", "") or ""),
-            for_serving=True,
-        )
-        # gpu_type: task.params > $GPU_TYPE (cli.py canonicalizes mi325x->mi300x).
-        resolved_gpu = (
-            str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
-        )
-        # Orchestration-supplied script + result_dir overrides.
+    @staticmethod
+    def _sanitized_overrides(params: Mapping[str, Any], output_dir: Path) -> _ScriptOverrides:
+        """The orchestration-supplied benchmark script and result dir, refused when either is unsafe."""
         try:
-            override_script = sanitize_script_name(params.get("benchmark_script"))
-            override_result_dir = sanitize_result_dir(params.get("result_dir"))
+            return _ScriptOverrides(
+                None,
+                sanitize_script_name(params.get("benchmark_script")),
+                sanitize_result_dir(params.get("result_dir")),
+            )
         except ValueError as exc:
-            return {
+            failure = {
                 "status": "failed",
                 "error_class": "bad_param",
                 "error": str(exc),
                 "output_dir": str(output_dir),
             }
+            return _ScriptOverrides(failure, None, None)
+
+    def _resolve_round_setup(self, ctx: RunnerContext, request: _BaselineRunRequest) -> _RoundSetup:
+        """Resolve everything one baseline attempt runs with, short of writing its benchmark config."""
+        params = ctx.task.params or {}
+        config_path = Path(params.get("config_path") or self.default_config_path or self._resolve_default_config())
+        if not config_path.exists():
+            raise FileNotFoundError(f"baseline config not found: {config_path}")
+        extra = getattr(ctx, "extra", None) or {}
+        shared_state = extra.get("shared_state") or self.shared_state
+        args = self._settle_attempt_server_args(
+            params,
+            shared_state,
+            drop_moe_runner_backend=request.force_drop_moe_runner_backend,
+        )
+        output_dir = self._resolve_workspace(ctx, "baseline")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        overrides = self._sanitized_overrides(params, output_dir)
         # Accuracy eval (GSM8K) opt-out: ``--no-eval``, the ``disable_run_eval`` param and the eval-failure fallback
         # force ``RUN_EVAL=false``.
-        base_extra_envs = dict(params.get("extra_envs") or {})
+        extra_envs = dict(params.get("extra_envs") or {})
         eval_disabled = self._eval_disabled(ctx)
-        # The staged accuracy round is itself an eval, so ``--no-eval`` cancels it.
-        defer_accuracy_until_after_measure = not eval_disabled and is_truthy(
-            params.get("defer_accuracy_until_after_measure")
+        if request.force_disable_eval or is_truthy(params.get("disable_run_eval")) or eval_disabled:
+            extra_envs["RUN_EVAL"] = "false"
+        return _RoundSetup(
+            overrides.failure,
+            ctx,
+            params,
+            shared_state,
+            extra,
+            args.framework,
+            args.server_args,
+            os.environ.get("INFERENCEX_PATH", "").strip(),
+            output_dir,
+            config_path,
+            self._resolve_timeout(params),
+            # Model path: unified resolver (params → $MODEL_PATH → SharedState), then serving-path normalization
+            # (HL_MODEL_BASE / HF cache).
+            resolve_session_model_path(
+                params=params,
+                state_model_path=str(getattr(shared_state, "model_path", "") or ""),
+                for_serving=True,
+            ),
+            # gpu_type: task.params > $GPU_TYPE (cli.py canonicalizes mi325x->mi300x).
+            str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower(),
+            overrides.script,
+            overrides.result_dir,
+            extra_envs,
+            eval_disabled,
+            # The staged accuracy round is itself an eval, so ``--no-eval`` cancels it.
+            not eval_disabled and is_truthy(params.get("defer_accuracy_until_after_measure")),
         )
-        if force_disable_eval or is_truthy(params.get("disable_run_eval")) or eval_disabled:
-            base_extra_envs["RUN_EVAL"] = "false"
-        await _prepare_aiter_serving_so(base_extra_envs)
-        try:
-            config_path = materialize_benchmark_config(
-                config_path,
-                output_dir,
-                extra_server_args=effective_extra_server_args,
-                extra_envs=base_extra_envs,
-                remove_args=params.get("remove_args"),
-                unset_envs=params.get("unset_envs"),
-                args_mode=str(params.get("args_mode") or "append"),
-                model_path=resolved_model,
-                gpu_type=resolved_gpu,
-                benchmark_script=override_script,
-                establish_quality_ref=is_genuine_baseline,
-                drop_moe_runner_backend=force_drop_moe_runner_backend,
-                flydsl_source_dirs=is_truthy(params.get("flydsl_source_dirs")),
-                agentx_mode=agentx_active(live_shared_state),
-                grading=getattr(live_shared_state, "grading", None),
-            )
-        except FrameworkScriptMismatchError as exc:
-            # Cross-framework script override: return a structured failure.
-            return {
-                "status": "failed",
-                "error_class": "framework_script_mismatch",
-                "error": str(exc),
-                "output_dir": str(output_dir),
-            }
-        # Stash for the result so Coordinator can reuse it downstream.
-        materialized_config_path = config_path
-        effective_inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
-        from .magpie_agentx import activate_runtime
 
-        activate_runtime(config_path, params.get("runtime_override") or {})
-        # Report the invocation now, with the config final and the server not
-        # yet booted. This frame is the only one that knows the args as a fact:
-        # the one-shot eager fallback and the MoE-runner drop have both had
-        # their say by here, and after the launch the same answer can only be
-        # guessed at by parsing the server's own log back.
-        if recorder is not None:
-            recorder.record_invocation(
-                run_index=run_index,
-                framework_args=effective_extra_server_args,
-                extra_envs=base_extra_envs,
-                config_path=materialized_config_path,
-                framework=fw,
-                model_path=resolved_model,
-                args_mode=str(params.get("args_mode") or "append"),
-            )
+    def _record_round_invocation(self, setup: _RoundSetup, request: _BaselineRunRequest, config_path: Path) -> None:
+        """Report the invocation, with the config final and the server not yet booted.
+
+        This frame is the only one that knows the args as a fact: the one-shot eager fallback and the
+        MoE-runner drop have both had their say by here, and after the launch the same answer can only be
+        guessed at by parsing the server's own log back.
+        """
+        if request.recorder is None:
+            return
+        request.recorder.record_invocation(
+            run_index=request.run_index,
+            framework_args=setup.server_args,
+            extra_envs=setup.extra_envs,
+            config_path=config_path,
+            framework=setup.framework,
+            model_path=setup.resolved_model,
+            args_mode=str(setup.params.get("args_mode") or "append"),
+        )
+
+    async def _round_preflight_failure(self, setup: _RoundSetup, config_path: Path) -> dict[str, Any] | None:
+        """Prepare the AgentX runtime and read the eval decision back, reporting whatever refuses the round."""
         # MLPerf prepares its delegated client off-loop; native AgentX is entirely managed by Magpie.
-        _agx_err = await asyncio.to_thread(
+        agx_err = await asyncio.to_thread(
             prepare_agentx_runtime,
             env=os.environ,
-            inferencex_path=effective_inferencex_path,
+            inferencex_path=setup.inferencex_path,
             config_path=config_path,
-            active=agentx_active(live_shared_state),
+            active=agentx_active(setup.shared_state),
         )
-        if _agx_err:
+        if agx_err:
             return {
                 "status": "failed",
                 "error_class": AGENTX_PREFLIGHT_ERROR_CLASS,
-                "error": _agx_err,
-                "output_dir": str(output_dir),
+                "error": agx_err,
+                "output_dir": str(setup.output_dir),
             }
         # Whether THIS run actually executes lm-eval, read back from the materialized config the subprocess consumes
         # -- the single source of truth.
-        hook_result = self._after_materialize_config(config_path, output_dir)
-        if hook_result is not None:
-            hook_result.setdefault("materialized_config", str(config_path))
-            hook_result.setdefault("output_dir", str(output_dir))
-            return hook_result
+        hook_result = self._after_materialize_config(config_path, setup.output_dir)
+        if hook_result is None:
+            return None
+        hook_result.setdefault("materialized_config", str(config_path))
+        hook_result.setdefault("output_dir", str(setup.output_dir))
+        return hook_result
 
+    async def _materialize_round_config(self, request: _BaselineRunRequest, setup: _RoundSetup) -> _MaterializedRound:
+        """Write the benchmark config this attempt runs from and settle how many rounds it takes."""
+        params = setup.params
+        await _prepare_aiter_serving_so(setup.extra_envs)
+        try:
+            config_path = materialize_benchmark_config(
+                setup.config_path,
+                setup.output_dir,
+                extra_server_args=setup.server_args,
+                extra_envs=setup.extra_envs,
+                remove_args=params.get("remove_args"),
+                unset_envs=params.get("unset_envs"),
+                args_mode=str(params.get("args_mode") or "append"),
+                model_path=setup.resolved_model,
+                gpu_type=setup.resolved_gpu,
+                benchmark_script=setup.override_script,
+                # Only a genuine ``baseline`` task may establish/overwrite the quality reference;
+                # ``replay_warm_recipe`` reuses this executor but must compare against the pure baseline
+                # reference rather than redefine it.
+                establish_quality_ref=_should_establish_quality_ref(getattr(setup.ctx.task, "kind", ""), params),
+                drop_moe_runner_backend=request.force_drop_moe_runner_backend,
+                flydsl_source_dirs=is_truthy(params.get("flydsl_source_dirs")),
+                agentx_mode=agentx_active(setup.shared_state),
+                grading=getattr(setup.shared_state, "grading", None),
+            )
+        except FrameworkScriptMismatchError as exc:
+            # Cross-framework script override: return a structured failure.
+            return _refused_round(
+                setup,
+                {
+                    "status": "failed",
+                    "error_class": "framework_script_mismatch",
+                    "error": str(exc),
+                    "output_dir": str(setup.output_dir),
+                },
+            )
+        from .magpie_agentx import activate_runtime
+
+        activate_runtime(config_path, params.get("runtime_override") or {})
+        self._record_round_invocation(setup, request, config_path)
+        failure = await self._round_preflight_failure(setup, config_path)
+        if failure is not None:
+            return _refused_round(setup, failure)
         # Cold-start "warmup artifact" guard: the freshly-booted server's first benchmark window pays one-time cold
         # costs that inflate later gains into fictitious "improvements".
-        lifecycle = _lifecycle.resolve_lifecycle_params(materialized_config_path)
+        lifecycle = _lifecycle.resolve_lifecycle_params(config_path)
         double_run_wanted = double_run_requested(params)
         double_run = double_run_wanted and lifecycle["eligible"]
-        if defer_accuracy_until_after_measure and double_run:
+        if setup.defer_accuracy and double_run:
             # Only the lifecycle path can reuse the hot server for a staged accuracy round.
             _set_materialized_run_eval(
-                materialized_config_path,
+                config_path,
                 enabled=False,
             )
-        run_eval_disabled = materialized_run_eval_disabled(materialized_config_path)
-
-        # Asked before the lease, because a round that will not be run should not hold a GPU while being refused.
-        ignitable, ignition_evidence = self._round_affordable_before_ignition(
-            double_run=double_run,
-            ctx_extra=extra,
+        return _MaterializedRound(
+            None,
+            setup,
+            config_path,
+            lifecycle,
+            double_run_wanted,
+            double_run,
+            materialized_run_eval_disabled(config_path),
         )
-        if not ignitable:
-            stopped_result = _stopped_round_result(
-                STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS],
-                round_label="baseline round",
-                returncode=None,
-                runtime_sec=0.0,
-                output_dir=output_dir,
-                capture_meta={
-                    "materialized_config": str(materialized_config_path),
-                    "run_eval_disabled": bool(run_eval_disabled),
-                },
-                started=False,
-            )
-            stopped_result["budget_shortfall"] = ignition_evidence
-            if ignition_evidence.get("one_more_measurement_sec"):
-                log.warning(
-                    "baseline_executor: this round (%.0fs) and one variant to read "
-                    "against it (%.0fs) need %.0fs, and %.0fs is left (bound=%s), so "
-                    "nothing is booted. A baseline no variant can follow is a "
-                    "denominator with no numerator; the anchor this session already "
-                    "measured stands.",
-                    ignition_evidence.get("round_sec", 0.0),
-                    ignition_evidence.get("one_more_measurement_sec", 0.0),
-                    ignition_evidence.get("expected_cost_sec", 0.0),
-                    ignition_evidence.get("affordable_sec", 0.0),
-                    ignition_evidence.get("bound", ""),
-                )
-            else:
-                log.warning(
-                    "baseline_executor: this round needs %.0fs and only %.0fs is left "
-                    "(bound=%s), so nothing is booted. The anchor this session already "
-                    "measured stands.",
-                    ignition_evidence.get("expected_cost_sec", 0.0),
-                    ignition_evidence.get("affordable_sec", 0.0),
-                    ignition_evidence.get("bound", ""),
-                )
-            return stopped_result
 
+    def _round_refused_before_ignition(self, prepared: _MaterializedRound) -> dict[str, Any] | None:
+        """Refuse a round the run can no longer afford.
+
+        Asked before the lease, because a round that will not be run should not hold a GPU while being refused.
+        """
+        ignitable, evidence = self._round_affordable_before_ignition(
+            double_run=prepared.double_run,
+            ctx_extra=prepared.setup.ctx_extra,
+        )
+        if ignitable:
+            return None
+        stopped_result = _stopped_round_result(
+            STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS],
+            round_label="baseline round",
+            returncode=None,
+            runtime_sec=0.0,
+            output_dir=prepared.setup.output_dir,
+            capture_meta={
+                "materialized_config": str(prepared.config_path),
+                "run_eval_disabled": bool(prepared.run_eval_disabled),
+            },
+            started=False,
+        )
+        stopped_result["budget_shortfall"] = evidence
+        if evidence.get("one_more_measurement_sec"):
+            log.warning(
+                "baseline_executor: this round (%.0fs) and one variant to read "
+                "against it (%.0fs) need %.0fs, and %.0fs is left (bound=%s), so "
+                "nothing is booted. A baseline no variant can follow is a "
+                "denominator with no numerator; the anchor this session already "
+                "measured stands.",
+                evidence.get("round_sec", 0.0),
+                evidence.get("one_more_measurement_sec", 0.0),
+                evidence.get("expected_cost_sec", 0.0),
+                evidence.get("affordable_sec", 0.0),
+                evidence.get("bound", ""),
+            )
+        else:
+            log.warning(
+                "baseline_executor: this round needs %.0fs and only %.0fs is left "
+                "(bound=%s), so nothing is booted. The anchor this session already "
+                "measured stands.",
+                evidence.get("expected_cost_sec", 0.0),
+                evidence.get("affordable_sec", 0.0),
+                evidence.get("bound", ""),
+            )
+        return stopped_result
+
+    def _prepare_round_patches(self, prepared: _MaterializedRound) -> _RoundPatches:
+        """Apply this attempt's warm-replay overlays and settle what they left behind."""
+        setup = prepared.setup
         # No single pre-apply sha: each overlay's own tree records its pre_sha, so the singular field is only a
         # fallback for a legacy reader.
         before_apply_sha = ""
 
         def _persist_recipe_snapshot(tree_records: list[dict[str, Any]]) -> bool:
-            if live_shared_state is None:
+            if setup.shared_state is None:
                 return True
-            pending = dict(getattr(live_shared_state, "warm_replay_pending", {}) or {})
+            pending = dict(getattr(setup.shared_state, "warm_replay_pending", {}) or {})
             primary = tree_records[0] if tree_records else {}
             pending.update(
                 {
@@ -1793,9 +1931,9 @@ class BenchmarkRunExecutor:
                     "recipe_patch_snapshot_manifest": primary.get("snapshot_manifest"),
                 }
             )
-            live_shared_state.warm_replay_pending = pending
+            setup.shared_state.warm_replay_pending = pending
             try:
-                live_shared_state.save(self.session_dir)
+                setup.shared_state.save(self.session_dir)
             except Exception:
                 log.warning(
                     "combined warm replay recipe snapshot persist failed",
@@ -1804,134 +1942,400 @@ class BenchmarkRunExecutor:
                 return False
             return True
 
-        patch_application = self._apply_recipe_patches(params, output_dir, before_mutation=_persist_recipe_snapshot)
+        application = self._apply_recipe_patches(
+            setup.params, setup.output_dir, before_mutation=_persist_recipe_snapshot
+        )
         settlement = self._settle_patch_application(
-            patch_application,
-            params=params,
-            output_dir=output_dir,
+            application,
+            params=setup.params,
+            output_dir=setup.output_dir,
             before_apply_sha=before_apply_sha,
-            live_shared_state=live_shared_state,
+            live_shared_state=setup.shared_state,
         )
         if settlement.failure is not None:
-            return settlement.failure
-        applied_patches, _pre_patch_sha = settlement.applied, settlement.pre_patch_sha
-        if applied_patches:
+            return _RoundPatches(settlement.failure, application, [], "")
+        if settlement.applied:
             log.info(
                 "baseline_executor: prepared %d warm-replay code patches: %s",
-                len(applied_patches),
-                [p["patch_file"] for p in applied_patches],
+                len(settlement.applied),
+                [p["patch_file"] for p in settlement.applied],
             )
+        return _RoundPatches(None, application, settlement.applied, settlement.pre_patch_sha)
+
+    @staticmethod
+    def _stamp_round_patches(result: dict[str, Any], patches: _RoundPatches, params: Mapping[str, Any]) -> None:
+        """Carry the warm-replay overlays a round was measured on into its result."""
+        if patches.applied:
+            result["warm_patches_applied"] = list(patches.applied)
+        _stamp_warm_patch_outcome(result, patches.application, params, patches.pre_sha)
+
+    async def _run_prepared_round(self, request: _BaselineRunRequest, prepared: _MaterializedRound) -> dict[str, Any]:
+        """Hold one GPU lease over every round this attempt takes, and run them under it."""
+        patches = self._prepare_round_patches(prepared)
+        if patches.failure is not None:
+            return patches.failure
+        setup = prepared.setup
         # Ray-managed GPU execution (§12 T1): one held Ray lease (``num_gpus=TP``) spans this baseline's benchmark
         # rounds — a double-run's warmup + measure reuse one persistent server, so both must run under the same lease.
         from ._grid_runner import _num_gpus_for_config
         from ._ray_serving import maybe_serving_lease
 
-        bench_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(materialized_config_path))
-
+        lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(prepared.config_path))
         # Deep-clean any lingering server right before this round actually boots -- after every earlier gate that can
         # still bail out without starting a server (budget, warm-patch failure), so a round that will not run does not
         # pay for a scan it gets no benefit from.
         await self._pre_start_cleanup(
-            pid_dir=output_dir,
-            framework=lifecycle["framework"],
-            port=lifecycle["port"],
+            pid_dir=setup.output_dir,
+            framework=prepared.lifecycle["framework"],
+            port=prepared.lifecycle["port"],
+        )
+        execution = _RoundExecution(
+            {
+                "timeout_sec": setup.timeout_sec,
+                "override_result_dir": setup.override_result_dir,
+                "resolved_model": setup.resolved_model,
+                "materialized_config_path": prepared.config_path,
+                "inferencex_path": setup.inferencex_path,
+                "effective_extra_server_args": setup.server_args,
+                "params": setup.params,
+                "ctx": setup.ctx,
+                "run_eval_disabled": prepared.run_eval_disabled,
+                "serving_lease": lease,
+            },
+            lease,
+            patches,
+        )
+        if prepared.double_run:
+            return await self._run_cold_start_guarded_rounds(request, prepared, execution)
+        return await self._run_single_round(request, prepared, execution)
+
+    async def _run_single_round(
+        self,
+        request: _BaselineRunRequest,
+        prepared: _MaterializedRound,
+        execution: _RoundExecution,
+    ) -> dict[str, Any]:
+        """Run the one measured round an attempt takes when the cold-start guard does not apply."""
+        if prepared.double_run_wanted and not prepared.lifecycle["eligible"]:
+            log.info(
+                "baseline_executor: cold-start double-run not eligible (%s); running single round.",
+                prepared.lifecycle["reason"],
+            )
+        try:
+            result = await self._run_reported_round(
+                label=ROUND_SINGLE,
+                config_path=prepared.config_path,
+                output_dir=prepared.setup.output_dir,
+                recorder=request.recorder,
+                run_index=request.run_index,
+                **execution.common,
+            )
+            self._stamp_round_patches(result, execution.patches, prepared.setup.params)
+            return result
+        finally:
+            # A required timeline's tree is promoted by prelude after this returns, so it must stay patched;
+            # reverting here handed prelude a clean tree and silently lost the replay.
+            if execution.patches.applied and not isinstance(execution.patches.application, dict):
+                _revert_legacy_warm_patch_trees(prepared.setup.params)
+            _lifecycle.stop_agentx_servers(prepared.setup.output_dir)
+            if execution.lease is not None:
+                execution.lease.close()
+
+    async def _run_warmup_round(
+        self,
+        request: _BaselineRunRequest,
+        prepared: _MaterializedRound,
+        execution: _RoundExecution,
+    ) -> dict[str, Any]:
+        """Run round 1: boot and run, leaving the server up for the measured round to re-attach to."""
+        setup = prepared.setup
+        warmup_dir = setup.output_dir / "warmup_round"
+        # A replayed KB config is promoted onto ``current_best`` and becomes the reference every later measurement
+        # in the session is taken against, so it may not be adopted on throughput alone.
+        force_warmup_eval = (
+            str(getattr(setup.ctx.task, "kind", "") or "") == "replay_warm_recipe"
+            and not setup.defer_accuracy
+            and not request.force_disable_eval
+            and not setup.eval_disabled
+        )
+        warmup_cfg = self._write_lifecycle_config(
+            prepared.config_path,
+            warmup_dir,
+            cleanup=False,
+            pid_dir=setup.output_dir,
+            port=prepared.lifecycle["port"],
+            run_eval=True if force_warmup_eval else None,
+        )
+        log.info(
+            "baseline_executor: cold-start guard — warmup round (discarded, boots persistent server) in %s",
+            warmup_dir,
+        )
+        # Each warmup starts a fresh benchmark cap; the session deadline never resets.
+        return await self._run_reported_round(
+            label=ROUND_WARMUP,
+            config_path=warmup_cfg,
+            output_dir=warmup_dir,
+            recorder=request.recorder,
+            run_index=request.run_index,
+            **execution.common,
         )
 
-        common = {
-            "timeout_sec": timeout_sec,
-            "override_result_dir": override_result_dir,
-            "resolved_model": resolved_model,
-            "materialized_config_path": materialized_config_path,
-            "inferencex_path": effective_inferencex_path,
-            "effective_extra_server_args": effective_extra_server_args,
-            "params": params,
-            "ctx": ctx,
-            "run_eval_disabled": run_eval_disabled,
-            "serving_lease": bench_lease,
-        }
+    def _warmup_failure_result(
+        self,
+        warmup_result: dict[str, Any],
+        prepared: _MaterializedRound,
+        execution: _RoundExecution,
+    ) -> dict[str, Any]:
+        """Report the failed warmup as the attempt's result; a warmup failure almost certainly recurs."""
+        warmup_result.setdefault("nonfatal_warnings", [])
+        warmup_result["nonfatal_warnings"].append(
+            "baseline_warmup_round_failed",
+        )
+        log.warning(
+            "baseline_executor: warmup round failed (error_class=%s); skipping measured round",
+            warmup_result.get("error_class"),
+        )
+        self._stamp_round_patches(warmup_result, execution.patches, prepared.setup.params)
+        return warmup_result
 
-        if not double_run:
-            if double_run_wanted and not lifecycle["eligible"]:
-                log.info(
-                    "baseline_executor: cold-start double-run not eligible (%s); running single round.",
-                    lifecycle["reason"],
-                )
+    def _cold_anchor_when_hot_pass_unaffordable(
+        self,
+        warmup_result: dict[str, Any],
+        prepared: _MaterializedRound,
+    ) -> dict[str, Any] | None:
+        """Keep the warmup as the baseline when the run can no longer afford the hot pass."""
+        if prepared.setup.defer_accuracy:
+            return None
+        affordable, evidence = self._measure_round_affordable(
+            warmup_runtime_sec=warmup_result.get("subprocess_runtime_sec"),
+            warmup_post_ready_sec=warmup_result.get("post_ready_runtime_sec"),
+            ctx_extra=prepared.setup.ctx_extra,
+        )
+        if affordable:
+            return None
+        if evidence.get("one_more_measurement_sec"):
+            why = "a hot pass (%.0fs) and one variant to read against it (%.0fs) need %.0fs" % (
+                evidence.get("measure_round_sec", 0.0),
+                evidence.get("one_more_measurement_sec", 0.0),
+                evidence.get("expected_cost_sec", 0.0),
+            )
+        else:
+            why = "a hot pass needs %.0fs" % (evidence.get("expected_cost_sec", 0.0),)
+        log.warning(
+            "baseline_executor: %s, and %.0fs is left (bound=%s), so the hot "
+            "pass is not run. It would have bought a denominator nothing "
+            "could then be compared to, and its own overtime anchor would "
+            "have gone unused. Keeping the warmup as the baseline; it is the "
+            "cold anchor a single-round baseline would have produced, and "
+            "the GPU time it cost is already spent. The marker below says "
+            "the figure is cold so the session's later gains can be read "
+            "against a known-depressed denominator.",
+            why,
+            evidence.get("affordable_sec", 0.0),
+            evidence.get("bound", ""),
+        )
+        return _cold_anchor_from_warmup(warmup_result, dropped=evidence)
+
+    async def _run_measure_round(
+        self,
+        request: _BaselineRunRequest,
+        prepared: _MaterializedRound,
+        execution: _RoundExecution,
+        warmup_tput: Any,
+    ) -> dict[str, Any]:
+        """Run round 2: re-attach to the hot server as a client only, and measure it."""
+        setup = prepared.setup
+        measure_dir = setup.output_dir / "measure_round"
+        measure_cfg = self._write_lifecycle_config(
+            prepared.config_path,
+            measure_dir,
+            cleanup=not setup.defer_accuracy,
+            pid_dir=setup.output_dir,
+            port=prepared.lifecycle["port"],
+            run_eval=False,
+        )
+        log.info(
+            "baseline_executor: cold-start guard — measured baseline "
+            "round in %s (warmup tput=%.1f tok/s discarded, reusing "
+            "hot server)",
+            measure_dir,
+            warmup_tput or 0.0,
+        )
+        return await self._run_reported_round(
+            label=ROUND_MEASURE,
+            server_already_ready=True,
+            config_path=measure_cfg,
+            output_dir=measure_dir,
+            recorder=request.recorder,
+            run_index=request.run_index,
+            **execution.common,
+        )
+
+    def _record_measured_against_warmup(self, result: dict[str, Any], warmup_result: dict[str, Any]) -> None:
+        """Credit the measured pass with the boot it re-attached to, and say what the cold figure would have claimed."""
+        result.setdefault("nonfatal_warnings", [])
+        result["nonfatal_warnings"].append(
+            "baseline_double_run_discarded_first",
+        )
+        # The measured pass re-attaches to the server launched by the warmup pass.
+        for evidence_field in (
+            "launch_evidence",
+            "launch_evidence_path",
+            "server_log_path",
+        ):
+            if warmup_result.get(evidence_field):
+                result[evidence_field] = warmup_result[evidence_field]
+        warmup_evidence = result.get("launch_evidence")
+        if isinstance(warmup_evidence, Mapping):
+            measured_evidence = dict(warmup_evidence)
+            measured_evidence["warm_reuse"] = {
+                **dict(warmup_evidence.get("warm_reuse") or {}),
+                "reused_ready_server": True,
+                "provenance": "warmup_round",
+                "source_server_log_path": str(result.get("server_log_path") or ""),
+            }
+            result["launch_evidence"] = measured_evidence
+        warmup_tput = warmup_result.get("output_throughput")
+        warmup_runtime = warmup_result.get("subprocess_runtime_sec")
+        result["warmup_round_tput"] = warmup_tput
+        self._record_baseline_convergence(result, warmup_tput)
+        # The Coordinator promotes ``subprocess_runtime_sec`` into the explore soft-kill anchor.
+        if isinstance(warmup_runtime, (int, float)) and warmup_runtime > 0:
+            result["measure_round_runtime_sec"] = result.get(
+                "subprocess_runtime_sec",
+            )
+            result["subprocess_runtime_sec"] = round(
+                float(warmup_runtime),
+                2,
+            )
+            # The split belongs to round 1 for the same reason its wall-clock does: round 2 re-attached, so it
+            # has no boot to separate and its own reading says nothing about what booting this workload costs.
+            result["post_ready_runtime_sec"] = warmup_result.get("post_ready_runtime_sec")
+        hot = result.get("output_throughput") or 0.0
+        cold = warmup_tput or 0.0
+        log.info(
+            "baseline_executor: cold-start guard — measured "
+            "baseline=%.1f tok/s (warmup=%.1f tok/s discarded; "
+            "artifact would have been +%.0f%%)",
+            hot,
+            cold,
+            ((hot / cold - 1.0) * 100.0) if cold > 0 else 0.0,
+        )
+
+    def _post_measure_accuracy_decision(self, setup: _RoundSetup, result: dict[str, Any]) -> _AccuracyStageDecision:
+        """Decide whether this measured round earned the staged accuracy pass."""
+        params = setup.params
+        hot = float(result.get("output_throughput") or 0.0)
+        keep_policy = params.get("post_measure_accuracy_keep_policy")
+        if keep_policy is None:
             try:
-                result = await self._run_reported_round(
-                    label=ROUND_SINGLE,
-                    config_path=config_path,
-                    output_dir=output_dir,
-                    recorder=recorder,
-                    run_index=run_index,
-                    **common,
-                )
-                if applied_patches:
-                    result["warm_patches_applied"] = list(applied_patches)
-                _stamp_warm_patch_outcome(result, patch_application, params, _pre_patch_sha)
-                return result
-            finally:
-                # A required timeline's tree is promoted by prelude after this returns, so it must stay patched;
-                # reverting here handed prelude a clean tree and silently lost the replay.
-                if applied_patches and not isinstance(patch_application, dict):
-                    _revert_legacy_warm_patch_trees(params)
-                _lifecycle.stop_agentx_servers(output_dir)
-                if bench_lease is not None:
-                    bench_lease.close()
+                min_tput = float(params.get("post_measure_accuracy_min_tput", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                min_tput = 0.0
+            return _AccuracyStageDecision(
+                hot >= min_tput,
+                {
+                    "status": "skipped",
+                    "reason": "throughput_below_threshold",
+                    "minimum_tput": min_tput,
+                    "observed_tput": hot,
+                },
+            )
+        performance = assess_integrate_performance(setup.shared_state, result, **keep_policy)
+        graded = performance.graded
+        return _AccuracyStageDecision(
+            performance.decision == "KEEP",
+            {
+                "status": "skipped",
+                "reason": (
+                    "intvty_regression"
+                    if graded.graded_on_intvty and graded.verdict == "REVERT"
+                    else "performance_keep_not_eligible"
+                ),
+                "graded_objective": graded.objective,
+                "candidate": graded.candidate,
+                "reference": graded.reference,
+                "base_tput": keep_policy["base_tput"],
+                "gain_pct": performance.gain_pct,
+                "stack_incremental_gain_pct": performance.stack_incremental_gain_pct,
+                "degrade_reason": graded.degrade_reason,
+            },
+        )
 
-        framework = lifecycle["framework"]
-        port = lifecycle["port"]
-        # pid_dir is shared across both rounds so round 2 discovers round 1's server; task root keeps it per-task
-        # isolated.
-        pid_dir = output_dir
+    async def _run_accuracy_round(
+        self,
+        request: _BaselineRunRequest,
+        prepared: _MaterializedRound,
+        execution: _RoundExecution,
+    ) -> dict[str, Any]:
+        """Run the staged accuracy round on the server the measured pass left hot."""
+        setup = prepared.setup
+        accuracy_dir = setup.output_dir / "accuracy_round"
+        accuracy_cfg = self._write_lifecycle_config(
+            prepared.config_path,
+            accuracy_dir,
+            cleanup=True,
+            pid_dir=setup.output_dir,
+            port=prepared.lifecycle["port"],
+            run_eval=True,
+        )
+        return await self._run_reported_round(
+            label=ROUND_ACCURACY,
+            server_already_ready=True,
+            config_path=accuracy_cfg,
+            output_dir=accuracy_dir,
+            recorder=request.recorder,
+            run_index=request.run_index,
+            **{
+                **execution.common,
+                "run_eval_disabled": False,
+            },
+        )
+
+    async def _settle_deferred_accuracy(
+        self,
+        request: _BaselineRunRequest,
+        prepared: _MaterializedRound,
+        execution: _RoundExecution,
+        result: dict[str, Any],
+    ) -> None:
+        """Stage the accuracy round after the measurement, or record why it was not worth its GPU time."""
+        decision = self._post_measure_accuracy_decision(prepared.setup, result)
+        if not decision.run:
+            result["accuracy_stage"] = decision.skipped
+            return
+        accuracy_result = await self._run_accuracy_round(request, prepared, execution)
+        result["accuracy_stage"] = {
+            "status": accuracy_result.get("status"),
+            "error_class": accuracy_result.get("error_class"),
+            "workspace": accuracy_result.get("workspace"),
+        }
+        if accuracy_result.get("status") != "succeeded":
+            result.setdefault("nonfatal_warnings", [])
+            result["nonfatal_warnings"].append("post_measure_accuracy_failed")
+            return
+        for key in (
+            "accuracy",
+            "accuracy_task",
+            "accuracy_metric",
+            "accuracy_source",
+        ):
+            if accuracy_result.get(key) is not None:
+                result[key] = accuracy_result[key]
+
+    async def _run_cold_start_guarded_rounds(
+        self,
+        request: _BaselineRunRequest,
+        prepared: _MaterializedRound,
+        execution: _RoundExecution,
+    ) -> dict[str, Any]:
+        """Boot on a discarded warmup round, then measure on the hot server it leaves running."""
+        setup = prepared.setup
         try:
-            # Round 1 (warmup): boot + run, leave running so round 2 can re-attach.
-            warmup_dir = output_dir / "warmup_round"
-            # A replayed KB config is promoted onto ``current_best`` and becomes the reference every later measurement
-            # in the session is taken against, so it may not be adopted on throughput alone.
-            force_warmup_eval = (
-                str(getattr(ctx.task, "kind", "") or "") == "replay_warm_recipe"
-                and not defer_accuracy_until_after_measure
-                and not force_disable_eval
-                and not eval_disabled
-            )
-            warmup_cfg = self._write_lifecycle_config(
-                materialized_config_path,
-                warmup_dir,
-                cleanup=False,
-                pid_dir=pid_dir,
-                port=port,
-                run_eval=True if force_warmup_eval else None,
-            )
-            log.info(
-                "baseline_executor: cold-start guard — warmup round (discarded, boots persistent server) in %s",
-                warmup_dir,
-            )
-            # Each warmup starts a fresh benchmark cap; the session deadline never resets.
-            warmup_result = await self._run_reported_round(
-                label=ROUND_WARMUP,
-                config_path=warmup_cfg,
-                output_dir=warmup_dir,
-                recorder=recorder,
-                run_index=run_index,
-                **common,
-            )
+            warmup_result = await self._run_warmup_round(request, prepared, execution)
             if warmup_result.get("status") != "succeeded":
-                # Warmup failure almost certainly recurs, so skip the measured round.
-                warmup_result.setdefault("nonfatal_warnings", [])
-                warmup_result["nonfatal_warnings"].append(
-                    "baseline_warmup_round_failed",
-                )
-                log.warning(
-                    "baseline_executor: warmup round failed (error_class=%s); skipping measured round",
-                    warmup_result.get("error_class"),
-                )
-                if applied_patches:
-                    warmup_result["warm_patches_applied"] = list(applied_patches)
-                _stamp_warm_patch_outcome(warmup_result, patch_application, params, _pre_patch_sha)
-                return warmup_result
+                return self._warmup_failure_result(warmup_result, prepared, execution)
             warmup_tput = warmup_result.get("output_throughput")
-            warmup_runtime = warmup_result.get("subprocess_runtime_sec")
-            warmup_post_ready = warmup_result.get("post_ready_runtime_sec")
             await report_progress(
                 unit="baseline_round",
                 label="warmup",
@@ -1939,68 +2343,13 @@ class BenchmarkRunExecutor:
                 total=2,
                 status="succeeded",
                 output_throughput=warmup_tput,
-                runtime_sec=warmup_runtime,
+                runtime_sec=warmup_result.get("subprocess_runtime_sec"),
             )
-
-            if not defer_accuracy_until_after_measure:
-                affordable, gate_evidence = self._measure_round_affordable(
-                    warmup_runtime_sec=warmup_runtime,
-                    warmup_post_ready_sec=warmup_post_ready,
-                    ctx_extra=extra,
-                )
-                if not affordable:
-                    if gate_evidence.get("one_more_measurement_sec"):
-                        why = "a hot pass (%.0fs) and one variant to read against it (%.0fs) need %.0fs" % (
-                            gate_evidence.get("measure_round_sec", 0.0),
-                            gate_evidence.get("one_more_measurement_sec", 0.0),
-                            gate_evidence.get("expected_cost_sec", 0.0),
-                        )
-                    else:
-                        why = "a hot pass needs %.0fs" % (gate_evidence.get("expected_cost_sec", 0.0),)
-                    log.warning(
-                        "baseline_executor: %s, and %.0fs is left (bound=%s), so the hot "
-                        "pass is not run. It would have bought a denominator nothing "
-                        "could then be compared to, and its own overtime anchor would "
-                        "have gone unused. Keeping the warmup as the baseline; it is the "
-                        "cold anchor a single-round baseline would have produced, and "
-                        "the GPU time it cost is already spent. The marker below says "
-                        "the figure is cold so the session's later gains can be read "
-                        "against a known-depressed denominator.",
-                        why,
-                        gate_evidence.get("affordable_sec", 0.0),
-                        gate_evidence.get("bound", ""),
-                    )
-                    return _cold_anchor_from_warmup(warmup_result, dropped=gate_evidence)
-
-            # Round 2 (measured): re-attach to the hot server (client only).
-            measure_dir = output_dir / "measure_round"
-            measure_cfg = self._write_lifecycle_config(
-                materialized_config_path,
-                measure_dir,
-                cleanup=not defer_accuracy_until_after_measure,
-                pid_dir=pid_dir,
-                port=port,
-                run_eval=False,
-            )
-            log.info(
-                "baseline_executor: cold-start guard — measured baseline "
-                "round in %s (warmup tput=%.1f tok/s discarded, reusing "
-                "hot server)",
-                measure_dir,
-                warmup_tput or 0.0,
-            )
-            result = await self._run_reported_round(
-                label=ROUND_MEASURE,
-                server_already_ready=True,
-                config_path=measure_cfg,
-                output_dir=measure_dir,
-                recorder=recorder,
-                run_index=run_index,
-                **common,
-            )
-            if applied_patches:
-                result["warm_patches_applied"] = list(applied_patches)
-            _stamp_warm_patch_outcome(result, patch_application, params, _pre_patch_sha)
+            cold_anchor = self._cold_anchor_when_hot_pass_unaffordable(warmup_result, prepared)
+            if cold_anchor is not None:
+                return cold_anchor
+            result = await self._run_measure_round(request, prepared, execution, warmup_tput)
+            self._stamp_round_patches(result, execution.patches, setup.params)
             if result.get("status") != "succeeded" and result.get("error_class") == SESSION_TIME_EXHAUSTED_CLASS:
                 # The gate before this pass admitted it and the run's clock took it anyway -- the pass overran what it
                 # was priced at.
@@ -2018,140 +2367,45 @@ class BenchmarkRunExecutor:
                     },
                 )
             if result.get("status") == "succeeded":
-                result.setdefault("nonfatal_warnings", [])
-                result["nonfatal_warnings"].append(
-                    "baseline_double_run_discarded_first",
-                )
-                # The measured pass re-attaches to the server launched by the warmup pass.
-                for evidence_field in (
-                    "launch_evidence",
-                    "launch_evidence_path",
-                    "server_log_path",
-                ):
-                    if warmup_result.get(evidence_field):
-                        result[evidence_field] = warmup_result[evidence_field]
-                warmup_evidence = result.get("launch_evidence")
-                if isinstance(warmup_evidence, Mapping):
-                    measured_evidence = dict(warmup_evidence)
-                    measured_evidence["warm_reuse"] = {
-                        **dict(warmup_evidence.get("warm_reuse") or {}),
-                        "reused_ready_server": True,
-                        "provenance": "warmup_round",
-                        "source_server_log_path": str(result.get("server_log_path") or ""),
-                    }
-                    result["launch_evidence"] = measured_evidence
-                result["warmup_round_tput"] = warmup_tput
-                self._record_baseline_convergence(result, warmup_tput)
-                # The Coordinator promotes ``subprocess_runtime_sec`` into the explore soft-kill anchor.
-                if isinstance(warmup_runtime, (int, float)) and warmup_runtime > 0:
-                    result["measure_round_runtime_sec"] = result.get(
-                        "subprocess_runtime_sec",
-                    )
-                    result["subprocess_runtime_sec"] = round(
-                        float(warmup_runtime),
-                        2,
-                    )
-                    # The split belongs to round 1 for the same reason its wall-clock does: round 2 re-attached, so it
-                    # has no boot to separate and its own reading says nothing about what booting this workload costs.
-                    result["post_ready_runtime_sec"] = warmup_result.get("post_ready_runtime_sec")
-                _hot = result.get("output_throughput") or 0.0
-                _cold = warmup_tput or 0.0
-                log.info(
-                    "baseline_executor: cold-start guard — measured "
-                    "baseline=%.1f tok/s (warmup=%.1f tok/s discarded; "
-                    "artifact would have been +%.0f%%)",
-                    _hot,
-                    _cold,
-                    ((_hot / _cold - 1.0) * 100.0) if _cold > 0 else 0.0,
-                )
-                if defer_accuracy_until_after_measure:
-                    keep_policy = params.get("post_measure_accuracy_keep_policy")
-                    if keep_policy is not None:
-                        performance = assess_integrate_performance(live_shared_state, result, **keep_policy)
-                        run_accuracy = performance.decision == "KEEP"
-                        graded = performance.graded
-                        skipped_accuracy = {
-                            "status": "skipped",
-                            "reason": (
-                                "intvty_regression"
-                                if graded.graded_on_intvty and graded.verdict == "REVERT"
-                                else "performance_keep_not_eligible"
-                            ),
-                            "graded_objective": graded.objective,
-                            "candidate": graded.candidate,
-                            "reference": graded.reference,
-                            "base_tput": keep_policy["base_tput"],
-                            "gain_pct": performance.gain_pct,
-                            "stack_incremental_gain_pct": performance.stack_incremental_gain_pct,
-                            "degrade_reason": graded.degrade_reason,
-                        }
-                    else:
-                        try:
-                            min_tput = float(params.get("post_measure_accuracy_min_tput", 0.0) or 0.0)
-                        except (TypeError, ValueError):
-                            min_tput = 0.0
-                        run_accuracy = float(_hot or 0.0) >= min_tput
-                        skipped_accuracy = {
-                            "status": "skipped",
-                            "reason": "throughput_below_threshold",
-                            "minimum_tput": min_tput,
-                            "observed_tput": float(_hot or 0.0),
-                        }
-                    if run_accuracy:
-                        accuracy_dir = output_dir / "accuracy_round"
-                        accuracy_cfg = self._write_lifecycle_config(
-                            materialized_config_path,
-                            accuracy_dir,
-                            cleanup=True,
-                            pid_dir=pid_dir,
-                            port=port,
-                            run_eval=True,
-                        )
-                        accuracy_result = await self._run_reported_round(
-                            label=ROUND_ACCURACY,
-                            server_already_ready=True,
-                            config_path=accuracy_cfg,
-                            output_dir=accuracy_dir,
-                            recorder=recorder,
-                            run_index=run_index,
-                            **{
-                                **common,
-                                "run_eval_disabled": False,
-                            },
-                        )
-                        result["accuracy_stage"] = {
-                            "status": accuracy_result.get("status"),
-                            "error_class": accuracy_result.get("error_class"),
-                            "workspace": accuracy_result.get("workspace"),
-                        }
-                        if accuracy_result.get("status") == "succeeded":
-                            for key in (
-                                "accuracy",
-                                "accuracy_task",
-                                "accuracy_metric",
-                                "accuracy_source",
-                            ):
-                                if accuracy_result.get(key) is not None:
-                                    result[key] = accuracy_result[key]
-                        else:
-                            result.setdefault("nonfatal_warnings", [])
-                            result["nonfatal_warnings"].append("post_measure_accuracy_failed")
-                    else:
-                        result["accuracy_stage"] = skipped_accuracy
+                self._record_measured_against_warmup(result, warmup_result)
+                if setup.defer_accuracy:
+                    await self._settle_deferred_accuracy(request, prepared, execution, result)
             return result
         finally:
             # Defensive teardown so no persistent server leaks.
             _lifecycle.teardown_lifecycle_server(
-                pid_dir=pid_dir,
-                framework=framework,
-                port=port,
+                pid_dir=setup.output_dir,
+                framework=prepared.lifecycle["framework"],
+                port=prepared.lifecycle["port"],
             )
             # Revert warm-replay patches to prevent state leakage into subsequent tasks that reuse the same InferenceX
             # checkout.
-            if applied_patches and not isinstance(patch_application, dict):
-                _revert_legacy_warm_patch_trees(params)
-            if bench_lease is not None:
-                bench_lease.close()
+            if execution.patches.applied and not isinstance(execution.patches.application, dict):
+                _revert_legacy_warm_patch_trees(setup.params)
+            if execution.lease is not None:
+                execution.lease.close()
+
+    async def _run_once(
+        self,
+        ctx: RunnerContext,
+        *,
+        force_disable_eval: bool = False,
+        force_drop_moe_runner_backend: bool = False,
+        recorder: Any = None,
+        run_index: int = 0,
+    ) -> dict[str, Any]:
+        """Run the Magpie baseline benchmark and parse its result."""
+        request = _BaselineRunRequest(force_disable_eval, force_drop_moe_runner_backend, recorder, run_index)
+        setup = self._resolve_round_setup(ctx, request)
+        if setup.failure is not None:
+            return setup.failure
+        prepared = await self._materialize_round_config(request, setup)
+        if prepared.failure is not None:
+            return prepared.failure
+        refused = self._round_refused_before_ignition(prepared)
+        if refused is not None:
+            return refused
+        return await self._run_prepared_round(request, prepared)
 
     def _settle_patch_application(
         self,
