@@ -150,7 +150,7 @@ def _make_lane_agent_factory(
 ):
     """Build the factory that binds one Implementer session to one lane."""
     from kernelforge.agent_backends.base import session_environment
-    from kernelforge.execution.aiter_cache import child_cache_environment
+    from kernelforge.tools.aiter_cache import child_cache_environment
 
     def factory(lane_dir: str, serialized_driver: str | None):
         # Each lane gets its own Config: a provider that requires the workspace as its cwd would otherwise start every

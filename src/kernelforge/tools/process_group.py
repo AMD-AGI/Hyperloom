@@ -10,7 +10,7 @@ import contextlib
 import os
 import signal
 
-from kernelforge.execution.aiter_cache import cleanup_current_owned_aiter_locks
+from kernelforge.tools.aiter_cache import cleanup_current_owned_aiter_locks
 
 
 async def kill_process_group(proc: asyncio.subprocess.Process) -> None:

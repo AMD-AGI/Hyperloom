@@ -97,7 +97,7 @@ _PROBE_CHILD_ENV_VARS = (
     "CUDA_VISIBLE_DEVICES",
     "GPU_DEVICE_ORDINAL",
     # Build caches, and the aiter cache isolation this campaign installs in
-    # ``execution.aiter_cache.configure_aiter_cache_isolation``.
+    # ``tools.aiter_cache.configure_aiter_cache_isolation``.
     "TRITON_CACHE_DIR",
     "TORCHINDUCTOR_CACHE_DIR",
     "AITER_ROOT_DIR",

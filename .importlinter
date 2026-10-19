@@ -153,10 +153,10 @@ ignore_imports =
 unmatched_ignore_imports_alerting = none
 
 
-[importlinter:contract:kf-execution-foundation]
-name = kernelforge execution does not depend on evaluation, product or entry layers
+[importlinter:contract:kf-tools-foundation]
+name = kernelforge tools do not depend on evaluation, product or entry layers
 type = forbidden
-source_modules = kernelforge.execution
+source_modules = kernelforge.tools
 forbidden_modules =
     kernelforge.agent_backends
     kernelforge.assembly

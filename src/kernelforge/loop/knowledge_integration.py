@@ -27,7 +27,7 @@ from kernelforge.knowledge.kb_store.identity.run import LoopKernel
 from kernelforge.knowledge.kb_store.identity.implementation import (
     canonical_owner_framework,
 )
-from kernelforge.durable_io import atomic_write_text, fsync_directory
+from kernelforge.tools.durable_io import atomic_write_text, fsync_directory
 from kernelforge.evaluation.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
     KEEP_MEASUREMENT_COUNT,

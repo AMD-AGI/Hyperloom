@@ -15,7 +15,7 @@ from typing import Any, ClassVar
 import yaml
 
 from kernelforge.evaluation.correctness.numerical import REQUEST_ENV, judge_evidence, validate_contract
-from kernelforge.execution.process_group import communicate_process_group
+from kernelforge.tools.process_group import communicate_process_group
 
 CANONICAL_CONFIG_FILENAME = "config.yaml"
 

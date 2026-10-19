@@ -125,12 +125,12 @@ from kernelforge.evaluation.benchmark.runner import (
     BenchRun,
     measure_wallclock,
 )
-from kernelforge.execution.process_group import communicate_process_group
+from kernelforge.tools.process_group import communicate_process_group
 from kernelforge.loop.new_path_allowlist import (
     matches_commit_new_paths,
     normalize_commit_new_paths,
 )
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.evaluation.scoring import (
     DEFAULT_SNR_THRESHOLD_DB,
     KEEP_MEASUREMENT_COUNT,
@@ -4656,7 +4656,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             )
         finally:
             try:
-                from kernelforge.execution.aiter_cache import (
+                from kernelforge.tools.aiter_cache import (
                     cleanup_current_owned_aiter_locks,
                 )
 

@@ -414,7 +414,7 @@ duplicated-lines src/kernelforge/tests/fusion/test_resolve_and_cli.py 36
 duplicated-lines src/kernelforge/tests/knowledge/kb_store/test_reader.py 18
 duplicated-lines src/kernelforge/tests/knowledge/kb_store/test_writer.py 18
 duplicated-lines src/kernelforge/tests/loop/test_knowledge_integration.py 28
-duplicated-lines src/kernelforge/tests/execution/test_aiter_cache.py 77
+duplicated-lines src/kernelforge/tests/tools/test_aiter_cache.py 77
 duplicated-lines src/kernelforge/tests/test_best_reporting.py 44
 duplicated-lines src/kernelforge/tests/test_campaign_cross_process.py 20
 duplicated-lines src/kernelforge/tests/test_claude_resume.py 17

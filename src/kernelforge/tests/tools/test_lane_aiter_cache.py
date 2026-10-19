@@ -22,7 +22,7 @@ from kernelforge.agent_backends.codex import CodexBackend
 from kernelforge.cli import lanes as cli_lanes
 from kernelforge.config import Config
 from kernelforge.orchestrator.agent import ImplementerSetup, ImplementerTask
-from kernelforge.execution import aiter_cache
+from kernelforge.tools import aiter_cache
 from kernelforge.loop.fanout import SERIALIZED_DRIVER_NAME
 from kernelforge.llm.git import git
 

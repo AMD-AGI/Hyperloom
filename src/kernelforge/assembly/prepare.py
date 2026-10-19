@@ -20,7 +20,7 @@ import yaml
 
 from kernelforge.assembly.capture import bind_compile
 from kernelforge.assembly.compiler import _validate_source
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.evaluation.benchmark.runner import BenchRun, bench_wallclock, calculate_mean_case_speedup
 from kernelforge.evaluation.correctness.canonical import accept_candidate
 from kernelforge.evaluation.correctness.numerical import validate_contract, validate_source_independence

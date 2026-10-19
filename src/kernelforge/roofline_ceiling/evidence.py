@@ -31,7 +31,7 @@ from pathlib import Path
 from collections.abc import Mapping
 from typing import Any, Sequence
 
-from kernelforge.execution.process_group import communicate_process_group
+from kernelforge.tools.process_group import communicate_process_group
 from kernelforge.roofline_ceiling.device_profile import DeviceIdentity, describe_device
 
 log = logging.getLogger("kernelforge.roofline_ceiling")

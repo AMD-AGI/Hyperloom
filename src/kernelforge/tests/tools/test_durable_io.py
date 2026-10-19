@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from kernelforge.durable_io import (
+from kernelforge.tools.durable_io import (
     atomic_write_bytes,
     atomic_write_text,
     fsync_tree,

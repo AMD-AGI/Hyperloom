@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kernelforge.llm.git import git
-from kernelforge.durable_io import atomic_write_text
+from kernelforge.tools.durable_io import atomic_write_text
 from kernelforge.loop.reporting import (
     BestResultPublisher,
     KeepBundle,

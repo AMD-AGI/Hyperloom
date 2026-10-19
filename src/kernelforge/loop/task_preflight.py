@@ -24,7 +24,7 @@ from kernelforge.evaluation.benchmark.runner import BenchRun, bench_wallclock
 from kernelforge.evaluation.correctness.driver import test_correctness
 from kernelforge.evaluation.profiling.contracts import PROFILE_RUN_FLAG
 from kernelforge.evaluation.scoring import DEFAULT_SNR_THRESHOLD_DB
-from kernelforge.execution.aiter_cache import cleanup_current_owned_aiter_locks
+from kernelforge.tools.aiter_cache import cleanup_current_owned_aiter_locks
 
 
 # Preflight — deterministic driver-contract validation

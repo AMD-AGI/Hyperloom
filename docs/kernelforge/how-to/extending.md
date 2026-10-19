@@ -24,7 +24,9 @@ are a new kernel backend, a new GPU tool, and new knowledge.
 
 ## Add a GPU toolchain helper
 
-1. Create `src/kernelforge/mcp_server/tools/mytool.py`.
+1. Create the helper under `src/kernelforge/evaluation/` when it measures or
+   validates a kernel, or under `src/kernelforge/tools/` when it is a
+   cross-feature technical helper with no evaluation policy.
 2. Call it from the loop stage that needs it — the tools are plain functions,
    invoked directly rather than through a protocol.
 

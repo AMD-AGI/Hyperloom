@@ -1683,7 +1683,7 @@ def forge_loop(request: ForgeLoopRequest):
 
     # AITER cache isolation: give this attempt its own runtime-build cache so parallel forge processes never
     # share/evict each other's kernels.
-    from kernelforge.execution.aiter_cache import (
+    from kernelforge.tools.aiter_cache import (
         activate_aiter_cache_for_sources,
         configure_aiter_cache_isolation,
         seed_prebuilt_modules,
