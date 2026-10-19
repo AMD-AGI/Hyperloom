@@ -3489,7 +3489,7 @@ def _candidate_model_config_paths(model_name: str) -> list[Path]:
         _hit = try_to_load_from_cache(repo_id=text, filename="config.json")
         if isinstance(_hit, str):
             candidates.append(Path(_hit))
-    except Exception:  # noqa: BLE001 - hub cache probe is optional
+    except (ImportError, OSError, ValueError):
         pass
     out: list[Path] = []
     seen: set[str] = set()
