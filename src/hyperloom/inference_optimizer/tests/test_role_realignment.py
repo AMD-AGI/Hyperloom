@@ -149,8 +149,7 @@ def test_shared_state_phase_status_summary_renders_compact_block():
         to_phase=phase,
         reason="prelude_done",
         evidence={"baseline_tput": 100},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1_000_000.0,
+        at=_ps.PhaseClock(ts="2026-05-19T00:00:00+00:00", ts_unix=1_000_000.0),
     )
     s.phase_budget_pct = {phase: 0.5}
     out = _ps.phase_status_summary(s, now_unix=1_000_120.0)
@@ -173,8 +172,7 @@ def test_shared_state_phase_status_summary_no_max_minutes_marks_unlimited():
         to_phase="FRAMEWORK_AGENT",
         reason="prelude_done",
         evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1.0,
+        at=_ps.PhaseClock(ts="2026-05-19T00:00:00+00:00", ts_unix=1.0),
     )
     out = _ps.phase_status_summary(s, now_unix=10.0)
     assert "unlimited run" in out.lower()

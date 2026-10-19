@@ -2117,7 +2117,10 @@ async def test_handle_unpromotable_profile_clears_the_initial_analysis_gate(sess
             {"status": "failed", "measurement_status": "failed", "error_class": "no_trace_files"},
         )
         assert c.shared_state.auto_roofline_pending_task_id == ""
-        assert phase_state.compute_next_phase(c.shared_state, kernel_enabled=True) is not None
+        assert (
+            phase_state.compute_next_phase(c.shared_state, flags=phase_state.PhaseFlags(kernel_enabled=True))
+            is not None
+        )
 
         c.shared_state.auto_roofline_pending_task_id = "t-other"
         await c.writeback.handle_unpromotable_result(
@@ -2154,7 +2157,7 @@ async def test_a_phase_releases_the_initial_analysis_gate_when_its_task_ended_un
         assert c.shared_state.auto_roofline_pending_task_id == task.task_id
 
         await c.tasks.transition(task.task_id, ending)
-        assert phase_state.compute_next_phase(c.shared_state, kernel_enabled=True) is None
+        assert phase_state.compute_next_phase(c.shared_state, flags=phase_state.PhaseFlags(kernel_enabled=True)) is None
         await c.phase_machine.advance_phase_if_needed()
         assert c.shared_state.auto_roofline_pending_task_id == ""
     finally:

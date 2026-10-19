@@ -601,10 +601,10 @@ class TestPreDispatchBackstop:
         assert coord.shared_state.last_conc_sweep["skip_reason"] == "session_time_budget"
         assert coord.shared_state.last_conc_sweep["was_skipped"] is True
         # Verify the sweep exit logic sees the recorded skip as a "done" closeout.
-        from hyperloom.orchestrator.phases.machine_state import workflow_predicate_inputs, replay_next_phase
+        from hyperloom.orchestrator.phases.machine_state import PhaseFlags, replay_next_phase, workflow_predicate_inputs
 
         coord.shared_state.phase = "SWEEP"
-        inputs = workflow_predicate_inputs(coord.shared_state, optimize_enabled=False)
+        inputs = workflow_predicate_inputs(coord.shared_state, flags=PhaseFlags(optimize_enabled=False))
         result = replay_next_phase(inputs)
         assert result is not None
         _target, reason, evidence = result

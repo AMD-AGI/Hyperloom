@@ -1154,7 +1154,7 @@ def test_record_conc_sweep_writes_last_conc_sweep():
 
 def test_sweep_exits_based_on_ladder_status():
     """The concurrency ladder is the only sweep, so its status is the phase's."""
-    from hyperloom.orchestrator.phases.machine_state import compute_next_phase
+    from hyperloom.orchestrator.phases.machine_state import PhaseFlags, compute_next_phase
 
     def _State(last_conc_sweep=None):
         return SharedState(
@@ -1167,7 +1167,7 @@ def test_sweep_exits_based_on_ladder_status():
 
     def _next(state):
         # optimize_enabled=False blocks cycle_reloop so the sweep status drives the exit.
-        return compute_next_phase(state, optimize_enabled=False)
+        return compute_next_phase(state, flags=PhaseFlags(optimize_enabled=False))
 
     # Nothing recorded => don't exit (budget remaining).
     assert _next(_State()) is None
@@ -2607,7 +2607,7 @@ def test_a_cancelled_sweep_stops_the_ladder_and_is_not_failed(
     """
     from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
     from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
-    from hyperloom.orchestrator.phases.machine_state import compute_next_phase
+    from hyperloom.orchestrator.phases.machine_state import PhaseFlags, compute_next_phase
 
     teardown_log: list[tuple] = []
     _patch_lifecycle_eligible(monkeypatch, teardown_log)
@@ -2663,7 +2663,7 @@ def test_a_cancelled_sweep_stops_the_ladder_and_is_not_failed(
         phase_budget_pct={"SWEEP": 0.05, "CLOSE": 0.02},
     )
     sweep_state.elapsed_charged_sec = 7000.0
-    result = compute_next_phase(sweep_state, now_unix=now, optimize_enabled=False)
+    result = compute_next_phase(sweep_state, now_unix=now, flags=PhaseFlags(optimize_enabled=False))
     assert result is not None
     target, reason, evidence = result
     assert target == "CLOSE"
@@ -2678,7 +2678,7 @@ def test_the_sweep_phase_budget_waits_for_the_sweep_it_granted():
     session clock still had. Ten minutes in, with no result yet, the phase waits for the grant; once the grant has
     run out, or the sweep has landed, the ordinary exits apply again.
     """
-    from hyperloom.orchestrator.phases.machine_state import compute_next_phase
+    from hyperloom.orchestrator.phases.machine_state import PhaseFlags, compute_next_phase
 
     now = 1_800_000_000.0
 
@@ -2696,7 +2696,7 @@ def test_the_sweep_phase_budget_waits_for_the_sweep_it_granted():
         return state
 
     def _next(state: SharedState):
-        return compute_next_phase(state, now_unix=now, optimize_enabled=False)
+        return compute_next_phase(state, now_unix=now, flags=PhaseFlags(optimize_enabled=False))
 
     granted = now - 600.0 + 3624 + 600
     assert _next(_state(granted_until=granted)) is None

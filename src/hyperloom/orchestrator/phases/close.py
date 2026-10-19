@@ -860,12 +860,14 @@ class ClosePhase(CoordinatorCollaborator):
         now = time.time()
         decision = _phase_state.compute_next_phase(
             state,
-            kernel_enabled=machine.kernel_enabled(),
-            optimize_enabled=machine.optimize_enabled(),
-            enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
             enablement_in_flight=enablement_in_flight,
             kernel_work_in_flight=kernel_facts.agent_in_flight,
             now_unix=now,
+            flags=_phase_state.PhaseFlags(
+                kernel_enabled=machine.kernel_enabled(),
+                optimize_enabled=machine.optimize_enabled(),
+                enablement_enabled=self._coord.enablement_lane.enablement_admitted(),
+            ),
         )
         assert decision is not None and decision[0] == _phase_state.PHASE_CLOSE
         target, reason, evidence = decision
@@ -874,7 +876,9 @@ class ClosePhase(CoordinatorCollaborator):
             state.consume_pending_escalate_hint()
         elif state.pending_escalate_hint:
             state.discard_pending_escalate_hint()
-        _phase_state.record_phase_transition(state, to_phase=target, reason=reason, evidence=evidence, ts_unix=now)
+        _phase_state.record_phase_transition(
+            state, to_phase=target, reason=reason, evidence=evidence, at=_phase_state.PhaseClock(ts_unix=now)
+        )
         machine.fire_phase_exit(Transition(from_phase=prior, to_phase=target, reason=reason, evidence=evidence))
         _phase_state.record_lifecycle_event(
             state, step=target, status=_phase_state.LIFECYCLE_STATUS_ENTER, phase=target, detail=f"reason={reason}"
