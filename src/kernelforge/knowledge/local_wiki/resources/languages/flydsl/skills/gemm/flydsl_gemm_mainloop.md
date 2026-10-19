@@ -42,7 +42,7 @@ are in `flydsl_gemm_schedule_and_locality.md`. LDS layout, global→LDS DMA and 
 | Occupancy | 2 waves per SIMD | 1 wave per SIMD (the whole 512-register file is one wave's) |
 | K loop | FlyDSL code, `range_constexpr(K_ITERS-2)` | one inline-asm region with a hardware loop |
 | LDS | 8 buffers: A/B × cur/next × two halves | operand pools of mixed depth (A 2-deep, B 3-deep) |
-| Where it wins | short K, small grids, beta=1 | long K, where the steady state amortizes an epilogue nothing overlaps |
+| Where it wins | short K, where an epilogue nothing overlaps would dominate a one-wave tile | long K, where the steady state amortizes that epilogue |
 | Turbo source | FP8 `_compile_dense_nt` (:85) | FP8 `_dense_nt_wave4_asm` (:2187), `_dense_tn_wave4_asm` (:1401); FP4 `MfmaScaleFp4` |
 
 **Why the 4-wave tile wins on long K.** A 2×2-wave split of a 256×256 tile gives each wave a 128×128
@@ -126,7 +126,7 @@ How Turbo structures it (FP8:1133-1230, 2187-2412):
 - **Persistent carry.** When a workgroup walks several tiles, the closing phases prefetch the next tile's
   first K-blocks into buffers the next tile does not re-prime (`_nt4_carry_bufs`, FP8:2512).
 - **Buffer select is free.** Each pool keeps one set of per-lane addresses. The buffer and tile deltas
-  go into the 16-bit `ds_read` offset field (`_Tn4Pool` asserts the sum stays below 65536).
+  go into the 16-bit `ds_read` offset field (`_Tn4Pool` asserts the sum stays below 65536, FP8:1208).
 
 *(field)* This emit order is a sharp local optimum. On an fp8 TN whole loop, every perturbation
 lost:
@@ -174,8 +174,8 @@ hot loop) and by wall time, not by `accum_offset` or register totals.
   VGPRs with no shuttle (`_MXFP4_ARCH_ACC`, FP4:578-582).
 - The same trade on the fp8 NT whole loop "measured a wash" (FP8:2045-2047): an MFMA writing an arch
   VGPR that a VALU then reads needs wait states that the single wave per SIMD has nothing to fill.
-- *(field)* At unchanged occupancy, freed registers buy nothing on their own. Releasing 72 VGPRs and
-  72 AGPRs cost −2.05%. Name the specific gain the headroom is for before building it.
+- *(field, attention)* At unchanged occupancy, freed registers buy nothing on their own. Releasing 72
+  VGPRs and 72 AGPRs cost −2.05%. Name the specific gain the headroom is for before building it.
 
 **Setting `amdgpu-agpr-alloc` and friends: the attribute name depends on the FlyDSL version.** Turbo
 passes these through `value_attrs` (`make_value_attrs`, GH:1580). Verified on MI355X by checking
@@ -215,7 +215,7 @@ construction. The three ways to get that zero:
 - **MX formats.** The packed E8M0 scale is zero past K, so the tail terms are scaled by 2⁻¹²⁷ twice and
   underflow to exactly zero. Drop a 128-K sub-step that is entirely padding rather than computing it.
 - Row strides that are not a multiple of the 128 B cache line cost bandwidth even when the tail is
-  correct. See `flydsl_gemm_datapath.md` §8.
+  correct. See `flydsl_gemm_datapath.md` §10.
 
 ## 7. Occupancy and allocation knobs
 

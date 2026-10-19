@@ -65,6 +65,16 @@ A captured scalar enters the key when the `@flyc.jit` object is created: changin
 object reuses the old binary on both versions, while a new jit object or a new process recompiles.
 0.3.4.1 also adds captured *types* to the key (FlyDSL `d6221d19`, #1130).
 
+Two more cases, checked on 0.3.2:
+- A module global read through `const_expr` is safe when it lives in the kernel's file or directory:
+  changing it after the first compile raises `RuntimeError: global '…' changed since first compile`. A
+  global in a helper module **from another directory** is not in the key, so the same jit object silently
+  keeps the old branch. Aliasing it to a local of the factory function makes new jit objects and new
+  processes recompile; the existing jit object still keeps the old binary.
+- A module-level dict that is first filled during tracing (e.g. a cache of generated asm strings) makes the
+  next call of the same jit object, `flyc.compile` included, raise `RuntimeError: global '<dict>' … changed
+  since first compile`. Fill it before the first call, or keep the cache inside the builder.
+
 Two checks that settle "did my change run?":
 - **Break it on purpose.** Make the kernel compute something wrong (scale by 2) without clearing the
   cache. If the old correct result comes back, every earlier measurement of that edit was stale.
@@ -299,6 +309,13 @@ runs as ordinary Python at trace time, so `if <runtime value>:` inside it raises
 `RuntimeError: cannot evaluate dynamic 'Boolean' as Python bool during tracing`. Helpers may emit
 branch-free code (`range_constexpr` loops, `.select()`, masked loads/stores); a runtime `if` belongs in
 the decorated body. Settle this before planning a refactor that moves code into helpers.
+
+**An `if` body is rewritten into its own function.** A value assigned inside the branch is not seen by a
+closure that was defined before the `if` and is called inside the branch: on 0.3.2 the closure read the old
+value. This happened for a runtime `if` and also for a literal `if True:`. With `if const_expr(...)`, a
+closure defined inside the branch, or the value passed as an argument, the closure saw the new value. A
+name first assigned inside the branch raises `NameError` at trace time. Pass values into closures as
+arguments.
 
 ### `AssertionError: unexpected ast node <ast.ClassDef ...>`
 Raised by `ASTRewriter.transform`. The rewriter re-reads the kernel's source from disk with
