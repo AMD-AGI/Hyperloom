@@ -753,7 +753,7 @@ _NO_KERNEL_CLI_BUDGET_PCT = {phase_state.PHASE_FRAMEWORK_AGENT: 0.2}
 def no_kernel_coordinator(session_dir):
     """A real Coordinator on an unbounded ``--no-kernel`` session, so FRAMEWORK owns a flat share of the cycle."""
     from hyperloom.orchestrator.roles import MockBackend, MockCriticBackend, ScriptedPlan
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import Coordinator, CoordinatorSettings
 
     SharedState(
         kernel_enabled=False,
@@ -768,7 +768,7 @@ def no_kernel_coordinator(session_dir):
     return Coordinator(
         session_dir,
         backends={"orchestration": MockBackend(silent, name="orch"), "critic": MockCriticBackend()},
-        phase_budget_pct=dict(_NO_KERNEL_CLI_BUDGET_PCT),
+        settings=CoordinatorSettings(phase_budget_pct=dict(_NO_KERNEL_CLI_BUDGET_PCT)),
     )
 
 

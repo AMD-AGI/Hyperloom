@@ -38,7 +38,7 @@ class _Instant(_Gated):
 
 @pytest.fixture
 def coord(tmp_path: Path):
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
     from hyperloom.orchestrator.roles.mock_backend import MockBackend, MockTurn, ScriptedPlan
     from hyperloom.orchestrator.state.shared_state import SharedState
@@ -52,7 +52,7 @@ def coord(tmp_path: Path):
         session_dir=tmp_path,
         backends={name: MockBackend(idle) for name in ("orchestration", "critic")},
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
 
 

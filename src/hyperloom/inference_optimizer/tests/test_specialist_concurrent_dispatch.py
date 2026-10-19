@@ -27,7 +27,7 @@ async def _build_coord_with_capacity(
         MockTurn,
         ScriptedPlan,
     )
-    from hyperloom.orchestrator.loop.coordinator import Coordinator
+    from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     # Clear GPU-pool env so tests resolve a deterministic [0..capacity-1] pool.
@@ -57,7 +57,7 @@ async def _build_coord_with_capacity(
         session_dir=tmp_path,
         backends=backends,
         role_registry=default_role_registry(),
-        knowledge_plane=None,
+        advisory=AdvisoryServices(knowledge_plane=None),
     )
 
 

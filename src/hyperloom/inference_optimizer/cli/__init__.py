@@ -104,7 +104,7 @@ __all__ = ["main"]
 from .. import framework_registry
 from ..session.manifest import load_manifest, write_manifest
 from ..protocol.action_surfaces import ACTION_CATALOGUE
-from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator import AdvisoryServices, Coordinator, CoordinatorSettings
 from hyperloom.orchestrator.collaborator import OrchestrationPrompt as _OrchestrationPrompt
 from hyperloom.inference_optimizer.framework_paths import resolve_framework_tree, resolve_kernel_search_roots
 from hyperloom.orchestrator.state.objective import AnyObjective, Objective, build_objective
@@ -2615,12 +2615,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     coordinator = Coordinator(
         session_dir,
         backends=backends,
-        model_class=(getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or ""),
-        phase_budget_pct=phase_budget_pct or None,
-        # KnowledgePlane facade (None when --degraded-pr).
-        knowledge_plane=knowledge_plane,
-        # Advisory multi-model specialist-proposal scorer, disabled by default (enable via --proposal-scoring).
-        proposal_scorer=_build_proposal_scorer(args, session_dir),
+        settings=CoordinatorSettings(
+            model_class=getattr(args, "model_class", None) or os.environ.get("MODEL_CLASS") or "",
+            phase_budget_pct=phase_budget_pct or None,
+        ),
+        advisory=AdvisoryServices(
+            # KnowledgePlane facade (None when --degraded-pr).
+            knowledge_plane=knowledge_plane,
+            # Advisory multi-model specialist-proposal scorer, disabled by default (enable via --proposal-scoring).
+            proposal_scorer=_build_proposal_scorer(args, session_dir),
+        ),
     )
     framework_for_prompt = os.environ.get("FRAMEWORK", "").strip().lower() or "sglang"
     max_minutes_for_prompt = int(round(float(args.max_hours) * 60))

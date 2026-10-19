@@ -217,6 +217,32 @@ class CoordinatorState:
     pending_proposals: dict[str, PendingProposal] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class CoordinatorSettings:
+    """Boot-time choices the launcher makes for a session.
+
+    Attributes:
+        model_class: Model class to record when the session has none yet.
+        phase_budget_pct: Per-phase budget percentages; library defaults when absent.
+    """
+
+    model_class: str | None = None
+    phase_budget_pct: dict[str, float] | None = None
+
+
+@dataclass(frozen=True)
+class AdvisoryServices:
+    """Optional advisory collaborators the session consults.
+
+    Attributes:
+        knowledge_plane: KnowledgePlane facade; pre-warms PR feed + advisory context.
+        proposal_scorer: Advisory multi-model specialist-proposal scorer.
+    """
+
+    knowledge_plane: Any = None
+    proposal_scorer: Any = None
+
+
 class Coordinator:
     """The single Coordinator instance per session."""
 
@@ -226,12 +252,8 @@ class Coordinator:
         *,
         backends: dict[str, Backend],
         role_registry: dict[str, AgentRole] | None = None,
-        sub_agent_runner: SubAgentRunner | None = None,
-        bus_class: type[MessageBus] = MessageBus,
-        model_class: str | None = None,
-        phase_budget_pct: dict[str, float] | None = None,
-        knowledge_plane: Any = None,
-        proposal_scorer: Any = None,
+        settings: CoordinatorSettings = CoordinatorSettings(),
+        advisory: AdvisoryServices = AdvisoryServices(),
     ):
         """Construct the per-session Coordinator and wire persistence, policy, and agents."""
         self.session_dir = Path(session_dir)
@@ -242,13 +264,14 @@ class Coordinator:
         # Orchestration prompt overrides, rebuild closure, and snapshot writes.
         self.orch_prompt = OrchestrationPrompt(overrides={})
         # KnowledgePlane facade; pre-warms PR feed + advisory context.
-        self.knowledge_plane: Any = knowledge_plane
+        self.knowledge_plane: Any = advisory.knowledge_plane
         from ..specialists.dispatch import SpecialistDispatchCollaborator
 
         self._collaborator(
-            "_specialist_dispatch", partial(SpecialistDispatchCollaborator, proposal_scorer=proposal_scorer)
+            "_specialist_dispatch",
+            partial(SpecialistDispatchCollaborator, proposal_scorer=advisory.proposal_scorer),
         )
-        self._model_class_override: str = (model_class or "").strip()
+        self._model_class_override: str = (settings.model_class or "").strip()
 
         # Validate every reactor has a backend wired.
         for name in self.role_registry:
@@ -264,14 +287,14 @@ class Coordinator:
         # before the file is opened.
         self.db = SqliteConnection(db_path, journal_mode=resolve_journal_mode())
 
-        self.bus = bus_class(self.db)
+        self.bus = MessageBus(self.db)
         self.locks = ResourceLockManager(SqliteLeaseBackend(self.db))
         self.tasks = TaskRegistry(
             self.db,
             dispatch_origin_provider=lambda: task_dispatch_origin(self.shared_state),
         )
         self.cursors = CursorStore(self.db)
-        self.sub = sub_agent_runner or SubAgentRunner(
+        self.sub = SubAgentRunner(
             self.locks,
             self.tasks,
             session_dir=self.session_dir,
@@ -375,7 +398,7 @@ class Coordinator:
         self._current_objective: Objective | None = None
 
         # Initialise phase machine (fresh session enters PRELUDE). Idempotent.
-        self.phase_machine.ensure_phase_initialised(phase_budget_pct)
+        self.phase_machine.ensure_phase_initialised(settings.phase_budget_pct)
         # Recipe KB T0 defensive fallback for direct SDK/test callers; best-effort.
         self.phase_machine.ensure_recipe_kb_t0_anchored()
 
