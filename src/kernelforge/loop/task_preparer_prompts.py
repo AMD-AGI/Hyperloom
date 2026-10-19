@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from typing import NamedTuple
 from pathlib import Path
 
@@ -206,20 +207,32 @@ rejected for that, whatever else it got right.
 """
 
 
-def _build_prompt(
-    evidence: str,
-    driver_rel: str,
-    reference_note: str,
-    prior_failure: str = "",
-    invocation_note: str = "",
-    prior_failure_heading: str = RETRY_HEADING_DEFAULT,
-    distributed_note: str = "",
-) -> str:
+@dataclass(frozen=True)
+class PromptBrief:
+    """What every attempt's prompt states: the evidence, the driver path, the invocation and distributed notes."""
+
+    evidence: str
+    driver_rel: str
+    invocation_note: str = ""
+    distributed_note: str = ""
+
+
+@dataclass(frozen=True)
+class RetryNote:
+    """Why the previous attempt failed, under the heading that frames it; empty on the first attempt."""
+
+    failure: str = ""
+    heading: str = RETRY_HEADING_DEFAULT
+
+
+def _build_prompt(brief: PromptBrief, reference_note: str, retry_note: RetryNote = RetryNote()) -> str:
+    evidence, driver_rel = brief.evidence, brief.driver_rel
+    invocation_note, distributed_note = brief.invocation_note, brief.distributed_note
     retry = ""
-    if prior_failure:
+    if retry_note.failure:
         retry = (
-            f"\n## {prior_failure_heading}\n"
-            f"{prior_failure}\n"
+            f"\n## {retry_note.heading}\n"
+            f"{retry_note.failure}\n"
             "Fix the driver so all preflight checks pass (correctness, benchmark, "
             "graph timing, and profiling contract). Do not stop until "
             f"`python {driver_rel}` prints a correctness metric AND timing.\n"

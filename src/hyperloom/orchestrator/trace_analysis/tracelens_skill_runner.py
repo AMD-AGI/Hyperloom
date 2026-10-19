@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import ast
-import importlib.util
 import logging
 import os
 import re
@@ -28,8 +27,10 @@ import yaml
 from TraceLens.Agent.Analysis.utils.config_utils import check_config
 
 from hyperloom.common.codex_session import (
+    CodexSessionConfig,
     CodexSessionError,
     CodexSessionResult,
+    CodexTurnRequest,
     run_codex_turn,
 )
 from hyperloom.common.llm_config import claude_sdk_env_options
@@ -407,13 +408,53 @@ def discover_capture_folder(trace_input: Path, trace_files: list[Path]) -> Path 
     return None
 
 
-def build_orchestrator_prompt(
-    *,
-    skill_path: Path,
-    output_dir: Path,
-    tracelens_root: Path,
-    tracelens_internal_root: Path | None,
-) -> str:
+@dataclass(frozen=True)
+class TraceLensSkillRequest:
+    """The inputs one TraceLens skill run reads besides its ``run.yaml``.
+
+    Attributes:
+        skill_path: Path to the TraceLens skill file to follow.
+        output_dir: Directory holding ``run.yaml`` and receiving the outputs.
+        tracelens_root: The TraceLens project root.
+        tracelens_internal_root: The TraceLens-internal root, ``None`` in OSS-only mode.
+        capture_folder: Graph-capture folder, read only as the Codex runner's
+            write scope; the run config already names it.
+    """
+
+    skill_path: Path
+    output_dir: Path
+    tracelens_root: Path
+    tracelens_internal_root: Path | None
+    capture_folder: Path | None
+
+
+@dataclass(frozen=True)
+class SdkEntryPoints:
+    """Agent SDK entry points that replace the installed ones; ``None`` keeps the real one."""
+
+    query: Callable[..., Any] | None = None
+    options_cls: Any | None = None
+    codex_turn_runner: Callable[..., Awaitable[CodexSessionResult]] | None = None
+
+
+@dataclass(frozen=True)
+class _SkillRun:
+    """One skill run after its command-prefix cache is written."""
+
+    request: TraceLensSkillRequest
+    prefix_path: Path
+    log: Callable[[str], None] | None
+
+
+@dataclass(frozen=True)
+class _StreamIdleBounds:
+    """Seconds an SDK stream may stay silent between messages, and while a tool call or background task is in flight."""
+
+    message: float
+    tool: float
+
+
+def build_orchestrator_prompt(request: TraceLensSkillRequest) -> str:
     """Prompt an agent to run the TraceLens standalone skill from ``run.yaml``.
 
     Provider-neutral: the same prompt drives the Claude SDK runner and the
@@ -422,37 +463,36 @@ def build_orchestrator_prompt(
     execution context the skill would otherwise ask for.
 
     Args:
-        skill_path (Path): Path to the TraceLens skill file to follow.
-        output_dir (Path): Directory holding ``run.yaml`` and receiving the outputs.
-        tracelens_root (Path): The TraceLens project root.
-        tracelens_internal_root (Path | None): The TraceLens-internal root, or
-            ``None`` in OSS-only mode.
+        request (TraceLensSkillRequest): The run's inputs.
 
     Returns:
         str: The fully assembled orchestrator prompt text.
     """
 
-    internal_root_text = str(tracelens_internal_root) if tracelens_internal_root else "(not installed; OSS-only mode)"
-    tl_extension_text = "TraceLens_internal" if tracelens_internal_root else "(unset)"
+    output_dir = request.output_dir
+    run_config = (output_dir / RUN_CONFIG_NAME).resolve()
+    internal_root_text = (
+        str(request.tracelens_internal_root) if request.tracelens_internal_root else "(not installed; OSS-only mode)"
+    )
+    tl_extension_text = "TraceLens_internal" if request.tracelens_internal_root else "(unset)"
     return f"""You are running TraceLens standalone analysis for Hyperloom.
 
 Read and follow the FULL instructions in this skill file:
-{skill_path}
+{request.skill_path}
 
-Run it from config {(output_dir / RUN_CONFIG_NAME).resolve()}, standalone.
+Run it from config {run_config}, standalone.
 The execution context below answers the remaining Step 0 questions.
 Do not ask the user any questions; proceed with the analysis.
 
 Execution context:
 - Environment: local
-- TraceLens root: {tracelens_root}
+- TraceLens root: {request.tracelens_root}
 - TraceLens-internal root: {internal_root_text}
 - TL_EXTENSION: {tl_extension_text}
 - Command prefix cache: {output_dir / "cache" / "cmd_prefix.txt"}
-- Run config: {(output_dir / RUN_CONFIG_NAME).resolve()}
+- Run config: {run_config}
 - Comparison scope: standalone
 - Output directory: {output_dir}
-
 
 Important requirements:
 1. Use the provided command prefix cache for all shell commands; do not rebuild it.
@@ -573,10 +613,9 @@ class _TrajectoryCall:
 
 async def _drive_sdk_stream(
     stream: Any,
+    bounds: _StreamIdleBounds,
     *,
     chunks: list[str],
-    idle_timeout: float,
-    tool_idle_timeout: float,
     observe: Callable[[Any], None],
     log: Callable[[str], None] | None,
 ) -> str:
@@ -590,7 +629,7 @@ async def _drive_sdk_stream(
     stream_iter = stream.__aiter__() if hasattr(stream, "__aiter__") else stream
     try:
         while True:
-            wait_for = tool_idle_timeout if in_flight.busy else idle_timeout
+            wait_for = bounds.tool if in_flight.busy else bounds.message
             try:
                 if wait_for > 0:
                     message = await asyncio.wait_for(stream_iter.__anext__(), timeout=wait_for)
@@ -634,16 +673,11 @@ async def _drive_sdk_stream(
 
 
 async def _run_tracelens_skill_codex(
+    run: _SkillRun,
+    turn: CodexTurnRequest,
     *,
-    prompt: str,
-    output_dir: Path,
-    prefix_path: Path,
-    tracelens_root: Path,
-    capture_folder: Path | None,
     model: str,
-    timeout_sec: float,
     codex_turn_runner: Callable[..., Awaitable[CodexSessionResult]],
-    log: Callable[[str], None] | None,
 ) -> TraceLensSkillRunResult:
     """Run the TraceLens skill on the Codex Agent SDK.
 
@@ -659,18 +693,13 @@ async def _run_tracelens_skill_codex(
     classification writes ``execution_details.json`` into the folder itself.
 
     Args:
-        prompt (str): The orchestrator prompt.
-        output_dir (Path): Directory the report is written to.
-        prefix_path (Path): The command-prefix cache path, reported as an
-            artifact.
-        tracelens_root (Path): The TraceLens project root; the session cwd.
-        capture_folder (Path | None): Graph-capture folder the inference perf
-            report writes into, or ``None`` outside graph-capture runs.
+        run (_SkillRun): The run's request, command-prefix cache path (reported
+            as an artifact) and logging callback.
+        turn (CodexTurnRequest): The orchestrator prompt and the turn's
+            wall-clock budget.
         model (str): The Codex model id.
-        timeout_sec (float): Wall-clock budget for the turn.
         codex_turn_runner (Callable[..., Awaitable[CodexSessionResult]]): The
             Codex turn entry point (injected by tests).
-        log (Callable[[str], None] | None): Optional logging callback.
 
     Returns:
         TraceLensSkillRunResult: The artifacts produced by the run.
@@ -678,22 +707,22 @@ async def _run_tracelens_skill_codex(
     Raises:
         RuntimeError: If ``analysis.md`` was not written.
     """
+    output_dir = run.request.output_dir
+    capture_folder = run.request.capture_folder
     codex_error = ""
     result = CodexSessionResult()
     try:
+        roots = (output_dir, capture_folder) if capture_folder else (output_dir,)
         result = await codex_turn_runner(
-            prompt=prompt,
+            config=CodexSessionConfig(cwd=run.request.tracelens_root, model=model, writable_roots=roots),
+            request=turn,
             developer_instructions=_CODEX_DEVELOPER_INSTRUCTIONS,
-            cwd=tracelens_root,
-            model=model,
-            timeout_sec=timeout_sec,
-            writable_roots=(output_dir, capture_folder) if capture_folder else (output_dir,),
         )
     except CodexSessionError as exc:
         # The SDK can fail after the report landed; artifact presence decides.
         codex_error = f"{type(exc).__name__}: {exc}"
-        if log:
-            log(f"[codex-sdk] WARNING: {codex_error}")
+        if run.log:
+            run.log(f"[codex-sdk] WARNING: {codex_error}")
     codex_error = codex_error or result.error
 
     report_path = output_dir / "analysis.md"
@@ -704,7 +733,7 @@ async def _run_tracelens_skill_codex(
 
     artifact_paths = {
         "tracelens_agent_report": str(report_path),
-        "tracelens_cmd_prefix": str(prefix_path),
+        "tracelens_cmd_prefix": str(run.prefix_path),
     }
     if codex_error:
         artifact_paths["tracelens_agent_sdk_error"] = codex_error
@@ -718,17 +747,11 @@ async def _run_tracelens_skill_codex(
 
 
 async def run_tracelens_skill(
+    request: TraceLensSkillRequest,
     *,
-    skill_path: Path,
-    output_dir: Path,
-    tracelens_root: Path,
-    tracelens_internal_root: Path | None,
-    capture_folder: Path | None,
     budget_minutes: float,
     model: str | None = None,
-    sdk_query_factory: Callable[..., Any] | None = None,
-    sdk_options_cls: Any | None = None,
-    codex_turn_runner: Callable[..., Awaitable[CodexSessionResult]] | None = None,
+    sdk: SdkEntryPoints = SdkEntryPoints(),
     log: Callable[[str], None] | None = None,
 ) -> TraceLensSkillRunResult:
     """Execute the standalone TraceLens skill on the configured agent runtime.
@@ -740,13 +763,7 @@ async def run_tracelens_skill(
     was written is recorded as metadata rather than raised.
 
     Args:
-        skill_path (Path): Path to the TraceLens skill file to follow.
-        output_dir (Path): Directory holding ``run.yaml`` and receiving the outputs.
-        tracelens_root (Path): The TraceLens project root.
-        tracelens_internal_root (Path | None): The TraceLens-internal root, or
-            ``None`` in OSS-only mode.
-        capture_folder (Path | None): Graph-capture folder, read only as the
-            Codex runner's write scope; the run config already names it.
+        request (TraceLensSkillRequest): The run's inputs.
         budget_minutes (float): Time budget for the run. The Codex path spends
             it as the turn's wall-clock timeout (floored at 60s, matching the
             other TraceLens subprocess timeouts); the Claude path bounds each
@@ -754,13 +771,11 @@ async def run_tracelens_skill(
         model (str | None): Optional model override. Defaults to
             :data:`DEFAULT_CLAUDE_MODEL` on the Claude SDK path, or ``$CODEX_MODEL`` /
             :data:`DEFAULT_CODEX_MODEL` on the Codex SDK path.
-        sdk_query_factory (Callable[..., Any] | None): Optional injected query
-            factory (used by tests); imported from the SDK when ``None``.
-        sdk_options_cls (Any | None): Optional injected options class (used by
-            tests); imported from the SDK when ``None``.
-        codex_turn_runner (Callable[..., Awaitable[CodexSessionResult]] | None):
-            Optional injected Codex turn entry point (used by tests); defaults
-            to :func:`hyperloom.common.codex_session.run_codex_turn`.
+        sdk (SdkEntryPoints): Optional injected query factory, options class
+            and Codex turn entry point (used by tests); the query factory and
+            options class are imported from the SDK when ``None``, and the
+            Codex turn entry point defaults to
+            :func:`hyperloom.common.codex_session.run_codex_turn`.
         log (Callable[[str], None] | None): Optional logging callback.
 
     Returns:
@@ -770,30 +785,24 @@ async def run_tracelens_skill(
         RuntimeError: If ``analysis.md`` is not written by the run.
     """
 
+    output_dir = request.output_dir
+    tracelens_root = request.tracelens_root
+    sdk_query_factory = sdk.query
+    sdk_options_cls = sdk.options_cls
     output_dir.mkdir(parents=True, exist_ok=True)
     prefix_path = write_local_cmd_prefix(output_dir, tracelens_root)
-    prompt = build_orchestrator_prompt(
-        skill_path=skill_path,
-        output_dir=output_dir,
-        tracelens_root=tracelens_root,
-        tracelens_internal_root=tracelens_internal_root,
-    )
+    prompt = build_orchestrator_prompt(request)
 
     resolved_model = (model or "").strip()
     if _should_use_codex_runner() and (
-        codex_turn_runner is not None or (sdk_query_factory is None and sdk_options_cls is None)
+        sdk.codex_turn_runner is not None or (sdk_query_factory is None and sdk_options_cls is None)
     ):
         codex_model = resolved_model or (os.environ.get("CODEX_MODEL") or "").strip() or DEFAULT_CODEX_MODEL
         return await _run_tracelens_skill_codex(
-            prompt=prompt,
-            output_dir=output_dir,
-            prefix_path=prefix_path,
-            tracelens_root=tracelens_root,
-            capture_folder=capture_folder,
+            _SkillRun(request, prefix_path, log),
+            CodexTurnRequest(prompt, timeout_sec=max(60.0, float(budget_minutes) * 60.0)),
             model=codex_model,
-            timeout_sec=max(60.0, float(budget_minutes) * 60.0),
-            codex_turn_runner=codex_turn_runner or run_codex_turn,
-            log=log,
+            codex_turn_runner=sdk.codex_turn_runner or run_codex_turn,
         )
 
     if sdk_query_factory is None or sdk_options_cls is None:
@@ -853,9 +862,8 @@ async def run_tracelens_skill(
     with _TrajectoryCall(resolved_model) as trajectory:
         sdk_error = await _drive_sdk_stream(
             sdk_query_factory(prompt=prompt, options=options),
+            _StreamIdleBounds(idle_timeout, tool_idle_timeout),
             chunks=chunks,
-            idle_timeout=idle_timeout,
-            tool_idle_timeout=tool_idle_timeout,
             observe=trajectory.observe,
             log=log,
         )
@@ -1081,124 +1089,6 @@ def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]
     return text, None, None
 
 
-# Launcher path → absolute source file resolver. Strategy (most-specific first):
-# $HYPERLOOM_FRAMEWORK_SOURCE_ROOTS override, importlib find_spec, then this fallback table.
-_FRAMEWORK_PKG_FALLBACK_ROOTS: dict[str, tuple[str, ...]] = {
-    "aiter": ("/sgl-workspace/aiter",),
-    "sglang": ("/sgl-workspace/sglang/python", "/sgl-workspace/sglang"),
-    "vllm": (
-        "/usr/local/lib/python3.12/dist-packages",
-        "/usr/local/lib/python3.10/dist-packages",
-        "/opt/venv/lib/python3.10/site-packages",
-        "/sgl-workspace/vllm",
-    ),
-    # atom fallback roots for CSV-only / static-analysis parses. Kept in sync
-    # with the reusable-source roots elsewhere, pinned by test_framework_paths_units.py.
-    "atom": (
-        "/app/ATOM",
-        "/usr/local/lib/python3.12/dist-packages",
-        "/usr/local/lib/python3.10/dist-packages",
-        "/opt/venv/lib/python3.10/site-packages",
-        "/opt/venv/lib/python3.12/site-packages",
-    ),
-}
-_FRAMEWORK_SOURCE_ROOTS_ENV = "HYPERLOOM_FRAMEWORK_SOURCE_ROOTS"
-
-
-def _env_framework_source_roots() -> dict[str, tuple[str, ...]]:
-    """Parse ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` into a package-root map.
-
-    The variable is a comma-separated list of ``pkg=/abs/parent`` entries.
-
-    Returns:
-        A ``{pkg: (root, ...)}`` mapping; unparseable entries are skipped.
-    """
-    raw = os.environ.get(_FRAMEWORK_SOURCE_ROOTS_ENV, "").strip()
-    if not raw:
-        return {}
-    out: dict[str, list[str]] = {}
-    for chunk in raw.split(","):
-        if "=" not in chunk:
-            continue
-        key, sep, value = chunk.partition("=")
-        key = key.strip().lower()
-        value = value.strip()
-        if not key or not value:
-            continue
-        out.setdefault(key, []).append(value)
-    return {k: tuple(v) for k, v in out.items()}
-
-
-def _package_root_parent(pkg: str) -> str | None:
-    """Find the directory containing a package on the live ``sys.path``.
-
-    Args:
-        pkg: The importable package name.
-
-    Returns:
-        The directory containing ``pkg/``, or ``None`` when not importable.
-    """
-    try:
-        spec = importlib.util.find_spec(pkg)
-    except (ImportError, ValueError):
-        return None
-    if spec is None:
-        return None
-    if spec.submodule_search_locations:
-        loc = list(spec.submodule_search_locations)[0]
-        return os.path.dirname(loc)
-    if spec.origin and spec.origin.endswith(".py"):
-        return os.path.dirname(os.path.dirname(spec.origin))
-    return None
-
-
-def _resolve_launcher_to_abs_source(
-    kernel_path: str,
-) -> tuple[str, int | None, str | None] | None:
-    """Resolve a TraceLens launcher-path to an absolute source file.
-
-    Args:
-        kernel_path: The TraceLens launcher-path to resolve.
-
-    Returns:
-        An ``(abs_file, line, function_name)`` tuple for an absolute path or a
-        resolvable framework-relative file, else ``None``.
-    """
-    raw_path, line, func = _parse_launcher_path(kernel_path)
-    if not raw_path:
-        return None
-    if os.path.isabs(raw_path):
-        # Keep container-resident paths even when this analysis host cannot stat
-        # them; the caller still needs the annotation split into separate fields.
-        return raw_path, line, func
-    head = raw_path.split("/", 1)[0]
-    if not head or head.startswith("."):
-        return None
-
-    candidate_roots: list[str] = []
-    env_roots = _env_framework_source_roots()
-    candidate_roots.extend(env_roots.get(head, ()))
-    pkg_parent = _package_root_parent(head)
-    if pkg_parent:
-        candidate_roots.append(pkg_parent)
-    candidate_roots.extend(_FRAMEWORK_PKG_FALLBACK_ROOTS.get(head, ()))
-
-    seen: set[str] = set()
-    for root in candidate_roots:
-        if not root or root in seen:
-            continue
-        seen.add(root)
-        abs_path = os.path.join(root, raw_path)
-        if not os.path.isfile(abs_path):
-            continue
-        # Validate the file actually hosts the launcher's function (guards sys.path shadowing).
-        if func and abs_path.endswith(".py"):
-            if _function_line_from_ast(Path(abs_path), func) is None:
-                continue
-        return abs_path, line, func
-    return None
-
-
 def _function_line_from_ast(path: Path, function_name: str) -> int | None:
     """Find the line number of a named function definition via AST.
 
@@ -1220,11 +1110,7 @@ def _function_line_from_ast(path: Path, function_name: str) -> int | None:
     return None
 
 
-def _resolve_source_target(
-    candidate: dict[str, Any],
-    *,
-    source_root: Path | None,
-) -> dict[str, Any] | None:
+def _resolve_source_target(candidate: dict[str, Any]) -> dict[str, Any] | None:
     """Resolve a candidate's source location to a source-target triple.
 
     A row TraceLens resolved carries the verdict directly in ``source_file`` /
@@ -1234,7 +1120,6 @@ def _resolve_source_target(
 
     Args:
         candidate: The candidate dict carrying resolved source / launcher paths.
-        source_root: Optional root to resolve relative paths against.
 
     Returns:
         A ``(source_path, definition_line, function_name)`` dict, or ``None``
@@ -1244,8 +1129,6 @@ def _resolve_source_target(
     source_file = str(candidate.get("source_file") or "")
     if source_file and isinstance(source_line, int) and source_line > 0:
         source_path = Path(source_file)
-        if not source_path.is_absolute() and source_root is not None:
-            source_path = source_root / source_path
         return {
             "source_path": str(source_path),
             "definition_line": source_line,
@@ -1262,8 +1145,6 @@ def _resolve_source_target(
     if not raw_path:
         return None
     source_path = Path(raw_path)
-    if not source_path.is_absolute() and source_root is not None:
-        source_path = source_root / source_path
     function_name = reported_func or source_path.stem
     definition_line = reported_line or 1
     if source_path.exists() and reported_func:
@@ -1316,11 +1197,7 @@ def _is_native_source(path: str) -> bool:
     return str(path).lower().endswith(_NATIVE_SOURCE_SUFFIXES)
 
 
-def aggregate_by_source_function(
-    candidates: list[dict[str, Any]],
-    *,
-    source_root: Path | str | None = None,
-) -> list[dict[str, Any]]:
+def aggregate_by_source_function(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Group TraceLens candidates into per-kernel ``task_group`` dicts.
 
     Groups are sorted by aggregate time (descending). Native symbols are
@@ -1333,7 +1210,6 @@ def aggregate_by_source_function(
 
     Args:
         candidates: The TraceLens candidate rows to group.
-        source_root: Optional root to resolve relative source paths against.
 
     Returns:
         The task-group dicts. Unparseable candidates are left out for legacy
@@ -1341,12 +1217,6 @@ def aggregate_by_source_function(
     """
     if not candidates:
         return []
-    root: Path | None = None
-    if source_root:
-        root = Path(source_root).expanduser()
-        if not root.is_dir():
-            root = None
-
     # Versioned identity builder. Operation normalization keeps different
     # kernels in one source separate while template/shape instances of one
     # operator merge.
@@ -1354,7 +1224,7 @@ def aggregate_by_source_function(
     for cand in candidates:
         if not isinstance(cand, dict):
             continue
-        target = _resolve_source_target(cand, source_root=root)
+        target = _resolve_source_target(cand)
         if target is None:
             continue
         operation = str(cand.get("name") or "").strip()
@@ -1489,6 +1359,8 @@ def aggregate_by_source_function(
 
 __all__ = [
     "RUN_CONFIG_NAME",
+    "SdkEntryPoints",
+    "TraceLensSkillRequest",
     "TraceLensSkillRunResult",
     "UPSTREAM_CATEGORY_TO_GEAK",
     "_function_line_from_ast",

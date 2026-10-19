@@ -11,9 +11,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.env import env_bool
 from hyperloom.common.io import atomic_write_json, atomic_write_text
-from hyperloom.common.jsonio import read_json
+from hyperloom.common.jsonio import read_json, read_json_strict
 
 from . import collectors
 from .recorder.event_finalize import finalize_events
@@ -63,7 +62,7 @@ def _load_session_json(path: Path, label: str, warnings: list[str]) -> dict[str,
         warnings.append(f"{label} missing at {path}")
         return {}
     try:
-        return read_json(path, require_dict=True, strict=True)
+        return read_json_strict(path, require_dict=True)
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"failed to parse {label}: {exc!r}")
         return {}
@@ -160,12 +159,14 @@ def build(session_dir: Path | str) -> dict[str, Any]:
     outcome = _safe_collect(
         "outcome",
         lambda: collectors.collect_v6_outcome(
-            session=session_section,
-            close=v6_close,
-            state=state,
-            timeline=timeline,
-            warnings=warnings,
-            recorded=assembled.get("outcome"),
+            collectors.OutcomeSources(
+                session=session_section,
+                close=v6_close,
+                state=state,
+                timeline=timeline,
+                recorded=assembled.get("outcome"),
+            ),
+            warnings,
         ),
         warnings,
         default={},
@@ -173,20 +174,21 @@ def build(session_dir: Path | str) -> dict[str, Any]:
     metadata = _safe_collect(
         "metadata",
         lambda: collectors.collect_v6_metadata(
+            collectors.MetadataSources(
+                session=session_section,
+                workload=workload,
+                model_info=model_info,
+                langfuse=langfuse,
+                state=state,
+                recorded=assembled.get("metadata"),
+            ),
             exported_at_utc=exported_at,
-            session=session_section,
-            workload=workload,
-            model_info=model_info,
-            langfuse=langfuse,
-            state=state,
             warnings=warnings,
-            recorded=assembled.get("metadata"),
         ),
         warnings,
         default={},
     )
     v6_critic = collectors.collect_v6_critic(assembled.get("critic"))
-    v6_robustness = collectors.collect_v6_robustness(assembled.get("robustness"))
     # Snapshot last: every collector above feeds this one list, and this is the
     # single place a collection failure surfaces.
     if isinstance(metadata, dict):
@@ -201,7 +203,6 @@ def build(session_dir: Path | str) -> dict[str, Any]:
         "timeline": timeline,
         "close": v6_close,
         "critic": v6_critic,
-        "robustness": v6_robustness,
     }
 
 
@@ -209,10 +210,7 @@ def _load_assembled(
     session_dir: Path,
     warnings: list[str],
 ) -> dict[str, Any]:
-    """Assemble recorder fragments into ``{section: value}`` (empty on opt-out or when no fragments exist)."""
-    if env_bool("INFERENCE_OPTIMIZER_BREAKDOWN_DISABLE_RECORDER"):
-        warnings.append("recorder: disabled by INFERENCE_OPTIMIZER_BREAKDOWN_DISABLE_RECORDER")
-        return {}
+    """Assemble recorder fragments into ``{section: value}`` (empty when no fragments exist)."""
     try:
         from .recorder import assemble_parts, has_parts
 
@@ -507,8 +505,7 @@ def write_minimal_final_report(
         "",
         "## Structured detail",
         "",
-        f"See `{breakdown_link.name}` (sibling of session root) for the "
-        f"complete `timeline` / `critic` / `robustness` blocks.",
+        f"See `{breakdown_link.name}` (sibling of session root) for the complete `timeline` / `critic` blocks.",
         "",
     ]
 
@@ -524,24 +521,14 @@ def _crash_safe_platform(gpu_type: str | None) -> dict[str, Any]:
     return platform_fingerprint(gpu_type)
 
 
-#: Who wrote a crash-safe ``final.json``. A producer may replace a fallback
-#: written by itself or by a lower-ranked producer, never the full
-#: ``ReportExecutor`` output. The supervisor outranks the coordinator: it
-#: writes only after observing the coordinator's process end.
+#: Value of ``producer`` in a crash-safe ``final.json``.
 FINAL_PRODUCER_COORDINATOR = "coordinator"
-FINAL_PRODUCER_SUPERVISOR = "supervisor"
-_FINAL_PRODUCER_RANK: dict[str, int] = {
-    FINAL_PRODUCER_COORDINATOR: 1,
-    FINAL_PRODUCER_SUPERVISOR: 2,
-}
 
 
 def write_minimal_final_json(
     session_dir: Path | str,
     *,
     output_path: Path | str | None = None,
-    producer: str = FINAL_PRODUCER_COORDINATOR,
-    extra: dict[str, Any] | None = None,
 ) -> Path:
     """Crash-safe ``reports/final.json`` fallback for any non-graceful exit."""
     from datetime import datetime, timezone
@@ -551,17 +538,12 @@ def write_minimal_final_json(
     sd = Path(session_dir).resolve()
     target = Path(output_path).resolve() if output_path else reports_dir(sd) / "final.json"
     target.parent.mkdir(parents=True, exist_ok=True)
-    # Keep a full report (``safety_net`` absent/false) and a fallback from a
-    # higher-ranked producer; refresh a fallback from an equal or lower-ranked
-    # one; preserve a corrupt file as ``final.json.corrupt`` and overwrite it.
-    rank = _FINAL_PRODUCER_RANK.get(producer, 1)
+    # Keep a full report (``safety_net`` absent/false); refresh an earlier fallback;
+    # preserve a corrupt file as ``final.json.corrupt`` and overwrite it.
     if target.exists() and target.stat().st_size > 0:
         try:
             existing = json.loads(target.read_text(encoding="utf-8"))
             overwrite = isinstance(existing, dict) and existing.get("safety_net") is True
-            if overwrite:
-                held = _FINAL_PRODUCER_RANK.get(existing.get("producer"), 1)
-                overwrite = rank >= held
         except (OSError, json.JSONDecodeError):
             try:
                 target.replace(target.with_name(target.name + ".corrupt"))
@@ -578,7 +560,7 @@ def write_minimal_final_json(
         # not finish gracefully.
         "safety_net": True,
         "report_complete": False,
-        "producer": producer,
+        "producer": FINAL_PRODUCER_COORDINATOR,
         "session_id": state.get("session_id") or "",
         "model_name": state.get("model_name") or "",
         "model_path": state.get("model_path") or "",
@@ -598,9 +580,6 @@ def write_minimal_final_json(
         # A run that died unattended is exactly when the host record is most useful, since nobody was watching.
         "platform": _crash_safe_platform(gpu_type),
     }
-    if extra:
-        summary.update(extra)
-
     atomic_write_json(target, summary)
     log.info("crash-safe final.json: wrote %s", target)
     return target
@@ -610,7 +589,6 @@ __all__ = [
     "BREAKDOWN_FILENAME",
     "EXPORTER_VERSION",
     "FINAL_PRODUCER_COORDINATOR",
-    "FINAL_PRODUCER_SUPERVISOR",
     "build",
     "write_breakdown_json",
     "write_minimal_final_json",

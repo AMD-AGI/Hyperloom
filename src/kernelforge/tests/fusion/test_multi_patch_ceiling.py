@@ -35,12 +35,12 @@ def spied(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     """Record what each pipeline was asked to do, without running either."""
     seen: dict[str, Any] = {"autoloop_ceiling": None, "claims": []}
 
-    def _fake_autoloop(recipes, **kwargs):
-        seen["autoloop_ceiling"] = kwargs.get("max_recipes")
+    def _fake_autoloop(recipes, run, plan, campaign, publish=None):
+        seen["autoloop_ceiling"] = plan.max_recipes
         seen["autoloop_recipes"] = [r.pattern_id for r in recipes]
         return LoopResult(kept=False, best=None, best_recipe=None, termination_reason="faked")
 
-    def _fake_claim(claim, **kwargs):
+    def _fake_claim(claim, *_args):
         seen["claims"].append(claim.pattern_id)
         return CompilePassOutcome(flag=claim.env_flag, kept=False), None
 
@@ -51,30 +51,28 @@ def spied(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 
 def _nominate(tmp_path: Path, *, authored: list[str], claims: list[str], max_recipes: int) -> None:
     cli_module._run_multi_patch_nomination(
-        claims=[_recipe(name) for name in claims],
-        authored=[_recipe(name) for name in authored],
-        framework="sglang",
-        framework_root="/repo",
-        out=tmp_path,
-        repo_root="/repo",
-        author=True,
-        gpu="0",
-        llm_model="m",
-        target_speedup=1.03,
-        model_path="/model",
-        run_arch="gfx942",
-        agent_backend="claude",
-        agent_sandbox_mode="workspace-write",
-        server_extra="",
-        ab_isl=512,
-        ab_osl=128,
-        max_turns=10,
-        max_recipes=max_recipes,
-        pristine_dir="",
-        tp=1,
-        block_size=0,
-        max_model_len=0,
-        agent_factory=lambda *_a, **_k: None,
+        cli_module._NominationSplit(
+            claims=[_recipe(name) for name in claims],
+            deferred=[_recipe(name) for name in authored],
+            top_recipe=None,
+            fuse_all_confirmed=False,
+            multi_patch=True,
+        ),
+        cli_module._FusionRun(
+            out=tmp_path,
+            repo_root="/repo",
+            pristine_dir="",
+            framework_root="/repo",
+            repo_scope=False,
+            session=cli_module.ServingSession("sglang", "/model", "0", 512, 128),
+            author=cli_module.AuthorAgent(backend=lambda *_a, **_k: None, gpu="0", model="m", max_turns=10),
+            gpu_arch="gfx942",
+            target_speedup=1.03,
+        ),
+        cli_module._LoopPlan(author=True, max_recipes=max_recipes),
+        cli_module.CampaignRuntime(
+            gpu="0", gpu_target="gfx942", model="m", agent_backend="claude", agent_sandbox_mode="workspace-write"
+        ),
     )
 
 

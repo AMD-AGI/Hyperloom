@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, replace
 from typing import Any
 from pathlib import Path
 
@@ -109,70 +110,114 @@ def _section_mission() -> list[str]:
     ]
 
 
-def _section_session_context(
-    *,
-    framework: str,
-    kernel_enabled: bool,
-    objective_kind: str,
-    objective_value: float | str | None,
-    max_minutes: int,
-    framework_agent_phase_enabled: bool = True,
-    framework_source_roots: tuple[str, ...] | None = None,
-    benchmark_mode: str = "",
-    agentx_corpus_shape: Mapping[str, Any] | None = None,
-    agentx_grading: Mapping[str, Any] | None = None,
-    agentx_backend: str = "",
-    session_framework_tree: str = "",
-) -> list[str]:
+@dataclass(frozen=True)
+class SessionContext:
+    """What the Orchestration prompt says about the session itself; fixed for the run while cycles and phases move.
+
+    Attributes:
+        framework: ``sglang`` / ``vllm`` -- printed in SESSION CONTEXT.
+        kernel_enabled: Explicit override; ``None`` derives from the kernel-owned actions.
+        framework_agent_phase_enabled: When False (``--no-framework-agent``) the FRAMEWORK_AGENT phase is skipped.
+        objective_kind: Objective kind string, printed verbatim.
+        objective_value: Objective target value, printed verbatim.
+        max_minutes: Wall-clock budget for the run, in minutes.
+        framework_source_roots: Source roots to search; a "none discovered" note is shown when empty.
+        session_framework_tree: The tree this session optimises; omitted from the rendering when empty.
+        transport: One of :data:`TRANSPORTS`, taken from the backend that will actually run the role. Omits the
+            modules describing a tool surface that transport does not mount.
+        benchmark_mode: ``"agentx"`` or ``""``/``"synthetic"``; injects the AgentX workload and grading blocks when
+            it names AgentX.
+        agentx_corpus_shape: The session's ``agentx_corpus_shape``, supplying the corpus numbers.
+        agentx_grading: The session's recorded ``grading``, naming the axis the grading block describes.
+        agentx_backend: The session's recorded ``agentx_backend``.
+    """
+
+    framework: str = "sglang"
+    kernel_enabled: bool | None = None
+    framework_agent_phase_enabled: bool = True
+    objective_kind: str = "time_only"
+    objective_value: float | str | None = None
+    max_minutes: int = 0
+    framework_source_roots: tuple[str, ...] | None = None
+    session_framework_tree: str = ""
+    transport: str = TRANSPORT_TOOLS
+    benchmark_mode: str = ""
+    agentx_corpus_shape: Mapping[str, Any] | None = None
+    agentx_grading: Mapping[str, Any] | None = None
+    agentx_backend: str = ""
+
+
+@dataclass(frozen=True)
+class PromptCycle:
+    """The parts of the prompt that move between rebuilds.
+
+    Attributes:
+        macro_cycle: Current macro-cycle counter; shown in the CYCLE DIRECTIVE section.
+        cycle_directive: Optional LLM-authored focus text for this cycle (from
+            ``orchestration_memory.next_cycle_directive``); empty with no ``cycle_strategy`` renders the standing
+            breadth->depth default.
+        cycle_strategy: Optional dict from ``plan_cycle_focus`` with deterministic focus, rationale, saturated
+            directions, and prior-cycle history; rendered in the CYCLE DIRECTIVE section after the LLM directive.
+        phase: Current pipeline phase; omits the modules whose behaviour it cannot reach. Empty renders every
+            module. The Coordinator rebuilds the prompt at each phase seam.
+    """
+
+    macro_cycle: int = 0
+    cycle_directive: str = ""
+    cycle_strategy: Mapping[str, Any] | None = None
+    phase: str = ""
+
+
+@dataclass(frozen=True)
+class PromptAssets:
+    """Where the prompt's rules fragment and reference documents are read from.
+
+    Attributes:
+        rules_fragment_path: Path to ``orchestration.md``; placeholder if unreadable.
+        references_dir: Directory of on-demand reference documents; ``asset_prompt_references_dir()`` when ``None``.
+    """
+
+    rules_fragment_path: Path | None = None
+    references_dir: Path | None = None
+
+
+def _section_session_context(session: SessionContext) -> list[str]:
     """Build the SESSION CONTEXT section lines.
 
     Args:
-        framework (str): The framework name shown verbatim.
-        kernel_enabled (bool): Whether kernel_agent-owned actions are enabled.
-        framework_agent_phase_enabled (bool): Whether the FRAMEWORK_AGENT phase
-            is enabled.
-        objective_kind (str): The objective kind (e.g. ``time_only``,
-            ``gain_pct``).
-        objective_value (float | str | None): Optional objective target value
-            rendered alongside the kind.
-        max_minutes (int): Wall-clock budget for the run, in minutes.
-        framework_source_roots (tuple[str, ...] | None): Optional source roots
-            to search; a "none discovered" note is shown when empty.
-        session_framework_tree (str): The tree this session optimises; omitted
-            from the rendering when empty.
-        benchmark_mode (str): ``"agentx"`` or ``""``/``"synthetic"``; injects
-            the AgentX workload and grading blocks when it names AgentX.
-        agentx_corpus_shape (Mapping[str, Any] | None): The session's
-            ``agentx_corpus_shape``, supplying the corpus numbers.
-        agentx_grading (Mapping[str, Any] | None): The session's recorded
-            ``grading``, naming the axis the grading block describes.
-        agentx_backend (str): The session's recorded ``agentx_backend``.
+        session (SessionContext): The session's framework, enabled phases,
+            objective, budget, source roots and AgentX workload.
 
     Returns:
         list[str]: Markdown lines describing static session context and phase
         awareness.
     """
-    obj = f"{objective_kind}"
-    if objective_value not in (None, ""):
-        obj = f"{objective_kind}={objective_value}"
-    roots = framework_source_roots or ()
+    obj = f"{session.objective_kind}"
+    if session.objective_value not in (None, ""):
+        obj = f"{session.objective_kind}={session.objective_value}"
+    roots = session.framework_source_roots or ()
     roots_line = ", ".join(roots) if roots else "none discovered on this host"
-    tree = str(session_framework_tree or "").strip()
+    tree = str(session.session_framework_tree or "").strip()
     tree_lines = [f"- session_framework_tree: {tree}  (the tree under optimisation)"] if tree else []
     lines = [
         "## 2. SESSION CONTEXT",
         "",
-        f"- framework        : {framework}",
-        f"- kernel_enabled   : {'true' if kernel_enabled else 'false'}",
-        f"- optimize_enabled : {'true' if framework_agent_phase_enabled else 'false'}",
+        f"- framework        : {session.framework}",
+        f"- kernel_enabled   : {'true' if session.kernel_enabled else 'false'}",
+        f"- optimize_enabled : {'true' if session.framework_agent_phase_enabled else 'false'}",
         f"- objective        : {obj}",
-        f"- graded_axis      : {graded_metric_key(benchmark_mode=benchmark_mode)}",
-        f"- max_minutes      : {max_minutes}",
+        f"- graded_axis      : {graded_metric_key(benchmark_mode=session.benchmark_mode)}",
+        f"- max_minutes      : {session.max_minutes}",
         *tree_lines,
         f"- framework_source_roots: {roots_line}  (source roots to search)",
     ]
-    if is_agentx_mode(benchmark_mode):
-        lines += ["", *corpus_lines(agentx_corpus_shape), "", *grading_lines(agentx_grading, agentx_backend)]
+    if is_agentx_mode(session.benchmark_mode):
+        lines += [
+            "",
+            *corpus_lines(session.agentx_corpus_shape),
+            "",
+            *grading_lines(session.agentx_grading, session.agentx_backend),
+        ]
     lines += [
         "",
         "Per-tick dynamic context (Phase, Mission progress, Time budget,",
@@ -715,7 +760,7 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
         lines.extend(
             [
                 "* **RULE F1** (PRELUDE) — same baseline fingerprint twice failed →"
-                " change at least one of the eight fingerprint fields.",
+                " change at least one of the seven fingerprint fields.",
                 "* **RULE F2** (PRELUDE) — `error_class='no_report'` + no"
                 " `rescued_from_leaked_path:*` → redirect RESULT_DIR.",
             ]
@@ -1039,25 +1084,9 @@ def build_orchestration_prompt(
     *,
     action_registry: Mapping[str, ActionMetadata],
     enabled_actions: Iterable[str],
-    framework: str = "sglang",
-    kernel_enabled: bool | None = None,
-    framework_agent_phase_enabled: bool = True,
-    objective_kind: str = "time_only",
-    objective_value: float | str | None = None,
-    max_minutes: int = 0,
-    macro_cycle: int = 0,
-    cycle_directive: str = "",
-    cycle_strategy: Mapping[str, Any] | None = None,
-    phase: str = "",
-    transport: str = TRANSPORT_TOOLS,
-    rules_fragment_path: Path | None = None,
-    framework_source_roots: tuple[str, ...] | None = None,
-    session_framework_tree: str = "",
-    references_dir: Path | None = None,
-    benchmark_mode: str = "",
-    agentx_corpus_shape: Mapping[str, Any] | None = None,
-    agentx_grading: Mapping[str, Any] | None = None,
-    agentx_backend: str = "",
+    session: SessionContext = SessionContext(),
+    cycle: PromptCycle = PromptCycle(),
+    assets: PromptAssets = PromptAssets(),
 ) -> str:
     """Compose the Orchestration system prompt (deterministic for given inputs).
 
@@ -1065,44 +1094,18 @@ def build_orchestration_prompt(
         action_registry: the ``ACTION_CATALOGUE`` mapping.
         enabled_actions: enabled action names; final ordering is by
             pipeline_phase.
-        framework: ``sglang`` / ``vllm`` — printed in SESSION CONTEXT.
-        kernel_enabled: explicit override; ``None`` derives from KERNEL_OWNED
-            actions.
-            skipped; the prompt annotates it as DISABLED so Orchestration's plan
-            matches the real phase chain.
-        framework_agent_phase_enabled: when False (``--no-framework-agent``) the
-            FRAMEWORK_AGENT phase is skipped; annotated DISABLED in the prompt.
-        objective_kind: :mod:`objective` kind string, printed verbatim.
-        objective_value: :mod:`objective` target value, printed verbatim.
-        max_minutes: wall-clock budget for the run.
-        macro_cycle: current macro-cycle counter; shown in the CYCLE DIRECTIVE
-            section.
-        cycle_directive: optional LLM-authored focus text for this cycle
-            (from ``orchestration_memory.next_cycle_directive``); empty string
-            with no ``cycle_strategy`` renders the standing breadth→depth default.
-        cycle_strategy: optional dict from ``plan_cycle_focus`` with deterministic
-            focus, rationale, saturated directions, and prior-cycle history; rendered
-            in the CYCLE DIRECTIVE section after the LLM directive (if any).
-        phase: current pipeline phase; omits the modules whose behaviour it
-            cannot reach. Empty renders every module. The Coordinator rebuilds
-            the prompt at each phase seam.
-        transport: one of :data:`TRANSPORTS`, taken from the backend that will
-            actually run the role. Omits the modules describing a tool surface
-            that transport does not mount.
-        rules_fragment_path: path to ``orchestration.md``; placeholder if
-            unreadable.
-        framework_source_roots: optional source roots to search, passed through
-            to the session-context section.
-        session_framework_tree: the tree this session optimises, passed through
-            to the session-context section.
-        references_dir: directory of on-demand reference documents; defaults
-            to ``asset_prompt_references_dir()`` when ``None``.
+        session: what the prompt says about the session itself. A disabled
+            kernel or FRAMEWORK_AGENT phase is annotated DISABLED so
+            Orchestration's plan matches the real phase chain.
+        cycle: the macro-cycle focus and the phase the prompt is scoped to.
+        assets: where the rules fragment and the reference documents are read
+            from.
 
     Returns:
         The composed Orchestration system prompt text.
 
     Raises:
-        ValueError: If ``transport`` is neither empty nor one of
+        ValueError: If ``session.transport`` is neither empty nor one of
             :data:`TRANSPORTS`. Raised rather than tolerated because the caller
             builds this at start-up, and an unknown transport silently strips
             the Output protocol instead of failing.
@@ -1112,17 +1115,19 @@ def build_orchestration_prompt(
     # are scoped by one, so an unknown value renders a prompt that never tells
     # the model how to answer. Nothing later in the pipeline can tell that apart
     # from a fragment that simply had nothing to say.
+    transport = session.transport
     if transport and transport not in TRANSPORTS:
         raise ValueError(f"unknown prompt transport {transport!r}; expected one of {', '.join(sorted(TRANSPORTS))}")
     actions, kernel_enabled, framework_norm, rules_md = _resolve_prompt_prelude(
         action_registry,
         enabled_actions,
-        framework,
-        kernel_enabled,
-        rules_fragment_path,
+        session.framework,
+        session.kernel_enabled,
+        assets.rules_fragment_path,
     )
-    phase_norm = (phase or "").strip().upper()
+    phase_norm = (cycle.phase or "").strip().upper()
 
+    references_dir = assets.references_dir
     if references_dir is None:
         from hyperloom.inference_optimizer.session.paths import asset_prompt_references_dir
 
@@ -1130,29 +1135,16 @@ def build_orchestration_prompt(
 
     sections: list[list[str]] = [
         _section_mission(),
-        _section_session_context(
-            framework=framework_norm,
-            kernel_enabled=kernel_enabled,
-            objective_kind=objective_kind,
-            objective_value=objective_value,
-            max_minutes=max_minutes,
-            framework_agent_phase_enabled=framework_agent_phase_enabled,
-            framework_source_roots=framework_source_roots,
-            benchmark_mode=benchmark_mode,
-            agentx_corpus_shape=agentx_corpus_shape,
-            agentx_grading=agentx_grading,
-            agentx_backend=agentx_backend,
-            session_framework_tree=session_framework_tree,
-        ),
-        _section_pipeline_and_budget(actions, max_minutes=max_minutes),
+        _section_session_context(replace(session, framework=framework_norm, kernel_enabled=kernel_enabled)),
+        _section_pipeline_and_budget(actions, max_minutes=session.max_minutes),
         _section_phase_semantics(
             kernel_enabled=kernel_enabled,
-            framework_agent_phase_enabled=framework_agent_phase_enabled,
+            framework_agent_phase_enabled=session.framework_agent_phase_enabled,
         ),
         _section_action_catalogue(actions),
         _section_decision_framework(kernel_enabled=kernel_enabled, phase=phase_norm, transport=transport),
         _section_cycle_directive(
-            macro_cycle=macro_cycle, cycle_directive=cycle_directive, cycle_strategy=cycle_strategy
+            macro_cycle=cycle.macro_cycle, cycle_directive=cycle.cycle_directive, cycle_strategy=cycle.cycle_strategy
         ),
     ]
     if (
@@ -1167,7 +1159,7 @@ def build_orchestration_prompt(
         ref_index = _section_reference_index(
             references_dir=references_dir,
             phase=phase_norm,
-            benchmark_mode=benchmark_mode,
+            benchmark_mode=session.benchmark_mode,
         )
         if ref_index:
             sections.append(ref_index)
@@ -1212,6 +1204,9 @@ __all__ = [
     "TRANSPORTS",
     "TRANSPORT_STRUCTURED_OUTPUT",
     "TRANSPORT_TOOLS",
+    "PromptAssets",
+    "PromptCycle",
+    "SessionContext",
     "build_orchestration_prompt",
     "default_enabled_actions",
 ]

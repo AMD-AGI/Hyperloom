@@ -119,6 +119,21 @@ class RemoteConfig:
 
 
 @dataclass(frozen=True)
+class ReadQuery:
+    """One ``POST /v1/read``: the decision at hand, its context, and how to narrow and size the answer.
+
+    A ``None`` setting is left to the service: its default schema, both outcomes, its default limit, no budget.
+    """
+
+    decision: str
+    context: Mapping[str, JsonValue]
+    outcome: str | None = None
+    limit: int | None = None
+    schema_ref: str | None = None
+    render_budget_chars: int | None = None
+
+
+@dataclass(frozen=True)
 class RemoteReadResult:
     read_id: str
     status: str
@@ -322,25 +337,16 @@ class RemoteClient:
     def health(self) -> dict[str, JsonValue]:
         return self._request(_GET, "/health")
 
-    def read(
-        self,
-        decision: str,
-        context: Mapping[str, JsonValue],
-        *,
-        outcome: str | None = None,
-        limit: int | None = None,
-        schema_ref: str | None = None,
-        render_budget_chars: int | None = None,
-    ) -> RemoteReadResult:
-        body: dict[str, JsonValue] = {"decision": decision, "context": dict(context)}
-        if outcome is not None:
-            body["outcome"] = outcome
-        if limit is not None:
-            body["limit"] = limit
-        if schema_ref is not None:
-            body["schema_ref"] = schema_ref
-        if render_budget_chars is not None:
-            body["render_budget_chars"] = render_budget_chars
+    def read(self, query: ReadQuery) -> RemoteReadResult:
+        body: dict[str, JsonValue] = {"decision": query.decision, "context": dict(query.context)}
+        if query.outcome is not None:
+            body["outcome"] = query.outcome
+        if query.limit is not None:
+            body["limit"] = query.limit
+        if query.schema_ref is not None:
+            body["schema_ref"] = query.schema_ref
+        if query.render_budget_chars is not None:
+            body["render_budget_chars"] = query.render_budget_chars
         try:
             payload = self._request(_POST, "/v1/read", body)
             refs = payload.get("rendered_refs")
@@ -732,6 +738,21 @@ class RemoteExperienceSession:
         return self._client.publish(self._experience, declaration=self._declaration, files=self._files)
 
 
+@dataclass(frozen=True)
+class ExperienceStart:
+    """What a producer states when it opens an Experience: its run and step, objective, origin, and starting point."""
+
+    run_id: str
+    seq: int
+    objective: str
+    provenance: Provenance
+    identity: Mapping[str, FieldValue] | None = None
+    baseline: Mapping[str, SessionValue] | None = None
+    parent_id: str = ""
+    supersedes: str = ""
+    created_at: datetime | None = None
+
+
 class RemoteExperienceKB:
     """Write-SDK-compatible facade backed by the Experience HTTP service."""
 
@@ -762,32 +783,20 @@ class RemoteExperienceKB:
             return None
         return cls(RemoteClient(config), declaration)
 
-    def begin(
-        self,
-        *,
-        run_id: str,
-        seq: int,
-        objective: str,
-        provenance: Provenance,
-        identity: Mapping[str, FieldValue] | None = None,
-        baseline: Mapping[str, SessionValue] | None = None,
-        parent_id: str = "",
-        supersedes: str = "",
-        created_at: datetime | None = None,
-    ) -> RemoteExperienceSession:
+    def begin(self, start: ExperienceStart) -> RemoteExperienceSession:
         files: dict[str, Path] = {}
         experience = Experience(
-            id=derive_experience_id(provenance.producer, run_id, seq),
-            run_id=run_id,
-            seq=seq,
-            created_at=created_at or datetime.now(timezone.utc),
-            objective=objective,
-            provenance=provenance,
+            id=derive_experience_id(start.provenance.producer, start.run_id, start.seq),
+            run_id=start.run_id,
+            seq=start.seq,
+            created_at=start.created_at or datetime.now(timezone.utc),
+            objective=start.objective,
+            provenance=start.provenance,
             schema_ref=self.declaration.schema_ref,
-            identity=dict(identity or {}),
-            baseline=_attached(baseline, files),
-            parent_id=parent_id,
-            supersedes=supersedes,
+            identity=dict(start.identity or {}),
+            baseline=_attached(start.baseline, files),
+            parent_id=start.parent_id,
+            supersedes=start.supersedes,
         )
         self.declaration.validate(experience)
         return RemoteExperienceSession(self.client, self.declaration, experience, files)
@@ -800,12 +809,14 @@ class RemoteExperienceKB:
         outcome: str | None = None,
         limit: int | None = None,
     ) -> RemoteReadResult:
-        return self.client.read(decision, context, outcome=outcome, limit=limit, schema_ref=self.schema_ref)
+        return self.client.read(ReadQuery(decision, context, outcome=outcome, limit=limit, schema_ref=self.schema_ref))
 
 
 __all__ = [
+    "ExperienceStart",
     "ListPage",
     "LocalFiles",
+    "ReadQuery",
     "RemoteClient",
     "RemoteClientError",
     "RemoteConfig",

@@ -5,19 +5,8 @@
 
 from __future__ import annotations
 
-from typing import Iterable
 
 from .errors import RuntimeAdapterError
-
-
-KB_KINDS: frozenset[str] = frozenset(
-    {
-        "pitfall",
-        "technique",
-        "params_catalog",
-        "model_profile",
-    }
-)
 
 
 # Critic categories → KB kinds; categories without an entry have no KB equivalent.
@@ -49,23 +38,7 @@ def map_category_to_kind(category: str) -> str:
     return kind
 
 
-def filter_supported_categories(
-    categories: Iterable[str],
-) -> tuple[list[str], list[str]]:
-    """Split an iterable into ``(supported, rejected)`` category lists."""
-    supported: list[str] = []
-    rejected: list[str] = []
-    for c in categories:
-        if c in CATEGORY_TO_KIND:
-            supported.append(c)
-        else:
-            rejected.append(c)
-    return supported, rejected
-
-
 __all__ = [
     "CATEGORY_TO_KIND",
-    "KB_KINDS",
-    "filter_supported_categories",
     "map_category_to_kind",
 ]

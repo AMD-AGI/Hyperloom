@@ -398,7 +398,7 @@ class PostgresDatabase(Database):
 
     serial_key = "BIGSERIAL PRIMARY KEY"
 
-    def __init__(self, conninfo: str, *, max_size: int = _POOL_MAX_SIZE) -> None:
+    def __init__(self, conninfo: str) -> None:
         import psycopg
         from psycopg.rows import dict_row
         from psycopg_pool import ConnectionPool
@@ -409,7 +409,7 @@ class PostgresDatabase(Database):
         self.pool = ConnectionPool(
             conninfo,
             min_size=1,
-            max_size=max_size,
+            max_size=_POOL_MAX_SIZE,
             kwargs={"row_factory": dict_row, "connect_timeout": _CONNECT_TIMEOUT_SECONDS},
             check=ConnectionPool.check_connection,
             open=False,

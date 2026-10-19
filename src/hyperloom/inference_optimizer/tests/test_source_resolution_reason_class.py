@@ -96,23 +96,23 @@ def test_every_class_is_known() -> None:
         assert value in ksc.KNOWN_REASON_CLASSES
 
 
-def test_make_entry_always_carries_a_class() -> None:
-    entry = ksc.make_entry(kernel_id="k001", name="k", gpu_pct=1.0)
+def test_entry_always_carries_a_class() -> None:
+    entry = ksc.SourceResolutionEntry(kernel_id="k001", name="k", gpu_pct=1.0).to_dict()
     assert entry["reason_class"] in ksc.KNOWN_REASON_CLASSES
 
 
-def test_make_entry_honours_an_explicit_class() -> None:
-    entry = ksc.make_entry(
+def test_entry_honours_an_explicit_class() -> None:
+    entry = ksc.SourceResolutionEntry(
         kernel_id="k001",
         name="k",
         gpu_pct=1.0,
         reason_class=ksc.CLASS_VENDOR_BINARY,
-    )
+    ).to_dict()
     assert entry["reason_class"] == ksc.CLASS_VENDOR_BINARY
 
 
 def test_document_validation_rejects_an_unknown_class() -> None:
-    entry = ksc.make_entry(kernel_id="k001", name="k", gpu_pct=1.0)
+    entry = ksc.SourceResolutionEntry(kernel_id="k001", name="k", gpu_pct=1.0).to_dict()
     entry["reason_class"] = "invented"
     doc = ksc.make_document([entry], generated_by="test")
     assert any("unknown reason_class" in problem for problem in ksc.validate_document(doc))
@@ -129,7 +129,7 @@ def test_schema_minor_was_bumped_not_the_major() -> None:
 
 
 def _entry(kernel_id: str, reason_class: str, gpu_pct: float) -> dict[str, Any]:
-    entry = ksc.make_entry(kernel_id=kernel_id, name=kernel_id, gpu_pct=gpu_pct)
+    entry = ksc.SourceResolutionEntry(kernel_id=kernel_id, name=kernel_id, gpu_pct=gpu_pct).to_dict()
     entry["reason_class"] = reason_class
     return entry
 

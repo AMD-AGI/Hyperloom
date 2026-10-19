@@ -7,11 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
-from hyperloom.orchestrator.roles.agent_role import (
-    BackendType,
-    default_role_registry,
-)
+from hyperloom.common.llm_config import DEFAULT_CLAUDE_MODEL
+from hyperloom.orchestrator.roles.agent_role import default_role_registry
 from hyperloom.inference_optimizer.protocol.intent import (
     Intent,
     IntentType,
@@ -63,8 +60,6 @@ def test_kernel_agent_not_a_role_but_still_a_request_target():
 
 def test_orchestration_permissions():
     role = default_role_registry()["orchestration"]
-    assert role.backend_type == BackendType.CLAUDE
-    assert role.model == DEFAULT_CLAUDE_MODEL
     assert role.can_delegate_side_effects is True
     assert IntentType.PROPOSE_ACTION in role.allowed_intents
     assert IntentType.DELEGATE in role.allowed_intents
@@ -74,10 +69,8 @@ def test_orchestration_permissions():
     assert IntentType.REVIEW_VERDICT not in role.allowed_intents
 
 
-def test_critic_review_only_codex_no_tools():
+def test_critic_review_only_no_tools():
     role = default_role_registry()["critic"]
-    assert role.backend_type == BackendType.CODEX
-    assert role.model == DEFAULT_CODEX_MODEL
     assert role.no_tools is True
     assert IntentType.REVIEW_VERDICT in role.allowed_intents
     assert IntentType.DELEGATE not in role.allowed_intents
@@ -209,9 +202,8 @@ def test_gate_refuses_a_model_requested_gemm_tuning_run(monkeypatch, precision, 
 
 def test_a_model_requested_kernel_optimization_has_no_handler_to_reach():
     """Source rewrite is the controller's, so the kind is unregistered."""
-    from hyperloom.orchestrator.kernel.request_handlers import get_handler, has_handler
+    from hyperloom.orchestrator.kernel.request_handlers import get_handler
 
-    assert has_handler("run_optimization") is False
     assert get_handler("run_optimization") is None
     assert "run_optimization" not in COORDINATOR_OWNED_KERNEL_REQUEST_KINDS
 

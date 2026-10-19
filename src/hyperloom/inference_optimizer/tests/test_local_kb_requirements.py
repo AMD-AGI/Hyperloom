@@ -12,10 +12,7 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.cli.kb import (
-    _build_recipe_kb_dispatcher,
-    _resolve_local_kb_root,
-)
+from hyperloom.inference_optimizer.cli.kb import _build_recipe_kb_dispatcher
 from hyperloom.orchestrator.knowledge.recipe_kb import (
     LocalRecipeStore,
     cid_to_path_components,
@@ -27,7 +24,6 @@ from hyperloom.orchestrator.knowledge.recipe_kb import (
 def env_clean(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clear the env vars the resolver consults so each test owns its own precedence tier."""
     for key in (
-        "HYPERLOOM_LOCAL_KB_ROOT",
         "KNOWLEDGE_LOCAL_ROOT",
         "KNOWLEDGE_STORE_MODE",
         "USER_DATA_PATH",
@@ -43,7 +39,6 @@ def env_clean(monkeypatch: pytest.MonkeyPatch) -> None:
 def _ns(**overrides: Any) -> argparse.Namespace:
     """Helper to build a CLI Namespace with the KB-related fields plus overrides."""
     fields: dict[str, Any] = {
-        "local_kb_root": None,
         "degraded_kb": False,
     }
     fields.update(overrides)
@@ -77,26 +72,29 @@ def test_item2_default_local_kb_root_is_user_data_path_knowledge(
 ) -> None:
     """Default resolution lands at ``${USER_DATA_PATH}/knowledge``."""
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    args = _ns()
-    assert _resolve_local_kb_root(args) == tmp_path / "knowledge"
+    kb = _build_recipe_kb_dispatcher(_ns())
+    assert kb.local.root == tmp_path / "knowledge"
 
 
-def test_item2_explicit_flag_wins_over_user_data_path(
+def test_item2_explicit_root_wins_over_user_data_path(
     env_clean: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """``--local-kb-root`` is the highest-priority tier."""
+    """``KNOWLEDGE_LOCAL_ROOT`` is the highest-priority tier."""
     monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
-    args = _ns(local_kb_root=str(tmp_path / "alt-root"))
-    assert _resolve_local_kb_root(args) == tmp_path / "alt-root"
+    monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path / "alt-root"))
+    kb = _build_recipe_kb_dispatcher(_ns())
+    assert kb.local.root == tmp_path / "alt-root"
 
 
 def test_item3_no_central_url_reads_and_writes_go_local(
     env_clean: None,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    args = _ns(local_kb_root=str(tmp_path))
+    monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path))
+    args = _ns()
     kb = _build_recipe_kb_dispatcher(args)
     assert kb.mode == "local"
 

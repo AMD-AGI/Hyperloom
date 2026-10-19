@@ -34,7 +34,7 @@ from .event_fields import (
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import EventSink, make_sink
-from .event_timeline import finish_event, open_event
+from .event_timeline import EventHeader, finish_event, open_event
 
 # Every section a stack event assembles from. Named from the leaf module the
 # assembler shares, so this writer reads its parts without an import cycle.
@@ -165,12 +165,9 @@ def _open(*, baseline_tput: Any = None, objective: str = "", start_time: str = "
         if sink is not None:
             sink.record(SECTION_EVENT, dict(shell))
     return open_event(
-        event_type=EVENT_TYPE,
-        event=stack_event_id(),
+        EventHeader(EVENT_TYPE, stack_event_id(), EVENT_KIND, start_time or _now()),
         event_section=SECTION_EVENT,
         producer=PRODUCER,
-        kind=EVENT_KIND,
-        start_time=start_time or _now(),
         ext=shell,
     )
 
@@ -337,12 +334,10 @@ def finish(*, end_time: str = "") -> None:
             event=stack_event_id(),
         )
         finish_event(
-            event_type=EVENT_TYPE,
-            event=stack_event_id(),
+            EventHeader(EVENT_TYPE, stack_event_id(), EVENT_KIND),
             sequence=sequence,
             status=status or STATUS_SKIPPED,
             ext=ext,
-            kind=EVENT_KIND,
             end_time=closed,
         )
     except RECORDING_ERRORS as exc:

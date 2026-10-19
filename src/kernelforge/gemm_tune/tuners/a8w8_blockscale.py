@@ -10,6 +10,7 @@ import logging
 from .base import BaseTuner, TuneResult
 from ._aiter_dense_common import (
     SPLITK_TRIAL_SCRIPT_KEY,
+    DenseTunerSpec,
     run_aiter_dense_tuner,
     validate_dense_tuner_inputs,
 )
@@ -29,11 +30,8 @@ class A8W8BlockscaleTuner(BaseTuner):
 
     def run(self) -> TuneResult:
         return run_aiter_dense_tuner(
-            tuner_name=self.name,
-            script_key=SPLITK_TRIAL_SCRIPT_KEY,
-            env_var=self.env_var,
-            ctx=self.ctx,
-            work_dir=self.work_dir,
             # --splitK enables aiter's split-K search.
-            extra_args=["--libtype", "all", "--splitK"],
+            DenseTunerSpec(self.name, SPLITK_TRIAL_SCRIPT_KEY, self.env_var, ("--libtype", "all", "--splitK")),
+            self.ctx,
+            self.work_dir,
         )

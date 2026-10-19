@@ -39,7 +39,17 @@ from .event_fields import (
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import EventSink, make_sink
-from .event_timeline import finish_event, open_event
+from .event_timeline import EventHeader, finish_event, open_event
+from .phase_records import (
+    MAX_REASON_CHARS,
+    ActionDispatch,
+    ActionSettlement,
+    PhaseEntry,
+    PhaseExit,
+    PhaseMarker,
+    PhaseProposal,
+    SpecialistRound,
+)
 
 # Every section a phase event assembles from. Named from the leaf module the
 # assembler shares, so :func:`_finish` reads its parts without an import cycle.
@@ -84,9 +94,6 @@ STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
 STATUS_DEGRADED = "degraded"
 STATUS_INTERRUPTED = "interrupted"
-
-#: Transition reasons and marker evidence are bounded prose, not logs.
-MAX_REASON_CHARS = 500
 
 
 def is_phase_transition_row(row: Any) -> bool:
@@ -134,61 +141,30 @@ def _open(event: str, *, phase: str, macro_cycle: int, start_time: str = "") -> 
     if sink is not None:
         sink.record(SECTION_EVENT, dict(shell))
     return open_event(
-        event_type=EVENT_TYPE,
-        event=event,
+        EventHeader(EVENT_TYPE, event, EVENT_KIND, start_time or _now()),
         event_section=SECTION_EVENT,
         producer=PRODUCER,
-        kind=EVENT_KIND,
-        start_time=start_time or _now(),
         ext=shell,
     )
 
 
-def record_entry(
-    *,
-    phase: str,
-    macro_cycle: int,
-    sequence: int,
-    from_phase: str = "",
-    reason: str = "",
-    evidence: Mapping[str, Any] | None = None,
-    entered_at: str = "",
-    entered_unix: float | None = None,
-) -> None:
-    """Open the phase being entered and record how the run got there. Never
-    raises. ``sequence`` is the transition's ``phase_history`` position and keys
-    the segment row; ``entered_unix`` measures the segment when it closes."""
-    event = phase_event_id(phase, macro_cycle)
+def record_entry(entry: PhaseEntry) -> None:
+    """Open the phase being entered and record how the run got there. Never raises."""
+    event = phase_event_id(entry.at.phase, entry.at.macro_cycle)
     sink = _sink(event)
     if sink is None:
         return
-    entered = str(entered_at or "") or _now()
-    _open(event, phase=phase, macro_cycle=macro_cycle, start_time=entered)
+    entered = str(entry.entered_at or "") or _now()
+    _open(event, phase=entry.at.phase, macro_cycle=entry.at.macro_cycle, start_time=entered)
     sink.record(
         SECTION_SEGMENT,
-        {
-            "sequence": int(sequence or 0),
-            "from_phase": str(from_phase or "").strip().upper(),
-            "entered_at": entered,
-            "entered_unix": _float_or_none(entered_unix),
-            "entered_reason": _clip(reason, MAX_REASON_CHARS),
-            "entered_evidence": _as_dict(evidence),
-        },
+        entry.row(entered),
         row_type="segment",
-        natural_ids=str(int(sequence or 0)),
+        natural_ids=str(int(entry.sequence or 0)),
     )
 
 
-def record_exit(
-    *,
-    phase: str,
-    macro_cycle: int,
-    to_phase: str = "",
-    reason: str = "",
-    evidence: Mapping[str, Any] | None = None,
-    exited_at: str = "",
-    exited_unix: float | None = None,
-) -> None:
+def record_exit(exit_: PhaseExit) -> None:
     """Close the phase being left on the exit that ended it. Never raises.
 
     The segment settled is the open one, found by reading the phase's own rows
@@ -197,9 +173,9 @@ def record_exit(
     event that was never opened. ``macro_cycle`` is only the fallback for when
     no open segment can be found.
     """
-    found = _open_segment(phase)
+    found = _open_segment(exit_.at.phase)
     if found is None:
-        event = phase_event_id(phase, macro_cycle)
+        event = phase_event_id(exit_.at.phase, exit_.at.macro_cycle)
         row_sequence: int | None = None
         entered_unix: float | None = None
     else:
@@ -207,18 +183,11 @@ def record_exit(
     sink = _sink(event)
     if sink is None:
         return
-    exited = str(exited_at or "") or _now()
+    exited = str(exit_.exited_at or "") or _now()
     duration = None
-    if entered_unix is not None and exited_unix is not None:
-        duration = max(0.0, float(exited_unix) - float(entered_unix))
-    settle: dict[str, Any] = {
-        "to_phase": str(to_phase or "").strip().upper(),
-        "exited_at": exited,
-        "exited_unix": _float_or_none(exited_unix),
-        "exit_reason": _clip(reason, MAX_REASON_CHARS),
-        "exit_evidence": _as_dict(evidence),
-        "duration_sec": duration,
-    }
+    if entered_unix is not None and exit_.exited_unix is not None:
+        duration = max(0.0, float(exit_.exited_unix) - float(entered_unix))
+    settle = exit_.settle(exited, duration)
     if row_sequence is not None:
         sink.record(
             SECTION_SEGMENT,
@@ -230,61 +199,31 @@ def record_exit(
     _finish(event, end_time=exited)
 
 
-def record_marker(
-    *,
-    phase: str,
-    macro_cycle: int,
-    sequence: int,
-    reason: str = "",
-    evidence: Mapping[str, Any] | None = None,
-    ts: str = "",
-) -> None:
+def record_marker(marker: PhaseMarker) -> None:
     """Record one non-transition marker against the phase it was raised in.
-    Never raises. ``sequence`` is its ``phase_history`` position and keys it."""
-    event = phase_event_id(phase, macro_cycle)
+
+    Never raises. ``marker.sequence`` is its ``phase_history`` position and keys it."""
+    event = phase_event_id(marker.at.phase, marker.at.macro_cycle)
     sink = _sink(event)
     if sink is None:
         return
-    _open(event, phase=phase, macro_cycle=macro_cycle)
+    _open(event, phase=marker.at.phase, macro_cycle=marker.at.macro_cycle)
     sink.record(
         SECTION_MARKER,
-        {
-            "sequence": int(sequence or 0),
-            "reason": _clip(reason, MAX_REASON_CHARS),
-            "evidence": _as_dict(evidence),
-            "ts": str(ts or "") or _now(),
-        },
+        marker.row(),
         row_type="marker",
-        natural_ids=str(int(sequence or 0)),
+        natural_ids=str(int(marker.sequence or 0)),
     )
 
 
-#: What a specialist round contributes to the action row that dispatched it.
-#: ``proposal_set`` is deliberately absent: for the FRAMEWORK arm each proposal
-#: owns a row on the framework event, and for the scouts the product is findings.
-_ROUND_TEXT_FIELDS = ("domain", "gap_canonical_id", "summary", "reason", "source")
-_ROUND_LIST_FIELDS = ("tags", "new_findings", "residual_questions", "notes")
-
-
-def record_specialist_round(
-    *,
-    task_id: str,
-    phase: str,
-    macro_cycle: int,
-    round_id: str = "",
-    proposals_total: Any = None,
-    empty: Any = None,
-    confidence: Any = None,
-    ensemble_scores: Mapping[str, Any] | None = None,
-    **fields: Any,
-) -> None:
+def record_specialist_round(round_: SpecialistRound) -> None:
     """Merge what a specialist round produced onto the action row that ordered it.
 
     Merged onto the action row the dispatcher already opened for ``task_id``,
     not added as a second one. Missing dispatch evidence is left missing rather
     than reconstructed after the fact with guessed provenance.
     """
-    key = str(task_id or "")
+    key = str(round_.task_id or "")
     if not key:
         return
     event = _action_event(key)
@@ -293,69 +232,25 @@ def record_specialist_round(
     sink = _sink(event)
     if sink is None:
         return
-    row: dict[str, Any] = {"task_id": key}
-    if str(round_id or "") and str(round_id) != key:
-        row["round_id"] = str(round_id)
-    for name in _ROUND_TEXT_FIELDS:
-        if name in fields:
-            row[name] = _clip(str(fields.get(name) or ""), MAX_REASON_CHARS)
-    for name in _ROUND_LIST_FIELDS:
-        if name in fields:
-            row[name] = [str(item) for item in (fields.get(name) or []) if str(item or "")]
-    if proposals_total is not None:
-        row["proposals_total"] = _int_or_none(proposals_total)
-    if empty is not None:
-        row["empty"] = bool(empty)
-    if confidence is not None:
-        row["confidence"] = _float_or_none(confidence)
-    if ensemble_scores:
-        row["ensemble_scores"] = _as_dict(ensemble_scores)
-    sink.record(SECTION_ACTION, row, row_type="action", natural_ids=key)
+    sink.record(SECTION_ACTION, round_.row(), row_type="action", natural_ids=key)
 
 
-def record_dispatch(
-    *,
-    action: str,
-    task_id: str,
-    phase: str,
-    macro_cycle: int,
-    tick: int = 0,
-    dispatch_class: str | None = None,
-    allowed: bool | None = True,
-    denial_rule: str | None = None,
-    dispatched_at: str = "",
-    dispatched_unix: float | None = None,
-) -> bool:
+def record_dispatch(dispatch: ActionDispatch) -> bool:
     """Record an action against its authoring phase and report durability."""
-    if not str(task_id or ""):
+    if not str(dispatch.task_id or ""):
         return False
-    event = phase_event_id(phase, macro_cycle)
+    event = phase_event_id(dispatch.at.phase, dispatch.at.macro_cycle)
     sink = _sink(event)
     if sink is None:
         return False
-    opened = _open(event, phase=phase, macro_cycle=macro_cycle)
-    row: dict[str, Any] = {
-        "action": str(action or ""),
-        "task_id": str(task_id),
-        "phase": str(phase or "").strip().upper(),
-        "macro_cycle": int(macro_cycle or 0),
-        "tick": int(tick or 0),
-        "dispatched_at": str(dispatched_at or "") or _now(),
-        "dispatched_unix": _float_or_none(dispatched_unix),
-    }
-    if dispatch_class is not None:
-        row.update(
-            dispatch_class=str(dispatch_class),
-            allowed=bool(allowed),
-            denial_rule=_text_or_none(denial_rule),
-        )
+    opened = _open(event, phase=dispatch.at.phase, macro_cycle=dispatch.at.macro_cycle)
     recorded = sink.record(
         SECTION_ACTION,
-        row,
+        dispatch.row(),
         row_type="action",
-        natural_ids=str(task_id),
+        natural_ids=str(dispatch.task_id),
     )
-    if opened is not None and recorded is not None and action == "profile":
+    if opened is not None and recorded is not None and dispatch.action == "profile":
         from ...session.session_binding import bound_session
         from .outcome_stage import record_stage_reached
 
@@ -394,48 +289,25 @@ def record_denial(
     )
 
 
-def record_proposal(
-    *,
-    proposal_msg_id: str,
-    action: str,
-    phase: str,
-    macro_cycle: int,
-    from_agent: str = "",
-    tick: int = 0,
-    predicted_gain_pct: Any = None,
-    candidate_id: Any = None,
-    variant_name: Any = None,
-    proposed_at: str = "",
-) -> None:
+def record_proposal(proposal: PhaseProposal) -> None:
     """Record a proposal against the phase that raised it. Never raises.
 
     Written when the proposal is minted, not when it is acted on: one refused by
     the Critic or left pending at the phase exit has no dispatch and so no other
     row, and the ruling needs a subject to be filed against.
     """
-    if not str(proposal_msg_id or ""):
+    if not str(proposal.proposal_msg_id or ""):
         return
-    event = phase_event_id(phase, macro_cycle)
+    event = phase_event_id(proposal.at.phase, proposal.at.macro_cycle)
     sink = _sink(event)
     if sink is None:
         return
-    _open(event, phase=phase, macro_cycle=macro_cycle)
+    _open(event, phase=proposal.at.phase, macro_cycle=proposal.at.macro_cycle)
     sink.record(
         SECTION_PROPOSAL,
-        {
-            "proposal_msg_id": str(proposal_msg_id),
-            "action": str(action or ""),
-            "from_agent": str(from_agent or ""),
-            "phase": str(phase or "").strip().upper(),
-            "macro_cycle": int(macro_cycle or 0),
-            "tick": int(tick or 0),
-            "predicted_gain_pct": _float_or_none(predicted_gain_pct),
-            "candidate_id": _text_or_none(candidate_id),
-            "variant_name": _text_or_none(variant_name),
-            "proposed_at": str(proposed_at or "") or _now(),
-        },
+        proposal.row(),
         row_type="proposal",
-        natural_ids=str(proposal_msg_id),
+        natural_ids=str(proposal.proposal_msg_id),
     )
 
 
@@ -541,44 +413,22 @@ def record_proposal_outcome(
     )
 
 
-def record_settle(
-    *,
-    task_id: str,
-    status: str = "",
-    decision: str = "",
-    error_class: Any = None,
-    workspace: Any = None,
-    settled_at: str = "",
-    settled_unix: float | None = None,
-    phase: str = "",
-    macro_cycle: int = 0,
-    action: str = "",
-) -> None:
+def record_settle(settlement: ActionSettlement) -> None:
     """Settle a dispatched action's row with the verdict it got. Never raises.
 
     The row settled is the one the dispatch opened, found by reading the spool
     back: the dispatching phase is not in scope at the settle. Missing dispatch
     evidence is left missing rather than reconstructed with guessed provenance.
     """
-    if not str(task_id or ""):
+    if not str(settlement.task_id or ""):
         return
-    event = _action_event(str(task_id))
+    event = _action_event(str(settlement.task_id))
     if event is None:
         return
     sink = _sink(event)
     if sink is None:
         return
-    settled = str(settled_at or "") or _now()
-    row: dict[str, Any] = {
-        "task_id": str(task_id),
-        "status": str(status or ""),
-        "decision": str(decision or ""),
-        "error_class": _text_or_none(error_class),
-        "workspace": _text_or_none(workspace),
-        "settled_at": settled,
-        "settled_unix": _float_or_none(settled_unix),
-    }
-    sink.record(SECTION_ACTION, row, row_type="action", natural_ids=str(task_id))
+    sink.record(SECTION_ACTION, settlement.row(), row_type="action", natural_ids=str(settlement.task_id))
 
 
 def _finish(event: str, *, end_time: str) -> None:
@@ -601,13 +451,10 @@ def _finish(event: str, *, end_time: str) -> None:
         parts = event_parts(PHASE_EVENT_SECTIONS, event=event)
         ext, status = assemble_phase_ext(parts, event=event)
         finish_event(
-            event_type=EVENT_TYPE,
-            event=event,
+            EventHeader(EVENT_TYPE, event, EVENT_KIND, str(ext.get("entered_at") or "")),
             sequence=sequence,
             status=status or STATUS_SUCCEEDED,
             ext=ext,
-            kind=EVENT_KIND,
-            start_time=str(ext.get("entered_at") or ""),
             end_time=end_time,
         )
     except RECORDING_ERRORS as exc:

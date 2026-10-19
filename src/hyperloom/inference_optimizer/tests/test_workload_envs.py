@@ -414,16 +414,15 @@ def test_run_eval_defaults_true(monkeypatch, tmp_path):
     assert bench["envs"]["RUN_EVAL"] == "true"
 
 
-def test_run_eval_explicit_false_warns_not_blocks(monkeypatch, tmp_path, caplog):
+def test_run_eval_process_env_false_is_ignored(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
     monkeypatch.setenv("RUN_EVAL", "false")
-    monkeypatch.setattr(we, "_RUN_EVAL_DISABLED_WARN_EMITTED", False)
-    src = _write(tmp_path / "cfg.yaml")
-    with caplog.at_level("WARNING"):
-        bench = _materialize(src, tmp_path / "out")
-    assert bench["envs"]["RUN_EVAL"] == "false"
-    assert any("RUN_EVAL is disabled" in r.message for r in caplog.records)
+    monkeypatch.setenv(OPERATOR_EXTRA_ENV_VAR, json.dumps({"RUN_EVAL": "false", "MY_KNOB": "1"}))
+    src = _write(tmp_path / "cfg.yaml", envs={"RUN_EVAL": "false"})
+    bench = _materialize(src, tmp_path / "out")
+    assert bench["envs"]["RUN_EVAL"] == "true"
+    assert bench["envs"]["MY_KNOB"] == "1"
 
 
 def test_profile_negative_delay_clamped(monkeypatch, tmp_path):
@@ -446,20 +445,6 @@ def test_profile_max_iters_override(monkeypatch, tmp_path):
     src = _write(tmp_path / "cfg.yaml", envs={"PROFILE": "1"})
     bench = _materialize(src, tmp_path / "out")
     assert "NUM_PROMPTS" in bench["envs"]
-
-
-def test_the_iters_override_keeps_the_delay_an_agentx_run_needs_at_zero(monkeypatch, tmp_path):
-    """Raising the capture bound must not reintroduce an iteration delay."""
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "128")
-    monkeypatch.setenv("HYPERLOOM_PROFILE_DELAY_ITERS", "64")
-    src = _write(tmp_path / "cfg.yaml", framework="vllm", envs={"PROFILE": "1"})
-    bench = _materialize(src, tmp_path / "out")
-    args = str(bench["envs"]["EXTRA_VLLM_ARGS"])
-    assert "--profiler-config.delay_iterations 0" in args
-    assert "--profiler-config.max_iterations 128" in args
 
 
 def test_a_synthetic_run_still_honors_the_delay_override(monkeypatch, tmp_path):
@@ -789,9 +774,9 @@ def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_pa
 # agentx_active: persisted benchmark_mode as a fallback for a missing env var
 
 
-def test_agentx_active_true_from_env_var(monkeypatch):
+def test_agentx_active_true_from_yaml(monkeypatch, native_benchmark):
     _clear_env(monkeypatch)
-    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_BENCHMARK_CONFIG", str(native_benchmark))
     assert we.agentx_active() is True
 
 

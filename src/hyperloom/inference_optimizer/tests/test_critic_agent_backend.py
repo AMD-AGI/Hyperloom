@@ -1332,7 +1332,6 @@ async def test_required_context_surfaces_in_metadata(
 """End-to-end test: real critic-agent runtime + mocked Codex + Coordinator.
 
 Shells out to the real ``hyperloom/agents/critic/runtime/cli.py`` (only Codex is faked).
-Marker ``critic_agent_e2e`` lets devs without the checkout skip it.
 """
 
 
@@ -1351,9 +1350,6 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
-
-
-pytestmark = pytest.mark.critic_agent_e2e
 
 
 # Fake Codex (only the LLM layer; the runtime is real).
@@ -1805,12 +1801,18 @@ async def test_anthropic_protocol_single_proposal_yields_verdict(
     # One call carrying the system prompt in its own field, under the shared cap.
     assert len(fake_completion.calls) == 1
     call = fake_completion.calls[0]
-    assert call["model"] == "claude-opus-4-8"
-    assert call["system"] == "critic system"
-    assert call["max_tokens"] == CRITIC_AGENT_MAX_COMPLETION_TOKENS
-    user_content = call["messages"][0]["content"]
-    assert "JUDGE BUNDLE" in user_content
-    assert "critic system" not in user_content
+    assert call["request"].model == "claude-opus-4-8"
+    assert call["request"].system == "critic system"
+    assert call["request"].max_tokens == CRITIC_AGENT_MAX_COMPLETION_TOKENS
+    user_content = call["request"].messages[0]["content"]
+    assert user_content[0] == {
+        "type": "text",
+        "text": backend._load_skill_preamble(),
+        "cache_control": {"type": "ephemeral"},
+    }
+    assert "cache_control" not in user_content[1]
+    assert "JUDGE BUNDLE" in user_content[1]["text"]
+    assert "critic system" not in "\n\n".join(block["text"] for block in user_content)
 
     # Token usage from the turn metadata landed on the critic trace row.
     import json as _json
@@ -1847,6 +1849,103 @@ def _truncated_anthropic_result() -> AnthropicMessageResult:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["http", "cli"])
+@pytest.mark.parametrize("with_preamble", [True, False])
+async def test_critic_cache_blocks_preserve_transport_prompt(
+    fake_critic_root, fake_session_dir, monkeypatch, transport, with_preamble
+):
+    import httpx
+    from types import SimpleNamespace
+    from hyperloom.common import claude_oneshot, llm_config
+
+    bundle = _minimal_judge_bundle()
+    bundle["notes"] = ["Unicode \u03bb ==== JUDGE BUNDLE ==== inside data"]
+    reply = '{"review_verdicts":[{"target_proposal_msg_id":"p1","verdict":"approve"}]}'
+    backend, _ = _make_anthropic_backend(
+        fake_critic_root, fake_session_dir, monkeypatch, results=[], judge_bundle=bundle
+    )
+    if not with_preamble:
+        (fake_critic_root / "SKILL.md").unlink()
+        (fake_critic_root / "actions/review_coordinator_inbox.md").unlink()
+    monkeypatch.setattr(f"{_CRITIC_MOD}.aanthropic_completion", llm_config.aanthropic_completion)
+    monkeypatch.setattr(llm_config, "anthropic_transport", lambda *_: transport if transport == "http" else "sdk")
+    observed = []
+
+    def respond(request):
+        assert request.url.path == "/v1/messages"
+        observed.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "msg_test",
+                "type": "message",
+                "role": "assistant",
+                "model": "claude-opus-4-8",
+                "content": [{"type": "text", "text": reply}],
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 20, "output_tokens": 10},
+            },
+        )
+
+    async def query(*, prompt, options):
+        observed.append(prompt)
+        yield SimpleNamespace(result=reply)
+
+    monkeypatch.setattr(
+        llm_config,
+        "get_async_anthropic_client",
+        lambda **_: httpx.AsyncClient(base_url="https://fixture.invalid", transport=httpx.MockTransport(respond)),
+    )
+    monkeypatch.setattr(
+        claude_oneshot,
+        "_load_sdk",
+        lambda: SimpleNamespace(query=query, ClaudeAgentOptions=lambda **kwargs: SimpleNamespace(**kwargs)),
+    )
+    recorded = []
+    monkeypatch.setattr(CriticAgentBackend, "_record_critic_conversation", lambda self, **kw: recorded.append(kw))
+    result, _, _ = await backend._reason(judge_bundle=bundle, system_prompt="critic system")
+    assert result["review_verdicts"][0]["verdict"] == "approve"
+    assert len(observed) == len(recorded) == 1
+    view = {
+        key: bundle.get(key)
+        for key in (
+            "kind",
+            "session_id",
+            "decision_id",
+            "phase",
+            "merged_context",
+            "missing_context",
+            "required_context",
+            "proposals",
+            "kb_priors_by_proposal",
+            "kb_priors_for_decision",
+            "kb_read_skipped_reason",
+            "review_constraints",
+            "notes",
+        )
+    }
+    dynamic = (
+        f"==== JUDGE BUNDLE ====\n{json.dumps(view, ensure_ascii=False, separators=(',', ':'))}"
+        f"\n==== END JUDGE BUNDLE ====\n\n{_REVIEW_OUTPUT_INSTRUCTIONS}"
+    )
+    expected = f"{backend._load_skill_preamble()}\n\n{dynamic}"
+    assert recorded[0]["user_prompt"].encode() == expected.encode()
+    if transport == "cli":
+        assert observed[0].encode() == expected.strip().encode()
+    else:
+        assert observed[0]["system"] == "critic system"
+        blocks = observed[0]["messages"][0]["content"]
+        assert blocks[-1] == {"type": "text", "text": dynamic}
+        assert len(blocks) == (2 if with_preamble else 1)
+        if with_preamble:
+            assert blocks[0] == {
+                "type": "text",
+                "text": backend._load_skill_preamble(),
+                "cache_control": {"type": "ephemeral"},
+            }
+
+
+@pytest.mark.asyncio
 async def test_truncated_review_is_retried_with_a_bigger_cap(
     fake_critic_root: Path,
     fake_session_dir: Path,
@@ -1871,8 +1970,9 @@ async def test_truncated_review_is_retried_with_a_bigger_cap(
     assert len(verdicts) == 1
     assert verdicts[0].payload["target_proposal_msg_id"] == "p1"
     assert len(fake_completion.calls) == 2
-    assert fake_completion.calls[0]["max_tokens"] == CRITIC_AGENT_MAX_COMPLETION_TOKENS
-    assert fake_completion.calls[1]["max_tokens"] == (
+    assert fake_completion.calls[0]["request"].messages == fake_completion.calls[1]["request"].messages
+    assert fake_completion.calls[0]["request"].max_tokens == CRITIC_AGENT_MAX_COMPLETION_TOKENS
+    assert fake_completion.calls[1]["request"].max_tokens == (
         CRITIC_AGENT_MAX_COMPLETION_TOKENS * CRITIC_AGENT_TRUNCATION_RETRY_FACTOR
     )
 
@@ -1973,7 +2073,7 @@ async def test_max_completion_tokens_env_override_raises_the_cap(
 
     await backend.run("prompt", system_prompt="critic system")
 
-    assert fake_completion.calls[0]["max_tokens"] == 64000
+    assert fake_completion.calls[0]["request"].max_tokens == 64000
 
 
 @pytest.mark.parametrize(
@@ -2204,3 +2304,32 @@ async def test_anthropic_protocol_traces_cache_counters_separately(
     assert row["cache_read_input_tokens"] == 4000
     assert row["cache_creation_input_tokens"] == 300
     assert row["output_tokens"] == 500
+
+
+@pytest.mark.asyncio
+async def test_a_failing_iteration_record_propagates_from_the_turn(
+    fake_critic_root: Path,
+    fake_session_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hyperloom.inference_optimizer.breakdown.recorder import critic_out
+
+    def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("critic record bug")
+
+    monkeypatch.setattr(critic_out, "record_critic_iteration", _boom)
+    judge_bundle = {
+        "kind": "coordinator_inbox",
+        "session_id": fake_session_dir.name,
+        "proposals": [],
+        "review_constraints": {},
+    }
+    backend, _ = _make_backend(
+        fake_critic_root,
+        fake_session_dir,
+        codex_replies=[],
+        judge_bundle=judge_bundle,
+    )
+
+    with pytest.raises(RuntimeError, match="critic record bug"):
+        await backend.run(prompt="=== inbox ===\n", system_prompt="You are critic.")

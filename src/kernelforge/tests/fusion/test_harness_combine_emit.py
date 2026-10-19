@@ -8,9 +8,9 @@ from __future__ import annotations
 import re
 import subprocess
 
-from kernelforge.fusion.author import build_author_prompt, build_multi_author_prompt
+from kernelforge.fusion.author import AuthorBrief, build_author_prompt, build_multi_author_prompt
 from kernelforge.fusion.command import _combined_recipe, _safe_artifact_id
-from kernelforge.fusion.emit import export_artifacts, restore_exported_changes
+from kernelforge.fusion.emit import FusionFiles, export_artifacts, restore_exported_changes
 from kernelforge.fusion.models import Recipe
 
 
@@ -34,19 +34,21 @@ def _recipe(pattern_id="residual_add_rmsnorm", env_flag="LFM2_FUSED_RESIDUAL", *
 class TestHarnessContractInPrompt:
     def test_single_prompt_includes_harness_when_path_given(self):
         p = build_author_prompt(
-            _recipe().to_dict(), framework="sglang", ab_hint="x", harness_path="/out/kernel_harness.py"
+            _recipe().to_dict(), AuthorBrief(framework="sglang", ab_hint="x", harness_path="/out/kernel_harness.py")
         )
         assert "/out/kernel_harness.py" in p
         assert '"compiled"' in p and '"parity"' in p and '"snr_db"' in p  # JSON contract
         assert "LFM2_FUSED_RESIDUAL" in p
 
     def test_single_prompt_omits_harness_without_path(self):
-        p = build_author_prompt(_recipe().to_dict(), framework="sglang", ab_hint="x")
+        p = build_author_prompt(_recipe().to_dict(), AuthorBrief(framework="sglang", ab_hint="x"))
         assert "kernel_harness.py" not in p
 
     def test_multi_prompt_includes_harness_and_all_flags(self):
         rs = [_recipe().to_dict(), _recipe(pattern_id="swiglu_silu_mul", env_flag="LFM2_FUSED_SILU").to_dict()]
-        p = build_multi_author_prompt(rs, framework="sglang", ab_hint="x", harness_path="/out/kernel_harness.py")
+        p = build_multi_author_prompt(
+            rs, AuthorBrief(framework="sglang", ab_hint="x", harness_path="/out/kernel_harness.py")
+        )
         assert "/out/kernel_harness.py" in p
         assert "LFM2_FUSED_RESIDUAL" in p and "LFM2_FUSED_SILU" in p
 
@@ -129,9 +131,8 @@ class TestArtifactId:
         )
         campaign_module.run_recipe_campaign(
             combined,
-            workspace=str(tmp_path),
-            harness_path=str(tmp_path / "kernel_harness.py"),
-            output_dir=str(tmp_path),
+            campaign_module.CampaignWorkspace(root=str(tmp_path), output_dir=str(tmp_path)),
+            campaign_module.CampaignBrief(harness_path=str(tmp_path / "kernel_harness.py")),
         )
 
         written = [p.name for p in tmp_path.iterdir() if p.is_file()]
@@ -162,7 +163,7 @@ class TestScopedEmit:
         (repo / "unrelated.py").write_text("# pre-existing\n# dirty\n", encoding="utf-8")
 
         out = tmp_path / "out"
-        arts = export_artifacts(str(repo), str(mdir / "lfm2.py"), out)
+        arts = export_artifacts(str(repo), FusionFiles(str(mdir / "lfm2.py")), out / "fusion.patch")
         paths = {c["path"] for c in arts.changes}
         assert any(p.endswith("models/lfm2.py") for p in paths)
         assert any(p.endswith("models/lfm2_fused.py") for p in paths)

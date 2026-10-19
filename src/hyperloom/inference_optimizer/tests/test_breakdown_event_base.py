@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.breakdown import recorder as rec
+from hyperloom.inference_optimizer.breakdown.recorder.event_timeline import EventHeader
 from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import make_kernel_recorder
 from hyperloom.inference_optimizer.session.session_binding import (
     SessionNotBoundError,
@@ -309,11 +310,9 @@ def test_recording_side_bookkeeping_does_not_reach_the_wire():
 def test_opening_an_event_makes_it_visible_as_running_before_it_finishes(tmp_path):
     with session_scope(tmp_path):
         sequence = rec.open_event(
-            event_type="kernel",
-            event=_EID,
+            EventHeader("kernel", _EID, "", "2026-09-02T10:00:00Z"),
             event_section="kernel_event",
             producer="orchestrator",
-            start_time="2026-09-02T10:00:00Z",
             ext={"in_flight_stage": "forge"},
         )
 
@@ -330,12 +329,7 @@ def test_the_sequence_of_an_opened_event_lands_on_its_event_level_fragment(tmp_p
     # The fragment is the event's only durable identity, so the sequence has to be there or the closing write cannot
     # find the entry to update.
     with session_scope(tmp_path):
-        sequence = rec.open_event(
-            event_type="kernel",
-            event=_EID,
-            event_section="kernel_event",
-            producer="orchestrator",
-        )
+        sequence = rec.open_event(EventHeader("kernel", _EID), event_section="kernel_event", producer="orchestrator")
         rows = rec.kernel_event_parts()["kernel_event"]
 
     assert [row[rec.TIMELINE_SEQUENCE_FIELD] for row in rows] == [sequence]
@@ -344,19 +338,15 @@ def test_the_sequence_of_an_opened_event_lands_on_its_event_level_fragment(tmp_p
 def test_closing_an_event_updates_the_same_entry_instead_of_appending_one(tmp_path):
     with session_scope(tmp_path):
         sequence = rec.open_event(
-            event_type="kernel",
-            event=_EID,
+            EventHeader("kernel", _EID, "", "2026-09-02T10:00:00Z"),
             event_section="kernel_event",
             producer="orchestrator",
-            start_time="2026-09-02T10:00:00Z",
         )
         rec.finish_event(
-            event_type="kernel",
-            event=_EID,
+            EventHeader("kernel", _EID, "", "2026-09-02T10:00:00Z"),
             sequence=sequence,
             status="succeeded",
             ext={"macro_cycle": 3},
-            start_time="2026-09-02T10:00:00Z",
             end_time="2026-09-02T10:05:00Z",
         )
 
@@ -368,7 +358,7 @@ def test_closing_an_event_updates_the_same_entry_instead_of_appending_one(tmp_pa
 
 
 def test_the_envelope_carries_the_event_id_as_id_and_never_repeats_it_in_ext():
-    envelope = rec.build_envelope(event_type="kernel", event=_EID, status="running", ext={"macro_cycle": 3})
+    envelope = rec.build_envelope(EventHeader("kernel", _EID), status="running", ext={"macro_cycle": 3})
     assert envelope["id"] == _EID
     assert "id" not in envelope["ext"]
     assert "event_id" not in envelope["ext"]
@@ -379,12 +369,7 @@ def test_the_envelope_carries_the_event_id_as_id_and_never_repeats_it_in_ext():
 
 def test_an_event_killed_after_it_opened_is_residual_with_its_sequence_recoverable(tmp_path):
     with session_scope(tmp_path):
-        sequence = rec.open_event(
-            event_type="kernel",
-            event=_EID,
-            event_section="kernel_event",
-            producer="orchestrator",
-        )
+        sequence = rec.open_event(EventHeader("kernel", _EID), event_section="kernel_event", producer="orchestrator")
         residual = rec.residual_events(rec.kernel_event_parts()["kernel_event"], event_type="kernel")
 
     assert residual == [rec.ResidualEvent(event_id=_EID, sequence=sequence, state=rec.RESIDUAL_RUNNING)]
@@ -401,19 +386,8 @@ def test_fragments_with_no_event_behind_them_are_residual_with_no_sequence(tmp_p
 
 def test_an_event_that_reached_a_terminal_status_is_not_residual(tmp_path):
     with session_scope(tmp_path):
-        sequence = rec.open_event(
-            event_type="kernel",
-            event=_EID,
-            event_section="kernel_event",
-            producer="orchestrator",
-        )
-        rec.finish_event(
-            event_type="kernel",
-            event=_EID,
-            sequence=sequence,
-            status="succeeded",
-            ext={},
-        )
+        sequence = rec.open_event(EventHeader("kernel", _EID), event_section="kernel_event", producer="orchestrator")
+        rec.finish_event(EventHeader("kernel", _EID), sequence=sequence, status="succeeded", ext={})
         assert rec.residual_events(rec.kernel_event_parts()["kernel_event"], event_type="kernel") == []
 
 
@@ -421,18 +395,9 @@ def test_a_recovered_event_is_marked_interrupted_rather_than_guessed_complete(tm
     # Nothing judged the run: the closing status is derived at assembly, and an event whose closing write never ran
     # has no verdict to report.
     with session_scope(tmp_path):
-        sequence = rec.open_event(
-            event_type="kernel",
-            event=_EID,
-            event_section="kernel_event",
-            producer="orchestrator",
-        )
+        sequence = rec.open_event(EventHeader("kernel", _EID), event_section="kernel_event", producer="orchestrator")
         rec.finish_event(
-            event_type="kernel",
-            event=_EID,
-            sequence=sequence,
-            status=rec.EVENT_STATUS_INTERRUPTED,
-            ext={"macro_cycle": 3},
+            EventHeader("kernel", _EID), sequence=sequence, status=rec.EVENT_STATUS_INTERRUPTED, ext={"macro_cycle": 3}
         )
         # Recovery is itself a close, so a second export must not recover it again.
         assert rec.residual_events(rec.kernel_event_parts()["kernel_event"], event_type="kernel") == []

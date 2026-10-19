@@ -31,6 +31,8 @@ from hyperloom.orchestrator.specialists.subprocess_ import (
     SpecialistSubprocessDispatcher,
     _build_specialist_env,
     _setup_worktree,
+    ReapWatch,
+    SpecialistSpawn,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
@@ -657,10 +659,8 @@ async def test_reap_loop_process_log_activity_prevents_stale_kill(
 
     writer = asyncio.create_task(_keep_streaming())
     outcome = await disp._reap_loop(
-        proc=proc,
-        workspace=workspace,
-        done_files=(),
-        heartbeat_file=heartbeat_file,
+        proc,
+        ReapWatch(workspace=workspace, done_files=(), heartbeat_file=heartbeat_file),
         deadline=Deadline.after(60.0),
         started=time.monotonic(),
     )
@@ -703,10 +703,8 @@ async def test_reap_loop_kills_when_no_activity_at_all(
     )
 
     outcome = await disp._reap_loop(
-        proc=proc,
-        workspace=workspace,
-        done_files=(),
-        heartbeat_file=heartbeat_file,
+        proc,
+        ReapWatch(workspace=workspace, done_files=(), heartbeat_file=heartbeat_file),
         deadline=Deadline.after(60.0),
         started=time.monotonic(),
     )
@@ -745,13 +743,10 @@ async def test_reap_loop_times_out_at_base_budget_without_extension(_live_reaper
 
     started = time.monotonic()
     outcome = await disp._reap_loop(
-        proc=proc,
-        workspace=workspace,
-        done_files=(),
-        heartbeat_file=workspace / "heartbeat.json",
+        proc,
+        ReapWatch(workspace=workspace, done_files=(), heartbeat_file=workspace / "heartbeat.json", task_id="task-base"),
         deadline=Deadline.after(0.3),
         started=time.monotonic(),
-        task_id="task-base",
     )
     elapsed = time.monotonic() - started
 
@@ -769,13 +764,12 @@ async def test_reap_loop_deadline_moves_when_extension_granted_mid_run(_live_rea
     started = time.monotonic()
     loop = asyncio.create_task(
         disp._reap_loop(
-            proc=proc,
-            workspace=workspace,
-            done_files=(),
-            heartbeat_file=workspace / "heartbeat.json",
+            proc,
+            ReapWatch(
+                workspace=workspace, done_files=(), heartbeat_file=workspace / "heartbeat.json", task_id="task-live"
+            ),
             deadline=Deadline.after(0.3),
             started=time.monotonic(),
-            task_id="task-live",
         )
     )
     # Grant the extension while the run is still in flight, before the original 0.3s cap would have fired.
@@ -803,13 +797,10 @@ async def test_reap_loop_ignores_extension_for_a_different_task(_live_reaper):
 
     started = time.monotonic()
     outcome = await disp._reap_loop(
-        proc=proc,
-        workspace=workspace,
-        done_files=(),
-        heartbeat_file=workspace / "heartbeat.json",
+        proc,
+        ReapWatch(workspace=workspace, done_files=(), heartbeat_file=workspace / "heartbeat.json", task_id="task-mine"),
         deadline=Deadline.after(0.3),
         started=time.monotonic(),
-        task_id="task-mine",
     )
     elapsed = time.monotonic() - started
 
@@ -939,17 +930,19 @@ async def test_run_routes_through_gpu_lease_and_strips_devices(
     cfg = SpecialistSubprocessConfig(poll_interval_seconds=0.05)
     disp = SpecialistSubprocessDispatcher(config=cfg)
     result = await disp.run(
-        task_id="t-gpu",
-        workspace=workspace,
-        worktree=None,
-        worktree_base=None,
-        system_prompt="sys",
-        user_prompt="usr",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        gpu_ids=(0, 1),
-        deadline=Deadline.after(60.0),
-        gpu_lease=lease,
+        SpecialistSpawn(
+            task_id="t-gpu",
+            workspace=workspace,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="sys",
+            user_prompt="usr",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            gpu_ids=(0, 1),
+            deadline=Deadline.after(60.0),
+            gpu_lease=lease,
+        )
     )
 
     assert lease.started is not None, "the subprocess must run inside the lease actor"
@@ -983,16 +976,18 @@ async def test_run_clears_stale_wall_budget_extension(
     cfg = SpecialistSubprocessConfig(poll_interval_seconds=0.05)
     disp = SpecialistSubprocessDispatcher(config=cfg)
     result = await disp.run(
-        task_id="t-reused",
-        workspace=workspace,
-        worktree=None,
-        worktree_base=None,
-        system_prompt="sys",
-        user_prompt="usr",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        deadline=Deadline.after(60.0),
-        gpu_lease=lease,
+        SpecialistSpawn(
+            task_id="t-reused",
+            workspace=workspace,
+            worktree=None,
+            worktree_base=None,
+            system_prompt="sys",
+            user_prompt="usr",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            deadline=Deadline.after(60.0),
+            gpu_lease=lease,
+        )
     )
 
     assert result.exit_code == 0
@@ -1283,16 +1278,18 @@ async def _spawn_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gpu_ids: t
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3")
     disp = SpecialistSubprocessDispatcher(config=SpecialistSubprocessConfig(poll_interval_seconds=0.01))
     result = await disp.run(
-        task_id="t-env",
-        workspace=tmp_path / "ws",
-        worktree=None,
-        worktree_base=None,
-        system_prompt="sys",
-        user_prompt="usr",
-        disallowed_tools=frozenset(),
-        max_turns=1,
-        gpu_ids=gpu_ids,
-        deadline=Deadline.after(5.0),
+        SpecialistSpawn(
+            task_id="t-env",
+            workspace=tmp_path / "ws",
+            worktree=None,
+            worktree_base=None,
+            system_prompt="sys",
+            user_prompt="usr",
+            disallowed_tools=frozenset(),
+            max_turns=1,
+            gpu_ids=gpu_ids,
+            deadline=Deadline.after(5.0),
+        )
     )
     assert "spawn refused by test" in (result.error or "")
     return captured

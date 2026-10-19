@@ -10,7 +10,7 @@ from pathlib import Path
 
 from hyperloom.orchestrator.kernel.geak_config import (
     _geak_overlay_digest,
-    _geak_overlay_is_loadable,
+    geak_overlay_is_loadable,
 )
 
 
@@ -27,24 +27,24 @@ def _overlay(root: Path, *, sitecustomize: bool = True, manifest: dict | None = 
 
 
 def test_empty_overlay_path_is_not_loadable() -> None:
-    assert _geak_overlay_is_loadable("") is False
+    assert geak_overlay_is_loadable("") is False
 
 
 def test_missing_directory_is_not_loadable(tmp_path: Path) -> None:
     # 25 of the 64 declared overlays name a directory that does not exist.
-    assert _geak_overlay_is_loadable(str(tmp_path / "absent")) is False
+    assert geak_overlay_is_loadable(str(tmp_path / "absent")) is False
 
 
 def test_directory_without_sitecustomize_is_not_loadable(tmp_path: Path) -> None:
     # 30 of the 64 exist but hold no sitecustomize.py: inert on launch.
     path = _overlay(tmp_path / "ov", sitecustomize=False)
-    assert _geak_overlay_is_loadable(path) is False
+    assert geak_overlay_is_loadable(path) is False
 
 
 def test_sitecustomize_without_a_manifest_is_loadable(tmp_path: Path) -> None:
     # Absence of evidence is not evidence of an empty overlay.
     path = _overlay(tmp_path / "ov")
-    assert _geak_overlay_is_loadable(path) is True
+    assert geak_overlay_is_loadable(path) is True
 
 
 def test_manifest_naming_a_module_is_loadable(tmp_path: Path) -> None:
@@ -52,7 +52,7 @@ def test_manifest_naming_a_module_is_loadable(tmp_path: Path) -> None:
         tmp_path / "ov",
         manifest={"modules": [{"file": "kern.py"}], "rebinds": [], "captures": []},
     )
-    assert _geak_overlay_is_loadable(path) is True
+    assert geak_overlay_is_loadable(path) is True
 
 
 def test_config_only_manifest_is_not_loadable(tmp_path: Path) -> None:
@@ -65,14 +65,14 @@ def test_config_only_manifest_is_not_loadable(tmp_path: Path) -> None:
             "note": "config-only result: no kernel overlay accepted",
         },
     )
-    assert _geak_overlay_is_loadable(path) is False
+    assert geak_overlay_is_loadable(path) is False
 
 
 def test_unreadable_manifest_is_not_loadable(tmp_path: Path) -> None:
     root = tmp_path / "ov"
     _overlay(root)
     (root / "_overlay_manifest.json").write_text("{not json")
-    assert _geak_overlay_is_loadable(str(root)) is False
+    assert geak_overlay_is_loadable(str(root)) is False
 
 
 # The digest — the content check the config fingerprint does not do

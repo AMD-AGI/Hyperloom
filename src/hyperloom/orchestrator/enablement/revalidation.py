@@ -8,14 +8,15 @@ from __future__ import annotations
 import sqlite3
 import time
 import uuid
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from hyperloom.inference_optimizer.breakdown.recorder import enablement_event
 
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..collaborator import CoordinatorCollaborator
-from ..state.task_registry import TerminalTaskReuse, create_in_cursor, task_dispatch_origin
+from ..state.round_store import RoundRequest
+from ..state.task_registry import TaskSpec, TerminalTaskReuse, create_in_cursor, task_dispatch_origin
+from .generation_scan import GenerationScan
 from .params import _enablement_carrier_params
 
 if TYPE_CHECKING:
@@ -52,7 +53,6 @@ class EnablementRevalidation(CoordinatorCollaborator):
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": ENABLEMENT_REVALIDATION_REASON,
-            "disable_run_eval": False,
             **_enablement_carrier_params(state),
         }
         benchmark_script = state.accepted_baseline_script()
@@ -109,8 +109,10 @@ class EnablementRevalidation(CoordinatorCollaborator):
         baseline_lanes, baseline_ttl = self._coord.dispatcher.registry_lanes_ttl("baseline")
         task_id, generation = await self._open_round_past_spent_generations(
             params=params,
-            key_for=lambda gen: f"enablement_revalidation:gen{gen}",
-            generation=int(state.enablement.revalidation_generation or 0),
+            scan=GenerationScan(
+                key_for=lambda gen: f"enablement_revalidation:gen{gen}",
+                generation=int(state.enablement.revalidation_generation or 0),
+            ),
             # Both halves of the catalogue contract: a baseline re-launches the
             # server, so it must hold the same lanes any other baseline does.
             requires_lanes=baseline_lanes,
@@ -124,20 +126,19 @@ class EnablementRevalidation(CoordinatorCollaborator):
         *,
         kind: str,
         params: dict[str, Any],
-        key_for: Callable[[int], str],
-        generation: int,
+        scan: GenerationScan,
         label: str,
-        attempts: int = 2,
         **create_kwargs: Any,
     ) -> tuple["Task | None", int]:
         """Create or re-use a task row, skipping generations already spent."""
         from ..state.task_registry import TERMINAL_STATES
 
-        for _attempt in range(max(1, attempts)):
+        generation = scan.generation
+        for _attempt in range(max(1, scan.attempts)):
             task, _existing = await self.tasks.create_or_return_existing(
                 kind=kind,
                 params=params,
-                idempotency_key=key_for(generation),
+                idempotency_key=scan.key_for(generation),
                 **create_kwargs,
                 dispatch_class="coordinator",
             )
@@ -159,11 +160,9 @@ class EnablementRevalidation(CoordinatorCollaborator):
         self,
         *,
         params: dict[str, Any],
-        key_for: Callable[[int], str],
-        generation: int,
+        scan: GenerationScan,
         requires_lanes: list[str],
         lease_ttl_sec: int,
-        attempts: int = 2,
     ) -> tuple[str, int]:
         """Acquire a bring-up round for a baseline row, skipping spent generations.
 
@@ -178,32 +177,33 @@ class EnablementRevalidation(CoordinatorCollaborator):
 
         Args:
             params: The baseline task params.
-            key_for: Builds the idempotency key for a generation number.
-            generation: The generation to try first.
+            scan: The generations to try, from the first one.
             requires_lanes: Lanes the baseline must hold while running.
             lease_ttl_sec: The baseline's lease, and the round's first one.
-            attempts: How many generations to try before giving up this pass.
 
         Returns:
             tuple[str, int]: The holder task id and the generation it sits on,
             or ``""`` with the generation to try next. The caller persists the
             generation.
         """
-        for _attempt in range(max(1, attempts)):
-            key = key_for(generation)
+        generation = scan.generation
+        for _attempt in range(max(1, scan.attempts)):
+            key = scan.key_for(generation)
             holder = uuid.uuid4().hex
 
             def _join(cur: sqlite3.Cursor, _key: str = key, _holder: str = holder) -> None:
                 _task, existing = create_in_cursor(
                     cur,
-                    kind="baseline",
-                    params=params,
-                    idempotency_key=_key,
-                    requires_lanes=requires_lanes,
-                    lease_ttl_sec=lease_ttl_sec,
-                    task_id=_holder,
-                    dispatch_class="coordinator",
-                    dispatch_origin=task_dispatch_origin(self.shared_state),
+                    TaskSpec(
+                        kind="baseline",
+                        params=params,
+                        idempotency_key=_key,
+                        requires_lanes=requires_lanes,
+                        lease_ttl_sec=lease_ttl_sec,
+                        task_id=_holder,
+                        dispatch_class="coordinator",
+                        dispatch_origin=task_dispatch_origin(self.shared_state),
+                    ),
                 )
                 if existing:
                     # A live row already runs this generation, under the round
@@ -213,11 +213,9 @@ class EnablementRevalidation(CoordinatorCollaborator):
             try:
                 acquired = await self.rounds.open(
                     f"revalidation-{holder}",
+                    RoundRequest(now_unix=time.time(), request_id=key, evidence={"idempotency_key": key}),
                     holder_task_id=holder,
                     lease_sec=float(lease_ttl_sec),
-                    now_unix=time.time(),
-                    request_id=key,
-                    evidence={"idempotency_key": key},
                     join=_join,
                 )
             except _RowAlreadyLive:

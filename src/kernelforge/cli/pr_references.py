@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable
+from typing import TYPE_CHECKING
 
 import click
 
@@ -16,6 +16,7 @@ from kernelforge.llm.git import git
 
 if TYPE_CHECKING:
     # Imported lazily at runtime to keep CLI startup off the knowledge stack.
+    from kernelforge.knowledge.pr_knowledge.context import PrReferenceQuery
     from kernelforge.knowledge.pr_knowledge.references import PRRefsResult
 
 
@@ -68,16 +69,7 @@ def _pr_refs_event_fields(reason: str, stats: dict) -> dict:
     }
 
 
-def _collect_pr_references(
-    *,
-    workspace_dir: str,
-    kernel_backend: str,
-    git_remote: str,
-    source_files: Iterable[str],
-    operator_name: str,
-    target_functions: Iterable[str],
-    budget_sec: float,
-) -> PRRefsResult | None:
+def _collect_pr_references(workspace_dir: str, query: PrReferenceQuery, budget_sec: float) -> PRRefsResult | None:
     """Run position A, absorbing every recoverable failure into a warning."""
     from kernelforge.knowledge.pr_knowledge.references import (
         PR_KB_RECOVERABLE,
@@ -87,11 +79,7 @@ def _collect_pr_references(
     try:
         return collect_references(
             workspace_dir=workspace_dir,
-            kernel_backend=kernel_backend,
-            git_remote=git_remote,
-            source_files=source_files,
-            operator_name=operator_name,
-            target_functions=target_functions,
+            query=query,
             budget_sec=budget_sec,
             # The campaign freshness guard runs inside the loop; until it passes this invocation may not modify the
             # workspace it was pointed at.

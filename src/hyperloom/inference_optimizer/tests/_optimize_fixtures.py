@@ -7,25 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from hyperloom.orchestrator.actions.executors._grid_base import VariantResult
 from hyperloom.orchestrator.state.shared_state import SharedState
-
-
-def variant_result(**overrides: Any) -> VariantResult:
-    """A real ``VariantResult`` with plausible defaults."""
-    fields: dict[str, Any] = {
-        "name": "v1",
-        "extra_server_args": "",
-        "extra_envs": {},
-        "status": "succeeded",
-        "output_throughput": 1000.0,
-        "ttft_mean_ms": 10.0,
-        "tpot_mean_ms": 2.0,
-        "error": "",
-        "nonfatal_warnings": [],
-    }
-    fields.update(overrides)
-    return VariantResult(**fields)
 
 
 def optimize_state(

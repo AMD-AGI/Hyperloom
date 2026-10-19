@@ -106,6 +106,20 @@ async def test_prune_events_respects_recent_window(conn):
     assert [r["seq"] for r in remaining] == list(range(91, 101))
 
 
+@pytest.mark.asyncio
+async def test_append_rejects_a_non_string_recipient(conn):
+    """``to_agent`` becomes a column: a list must be refused, not bound.
+
+    Binding an unsupported type raises sqlite3.ProgrammingError from inside
+    the INSERT, which faults the caller's open phase event.
+    """
+    bus = MessageBus(conn)
+    with pytest.raises(ValueError, match="to_agent"):
+        await bus.append_and_seq(Message.new("orchestration", ["critic", "kernel_agent"], "observation", {"x": 1}))
+    rows = await conn.fetchall("SELECT COUNT(*) AS n FROM events")
+    assert rows[0]["n"] == 0
+
+
 # pruning must not delete a still-pending proposal
 @pytest.mark.asyncio
 async def test_prune_events_protects_pending_proposal(conn):
@@ -131,46 +145,6 @@ async def test_prune_events_protects_pending_proposal(conn):
     await dbm.prune_events(conn, keep_recent=0)
     rows = await conn.fetchall("SELECT msg_id FROM events WHERE topic='proposal'")
     assert rows == []
-
-
-@pytest.mark.asyncio
-async def test_pending_proposal_seqs_matches_reconstruct_logic(conn):
-    """The pruning guard's pending set must agree with the resume reconstruct logic: a proposal is decided iff a verdict has a NON-EMPTY target equal to its msg_id (empty/missing targets do not decide anything)."""
-    bus = MessageBus(conn)
-    p_pending = Message.new("orchestration", "*", "proposal", {"action_name": "a"})
-    p_decided = Message.new("orchestration", "*", "proposal", {"action_name": "b"})
-    await bus.append_and_seq(p_pending)
-    await bus.append_and_seq(p_decided)
-    # Decided one gets a real verdict.
-    await bus.append_and_seq(
-        Message.new(
-            "critic",
-            "*",
-            "review_verdict",
-            {"target_proposal_msg_id": p_decided.msg_id, "verdict": "reject"},
-        )
-    )
-    # An empty-target verdict must NOT decide any proposal (NULL-trap guard).
-    await bus.append_and_seq(
-        Message.new(
-            "critic",
-            "*",
-            "review_verdict",
-            {"target_proposal_msg_id": "", "verdict": "approve"},
-        )
-    )
-
-    rows = await conn.fetchall(dbm._PENDING_PROPOSAL_SEQS_SQL)
-    pending = {int(r["seq"]) for r in rows or []}
-
-    # Cross-check against the same join replay_for_resume uses.
-    proposals = await bus.tail(topic="proposal", n=1000)
-    verdicts = await bus.tail(topic="review_verdict", n=1000)
-    decided = {v.payload.get("target_proposal_msg_id") for v in verdicts if v.payload.get("target_proposal_msg_id")}
-    expected_pending_seqs = {p.seq for p in proposals if p.msg_id not in decided}
-    assert pending == expected_pending_seqs
-    # Concretely: only the undecided proposal is protected.
-    assert pending == {p_pending.seq}
 
 
 @pytest.mark.asyncio

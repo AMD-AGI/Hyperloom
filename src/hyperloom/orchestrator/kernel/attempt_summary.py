@@ -561,16 +561,12 @@ def _summary_one_line(
     return handling.summary(entry, backend_ladder, artifact_error)
 
 
-def build_kernel_optimization_summary(
-    state: Any,
-    session_dir: Path | str,
-    *,
-    schema_version: int = 2,
-) -> dict[str, Any]:
+def build_kernel_optimization_summary(state: Any, session_dir: Path | str) -> dict[str, Any]:
     """Build the full summary block for one session."""
     sd_path = Path(session_dir)
     session_id = str(getattr(state, "session_id", "") or "")
     results_dir = _backend_results_dir(sd_path, session_id)
+    where = ResultsLocation(results_dir=results_dir, session_dir=sd_path)
 
     top15: list[dict[str, Any]] = list(
         (getattr(state, "last_trace_analyze", {}) or {}).get("kernel_roofline_top15") or []
@@ -658,8 +654,7 @@ def build_kernel_optimization_summary(
                 top_entry,
                 attempt,
                 category,
-                results_dir=results_dir,
-                session_dir=sd_path,
+                where,
                 last_kernel_opt=last_kernel_opt if kid == keep_pending_kid else None,
             )
         )
@@ -686,8 +681,7 @@ def build_kernel_optimization_summary(
                 {"kernel_id": kid},
                 attempt,
                 category,
-                results_dir=results_dir,
-                session_dir=sd_path,
+                where,
                 last_kernel_opt=None,
             )
         )
@@ -704,8 +698,7 @@ def build_kernel_optimization_summary(
                 {"kernel_id": gemm_kid, "name": gemm_kid, "kernel_category": "gemm_tuning"},
                 _synthetic_gemm_tuning_attempt(gemm_entry),
                 CATEGORY_INTEGRATED,
-                results_dir=results_dir,
-                session_dir=sd_path,
+                where,
                 last_kernel_opt=None,
             )
         )
@@ -733,12 +726,9 @@ def build_kernel_optimization_summary(
         "geak": _geak_lane_totals(state),
         "gemm_tuning": _gemm_tuning_lane_totals(state),
     }
-    overall_outcome = source_outcome
-    if schema_version >= 2:
-        counts["attempted"] = sum(int(lane["attempted"]) for lane in lane_totals.values())
-        overall_outcome = _overall_lane_outcome(lane_totals)
-        if counts["attempted"] and lane_totals["source_level"]["attempted"] == 0:
-            top_takeaways[0] = "No source-level kernel rewrites were attempted; other kernel lanes did run."
+    counts["attempted"] = sum(int(lane["attempted"]) for lane in lane_totals.values())
+    if counts["attempted"] and lane_totals["source_level"]["attempted"] == 0:
+        top_takeaways[0] = "No source-level kernel rewrites were attempted; other kernel lanes did run."
     geak_result = getattr(state, "geak_result", None)
     absent_backends = geak_result.get("absent_backends") if isinstance(geak_result, dict) else None
     if isinstance(absent_backends, dict) and absent_backends:
@@ -747,34 +737,39 @@ def build_kernel_optimization_summary(
             "any no-win it reports did not try them."
         )
 
-    summary = {
-        "schema_version": schema_version,
+    return {
+        "schema_version": 2,
         "session_id": session_id,
         "model_name": str(getattr(state, "model_name", "") or ""),
         "cumulative_gain_validated_pct": float(getattr(state, "cumulative_gain_validated", 0.0) or 0.0),
-        "kernel_opt_outcome": overall_outcome,
+        "kernel_opt_outcome": _overall_lane_outcome(lane_totals),
         "totals": counts,
         "rejection_breakdown": rejection_breakdown,
         "failure_reason_breakdown": failure_reason_breakdown,
         "field_glossary": FIELD_GLOSSARY,
         "by_kernel": by_kernel,
         "top_takeaways": top_takeaways,
+        "lane_totals": lane_totals,
     }
-    if schema_version >= 2:
-        summary["lane_totals"] = lane_totals
-    return summary
+
+
+class ResultsLocation(NamedTuple):
+    """Where a session's per-kernel result files live and what their paths are relative to."""
+
+    results_dir: Path | None
+    session_dir: Path
 
 
 def _render_attempted_row(
     top_entry: dict[str, Any],
     attempt: dict[str, Any],
     category: str,
+    where: ResultsLocation,
     *,
-    results_dir: Path | None,
-    session_dir: Path,
     last_kernel_opt: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Build a summary row for a kernel that was attempted."""
+    results_dir, session_dir = where
     kid = str(top_entry.get("kernel_id") or attempt.get("kernel_id") or "")
     ladder, ladder_unavailable = _load_backend_ladder(results_dir, kid)
     kernel_result, _ = _load_kernel_result(results_dir, kid)

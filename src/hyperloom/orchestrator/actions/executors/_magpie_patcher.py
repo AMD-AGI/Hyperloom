@@ -507,7 +507,7 @@ def _file_lock(lock_path: str) -> Iterator[None]:
 def atomic_write_text(src: Path, content: str, *, log_prefix: str) -> bool:
     """Atomically replace ``src`` with ``content``, keeping its permission bits; log and return False on OSError."""
     try:
-        _common_io.atomic_write_text(src, content, preserve_mode=True)
+        _common_io.atomic_write_text(src, content, options=_common_io.WriteOptions(preserve_mode=True))
     except OSError as e:
         log.warning("%s: cannot write %s: %s", log_prefix, src, e)
         return False

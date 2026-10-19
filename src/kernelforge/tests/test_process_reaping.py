@@ -313,7 +313,7 @@ async def test_a_process_of_ours_that_moved_out_of_the_workspace_is_reaped(tmp_p
     # Its cwd says it has nothing to do with the workspace; its parent says otherwise, and the parent is the one that
     # started it there.
     assert os.path.realpath(f"/proc/{moved}/cwd") == str(elsewhere.resolve())
-    assert moved in process_reaping.owned_processes_under(str(workspace))
+    assert moved in process_reaping._survey(os.path.realpath(workspace)).owned
 
     report = await _reap_workspace_processes(str(workspace))
 

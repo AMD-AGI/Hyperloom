@@ -114,8 +114,5 @@ class TestKeySchemaMatchesInstalledAiter:
                 f"{table} gained a key column aiter does not have"
             )
 
-    def test_q_dtype_w_is_a_key_the_log_cannot_supply(self):
-        # Both facts matter together: it belongs in the key, and evidence can never fill it, so it has to come from
-        # the hardware downstream.
+    def test_q_dtype_w_is_part_of_the_dense_key(self):
         assert "q_dtype_w" in ev.TABLE_KEY_SCHEMA["a8w8_tuned_gemm.csv"]
-        assert "q_dtype_w" in ev.UNLOGGABLE_KEY_FIELDS

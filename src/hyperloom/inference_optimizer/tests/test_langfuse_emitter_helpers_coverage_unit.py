@@ -232,3 +232,44 @@ def test_load_json_missing_and_malformed(tmp_path: Path) -> None:
     ok = tmp_path / "ok.json"
     ok.write_text('{"k": "v"}', encoding="utf-8")
     assert lfe._load_json(ok) == {"k": "v"}
+
+
+def test_end_obs_propagates_failure_of_the_bare_end_fallback() -> None:
+    import pytest
+
+    class _EndAlwaysFails:
+        def end(self, end_time: "datetime | None" = None) -> None:
+            if end_time is not None:
+                raise ValueError("rejected typed end")
+            raise RuntimeError("bare end failed")
+
+    with pytest.raises(RuntimeError):
+        lfe._end_obs(_EndAlwaysFails(), datetime.now(timezone.utc))
+
+
+def test_set_trace_attrs_propagates_update_trace_failure() -> None:
+    import pytest
+
+    class _UpdateFails:
+        def update_trace(self, **kwargs: Any) -> None:
+            raise RuntimeError("sdk down")
+
+    with pytest.raises(RuntimeError):
+        lfe._set_trace_attrs(_UpdateFails(), name="n")
+
+
+def test_set_trace_attrs_propagates_otel_failure() -> None:
+    import pytest
+
+    class _OtelFails:
+        def set_attribute(self, key: str, value: Any) -> None:
+            raise RuntimeError("otel down")
+
+    class _SpanV4OtelFails:
+        _otel_span = _OtelFails()
+
+        def update_trace(self, **kwargs: Any) -> None:
+            raise AttributeError("v4")
+
+    with pytest.raises(RuntimeError):
+        lfe._set_trace_attrs(_SpanV4OtelFails(), name="n")

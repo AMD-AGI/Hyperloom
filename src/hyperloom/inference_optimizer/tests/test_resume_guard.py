@@ -324,7 +324,7 @@ async def test_matching_scope_dead_holder_reaches_existing_reaper(tmp_path, monk
 async def test_current_handoff_to_unstarted_holder_remains_resumable(tmp_path):
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
     from hyperloom.orchestrator.bus.storage.schema import ensure_schema
-    from hyperloom.orchestrator.state.round_store import RoundStore
+    from hyperloom.orchestrator.state.round_store import RoundRequest, RoundStore
     from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
     path = db_path_for(tmp_path)
@@ -336,16 +336,17 @@ async def test_current_handoff_to_unstarted_holder_remains_resumable(tmp_path):
         rounds = RoundStore(db)
         for task_id in ("first", "next"):
             await tasks.create(kind="baseline", params={}, idempotency_key=task_id, task_id=task_id)
-        opened = await rounds.open("round-1", holder_task_id="first", lease_sec=1, now_unix=1, request_id="open")
+        opened = await rounds.open(
+            "round-1", RoundRequest(now_unix=1, request_id="open"), holder_task_id="first", lease_sec=1
+        )
         assert opened.ok
         await tasks.transition("first", "running")
         await tasks.transition("first", "succeeded", evidence={"reason": "completed"})
         handed_off = await rounds.handoff(
             await rounds.get("round-1"),
+            RoundRequest(now_unix=2, request_id="handoff"),
             new_holder_task_id="next",
             lease_sec=1,
-            now_unix=2,
-            request_id="handoff",
         )
         assert handed_off.ok
     finally:
@@ -421,7 +422,7 @@ def test_wal_ownership_is_seen_without_changing_database_or_history(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="CLI imports require POSIX fcntl")
-@pytest.mark.parametrize("residual", ["foreign", "legacy", "cancelled", "matching"])
+@pytest.mark.parametrize("residual", ["foreign", "legacy", "cancelled", "matching", "older_schema"])
 def test_cli_checks_ownership_before_state_changes_or_execution(tmp_path, monkeypatch, capsys, residual):
     import hyperloom.inference_optimizer.cli as cli
     from hyperloom.orchestrator.bus import resource_lock
@@ -437,6 +438,9 @@ def test_cli_checks_ownership_before_state_changes_or_execution(tmp_path, monkey
     elif residual == "legacy":
         _task(path)
         _execute(path, "INSERT INTO leases VALUES ('benchmark_lane', 'holder-1', 'task-1', 123)")
+    elif residual == "older_schema":
+        _execute(path, "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
+        _execute(path, "INSERT INTO schema_version VALUES (6, '2026-10-01 00:00:00')")
     else:
         _task(path)
         scope = "local" if residual == "matching" else "foreign"
@@ -478,7 +482,15 @@ def test_cli_checks_ownership_before_state_changes_or_execution(tmp_path, monkey
         assert exc.value.code == 2
         lock.release.assert_called_once()
         install.assert_not_called()
-        assert "task-1" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        if residual == "older_schema":
+            assert (
+                "ERROR: --resume-from coordinator.db is at schema version 6, older than this build's 7: sessions "
+                "created before this release cannot be resumed. Finish the session under the build that started "
+                "it, or start a new session."
+            ) in err.splitlines()
+        else:
+            assert "task-1" in err
     coordinator.assert_not_called()
     resume_leg.assert_not_called()
     assert path.read_bytes() == before_db
@@ -595,13 +607,13 @@ _CONFIRMATION_REASON = "Verified the entire process tree and every Ray actor sto
 
 
 def _confirm_in_sqlite(path, *, task_id="task-1", reason=_CONFIRMATION_REASON):
-    from hyperloom.inference_optimizer.session.resume_guard import _confirm_task_stopped_in_transaction
+    from hyperloom.inference_optimizer.session.resume_guard import _Confirmation, _confirm_task_stopped_in_transaction
 
     with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=rw", uri=True)) as db, db:
         db.row_factory = sqlite3.Row
         db.execute("BEGIN IMMEDIATE")
         return _confirm_task_stopped_in_transaction(
-            db, task_id=task_id, reason=reason, operator="test-operator", confirmed_at=_CONFIRMED_AT
+            db, task_id, _Confirmation(reason=reason, operator="test-operator", confirmed_at=_CONFIRMED_AT)
         )
 
 
@@ -906,10 +918,10 @@ def test_confirmation_cli_reports_confirmation_failure_without_reports(tmp_path,
 
 @pytest.mark.asyncio
 async def test_confirmation_leaves_round_fence_and_events_for_existing_reconciler(tmp_path):
-    from hyperloom.orchestrator.bringup.reconcile import Reconciler
+    from hyperloom.orchestrator.bringup.reconcile import ReconcileLimits, Reconciler, ReconcileStores
     from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
     from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
-    from hyperloom.orchestrator.state.round_store import EXPIRED_REAPED, RoundStore
+    from hyperloom.orchestrator.state.round_store import EXPIRED_REAPED, RoundRequest, RoundStore
     from hyperloom.orchestrator.state.task_registry import TaskRegistry
 
     path = db_path_for(tmp_path)
@@ -920,14 +932,14 @@ async def test_confirmation_leaves_round_fence_and_events_for_existing_reconcile
         await tasks.create(kind="baseline", params={}, idempotency_key="task-1", task_id="task-1")
         await tasks.transition("task-1", "running")
         await tasks.transition("task-1", "cancelled", evidence={"reason": "cancelled_in_flight"})
-        opened = await rounds.open("round-1", holder_task_id="task-1", lease_sec=1, now_unix=1, request_id="open")
+        opened = await rounds.open(
+            "round-1", RoundRequest(now_unix=1, request_id="open"), holder_task_id="task-1", lease_sec=1
+        )
         assert opened.ok
         reconciler = Reconciler(
-            rounds=rounds,
-            tasks=tasks,
-            locks=ResourceLockManager(SqliteLeaseBackend(db)),
-            shared_state=None,
-            terminal_holder_cap_sec=0,
+            ReconcileStores(rounds=rounds, tasks=tasks, locks=ResourceLockManager(SqliteLeaseBackend(db))),
+            None,
+            limits=ReconcileLimits(terminal_holder_cap_sec=0),
         )
         report = await reconciler.run(2_000_000_000)
         assert not report.settled and not report.failures

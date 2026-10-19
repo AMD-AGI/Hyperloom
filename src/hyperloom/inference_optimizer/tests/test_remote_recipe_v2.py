@@ -1467,7 +1467,7 @@ def test_unvalidated_write_back_audit_omits_mismatched_metrics(tmp_path: Path, m
     )
     monkeypatch.setattr(
         "hyperloom.orchestrator.knowledge.recipe_journal._close_out.record_write_back_settled",
-        lambda *args, **kwargs: captured.update(kwargs),
+        lambda _session_dir, settlement: captured.update(vars(settlement)),
     )
 
     collaborator._record_write_back_settled(
@@ -1709,13 +1709,13 @@ def test_write_boundary_sanitizes_directly_constructed_bundle(tmp_path: Path) ->
         }
     )
 
-    result = RemoteRecipeClient(store).write_if_better(  # type: ignore[arg-type]
+    result = RemoteRecipeClient(store).write_if_better(
         "inference:m:h:f:mt:a:v:p",
         "session-1",
         bundle,
-        scope=_SCOPE,
-        primary_metric="optimized_throughput",
-        primary_value=130.0,
+        KBSelectionProfile(
+            scope=_SCOPE, primary_metric="optimized_throughput", primary_value=130.0, objective_schema="", metrics={}
+        ),
         files_dir=tmp_path,
     )
 
@@ -1755,13 +1755,13 @@ def test_empty_replay_material_skips_even_when_throughput_beats_champion(
             },
         }
     )
-    result = RemoteRecipeClient(store).write_if_better(  # type: ignore[arg-type]
+    result = RemoteRecipeClient(store).write_if_better(
         "inference:m:h:f:mt:a:v:p",
         "session-1",
         bundle,
-        scope=_SCOPE,
-        primary_metric="optimized_throughput",
-        primary_value=200.0,
+        KBSelectionProfile(
+            scope=_SCOPE, primary_metric="optimized_throughput", primary_value=200.0, objective_schema="", metrics={}
+        ),
         files_dir=tmp_path,
     )
     assert result.status == "skipped"

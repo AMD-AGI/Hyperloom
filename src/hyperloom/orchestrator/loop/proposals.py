@@ -103,21 +103,24 @@ def _record_phase_proposal(coord: "Coordinator", pending: PendingProposal) -> No
     the Critic's ruling is filed on.
     """
     from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseProposal
 
     state = coord.shared_state
     if not pending.proposal_msg_id or not state.phase:
         return
     params = pending.payload.get("params") if isinstance(pending.payload.get("params"), dict) else {}
     phase_event.record_proposal(
-        proposal_msg_id=pending.proposal_msg_id,
-        action=pending.action_name,
-        phase=state.phase,
-        macro_cycle=state.macro_cycle,
-        from_agent=pending.from_agent,
-        tick=state.tick,
-        predicted_gain_pct=pending.predicted_gain_pct,
-        candidate_id=pending.payload.get("framework_agent_candidate_id") or params.get("framework_agent_candidate_id"),
-        variant_name=pending.payload.get("variant_name") or params.get("variant_name"),
+        PhaseProposal(
+            at=PhaseCycle(state.phase, state.macro_cycle),
+            proposal_msg_id=pending.proposal_msg_id,
+            action=pending.action_name,
+            from_agent=pending.from_agent,
+            tick=state.tick,
+            predicted_gain_pct=pending.predicted_gain_pct,
+            candidate_id=pending.payload.get("framework_agent_candidate_id")
+            or params.get("framework_agent_candidate_id"),
+            variant_name=pending.payload.get("variant_name") or params.get("variant_name"),
+        )
     )
 
 
@@ -227,16 +230,13 @@ def _record_proposal_materialized(proposal_msg_id: str, task_id: str) -> None:
     """
     if not proposal_msg_id or not task_id:
         return
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
 
-        phase_event.record_proposal_outcome(
-            proposal_msg_id=str(proposal_msg_id),
-            materialized=True,
-            task_id=str(task_id),
-        )
-    except Exception:
-        log.debug("phase timeline: proposal task link failed for %s", proposal_msg_id, exc_info=True)
+    phase_event.record_proposal_outcome(
+        proposal_msg_id=str(proposal_msg_id),
+        materialized=True,
+        task_id=str(task_id),
+    )
 
 
 def _record_config_routed(coll: Any, pending: Any, *, task_id: str) -> None:
@@ -283,6 +283,12 @@ def _record_config_dropped(coll: Any, pending: Any, *, reason: str) -> None:
 
 class ProposalsCollaborator(CoordinatorCollaborator):
     """Turns approved proposals into queued tasks."""
+
+    def register_review_proposal(self, message: Message, payload: dict[str, Any]) -> None:
+        """Register a coordinator proposal before publishing it for Critic review."""
+        pending = PendingProposal(message.msg_id, "coordinator", payload["action_name"], 0.0, payload)
+        self.state.pending_proposals[message.msg_id] = pending
+        _record_phase_proposal(self._coord, pending)
 
     def _approved_idempotency_key(self, action_name: str, params: dict[str, Any]) -> str:
         """Content-addressed idempotency key for an approved proposal."""
@@ -467,7 +473,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
             return
         try:
             from hyperloom.common.timeutil import now_iso
-            from hyperloom.common.io import append_jsonl
+            from hyperloom.common.io import JsonLineFormat, append_jsonl
             from hyperloom.inference_optimizer.session.session_paths import proposal_task_map_path
 
             path = proposal_task_map_path(self.session_dir)
@@ -476,7 +482,7 @@ class ProposalsCollaborator(CoordinatorCollaborator):
                 "proposal_msg_id": str(proposal_msg_id),
                 "task_id": str(task_id),
             }
-            append_jsonl(path, row, make_parents=True, sort_keys=True)
+            append_jsonl(path, row, make_parents=True, fmt=JsonLineFormat(sort_keys=True))
         except Exception:
             log.debug(
                 "full-trace: proposal_task_map append failed for msg_id=%s task_id=%s",
