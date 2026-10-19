@@ -294,6 +294,15 @@ def unsupported_capability_reason(variant: "GridVariant") -> str | None:
 _FILE_REFERENCING_ENV_PREFIXES: tuple[str, ...] = ("AITER_CONFIG_",)
 
 
+def _is_file(path: str) -> bool:
+    # Path.is_file() raises for an unreadable parent or an overlong name (before Python 3.14); such a path is not a
+    # file the server can read either, and one variant's proposal must not crash the whole grid.
+    try:
+        return Path(path).is_file()
+    except OSError:
+        return False
+
+
 def ungrounded_env_file_reason(variant: "GridVariant") -> str | None:
     """Return a drop reason if an extra_envs value names a config file that does not exist, else ``None``.
 
@@ -310,7 +319,7 @@ def ungrounded_env_file_reason(variant: "GridVariant") -> str | None:
         value = str(raw_value or "").strip()
         if not value:
             continue
-        missing = [p for p in (part.strip() for part in value.split(":")) if p and not Path(p).is_file()]
+        missing = [p for p in (part.strip() for part in value.split(":")) if p and not _is_file(p)]
         if missing:
             return (
                 f"{key} points at {value}, whose element(s) {':'.join(missing)} do not exist; the server would read it "

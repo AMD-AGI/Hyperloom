@@ -97,6 +97,16 @@ def test_ungrounded_env_file_reason_drops_colon_joined_missing_element(tmp_path)
     assert reason and missing in reason and str(a) not in reason.split("element(s)")[1].split(" do not exist")[0]
 
 
+def test_ungrounded_env_file_reason_treats_an_unreadable_path_as_missing(monkeypatch) -> None:
+    # An unreadable parent or an overlong name makes Path.is_file() raise; the variant is dropped, the grid runs on.
+    def raise_eacces(self):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(gr.Path, "is_file", raise_eacces)
+    v = _variant("gemm", envs={"AITER_CONFIG_GEMM_BF16": "/root/private/tuned.csv"})
+    reason = gr.ungrounded_env_file_reason(v)
+    assert reason and "/root/private/tuned.csv" in reason
+
 
 def test_ungrounded_env_file_reason_noop_without_config_envs(tmp_path) -> None:
     # Non-file envs (even under aiter-ish prefixes like the JSON-payload AITER_CONFIG) must stay untouched.
