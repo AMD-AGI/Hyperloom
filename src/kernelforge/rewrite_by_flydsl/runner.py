@@ -379,6 +379,45 @@ def _run_applyback(spec, config: Config, request: ApplybackRequest, usage):
     return applyback
 
 
+def _ingest_spec(request: RewriteRun, attempt, driver_path: str):
+    """The normalized spec for the attempt's candidate, announced, or the setup failure that refused it."""
+    try:
+        candidate_kernel = attempt.candidate_path(request.flydsl_kernel_name)
+    except ValueError as error:
+        return None, (str(error), CANDIDATE_NAME_INVALID)
+    try:
+        spec = ingest.build_spec(
+            request.subject, flydsl_kernel=str(candidate_kernel), workspace=request.workspace.workspace_dir
+        )
+    except Exception as e:  # noqa: BLE001 - any ingest error must still be scorable
+        return None, (f"ingest error: {type(e).__name__}: {e}", INGEST_FAILED)
+    driver_contract.export_driver_environment(spec)
+    print(
+        f"  [forge-rewrite] op={spec.op_name} src={spec.source_kernel_name} "
+        f"entry={spec.source_entry or '<none>'} driver={Path(driver_path).name} "
+        f"-> {spec.flydsl_kernel_relpath}",
+        flush=True,
+    )
+    return spec, None
+
+
+def _speedup_text(speedup) -> str:
+    """A speedup as the run's progress lines print it."""
+    return f"{speedup:.3f}x" if speedup else "unknown"
+
+
+def _publish_interim(interim, result_json: str | None) -> None:
+    """Persist the port-only result before OPTIMIZE starts, so a run cut off later still reports its correct port."""
+    if result_json:
+        report.emit_result(interim, result_json)
+    print(
+        f"  [forge-rewrite] interim (port only): flydsl={interim.flydsl_best_ms} ms "
+        f"vs source={interim.source_ms} ms -> speedup={_speedup_text(interim.speedup)} "
+        f"(persisted; OPTIMIZE will improve)",
+        flush=True,
+    )
+
+
 def run_rewrite(request: RewriteRun, config: Config) -> dict:
     """Run the full rewrite pipeline; return (and sentinel-print) the result dict."""
     subject = request.subject
@@ -454,21 +493,9 @@ def run_rewrite(request: RewriteRun, config: Config) -> dict:
         )
 
     # (1) Ingest -> normalized spec (auto-discovers the source_entry hint if omitted).
-    try:
-        candidate_kernel = attempt.candidate_path(request.flydsl_kernel_name)
-    except ValueError as error:
-        return _setup_failed(str(error), CANDIDATE_NAME_INVALID)
-    try:
-        spec = ingest.build_spec(subject, flydsl_kernel=str(candidate_kernel), workspace=workspace)
-    except Exception as e:  # noqa: BLE001 - any ingest error must still be scorable
-        return _setup_failed(f"ingest error: {type(e).__name__}: {e}", INGEST_FAILED)
-    driver_contract.export_driver_environment(spec)
-    print(
-        f"  [forge-rewrite] op={spec.op_name} src={spec.source_kernel_name} "
-        f"entry={spec.source_entry or '<none>'} driver={Path(driver_path).name} "
-        f"-> {spec.flydsl_kernel_relpath}",
-        flush=True,
-    )
+    spec, ingest_failure = _ingest_spec(request, attempt, driver_path)
+    if ingest_failure is not None:
+        return _setup_failed(*ingest_failure)
 
     # (2) Seed the FlyDSL skeleton.
     seed.generate_seed(spec, spec.flydsl_kernel)
@@ -592,15 +619,7 @@ def run_rewrite(request: RewriteRun, config: Config) -> dict:
             },
         ),
     )
-    if result_json:
-        report.emit_result(interim, result_json)
-    sp0 = interim.speedup
-    print(
-        f"  [forge-rewrite] interim (port only): flydsl={flydsl_baseline_ms} ms "
-        f"vs source={source_ms} ms -> speedup={f'{sp0:.3f}x' if sp0 else 'unknown'} "
-        f"(persisted; OPTIMIZE will improve)",
-        flush=True,
-    )
+    _publish_interim(interim, result_json)
 
     # (6) OPTIMIZE: reuse forge-loop over the FlyDSL kernel (unchanged).
     #
@@ -683,9 +702,9 @@ def run_rewrite(request: RewriteRun, config: Config) -> dict:
     kb_write = rewrite_kb.publish_final(opt, source_ms, port, port_commit, optimize_session_key)
 
     # The standalone best is now restored in the rewrite workspace.
-    applyback = None
+    applyback_result = None
     if applyback_enabled:
-        applyback = _run_applyback(
+        applyback_result = _run_applyback(
             spec,
             config,
             ApplybackRequest(
@@ -698,7 +717,7 @@ def run_rewrite(request: RewriteRun, config: Config) -> dict:
                 request.applyback.max_applyback_attempts,
             ),
             usage,
-        )
+        ).to_dict()
     result = report.build_result(
         scope,
         report.RewriteOutcome(
@@ -706,7 +725,7 @@ def run_rewrite(request: RewriteRun, config: Config) -> dict:
             port_attempts=port.attempts,
             source_ms=source_ms,
             optimize_result=opt,
-            applyback_result=applyback.to_dict() if applyback is not None else None,
+            applyback_result=applyback_result,
             applyback_required=applyback_required,
             llm_usage=_run_usage(usage, opt, optimize_ran=optimize_ran),
             kb_experience={
@@ -718,7 +737,7 @@ def run_rewrite(request: RewriteRun, config: Config) -> dict:
     sp = result.speedup
     print(
         f"  [forge-rewrite] DONE: flydsl_best={result.flydsl_best_ms} ms "
-        f"vs source={source_ms} ms -> speedup={f'{sp:.3f}x' if sp else 'unknown'}",
+        f"vs source={source_ms} ms -> speedup={_speedup_text(sp)}",
         flush=True,
     )
     return _emit_final(result, result_json)

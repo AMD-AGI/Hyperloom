@@ -99,6 +99,35 @@ class RewriteOutcome:
     failure_detail: str = ""
 
 
+def _optimize_figure(optimize_result: dict, key: str):
+    """What OPTIMIZE reported under ``key``; a run that never optimized reported nothing."""
+    return optimize_result.get(key) if optimize_result else None
+
+
+def _applyback_text(applyback: dict, key: str) -> str:
+    """An apply-back field as text, empty when apply-back did not report it."""
+    return str(applyback.get(key) or "")
+
+
+def _best_commit(applyback: dict, applyback_required: bool, flydsl_best_commit: str) -> str:
+    """The commit the result names as the run's best."""
+    # With apply-back required this key means the apply-back commit and nothing else; the standalone best is reported
+    # only as flydsl_best_commit.
+    return _applyback_text(applyback, "best_commit") or ("" if applyback_required else flydsl_best_commit)
+
+
+def _run_succeeded(port_ok: bool, applyback_required: bool, applyback_ok: bool) -> bool:
+    """A run succeeds with a correct port, plus the framework patch when one was required."""
+    return bool(port_ok and (not applyback_required or applyback_ok))
+
+
+def _llm_usage(outcome: RewriteOutcome) -> dict:
+    """The spend the outcome reports, else what OPTIMIZE reported, else none."""
+    return dict(
+        outcome.llm_usage if outcome.llm_usage is not None else (outcome.optimize_result.get("llm_usage") or {})
+    )
+
+
 def build_result(scope: ResultScope, outcome: RewriteOutcome) -> RewriteResult:
     """Combine the port + preflight + optimize outcomes into one result."""
     op_name = scope.op_name
@@ -106,16 +135,14 @@ def build_result(scope: ResultScope, outcome: RewriteOutcome) -> RewriteResult:
     optimize_result = outcome.optimize_result
     applyback_result = outcome.applyback_result
     applyback_required = outcome.applyback_required
-    flydsl_best_ms = optimize_result.get("best_ms") if optimize_result else None
-    experiment_id = optimize_result.get("experiment_id") if optimize_result else None
+    flydsl_best_ms = _optimize_figure(optimize_result, "best_ms")
+    experiment_id = _optimize_figure(optimize_result, "experiment_id")
     applyback = applyback_result or {}
     applyback_ok = bool(applyback.get("ok")) if applyback_result is not None else False
-    flydsl_best_commit = str((optimize_result.get("best_commit") if optimize_result else "") or "")
-    # With apply-back required this key means the apply-back commit and nothing else; the standalone best is reported
-    # only as flydsl_best_commit.
-    best_commit = str(applyback.get("best_commit") or "") or ("" if applyback_required else flydsl_best_commit)
+    flydsl_best_commit = str(_optimize_figure(optimize_result, "best_commit") or "")
+    best_commit = _best_commit(applyback, applyback_required, flydsl_best_commit)
 
-    mean_case_speedup = optimize_result.get("mean_case_speedup") if optimize_result else None
+    mean_case_speedup = _optimize_figure(optimize_result, "mean_case_speedup")
     speedup = mean_case_speedup if port_ok else None
 
     return RewriteResult(
@@ -132,36 +159,32 @@ def build_result(scope: ResultScope, outcome: RewriteOutcome) -> RewriteResult:
         flydsl_best_ms=flydsl_best_ms,
         speedup=speedup,
         experiment_id=experiment_id,
-        llm_usage=dict(
-            outcome.llm_usage if outcome.llm_usage is not None else (optimize_result.get("llm_usage") or {})
-        ),
+        llm_usage=_llm_usage(outcome),
         port_attempts=outcome.port_attempts,
-        success=bool(
-            port_ok and (not applyback_required or (applyback.get("ok") if applyback_result is not None else False))
-        ),
+        success=_run_succeeded(port_ok, applyback_required, applyback_ok),
         baseline_ms=outcome.source_ms,
         best_ms=flydsl_best_ms,
         improved=bool(speedup and speedup > 1.0),
         total_speedup=speedup,
-        base_commit=str(applyback.get("base_commit") or ""),
+        base_commit=_applyback_text(applyback, "base_commit"),
         best_commit=best_commit,
         flydsl_best_commit=flydsl_best_commit,
-        applyback_commit_ref=str(applyback.get("commit_ref") or ""),
-        patch_path=str(applyback.get("patch_path") or ""),
+        applyback_commit_ref=_applyback_text(applyback, "commit_ref"),
+        patch_path=_applyback_text(applyback, "patch_path"),
         artifacts=list(applyback.get("artifacts") or []),
         # Only a published apply-back bundle carries an artifact kind; an interim or failed run must not name one.
         artifact_kind=(protocol.ARTIFACT_KIND_FRAMEWORK_APPLYBACK if applyback_ok else ""),
         artifact_schema_version=(protocol.ARTIFACT_SCHEMA_VERSION if applyback_ok else 0),
-        canonical_manifest=str(applyback.get("manifest_path") or ""),
+        canonical_manifest=_applyback_text(applyback, "manifest_path"),
         canonical_patch_path=str(applyback.get("canonical_patch_path") or applyback.get("patch_path") or ""),
-        canonical_files_root=str(applyback.get("canonical_files_root") or ""),
-        canonical_result_path=str(applyback.get("canonical_result_path") or ""),
-        forge_workspace=str(applyback.get("forge_workspace") or ""),
+        canonical_files_root=_applyback_text(applyback, "canonical_files_root"),
+        canonical_result_path=_applyback_text(applyback, "canonical_result_path"),
+        forge_workspace=_applyback_text(applyback, "forge_workspace"),
         changed_files=list(applyback.get("changed_files") or []),
         applyback_required=applyback_required,
         applyback_ok=applyback_ok,
-        applyback_error=str(applyback.get("error") or ""),
-        terminated_for_deadline=bool(optimize_result.get("terminated_for_deadline")) if optimize_result else False,
+        applyback_error=_applyback_text(applyback, "error"),
+        terminated_for_deadline=bool(_optimize_figure(optimize_result, "terminated_for_deadline")),
         failure_class=outcome.failure_class,
         failure_detail=outcome.failure_detail,
         temporary_paths=list(scope.temporary_paths),
