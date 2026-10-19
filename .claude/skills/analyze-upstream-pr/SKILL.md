@@ -27,12 +27,12 @@ others leave. The reader acts on the whole row.
 | `NOT-APPLICABLE -- reverted by <ref>` | a merged revert of the PR survived Step 9; add `, relanded in <ref>` for a merged reland | do not take it; analyze the reland, if any. When Step 4 found the PR and not its revert, the tree carries a change upstream backed out: analyze the revert next |
 | `NOT-APPLICABLE -- already in tree` | Step 4 found the PR, or Step 6's verdict is `EXISTS-MERGED -- in your tree` or `EXISTS-OPEN -- in your tree` (then `-- already in tree via <ref>`) | nothing to take: name the commit that carries the change |
 | `NOT-APPLICABLE -- merged as <ref>` | the PR is not merged, and Step 6's verdict is `EXISTS-MERGED -- inclusion unchecked` | analyze `<ref>` instead |
-| `NOT-APPLICABLE -- superseded by <ref>` | the PR is not merged, and Step 1 found an open or merged successor, or the PR closed unmerged and Step 6's verdict is `EXISTS-OPEN -- inclusion unchecked` | analyze `<ref>` instead |
+| `NOT-APPLICABLE -- superseded by <ref>` | the PR is not merged, and an open or merged successor survived Step 9, or the PR closed unmerged and Step 6's verdict is `EXISTS-OPEN -- inclusion unchecked` | analyze `<ref>` instead |
 | `NOT-APPLICABLE -- off path: <condition>` | every Step 3 line is `OFF-PATH` | nothing to take: name the condition that excludes the target |
 | `NEEDS-MEASUREMENT` | a Step 3 line the effect rests on stayed `UNKNOWN`, or a `blocking` risk survived Step 9 that only a run on the target can settle | hand `measure.md` to the user, then rerun Steps 9 and 10 with their results |
 | `WAIT-FOR-MERGE -- <risk>` | the PR is open and a surviving risk is one upstream is settling: changes requested, a design question open in the comments, a check failing at the head, or a competing open PR (Step 6's `EXISTS-OPEN -- inclusion unchecked`) | rerun when the PR, or the competing one, merges or changes its head |
 | `ADOPT-NOW` | merged, `ON-PATH`, no `blocking` risk survived; add `-- inclusion unchecked` when Step 4 is `unknown` or `SKIPPED` | move the tree past the merge commit, or cherry-pick it; confirm the effect with `measure.md` |
-| `CARRY-AS-PATCH` | open, or closed unmerged with no successor; `ON-PATH`; no `blocking` risk survived; add `-- conflicts with <patch>` from Step 6 | apply `diff.txt` as a local patch named with the PR and its head sha, so the rebase that brings the merge drops it |
+| `CARRY-AS-PATCH` | open, or closed unmerged with no surviving successor; `ON-PATH`; no `blocking` risk survived; add `-- conflicts with <patch>` from Step 6 | apply `diff.txt` as a local patch named with the PR and its head sha, so the rebase that brings the merge drops it |
 | `NOT-APPLICABLE -- <lens>: <condition>` | no row above applies, as when a `blocking` risk survived Step 9 that the code at `tree@commit` or upstream's history settles | name the risk and what would settle it |
 
 `ADOPT-NOW` and `CARRY-AS-PATCH` add `-- does not apply at <commit>` when Step 6's apply check
@@ -107,11 +107,11 @@ Two sentences into `$WORK/mechanism.txt`, from `diff.txt`, not the body: what th
 which code path (`path:symbol`), and why that moves a metric or a result. A sentence naming no
 path or symbol cannot be checked in Step 3; rewrite it.
 
-Then read `xrefs.tsv` and the comments. A merged row titled as a revert of this PR is a revert,
-and one that a title or comment calls its replacement, follow-up or reland is a successor; collect
-either with `read.sh` before relying on it. An open or merged successor may be the right PR to
-analyze: add `SUCCESSOR: <ref> <state>` and ask the user. A merged revert goes to Steps 4 and 9,
-where its diff must undo this one.
+Then read `xrefs.tsv` and the comments. A merged row titled as a revert of this PR is a revert. A PR
+that either PR's title, body or comments call this one's replacement or reland is a successor; one
+stacked on it or following it up is not. Collect either with `read.sh` first. Add
+`SUCCESSOR: <ref> <state>` for an open or merged one and ask the user; it goes to Step 9. A merged
+revert goes to Steps 4 and 9, where its diff must undo this one.
 
 ## Step 2 — The operating point it was validated at
 
@@ -178,8 +178,8 @@ operating point, and reaches the report as `quoted`. An all `OFF-PATH` Step 3 ma
 **Other PRs.** Run check-prior-art through its verdict, its Steps 0 to 7, with `$WORK/prior-art`
 as its work directory, so `$WORK` stays this skill's: Step 1's mechanism, this skill's `tree` and
 `commit`, the PR's repository and any other where the change could land, and the changed non-test
-paths of `files.txt` as the planned paths. Keep `<owner/name>#<N>` out of its shortlist and
-classes: its search and path scan find this PR too. Write its verdict line into
+paths of `files.txt` as the planned paths. Keep `<owner/name>#<N>`, and any PR stacked on it,
+out of its shortlist and classes: its search and path scan find them too. Write its verdict into
 `$WORK/conflicts.txt` as `prior-art <verdict> -- <ref>`, and one `<ref> OVERLAP -- <the shared
 paths>` line per OVERLAPPING PR.
 
@@ -227,13 +227,12 @@ when they ran, and Steps 9 and 10 are rerun with them.
 
 ## Step 9 — Refutation
 
-Try to kill each claim once before it reaches the report: every `RISK` line, every `ON-PATH` and
-`OFF-PATH` line, each `GAP`, an `unknown` inclusion answer, Step 5's direction, Step 6's
-check-prior-art verdict and each `CONFLICT`, and each merged revert. One block each in
-`$WORK/refutations.txt`:
+Try to kill each claim once before it reaches the report: every `RISK`, `ON-PATH` and `OFF-PATH`
+line, each `GAP`, an `unknown` inclusion answer, Step 5's direction, Step 6's verdict, each
+`CONFLICT`, each merged revert and each successor. One block each in `$WORK/refutations.txt`:
 
 ```
-FINDING: <L<n>|on-path:<path>|gap:<dimension>|inclusion|effect|prior-art|conflict:<ref>|revert:<ref>>
+FINDING: <L<n>|on-path:<path>|gap:<dimension>|inclusion|effect|prior-art|conflict:<ref>|revert:<ref>|successor:<ref>>
 ATTEMPT: <what you opened or ran to kill it -- must name a file, symbol, condition or command>
 OUTCOME: SURVIVES|DROPPED -- <what that showed>
 ```
@@ -241,9 +240,10 @@ OUTCOME: SURVIVES|DROPPED -- <what that showed>
 Attack in this order: is the claim anchored in the diff at the head, or only in the body; does the
 cited `path:line` say that at `tree@commit`; is the condition reachable with the target's arch and
 flags; did a later comment, commit or `xrefs.tsv` row settle it. Attack an `unknown` inclusion in
-the tree's history, as check-prior-art's Step 6 does. A dropped claim gets `-- dropped, see
-refutations.txt` on its artifact line. With nothing to refute, write `FINDING: none -- <reason>`;
-an empty file reads as a skipped step.
+the tree's history, as check-prior-art's Step 6 does, and a successor in both PRs' bodies: one
+stacked on this PR or following it up is not its replacement. A dropped claim gets `-- dropped, see
+refutations.txt` on its artifact line. With nothing to refute, write `FINDING: none -- <reason>`; an
+empty file reads as a skipped step.
 
 ## Step 10 — Report
 
