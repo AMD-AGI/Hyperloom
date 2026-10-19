@@ -287,7 +287,6 @@ class SweepPhase(CoordinatorCollaborator):
                 to_phase=_phase_state.PHASE_SWEEP,
                 reason=_RESUME,
                 evidence={},
-                loopback=False,
             )
         )
 

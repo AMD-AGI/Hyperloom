@@ -34,6 +34,10 @@ from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
     PRODUCER as _RECORDER_PRODUCER,
     PROFILE_ATTEMPT_COMPUTE_BOUND,
     PROFILE_ATTEMPT_INITIAL,
+    AnalysisRunOutcome,
+    ProfileRunOutcome,
+    RooflineConclusion,
+    RooflineRequest,
     make_roofline_recorder,
     roofline_event_id,
 )
@@ -575,17 +579,19 @@ async def _end_profile_run(
     if recorder is None:
         return
     recorder.end_profile_run(
-        run_index=run_index,
-        status=status,
-        disable_cuda_graph=arm.disable_cuda_graph,
-        profile_result=result,
-        failure=failure,
-        # Probed on every attempt, not only the failed ones: the run this is meant to catch is the one that reports
-        # success.
-        server_liveness=await asyncio.to_thread(_server_liveness_probe, session_dir, recorder.task_id),
-        # Drained per attempt, so every attempt carries which patchers ran and what they returned -- including the
-        # attempts that raised, where no result dict exists to carry it.
-        instrumentation=_drain_instrumentation(profile_executor),
+        run_index,
+        ProfileRunOutcome(
+            status=status,
+            disable_cuda_graph=arm.disable_cuda_graph,
+            profile_result=result,
+            failure=failure,
+            # Probed on every attempt, not only the failed ones: the run this is meant to catch is the one that reports
+            # success.
+            server_liveness=await asyncio.to_thread(_server_liveness_probe, session_dir, recorder.task_id),
+            # Drained per attempt, so every attempt carries which patchers ran and what they returned -- including the
+            # attempts that raised, where no result dict exists to carry it.
+            instrumentation=_drain_instrumentation(profile_executor),
+        ),
     )
 
 
@@ -740,12 +746,14 @@ def _end_analysis_run(
     """Row one trace-analysis attempt against the request it ran."""
     if recorder is not None:
         recorder.end_analysis_run(
-            run_index=run_index,
-            status=status,
-            trace_input=str(payload["trace_input"]),
-            requested_steady_state_mode=str(payload.get("steady_state_mode") or ""),
-            ta_result=result,
-            failure=failure,
+            run_index,
+            AnalysisRunOutcome(
+                status=status,
+                trace_input=str(payload["trace_input"]),
+                requested_steady_state_mode=str(payload.get("steady_state_mode") or ""),
+                ta_result=result,
+                failure=failure,
+            ),
         )
 
 
@@ -862,11 +870,13 @@ class RooflineExecutor:
         params = ctx.task.params or {}
         recorder = make_roofline_recorder(
             self._resolve_sink(ctx),
-            task_id=str(getattr(ctx.task, "task_id", "") or ""),
-            task_kind=str(getattr(ctx.task, "kind", "") or ""),
-            reason=str(params.get("reason") or ""),
-            framework=self._resolve_framework(ctx),
-            params=params,
+            RooflineRequest(
+                task_id=str(getattr(ctx.task, "task_id", "") or ""),
+                task_kind=str(getattr(ctx.task, "kind", "") or ""),
+                reason=str(params.get("reason") or ""),
+                framework=self._resolve_framework(ctx),
+                params=params,
+            ),
             owns_event=not str(params.get(INLINE_EVENT_PARAM) or ""),
         )
         try:
@@ -1216,14 +1226,16 @@ class RooflineExecutor:
         if recorder is not None:
             snapshots = self.shared_state.roofline_snapshots
             recorder.finish_succeeded(
-                snapshot_id=cached.get("roofline_snapshot_id"),
-                hot_kernel_count=len(hot),
-                kernel_attribution_degraded=attribution_degraded,
-                cached=cached,
-                trace_path=trace_path,
-                # The snapshot this run just appended. Read here rather than in the recorder because the history is
-                # capped and later runs evict entries, so the numbers have to be taken while this run is the latest.
-                snapshot=snapshots[-1] if isinstance(snapshots, list) and snapshots else None,
+                RooflineConclusion(
+                    snapshot_id=cached.get("roofline_snapshot_id"),
+                    hot_kernel_count=len(hot),
+                    kernel_attribution_degraded=attribution_degraded,
+                    cached=cached,
+                    trace_path=trace_path,
+                    # The snapshot this run just appended. Read here rather than in the recorder because the history is
+                    # capped and later runs evict entries, so the numbers have to be taken while this run is the latest.
+                    snapshot=snapshots[-1] if isinstance(snapshots, list) and snapshots else None,
+                )
             )
         return result
 

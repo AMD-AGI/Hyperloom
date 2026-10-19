@@ -2138,7 +2138,7 @@ def _record_critic_probes(monkeypatch, *, fail: bool = False) -> list[tuple[str,
     sent: list[tuple[str, str]] = []
 
     def _anthropic(**kw):
-        sent.append(("anthropic", kw["model"]))
+        sent.append(("anthropic", kw["request"].model))
         if fail:
             raise RuntimeError("AuthenticationError")
 

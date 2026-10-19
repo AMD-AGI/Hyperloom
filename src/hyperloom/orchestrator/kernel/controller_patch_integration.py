@@ -14,7 +14,7 @@ from typing import Any
 
 from kernelforge.kernel_rewrite_controller.task import load_task
 
-from hyperloom.common.io import atomic_write_json
+from hyperloom.common.io import JsonFormat, atomic_write_json
 from hyperloom.orchestrator.actions.executors._patch_snapshot import (
     _git_commit_kept,
     _patch_touched_paths,
@@ -189,11 +189,7 @@ def _settle_apply_manifest(validation: dict[str, Any], *, kept: bool) -> str:
 
 
 def _write_result(results_dir: Path, index: int, result: PatchIntegrationResult) -> None:
-    atomic_write_json(
-        results_dir / f"{index:04d}.json",
-        asdict(result),
-        trailing_newline=True,
-    )
+    atomic_write_json(results_dir / f"{index:04d}.json", asdict(result), fmt=JsonFormat(trailing_newline=True))
 
 
 def _keep_result(
@@ -499,11 +495,7 @@ async def integrate_controller_patches(
         skipped_count=skipped,
         results_dir=str(results_dir),
     )
-    atomic_write_json(
-        integration_root / "summary.json",
-        summary.to_dict(),
-        trailing_newline=True,
-    )
+    atomic_write_json(integration_root / "summary.json", summary.to_dict(), fmt=JsonFormat(trailing_newline=True))
     return summary
 
 

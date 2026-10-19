@@ -11,6 +11,7 @@ import random
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from typing import Any, Protocol
 
 
@@ -20,11 +21,6 @@ from .errors import (
     KBTransportError,
     KBValidationError,
 )
-from .metrics import (
-    CRITIC_KB_WRITE_DURATION_SECONDS,
-    CRITIC_KB_WRITE_TOTAL,
-    get_registry,
-)
 from hyperloom.common.url_safety import require_http_url as _require_http_url
 
 
@@ -33,19 +29,22 @@ DEFAULT_RETRY_MAX = 3
 DEFAULT_BACKOFF_BASE = 1.0  # seconds
 
 
+@dataclass(frozen=True)
+class KBListQuery:
+    """Which entries one ``POST /api/kb/list`` reads, how many and in what order."""
+
+    scope_filter: dict[str, Any]
+    kind: str | None = None
+    metadata_filter: dict[str, Any] | None = None
+    limit: int = 10
+    sort_by: str = "updated_at_desc"
+    include_deleted: bool = False
+
+
 class KBClient(Protocol):
     """Protocol shared between ``HTTPKBClient`` and ``InMemoryKBClient``."""
 
-    def list(
-        self,
-        *,
-        scope_filter: dict[str, Any],
-        kind: str | None = None,
-        metadata_filter: dict[str, Any] | None = None,
-        limit: int = 10,
-        sort_by: str = "updated_at_desc",
-        include_deleted: bool = False,
-    ) -> dict[str, Any]:
+    def list(self, query: KBListQuery) -> dict[str, Any]:
         """Read entries matching a scope via ``POST /api/kb/list``."""
 
     def upsert(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -74,7 +73,6 @@ class HTTPKBClient:
         token: str | None = None,
         timeout_ms: int = DEFAULT_TIMEOUT_MS,
         retry_max: int = DEFAULT_RETRY_MAX,
-        backoff_base: float = DEFAULT_BACKOFF_BASE,
         sleep_fn=time.sleep,
     ):
         """Configure the HTTP transport."""
@@ -84,31 +82,21 @@ class HTTPKBClient:
         self.token = token or os.environ.get("KB_SERVICE_TOKEN") or ""
         self.timeout_s = float(timeout_ms) / 1000.0
         self.retry_max = retry_max
-        self.backoff_base = backoff_base
         self._sleep = sleep_fn
 
     # Public API — one method per endpoint.
-    def list(
-        self,
-        *,
-        scope_filter: dict[str, Any],
-        kind: str | None = None,
-        metadata_filter: dict[str, Any] | None = None,
-        limit: int = 10,
-        sort_by: str = "updated_at_desc",
-        include_deleted: bool = False,
-    ) -> dict[str, Any]:
+    def list(self, query: KBListQuery) -> dict[str, Any]:
         """Read entries matching a scope via ``POST /api/kb/list``."""
         body: dict[str, Any] = {
-            "scope_filter": scope_filter,
-            "limit": limit,
-            "sort_by": sort_by,
-            "include_deleted": include_deleted,
+            "scope_filter": query.scope_filter,
+            "limit": query.limit,
+            "sort_by": query.sort_by,
+            "include_deleted": query.include_deleted,
         }
-        if kind is not None:
-            body["kind"] = kind
-        if metadata_filter is not None:
-            body["metadata_filter"] = metadata_filter
+        if query.kind is not None:
+            body["kind"] = query.kind
+        if query.metadata_filter is not None:
+            body["metadata_filter"] = query.metadata_filter
         return self._request("/api/kb/list", body)
 
     def upsert(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -133,7 +121,7 @@ class HTTPKBClient:
 
     # Internal — request / retry
     def _request(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
-        """POST ``body`` to ``path`` with retry, backoff, and metrics."""
+        """POST ``body`` to ``path`` with retry and backoff."""
         url = f"{self.base_url}{path}"
         data = json.dumps(body).encode("utf-8")
         headers = {
@@ -143,11 +131,8 @@ class HTTPKBClient:
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
 
-        registry = get_registry()
-        endpoint_label = path.split("/")[-1]
         last_error: Exception | None = None
         attempt = 0
-        start = time.time()
         while attempt <= self.retry_max:
             attempt += 1
             _require_http_url(url)
@@ -155,27 +140,11 @@ class HTTPKBClient:
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:  # nosec B310 - URL scheme checked above.
                     payload = resp.read().decode("utf-8") or "{}"
-                    body_obj = json.loads(payload)
-                    registry.counter(CRITIC_KB_WRITE_TOTAL).inc(
-                        {
-                            "endpoint": endpoint_label,
-                            "status": str(resp.status),
-                        }
-                    )
-                    registry.histogram(CRITIC_KB_WRITE_DURATION_SECONDS).observe(
-                        time.time() - start, {"endpoint": endpoint_label}
-                    )
-                    return body_obj
+                    return json.loads(payload)
             except urllib.error.HTTPError as exc:
                 # 4xx → don't retry.
                 status = getattr(exc, "code", 0)
                 err_body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
-                registry.counter(CRITIC_KB_WRITE_TOTAL).inc(
-                    {
-                        "endpoint": endpoint_label,
-                        "status": str(status),
-                    }
-                )
                 if status == 404:
                     raise KBNotFoundError(f"{path} 404: {err_body}") from exc
                 if status == 409:
@@ -192,7 +161,7 @@ class HTTPKBClient:
 
     def _backoff_for(self, attempt: int) -> float:
         """Compute the sleep duration before the next retry."""
-        base = self.backoff_base * (2 ** (attempt - 1))
+        base = DEFAULT_BACKOFF_BASE * (2 ** (attempt - 1))
         return base * (0.9 + 0.2 * random.random())
 
 
@@ -202,4 +171,5 @@ __all__ = [
     "DEFAULT_TIMEOUT_MS",
     "HTTPKBClient",
     "KBClient",
+    "KBListQuery",
 ]

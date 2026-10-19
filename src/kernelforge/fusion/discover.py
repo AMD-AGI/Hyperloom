@@ -13,6 +13,7 @@ import logging
 import os
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
@@ -35,6 +36,7 @@ from .llm_failure import (
     retry_delay,
 )
 from .locate import (
+    FrameworkInstall,
     _read_source,
     _unclaimable_note,
     covered_by_vllm_compile_pass,
@@ -43,15 +45,72 @@ from .locate import (
     vllm_compile_pass_state,
 )
 from .models import Diagnosis, Recipe
-from .vllm_passes import PassState, resolve_target_runtime
+from .vllm_passes import resolve_target_runtime
 
 log = logging.getLogger("forge_fusion")
 
 LlmFn = Callable[[str], str]  # prompt -> raw model text (expected to contain JSON)
 
+
+@dataclass(frozen=True)
+class DiscoveryTarget:
+    """What discovery proposes fusions for: the model, the framework install, the source file, shapes and scope."""
+
+    model_type: str
+    install: FrameworkInstall
+    source_file: str
+    shapes: dict[str, Any]
+    repo_scope: bool = False
+    repo_root: str = ""
+
+
+@dataclass(frozen=True)
+class DiscoveryEvidence:
+    """The runtime evidence a discovery prompt cites: diagnosis, hot kernels, fusion boundaries, known operators."""
+
+    diagnosis: Diagnosis
+    hot_kernels: list[dict[str, Any]]
+    ordered_boundaries: Optional[list[dict[str, Any]]] = None
+    existing_operator_hints: Optional[list[dict[str, str]]] = None
+
+
+@dataclass(frozen=True)
+class DiscoveryPrompting:
+    """How many fusions discovery asks for, and the operator-knowledge corpus its hints come from."""
+
+    max_fusions: Optional[int] = None
+    knowledge_root: str | Path | None = None
+
+
+@dataclass(frozen=True)
+class DiscoverySession:
+    """One read-only discovery session: model, per-attempt timeout, transcript, working dir and guarded files."""
+
+    model: str = ""
+    timeout_s: int = 900
+    log_path: str = ""
+    workdir: str = "."
+    protected_files: Sequence[str] = ()
+
+
+@dataclass(frozen=True)
+class DiscoveryRetry:
+    """Overrides for how many attempts a discovery call makes and how it backs off between them."""
+
+    attempts: Optional[int] = None
+    base_delay_sec: Optional[float] = None
+    max_delay_sec: Optional[float] = None
+    sleep: Optional[Callable[[float], Any]] = None
+
+
 # Each proposed fusion costs discovery tokens plus one authoring subprocess and validation pass, and that cost is paid
 # before the E2E gate can reject it.
 _DEFAULT_MAX_FUSIONS = 4
+# Hot kernels quoted in the discovery prompt.
+_TOP_KERNELS = 15
+# Operator hints offered, and the share of the best score a hint must reach.
+_OPERATOR_HINT_LIMIT = 12
+_OPERATOR_HINT_MIN_SCORE_RATIO = 0.25
 
 # Discovery is handed read and search tools, and the first tool call ends the turn.
 DEFAULT_DISCOVERY_TURNS = 60
@@ -393,10 +452,8 @@ def existing_operator_hints_from_knowledge(
     knowledge_root: str | Path | None,
     boundaries: list[dict[str, Any]],
     *,
-    limit: int = 12,
     fallback_categories: Optional[list[str]] = None,
     fallback_kernel_names: Optional[list[str]] = None,
-    min_score_ratio: float = 0.25,
 ) -> list[dict[str, Any]]:
     """Retrieve existing ROCm operator names using observed runtime semantics."""
     root = Path(knowledge_root) if knowledge_root else _default_knowledge_root()
@@ -457,8 +514,8 @@ def existing_operator_hints_from_knowledge(
         return []
     # Pre-trim marginal matches relative to the best one, so a long tail of weak hints cannot pad the prompt and
     # inflate downstream authoring attempts.
-    cutoff = ranked[0][0] * min_score_ratio
-    return [row for score, row in ranked[:limit] if score >= cutoff]
+    cutoff = ranked[0][0] * _OPERATOR_HINT_MIN_SCORE_RATIO
+    return [row for score, row in ranked[:_OPERATOR_HINT_LIMIT] if score >= cutoff]
 
 
 # Terms a proposal may declare in ``ops``.
@@ -683,29 +740,27 @@ def _output_schema_block(model_type: str, *, repo_scope: bool = False) -> str:
 
 
 def build_discovery_prompt(
-    *,
-    model_type: str,
-    framework: str,
+    target: DiscoveryTarget,
     source_text: str,
-    diagnosis: Diagnosis,
-    hot_kernels: list[dict[str, Any]],
-    shapes: dict[str, Any],
+    evidence: DiscoveryEvidence,
     max_fusions: int = _DEFAULT_MAX_FUSIONS,
-    ordered_boundaries: Optional[list[dict[str, Any]]] = None,
-    existing_operator_hints: Optional[list[dict[str, str]]] = None,
-    source_files: Sequence[str] = (),
-    repo_scope: bool = False,
-    repo_root: str = "",
 ) -> str:
     """Assemble the discovery prompt from runtime, source, and operator evidence.
 
-    ``repo_scope`` embeds no source at all and points the agent at the repository
-    instead, naming ``source_files`` as the entry points to start from.
+    Repo scope embeds no source at all and points the agent at the repository
+    instead, naming the target's source file as the entry point to start from.
     """
+    model_type, framework, shapes, repo_scope = (
+        target.model_type,
+        target.install.framework,
+        target.shapes,
+        target.repo_scope,
+    )
+    diagnosis, hot_kernels = evidence.diagnosis, evidence.hot_kernels
     if repo_scope:
         source_block = render_repo_scope_brief(
-            repo_root,
-            source_files,
+            target.repo_root,
+            [target.source_file] if target.source_file else [],
             model_type=model_type,
             framework=framework,
         )
@@ -749,14 +804,14 @@ def build_discovery_prompt(
         line += f"\n    kernels: {' | '.join(boundary.get('kernels', []))[:500]}"
         return line
 
-    boundary_lines = "\n".join(boundary_line(boundary) for boundary in (ordered_boundaries or []))
+    boundary_lines = "\n".join(boundary_line(boundary) for boundary in (evidence.ordered_boundaries or []))
 
     def operator_line(hint: dict[str, Any]) -> str:
         score = hint.get("score")
         score_text = f" score={float(score):.1f}" if score is not None else ""
         return f"  - `{hint['operator']}` ({hint['path']}){score_text}: {hint['evidence']}"
 
-    operator_lines = "\n".join(operator_line(hint) for hint in (existing_operator_hints or []))
+    operator_lines = "\n".join(operator_line(hint) for hint in (evidence.existing_operator_hints or []))
     dom = ", ".join(diagnosis.dominant_categories)
     return f"""You are analyzing the DECODE path of a {framework} model (`model_type={model_type}`)
 on AMD MI325X (gfx942), bf16, to find SOURCE-LEVEL KERNEL FUSIONS. Analyze only; do
@@ -1011,18 +1066,10 @@ def resolve_proposed_source_file(value: Any, in_scope_files: Sequence[str], defa
 
 def parse_discovered_recipes(
     text: str,
+    target: DiscoveryTarget,
     *,
-    model_type: str,
-    framework: str,
-    source_file: str,
-    shapes: dict[str, Any],
     category_shares: dict[str, float] | None = None,
-    pass_probe: Optional[Callable[[str], PassState]] = None,
-    framework_root: str = "",
     explicit_target: bool = False,
-    in_scope_files: Sequence[str] = (),
-    repo_scope: bool = False,
-    repo_root: str = "",
 ) -> list[Recipe]:
     """Convert the LLM's JSON proposals into ranked :class:`Recipe` objects.
 
@@ -1030,18 +1077,24 @@ def parse_discovered_recipes(
     then warns instead of dropping: it recognizes nine coarse terms, so it can reject
     a wireable chain, and discarding what was explicitly asked for hides that.
 
-    ``in_scope_files`` lists every file the prompt embedded. A proposal may name
-    any of them as its call site, and the scope gate judges against all of them --
+    The scope gate judges a proposal against the source file the prompt embedded:
     it must see the same source the model did, or it drops chains for being
     "outside" a file they were never claimed to be in.
 
-    ``repo_scope`` replaces that offered list with the repository: the prompt
-    embedded nothing, so each proposal names its own files and is judged against
-    the files IT named. A proposal whose call site does not resolve is dropped
-    rather than retargeted onto ``source_file``.
+    Repo scope replaces that file with the repository: the prompt embedded
+    nothing, so each proposal names its own files and is judged against the
+    files IT named. A proposal whose call site does not resolve is dropped rather
+    than retargeted onto the target's source file.
     """
-    runtime = resolve_target_runtime(framework, framework_root=framework_root)
-    scope_files = [p for p in (in_scope_files or [source_file]) if p]
+    model_type, framework, source_file, shapes = (
+        target.model_type,
+        target.install.framework,
+        target.source_file,
+        target.shapes,
+    )
+    repo_scope, repo_root, pass_probe = target.repo_scope, target.repo_root, target.install.pass_probe
+    runtime = resolve_target_runtime(framework, framework_root=target.install.framework_root)
+    scope_files = [p for p in [source_file] if p]
     # The same files the prompt embedded, re-read so the scope gate below judges a proposal against exactly the source
     # the model was shown. Repo scope embedded nothing, so there is no run-wide source text to judge against.
     source_text = "" if repo_scope else "\n".join(_read_source(path) for path in scope_files)
@@ -1300,76 +1353,33 @@ def _run_agent_discovery_once(
     return result
 
 
+def _override_or_env(override: Any, name: str, default: float, cast: Callable[[Any], Any]) -> Any:
+    """An explicit override, else the environment setting ``name`` with its default."""
+    return cast(override) if override is not None else cast(env_setting(name, default, cast=cast))
+
+
 def registered_agent_llm_fn(
     backend: Any,
-    *,
-    model: str = "",
-    timeout_s: int = 900,
-    log_path: str = "",
-    workdir: str = ".",
-    protected_files: Optional[list[str]] = None,
-    attempts: Optional[int] = None,
-    base_delay_sec: Optional[float] = None,
-    max_delay_sec: Optional[float] = None,
-    deadline_sec: Optional[float] = None,
-    sleep: Optional[Callable[[float], Any]] = None,
-    monotonic: Optional[Callable[[], float]] = None,
+    session: DiscoverySession = DiscoverySession(),
+    retry: DiscoveryRetry = DiscoveryRetry(),
 ) -> LlmFn:
     """Adapt one registered Agent backend into discovery's text interface."""
     import time as _time
 
-    selected_model = model.strip() or str(getattr(getattr(backend, "runtime", None), "model", "")).strip()
-    resolved_attempts = (
-        int(attempts)
-        if attempts is not None
-        else int(
-            env_setting(
-                "FORGE_FUSION_LLM_ATTEMPTS",
-                DEFAULT_ATTEMPTS,
-                cast=int,
-            )
-        )
+    timeout_s, log_path, workdir = session.timeout_s, session.log_path, session.workdir
+    selected_model = session.model.strip() or str(getattr(getattr(backend, "runtime", None), "model", "")).strip()
+    resolved_attempts = _override_or_env(retry.attempts, "FORGE_FUSION_LLM_ATTEMPTS", DEFAULT_ATTEMPTS, int)
+    resolved_turns = max(1, int(env_setting("FORGE_FUSION_DISCOVERY_TURNS", DEFAULT_DISCOVERY_TURNS, cast=int)))
+    resolved_base_delay = _override_or_env(
+        retry.base_delay_sec, "FORGE_FUSION_LLM_RETRY_BASE_SEC", DEFAULT_BASE_DELAY_SEC, float
     )
-    resolved_turns = max(
-        1,
-        int(env_setting("FORGE_FUSION_DISCOVERY_TURNS", DEFAULT_DISCOVERY_TURNS, cast=int)),
+    resolved_max_delay = _override_or_env(
+        retry.max_delay_sec, "FORGE_FUSION_LLM_RETRY_MAX_SEC", DEFAULT_MAX_DELAY_SEC, float
     )
-    resolved_base_delay = (
-        float(base_delay_sec)
-        if base_delay_sec is not None
-        else float(
-            env_setting(
-                "FORGE_FUSION_LLM_RETRY_BASE_SEC",
-                DEFAULT_BASE_DELAY_SEC,
-                cast=float,
-            )
-        )
-    )
-    resolved_max_delay = (
-        float(max_delay_sec)
-        if max_delay_sec is not None
-        else float(
-            env_setting(
-                "FORGE_FUSION_LLM_RETRY_MAX_SEC",
-                DEFAULT_MAX_DELAY_SEC,
-                cast=float,
-            )
-        )
-    )
-    resolved_deadline = (
-        float(deadline_sec)
-        if deadline_sec is not None
-        else float(
-            env_setting(
-                "FORGE_LLM_RETRY_DEADLINE_SEC",
-                DEFAULT_DEADLINE_SEC,
-                cast=float,
-            )
-        )
-    )
-    pause = sleep or _time.sleep
-    clock = monotonic or _time.monotonic
-    protected = list(protected_files or [])
+    resolved_deadline = float(env_setting("FORGE_LLM_RETRY_DEADLINE_SEC", DEFAULT_DEADLINE_SEC, cast=float))
+    pause = retry.sleep or _time.sleep
+    clock = _time.monotonic
+    protected = list(session.protected_files or [])
 
     def _record_transcript(progress: list[str], text: str) -> None:
         """Persist what the session did, whatever the outcome."""
@@ -1482,22 +1492,13 @@ def registered_agent_llm_fn(
 
 def discover_recipes(
     diagnosis: Diagnosis,
-    *,
-    model_type: str,
-    framework: str,
-    source_file: str,
-    shapes: dict[str, Any],
+    target: DiscoveryTarget,
     trace_path: str,
     llm_fn: LlmFn,
-    max_fusions: Optional[int] = None,
-    top_kernels: int = 15,
-    knowledge_root: str | Path | None = None,
-    pass_probe: Optional[Callable[[str], PassState]] = None,
-    framework_root: str = "",
-    repo_scope: bool = False,
-    repo_root: str = "",
+    prompting: DiscoveryPrompting = DiscoveryPrompting(),
 ) -> list[Recipe]:
     """LLM-autonomous discovery: propose fusible chains from the trace + source."""
+    source_file, repo_scope = target.source_file, target.repo_scope
     if not diagnosis.is_candidate:
         return []
     try:
@@ -1507,43 +1508,29 @@ def discover_recipes(
     if not source_text and not repo_scope:
         log.warning("discovery: model source unreadable (%s); cannot self-discover", source_file)
         return []
-    hot = hot_kernels_from_trace(trace_path, top_n=top_kernels)
+    hot = hot_kernels_from_trace(trace_path, top_n=_TOP_KERNELS)
     ordered_boundaries = ordered_fusion_boundaries_from_trace(trace_path)
     # Hot kernels and the diagnosis categories are folded in as a second evidence source: ordered boundaries need
     # repeats to exist, so a short trace would otherwise leave retrieval with nothing to match against.
     existing_operator_hints = existing_operator_hints_from_knowledge(
-        knowledge_root,
+        prompting.knowledge_root,
         ordered_boundaries,
         fallback_categories=list(diagnosis.dominant_categories),
         fallback_kernel_names=kernel_names_from_trace(trace_path),
     )
     prompt = build_discovery_prompt(
-        model_type=model_type,
-        framework=framework,
-        source_text=source_text,
-        diagnosis=diagnosis,
-        hot_kernels=hot,
-        shapes=shapes,
-        max_fusions=_resolve_max_fusions(max_fusions),
-        ordered_boundaries=ordered_boundaries,
-        existing_operator_hints=existing_operator_hints,
-        source_files=[source_file] if (repo_scope and source_file) else (),
-        repo_scope=repo_scope,
-        repo_root=repo_root,
+        target,
+        source_text,
+        DiscoveryEvidence(
+            diagnosis=diagnosis,
+            hot_kernels=hot,
+            ordered_boundaries=ordered_boundaries,
+            existing_operator_hints=existing_operator_hints,
+        ),
+        _resolve_max_fusions(prompting.max_fusions),
     )
     raw = llm_fn(prompt)
-    recipes = parse_discovered_recipes(
-        raw,
-        model_type=model_type,
-        framework=framework,
-        source_file=source_file,
-        shapes=shapes,
-        category_shares=diagnosis.category_shares,
-        pass_probe=pass_probe,
-        framework_root=framework_root,
-        repo_scope=repo_scope,
-        repo_root=repo_root,
-    )
+    recipes = parse_discovered_recipes(raw, target, category_shares=diagnosis.category_shares)
     log.info(
         "discovery proposed %d fusion(s): %s",
         len(recipes),

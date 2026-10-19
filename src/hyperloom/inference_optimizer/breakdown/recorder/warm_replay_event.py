@@ -35,7 +35,7 @@ from .event_fields import (
 from .event_ids import event_id
 from .event_rows import rows_for_event, sort_rows, wire_rows
 from .event_sink import RecordSink, make_sink
-from .event_timeline import finish_event, open_event
+from .event_timeline import EventHeader, finish_event, open_event
 
 log = logging.getLogger(__name__)
 
@@ -252,12 +252,9 @@ class WarmReplayEventRecorder:
         reads as the replay of a named recipe, not an anonymous unfinished one.
         """
         self._sequence = open_event(
-            event_type=EVENT_TYPE,
-            event=self.event_id,
+            EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
             event_section=SECTION_EVENT,
             producer=PRODUCER,
-            kind=EVENT_KIND,
-            start_time=self._start_time,
             ext={"request": dict(self._request)},
         )
 
@@ -501,13 +498,10 @@ class WarmReplayEventRecorder:
         try:
             ext, derived = assemble_warm_replay_ext(warm_replay_event_parts(self.event_id), event=self.event_id)
             finish_event(
-                event_type=EVENT_TYPE,
-                event=self.event_id,
+                EventHeader(EVENT_TYPE, self.event_id, EVENT_KIND, self._start_time),
                 sequence=self._sequence,
                 status=derived or status,
                 ext=ext,
-                kind=EVENT_KIND,
-                start_time=self._start_time,
                 end_time=end_time,
             )
         except RECORDING_ERRORS as exc:

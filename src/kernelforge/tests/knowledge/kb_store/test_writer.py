@@ -89,6 +89,11 @@ def _records(config, workspace) -> KernelRecipeKB:
     return KernelRecipeKB.open_identity(identity, config)
 
 
+def _candidates(kb: KernelRecipeKB, limit: int = 3) -> list:
+    """Ranking entries the store holds for the identity, without downloading artifacts."""
+    return kb._store.candidates(kb.canonical_id, limit=limit)
+
+
 # --- gates ----------------------------------------------------------------- #
 def test_write_skips_when_the_store_is_not_configured(tmp_path, workspace):
     # Built directly: from_env refuses remote mode without KB Store credentials.
@@ -118,7 +123,7 @@ def test_write_fails_closed_without_gpu_type(config, workspace):
 
 def test_write_skips_empty_diff(config, workspace):
     assert _write(config, workspace, cumulative_diff="")["reason"] == "empty_diff"
-    assert _records(config, workspace).list_candidates() == []
+    assert _candidates(_records(config, workspace)) == []
 
 
 def test_a_run_that_lost_to_its_baseline_is_still_recorded(config, workspace):
@@ -133,7 +138,7 @@ def test_a_run_that_lost_to_its_baseline_is_still_recorded(config, workspace):
     assert losing["speedup"] == 0.9
     # Recorded, but not held up as the identity's best.
     assert losing["champion"] is False
-    assert len(_records(config, workspace).list_candidates(limit=5)) == 1
+    assert len(_candidates(_records(config, workspace), limit=5)) == 1
 
 
 def test_write_requires_explicit_mean_case_speedup(config, workspace):
@@ -145,7 +150,7 @@ def test_write_requires_explicit_mean_case_speedup(config, workspace):
         "written": False,
         "reason": "invalid_mean_case_speedup",
     }
-    assert _records(config, workspace).list_candidates() == []
+    assert _candidates(_records(config, workspace)) == []
 
 
 # --- what a successful write records --------------------------------------- #
@@ -161,7 +166,7 @@ def test_write_files_the_run_under_its_five_tuple(config, workspace):
 def test_write_preserves_the_patch_and_the_measurements(config, workspace):
     status = _write(config, workspace)
     kb = _records(config, workspace)
-    record = kb.list_candidates(limit=1)[0].value
+    record = _candidates(kb, limit=1)[0].knowledge["value"]
 
     assert record["metric"] == {
         "wall_ms": 5.0,
@@ -232,7 +237,7 @@ def test_write_persists_supplied_pristine_implementation_contract(config, worksp
     )
 
     assert status["written"] is True
-    record = _records(config, workspace).list_candidates(limit=1)[0].value
+    record = _candidates(_records(config, workspace), limit=1)[0].knowledge["value"]
     assert record["implementation_signature"] == pristine_signature
     assert record["implementation_identity"] == pristine_identity
 
@@ -251,8 +256,8 @@ def test_a_slower_run_is_still_recorded_but_never_takes_the_champion(config, wor
 
     assert [fast["champion"], slow["champion"]] == [True, False]
     kb = _records(config, workspace)
-    assert [c.speedup for c in kb.list_candidates()] == [3.0, 1.5]
-    assert kb.list_candidates(limit=1)[0].value["task_id"] == "run-a"
+    assert [c.speedup for c in _candidates(kb)] == [3.0, 1.5]
+    assert _candidates(kb, limit=1)[0].knowledge["value"]["task_id"] == "run-a"
 
 
 def test_a_warm_started_run_that_improved_nothing_records_no_second_copy(config, workspace):
@@ -271,7 +276,7 @@ def test_a_warm_started_run_that_improved_nothing_records_no_second_copy(config,
     # The one recorded solution still stands, and still serves its patch: the warm-started run keeps it as its own
     # result.
     kb = _records(config, workspace)
-    candidates = kb.list_candidates(limit=5)
+    candidates = _candidates(kb, limit=5)
     assert len(candidates) == 1
     assert kb.prior_file(candidates[0].session_id, PATCH_ARTIFACT) == DIFF.encode()
 
@@ -290,7 +295,7 @@ def test_a_warm_started_run_that_improved_records_the_better_result(config, work
 
     assert better["written"] is True
     assert better["champion"] is True
-    assert len(_records(config, workspace).list_candidates(limit=5)) == 2
+    assert len(_candidates(_records(config, workspace), limit=5)) == 2
 
 
 def test_a_new_summary_for_one_solution_is_recorded_as_a_second_candidate(config, workspace):
@@ -298,7 +303,7 @@ def test_a_new_summary_for_one_solution_is_recorded_as_a_second_candidate(config
     _write(config, workspace, summary_override={**SUMMARY, "lessons": ""})
     _write(config, workspace, summary_override={**SUMMARY, "lessons": "later"})
 
-    assert len(_records(config, workspace).list_candidates(limit=5)) == 2
+    assert len(_candidates(_records(config, workspace), limit=5)) == 2
 
 
 def test_a_cold_run_is_unaffected_by_the_reuse_floor(config, workspace):
@@ -311,7 +316,7 @@ def test_recording_the_same_result_twice_updates_one_record(config, workspace):
     second = _write(config, workspace)
 
     assert first["session_id"] == second["session_id"]
-    assert len(_records(config, workspace).list_candidates(limit=5)) == 1
+    assert len(_candidates(_records(config, workspace), limit=5)) == 1
 
 
 def test_a_different_gpu_is_a_different_address(config, workspace):
@@ -333,9 +338,9 @@ def test_a_different_gpu_is_a_different_address(config, workspace):
     assert other.canonical_id.endswith(":mi355x")
     assert other.canonical_id != IDENTITY
     # Each model holds exactly its own run, so neither can be read on the other's behalf.
-    assert len(other.list_candidates(limit=5)) == 1
+    assert len(_candidates(other, limit=5)) == 1
     config.gpu_type = "mi300x"
-    assert len(_records(config, workspace).list_candidates(limit=5)) == 1
+    assert len(_candidates(_records(config, workspace), limit=5)) == 1
 
 
 def test_either_spelling_of_one_operator_reaches_the_same_record(config, workspace):
@@ -356,7 +361,7 @@ def test_either_spelling_of_one_operator_reaches_the_same_record(config, workspa
         )
         records = KernelRecipeKB.open_identity(identity, config)
         assert identity.kernel_name == "kda_packed_decode"
-        assert len(records.list_candidates(limit=5)) == 1
+        assert len(_candidates(records, limit=5)) == 1
 
 
 def test_a_different_producer_is_a_different_address(config, workspace):
@@ -378,9 +383,9 @@ def test_a_different_producer_is_a_different_address(config, workspace):
 
     assert other.canonical_id.startswith("kernel:fusion:")
     assert other.canonical_id != IDENTITY
-    assert len(other.list_candidates(limit=5)) == 1
+    assert len(_candidates(other, limit=5)) == 1
     config.producer = ""
-    assert len(_records(config, workspace).list_candidates(limit=5)) == 1
+    assert len(_candidates(_records(config, workspace), limit=5)) == 1
 
 
 def test_an_unset_producer_still_files_under_the_loops_own(config, workspace):

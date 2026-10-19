@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from ..state_paths import resolve_state_file, state_file_safe_to_read
+from .infera_support import ssh_role_port_offset
 from .ssh_client import DEFAULT_SSH_PORT
 
 log = logging.getLogger(__name__)
@@ -120,13 +121,6 @@ def build_external_state_from_env() -> dict[str, Any]:
     gpn = _int_env("INFERENCE_OPTIMIZER_GPUS_PER_NODE", 8)
     # From the --pd-mode flag, mirrored into the env by `optimize`.
     pd_mode = (os.environ.get("PD_MODE", "") or "aggregated").strip().lower()
-
-    try:
-        from .infera_support import ssh_role_port_offset
-    except Exception:  # noqa: BLE001
-
-        def ssh_role_port_offset(role: str) -> int:  # type: ignore[misc]
-            return 10 if (role or "").lower() == "decode" else 0
 
     def _pods(ips: list[str], role: str) -> list[dict[str, Any]]:
         """Build SSH targets for one role, mirroring the pods' own port math."""

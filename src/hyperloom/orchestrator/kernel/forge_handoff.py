@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import is_secret_shaped_env_name, redact_secret_values
-from hyperloom.common.io import atomic_write_text
+from hyperloom.common.io import WriteOptions, atomic_write_text
 from hyperloom.common.kernel_source_contract import SOURCE_RESOLUTION_FILENAME
 from hyperloom.inference_optimizer.roofline_snapshot import extract_workload_summary
 from hyperloom.inference_optimizer.session.session_paths import forge_handoff_dir
@@ -281,10 +281,7 @@ def write_forge_handoff(
         atomic_write_text(
             handoff_dir / filename,
             text,
-            make_parents=True,
-            fsync=True,
-            fsync_dir=True,
-            mode=0o600,
+            options=WriteOptions(make_parents=True, fsync=True, fsync_dir=True, mode=0o600),
         )
     return handoff_dir
 

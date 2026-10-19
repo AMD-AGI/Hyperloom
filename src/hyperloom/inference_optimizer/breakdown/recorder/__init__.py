@@ -92,6 +92,7 @@ from .event_timeline import (
     RESIDUAL_NO_EVENT,
     RESIDUAL_RUNNING,
     TIMELINE_SEQUENCE_FIELD,
+    EventHeader,
     ResidualEvent,
     build_envelope,
     finish_event,
@@ -110,7 +111,6 @@ from .recorder import (
     SectionShape,
     get_recorder,
     recorder_for,
-    section_shape,
 )
 from .session_metadata import (
     record_metadata_identity,
@@ -138,6 +138,7 @@ __all__ = [
     "SECTION_SHAPES",
     "TIMELINE_SEQUENCE_FIELD",
     "EventId",
+    "EventHeader",
     "EventSink",
     "RecordSink",
     "Recorder",
@@ -184,7 +185,6 @@ __all__ = [
     "rows_for_event",
     "snapshot_metadata",
     "snapshot_state_sections",
-    "section_shape",
     "sort_rows",
     "trace_enabled",
     "wire_row",

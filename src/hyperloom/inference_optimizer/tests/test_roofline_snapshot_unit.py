@@ -151,21 +151,22 @@ def test_extract_top_kernel_unnamed_returns_none(tmp_path):
     assert rs.extract_top_kernel(md) is None
 
 
-# ---- _compute_within_and_gap ----
+# ---- within_roofline_pct / _clamp_within ----
 
 
-def test_compute_within_and_gap():
-    assert rs._compute_within_and_gap(peak=0, achieved=10) == (None, None)
-    within, gap = rs._compute_within_and_gap(peak=100, achieved=80)
-    assert within == 80.0
-    assert gap == 20.0
+def test_within_roofline_pct():
+    assert rs.within_roofline_pct(peak=0, achieved=10) is None
+    assert rs.within_roofline_pct(peak=100, achieved=80) == 80.0
 
 
-def test_compute_within_and_gap_clamps_overshoot():
+def test_clamp_within_splits_ratio_and_gap():
+    assert rs._clamp_within(None) == (None, None)
+    assert rs._clamp_within(80.0) == (80.0, 20.0)
+
+
+def test_clamp_within_caps_overshoot():
     """Beating the modelled ceiling caps ``within`` instead of reporting a negative gap."""
-    within, gap = rs._compute_within_and_gap(peak=100, achieved=120)
-    assert within == 100.0
-    assert gap == 0.0
+    assert rs._clamp_within(rs.within_roofline_pct(peak=100, achieved=120)) == (100.0, 0.0)
 
 
 def test_build_roofline_snapshot_reports_ceiling_overshoot():

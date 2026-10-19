@@ -378,8 +378,6 @@ class _PhaseStateMixin:
         )
         # Preserve accepted bucket from prior runs (record_explore_accepted is its writer).
         merged["accepted"] = list(prior.get("accepted") or [])
-        # Drop so a later load re-runs the legacy union.
-        merged.pop("merged_from_legacy_sig", None)
         self.explore_search = merged
 
     def record_explore_accepted(self, variant: dict[str, Any]) -> None:

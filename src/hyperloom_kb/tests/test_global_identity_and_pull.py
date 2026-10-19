@@ -19,11 +19,7 @@ from hyperloom_kb import (
     ExperienceDeclaration,
     ExperienceHTTPService,
     ExperienceStatus,
-    FieldDeclaration,
-    FieldKind,
-    FieldRole,
     HTTPServiceConfig,
-    ObjectiveDeclaration,
     Provenance,
     RemoteClient,
     RemoteClientError,
@@ -34,29 +30,13 @@ from hyperloom_kb import (
 )
 from hyperloom_kb.database import utc_now
 from hyperloom_kb.tests.conftest import fresh_database
+from hyperloom_kb.tests.declaration_fixtures import throughput_declaration
 
 TOKEN = "pull-token"
 NOW = datetime(2026, 10, 1, tzinfo=timezone.utc)
 
 
-def _declaration(objective: str = "throughput@v1") -> ExperienceDeclaration:
-    return ExperienceDeclaration(
-        objectives=(ObjectiveDeclaration(objective, "Maximize throughput."),),
-        identity=(FieldDeclaration("model", "Model."),),
-        baseline=(FieldDeclaration("config", "Baseline.", group=True),),
-        change=(
-            FieldDeclaration("knob", "Knob.", group=True),
-            FieldDeclaration("summary", "What changed.", role=FieldRole.SUMMARY),
-        ),
-        outcome=(
-            FieldDeclaration("decision", "Decision.", role=FieldRole.DECISION, values=("keep", "revert")),
-            FieldDeclaration("value", "Throughput.", kind=FieldKind.NUMBER, role=FieldRole.MEASUREMENT),
-        ),
-        reflection=(FieldDeclaration("text", "Reflection.", kind=FieldKind.TEXT),),
-    )
-
-
-SCHEMA = _declaration()
+SCHEMA = throughput_declaration()
 
 
 def _experience(seq: int, *, run_id: str = "local-run", schema: ExperienceDeclaration = SCHEMA) -> Experience:
@@ -83,8 +63,9 @@ def _service(home: Path, global_url: str | None = None, **options: Any) -> Exper
     global_kb = None if global_url is None else RemoteClient(RemoteConfig(global_url, TOKEN))
     schema = options.pop("schema", SCHEMA)
     database = options.pop("database", None) or fresh_database()
+    name = options.pop("name", "")
     return ExperienceHTTPService(
-        HTTPServiceConfig(home, TOKEN), schema, None, database=database, global_kb=global_kb, **options
+        HTTPServiceConfig(home, TOKEN, name=name), schema, None, database=database, global_kb=global_kb, **options
     )
 
 
@@ -171,7 +152,7 @@ def test_a_pull_brings_what_a_global_kb_restore_shows_again(tmp_path: Path) -> N
 
 
 def test_a_pull_brings_only_the_schema_it_names_and_registers_it(tmp_path: Path) -> None:
-    other = _declaration(objective="latency@v1")
+    other = throughput_declaration(objective="latency@v1")
     with _serving(_service(tmp_path / "global")) as global_client:
         _seed(global_client, 2)
         global_client.write(_experience(0, run_id="latency-run", schema=other), declaration=other)

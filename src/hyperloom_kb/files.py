@@ -34,8 +34,8 @@ def file_sha256(value: str) -> str:
     return value
 
 
-def file_ref(path: Path, name: str = "") -> FileRef:
-    """The ``FileRef`` a record names the local file at ``path`` by; ``name`` defaults to its file name."""
+def file_ref(path: Path) -> FileRef:
+    """The ``FileRef`` a record names the local file at ``path`` by, under its file name."""
 
     digest = hashlib.sha256()
     size = 0
@@ -43,7 +43,7 @@ def file_ref(path: Path, name: str = "") -> FileRef:
         while chunk := stream.read(_CHUNK_BYTES):
             digest.update(chunk)
             size += len(chunk)
-    return FileRef(name=name or path.name, sha256=digest.hexdigest(), bytes=size)
+    return FileRef(name=path.name, sha256=digest.hexdigest(), bytes=size)
 
 
 class FileStore:
