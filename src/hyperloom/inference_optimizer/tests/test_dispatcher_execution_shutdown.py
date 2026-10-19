@@ -26,7 +26,7 @@ from hyperloom.orchestrator.bus.message_bus import MessageBus
 from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
 from hyperloom.orchestrator.loop import dispatcher as dispatcher_module
-from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator
+from hyperloom.orchestrator.loop.dispatcher import DispatcherCollaborator, HeldLeases
 from hyperloom.orchestrator.bringup.reconcile import ReconcileReport
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
@@ -310,7 +310,9 @@ def test_unconfirmed_physical_cleanup_prevents_database_close(tmp_path, monkeypa
             kind="shutdown_test", params={}, idempotency_key="physical-cleanup", requires_lanes=["research_lane"]
         )
         with pytest.raises(ExecutionCleanupUnconfirmed):
-            await dispatcher.run_task_registered(task, gpu_specialist_lease=SimpleNamespace(close=lambda: False))
+            await dispatcher.run_task_registered(
+                task, HeldLeases(gpu_specialist_lease=SimpleNamespace(close=lambda: False))
+            )
         await _close(dispatcher)
         assert await dispatcher.locks.lane_holders()
         assert dispatcher.db.fetchone_sync("SELECT 1")[0] == 1
@@ -346,9 +348,7 @@ def test_forced_specialist_actor_kill_releases_capacity_and_lane(tmp_path, monke
             kind="shutdown_test", params={}, idempotency_key="forced-actor-kill", requires_lanes=["research_lane"]
         )
         result = await dispatcher.run_task_registered(
-            task,
-            gpu_specialist_lease=specialist_lease,
-            gpu_lease=gpu_lease,
+            task, HeldLeases(gpu_lease=gpu_lease, gpu_specialist_lease=specialist_lease)
         )
         assert result.state == "succeeded"
         assert killed == [actor]
@@ -396,8 +396,7 @@ def test_cleanup_unconfirmed_preserves_outcome_without_completion(tmp_path, clea
         with pytest.raises(ExecutionCleanupUnconfirmed) as caught:
             await dispatcher.run_task_registered(
                 task,
-                gpu_specialist_lease=SimpleNamespace(close=close),
-                gpu_lease=object(),
+                HeldLeases(gpu_lease=object(), gpu_specialist_lease=SimpleNamespace(close=close)),
                 on_complete=completed,
             )
         result = caught.value.result
@@ -614,7 +613,9 @@ def test_terminal_race_preserves_unconfirmed_outcome(tmp_path):
         dispatcher.sub.register_executor("shutdown_test", execute)
         task = await dispatcher.tasks.create(kind="shutdown_test", params={}, idempotency_key="terminal-race")
         with pytest.raises(ExecutionCleanupUnconfirmed) as caught:
-            await dispatcher.run_task_registered(task, gpu_specialist_lease=SimpleNamespace(close=lambda: False))
+            await dispatcher.run_task_registered(
+                task, HeldLeases(gpu_specialist_lease=SimpleNamespace(close=lambda: False))
+            )
         for index in range(125):
             await dispatcher.tasks.record_progress(task.task_id, {"index": index})
         stored = await dispatcher.tasks.get(task.task_id)
@@ -747,7 +748,7 @@ def test_specialist_followup_ack_reaches_dispatcher_cleanup(tmp_path, monkeypatc
         )
         if confirmed and not direct:
             result = await dispatcher.run_task_registered(
-                task, gpu_specialist_lease=lease, cancel_scope=scope, on_complete=completed
+                task, HeldLeases(gpu_specialist_lease=lease), cancel_scope=scope, on_complete=completed
             )
             assert result.state == ("cancelled" if phase.startswith("cancel") else "succeeded")
             if phase.startswith("cancel"):
@@ -767,7 +768,7 @@ def test_specialist_followup_ack_reaches_dispatcher_cleanup(tmp_path, monkeypatc
             expected_error = asyncio.CancelledError if confirmed and direct else ExecutionCleanupUnconfirmed
             with pytest.raises(expected_error):
                 await dispatcher.run_task_registered(
-                    task, gpu_specialist_lease=lease, cancel_scope=scope, on_complete=completed
+                    task, HeldLeases(gpu_specialist_lease=lease), cancel_scope=scope, on_complete=completed
                 )
             assert (await dispatcher.tasks.get(task.task_id)).state == "running"
             assert await dispatcher.locks.lane_holders() == {"research_lane": 1}

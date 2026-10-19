@@ -49,6 +49,7 @@ from hyperloom.orchestrator.policy.gate import PolicyDenied
 from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState, effective_closing_grace_sec
 from hyperloom.orchestrator.state.task_registry import Task
+from hyperloom.orchestrator.loop.dispatcher import HeldLeases
 
 
 # The costliest action the catalogue prices, so a short budget cannot fit it.
@@ -1192,7 +1193,7 @@ async def test_specialist_cleanup_ack_precedes_capacity_release(coord, confirmed
     coord.gpu_specialist_pool.release = release
     on_complete = AsyncMock()
     execution = coord.dispatcher.run_task_registered(
-        task, gpu_lease=gpu, gpu_specialist_lease=RayLease(), on_complete=on_complete
+        task, HeldLeases(gpu_lease=gpu, gpu_specialist_lease=RayLease()), on_complete=on_complete
     )
     if confirmed:
         await execution
