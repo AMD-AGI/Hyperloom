@@ -13,6 +13,7 @@ import codecs
 import gzip
 import json
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -577,27 +578,49 @@ def select_steady_window(
     }
 
 
+@dataclass
+class _TraceBuffers:
+    """Device events and attribution maps buffered in one pass over a trace.
+
+    One pass serves both full-trace and steady-window aggregation without re-reading the trace.
+    """
+
+    # (name, duration, correlation, start, end) per GPU kernel; (duration, start, end) per memcpy/memset.
+    k_events: list[tuple[str, float, Any, float, float]] = field(default_factory=list)
+    m_events: list[tuple[float, float, float]] = field(default_factory=list)
+    # Kineto attribution chain: launch correlation -> external id -> framework op.
+    corr_to_extid: dict[int, int] = field(default_factory=dict)
+    extid_to_opname: dict[int, str] = field(default_factory=dict)
+    # Compact per-op meta (first-seen) for shape + Triton-source enrichment.
+    extid_to_opmeta: dict[int, dict[str, Any]] = field(default_factory=dict)
+    # Launch geometry (grid/block) per correlation, kept so a kernel whose correlation->cpu_op shape chain is broken
+    # (Triton direct-launch, graph replay) can still surface a launch-grid shape fallback.
+    corr_to_launch_geom: dict[Any, tuple[Any, Any]] = field(default_factory=dict)
+    # Correlations of CUDA/HIP graph-launch runtime events (no External id), so their replayed kernels are classified
+    # graph-attributed, not (unlinked).
+    graph_launch_corrs: set[int] = field(default_factory=set)
+
+
 def _finalize(
-    k_events: list[tuple[str, float, Any, float, float]],
-    m_events: list[tuple[float, float, float]],
-    corr_to_extid: dict[int, int],
-    extid_to_opname: dict[int, str],
-    extid_to_opmeta: dict[int, dict[str, Any]],
+    buffers: _TraceBuffers,
     *,
     window: tuple[float, float] | None,
     top_k: int,
     emit_launches: bool = False,
-    graph_launch_corrs: frozenset[int] | None = None,
-    graph_launch_count: int = 0,
-    corr_to_launch_geom: dict[Any, tuple[Any, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build timeline + op/kernel aggregates from buffered device events."""
+    k_events = buffers.k_events
+    m_events = buffers.m_events
+    corr_to_extid = buffers.corr_to_extid
+    extid_to_opname = buffers.extid_to_opname
+    extid_to_opmeta = buffers.extid_to_opmeta
+    graph_launch_corrs = frozenset(buffers.graph_launch_corrs)
+    graph_launch_count = len(graph_launch_corrs)
     # Graph capture health is a WHOLE-TRACE property (activity-buffer overflow drops replays across the run), so the
     # recorded-launch coverage must be computed over the full event stream -- BEFORE any steady-window filter -- to
     # stay scope-consistent with ``graph_launch_count`` (also whole-trace).
-    _graph_corrs_full = graph_launch_corrs or frozenset()
     graph_launch_corrs_with_kernels: set[int] = {
-        e[2] for e in k_events if e[2] is not None and e[2] in _graph_corrs_full
+        e[2] for e in k_events if e[2] is not None and e[2] in graph_launch_corrs
     }
 
     ws = we = None
@@ -653,10 +676,8 @@ def _finalize(
     # Graph-internal kernels launched via a captured CUDA/HIP graph: they carry a correlation matching a graph-launch
     # runtime event (which has no External id), so they resolve to no cpu_op but are not a genuine attribution
     # failure.
-    graph_corrs = graph_launch_corrs or frozenset()
     graph_kernels = 0
     graph_gpu_us = 0.0
-    geom = corr_to_launch_geom or {}
     # Name-keyed shape backfill: accumulate GPU time per (kernel, shape) so the majority capture-time shape wins;
     # multiple distinct shapes mark ambiguous.
     kern_name_backfill_by_sig: dict[str, dict[tuple[tuple[tuple[int, ...], ...], tuple[str, ...]], dict[str, Any]]] = {}
@@ -668,7 +689,7 @@ def _finalize(
         if op_name:
             attributed_us += dur
             attributed_kernels += 1
-        elif corr is not None and corr in graph_corrs:
+        elif corr is not None and corr in graph_launch_corrs:
             op_name = "(graph)"
             graph_kernels += 1
             graph_gpu_us += dur
@@ -698,7 +719,7 @@ def _finalize(
                         else:
                             entry["gpu_us"] += dur
         if name not in kern_name_launch_geom:
-            g = geom.get(corr)
+            g = buffers.corr_to_launch_geom.get(corr)
             if g is not None and (g[0] is not None or g[1] is not None):
                 kern_name_launch_geom[name] = g
 
@@ -844,21 +865,24 @@ def _finalize(
     }
 
 
-def analyze_trace(
-    trace_input: str | Path,
-    *,
-    top_k: int = 10,
-    steady_state: bool = False,
-    framework: str = "",
-    emit_launches: bool = False,
-    require_single_rank: bool = False,
-    tensor_parallel_size: int | None = None,
-) -> dict[str, Any]:
+@dataclass(frozen=True)
+class TraceAnalysisOptions:
+    """What one trace analysis keeps and which trace file it reads."""
+
+    top_k: int = 10
+    steady_state: bool = False
+    framework: str = ""
+    emit_launches: bool = False
+    require_single_rank: bool = False
+    tensor_parallel_size: int | None = None
+
+
+def analyze_trace(trace_input: str | Path, options: TraceAnalysisOptions = TraceAnalysisOptions()) -> dict[str, Any]:
     """Stream a Kineto trace and return timeline + op/kernel aggregates."""
     tf = resolve_trace_file(
         trace_input,
-        require_single_rank=require_single_rank,
-        tensor_parallel_size=tensor_parallel_size,
+        require_single_rank=options.require_single_rank,
+        tensor_parallel_size=options.tensor_parallel_size,
     )
     if tf is None:
         return {
@@ -867,22 +891,15 @@ def analyze_trace(
             "trace_file": "",
         }
 
-    # Kineto attribution chain: launch correlation -> external id -> framework op.
-    corr_to_extid: dict[int, int] = {}
-    extid_to_opname: dict[int, str] = {}
-    # Compact per-op meta (first-seen) for shape + Triton-source enrichment.
-    extid_to_opmeta: dict[int, dict[str, Any]] = {}
-    # Launch geometry (grid/block) per correlation, kept so a kernel whose correlation->cpu_op shape chain is broken
-    # (Triton direct-launch, graph replay) can still surface a launch-grid shape fallback.
-    corr_to_launch_geom: dict[Any, tuple[Any, Any]] = {}
-    # Buffered device events so one pass serves both full-trace and steady-window aggregation without re-reading the
-    # trace.
-    k_events: list[tuple[str, float, Any, float, float]] = []
-    m_events: list[tuple[float, float, float]] = []
+    buffers = _TraceBuffers()
+    k_events = buffers.k_events
+    m_events = buffers.m_events
+    corr_to_extid = buffers.corr_to_extid
+    extid_to_opname = buffers.extid_to_opname
+    extid_to_opmeta = buffers.extid_to_opmeta
+    corr_to_launch_geom = buffers.corr_to_launch_geom
+    graph_launch_corrs = buffers.graph_launch_corrs
     annotation_windows: list[dict[str, Any]] = []
-    # Correlations of CUDA/HIP graph-launch runtime events (no External id), so their replayed kernels are classified
-    # graph-attributed, not (unlinked).
-    graph_launch_corrs: set[int] = set()
     # (pid, tid) -> [(ts, end, name), ...] for the duration-sanity check.
     stream_intervals: dict[Any, list[tuple[float, float, str]]] = {}
     stream_interval_count = 0
@@ -962,25 +979,13 @@ def analyze_trace(
     scope = "full_trace"
     steady_window: dict[str, Any] | None = None
     window: tuple[float, float] | None = None
-    if steady_state:
-        steady_window = select_steady_window(annotation_windows, framework=framework)
+    if options.steady_state:
+        steady_window = select_steady_window(annotation_windows, framework=options.framework)
         if steady_window is not None:
             window = (steady_window["start_us"], steady_window["end_us"])
             scope = "steady_state"
 
-    body = _finalize(
-        k_events,
-        m_events,
-        corr_to_extid,
-        extid_to_opname,
-        extid_to_opmeta,
-        window=window,
-        top_k=top_k,
-        emit_launches=emit_launches,
-        graph_launch_corrs=frozenset(graph_launch_corrs),
-        graph_launch_count=len(graph_launch_corrs),
-        corr_to_launch_geom=corr_to_launch_geom,
-    )
+    body = _finalize(buffers, window=window, top_k=options.top_k, emit_launches=options.emit_launches)
     body["attribution"]["annotation_window_count"] = len(annotation_windows)
     stream_overlap = _stream_overlap_health(stream_intervals)
     if stream_overlap:
@@ -1006,7 +1011,7 @@ def analyze_trace(
     }
     if steady_window is not None:
         result["steady_window"] = steady_window
-    elif steady_state:
+    elif options.steady_state:
         result["steady_window_status"] = "no_repeating_window_fell_back_to_full_trace"
     if cap_exceeded:
         result["truncation_reason"] = cap_exceeded

@@ -225,6 +225,20 @@ class Config:
             # is not an explicit "off" leaves the pointers in place.
             self.defer_knowledge_maps = env_flag("KERNELFORGE_DEFER_KNOWLEDGE_MAPS", default=True)
 
+    def agent_runtime_settings(self):
+        """The configured runtime settings, independent of which provider runs them."""
+        from kernelforge.agent_backends.base import AgentRuntimeSettings
+
+        return AgentRuntimeSettings(
+            executable=self.agent_cli,
+            timeout_sec=self.agent_timeout_sec,
+            reasoning_effort=self.agent_reasoning_effort,
+            sandbox_mode=self.agent_sandbox_mode,
+            precheck=self.agent_precheck,
+            fallback_provider=self.agent_fallback_provider,
+            options=self.agent_options,
+        )
+
     def agent_runtime(self):
         """Resolve the selected provider into one complete runtime config."""
         from kernelforge.agent_backends.registry import (
@@ -239,17 +253,7 @@ class Config:
         # provider is settled -- reading it before ``auto`` resolves is how a
         # Claude model id reaches Codex.
         model = self.agent_model or resolve_agent_model(provider)
-        return resolve_agent_runtime(
-            provider,
-            model=model,
-            executable=self.agent_cli,
-            timeout_sec=self.agent_timeout_sec,
-            reasoning_effort=self.agent_reasoning_effort,
-            sandbox_mode=self.agent_sandbox_mode,
-            precheck=self.agent_precheck,
-            fallback_provider=self.agent_fallback_provider,
-            options=self.agent_options,
-        )
+        return resolve_agent_runtime(provider, model=model, settings=self.agent_runtime_settings())
 
     @classmethod
     def from_env(cls, **overrides) -> Config:

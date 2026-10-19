@@ -54,9 +54,11 @@ def captured_run_spec(monkeypatch):
         config.agent_runtime = lambda: runtime
         make_kwargs.setdefault("program_md", "PROGRAM BODY")
         agent_fn = agent_mod.make_agent_fn(
-            config=config,
-            session_timeout_sec=session_timeout_sec,
-            **make_kwargs,
+            config,
+            agent_mod.ImplementerSetup(
+                agent_mod.ImplementerTask(**make_kwargs),
+                session=agent_mod.SessionOptions(session_timeout_sec=session_timeout_sec),
+            ),
         )
         asyncio.run(agent_fn(kernel_path, "(history)"))
         return seen["spec"]

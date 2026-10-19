@@ -226,12 +226,14 @@ async def test_accepted_appended_only_ablation_survives_integrate_patch(native_s
     assert len(next_round["winners"]) == 1, next_round
     winner = next_round["winners"][0]
     bench, _ = await integrate_patch.IntegratePatchExecutor(session_dir=tmp_path)._bench_patch(
-        params={"config_path": str(session.config), **stack_base_params(winner)},
-        output_root=tmp_path / "integrate",
+        integrate_patch._PatchBench(
+            params={"config_path": str(session.config), **stack_base_params(winner)},
+            output_root=tmp_path / "integrate",
+            specialist_task_id="accepted-ablation",
+            benchmark_mode="agentx",
+        ),
         extra_server_args_applied="",
         extra_envs_applied={},
-        specialist_task_id="accepted-ablation",
-        benchmark_mode="agentx",
     )
     assert bench["status"] == "succeeded", bench
     assert len(observed) == 3
@@ -285,12 +287,14 @@ async def test_explicit_recipe_replacement_survives_following_keep_and_replay(na
         base=stack_base_params(winner),
     )
     bench, _ = await integrate_patch.IntegratePatchExecutor(session_dir=tmp_path)._bench_patch(
-        params={"config_path": str(session.config), **stack_base_params(winner)},
-        output_root=tmp_path / "integrate-replaced-stack",
+        integrate_patch._PatchBench(
+            params={"config_path": str(session.config), **stack_base_params(winner)},
+            output_root=tmp_path / "integrate-replaced-stack",
+            specialist_task_id="after-replacement",
+            benchmark_mode="agentx",
+        ),
         extra_server_args_applied="",
         extra_envs_applied={"SGLANG_TEST": "3"},
-        specialist_task_id="after-replacement",
-        benchmark_mode="agentx",
     )
     assert bench["status"] == "succeeded", bench
     assert len(observed) == 4
