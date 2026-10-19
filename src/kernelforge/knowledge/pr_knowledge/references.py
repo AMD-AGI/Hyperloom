@@ -99,6 +99,28 @@ def _state_label(lifecycle: PRLifecycle) -> str:
     return f"{label}, draft" if lifecycle.draft else label
 
 
+def _sanitize_items(items: tuple[str, ...]) -> str:
+    """Flatten the first ``LIST_ITEMS`` untrusted items into one comma-separated line, skipping empty ones."""
+    cleaned = [sanitize(item) for item in items[:LIST_ITEMS]]
+    return ", ".join(item for item in cleaned if item)
+
+
+def _entry_fields(reference: PRReference) -> list[tuple[str, str]]:
+    """The sanitized fields a reference populates, in rendering order."""
+    candidates = (
+        ("title", sanitize(reference.title)),
+        ("summary", sanitize(reference.summary)),
+        ("components", _sanitize_items(reference.components)),
+        ("mechanisms", _sanitize_items(reference.mechanisms)),
+        ("expected gain", sanitize(reference.expected_gain)),
+        ("risk", sanitize(reference.risk_notes)),
+    )
+    fields = [(name, value) for name, value in candidates if value]
+    if reference.distill_absent:
+        fields.append(("note", "not distilled yet; relevance unverified"))
+    return fields
+
+
 def render_entry(reference: PRReference) -> str:
     """Render every populated field within one shared byte budget."""
     worth = "unknown" if reference.worth_trying is None else f"{reference.worth_trying:.2f}"
@@ -107,28 +129,7 @@ def render_entry(reference: PRReference) -> str:
         f"- {reference.repo}#{reference.number} ({state}, worth {worth}, "
         f"via {'+'.join(reference.hit_via) or 'unknown'}, {reference.n_files} files)"
     )
-    fields: list[tuple[str, str]] = []
-    title = sanitize(reference.title)
-    if title:
-        fields.append(("title", title))
-    summary = sanitize(reference.summary)
-    if summary:
-        fields.append(("summary", summary))
-    components = [sanitize(item) for item in reference.components[:LIST_ITEMS]]
-    if any(components):
-        fields.append(("components", ", ".join(item for item in components if item)))
-    mechanisms = [sanitize(item) for item in reference.mechanisms[:LIST_ITEMS]]
-    if any(mechanisms):
-        fields.append(("mechanisms", ", ".join(item for item in mechanisms if item)))
-    gain = sanitize(reference.expected_gain)
-    if gain:
-        fields.append(("expected gain", gain))
-    risk = sanitize(reference.risk_notes)
-    if risk:
-        fields.append(("risk", risk))
-    if reference.distill_absent:
-        fields.append(("note", "not distilled yet; relevance unverified"))
-
+    fields = _entry_fields(reference)
     if not fields:
         return clip_bytes(header, MAX_ENTRY_BYTES)
     prefixes = [f"  {name}: " for name, _ in fields]
@@ -438,6 +439,79 @@ def _filter_cached_empties(context: PRQueryContext, snapshot: Snapshot) -> tuple
     return replace(context, file_paths=paths, keywords=keywords), skipped
 
 
+def _expired(deadline: float) -> bool:
+    """True once the shared cutoff leaves no time for another stage."""
+    return remaining_sec(deadline) <= 0
+
+
+def _tracked_repos(client: PRMonitorClient, deadline: float) -> tuple[tuple[str, ...], str]:
+    """Preflight the service and list the repositories it tracks; on failure, the reason the lookup degrades."""
+    if _expired(deadline):
+        return (), REASON_SKIPPED_DEADLINE
+
+    if not client.healthz(timeout_sec=remaining_sec(deadline)):
+        return (), REASON_SKIPPED_DEADLINE if _expired(deadline) else REASON_SERVICE_UNREACHABLE
+
+    if _expired(deadline):
+        return (), REASON_SKIPPED_DEADLINE
+
+    try:
+        repos_payload = client.list_repos(timeout_sec=remaining_sec(deadline))
+    except PRMonitorError as error:
+        log.warning("pr-monitor repository lookup failed: %s", error)
+        return (), REASON_SKIPPED_DEADLINE if _expired(deadline) else REASON_SERVICE_UNREACHABLE
+    drift = check_whitelist(repos_payload)
+    if not drift.clean:
+        log.warning(
+            "pr_refs: tracked repo drift (missing=%s unexpected=%s inactive=%s)",
+            drift.missing,
+            drift.unexpected,
+            drift.inactive,
+        )
+    return tuple(str(entry.get("repo_name")) for entry in repos_payload if entry.get("repo_name")), ""
+
+
+@dataclass(frozen=True)
+class _PathProbe:
+    """The query context after probing source ownership, the requests it cost, and why it degraded or must stop."""
+
+    context: PRQueryContext
+    http_calls: int = 0
+    degraded_reason: str = ""
+    stop_reason: str = ""
+
+
+def _probe_untracked_repo(
+    client: PRMonitorClient,
+    context: PRQueryContext,
+    tracked: tuple[str, ...],
+    deadline: float,
+) -> _PathProbe:
+    """Recover an untracked repository from the tracked one that owns its first source path."""
+    if context.reason != REASON_REPO_UNTRACKED or not context.file_paths:
+        return _PathProbe(context)
+    if _expired(deadline):
+        return _PathProbe(context, stop_reason=REASON_SKIPPED_DEADLINE)
+    # Probe source ownership within the shared end-to-end budget.
+    identified, probes, probe_reason = identify_repo_by_path(
+        client,
+        context.file_paths[0],
+        tracked,
+        hint=context.repo,
+        budget_sec=remaining_sec(deadline),
+    )
+    if not identified and _expired(deadline):
+        return _PathProbe(context, probes, stop_reason=REASON_SKIPPED_DEADLINE)
+    if identified:
+        log.info(
+            "pr_refs: %s is untracked; identified %s by source path",
+            context.repo,
+            identified,
+        )
+        return _PathProbe(replace(context, repo=identified, reason=""), probes, degraded_reason=probe_reason)
+    return _PathProbe(context, probes, stop_reason=probe_reason)
+
+
 def collect_references(
     *,
     workspace_dir: str,
@@ -456,35 +530,9 @@ def collect_references(
     # finalization reserve.
     snapshot = load_snapshot(workspace_dir)
 
-    def expired() -> bool:
-        """True once the shared cutoff leaves no time for another stage."""
-        return remaining_sec(deadline) <= 0
-
-    if expired():
-        return _degraded(snapshot, REASON_SKIPPED_DEADLINE)
-
-    if not client.healthz(timeout_sec=remaining_sec(deadline)):
-        reason = REASON_SKIPPED_DEADLINE if expired() else REASON_SERVICE_UNREACHABLE
-        return _degraded(snapshot, reason)
-
-    if expired():
-        return _degraded(snapshot, REASON_SKIPPED_DEADLINE)
-
-    try:
-        repos_payload = client.list_repos(timeout_sec=remaining_sec(deadline))
-    except PRMonitorError as error:
-        log.warning("pr-monitor repository lookup failed: %s", error)
-        reason = REASON_SKIPPED_DEADLINE if expired() else REASON_SERVICE_UNREACHABLE
-        return _degraded(snapshot, reason)
-    drift = check_whitelist(repos_payload)
-    if not drift.clean:
-        log.warning(
-            "pr_refs: tracked repo drift (missing=%s unexpected=%s inactive=%s)",
-            drift.missing,
-            drift.unexpected,
-            drift.inactive,
-        )
-    tracked = tuple(str(entry.get("repo_name")) for entry in repos_payload if entry.get("repo_name"))
+    tracked, failure_reason = _tracked_repos(client, deadline)
+    if failure_reason:
+        return _degraded(snapshot, failure_reason)
 
     workspace = Path(workspace_dir).resolve()
     context = build_context(
@@ -493,56 +541,28 @@ def collect_references(
         workspace=str(workspace),
         exists=lambda rel: (workspace / rel).exists(),
     )
-    probes = 0
-    probe_reason = ""
-    if context.reason == REASON_REPO_UNTRACKED and context.file_paths:
-        if expired():
-            return _degraded(snapshot, REASON_SKIPPED_DEADLINE)
-        # Probe source ownership within the shared end-to-end budget.
-        identified, probes, probe_reason = identify_repo_by_path(
-            client,
-            context.file_paths[0],
-            tracked,
-            hint=context.repo,
-            budget_sec=remaining_sec(deadline),
-        )
-        if not identified and expired():
-            return _degraded(
-                snapshot,
-                REASON_SKIPPED_DEADLINE,
-                http_calls=probes,
-            )
-        if identified:
-            log.info(
-                "pr_refs: %s is untracked; identified %s by source path",
-                context.repo,
-                identified,
-            )
-            context = replace(context, repo=identified, reason="")
-        elif probe_reason:
-            return _degraded(
-                snapshot,
-                probe_reason,
-                http_calls=probes,
-            )
+    probe = _probe_untracked_repo(client, context, tracked, deadline)
+    if probe.stop_reason:
+        return _degraded(snapshot, probe.stop_reason, http_calls=probe.http_calls)
+    context = probe.context
 
     if context.reason:
         return _degraded(
             snapshot,
             context.reason,
             repo="" if context.reason == REASON_REPO_UNTRACKED else context.repo,
-            http_calls=probes,
+            http_calls=probe.http_calls,
         )
 
     narrowed, skipped = _filter_cached_empties(context, snapshot)
-    stats: dict[str, Any] = {"skipped_cached_empty": skipped, "http_calls": probes}
+    stats: dict[str, Any] = {"skipped_cached_empty": skipped, "http_calls": probe.http_calls}
     reason = ""
     pending: dict[str, Any] = {}
 
     if narrowed.file_paths or narrowed.keywords:
         outcome = discover(client, narrowed, deadline=deadline)
         stats.update(outcome.stats)
-        stats["http_calls"] = stats.get("http_calls", 0) + probes
+        stats["http_calls"] = stats.get("http_calls", 0) + probe.http_calls
         reason = outcome.reason
         for kind, value in stats.pop("empty_queries", []):
             record_empty_query(snapshot, query_key(kind, context.repo, value))
@@ -558,9 +578,19 @@ def collect_references(
     else:
         reason = REASON_NO_CANDIDATE
 
-    if probe_reason == REASON_CONTRACT_ERROR or (probe_reason and not stats.get("degraded_reason")):
-        stats["degraded_reason"] = probe_reason
+    if probe.degraded_reason == REASON_CONTRACT_ERROR or (probe.degraded_reason and not stats.get("degraded_reason")):
+        stats["degraded_reason"] = probe.degraded_reason
+    return _snapshot_result(snapshot, context, reason, stats, pending)
 
+
+def _snapshot_result(
+    snapshot: Snapshot,
+    context: PRQueryContext,
+    reason: str,
+    stats: dict[str, Any],
+    pending: dict[str, Any],
+) -> PRRefsResult:
+    """Render what the snapshot holds for this query; ``reason`` is reported as degraded only beside references."""
     # Re-render cached references so refreshes never retract prior context.
     shown = _ranked_from_snapshot(snapshot, context)
     prompt_context = render_reference_set(shown)
