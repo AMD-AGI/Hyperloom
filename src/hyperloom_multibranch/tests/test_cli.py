@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from hyperloom.common.llm_config import (
     AGENT_BACKEND_CLAUDE,
     AGENT_BACKEND_CODEX,
@@ -164,10 +165,11 @@ def test_usage_errors_exit_two(argv: list[str], tmp_path: Path, monkeypatch: pyt
 
 @pytest.fixture(autouse=True)
 def eight_cards(monkeypatch: pytest.MonkeyPatch) -> None:
-    """This machine shows eight cards, and the operator names no AgentX switch."""
+    """This machine shows eight cards, and the operator names no AgentX switch or benchmark YAML."""
 
     monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
     monkeypatch.delenv(AGENTX_ENV, raising=False)
+    monkeypatch.delenv(BENCHMARK_CONFIG_ENV, raising=False)
 
 
 @pytest.mark.parametrize(
@@ -189,6 +191,21 @@ def test_an_agentx_switch_that_contradicts_the_workload_exits_two(
 
     assert exc.value.code == cli.EXIT_USAGE
     assert AGENTX_ENV in capsys.readouterr().err
+    assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("workload", [WORKLOAD_ARGS, AGENTX_ARGS])
+def test_a_benchmark_yaml_the_operator_names_exits_two(
+    workload: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv(BENCHMARK_CONFIG_ENV, "/operator/benchmark.yaml")
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["run", *workload])
+
+    assert exc.value.code == cli.EXIT_USAGE
+    assert BENCHMARK_CONFIG_ENV in capsys.readouterr().err
     assert not any(tmp_path.iterdir())
 
 

@@ -11,7 +11,9 @@ on; its learnings tool recalls this session's learnings only, as MB1 runs on no 
 (:func:`~hyperloom_multibranch.scheduling.mb_fakes.mb_fake_learning_recall`). Every test is measured on a
 :class:`MeasurementHost`: this machine's cards, the image the launcher names in ``HYPERLOOM_ACTIVE_IMAGE_REF`` and
 ``HYPERLOOM_ACTIVE_IMAGE_DIGEST``, the tool commits Hyperloom pins and an InferenceX checkout at its commit; the
-canonical measurement is rendered with the workload's model and GPU type and that checkout. The gate's session service and the specialist
+canonical measurement is rendered with the workload's model and GPU type and that checkout, from the shipped baseline
+of an InferenceX workload and from the Magpie AgentX benchmark the session writes for an AgentX one, which the PRELUDE
+child is bound to as well. The gate's session service and the specialist
 runtime judge on one rule, :func:`workload_rule`; the runtime settles through a rule gate that asks the scheduler's fork
 desk for branches, and the MCP service's ``request_repair`` and ``decline_repair`` conclude a blocked candidate through
 the same gate, which the scheduler has land each fork it admits and record each fork and repair it voids. A specialist
@@ -39,8 +41,10 @@ from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING
 
+from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV
 from hyperloom.common.llm_config import preferred_agent_backend, provider_model_defaults, resolve_forge_llm_model
 from hyperloom.common.model_paths import resolve_serving_model_path
+from hyperloom.common.workload_defaults import DEFAULT_EP
 from hyperloom_multibranch.contracts.llm_prices import price_of
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.interfaces import BranchLogStore, CommitQuery
@@ -76,6 +80,8 @@ GATE_WRITER = "rule-gate"
 BRIEFS_READER = "briefs"
 CANONICAL_DIR = "canonical"
 POINTS_DIR = "points"
+#: The Magpie AgentX benchmark of an AgentX session, under ``MB-toolbox``.
+BENCHMARK_FILE = "benchmark.yaml"
 #: A claim's lease on the specialist tools: the runtime renews it every 10 minutes (board #26).
 CLAIM_TTL_SECONDS = 1800.0
 #: The switch the main flow and the measurement renderer read an AgentX workload from
@@ -136,6 +142,31 @@ def workload_environment(workload: Workload) -> Mapping[str, str]:
     }
 
 
+def _export_workload(workload: Workload, toolbox_dir: Path) -> None:
+    """Export :func:`workload_environment` into this process. For an AgentX workload, also write the Magpie AgentX
+    benchmark ``hyperloom optimize`` generates for it to :data:`BENCHMARK_FILE` in ``toolbox_dir`` and name it in
+    ``HYPERLOOM_BENCHMARK_CONFIG``: the canonical measurement is rendered from it, and the PRELUDE child binds its
+    command line to it. The file pins no model directory, so the child's ``--model`` stays the workload's model."""
+
+    os.environ.update(workload_environment(workload))
+    if workload.inferencex is not None:
+        return
+    from hyperloom.inference_optimizer.cli.benchmark_config import AgentXWorkload, write_agentx_benchmark
+
+    path = toolbox_dir / BENCHMARK_FILE
+    benchmark = AgentXWorkload(
+        framework=workload.framework,
+        model=workload.model,
+        precision=workload.precision,
+        tp=workload.tp,
+        ep=DEFAULT_EP,
+        conc=workload.conc,
+        gpu_type=workload.gpu_type,
+    )
+    write_agentx_benchmark(path, benchmark)
+    os.environ[BENCHMARK_CONFIG_ENV] = str(path.resolve())
+
+
 def workload_rule(workload: Workload, notebook: CommitQuery) -> Rule:
     """The rule a session of ``workload`` is judged on: InferenceX throughput at the workload's conc against the
     PRELUDE bar ``notebook`` holds, or AgentX P50 interactivity with its guards."""
@@ -161,7 +192,7 @@ def _canonical(out_dir: Path, workload: Workload, host: MeasurementHost) -> Cano
 
 
 def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: PeerSetup) -> Peers:
-    """The session's peers on this machine; exports :func:`workload_environment` into this process.
+    """The session's peers on this machine; exports the workload into this process (:func:`_export_workload`).
 
     Called on the event loop the session runs on. The toolbox is built, not started: the session starts it, and its
     close releases the backend and the sandboxes. The MCP service is started; the session stop stops it.
@@ -183,7 +214,7 @@ def local_peers(host: MeasurementHost, sessions: SpecialistSessions, setup: Peer
     from hyperloom_multibranch.toolbox.toolbox import AcceptanceSetup
 
     layout, workload = setup.layout, setup.workload
-    os.environ.update(workload_environment(workload))
+    _export_workload(workload, layout.toolbox)
     repo = GitExperimentRepo(layout.repo, setup.blobs)
     canonical = _canonical(layout.toolbox / CANONICAL_DIR, workload, host)
     image = host.image

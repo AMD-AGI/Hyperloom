@@ -12,14 +12,18 @@ import json
 import os
 import urllib.request
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
 import yaml
 
+from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path, is_magpie_agentx
 from hyperloom.contracts.measurement import AttachmentRef
 from hyperloom.inference_optimizer import inferencex_checkout
+from hyperloom.inference_optimizer.cli.benchmark_config import configure_benchmark
+from hyperloom.inference_optimizer.cli.parser import _build_parser
 from hyperloom.contracts.recipe import Recipe, RecipeDelta
 from hyperloom.common.env import forge_explicitly_enabled
 from hyperloom.common.perf_metric import agentx_enabled
@@ -60,6 +64,7 @@ from hyperloom_multibranch.scheduling.local_peers import (
     _specialist_role,
 )
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup, PeersUnavailable
+from hyperloom_multibranch.scheduling.prelude import prelude_argv
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry
 from hyperloom_multibranch.scheduling.roster import Roster, RosterCaps
 from hyperloom_multibranch.scheduling.settings import InferenceXShape, KernelOptimizer, Workload
@@ -290,20 +295,20 @@ class _Built:
     wiring: SessionWiring
 
 
-@pytest.fixture
-async def built(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Built]:
-    """The real peers of a session in ``tmp_path``, with the wiring their specialist sessions were built on."""
+@asynccontextmanager
+async def _peers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workload: Workload) -> AsyncIterator[_Built]:
+    """The real peers of a session of ``workload`` in ``tmp_path``, with the wiring their specialist sessions were
+    built on; every variable the build exports is restored afterwards."""
 
-    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
-    for name in workload_environment(WORKLOAD):
+    for name in (*workload_environment(workload), BENCHMARK_CONFIG_ENV):
         monkeypatch.setenv(name, "")
     monkeypatch.delenv("GPU_TYPE", raising=False)
     monkeypatch.delenv("HYPERLOOM_KB_URL", raising=False)
     clock = Clock()
-    layout = create_session(tmp_path, WORKLOAD.model_basename, clock)
+    layout = create_session(tmp_path, workload.model_basename, clock)
     desk = ForkDesk(Roster(RosterCaps(1, 1, 1), layout.roster, clock), DecisionLog(layout.decisions, clock), clock)
     blobs = LocalBlobStore(layout.blobs)
-    setup = PeerSetup(layout, WORKLOAD, desk, ProcessRegistry(layout.pids, clock), blobs, NoCritic())
+    setup = PeerSetup(layout, workload, desk, ProcessRegistry(layout.pids, clock), blobs, NoCritic())
     wired: list[SessionWiring] = []
 
     def sessions(wiring: SessionWiring) -> ModelSessions:
@@ -326,6 +331,42 @@ async def built(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterato
         await peers.toolbox.close()
 
 
+@pytest.fixture
+async def built(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[_Built]:
+    """The real peers of an InferenceX session in ``tmp_path``."""
+
+    monkeypatch.delenv("HL_MODEL_BASE", raising=False)
+    async with _peers(tmp_path, monkeypatch, WORKLOAD) as peers:
+        yield peers
+
+
+async def test_an_agentx_session_measures_the_agentx_benchmark_its_prelude_child_is_bound_to(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "models" / "Llama-3-8B").mkdir(parents=True)
+    monkeypatch.setenv("HL_MODEL_BASE", str(tmp_path / "models"))
+    workload = replace(AGENTX, model="meta-llama/Llama-3-8B")
+
+    async with _peers(tmp_path / "workspace", monkeypatch, workload) as built:
+        toolbox = built.layout.toolbox
+        assert benchmark_config_path() == (toolbox / "benchmark.yaml").resolve()
+        canonical = yaml.safe_load((toolbox / "canonical" / "canonical.yaml").read_text())["benchmark"]
+        assert is_magpie_agentx(canonical) and canonical["agentx"]["mode"] == "canonical"
+        assert canonical["model"] == str(tmp_path / "models" / "Llama-3-8B")
+        assert (str(canonical["envs"]["TP"]), str(canonical["envs"]["CONC"])) == (str(workload.tp), str(workload.conc))
+        argv = prelude_argv(workload, 1.0, built.layout.prelude_launch)
+        args = _build_parser().parse_args(list(argv[argv.index("optimize") :]))
+        configure_benchmark(args)
+        assert (args.model, args.framework, args.tp, args.ep, args.conc, args.precision) == (
+            workload.model,
+            workload.framework,
+            workload.tp,
+            1,
+            workload.conc,
+            workload.precision,
+        )
+
+
 async def test_the_real_peers_live_inside_the_session_directory(built: _Built) -> None:
     layout, setup, peers, wiring = built.layout, built.setup, built.peers, built.wiring
     assert (wiring.setup, wiring.repo, wiring.briefs) == (setup, peers.repo, peers.briefs)
@@ -339,6 +380,7 @@ async def test_the_real_peers_live_inside_the_session_directory(built: _Built) -
         HOST.inferencex_path,
     )
     assert not (layout.toolbox / "measurement-config.json").exists()
+    assert benchmark_config_path() is None and not (layout.toolbox / "benchmark.yaml").exists()
     assert peers.base_image_digest == IMAGE.digest
     assert peers.mcp.url.startswith("http://127.0.0.1:")
     assert {name: os.environ[name] for name in workload_environment(WORKLOAD)} == workload_environment(WORKLOAD)

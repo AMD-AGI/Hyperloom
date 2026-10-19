@@ -6,7 +6,8 @@
 ``run`` takes the fixed workload, spelled as ``hyperloom optimize`` spells it, the wall-clock budget and the kernel
 optimizer its recipes are scoped to, and the hard limits the judge works within. ``--workload`` names the workload
 kind: ``inferencex`` takes ``--isl`` and ``--osl``, and ``agentx`` refuses them, as the trace it replays fixes its
-requests; an operator environment whose ``HYPERLOOM_AGENTX`` says otherwise than ``--workload`` is refused.
+requests; an operator environment whose ``HYPERLOOM_AGENTX`` says otherwise than ``--workload``, or that names a
+benchmark YAML in ``HYPERLOOM_BENCHMARK_CONFIG``, is refused.
 ``--max-gpu-hours`` caps the GPU hours the session's tests use: EXPLORE ends with ``gpu_hours_exhausted`` once only
 FINAL's share is left, and FINAL still runs. ``--max-llm-usd`` caps the dollars the session's LLM calls cost: EXPLORE
 ends with ``llm_budget_exhausted`` once their recorded spend reaches it, and FINAL still runs. Each call is priced from
@@ -39,6 +40,7 @@ import sys
 from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 
+from hyperloom.common.benchmark_config import BENCHMARK_CONFIG_ENV, benchmark_config_path
 from hyperloom.common.env import EnvValueError
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.inference_optimizer.session.paths import workspace_root
@@ -180,10 +182,12 @@ def settings_from(args: argparse.Namespace) -> RunSettings:
 
 
 def require_workload_switch(workload: Workload, env: Mapping[str, str]) -> None:
-    """Raise ValueError when ``env`` sets ``HYPERLOOM_AGENTX`` to anything but what ``workload``'s kind says; the
-    session sets it for an AgentX workload itself, so an operator who set it means a workload ``--workload`` does not
-    name."""
+    """Raise ValueError when ``env`` sets ``HYPERLOOM_AGENTX`` to anything but what ``workload``'s kind says, or names
+    a benchmark YAML in ``HYPERLOOM_BENCHMARK_CONFIG``; the session sets both for an AgentX workload itself, so an
+    operator who set them means a workload ``--workload`` and its flags do not name."""
 
+    if benchmark_config_path(env) is not None:
+        raise ValueError(f"{BENCHMARK_CONFIG_ENV} names a workload YAML; --workload and its flags define the workload")
     if AGENTX_ENV not in env:
         return
     try:
