@@ -25,7 +25,6 @@ note neither, and the key is left out: their warmup replayed the measured prompt
 from __future__ import annotations
 
 import hashlib
-import inspect
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -226,22 +225,7 @@ def publish_final_recipe(
         bundle = KnowledgeBundle(knowledge, stage_files(final.recipe, final.files_root, staging, final.blobs))
         value = float(knowledge[metric])
         selection = KBSelectionProfile(scope, metric, value, objective, {metric: value})
-        write = client.write_if_better
-        if "profile" in inspect.signature(write).parameters:
-            return write(canonical_id, profile.session_id, bundle, selection, files_dir=staging)
-        return write(canonical_id, profile.session_id, bundle, files_dir=staging, **_keywords(selection))
-
-
-def _keywords(selection: KBSelectionProfile) -> dict[str, object]:
-    """``write_if_better``'s keywords before main's #1977 took them as one ``KBSelectionProfile``; drop this once main
-    is merged past it."""
-
-    return {
-        "scope": selection.scope,
-        "primary_metric": selection.primary_metric,
-        "primary_value": selection.primary_value,
-        "objective_schema": selection.objective_schema,
-    }
+        return client.write_if_better(canonical_id, profile.session_id, bundle, selection, files_dir=staging)
 
 
 __all__ = [
