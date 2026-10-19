@@ -177,15 +177,10 @@ def test_probe_failure_falls_back_to_none(monkeypatch):
     assert gpu_probe.remote_autodetect_gpu_type(timeout_s=1) is None
 
 
-@pytest.mark.parametrize(
-    "failure",
-    [
-        httpx.ConnectError("dashboard unreachable"),
-        OSError("no route to host"),
-        subprocess.TimeoutExpired(["ssh"], 1),
-    ],
-)
-def test_expected_probe_failures_fall_back_to_none(monkeypatch, tmp_path, failure):
+_BACKENDS = [_infera_state(), {"backend": "rayjob", "head_pod_ip": "10.0.0.1"}]
+
+
+def _probe_failing_with(monkeypatch, tmp_path, failure, state):
     _track_scratch_dirs(monkeypatch, tmp_path)
 
     def _fail(*_a, **_k):
@@ -193,24 +188,23 @@ def test_expected_probe_failures_fall_back_to_none(monkeypatch, tmp_path, failur
 
     monkeypatch.setattr(gpu_probe.ssh_client, "ssh_run", _fail)
     monkeypatch.setattr(gpu_probe.ray_dashboard, "RayDashboardClient", _fail)
-    for backend_state in (_infera_state(), {"backend": "rayjob", "head_pod_ip": "10.0.0.1"}):
-        monkeypatch.setattr(gpu_probe, "build_external_state_from_env", lambda state=backend_state: state)
-        assert gpu_probe.remote_autodetect_gpu_type(timeout_s=1) is None
+    monkeypatch.setattr(gpu_probe, "build_external_state_from_env", lambda: state)
+    return gpu_probe.remote_autodetect_gpu_type(timeout_s=1)
 
 
-@pytest.mark.parametrize("backend_state", [_infera_state(), {"backend": "rayjob", "head_pod_ip": "10.0.0.1"}])
-def test_an_unexpected_probe_error_propagates(monkeypatch, tmp_path, backend_state):
-    _track_scratch_dirs(monkeypatch, tmp_path)
+@pytest.mark.parametrize("state", _BACKENDS)
+@pytest.mark.parametrize(
+    "failure",
+    [httpx.ConnectError("dashboard unreachable"), OSError("no route to host"), subprocess.TimeoutExpired(["ssh"], 1)],
+)
+def test_expected_probe_failures_fall_back_to_none(monkeypatch, tmp_path, failure, state):
+    assert _probe_failing_with(monkeypatch, tmp_path, failure, state) is None
 
-    def _bug(*_a, **_k):
-        raise KeyError("status")
 
-    monkeypatch.setattr(gpu_probe.ssh_client, "ssh_run", _bug)
-    monkeypatch.setattr(gpu_probe.ray_dashboard, "RayDashboardClient", _bug)
-    monkeypatch.setattr(gpu_probe, "build_external_state_from_env", lambda: backend_state)
-
+@pytest.mark.parametrize("state", _BACKENDS)
+def test_an_unexpected_probe_error_propagates(monkeypatch, tmp_path, state):
     with pytest.raises(KeyError, match="status"):
-        gpu_probe.remote_autodetect_gpu_type(timeout_s=1)
+        _probe_failing_with(monkeypatch, tmp_path, KeyError("status"), state)
 
 
 def test_no_handoff_returns_none(monkeypatch):

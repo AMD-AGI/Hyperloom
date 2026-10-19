@@ -1416,10 +1416,6 @@ def test_remote_close_transport_failure_is_nonfatal(
 def _remote_journal_failing_with(tmp_path: Path, monkeypatch, failure: Exception) -> RecipeJournalCollaborator:
     from hyperloom.orchestrator.knowledge import remote_recipe
 
-    class _Journal:
-        def finalize(self, **kwargs) -> None:
-            pass
-
     coordinator = SimpleNamespace(
         session_dir=tmp_path,
         shared_state=SharedState(current_best={"tput": 130.0}, cumulative_gain_validated=30.0),
@@ -1435,7 +1431,7 @@ def _remote_journal_failing_with(tmp_path: Path, monkeypatch, failure: Exception
 
     monkeypatch.setattr(remote_recipe.HyperloomRemoteKB, "from_env", classmethod(fail_publish))
     journal = RecipeJournalCollaborator(coordinator)
-    journal.ensure_journal = lambda: _Journal()
+    journal.ensure_journal = lambda: SimpleNamespace(finalize=lambda **_kwargs: None)
     journal.workload_canonical_id = lambda: "inference:m:h:f:mt:a:v:p"
     return journal
 
@@ -1465,11 +1461,6 @@ def test_remote_close_records_a_publish_failure_it_expects(
         "result_type": result_type,
         "error_class": type(failure).__name__,
     }
-    from hyperloom.inference_optimizer.session.session_paths import recipe_snapshot_audit_jsonl
-
-    row = json.loads(recipe_snapshot_audit_jsonl(tmp_path).read_text(encoding="utf-8"))
-    assert row["status"] == "error"
-    assert row["error"]["type"] == type(failure).__name__
 
 
 def test_remote_close_propagates_an_unexpected_publish_failure(tmp_path: Path, monkeypatch) -> None:

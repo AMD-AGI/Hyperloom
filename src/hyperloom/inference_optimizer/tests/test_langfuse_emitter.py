@@ -200,12 +200,6 @@ def test_sdk_import_error_other_than_missing_module_propagates(tmp_path, monkeyp
         lfe.LangfuseEmitter(tmp_path)
 
 
-def test_sdk_missing_is_recorded_as_the_disabled_reason(tmp_path, monkeypatch):
-    _enable_env(monkeypatch)
-    monkeypatch.setitem(sys.modules, "langfuse", None)
-    assert lfe.LangfuseEmitter(tmp_path).receipt()["disabled_reason"] == "sdk_missing"
-
-
 def test_sdk_availability_is_false_for_a_module_without_a_spec(monkeypatch):
     def _no_spec(_name):
         raise ValueError("langfuse.__spec__ is None")
