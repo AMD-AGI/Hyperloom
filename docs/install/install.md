@@ -244,10 +244,7 @@ credentials (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, AWS Bedrock vars, etc.)
 by default so the agent CLI can authenticate. Unrelated secrets such as GitHub
 and KB tokens are never forwarded. To suppress credential forwarding when the
 agent CLI (`claude` or `codex`) is authenticated through its own config, set
-`HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=0`. Hugging Face Hub settings
-(`HF_HOME`, `HF_HUB_CACHE`, `HF_HUB_OFFLINE`, `HF_ENDPOINT`) are forwarded so a
-specialist finds cached weights, honours offline mode and uses a configured
-mirror; `HF_TOKEN` is not, so a specialist can download only public repos.
+`HYPERLOOM_SPECIALIST_INHERIT_SECRET_ENV=0`.
 
 `.env` in the current workspace is the single source of truth; no extra script
 needs sourcing. Setup only needs to run again when changing the LLM provider,
