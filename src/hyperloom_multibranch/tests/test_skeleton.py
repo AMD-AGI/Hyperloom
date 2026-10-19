@@ -46,6 +46,7 @@ from hyperloom.measure.versions import socket_versions
 from hyperloom_multibranch.contracts.fork import AdmissionStatus, ForkAdmission, ForkRequest, RepairRequest
 from hyperloom_multibranch.contracts.intent import Intent, IntentLayer
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
+from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH, Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import (
     LlmUsage,
@@ -86,7 +87,7 @@ from hyperloom_multibranch.scheduling.lifecycle import (
     SessionServices,
 )
 from hyperloom_multibranch.scheduling.local_peers import workload_rule
-from hyperloom_multibranch.scheduling.llm import CompletionFailed, CompletionReply, CompletionUsage
+from hyperloom_multibranch.scheduling.llm import CompletionFailed, CompletionReply
 from hyperloom_multibranch.scheduling.peers import Peers, PeerSetup
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
 from hyperloom_multibranch.scheduling.roster import BranchOrigin, BranchStatus, RosterCaps, StopCause
@@ -146,7 +147,9 @@ TINY_GPU_HOURS = 0.01
 #: An LLM budget one specialist launch of :data:`LAUNCH_USD` uses up.
 SMALL_LLM_USD = 2.5
 LAUNCH_USD = 3.0
-JUDGE_USAGE = CompletionUsage(input_tokens=4000, output_tokens=120)
+#: What each judge call uses and costs: most of its prompt read from the cache.
+JUDGE_TOKENS = TokenCounts(input=400, output=120, cache_read=3600)
+JUDGE_USD = 0.04
 CONVERGED_REASON = "every branch is flat"
 #: What the scheduler's own tests measure: the root, ``c1`` alone (the integration head once merged) and ``c2``, which
 #: sweeps higher than the integration head but measures the root's value when reproduced; every other recipe measures
@@ -395,7 +398,7 @@ def _script(stage: Stage, forks: int = len(FIX_REASONS)) -> None:
 
 async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Path) -> None:
     stage = _stage(tmp_path, child=child_with_patch(tmp_path))
-    stage.judge.usage = JUDGE_USAGE
+    stage.judge.tokens, stage.judge.cost_usd = JUDGE_TOKENS, JUDGE_USD
     _script(stage)
 
     outcome = await stage.run()
@@ -494,10 +497,11 @@ async def test_a_session_runs_every_phase_and_leaves_nothing_behind(tmp_path: Pa
     assert set(manifest["code_version"]) == {"package", "git_sha"} and manifest["metric"] == GRADED_OUTPUT
     judge_calls = len(stage.layout.judge.read_text().splitlines())
     spends = [_judge_state(prompt)["spend"] for prompt in _judge_prompts(stage)]
-    assert [spend["scheduler_llm_tokens"] for spend in spends[:2]] == [
-        {"input_tokens": 0, "output_tokens": 0},
-        {"input_tokens": JUDGE_USAGE.input_tokens, "output_tokens": JUDGE_USAGE.output_tokens},
-    ]
+    assert [spend["scheduler_llm_usd"] for spend in spends[:2]] == [0.0, JUDGE_USD]
+    usages = [record.usage for record in (await observer.snapshot()).llm_usage]
+    assert (
+        usages == [LlmUsage("", UsageSource.JUDGE, JUDGE_USD, JUDGE_TOKENS.prompt, JUDGE_TOKENS.output)] * judge_calls
+    )
     assert all(spend["explore_gpu_hours"] is None for spend in spends)
     [rooted] = [row for row in _decisions(stage) if row["reason"] == "root committed"]
     prelude_hours = round(rooted["detail"]["child_gpu_seconds_upper_bound"] / MB_SECONDS_PER_HOUR, 3)
@@ -744,6 +748,22 @@ async def test_spent_specialist_llm_dollars_end_explore_as_a_completed_session_t
     [opening] = _judge_prompts(stage)
     spend = _judge_state(opening)["spend"]
     assert (spend["specialist_llm_usd"], spend["max_llm_usd"]) == (0.0, SMALL_LLM_USD)
+
+
+async def test_the_judge_s_own_llm_dollars_count_against_the_llm_budget(tmp_path: Path) -> None:
+    stage = _stage(tmp_path, child=child_with_patch(tmp_path))
+    stage.settings = replace(SETTINGS, max_llm_usd=SMALL_LLM_USD)
+    stage.judge = ScriptedCompletion([OPENING], tokens=JUDGE_TOKENS, cost_usd=LAUNCH_USD)
+
+    outcome = await stage.run()
+
+    assert (outcome.stop_reason, outcome.error, outcome.exit_code) == (SessionStopReason.LLM_BUDGET_EXHAUSTED, "", 0)
+    [opening] = _judge_prompts(stage)
+    spend = _judge_state(opening)["spend"]
+    assert (spend["specialist_llm_usd"], spend["scheduler_llm_usd"]) == (0.0, 0.0)
+    snapshot = await stage.handle(Role.OBSERVER).snapshot()
+    assert snapshot.llm_usd == LAUNCH_USD
+    assert [record.usage.source for record in snapshot.llm_usage] == [UsageSource.JUDGE]
 
 
 async def test_a_judge_soft_stop_ends_explore_early_and_still_runs_final(tmp_path: Path) -> None:

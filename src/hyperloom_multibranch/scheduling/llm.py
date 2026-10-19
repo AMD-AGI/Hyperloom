@@ -1,12 +1,13 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The one LLM call shape the scheduling side uses: a system and a user prompt in, the reply text and its usage out.
+"""The one LLM call shape the scheduling side uses: a system and a user prompt in, the reply text, its tokens and
+what they cost out.
 
 The judge and the integrator's patch resolver take a :data:`Completion` through their constructors, so tests hand
-them a deterministic stand-in; production builds one with :func:`anthropic_completion` over ``llm_config``. A call
-that fails raises :class:`CompletionFailed` whatever the transport, so the callers name one error. A
-:class:`CompletionMeter` adds up the tokens of every reply the completions it meters return.
+them a deterministic stand-in; production builds one with :func:`anthropic_completion` over ``llm_config``, priced
+from the price sheet. A call that fails raises :class:`CompletionFailed` whatever the transport, so the callers name
+one error. :func:`recorded` writes what each reply cost to the notebook as the scheduler's own LLM usage.
 """
 
 from __future__ import annotations
@@ -24,23 +25,17 @@ from hyperloom.common.llm_config import (
     provider_model_defaults,
     resolve_forge_llm_model,
 )
-
-
-@dataclass(frozen=True)
-class CompletionUsage:
-    """The tokens one call or several used; ``input_tokens`` counts every prompt token, the cached ones included."""
-
-    input_tokens: int = 0
-    output_tokens: int = 0
-
-    def __add__(self, other: CompletionUsage) -> CompletionUsage:
-        return CompletionUsage(self.input_tokens + other.input_tokens, self.output_tokens + other.output_tokens)
+from hyperloom_multibranch.contracts.llm_prices import TokenCounts, price_of
+from hyperloom_multibranch.contracts.notebook.interfaces import UsageSink
+from hyperloom_multibranch.contracts.notebook.records import LlmUsage
+from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 
 
 @dataclass(frozen=True)
 class CompletionReply:
     text: str
-    usage: CompletionUsage
+    tokens: TokenCounts
+    cost_usd: float
 
 
 #: ``(system, user) -> reply``; raises :class:`CompletionFailed` when the call fails.
@@ -77,50 +72,24 @@ def _transport_errors() -> tuple[type[BaseException], ...]:
     return (RuntimeError, OSError, TimeoutError, asyncio.TimeoutError, httpx.HTTPError, ClaudeSDKError)
 
 
-#: The prompt-token counters of an Anthropic ``usage``: its ``input_tokens`` is only the uncached share.
-_ANTHROPIC_INPUT_COUNTERS = ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+def recorded(completion: Completion, notebook: UsageSink, source: UsageSource) -> Completion:
+    """``completion``, recording what each reply cost in ``notebook`` as the scheduler's ``source``; a failed call
+    records nothing."""
 
+    async def complete(system: str, user: str) -> CompletionReply:
+        reply = await completion(system, user)
+        usage = LlmUsage("", source, reply.cost_usd, reply.tokens.prompt, reply.tokens.output)
+        await notebook.record_llm_usage(usage)
+        return reply
 
-def _token_count(usage: Mapping[str, object], key: str) -> int:
-    value = usage.get(key)
-    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
-
-
-def _anthropic_usage(usage: object) -> CompletionUsage:
-    """The tokens of an Anthropic ``usage`` mapping, as both transports report it; none when it carries no mapping."""
-
-    if not isinstance(usage, Mapping):
-        return CompletionUsage()
-    return CompletionUsage(
-        input_tokens=sum(_token_count(usage, key) for key in _ANTHROPIC_INPUT_COUNTERS),
-        output_tokens=_token_count(usage, "output_tokens"),
-    )
-
-
-class CompletionMeter:
-    """Adds up the usage of every reply the completions it :meth:`meters <metered>` return; a failed call adds none."""
-
-    def __init__(self) -> None:
-        self._used = CompletionUsage()
-
-    @property
-    def used(self) -> CompletionUsage:
-        return self._used
-
-    def metered(self, completion: Completion) -> Completion:
-        """``completion``, counting each reply's usage here before returning it."""
-
-        async def complete(system: str, user: str) -> CompletionReply:
-            reply = await completion(system, user)
-            self._used += reply.usage
-            return reply
-
-        return complete
+    return complete
 
 
 def anthropic_completion(model: str, *, component: str, operation: str) -> Completion:
-    """A :data:`Completion` over ``llm_config``'s Anthropic transport, tagged with ``component`` and ``operation``."""
+    """A :data:`Completion` over ``llm_config``'s Anthropic transport, tagged with ``component`` and ``operation``,
+    each reply priced at ``model``'s rates; raises :class:`UnpricedModel` for a model the price sheet does not list."""
 
+    price = price_of(model)
     errors = _transport_errors()
     timeout = build_http_timeout(connect=MB_LLM_CONNECT_TIMEOUT_SECONDS, read=MB_LLM_READ_TIMEOUT_SECONDS)
 
@@ -137,7 +106,9 @@ def anthropic_completion(model: str, *, component: str, operation: str) -> Compl
             result = await aanthropic_completion(request=request, component=component, operation=operation)
         except errors as exc:
             raise CompletionFailed(f"{operation} call failed: {type(exc).__name__}: {exc}") from exc
-        return CompletionReply(result.text, _anthropic_usage(result.usage))
+        usage = result.usage if isinstance(result.usage, Mapping) else {}
+        tokens = TokenCounts.from_anthropic_usage(usage)
+        return CompletionReply(result.text, tokens, price.cost_usd(tokens))
 
     return complete
 
@@ -147,9 +118,8 @@ __all__ = [
     "MB_LLM_READ_TIMEOUT_SECONDS",
     "Completion",
     "CompletionFailed",
-    "CompletionMeter",
     "CompletionReply",
-    "CompletionUsage",
     "anthropic_completion",
     "default_model",
+    "recorded",
 ]

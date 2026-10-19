@@ -30,7 +30,7 @@ from hyperloom_multibranch.notebook import STALL_TESTS
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.events import MB_BIG_GAIN_BARS, MB_BOTTLENECK_SHIFT_PP, SessionEvent
 from hyperloom_multibranch.scheduling.forks import PendingBranch
-from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed, CompletionUsage
+from hyperloom_multibranch.scheduling.llm import Completion, CompletionFailed
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, RosterCaps
 from hyperloom_multibranch.scheduling.similarity import SimilarBranch
 from hyperloom_multibranch.scheduling.widening import WideningSignals
@@ -107,12 +107,11 @@ explore_gpu_hours is the gpu_hours_used at which EXPLORE ends to leave FINAL its
 limited: as gpu_hours_used nears it, a branch opened now has few tests left to run, and the session stops exploring
 there whatever you decide. prelude_gpu_hours_upper_bound is at most the GPU time the PRELUDE run used on its own: its
 wall time times the cards one test uses, which nothing limits and which gpu_hours_used leaves out.
-specialist_llm_usd is what the specialists' LLM launches cost, as each launch's CLI reported it when the launch ended:
-a launch still running, one cut short, lost or stopped, and one whose CLI reports no cost are not in it, so it reads
-low. max_llm_usd is the specialist_llm_usd at which the session stops exploring whatever you decide, or null when it
-is not limited: as specialist_llm_usd nears it, a branch opened now has few launches left.
-scheduler_llm_tokens are the tokens your own calls and the patch resolver's have used; the specialists' LLM spend is
-not in it.
+specialist_llm_usd is what the specialists' LLM launches cost, each priced per call from its log when it ended, a
+launch cut short, lost or stopped included; a launch still running is not in it yet.
+scheduler_llm_usd is what your own calls and the patch resolver's cost; the rule gate's fix critic is not in it.
+max_llm_usd is the specialist_llm_usd plus scheduler_llm_usd at which the session stops exploring whatever you decide,
+or null when it is not limited: as that sum nears it, a branch opened now has few launches left.
 A specialist branch's specialist, shown only when the specialist runtime reports it, says whether its specialist is
 running, how many times it crashed (crashes) and how many times it was restarted after its heartbeat was lost (lost),
 whether the runtime gave up restarting it after repeated crashes or after several sessions in a row lost their
@@ -152,10 +151,11 @@ class JudgeView:
     ``gpu_hours_used`` are the GPU hours of the session's tests that have a result: the root's baseline is among them,
     a test withdrawn before its result and the PRELUDE child's own measurements are not. ``explore_gpu_hours`` is where
     EXPLORE ends under ``--max-gpu-hours``, ``None`` without a limit, ``prelude_gpu_hours_upper_bound`` the PRELUDE
-    child's wall time times the workload's TP. ``specialist_llm_usd`` is what the specialists' recorded LLM launches
-    cost, ``max_llm_usd`` where EXPLORE ends under ``--max-llm-usd``, ``None`` without a limit, and ``scheduler_llm``
-    the tokens the judge and the patch resolver used. ``specialists`` maps a running specialist branch to what the
-    specialist runtime knows of its specialist; a branch whose specialist's state is not known is not in it.
+    child's wall time times the workload's TP. ``specialist_llm_usd`` is what the specialists' recorded LLM calls
+    cost, ``scheduler_llm_usd`` what the judge's and the patch resolver's recorded calls cost, and ``max_llm_usd``
+    where their sum ends EXPLORE under ``--max-llm-usd``, ``None`` without a limit. ``specialists`` maps a running
+    specialist branch to what the specialist runtime knows of its specialist; a branch whose specialist's state is not
+    known is not in it.
     """
 
     now: float
@@ -181,7 +181,7 @@ class JudgeView:
     prelude_gpu_hours_upper_bound: float
     specialist_llm_usd: float
     max_llm_usd: float | None
-    scheduler_llm: CompletionUsage
+    scheduler_llm_usd: float
     specialists: Mapping[str, SpecialistStatus]
 
 
@@ -315,7 +315,7 @@ def render_prompt(view: JudgeView) -> str:
             "prelude_gpu_hours_upper_bound": round(view.prelude_gpu_hours_upper_bound, _GPU_HOURS_DIGITS),
             "specialist_llm_usd": round(view.specialist_llm_usd, _USD_DIGITS),
             "max_llm_usd": view.max_llm_usd,
-            "scheduler_llm_tokens": asdict(view.scheduler_llm),
+            "scheduler_llm_usd": round(view.scheduler_llm_usd, _USD_DIGITS),
         },
         "events": [{"event": event.kind.value, "reason": event.reason, **event.detail} for event in view.events],
         _KEY_BRANCHES: [_branch_row(entry, progress.get(entry.branch), view) for entry in view.roster],

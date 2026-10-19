@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.lifecycle import SpecialistStatus
 from hyperloom_multibranch.contracts.notebook import INTEGRATION_BRANCH
 from hyperloom_multibranch.contracts.notebook.records import BranchProgress, FrontierScore
@@ -32,7 +33,7 @@ from hyperloom_multibranch.scheduling.judge import (
     render_prompt,
 )
 from hyperloom_multibranch.scheduling.forks import PendingBranch
-from hyperloom_multibranch.scheduling.llm import CompletionFailed, CompletionReply, CompletionUsage
+from hyperloom_multibranch.scheduling.llm import CompletionFailed, CompletionReply
 from hyperloom_multibranch.scheduling.roster import (
     BranchEntry,
     BranchKind,
@@ -126,23 +127,23 @@ def _view(
         prelude_gpu_hours_upper_bound=0.41666,
         specialist_llm_usd=3.14159,
         max_llm_usd=max_llm_usd,
-        scheduler_llm=CompletionUsage(input_tokens=5200, output_tokens=310),
+        scheduler_llm_usd=0.27183,
         specialists=specialists or {},
     )
 
 
 def _text(reply: str) -> CompletionReply:
-    return CompletionReply(reply, CompletionUsage())
+    return CompletionReply(reply, TokenCounts(), 0.0)
 
 
-def test_the_prompt_shows_and_explains_the_gpu_hours_llm_dollars_and_llm_tokens_used() -> None:
+def test_the_prompt_shows_and_explains_the_gpu_hours_and_llm_dollars_used() -> None:
     assert _state(_view())["spend"] == {
         "gpu_hours_used": 1.235,
         "explore_gpu_hours": None,
         "prelude_gpu_hours_upper_bound": 0.417,
         "specialist_llm_usd": 3.14,
         "max_llm_usd": None,
-        "scheduler_llm_tokens": {"input_tokens": 5200, "output_tokens": 310},
+        "scheduler_llm_usd": 0.27,
     }
     assert _state(_view(explore_gpu_hours=7.08333))["spend"]["explore_gpu_hours"] == 7.083
     assert _state(_view(max_llm_usd=25.0))["spend"]["max_llm_usd"] == 25.0
@@ -153,14 +154,15 @@ def test_the_prompt_shows_and_explains_the_gpu_hours_llm_dollars_and_llm_tokens_
         "prelude_gpu_hours_upper_bound",
         "specialist_llm_usd",
         "max_llm_usd",
-        "scheduler_llm_tokens",
+        "scheduler_llm_usd",
     ):
         assert text in prompt
-    assert "so it reads low" in prompt
+    assert "a launch cut short, lost or stopped included" in prompt
     assert "a test taken back before its result is not in it" in prompt
     assert "the baseline measured on the root commit included" in prompt
     assert "the measurements the PRELUDE run that built the root commit made on its own" in prompt
-    assert "the specialists' LLM spend is not in it" in prompt
+    assert "the rule gate's fix critic is not in it" in prompt
+    assert "max_llm_usd is the specialist_llm_usd plus scheduler_llm_usd" in prompt
     assert "its wall time times the cards one test uses, which nothing limits and which gpu_hours_used leaves out" in (
         prompt
     )

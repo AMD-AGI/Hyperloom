@@ -32,6 +32,7 @@ from hyperloom.measure.versions import socket_versions
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.records import ManifestFingerprint
+from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.notebook.codec import encode
 from hyperloom_multibranch.notebook.rsi.session import FRONTIER_LOG, session_frontier
@@ -51,7 +52,7 @@ from hyperloom_multibranch.scheduling.forks import ForkDesk
 from hyperloom_multibranch.scheduling.integrator import Integrator, LlmPatchResolver, MergeRecords
 from hyperloom_multibranch.scheduling.judge import JUDGE_PROMPT_VERSION, Judge
 from hyperloom_multibranch.scheduling.layout import SessionLayout
-from hyperloom_multibranch.scheduling.llm import Completion, CompletionMeter
+from hyperloom_multibranch.scheduling.llm import Completion, recorded
 from hyperloom_multibranch.scheduling.peers import PeerFactory, PeerSetup
 from hyperloom_multibranch.scheduling.policy import SCHEDULING_POLICY, policy_version
 from hyperloom_multibranch.scheduling.prelude import Prelude, PreludeFailed, PreludeResult
@@ -175,11 +176,12 @@ class Session:
             self._notebook, metric, budget_seconds=budget, log_path=layout.reports / FRONTIER_LOG
         )
         dashboard = SessionDashboard(self._notebook, progress, peers.toolbox, metric, layout.dashboard)
-        llm_usage = CompletionMeter()
-        resolver = LlmPatchResolver(llm_usage.metered(services.resolver_completion), peers.repo)
+        resolver = LlmPatchResolver(
+            recorded(services.resolver_completion, self._notebook, UsageSource.RESOLVER), peers.repo
+        )
         self._prelude = Prelude(context, peers.repo, peers.gate, tests, recipe_kb=services.recipe_kb)
         integrator = Integrator(MergeRecords(merger, DecisionLog(layout.merges, clock)), peers.repo, checks, resolver)
-        judge = Judge(llm_usage.metered(services.judge_completion), layout.judge, clock)
+        judge = Judge(recorded(services.judge_completion, self._notebook, UsageSource.JUDGE), layout.judge, clock)
         widening = Widening(peers.toolbox, self._roster, progress.policy)
         similarity = BranchSimilarity(peers.repo, self._roster)
         profiler = IntegrationProfiler(peers.toolbox, tests, self._notebook, clock)
@@ -192,7 +194,6 @@ class Session:
             widening,
             similarity,
             events,
-            llm_usage,
             peers.lifecycle,
         )
         self._explorer = Explorer(context, self._branches, integrator, steering)

@@ -14,7 +14,7 @@ the profile taken of the integration head after such a merge moving, or a quaran
 judge opens after the opening batch starts from the integration head, briefed on a focus. The judge reads the
 frontier-scored progress, how similar archived sessions went, which running branches made much the same change, the
 events since its last call, how far each branch lies behind the integration head, whether a profile of the integration
-head runs, the GPU hours, the specialists' LLM dollars and the scheduler LLM tokens used so far, and what is known of
+head runs, the GPU hours and the LLM dollars the specialists and the scheduler itself spent so far, and what is known of
 each running branch's specialist (given up after its crashes, stopped because its judging failed, its heartbeat lost
 again and again), and decides what to stop; a judge call that has not answered by the EXPLORE deadline counts as failed,
 and a branch that has not opened by then is withdrawn, so neither eats into FINAL. The integrator merges in a background
@@ -22,9 +22,9 @@ task of its own, in rounds as wide as the integration branch's K. When EXPLORE e
 integrator abandons its round, so the integration head the FINAL candidates are read from no longer moves and no merge
 test competes with FINAL's measurements; a profile of the integration head still running is cancelled before that,
 taking its test back. Under ``--max-gpu-hours`` EXPLORE also ends, at a tick, once the session's tests have used the GPU
-hours FINAL's share leaves it, and under ``--max-llm-usd`` once the specialists' recorded LLM spend reaches it: FINAL
-runs no specialist, so it gets no share of that cap. EXPLORE ends at a tick as well once the toolbox has fewer usable
-cards than one test needs, and the session then skips FINAL.
+hours FINAL's share leaves it, and under ``--max-llm-usd`` once the LLM spend recorded by the specialists, the judge
+and the patch resolver reaches it: FINAL runs no specialist and asks no judge, so it gets no share of that cap. EXPLORE
+ends at a tick as well once the toolbox has fewer usable cards than one test needs, and the session then skips FINAL.
 """
 
 from __future__ import annotations
@@ -49,7 +49,6 @@ from hyperloom_multibranch.scheduling.decisions import Decision, DecisionKind
 from hyperloom_multibranch.scheduling.events import SessionEvents, behind_integration_pct
 from hyperloom_multibranch.scheduling.integrator import Integrator
 from hyperloom_multibranch.scheduling.judge import Judge, JudgeDecision, JudgeView
-from hyperloom_multibranch.scheduling.llm import CompletionMeter
 from hyperloom_multibranch.scheduling.roster import BranchEntry, BranchKind, BranchOrigin, BranchStop, StopCause
 from hyperloom_multibranch.scheduling.settle import failure_text, settled
 from hyperloom_multibranch.scheduling.similarity import BranchSimilarity
@@ -68,7 +67,7 @@ FORK_NOT_LANDED = "the rule gate did not land the fork"
 class ExploreWindow:
     """The commit branches start from, the roofline ceiling, the clock times EXPLORE and the budget end at, the
     session's whole budget, the GPU seconds the session's tests may use before EXPLORE ends and the dollars the
-    specialists' recorded LLM launches may cost (``math.inf`` for no limit, for either), and the upper bound of the GPU
+    session's recorded LLM calls may cost (``math.inf`` for no limit, for either), and the upper bound of the GPU
     seconds the PRELUDE child used, which no limit counts."""
 
     root_commit: str
@@ -86,8 +85,8 @@ class Steering:
     """How the judge steers EXPLORE: the judge, how often it is asked, the frontier-scored progress it reads, against
     the archived sessions that progress holds, the dashboard rebuilt once the opening batch is open and after every
     later judge call, the signals of whether a branch opened now would still pay off, which running branches made
-    much the same change, the events that have the judge asked at once, the meter of the judge's and the patch
-    resolver's LLM tokens, and the specialist lifecycle, which reports each running branch's specialist."""
+    much the same change, the events that have the judge asked at once, and the specialist lifecycle, which reports
+    each running branch's specialist."""
 
     judge: Judge
     interval_seconds: float
@@ -96,7 +95,6 @@ class Steering:
     widening: Widening
     similarity: BranchSimilarity
     events: SessionEvents
-    llm_usage: CompletionMeter
     specialists: SpecialistLifecycle
 
 
@@ -105,13 +103,6 @@ def spent_gpu_seconds(progress: Iterable[BranchProgress]) -> float:
     branch's baseline on the root included; a test withdrawn before its result counts none."""
 
     return sum(row.gpu_seconds for row in progress)
-
-
-def spent_llm_usd(progress: Iterable[BranchProgress]) -> float:
-    """The dollars the specialists' LLM launches recorded: a launch counts once it ended and its CLI reported its
-    cost, so this is a lower bound."""
-
-    return sum(row.llm_usd for row in progress)
 
 
 def integration_row(progress: tuple[BranchProgress, ...]) -> BranchProgress | None:
@@ -145,7 +136,6 @@ class Explorer:
         self._widening = steering.widening
         self._similarity = steering.similarity
         self._events = steering.events
-        self._llm_usage = steering.llm_usage
         self._specialists = steering.specialists
 
     async def run(self, window: ExploreWindow) -> SessionStopReason:
@@ -199,15 +189,13 @@ class Explorer:
         return SessionStopReason.TIME_EXHAUSTED
 
     async def _budget_spent(self, window: ExploreWindow) -> SessionStopReason | None:
-        """The budget the session used up, if any: the GPU seconds EXPLORE has, then the specialists' LLM dollars.
+        """The budget the session used up, if any: the GPU seconds EXPLORE has, then the session's LLM dollars.
         Reads the notebook's own progress: a frontier-scored read appends a round to the frontier log."""
 
-        if window.explore_gpu_seconds == math.inf and window.max_llm_usd == math.inf:
-            return None
-        progress = await self._notebook.progress()
-        if spent_gpu_seconds(progress) >= window.explore_gpu_seconds:
+        gpu_limited = window.explore_gpu_seconds != math.inf
+        if gpu_limited and spent_gpu_seconds(await self._notebook.progress()) >= window.explore_gpu_seconds:
             return SessionStopReason.GPU_HOURS_EXHAUSTED
-        if spent_llm_usd(progress) >= window.max_llm_usd:
+        if window.max_llm_usd != math.inf and (await self._notebook.snapshot()).llm_usd >= window.max_llm_usd:
             return SessionStopReason.LLM_BUDGET_EXHAUSTED
         return None
 
@@ -259,6 +247,7 @@ class Explorer:
         integration = integration_row(progress)
         integration_value = dict(integration.head_value) if integration is not None else {}
         root = await self._notebook.recorded_value(window.root_commit)
+        snapshot = await self._notebook.snapshot()
         view = JudgeView(
             now=now,
             explore_remaining_seconds=max(window.explore_end - now, 0.0),
@@ -273,7 +262,7 @@ class Explorer:
             free_slots=self._roster.free_slots(),
             pending=self._desk.pending(),
             history=judge_history(
-                await self._notebook.snapshot(),
+                snapshot,
                 self._progress.history,
                 self._metric,
                 budget_seconds=window.budget_seconds,
@@ -286,9 +275,9 @@ class Explorer:
             gpu_hours_used=spent_gpu_seconds(progress) / MB_SECONDS_PER_HOUR,
             explore_gpu_hours=_hours_or_none(window.explore_gpu_seconds),
             prelude_gpu_hours_upper_bound=window.prelude_gpu_seconds_upper_bound / MB_SECONDS_PER_HOUR,
-            specialist_llm_usd=spent_llm_usd(progress),
+            specialist_llm_usd=sum(row.llm_usd for row in progress),
             max_llm_usd=None if window.max_llm_usd == math.inf else window.max_llm_usd,
-            scheduler_llm=self._llm_usage.used,
+            scheduler_llm_usd=sum(record.usage.cost_usd for record in snapshot.llm_usage if not record.usage.branch),
             specialists=await self._specialist_states(),
         )
         try:
@@ -380,5 +369,4 @@ __all__ = [
     "Steering",
     "integration_row",
     "spent_gpu_seconds",
-    "spent_llm_usd",
 ]

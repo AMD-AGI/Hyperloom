@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""The production completion: it returns the reply text with its token usage and turns every transport failure into
-one error; the meter adds up the usage of the replies.
+"""The production completion: it returns the reply text with its tokens, cached ones apart, and their cost from the
+price sheet, refuses a model the sheet cannot price, and turns every transport failure into one error; a recorded
+completion writes what each reply cost to the notebook as the scheduler's own spend.
 
 ``aanthropic_completion`` is the network boundary, so these tests replace it in place.
 """
@@ -14,7 +15,12 @@ import pytest
 from claude_agent_sdk import ClaudeSDKError
 
 from hyperloom.common.llm_config import AnthropicCompletionRequest, AnthropicMessageResult
+from hyperloom_multibranch.contracts.llm_prices import TokenCounts, UnpricedModel, price_of
+from hyperloom_multibranch.contracts.notebook.records import LlmUsage, LlmUsageRecord
+from hyperloom_multibranch.contracts.notebook.vocab import UsageSource
 from hyperloom_multibranch.scheduling import llm
+
+MODEL = "claude-sonnet-5-5"
 
 
 def _answering(monkeypatch: pytest.MonkeyPatch, usage: object) -> list[AnthropicCompletionRequest]:
@@ -30,51 +36,81 @@ def _answering(monkeypatch: pytest.MonkeyPatch, usage: object) -> list[Anthropic
     return asked
 
 
-async def test_the_completion_returns_the_reply_text_and_its_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_the_completion_returns_the_reply_text_its_tokens_and_their_cost(monkeypatch: pytest.MonkeyPatch) -> None:
     asked = _answering(
         monkeypatch,
         {"input_tokens": 40, "cache_read_input_tokens": 900, "cache_creation_input_tokens": 60, "output_tokens": 25},
     )
 
-    reply = await llm.anthropic_completion("m", component="c", operation="judge")("sys", "user")
+    reply = await llm.anthropic_completion(MODEL, component="c", operation="judge")("sys", "user")
 
-    assert reply == llm.CompletionReply("reply", llm.CompletionUsage(input_tokens=1000, output_tokens=25))
+    tokens = TokenCounts(input=40, output=25, cache_read=900, cache_write=60)
+    assert reply == llm.CompletionReply("reply", tokens, price_of(MODEL).cost_usd(tokens))
+    assert reply.cost_usd == pytest.approx((40 * 2 + 25 * 10 + 900 * 0.1 + 60 * 2.5) / 1e6)
     (request,) = asked
     assert (request.model, request.system, list(request.messages)) == (
-        "m",
+        MODEL,
         "sys",
         [{"role": "user", "content": "user"}],
     )
+
+
+async def test_cache_writes_split_by_lifetime_are_priced_at_their_own_rates(monkeypatch: pytest.MonkeyPatch) -> None:
+    _answering(
+        monkeypatch,
+        {
+            "input_tokens": 10,
+            "cache_creation_input_tokens": 300,
+            "cache_creation": {"ephemeral_5m_input_tokens": 100, "ephemeral_1h_input_tokens": 200},
+            "output_tokens": 5,
+        },
+    )
+
+    reply = await llm.anthropic_completion(MODEL, component="c", operation="judge")("sys", "user")
+
+    assert reply.tokens == TokenCounts(input=10, output=5, cache_write=100, cache_write_1h=200)
+    assert reply.cost_usd == pytest.approx((10 * 2 + 5 * 10 + 100 * 2.5 + 200 * 4) / 1e6)
 
 
 @pytest.mark.parametrize("usage", [None, {}, {"input_tokens": None, "output_tokens": -1}])
 async def test_a_reply_without_usable_counts_used_no_tokens(monkeypatch: pytest.MonkeyPatch, usage: object) -> None:
     _answering(monkeypatch, usage)
 
-    reply = await llm.anthropic_completion("m", component="c", operation="judge")("sys", "user")
+    reply = await llm.anthropic_completion(MODEL, component="c", operation="judge")("sys", "user")
 
-    assert reply == llm.CompletionReply("reply", llm.CompletionUsage())
+    assert reply == llm.CompletionReply("reply", TokenCounts(), 0.0)
 
 
-async def test_the_meter_adds_up_the_tokens_of_every_completion_it_meters() -> None:
-    meter = llm.CompletionMeter()
+def test_a_model_the_price_sheet_does_not_list_is_refused_when_the_completion_is_built() -> None:
+    with pytest.raises(UnpricedModel, match="no-such-model"):
+        llm.anthropic_completion("no-such-model", component="c", operation="judge")
+
+
+class _Usages:
+    def __init__(self) -> None:
+        self.recorded: list[LlmUsage] = []
+
+    async def record_llm_usage(self, usage: LlmUsage) -> LlmUsageRecord:
+        self.recorded.append(usage)
+        return LlmUsageRecord(f"u{len(self.recorded)}", 0.0, usage)
+
+
+async def test_a_recorded_completion_writes_each_reply_s_cost_as_the_scheduler_s_own() -> None:
+    usages = _Usages()
     failing = True
-
-    async def judge(system: str, user: str) -> llm.CompletionReply:
-        return llm.CompletionReply("j", llm.CompletionUsage(100, 10))
 
     async def resolver(system: str, user: str) -> llm.CompletionReply:
         if failing:
             raise llm.CompletionFailed("patch_resolve call failed")
-        return llm.CompletionReply("r", llm.CompletionUsage(7, 3))
+        return llm.CompletionReply("r", TokenCounts(input=7, output=3, cache_read=50), 0.25)
 
+    recorded = llm.recorded(resolver, usages, UsageSource.RESOLVER)
     with pytest.raises(llm.CompletionFailed):
-        await meter.metered(resolver)("sys", "user")
+        await recorded("sys", "user")
     failing = False
-    assert (await meter.metered(judge)("sys", "user")).text == "j"
-    await meter.metered(resolver)("sys", "user")
+    assert (await recorded("sys", "user")).text == "r"
 
-    assert meter.used == llm.CompletionUsage(input_tokens=107, output_tokens=13)
+    assert usages.recorded == [LlmUsage("", UsageSource.RESOLVER, 0.25, input_tokens=57, output_tokens=3)]
 
 
 @pytest.mark.parametrize(
@@ -96,7 +132,7 @@ async def test_every_transport_failure_is_a_completion_failure(
     monkeypatch.setattr(llm, "aanthropic_completion", transport)
 
     with pytest.raises(llm.CompletionFailed, match=type(error).__name__):
-        await llm.anthropic_completion("m", component="c", operation="judge")("sys", "user")
+        await llm.anthropic_completion(MODEL, component="c", operation="judge")("sys", "user")
 
 
 async def test_a_bug_is_not_a_completion_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -106,4 +142,4 @@ async def test_a_bug_is_not_a_completion_failure(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(llm, "aanthropic_completion", transport)
 
     with pytest.raises(KeyError):
-        await llm.anthropic_completion("m", component="c", operation="judge")("sys", "user")
+        await llm.anthropic_completion(MODEL, component="c", operation="judge")("sys", "user")

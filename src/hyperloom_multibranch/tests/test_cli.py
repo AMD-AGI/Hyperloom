@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.common.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX
+from hyperloom.common.llm_config import AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX, DEFAULT_CLAUDE_MODEL
 from hyperloom.common.perf_metric import GRADED_INTVTY_P50
 from hyperloom.measure import compile as compile_module
 from hyperloom.measure.compile import PackageBase
@@ -188,8 +188,8 @@ def test_an_agentx_switch_that_contradicts_the_workload_exits_two(
 
 @pytest.fixture
 def ready_environment(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory) -> None:
-    """No Experience KB, no Recipe KB, the launcher's image named, the shipped tool pins, a writable RSI archive
-    outside the test's workspace, and the framework's package installed in the image."""
+    """No Experience KB, no Recipe KB, the launcher's image named, the shipped tool pins, a model the price sheet lists,
+    a writable RSI archive outside the test's workspace, and the framework's package installed in the image."""
 
     for name in ("HYPERLOOM_KB_URL", "HYPERLOOM_KB_TOKEN", "MAGPIE_REF", "INFERENCEX_REF"):
         monkeypatch.delenv(name, raising=False)
@@ -197,6 +197,7 @@ def ready_environment(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.
         monkeypatch.setenv(name, value)
     monkeypatch.delenv("KB_STORE_URL", raising=False)
     monkeypatch.delenv("KB_STORE_TOKEN", raising=False)
+    monkeypatch.setenv("CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL)
     monkeypatch.setenv(ARCHIVE_ENV, str(tmp_path_factory.mktemp("rsi-archive")))
     installed = PackageBase("vllm", tmp_path_factory.mktemp("site-packages") / "vllm", "vllm", "0.0.0")
     monkeypatch.setattr(compile_module, "locate_installed_package", lambda layout: installed)
@@ -215,7 +216,7 @@ def agent_cli(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPath
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
     runs: list[RunSettings] = []
 
-    def run_session(settings: RunSettings, peer_factory: PeerFactory, recipe_kb: object) -> int:
+    def run_session(settings: RunSettings, peer_factory: PeerFactory, services: object) -> int:
         runs.append(settings)
         return 0
 
@@ -294,6 +295,21 @@ def test_an_unnamed_image_fails_loudly_before_creating_anything(
 
     captured = capsys.readouterr()
     assert "measurement pins" in captured.err and all(name in captured.err for name in IMAGE_VARS)
+    assert captured.out == ""
+    assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.usefixtures("ready_environment", "agent_cli")
+def test_a_judge_model_without_a_price_fails_loudly_before_creating_anything(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("USER_DATA_PATH", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_MODEL", "no-such-model")
+
+    assert cli.main(["run", *WORKLOAD_ARGS]) == cli.EXIT_FAILED
+
+    captured = capsys.readouterr()
+    assert "cannot run a session" in captured.err and "no-such-model" in captured.err
     assert captured.out == ""
     assert not any(tmp_path.iterdir())
 

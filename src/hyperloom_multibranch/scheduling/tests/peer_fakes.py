@@ -48,6 +48,7 @@ from hyperloom_multibranch.contracts.fork import (
     RepairRequest,
 )
 from hyperloom_multibranch.contracts.gate import RegressionOutcome
+from hyperloom_multibranch.contracts.llm_prices import TokenCounts
 from hyperloom_multibranch.contracts.judgement import Judgement, Verdict
 from hyperloom_multibranch.contracts.notebook import Role, Writer
 from hyperloom_multibranch.contracts.notebook.interfaces import SnapshotQuery
@@ -64,7 +65,7 @@ from hyperloom_multibranch.rulegate.service import GateNotebook, GateService, Po
 from hyperloom_multibranch.notebook import LocalNotebook
 from hyperloom_multibranch.scheduling.clock import Clock
 from hyperloom_multibranch.scheduling.local_peers import GATE_WRITER
-from hyperloom_multibranch.scheduling.llm import CompletionReply, CompletionUsage
+from hyperloom_multibranch.scheduling.llm import CompletionReply
 from hyperloom_multibranch.scheduling.processes import ProcessRegistry, RegisteredProcess
 from hyperloom_multibranch.specialist.judging import Judging
 from hyperloom_multibranch.specialist.runtime import RuntimePacing, SessionFactory, SessionStart, SpecialistRuntime
@@ -662,7 +663,7 @@ def judged(verdict: Verdict, gain_pct: float, request_id: str, value: float) -> 
 @dataclass
 class ScriptedCompletion:
     """A model for the tests: raises ``error`` when it is set, else the scripted replies in order, then ``fallback``,
-    each reply using ``usage``.
+    each reply using ``tokens`` that cost ``cost_usd``.
 
     Not a placeholder: a test never calls a real model.
     """
@@ -671,13 +672,14 @@ class ScriptedCompletion:
     fallback: str = '{"open": 0, "branches": [], "stop": [], "stop_session": null}'
     error: Exception | None = None
     calls: list[tuple[str, str]] = field(default_factory=list)
-    usage: CompletionUsage = CompletionUsage()
+    tokens: TokenCounts = TokenCounts()
+    cost_usd: float = 0.0
 
     async def __call__(self, system: str, user: str) -> CompletionReply:
         self.calls.append((system, user))
         if self.error is not None:
             raise self.error
-        return CompletionReply(self.replies.pop(0) if self.replies else self.fallback, self.usage)
+        return CompletionReply(self.replies.pop(0) if self.replies else self.fallback, self.tokens, self.cost_usd)
 
 
 @dataclass

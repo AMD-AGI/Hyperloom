@@ -8,20 +8,22 @@ optimizer its recipes are scoped to, and the hard limits the judge works within.
 kind: ``inferencex`` takes ``--isl`` and ``--osl``, and ``agentx`` refuses them, as the trace it replays fixes its
 requests; an operator environment whose ``HYPERLOOM_AGENTX`` says otherwise than ``--workload`` is refused.
 ``--max-gpu-hours`` caps the GPU hours the session's tests use: EXPLORE ends with ``gpu_hours_exhausted`` once only
-FINAL's share is left, and FINAL still runs. ``--max-llm-usd`` caps the dollars the specialists' LLM launches cost:
-EXPLORE ends with ``llm_budget_exhausted`` once their recorded spend reaches it, and FINAL still runs. That spend is a
-lower bound: a launch counts once it ends and its CLI reported its cost, so a launch cut short, lost or stopped, a CLI
-that reports no cost and the scheduler's own judge and resolver are not in it, and the stop can come up to one launch
-late. A session whose toolbox has fewer usable cards left than one test needs ends EXPLORE with ``no_measurement_cards``
-and skips FINAL. Exit codes: 0 when the session ran its course, its wall-clock, GPU-hour or LLM budget spent included, 1
-when it failed or was stopped, ``no_measurement_cards`` included, 2 on a usage error. The environment and the peers a
-session needs are checked before anything is created, so a missing one fails the command without leaving a session
-directory behind: the Recipe KB that PRELUDE reads warm-start leads from and CLOSE writes the final recipe back to is
-configured by ``KB_STORE_URL`` and ``KB_STORE_TOKEN``, both or neither, and is not used without them; the RSI archive
-defaults to :data:`RSI_ARCHIVE_DEFAULT`, set in this process's environment for every reader of it, and must be a
-writable directory; the measurement pins must be readable, the image the session runs on named by both
+FINAL's share is left, and FINAL still runs. ``--max-llm-usd`` caps the dollars the session's LLM calls cost: EXPLORE
+ends with ``llm_budget_exhausted`` once their recorded spend reaches it, and FINAL still runs. Each call is priced from
+the price sheet, cached tokens at cache rates: a specialist launch's calls from its log when the launch ends, a launch
+cut short, lost or stopped included, so the stop can come up to one launch late, and each call of the scheduler's own
+judge and patch resolver as it returns. The rule gate's fix critic is not counted. A session whose toolbox has fewer
+usable cards left than one test needs ends EXPLORE with ``no_measurement_cards`` and skips FINAL. Exit codes: 0 when
+the session ran its course, its wall-clock, GPU-hour or LLM budget spent included, 1 when it failed or was stopped,
+``no_measurement_cards`` included, 2 on a usage error. The environment and the peers a session needs are checked before
+anything is created, so a missing one fails the command without leaving a session directory behind: the Recipe KB that
+PRELUDE reads warm-start leads from and CLOSE writes the final recipe back to is configured by ``KB_STORE_URL`` and
+``KB_STORE_TOKEN``, both or neither, and is not used without them; the RSI archive defaults to
+:data:`RSI_ARCHIVE_DEFAULT`, set in this process's environment for every reader of it, and must be a writable
+directory; the measurement pins must be readable, the image the session runs on named by both
 ``HYPERLOOM_ACTIVE_IMAGE_REF`` and ``HYPERLOOM_ACTIVE_IMAGE_DIGEST`` included; the framework's package must be
-installed in the image; and the agent CLI the specialists run must be installed.
+installed in the image; the agent CLI the specialists run must be installed; and the price sheet must have a rate for
+the model the judge and the patch resolver ask.
 A session uses no Experience KB, whatever ``HYPERLOOM_KB_URL`` names (see
 :data:`~hyperloom_multibranch.scheduling.mb_fakes.MB_FAKE_EXPERIENCE_KB`).
 """
@@ -41,6 +43,7 @@ from hyperloom.common.env import EnvValueError
 from hyperloom.common.perf_metric import agentx_enabled
 from hyperloom.inference_optimizer.session.paths import workspace_root
 from hyperloom.orchestrator.knowledge.remote_recipe.client import RemoteRecipeClient, RemoteRecipeConfigurationError
+from hyperloom_multibranch.contracts.llm_prices import UnpricedModel
 from hyperloom_multibranch.contracts.toolbox import WorkloadKind
 from hyperloom_multibranch.notebook.rsi.archive import ARCHIVE_ENV
 from hyperloom_multibranch.rulegate.critic import LlmCritic, anthropic_critic
@@ -107,7 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-llm-usd",
         type=float,
         default=0.0,
-        help="Dollars the specialists' recorded LLM launches may cost; EXPLORE ends when they reach it; 0 = none.",
+        help="Dollars the session's recorded LLM calls, all but the fix critic's, may cost; EXPLORE ends there; 0 = none.",
     )
     run.add_argument(
         "--max-branches", type=int, default=DEFAULT_MAX_BRANCHES, help="Specialist branches not stopped, at most."
@@ -215,23 +218,28 @@ def require_rsi_archive(env: MutableMapping[str, str]) -> None:
         )
 
 
-def run_session(settings: RunSettings, peer_factory: PeerFactory, recipe_kb: RemoteRecipeClient | None) -> int:
+def session_services(recipe_kb: RemoteRecipeClient | None) -> SessionServices:
+    """The judge, the patch resolver and the fix critic on the default model, and ``recipe_kb``; raises
+    :class:`UnpricedModel` for a model the price sheet does not list, before any session directory exists."""
+
+    model = default_model()
+    judge = anthropic_completion(model, component=PROG, operation="judge")
+    resolver = anthropic_completion(model, component=PROG, operation="patch_resolve")
+    return SessionServices(judge, resolver, recipe_kb, LlmCritic(anthropic_critic(model, component=PROG)))
+
+
+def run_session(settings: RunSettings, peer_factory: PeerFactory, services: SessionServices) -> int:
     """Create the session directory, print it on one stdout line, run the session and return its exit code.
 
-    The model is resolved first, so an environment that cannot provide it fails before any session directory exists.
     The session and its peers are built on the event loop they run on, which the specialist tools of the MCP service
     hand every toolbox call to.
     """
 
-    return asyncio.run(_run_session(settings, peer_factory, recipe_kb))
+    return asyncio.run(_run_session(settings, peer_factory, services))
 
 
-async def _run_session(settings: RunSettings, peer_factory: PeerFactory, recipe_kb: RemoteRecipeClient | None) -> int:
+async def _run_session(settings: RunSettings, peer_factory: PeerFactory, services: SessionServices) -> int:
     clock = Clock()
-    model = default_model()
-    judge = anthropic_completion(model, component=PROG, operation="judge")
-    resolver = anthropic_completion(model, component=PROG, operation="patch_resolve")
-    services = SessionServices(judge, resolver, recipe_kb, LlmCritic(anthropic_critic(model, component=PROG)))
     layout = create_session(workspace_root(), settings.workload.model_basename, clock)
     print(layout.root, flush=True)
     logging.getLogger().addHandler(_file_handler(layout.scheduler_log))
@@ -261,10 +269,11 @@ def main(argv: list[str] | None = None) -> int:
         recipe_kb = recipe_kb_from_env()
         require_rsi_archive(os.environ)
         peer_factory = load_peers(settings.workload)
-    except (EnvironmentIncomplete, PeersUnavailable) as exc:
+        services = session_services(recipe_kb)
+    except (EnvironmentIncomplete, PeersUnavailable, UnpricedModel) as exc:
         print(f"{PROG}: cannot run a session, {exc}", file=sys.stderr)
         return EXIT_FAILED
-    return run_session(settings, peer_factory, recipe_kb)
+    return run_session(settings, peer_factory, services)
 
 
 __all__ = [
@@ -279,5 +288,6 @@ __all__ = [
     "require_rsi_archive",
     "require_workload_switch",
     "run_session",
+    "session_services",
     "settings_from",
 ]
