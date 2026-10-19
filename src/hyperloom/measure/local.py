@@ -77,6 +77,9 @@ _LOG_TAIL_CHARS = 64 * 1024
 _ACCURACY = "accuracy"
 _UTF8 = "utf-8"
 _PROFILE = "profile"
+#: The ``/start_profile`` body of the benchmark client. It reads it from its own process environment, not from the
+#: point's ``envs``; without it the client sends its built-in body, which captures one step per stage.
+_PROFILE_BODY_ENV = "PROFILE_EXTRA_BODY"
 _REPRO = "repro"
 _GRID = "grid"
 #: How long a repro case may run, and the share of what is left of the test's time it may take: a case that hangs must
@@ -288,6 +291,8 @@ def _test_environment(call: TestCall) -> Iterator[list[str]]:
         settings["INFERENCE_OPTIMIZER_BENCHMARK_SILENCE_TIMEOUT_SEC"] = str(call.silence_timeout_sec)
     if facts is not None and facts.inferencex_path:
         settings["INFERENCEX_PATH"] = facts.inferencex_path
+    if call.kind == _PROFILE and (body := _point_envs(call.points[0]).get(_PROFILE_BODY_ENV)):
+        settings[_PROFILE_BODY_ENV] = str(body)
     settings.update({str(key): str(value) for key, value in call.env_overrides.items()})
     saved = {key: os.environ.get(key) for key in settings}
     os.environ.update(settings)

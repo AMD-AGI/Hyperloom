@@ -75,7 +75,12 @@ class _Grid:
         self.env_seen.append(
             {
                 key: os.environ.get(key)
-                for key in ("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", "INFERENCEX_PATH", "HL_TEST_FLAG")
+                for key in (
+                    "INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR",
+                    "INFERENCEX_PATH",
+                    "HL_TEST_FLAG",
+                    "PROFILE_EXTRA_BODY",
+                )
             }
         )
         name = kwargs["grid"][0].name
@@ -571,8 +576,10 @@ def test_an_environment_that_cannot_be_rebuilt_is_refused_with_the_reason(grid, 
 # --- profile test -------------------------------------------------------------------------------------------------
 
 
-def _profile_point(directory: Path, *, profile: object = "1", enabled: bool = True) -> Path:
+def _profile_point(directory: Path, *, profile: object = "1", enabled: bool = True, body: str | None = None) -> Path:
     envs: dict[str, object] = {"TP": 1, "CONC": 4, "RUN_EVAL": "false"}
+    if body is not None:
+        envs["PROFILE_EXTRA_BODY"] = body
     if profile is not None:
         envs["PROFILE"] = profile
     config = {"benchmark": {"framework": "sglang", "envs": envs, "profiler": {"torch_profiler": {"enabled": enabled}}}}
@@ -600,6 +607,18 @@ def test_a_profile_test_is_one_profiled_round_with_no_warmup_before_it(grid, tmp
     assert [v.name for v in kwargs["grid"]] == ["test"]
     assert kwargs["warmup_before_measure"] is False, "a profiled round is not a statistic: no warmup before it"
     assert outcome.returncode == 0 and [r.phase for r in outcome.rounds] == ["measure"]
+
+
+def test_a_profile_test_puts_the_points_start_profile_body_in_the_process_environment(grid, tmp_path, monkeypatch):
+    """The benchmark client reads PROFILE_EXTRA_BODY from its own environment; the point's envs never reach it."""
+    monkeypatch.delenv("PROFILE_EXTRA_BODY", raising=False)
+    _with_trace(grid)
+    body = '{"start_step": 320, "num_steps": 128, "profile_by_stage": false}'
+
+    _run(_call(tmp_path, _profile_point(tmp_path, body=body), kind="profile"))
+
+    assert [seen["PROFILE_EXTRA_BODY"] for seen in grid.env_seen] == [body]
+    assert "PROFILE_EXTRA_BODY" not in os.environ, "the test's environment is put back afterwards"
 
 
 def test_the_traces_of_a_profile_test_move_into_the_output_profile_directory(grid, tmp_path):
