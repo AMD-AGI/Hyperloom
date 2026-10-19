@@ -11,6 +11,10 @@ from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
     validate_envelope,
 )
+from hyperloom.orchestrator.roles.mcp_emit_intent import (
+    _emit_intent_handler,
+    validate_emit_intent_input,
+)
 
 
 def _propose(params: dict) -> dict:
@@ -84,3 +88,34 @@ def test_a_null_nested_deeper_than_params_is_left_alone():
     (intent,) = validate_envelope(_propose({"grid": [{"extra_args": "--x", "note": None}]}))
 
     assert intent.payload["params"]["grid"] == [{"extra_args": "--x", "note": None}]
+
+
+@pytest.mark.asyncio
+async def test_the_tool_ack_agrees_with_the_harvest_on_a_null_required_field():
+    """The ack is what the agent retries on, so it may not be more permissive than the harvest.
+
+    ``_emit_intent_handler`` acked ``ok`` for ``action_name: null`` while
+    ``validate_envelope`` dropped the intent, leaving the agent told it had
+    succeeded with nothing to correct.
+    """
+    result = await _emit_intent_handler(
+        {"intent_type": "propose_action", "payload": {"action_name": None, "predicted_gain_pct": 1.0}}
+    )
+
+    assert result["is_error"] is True
+    assert "action_name" in result["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_the_tool_ack_reaches_the_value_checks_the_harvest_applies():
+    """The eager path stopped at presence, so a bad severity or verdict was acked and then lost."""
+    result = await _emit_intent_handler(
+        {"intent_type": "alert", "payload": {"severity": "catastrophic", "summary": "s"}}
+    )
+
+    assert result["is_error"] is True
+    assert "severity" in result["content"][0]["text"]
+
+
+def test_the_eager_validator_still_accepts_what_the_harvest_accepts():
+    validate_emit_intent_input({"intent_type": "send_message", "payload": {"topic": "heartbeat"}})
