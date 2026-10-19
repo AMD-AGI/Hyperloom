@@ -245,6 +245,8 @@ def _record_config_attempts(
             },
             decision=outcome,
             adopted=adopted,
+            # Every variant recorded here ran: the deduped one is skipped above.
+            benched=True,
             # Recorded rather than referenced: every KEEP advances the
             # stack, so the session's current config is not what this
             # variant was measured on top of.
