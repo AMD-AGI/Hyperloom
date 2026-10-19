@@ -13,6 +13,7 @@ from hyperloom.orchestrator.lever import LEVER_ENABLEMENT
 from ..collaborator import CoordinatorCollaborator
 from ..bringup import recorded_verdict, session_root
 from .params import _enablement_carrier_params
+from .revalidation import GenerationScan
 
 if TYPE_CHECKING:
     from ..state.task_registry import Task
@@ -449,8 +450,10 @@ class EnablementBuild(CoordinatorCollaborator):
         probe_task, generation = await self._coord.enablement_revalidation.open_row_past_spent_generations(
             kind="integrate_patch",
             params=params,
-            key_for=lambda gen: f"build_launch_probe:{build_task_id}:gen{gen}",
-            generation=generation,
+            scan=GenerationScan(
+                key_for=lambda gen: f"build_launch_probe:{build_task_id}:gen{gen}",
+                generation=generation,
+            ),
             label="build launch probe",
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
