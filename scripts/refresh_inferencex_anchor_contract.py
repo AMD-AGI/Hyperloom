@@ -33,7 +33,7 @@ from pathlib import Path
 # The package is used from a source checkout here, not an installed wheel.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from hyperloom.inference_optimizer.cli.preflight import _INFERENCEX_REF_DEFAULT
+from hyperloom.inference_optimizer.inferencex_checkout import DEFAULT_REF
 from hyperloom.orchestrator.actions.executors.inferencex_anchor_contract import build_record
 
 #: The record ``test_inferencex_anchor_contract.py`` checks; a test fixture, read as data.
@@ -48,7 +48,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--ref",
-        default=_INFERENCEX_REF_DEFAULT,
+        default=DEFAULT_REF,
         help="commit to verify against (default: the pin the code installs)",
     )
     args = parser.parse_args()

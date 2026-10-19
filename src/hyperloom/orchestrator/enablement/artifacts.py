@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from hyperloom.common.io import atomic_write_text
+from hyperloom.common.io import WriteOptions, atomic_write_text
 from hyperloom.inference_optimizer.grid_server_args import strip_benchmark_harness_flags
 from hyperloom.inference_optimizer.session.session_paths import (
     enablement_dir,
@@ -72,7 +72,7 @@ def _copy_log_tail(src: Path, dest: Path, limit: int = _SERVER_LOG_TAIL_LIMIT) -
     text = raw.decode("utf-8", errors="ignore")
     if dropped:
         text = _LOG_TRUNCATION_NOTE.format(dropped=dropped) + text
-    atomic_write_text(dest, text, make_parents=True)
+    atomic_write_text(dest, text, options=WriteOptions(make_parents=True))
     return True
 
 
@@ -189,7 +189,7 @@ def write_setting_script(
         setup_script=SETUP_SCRIPT_NAME,
     )
     out = enablement_dir(Path(session_dir)) / "enablement_setting.sh"
-    atomic_write_text(out, text, make_parents=True, mode=0o700)
+    atomic_write_text(out, text, options=WriteOptions(make_parents=True, mode=0o700))
     return str(out.relative_to(session_dir))
 
 

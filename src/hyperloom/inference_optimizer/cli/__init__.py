@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common import llm_config
-from hyperloom.common.env import env_bool
+from hyperloom.common.env import EnvValueError, env_bool
 from hyperloom.common.llm_config import CLAUDE_OAUTH_TOKEN_ENV
 from hyperloom.common.llm_headers import parse_custom_headers
 from .executors import (
@@ -130,6 +130,12 @@ from hyperloom.common.workload_defaults import (
     DEFAULT_TP,
     DEFAULT_EP,
     DEFAULT_PRECISION,
+)
+from .custom_specialist import (
+    CUSTOM_SPECIALIST_ONLY_ENV,
+    _apply_custom_specialist_resume as _apply_custom_specialist_resume,
+    _custom_specialist_conflict as _custom_specialist_conflict,
+    _load_custom_specialist_args as _load_custom_specialist_args,
 )
 from .parser import (
     DEFAULT_MAX_HOURS,
@@ -343,7 +349,6 @@ def _build_orchestration_prompt(
     agentx_corpus_shape: Mapping[str, Any] | None = None,
     agentx_grading: Mapping[str, Any] | None = None,
     agentx_backend: str = "",
-    custom_specialist_description: str = "",
 ) -> str:
     """Compose the Orchestration system prompt from typed inputs (``--orch-prompt`` overrides)."""
     registry = action_registry or ACTION_CATALOGUE
@@ -367,7 +372,6 @@ def _build_orchestration_prompt(
         agentx_corpus_shape=agentx_corpus_shape,
         agentx_grading=agentx_grading,
         agentx_backend=agentx_backend,
-        custom_specialist_description=custom_specialist_description,
         rules_fragment_path=_orchestration_rules_fragment_path(),
         framework_source_roots=resolve_kernel_search_roots(),
         session_framework_tree=resolve_framework_tree(framework),
@@ -854,10 +858,9 @@ def _probe_critic_review_model(
         try:
             if protocol == "anthropic":
                 llm_config.anthropic_completion(
-                    model=model,
-                    messages=messages,
-                    max_tokens=16,
-                    timeout_s=_CRITIC_PROBE_TIMEOUT_SEC,
+                    request=llm_config.AnthropicCompletionRequest(
+                        model=model, messages=messages, max_tokens=16, timeout_s=_CRITIC_PROBE_TIMEOUT_SEC
+                    ),
                     component="critic",
                     operation="preflight",
                 )
@@ -977,77 +980,6 @@ def _resolve_critic_choice(args: argparse.Namespace) -> str:
     return chosen
 
 
-_CUSTOM_SPECIALIST_PROMPT_MAX_BYTES = 16 * 1024
-_CUSTOM_SPECIALIST_DESCRIPTION_MAX_CHARS = 200
-
-
-def _load_custom_specialist_args(args: argparse.Namespace) -> None:
-    """Validate the ``--custom-specialist-*`` pair and set ``args.custom_specialist_prompt``.
-
-    Raises:
-        ValueError: When only one flag is given or either value is unusable.
-    """
-    path = getattr(args, "custom_specialist_prompt_file", None)
-    description = getattr(args, "custom_specialist_description", None)
-    args.custom_specialist_prompt = ""
-    if path is None and description is None:
-        return
-    if path is None or description is None:
-        raise ValueError("--custom-specialist-prompt-file and --custom-specialist-description must be passed together")
-    try:
-        text = Path(path).expanduser().read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeDecodeError) as exc:
-        raise ValueError(f"--custom-specialist-prompt-file: cannot read {path}: {exc}") from exc
-    if not text:
-        raise ValueError(f"--custom-specialist-prompt-file: {path} is empty")
-    if len(text.encode("utf-8")) > _CUSTOM_SPECIALIST_PROMPT_MAX_BYTES:
-        raise ValueError(f"--custom-specialist-prompt-file: {path} exceeds {_CUSTOM_SPECIALIST_PROMPT_MAX_BYTES} bytes")
-    description = description.strip()
-    if not description or "\n" in description or "\r" in description:
-        raise ValueError("--custom-specialist-description must be a single non-empty line")
-    if len(description) > _CUSTOM_SPECIALIST_DESCRIPTION_MAX_CHARS:
-        raise ValueError(
-            f"--custom-specialist-description exceeds {_CUSTOM_SPECIALIST_DESCRIPTION_MAX_CHARS} characters"
-        )
-    args.custom_specialist_prompt = text
-    args.custom_specialist_description = description
-
-
-def _apply_custom_specialist_resume(args: argparse.Namespace, state: SharedState) -> None:
-    """Flags passed on a resume replace the stored custom specialist; otherwise the stored one stays.
-
-    A changed definition is guaranteed its own first run.
-    """
-    prompt = getattr(args, "custom_specialist_prompt", "")
-    if not prompt:
-        return
-    if (prompt, args.custom_specialist_description) != (
-        state.custom_specialist_prompt,
-        state.custom_specialist_description,
-    ):
-        state.custom_specialist_dispatched = False
-    state.custom_specialist_prompt = prompt
-    state.custom_specialist_description = args.custom_specialist_description
-    print(f"  re-exported custom specialist: {state.custom_specialist_description}")
-
-
-def _custom_specialist_conflict(args: argparse.Namespace, state: SharedState) -> str:
-    """Return why a custom specialist from this launch or the stored state cannot run, or ``""``."""
-    # --reset-state wipes the stored definition, so only a definition passed on this launch counts.
-    stored = "" if getattr(args, "reset_state", False) else state.custom_specialist_prompt
-    if not (getattr(args, "custom_specialist_prompt", "") or stored):
-        return ""
-    if args.orch_prompt:
-        return "--orch-prompt replaces the Orchestration prompt, so custom_specialist would never be offered"
-    if bool(getattr(args, "no_framework_agent", False)) or not state.framework_agent_phase_enabled:
-        return "the FRAMEWORK_AGENT phase is disabled, so custom_specialist cannot be guaranteed to run"
-    if int(getattr(args, "research_lane_capacity", 1) or 0) <= 0:
-        return "--research-lane-capacity 0 builds no specialist executor"
-    if getattr(args, "reset_state", False):
-        return "--reset-state wipes the custom specialist definition; reset first, then launch with the flags"
-    return ""
-
-
 def _reset_state_file(session_dir: Path, *, framework: str) -> None:
     """Back up ``state.json`` to ``state.json.preReset.<unix_ts>`` and start fresh (Recipe KB untouched).
 
@@ -1124,7 +1056,7 @@ def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
     # is a deliberate choice even when it equals the default, and gets no note.
     if getattr(args, "max_hours", None) is None:
         print(
-            f"NOTE: HYPERLOOM_AGENTX is on and --max-hours is at its default of {DEFAULT_MAX_HOURS}. "
+            f"NOTE: AgentX replay is configured and --max-hours is at its default of {DEFAULT_MAX_HOURS}. "
             "One AgentX round (corpus load + warmup + drain + measurement window) "
             "typically exceeds that on its own; pass an explicit --max-hours sized "
             "to the number of candidates you intend to measure.",
@@ -1132,35 +1064,8 @@ def _apply_agentx_budget_profile(args: argparse.Namespace) -> None:
         )
 
 
-# Largest input+output a single request reaches in the 256k-capped weka corpus, measured over all 30,141 requests of
-# semianalysis_cc_traces_weka_062126_256k (max input alone is 255,808).
-AGENTX_CAPPED_CORPUS_PEAK_TOKENS = 255_999
-
-
-def _warn_if_context_too_small_for_corpus(resolved: int, source: str) -> None:
-    """Say up front when the served window cannot hold the replay corpus."""
-    if not _agentx_enabled() or resolved >= AGENTX_CAPPED_CORPUS_PEAK_TOKENS:
-        return
-    print(
-        f"WARNING: HYPERLOOM_AGENTX is on but the served context window "
-        f"({resolved}, from {source}) is below the replay corpus peak "
-        f"({AGENTX_CAPPED_CORPUS_PEAK_TOKENS} input+output tokens). Requests that "
-        f"do not fit will be refused by the server; the run is expected to come "
-        f"back non-submittable, and a model this size is not comparable on the "
-        f"AgentX board.",
-        file=sys.stderr,
-    )
-
-
 def _resolve_run_max_model_len(args: argparse.Namespace) -> tuple[int, str]:
-    """Resolve run-wide MAX_MODEL_LEN with explicit operator values winning."""
-    resolved = _resolve_run_max_model_len_inner(args)
-    _warn_if_context_too_small_for_corpus(*resolved)
-    return resolved
-
-
-def _resolve_run_max_model_len_inner(args: argparse.Namespace) -> tuple[int, str]:
-    """Resolution proper; the corpus-fit warning is applied by the caller."""
+    """Resolve planning context; native AgentX serving context remains in its YAML."""
     if getattr(args, "max_model_len", None):
         return int(args.max_model_len), "--max-model-len"
     max_model_len_env = os.environ.get("MAX_MODEL_LEN", "").strip()
@@ -1182,10 +1087,8 @@ def _resolve_run_max_model_len_inner(args: argparse.Namespace) -> tuple[int, str
             return int(native), "agentx-native-context"
         # Model not on disk yet (uncached HF id).
         print(
-            "WARNING: HYPERLOOM_AGENTX is on but the model's native context could "
-            "not be read (weights not on disk yet), so MAX_MODEL_LEN falls back "
-            "to the synthetic ISL+OSL derivation and the server will be booted at "
-            "that width. Pre-fetch the weights, or pass --max-model-len.",
+            "NOTE: Model context is unavailable locally; using a planning estimate. "
+            "Magpie resolves the AgentX serving context from its workload configuration.",
             file=sys.stderr,
         )
     return (
@@ -2288,21 +2191,7 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
     if _fw_version_for_env:
         os.environ["FRAMEWORK_VERSION"] = _fw_version_for_env
     if _agentx_enabled():
-        from hyperloom.inference_optimizer.agentx.mapping import (
-            CANONICAL_ISL,
-            CANONICAL_OSL,
-            CANONICAL_PREFIX_CACHE_HIT,
-        )
-
-        print(
-            f"Workload        : AgentX corpus replay "
-            f"(ISL avg={CANONICAL_ISL['avg']} p50={CANONICAL_ISL['p50']} p90={CANONICAL_ISL['p90']}, "
-            f"OSL avg={CANONICAL_OSL['avg']} p50={CANONICAL_OSL['p50']}, "
-            f"prefix_cache~{CANONICAL_PREFIX_CACHE_HIT:.0%}) "
-            f"MAX_MODEL_LEN={max_model_len} ({max_model_len_source}) "
-            f"PRECISION={args.precision} "
-            f"FRAMEWORK_VERSION={_fw_version_for_env or '<unset>'}"
-        )
+        print(f"Workload        : AgentX replay, CONC={args.conc}; corpus and model context resolved by Magpie")
     else:
         print(
             f"Workload        : ISL={args.isl} OSL={args.osl} "
@@ -2316,6 +2205,9 @@ async def _seed_fresh_session(args: argparse.Namespace, *, nodes_resolved: int) 
     # Single-optimizer guard: take the lock so the contract holds uniformly and the owner pid is published for the
     # session diagnostics.
     session_lock = _acquire_session_lock_or_exit(session_dir)
+    from .benchmark_config import bind_benchmark
+
+    bind_benchmark(session_dir, args)
     manifest = write_manifest(session_dir, args=args)
     _persist_install_event(args, session_dir)
     # One-shot Langfuse startup marker so a run killed before a breakdown still leaves a correlatable trace.
@@ -2572,9 +2464,26 @@ def _resolve_agent_lineup(args: argparse.Namespace) -> _AgentLineup:
     )
 
 
+def _settle_custom_specialist_only(args: argparse.Namespace) -> None:
+    """Read only mode once the operator's pins are in the environment, and refuse a fresh launch's custom conflicts.
+
+    A resume checks its conflicts against the stored state once that is loaded.
+    """
+    try:
+        args.custom_specialist_only = env_bool(CUSTOM_SPECIALIST_ONLY_ENV)
+    except EnvValueError as exc:
+        print(f"ERROR: {exc}.", file=sys.stderr)
+        raise SystemExit(2) from exc
+    conflict = "" if args.resume_from else _custom_specialist_conflict(args, SharedState())
+    if conflict:
+        print(f"ERROR: {conflict}.", file=sys.stderr)
+        raise SystemExit(2)
+
+
 async def _run_optimize(args: argparse.Namespace) -> int:
     """Run the ``optimize`` subcommand end to end."""
     nodes_resolved = _resolve_run_topology(args)
+    _settle_custom_specialist_only(args)
 
     # Stale aiter JIT lock sweep: killed runs leave locks that block subsequent starts (locks <5min preserved).
     aiter_sweep = clean_stale_aiter_locks()
@@ -2603,7 +2512,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             log.warning("failed to preserve SBD V6 preflight failure", exc_info=True)
         raise
 
-    _resolve_models_for_run(
+    # Model resolution makes blocking LLM calls; the subscription-token client refuses to run inside this loop.
+    await asyncio.to_thread(
+        _resolve_models_for_run,
         args,
         resolved_urls,
         claude_follows_codex=claude_follows_codex,
@@ -2742,7 +2653,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
             agentx_grading=coordinator.shared_state.grading,
             agentx_backend=coordinator.shared_state.agentx_backend,
-            custom_specialist_description=coordinator.shared_state.custom_specialist_description,
         ),
         "critic": args.critic_prompt or _load_critic_prompt(),
     }
@@ -2763,7 +2673,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             agentx_corpus_shape=coordinator.shared_state.agentx_corpus_shape,
             agentx_grading=coordinator.shared_state.grading,
             agentx_backend=coordinator.shared_state.agentx_backend,
-            custom_specialist_description=coordinator.shared_state.custom_specialist_description,
         ),
     )
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
@@ -2891,15 +2800,13 @@ def main(argv: list[str] | None = None) -> int:
             v = getattr(args, attr)
             if v and Path(v).exists():
                 setattr(args, attr, Path(v).read_text(encoding="utf-8"))
+        from .benchmark_config import configure_benchmark
+
         try:
+            configure_benchmark(args)
             _load_custom_specialist_args(args)
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             parser.error(str(exc))
-        # A fresh session's conflicts depend on flags only; a resume checks them against its stored state.
-        if not args.resume_from:
-            custom_conflict = _custom_specialist_conflict(args, SharedState())
-            if custom_conflict:
-                parser.error(custom_conflict)
         return asyncio.run(_run_optimize(args))
     if args.command == "recover":
         return _run_recover_session(args)

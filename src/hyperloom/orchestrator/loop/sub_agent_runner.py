@@ -280,16 +280,6 @@ class SubAgentRunner:
         evidence: dict[str, Any] = {}
         context = "executor_success"
         try:
-            if task.kind == "recover" and runner is None and task.state == "queued":
-                evidence = {"reason": "unsupported_action"}
-                outcome = SubAgentResult(
-                    task_id=task.task_id,
-                    state="cancelled",
-                    result={"status": "cancelled", "error_class": "unsupported_action"},
-                    error="recover is no longer supported",
-                    error_class="unsupported_action",
-                )
-                return outcome
             if self.policy is not None:
                 try:
                     self.policy.validate_dispatched_task(

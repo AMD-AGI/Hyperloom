@@ -12,7 +12,7 @@ from __future__ import annotations
 import dataclasses
 from collections import Counter
 
-from code_metrics_collect import METRICS, MODULE, MODULE_LINES, Finding, Key
+from code_metrics_collect import METRICS, MODULE, MODULE_LINES, PENDING, Finding, Key
 
 MARKER = "<!-- code-metrics-report -->"
 UPDATE_COMMAND = "python scripts/code_metrics.py --update-baseline"
@@ -169,6 +169,8 @@ def _summary(outcome: Outcome) -> str:
     rows = ["| Dimension | Limit | New | Worse | Baseline out of date | Baseline entries | vs base |"]
     rows.append("|---|---:|---:|---:|---:|---:|---:|")
     for name, metric in METRICS.items():
+        if name in PENDING and name not in outcome.thresholds:
+            continue
         delta = "n/a" if outcome.base_baseline is None else f"{counts['head'][name] - counts['base'][name]:+d}"
         cells = [counts[c][name] for c in ("new", "worse", "stale", "head")]
         rows.append(

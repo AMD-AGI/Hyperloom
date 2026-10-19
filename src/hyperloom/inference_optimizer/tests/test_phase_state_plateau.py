@@ -13,13 +13,10 @@ from hyperloom.orchestrator.lever import LEVER_CONFIG
 from hyperloom.orchestrator.phases.machine_state import (
     DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
     DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
-    ESCALATE_HINT_BUDGET_BUMP_CAP,
-    ESCALATE_HINT_BUDGET_BUMP_DELTA,
     PHASE_CLOSE,
     PHASE_KERNEL_AGENT,
     PHASE_SWEEP,
     _config_lever_dry,
-    apply_escalate_budget_bump,
     compute_next_phase,
     kernel_work_pending,
 )
@@ -40,8 +37,6 @@ def test_escalate_hint_vocab_closed():
             "skip_to_kernel",
             "skip_to_sweep",
             "skip_to_close",
-            "extend_explore_budget",
-            "extend_kernel_budget",
         }
     )
 
@@ -464,50 +459,6 @@ def test_a_whitespace_padded_target_file_still_matches():
     assert kernel_work_pending(state) is False
 
 
-def test_apply_escalate_budget_bump_lifts_phase_within_cap():
-    out = apply_escalate_budget_bump(
-        {"FRAMEWORK_AGENT": 0.60},
-        phase="FRAMEWORK_AGENT",
-        configured_budget_pct={"FRAMEWORK_AGENT": 0.60},
-    )
-    assert out["FRAMEWORK_AGENT"] == pytest.approx(
-        0.60 + ESCALATE_HINT_BUDGET_BUMP_DELTA,
-    )
-
-
-@pytest.mark.parametrize("configured", [0.04, 0.38, 0.86])
-def test_repeated_hints_stop_the_cap_above_the_configured_share(configured):
-    # Every hint reads the ceiling off the configured share, so the hints before it do not move it.
-    out = {"FRAMEWORK_AGENT": configured}
-    for _ in range(30):
-        out = apply_escalate_budget_bump(
-            out, phase="FRAMEWORK_AGENT", configured_budget_pct={"FRAMEWORK_AGENT": configured}
-        )
-    assert out["FRAMEWORK_AGENT"] == pytest.approx(configured + ESCALATE_HINT_BUDGET_BUMP_CAP)
-
-
-def test_apply_escalate_budget_bump_never_raises_past_the_whole_session():
-    out = apply_escalate_budget_bump(
-        {"KERNEL_AGENT": 0.97}, phase="KERNEL_AGENT", configured_budget_pct={"KERNEL_AGENT": 0.97}
-    )
-    assert out["KERNEL_AGENT"] == 1.0
-
-
-@pytest.mark.parametrize(("phase", "share"), [("KERNEL_AGENT", 0.86), ("FRAMEWORK_AGENT", 0.95)])
-def test_apply_escalate_budget_bump_never_shortens_a_phase(phase, share):
-    # A share already past its ceiling, as an older build's hints could leave it, stays; lowering it would end the
-    # phase early.
-    out = apply_escalate_budget_bump({phase: share}, phase=phase, configured_budget_pct={phase: 0.04})
-    assert out[phase] == share
-
-
-def test_apply_escalate_budget_bump_ignores_unknown_phase():
-    inp = {"FRAMEWORK_AGENT": 0.60}
-    out = apply_escalate_budget_bump(inp, phase="NOT_A_PHASE")
-    # No bump; returns a normalised copy with all known phases populated.
-    assert out["FRAMEWORK_AGENT"] == 0.60
-
-
 def test_set_pending_escalate_hint_accepts_vocab():
     s = SharedState()
     assert s.set_pending_escalate_hint(ESCALATE_HINT_SKIP_TO_KERNEL) == "skip_to_kernel"
@@ -598,7 +549,6 @@ def test_stop_reason_vocab_has_v08_additions():
     for new in (
         "no_kernel_skipped",
         "sweep_done",
-        "robustness_escalated",
         "prelude_baseline_failed",
         "time_exhausted_during_prelude",
     ):

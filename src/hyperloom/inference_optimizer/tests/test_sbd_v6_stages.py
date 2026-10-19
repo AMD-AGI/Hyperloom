@@ -24,6 +24,7 @@ from hyperloom.inference_optimizer.breakdown.collectors import v6 as v6_collecto
 from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_timeline
 from hyperloom.inference_optimizer.breakdown.collectors.v6_close import collect_v6_close
 from hyperloom.inference_optimizer.breakdown.recorder.close_out import (
+    CloseStep,
     record_close_opened,
     record_close_settled,
     record_close_step,
@@ -47,9 +48,7 @@ def _write_json(path: Path, payload: dict) -> None:
 def _record_steps(session_dir: Path, steps: tuple[str, ...]) -> None:
     for step in steps:
         record_close_step(
-            session_dir,
-            step=step,
-            status="running" if step == "sequencer_started" else "done",
+            session_dir, CloseStep(step=step, status="running" if step == "sequencer_started" else "done")
         )
 
 
@@ -62,7 +61,7 @@ def _session_with_step_two_breakdown(tmp_path: Path) -> Path:
     exporter.write_breakdown_json(tmp_path)
     # The sequencer then finishes, recording the remaining steps and its verdict.
     _record_steps(tmp_path, _CLOSE_STEPS[4:])
-    record_close_settled(tmp_path, stop_reason="target_reached")
+    record_close_settled(tmp_path)
     return tmp_path / exporter.BREAKDOWN_FILENAME
 
 
@@ -105,7 +104,7 @@ def test_close_patch_is_idempotent(tmp_path):
 def test_close_patch_is_a_no_op_without_a_breakdown(tmp_path):
     record_close_opened(tmp_path)
     _record_steps(tmp_path, _CLOSE_STEPS)
-    record_close_settled(tmp_path, stop_reason="target_reached")
+    record_close_settled(tmp_path)
 
     assert exporter.patch_breakdown_close(tmp_path) is False
 
@@ -115,7 +114,7 @@ def test_close_patch_leaves_a_payload_that_never_carried_close_alone(tmp_path):
     _write_json(target, {"schema_version": "hyperloom.session_breakdown.v5.0", "outcome": {}})
     record_close_opened(tmp_path)
     _record_steps(tmp_path, _CLOSE_STEPS)
-    record_close_settled(tmp_path, stop_reason="target_reached")
+    record_close_settled(tmp_path)
 
     assert exporter.patch_breakdown_close(tmp_path) is False
     assert "close" not in json.loads(target.read_text(encoding="utf-8"))
@@ -191,10 +190,9 @@ def test_the_delivered_manifest_describes_the_rebuilt_bundle(tmp_path):
 # ---------------------------------------------------------------------------
 def _v6_outcome(timeline: list | None = None) -> dict:
     return v6_collectors.collect_v6_outcome(
-        session={"stop_reason": "target_reached"},
-        close={},
-        state={"phase": "CLOSE"},
-        timeline=timeline or [],
+        v6_collectors.OutcomeSources(
+            session={"stop_reason": "target_reached"}, close={}, state={"phase": "CLOSE"}, timeline=timeline or []
+        )
     )
 
 

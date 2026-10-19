@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-from kernelforge.gemm_tune.tuners.vllm_moe_triton import _generate_sweep_script
+from kernelforge.gemm_tune.tuners.vllm_moe_triton import SweepGrid, _generate_sweep_script
 
 _PROFILE = SimpleNamespace(
     num_experts=8,
@@ -84,20 +84,22 @@ def _sweep(tmp_path: Path, *, fail_baseline: bool) -> tuple[int, dict, dict]:
     script = _generate_sweep_script(
         work_dir,
         _PROFILE,
-        batch_sizes=[16],
-        iters=1,
-        warmup=1,
         gpu_id="0",
-        configs=[
-            {
-                "BLOCK_SIZE_M": 64,
-                "BLOCK_SIZE_N": 64,
-                "BLOCK_SIZE_K": 64,
-                "GROUP_SIZE_M": 1,
-                "num_warps": 4,
-                "num_stages": 2,
-            }
-        ],
+        grid=SweepGrid(
+            batch_sizes=[16],
+            iters=1,
+            warmup=1,
+            configs=[
+                {
+                    "BLOCK_SIZE_M": 64,
+                    "BLOCK_SIZE_N": 64,
+                    "BLOCK_SIZE_K": 64,
+                    "GROUP_SIZE_M": 1,
+                    "num_warps": 4,
+                    "num_stages": 2,
+                }
+            ],
+        ),
     )
     env = {
         "PATH": "/usr/bin:/bin",

@@ -993,7 +993,7 @@ async def test_execution_order_does_not_deny_backends_when_trace_analyze_stale(
     propose = Intent(
         type=IntentType.PROPOSE_ACTION,
         payload={
-            "action_name": "params",
+            "action_name": "explore",
             "predicted_gain_pct": 3.0,
         },
     )
@@ -2633,19 +2633,11 @@ async def test_run_preserves_prior_stop_reason_when_loop_exits_without_new_reaso
 @pytest.mark.asyncio
 async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
     # Defensive audit (log-only): a queued task whose kind has no registered executor is flagged in the process log;
-    # dispatch itself is unchanged (the task still fails on the missing runner).
+    # dispatch itself is unchanged (the task still fails on the missing runner). Admission refuses such a kind from
+    # the orchestrator, so the task is queued directly, the way a Coordinator-internal producer would.
     import logging
 
-    delegate = Intent(
-        type=IntentType.DELEGATE,
-        payload={
-            "action_name": "long_running",
-            "params": {},
-            "idempotency_key": "k-audit-dispatch-1",
-        },
-    )
-    plans = {"orchestration": ScriptedPlan(turns=[MockTurn(intents=[delegate])])}
-    c = Coordinator(session_dir, backends=_build_backends(plans))
+    c = Coordinator(session_dir, backends=_build_backends({}))
 
     async def _noop_executor(ctx):
         return {}
@@ -2654,9 +2646,9 @@ async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
     # one unrelated executor first.
     c.sub.register_executor("report", _noop_executor)
     try:
+        await c.tasks.create(kind="long_running", params={}, idempotency_key="k-audit-dispatch-1")
         with caplog.at_level(logging.WARNING, logger="hyperloom.orchestrator.loop.dispatcher"):
-            await c.tick(1)
-        await pump_until_settled(c.dispatcher)
+            await pump_until_settled(c.dispatcher)
         assert any("dispatch audit" in r.getMessage() and "long_running" in r.getMessage() for r in caplog.records)
         assert await c.tasks.by_state("failed")
     finally:

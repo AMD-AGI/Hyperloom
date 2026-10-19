@@ -53,6 +53,8 @@ from hyperloom.common.provenance import (
 from hyperloom.common.timeutil import now_iso
 from hyperloom.common.visible_devices import hip_mask_within_rocr
 
+from .. import inferencex_checkout
+
 from .credentials import (
     _is_stale_proxy_url,
     _resolve_llm_endpoints,
@@ -68,6 +70,8 @@ from ..session.paths import (
 )
 
 log = logging.getLogger("hyperloom.inference_optimizer.cli")
+
+_CLONE_INFERENCEX_STEP = "clone_inferencex"
 
 _PROVIDER_FALLBACK_KEYS: tuple[str, ...] = (
     "OPENAI_BASE_URL",
@@ -1807,52 +1811,6 @@ def _print_recipe_kb_queue_status() -> dict[str, Any]:
     }
 
 
-INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
-# MUST stay in lockstep with INFERENCEX_REF in assets/install.sh.
-_INFERENCEX_REF_DEFAULT = "3d5581562f643f9bdeb8410cd924e2c70906c966"
-
-
-def _inferencex_head_sha(path: Path | str) -> str:
-    """Full SHA at ``path``'s HEAD, or "" when it cannot be read."""
-    try:
-        out = subprocess.run(
-            ["git", "-C", str(path), "rev-parse", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ""
-    return (out.stdout or "").strip() if out.returncode == 0 else ""
-
-
-def _inferencex_ref_matches(path: Path | str, ref: str) -> bool:
-    """Whether the checkout at ``path`` is at ``ref``."""
-    if not re.fullmatch(r"[0-9a-fA-F]{7,40}", ref or ""):
-        return True
-    head = _inferencex_head_sha(path)
-    if not head:
-        return True
-    return head.startswith(ref.lower()) or ref.lower().startswith(head)
-
-
-def _inferencex_checkout_ok(path: Path | str, *, ref: str | None = None) -> bool:
-    """True when ``path`` is a usable InferenceX checkout at the expected ref."""
-    if not (Path(path) / "benchmarks" / "benchmark_lib.sh").is_file():
-        return False
-    if ref is None:
-        ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
-    if not ref:
-        return True
-    return _inferencex_ref_matches(path, ref)
-
-
-def _inferencex_dest_name(ref: str) -> str:
-    """Per-revision checkout dir name, matching install.sh's ``InferenceX@<sha>``."""
-    slug = ref if re.fullmatch(r"[0-9a-fA-F]{7,40}", ref or "") else re.sub(r"[^A-Za-z0-9._-]", "-", ref or "head")
-    return f"InferenceX@{slug}"
-
-
 def _ensure_eval_concurrency_compat(magpie_path: str, inferencex_path: str) -> bool:
     """Scrub the fatal ``--concurrent-requests`` eval flag from the resolved trees."""
     try:
@@ -1927,43 +1885,6 @@ def _ensure_client_trust_compat(magpie_path: str) -> bool:
             "request. Models without remote code are unaffected."
         )
     return ok
-
-
-def _clone_inferencex(dest: Path) -> str | None:
-    """Clone InferenceX into ``dest`` (writable), pinned to INFERENCEX_REF."""
-    repo = os.environ.get("INFERENCEX_REPO") or INFERENCEX_REPO_DEFAULT
-    ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
-    dest_str = str(dest)
-    try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        if re.fullmatch(r"[0-9a-fA-F]{7,40}", ref):
-            subprocess.run(["git", "init", "-q", dest_str], check=True, timeout=60)
-            subprocess.run(
-                ["git", "-C", dest_str, "fetch", "-q", "--depth", "1", repo, ref],
-                check=True,
-                timeout=600,
-            )
-            subprocess.run(
-                ["git", "-C", dest_str, "checkout", "-q", "FETCH_HEAD"],
-                check=True,
-                timeout=120,
-            )
-        else:
-            subprocess.run(
-                ["git", "clone", "-q", "--depth", "1", "--branch", ref, repo, dest_str],
-                check=True,
-                timeout=600,
-            )
-        # ref="" : the tree was just checked out at `ref` by construction, so re-deriving the pin here would only
-        # re-read what we wrote.
-        if not _inferencex_checkout_ok(dest, ref=""):
-            raise OSError(f"clone reported success but {dest_str} is missing benchmarks/benchmark_lib.sh")
-        log.info("InferenceX cloned into %s at %s", dest_str, _inferencex_head_sha(dest) or ref)
-        return dest_str
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
-        log.warning("InferenceX clone into %s failed: %s", dest_str, exc)
-        shutil.rmtree(dest, ignore_errors=True)
-        return None
 
 
 def _begin_install_event(args: argparse.Namespace | None) -> dict[str, Any]:
@@ -2245,18 +2166,18 @@ def _ensure_magpie(
         if not magpie_active:
             print(f"Preflight: benchmark backend is {benchmark_backend!r}; skipping Magpie install/import")
         else:
-            check = subprocess.run([magpie_python, "-c", "import Magpie"], capture_output=True)
-            if check.returncode != 0:
+            magpie_ref = os.environ.get("MAGPIE_REF", "6a1ee26f9053363d3750b43e3d5afb5d1c4ce84e")
+            checker = Path(__file__).resolve().parent.parent / "assets" / "check_magpie.py"
+            check = subprocess.run([magpie_python, str(checker), magpie_ref], capture_output=True)
+            if check.returncode != 0 and not os.environ.get("MAGPIE_PATH"):
                 magpie_repo = os.environ.get("MAGPIE_REPO", "https://github.com/AMD-AGI/Magpie.git")
-                magpie_ref = os.environ.get("MAGPIE_REF", "e6833b8183c6c41adf6038252337550876ca0433")
                 magpie_spec = os.environ.get("MAGPIE_PACKAGE_SPEC", f"magpie-eval @ git+{magpie_repo}@{magpie_ref}")
-                print(f"Preflight: Magpie not importable; installing {magpie_spec} ...")
+                print(f"Preflight: Magpie revision is missing; installing {magpie_spec} ...")
                 subprocess.run(
                     [magpie_python, "-m", "pip", "install", "--quiet", *pip_extra, magpie_spec],
                     check=True,
                 )
                 magpie_installed = True
-                print("Preflight: Magpie installed OK")
         if magpie_active and not os.environ.get("MAGPIE_PATH", "").strip():
             magpie_root = subprocess.run(
                 [
@@ -2292,47 +2213,11 @@ def _ensure_magpie(
     )
 
 
-def _detect_inferencex_checkout() -> str:
-    """A writable InferenceX checkout at the pinned revision, or "" when there is none.
-
-    Detection order: the Magpie submodule (canonical post-install.sh), then the
-    installer's per-revision cache checkout (resolved via ``resolve_dep_dir`` so
-    a process that did not inherit INFERENCEX_PATH still finds it), then the
-    bare dir. A complete checkout at the wrong revision is refused rather than
-    accepted silently.
-    """
-    from ..session.paths import magpie_dir as _magpie_default, resolve_dep_dir as _resolve_dep_dir
-
-    magpie_env = os.environ.get("MAGPIE_PATH")
-    magpie_root = Path(magpie_env) if magpie_env else _magpie_default()
-    want_ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
-    for candidate in (
-        magpie_root / "InferenceX",
-        _resolve_dep_dir(_inferencex_dest_name(want_ref)),
-        _resolve_dep_dir("InferenceX"),
-    ):
-        if _inferencex_checkout_ok(candidate):
-            if os.access(candidate, os.W_OK):
-                return str(candidate)
-            print(
-                "Preflight: skipping non-writable auto-detected "
-                f"InferenceX checkout at {candidate}; cloning a "
-                "writable checkout instead."
-            )
-        elif (Path(candidate) / "benchmarks" / "benchmark_lib.sh").is_file():
-            print(
-                f"Preflight: ignoring InferenceX at {candidate}: it is at "
-                f"{_inferencex_head_sha(candidate)[:12] or 'an unreadable ref'}, "
-                f"not the pinned {want_ref[:12]}."
-            )
-    return ""
-
-
 def _fail_inferencex(install_event: Any, message: str) -> NoReturn:
     """Record a fatal InferenceX problem and stop: baseline cannot run without a usable checkout."""
     print(message, file=sys.stderr)
     exc = SystemExit(2)
-    _fail_install_step(install_event, step_id="clone_inferencex", category="install", exc=exc)
+    _fail_install_step(install_event, step_id=_CLONE_INFERENCEX_STEP, category="install", exc=exc)
     raise exc
 
 
@@ -2342,18 +2227,18 @@ def _ensure_inferencex(install_event: Any) -> str:
     Required for the GSM8K accuracy eval; lm-eval deps auto-install at runtime
     via ``benchmark_lib.sh``.
     """
-    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip() or _detect_inferencex_checkout()
+    inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip() or inferencex_checkout.detect()
     inferencex_cloned = False
-    if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
+    if not (inferencex_path and inferencex_checkout.checkout_ok(inferencex_path)):
         from ..session.paths import deps_cache_root as _open_source_default
 
-        ref = os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT
+        ref = os.environ.get("INFERENCEX_REF") or inferencex_checkout.DEFAULT_REF
         # Per-revision dir, matching install.sh: a shared name is what allowed a pre-bump clone to be reused forever.
-        dest = _open_source_default() / _inferencex_dest_name(ref)
+        dest = _open_source_default() / inferencex_checkout.destination_name(ref)
         print(f"Preflight: no InferenceX checkout at {ref[:12]}; cloning into {dest} ...")
-        inferencex_path = _clone_inferencex(dest)
+        inferencex_path = inferencex_checkout.clone(dest)
         inferencex_cloned = bool(inferencex_path)
-        if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
+        if not (inferencex_path and inferencex_checkout.checkout_ok(inferencex_path)):
             _fail_inferencex(
                 install_event,
                 "Preflight: ERROR — InferenceX checkout missing and clone "
@@ -2388,14 +2273,14 @@ def _ensure_inferencex(install_event: Any) -> str:
         )
     _record_install_step(
         install_event,
-        step_id="clone_inferencex",
+        step_id=_CLONE_INFERENCEX_STEP,
         category="install",
         status="applied" if inferencex_cloned else "already_present",
         skip_reason=None,
         target="InferenceX",
-        version_after=_inferencex_head_sha(inferencex_path) or None,
+        version_after=inferencex_checkout.head_sha(inferencex_path) or None,
         detail={
-            "ref": os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT,
+            "ref": os.environ.get("INFERENCEX_REF") or inferencex_checkout.DEFAULT_REF,
             "dest": inferencex_path,
             "writable": os.access(inferencex_path, os.W_OK),
             "network_fs": inferencex_network_fs,
@@ -2439,6 +2324,25 @@ def _patch_magpie_compat(install_event: Any, inferencex_path: str, *, magpie_act
             "inferencex_patch_anchors_ok": anchors_ok,
         },
     )
+
+
+def _prepare_inferencex(install_event: Any, *, magpie_active: bool) -> str:
+    """Prepare the synthetic runtime; native AgentX's checkout belongs to Magpie."""
+    from hyperloom.common.agentx_workload import is_mlperf_backend
+    from hyperloom.common.perf_metric import agentx_enabled
+
+    if agentx_enabled() and not is_mlperf_backend():
+        _record_install_step(
+            install_event,
+            step_id=_CLONE_INFERENCEX_STEP,
+            category="install",
+            status="skipped",
+            skip_reason="magpie_manages_native_agentx",
+        )
+        return ""
+    inferencex_path = _ensure_inferencex(install_event)
+    _patch_magpie_compat(install_event, inferencex_path, magpie_active=magpie_active)
+    return inferencex_path
 
 
 def _check_kernel_and_tracelens_clis(install_event: Any, args: argparse.Namespace | None) -> None:
@@ -2676,9 +2580,7 @@ def _preflight(
         pip_extra=pip_extra,
     )
 
-    inferencex_path = _ensure_inferencex(install_event)
-
-    _patch_magpie_compat(install_event, inferencex_path, magpie_active=_magpie_backend_active)
+    inferencex_path = _prepare_inferencex(install_event, magpie_active=_magpie_backend_active)
 
     # --- node / claude / codex CLI presence (WARN-only) ---
     _check_node_claude_cli()

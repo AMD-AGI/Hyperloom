@@ -35,7 +35,7 @@ from .assembler import (
     WARM_START_EVENT_SECTIONS,
     event_parts,
 )
-from .event_timeline import EVENT_STATUS_INTERRUPTED, finish_event, residual_events
+from .event_timeline import EVENT_STATUS_INTERRUPTED, EventHeader, finish_event, residual_events
 
 __all__ = ["finalize_events"]
 
@@ -173,13 +173,15 @@ def _finalize_type(spec: _EventType) -> list[str]:
             )
             continue
         finish_event(
-            event_type=spec.event_type,
-            event=residual.event_id,
+            EventHeader(
+                spec.event_type,
+                residual.event_id,
+                spec.kind,
+                _start_time(parts.get(spec.event_section) or [], residual.event_id),
+            ),
             sequence=residual.sequence,
             status=EVENT_STATUS_INTERRUPTED,
             ext=ext,
-            kind=spec.kind,
-            start_time=_start_time(parts.get(spec.event_section) or [], residual.event_id),
         )
         closed.append(residual.event_id)
         log.warning(

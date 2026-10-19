@@ -129,15 +129,6 @@ def _toml_string(value: str) -> str:
     return json.dumps(value)
 
 
-def api_key_env_name(
-    *,
-    api_key_env: str = "OPENAI_API_KEY",
-    env: dict[str, str] | None = None,
-) -> str:
-    """Return the NAME of the env var holding the OpenAI-side API key."""
-    return _api_key_env_name(api_key_env=api_key_env, source=_effective_env(env))
-
-
 def _api_key_env_name(*, api_key_env: str, source: Mapping[str, str]) -> str:
     """Resolve the API key variable name from an already-effective mapping."""
     candidates = list(dict.fromkeys([api_key_env, "OPENAI_API_KEY"]))
@@ -261,20 +252,6 @@ def _resolve_codex_provider_config(
             env_additions[header_env_name] = value
         overrides.append(f"model_providers.{provider}.env_http_headers.{header}={_toml_string(header_env_name)}")
     return CodexProviderConfig(overrides=tuple(overrides), env_additions=tuple(env_additions.items()))
-
-
-def codex_provider_overrides(
-    *,
-    api_key_env: str = "OPENAI_API_KEY",
-    base_url_env: str = "OPENAI_BASE_URL",
-    env: dict[str, str] | None = None,
-) -> tuple[str, ...]:
-    """Return provider overrides for compatibility with existing callers."""
-    return resolve_codex_provider_config(
-        api_key_env=api_key_env,
-        base_url_env=base_url_env,
-        env=env,
-    ).overrides
 
 
 def _writable_root_overrides(writable_roots: Sequence[Path]) -> tuple[str, ...]:
@@ -506,37 +483,21 @@ def _codex_home_parent(
     return fallback
 
 
-def _cleanup_codex_home(
-    temporary: tempfile.TemporaryDirectory[str],
-    *,
-    timeout_sec: float | None = None,
-    grace_sec: float | None = None,
-    settle_sec: float | None = None,
-    initial_backoff_sec: float | None = None,
-    max_backoff_sec: float | None = None,
-    sleeper: Callable[[float], None] = time.sleep,
-    monotonic: Callable[[], float] = time.monotonic,
-) -> None:
+def _cleanup_codex_home(temporary: tempfile.TemporaryDirectory[str]) -> None:
     """Remove exactly one generated CODEX_HOME despite transient late writers."""
     path = Path(temporary.name)
-    timeout = max(0.0, _CODEX_HOME_CLEANUP_TIMEOUT_SEC if timeout_sec is None else timeout_sec)
-    grace = max(0.0, _CODEX_HOME_CLEANUP_GRACE_SEC if grace_sec is None else grace_sec)
-    settle = max(0.0, _CODEX_HOME_CLEANUP_SETTLE_SEC if settle_sec is None else settle_sec)
-    initial_backoff = max(
-        0.001,
-        _CODEX_HOME_CLEANUP_INITIAL_BACKOFF_SEC if initial_backoff_sec is None else initial_backoff_sec,
-    )
-    maximum_backoff = max(
-        initial_backoff,
-        _CODEX_HOME_CLEANUP_MAX_BACKOFF_SEC if max_backoff_sec is None else max_backoff_sec,
-    )
-    deadline = monotonic() + timeout
+    timeout = max(0.0, _CODEX_HOME_CLEANUP_TIMEOUT_SEC)
+    grace = max(0.0, _CODEX_HOME_CLEANUP_GRACE_SEC)
+    settle = max(0.0, _CODEX_HOME_CLEANUP_SETTLE_SEC)
+    initial_backoff = max(0.001, _CODEX_HOME_CLEANUP_INITIAL_BACKOFF_SEC)
+    maximum_backoff = max(initial_backoff, _CODEX_HOME_CLEANUP_MAX_BACKOFF_SEC)
+    deadline = time.monotonic() + timeout
 
     def _sleep_within_deadline(duration: float) -> None:
-        remaining = max(0.0, deadline - monotonic())
+        remaining = max(0.0, deadline - time.monotonic())
         delay = min(max(0.0, duration), remaining)
         if delay:
-            sleeper(delay)
+            time.sleep(delay)
 
     _sleep_within_deadline(grace)
     backoff = initial_backoff
@@ -560,7 +521,7 @@ def _cleanup_codex_home(
                 return
             last_status = "recreated-by-late-writer"
 
-        if monotonic() >= deadline:
+        if time.monotonic() >= deadline:
             raise CodexHomeCleanupError(path, f"{last_status}-after-{timeout:g}s")
         _sleep_within_deadline(backoff)
         backoff = min(maximum_backoff, backoff * 2)
@@ -646,33 +607,47 @@ def normalize_codex_result(result: Any, thread_id: str) -> CodexSessionResult:
     )
 
 
+@dataclass(frozen=True)
+class CodexSessionConfig:
+    """The runtime one Codex session runs in: workspace, model, sandbox, binary and environment."""
+
+    cwd: Path
+    model: str
+    writable_roots: Sequence[Path] = ()
+    sandbox_mode: str = ""
+    codex_bin: str = ""
+    env: dict[str, str] | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "cwd", Path(self.cwd))
+        object.__setattr__(self, "writable_roots", tuple(self.writable_roots))
+
+
+@dataclass(frozen=True)
+class CodexTurnRequest:
+    """One prompt sent on a Codex thread, its wall-clock budget and an optional enforced output schema."""
+
+    prompt: str
+    timeout_sec: float
+    output_schema: dict[str, Any] | None = None
+
+
 class CodexSession:
-    """One Codex Agent SDK runtime held open across many turns."""
+    """One Codex Agent SDK runtime held open across many turns.
+
+    ``developer_instructions`` scope the conversation thread and may change between threads.
+    """
 
     def __init__(
         self,
+        config: CodexSessionConfig,
         *,
-        cwd: Path,
-        model: str,
         developer_instructions: str = "",
-        writable_roots: Sequence[Path] = (),
-        sandbox_mode: str = "",
-        api_key_env: str = "OPENAI_API_KEY",
-        base_url_env: str = "OPENAI_BASE_URL",
-        codex_bin: str = "",
-        env: dict[str, str] | None = None,
         component: str = "",
         operation: str = "",
     ) -> None:
-        self.cwd = Path(cwd)
-        self.model = model
+        self.config = config
         self.developer_instructions = developer_instructions
-        self.writable_roots = tuple(writable_roots)
-        self.sandbox_mode = sandbox_mode
-        self.api_key_env = api_key_env
-        self.base_url_env = base_url_env
-        self.codex_bin = codex_bin
-        self.env = env
         self.component = component
         self.operation = operation
         self._stack: contextlib.AsyncExitStack | None = None
@@ -700,7 +675,7 @@ class CodexSession:
         """Resolve policy and credentials, then open the SDK client."""
         if self._stack is not None:
             return
-        effective_env = _effective_env(self.env)
+        effective_env = _effective_env(self.config.env)
         # Tag before provider resolution so the header is mapped into ``env_http_headers`` with the gateway's own.
         if self.component:
             inject_attribution_env(
@@ -709,7 +684,7 @@ class CodexSession:
                 operation=self.operation,
             )
         resolved_sandbox_mode = _resolve_codex_sandbox_mode(
-            sandbox_mode=self.sandbox_mode,
+            sandbox_mode=self.config.sandbox_mode,
             source=effective_env,
         )
         if resolved_sandbox_mode != "bypass" and not _probe_codex_sandbox_capability(
@@ -724,20 +699,20 @@ class CodexSession:
             )
 
         provider_config = _resolve_codex_provider_config(
-            api_key_env=self.api_key_env,
-            base_url_env=self.base_url_env,
+            api_key_env="OPENAI_API_KEY",
+            base_url_env="OPENAI_BASE_URL",
             source=effective_env,
         )
         sdk = load_codex_sdk()
         sandbox = codex_sandbox(
             sdk,
-            writable_roots=self.writable_roots,
+            writable_roots=self.config.writable_roots,
             sandbox_mode=resolved_sandbox_mode,
         )
         config_overrides = (
             "features.memories=false",
             *provider_config.overrides,
-            *_writable_root_overrides(self.writable_roots),
+            *_writable_root_overrides(self.config.writable_roots),
         )
         # The client is entered inside the CODEX_HOME context so unwinding closes the client first and only then
         # removes the state it writes.
@@ -745,8 +720,8 @@ class CodexSession:
         try:
             codex_home = stack.enter_context(
                 _private_codex_home(
-                    cwd=self.cwd,
-                    writable_roots=self.writable_roots,
+                    cwd=self.config.cwd,
+                    writable_roots=self.config.writable_roots,
                     source=effective_env,
                 )
             )
@@ -754,9 +729,9 @@ class CodexSession:
             child_env.update(provider_config.env_additions)
             child_env["CODEX_HOME"] = str(codex_home)
             config = sdk.CodexConfig(
-                codex_bin=self.codex_bin or None,
+                codex_bin=self.config.codex_bin or None,
                 config_overrides=config_overrides,
-                cwd=str(self.cwd),
+                cwd=str(self.config.cwd),
                 env=child_env,
                 client_name=_CLIENT_NAME,
                 client_title=_CLIENT_TITLE,
@@ -795,22 +770,16 @@ class CodexSession:
         if self._thread is None:
             self._thread = await self._client.thread_start(
                 approval_mode=self._sdk.ApprovalMode.deny_all,
-                cwd=str(self.cwd),
+                cwd=str(self.config.cwd),
                 developer_instructions=self.developer_instructions,
-                model=self.model,
+                model=self.config.model,
                 model_provider=CODEX_PROVIDER_NAME,
                 sandbox=self._sandbox,
             )
             self._thread_id = str(getattr(self._thread, "id", "") or "")
         return self._thread
 
-    async def turn(
-        self,
-        prompt: str,
-        *,
-        timeout_sec: float,
-        output_schema: dict[str, Any] | None = None,
-    ) -> CodexSessionResult:
+    async def turn(self, request: CodexTurnRequest) -> CodexSessionResult:
         """Run one turn on this session's conversation."""
         # Both, not just the client: ``start()`` sets them together and ``aclose()`` clears them together, and
         # ``_open_thread`` reaches for the SDK as well.
@@ -820,15 +789,15 @@ class CodexSession:
         try:
             thread = await self._open_thread()
             turn_handle = await thread.turn(
-                prompt,
+                request.prompt,
                 approval_mode=self._sdk.ApprovalMode.deny_all,
-                cwd=str(self.cwd),
-                model=self.model,
-                output_schema=output_schema,
+                cwd=str(self.config.cwd),
+                model=self.config.model,
+                output_schema=request.output_schema,
                 sandbox=self._sandbox,
             )
             turn_task = asyncio.create_task(turn_handle.run())
-            completed, _pending = await asyncio.wait({turn_task}, timeout=timeout_sec)
+            completed, _pending = await asyncio.wait({turn_task}, timeout=request.timeout_sec)
             if not completed:
                 # Teardown of an already-failed turn: the timeout below is the reported failure, so interrupt errors
                 # add no signal.
@@ -836,7 +805,7 @@ class CodexSession:
                     await asyncio.wait_for(turn_handle.interrupt(), timeout=_INTERRUPT_TIMEOUT_SEC)
                 with contextlib.suppress(Exception):  # broad-suppress: SDK teardown
                     await asyncio.wait_for(asyncio.shield(turn_task), timeout=_INTERRUPT_TIMEOUT_SEC)
-                raise CodexSessionTimeoutError(f"Codex turn timed out after {timeout_sec:g}s")
+                raise CodexSessionTimeoutError(f"Codex turn timed out after {request.timeout_sec:g}s")
             sdk_result = turn_task.result()
         except CodexSessionError:
             raise
@@ -852,32 +821,16 @@ class CodexSession:
 
 async def run_codex_turn(
     *,
-    prompt: str,
+    config: CodexSessionConfig,
+    request: CodexTurnRequest,
     developer_instructions: str,
-    cwd: Path,
-    model: str,
-    timeout_sec: float,
-    writable_roots: Sequence[Path] = (),
-    sandbox_mode: str = "",
-    api_key_env: str = "OPENAI_API_KEY",
-    base_url_env: str = "OPENAI_BASE_URL",
-    codex_bin: str = "",
-    output_schema: dict[str, Any] | None = None,
-    env: dict[str, str] | None = None,
     component: str = "",
     operation: str = "",
 ) -> CodexSessionResult:
     """Run one non-interactive Codex turn in a session of its own."""
     session = CodexSession(
-        cwd=cwd,
-        model=model,
+        config,
         developer_instructions=developer_instructions,
-        writable_roots=writable_roots,
-        sandbox_mode=sandbox_mode,
-        api_key_env=api_key_env,
-        base_url_env=base_url_env,
-        codex_bin=codex_bin,
-        env=env,
         component=component,
         operation=operation,
     )
@@ -885,7 +838,7 @@ async def run_codex_turn(
     result: CodexSessionResult | None = None
     operation_error: BaseException | None = None
     try:
-        result = await session.turn(prompt, timeout_sec=timeout_sec, output_schema=output_schema)
+        result = await session.turn(request)
     except BaseException as exc:
         operation_error = exc
         raise
@@ -908,14 +861,14 @@ __all__ = [
     "CodexHomeCleanupError",
     "CodexProviderConfig",
     "CodexSession",
+    "CodexSessionConfig",
     "CodexSessionError",
     "CodexSessionResult",
     "CodexSessionTimeoutError",
+    "CodexTurnRequest",
     "CodexSessionUnavailableError",
     "DEFAULT_CODEX_SANDBOX_MODE",
     "HYPERLOOM_RUNTIME_DIR_ENV",
-    "api_key_env_name",
-    "codex_provider_overrides",
     "codex_sandbox",
     "load_codex_sdk",
     "normalize_codex_result",

@@ -540,17 +540,6 @@ def test_managed_process_closes_files_on_spawn_failure(
     assert mgr.stop() is True
 
 
-# ── shared artifact root ─────────────────────────────────────────────────────
-def test_resolve_shared_artifact_root_single_node(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.delenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", raising=False)
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "1")
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
-    assert rb.resolve_shared_artifact_root(tmp_path) == tmp_path
-
-
 def test_get_ray_backend_singleton():
     a = rb.get_ray_backend()
     b = rb.get_ray_backend()
@@ -1468,16 +1457,7 @@ def test_run_magpie_local_path_untouched(tmp_path: Path, monkeypatch: pytest.Mon
     assert not (tmp_path / "config.ray.yaml").exists()
 
 
-# ── coverage: shared-root MN + strip fallbacks ───────────────────────────────
-def test_resolve_shared_artifact_root_multi_node(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Multi-node + HYPERLOOM_MN_PROFILE_TRACE_DIR -> the shared root wins."""
-    mn_root = tmp_path / "shared"
-    monkeypatch.setenv("HYPERLOOM_MN_PROFILE_TRACE_DIR", str(mn_root))
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
-    monkeypatch.setenv("MULTI_NODE_STATE_FILE", str(tmp_path / "nope.json"))
-    assert rb.resolve_shared_artifact_root(tmp_path / "sess") == mn_root
-
-
+# ── coverage: strip fallbacks ───────────────────────────────
 def test_strip_visible_devices_unparseable_yaml_returns_src(tmp_path: Path):
     """A YAML parse error returns the original path unchanged (fail-soft)."""
     cfg = tmp_path / "bad.yaml"

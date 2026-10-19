@@ -187,9 +187,9 @@ class _FlakyKBClient(InMemoryKBClient):
             self._fail_count[endpoint] = remaining - 1
             raise KBTransportError(f"{endpoint}: simulated transport error")
 
-    def list(self, **kwargs):
+    def list(self, query):
         self._consume("list")
-        return super().list(**kwargs)
+        return super().list(query)
 
     def upsert(self, payload):
         self._consume("upsert")
@@ -242,7 +242,7 @@ def test_list_priors_short_circuits_after_first_transport_error(breaker_writer):
 def test_list_priors_validation_error_does_not_open_breaker(breaker_writer):
     w, kb, _, _ = breaker_writer
 
-    def boom(**kwargs):
+    def boom(_query):
         raise KBValidationError("422 bad scope")
 
     kb.list = boom  # type: ignore[method-assign]

@@ -50,6 +50,12 @@ _ALLOWED: tuple[tuple[str, str, str], ...] = (
         "Release notes naming the retired console script, so an operator whose script "
         "still invokes it recognises the spelling that now fails.",
     ),
+    (
+        "docs/release-notes.md",
+        r"kernel_agents\.agent_providers|KERNEL_AGENTS_MAX_TURNS",
+        "Release notes naming the retired entry-point group and env var, so a plugin "
+        "author or operator still using them recognises what is no longer read.",
+    ),
 )
 
 

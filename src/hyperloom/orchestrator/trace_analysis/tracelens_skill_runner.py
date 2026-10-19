@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import ast
-import importlib.util
 import logging
 import os
 import re
@@ -25,8 +24,10 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable
 
 from hyperloom.common.codex_session import (
+    CodexSessionConfig,
     CodexSessionError,
     CodexSessionResult,
+    CodexTurnRequest,
     run_codex_turn,
 )
 from hyperloom.common.llm_config import claude_sdk_env_options
@@ -671,13 +672,11 @@ async def _run_tracelens_skill_codex(
     codex_error = ""
     result = CodexSessionResult()
     try:
+        roots = (output_dir, capture_folder) if capture_folder else (output_dir,)
         result = await codex_turn_runner(
-            prompt=prompt,
+            config=CodexSessionConfig(cwd=tracelens_root, model=model, writable_roots=roots),
+            request=CodexTurnRequest(prompt, timeout_sec=timeout_sec),
             developer_instructions=_CODEX_DEVELOPER_INSTRUCTIONS,
-            cwd=tracelens_root,
-            model=model,
-            timeout_sec=timeout_sec,
-            writable_roots=(output_dir, capture_folder) if capture_folder else (output_dir,),
         )
     except CodexSessionError as exc:
         # The SDK can fail after the report landed; artifact presence decides.
@@ -1081,124 +1080,6 @@ def _parse_launcher_path(kernel_path: str) -> tuple[str, int | None, str | None]
     return text, None, None
 
 
-# Launcher path → absolute source file resolver. Strategy (most-specific first):
-# $HYPERLOOM_FRAMEWORK_SOURCE_ROOTS override, importlib find_spec, then this fallback table.
-_FRAMEWORK_PKG_FALLBACK_ROOTS: dict[str, tuple[str, ...]] = {
-    "aiter": ("/sgl-workspace/aiter",),
-    "sglang": ("/sgl-workspace/sglang/python", "/sgl-workspace/sglang"),
-    "vllm": (
-        "/usr/local/lib/python3.12/dist-packages",
-        "/usr/local/lib/python3.10/dist-packages",
-        "/opt/venv/lib/python3.10/site-packages",
-        "/sgl-workspace/vllm",
-    ),
-    # atom fallback roots for CSV-only / static-analysis parses. Kept in sync
-    # with the reusable-source roots elsewhere, pinned by test_framework_paths_units.py.
-    "atom": (
-        "/app/ATOM",
-        "/usr/local/lib/python3.12/dist-packages",
-        "/usr/local/lib/python3.10/dist-packages",
-        "/opt/venv/lib/python3.10/site-packages",
-        "/opt/venv/lib/python3.12/site-packages",
-    ),
-}
-_FRAMEWORK_SOURCE_ROOTS_ENV = "HYPERLOOM_FRAMEWORK_SOURCE_ROOTS"
-
-
-def _env_framework_source_roots() -> dict[str, tuple[str, ...]]:
-    """Parse ``$HYPERLOOM_FRAMEWORK_SOURCE_ROOTS`` into a package-root map.
-
-    The variable is a comma-separated list of ``pkg=/abs/parent`` entries.
-
-    Returns:
-        A ``{pkg: (root, ...)}`` mapping; unparseable entries are skipped.
-    """
-    raw = os.environ.get(_FRAMEWORK_SOURCE_ROOTS_ENV, "").strip()
-    if not raw:
-        return {}
-    out: dict[str, list[str]] = {}
-    for chunk in raw.split(","):
-        if "=" not in chunk:
-            continue
-        key, sep, value = chunk.partition("=")
-        key = key.strip().lower()
-        value = value.strip()
-        if not key or not value:
-            continue
-        out.setdefault(key, []).append(value)
-    return {k: tuple(v) for k, v in out.items()}
-
-
-def _package_root_parent(pkg: str) -> str | None:
-    """Find the directory containing a package on the live ``sys.path``.
-
-    Args:
-        pkg: The importable package name.
-
-    Returns:
-        The directory containing ``pkg/``, or ``None`` when not importable.
-    """
-    try:
-        spec = importlib.util.find_spec(pkg)
-    except (ImportError, ValueError):
-        return None
-    if spec is None:
-        return None
-    if spec.submodule_search_locations:
-        loc = list(spec.submodule_search_locations)[0]
-        return os.path.dirname(loc)
-    if spec.origin and spec.origin.endswith(".py"):
-        return os.path.dirname(os.path.dirname(spec.origin))
-    return None
-
-
-def _resolve_launcher_to_abs_source(
-    kernel_path: str,
-) -> tuple[str, int | None, str | None] | None:
-    """Resolve a TraceLens launcher-path to an absolute source file.
-
-    Args:
-        kernel_path: The TraceLens launcher-path to resolve.
-
-    Returns:
-        An ``(abs_file, line, function_name)`` tuple for an absolute path or a
-        resolvable framework-relative file, else ``None``.
-    """
-    raw_path, line, func = _parse_launcher_path(kernel_path)
-    if not raw_path:
-        return None
-    if os.path.isabs(raw_path):
-        # Keep container-resident paths even when this analysis host cannot stat
-        # them; the caller still needs the annotation split into separate fields.
-        return raw_path, line, func
-    head = raw_path.split("/", 1)[0]
-    if not head or head.startswith("."):
-        return None
-
-    candidate_roots: list[str] = []
-    env_roots = _env_framework_source_roots()
-    candidate_roots.extend(env_roots.get(head, ()))
-    pkg_parent = _package_root_parent(head)
-    if pkg_parent:
-        candidate_roots.append(pkg_parent)
-    candidate_roots.extend(_FRAMEWORK_PKG_FALLBACK_ROOTS.get(head, ()))
-
-    seen: set[str] = set()
-    for root in candidate_roots:
-        if not root or root in seen:
-            continue
-        seen.add(root)
-        abs_path = os.path.join(root, raw_path)
-        if not os.path.isfile(abs_path):
-            continue
-        # Validate the file actually hosts the launcher's function (guards sys.path shadowing).
-        if func and abs_path.endswith(".py"):
-            if _function_line_from_ast(Path(abs_path), func) is None:
-                continue
-        return abs_path, line, func
-    return None
-
-
 def _function_line_from_ast(path: Path, function_name: str) -> int | None:
     """Find the line number of a named function definition via AST.
 
@@ -1220,11 +1101,7 @@ def _function_line_from_ast(path: Path, function_name: str) -> int | None:
     return None
 
 
-def _resolve_source_target(
-    candidate: dict[str, Any],
-    *,
-    source_root: Path | None,
-) -> dict[str, Any] | None:
+def _resolve_source_target(candidate: dict[str, Any]) -> dict[str, Any] | None:
     """Resolve a candidate's source location to a source-target triple.
 
     A row TraceLens resolved carries the verdict directly in ``source_file`` /
@@ -1234,7 +1111,6 @@ def _resolve_source_target(
 
     Args:
         candidate: The candidate dict carrying resolved source / launcher paths.
-        source_root: Optional root to resolve relative paths against.
 
     Returns:
         A ``(source_path, definition_line, function_name)`` dict, or ``None``
@@ -1244,8 +1120,6 @@ def _resolve_source_target(
     source_file = str(candidate.get("source_file") or "")
     if source_file and isinstance(source_line, int) and source_line > 0:
         source_path = Path(source_file)
-        if not source_path.is_absolute() and source_root is not None:
-            source_path = source_root / source_path
         return {
             "source_path": str(source_path),
             "definition_line": source_line,
@@ -1262,8 +1136,6 @@ def _resolve_source_target(
     if not raw_path:
         return None
     source_path = Path(raw_path)
-    if not source_path.is_absolute() and source_root is not None:
-        source_path = source_root / source_path
     function_name = reported_func or source_path.stem
     definition_line = reported_line or 1
     if source_path.exists() and reported_func:
@@ -1316,11 +1188,7 @@ def _is_native_source(path: str) -> bool:
     return str(path).lower().endswith(_NATIVE_SOURCE_SUFFIXES)
 
 
-def aggregate_by_source_function(
-    candidates: list[dict[str, Any]],
-    *,
-    source_root: Path | str | None = None,
-) -> list[dict[str, Any]]:
+def aggregate_by_source_function(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Group TraceLens candidates into per-kernel ``task_group`` dicts.
 
     Groups are sorted by aggregate time (descending). Native symbols are
@@ -1333,7 +1201,6 @@ def aggregate_by_source_function(
 
     Args:
         candidates: The TraceLens candidate rows to group.
-        source_root: Optional root to resolve relative source paths against.
 
     Returns:
         The task-group dicts. Unparseable candidates are left out for legacy
@@ -1341,12 +1208,6 @@ def aggregate_by_source_function(
     """
     if not candidates:
         return []
-    root: Path | None = None
-    if source_root:
-        root = Path(source_root).expanduser()
-        if not root.is_dir():
-            root = None
-
     # Versioned identity builder. Operation normalization keeps different
     # kernels in one source separate while template/shape instances of one
     # operator merge.
@@ -1354,7 +1215,7 @@ def aggregate_by_source_function(
     for cand in candidates:
         if not isinstance(cand, dict):
             continue
-        target = _resolve_source_target(cand, source_root=root)
+        target = _resolve_source_target(cand)
         if target is None:
             continue
         operation = str(cand.get("name") or "").strip()

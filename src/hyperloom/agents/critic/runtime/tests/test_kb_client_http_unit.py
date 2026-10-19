@@ -16,7 +16,7 @@ from hyperloom.agents.critic.runtime.errors import (
     KBTransportError,
     KBValidationError,
 )
-from hyperloom.agents.critic.runtime.kb_client import HTTPKBClient
+from hyperloom.agents.critic.runtime.kb_client import HTTPKBClient, KBListQuery
 
 
 class _Resp:
@@ -67,7 +67,7 @@ def test_endpoint_methods_build_bodies(monkeypatch) -> None:
 
     monkeypatch.setattr(client, "_request", fake_request)
 
-    client.list(scope_filter={"model": "m"}, kind="pitfall", metadata_filter={"a": 1}, limit=5)
+    client.list(KBListQuery(scope_filter={"model": "m"}, kind="pitfall", metadata_filter={"a": 1}, limit=5))
     client.upsert({"topic": "t"})
     client.batch_insert([{"x": 1}], on_conflict="skip")
     client.add_edges([{"src": "a", "dst": "b"}])
@@ -181,7 +181,7 @@ def test_request_recovers_after_one_failure(monkeypatch) -> None:
 
 def test_backoff_grows(monkeypatch) -> None:
     monkeypatch.setattr("hyperloom.agents.critic.runtime.kb_client.random.random", lambda: 0.5)
-    client = HTTPKBClient("http://kb.local", backoff_base=1.0)
+    client = HTTPKBClient("http://kb.local")
     b1 = client._backoff_for(1)
     b2 = client._backoff_for(2)
     assert b2 > b1

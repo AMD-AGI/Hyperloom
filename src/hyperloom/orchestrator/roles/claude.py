@@ -40,6 +40,7 @@ from .base import (
 )
 from .claude_requests import ClaudeRequestTracker
 from .mcp_context_tools import (
+    CONTEXT_TOOL_NAMES,
     CONTEXT_TOOL_QUALIFIED_NAMES,
     MCP_SERVER_NAME as CONTEXT_MCP_SERVER_NAME,
     ContextProvider,
@@ -717,6 +718,7 @@ class ClaudeBackend:
                     allowed.append(qname)
         if allowed:
             kwargs["allowed_tools"] = allowed
+        kwargs["tools"] = [t for t in allowed if t not in CONTEXT_TOOL_NAMES and not t.startswith("mcp__")]
         if disallowed_tools:
             kwargs["disallowed_tools"] = disallowed_tools
         mcp_servers: dict[str, Any] = {}

@@ -66,6 +66,8 @@ class GridVariant:
         # Optional runtime override; injected into materialized YAML benchmark.envs by _build_variant_yaml so the
         # server subprocess resolves the attempt runtime.
         self.runtime_override: dict[str, str] = {}
+        self.source_patches: list[dict[str, str]] = []
+        self.overlay_pythonpath: str = ""
 
 
 def coerce_extra_envs(value: Any) -> dict[str, str]:
@@ -116,6 +118,10 @@ class VariantResult:
     extra_server_args: str
     extra_envs: dict[str, str]
     status: str
+    benchmark_backend: str | None = None
+    benchmark_valid: bool | None = None
+    diagnostic_only: bool | None = None
+    workload_identity: str | None = None
     output_throughput: float | None = None
     request_throughput: float | None = None
     total_token_throughput: float | None = None
@@ -155,6 +161,10 @@ class VariantResult:
     def to_dict(self) -> dict[str, Any]:
         """Serialize this result to a plain JSON-friendly dict."""
         return {
+            "benchmark_backend": self.benchmark_backend,
+            "benchmark_valid": self.benchmark_valid,
+            "diagnostic_only": self.diagnostic_only,
+            "workload_identity": self.workload_identity,
             "name": self.name,
             "extra_server_args": self.extra_server_args,
             "extra_envs": self.extra_envs,

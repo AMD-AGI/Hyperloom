@@ -19,6 +19,7 @@ import sys
 import urllib.error
 import urllib.request
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 
 SENTINEL_USER = "hlaudit"
 
@@ -318,16 +319,24 @@ def tls_context(ca_cert: str | None, insecure: bool) -> ssl.SSLContext:
     return ssl.create_default_context(cafile=ca_cert) if ca_cert else ssl.create_default_context()
 
 
-def rf_get(
-    host: str, path: str, user: str, password: str, ctx: ssl.SSLContext, timeout: int = 30
-) -> tuple[dict | None, str]:
+@dataclass(frozen=True)
+class RedfishEndpoint:
+    """One BMC's Redfish service as reached by this audit; an empty ``user`` sends no credentials."""
+
+    host: str
+    user: str
+    password: str = field(repr=False)
+    ctx: ssl.SSLContext
+
+
+def rf_get(endpoint: RedfishEndpoint, path: str, timeout: int = 30) -> tuple[dict | None, str]:
     """GET a Redfish resource, returning ``(document, error)``."""
-    req = urllib.request.Request(f"https://{host}{path}")
-    if user:
-        token = base64.b64encode(f"{user}:{password}".encode()).decode()
+    req = urllib.request.Request(f"https://{endpoint.host}{path}")
+    if endpoint.user:
+        token = base64.b64encode(f"{endpoint.user}:{endpoint.password}".encode()).decode()
         req.add_header("Authorization", f"Basic {token}")
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:  # nosec B310
+        with urllib.request.urlopen(req, timeout=timeout, context=endpoint.ctx) as r:  # nosec B310
             return json.loads(r.read().decode()), ""
     except urllib.error.HTTPError as exc:
         return None, f"HTTP {exc.code}"
@@ -347,21 +356,21 @@ def rf_get(
 
 def probe_reachable(host: str, ctx: ssl.SSLContext) -> str:
     """Check the service root before minting anything; ``\"\"`` when reachable."""
-    doc, err = rf_get(host, "/redfish/v1", "", "", ctx, timeout=15)
+    doc, err = rf_get(RedfishEndpoint(host, "", "", ctx), "/redfish/v1", timeout=15)
     if doc is not None:
         return ""
     return err or "service root unreachable"
 
 
-def redfish_bios(host: str, user: str, password: str, ctx: ssl.SSLContext) -> tuple[dict, str, str]:
+def redfish_bios(endpoint: RedfishEndpoint) -> tuple[dict, str, str]:
     """Fetch BIOS attributes, discovering the system path (varies by OEM)."""
-    systems, err = rf_get(host, "/redfish/v1/Systems", user, password, ctx)
+    systems, err = rf_get(endpoint, "/redfish/v1/Systems")
     if systems is None and err:
         return {}, "", err
     members = [m.get("@odata.id") for m in (systems or {}).get("Members", [])]
     last = ""
     for base in members or ["/redfish/v1/Systems/1", "/redfish/v1/Systems/System.Embedded.1"]:
-        doc, err = rf_get(host, f"{base}/Bios", user, password, ctx)
+        doc, err = rf_get(endpoint, f"{base}/Bios")
         last = err or last
         if doc and doc.get("Attributes"):
             return doc["Attributes"], f"{base}/Bios", ""
@@ -503,7 +512,7 @@ def main() -> int:
     try:
         if args.bmc_user:
             password = os.environ.get("BMC_PASSWORD") or getpass.getpass(f"Password for {args.bmc_user}@{host}: ")
-            attrs, _, err = redfish_bios(host, args.bmc_user, password, ctx)
+            attrs, _, err = redfish_bios(RedfishEndpoint(host, args.bmc_user, password, ctx))
         else:
             if args.insecure:
                 print(
@@ -520,7 +529,7 @@ def main() -> int:
                 else:
                     if acct.mint_errors:
                         print(f"Note: {'; '.join(acct.mint_errors)}", file=sys.stderr)
-                    attrs, _, err = redfish_bios(host, acct.user, acct.password, ctx)
+                    attrs, _, err = redfish_bios(RedfishEndpoint(host, acct.user, acct.password, ctx))
     except KeyboardInterrupt:
         # SIGTERM and SIGINT arrive here as an exception precisely so the `with` above unwinds and revokes.
         interrupted = True

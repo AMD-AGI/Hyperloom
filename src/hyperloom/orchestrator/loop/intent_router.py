@@ -39,13 +39,13 @@ from ..policy.gate import (
     PRUNE_BRANCH_SCOPE_QUEUED,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
+from ..specialists.wall_budget import grant_wall_budget_extension
 from ..state.shared_state import (
-    ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
-    ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
     ESCALATE_HINT_SKIP_TO_KERNEL,
     inject_stack_base_params,
     is_valid_escalate_hint,
 )
+from ..state.analysis_failures import remember_trace_failure
 from ..state.experience_citations import merge_citations, normalize_citations, shown_ids
 from ..state.task_registry import IllegalTransition, TaskNotFound
 from hyperloom.inference_optimizer.trace.trajectory_trace import (
@@ -560,7 +560,7 @@ class IntentRouter(CoordinatorCollaborator):
                     ),
                 },
             )
-        denied = self._coord.dispatcher.admission_denial_for_action(action_name)
+        denied = self._coord.dispatcher.admission_denial_for_action(action_name, params=intent.payload.get("params"))
         if denied is not None:
             await self.record_policy_denied(source, intent, denied)
             return
@@ -831,8 +831,10 @@ class IntentRouter(CoordinatorCollaborator):
         sid_candidate: str,
     ) -> None:
         """Materialise, deny, or send back a proposal according to its collapsed verdict."""
-        # Both `approve` and `advise` mean "dispatch may proceed"; treat them
-        # identically for materialization.
+        from ..phases.geak_native_revalidation import record_review
+
+        if record_review(self, pending, verdict=verdict, reasoning=reasoning):
+            return
         if verdict in ("approve", "advise"):
             await self._coord.proposals.materialize_approved_proposal(
                 pending,
@@ -841,8 +843,6 @@ class IntentRouter(CoordinatorCollaborator):
         elif verdict == "reject" and is_upstream_pr_prescreen(pending.action_name, pending.payload):
             await self._coord.phase_framework.record_critic_denial(pending, reasoning)
         elif verdict == "reject" and pending.action_name == "integrate_patch" and bool(pa_params.get("enablement")):
-            # A Critic-rejected ENABLEMENT integrate_patch never reaches the executor, so the normal integrate-result
-            # rearm never fires.
             try:
                 await self._coord.enablement_lane.maybe_rearm_enablement(
                     {"enablement": True, "status": "reverted", "reason": "critic_rejected"}
@@ -874,7 +874,7 @@ class IntentRouter(CoordinatorCollaborator):
                     ),
                 },
             )
-        denied = self._coord.dispatcher.admission_denial_for_action(action_name)
+        denied = self._coord.dispatcher.admission_denial_for_action(action_name, params=intent.payload.get("params"))
         if denied is not None:
             await self.record_policy_denied(
                 source,
@@ -1078,6 +1078,13 @@ class IntentRouter(CoordinatorCollaborator):
         self.shared_state.record_action_failure(action=kind, task_id=request_msg_id, result=result)
         self.shared_state.save(self.session_dir)
 
+    def _record_trace_analyze_outcome(self, payload: dict[str, Any], result: dict[str, Any]) -> None:
+        """Cache a successful analysis of a trace, or remember a failure the same trace reproduces."""
+        if result.get("status") in ("ok", "succeeded"):
+            self.shared_state.record_trace_analyze(payload, result)
+        else:
+            remember_trace_failure(self.shared_state, payload, result)
+
     def _record_trace_analyze_on_timeline(
         self,
         *,
@@ -1130,9 +1137,9 @@ class IntentRouter(CoordinatorCollaborator):
 
     async def _handle_request(self, source: str, intent: Intent) -> None:
         """Route a REQUEST intent to its programmatic handler."""
-        target_agent = intent.payload["target_agent"]
+        target_agent = str(intent.payload["target_agent"]).strip()
         kind = intent.payload["kind"]
-        denied = self._coord.dispatcher.sequence_denial_for_request(target_agent, kind)
+        denied = self._coord.dispatcher.admission_denial_for_request(target_agent, kind)
         if denied is not None:
             await self.record_policy_denied(source, intent, denied)
             return
@@ -1310,9 +1317,9 @@ class IntentRouter(CoordinatorCollaborator):
             )
             if str(result.get("status", "")).lower() in ("failed", "error"):
                 self._record_request_failure(kind=kind, request_msg_id=request_msg.msg_id, result=result)
-            # Cache trace_analyze output (successful runs only).
-            if kind == "trace_analyze" and cache_hit_source is None and result.get("status") in ("ok", "succeeded"):
-                self.shared_state.record_trace_analyze(merged_payload, result)
+            # Cache a successful trace_analyze, or remember a failure the same trace reproduces.
+            if kind == "trace_analyze" and cache_hit_source is None:
+                self._record_trace_analyze_outcome(merged_payload, result)
                 self.shared_state.save(self.session_dir)
             if kind == "trace_analyze":
                 self._record_trace_analyze_on_timeline(
@@ -1379,13 +1386,11 @@ class IntentRouter(CoordinatorCollaborator):
             log.exception("extend_lease: GPU lease refresh failed for task=%s", task_id)
             gpus = 0
             gpu_error = repr(exc)[:200]
-        # Push the live subprocess's hard wall-clock kill deadline out too, so the extension actually buys the
-        # specialist more time to run.
+        # Move the live subprocess's kill instant too, within the room its dispatch left before the phase end.
         wall_budget_error = ""
+        granted_sec = 0.0
         try:
-            from ..specialists.subprocess_ import grant_wall_budget_extension
-
-            grant_wall_budget_extension(task_id, extra_sec)
+            granted_sec = grant_wall_budget_extension(task_id, extra_sec)
         except Exception as exc:
             log.exception("extend_lease: wall-budget extension failed for task=%s", task_id)
             wall_budget_error = repr(exc)[:200]
@@ -1403,6 +1408,7 @@ class IntentRouter(CoordinatorCollaborator):
                 "lease_expires_in_sec": remaining_sec,
                 "lanes": lanes,
                 "gpu_rows": gpus,
+                "wall_budget_extension_sec": granted_sec,
                 **({"gpu_refresh_error": gpu_error} if gpu_error else {}),
                 **({"wall_budget_extension_error": wall_budget_error} if wall_budget_error else {}),
                 "reason": str(intent.payload.get("reason") or "")[:200],
@@ -1450,10 +1456,6 @@ class IntentRouter(CoordinatorCollaborator):
         )
         hint = str(payload.get("next_action_hint") or "").strip()
         if not hint or not is_valid_escalate_hint(hint):
-            return
-        if hint in (ESCALATE_HINT_EXTEND_EXPLORE_BUDGET, ESCALATE_HINT_EXTEND_KERNEL_BUDGET):
-            self.shared_state.bump_phase_budget(hint)
-            self.shared_state.save(self.session_dir)
             return
         from ..phases.machine_state import PHASE_FRAMEWORK_AGENT
 

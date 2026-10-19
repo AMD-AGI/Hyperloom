@@ -22,8 +22,6 @@ from kernelforge.mcp_server import stdio_transport
 #: Re-exported so the two servers stay one import away from the shared wire
 #: format; both spellings name the same objects.
 InvalidParamsError = stdio_transport.InvalidParamsError
-_write_message = stdio_transport.write_message
-_write_error = stdio_transport.write_error
 
 SERVER_NAME = "kernelforge-pr-monitor"
 # Agents see these as mcp__pr_monitor__<name>.

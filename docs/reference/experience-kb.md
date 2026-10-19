@@ -330,7 +330,9 @@ for 40,000 characters, so the block an orchestration turn or a specialist
 prompt carries stays bounded whatever the records hold.
 
 Each item in `experiences`, and in `/v1/list`, is a summary: `experience_id`,
-`source_run_id`, and the values the schema gives the change's summary role
+`source_run_id`, `identity` (the conditions the record was measured under, as
+it holds them, so a reader can tell which records match its own without
+fetching each one), and the values the schema gives the change's summary role
 (`change_summary`), the outcome's decision role (`decision`), and the
 baseline's and outcome's measurement roles (`baseline_value`, `outcome_value`),
 empty or `null` where it declares none; reads add `score` and `why_matched`.

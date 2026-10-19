@@ -6,7 +6,6 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.common.env import EnvValueError, env_float
-from hyperloom.inference_optimizer.breakdown.recorder import section_shape
 from hyperloom.inference_optimizer.breakdown.reporters._renderers import (
     roofline,
     workload,
@@ -17,10 +16,6 @@ def test_env_float_invalid_raises(monkeypatch):
     monkeypatch.setenv("HL_BAD_FLOAT", "not-a-float")
     with pytest.raises(EnvValueError):
         env_float("HL_BAD_FLOAT", 3.5)
-
-
-def test_section_shape_unknown_is_none():
-    assert section_shape("not_registered") is None
 
 
 def test_roofline_and_workload_render_minimal_inputs():

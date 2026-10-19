@@ -79,6 +79,7 @@ Two layers. The **gate** is the `code-metrics` CI job (`scripts/code_metrics.py`
 | Cognitive complexity | > 30 | Twice SonarSource's S3776 default of 15, the same step as the ceiling; it weights nesting, so past 30 a function has to be re-read rather than read | complexipy |
 | Function length | > 80 lines | A function past one screen; counted as below, `def` line through the last line | the script |
 | Nested block depth | > 5 | pylint `R1702` default: past five levels the innermost line depends on six conditions at once | ruff `PLR1702` |
+| Parameter count | > 5 | pylint `R0913` default: past five, the call site stops reading as a sentence and the values travel together anyway — pass the object they come from, or name them in a dataclass (A8). `self`/`cls` and `*args`/`**kwargs` do not count; keyword-only parameters do | ruff `PLR0913` |
 | Module length | > 1200 lines (over 800 is a report-only warning) | Half again the 800-line review trigger; at that size a module almost always holds more than one job | the script |
 | Duplicated code | any clone of >= 100 tokens and >= 10 lines | SonarSource CPD defaults | jscpd |
 | Dead code | any finding at >= 80% confidence | vulture's recommended CI setting | vulture |
@@ -259,7 +260,7 @@ CI runs `pylint --errors-only` on core packages (fatal/error severity only). Fix
 
 **E2E markers** (skipped in CI by default):
 
-- `critic_agent_e2e`, `targeted_build_e2e`
+- `targeted_build_e2e`
 
 **What to test:** Pin the **exported surface** — CLI flags, public functions, persisted schemas, artifact layouts — with tests that state the contract *and* its failure modes; those are what callers outside this repo depend on. Pick the boundary by what is being protected: a focused unit test for deterministic logic, or a CLI/filesystem/serialization integration test where that pins the contract more directly. Internal functions that only thread a business flow together do not each need one: per-function tests there assert the current implementation and break on the next refactor. Prefer covering those flows through their entry point, and unit-test an internal helper when it carries real logic of its own.
 
@@ -333,7 +334,7 @@ pip install pre-commit ruff mypy reuse
 pre-commit install
 pre-commit run --all-files   # first-time baseline
 
-pytest -m "not critic_agent_e2e and not targeted_build_e2e"
+pytest -m "not targeted_build_e2e"
 ruff check . && ruff format --check .
 mypy src/hyperloom
 reuse lint

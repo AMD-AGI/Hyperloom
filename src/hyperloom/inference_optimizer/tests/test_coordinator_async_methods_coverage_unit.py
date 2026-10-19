@@ -18,7 +18,6 @@ from hyperloom.orchestrator.roles import (
 from hyperloom.inference_optimizer.session.optimization_journal import Verdict
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.state.objective import TargetGainObjective, TimeOnlyObjective
-from hyperloom.orchestrator.state.shared_state import SharedState
 from hyperloom.orchestrator.state.task_registry import Task
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 
@@ -556,43 +555,14 @@ async def test_escalate_invalid_hint_broadcasts_only(coord: Coordinator) -> None
     assert coord.shared_state.pending_escalate_hint != "bogus"
 
 
-_EXTEND_BUDGET_HINTS = pytest.mark.parametrize(
-    ("hint", "phase"),
-    [("extend_explore_budget", "FRAMEWORK_AGENT"), ("extend_kernel_budget", "KERNEL_AGENT")],
-)
-
-
 @pytest.mark.asyncio
-@_EXTEND_BUDGET_HINTS
-async def test_escalate_extend_budget_raises_the_phase_share(coord: Coordinator, hint: str, phase: str) -> None:
-    from hyperloom.orchestrator.phases.machine_state import ESCALATE_HINT_BUDGET_BUMP_DELTA
-
+async def test_escalate_cannot_lengthen_a_phase_budget(coord: Coordinator) -> None:
+    """Phase budgets are operator configuration; no escalate hint raises one."""
     before = dict(coord.shared_state.phase_budget_pct)
 
-    await coord.router._handle_escalate_strategy_change("orchestration", _escalate(hint))
+    await coord.router._handle_escalate_strategy_change("orchestration", _escalate("extend_explore_budget"))
 
-    after = coord.shared_state.phase_budget_pct
-    assert after[phase] == pytest.approx(before[phase] + ESCALATE_HINT_BUDGET_BUMP_DELTA)
-    assert {k: v for k, v in after.items() if k != phase} == {k: v for k, v in before.items() if k != phase}
-    assert coord.shared_state.pending_escalate_hint == ""
-
-
-@pytest.mark.asyncio
-@_EXTEND_BUDGET_HINTS
-async def test_repeated_extend_hints_stop_the_cap_above_the_configured_share(
-    coord: Coordinator, hint: str, phase: str
-) -> None:
-    from hyperloom.orchestrator.phases.machine_state import ESCALATE_HINT_BUDGET_BUMP_CAP
-
-    configured = dict(coord.shared_state.configured_phase_budget_pct)
-
-    for _ in range(10):
-        await coord.router._handle_escalate_strategy_change("orchestration", _escalate(hint))
-
-    assert coord.shared_state.phase_budget_pct[phase] == pytest.approx(
-        configured[phase] + ESCALATE_HINT_BUDGET_BUMP_CAP
-    )
-    assert SharedState.load_or_init(coord.session_dir).configured_phase_budget_pct == configured
+    assert coord.shared_state.phase_budget_pct == before
     assert coord.shared_state.pending_escalate_hint == ""
 
 
@@ -1077,17 +1047,23 @@ async def test_fan_out_wave_rejects_invalid_entries(coord: Coordinator, monkeypa
 
 # -- warm_specialist_params -----------------------------------------------
 @pytest.mark.asyncio
-async def test_warm_specialist_params_fills_defaults(coord: Coordinator) -> None:
+async def test_warm_specialist_params_always_writes_the_unconditional_keys(coord: Coordinator) -> None:
+    """Three keys are written whatever the session holds, so a specialist can read them without a presence test."""
     coord.shared_state.gpu_type = "mi300x"
-    coord.shared_state.tp = 1
-    coord.shared_state.conc = 64
-    coord.shared_state.isl = 256
-    coord.shared_state.osl = 256
     params: dict = {"domain": "kernel_agent"}
+
     await coord.specialist_dispatch.warm_specialist_params(params)
+
     assert params["gpu_type"] == "mi300x"
-    assert params["tp"] == 1
-    assert "kb_subgraph" in params
+    assert params["kb_subgraph"] == {}
+    assert "keep_threshold_pct" in params
+
+    empty: dict = {"domain": "kernel_agent"}
+    coord.shared_state.gpu_type = ""
+
+    await coord.specialist_dispatch.warm_specialist_params(empty)
+
+    assert empty["gpu_type"] == ""
 
 
 #: ``(state field, param key, value to set, value expected on the params)`` for every field whose value
@@ -1133,9 +1109,6 @@ async def test_warm_specialist_params_omits_a_field_state_left_empty(coord: Coor
     await coord.specialist_dispatch.warm_specialist_params(params)
 
     assert [key for _f, key, _v, _e in _STATE_EXPORTS if key in params] == []
-    # Both of these are written whatever the state holds.
-    assert params["gpu_type"] == ""
-    assert "keep_threshold_pct" in params
 
 
 @pytest.mark.asyncio

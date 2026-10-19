@@ -30,16 +30,6 @@ REQUEST_KINDS: frozenset[str] = frozenset(
 )
 
 
-# Context dimensions the KB scope is built from.
-CONTEXT_DIMENSIONS: tuple[str, ...] = (
-    "model",
-    "framework",
-    "model_family",
-    "workload",
-    "precision",
-    "scale",
-    "objective",
-)
 CRITICAL_CONTEXT_KEYS: tuple[str, ...] = ("model", "framework")
 
 
@@ -208,7 +198,6 @@ def parse_request(raw: dict[str, Any]) -> CriticRequest:
 
 __all__ = [
     "COORDINATOR_INBOX",
-    "CONTEXT_DIMENSIONS",
     "CRITICAL_CONTEXT_KEYS",
     "CriticRequest",
     "DECISION_REQUEST",

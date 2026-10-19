@@ -46,17 +46,6 @@ def pr_monitor_base_url(
     return f"{base}/{PR_MONITOR_MOUNT}" if base else ""
 
 
-def pr_monitor_rest_url(
-    value: str | None = None,
-    *,
-    env: Mapping[str, str] | None = None,
-) -> str:
-    """Return ``<KB_STORE_URL>/pr-monitor/v1``."""
-
-    base = pr_monitor_base_url(value, env=env)
-    return f"{base}/v1" if base else ""
-
-
 def pr_monitor_mcp_url(
     value: str | None = None,
     *,
@@ -77,5 +66,4 @@ __all__ = [
     "pr_monitor_base_url",
     "pr_monitor_enabled",
     "pr_monitor_mcp_url",
-    "pr_monitor_rest_url",
 ]
