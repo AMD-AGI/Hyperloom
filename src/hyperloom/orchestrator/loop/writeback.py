@@ -1701,9 +1701,11 @@ class WritebackCollaborator(CoordinatorCollaborator):
         # next round's anchor has no snapshot, and the session degrades to
         # output grading permanently after the first KEEP.
         current_best.update(graded_axes_of(cand_source))
-        for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
-            if bv.get(_ctrl_key):
-                current_best[_ctrl_key] = bv.get(_ctrl_key)
+        _ctrl_keys = ("remove_args", "unset_envs", "args_mode")
+        _ctrl_source = bv if any(bv.get(k) for k in _ctrl_keys) else previous
+        for _ctrl_key in _ctrl_keys:
+            if _ctrl_source.get(_ctrl_key):
+                current_best[_ctrl_key] = _ctrl_source.get(_ctrl_key)
         if bv.get("effective_extra_server_args"):
             current_best["effective_extra_server_args"] = dedupe_extra_server_args(
                 strip_benchmark_harness_flags(bv.get("effective_extra_server_args"))
