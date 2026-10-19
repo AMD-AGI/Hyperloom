@@ -262,8 +262,6 @@ cognitive-complexity src/kernelforge/loop/runner.py::IterationLoop.run_one_itera
 cognitive-complexity src/kernelforge/loop/task_preflight.py::_preflight_async 41
 cognitive-complexity src/kernelforge/loop/task_preparer.py::prepare_task 37
 cognitive-complexity src/kernelforge/mcp_server/probe_stdio_server.py::probe_variant 34
-cognitive-complexity src/kernelforge/mcp_server/tools/bench.py::aggregate_benchmark_measurements 38
-cognitive-complexity src/kernelforge/mcp_server/tools/bench.py::sweep_case 51
 cognitive-complexity src/kernelforge/orchestrator/agent.py::make_agent_fn 73
 cognitive-complexity src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._write_artifact_catalog 32
 cognitive-complexity src/kernelforge/orchestrator/analysis.py::AnalysisAgentService.apply_checkpoint 39
@@ -929,9 +927,7 @@ function-lines src/kernelforge/loop/task_preflight.py::_count_graph_replays 85
 function-lines src/kernelforge/loop/task_preflight.py::_preflight_async 195
 function-lines src/kernelforge/loop/task_preparer.py::prepare_task 340
 function-lines src/kernelforge/mcp_server/probe_stdio_server.py::probe_variant 247
-function-lines src/kernelforge/mcp_server/tools/bench.py::aggregate_benchmark_measurements 97
 function-lines src/kernelforge/mcp_server/tools/bench.py::bench_wallclock 110
-function-lines src/kernelforge/mcp_server/tools/bench.py::sweep_case 178
 function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn 319
 function-lines src/kernelforge/orchestrator/agent.py::make_agent_fn.agent_fn 194
 function-lines src/kernelforge/orchestrator/analysis.py::AnalysisAgentService._prompts 227
