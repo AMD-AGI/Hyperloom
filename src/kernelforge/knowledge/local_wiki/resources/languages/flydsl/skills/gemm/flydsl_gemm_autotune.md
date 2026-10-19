@@ -18,7 +18,9 @@ sources:
 > No single FlyDSL GEMM configuration is best across shapes. Two loop designs, tile shapes, L2 bands, store
 > policy and split-K all change sign between shapes (`flydsl_gemm_mainloop.md` §1,
 > `flydsl_gemm_epilogue.md` §5). Turbo's dense GEMMs therefore race a short candidate list on the first call
-> for each shape and cache the winner. "FP8", "FP4", "MX8" and "GH" are the files under
+> for each shape and cache the winner. FlyDSL's own kernels take their configuration from the caller; aiter picks
+> it from offline-tuned tables (`flydsl_gemm_small_m.md` §7, `../optimize/flydsl_levers/flydsl_knob_space.md`).
+> "FP8", "FP4", "MX8" and "GH" are the files under
 > `primus_turbo/flydsl/{gemm,utils}` at Primus-Turbo main `7615a5a2`. Numbers marked *(field)* are measured
 > values. Use them for direction and order of magnitude, not as targets.
 

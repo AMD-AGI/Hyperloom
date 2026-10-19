@@ -127,6 +127,9 @@ sources:
   reported +8.0% for a true +6.9%.
 - Use measured ceilings with the same read/write ratio as the kernel, never the datasheet or your own
   fastest kernel.
+- Report TF/s and bytes moved with the per-dtype formulas in FlyDSL's guide, including MX scale bytes
+  (`../optimize/gemm-optimization.md` §8.1–§8.2). Its peak figures are for gfx942; take gfx950's from
+  `../../../../hardware/mi350_overview.md`.
 
 ## 8. Autotune races
 

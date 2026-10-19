@@ -73,7 +73,7 @@ Substitute `<op>` with the operator (catalog below). Paths are relative to this 
 | "Understand the layout algebra (Shape/Stride/tiled copy/MMA)" | `API_docs/layout_system_guide.md` → `API_docs/cute_layout_algebra_guide.md` → `API_docs/flydsl-tile-programming.md` |
 | "Use the aiter FlyDSL GEMM library — which knobs?" | `skills/optimize/flydsl_levers/flydsl_kernel_library.md` → `.../flydsl_knob_space.md` |
 | "Author & optimize a new kernel (structure-first)" | `skills/optimize/flydsl_levers/flydsl_authoring_method.md` |
-| "Write or optimize a dense GEMM (fp8 / MXFP4 / MXFP8 / bf16)" | `skills/gemm/INDEX.md` → the card it routes to |
+| "Write or optimize a dense GEMM (fp8 / MXFP4 / MXFP8 / bf16)" | `skills/optimize/gemm-optimization.md` (FlyDSL's walkthrough) → `skills/gemm/INDEX.md` → the card it routes to |
 | "LDS bank conflicts / double-buffer / swizzle" | `skills/optimize/lds-optimization.md` → `API_docs/conventions.md` (SharedAllocator) |
 | "Overlap loads / prefetch / pipeline" | `skills/optimize/prefetch-data-load.md` |
 | "Wrong output / NaN / won't compile / fix didn't take" | `skills/bottleneck/debug-flydsl-kernel.md` (clear cache first) → `API_docs/conventions.md` |
@@ -98,8 +98,8 @@ languages/flydsl/
 │   ├── flydsl-tile-programming.md        # the PROCEDURE: classify pattern → skeleton → compute → sync/LDS → verify
 │   └── examples/                         # runnable skeletons: 01 vectorAdd · 02 tiledCopy · 03 tiledMma · 04 preshuffle_gemm
 ├── skills/                               ← techniques by phase
-│   ├── gemm/                             # dense GEMM package (exemplar: Primus-Turbo main) — open its INDEX.md
-│   │   ├── INDEX.md                      # task → card routing, Turbo kernel map
+│   ├── gemm/                             # dense GEMM package (FlyDSL kernels, Primus-Turbo main, measured work) — open its INDEX.md
+│   │   ├── INDEX.md                      # task → card routing, kernel map
 │   │   └── flydsl_gemm_*.md              # workflow · grid_pricing · mainloop · datapath · schedule_and_locality ·
 │   │                                     #   epilogue · autotune · attribution · correctness · measurement
 │   ├── optimize/
@@ -107,6 +107,7 @@ languages/flydsl/
 │   │   │   ├── flydsl_kernel_library.md  # Path A: the shipped aiter families (HGEMM, small-M, fp8-A8, MoE, GDR, silu_fq)
 │   │   │   ├── flydsl_knob_space.md      # Path A: the knob set + which 3 knobs are arch-pinned, not tunable
 │   │   │   └── flydsl_authoring_method.md# Path B: structure-before-parameters workflow, with the stop conditions
+│   │   ├── gemm-optimization.md          # FlyDSL's GEMM walkthrough (preshuffle_gemm: tiling, ping-pong, swizzle, scheduler, epilogue)
 │   │   ├── lds-optimization.md           # LDS sizing / bank-conflict / buffering
 │   │   ├── prefetch-data-load.md         # prefetch & load-overlap / pipelining
 │   │   └── bisect-perf-regression.md     # locate the commit that regressed perf
