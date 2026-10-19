@@ -11,7 +11,7 @@ import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from kernelforge.tools.durable_io import atomic_write_text
-from kernelforge.experience_distillation import (
+from kernelforge.knowledge.experience.distillation import (
     ConstraintMemory,
     extract_signature,
     render_ledger,

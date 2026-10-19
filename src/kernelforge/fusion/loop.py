@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .models import Recipe, ValidationResult
-from kernelforge.experience_distillation import (
+from kernelforge.knowledge.experience.distillation import (
     ConstraintMemory,
     extract_signature,
     render_ledger,
