@@ -107,30 +107,27 @@ def build_launch_evidence(
     engine_adjusted_settings: dict[str, dict[str, str]] = {}
     observed_model_binding: dict[str, Any] = {}
     if actual_server_log:
-        try:
-            observed_server_config = observed_server_config_from_log(actual_server_log, resolved_framework)
-            engine_adjusted_settings = engine_adjusted_settings_from_log(actual_server_log, resolved_framework)
-            observed_flags = launch_argv_from_log(actual_server_log, resolved_framework)
-            # Read from the raw launch line, which still carries the operands
-            # ``split_launch_flags`` strips: without it the evidence records only
-            # the *requested* model and cannot detect a server that resolved a
-            # different one.
-            observed_model_binding = observed_model_binding_from_log(actual_server_log, resolved_framework)
-            if not observed_flags:
-                # Neither engine echoes an argv line reliably -- vLLM never does,
-                # in no log, successful or failed -- so without the record every
-                # requested setting would be judged unconfirmed. The resolved
-                # settings the engine DOES print are the observed side.
-                observed_server_identity = observed_server_identity_from_log(actual_server_log, resolved_framework)
-                if not observed_model_binding:
-                    # The two engines name the model differently, so the binding
-                    # is read per engine even though the record is not.
-                    if resolved_framework == "vllm":
-                        observed_model_binding = _binding_from_vllm_identity(observed_server_identity)
-                    else:
-                        observed_model_binding = _binding_from_identity(observed_server_identity)
-        except Exception:
-            log.debug("launch evidence could not inspect server log %s", actual_server_log, exc_info=True)
+        observed_server_config = observed_server_config_from_log(actual_server_log, resolved_framework)
+        engine_adjusted_settings = engine_adjusted_settings_from_log(actual_server_log, resolved_framework)
+        observed_flags = launch_argv_from_log(actual_server_log, resolved_framework)
+        # Read from the raw launch line, which still carries the operands
+        # ``split_launch_flags`` strips: without it the evidence records only
+        # the *requested* model and cannot detect a server that resolved a
+        # different one.
+        observed_model_binding = observed_model_binding_from_log(actual_server_log, resolved_framework)
+        if not observed_flags:
+            # Neither engine echoes an argv line reliably -- vLLM never does,
+            # in no log, successful or failed -- so without the record every
+            # requested setting would be judged unconfirmed. The resolved
+            # settings the engine DOES print are the observed side.
+            observed_server_identity = observed_server_identity_from_log(actual_server_log, resolved_framework)
+            if not observed_model_binding:
+                # The two engines name the model differently, so the binding
+                # is read per engine even though the record is not.
+                if resolved_framework == "vllm":
+                    observed_model_binding = _binding_from_vllm_identity(observed_server_identity)
+                else:
+                    observed_model_binding = _binding_from_identity(observed_server_identity)
 
     warmup_root = slot / "warmup_round"
     actual_path = Path(actual_server_log) if actual_server_log else None

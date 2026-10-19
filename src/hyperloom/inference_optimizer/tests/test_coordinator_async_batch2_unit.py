@@ -1891,7 +1891,7 @@ async def test_warm_specialist_params_rich_context(coord: Coordinator, monkeypat
 async def test_record_fact_per_task_writes_lesson(coord: Coordinator, monkeypatch) -> None:
     from hyperloom.orchestrator.state.task_registry import Task
 
-    coord.knowledge_plane = KnowledgePlane(recipe_kb=object())  # non-None -> KB amend path
+    coord.knowledge_plane = KnowledgePlane(recipe_kb=_FakeRecipeKB())  # non-None -> KB amend path
     coord.shared_state.model_name = "llama"
     coord.shared_state.gpu_type = "mi300x"
     amends: list[dict] = []
@@ -2185,6 +2185,9 @@ class _FakeLocal:
 class _FakeRecipeKB:
     def __init__(self) -> None:
         self.local = _FakeLocal()
+
+    def get_authoritative_recipe(self, *, canonical_id):
+        return self.local.get_recipe(canonical_id=canonical_id)
 
 
 @pytest.mark.asyncio
