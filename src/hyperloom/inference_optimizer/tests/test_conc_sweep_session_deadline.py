@@ -17,7 +17,7 @@ import yaml
 
 from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import SweepBudget
 from hyperloom.orchestrator.actions.executors import _grid_runner as gr
-from hyperloom.orchestrator.actions.executors import _aiter_jit, _ray_serving, _server_lifecycle, benchmark_backend
+from hyperloom.orchestrator.actions.executors import _aiter_jit, _ray_serving, benchmark_backend
 from hyperloom.orchestrator.actions.executors._subprocess_kill import ORCHESTRATOR_CANCELLED_RETURNCODE
 from hyperloom.orchestrator.actions.stop_attribution import (
     ORCHESTRATOR_CANCELLED_CLASS,
@@ -47,7 +47,6 @@ def sweep_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_backend):
     monkeypatch.delenv("INFERENCEX_PATH", raising=False)
     monkeypatch.setattr(_ray_serving, "maybe_serving_lease", lambda **kwargs: None)
     monkeypatch.setattr(_aiter_jit, "sweep_stale_aiter_locks_if_dead", dict)
-    monkeypatch.setattr(_server_lifecycle, "teardown_lifecycle_server", MagicMock())
     monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: sys.executable)
     monkeypatch.setattr(gr, "build_benchmark_command", lambda **kwargs: [sys.executable, "scripted-benchmark"])
     monkeypatch.setattr(
@@ -100,7 +99,6 @@ def sweep_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_backend):
 
     def run(
         *,
-        persistent,
         attempts,
         usable=40.0,
         concs=(8, 4, 2),
@@ -112,11 +110,6 @@ def sweep_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, launch_backend):
         recorder=None,
         benchmark_mode="",
     ):
-        monkeypatch.setattr(
-            _server_lifecycle,
-            "resolve_lifecycle_params",
-            lambda _: {"eligible": persistent, "framework": "sglang", "port": 8888},
-        )
         state.max_minutes = max_minutes if bounded else 0
         state.closing_grace_sec = closing_grace_sec
         state.elapsed_charged_sec = max_minutes * 60.0 - closing_grace_sec - usable
@@ -156,14 +149,13 @@ def _measured(seconds=5.0):
     )
 
 
-@pytest.mark.parametrize("persistent", [False, True], ids=["restart-rungs", "boot-and-reuse"])
-def test_session_deadline_is_shared_across_rungs_and_anchor(sweep_run, persistent):
-    payload, backend, calls, bounds, clock = sweep_run(persistent=persistent, attempts=[_measured()] * 6, usable=100.0)
+def test_session_deadline_is_shared_across_rungs_and_anchor(sweep_run):
+    payload, backend, calls, bounds, clock = sweep_run(attempts=[_measured()] * 6, usable=100.0)
     assert payload["status"] == "succeeded"
     assert len(backend.calls) == 6
     assert len(bounds) == 1
     assert [call["grid"][0].name for call in calls] == [
-        f"{arm}_conc{conc}" for arm in ("optimized", "baseline") for conc in (8, 4, 2)
+        f"{arm}_conc{conc}" for conc in (8, 4, 2) for arm in ("optimized", "baseline")
     ]
     assert [call.get("session_deadline_sec") for call in calls] == [10100.0] * 6
     assert [call.get("variant_expected_sec") for call in calls] == [5.0] * 6
@@ -171,22 +163,21 @@ def test_session_deadline_is_shared_across_rungs_and_anchor(sweep_run, persisten
     assert clock.elapsed == 30.0
 
 
-@pytest.mark.parametrize("path", ["restart", "reuse", "boot-retry", "boot-timeout", "anchor", "fallback"])
+# What each path runs before the rung the deadline reaps, the rungs that end skipped, and the status that leaves.
+_EXHAUSTION_PATHS = {
+    "hung-first-rung": ([], 6, "skipped"),
+    "measured-then-hung": ([_measured(10.0)], 5, "skipped"),
+    "failed-then-hung": ([LaunchAttempt(outcome="died_silently", duration_sec=10.0)], 5, "failed"),
+    "pair-then-hung": ([_measured(10.0)] * 3, 3, "succeeded"),
+}
+
+
+@pytest.mark.parametrize("path", sorted(_EXHAUSTION_PATHS))
 @pytest.mark.parametrize("sweep_budget", [False, True], ids=["session-deadline", "sweep-deadline"])
 def test_budget_exhaustion_stops_ladder_and_preserves_attribution(sweep_run, path, sweep_budget):
-    if path == "boot-timeout":
-        prefix = []
-    elif path == "boot-retry":
-        prefix = [LaunchAttempt(outcome="died_silently", duration_sec=10.0)]
-    elif path == "anchor":
-        prefix = [_measured(10.0)] * 3
-    elif path == "fallback":
-        prefix = [LaunchAttempt(outcome="died_silently", duration_sec=5.0)] * 3
-    else:
-        prefix = [_measured(10.0)]
+    prefix, skipped_rungs, status = _EXHAUSTION_PATHS[path]
     attempts = prefix + [LaunchAttempt(outcome="hang")] * 20
     payload, backend, calls, bounds, clock = sweep_run(
-        persistent=path != "restart",
         attempts=attempts,
         bounded=not sweep_budget,
         total_budget_sec=40 if sweep_budget else None,
@@ -204,21 +195,20 @@ def test_budget_exhaustion_stops_ladder_and_preserves_attribution(sweep_run, pat
     points = payload["optimized"]["points"] + payload["baseline"]["points"]
     skipped = [point for point in points if point["status"] == "skipped"]
     assert len(points) == 6
-    assert len(skipped) == {"boot-timeout": 6, "anchor": 3, "fallback": 6}.get(path, 5)
+    assert len(skipped) == skipped_rungs
     assert all(point["error_class"] == error_class for point in skipped)
-    assert payload["status"] == ("failed" if path == "boot-retry" else "skipped")
-    if path == "boot-retry":
+    assert payload["status"] == status
+    if path == "failed-then-hung":
         assert (
             next(point for point in points if point["conc"] == 8 and point["arm"] == "optimized")["status"] == "failed"
         )
 
 
-@pytest.mark.parametrize("persistent", [False, True])
 @pytest.mark.parametrize("usable", [0.0, 4.0], ids=["expired", "cannot-fit-measurement"])
-def test_session_admission_skip_is_not_a_boot_failure(sweep_run, persistent, usable):
-    payload, backend, calls, bounds, clock = sweep_run(persistent=persistent, attempts=[_measured()] * 6, usable=usable)
+def test_session_admission_skip_is_not_a_boot_failure(sweep_run, usable):
+    payload, backend, calls, bounds, clock = sweep_run(attempts=[_measured()] * 6, usable=usable)
     assert not backend.calls
-    assert len(calls) == 1
+    assert not calls
     assert len(bounds) == 1
     assert clock.elapsed == 0.0
     assert payload["status"] == "skipped"
@@ -232,7 +222,7 @@ def test_session_admission_skip_is_not_a_boot_failure(sweep_run, persistent, usa
 
 
 def test_unbounded_session_keeps_unbounded_grid(sweep_run):
-    payload, backend, calls, bounds, clock = sweep_run(persistent=True, attempts=[_measured()] * 6, bounded=False)
+    payload, backend, calls, bounds, clock = sweep_run(attempts=[_measured()] * 6, bounded=False)
     assert payload["status"] == "succeeded"
     assert payload["budget_exhausted"] is False
     assert len(backend.calls) == 6
@@ -240,11 +230,9 @@ def test_unbounded_session_keeps_unbounded_grid(sweep_run):
     assert clock.elapsed == 30.0
 
 
-@pytest.mark.parametrize("persistent", [False, True], ids=["restart-rungs", "boot-and-reuse"])
 @pytest.mark.parametrize("baseline_runtime_sec", [5.0, None], ids=["measured", "unknown"])
-def test_two_hour_sweep_admits_work_below_hard_cap(sweep_run, persistent, baseline_runtime_sec):
+def test_two_hour_sweep_admits_work_below_hard_cap(sweep_run, baseline_runtime_sec):
     payload, backend, calls, bounds, clock = sweep_run(
-        persistent=persistent,
         attempts=[_measured()] * 6,
         usable=7080.0,
         max_minutes=120,
@@ -262,10 +250,8 @@ def test_two_hour_sweep_admits_work_below_hard_cap(sweep_run, persistent, baseli
     assert payload["budget_exhausted"] is False
 
 
-@pytest.mark.parametrize("persistent", [False, True], ids=["restart-rungs", "boot-and-reuse"])
-def test_sweep_keeps_running_after_remaining_drops_below_hard_cap(sweep_run, persistent):
+def test_sweep_keeps_running_after_remaining_drops_below_hard_cap(sweep_run):
     payload, backend, calls, bounds, clock = sweep_run(
-        persistent=persistent,
         attempts=[_measured(1300.0)] + [_measured()] * 5,
         bounded=False,
         total_budget_sec=9000,
@@ -279,10 +265,9 @@ def test_sweep_keeps_running_after_remaining_drops_below_hard_cap(sweep_run, per
 @pytest.mark.parametrize(
     "usable", [None, 7080.0, 9000.0, 21480.0], ids=["sweep-only", "session-earlier", "tied", "sweep-earlier"]
 )
-def test_boot_retries_share_total_budget_and_preserve_stop_source(sweep_run, usable):
+def test_hung_rungs_share_total_budget_and_preserve_stop_source(sweep_run, usable):
     recorder = MagicMock()
     payload, backend, calls, bounds, clock = sweep_run(
-        persistent=True,
         attempts=[LaunchAttempt(outcome="hang", server_log="Loading model weights; not ready\n")] * 2,
         bounded=usable is not None,
         usable=usable or 40.0,
@@ -331,22 +316,18 @@ def test_boot_retries_share_total_budget_and_preserve_stop_source(sweep_run, usa
     recorder.finish.assert_called_once_with(payload, stop_reason="")
 
 
-@pytest.mark.parametrize("persistent", [False, True], ids=["restart-rungs", "boot-and-reuse"])
-@pytest.mark.parametrize("first_duration", [None, 6.0], ids=["initial-admission", "remaining-admission"])
-def test_sweep_admission_prices_measurement_and_preserves_budget_fields(sweep_run, persistent, first_duration):
-    attempts = [_measured(first_duration)] if first_duration is not None else [_measured()]
-    launches = int(first_duration is not None)
-    total = 10 if launches else 4
+def test_sweep_admission_prices_measurement_and_preserves_budget_fields(sweep_run):
+    """A 4 s budget cannot admit a 5 s rung: neither arm starts, and each records the gate that refused it."""
+    total = 4
     recorder = MagicMock()
     payload, backend, calls, bounds, clock = sweep_run(
-        persistent=persistent,
-        attempts=attempts,
+        attempts=[_measured()],
         bounded=False,
         total_budget_sec=total,
         recorder=recorder,
     )
-    assert len(backend.calls) == launches
-    assert clock.elapsed == (first_duration or 0.0)
+    assert len(backend.calls) == 0
+    assert clock.elapsed == 0.0
     assert payload["status"] == "skipped"
     assert payload["was_skipped"] is True
     assert payload["skip_reason"] == "budget_exhausted_no_successful_pairs"
@@ -356,17 +337,16 @@ def test_sweep_admission_prices_measurement_and_preserves_budget_fields(sweep_ru
     assert payload["budget_skip_reason"] == "insufficient_remaining_for_variant"
     assert payload["budget_remaining_sec"] == 4.0
     points = payload["baseline"]["points"] + payload["optimized"]["points"]
-    assert sum(point["status"] == "succeeded" for point in points) == launches
+    assert not any(point["status"] == "succeeded" for point in points)
     skipped = [point for point in points if point["status"] == "skipped"]
-    assert len(skipped) == 6 - launches
+    assert len(skipped) == 6
     assert {point["error_class"] for point in skipped} == {"budget_exhausted"}
-    if persistent:
-        _server_lifecycle.teardown_lifecycle_server.assert_called_once()
-    recorded_skips = [
-        call.args[1] for call in recorder.record_variant.call_args_list if call.args[1].point["status"] == "skipped"
-    ]
-    assert recorded_skips
-    assert all(rung.stage == "budget_skip" and rung.budget_remaining_sec == 4.0 for rung in recorded_skips)
+    # Refused before either arm started: each arm records the gate, and no rung of a ladder it never began.
+    assert not [call for call in recorder.record_variant.call_args_list if call.args[1].point["status"] == "skipped"]
+    refusals = {call.args[0]: call.kwargs for call in recorder.record_arm_refused.call_args_list}
+    assert refusals == {
+        arm: {"reason": "insufficient_remaining_for_variant", "remaining_sec": 4.0} for arm in ("optimized", "baseline")
+    }
     recorder.record_budget.assert_called_once_with(
         SweepBudget(
             declared_total_sec=total,
@@ -380,9 +360,9 @@ def test_sweep_admission_prices_measurement_and_preserves_budget_fields(sweep_ru
 
 
 def test_the_agentx_ladder_keeps_the_declared_budget(sweep_run):
+    """9000 s admits one 6660 s rung but not the pair a level needs, so no rung starts and none is half a pair."""
     recorder = MagicMock()
     payload, backend, calls, bounds, clock = sweep_run(
-        persistent=False,
         attempts=[_measured(6660.0)],
         bounded=False,
         total_budget_sec=9000,
@@ -391,17 +371,15 @@ def test_the_agentx_ladder_keeps_the_declared_budget(sweep_run):
         concs=None,
         recorder=recorder,
     )
-    assert len(backend.calls) == 1
-    assert calls[0]["grid"][0].name == "optimized_conc28"
+    assert not backend.calls
     assert payload["concs_requested"] == conc_sweep.AGENTX_DEFAULT_CONCS
     assert len(payload["baseline"]["points"]) == len(payload["optimized"]["points"]) == 7
     points = payload["baseline"]["points"] + payload["optimized"]["points"]
-    assert sum(point["status"] == "succeeded" for point in points) == 1
-    skipped = [point for point in points if point["status"] == "skipped"]
-    assert len(skipped) == 13
-    assert {point["error_class"] for point in skipped} == {"budget_exhausted"}
+    assert {point["status"] for point in points} == {"skipped"}
+    assert {point["error_class"] for point in points} == {"budget_exhausted"}
+    assert payload["status"] == "skipped"
     assert payload["total_budget_sec"] == 9000
-    assert payload["budget_remaining_sec"] == 2340.0
+    assert payload["budget_remaining_sec"] == 9000.0
     assert payload["budget_exhausted"] is True
     assert payload["budget_skip_reason"] == "insufficient_remaining_for_variant"
     recorder.record_budget.assert_called_once_with(
@@ -419,12 +397,13 @@ def test_the_agentx_ladder_keeps_the_declared_budget(sweep_run):
 @pytest.mark.parametrize("remaining", [0.0, 4.0], ids=["expired", "positive"])
 def test_grid_unknown_estimate_does_not_use_hard_cap_for_admission(sweep_run, remaining):
     payload, backend, calls, bounds, clock = sweep_run(
-        persistent=False,
         attempts=[LaunchAttempt(outcome="hang")],
         usable=remaining,
         concs=(8,),
         baseline_runtime_sec=None,
     )
+    # With no estimate the level gate refuses only an expired deadline, and refuses it before any rung starts.
+    assert len(calls) == (1 if remaining > 0 else 0)
     assert len(backend.calls) == (1 if remaining > 0 else 0)
     assert clock.elapsed == remaining
     assert payload["budget_skip_reason"] == SESSION_TIME_EXHAUSTED_CLASS
@@ -452,9 +431,7 @@ def test_grid_deadline_attribution_does_not_relabel_cancellation(sweep_run, monk
         if cancelled
         else LaunchAttempt(outcome="hang")
     )
-    payload, backend, calls, bounds, clock = sweep_run(
-        persistent=False, attempts=[attempt] * 2, usable=40.0, concs=(8,)
-    )
+    payload, backend, calls, bounds, clock = sweep_run(attempts=[attempt] * 2, usable=40.0, concs=(8,))
     expected = STOPPED_BY_THE_RUN[ORCHESTRATOR_CANCELLED_CLASS] if cancelled else sweep_stop
     assert backend.calls
     point = payload["optimized"]["points"][0]
@@ -464,3 +441,128 @@ def test_grid_deadline_attribution_does_not_relabel_cancellation(sweep_run, monk
     abort = json.loads(abort_path.read_text(encoding="utf-8"))
     assert abort["error_class"] == expected.error_class
     assert abort["error"] == f"{expected.interrupted}; tree reaped"
+
+
+def _launched(calls):
+    return [call["grid"][0].name for call in calls]
+
+
+def test_a_budget_that_fits_two_levels_keeps_two_pairs(sweep_run):
+    """Each 5 s rung, two per level: 22 s runs levels 8 and 4 as pairs and refuses 2 and 1, rather than spending it
+    all on one arm's ladder and pairing nothing."""
+    payload, backend, calls, bounds, clock = sweep_run(
+        attempts=[_measured()] * 8, bounded=False, total_budget_sec=22, concs=(8, 4, 2, 1)
+    )
+    assert _launched(calls) == ["optimized_conc8", "baseline_conc8", "optimized_conc4", "baseline_conc4"]
+    assert payload["status"] == "succeeded"
+    assert payload["summary"]["successful_pairs"] == 2
+    assert payload["budget_exhausted"] is True
+    assert payload["budget_skip_reason"] == "insufficient_remaining_for_variant"
+    assert payload["budget_remaining_sec"] == 2.0
+    skipped = [p for arm in ("optimized", "baseline") for p in payload[arm]["points"] if p["status"] == "skipped"]
+    assert sorted((p["arm"], p["conc"]) for p in skipped) == [
+        ("baseline", 1),
+        ("baseline", 2),
+        ("optimized", 1),
+        ("optimized", 2),
+    ]
+    assert {p["error_class"] for p in skipped} == {"budget_exhausted"}
+
+
+def test_a_timed_out_rung_does_not_stop_the_next_level(sweep_run):
+    """The optimized rung at the top level runs into the benchmark's own timeout; its partner still runs, and so does
+    every level below it."""
+    payload, backend, calls, bounds, clock = sweep_run(
+        attempts=[LaunchAttempt(outcome="hang")] + [_measured()] * 5, bounded=False, total_budget_sec=7900
+    )
+    assert _launched(calls) == [f"{arm}_conc{conc}" for conc in (8, 4, 2) for arm in ("optimized", "baseline")]
+    top = next(p for p in payload["optimized"]["points"] if p["conc"] == 8)
+    assert top["status"] == "failed"
+    assert top["error_class"] == "magpie_timeout"
+    assert payload["status"] == "succeeded"
+    assert payload["summary"]["successful_pairs"] == 2
+    assert payload["budget_exhausted"] is False
+
+
+@pytest.mark.parametrize("concs", [(8, 4, 2, 1), (1, 8, 2, 4), (4, 1, 8, 2, 8)], ids=["sorted", "shuffled", "repeated"])
+def test_the_levels_run_high_to_low_with_both_arms_at_each(sweep_run, concs):
+    payload, backend, calls, bounds, clock = sweep_run(attempts=[_measured()] * 8, bounded=False, concs=concs)
+    assert _launched(calls) == [f"{arm}_conc{conc}" for conc in (8, 4, 2, 1) for arm in ("optimized", "baseline")]
+    assert payload["summary"]["successful_pairs"] == 4
+
+
+@pytest.mark.parametrize(
+    "warmup, total, launched",
+    [
+        ("0", 9, []),
+        ("0", 15, ["optimized_conc8", "baseline_conc8"]),
+        # A warm-up pass doubles what each rung is admitted against: 19 s fits one 10 s rung, not the 20 s of a pair.
+        ("1", 19, []),
+    ],
+    ids=["first-level", "after-a-pair", "warm-up-pass"],
+)
+def test_a_budget_for_one_arm_does_not_start_the_level(sweep_run, monkeypatch, warmup, total, launched):
+    """What is left fits one 5 s rung (10 s with its warm-up pass) and not its partner, so neither runs."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_RUN_GRID_WARMUP", warmup)
+    recorder = MagicMock()
+    payload, backend, calls, bounds, clock = sweep_run(
+        attempts=[_measured()] * 4, bounded=False, total_budget_sec=total, concs=(8, 4), recorder=recorder
+    )
+    remaining = total - 5.0 * len(launched)
+    assert _launched(calls) == launched
+    assert payload["budget_exhausted"] is True
+    assert payload["budget_skip_reason"] == "insufficient_remaining_for_variant"
+    assert payload["budget_remaining_sec"] == remaining
+    refused = [(p["arm"], p["conc"]) for arm in ("optimized", "baseline") for p in payload[arm]["points"]]
+    refused = [key for key in refused if f"{key[0]}_conc{key[1]}" not in launched]
+    assert len(refused) == 4 - len(launched)
+    assert payload["summary"]["successful_pairs"] == len(launched) // 2
+    assert payload["status"] == ("succeeded" if launched else "skipped")
+    if not launched:
+        refusals = {c.args[0]: c.kwargs for c in recorder.record_arm_refused.call_args_list}
+        assert refusals == {
+            arm: {"reason": "insufficient_remaining_for_variant", "remaining_sec": remaining}
+            for arm in ("optimized", "baseline")
+        }
+        recorder.open_arm.assert_not_called()
+
+
+@pytest.mark.parametrize("first_sec", [9.0, 9.9], ids=["leaves-1s", "leaves-0.1s"])
+def test_a_first_arm_that_overruns_its_estimate_does_not_cost_its_partner_the_admission(sweep_run, first_sec):
+    """A 10 s budget admits the level (5 s per rung, two rungs). The optimized rung takes ``first_sec`` instead, leaving
+    too little for the partner under ``run_grid``'s gate; the partner still runs, so the level is a pair,
+    and no level below it starts."""
+    payload, backend, calls, bounds, clock = sweep_run(
+        attempts=[_measured(first_sec), _measured()], bounded=False, total_budget_sec=10, concs=(8, 4)
+    )
+    assert _launched(calls) == ["optimized_conc8", "baseline_conc8"]
+    top = [p for arm in ("optimized", "baseline") for p in payload[arm]["points"] if p["conc"] == 8]
+    assert [p["status"] for p in top] == ["succeeded", "succeeded"]
+    assert payload["summary"]["successful_pairs"] == 1
+    assert payload["status"] == "succeeded"
+    assert payload["budget_exhausted"] is True
+    below = [p for arm in ("optimized", "baseline") for p in payload[arm]["points"] if p["conc"] == 4]
+    assert {p["status"] for p in below} == {"skipped"}
+
+
+@pytest.mark.parametrize(
+    ("usable", "extended"), [(40.0, True), (12.0, False)], ids=["session-has-room", "session-binds"]
+)
+def test_the_partner_is_never_extended_past_the_session_deadline(sweep_run, usable, extended):
+    """On a bounded session the partner of an overrunning first arm may outlast the 10 s sweep budget, but only up to
+    the session's own deadline; when that deadline is the nearer limit there is nothing to extend."""
+    payload, backend, calls, bounds, clock = sweep_run(
+        attempts=[_measured(9.0), _measured()], bounded=True, usable=usable, total_budget_sec=10, concs=(8, 4)
+    )
+    session_deadline = 10000.0 + usable
+    assert [call["session_deadline_sec"] for call in calls][0] == 10010.0
+    partner_deadlines = [call["session_deadline_sec"] for call in calls[1:]]
+    assert all(deadline <= session_deadline for deadline in partner_deadlines)
+    assert all(call.session_deadline_sec <= session_deadline for call in backend.calls)
+    assert clock.elapsed <= usable
+    if extended:
+        assert _launched(calls) == ["optimized_conc8", "baseline_conc8"]
+        assert partner_deadlines[0] > 10010.0
+    else:
+        assert partner_deadlines == [session_deadline]
+        assert len(backend.calls) == 1

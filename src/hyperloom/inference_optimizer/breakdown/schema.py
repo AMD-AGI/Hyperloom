@@ -697,10 +697,10 @@ class V6ConcSweepInputAnchor(TypedDict, total=False):
 class V6ConcSweepPlan(TypedDict, total=False):
     """The ladder the sweep resolved and the order it will run it in.
 
-    ``arms_order`` matters to a reader of the budget: the optimized arm runs
-    first as the more informative of the two, so a budget that runs out takes
-    the baseline arm with it. ``concs_ordered`` is descending because a
-    single-server arm boots at the most demanding rung and reuses down."""
+    The sweep runs ``concs_ordered`` (deduplicated, descending) one level at a
+    time, and ``arms_order`` is the order the arms run within each level. A
+    level starts only when the time left admits a rung of every arm, so a
+    budget that runs out ends the ladder between levels, not between arms."""
 
     grid_source: str | None
     concs_requested: list[int]

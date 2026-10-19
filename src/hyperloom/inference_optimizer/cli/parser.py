@@ -1045,9 +1045,9 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="conc_sweep_concs",
         type=str,
         default=None,
-        help="Comma-separated CONC ladder for --enable-conc-sweep. Ordered "
-        "high-to-low internally for single-server arm reuse, so the order given "
-        "does not matter. Defaults to the ladder for the workload: "
+        help="Comma-separated CONC ladder for --enable-conc-sweep. Run "
+        "high-to-low, both arms at each CONC before the next lower one, so the "
+        "order given does not matter. Defaults to the ladder for the workload: "
         "256,128,64,32,16,8,4,2 for synthetic, 1,4,8,10,14,20,28 for MLPerf. "
         "Unavailable for native Magpie AgentX.",
     )
@@ -1056,14 +1056,14 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="conc_sweep_total_budget_sec",
         type=int,
         default=9000,
-        help="Total wall-clock budget (seconds) for the whole conc-sweep "
-        "action, independent of the per-variant Magpie timeout. "
-        "Once exhausted, remaining variants are recorded as "
-        "status=skipped / error_class=budget_exhausted and the "
-        "JSON envelope carries budget_exhausted=true. Default 9000 "
-        "(~2.5h); set to 0 to disable. Also bounded above by the "
-        "main session wall-clock deadline since conc_sweep runs as "
-        "a SWEEP-phase action.",
+        help="Total wall-clock budget (seconds) for the whole conc-sweep action, independent of the per-variant "
+        "Magpie timeout. Once exhausted, remaining variants are recorded as status=skipped / "
+        "error_class=budget_exhausted and the JSON envelope carries budget_exhausted=true. Default 9000 (~2.5h); "
+        "set to 0 to disable. Also bounded above by the main session wall-clock deadline since conc_sweep runs as "
+        "a SWEEP-phase action. A CONC level starts only when the time left admits a rung of both arms, so pairing "
+        "L levels takes (L-1) x 2 x one rung's wall time plus the last level's admission of "
+        "2 x rung_cost_sec x benchmark passes. A level's second arm may run past the budget (never past the main "
+        "session deadline) so the level is not left with one arm measured.",
     )
     # Per-variant explore overtime kill ratio (mirrored to SharedState.explore_overtime_kill_ratio). 0 disables.
     # Explore variant hard timeout — operator override for the auto-derived cap. 0 (default) keeps auto-derive;

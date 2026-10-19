@@ -28,10 +28,8 @@ from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     STAGE_BOOT_ATTEMPT,
     STAGE_BUDGET_SKIP,
     STAGE_REUSE,
-    STAGE_SERVER_RESTART,
     STRATEGY_REFUSED,
     STRATEGY_SERVER_RESTART,
-    STRATEGY_SINGLE_SERVER,
     ArmStrategy,
     SweepAnchor,
     SweepBudget,
@@ -316,21 +314,13 @@ def test_an_arm_says_how_it_ran_its_ladder(_bound_session):
     )
     recorder.record_arm_strategy(
         ARM_OPTIMIZED,
-        ArmStrategy(
-            strategy=STRATEGY_SINGLE_SERVER,
-            lifecycle_eligible=True,
-            lifecycle_reason="supported",
-            port=8888,
-            framework="sglang",
-            serving_lease_held=True,
-        ),
+        ArmStrategy(strategy=STRATEGY_SERVER_RESTART, serving_lease_held=True),
     )
     recorder.finish_arm(ARM_OPTIMIZED, status="succeeded")
     recorder.finish(_final())
 
     arm = _ext(_bound_session)["arms"][ARM_OPTIMIZED]
-    assert arm["strategy"] == STRATEGY_SINGLE_SERVER
-    assert arm["lifecycle"] == {"eligible": True, "reason": "supported", "port": 8888, "framework": "sglang"}
+    assert arm["strategy"] == STRATEGY_SERVER_RESTART
     assert arm["serving_lease_held"] is True
     assert arm["status"] == "succeeded"
     # The load each rung carries is derived from its concurrency and was never
@@ -339,30 +329,6 @@ def test_an_arm_says_how_it_ran_its_ladder(_bound_session):
         {"name": "optimized_conc64", "conc": 64, "num_prompts": 320},
         {"name": "optimized_conc32", "conc": 32, "num_prompts": 160},
     ]
-
-
-def test_an_arm_that_restarted_per_rung_says_why(_bound_session):
-    recorder = _recorder()
-    recorder.open_arm(ARM_BASELINE, extra_server_args="", extra_envs={})
-    recorder.record_arm_strategy(
-        ARM_BASELINE,
-        ArmStrategy(
-            strategy=STRATEGY_SERVER_RESTART,
-            reason="framework_not_lifecycle_eligible",
-            lifecycle_eligible=False,
-            lifecycle_reason="no_server_lifecycle",
-            port=8888,
-            framework="vllm",
-            serving_lease_held=False,
-        ),
-    )
-    recorder.finish_arm(ARM_BASELINE, status="succeeded")
-    recorder.finish(_final())
-
-    arm = _ext(_bound_session)["arms"][ARM_BASELINE]
-    assert arm["strategy"] == STRATEGY_SERVER_RESTART
-    assert arm["strategy_reason"] == "framework_not_lifecycle_eligible"
-    assert arm["lifecycle"]["eligible"] is False
 
 
 def test_the_baseline_arms_empty_args_are_an_answer_rather_than_a_gap(_bound_session):
@@ -486,9 +452,9 @@ def test_a_rung_the_budget_refused_is_not_a_benchmark_failure(_bound_session):
 
 
 # ---------------------------------------------------------------------------
-# Boot-retry-descend
+# Events persisted by the earlier boot-once ladder
 # ---------------------------------------------------------------------------
-def test_the_concurrencies_the_server_would_not_boot_at_are_reported(_bound_session):
+def test_a_persisted_boot_attempt_still_reads_as_one(_bound_session):
     recorder = _recorder()
     recorder.open_arm(ARM_OPTIMIZED, extra_server_args="--x", extra_envs={})
     recorder.record_variant(
@@ -502,72 +468,20 @@ def test_the_concurrencies_the_server_would_not_boot_at_are_reported(_bound_sess
         ),
     )
     recorder.record_variant(ARM_OPTIMIZED, SweepRung(stage=STAGE_BOOT, conc=32, point=_point(32)))
-    recorder.commit_variant(
+    recorder._record_arm(
         ARM_OPTIMIZED,
-        stage=STAGE_BOOT_ATTEMPT,
-        conc=64,
-        point=_point(64, status="failed", error="OOM", error_class="single_server_boot_failed"),
-    )
-    recorder.record_arm_boot(
-        ARM_OPTIMIZED,
-        succeeded=True,
-        booted_conc=32,
-        attempted_concs=[64, 32],
-        failed_concs=[64],
+        {"boot": {"succeeded": True, "booted_conc": 32, "attempted_concs": [64, 32], "failed_concs": [64]}},
     )
     recorder.finish_arm(ARM_OPTIMIZED, status="degraded")
     recorder.finish(_final())
 
-    boot = _ext(_bound_session)["arms"][ARM_OPTIMIZED]["boot"]
-    assert boot["succeeded"] is True
-    assert boot["booted_conc"] == 32
-    assert boot["attempted_concs"] == [64, 32]
-    assert boot["failed_concs"] == [64]
-    assert [(row["conc"], row["status"], row["committed"]) for row in boot["attempts"]] == [
-        (64, "failed", True),
+    arm = _ext(_bound_session)["arms"][ARM_OPTIMIZED]
+    assert [point["conc"] for point in arm["points"]] == [32]
+    assert [(row["conc"], row["status"], row["committed"]) for row in arm["boot"]["attempts"]] == [
+        (64, "failed", False),
         (32, "succeeded", True),
     ]
-    assert boot["attempts"][0]["error"] == "OOM"
-
-
-def test_a_failed_boot_counts_only_once_a_lower_rung_came_up(_bound_session):
-    recorder = _recorder()
-    recorder.open_arm(ARM_OPTIMIZED, extra_server_args="--x", extra_envs={})
-    for conc in (64, 32):
-        recorder.record_variant(
-            ARM_OPTIMIZED,
-            SweepRung(
-                stage=STAGE_BOOT_ATTEMPT,
-                conc=conc,
-                point=_point(conc, status="failed", error_class="single_server_boot_failed"),
-                committed=False,
-            ),
-        )
-    recorder.record_arm_boot(ARM_OPTIMIZED, succeeded=False, attempted_concs=[64, 32], failed_concs=[64, 32])
-    recorder.record_arm_strategy(
-        ARM_OPTIMIZED,
-        ArmStrategy(
-            strategy=STRATEGY_SERVER_RESTART,
-            reason="all_boot_attempts_failed",
-            lifecycle_eligible=True,
-            lifecycle_reason="supported",
-        ),
-    )
-    recorder.record_variant(ARM_OPTIMIZED, SweepRung(stage=STAGE_SERVER_RESTART, conc=64, point=_point(64)))
-    recorder.record_variant(ARM_OPTIMIZED, SweepRung(stage=STAGE_SERVER_RESTART, conc=32, point=_point(32)))
-    recorder.finish_arm(ARM_OPTIMIZED, status="succeeded")
-    recorder.finish(_final())
-
-    arm = _ext(_bound_session)["arms"][ARM_OPTIMIZED]
-    # The curve is the retry's results, one per concurrency, not four rows.
-    assert [(point["conc"], point["stage"]) for point in arm["points"]] == [
-        (32, STAGE_SERVER_RESTART),
-        (64, STAGE_SERVER_RESTART),
-    ]
-    assert arm["boot"]["succeeded"] is False
-    assert [row["committed"] for row in arm["boot"]["attempts"]] == [False, False]
-    assert arm["strategy"] == STRATEGY_SERVER_RESTART
-    assert arm["strategy_reason"] == "all_boot_attempts_failed"
+    assert arm["boot"]["failed_concs"] == [64]
 
 
 # ---------------------------------------------------------------------------
@@ -930,15 +844,7 @@ def test_every_recorded_block_is_the_block_the_schema_declares(_bound_session):
     recorder.record_arm_grid(ARM_OPTIMIZED, rungs=[{"name": "c64", "conc": 64, "num_prompts": 320}])
     recorder.record_arm_strategy(
         ARM_OPTIMIZED,
-        ArmStrategy(
-            strategy=STRATEGY_SINGLE_SERVER,
-            reason="lifecycle_eligible",
-            lifecycle_eligible=True,
-            lifecycle_reason="sglang keeps a server across rungs",
-            port=30000,
-            framework="sglang",
-            serving_lease_held=True,
-        ),
+        ArmStrategy(strategy=STRATEGY_SERVER_RESTART, reason="lifecycle_eligible", serving_lease_held=True),
     )
     recorder.record_variant(
         ARM_OPTIMIZED,
@@ -953,7 +859,15 @@ def test_every_recorded_block_is_the_block_the_schema_declares(_bound_session):
             budget_remaining_sec=7000.0,
         ),
     )
-    recorder.record_arm_boot(ARM_OPTIMIZED, succeeded=True, booted_conc=64, attempted_concs=[64], failed_concs=[])
+    # The earlier ladder's arm rows are still read, so the wire shape of their ``lifecycle`` and ``boot`` blocks is
+    # held to the schema as it was persisted.
+    recorder._record_arm(
+        ARM_OPTIMIZED,
+        {
+            "lifecycle": {"eligible": True, "reason": "supported", "port": 30000, "framework": "sglang"},
+            "boot": {"succeeded": True, "booted_conc": 64, "attempted_concs": [64], "failed_concs": []},
+        },
+    )
     recorder.finish_arm(ARM_OPTIMIZED, status="succeeded")
     recorder.open_arm(ARM_BASELINE, extra_server_args="", extra_envs={})
     recorder.record_arm_refused(ARM_BASELINE, reason="insufficient_remaining_for_variant", remaining_sec=12.0)

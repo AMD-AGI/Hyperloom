@@ -127,7 +127,6 @@ def test_optimized_arm_missing_current_best():
     assert _optimized_arm(s) is None
 
 
-@pytest.mark.parametrize("persistent_server", [False, True])
 @pytest.mark.parametrize(
     "current_best, expected_args, expected_env",
     [
@@ -158,15 +157,12 @@ def test_optimized_arm_missing_current_best():
 def test_conc_sweep_preserves_retained_launch_controls(
     session_dir: Path,
     baseline_yaml: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    persistent_server: bool,
     current_best: dict[str, Any],
     expected_args: str,
     expected_env: str | None,
 ):
     import yaml
 
-    from hyperloom.orchestrator.actions.executors import _server_lifecycle
     from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
 
     baseline_args = (
@@ -186,10 +182,6 @@ def test_conc_sweep_preserves_retained_launch_controls(
         )
     )
     state = _make_state(baseline_config_path=str(baseline_yaml), current_best=current_best)
-    if persistent_server:
-        _patch_lifecycle_eligible(monkeypatch, [])
-    else:
-        monkeypatch.setattr(_server_lifecycle, "resolve_lifecycle_params", lambda _: {"eligible": False})
     children = []
 
     async def launch_children(*, grid: list[GridVariant], base_yaml_path: Path, **kwargs):
@@ -228,13 +220,10 @@ def test_conc_sweep_preserves_retained_launch_controls(
 
 # _build_comparison
 @pytest.mark.parametrize("extra_args", ["", "--max-running-requests 64"])
-@pytest.mark.parametrize("persistent_server", [False, True])
 def test_conc_sweep_loads_retained_overlay_only_in_optimized_arm(
     session_dir: Path,
     baseline_yaml: Path,
-    monkeypatch: pytest.MonkeyPatch,
     extra_args: str,
-    persistent_server: bool,
 ):
     import os
     import subprocess
@@ -242,7 +231,6 @@ def test_conc_sweep_loads_retained_overlay_only_in_optimized_arm(
     import yaml
 
     from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
-    from hyperloom.orchestrator.actions.executors import _server_lifecycle
 
     overlay = session_dir / "retained_overlay"
     overlay.mkdir()
@@ -252,11 +240,6 @@ def test_conc_sweep_loads_retained_overlay_only_in_optimized_arm(
         baseline_config_path=str(baseline_yaml),
         current_best={"extra_server_args": extra_args, "extra_envs": {}, "final_overlay": str(overlay)},
     )
-    teardown_log: list[tuple] = []
-    if persistent_server:
-        _patch_lifecycle_eligible(monkeypatch, teardown_log)
-    else:
-        monkeypatch.setattr(_server_lifecycle, "resolve_lifecycle_params", lambda _: {"eligible": False})
     child_results: list[tuple[str, str]] = []
 
     async def _child_run_grid(*, grid: list[GridVariant], **kwargs):
@@ -287,8 +270,6 @@ def test_conc_sweep_loads_retained_overlay_only_in_optimized_arm(
     assert len(child_results) == 4
     for name, loaded in child_results:
         assert loaded == ("candidate" if name.startswith("optimized_") else "stock")
-    if persistent_server:
-        assert len(teardown_log) == 2
 
 
 @pytest.mark.parametrize("overlay_state", ["missing", "inert", "joined", "traversal"])
@@ -605,7 +586,6 @@ def test_run_conc_sweep_canonicalizes_gpu_type_to_runner(
 def test_conc_sweep_preserves_baseline_script_through_variant_materialization(session_dir, baseline_yaml, monkeypatch):
     import yaml
 
-    from hyperloom.orchestrator.actions.executors import _server_lifecycle
     from hyperloom.orchestrator.actions.executors._grid_runner import _build_variant_yaml
 
     baseline_yaml.write_text(
@@ -616,7 +596,6 @@ def test_conc_sweep_preserves_baseline_script_through_variant_materialization(se
     state.gpu_type = "MI355X"
     state.baseline_benchmark_script = "sglang_custom.sh"
     monkeypatch.setenv("GPU_TYPE", "mi355x")
-    monkeypatch.setattr(_server_lifecycle, "teardown_lifecycle_server", lambda **_kwargs: None)
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
     )
@@ -1321,65 +1300,32 @@ def test_build_arm_grid_optimized_arm_carries_args():
     assert int(grid[0].extra_envs["NUM_PROMPTS"]) >= 4
 
 
-# ───────────────────────────────────────────────────────────────────────────── Change 1: soft switch + arm-major
-# orchestration ─────────────────────────────────────────────────────────────────────────────
+# Interleaved ladder: both arms at each CONC, high to low
 
 
-def test_run_conc_sweep_single_server_arm_major_order(
+def test_run_conc_sweep_runs_both_arms_at_each_level_high_to_low(
     session_dir: Path,
     baseline_yaml: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ):
-    """In single-server mode optimized arm runs before baseline."""
+    """The optimized arm and then the baseline arm at each CONC, highest first, each rung on its own server."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
-    call_log: list[str] = []
+    calls: list[tuple[str, Any]] = []
 
-    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
-        for v in grid:
-            call_log.append(v.name)
+    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
+        calls.extend((v.name, kw.get("server_lifecycle")) for v in grid)
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
     with (
         patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
         patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
     ):
-        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 16, 4]))
 
     assert payload["status"] == "succeeded"
-    # optimized_ variants should appear before baseline_ variants.
-    first_opt = next((i for i, n in enumerate(call_log) if n.startswith("optimized_")), None)
-    first_base = next((i for i, n in enumerate(call_log) if n.startswith("baseline_")), None)
-    assert first_opt is not None and first_base is not None
-    assert first_opt < first_base, f"expected optimized before baseline; got {call_log}"
-
-
-def test_run_conc_sweep_single_server_concs_descending(
-    session_dir: Path,
-    baseline_yaml: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """CONCs within each arm are visited highest-to-lowest."""
-    state = _make_state(baseline_config_path=str(baseline_yaml))
-    call_log: list[str] = []
-
-    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
-        for v in grid:
-            call_log.append(v.name)
-        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
-    ):
-        asyncio.run(run_conc_sweep(state, session_dir, concs=[1, 4, 16]))
-
-    opt_calls = [n for n in call_log if n.startswith("optimized_")]
-    opt_concs = [int(n.split("conc")[1]) for n in opt_calls]
-    assert opt_concs == sorted(opt_concs, reverse=True), f"expected descending, got {opt_concs}"
-
-    base_calls = [n for n in call_log if n.startswith("baseline_")]
-    base_concs = [int(n.split("conc")[1]) for n in base_calls]
-    assert base_concs == sorted(base_concs, reverse=True), f"expected descending, got {base_concs}"
+    assert [name for name, _ in calls] == [
+        f"{arm}_conc{conc}" for conc in (16, 4, 1) for arm in ("optimized", "baseline")
+    ]
+    assert all(lifecycle is None for _, lifecycle in calls)
 
 
 # ───────────────────────────────────────────────────────────────────────────── Change 5: _flush_conc_sweep_report
@@ -1726,11 +1672,11 @@ def test_mid_sweep_summary_is_the_final_report_in_progress(
     assert final["status"] == "succeeded"
     assert [[p["conc"] for p in write["optimized"]["points"]] for write in progress] == [
         [16],
-        [4, 16],
+        [16],
         [4, 16],
         [4, 16],
     ]
-    assert [[p["conc"] for p in write["baseline"]["points"]] for write in progress] == [[], [], [16], [4, 16]]
+    assert [[p["conc"] for p in write["baseline"]["points"]] for write in progress] == [[], [16], [16], [4, 16]]
     varying = {"status", "comparison", "summary", "elapsed_sec", "baseline", "optimized"}
     for write in progress:
         assert set(write) == set(final) - _END_ONLY_FIELDS
@@ -2247,44 +2193,17 @@ def test_format_conc_sweep_curve_section_with_png():
     assert "reports/conc_sweep_curve.png" not in embed
 
 
-# ───────────────────────────────────────────────────────────────────────────── Change 1: single-server Option A
-# boot/reuse path (lifecycle-eligible) ─────────────────────────────────────────────────────────────────────────────
-
-
-def _patch_lifecycle_eligible(monkeypatch: pytest.MonkeyPatch, teardown_log: list[tuple]):
-    """Patch resolve_lifecycle_params → eligible and track teardown calls."""
-    import hyperloom.orchestrator.actions.executors._server_lifecycle as _sl
-
-    def _fake_resolve(_cfg_path):
-        return {"eligible": True, "framework": "vllm", "port": 8888, "reason": ""}
-
-    def _fake_teardown(*, pid_dir, framework, port):
-        teardown_log.append((str(pid_dir), framework, port))
-
-    monkeypatch.setattr(_sl, "resolve_lifecycle_params", _fake_resolve)
-    monkeypatch.setattr(_sl, "teardown_lifecycle_server", _fake_teardown)
-
-
-def test_single_server_option_a_boot_and_reuse(
+def test_closing_mid_sweep_skips_the_rungs_left(
     session_dir: Path,
     baseline_yaml: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ):
-    """Option A: highest-CONC boot round + reuse rounds; one teardown per arm."""
-    teardown_log: list[tuple] = []
-    _patch_lifecycle_eligible(monkeypatch, teardown_log)
-
+    """The session starting to close after the first rung skips every rung after it, its partner included."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
-    grid_calls: list[dict] = []
+    ran: list[str] = []
 
-    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
-        grid_calls.append(
-            {
-                "name": grid[0].name,
-                "server_lifecycle": kw.get("server_lifecycle"),
-                "server_already_ready": kw.get("server_already_ready"),
-            }
-        )
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        ran.append(grid[0].name)
+        state.closing_phase = True
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
     with (
@@ -2293,227 +2212,26 @@ def test_single_server_option_a_boot_and_reuse(
     ):
         payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16, 64]))
 
-    assert payload["status"] == "succeeded"
-    # 2 arms × 3 concs = 6 run_grid calls.
-    assert len(grid_calls) == 6
-    # One teardown per arm.
-    assert len(teardown_log) == 2
-
-    # First call per arm = boot round: highest conc, server_already_ready=False, cleanup=False.
-    opt_calls = [c for c in grid_calls if c["name"].startswith("optimized_")]
-    boot = opt_calls[0]
-    assert boot["name"] == "optimized_conc64", f"boot should be highest conc; got {boot['name']}"
-    assert boot["server_already_ready"] is False
-    assert boot["server_lifecycle"]["cleanup"] is False
-
-    # Middle reuse round: server_already_ready=True, cleanup=False.
-    mid = opt_calls[1]
-    assert mid["server_already_ready"] is True
-    assert mid["server_lifecycle"]["cleanup"] is False
-
-    # Last reuse round: cleanup=True.
-    last = opt_calls[-1]
-    assert last["server_lifecycle"]["cleanup"] is True
-
-
-def test_single_server_boot_only_is_measured_by_reuse_round(
-    session_dir: Path,
-    baseline_yaml: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Booting the persistent server is not a data point; the same CONC must still run as a client round."""
-    state = _make_state(baseline_config_path=str(baseline_yaml))
-    teardown_log: list[tuple] = []
-    _patch_lifecycle_eligible(monkeypatch, teardown_log)
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
-    )
-    calls: list[dict[str, Any]] = []
-
-    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
-        variant = grid[0]
-        calls.append(
-            {
-                "name": variant.name,
-                "server_lifecycle": kw.get("server_lifecycle"),
-                "server_already_ready": kw.get("server_already_ready"),
-                "base_extra_envs": kw.get("base_extra_envs") or {},
-            }
-        )
-        if kw.get("server_lifecycle") and kw.get("server_already_ready") is False:
-            booted = _fake_variant(
-                variant.name,
-                throughput=None,
-                envs=variant.extra_envs,
-                status="succeeded",
-                error=None,
-            )
-            booted.note = "server_lifecycle_boot_only"
-            return [booted]
-        return [_fake_variant(variant.name, throughput=100.0, envs=variant.extra_envs)]
-
-    monkeypatch.setattr("hyperloom.orchestrator.kernel.conc_sweep.run_grid", _fake_run_grid)
-
-    payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[32, 16]))
-
-    assert [call["name"] for call in calls[:3]] == [
-        "optimized_conc32",
-        "optimized_conc32",
-        "optimized_conc16",
-    ]
-    boot, measured_boot = calls[0], calls[1]
-    assert boot["server_already_ready"] is False
-    assert boot["base_extra_envs"] == {"MAGPIE_RUN_PHASE": "server"}
-    assert measured_boot["server_already_ready"] is True
-    assert payload["summary"]["successful_pairs"] == 2
-
-
-def test_single_server_boot_retry_descend(
-    session_dir: Path,
-    baseline_yaml: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """If the highest-CONC boot fails, the next lower CONC is tried as boot."""
-    teardown_log: list[tuple] = []
-    _patch_lifecycle_eligible(monkeypatch, teardown_log)
-
-    state = _make_state(baseline_config_path=str(baseline_yaml))
-    boot_attempts: list[str] = []
-
-    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
-        name = grid[0].name
-        is_boot = kw.get("server_already_ready") is False
-        if is_boot:
-            boot_attempts.append(name)
-            # Fail the very first (highest-conc) boot attempt only.
-            if name.endswith("conc64"):
-                return [
-                    _fake_variant(name, throughput=None, status="failed", envs=grid[0].extra_envs, error="boot fail")
-                ]
-        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
-    ):
-        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[16, 64]))
-
-    # optimized arm: boot conc64 fails → retries boot at conc16.
-    opt_boots = [b for b in boot_attempts if b.startswith("optimized_")]
-    assert "optimized_conc64" in opt_boots
-    assert "optimized_conc16" in opt_boots
-    assert payload["status"] in {"succeeded", "failed"}
-
-
-def test_single_server_all_boot_fail_falls_back_option_b(
-    session_dir: Path,
-    baseline_yaml: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """When every boot attempt fails, remaining variants run via Option B."""
-    teardown_log: list[tuple] = []
-    _patch_lifecycle_eligible(monkeypatch, teardown_log)
-
-    state = _make_state(baseline_config_path=str(baseline_yaml))
-    option_b_calls: list[str] = []
-
-    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
-        name = grid[0].name
-        # Boot rounds (server_lifecycle set, not already ready) always fail.
-        if kw.get("server_already_ready") is False and kw.get("server_lifecycle"):
-            return [_fake_variant(name, throughput=None, status="failed", envs=grid[0].extra_envs, error="boot fail")]
-        # Option B path = no server_lifecycle kwarg.
-        if kw.get("server_lifecycle") is None:
-            option_b_calls.append(name)
-        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
-    ):
-        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[8, 16]))
-
-    # After all boots fail, Option B (no server_lifecycle) runs the remaining variants.
-    assert len(option_b_calls) > 0, "expected Option B fallback calls"
-    assert payload["status"] in {"succeeded", "failed"}
-
-
-def test_single_server_not_eligible_uses_option_b(
-    session_dir: Path,
-    baseline_yaml: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """A non-lifecycle-eligible framework routes straight to Option B."""
-    import hyperloom.orchestrator.actions.executors._server_lifecycle as _sl
-
-    monkeypatch.setattr(
-        _sl,
-        "resolve_lifecycle_params",
-        lambda _p: {"eligible": False, "framework": "", "port": 8888, "reason": "not a builtin"},
-    )
-
-    state = _make_state(baseline_config_path=str(baseline_yaml))
-    calls: list[dict] = []
-
-    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
-        calls.append({"name": grid[0].name, "server_lifecycle": kw.get("server_lifecycle")})
-        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
-    ):
-        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
-
-    assert payload["status"] == "succeeded"
-    # Option B: no server_lifecycle kwarg on any call.
-    assert all(c["server_lifecycle"] is None for c in calls)
-
-
-def test_single_server_reuse_loop_stops_on_closing_phase(
-    session_dir: Path,
-    baseline_yaml: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """closing_phase set mid-arm skips the remaining reuse points."""
-    teardown_log: list[tuple] = []
-    _patch_lifecycle_eligible(monkeypatch, teardown_log)
-
-    state = _make_state(baseline_config_path=str(baseline_yaml))
-
-    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
-        # After the boot round (server_already_ready=False), flip closing_phase.
-        if kw.get("server_already_ready") is False:
-            state.closing_phase = True
-        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
-    ):
-        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16, 64]))
-
+    assert ran == ["optimized_conc64"]
     all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
     skipped = [p for p in all_points if p["status"] == "skipped"]
-    assert len(skipped) > 0
+    assert len(skipped) == 5
+    assert {p["error_class"] for p in skipped} == {"budget_exhausted"}
     assert payload["budget_skip_reason"] == "session_deadline_reserve"
 
 
-def test_single_server_reuse_exception_recorded_as_failed(
+def test_a_rung_that_raises_is_recorded_as_failed_and_the_ladder_goes_on(
     session_dir: Path,
     baseline_yaml: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ):
-    """An exception in a reuse round is captured as a failed point, not raised."""
-    teardown_log: list[tuple] = []
-    _patch_lifecycle_eligible(monkeypatch, teardown_log)
-
+    """An exception out of one rung is that rung's failed point; its partner and the levels below still run."""
     state = _make_state(baseline_config_path=str(baseline_yaml))
+    ran: list[str] = []
 
-    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
-        # Boot round succeeds; reuse rounds raise.
-        if kw.get("server_already_ready") is True:
-            raise RuntimeError("reuse boom")
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        ran.append(grid[0].name)
+        if grid[0].name == "optimized_conc16":
+            raise RuntimeError("rung boom")
         return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
 
     with (
@@ -2522,56 +2240,19 @@ def test_single_server_reuse_exception_recorded_as_failed(
     ):
         payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
 
-    all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
-    failed = [p for p in all_points if p["status"] == "failed"]
-    # Each arm: boot(conc16) ok, reuse(conc4) raises → at least 2 failed points.
-    assert len(failed) >= 2
-    # The exception's own type survives; the round it broke in is the message.
-    assert any(p.get("error_class") == "RuntimeError" for p in failed)
-    assert any((p.get("error") or "").startswith("single_server_reuse: ") for p in failed)
+    assert ran == ["optimized_conc16", "baseline_conc16", "optimized_conc4", "baseline_conc4"]
+    failed = [p for p in payload["optimized"]["points"] if p["status"] == "failed"]
+    assert [(p["conc"], p["error_class"]) for p in failed] == [(16, "RuntimeError")]
+    assert failed[0]["error"] == "conc_sweep_rung: rung boom"
+    assert payload["summary"]["successful_pairs"] == 1
+    assert payload["status"] == "succeeded"
 
 
-def test_single_server_boot_exception_falls_back(
+def test_closing_before_the_sweep_skips_every_rung(
     session_dir: Path,
     baseline_yaml: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """A boot round raising an exception is caught and boot-retry-descend continues."""
-    teardown_log: list[tuple] = []
-    _patch_lifecycle_eligible(monkeypatch, teardown_log)
-
-    state = _make_state(baseline_config_path=str(baseline_yaml))
-
-    async def _fake_run_grid(*, grid: list[GridVariant], **kw):
-        name = grid[0].name
-        # Highest-conc boot raises; lower-conc boot succeeds.
-        if kw.get("server_already_ready") is False and name.endswith("conc64"):
-            raise RuntimeError("boot boom")
-        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
-
-    with (
-        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
-        patch("hyperloom.orchestrator.kernel.conc_sweep.prepare_grid_benchmark_config", side_effect=_fake_materialize),
-    ):
-        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[16, 64]))
-
-    all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
-    # conc64 boot exception → recorded as failed; conc16 boots and succeeds.
-    failed = [p for p in all_points if p["status"] == "failed" and p["conc"] == 64]
-    assert len(failed) >= 1
-    assert any(p.get("error_class") == "RuntimeError" for p in failed)
-    assert any((p.get("error") or "").startswith("single_server_boot: ") for p in failed)
-
-
-def test_single_server_pre_arm_skip_on_closing_phase(
-    session_dir: Path,
-    baseline_yaml: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ):
     """closing_phase set before the sweep skips every arm's variants."""
-    teardown_log: list[tuple] = []
-    _patch_lifecycle_eligible(monkeypatch, teardown_log)
-
     state = _make_state(baseline_config_path=str(baseline_yaml))
     state.closing_phase = True
     ran: list[str] = []
@@ -2602,15 +2283,13 @@ def test_a_cancelled_sweep_stops_the_ladder_and_is_not_failed(
 ):
     """A phase transition reaping the baseline boot ends the sweep there, as cancelled rather than failed.
 
-    The cancelled scope stays cancelled, so before the fix every lower boot attempt and the whole Option B ladder
-    were started and reaped within a second each, and the sweep then summarised itself as eight failed pairs.
+    The cancelled scope stays cancelled, so before the fix every lower rung was started and reaped within a second
+    each, and the sweep then summarised itself as failed pairs.
     """
     from hyperloom.orchestrator.actions.cancel_channel import CancelScope, use_cancel_scope
     from hyperloom.orchestrator.actions.stop_attribution import ORCHESTRATOR_CANCELLED_CLASS
     from hyperloom.orchestrator.phases.machine_state import PhaseFlags, compute_next_phase
 
-    teardown_log: list[tuple] = []
-    _patch_lifecycle_eligible(monkeypatch, teardown_log)
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors._ray_serving.maybe_serving_lease", lambda **_kwargs: None
     )
@@ -2648,7 +2327,7 @@ def test_a_cancelled_sweep_stops_the_ladder_and_is_not_failed(
     assert len(baseline_points) == 3
     assert all(point["status"] == "skipped" for point in baseline_points)
     assert {point["error_class"] for point in baseline_points} == {ORCHESTRATOR_CANCELLED_CLASS}
-    assert teardown_log, "the reaped boot's server must still be torn down"
+    assert calls == ["optimized_conc8", "baseline_conc8"]
 
     # The phase closes on the budget that ordered the transition, not on sweep_failed.
     state.record_conc_sweep(payload)

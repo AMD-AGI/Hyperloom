@@ -11,7 +11,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -23,13 +23,9 @@ from hyperloom.common.timeutil import now_iso, utc_now_compact
 from hyperloom.inference_optimizer.breakdown.recorder.conc_sweep_event import (
     GRID_MODE_DEFAULT,
     GRID_REQUESTED,
-    STAGE_BOOT,
-    STAGE_BOOT_ATTEMPT,
     STAGE_BUDGET_SKIP,
-    STAGE_REUSE,
     STAGE_SERVER_RESTART,
     STRATEGY_SERVER_RESTART,
-    STRATEGY_SINGLE_SERVER,
     ArmStrategy,
     SweepAnchor,
     SweepBudget,
@@ -44,7 +40,7 @@ from ..actions.executors._grid_runner import (
     VariantResult,
     run_grid,
     session_grid_bounds,
-    variant_conc,
+    variant_rounds,
 )
 from ..actions.executors._subprocess_kill import resolve_benchmark_timeouts, session_deadline_to_remaining_sec
 from ..actions.cancel_channel import current_cancel_scope
@@ -434,36 +430,23 @@ class _Budget:
     def spend_on_session_reserve(self) -> None:
         self.exhaust(_SESSION_RESERVE, 0.0)
 
-    def refuses_next_arm(self) -> bool:
-        """A deadline stop refuses the next arm; the session reserve leaves each arm to skip its own rungs."""
-        return self.exhausted and self.skip_reason != _SESSION_RESERVE
+
+@dataclass(frozen=True)
+class _RungBounds:
+    """The deadline a rung runs under and the cost ``run_grid`` admits it against."""
+
+    deadline_sec: float | None
+    expected_sec: float | None
 
 
 @dataclass(frozen=True)
 class _RungNote:
-    """How one rung came to run and whether it is part of the published curve.
-
-    ``stage`` is a ``STAGE_*`` value, ``committed`` says whether the rung is part
-    of the published curve, and the seconds fields are wall clock.
-    """
+    """How one rung came to run: ``stage`` is a ``STAGE_*`` value and the seconds fields are wall clock."""
 
     stage: str
-    committed: bool = True
     start_time: str = ""
     wall_duration_sec: float | None = None
     budget_remaining_sec: float | None = None
-
-
-@dataclass(frozen=True)
-class _RungServer:
-    """The serving lease and server lifecycle a rung runs under."""
-
-    serving_lease: Any
-    base_extra_envs: dict[str, str] | None = None
-    server_lifecycle: dict[str, Any] | None = None
-    server_already_ready: bool = False
-    warmup_before_measure: bool | None = None
-    lifecycle_boot_only: bool = False
 
 
 @dataclass
@@ -471,8 +454,10 @@ class _SweepRun:
     """One conc sweep's fixed inputs, and the progress both of its arms add to.
 
     ``results`` and ``budget`` are shared across arms on purpose: every incremental flush reports the whole sweep so
-    far, and a budget stop inside one arm has to refuse the next. ``session_deadline_sec`` is the earlier monotonic
-    sweep/session boundary, named by ``deadline_stop`` and distinct from the fixed per-spawn ``benchmark_timeout_sec``.
+    far, and a budget stop in either arm has to stop every rung after it. ``session_deadline_sec`` is the earlier monotonic
+    sweep/session boundary, named by ``deadline_stop`` and distinct from the fixed per-spawn ``benchmark_timeout_sec``;
+    ``grid_deadline_sec`` is the session's own deadline alone (``None`` when the session has none), the line no rung may
+    be extended past.
     """
 
     state: SharedState
@@ -492,6 +477,7 @@ class _SweepRun:
     session_deadline_sec: float | None
     variant_expected_sec: float | None
     deadline_stop: StoppedByTheRun
+    grid_deadline_sec: float | None
     started_at: float
     total_budget_sec: int | None
     json_path: Path
@@ -559,7 +545,6 @@ class _SweepRun:
                 stage=note.stage,
                 conc=point.get("conc"),
                 point=point,
-                committed=note.committed,
                 num_prompts=(result.extra_envs or {}).get("NUM_PROMPTS"),
                 start_time=note.start_time,
                 wall_duration_sec=note.wall_duration_sec,
@@ -568,25 +553,11 @@ class _SweepRun:
             ),
         )
 
-    def commit_failed_boots(self, arm_name: str, boots: list[VariantResult]) -> None:
-        """Publish the boot attempts a lower rung's outcome has settled as part of the curve."""
-        for failed in boots:
-            self.results.append(failed)
-            if self.recorder is not None:
-                self.recorder.commit_variant(
-                    arm_name,
-                    stage=STAGE_BOOT_ATTEMPT,
-                    conc=variant_conc(failed),
-                    point=_point_from_variant(failed, arm=arm_name),
-                )
-
     def close_arm(self, arm_name: str, exc: BaseException | None) -> None:
         """Close one arm's row, whichever of its ladder's paths it leaves by.
 
-        An arm leaves by three: the restart ladder it was delegated to, the restart
-        retry after every boot failed, and the reuse ladder. Closing here means an
-        arm that raised mid-ladder says so once, rather than each path reporting a
-        ladder it never finished as the status its own results happen to add up to.
+        An arm that raised mid-ladder says so once, rather than reporting a ladder
+        it never finished as the status its own results happen to add up to.
         """
         if self.recorder is None:
             return
@@ -595,8 +566,19 @@ class _SweepRun:
         else:
             self.recorder.fail_arm(arm_name, exc)
 
-    async def run_rung(self, variant: GridVariant, server: _RungServer) -> list[VariantResult]:
-        """Run one rung from the sweep's base config; a deadline stop inside it exhausts the sweep's budget."""
+    async def run_rung(
+        self,
+        variant: GridVariant,
+        *,
+        serving_lease: Any,
+        bounds: _RungBounds | None = None,
+    ) -> list[VariantResult]:
+        """Run one rung from the sweep's base config; a deadline stop inside it exhausts the sweep's budget.
+
+        ``bounds`` replaces the sweep's own deadline and admission cost for this rung (see :meth:`partner_bounds`).
+        """
+        if bounds is None:
+            bounds = _RungBounds(self.session_deadline_sec, self.variant_expected_sec)
         if self.observe_cancel():
             return [_deadline_skip_result(variant, _CANCEL_STOP)]
         if self.budget.exhausted:
@@ -609,28 +591,77 @@ class _SweepRun:
             model_path=self.model_path,
             gpu_type=self.gpu_type,
             benchmark_script=self.benchmark_script,
-            server_lifecycle=server.server_lifecycle,
-            base_extra_envs=server.base_extra_envs,
-            warmup_before_measure=server.warmup_before_measure,
-            server_already_ready=server.server_already_ready,
-            serving_lease=server.serving_lease,
-            session_deadline_sec=self.session_deadline_sec,
-            variant_expected_sec=self.variant_expected_sec,
+            serving_lease=serving_lease,
+            session_deadline_sec=bounds.deadline_sec,
+            variant_expected_sec=bounds.expected_sec,
             deadline_stop=self.deadline_stop,
-            lifecycle_boot_only=server.lifecycle_boot_only,
         )
         self.observe_cancel(results)
         if any(result.error_class == self.deadline_stop.error_class for result in results):
-            remaining = session_deadline_to_remaining_sec(self.session_deadline_sec)
-            reason = self.deadline_stop.error_class
-            if self.deadline_stop == _SWEEP_BUDGET_STOP:
-                reason = (
-                    "total_budget_exhausted"
-                    if remaining is not None and remaining <= 0
-                    else "insufficient_remaining_for_variant"
-                )
-            self.budget.exhaust(reason, max(0.0, remaining) if remaining is not None else 0.0)
+            self._exhaust_on_deadline(session_deadline_to_remaining_sec(self.session_deadline_sec))
         return results
+
+    def _exhaust_on_deadline(self, remaining: float | None) -> None:
+        """Stop the sweep on its deadline, naming whether the time ran out or only cannot fit what comes next."""
+        reason = self.deadline_stop.error_class
+        if self.deadline_stop == _SWEEP_BUDGET_STOP:
+            reason = (
+                "total_budget_exhausted"
+                if remaining is not None and remaining <= 0
+                else "insufficient_remaining_for_variant"
+            )
+        self.budget.exhaust(reason, max(0.0, remaining) if remaining is not None else 0.0)
+
+    def admit_level(self, arms: int) -> None:
+        """Stop the sweep before a CONC level when what is left cannot admit one rung of each of ``arms`` arms.
+
+        ``run_grid`` admits a rung against ``variant_expected_sec`` times the benchmark passes it runs
+        (:func:`variant_rounds`); a level runs one such rung per arm, so it starts only on ``arms`` times that, and a
+        level the estimate says would end with one arm measured is not started. A first rung that overruns the estimate
+        can still leave its partner refused by ``run_grid``'s own gate. With no estimate a level starts
+        while any time is left, as a rung does; a sweep already stopped leaves its rungs to record why.
+        """
+        if self.budget.exhausted or self.cancelled or self.session_deadline_sec is None:
+            return
+        remaining = float(self.session_deadline_sec) - time.monotonic()
+        rung_sec = None if self.variant_expected_sec is None else float(self.variant_expected_sec) * variant_rounds()
+        if remaining > 0 and (rung_sec is None or remaining >= arms * rung_sec):
+            return
+        log.warning(
+            "conc_sweep: %.0fs left cannot admit a rung of each of %d arms (%s s each); not starting this level",
+            max(0.0, remaining),
+            arms,
+            rung_sec,
+        )
+        self._exhaust_on_deadline(remaining)
+
+    def partner_bounds(self) -> _RungBounds:
+        """Bounds for the second arm of a level whose first arm has run, so the pair is never left half measured.
+
+        The level was admitted on the estimate for both rungs; a first rung that overran it must not cost its partner
+        the admission it was promised. The sweep's own budget deadline is extended to twice the time one rung is
+        estimated to take, which clears ``run_grid``'s gate and still lets the partner be stopped if it hangs. The
+        extension never passes the session's grid deadline, so the partner cannot run into the reserve the session keeps
+        for closing; when the session clock is already the binding limit there is nothing to extend, and a partner the
+        gate refuses is recorded as an unpaired level. A session that is closing or cancelled still stops it before it
+        starts.
+        """
+        if self.session_deadline_sec is None or self.variant_expected_sec is None:
+            return _RungBounds(self.session_deadline_sec, self.variant_expected_sec)
+        rung_sec = float(self.variant_expected_sec) * variant_rounds()
+        deadline = max(float(self.session_deadline_sec), time.monotonic() + 2 * rung_sec)
+        if self.grid_deadline_sec is not None:
+            deadline = min(deadline, float(self.grid_deadline_sec))
+        if deadline > float(self.session_deadline_sec):
+            log.info(
+                "conc_sweep: extending the partner rung's deadline by %.0fs (sweep budget %.0fs left, session %s)",
+                deadline - float(self.session_deadline_sec),
+                max(0.0, float(self.session_deadline_sec) - time.monotonic()),
+                "uncapped"
+                if self.grid_deadline_sec is None
+                else f"{self.grid_deadline_sec - time.monotonic():.0f}s left",
+            )
+        return _RungBounds(deadline, self.variant_expected_sec)
 
     def session_closing(self) -> bool:
         return bool(self.state.closing_phase or self.state.stop_reason)
@@ -713,420 +744,161 @@ class _SweepRun:
         self.write(payload)
 
 
-async def _sweep_one_arm_single_server(run: _SweepRun, arm: _Arm) -> None:
-    """Sweep one arm across all CONC values reusing a single persistent server.
+@dataclass
+class _Ladder:
+    """The arms of one interleaved ladder, which of them have started, and the serving lease they share.
 
-    Boots the server on the highest CONC (Option A), then reuses it for all
-    lower CONCs.  If boot fails, retries with the next lower CONC
-    (boot-retry-descend).  Falls back to the legacy per-variant server-restart
-    path (Option B) when all boot retries are exhausted.
+    An arm opens when its first rung is dispatched, so an arm whose every rung the sweep refused records the gate that
+    refused it instead of a ladder it never climbed.
     """
-    from ..actions.executors._grid_runner import _num_gpus_for_config
-    from ..actions.executors._ray_serving import maybe_serving_lease
-    from ..actions.executors._server_lifecycle import (
-        resolve_lifecycle_params,
-        teardown_lifecycle_server,
-    )
 
-    recorder = run.recorder
-    arm_name = arm.name
-    grid = run.arm_grid(arm)
-    if not grid:
-        return
-    if recorder is not None:
+    run: _SweepRun
+    arms: list[_Arm]
+    lease: Any = None
+    opened: list[str] = field(default_factory=list)
+
+    def open(self, arm: _Arm) -> None:
+        """Start an arm's row the first time one of its rungs is dispatched."""
+        if arm.name in self.opened:
+            return
+        self.opened.append(arm.name)
+        recorder = self.run.recorder
+        if recorder is None:
+            return
+        recorder.open_arm(arm.name, extra_server_args=arm.args, extra_envs=arm.envs)
         recorder.record_arm_grid(
-            arm_name,
+            arm.name,
             rungs=[
                 {
                     "name": variant.name,
                     "conc": variant.extra_envs.get("CONC"),
                     "num_prompts": variant.extra_envs.get("NUM_PROMPTS"),
                 }
-                for variant in grid
+                for variant in self.run.arm_grid(arm)
             ],
         )
-
-    # Ray-managed GPU execution: one held Ray lease (``num_gpus=TP``) spans this arm's persistent server — boot +
-    # every CONC reuse round, or the Option B per-variant restarts — so the shared server's whole lifetime is covered
-    # by a single lease and no GPU process outlives it.
-    arm_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(run.base_yaml_path))
-
-    # Shared pid_dir for server reuse across all CONC variants in this arm.
-    pid_dir = run.workspace / f"server_{arm_name}"
-    pid_dir.mkdir(parents=True, exist_ok=True)
-
-    # Resolve lifecycle params (port, framework) from the materialized config.
-    lc_reason = "resolve_failed"
-    try:
-        lc_params = resolve_lifecycle_params(run.base_yaml_path)
-        port = int(lc_params.get("port") or 8888)
-        framework = str(lc_params.get("framework") or "")
-        lc_eligible = bool(lc_params.get("eligible"))
-        lc_reason = str(lc_params.get("reason") or "")
-    except Exception as exc:
-        log.warning("conc_sweep single-server: resolve_lifecycle_params failed", exc_info=True)
-        if recorder is not None:
-            # Named per arm: both arms resolve, and two faults reading alike
-            # would collapse into one row.
-            recorder.record_fault(stage=f"resolve_lifecycle_params:{arm_name}", exc=exc)
-        lc_eligible = False
-        port = 8888
-        framework = ""
-
-    arm_strategy = ArmStrategy(
-        strategy=STRATEGY_SINGLE_SERVER if lc_eligible else STRATEGY_SERVER_RESTART,
-        reason=None if lc_eligible else "framework_not_lifecycle_eligible",
-        lifecycle_eligible=lc_eligible,
-        lifecycle_reason=lc_reason,
-        port=port,
-        framework=framework,
-        serving_lease_held=arm_lease is not None,
-    )
-    if recorder is not None:
-        recorder.record_arm_strategy(arm_name, arm_strategy)
-
-    async def _sweep_ladder_by_restart() -> None:
-        """Run the whole ladder with a server restart per rung.
-
-        The arm whose framework cannot hold a server across rungs and the arm
-        whose every boot failed both run the ladder this way, and it is the
-        same run for both.
-        """
-        arm_failure: BaseException | None = None
-        try:
-            await _sweep_arm_option_b(run, arm_name, grid, serving_lease=arm_lease)
-        except BaseException as exc:
-            arm_failure = exc
-            raise
-        finally:
-            if arm_lease is not None:
-                arm_lease.close()
-            run.close_arm(arm_name, arm_failure)
-
-    if not lc_eligible:
-        # Framework does not support server_lifecycle — fall through to Option B (per-variant server restart via
-        # normal run_grid).
-        log.info(
-            "conc_sweep single-server: arm=%s not lifecycle-eligible (%s); using per-variant server restart (Option B)",
-            arm_name,
-            lc_reason,
+        recorder.record_arm_strategy(
+            arm.name, ArmStrategy(strategy=STRATEGY_SERVER_RESTART, serving_lease_held=self.lease is not None)
         )
-        await _sweep_ladder_by_restart()
-        return
 
-    # Boot-retry-descend: try each CONC from highest to lowest until boot succeeds.
-    failed_boots: list[VariantResult] = []
-    boot_idx = 0
-    boot_succeeded = False
-    while boot_idx < len(grid):
-        boot_variant = grid[boot_idx]
-        log.info(
-            "conc_sweep single-server: arm=%s boot attempt %d/%d (conc=%s)",
-            arm_name,
-            boot_idx + 1,
-            len(grid),
-            boot_variant.extra_envs.get("CONC", "?"),
-        )
-        server_lifecycle_boot = {
-            "cleanup": False,
-            "pid_dir": str(pid_dir),
-            "port": port,
-        }
-        boot_started_iso = now_iso("seconds")
-        boot_started_at = time.time()
-        try:
-            boot_results = await run.run_rung(
-                boot_variant,
-                _RungServer(
-                    serving_lease=arm_lease,
-                    base_extra_envs={"MAGPIE_RUN_PHASE": "server"},
-                    server_lifecycle=server_lifecycle_boot,
-                    server_already_ready=False,
-                    warmup_before_measure=False,
-                    lifecycle_boot_only=True,
-                ),
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.warning(
-                "conc_sweep single-server: arm=%s boot conc=%s raised %r; trying next lower conc",
-                arm_name,
-                boot_variant.extra_envs.get("CONC", "?"),
-                exc,
-            )
-            boot_results = [
-                VariantResult(
-                    name=boot_variant.name,
-                    extra_server_args=boot_variant.extra_server_args,
-                    extra_envs=dict(boot_variant.extra_envs),
-                    status="failed",
-                    error=f"single_server_boot: {exc}",
-                    error_class=type(exc).__name__,
-                )
-            ]
-
-        br = boot_results[0] if boot_results else None
-        boot_failed = br is None or br.status in {"failed", "skipped"}
-        boot_elapsed = round(time.time() - boot_started_at, 3)
-
-        boot_stop = run.stop_named_by(br)
-        if boot_stop is None and boot_failed and run.cancelled:
-            # A boot that failed under a cancel still ends the ladder: every lower rung would be reaped on start.
-            boot_stop = _CANCEL_STOP
-        if boot_stop is not None:
-            if boot_stop is _CANCEL_STOP:
-                log.info(
-                    "conc_sweep single-server: arm=%s stopped at boot conc=%s (%s); not trying lower concs",
-                    arm_name,
-                    boot_variant.extra_envs.get("CONC", "?"),
-                    run.cancel_reason or ORCHESTRATOR_CANCELLED_CLASS,
-                )
-            run.commit_failed_boots(arm_name, failed_boots)
-            stopped_results = [
-                *([br] if br is not None else []),
-                *[_deadline_skip_result(v, boot_stop) for v in grid[boot_idx + 1 :]],
-            ]
-            for stopped in stopped_results:
-                run.results.append(stopped)
-                run.record_rung(
-                    arm_name, stopped, _RungNote(stage=STAGE_BUDGET_SKIP, budget_remaining_sec=run.budget.remaining_sec)
-                )
-            try:
-                teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
-            finally:
-                if arm_lease is not None:
-                    arm_lease.close()
-                run.close_arm(arm_name, None)
+    def skip(self, arm_name: str, result: VariantResult, *, budget_remaining_sec: float | None) -> None:
+        """Record a rung the sweep did not start; an arm that never opened keeps it off its rung rows."""
+        self.run.results.append(result)
+        if arm_name not in self.opened:
             return
-
-        if boot_failed:
-            # Ensure server is torn down before retrying at a lower CONC.
-            try:
-                teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
-            except Exception:  # noqa: BLE001
-                pass
-            failed = br or VariantResult(
-                name=boot_variant.name,
-                extra_server_args=boot_variant.extra_server_args,
-                extra_envs=dict(boot_variant.extra_envs),
-                status="failed",
-                error="single_server_boot_failed",
-                error_class="single_server_boot_failed",
-            )
-            failed_boots.append(failed)
-            # Recorded now and uncommitted: a concurrency the server would not
-            # come up at is the finding, and whether it counts toward the curve
-            # is not known until a lower rung either boots or does not.
-            run.record_rung(
-                arm_name,
-                failed,
-                _RungNote(
-                    stage=STAGE_BOOT_ATTEMPT,
-                    committed=False,
-                    start_time=boot_started_iso,
-                    wall_duration_sec=boot_elapsed,
-                ),
-            )
-            boot_idx += 1
-            continue
-
-        # Boot succeeded (br is not None here — boot_failed guarded above).
-        assert br is not None
-        boot_succeeded = True
-        boot_only = str(getattr(br, "note", "") or "") == "server_lifecycle_boot_only"
-        # Commit the higher-CONC failed boots (genuine capacity failures) first.
-        run.commit_failed_boots(arm_name, failed_boots)
-        if not boot_only:
-            run.results.append(br)
-        run.record_rung(
-            arm_name, br, _RungNote(stage=STAGE_BOOT, start_time=boot_started_iso, wall_duration_sec=boot_elapsed)
+        self.run.record_rung(
+            arm_name, result, _RungNote(stage=STAGE_BUDGET_SKIP, budget_remaining_sec=budget_remaining_sec)
         )
-        if recorder is not None:
-            recorder.record_arm_boot(
-                arm_name,
-                succeeded=True,
-                booted_conc=variant_conc(boot_variant),
-                attempted_concs=[variant_conc(variant) for variant in grid[: boot_idx + 1]],
-                failed_concs=[variant_conc(fb) for fb in failed_boots],
-            )
-        # Incremental flush after boot point.
-        run.flush_progress()
-        break
 
-    if not boot_succeeded:
-        # Every CONC failed to boot the persistent server — retry the full grid via Option B (per-variant restart, no
-        # lifecycle) which may succeed where persistent reuse could not.
-        log.warning(
-            "conc_sweep single-server: arm=%s all boot attempts failed; "
-            "falling back to Option B (per-variant restart) for the full ladder",
-            arm_name,
+    def close(self, failed: BaseException | None) -> None:
+        """Close every arm on its rungs, or on the gate that refused it before it started.
+
+        What raised out of a rung ends both ladders, not only the arm whose rung it was, so every arm says so.
+        """
+        run = self.run
+        for arm in self.arms:
+            if failed is not None or arm.name in self.opened:
+                run.close_arm(arm.name, failed)
+            elif run.recorder is None:
+                continue
+            elif run.cancelled:
+                run.recorder.record_arm_refused(arm.name, reason=run.cancel_reason, remaining_sec=0.0)
+            elif run.budget.exhausted:
+                run.recorder.record_arm_refused(
+                    arm.name, reason=run.budget.skip_reason, remaining_sec=run.budget.remaining_sec
+                )
+
+
+async def _run_level_rung(
+    run: _SweepRun, ladder: _Ladder, arm: _Arm, variant: GridVariant, bounds: _RungBounds | None = None
+) -> bool:
+    """Run, or record as stopped, one arm's rung at the current level, each on a server of its own.
+
+    The two arms alternate on the same GPUs, so no server outlives the rung it was started for. A rung the sweep can
+    no longer start -- cancelled, closing, or out of budget -- is recorded as skipped under that cause and never boots.
+    Returns whether the rung ran, so the level's next arm knows it is completing a pair.
+    """
+    rung_remaining = session_deadline_to_remaining_sec(run.session_deadline_sec)
+    if run.observe_cancel():
+        ladder.skip(arm.name, _deadline_skip_result(variant, _CANCEL_STOP), budget_remaining_sec=None)
+        return False
+    if run.session_closing():
+        run.budget.spend_on_session_reserve()
+        ladder.skip(arm.name, _budget_skip_result(variant), budget_remaining_sec=0.0)
+        return False
+    if run.budget.exhausted:
+        ladder.skip(
+            arm.name,
+            _deadline_skip_result(variant, run.deadline_stop),
+            budget_remaining_sec=run.budget.remaining_sec,
         )
-        if recorder is not None:
-            recorder.record_arm_boot(
-                arm_name,
-                succeeded=False,
-                attempted_concs=[variant_conc(variant) for variant in grid],
-                failed_concs=[variant_conc(fb) for fb in failed_boots],
-            )
-            # The whole ladder is retried per-rung, and those results supersede
-            # the boot attempts rather than adding to them -- which is why the
-            # attempts above stay uncommitted.
-            recorder.record_arm_strategy(
-                arm_name, replace(arm_strategy, strategy=STRATEGY_SERVER_RESTART, reason="all_boot_attempts_failed")
-            )
-        await _sweep_ladder_by_restart()
-        return
-
-    # Server is up: sweep remaining CONCs by reuse.
-    reuse_failure: BaseException | None = None
+        return False
+    ladder.open(arm)
+    rung_started_iso = now_iso("seconds")
+    rung_started_at = time.time()
     try:
-        reuse_grid = (
-            grid[boot_idx:]
-            if str(getattr(br, "note", "") or "") == "server_lifecycle_boot_only"
-            else grid[boot_idx + 1 :]
+        results = await run.run_rung(variant, serving_lease=ladder.lease, bounds=bounds)
+    except Exception as exc:  # noqa: BLE001
+        results = [
+            VariantResult(
+                name=variant.name,
+                extra_server_args=variant.extra_server_args,
+                extra_envs=dict(variant.extra_envs),
+                status="failed",
+                error=f"conc_sweep_rung: {exc}",
+                error_class=type(exc).__name__,
+            )
+        ]
+    rung_elapsed = round(time.time() - rung_started_at, 3)
+    for result in results:
+        run.results.append(result)
+        stopped = run.stop_named_by(result) is not None
+        run.record_rung(
+            arm.name,
+            result,
+            _RungNote(
+                stage=STAGE_BUDGET_SKIP if stopped else STAGE_SERVER_RESTART,
+                start_time=rung_started_iso,
+                wall_duration_sec=rung_elapsed,
+                budget_remaining_sec=run.budget.remaining_sec if stopped else rung_remaining,
+            ),
         )
-        for r_idx, variant in enumerate(reuse_grid):
-            _reuse_remaining = session_deadline_to_remaining_sec(run.session_deadline_sec)
-            if run.observe_cancel():
-                for v in reuse_grid[r_idx:]:
-                    skip_r = _deadline_skip_result(v, _CANCEL_STOP)
-                    run.results.append(skip_r)
-                    run.record_rung(arm_name, skip_r, _RungNote(stage=STAGE_BUDGET_SKIP))
-                break
-            # Check session deadline before each reuse point.
-            if run.session_closing():
-                run.budget.spend_on_session_reserve()
-                for v in reuse_grid[r_idx:]:
-                    skip_r = _budget_skip_result(v)
-                    run.results.append(skip_r)
-                    run.record_rung(arm_name, skip_r, _RungNote(stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0))
-                break
+    run.flush_progress()
+    return True
 
-            is_last = r_idx == len(reuse_grid) - 1
-            reuse_started_iso = now_iso("seconds")
-            reuse_started_at = time.time()
-            server_lifecycle_reuse = {
-                "cleanup": is_last,
-                "pid_dir": str(pid_dir),
-                "port": port,
-            }
-            try:
-                reuse_results = await run.run_rung(
-                    variant,
-                    _RungServer(
-                        serving_lease=arm_lease,
-                        server_lifecycle=server_lifecycle_reuse,
-                        server_already_ready=True,
-                        warmup_before_measure=False,
-                    ),
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.warning(
-                    "conc_sweep single-server: arm=%s reuse conc=%s raised %r",
-                    arm_name,
-                    variant.extra_envs.get("CONC", "?"),
-                    exc,
-                )
-                reuse_results = [
-                    VariantResult(
-                        name=variant.name,
-                        extra_server_args=variant.extra_server_args,
-                        extra_envs=dict(variant.extra_envs),
-                        status="failed",
-                        error=f"single_server_reuse: {exc}",
-                        error_class=type(exc).__name__,
-                    )
-                ]
-            reuse_elapsed = round(time.time() - reuse_started_at, 3)
-            for rr in reuse_results:
-                run.results.append(rr)
-                stopped = run.stop_named_by(rr) is not None
-                run.record_rung(
-                    arm_name,
-                    rr,
-                    _RungNote(
-                        stage=STAGE_BUDGET_SKIP if stopped else STAGE_REUSE,
-                        start_time=reuse_started_iso,
-                        wall_duration_sec=reuse_elapsed,
-                        budget_remaining_sec=run.budget.remaining_sec if stopped else _reuse_remaining,
-                    ),
-                )
-            # Incremental flush after each reuse point.
-            run.flush_progress()
+
+async def _sweep_interleaved(run: _SweepRun, arms: list[_Arm]) -> None:
+    """Sweep the ladder one CONC level at a time, high to low, running every arm's rung at a level before the next.
+
+    A pair needs both arms measured at one CONC, so a budget that runs out keeps every level already finished. A level
+    starts only when what is left admits a rung of every arm (:meth:`_SweepRun.admit_level`), so a level the estimate
+    says it cannot finish is not started, and once its first arm has run the rest of the level is admitted whatever that
+    rung cost (:meth:`_SweepRun.partner_bounds`), so a level is never left with one arm measured.
+    """
+    from ..actions.executors._grid_runner import _num_gpus_for_config
+    from ..actions.executors._ray_serving import maybe_serving_lease
+
+    grids = [run.arm_grid(arm) for arm in arms]
+    # Ray-managed GPU execution: the arms take turns on the same GPUs, so one held lease (``num_gpus=TP``) spans the
+    # whole sweep rather than one per arm, which two interleaved arms would hold at once.
+    ladder = _Ladder(run=run, arms=arms, lease=maybe_serving_lease(num_gpus=_num_gpus_for_config(run.base_yaml_path)))
+    failed: BaseException | None = None
+    try:
+        for level in range(len(run.concs_desc)):
+            run.admit_level(len(arms))
+            ran = False
+            for arm, grid in zip(arms, grids):
+                # Once an arm has run at this level its partner is admitted whatever the first rung cost.
+                ran = await _run_level_rung(run, ladder, arm, grid[level], run.partner_bounds() if ran else None)
     except BaseException as exc:
-        reuse_failure = exc
+        failed = exc
         raise
     finally:
-        # Safety teardown — idempotent, no-op if already torn down.
         try:
-            teardown_lifecycle_server(pid_dir=pid_dir, framework=framework, port=port)
-        except Exception as exc:
-            # The last word on this arm's server: a teardown that failed here
-            # leaves it alive past the arm that owned it.
-            log.warning("conc_sweep single-server: arm=%s teardown failed", arm_name, exc_info=True)
-            if recorder is not None:
-                recorder.record_fault(stage=f"teardown_lifecycle_server:{arm_name}", exc=exc)
-        if arm_lease is not None:
-            arm_lease.close()
-        run.close_arm(arm_name, reuse_failure)
-
-
-async def _sweep_arm_option_b(
-    run: _SweepRun,
-    arm_name: str,
-    grid: list[GridVariant],
-    *,
-    serving_lease: Any = None,
-) -> None:
-    """Option B fallback: run each variant with its own server (legacy behaviour).
-
-    Used when ``_sweep_one_arm_single_server`` detects the framework is not
-    lifecycle-eligible or all boot retries are exhausted. The same monotonic
-    deadline covers both arms and all retries. ``serving_lease`` is ``None``
-    when the arm runs on the local (non-Ray) path.
-    """
-    for variant in grid:
-        _ob_rem = session_deadline_to_remaining_sec(run.session_deadline_sec)
-        if run.observe_cancel():
-            skip_r = _deadline_skip_result(variant, _CANCEL_STOP)
-            run.results.append(skip_r)
-            run.record_rung(arm_name, skip_r, _RungNote(stage=STAGE_BUDGET_SKIP))
-            continue
-        if run.session_closing():
-            run.budget.spend_on_session_reserve()
-            skip_r = _budget_skip_result(variant)
-            run.results.append(skip_r)
-            run.record_rung(arm_name, skip_r, _RungNote(stage=STAGE_BUDGET_SKIP, budget_remaining_sec=0.0))
-            continue
-        rung_started_iso = now_iso("seconds")
-        rung_started_at = time.time()
-        try:
-            sub = await run.run_rung(variant, _RungServer(serving_lease=serving_lease))
-        except Exception as exc:  # noqa: BLE001
-            sub = [
-                VariantResult(
-                    name=variant.name,
-                    extra_server_args=variant.extra_server_args,
-                    extra_envs=dict(variant.extra_envs),
-                    status="failed",
-                    error=f"option_b: {exc}",
-                    error_class=type(exc).__name__,
-                )
-            ]
-        rung_elapsed = round(time.time() - rung_started_at, 3)
-        for r in sub:
-            run.results.append(r)
-            stopped = run.stop_named_by(r) is not None
-            run.record_rung(
-                arm_name,
-                r,
-                _RungNote(
-                    stage=STAGE_BUDGET_SKIP if stopped else STAGE_SERVER_RESTART,
-                    start_time=rung_started_iso,
-                    wall_duration_sec=rung_elapsed,
-                    budget_remaining_sec=run.budget.remaining_sec if stopped else _ob_rem,
-                ),
-            )
-        run.flush_progress()
+            if ladder.lease is not None:
+                ladder.lease.close()
+        finally:
+            ladder.close(failed)
 
 
 def _flush_conc_sweep_report(payload: dict[str, Any], session_dir: Path) -> Exception | None:
@@ -1313,6 +1085,7 @@ async def run_conc_sweep(
 
     started_at = time.time()
     deadline_stop = STOPPED_BY_THE_RUN[SESSION_TIME_EXHAUSTED_CLASS]
+    grid_deadline_sec = session_deadline_sec
     if total_budget_sec is not None:
         sweep_deadline_sec = time.monotonic() + total_budget_sec
         if session_deadline_sec is None or sweep_deadline_sec < session_deadline_sec:
@@ -1355,20 +1128,23 @@ async def run_conc_sweep(
         session_deadline_sec=session_deadline_sec,
         variant_expected_sec=variant_expected_sec,
         deadline_stop=deadline_stop,
+        grid_deadline_sec=grid_deadline_sec,
         started_at=started_at,
         total_budget_sec=total_budget_sec,
         json_path=json_path,
         csv_path=csv_path,
         recorder=recorder,
     )
+    # Within a level the optimized arm runs first, then the baseline arm at the same CONC.
+    arms_order = [run.optimized, run.baseline]
     log.info(
-        "conc_sweep (single-server): arms=optimized,baseline concs=%s isl=%d osl=%d total_budget=%s",
+        "conc_sweep (interleaved): arms=%s per level, concs=%s isl=%d osl=%d total_budget=%s",
+        ",".join(arm.name for arm in arms_order),
         run.concs_desc,
         isl,
         osl,
         f"{total_budget_sec}s" if total_budget_sec is not None else "unbounded",
     )
-    arms_order = [run.optimized, run.baseline]
     if recorder is not None:
         recorder.record_plan(
             SweepPlan(
@@ -1380,29 +1156,7 @@ async def run_conc_sweep(
                 arms_order=[arm.name for arm in arms_order],
             )
         )
-    for arm in arms_order:
-        if run.observe_cancel():
-            run.results.extend(_deadline_skip_result(v, _CANCEL_STOP) for v in run.arm_grid(arm))
-            if recorder is not None:
-                recorder.record_arm_refused(arm.name, reason=ORCHESTRATOR_CANCELLED_CLASS, remaining_sec=0.0)
-            continue
-        if run.budget.refuses_next_arm():
-            run.results.extend(_deadline_skip_result(v, deadline_stop) for v in run.arm_grid(arm))
-            if recorder is not None:
-                recorder.record_arm_refused(
-                    arm.name, reason=run.budget.skip_reason, remaining_sec=run.budget.remaining_sec
-                )
-            continue
-        if run.session_closing():
-            run.budget.spend_on_session_reserve()
-            run.results.extend(_budget_skip_result(v) for v in run.arm_grid(arm))
-            if recorder is not None:
-                recorder.record_arm_refused(arm.name, reason=_SESSION_RESERVE, remaining_sec=0.0)
-            continue
-
-        if recorder is not None:
-            recorder.open_arm(arm.name, extra_server_args=arm.args, extra_envs=arm.envs)
-        await _sweep_one_arm_single_server(run, arm)
+    await _sweep_interleaved(run, arms_order)
 
     payload = run.payload(in_progress=False)
     comparison, summary = payload["comparison"], payload["summary"]
