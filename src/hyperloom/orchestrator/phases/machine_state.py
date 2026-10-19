@@ -2079,21 +2079,18 @@ def append_phase_history_event(
     if len(history) > _PHASE_HISTORY_CAP:
         history = history[-_PHASE_HISTORY_CAP:]
     state.phase_history = history
-    try:
-        from hyperloom.inference_optimizer.breakdown.recorder import phase_event
-        from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseMarker
+    from hyperloom.inference_optimizer.breakdown.recorder import phase_event
+    from hyperloom.inference_optimizer.breakdown.recorder.phase_records import PhaseCycle, PhaseMarker
 
-        phase_event.record_marker(
-            PhaseMarker(
-                at=PhaseCycle(phase, state.macro_cycle),
-                sequence=len(history),
-                reason=str(row.get("reason") or ""),
-                evidence=dict(row.get("evidence") or {}),
-                ts=str(row.get("ts") or ""),
-            )
+    phase_event.record_marker(
+        PhaseMarker(
+            at=PhaseCycle(phase, state.macro_cycle),
+            sequence=len(history),
+            reason=str(row.get("reason") or ""),
+            evidence=dict(row.get("evidence") or {}),
+            ts=str(row.get("ts") or ""),
         )
-    except Exception:  # noqa: BLE001 -- telemetry must never block the marker
-        pass
+    )
     return row
 
 

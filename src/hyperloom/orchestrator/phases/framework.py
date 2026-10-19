@@ -34,7 +34,7 @@ from hyperloom.inference_optimizer.grid_server_args import (
     merge_server_args,
     tokenize_server_args_preserving_json,
 )
-from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR
+from ..actions.executors.integrate_patch import PATCH_SOURCE_UPSTREAM_PR, RESULT_BENCHED
 from ..specialists.profile import is_authoring_specialist
 from hyperloom.common.framework_arm import LOCAL_EXPLORE_CANDIDATE_PREFIX
 from hyperloom.orchestrator.lever import LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, patch_lever_kind, patch_owner_phase
@@ -611,6 +611,7 @@ def _record_source_attempt(
         },
         decision=attempt.status,
         adopted=attempt.adopted,
+        benched=bool(result.get(RESULT_BENCHED)),
         # What stood behind the adoption, on the same rule the config arm
         # writes it under: a KEEP no accuracy gate ruled on rests on
         # throughput alone, a weaker claim that must not read alike. Only

@@ -669,17 +669,14 @@ class LoopStateStore:
 
     def _prime_recent(self) -> None:
         """Seed the in-memory recent-event caches from disk (once, at init)."""
-        try:
-            events = self.read_events()
-            for event in events[-_RECENT_CACHE:]:
-                self._recent.append(event)
-            # Scanned in full rather than from the tail above: an outcome older than the last ``_RECENT_CACHE`` events
-            # is still inside the outcome window, and the deque keeps only what fits.
-            for event in events:
-                if event.get("type") == "iteration_result":
-                    self._recent_results.append(event)
-        except Exception as e:  # noqa: BLE001 - best-effort
-            self._mark_degraded("prime recent cache", e)
+        events = self.read_events()
+        for event in events[-_RECENT_CACHE:]:
+            self._recent.append(event)
+        # Scanned in full rather than from the tail above: an outcome older than the last ``_RECENT_CACHE`` events
+        # is still inside the outcome window, and the deque keeps only what fits.
+        for event in events:
+            if event.get("type") == "iteration_result":
+                self._recent_results.append(event)
 
     def load(self) -> RunState:
         """Load the current persisted state, or a fresh state when absent."""

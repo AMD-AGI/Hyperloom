@@ -63,6 +63,7 @@ from ._accuracy_gate import (
 from . import _framework_switch_manifest as _switch_manifest
 from hyperloom.inference_optimizer.canonical_fingerprint import workload_signature
 from ._proposal_identity import effective_fingerprint, normalize_proposal
+from .measured_variants import GAIN_BELOW_THRESHOLD, MeasuredOn, measured_verdict, stack_of_measured
 from ._grid_base import (
     TS_FAILED,
     TS_KILLED_OVERTIME,
@@ -114,6 +115,9 @@ log = logging.getLogger(__name__)
 _now_iso = functools.partial(now_iso, "auto")
 
 STACK_REVALIDATE_SOURCE: str = "stack_revalidate"
+
+# ``skipped_dup`` reason for a variant whose launch the session already measured on the same stack.
+ALREADY_MEASURED: str = "already_measured"
 
 
 def is_stack_revalidation(params: dict | None) -> bool:
@@ -748,6 +752,39 @@ class ExploreExecutor:
         self.session_dir = session_dir
         self.keep_threshold_pct = float(keep_threshold_pct)
 
+    @staticmethod
+    def _already_measured(
+        gv: GridVariant,
+        ss: Any,
+        params: dict[str, Any],
+        now: MeasuredOn,
+        skipped: list[dict[str, Any]],
+    ) -> bool:
+        """Whether the session ledger already holds a verdict for ``gv`` under ``now``, recording the skip if so.
+
+        ``now.stack`` is what the variant would launch on: a KEEP earlier in the round advances it, so the check runs
+        per variant rather than once for the round. A stack revalidation exists to re-measure, and a kernel
+        overlay changes the launch without changing the fingerprint, so neither is ever skipped.
+        """
+        if ss is None or is_stack_revalidation(params) or getattr(gv, "overlay_pythonpath", ""):
+            return False
+        fp = str(getattr(gv, "canonical_fp", "") or "")
+        prior = measured_verdict(
+            getattr(ss, "explore_search", None),
+            fp,
+            variant={"extra_args": gv.extra_server_args, "extra_envs": gv.extra_envs, **_variant_control_fields(gv)},
+            now=now,
+        )
+        if prior is None:
+            return False
+        detail = (
+            f"measured as {prior.get('name') or fp} in {prior.get('round_id') or 'an earlier round'} on this "
+            f"stack: {prior.get('outcome')}"
+        )
+        log.info("explore: skipping already-measured variant %s (%s)", gv.name, detail)
+        skipped.append({"name": gv.name, "fingerprint": fp, "reason": ALREADY_MEASURED, "detail": detail})
+        return True
+
     async def __call__(self, ctx) -> dict[str, Any]:
         """Run the merged ``explore`` action for one task."""
         params = dict(ctx.task.params or {})
@@ -1165,6 +1202,14 @@ class ExploreExecutor:
 
         try:
             for idx, gv in enumerate(runnable):
+                if self._already_measured(
+                    gv,
+                    ss,
+                    params,
+                    MeasuredOn(stack_of_measured(_measured_against()), ws_sig, keep_threshold_pct),
+                    skipped_dup,
+                ):
+                    continue
                 # A warm-decision variant pays for both rounds, so admitting it on the decision round alone would let
                 # it in and then strand it mid-variant with a discarded warmup and no measurement.
                 if decision_expected_sec is not None:
@@ -1447,7 +1492,7 @@ class ExploreExecutor:
                         elif _graded_on_intvty:
                             reason = f"{graded.refused_by} ({axes})"
                         else:
-                            reason = "gain_below_threshold"
+                            reason = GAIN_BELOW_THRESHOLD
                     else:
                         gain = gain_pct(graded.candidate, graded.reference)
                     if r.status == "succeeded":
@@ -1885,7 +1930,9 @@ class ExploreExecutor:
         produced_measurement = any(
             t.get("outcome") in ("KEEP", "REVERT", TS_KILLED_OVERTIME) for t in tested_update.values()
         )
-        status = "succeeded" if produced_measurement or winners else "failed"
+        # A round whose every variant already had its verdict is answered, as if measured again.
+        answered = bool(runnable) and sum(sd.get("reason") == ALREADY_MEASURED for sd in skipped_dup) == len(runnable)
+        status = "succeeded" if produced_measurement or winners or answered else "failed"
         # A round that measured nothing because the run stopped it is not the same as one whose variants failed. As a
         # bare ``failed`` with no error_class nothing downstream could tell the two apart, and the KB would learn that
         # these variants are bad.

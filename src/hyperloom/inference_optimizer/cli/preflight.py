@@ -1786,15 +1786,11 @@ def _print_recipe_kb_queue_status() -> dict[str, Any]:
 
 def _ensure_eval_concurrency_compat(magpie_path: str, inferencex_path: str) -> bool:
     """Scrub the fatal ``--concurrent-requests`` eval flag from the resolved trees."""
-    try:
-        from hyperloom.orchestrator.actions.executors._magpie_patcher import (
-            ensure_eval_concurrency_compat,
-        )
+    from hyperloom.orchestrator.actions.executors._magpie_patcher import (
+        ensure_eval_concurrency_compat,
+    )
 
-        ok = ensure_eval_concurrency_compat(magpie_path or None, inferencex_path or None)
-    except Exception as exc:  # noqa: BLE001 — preflight must not die here
-        print(f"Preflight: WARNING — eval-concurrency compat patch failed to run: {exc}")
-        return False
+    ok = ensure_eval_concurrency_compat(magpie_path or None, inferencex_path or None)
     if not ok:
         print(
             "Preflight: WARNING — could not remove the redundant "
@@ -1839,15 +1835,11 @@ def _ensure_client_trust_compat(magpie_path: str) -> bool:
 
     if not is_multi_node():
         return True
-    try:
-        from hyperloom.orchestrator.actions.executors._magpie_patcher import (
-            ensure_client_trust_compat,
-        )
+    from hyperloom.orchestrator.actions.executors._magpie_patcher import (
+        ensure_client_trust_compat,
+    )
 
-        ok = ensure_client_trust_compat(magpie_path or None)
-    except Exception as exc:  # noqa: BLE001 — preflight must not die here
-        print(f"Preflight: WARNING — client trust compat patch failed to run: {exc}")
-        return False
+    ok = ensure_client_trust_compat(magpie_path or None)
     if not ok:
         print(
             "Preflight: WARNING — could not apply the custom-tokenizer trust "
@@ -1874,12 +1866,9 @@ def _begin_install_event(args: argparse.Namespace | None) -> dict[str, Any]:
             "steps": [],
         },
     }
-    try:
-        from ..session.sbd_v6 import set_pending_install_event
+    from ..session.sbd_v6 import set_pending_install_event
 
-        set_pending_install_event(args, event)
-    except Exception:
-        log.warning("failed to initialize SBD V6 install event", exc_info=True)
+    set_pending_install_event(args, event)
     return event
 
 
@@ -1931,25 +1920,21 @@ def _fail_install_step(
 def _mark_pending_install_event_failed(
     args: argparse.Namespace | None,
     exc: BaseException,
-) -> dict[str, Any] | None:
+) -> dict[str, Any]:
     """Mark an unwrapped preflight exception on the pending install event."""
-    try:
-        from ..session.sbd_v6 import pending_install_event
+    from ..session.sbd_v6 import pending_install_event
 
-        event = pending_install_event(args)
-        if event is None:
-            event = _begin_install_event(args)
-        if str(event.get("status") or "") != "failed":
-            _fail_install_step(
-                event,
-                step_id="unhandled_preflight",
-                category="check",
-                exc=exc,
-            )
-        return event
-    except Exception:
-        log.warning("failed to finalize SBD V6 install failure", exc_info=True)
-        return None
+    event = pending_install_event(args)
+    if event is None:
+        event = _begin_install_event(args)
+    if str(event.get("status") or "") != "failed":
+        _fail_install_step(
+            event,
+            step_id="unhandled_preflight",
+            category="check",
+            exc=exc,
+        )
+    return event
 
 
 def _run_install_step(
@@ -2576,16 +2561,11 @@ def _preflight(
         ),
     )
 
-    try:
-        _finish_install_event(
-            install_event,
-            args=args,
-            runtime=PreflightRuntime(
-                benchmark_backend, benchmark_python, magpie_python, inferencex_path, resolved_urls
-            ),
-        )
-    except Exception:
-        log.warning("failed to finalize SBD V6 install event", exc_info=True)
+    _finish_install_event(
+        install_event,
+        args=args,
+        runtime=PreflightRuntime(benchmark_backend, benchmark_python, magpie_python, inferencex_path, resolved_urls),
+    )
 
     return resolved_urls
 

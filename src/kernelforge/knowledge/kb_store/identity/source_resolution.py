@@ -38,16 +38,13 @@ def resolve_operation(kernel_source: str, kernel_path: str, target_functions: li
             return preferred[0]
         return names[0] if names else None
 
-    try:
-        from kernelforge.mcp_server.tools.pmc import derive_kernel_names
+    from kernelforge.mcp_server.tools.pmc import derive_kernel_names
 
-        # Anchor source order is stable for the same file, so keep it (the first compute kernel is usually the primary
-        # one, helpers come later).
-        picked = _pick(derive_kernel_names(kernel_source or ""))
-        if picked:
-            return picked
-    except Exception as exc:  # noqa: BLE001 - best-effort; fall back below
-        log.debug("resolve_operation: derive_kernel_names failed: %r", exc)
+    # Anchor source order is stable for the same file, so keep it (the first compute kernel is usually the primary
+    # one, helpers come later).
+    picked = _pick(derive_kernel_names(kernel_source or ""))
+    if picked:
+        return picked
     # Fallback: order-independent (sorted, de-duplicated) so producer/consumer converge even when their
     # target-function lists are ordered differently.
     candidates = sorted({function.strip() for function in (target_functions or []) if function and function.strip()})
