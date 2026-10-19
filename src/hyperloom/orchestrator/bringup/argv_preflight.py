@@ -155,6 +155,22 @@ class ArgvVerdict:
         return self.status == INVALID
 
 
+@dataclass(frozen=True)
+class ProbeTarget:
+    """Where a probe program runs.
+
+    Attributes:
+        interpreter: Interpreter to run the program with.
+        env: Environment the probe runs in -- the launch env, so it resolves the
+            same packages the server will.
+        probe: The subprocess shim; the real one when omitted.
+    """
+
+    interpreter: str
+    env: Mapping[str, str]
+    probe: ProbeFn | None = None
+
+
 @dataclass
 class Probe:
     """One decoded probe result: the JSON the program printed, or why not.
@@ -188,33 +204,28 @@ def _clip(text: str) -> str:
 
 
 def run_probe_json(
-    interpreter: str,
+    target: ProbeTarget,
     program: str,
     args: Sequence[str],
     *,
-    env: Mapping[str, str],
     timeout_sec: float,
-    probe: ProbeFn | None = None,
 ) -> Probe:
     """Run a probe program and decode the single JSON object it prints.
 
     Args:
-        interpreter: Interpreter to run the program with.
+        target: Interpreter, environment and subprocess shim the program runs with.
         program: The program source.
         args: Positional arguments appended after ``-c <program>``.
-        env: Environment the probe runs in -- the launch env, so it resolves the
-            same packages the server will.
         timeout_sec: Hard bound on the probe.
-        probe: The subprocess shim; the real one when omitted.
 
     Returns:
         Probe: The decoded payload, or the reason there is none.
     """
-    probe = probe if probe is not None else _default_probe
-    if not interpreter:
+    probe = target.probe if target.probe is not None else _default_probe
+    if not target.interpreter:
         return Probe(detail="no interpreter to probe with")
     try:
-        completed = probe([interpreter, "-c", program, *args], env, timeout_sec)
+        completed = probe([target.interpreter, "-c", program, *args], target.env, timeout_sec)
     except subprocess.TimeoutExpired:
         return Probe(detail=f"probe timed out after {timeout_sec:g}s")
     except (OSError, ValueError) as exc:
@@ -268,22 +279,9 @@ def _resolve_probe_interpreter(framework: str) -> str:
     return _resolve_probe_python(framework)
 
 
-def _identity(
-    interpreter: str,
-    framework: str,
-    *,
-    env: Mapping[str, str],
-    probe: ProbeFn,
-) -> tuple[Mapping[str, object] | None, str]:
-    """Return ``interpreter``'s identity for ``framework``, or why it is unknown."""
-    result = run_probe_json(
-        interpreter,
-        _IDENTITY_PROGRAM,
-        [framework],
-        env=env,
-        timeout_sec=_IDENTITY_TIMEOUT_SEC,
-        probe=probe,
-    )
+def _identity(target: ProbeTarget, framework: str) -> tuple[Mapping[str, object] | None, str]:
+    """Return the target interpreter's identity for ``framework``, or why it is unknown."""
+    result = run_probe_json(target, _IDENTITY_PROGRAM, [framework], timeout_sec=_IDENTITY_TIMEOUT_SEC)
     if not result.ok or result.payload is None:
         return None, result.detail or "identity probe produced no answer"
     if not str(result.payload.get("origin", "")):
@@ -317,15 +315,7 @@ def _offending_flags(unknown: Sequence[object]) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _parse(
-    framework: str,
-    parser_source: str,
-    argv: Sequence[str],
-    *,
-    interpreter: str,
-    env: Mapping[str, str],
-    probe: ProbeFn,
-) -> tuple[str, str, tuple[str, ...]]:
+def _parse(parser_source: str, argv: Sequence[str], target: ProbeTarget) -> tuple[str, str, tuple[str, ...]]:
     """Run the framework's parser over ``argv``.
 
     Returns:
@@ -333,12 +323,10 @@ def _parse(
         :data:`OK`, :data:`INVALID`, :data:`UNAVAILABLE`.
     """
     result = run_probe_json(
-        interpreter,
+        target,
         parser_source + "\n" + _PARSE_PROGRAM,
         [json.dumps(list(argv))],
-        env=env,
         timeout_sec=_PARSE_TIMEOUT_SEC,
-        probe=probe,
     )
     if not result.ok or result.payload is None:
         return UNAVAILABLE, result.detail or "parser probe produced no answer", ()
@@ -404,10 +392,11 @@ def check_server_argv(
 
     if not serving or not probe_interpreter:
         return _unavailable(INTERPRETER_UNPROVEN, "could not resolve both the probe and the serving interpreter")
-    serving_id, serving_why = _identity(serving, name, env=launch_env, probe=probe)
+    serving_id, serving_why = _identity(ProbeTarget(serving, launch_env, probe), name)
     if serving_id is None:
         return _unavailable(INTERPRETER_UNPROVEN, f"serving interpreter: {serving_why}")
-    probe_id, probe_why = _identity(probe_interpreter, name, env=launch_env, probe=probe)
+    probe_target = ProbeTarget(probe_interpreter, launch_env, probe)
+    probe_id, probe_why = _identity(probe_target, name)
     if probe_id is None:
         return _unavailable(INTERPRETER_UNPROVEN, f"probe interpreter: {probe_why}")
     if not _same_install(probe_id, serving_id):
@@ -416,14 +405,7 @@ def check_server_argv(
             f"probe {json.dumps(dict(probe_id), sort_keys=True)} != serving {json.dumps(dict(serving_id), sort_keys=True)}",
         )
 
-    status, detail, flags = _parse(
-        name,
-        parser_source,
-        argv,
-        interpreter=probe_interpreter,
-        env=launch_env,
-        probe=probe,
-    )
+    status, detail, flags = _parse(parser_source, argv, probe_target)
     if status == UNAVAILABLE:
         return _unavailable(PROBE_FAILED, detail)
     if status == OK:
@@ -463,14 +445,7 @@ def check_server_argv(
     if split is None:
         return _invalid(REPAIR_FAILED, f"{detail}\ndropping {' '.join(flags)} left an argv that cannot be tokenised")
     repaired_text, tokens = split
-    retry_status, retry_detail, _retry_flags = _parse(
-        name,
-        parser_source,
-        tokens,
-        interpreter=probe_interpreter,
-        env=launch_env,
-        probe=probe,
-    )
+    retry_status, retry_detail, _retry_flags = _parse(parser_source, tokens, probe_target)
     if retry_status == UNAVAILABLE:
         return _unavailable(PROBE_FAILED, retry_detail)
     if retry_status != OK:
@@ -541,6 +516,7 @@ __all__ = [
     "UNAVAILABLE",
     "ArgvVerdict",
     "Probe",
+    "ProbeTarget",
     "argv_invalid_observation",
     "check_server_argv",
     "is_argv_invalid",

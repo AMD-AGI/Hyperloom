@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from collections.abc import Collection, Iterable, Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from hyperloom.common.coerce import to_float
 from hyperloom.common.env_safety import redact_secret_values
@@ -24,7 +24,7 @@ from ..state.task_registry import TaskNotFound
 from ..state.shared_state import resolve_grading_anchor_tput, inject_stack_base_params
 
 if TYPE_CHECKING:
-    from ..predictor.pump import PhaseBudget
+    from ..predictor.payload import PhaseBudget
     from ..predictor.view import SessionView
     from ..state.task_registry import Task
     from .machine import Transition
@@ -300,7 +300,7 @@ def _recorder(coord: Any):
 
 def predictor_budget(state: SessionView) -> PhaseBudget:
     """The FRAMEWORK clock a predictor request is conditioned on, read when the request goes out."""
-    from ..predictor.pump import PhaseBudget
+    from ..predictor.payload import PhaseBudget
 
     limits: list[float] = []
     remaining = _phase_state.phase_budget_remaining_seconds(state)
@@ -348,15 +348,41 @@ def _record_run(coord: Any, task: Any, *, role: str, status: str, **fields: Any)
     )
 
 
-def _record_step(
-    coord: Any,
-    proposal_id: str,
-    *,
-    step: str,
-    run_ref: str = "",
-    outcome: str = "",
-    reason: str = "",
-) -> None:
+class AuthoringRetry(NamedTuple):
+    """An apply-failure retry queued for a fresh authoring specialist."""
+
+    lane: str
+    candidate: dict[str, Any] | None = None
+    batch_id: str = ""
+    specialist_task_id: str = ""
+    attempt: int = 1
+    retry_feedback: list[dict[str, Any]] | None = None
+    vetting_drops: list[str] | None = None
+
+
+class ProgressStamp(NamedTuple):
+    """The terminal ``framework_agent_phase_progress`` row a candidate ends with."""
+
+    candidate_id: str
+    status: str
+    batch_id: str = ""
+    kept: bool = False
+    rationale: str = ""
+    provenance: str = ""
+    gain_pct: float | None = None
+    extra: dict[str, Any] | None = None
+
+
+class ProposalStep(NamedTuple):
+    """One step of a candidate's lifecycle: a ``STEP_*`` value and what it ran and decided."""
+
+    step: str
+    run_ref: str = ""
+    outcome: str = ""
+    reason: str = ""
+
+
+def _record_step(coord: Any, proposal_id: str, step: ProposalStep) -> None:
     """Record one step of a candidate's lifecycle, keyed by ``STEP_*`` value.
 
     Steps are recorded as they happen rather than derived from counters: a
@@ -368,10 +394,10 @@ def _record_step(
         return
     recorder.record_proposal_step(
         proposal_id,
-        step=step,
-        run_ref=run_ref,
-        outcome=outcome,
-        reason=reason,
+        step=step.step,
+        run_ref=step.run_ref,
+        outcome=step.outcome,
+        reason=step.reason,
     )
 
 
@@ -475,16 +501,22 @@ def _record_kb_exposure(recorder: Any, proposal_id: str, params: Mapping[str, An
         recorder.record_proposal(proposal_id, kb_read_id=read_id, rendered_refs=refs)
 
 
+class AuthoredAttempt(NamedTuple):
+    """One authored deliverable's measured attempt: who ran it and how it was decided."""
+
+    task: Any
+    candidate_id: str
+    status: str
+    adopted: bool
+    specialist_task_id: str = ""
+
+
 def _record_source_attempt(
     coord: Any,
+    attempt: AuthoredAttempt,
     *,
-    task: Any,
-    candidate_id: str,
-    status: str,
-    adopted: bool,
     result: Mapping[str, Any],
     params: Mapping[str, Any],
-    specialist_task_id: str = "",
 ) -> None:
     """Record one authored deliverable's measured attempt -- a patch, or server args and envs -- on the framework event.
 
@@ -497,7 +529,7 @@ def _record_source_attempt(
         return
     from hyperloom.inference_optimizer.breakdown.recorder.framework_event import ARM_SOURCE, GateVerdict
 
-    task_id = str(getattr(task, "task_id", "") or "")
+    task_id = str(getattr(attempt.task, "task_id", "") or "")
     if not task_id:
         return
     base = result.get("base_tput") if result.get("base_tput") is not None else params.get("base_tput")
@@ -521,7 +553,7 @@ def _record_source_attempt(
     error_class = str(result.get("error_class") or "")
     error_excerpt = str(result.get("error") or "")[:600]
     failure_attribution = ""
-    if status.upper() in UNMEASURED_OUTCOMES:
+    if attempt.status.upper() in UNMEASURED_OUTCOMES:
         failure_attribution = classify_failure_attribution(
             error_class=error_class,
             error_excerpt=error_excerpt,
@@ -532,17 +564,17 @@ def _record_source_attempt(
         task_id,
         arm=ARM_SOURCE,
         task_id=task_id,
-        proposal_ref=candidate_id,
-        candidate_id=candidate_id,
+        proposal_ref=attempt.candidate_id,
+        candidate_id=attempt.candidate_id,
         provenance=str(params.get("lever_kind") or ""),
-        outcome=status,
+        outcome=attempt.status,
         reason=str(result.get("reason") or ""),
         reasoning=reasoning,
         reasoning_origin=reasoning_origin,
         experience_citations=params.get("experience_citations") or [],
         stage=str(result.get("stage") or ""),
         route=str(params.get("audit_step") or ""),
-        patch_source=specialist_task_id,
+        patch_source=attempt.specialist_task_id,
         patch_path=patch_path,
         fingerprint=str(result.get("patch_sha256") or result.get("fingerprint") or ""),
         # An attempt can apply several patches, and which ones landed is
@@ -553,7 +585,7 @@ def _record_source_attempt(
             Path(coord._coord.session_dir), [patch_path, *patches_applied, *patches_reverted]
         ),
         target_files=result.get("target_files") or [],
-        source_ref=str(params.get("framework_agent_candidate_id") or candidate_id),
+        source_ref=str(params.get("framework_agent_candidate_id") or attempt.candidate_id),
         measurement={
             "before_tput": base,
             "after_tput": result.get("output_throughput"),
@@ -577,21 +609,21 @@ def _record_source_attempt(
             "workspace": str(result.get("workspace") or ""),
             "server_log_path": str(result.get("server_log_path") or ""),
         },
-        decision=status,
-        adopted=adopted,
+        decision=attempt.status,
+        adopted=attempt.adopted,
         # What stood behind the adoption, on the same rule the config arm
         # writes it under: a KEEP no accuracy gate ruled on rests on
         # throughput alone, a weaker claim that must not read alike. Only
         # an adoption carries it -- on a reverted row "accuracy_pass"
         # would name the gate that refused it.
         validation_basis=(
-            ("accuracy_pass" if accuracy_pass is not None else "keep_verdict_unscored") if adopted else ""
+            ("accuracy_pass" if accuracy_pass is not None else "keep_verdict_unscored") if attempt.adopted else ""
         ),
-        attribution_eligible=(adopted and base is not None and result.get("output_throughput") is not None),
+        attribution_eligible=(attempt.adopted and base is not None and result.get("output_throughput") is not None),
         **measured_against,
         **config_delta,
     )
-    _record_kb_exposure(recorder, candidate_id, params)
+    _record_kb_exposure(recorder, attempt.candidate_id, params)
     delta_pct = result.get("delta_pct")
     keep_threshold = result.get("keep_threshold_pct")
     if keep_threshold is None:
@@ -626,10 +658,8 @@ def _record_source_attempt(
         )
     _record_step(
         coord,
-        candidate_id,
-        step="attempted",
-        run_ref=specialist_task_id,
-        outcome=status,
+        attempt.candidate_id,
+        ProposalStep(step="attempted", run_ref=attempt.specialist_task_id, outcome=attempt.status),
     )
 
 
@@ -736,13 +766,14 @@ class FrameworkPhase(ProposalBench):
         if not cand_id:
             return
         self._stamp_framework_progress(
-            candidate_id=cand_id,
-            batch_id=str(params.get("batch_id") or ""),
-            status="no_result_failed",
-            kept=False,
-            rationale=str(result_payload.get("reason") or result_payload.get("error") or "")[:500],
-            provenance="executor",
-            extra={"status": str(result_payload.get("status") or "")},
+            ProgressStamp(
+                candidate_id=cand_id,
+                batch_id=str(params.get("batch_id") or ""),
+                status="no_result_failed",
+                rationale=str(result_payload.get("reason") or result_payload.get("error") or "")[:500],
+                provenance="executor",
+                extra={"status": str(result_payload.get("status") or "")},
+            )
         )
 
     def timeline(self):
@@ -1093,11 +1124,13 @@ class FrameworkPhase(ProposalBench):
             # Stamp a terminal row so an unrecoverable outcome cannot make the pump re-select the same
             # finished specialist forever.
             self._stamp_framework_progress(
-                candidate_id=cand_id,
-                batch_id=batch_id,
-                status="recovery_failed",
-                rationale=f"{label} outcome unrecoverable from persisted results",
-                provenance="pump",
+                ProgressStamp(
+                    candidate_id=cand_id,
+                    batch_id=batch_id,
+                    status="recovery_failed",
+                    rationale=f"{label} outcome unrecoverable from persisted results",
+                    provenance="pump",
+                )
             )
         return True
 
@@ -1202,9 +1235,9 @@ class FrameworkPhase(ProposalBench):
         _record_step(
             self,
             cand_id,
-            step="reauthored" if int(reauthor_attempt) > 0 else "authored",
-            run_ref=spec_tid,
-            outcome="dispatched",
+            ProposalStep(
+                step="reauthored" if int(reauthor_attempt) > 0 else "authored", run_ref=spec_tid, outcome="dispatched"
+            ),
         )
         log.info(
             "FRAMEWORK: dispatched authoring specialist candidate=%s batch=%s gap=%s",
@@ -1282,12 +1315,13 @@ class FrameworkPhase(ProposalBench):
         if attempt > _AUTHORED_LANE_MAX_ATTEMPTS:
             # Cap reached: stamp a terminal progress row.
             self._stamp_framework_progress(
-                candidate_id=cand_id,
-                batch_id=batch_id,
-                status="apply_fail_cap",
-                kept=False,
-                rationale=f"apply_failed {attempt} times (cap={_AUTHORED_LANE_MAX_ATTEMPTS})",
-                provenance="apply_fail_retry",
+                ProgressStamp(
+                    candidate_id=cand_id,
+                    batch_id=batch_id,
+                    status="apply_fail_cap",
+                    rationale=f"apply_failed {attempt} times (cap={_AUTHORED_LANE_MAX_ATTEMPTS})",
+                    provenance="apply_fail_retry",
+                )
             )
             try:
                 state.save(self.session_dir)
@@ -1318,30 +1352,20 @@ class FrameworkPhase(ProposalBench):
         except Exception:
             log.debug("authored_lane: save after retry-pending failed", exc_info=True)
 
-    async def _enqueue_author_specialist(
-        self,
-        *,
-        lane: str,
-        candidate: "dict[str, Any] | None" = None,
-        batch_id: str = "",
-        specialist_task_id: str = "",
-        attempt: int = 1,
-        retry_feedback: "list[dict[str, Any]] | None" = None,
-        vetting_drops: "list[str] | None" = None,
-    ) -> str:
+    async def _enqueue_author_specialist(self, retry: AuthoringRetry) -> str:
         """Dispatch a fresh authoring specialist for an apply-failure retry."""
-        if lane not in ("perf_framework", "perf_explore"):
-            log.warning("_enqueue_author_specialist: unsupported lane=%s — skipping", lane)
+        if retry.lane not in ("perf_framework", "perf_explore"):
+            log.warning("_enqueue_author_specialist: unsupported lane=%s — skipping", retry.lane)
             return ""
 
-        candidate = dict(candidate or {})
-        if batch_id and not candidate.get("batch_id"):
-            candidate["batch_id"] = batch_id
-        retry_feedback = retry_feedback or []
+        candidate = dict(retry.candidate or {})
+        if retry.batch_id and not candidate.get("batch_id"):
+            candidate["batch_id"] = retry.batch_id
+        retry_feedback = retry.retry_feedback or []
         state = self.shared_state
 
         feedback_lines: list[str] = []
-        if vetting_drops:
+        if retry.vetting_drops:
             feedback_lines.append("")
             feedback_lines.append(
                 "PATCH GROUNDING FAILURE: the prior round's patches were dropped by "
@@ -1350,7 +1374,7 @@ class FrameworkPhase(ProposalBench):
                 "harvested automatically. Do not switch to the artifacts_written "
                 "channel to avoid the gate."
             )
-            feedback_lines.append("Dropped targets: " + "; ".join(vetting_drops[:4]))
+            feedback_lines.append("Dropped targets: " + "; ".join(retry.vetting_drops[:4]))
             feedback_lines.append("")
         if retry_feedback:
             feedback_lines.append("")
@@ -1367,7 +1391,7 @@ class FrameworkPhase(ProposalBench):
                     feedback_lines.append(fb.format_for_mandate())
             feedback_lines.append("")
 
-        if lane == "perf_framework":
+        if retry.lane == "perf_framework":
             # Re-dispatch a framework_agent authoring specialist with apply failure context injected via a
             # critic_feedback-style note.
             cand_id = self._framework_candidate_key(candidate)
@@ -1376,9 +1400,9 @@ class FrameworkPhase(ProposalBench):
                 return ""
             # Look up original audit from the specialist task params if available.
             audit: dict[str, Any] = {}
-            if specialist_task_id:
+            if retry.specialist_task_id:
                 try:
-                    spec_task = await self.tasks.get(specialist_task_id)
+                    spec_task = await self.tasks.get(retry.specialist_task_id)
                 except TaskNotFound:
                     spec_task = None
                 spec_params = dict(getattr(spec_task, "params", None) or {})
@@ -1389,13 +1413,13 @@ class FrameworkPhase(ProposalBench):
             new_task_id = await self._enqueue_framework_agent_authoring_specialist(
                 candidate,
                 audit=audit,
-                reauthor_attempt=attempt,
+                reauthor_attempt=retry.attempt,
                 critic_feedback=merged_feedback,
             )
             log.info(
                 "AUTHORED_LANE: dispatched perf_framework retry specialist cand=%s attempt=%d task=%s",
                 cand_id,
-                attempt,
+                retry.attempt,
                 new_task_id,
             )
             return new_task_id
@@ -1404,9 +1428,9 @@ class FrameworkPhase(ProposalBench):
         gap_cid = ""
         gap_symptom = ""
         framework_name = str(state.framework or "").strip().lower()
-        if specialist_task_id:
+        if retry.specialist_task_id:
             try:
-                spec_task = await self.tasks.get(specialist_task_id)
+                spec_task = await self.tasks.get(retry.specialist_task_id)
             except TaskNotFound:
                 spec_task = None
             spec_params = dict(getattr(spec_task, "params", None) or {})
@@ -1414,7 +1438,7 @@ class FrameworkPhase(ProposalBench):
             gap_symptom = str(spec_params.get("gap_symptom") or "").strip()
             framework_name = str(spec_params.get("framework") or framework_name).strip().lower()
         if not gap_cid:
-            gap_cid = f"gap.explore.retry.{specialist_task_id or 'unknown'}"
+            gap_cid = f"gap.explore.retry.{retry.specialist_task_id or 'unknown'}"
         notes_lines: list[str] = list(feedback_lines)
         notes = "\n".join(notes_lines).strip()
         params: dict[str, Any] = {
@@ -1428,11 +1452,11 @@ class FrameworkPhase(ProposalBench):
             "task_kind": "explore_apply_retry",
             "source": "coordinator_internal",
             "notes": notes,
-            "apply_retry_attempt": attempt,
+            "apply_retry_attempt": retry.attempt,
         }
         await self._coord.specialist_dispatch.warm_specialist_params(params)
         # Gap id and attempt both repeat across cycles.
-        idem = f"perf_explore_authoring:{gap_cid}:retry:{attempt}{self._coord.dispatcher.cycle_idem_suffix()}"
+        idem = f"perf_explore_authoring:{gap_cid}:retry:{retry.attempt}{self._coord.dispatcher.cycle_idem_suffix()}"
         lanes, ttl = self._coord.gpu_lanes.framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         spec_task, _ = await self.tasks.create_or_return_existing(
             kind="specialist",
@@ -1447,7 +1471,7 @@ class FrameworkPhase(ProposalBench):
         log.info(
             "AUTHORED_LANE: dispatched perf_explore retry specialist gap=%s attempt=%d task=%s",
             gap_cid,
-            attempt,
+            retry.attempt,
             new_tid,
         )
         return new_tid
@@ -1472,13 +1496,15 @@ class FrameworkPhase(ProposalBench):
             retry_feedback = list(ctx.get("retry_feedback") or [])
             vetting_drops = list(ctx.get("vetting_drops") or [])
             await self._enqueue_author_specialist(
-                lane=lane,
-                candidate=candidate,
-                batch_id=batch_id,
-                specialist_task_id=specialist_task_id,
-                attempt=attempt,
-                retry_feedback=retry_feedback,
-                vetting_drops=vetting_drops or None,
+                AuthoringRetry(
+                    lane=lane,
+                    candidate=candidate,
+                    batch_id=batch_id,
+                    specialist_task_id=specialist_task_id,
+                    attempt=attempt,
+                    retry_feedback=retry_feedback,
+                    vetting_drops=vetting_drops or None,
+                )
             )
         try:
             state.save(self.session_dir)
@@ -1896,13 +1922,14 @@ class FrameworkPhase(ProposalBench):
             )
             # Record enqueue_failed progress row so the candidate is skipped next tick (else the loop spins).
             self._stamp_framework_progress(
-                candidate_id=cand_id,
-                batch_id=str(candidate.get("batch_id") or ""),
-                status="enqueue_failed",
-                kept=False,
-                rationale=repr(exc),
-                provenance="pump",
-                extra={"error": repr(exc)},
+                ProgressStamp(
+                    candidate_id=cand_id,
+                    batch_id=str(candidate.get("batch_id") or ""),
+                    status="enqueue_failed",
+                    rationale=repr(exc),
+                    provenance="pump",
+                    extra={"error": repr(exc)},
+                )
             )
 
     def _collect_framework_agent_candidate_priors(self) -> dict[str, Any]:
@@ -1968,13 +1995,14 @@ class FrameworkPhase(ProposalBench):
                     self._MAX_REPEATED_REVIEW_SUBMISSIONS,
                 )
                 self._stamp_framework_progress(
-                    candidate_id=cand_id,
-                    batch_id=batch_id,
-                    status="repeated_review_abort",
-                    kept=False,
-                    rationale=(f"submitted for review {count} times (> cap {self._MAX_REPEATED_REVIEW_SUBMISSIONS})"),
-                    provenance="pump",
-                    extra={"review_submissions": count},
+                    ProgressStamp(
+                        candidate_id=cand_id,
+                        batch_id=batch_id,
+                        status="repeated_review_abort",
+                        rationale=f"submitted for review {count} times (> cap {self._MAX_REPEATED_REVIEW_SUBMISSIONS})",
+                        provenance="pump",
+                        extra={"review_submissions": count},
+                    )
                 )
                 return
         propose_payload: dict[str, Any] = {
@@ -2000,9 +2028,9 @@ class FrameworkPhase(ProposalBench):
         _record_step(
             self,
             cand_id,
-            step="routed",
-            outcome=str(audit_step or ""),
-            reason=f"submitted_for_review:{pending.proposal_msg_id}",
+            ProposalStep(
+                step="routed", outcome=str(audit_step or ""), reason=f"submitted_for_review:{pending.proposal_msg_id}"
+            ),
         )
         log.info(
             "FRAMEWORK: candidate submitted for Critic review msg_id=%s candidate=%s batch=%s audit_step=%s",
@@ -2074,29 +2102,19 @@ class FrameworkPhase(ProposalBench):
                 # approved-but-undispatchable candidate is not re-selected every tick.
                 if not want_raw:
                     self._stamp_framework_progress(
-                        candidate_id=cand_id,
-                        batch_id=batch_id,
-                        status="materialize_failed",
-                        kept=False,
-                        rationale=repr(exc),
-                        provenance="pump",
-                        extra={"error": repr(exc)},
+                        ProgressStamp(
+                            candidate_id=cand_id,
+                            batch_id=batch_id,
+                            status="materialize_failed",
+                            rationale=repr(exc),
+                            provenance="pump",
+                            extra={"error": repr(exc)},
+                        )
                     )
 
-    def _stamp_framework_progress(
-        self,
-        *,
-        candidate_id: str,
-        batch_id: str = "",
-        status: str,
-        kept: bool = False,
-        rationale: str = "",
-        provenance: str = "",
-        gain_pct: float | None = None,
-        extra: dict[str, Any] | None = None,
-    ) -> bool:
+    def _stamp_framework_progress(self, stamp: ProgressStamp) -> bool:
         """Idempotently stamp a terminal ``framework_agent_phase_progress`` row."""
-        cand_id = str(candidate_id or "")
+        cand_id = str(stamp.candidate_id or "")
         if not cand_id:
             return False
         state = self.shared_state
@@ -2108,19 +2126,19 @@ class FrameworkPhase(ProposalBench):
             return False
         row: dict[str, Any] = {
             "candidate_id": cand_id,
-            "batch_id": str(batch_id or ""),
-            "status": str(status or ""),
-            "kept": bool(kept),
-            "rationale": str(rationale or ""),
-            "gain_pct": (float(gain_pct) if isinstance(gain_pct, (int, float)) else 0.0),
-            "provenance": str(provenance or ""),
+            "batch_id": str(stamp.batch_id or ""),
+            "status": str(stamp.status or ""),
+            "kept": bool(stamp.kept),
+            "rationale": str(stamp.rationale or ""),
+            "gain_pct": (float(stamp.gain_pct) if isinstance(stamp.gain_pct, (int, float)) else 0.0),
+            "provenance": str(stamp.provenance or ""),
             "ts": datetime.now(timezone.utc).isoformat(),
             "cycle": int(state.macro_cycle or 0),
         }
         # Merge caller-supplied extras (e.g. ``error`` / ``review_submissions``) onto the row too, without clobbering
         # the canonical fields above, so downstream consumers see the same detail the decision.json carries.
-        if isinstance(extra, dict):
-            for k, v in extra.items():
+        if isinstance(stamp.extra, dict):
+            for k, v in stamp.extra.items():
                 row.setdefault(str(k), v)
         progress.append(row)
         # The single idempotent terminal-row writer for every path that ends a
@@ -2129,8 +2147,8 @@ class FrameworkPhase(ProposalBench):
         _settle(
             self,
             cand_id,
-            disposition="attempted" if (kept or str(status or "") in {"kept", "reverted"}) else "dropped",
-            reason=str(status or ""),
+            disposition="attempted" if (stamp.kept or str(stamp.status or "") in {"kept", "reverted"}) else "dropped",
+            reason=str(stamp.status or ""),
         )
         try:
             state.save(self.session_dir)
@@ -2138,13 +2156,13 @@ class FrameworkPhase(ProposalBench):
             log.exception(
                 "FRAMEWORK: save after progress stamp failed candidate=%s status=%s",
                 cand_id,
-                status,
+                stamp.status,
             )
         log.info(
             "FRAMEWORK: stamped terminal progress candidate=%s batch=%s status=%s",
             cand_id,
-            str(batch_id or ""),
-            status,
+            str(stamp.batch_id or ""),
+            stamp.status,
         )
         return True
 
@@ -2163,12 +2181,13 @@ class FrameworkPhase(ProposalBench):
         )
         batch_id = str(payload.get("batch_id") or "")
         self._stamp_framework_progress(
-            candidate_id=cand_id,
-            batch_id=batch_id,
-            status=FRAMEWORK_CRITIC_DENIED_STATUS,
-            kept=False,
-            rationale=str(reasoning or ""),
-            provenance="critic",
+            ProgressStamp(
+                candidate_id=cand_id,
+                batch_id=batch_id,
+                status=FRAMEWORK_CRITIC_DENIED_STATUS,
+                rationale=str(reasoning or ""),
+                provenance="critic",
+            )
         )
         _record_review_outcome(
             self,
@@ -2238,12 +2257,13 @@ class FrameworkPhase(ProposalBench):
         if not required_evidence:
             # needs_review with nothing to act on: no re-author is possible, so this is terminal for the candidate.
             self._stamp_framework_progress(
-                candidate_id=cand_id,
-                batch_id=batch_id,
-                status="needs_review_no_evidence",
-                kept=False,
-                rationale=str(advisory.get("advice_text") or "")[:500],
-                provenance="critic",
+                ProgressStamp(
+                    candidate_id=cand_id,
+                    batch_id=batch_id,
+                    status="needs_review_no_evidence",
+                    rationale=str(advisory.get("advice_text") or "")[:500],
+                    provenance="critic",
+                )
             )
             return
         # Skip if the candidate is already materializing as a live integrate_patch task.
@@ -2273,12 +2293,13 @@ class FrameworkPhase(ProposalBench):
             )
             # Re-author budget exhausted: terminal for the candidate.
             self._stamp_framework_progress(
-                candidate_id=cand_id,
-                batch_id=batch_id,
-                status="reauthor_cap",
-                kept=False,
-                rationale=f"reauthor attempts >= cap ({_AUTHORED_LANE_MAX_ATTEMPTS})",
-                provenance="pump",
+                ProgressStamp(
+                    candidate_id=cand_id,
+                    batch_id=batch_id,
+                    status="reauthor_cap",
+                    rationale=f"reauthor attempts >= cap ({_AUTHORED_LANE_MAX_ATTEMPTS})",
+                    provenance="pump",
+                )
             )
             return
         attempt = prior + 1
@@ -2403,23 +2424,25 @@ class FrameworkPhase(ProposalBench):
                 row for row in progress if not (isinstance(row, dict) and self._framework_candidate_key(row) == cand_id)
             ]
         recorded = self._stamp_framework_progress(
-            candidate_id=cand_id,
-            batch_id=batch_id,
-            status=status,
-            kept=adopted,
-            rationale=str(res.get("reason") or ""),
-            provenance="authored",
-            gain_pct=gain,
-            extra={
-                # The anchor the executor graded against, so post/pre and gain_pct in the same row agree once a stack
-                # has formed.
-                "pre_tput": float(res.get("base_tput") or params.get("base_tput") or 0.0),
-                "post_tput": float(new_tput) if isinstance(new_tput, (int, float)) else 0.0,
-                "accuracy_pass": res.get("accuracy_pass"),
-                "specialist_task_id": spec_tid,
-                "integrate_task_id": str(getattr(task, "task_id", "") or ""),
-                "reauthor_attempt": res.get("reauthor_attempt", params.get("reauthor_attempt")),
-            },
+            ProgressStamp(
+                candidate_id=cand_id,
+                batch_id=batch_id,
+                status=status,
+                kept=adopted,
+                rationale=str(res.get("reason") or ""),
+                provenance="authored",
+                gain_pct=gain,
+                extra={
+                    # The anchor the executor graded against, so post/pre and gain_pct in the same row agree once a stack
+                    # has formed.
+                    "pre_tput": float(res.get("base_tput") or params.get("base_tput") or 0.0),
+                    "post_tput": float(new_tput) if isinstance(new_tput, (int, float)) else 0.0,
+                    "accuracy_pass": res.get("accuracy_pass"),
+                    "specialist_task_id": spec_tid,
+                    "integrate_task_id": str(getattr(task, "task_id", "") or ""),
+                    "reauthor_attempt": res.get("reauthor_attempt", params.get("reauthor_attempt")),
+                },
+            )
         )
         if not recorded:
             return
@@ -2439,13 +2462,11 @@ class FrameworkPhase(ProposalBench):
         record_attempt_row(self.shared_state, row)
         _record_source_attempt(
             self,
-            task=task,
-            candidate_id=cand_id,
-            status=status,
-            adopted=adopted,
+            AuthoredAttempt(
+                task=task, candidate_id=cand_id, status=status, adopted=adopted, specialist_task_id=spec_tid
+            ),
             result=res,
             params=params,
-            specialist_task_id=spec_tid,
         )
         log.info(
             "FRAMEWORK: authored patch outcome candidate=%s batch=%s status=%s gain=%.2f%%",
@@ -2531,17 +2552,18 @@ class FrameworkPhase(ProposalBench):
         if not cand_id:
             return
         recorded = self._stamp_framework_progress(
-            candidate_id=cand_id,
-            batch_id=str(params.get("framework_batch_id") or ""),
-            status="dispatch_failed",
-            kept=False,
-            rationale=run_error[:500],
-            provenance="dispatch_failed",
-            gain_pct=0.0,
-            extra={
-                "specialist_task_id": str(getattr(task, "task_id", "") or ""),
-                "reauthor_attempt": params.get("reauthor_attempt"),
-            },
+            ProgressStamp(
+                candidate_id=cand_id,
+                batch_id=str(params.get("framework_batch_id") or ""),
+                status="dispatch_failed",
+                rationale=run_error[:500],
+                provenance="dispatch_failed",
+                gain_pct=0.0,
+                extra={
+                    "specialist_task_id": str(getattr(task, "task_id", "") or ""),
+                    "reauthor_attempt": params.get("reauthor_attempt"),
+                },
+            )
         )
         if not recorded:
             return
@@ -2610,17 +2632,18 @@ class FrameworkPhase(ProposalBench):
             status = "author_empty"
         reason = str(inner.get("summary") or "").strip()[:500]
         recorded = self._stamp_framework_progress(
-            candidate_id=cand_id,
-            batch_id=batch_id,
-            status=status,
-            kept=False,
-            rationale=reason,
-            provenance="authored_empty",
-            gain_pct=0.0,
-            extra={
-                "specialist_task_id": str(getattr(task, "task_id", "") or ""),
-                "reauthor_attempt": params.get("reauthor_attempt"),
-            },
+            ProgressStamp(
+                candidate_id=cand_id,
+                batch_id=batch_id,
+                status=status,
+                rationale=reason,
+                provenance="authored_empty",
+                gain_pct=0.0,
+                extra={
+                    "specialist_task_id": str(getattr(task, "task_id", "") or ""),
+                    "reauthor_attempt": params.get("reauthor_attempt"),
+                },
+            )
         )
         if not recorded:
             return

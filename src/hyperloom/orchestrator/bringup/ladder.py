@@ -213,17 +213,28 @@ def _failure_site(text: str, signature: rules.FailureSignature, root: _Traceback
     return root.anchor, root.exc_line
 
 
-def _classified_streams(
-    server_log: str,
-    wrapper_stderr: str,
-    wrapper_stdout: str,
-) -> tuple[tuple[str, str, rules.FailureSignature], ...]:
+@dataclass(frozen=True)
+class BootStreams:
+    """The text streams one bring-up attempt produced.
+
+    Attributes:
+        server_log: Full text of the server child's log.
+        wrapper_stderr: Launcher stderr, used only as fallback.
+        wrapper_stdout: Launcher stdout, used only as fallback.
+    """
+
+    server_log: str
+    wrapper_stderr: str = ""
+    wrapper_stdout: str = ""
+
+
+def _classified_streams(streams: BootStreams) -> tuple[tuple[str, str, rules.FailureSignature], ...]:
     """Return ``(stream_name, text, signature)`` per non-empty stream."""
     out: list[tuple[str, str, rules.FailureSignature]] = []
     for name, text in (
-        (SERVER_LOG, server_log),
-        (WRAPPER_STDERR, wrapper_stderr),
-        (WRAPPER_STDOUT, wrapper_stdout),
+        (SERVER_LOG, streams.server_log),
+        (WRAPPER_STDERR, streams.wrapper_stderr),
+        (WRAPPER_STDOUT, streams.wrapper_stdout),
     ):
         if text.strip():
             out.append((name, text, rules.classify_failure(text)))
@@ -231,22 +242,18 @@ def _classified_streams(
 
 
 def classify(
+    streams: BootStreams,
     *,
-    server_log: str,
     server_elapsed_sec: float,
-    wrapper_stderr: str = "",
-    wrapper_stdout: str = "",
     trees: Sequence[TreeIdentity] | Sequence[str] | None = None,
     session_root: str = "",
 ) -> BootObservation:
     """Classify one bring-up attempt into a :class:`BootObservation`.
 
     Args:
-        server_log: Full text of the server child's log.
+        streams: The server log and the launcher's fallback streams.
         server_elapsed_sec: Seconds from server start to this observation, on
             the server child's clock.
-        wrapper_stderr: Launcher stderr, used only as fallback.
-        wrapper_stdout: Launcher stdout, used only as fallback.
         trees: Pinned trees (or roots) frames are normalised against.
         session_root: Absolute session root redacted out of the excerpt.
 
@@ -256,11 +263,11 @@ def classify(
     """
     roots = _roots_of(trees)
     redact_roots = (session_root,) if session_root.strip() else ()
-    streams = _classified_streams(server_log, wrapper_stderr, wrapper_stdout)
+    classified = _classified_streams(streams)
 
     witnessed: LadderStage | None = None
     progress_witness: dict[str, str] = {}
-    for _name, text, _sig in streams:
+    for _name, text, _sig in classified:
         stage, witness = _witness_progress(text)
         for key, marker in witness.items():
             progress_witness.setdefault(key, marker)
@@ -268,16 +275,16 @@ def classify(
             witnessed = stage
 
     chosen: tuple[str, str, rules.FailureSignature] | None = None
-    for entry in streams:
+    for entry in classified:
         if entry[2].is_actionable:
             chosen = entry
             break
     if chosen is None:
         # No rule fired anywhere: keep the highest-precedence stream with
         # content so the observation still carries a frame and an excerpt.
-        chosen = streams[0] if streams else None
+        chosen = classified[0] if classified else None
 
-    floor = LadderStage.PROCESS_START if streams else LadderStage.ARGV_PARSE
+    floor = LadderStage.PROCESS_START if classified else LadderStage.ARGV_PARSE
     stage_reached = witnessed if witnessed is not None else floor
 
     if chosen is None:
